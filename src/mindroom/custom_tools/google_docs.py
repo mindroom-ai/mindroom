@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from dataclasses import replace
 from typing import TYPE_CHECKING, Any, cast
 
 from googleapiclient.errors import HttpError
@@ -16,6 +17,7 @@ from mindroom.oauth.google import google_oauth_provider
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
+    from mindroom.tool_system.tool_function import ToolFunction
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 logger = get_logger(__name__)
@@ -33,6 +35,68 @@ _FORMAT_OPERATION_TYPES = frozenset(
         "hyperlink",
     },
 )
+_FORMAT_RANGE_PROPERTIES: dict[str, object] = {
+    "start_index": {"type": "integer", "minimum": 1},
+    "end_index": {"type": "integer", "minimum": 2},
+}
+_STYLE_OPERATION_PROPERTIES: dict[str, object] = {
+    **_FORMAT_RANGE_PROPERTIES,
+    "style": {"type": "object", "additionalProperties": True},
+    "fields": {"type": "array", "items": {"type": "string"}, "minItems": 1},
+}
+
+
+def _format_operation_schema(
+    operation_type: str,
+    properties: dict[str, object],
+    required: list[str],
+) -> dict[str, object]:
+    return {
+        "type": "object",
+        "properties": {"type": {"type": "string", "enum": [operation_type]}, **properties},
+        "required": ["type", "start_index", "end_index", *required],
+        "additionalProperties": False,
+    }
+
+
+_FORMAT_DOCUMENT_PARAMETERS: dict[str, object] = {
+    "type": "object",
+    "properties": {
+        "document_id": {"type": "string", "description": "Google Docs document ID or edit URL."},
+        "tab_id": {"type": "string", "description": "Immutable ID of the tab to format."},
+        "expected_revision_id": {"type": "string", "description": "Revision ID from the preceding document read."},
+        "operations": {
+            "type": "array",
+            "minItems": 1,
+            "items": {
+                "oneOf": [
+                    _format_operation_schema("paragraph_style", _STYLE_OPERATION_PROPERTIES, ["style", "fields"]),
+                    _format_operation_schema("text_style", _STYLE_OPERATION_PROPERTIES, ["style", "fields"]),
+                    _format_operation_schema(
+                        "native_list",
+                        {**_FORMAT_RANGE_PROPERTIES, "bullet_preset": {"type": "string"}},
+                        ["bullet_preset"],
+                    ),
+                    _format_operation_schema("remove_native_list", _FORMAT_RANGE_PROPERTIES, []),
+                    _format_operation_schema(
+                        "hyperlink",
+                        {**_FORMAT_RANGE_PROPERTIES, "url": {"type": "string"}},
+                        ["url"],
+                    ),
+                ],
+            },
+        },
+    },
+    "required": ["document_id", "tab_id", "expected_revision_id", "operations"],
+    "additionalProperties": False,
+}
+
+
+class _FormattingOperationError(ValueError):
+    """Identify which operation failed formatting validation."""
+
+    def __init__(self, index: int, error: Exception) -> None:
+        super().__init__(f"operations[{index}]: {error}")
 
 
 def _document_url(document_id: str) -> str:
@@ -93,8 +157,16 @@ def _formatting_style(operation: dict[str, object]) -> dict[str, object]:
 
 
 def _require_operation_keys(operation: dict[str, object], expected: set[str]) -> None:
-    if set(operation) != expected:
-        msg = "operation contains unsupported or missing fields"
+    actual = set(operation)
+    missing = sorted(expected - actual)
+    unexpected = sorted(actual - expected)
+    if missing or unexpected:
+        details = []
+        if missing:
+            details.append(f"missing fields: {', '.join(missing)}")
+        if unexpected:
+            details.append(f"unexpected fields: {', '.join(unexpected)}")
+        msg = "; ".join(details)
         raise ValueError(msg)
 
 
@@ -104,7 +176,7 @@ def _formatting_request(operation: object, tab_id: str) -> dict[str, object]:
         raise TypeError(msg)
     operation = cast("dict[str, object]", operation)
     operation_type = operation.get("type")
-    if operation_type not in _FORMAT_OPERATION_TYPES:
+    if not isinstance(operation_type, str) or operation_type not in _FORMAT_OPERATION_TYPES:
         msg = "operation type is not supported"
         raise ValueError(msg)
 
@@ -202,7 +274,29 @@ def _formatting_requests(operations: object, tab_id: str) -> list[dict[str, obje
     if not operations:
         msg = "operations must not be empty"
         raise ValueError(msg)
-    return [_formatting_request(operation, tab_id) for operation in operations]
+    requests = []
+    for index, operation in enumerate(operations):
+        try:
+            requests.append(_formatting_request(operation, tab_id))
+        except (TypeError, ValueError) as exc:
+            raise _FormattingOperationError(index, exc) from None
+    return requests
+
+
+def _format_document_http_error(exc: HttpError) -> str:
+    """Return a sanitized formatting failure with safe stale-revision guidance."""
+    result = google_http_error_result("Google Docs", "format_document", exc)
+    if exc.resp.status != 400:
+        return result
+    message = cast("str", json.loads(result)["error"])
+    return json.dumps(
+        {
+            "error": (
+                f"{message}. If the document may have changed, read it again and retry with its current revisionId; "
+                "otherwise correct the formatting operation."
+            ),
+        },
+    )
 
 
 class GoogleDocsTools(GoogleApiToolkit):
@@ -226,6 +320,9 @@ class GoogleDocsTools(GoogleApiToolkit):
         format_document: bool = False,
         **kwargs: Any,  # noqa: ANN401
     ) -> None:
+        if format_document and not read_document:
+            msg = "Google Docs format_document requires read_document"
+            raise ValueError(msg)
         tools = []
         if create_document:
             tools.append(self.google_docs_create_document)
@@ -249,6 +346,12 @@ class GoogleDocsTools(GoogleApiToolkit):
             runtime_config=runtime_config,
             **kwargs,
         )
+
+    def offered_function(self, function: ToolFunction) -> ToolFunction:
+        """Give the formatting operation its explicit model-facing schema."""
+        if function.name != "google_docs_format_document":
+            return function
+        return replace(function, parameters=_FORMAT_DOCUMENT_PARAMETERS)
 
     def _batch_update(
         self,
@@ -503,4 +606,4 @@ class GoogleDocsTools(GoogleApiToolkit):
                 },
             )
         except HttpError as exc:
-            return google_http_error_result("Google Docs", "format_document", exc)
+            return _format_document_http_error(exc)
