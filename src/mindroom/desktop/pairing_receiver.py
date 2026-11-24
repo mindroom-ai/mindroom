@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -102,13 +103,30 @@ class DesktopPairingReceiver:
         if not is_human_requester_id(sender_id, config, self.runtime_paths):
             return False
         membership_index = self.membership_index if self.membership_index is not None else AgentReplyMembershipIndex()
-        return is_sender_allowed_for_responder(
+        if is_sender_allowed_for_responder(
             sender_id,
             self.agent_name,
             None,
             config,
             self.runtime_paths,
             membership_index,
+        ):
+            return True
+        rooms = getattr(self.client, "rooms", None)
+        if not isinstance(rooms, Mapping):
+            return False
+        return any(
+            sender_id in room.users
+            and sender_id not in getattr(room, "invited_users", ())
+            and is_sender_allowed_for_responder(
+                sender_id,
+                self.agent_name,
+                room.room_id,
+                config,
+                self.runtime_paths,
+                membership_index,
+            )
+            for room in rooms.values()
         )
 
     def _check_eligibility(self) -> str | None:
@@ -193,7 +211,7 @@ class DesktopPairingReceiver:
                 reason="untrusted_device",
             )
             return
-        if not self._is_sender_authorized(event.sender):
+        if event.type != DESKTOP_PAIRING_CLAIM_EVENT_TYPE and not self._is_sender_authorized(event.sender):
             logger.warning(
                 "desktop_pairing_event_rejected",
                 agent=self.agent_name,

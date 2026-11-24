@@ -34,6 +34,8 @@ from mindroom.desktop.native_config import (
     native_config_path,
     save_native_config,
 )
+from mindroom.desktop.native_host import desktop_host_lock
+from mindroom.desktop.native_protocol import NativeProtocolError
 from mindroom.desktop.provider import DesktopProviderError
 from mindroom.desktop.session import DesktopMatrixSession, DesktopSessionError, save_desktop_session
 from mindroom.desktop.shell import DesktopShellError
@@ -357,15 +359,16 @@ def test_desktop_setup_logs_in_only_when_needed(
             DesktopMatrixSession("https://matrix.example.org", "@alice:example.org", "DESKTOP", "saved-token"),
         ),
     )
-    pair = MagicMock()
+    pair = MagicMock(return_value="VERIFY123")
     monkeypatch.setattr(desktop_cli, "desktop_login", login)
-    monkeypatch.setattr(desktop_cli, "desktop_pair", pair)
+    monkeypatch.setattr(desktop_cli, "_claim_pairing", pair)
 
     result = runner.invoke(desktop_app, _SETUP_ARGS)
 
     assert result.exit_code == 0, result.output
     assert login.called is not session_exists
     assert pair.call_args.kwargs["code"] == "short-code"
+    assert "!desktop confirm computer short-code VERIFY123" in result.output
 
 
 @pytest.mark.parametrize(("content", "mode", "saved_revision"), [("{", 0o600, 0), (None, 0o644, 1)])
@@ -388,7 +391,7 @@ def test_desktop_setup_repairs_malformed_or_exposed_config(
     else:
         path.write_text(content, encoding="utf-8")
     path.chmod(mode)
-    monkeypatch.setattr(desktop_cli, "desktop_pair", MagicMock())
+    monkeypatch.setattr(desktop_cli, "_claim_pairing", MagicMock(return_value="VERIFY123"))
 
     result = runner.invoke(desktop_app, _SETUP_ARGS)
 
@@ -425,8 +428,8 @@ def test_desktop_setup_validates_journal_and_allows_additional_controllers(
                 PinnedMatrixDevice("@computer:example.org", journal_state, "cloud-fingerprint"),
             ),
         ).close()
-    pair = MagicMock()
-    monkeypatch.setattr(desktop_cli, "desktop_pair", pair)
+    pair = MagicMock(return_value="VERIFY123")
+    monkeypatch.setattr(desktop_cli, "_claim_pairing", pair)
 
     result = runner.invoke(desktop_app, _SETUP_ARGS)
 
@@ -455,7 +458,7 @@ def test_desktop_setup_asks_for_access_while_only_a_browser_is_saved(
         browser=NativeBrowserConfig(enabled=True),
     )
     save_native_config(native_config_path(tmp_path), saved, expected_revision=0)
-    monkeypatch.setattr(desktop_cli, "desktop_pair", MagicMock())
+    monkeypatch.setattr(desktop_cli, "_claim_pairing", MagicMock(return_value="VERIFY123"))
 
     result = runner.invoke(desktop_app, _SETUP_ARGS)
 
@@ -487,7 +490,7 @@ def test_desktop_setup_rejects_saved_session_for_another_account(
     login = MagicMock()
     pair = MagicMock()
     monkeypatch.setattr(desktop_cli, "desktop_login", login)
-    monkeypatch.setattr(desktop_cli, "desktop_pair", pair)
+    monkeypatch.setattr(desktop_cli, "_claim_pairing", pair)
 
     result = runner.invoke(desktop_app, _SETUP_ARGS)
 
@@ -513,7 +516,7 @@ def test_desktop_setup_compares_saved_session_with_default_homeserver(
         "mindroom.constants.runtime_matrix_homeserver",
         lambda _runtime_paths: "https://matrix.example.org",
     )
-    monkeypatch.setattr(desktop_cli, "desktop_pair", pair)
+    monkeypatch.setattr(desktop_cli, "_claim_pairing", pair)
 
     result = runner.invoke(desktop_app, ["setup", "--allow-agent", "computer", *_PAIRING_ARGS])
 
@@ -1026,7 +1029,7 @@ def test_desktop_pair_setup_and_access_print_their_errors_whole_on_one_line(
     save_desktop_session(session_path, replace(own_session, homeserver=other_homeserver))
     mismatched = runner.invoke(desktop_app, _SETUP_ARGS).stderr.splitlines()
     save_desktop_session(session_path, own_session)
-    monkeypatch.setattr(desktop_cli, "desktop_pair", MagicMock(side_effect=ValueError(f"Cannot save {text}")))
+    monkeypatch.setattr(desktop_cli, "_claim_pairing", MagicMock(side_effect=ValueError(f"Cannot save {text}")))
     unsaved = runner.invoke(desktop_app, _SETUP_ARGS).stderr.splitlines()
     monkeypatch.setattr(
         "mindroom.desktop.native_config.load_native_config",
@@ -1093,3 +1096,129 @@ def test_desktop_plain_lines_keep_emoji_codes_as_written(capsys: pytest.CaptureF
     desktop_cli._print_plain("  Read-only folders: /home/me/:rocket:-notes")
 
     assert capsys.readouterr().out == "  Read-only folders: /home/me/:rocket:-notes\n"
+
+
+@pytest.mark.usefixtures("cli_runtime")
+def test_desktop_setup_additive_and_rotated_controllers_preserve_existing_capabilities(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    empty_selected_root: Path,
+) -> None:
+    """Adding or rotating a controller via CLI setup preserves saved apps, capture, browser, folders, and shell."""
+    session_path = tmp_path / "desktop_bridge" / "matrix_session.json"
+    save_desktop_session(
+        session_path,
+        DesktopMatrixSession("https://matrix.example.org", "@alice:example.org", "DESKTOP", "saved-token"),
+    )
+    ctrl_a = PinnedMatrixDevice("@computer:example.org", "CLOUD_A", "fp-a")
+    ctrl_b = PinnedMatrixDevice("@coder:example.org", "CLOUD_B", "fp-b")
+    ctrl_a_rotated = PinnedMatrixDevice("@computer:example.org", "CLOUD_A2", "fp-a2")
+    initial = NativeDesktopConfig(
+        revision=0,
+        enabled=True,
+        controller=ctrl_a,
+        allowed_requester_ids=("@alice:example.org",),
+        allowed_agent_names=("computer",),
+        allowed_app_ids=("com.apple.TextEdit",),
+        capture=NativeCaptureConfig(max_screenshot_width=1280, jpeg_quality=72),
+        browser=NativeBrowserConfig(enabled=True, timeout_seconds=45),
+        files=NativeFilesConfig((empty_selected_root,)),
+        shell=NativeShellConfig(enabled=True),
+    )
+    save_native_config(native_config_path(tmp_path), initial, expected_revision=0)
+    monkeypatch.setattr(desktop_cli, "_claim_pairing", MagicMock(return_value="VERIFY456"))
+
+    # Add second controller B without --allow-app -> preserves all saved capabilities and controller A.
+    add_result = runner.invoke(
+        desktop_app,
+        [
+            "setup",
+            "--homeserver",
+            "https://matrix.example.org",
+            "--code",
+            "code-b",
+            "--controller-user-id",
+            ctrl_b.user_id,
+            "--controller-device-id",
+            ctrl_b.device_id,
+            "--controller-ed25519",
+            ctrl_b.ed25519,
+            "--allow-agent",
+            "coder",
+        ],
+    )
+    assert add_result.exit_code == 0, add_result.output
+    assert "!desktop confirm coder code-b VERIFY456" in add_result.output
+    after_add = load_native_config(native_config_path(tmp_path))
+    assert [entry.controller for entry in after_add.controllers] == [ctrl_a, ctrl_b]
+    assert after_add.allowed_app_ids == ("com.apple.TextEdit",)
+    assert after_add.capture == initial.capture
+    assert after_add.browser == initial.browser
+    assert after_add.files == initial.files
+    assert after_add.shell == initial.shell
+
+    # Rotate controller A with explicit --allow-app -> replaces A in place, keeps B and folders/shell/capture/browser.
+    rotate_result = runner.invoke(
+        desktop_app,
+        [
+            "setup",
+            "--homeserver",
+            "https://matrix.example.org",
+            "--code",
+            "code-a2",
+            "--controller-user-id",
+            ctrl_a_rotated.user_id,
+            "--controller-device-id",
+            ctrl_a_rotated.device_id,
+            "--controller-ed25519",
+            ctrl_a_rotated.ed25519,
+            "--allow-agent",
+            "computer",
+            "--allow-app",
+            "com.apple.Notes",
+        ],
+    )
+    assert rotate_result.exit_code == 0, rotate_result.output
+    after_rotate = load_native_config(native_config_path(tmp_path))
+    assert [entry.controller for entry in after_rotate.controllers] == [ctrl_a_rotated, ctrl_b]
+    assert after_rotate.allowed_app_ids == ("com.apple.Notes",)
+    assert after_rotate.capture == initial.capture
+    assert after_rotate.browser == initial.browser
+    assert after_rotate.files == initial.files
+    assert after_rotate.shell == initial.shell
+
+
+def test_desktop_run_holds_host_lock_and_refuses_when_already_locked(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """`mindroom desktop run` holds host.lock for its lifetime and fails clearly if another host holds it."""
+    _stub_run_command(monkeypatch, tmp_path)
+
+    # 1. Refuses to start when another host holds host.lock.
+    blocked_bridge = AsyncMock()
+    monkeypatch.setattr(desktop_cli, "_run_bridge", blocked_bridge)
+    with desktop_host_lock(tmp_path):
+        blocked = runner.invoke(desktop_app, _RUN_ARGS)
+    assert blocked.exit_code == 1
+    assert "Another MindRoom app" in blocked.output
+    blocked_bridge.assert_not_awaited()
+
+    # 2. Holds host.lock while running and releases it on exit.
+    observed_locked = False
+
+    async def assert_lock_held(**_kwargs: object) -> None:
+        nonlocal observed_locked
+        with pytest.raises(NativeProtocolError) as exc, desktop_host_lock(tmp_path):
+            pass
+        assert exc.value.code == "already_running"
+        observed_locked = True
+
+    monkeypatch.setattr(desktop_cli, "_run_bridge", assert_lock_held)
+    ok = runner.invoke(desktop_app, _RUN_ARGS)
+    assert ok.exit_code == 0, ok.output
+    assert observed_locked is True
+
+    # Lock is released once `desktop run` exits.
+    with desktop_host_lock(tmp_path):
+        pass

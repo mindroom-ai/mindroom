@@ -1298,15 +1298,17 @@ def _pair_result(
     device_ed25519: str,
     entry: NativeControllerEntry,
 ) -> dict[str, object]:
-    result: dict[str, object] = {
+    confirmation_command = (
+        f"!desktop confirm {entry.allowed_agent_names[0]} {code} {verification}"
+        if len(entry.allowed_agent_names) == 1
+        else f"!desktop confirm {code} {verification}"
+    )
+    return {
         "verification": verification,
-        "confirmation_command": f"!desktop confirm {code} {verification}",
+        "confirmation_command": confirmation_command,
         "device_id": device_id,
         "device_ed25519": device_ed25519,
     }
-    if len(entry.allowed_agent_names) == 1:
-        result["agent_confirmation_command"] = f"!desktop confirm {entry.allowed_agent_names[0]} {code} {verification}"
-    return result
 
 
 def _merge_v1_configure(
@@ -1314,28 +1316,21 @@ def _merge_v1_configure(
     raw_config: object,
     incoming: NativeDesktopConfig,
 ) -> tuple[NativeDesktopConfig, bool]:
-    """Preserve unrelated secondary controllers when a legacy v1 configure saves one controller."""
+    """Promote the configured v1 controller to primary while preserving unrelated pins after it."""
     if existing is None or not existing.controllers:
         return incoming, False
     is_v1 = isinstance(raw_config, dict) and raw_config.get("v") == 1 and len(incoming.controllers) == 1
-    if not is_v1 or len(existing.controllers) <= 1:
+    if not is_v1:
         previous_primary = _primary_controller(existing)
         current_primary = _primary_controller(incoming)
         return incoming, previous_primary is not None and previous_primary == current_primary
     entry = incoming.controllers[0]
     exact_match = any(saved.controller == entry.controller for saved in existing.controllers)
     device_key = (entry.controller.user_id, entry.controller.device_id)
-    merged: list[NativeControllerEntry] = []
-    replaced = False
-    for saved in existing.controllers:
-        if (saved.controller.user_id, saved.controller.device_id) == device_key:
-            merged.append(entry)
-            replaced = True
-        else:
-            merged.append(saved)
-    if not replaced:
-        merged.append(entry)
-    return replace(incoming, controllers=tuple(merged)), exact_match
+    other_entries = tuple(
+        saved for saved in existing.controllers if (saved.controller.user_id, saved.controller.device_id) != device_key
+    )
+    return replace(incoming, controllers=(entry, *other_entries)), exact_match
 
 
 def _authority_controllers_status(
@@ -1576,8 +1571,8 @@ def _acquire_host_lock(storage_root: Path) -> int:
         if not _try_lock_host_fd(fd):
             raise NativeProtocolError(
                 "already_running",
-                "Another MindRoom app is already running Desktop access for this storage path.",
-                recovery="Stop Computer Access in the other MindRoom app and try again.",
+                "Another MindRoom app or CLI bridge is already running Desktop access for this storage path.",
+                recovery="Stop Computer Access in the other MindRoom app or terminal bridge and try again.",
             )
         if os.name != "nt":
             os.fchmod(fd, 0o600)
@@ -1598,11 +1593,8 @@ def _release_host_lock(fd: int | None) -> None:
 
 
 @contextmanager
-def _host_lock_guard(storage_root: Path, *, held: bool) -> Iterator[None]:
-    """Ensure no other process holds host.lock for the duration of a configuration mutation."""
-    if held:
-        yield
-        return
+def desktop_host_lock(storage_root: Path) -> Iterator[None]:
+    """Acquire and hold ``host.lock`` exclusively for one running Desktop host or CLI bridge."""
     fd = _acquire_host_lock(storage_root)
     try:
         yield
@@ -1610,10 +1602,21 @@ def _host_lock_guard(storage_root: Path, *, held: bool) -> Iterator[None]:
         _release_host_lock(fd)
 
 
+@contextmanager
+def _host_lock_guard(storage_root: Path, *, held: bool) -> Iterator[None]:
+    """Ensure no other process holds host.lock for the duration of a configuration mutation."""
+    if held:
+        yield
+        return
+    with desktop_host_lock(storage_root):
+        yield
+
+
 __all__ = [
     "NativeBridgeRuntime",
     "NativeDesktopHost",
     "NativeHostDependencies",
+    "desktop_host_lock",
     "run_native_stdio",
     "serve_native_stream",
 ]

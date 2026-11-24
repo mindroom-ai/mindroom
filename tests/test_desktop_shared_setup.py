@@ -535,14 +535,15 @@ def test_access_edit_loses_to_a_concurrent_app_save(
     assert saved.shell.enabled is False
 
 
-def test_setup_keeps_folder_and_shell_access_only_for_the_same_controller(
+def test_setup_preserves_folder_shell_and_apps_when_repairing_or_rotating_controller(
     shared_setup: SimpleNamespace,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Re-pairing the same controller keeps local access; a different controller starts without it."""
+    """Re-pairing or rotating a controller via CLI setup preserves saved apps, folders, and shell access."""
     path = native_config_path(shared_setup.storage_root)
     folder = _folder(shared_setup)
-    save_native_config(path, _with_local_access(_config(), folder), expected_revision=0)
+    initial = _with_local_access(_config(), folder)
+    save_native_config(path, initial, expected_revision=0)
     monkeypatch.setattr(desktop_cli, "_pair_desktop", AsyncMock(return_value="verification"))
 
     same = CliRunner().invoke(desktop_cli.desktop_app, _setup_args())
@@ -558,9 +559,9 @@ def test_setup_keeps_folder_and_shell_access_only_for_the_same_controller(
     assert other.exit_code == 0, other.output
     saved = load_native_config(path)
     assert saved.controller.device_id == "OTHER"
-    assert saved.files.roots == ()
-    assert saved.shell.enabled is False
-    assert saved.allowed_app_ids == ()
+    assert saved.files.roots == (folder,)
+    assert saved.shell.enabled is True
+    assert saved.allowed_app_ids == initial.allowed_app_ids
 
 
 def test_folder_and_shell_run_skips_gui_dependencies(

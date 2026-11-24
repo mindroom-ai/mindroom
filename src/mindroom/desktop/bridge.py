@@ -596,7 +596,6 @@ class DesktopBridge:
             expires_at_ms=None if duration_seconds is None else round((self.clock() + duration_seconds) * 1000),
             computer=computer,
         )
-        self._sync_policy_control()
         return self.local_status()
 
     def grant_control(
@@ -616,7 +615,6 @@ class DesktopBridge:
         else:
             self._require_controller(controller_key)
             self._control_grants.pop(controller_key, None)
-        self._sync_policy_control()
         return self.local_status()
 
     def revoke_control(self, controller_key: str | None = None) -> dict[str, object]:
@@ -646,23 +644,7 @@ class DesktopBridge:
             self._control_grants.pop(removed_key, None)
             if self.shell is not None:
                 self.shell.revoke(controller_key=removed_key)
-        self._sync_policy_control()
         return self.local_status()
-
-    def _sync_policy_control(self) -> None:
-        grants = [
-            grant
-            for key, grant in self._control_grants.items()
-            if key in self._controllers and self._grant_active(grant)
-        ]
-        if not grants:
-            self.policy = replace(self.policy, allow_control=False, control_lease_expires_at_ms=None)
-            return
-        if any(grant.expires_at_ms is None for grant in grants):
-            expires_at_ms = None
-        else:
-            expires_at_ms = max(grant.expires_at_ms for grant in grants if grant.expires_at_ms is not None)
-        self.policy = replace(self.policy, allow_control=True, control_lease_expires_at_ms=expires_at_ms)
 
     async def stop(self) -> None:
         """Fence admission, settle active work, and give recorded replies a bounded final delivery."""
@@ -1140,10 +1122,11 @@ class DesktopBridge:
         }
         if controller_key is not None:
             grant = self._control_grants.get(controller_key)
-            if grant is not None and grant.expires_at_ms is not None:
-                status["control_lease_expires_at_ms"] = grant.expires_at_ms
-        elif self.policy.control_lease_expires_at_ms is not None:
-            status["control_lease_expires_at_ms"] = self.policy.control_lease_expires_at_ms
+            expires_at_ms = grant.expires_at_ms if grant is not None else None
+        else:
+            _, expires_at_ms = self._top_level_lease_summary()
+        if expires_at_ms is not None:
+            status["control_lease_expires_at_ms"] = expires_at_ms
         return status
 
     def _controller_local_status(self, controller_key: str) -> dict[str, object]:
@@ -1174,7 +1157,12 @@ class DesktopBridge:
             if key in self._controllers and self._grant_active(grant)
         ]
         if not active:
-            return 0.0, self.policy.control_lease_expires_at_ms
+            expired_ms = [
+                grant.expires_at_ms
+                for key, grant in self._control_grants.items()
+                if key in self._controllers and grant.expires_at_ms is not None
+            ]
+            return 0.0, max(expired_ms) if expired_ms else None
         if any(grant.deadline == math.inf for grant in active):
             return 0.0, None
         longest = max(active, key=lambda grant: grant.deadline)

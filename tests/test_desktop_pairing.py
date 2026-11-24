@@ -17,6 +17,7 @@ from nio import AuthenticatedDevice, AuthenticatedToDeviceEvent
 from nio.durable import RecordKind, SyncBatch, SyncRecord
 
 import mindroom.tools  # noqa: F401
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.commands.desktop_commands import DesktopCommandScope, desktop_room_agent, handle_desktop_command
 from mindroom.commands.handler import handle_command
 from mindroom.commands.parsing import Command, CommandType
@@ -58,6 +59,7 @@ from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.olm_to_device import OlmToDeviceError
 from mindroom.matrix.room_membership import ensure_room_membership_synced
 from mindroom.message_target import MessageTarget
+from tests.access_schema_support import joined_members_response, refresh_memberships
 from tests.authorization_helpers import make_test_command_handler_context
 from tests.conftest import make_conversation_reader_mock, test_runtime_paths
 from tests.identity_helpers import persist_entity_accounts
@@ -803,6 +805,8 @@ def _olm_receiver(
     devices: dict[str, dict[str, SimpleNamespace]],
     agent_name: str = "computer",
     config: Config | None = None,
+    rooms: dict[str, object] | None = None,
+    membership_index: AgentReplyMembershipIndex | None = None,
 ) -> tuple[DesktopPairingReceiver, list[tuple[PinnedMatrixDevice, str, dict[str, object]]]]:
     sent: list[tuple[PinnedMatrixDevice, str, dict[str, object]]] = []
 
@@ -816,12 +820,13 @@ def _olm_receiver(
         sent.append((target, event_type, content))
 
     monkeypatch.setattr("mindroom.desktop.pairing_receiver.send_encrypted_to_device", capture_send)
-    client = SimpleNamespace(olm=SimpleNamespace(device_store=devices))
+    client = SimpleNamespace(olm=SimpleNamespace(device_store=devices), rooms=rooms or {})
     receiver = DesktopPairingReceiver(
         client=client,  # type: ignore[arg-type]
         agent_name=agent_name,
         runtime_paths=runtime_paths,  # type: ignore[arg-type]
         config=config if config is not None else _desktop_config(runtime_paths),
+        membership_index=membership_index,
     )
     return receiver, sent
 
@@ -1594,17 +1599,33 @@ async def test_olm_pairing_receiver_rejects_unauthorized_senders_on_all_events(
     )
     assert sent == []
 
-    # 2. pairing_claim.v1 from unauthorized sender -> silently dropped, pairing remains unclaimed.
+    # 2. pairing_claim.v1 from unauthorized sender against an Olm-initiated pairing -> rejected by claim_desktop_pairing.
+    alice_pending = create_desktop_pairing(
+        runtime_paths,
+        requester_id="@alice:example.org",
+        agent_name="computer",
+        initiator_device_id="CHAT_A",
+        initiator_ed25519="chat-a-key",
+    )
     await receiver.on_event(
         _olm_event(
             sender="@mallory:example.org",
             device_id="HELP_M",
             ed25519="help-m-key",
             event_type=DESKTOP_PAIRING_CLAIM_EVENT_TYPE,
-            content=DesktopPairingClaim(pending.token).to_content(),
+            content=DesktopPairingClaim(alice_pending.token).to_content(),
         ),
     )
     assert sent == []
+    # Alice's pairing remains unclaimed and can still be claimed by Alice.
+    claim_desktop_pairing(
+        runtime_paths,
+        token=alice_pending.token,
+        agent_name="computer",
+        device_user_id="@alice:example.org",
+        device_id="HELP_A",
+        device_ed25519="help-a-key",
+    )
 
     # Claim in DB directly so confirm would otherwise succeed if authorization weren't checked.
     claim_desktop_pairing(
@@ -1669,3 +1690,186 @@ async def test_olm_pairing_receiver_rejects_unauthorized_senders_on_all_events(
     offer = DesktopSetupOffer.from_content(sent.pop()[2])
     assert offer.eligible is True
     assert offer.homeserver == "https://secret.example.org"
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_legacy_dedicated_bridge_account_claim_accepted_by_receiver(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Dedicated bridge accounts outside access.users can still claim legacy manual pairings through the receiver."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = Config.validate_with_runtime(
+        {
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
+            "defaults": {"tools": []},
+            "agents": {
+                "computer": {
+                    "display_name": "Computer",
+                    "role": "Operate apps",
+                    "tools": ["desktop"],
+                    "access": {"users": ["@alice:example.org"]},
+                },
+            },
+        },
+        runtime_paths,
+    )
+    devices = {
+        "@alice-mac:example.org": {"BRIDGE1": _olm_device("bridge1-key")},
+    }
+    receiver, sent = _olm_receiver(runtime_paths, monkeypatch, devices=devices, agent_name="computer", config=config)
+
+    # Legacy manual /desktop setup pairing (no initiator_device_id) owned by @alice:example.org.
+    legacy = create_desktop_pairing(runtime_paths, requester_id="@alice:example.org", agent_name="computer")
+    await receiver.on_event(
+        _olm_event(
+            sender="@alice-mac:example.org",
+            device_id="BRIDGE1",
+            ed25519="bridge1-key",
+            event_type=DESKTOP_PAIRING_CLAIM_EVENT_TYPE,
+            content=DesktopPairingClaim(legacy.token).to_content(),
+        ),
+    )
+    assert len(sent) == 1
+    target, event_type, content = sent.pop()
+    assert target == PinnedMatrixDevice("@alice-mac:example.org", "BRIDGE1", "bridge1-key")
+    assert event_type == DESKTOP_PAIRING_ACCEPTED_EVENT_TYPE
+    expected_ver = desktop_pairing_verification(legacy.token, "bridge1-key")
+    assert DesktopPairingAccepted.from_content(content).verification == expected_ver
+
+    # The dedicated bridge account is still rejected on requester-only Olm operations.
+    await receiver.on_event(
+        _olm_event(
+            sender="@alice-mac:example.org",
+            device_id="BRIDGE1",
+            ed25519="bridge1-key",
+            event_type=DESKTOP_SETUP_REQUEST_EVENT_TYPE,
+            content=DesktopSetupRequest(nonce="bridge-setup-01234", agent_name="computer").to_content(),
+        ),
+    )
+    assert sent == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_olm_pairing_receiver_authorizes_current_room_members_via_shared_room(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Users authorized only via access.current_room_members in a verified shared room can pair over Olm."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = Config.validate_with_runtime(
+        {
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
+            "defaults": {"tools": []},
+            "agents": {
+                "computer": {
+                    "display_name": "Computer",
+                    "role": "Operate apps",
+                    "tools": ["desktop"],
+                    "access": {"users": [], "current_room_members": True, "members_of_rooms": []},
+                },
+            },
+        },
+        runtime_paths,
+    )
+    shared_room_id = "!shared:example.org"
+    observer_client = AsyncMock()
+    observer_client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[shared_room_id])
+    observer_client.joined_members.return_value = joined_members_response(shared_room_id, "@bob:example.org")
+    memberships = AgentReplyMembershipIndex()
+    await refresh_memberships(memberships, config, runtime_paths, observer_client)
+
+    devices = {
+        "@bob:example.org": {"CHAT_B": _olm_device("chat-b-key"), "HELP_B": _olm_device("help-b-key")},
+        "@outsider:example.org": {"CHAT_O": _olm_device("chat-o-key")},
+        "@invited:example.org": {"CHAT_I": _olm_device("chat-i-key")},
+    }
+    shared_room = SimpleNamespace(
+        room_id=shared_room_id,
+        users={"@bob:example.org": object(), "@invited:example.org": object()},
+        invited_users={"@invited:example.org": object()},
+    )
+    receiver, sent = _olm_receiver(
+        runtime_paths,
+        monkeypatch,
+        devices=devices,
+        agent_name="computer",
+        config=config,
+        rooms={shared_room_id: shared_room},
+        membership_index=memberships,
+    )
+
+    # Outsider not in any shared room is silently rejected.
+    await receiver.on_event(
+        _olm_event(
+            sender="@outsider:example.org",
+            device_id="CHAT_O",
+            ed25519="chat-o-key",
+            event_type=DESKTOP_SETUP_REQUEST_EVENT_TYPE,
+            content=DesktopSetupRequest(nonce="outsider-setup-012", agent_name="computer").to_content(),
+        ),
+    )
+    assert sent == []
+
+    # Invited-only user is not a joined member and is also rejected.
+    await receiver.on_event(
+        _olm_event(
+            sender="@invited:example.org",
+            device_id="CHAT_I",
+            ed25519="chat-i-key",
+            event_type=DESKTOP_SETUP_REQUEST_EVENT_TYPE,
+            content=DesktopSetupRequest(nonce="invited-setup-0123", agent_name="computer").to_content(),
+        ),
+    )
+    assert sent == []
+
+    # @bob:example.org is authorized via access.current_room_members in the verified shared room.
+    await receiver.on_event(
+        _olm_event(
+            sender="@bob:example.org",
+            device_id="CHAT_B",
+            ed25519="chat-b-key",
+            event_type=DESKTOP_SETUP_REQUEST_EVENT_TYPE,
+            content=DesktopSetupRequest(nonce="bob-setup-01234567", agent_name="computer").to_content(),
+        ),
+    )
+    assert len(sent) == 1
+    offer = DesktopSetupOffer.from_content(sent.pop()[2])
+    assert offer.eligible is True
+    assert offer.code is not None
+
+    await receiver.on_event(
+        _olm_event(
+            sender="@bob:example.org",
+            device_id="HELP_B",
+            ed25519="help-b-key",
+            event_type=DESKTOP_PAIRING_CLAIM_EVENT_TYPE,
+            content=DesktopPairingClaim(offer.code).to_content(),
+        ),
+    )
+    ver = DesktopPairingAccepted.from_content(sent.pop()[2]).verification
+
+    await receiver.on_event(
+        _olm_event(
+            sender="@bob:example.org",
+            device_id="CHAT_B",
+            ed25519="chat-b-key",
+            event_type=DESKTOP_PAIRING_CONFIRM_EVENT_TYPE,
+            content=DesktopPairingConfirm(
+                nonce="bob-confirm-012345",
+                token=offer.code,
+                verification=ver,
+                device_id="HELP_B",
+                device_ed25519="help-b-key",
+            ).to_content(),
+        ),
+    )
+    confirmed = DesktopPairingConfirmed.from_content(sent.pop()[2])
+    assert confirmed == DesktopPairingConfirmed(nonce="bob-confirm-012345", agent_name="computer", ok=True)
+    assert load_desktop_credentials(
+        get_runtime_credentials_manager(runtime_paths),
+        requester_id="@bob:example.org",
+        agent_name="computer",
+    ) == {"device_user_id": "@bob:example.org", "device_id": "HELP_B", "device_ed25519": "help-b-key"}

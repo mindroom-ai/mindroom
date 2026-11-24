@@ -30,7 +30,10 @@ import nio
 import pytest
 from mcp.types import CallToolResult, TextContent
 from nio import AuthenticatedDevice, AuthenticatedToDeviceEvent
+from typer.testing import CliRunner
 
+import mindroom.cli.desktop as desktop_cli
+from mindroom.cli.desktop import desktop_app
 from mindroom.desktop.bridge import DesktopBridge
 from mindroom.desktop.bridge_session import DesktopBridgeSessionDeps
 from mindroom.desktop.cloudflare_access import CloudflareAccessHeaders
@@ -2682,8 +2685,8 @@ async def test_pair_targets_selected_controller_when_stopped(
     expected_ver_b = desktop_pairing_verification("code-b", "stopped-ed25519")
     assert stopped_targets == [ctrl_2]
     assert stopped_b["verification"] == expected_ver_b
-    assert stopped_b["confirmation_command"] == f"!desktop confirm code-b {expected_ver_b}"
-    assert stopped_b["agent_confirmation_command"] == f"!desktop confirm helper code-b {expected_ver_b}"
+    assert stopped_b["confirmation_command"] == f"!desktop confirm helper code-b {expected_ver_b}"
+    assert "agent_confirmation_command" not in stopped_b
     assert stopped_b["device_id"] == "LOCAL"
     assert stopped_b["device_ed25519"] == "stopped-ed25519"
 
@@ -2774,8 +2777,8 @@ async def test_pair_targets_selected_controller_while_running_preserving_handles
         expected_ver = desktop_pairing_verification("code-b-live", live_fingerprint)
         assert live_claims == [(ctrl_2, "code-b-live")]
         assert live_result["verification"] == expected_ver
-        assert live_result["confirmation_command"] == f"!desktop confirm code-b-live {expected_ver}"
-        assert live_result["agent_confirmation_command"] == f"!desktop confirm coder code-b-live {expected_ver}"
+        assert live_result["confirmation_command"] == f"!desktop confirm coder code-b-live {expected_ver}"
+        assert "agent_confirmation_command" not in live_result
         assert live_result["device_id"] == "LOCAL"
         assert live_result["device_ed25519"] == live_fingerprint
         assert live_result["status"]["bridge"]["state"] == "observe_only"
@@ -2856,10 +2859,65 @@ async def test_legacy_v1_configure_preserves_unrelated_secondary_controllers_and
     assert [c["controller_key"] for c in updated["config"]["controllers"]] == [key_1, key_2]
     assert updated["config"]["allowed_app_ids"] == ["com.example.Updated"]
 
-    # Legacy v1 configure with a brand-new controller C appends cleanly without wiping A or B.
-    v1_add_c = _config_payload() | {
+    # Legacy v1 configure for secondary controller B promotes B to controllers[0] while preserving A!
+    v1_promote_b = _config_payload() | {
         "revision": 5,
+        "controller": {"user_id": ctrl_2.user_id, "device_id": ctrl_2.device_id, "ed25519": ctrl_2.ed25519},
+    }
+    promoted = (await host.handle(_request("configure", expected_revision=5, config=v1_promote_b)))["status"]
+    assert [c["controller_key"] for c in promoted["config"]["controllers"]] == [key_2, key_1]
+    assert promoted["config"]["controller_user_id"] == ctrl_2.user_id
+
+    # Legacy v1 configure with a brand-new controller C promotes C to controllers[0] without wiping B or A.
+    v1_add_c = _config_payload() | {
+        "revision": 6,
         "controller": {"user_id": ctrl_3.user_id, "device_id": ctrl_3.device_id, "ed25519": ctrl_3.ed25519},
     }
-    added = (await host.handle(_request("configure", expected_revision=5, config=v1_add_c)))["status"]
-    assert [c["controller_key"] for c in added["config"]["controllers"]] == [key_1, key_2, key_3]
+    added = (await host.handle(_request("configure", expected_revision=6, config=v1_add_c)))["status"]
+    assert [c["controller_key"] for c in added["config"]["controllers"]] == [key_3, key_2, key_1]
+    assert added["config"]["controller_user_id"] == ctrl_3.user_id
+
+
+def test_cli_desktop_run_holding_host_lock_blocks_native_remove_controller(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Holding host.lock in `mindroom desktop run` prevents native host remove_controller from mutating config."""
+    ctrl_2 = PinnedMatrixDevice("@controller2:example.org", "DEVICE2", "key2")
+    key_2 = controller_journal_key(ctrl_2)
+
+    host = _host(tmp_path, FakeRuntime())
+    asyncio.run(host.handle(_request("configure", expected_revision=0, config=_config_payload())))
+    asyncio.run(host.handle(_upsert_request(1, ctrl_2)))
+    assert len(load_native_config(native_config_path(tmp_path)).controllers) == 2
+
+    monkeypatch.setattr(
+        desktop_cli,
+        "activate_cli_runtime",
+        lambda *_args, **_kwargs: SimpleNamespace(storage_root=tmp_path),
+    )
+    monkeypatch.setattr("mindroom.logging_config.setup_logging", lambda **_kwargs: None)
+    monkeypatch.setattr(desktop_cli, "_ensure_desktop_dependencies", lambda *_args, **_kwargs: None)
+    save_desktop_session(
+        tmp_path / "desktop_bridge" / "matrix_session.json",
+        DesktopMatrixSession("https://matrix.example.org", "@me:example.org", "LOCAL", "secret"),
+    )
+
+    blocked_error_code: str | None = None
+
+    async def run_while_locked(**_kwargs: object) -> None:
+        nonlocal blocked_error_code
+        other_host = _host(tmp_path, FakeRuntime())
+        with pytest.raises(NativeProtocolError) as refused:
+            await other_host.handle(_request("remove_controller", expected_revision=2, controller_key=key_2))
+        blocked_error_code = refused.value.code
+
+    monkeypatch.setattr(desktop_cli, "_run_bridge", run_while_locked)
+    result = CliRunner().invoke(desktop_app, ["run"])
+    assert result.exit_code == 0, result.output
+    assert blocked_error_code == "already_running"
+    assert len(load_native_config(native_config_path(tmp_path)).controllers) == 2
+
+    # Once `mindroom desktop run` exits, native host remove_controller succeeds.
+    removed = asyncio.run(host.handle(_request("remove_controller", expected_revision=2, controller_key=key_2)))
+    assert len(removed["status"]["config"]["controllers"]) == 1

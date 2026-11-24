@@ -145,6 +145,12 @@ def _response(send: AsyncMock) -> DesktopResponse:
     return DesktopResponse.from_content(content)
 
 
+@pytest.fixture(autouse=True)
+def _stub_macos_permissions(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Stub host macOS TCC probes so fake-provider bridge tests do not depend on local grants."""
+    monkeypatch.setattr("mindroom.desktop.bridge.missing_macos_desktop_permissions", lambda: ())
+
+
 @pytest.fixture
 def transport(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
     """Accept the exact controller identity while capturing encrypted responses."""

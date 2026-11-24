@@ -372,18 +372,16 @@ def _print_device_identity(
     _console.print("\nUse the pairing command returned by `/desktop setup` in the direct agent chat.")
 
 
-@desktop_app.command("pair", rich_help_panel="Advanced")
-def desktop_pair(
-    code: str = _CODE_OPTION,
-    controller_user_id: str = _CONTROLLER_USER_ID_OPTION,
-    controller_device_id: str = _CONTROLLER_DEVICE_ID_OPTION,
-    controller_ed25519: str = _CONTROLLER_ED25519_OPTION,
-    cloudflare_access: bool = _CLOUDFLARE_ACCESS_OPTION,
-    matrix_http_headers_file: Path | None = _MATRIX_HTTP_HEADERS_FILE_OPTION,
-    config_path: Path | None = _CONFIG_PATH_OPTION,
-    storage_path: Path | None = _STORAGE_PATH_OPTION,
+def _claim_pairing(
+    *,
+    runtime_paths: RuntimePaths,
+    code: str,
+    controller_user_id: str,
+    controller_device_id: str,
+    controller_ed25519: str,
+    cloudflare_access: bool,
+    matrix_http_headers_file: Path | None,
 ) -> str:
-    """Claim one requester-agent pairing through authenticated Matrix E2EE."""
     from mindroom.desktop.cloudflare_access import CloudflareAccessError  # noqa: PLC0415
     from mindroom.desktop.session import (  # noqa: PLC0415
         DesktopSessionError,
@@ -393,7 +391,6 @@ def desktop_pair(
     )
     from mindroom.matrix.olm_to_device import OlmToDeviceError  # noqa: PLC0415
 
-    runtime_paths = _activate_desktop_runtime(config_path, storage_path=storage_path)
     try:
         session = load_desktop_session(desktop_session_path(runtime_paths))
         http_headers = desktop_http_headers(
@@ -401,7 +398,7 @@ def desktop_pair(
             matrix_http_headers_file,
             cloudflare_access=cloudflare_access or session.cloudflare_access,
         )
-        verification = asyncio.run(
+        return asyncio.run(
             _pair_desktop(
                 runtime_paths=runtime_paths,
                 session=session,
@@ -415,8 +412,41 @@ def desktop_pair(
     except (CloudflareAccessError, DesktopSessionError, OlmToDeviceError, ValueError) as exc:
         print_literal("[red]Desktop pairing failed:[/red] ", exc, console=_error_console)
         raise typer.Exit(1) from None
+
+
+def _print_pairing_confirmation(code: str, verification: str, *, agent_name: str | None = None) -> None:
+    command = (
+        f"!desktop confirm {agent_name} {code} {verification}"
+        if agent_name is not None
+        else f"!desktop confirm {code} {verification}"
+    )
     _console.print("[green]Pairing claim accepted.[/green] Return to the chat and run:")
-    _console.print(f"!desktop confirm {code} {verification}", markup=False)
+    _console.print(command, markup=False)
+
+
+@desktop_app.command("pair", rich_help_panel="Advanced")
+def desktop_pair(
+    code: str = _CODE_OPTION,
+    controller_user_id: str = _CONTROLLER_USER_ID_OPTION,
+    controller_device_id: str = _CONTROLLER_DEVICE_ID_OPTION,
+    controller_ed25519: str = _CONTROLLER_ED25519_OPTION,
+    cloudflare_access: bool = _CLOUDFLARE_ACCESS_OPTION,
+    matrix_http_headers_file: Path | None = _MATRIX_HTTP_HEADERS_FILE_OPTION,
+    config_path: Path | None = _CONFIG_PATH_OPTION,
+    storage_path: Path | None = _STORAGE_PATH_OPTION,
+) -> str:
+    """Claim one requester-agent pairing through authenticated Matrix E2EE."""
+    runtime_paths = _activate_desktop_runtime(config_path, storage_path=storage_path)
+    verification = _claim_pairing(
+        runtime_paths=runtime_paths,
+        code=code,
+        controller_user_id=controller_user_id,
+        controller_device_id=controller_device_id,
+        controller_ed25519=controller_ed25519,
+        cloudflare_access=cloudflare_access,
+        matrix_http_headers_file=matrix_http_headers_file,
+    )
+    _print_pairing_confirmation(code, verification)
     return verification
 
 
@@ -513,21 +543,20 @@ def desktop_setup(
         )
         config = _build_setup_config(previous, base_revision=base_revision, entry=entry, allow_app=allow_app)
         config = NativeDesktopConfig.from_payload(config.to_payload(), validate_browser_paths=False)
-        verification = desktop_pair(
+        verification = _claim_pairing(
+            runtime_paths=runtime_paths,
             code=code,
             controller_user_id=controller_user_id,
             controller_device_id=controller_device_id,
             controller_ed25519=controller_ed25519,
             cloudflare_access=cloudflare_access,
             matrix_http_headers_file=matrix_http_headers_file,
-            config_path=config_path,
-            storage_path=storage_path,
         )
-        if isinstance(verification, str) and len(allow_agent) == 1:
-            _console.print(
-                f"In a multi-agent room, run: !desktop confirm {allow_agent[0]} {code} {verification}",
-                markup=False,
-            )
+        _print_pairing_confirmation(
+            code,
+            verification,
+            agent_name=allow_agent[0] if len(allow_agent) == 1 else None,
+        )
         save_desktop_session(
             session_path,
             replace(session, cloudflare_access=cloudflare_access or session.cloudflare_access),
@@ -553,7 +582,7 @@ def _build_setup_config(
     entry: NativeControllerEntry,
     allow_app: list[str] | None,
 ) -> NativeDesktopConfig:
-    """Merge one setup controller into saved config, preserving unrelated controllers cleanly."""
+    """Merge one setup controller into saved config, preserving unrelated controllers and saved capabilities."""
     from mindroom.desktop.native_config import (  # noqa: PLC0415
         NativeBrowserConfig,
         NativeCaptureConfig,
@@ -574,15 +603,8 @@ def _build_setup_config(
             shell=NativeShellConfig(),
         )
     if any(saved.controller == entry.controller for saved in previous.controllers):
-        # Saved local authority carries over only when re-pairing an already-pinned controller.
-        updated = previous.with_upserted_controller(entry)
-        return replace(
-            updated,
-            revision=base_revision,
-            enabled=True,
-            allowed_app_ids=tuple(allow_app) if allow_app is not None else previous.allowed_app_ids,
-        )
-    if any(saved.controller.user_id == entry.controller.user_id for saved in previous.controllers):
+        next_controllers = previous.with_upserted_controller(entry).controllers
+    elif any(saved.controller.user_id == entry.controller.user_id for saved in previous.controllers):
         controllers: list[NativeControllerEntry] = []
         inserted = False
         for saved in previous.controllers:
@@ -595,15 +617,12 @@ def _build_setup_config(
         next_controllers = tuple(controllers)
     else:
         next_controllers = previous.with_upserted_controller(entry).controllers
-    return NativeDesktopConfig(
+    return replace(
+        previous,
         revision=base_revision,
         enabled=True,
         controllers=next_controllers,
-        allowed_app_ids=tuple(allow_app) if allow_app is not None else (),
-        capture=NativeCaptureConfig(),
-        browser=NativeBrowserConfig(),
-        files=NativeFilesConfig(),
-        shell=NativeShellConfig(),
+        allowed_app_ids=tuple(allow_app) if allow_app is not None else previous.allowed_app_ids,
     )
 
 
@@ -881,6 +900,7 @@ def desktop_run(
     """
     from mindroom.desktop.bridge_session import DesktopWorkerStoppedError  # noqa: PLC0415
     from mindroom.desktop.cloudflare_access import CloudflareAccessError  # noqa: PLC0415
+    from mindroom.desktop.native_host import desktop_host_lock  # noqa: PLC0415
     from mindroom.desktop.provider import DesktopProviderError  # noqa: PLC0415
     from mindroom.desktop.session import (  # noqa: PLC0415
         DesktopSessionError,
@@ -919,20 +939,21 @@ def desktop_run(
             matrix_http_headers_file,
             cloudflare_access=cloudflare_access or session.cloudflare_access,
         )
-        # Folder and shell access need no GUI runtime or macOS GUI permissions.
-        if config.allowed_app_ids:
-            _ensure_desktop_dependencies(runtime_paths)
-        asyncio.run(
-            _run_bridge(
-                runtime_paths=runtime_paths,
-                session=session,
-                config=config,
-                allow_control=allow_control,
-                lease_minutes=lease_minutes,
-                shell_auto_approve_minutes=shell_auto_approve_minutes,
-                http_headers=http_headers,
-            ),
-        )
+        with desktop_host_lock(runtime_paths.storage_root):
+            # Folder and shell access need no GUI runtime or macOS GUI permissions.
+            if config.allowed_app_ids:
+                _ensure_desktop_dependencies(runtime_paths)
+            asyncio.run(
+                _run_bridge(
+                    runtime_paths=runtime_paths,
+                    session=session,
+                    config=config,
+                    allow_control=allow_control,
+                    lease_minutes=lease_minutes,
+                    shell_auto_approve_minutes=shell_auto_approve_minutes,
+                    http_headers=http_headers,
+                ),
+            )
     except KeyboardInterrupt:
         _console.print("\n[yellow]Desktop bridge stopped.[/yellow]")
     except (

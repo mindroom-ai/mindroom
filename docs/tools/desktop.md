@@ -48,6 +48,9 @@ agents:
 | --- | --- | --- | --- |
 | `timeout_seconds` | number | `30` | From 1 to 120; bounds each call and each shell-output download. `run_shell` always waits up to 120 seconds so the person at the computer has time to decide. |
 
+By default, `defaults.desktop_pairing` is `self_service`, so authorized users can pair their computer with any concrete agent without statically listing `desktop` in `tools` (the tool activates automatically once paired).
+Set `defaults.desktop_pairing: explicit_only` to restrict pairing to agents that explicitly configure `desktop`, or `disabled` to refuse new pairings while still allowing existing pairings to disconnect.
+
 Never put device identity fields in agent YAML for the `desktop` tool; each user pairs their own computer through chat.
 Pairings are already scoped to one requester and one agent, so add `private: {per: user_agent}` only when the agent's whole runtime and state should also be requester-private.
 The tool needs a live Matrix room and runs in the primary agent process, so it is unavailable in [OpenAI-compatible API](../openai-api.md) runs.
@@ -68,8 +71,7 @@ To drive the user's signed-in browser, also configure the [`browser`](web-scrapi
 Only the same requester with the same agent can confirm or use the pairing.
 Until pairing is confirmed, `desktop` calls return a setup-required result while the agent's other tools keep working, and the model cannot register or replace a device itself.
 
-Repeating setup for the same controller keeps saved browser, capture, folder, and shell choices, and keeps app choices unless you supply new app IDs.
-Setup for a different controller starts without saved folders or shell access; after the bridge has started once, see **Change the cloud controller** under [Operations](#operations).
+Repeating setup for the same controller, rotating a controller device, or adding another controller keeps saved browser, capture, folder, and shell choices, and keeps app choices unless you supply new app IDs.
 If the saved session belongs to a different homeserver or Matrix user than the setup command names, setup exits without pairing; pass `--storage-path` for a separate setup or run `mindroom desktop login --replace`.
 The separate `mindroom desktop login` and `mindroom desktop pair` commands remain available for manual recovery.
 
@@ -447,8 +449,8 @@ Adding `run_shell` to the set adds a chat confirmation before the request is sen
 - **Rotate the local device**: Run `mindroom desktop login --replace`, revoke the old device in your Matrix account settings, then run `!desktop rotate` in the agent chat and follow its pairing command.
   `--replace` does not revoke the old device by itself.
   If a `browser` tool uses the desktop target, update its `device_id` and `device_ed25519` settings to the new device, or its calls fail.
-- **Change the cloud controller**: Once the bridge has started, setup, the macOS app, and `mindroom desktop run` refuse a different controller identity with `Desktop journal belongs to a different controller.`
-  Use `--storage-path` with a new directory for `mindroom desktop login`, `mindroom desktop setup`, and `mindroom desktop run`; the new setup does not carry over pending commands or outcomes, and the macOS app has no migration action.
+- **Add or change cloud controllers**: The v2 command journal (`commands.sqlite3`) isolates command history per controller inside one storage directory, so a single bridge can serve multiple paired cloud controllers or rotate an existing controller device without switching `--storage-path`.
+  Run `mindroom desktop setup` (or upsert/remove controllers in the macOS app) to add, rotate, or remove controllers while keeping existing local capabilities intact.
 - **Identity mismatch**: A device ID or Ed25519 mismatch is a hard failure; treat it as a rotation or possible substitution and do not bypass it.
 - **Stop**: `Ctrl+C` in the terminal or **Stop Access** in the macOS app stops the bridge and its shell commands.
   An app or browser action already in progress can still finish, so observe local state before retrying it.

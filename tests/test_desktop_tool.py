@@ -1274,15 +1274,29 @@ def test_dynamic_desktop_tool_absent_when_unpaired_and_injected_when_paired(tmp_
     config, runtime_paths, paired, alice_id = _build_assistant(tmp_path, requester_id="@alice:example.org", pair=True)
     assert "desktop" in {t.name for t in paired.spec.toolkits}
     assert paired.tool_jobs is not None
+    tools_registry = config_plugins(config, runtime_paths).tools
+    desktop_authority = dict(paired.tool_jobs.tools["desktop"].authority)
     assert locally_allowed(
         config,
         alice_id,
-        tools=config_plugins(config, runtime_paths).tools,
+        tools=tools_registry,
         tool_name="desktop",
         toolkit_name="desktop",
         origin={},
         depth=0,
-        authority=dict(paired.tool_jobs.tools["desktop"].authority),
+        authority=desktop_authority,
+        runtime_paths=runtime_paths,
+    )
+    assert not locally_allowed(
+        config,
+        alice_id,
+        tools=tools_registry,
+        tool_name="desktop",
+        toolkit_name="desktop",
+        origin={},
+        depth=0,
+        authority=desktop_authority,
+        runtime_paths=None,
     )
 
     _, _, bob_build, _ = _build_assistant(tmp_path, requester_id="@bob:example.org")

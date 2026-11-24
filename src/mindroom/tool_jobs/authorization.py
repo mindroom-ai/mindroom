@@ -95,10 +95,8 @@ def locally_allowed(
         and turn_keeps_room_tools(owner)
         and tools.available("desktop")
         and bool(owner.requester_id)
-        and (
-            runtime_paths is None
-            or has_ready_self_service_desktop(config, runtime_paths, owner.agent_name, owner.requester_id)
-        )
+        and runtime_paths is not None
+        and has_ready_self_service_desktop(config, runtime_paths, owner.agent_name, owner.requester_id)
     ):
         entry = EffectiveToolConfig(name="desktop", tool_config_overrides={}, authored_name="desktop")
     if entry is None:

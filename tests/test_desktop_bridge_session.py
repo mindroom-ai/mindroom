@@ -420,12 +420,12 @@ async def test_close_fences_admission_and_ends_control_before_it_yields(
         offline_session_deps(FakeMatrixOwner()),
         control_lease_seconds=600,
     )
-    assert session.bridge.policy.allow_control is True
+    assert session.bridge.local_status()["control_available"] is True
 
     closing = asyncio.create_task(session.close())
     await asyncio.sleep(0)
 
-    assert session.bridge.policy.allow_control is False
+    assert session.bridge.local_status()["control_available"] is False
     assert session.bridge.local_status()["gui_mode"] == "stopped"
     await closing
 

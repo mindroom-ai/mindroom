@@ -162,7 +162,7 @@ def test_pair_preserves_or_upgrades_saved_access_only_after_claim(
 
     result = asyncio.run(host.handle(NativeRequest("pair", "pair", parameters)))
 
-    assert result["confirmation_command"] == "!desktop confirm pairing-code ABCD-EFGH"
+    assert result["confirmation_command"] == "!desktop confirm assistant pairing-code ABCD-EFGH"
     assert result["device_id"] == "LOCAL"
     assert result["device_ed25519"] == "device-ed25519"
     assert load_desktop_session(session_path).cloudflare_access is bool(saved_access or requested_access)
