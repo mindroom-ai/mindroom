@@ -102,7 +102,8 @@ async def _wait_child_question(engine: WorkflowEngine, run_id: str, ask_key: str
         async with cond:
             cur = await asyncio.to_thread(engine.store.get_node, run_id, ask_key)
             run = await asyncio.to_thread(engine.store.get_run, run_id)
-            if cur is None or cur.state is WorkflowNodeState.CANCELLED or engine.run_ended(run_id):
+            ended = engine.is_stopping(run_id) or run.state in TERMINAL_RUN_STATES
+            if cur is None or cur.state is WorkflowNodeState.CANCELLED or ended:
                 raise WorkflowRunStoreError(_NOT_ANSWERED)
             if cur.state is WorkflowNodeState.COMPLETED:
                 return str(cur.result)
@@ -134,7 +135,7 @@ async def ask_child_question(
             if saved.attempt != run.attempt or saved.stale:
                 await engine.stamp(saved, run.epoch, ignore=True, attempt=run.attempt, stale=False)
             ask_node = saved
-        elif engine.run_ended(run_id):
+        elif engine.is_stopping(run_id) or run.state in TERMINAL_RUN_STATES:
             raise WorkflowRunStoreError(_NOT_ANSWERED)
         else:
             ask_node = WorkflowNode(
