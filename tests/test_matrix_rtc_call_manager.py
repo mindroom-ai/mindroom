@@ -762,7 +762,7 @@ async def test_oldest_member_on_a_foreign_service_blocks_the_call_under_either_s
             assert state.session is None
             assert state.retry_task is None
             assert state.logical_call is not None
-            assert state.logical_call.join_blocked
+            assert state.logical_call.join_block is not None
         client.get_openid_token.assert_not_awaited()
 
         await _reconcile_roster(manager, client, room)
@@ -2350,7 +2350,7 @@ async def test_agent_failure_during_the_sfu_connect_ends_the_join_before_its_mem
     assert _call_state(manager).session is None
     assert _call_state(manager).retry_task is None
     assert _call_state(manager).logical_call is not None
-    assert _call_state(manager).logical_call.join_blocked
+    assert _call_state(manager).logical_call.join_block is not None
 
 
 @pytest.mark.asyncio
@@ -2514,7 +2514,9 @@ async def test_agent_that_failed_before_a_media_error_is_skipped_not_retried(
     await asyncio.wait_for(_deliver(manager, manager.on_room_event(_room(), _member_unknown_event())), timeout=1)
     await _wait_until(lambda: bridge.closed)
     await _wait_until(
-        lambda: _call_state(manager).logical_call is not None and _call_state(manager).logical_call.join_blocked,
+        lambda: (
+            _call_state(manager).logical_call is not None and _call_state(manager).logical_call.join_block is not None
+        ),
     )
 
     assert _call_state(manager).session is None
@@ -2730,17 +2732,16 @@ async def test_update_config_retries_waiting_caller_after_missing_credential_is_
     await _deliver(manager, manager.on_room_event(room, _member_unknown_event()))
     logical_call = _call_state(manager).logical_call
     assert logical_call is not None
-    assert logical_call.join_blocked is True
-    assert logical_call.join_blocked_by_config is True
+    assert logical_call.join_block == "config"
     assert bridge.connected_grant is None
 
-    # An unrelated reload leaves the config-failure block intact instead of retrying.
-    unrelated = _config(credentials_service="missing")
-    unrelated.agents["helper"].display_name = "Helper Renamed"
-    manager.update_config(unrelated)
+    # A reload with the credential still missing fails and blocks as a config failure again.
+    still_missing = _config(credentials_service="missing")
+    still_missing.agents["helper"].display_name = "Helper Renamed"
+    manager.update_config(still_missing)
     await asyncio.gather(*list(manager._background_tasks))
     assert bridge.connected_grant is None
-    assert logical_call.join_blocked is True
+    assert logical_call.join_block == "config"
 
     # Fixing the credential clears the config block and connects the still-waiting caller.
     manager.update_config(_config(credentials_service="openai"))
@@ -2775,8 +2776,7 @@ async def test_update_config_does_not_reopen_deliberately_ended_session(tmp_path
     assert bridges[0].closed
     assert _call_state(manager).session is None
     assert logical_call is not None
-    assert logical_call.join_blocked is True
-    assert logical_call.join_blocked_by_config is False
+    assert logical_call.join_block == "terminal"
 
     reloaded = _config()
     reloaded.calls.profiles["realtime"].voice = "cedar"
@@ -2787,7 +2787,7 @@ async def test_update_config_does_not_reopen_deliberately_ended_session(tmp_path
 
     assert len(bridges) == 1
     assert _call_state(manager).session is None
-    assert logical_call.join_blocked is True
+    assert logical_call.join_block == "terminal"
     await manager.shutdown()
 
 
@@ -5491,6 +5491,7 @@ async def test_call_retries_reuse_per_call_session_id(
             room.room_id,
             requester_id=members[0].user_id,
             session_id=logical_call.agent_session_id,
+            call_config=manager._call_config,
         )
         return next(results)
 
@@ -5803,7 +5804,7 @@ async def test_nonretryable_terminal_close_stays_quarantined_until_next_call(tmp
     assert _call_state(manager).session is None
     logical_call = _call_state(manager).logical_call
     assert logical_call is not None
-    assert logical_call.join_blocked
+    assert logical_call.join_block is not None
 
     client.room_get_state.return_value = _state_response()
     await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
@@ -5845,7 +5846,7 @@ async def test_nonretryable_terminal_close_reopens_when_the_caller_rejoins(tmp_p
     rejoined_call = _call_state(manager).logical_call
     assert rejoined_call is not None
     assert rejoined_call is not abandoned_call
-    assert not rejoined_call.join_blocked
+    assert rejoined_call.join_block is None
     await manager.shutdown()
 
 

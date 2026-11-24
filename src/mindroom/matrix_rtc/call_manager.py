@@ -218,9 +218,8 @@ class _LogicalCallState:
 
     requester_id: str
     agent_session_id: str
-    join_blocked: bool = False
-    #: True when ``join_blocked`` came from a config/backend-unavailable join failure that a reload may clear.
-    join_blocked_by_config: bool = False
+    #: Why joins are blocked for this logical call; only ``"config"`` clears on reload.
+    join_block: Literal["config", "terminal"] | None = None
     #: Sessions that failed since the call last had a stable one; keeps rejoins backing off.
     failed_sessions: int = 0
     session_started_ms: int = 0
@@ -384,17 +383,6 @@ def _queue_pending_key(
     pending[identity] = _PendingFrameKey(received, event)
 
 
-def _call_join_config_key(config: Config, call_config: CallProfile) -> tuple[object, ...]:
-    """Return the call-config inputs that govern whether joining a waiting call can now succeed."""
-    model_name = None
-    if call_config.backend == "cascaded":
-        model_name = call_config.model
-    elif call_config.backend == "live":
-        model_name = call_config.agent_model
-    model = config.models.get(model_name) if model_name is not None else None
-    return (call_config, config.calls.livekit_service_url, model)
-
-
 def _build_call_instructions(chat_system_prompt: str, origin_brief: str = "") -> str:
     """Append the origin brief and voice delivery guidance to the chat system prompt."""
     parts = [chat_system_prompt, origin_brief, _VOICE_STYLE_ADDENDUM]
@@ -554,37 +542,34 @@ class CallManager:
 
     def update_config(self, config: Config) -> None:
         """Adopt a reloaded config for authorization checks and for calls started after this point."""
-        old_join_config = _call_join_config_key(self._config, self._call_config)
-        new_call_config = config.calls.resolve_agent_config(self._agent_name)
         self._config = config
-        self._call_config = new_call_config
+        self._call_config = config.calls.resolve_agent_config(self._agent_name)
         if self._shutting_down:
             return
-        clear_config_blocks = old_join_config != _call_join_config_key(config, new_call_config)
-        task = asyncio.create_task(self._reconcile_after_config_update(clear_config_blocks=clear_config_blocks))
+        task = asyncio.create_task(self._reconcile_after_config_update())
         self._track_background_task(
             task,
             event="call_config_authorization_reconcile_failed",
             room_id="*",
         )
 
-    async def _reconcile_after_config_update(self, *, clear_config_blocks: bool) -> None:
+    async def _reconcile_after_config_update(self) -> None:
         """Re-check reply authorization and retry calls blocked only by an earlier call-config failure."""
         unblocked_rooms: list[nio.MatrixRoom] = []
-        if clear_config_blocks:
-            for room_id in list(self._rooms):
-                lock = self._locks.setdefault(room_id, asyncio.Lock())
-                async with lock:
-                    if self._shutting_down:
-                        return
-                    room_call = self._rooms.get(room_id)
-                    logical_call = room_call.logical_call if room_call is not None else None
-                    if logical_call is not None and logical_call.join_blocked and logical_call.join_blocked_by_config:
-                        logical_call.join_blocked = False
-                        logical_call.join_blocked_by_config = False
-                        unblocked_rooms.append(room_call.room)
+        for room_id in list(self._rooms):
+            lock = self._locks.setdefault(room_id, asyncio.Lock())
+            async with lock:
+                if self._shutting_down:
+                    return
+                room_call = self._rooms.get(room_id)
+                if room_call is None:
+                    continue
+                if room_call.logical_call is not None and room_call.logical_call.join_block == "config":
+                    room_call.logical_call.join_block = None
+                    unblocked_rooms.append(room_call.room)
         await self.reconcile_reply_authorization()
         for room in unblocked_rooms:
+            # Joined rooms are already retried by reconcile_joined_rooms above.
             if room.room_id not in self._client.rooms and room.room_id not in self._departed_rooms:
                 self._request_reconcile(room)
 
@@ -743,8 +728,7 @@ class CallManager:
             return
 
         if logical_call is not None:
-            logical_call.join_blocked = True
-            logical_call.join_blocked_by_config = False
+            logical_call.join_block = "terminal"
         if starting_call is not None:
             starting_call.task.cancel()
             await asyncio.gather(starting_call.task, return_exceptions=True)
@@ -921,7 +905,7 @@ class CallManager:
         agent_call_events: tuple[dict[str, Any], ...],
     ) -> None:
         """Join a populated call unless it is blocked or backing off."""
-        if logical_call.join_blocked or (room_call.retry_attempts is not None and not retrying):
+        if logical_call.join_block is not None or (room_call.retry_attempts is not None and not retrying):
             return
         if self._response_admission_gate.closed:
             # A forced replacement may have planned this agent as idle; join once it publishes its config.
@@ -940,8 +924,7 @@ class CallManager:
         else:
             room_call.clear_reconcile_retry()
             room_call.pending_keys.clear()
-            logical_call.join_blocked = True
-            logical_call.join_blocked_by_config = result == "config_skip"
+            logical_call.join_block = "config" if result == "config_skip" else "terminal"
 
     async def _update_session_members(
         self,
@@ -1404,7 +1387,7 @@ class CallManager:
             and room_id not in self._departed_rooms
             and room_call is not None
             and room_call.logical_call is logical_call
-            and not logical_call.join_blocked
+            and logical_call.join_block is None
             and self._is_authorized_call_member(requester_id, room_id)
         )
 
@@ -1559,8 +1542,7 @@ class CallManager:
             logical_call = room_call.logical_call
             stable = False
             if logical_call is not None:
-                logical_call.join_blocked = True
-                logical_call.join_blocked_by_config = False
+                logical_call.join_block = "terminal"
                 stable = self._clock_ms() - logical_call.session_started_ms >= _STABLE_CALL_SESSION_MS
                 if not retryable:
                     # The memberships stay in room state when the caller's client left without
@@ -1574,8 +1556,7 @@ class CallManager:
                 self._request_reconcile(room_call.room)
             if retryable and not self._shutting_down:
                 if logical_call is not None:
-                    logical_call.join_blocked = False
-                    logical_call.join_blocked_by_config = False
+                    logical_call.join_block = None
                     if stable:
                         logical_call.failed_sessions = 0
                     # Resume this call's backoff, so a provider that fails every session cannot rejoin every second.
@@ -1701,17 +1682,16 @@ class CallManager:
         *,
         requester_id: str,
         session_id: str,
-        call_config: CallProfile | None = None,
+        call_config: CallProfile,
         origin_context: CallOriginContext | None = None,
     ) -> CallAgentTooling:
         """Build agent tools with the sole caller as the Matrix requester."""
-        active_call_config = self._call_config if call_config is None else call_config
-        enable_responder = active_call_config.backend in {"cascaded", "live"}
+        enable_responder = call_config.backend in {"cascaded", "live"}
         active_model_name = None
-        if active_call_config.backend == "live":
-            active_model_name = active_call_config.agent_model
-        elif active_call_config.backend == "cascaded":
-            active_model_name = active_call_config.model
+        if call_config.backend == "live":
+            active_model_name = call_config.agent_model
+        elif call_config.backend == "cascaded":
+            active_model_name = call_config.model
         return await build_call_tools(
             agent_name=self._agent_name,
             config=self._config,
@@ -1727,7 +1707,7 @@ class CallManager:
             enable_responder=enable_responder,
             voice_instructions=_VOICE_STYLE_ADDENDUM if enable_responder else None,
             active_model_name=active_model_name,
-            reconcile_spoken_response=active_call_config.backend != "live",
+            reconcile_spoken_response=call_config.backend != "live",
             origin_brief=partial(self._call_context_text, origin_context) if enable_responder else None,
             instructions_room_id=origin_context.origin.room_id if origin_context is not None else None,
         )

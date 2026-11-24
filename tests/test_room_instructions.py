@@ -833,6 +833,7 @@ async def test_voice_call_reads_instructions_from_validated_origin_room_while_ke
         call_room,
         requester_id="@caller:localhost",
         session_id=f"{call_room}:call:1",
+        call_config=live_manager._call_config,
         origin_context=origin_context,
     )
     assert live_tooling.get_system_prompt is not None
@@ -866,6 +867,7 @@ async def test_voice_call_reads_instructions_from_validated_origin_room_while_ke
         call_room,
         requester_id="@caller:localhost",
         session_id=f"{call_room}:call:2",
+        call_config=realtime_manager._call_config,
         origin_context=origin_context,
     )
     assert "ORIGIN_ROOM_RULE_111" in realtime_tooling.instructions
@@ -878,6 +880,7 @@ async def test_voice_call_reads_instructions_from_validated_origin_room_while_ke
         call_room,
         requester_id="@caller:localhost",
         session_id=f"{call_room}:call:3",
+        call_config=realtime_manager._call_config,
         origin_context=None,
     )
     assert "CALL_ROOM_RULE_222" in standalone_tooling.instructions
