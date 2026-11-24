@@ -1546,8 +1546,7 @@ class WorkflowEngine:
             (kind, text), usage, claim, continued = ("indeterminate", str(exc)), {}, None, False
         # A further turn of the node is an entry of its own, and the node keeps whether any turn started a tool call.
         turn = int(node.links.get("turn", 1))
-        session_turn = int(node.request["turn"]) if node.kind == "turn" else 1
-        usage = {session_turn + turn - 1 if key == 1 else key: used for key, used in usage.items()}
+        usage = {turn if key == 1 else key: used for key, used in usage.items()}
         made = bool(node.links.get("made")) or any(used.get("tool_calls") for used in usage.values())
         stopping = node.run_id in self._stopping
         outcome: _Outcome | str | WorkflowNode

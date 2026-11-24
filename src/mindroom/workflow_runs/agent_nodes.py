@@ -291,8 +291,7 @@ async def launch_child(
             node.key,
             node.generation,
         )
-        session_turn = int(node.request["turn"]) if node.kind == "turn" else 1
-        job_id = turn_job_id(run, node.key, node.generation, session_turn + turn - 1)
+        job_id = turn_job_id(run, node.key, node.generation, turn)
         orchestrator = context.orchestrator
         spec = delegation_call_job(
             child,

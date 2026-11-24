@@ -136,7 +136,7 @@ async def test_second_turn_continues_the_same_child_as_its_own_job(stack: Workfl
     child1, child2 = delegation_child(job1), delegation_child(job2)
 
     assert job1.job_id == turn_job_id(run, "@1", 1, 1)
-    assert job2.job_id == turn_job_id(run, "@2", 1, 2)
+    assert job2.job_id == turn_job_id(run, "@2", 1, 1)
     assert job1.job_id != job2.job_id
     assert child1.subagent_id == child2.subagent_id
     assert child1.session_id == child2.session_id
