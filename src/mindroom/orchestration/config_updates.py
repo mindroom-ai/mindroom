@@ -261,7 +261,7 @@ def _authored_outside_knowledge_graph(config: Config) -> dict[str, object]:
 
 
 def _call_manager_signature(config: Config, agent_name: str) -> str | None:
-    """Return the construction-time call settings one agent's call manager is built from."""
+    """Return only construction-time fields; CallManager.update_config() picks up everything else for later calls."""
     if not config.calls.enabled or agent_name not in config.calls.agents:
         return None
     return config.calls.resolve_agent_config(agent_name).backend

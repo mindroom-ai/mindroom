@@ -207,7 +207,7 @@ class _PendingFrameKey:
     event: AuthenticatedToDeviceEvent
 
 
-_JoinResult = Literal["joined", "retry", "skip"]
+_JoinResult = Literal["joined", "retry", "skip", "config_skip"]
 #: ``(user_id, device_id, created_ts)`` of each membership in one call roster.
 type _MembershipIdentities = frozenset[tuple[str, str, int]]
 
@@ -219,6 +219,8 @@ class _LogicalCallState:
     requester_id: str
     agent_session_id: str
     join_blocked: bool = False
+    #: True when ``join_blocked`` came from a config/backend-unavailable join failure that a reload may clear.
+    join_blocked_by_config: bool = False
     #: Sessions that failed since the call last had a stable one; keeps rejoins backing off.
     failed_sessions: int = 0
     session_started_ms: int = 0
@@ -382,6 +384,17 @@ def _queue_pending_key(
     pending[identity] = _PendingFrameKey(received, event)
 
 
+def _call_join_config_key(config: Config, call_config: CallProfile) -> tuple[object, ...]:
+    """Return the call-config inputs that govern whether joining a waiting call can now succeed."""
+    model_name = None
+    if call_config.backend == "cascaded":
+        model_name = call_config.model
+    elif call_config.backend == "live":
+        model_name = call_config.agent_model
+    model = config.models.get(model_name) if model_name is not None else None
+    return (call_config, config.calls.livekit_service_url, model)
+
+
 def _build_call_instructions(chat_system_prompt: str, origin_brief: str = "") -> str:
     """Append the origin brief and voice delivery guidance to the chat system prompt."""
     parts = [chat_system_prompt, origin_brief, _VOICE_STYLE_ADDENDUM]
@@ -541,16 +554,39 @@ class CallManager:
 
     def update_config(self, config: Config) -> None:
         """Adopt a reloaded config for authorization checks and for calls started after this point."""
+        old_join_config = _call_join_config_key(self._config, self._call_config)
+        new_call_config = config.calls.resolve_agent_config(self._agent_name)
         self._config = config
-        self._call_config = config.calls.resolve_agent_config(self._agent_name)
+        self._call_config = new_call_config
         if self._shutting_down:
             return
-        task = asyncio.create_task(self.reconcile_reply_authorization())
+        clear_config_blocks = old_join_config != _call_join_config_key(config, new_call_config)
+        task = asyncio.create_task(self._reconcile_after_config_update(clear_config_blocks=clear_config_blocks))
         self._track_background_task(
             task,
             event="call_config_authorization_reconcile_failed",
             room_id="*",
         )
+
+    async def _reconcile_after_config_update(self, *, clear_config_blocks: bool) -> None:
+        """Re-check reply authorization and retry calls blocked only by an earlier call-config failure."""
+        unblocked_rooms: list[nio.MatrixRoom] = []
+        if clear_config_blocks:
+            for room_id in list(self._rooms):
+                lock = self._locks.setdefault(room_id, asyncio.Lock())
+                async with lock:
+                    if self._shutting_down:
+                        return
+                    room_call = self._rooms.get(room_id)
+                    logical_call = room_call.logical_call if room_call is not None else None
+                    if logical_call is not None and logical_call.join_blocked and logical_call.join_blocked_by_config:
+                        logical_call.join_blocked = False
+                        logical_call.join_blocked_by_config = False
+                        unblocked_rooms.append(room_call.room)
+        await self.reconcile_reply_authorization()
+        for room in unblocked_rooms:
+            if room.room_id not in self._client.rooms and room.room_id not in self._departed_rooms:
+                self._request_reconcile(room)
 
     async def on_room_event(self, room: nio.MatrixRoom, event: nio.UnknownEvent) -> None:
         """Sync callback for custom room events (call membership, ring)."""
@@ -708,6 +744,7 @@ class CallManager:
 
         if logical_call is not None:
             logical_call.join_blocked = True
+            logical_call.join_blocked_by_config = False
         if starting_call is not None:
             starting_call.task.cancel()
             await asyncio.gather(starting_call.task, return_exceptions=True)
@@ -904,6 +941,7 @@ class CallManager:
             room_call.clear_reconcile_retry()
             room_call.pending_keys.clear()
             logical_call.join_blocked = True
+            logical_call.join_blocked_by_config = result == "config_skip"
 
     async def _update_session_members(
         self,
@@ -1128,16 +1166,16 @@ class CallManager:
         agent_call_events: tuple[dict[str, Any], ...],
     ) -> _JoinResult:
         join_started = time.monotonic()
-        room_id = room.room_id
-        requester_id = members[0].user_id
+        call_config = self._call_config
+        room_id, requester_id = room.room_id, members[0].user_id
         backend = resolve_voice_backend(
-            self._call_config,
+            call_config,
             self._runtime_paths,
             agent_name=self._agent_name,
             room_id=room_id,
         )
         if backend is None:
-            return "skip"
+            return "config_skip"
         try:
             service = await resolve_livekit_service(
                 members,
@@ -1150,10 +1188,10 @@ class CallManager:
             return "retry"
         except ValueError as error:
             logger.warning("call_service_discovery_failed", room_id=room_id, agent=self._agent_name, error=str(error))
-            return "skip"
+            return "config_skip"
         if service is None:
             logger.warning("call_join_skipped_no_livekit_service", room_id=room_id, agent=self._agent_name)
-            return "skip"
+            return "config_skip"
         service_resolved = time.monotonic()
         try:
             device_id = required_device_id(self._client)
@@ -1184,6 +1222,7 @@ class CallManager:
                 requester_id,
                 bridge=bridge,
                 backend=backend,
+                call_config=call_config,
                 agent_call_events=agent_call_events,
             )
             return prepared.options
@@ -1226,10 +1265,10 @@ class CallManager:
             if not await self._start_call_session(room_call, session, members, logical_call):
                 return "skip"
         except _CallAgentUnavailableError:
-            return "skip"
+            return "config_skip"
         except ValueError as error:
             logger.warning("call_join_rejected", room_id=room_id, agent=self._agent_name, error=str(error))
-            return "skip"
+            return "config_skip"
         except (CallJoinError, *_CALL_NETWORK_ERRORS) as error:
             logger.warning("call_join_failed", room_id=room_id, agent=self._agent_name, error=str(error))
             return "retry"
@@ -1262,6 +1301,7 @@ class CallManager:
         *,
         bridge: VoiceBridgeLike,
         backend: ResolvedVoiceBackend,
+        call_config: CallProfile,
         agent_call_events: tuple[dict[str, Any], ...],
     ) -> _PreparedCallAgent:
         """Resolve the call's origin and materialize its voice agent, while its session joins the call's media."""
@@ -1285,6 +1325,7 @@ class CallManager:
                 room_id,
                 requester_id=requester_id,
                 session_id=logical_call.agent_session_id,
+                call_config=call_config,
                 origin_context=origin_context,
             )
             transcript = CallTranscript.start(
@@ -1301,6 +1342,7 @@ class CallManager:
                 room=room,
                 bridge=bridge,
                 backend=backend,
+                call_config=call_config,
                 logical_call=logical_call,
                 origin_context=origin_context,
             )
@@ -1518,6 +1560,7 @@ class CallManager:
             stable = False
             if logical_call is not None:
                 logical_call.join_blocked = True
+                logical_call.join_blocked_by_config = False
                 stable = self._clock_ms() - logical_call.session_started_ms >= _STABLE_CALL_SESSION_MS
                 if not retryable:
                     # The memberships stay in room state when the caller's client left without
@@ -1532,6 +1575,7 @@ class CallManager:
             if retryable and not self._shutting_down:
                 if logical_call is not None:
                     logical_call.join_blocked = False
+                    logical_call.join_blocked_by_config = False
                     if stable:
                         logical_call.failed_sessions = 0
                     # Resume this call's backoff, so a provider that fails every session cannot rejoin every second.
@@ -1657,15 +1701,17 @@ class CallManager:
         *,
         requester_id: str,
         session_id: str,
+        call_config: CallProfile | None = None,
         origin_context: CallOriginContext | None = None,
     ) -> CallAgentTooling:
         """Build agent tools with the sole caller as the Matrix requester."""
-        enable_responder = self._call_config.backend in {"cascaded", "live"}
+        active_call_config = self._call_config if call_config is None else call_config
+        enable_responder = active_call_config.backend in {"cascaded", "live"}
         active_model_name = None
-        if self._call_config.backend == "live":
-            active_model_name = self._call_config.agent_model
-        elif self._call_config.backend == "cascaded":
-            active_model_name = self._call_config.model
+        if active_call_config.backend == "live":
+            active_model_name = active_call_config.agent_model
+        elif active_call_config.backend == "cascaded":
+            active_model_name = active_call_config.model
         return await build_call_tools(
             agent_name=self._agent_name,
             config=self._config,
@@ -1681,7 +1727,7 @@ class CallManager:
             enable_responder=enable_responder,
             voice_instructions=_VOICE_STYLE_ADDENDUM if enable_responder else None,
             active_model_name=active_model_name,
-            reconcile_spoken_response=self._call_config.backend != "live",
+            reconcile_spoken_response=active_call_config.backend != "live",
             origin_brief=partial(self._call_context_text, origin_context) if enable_responder else None,
             instructions_room_id=origin_context.origin.room_id if origin_context is not None else None,
         )
@@ -1741,6 +1787,7 @@ class CallManager:
         room: nio.MatrixRoom,
         bridge: VoiceBridgeLike,
         backend: ResolvedVoiceBackend,
+        call_config: CallProfile,
         logical_call: _LogicalCallState,
         origin_context: CallOriginContext | None = None,
     ) -> CallVoiceAgentOptions:
@@ -1752,8 +1799,8 @@ class CallManager:
         def on_session_error(message: str) -> None:
             self._schedule_call_failure_notice(room.room_id, logical_call, message)
 
-        if self._call_config.backend == "realtime":
-            realtime_config = self._call_config
+        if call_config.backend == "realtime":
+            realtime_config = call_config
             if backend.realtime_api_key is None:
                 msg = "Realtime call API key was not resolved"
                 raise RuntimeError(msg)
@@ -1779,8 +1826,8 @@ class CallManager:
                     execution_identity=tooling.execution_identity,
                 ),
             )
-        if self._call_config.backend == "live":
-            live_config = self._call_config
+        if call_config.backend == "live":
+            live_config = call_config
             get_system_prompt = tooling.get_system_prompt
             if backend.realtime_api_key is None or tooling.responder is None or get_system_prompt is None:
                 msg = "Live call agent was not fully materialized"
