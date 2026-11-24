@@ -4,14 +4,21 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Literal
+from contextvars import ContextVar
+from typing import Literal, cast
 
+from mindroom.script_runs.models import ScriptCallRecord, ScriptCallState, ScriptToolGrant
 from mindroom.workflow_runs.models import LIVE_NODE_STATES, WorkflowNode, WorkflowNodeState
 
 type _Action = Literal["hit", "attach", "raise_indeterminate", "run"]
+type Outcome = tuple[WorkflowNodeState, object, dict[str, object] | None]
 
 # Written onto earlier-attempt rows after a node that ran, so they rerun without colliding with explicit reruns ('').
 DIRTY_DIGEST = "dirty"
+INTERRUPTED: dict[str, object] = {"kind": "interrupted", "message": "The call was interrupted before its tool ran."}
+_SHELL_COMMAND = ScriptToolGrant("shell", "run_shell_command")
+# The node of the script's tool call that the current task runs, for a call of the `workflow` toolkit made in it.
+CALLING_NODE: ContextVar[tuple[str, str, int] | None] = ContextVar("workflow_calling_node", default=None)
 
 
 def node_digest(kind: str, args: dict[str, object]) -> str:
@@ -62,3 +69,75 @@ def decide(saved: WorkflowNode | None, digest: str, *, cached: bool) -> _Action:
     if saved.state is WorkflowNodeState.COMPLETED and cached:
         return "hit"
     return "run"
+
+
+def calling_node() -> tuple[str, str, int] | None:
+    """Return the run, the key and the generation of the script's tool call this context runs in, if it runs in one."""
+    return CALLING_NODE.get()
+
+
+def nested_key(outer: tuple[str, str, int], source: bytes, args: object) -> str:
+    """Return the key of a run inside a run: the call it is made in, its script and its arguments, and no call ID.
+
+    A call that is made again under another ID, in the same turn or in a continued one, finds the run it started
+    by this key: it waits for a run that still runs, and gets the report of one that ended.
+    """
+    identity = [*outer, hashlib.sha256(source).hexdigest(), args]
+    return "nested:" + hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+
+
+def changed(node: WorkflowNode, outcome: Outcome) -> bool:
+    """Return whether a call that runs on every resume answered something else than before, which dirties what follows.
+
+    Its handle holds the digest of the earlier result, compared whole and as JSON. The live call and the look at the
+    receipt of a call whose attempt died both ask, and save the answer with the node's end.
+    """
+    same_as = node.handle.same_as if node.handle is not None else None
+    state, result, _ = outcome
+    return same_as is not None and not (state is WorkflowNodeState.COMPLETED and result_digest(result) == same_as)
+
+
+def indeterminate(node: WorkflowNode, said: object = None) -> Outcome:
+    """Return the end of a call that may have run, with what its tool *said* when it failed after it was invoked."""
+    message = (
+        f"This call may already have run (attempt {node.attempt}). Check its effect; "
+        f'to run it again call resume_workflow(run_id, rerun=["n{node.seq}"]).'
+    )
+    message = f"{said}\n\n{message}" if said else message
+    return WorkflowNodeState.INDETERMINATE, None, {"kind": "indeterminate", "message": message}
+
+
+def unless_proven(node: WorkflowNode, started: bool | None, safe: Outcome, said: object = None) -> Outcome:
+    """Return how a node that ended without a result ends: as *safe* to run again only if its record proves that."""
+    return indeterminate(node, said) if may_have_written(started) else safe
+
+
+def _completed_outcome(node: WorkflowNode, call: ScriptCallRecord) -> Outcome:
+    """Return how the node of a call that answered ends; a shell command ended only if its exit status says so."""
+    facts = call.metadata or {}
+    if call.grant != _SHELL_COMMAND:
+        return WorkflowNodeState.COMPLETED, call.result, None
+    if facts.get("not_started"):
+        # The shell tool refused before any command ran, and its text says why.
+        return WorkflowNodeState.FAILED, None, {"kind": "failed", "message": str(call.result)}
+    if facts.get("exit_code") is None:
+        # No status says the command ended: its answer was lost on the way, so it may have run.
+        return indeterminate(node)
+    return WorkflowNodeState.COMPLETED, {"output": call.result, "exit_code": facts["exit_code"]}, None
+
+
+def call_outcome(node: WorkflowNode, call: ScriptCallRecord) -> Outcome:
+    """Map a broker receipt to how its node ends; the effect stamp says what is safe to run again."""
+    if call.state is ScriptCallState.COMPLETED:
+        return _completed_outcome(node, call)
+    details = cast("dict[str, object]", call.error if isinstance(call.error, dict) else {})
+    refusal = "denied" if details.get("kind") == "approval_denied" else "failed"
+    # A failed receipt without the stamp is a refusal. Without either, the call was claimed and still waited for
+    # hooks or approval when its attempt ended.
+    failed = call.state is ScriptCallState.FAILED
+    safe = {"kind": refusal, "message": details.get("message")} if failed else INTERRUPTED
+    # With the stamp the tool was invoked: whatever failed then, the tool, a check of its result or the way back,
+    # the call may have had its effect, unless the call's own word says it never left for its tool.
+    started = call.effect_started_at is not None and not details.get("not_started")
+    said = details.get("message") if failed else None
+    return unless_proven(node, started, (WorkflowNodeState.FAILED, None, safe), said)

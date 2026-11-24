@@ -20,6 +20,7 @@ from mindroom.script_runs.models import ScriptRunState
 from mindroom.workflow_runs import engine as engine_module
 from mindroom.workflow_runs.limits import WorkflowLimits
 from mindroom.workflow_runs.models import WorkflowNodeState, WorkflowRunState
+from mindroom.workflow_runs.replay import calling_node
 from tests.fakes.scripted_model import Await, answer, calls, tool_call
 from tests.tool_job_helpers import JobApprovalCards
 from tests.workflow_helpers import NodeFailed, WorkflowStack, tool_args, workflow_stack
@@ -238,7 +239,7 @@ async def test_agent_that_starts_in_the_place_a_tool_call_leaves_is_not_inside_t
     seen: list[object] = []
 
     async def launch(*_args: object, **_kwargs: object) -> object:
-        seen.append(engine_module.calling_node())
+        seen.append(calling_node())
         msg = "Seen."
         raise engine_module.AgentNodeError(msg)
 

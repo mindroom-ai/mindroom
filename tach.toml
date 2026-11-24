@@ -2550,13 +2550,22 @@ depends_on = ["mindroom.workflow_runs.models"]
 [[interfaces]]
 from = ["mindroom.workflow_runs.replay"]
 expose = [
+    "CALLING_NODE",
     "DIRTY_DIGEST",
+    "INTERRUPTED",
+    "Outcome",
+    "call_outcome",
+    "calling_node",
+    "changed",
     "decide",
+    "indeterminate",
     "may_have_written",
+    "nested_key",
     "node_digest",
     "parent_group",
     "result_digest",
     "split_key",
+    "unless_proven",
 ]
 
 [[modules]]
@@ -2715,8 +2724,6 @@ expose = [
     "ResumeAccess",
     "SupersededAttemptError",
     "WorkflowEngine",
-    "calling_node",
-    "nested_key",
 ]
 
 [[modules]]
@@ -2821,7 +2828,6 @@ depends_on = [
     "mindroom.tool_system.tool_hooks",
     "mindroom.tool_system.worker_routing",
     "mindroom.workflow_runs.answers",
-    "mindroom.workflow_runs.engine",
     "mindroom.workflow_runs.limits",
     "mindroom.workflow_runs.models",
     "mindroom.workflow_runs.peers",

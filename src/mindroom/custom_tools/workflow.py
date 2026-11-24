@@ -40,7 +40,6 @@ from mindroom.tool_system.tool_hooks import dispatch_external_tool_hooks
 from mindroom.tool_system.worker_routing import serialize_tool_execution_identity
 from mindroom.workers.models import ScriptResourceProfileName  # noqa: TC001 - the tool schema reads it at runtime.
 from mindroom.workflow_runs.answers import handle_workflow_answer
-from mindroom.workflow_runs.engine import calling_node, nested_key
 from mindroom.workflow_runs.limits import WorkflowLimits, ceiling, limit_reached, run_usage
 from mindroom.workflow_runs.models import (
     LIVE_NODE_STATES,
@@ -51,7 +50,7 @@ from mindroom.workflow_runs.models import (
     new_workflow_run_id,
 )
 from mindroom.workflow_runs.peers import all_messages, all_state
-from mindroom.workflow_runs.replay import result_digest
+from mindroom.workflow_runs.replay import calling_node, nested_key, result_digest
 from mindroom.workflow_runs.saved import list_saved, save_source
 from mindroom.workflow_runs.store import WorkflowRunNotFoundError, WorkflowRunStoreError, owned_run
 

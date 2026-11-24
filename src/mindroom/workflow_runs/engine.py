@@ -9,7 +9,7 @@ import secrets
 import time
 from collections import Counter, deque
 from contextlib import suppress
-from contextvars import ContextVar, copy_context
+from contextvars import copy_context
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from functools import partial
@@ -29,8 +29,6 @@ from mindroom.script_runs.broker import ScriptRuntimeUnavailableError
 from mindroom.script_runs.manager import ScriptRunLimits, ScriptRuntimeNotReadyError
 from mindroom.script_runs.models import (
     TERMINAL_SCRIPT_RUN_STATES,
-    ScriptCallRecord,
-    ScriptCallState,
     ScriptRunState,
     ScriptToolGrant,
     utc_timestamp,
@@ -88,12 +86,19 @@ from mindroom.workflow_runs.peers import send as send_peer_message
 from mindroom.workflow_runs.questions import MAX_OPTION_BYTES, MAX_OPTIONS, show_question
 from mindroom.workflow_runs.recovery import AUTO_RESUME_REASONS, NO_ACCESS
 from mindroom.workflow_runs.replay import (
+    CALLING_NODE,
     DIRTY_DIGEST,
+    INTERRUPTED,
+    Outcome,
+    call_outcome,
+    changed,
     decide,
-    may_have_written,
+    indeterminate,
+    nested_key,
     node_digest,
     result_digest,
     split_key,
+    unless_proven,
 )
 from mindroom.workflow_runs.saved import WORKFLOWS_DIR, validate_workflow_name
 from mindroom.workflow_runs.store import SupersededAttemptError, WorkflowRunNotFoundError, WorkflowRunStoreError
@@ -121,7 +126,6 @@ logger = get_logger(__name__)
 
 # How many failed calls the first line of a report names; `get_workflow` lists them all.
 _MAX_FAILED_NAMED = 10
-_SHELL_COMMAND = ScriptToolGrant("shell", "run_shell_command")
 # The owner of the tasks that admit calls: they outlive their requests, and a run's end waits for them, not stops them.
 _ADMISSIONS = "admissions"
 # How the engine's wait for an agent with a timeout is named, before its job's ID.
@@ -142,7 +146,6 @@ _MAX_IDLE_RESUMES = 5
 _OUT_OF_TIME = "The run used its {hours:g} hours of working time. resume_workflow continues it."
 # How often a running run's working time is saved, so a primary that dies loses at most this much of the count.
 _CHARGE_SECONDS = 60.0
-_INTERRUPTED: dict[str, object] = {"kind": "interrupted", "message": "The call was interrupted before its tool ran."}
 _NO_AGENTS = "A workflow runs agents as background tool jobs. Set background_tool_jobs.enabled: true."
 _NAME_LABELS = 'name="{name}" only labels the node. Use agent="{name}" to run that agent.'
 _STOPPED_JOB_STATUSES = frozenset({"cancel_requested", "cancelled", "denied"})
@@ -156,25 +159,6 @@ _NOT_ANSWERED = "The run ended before the question was answered."
 _TOO_MANY_OPTIONS = "A question takes at most 20 options of at most 200 bytes each."
 _NO_SESSIONS = 'A workflow script cannot call delegate.{function} yet. Start a fresh agent with agent() or tool("delegate", "run_subagent", ...).'
 _SESSION_BUSY = "Session '{name}' is already in a turn. Wait for it or spawn another agent."
-# The node of the script's tool call that the current task runs, for a call of the `workflow` toolkit made in it.
-_CALLING_NODE: ContextVar[tuple[str, str, int] | None] = ContextVar("workflow_calling_node", default=None)
-
-
-def calling_node() -> tuple[str, str, int] | None:
-    """Return the run, the key and the generation of the script's tool call this context runs in, if it runs in one."""
-    return _CALLING_NODE.get()
-
-
-def nested_key(outer: tuple[str, str, int], source: bytes, args: object) -> str:
-    """Return the key of a run inside a run: the call it is made in, its script and its arguments, and no call ID.
-
-    A call that is made again under another ID, in the same turn or in a continued one, finds the run it started
-    by this key: it waits for a run that still runs, and gets the report of one that ended.
-    """
-    identity = [*outer, hashlib.sha256(source).hexdigest(), args]
-    return "nested:" + hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
-
-
 # How long the end of a run waits for its agents' cancelled jobs, all together, before each node is settled as it
 # stands: one whose job has not ended is one nobody could read.
 _STOP_SECONDS, _STOP_POLL_SECONDS = 30.0, 0.05
@@ -183,8 +167,6 @@ _STOPPING = "The agent this call replaces is stopping. Try again in a moment."
 _RATE_WAIT_SECONDS = 1.0
 # How long after its report a script's exit is looked for, before the script runtime's own pass finds it.
 _EXIT_POLL_SECONDS = (0.05, 0.2, 0.5, 1.0, 2.0, 5.0)
-
-type _Outcome = tuple[WorkflowNodeState, object, dict[str, object] | None]
 
 
 @dataclass(slots=True)
@@ -1265,7 +1247,7 @@ class WorkflowEngine:
         self,
         run: WorkflowRun,
         node: WorkflowNode,
-        gate: Callable[[], Awaitable[_Outcome]],
+        gate: Callable[[], Awaitable[Outcome]],
     ) -> None:
         """Start the agent of a call the broker let pass, in its turn among the run's calls; a refusal is its end."""
         outcome = await gate()
@@ -1680,7 +1662,7 @@ class WorkflowEngine:
         turn = int(node.links.get("turn", 1))
         made = bool(node.links.get("made")) or any(used.get("tool_calls") for _, _, used in usage)
         stopping = node.run_id in self._stopping
-        outcome: _Outcome | str | WorkflowNode
+        outcome: Outcome | str | WorkflowNode
         further = None
         try:
             with suppress(SupersededAttemptError):
@@ -1714,7 +1696,7 @@ class WorkflowEngine:
         turn: int,
         made: bool,
         block: bool,
-    ) -> WorkflowNode | _Outcome:
+    ) -> WorkflowNode | Outcome:
         """Start the further *turn* of an agent node whose answer did not match its schema; return the node with it.
 
         The turn is authorized as every call of the run is, and gets what the call has left of its working time.
@@ -1730,8 +1712,8 @@ class WorkflowEngine:
                 if (
                     reason := await asyncio.to_thread(budget_exceeded, self.store, self.store.get_run(node.run_id))
                 ) is not None:
-                    stopped: _Outcome = WorkflowNodeState.CANCELLED, None, {"kind": "cancelled", "message": reason}
-                    return _unless_proven(node, made, stopped)
+                    stopped: Outcome = WorkflowNodeState.CANCELLED, None, {"kind": "cancelled", "message": reason}
+                    return unless_proven(node, made, stopped)
                 return await self._launch_agent(
                     run,
                     node,
@@ -1746,8 +1728,8 @@ class WorkflowEngine:
                     raise
                 await asyncio.sleep(RECHECK_SECONDS)
             except AgentNodeError as exc:
-                refused: _Outcome = WorkflowNodeState.FAILED, None, {"kind": "refused", "message": str(exc)}
-                return _unless_proven(node, made, refused)
+                refused: Outcome = WorkflowNodeState.FAILED, None, {"kind": "refused", "message": str(exc)}
+                return unless_proven(node, made, refused)
 
     async def _node_waits(
         self,
@@ -1800,7 +1782,7 @@ class WorkflowEngine:
             # inside this one, which does not outlive it and is reached only as it ends: the end of that run
             # settles the group, or this does.
             end = WorkflowNodeState.CANCELLED if stop else WorkflowNodeState.FAILED
-            error = {"kind": "cancelled", "message": _RUN_ENDED} if stop else _INTERRUPTED
+            error = {"kind": "cancelled", "message": _RUN_ENDED} if stop else INTERRUPTED
             if node.handle is not None:
                 await self.cancel(node.handle.ref, reason=_RUN_ENDED)
             await self._settle(node, epoch, state=end, error=error)
@@ -1835,7 +1817,7 @@ class WorkflowEngine:
             # A Stop waits for nobody's access and for no job runtime: the turn it may not read may have done
             # anything. A handle without the mark that its job was handed over proves nothing either, since the job
             # starts before that mark is saved.
-            state, _, error = _indeterminate(node)
+            state, _, error = indeterminate(node)
             await self._settle(node, epoch, state=state, error=error)
         return False
 
@@ -1938,7 +1920,7 @@ class WorkflowEngine:
         assert node.handle is not None
         script_run_id, _, call_id = node.handle.ref.partition(":")
         try:
-            outcome = _call_outcome(node, self.scripts.store.get_call(script_run_id, call_id))
+            outcome = call_outcome(node, self.scripts.store.get_call(script_run_id, call_id))
         except ScriptCallNotFoundError:
             # No claim proves the call never started only while the attempt's records are still there to hold one.
             try:
@@ -1946,15 +1928,15 @@ class WorkflowEngine:
                 started = False
             except ScriptRunNotFoundError:
                 started = None
-            outcome = _unless_proven(node, started, (WorkflowNodeState.FAILED, None, _INTERRUPTED))
+            outcome = unless_proven(node, started, (WorkflowNodeState.FAILED, None, INTERRUPTED))
         return self._settle_broker(node, epoch, outcome)
 
-    def _settle_broker(self, node: WorkflowNode, epoch: int, outcome: _Outcome) -> WorkflowNodeState:
+    def _settle_broker(self, node: WorkflowNode, epoch: int, outcome: Outcome) -> WorkflowNodeState:
         if outcome[0] is WorkflowNodeState.COMPLETED and (interrupted := self._nested_interrupted(node)) is not None:
             outcome = interrupted
         state, result, error = outcome
         settle = partial(self.store.settle_node, node.run_id, node.key, node.generation, epoch)
-        settle(state=state, result=result, error=error, dirty_after=_changed(node, outcome))
+        settle(state=state, result=result, error=error, dirty_after=changed(node, outcome))
         return state
 
     async def _stamp(self, node: WorkflowNode, epoch: int, *, ignore: bool = False, **changes: object) -> bool:
@@ -1988,7 +1970,7 @@ class WorkflowEngine:
         tasks = self._tasks.setdefault(owner, set())
         # In no script's tool call, whatever starts it: a task started as a tool call ends is not inside that call.
         context = copy_context()
-        context.run(_CALLING_NODE.set, None)
+        context.run(CALLING_NODE.set, None)
         task = asyncio.create_task(work, name=f"workflow:{owner}", context=context)
         tasks.add(task)
         task.add_done_callback(tasks.discard)
@@ -2021,7 +2003,7 @@ class WorkflowEngine:
         tool_call: tuple[ScriptToolGrant, dict[str, object]],
         *,
         gate_only: bool = False,
-    ) -> _Outcome:
+    ) -> Outcome:
         """Run one broker call for *node* within the rate limit and return its node outcome."""
         cid = _broker_call_id(node)
         waits = partial(self._node_waits, node, epoch, gate_only=gate_only)
@@ -2036,7 +2018,7 @@ class WorkflowEngine:
         )
         while True:
             try:
-                return _call_outcome(node, await call())
+                return call_outcome(node, await call())
             except ScriptCallRateLimitError:
                 await asyncio.sleep(_RATE_WAIT_SECONDS)
             except (ScriptRunStoreError, ScriptRuntimeUnavailableError) as exc:
@@ -2046,11 +2028,11 @@ class WorkflowEngine:
         self,
         node: WorkflowNode,
         epoch: int,
-        call: Callable[[], Awaitable[_Outcome]],
+        call: Callable[[], Awaitable[Outcome]],
     ) -> None:
         """Run one tool call and settle its node."""
         # A `start_workflow` this call makes starts a run inside this one, under this node.
-        _CALLING_NODE.set((node.run_id, node.key, node.generation))
+        CALLING_NODE.set((node.run_id, node.key, node.generation))
         try:
             outcome = await call()
             await hold("before_settle")
@@ -2228,7 +2210,7 @@ class WorkflowEngine:
             settle = partial(self.store.settle_node, outer.run_id, key, generation, outer.epoch, state=end, error=error)
             await asyncio.to_thread(settle)
 
-    def _nested_interrupted(self, node: WorkflowNode) -> _Outcome | None:
+    def _nested_interrupted(self, node: WorkflowNode) -> Outcome | None:
         """Return a non-completed outcome when this generation's nested run ended interrupted."""
         if (node.request.get("toolkit"), node.request.get("function")) != ("workflow", "start_workflow"):
             return None
@@ -2246,17 +2228,6 @@ def _transcript_prompt(earlier: list[tuple[str, str]], message: str) -> str:
     """Build the first prompt of a fresh session child from saved earlier exchanges and the new *message*."""
     sections = ["Earlier conversation:", *(f"User: {asked}\nAssistant: {answered}" for asked, answered in earlier)]
     return "\n\n".join(sections) + f"\n\n{message}"
-
-
-def _changed(node: WorkflowNode, outcome: _Outcome) -> bool:
-    """Return whether a call that runs on every resume answered something else than before, which dirties what follows.
-
-    Its handle holds the digest of the earlier result, compared whole and as JSON. The live call and the look at the
-    receipt of a call whose attempt died both ask, and save the answer with the node's end.
-    """
-    same_as = node.handle.same_as if node.handle is not None else None
-    state, result, _ = outcome
-    return same_as is not None and not (state is WorkflowNodeState.COMPLETED and result_digest(result) == same_as)
 
 
 def _tool_grant(request: dict[str, object]) -> tuple[ScriptToolGrant, dict[str, object]]:
@@ -2325,21 +2296,6 @@ def _broker_call_id(node: WorkflowNode) -> str:
     return uuid5(NAMESPACE_OID, f"{node.run_id}:{node.key}:{node.generation}").hex
 
 
-def _indeterminate(node: WorkflowNode, said: object = None) -> _Outcome:
-    """Return the end of a call that may have run, with what its tool *said* when it failed after it was invoked."""
-    message = (
-        f"This call may already have run (attempt {node.attempt}). Check its effect; "
-        f'to run it again call resume_workflow(run_id, rerun=["n{node.seq}"]).'
-    )
-    message = f"{said}\n\n{message}" if said else message
-    return WorkflowNodeState.INDETERMINATE, None, {"kind": "indeterminate", "message": message}
-
-
-def _unless_proven(node: WorkflowNode, started: bool | None, safe: _Outcome, said: object = None) -> _Outcome:
-    """Return how a node that ended without a result ends: as *safe* to run again only if its record proves that."""
-    return _indeterminate(node, said) if may_have_written(started) else safe
-
-
 def _turn_outcome(
     node: WorkflowNode,
     kind: str,
@@ -2348,7 +2304,7 @@ def _turn_outcome(
     last: bool,
     made: bool,
     stopping: bool,
-) -> _Outcome | str:
+) -> Outcome | str:
     """Return how an agent's call ends on the end of one of its turns, or what a further turn tells the agent.
 
     A turn that did not complete ends the call. Whatever ended it proves nothing of a tool call that an earlier
@@ -2357,12 +2313,12 @@ def _turn_outcome(
     if kind == "completed":
         return _answer_outcome(node, text, last=last, made=made, stopping=stopping)
     if kind == "indeterminate" or node.links.get("made"):
-        return _indeterminate(node, None if kind == "indeterminate" else text)
+        return indeterminate(node, None if kind == "indeterminate" else text)
     state = WorkflowNodeState.CANCELLED if kind == "cancelled" else WorkflowNodeState.FAILED
     return state, None, {"kind": kind, "message": text}
 
 
-def _answer_outcome(node: WorkflowNode, text: str, *, last: bool, made: bool, stopping: bool) -> _Outcome | str:
+def _answer_outcome(node: WorkflowNode, text: str, *, last: bool, made: bool, stopping: bool) -> Outcome | str:
     """Return how an agent's call ends on its answer, or what a further turn tells an agent that missed its schema.
 
     The answer is the call's result, or with a schema the value in it when that matches. A run that is ending
@@ -2381,48 +2337,17 @@ def _answer_outcome(node: WorkflowNode, text: str, *, last: bool, made: bool, st
             wrong = validation_error(value, node.request["schema"])
         except SchemaError as exc:
             # The schema itself cannot be applied, which no further turn changes.
-            broken: _Outcome = WorkflowNodeState.FAILED, None, {"kind": "schema", "message": str(exc)}
-            return _unless_proven(node, made, broken, str(exc))
+            broken: Outcome = WorkflowNodeState.FAILED, None, {"kind": "schema", "message": str(exc)}
+            return unless_proven(node, made, broken, str(exc))
     if wrong is None:
         return WorkflowNodeState.COMPLETED, value, None
     if stopping:
-        ended: _Outcome = WorkflowNodeState.CANCELLED, None, {"kind": "cancelled", "message": _RUN_ENDED}
-        return _unless_proven(node, made, ended)
+        ended: Outcome = WorkflowNodeState.CANCELLED, None, {"kind": "cancelled", "message": _RUN_ENDED}
+        return unless_proven(node, made, ended)
     if not last:
         return _CORRECTION.format(error=wrong)
     said = _NO_MATCH.format(name=node.name or node.label, turns=SCHEMA_TURNS, error=wrong)
-    return _unless_proven(node, made, (WorkflowNodeState.FAILED, None, {"kind": "schema", "message": said}), said)
-
-
-def _completed_outcome(node: WorkflowNode, call: ScriptCallRecord) -> _Outcome:
-    """Return how the node of a call that answered ends; a shell command ended only if its exit status says so."""
-    facts = call.metadata or {}
-    if call.grant != _SHELL_COMMAND:
-        return WorkflowNodeState.COMPLETED, call.result, None
-    if facts.get("not_started"):
-        # The shell tool refused before any command ran, and its text says why.
-        return WorkflowNodeState.FAILED, None, {"kind": "failed", "message": str(call.result)}
-    if facts.get("exit_code") is None:
-        # No status says the command ended: its answer was lost on the way, so it may have run.
-        return _indeterminate(node)
-    return WorkflowNodeState.COMPLETED, {"output": call.result, "exit_code": facts["exit_code"]}, None
-
-
-def _call_outcome(node: WorkflowNode, call: ScriptCallRecord) -> _Outcome:
-    """Map a broker receipt to how its node ends; the effect stamp says what is safe to run again."""
-    if call.state is ScriptCallState.COMPLETED:
-        return _completed_outcome(node, call)
-    details = cast("dict[str, object]", call.error if isinstance(call.error, dict) else {})
-    refusal = "denied" if details.get("kind") == "approval_denied" else "failed"
-    # A failed receipt without the stamp is a refusal. Without either, the call was claimed and still waited for
-    # hooks or approval when its attempt ended.
-    failed = call.state is ScriptCallState.FAILED
-    safe = {"kind": refusal, "message": details.get("message")} if failed else _INTERRUPTED
-    # With the stamp the tool was invoked: whatever failed then, the tool, a check of its result or the way back,
-    # the call may have had its effect, unless the call's own word says it never left for its tool.
-    started = call.effect_started_at is not None and not details.get("not_started")
-    said = details.get("message") if failed else None
-    return _unless_proven(node, started, (WorkflowNodeState.FAILED, None, safe), said)
+    return unless_proven(node, made, (WorkflowNodeState.FAILED, None, {"kind": "schema", "message": said}), said)
 
 
 def _run_outcome(
