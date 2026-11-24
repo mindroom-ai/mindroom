@@ -512,8 +512,13 @@ class WorkflowEngine:
         state, error = run_outcome(self.store.get_run(run.run_id), attempt)
         if replay and state is WorkflowRunState.INTERRUPTED and error in AUTO_RESUME_REASONS:
             # The attempt is over and the run is not: its nodes are settled, and the next attempt runs the same script.
-            same_script = {"previous_source_digest": run.source_digest}
-            return await self.endings.end_run(run, WorkflowRunState.STARTING, None, finished_at=None, **same_script)
+            return await self.endings.end_run(
+                run,
+                WorkflowRunState.STARTING,
+                None,
+                finished_at=None,
+                previous_source_digest=run.source_digest,
+            )
         return await self.endings.end_run(run, state, error)
 
     async def close(self) -> None:

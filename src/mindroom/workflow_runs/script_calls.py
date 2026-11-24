@@ -32,6 +32,7 @@ from mindroom.workflow_runs.models import (
 from mindroom.workflow_runs.peers import (
     script_op,
     session_turn_message,
+    valid_wait_seconds,
     withdraw_unread,
 )
 from mindroom.workflow_runs.replay import (
@@ -119,6 +120,15 @@ def _value(args: dict[str, object]) -> object:
         return secrets.SystemRandom().random()
     msg = f"A value call is now or random, not {args.get('op')!r}."
     raise WorkflowRunStoreError(msg)
+
+
+def _saved_turn_number(node: WorkflowNode) -> int:
+    """Return one saved session turn's validated positive integer sequence number."""
+    turn = node.request.get("turn")
+    if type(turn) is not int or turn < 1:
+        msg = "Saved session turn number must be a whole number of at least 1."
+        raise WorkflowRunStoreError(msg)
+    return turn
 
 
 class ScriptCalls:
@@ -284,12 +294,18 @@ class ScriptCalls:
         action: str,
     ) -> NodeReceipt:
         """Adopt a saved node for this attempt (`hit`, `attach`, or `raise_indeterminate`)."""
-        stamp: dict[str, object] = {"attempt": run.attempt, "stale": False, "cached": action == "hit"}
-        if (phase := cast("str | None", meta.get("phase"))) != saved.phase:
-            stamp["phase"] = phase
-        if regrouped := members != saved.members:
-            stamp["members"] = members
-        await self.live.stamp(saved, epoch, dirty_after=regrouped, **stamp)
+        phase = cast("str | None", meta.get("phase"))
+        regrouped = members != saved.members
+        await self.live.stamp(
+            saved,
+            epoch,
+            attempt=run.attempt,
+            stale=False,
+            cached=action == "hit",
+            phase=phase,
+            members=members,
+            dirty_after=regrouped,
+        )
         if action == "raise_indeterminate":
             return replace(receipt(saved), state=WorkflowNodeState.FAILED)
         if action == "attach":
@@ -409,7 +425,7 @@ class ScriptCalls:
                 if not done:
                     waiting = replace(node, state=WorkflowNodeState.WAITING, waiting_on="peer", ended_at=None)
                     wait_node = await asyncio.to_thread(self.live.store.put_node, waiting, epoch, dirty_after=True)
-                    self.live.spawn(run.run_id, self.ask.wait_inbox(run, wait_node, epoch, float(value)))
+                    self.live.spawn(run.run_id, self.ask.wait_inbox(run, wait_node, epoch, valid_wait_seconds(value)))
                     return receipt(wait_node)
                 node = replace(node, result=value)
         elif kind == "value":
@@ -468,8 +484,8 @@ class ScriptCalls:
             if turn.attempt == run.attempt and not turn.stale
         ]
         earlier = sorted(
-            (turn for turn in in_attempt if turn.key != key and int(turn.request["turn"]) < turn_num),
-            key=lambda turn: (int(turn.request["turn"]), turn.seq),
+            (turn for turn in in_attempt if turn.key != key and _saved_turn_number(turn) < turn_num),
+            key=lambda turn: (_saved_turn_number(turn), turn.seq),
         )
         prev = next((t for t in reversed(earlier) if t.state is WorkflowNodeState.COMPLETED), None)
         lineage = [

@@ -9,7 +9,7 @@ from contextvars import copy_context
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from functools import partial
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, TypedDict
 from weakref import WeakValueDictionary
 
 from mindroom.script_runs.broker import ScriptRuntimeUnavailableError
@@ -41,6 +41,12 @@ if TYPE_CHECKING:
 ADMISSIONS = "admissions"
 
 
+class _TimeLeft(TypedDict, total=False):
+    """The optional working-time field a run update writes."""
+
+    runtime_seconds_left: float
+
+
 @dataclass(slots=True)
 class Places:
     """The places among one run's working calls: at most `limit` agent and tool calls of the run work at one time.
@@ -70,7 +76,7 @@ class RunCoordinator:
         store: WorkflowRunStore,
         scripts: ScriptRunManager,
         clock: Callable[[], float],
-        cancel_run: Callable[..., asyncio.Task[None]],
+        cancel_run: Callable[..., asyncio.Task[WorkflowRun]],
     ) -> None:
         self.store = store
         self.scripts = scripts
@@ -268,12 +274,21 @@ class RunCoordinator:
                 waits = WorkflowNodeState.WAITING in states and not working
                 state = WorkflowRunState.WAITING if waits else WorkflowRunState.RUNNING
                 if state is not run.state:
-                    changes = {"state": state, **self.time_left(run, span)}
-                    self.store.update_run(run_id, run.epoch, when=SERVED_RUN_STATES, **changes)
+                    remaining = self.time_left(run, span)
+                    if "runtime_seconds_left" in remaining:
+                        self.store.update_run(
+                            run_id,
+                            run.epoch,
+                            when=SERVED_RUN_STATES,
+                            state=state,
+                            runtime_seconds_left=remaining["runtime_seconds_left"],
+                        )
+                    else:
+                        self.store.update_run(run_id, run.epoch, when=SERVED_RUN_STATES, state=state)
                     return True
         return False
 
-    def time_left(self, run: WorkflowRun, span: tuple[float, float] | None = None) -> dict[str, object]:
+    def time_left(self, run: WorkflowRun, span: tuple[float, float] | None = None) -> _TimeLeft:
         """Return, as a change to save, the working time *run* has left after what it used since the last charge.
 
         Only a running run uses any, up to where its script ended: time spent waiting for a person, starting or

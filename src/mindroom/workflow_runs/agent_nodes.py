@@ -54,7 +54,7 @@ if TYPE_CHECKING:
     from mindroom.tool_jobs.runtime import BackgroundJob, JobClaim, ToolJobRuntime
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
-    from mindroom.workflow_runs.models import WorkflowNode, WorkflowRun
+    from mindroom.workflow_runs.models import WorkflowNode, WorkflowNodeLinks, WorkflowRun
     from mindroom.workflow_runs.store import WorkflowRunStore
 
 # The options of the SDK's `agent()` as the arguments of `run_subagent`, whose rules resolve them.
@@ -76,9 +76,9 @@ _NO_ANSWER = "The agent's turn left no record of how it ended."
 _NODE_ENDED = "The call ended before its agent started."
 
 # How one agent turn ended: `completed` and its answer, or the kind of its error and what to tell the script.
-type ChildOutcome = tuple[str, str]
+type _ChildOutcome = tuple[str, str]
 # Ledger entries one agent turn adds: (ledger_key, attempt, usage_payload).
-type TurnUsage = list[tuple[int | str, int, dict[str, object]]]
+type _TurnUsage = list[tuple[int | str, int, dict[str, object]]]
 _EARLIER_TURN = "cut:"
 
 
@@ -123,7 +123,7 @@ def first_prompt(node: WorkflowNode) -> str:
     return prompt if schema is None else schema_prompt(prompt, schema)
 
 
-def turn_job_id(run: WorkflowRun, key: str, generation: int, turn: int) -> str:
+def _turn_job_id(run: WorkflowRun, key: str, generation: int, turn: int) -> str:
     """Return the ID of the job one turn of one generation of a node runs as: the same for the same turn, always."""
     identity = [run.execution_identity, run.run_id, key, generation, turn]
     return hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
@@ -275,7 +275,7 @@ async def launch_child(
             node.key,
             node.generation,
         )
-        job_id = turn_job_id(run, node.key, node.generation, turn)
+        job_id = _turn_job_id(run, node.key, node.generation, turn)
         orchestrator = context.orchestrator
         spec = delegation_call_job(
             child,
@@ -295,10 +295,17 @@ async def launch_child(
             raise AgentNodeError(spec)
         work_until = None if timeout is None else time.time() + timeout
         handle = DispatchHandle("job", job_id, dispatched=False, work_until=work_until)
-        links = {"job_id": job_id, "delegation_id": child.delegation_id, "subagent_id": child.subagent_id}
+        links: WorkflowNodeLinks = {
+            "job_id": job_id,
+            "delegation_id": child.delegation_id,
+            "subagent_id": child.subagent_id,
+            "agent": target.agent_name,
+            "model": child.model_name,
+        }
         # And what the call resolved to, which its arguments need not name.
-        links |= {"agent": target.agent_name, "model": child.model_name}
-        links |= {"turn": turn, "made": made} if turn > 1 else {}
+        if turn > 1:
+            links["turn"] = turn
+            links["made"] = made
         node = replace(node, state=WorkflowNodeState.RUNNING, handle=handle, links=links)
         if (saved := await asyncio.to_thread(store.save_dispatched, node, epoch)) is None:
             # The node that waited for its place has an end by now: its run ended.
@@ -313,7 +320,11 @@ async def launch_child(
     node = replace(node, handle=replace(handle, dispatched=True))
     await asyncio.to_thread(store.update_node, run.run_id, node.key, node.generation, epoch, handle=node.handle)
     if session is not None:
-        links = {"subagent_id": child.subagent_id, "agent": target.agent_name, "model": child.model_name}
+        links: WorkflowNodeLinks = {
+            "subagent_id": child.subagent_id,
+            "agent": target.agent_name,
+            "model": child.model_name,
+        }
         await asyncio.to_thread(store.update_node, run.run_id, session.key, session.generation, epoch, links=links)
     return node
 
@@ -324,7 +335,7 @@ async def await_child(  # noqa: C901
     runtime: AgentRuntime,
     *,
     on_waiting: Callable[[str | None, float | None], Awaitable[object]] | None,
-) -> tuple[ChildOutcome, TurnUsage, JobClaim | None]:
+) -> tuple[_ChildOutcome, _TurnUsage, JobClaim | None]:
     """Wait for the job of *node* to end; return its outcome, usage, claim, and whether a restart continued it.
 
     The wait is on the saved job ID and starts nothing. *on_waiting* is told when the job starts to wait for a
@@ -349,8 +360,14 @@ async def await_child(  # noqa: C901
     while True:
         since = loop.time()
         try:
-            times = {"approval_timeout": None if waiting else 0, "work_timeout": 0 if waiting else left}
-            waited = await wait(**times) if on_waiting is not None else await wait(timeout=0)
+            waited = (
+                await wait(
+                    approval_timeout=None if waiting else 0,
+                    work_timeout=0 if waiting else left,
+                )
+                if on_waiting is not None
+                else await wait(timeout=0)
+            )
         except JobAccessError as exc:
             # A read that is denied says nothing of what the turn did, so its call is not one to run again: the
             # runtime holds the job, which may have started before its handle got the mark that it was handed over.
@@ -392,7 +409,7 @@ async def _job_outcome(
     runtime: AgentRuntime,
     reading: WorkflowRun,
     node: WorkflowNode,
-) -> tuple[ChildOutcome, TurnUsage]:
+) -> tuple[_ChildOutcome, _TurnUsage]:
     """Return how an ended *job* ended and the ledger entries it adds for *node* as read by *reading*.
 
     The answer is the run's, whole and as the child wrote it: not the job's text, which adds a receipt. The usage is
@@ -410,7 +427,7 @@ async def _job_outcome(
         if job.status != "completed" and record is not None and record.status == RunStatus.completed and job.result
         else (record.handover_content if record is not None else None) or job.result or _NO_ANSWER
     )
-    usage: TurnUsage = []
+    usage: _TurnUsage = []
     records = [rec for rec in (*cut_short, record) if rec is not None]
     prices = model_prices(runtime.config)
     for is_final, rec in (*((False, r) for r in cut_short), (True, record)):

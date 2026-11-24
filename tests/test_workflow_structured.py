@@ -17,7 +17,7 @@ from mindroom.script_runs.models import ScriptRunState
 from mindroom.workflow_runs import agent_dispatch as agent_dispatch_module
 from mindroom.workflow_runs import agent_nodes
 from mindroom.workflow_runs import engine as engine_module
-from mindroom.workflow_runs.agent_nodes import turn_job_id
+from mindroom.workflow_runs.agent_nodes import _turn_job_id
 from mindroom.workflow_runs.limits import run_usage
 from mindroom.workflow_runs.models import WorkflowNodeState
 from mindroom.workflow_runs.replay import node_digest
@@ -193,7 +193,7 @@ async def test_second_turn_fixes_the_answer_in_the_same_session_with_its_own_job
 
     run = stack.store.get_run(stack.run_id)
     jobs = {job.job_id: delegation_child(job) for job in stack.jobs.retained_jobs()}
-    first, second = (jobs[turn_job_id(run, "@0", 1, turn)] for turn in (1, 2))
+    first, second = (jobs[_turn_job_id(run, "@0", 1, turn)] for turn in (1, 2))
     node = stack.store.get_node(stack.run_id, "@0")
     assert result == {"ok": True}
     assert (first.session_id, first.subagent_id) == (second.session_id, second.subagent_id)
@@ -202,7 +202,7 @@ async def test_second_turn_fixes_the_answer_in_the_same_session_with_its_own_job
     assert (
         "Your answer did not match the schema: no JSON value found. Reply with only the corrected fenced json block."
     ) in _last_said(model)
-    assert (node.links["turn"], node.links["job_id"]) == (2, turn_job_id(run, "@0", 1, 2))
+    assert (node.links["turn"], node.links["job_id"]) == (2, _turn_job_id(run, "@0", 1, 2))
     assert run_usage(stack.store, stack.run_id)["cost_usd"] == pytest.approx(0.2)
 
 
@@ -364,7 +364,7 @@ async def test_correction_that_ends_without_an_answer_keeps_what_the_first_turn_
     wrote, again = calls(tool_call("append", "c1", line="a")), calls(tool_call("append", "c2", line="b"))
     further = [Await(_provider_fails)] if ends == "fails" else [Await(gate.wait), *answer(_GOOD)]
     model = stack.child_script(wrote, answer("no json here"), further, again, answer(_GOOD))
-    second = turn_job_id(stack.store.get_run(stack.run_id), "@0", 1, 2)
+    second = _turn_job_id(stack.store.get_run(stack.run_id), "@0", 1, 2)
     start = stack.jobs.start
 
     async def stopped(job_id: str, **options: object) -> object:

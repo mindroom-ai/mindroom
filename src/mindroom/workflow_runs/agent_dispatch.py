@@ -185,7 +185,7 @@ class AgentDispatcher:
             raise AgentNodeError(context if isinstance(context, str) else NO_AGENTS)
         session = self.live.store.get_node(run.run_id, node.session_key) if node.session_key else None
         source = session.request if session is not None else node.request
-        first_turn = node.kind != "turn" or int(node.request.get("turn", 1)) == 1
+        first_turn = node.kind != "turn" or node.request.get("turn", 1) == 1
         if turn == 1 and first_turn and not source.get("agent") and node.name in context.current_config.agents:
             await asyncio.to_thread(self.live.store.append_log, run.run_id, epoch, _NAME_LABELS.format(name=node.name))
         return await launch_child(

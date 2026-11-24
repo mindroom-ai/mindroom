@@ -58,7 +58,7 @@ ProviderPreset = Literal[
     "vertexai_claude",
 ]
 ProviderMenuChoice = ProviderPreset | Literal["claude_code+codex"]
-CombinedDefaultChoice = Literal["sonnet", "sol", "opus"]
+_CombinedDefaultChoice = Literal["sonnet", "sol", "opus"]
 
 _YAML_RESERVED_KEYS = frozenset({"true", "false", "yes", "no", "on", "off", "null", "y", "n"})
 
@@ -242,7 +242,7 @@ def default_model_selection(
 
 
 def _combined_claude_codex_selection(
-    default_choice: CombinedDefaultChoice,
+    default_choice: _CombinedDefaultChoice,
     *,
     claude_cli_path: str | None,
     ready: bool,
@@ -518,7 +518,7 @@ def _finalize_interactive_choice(
     if choice == "claude_code+codex":
         sonnet_label = CONFIG_INIT_MODEL_PRESETS["claude_code"].display_name or "Claude Sonnet 5.5"
         opus_label = dict(CONFIG_INIT_ADDITIONAL_MODELS["claude_code"])["opus"].display_name or "Claude Opus 5.5"
-        default_choice: CombinedDefaultChoice = io.select(
+        default_choice: _CombinedDefaultChoice = io.select(
             "Default model for Mind?",
             [("sonnet", sonnet_label), ("sol", "Codex Sol"), ("opus", opus_label)],
         )

@@ -47,7 +47,7 @@ def _clip_options(options: list[str], limit: int | None) -> list[str]:
     return [] if limit == 0 else [clip(option, limit) for option in options]
 
 
-def question_content(
+def _question_content(
     run: WorkflowRun,
     node: WorkflowNode,
     status: Literal["open", "answered", "cancelled"] = "open",
@@ -115,7 +115,7 @@ async def show_question(
         return None
     as_edit = status != "open"
     for chars, answer_chars, option_chars, body_option_chars in _CLOSED_FITS if as_edit else _OPEN_FITS:
-        content = question_content(
+        content = _question_content(
             run,
             node,
             status,

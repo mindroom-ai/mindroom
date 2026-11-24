@@ -32,7 +32,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from pathlib import Path
 
-    from mindroom.llm.types import MessageMetrics
+    from mindroom.llm.usage import MessageMetrics
 
 _PROMPT = {"prompt": "Look into it."}
 # The model costs 1 USD per million input tokens, so a request of 100,000 tokens costs ten cents.

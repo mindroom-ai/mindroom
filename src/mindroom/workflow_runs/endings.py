@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import suppress
 from functools import partial
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, TypedDict, Unpack, cast
 
 from mindroom.script_runs.models import TERMINAL_SCRIPT_RUN_STATES, ScriptRunState, utc_timestamp
 from mindroom.workflow_runs.agent_nodes import works
@@ -37,6 +37,13 @@ _ATTEMPT_GONE = "The record of the run's attempt is gone."
 _CHARGE_SECONDS = 60.0
 # How long after its report a script's exit is looked for, before the script runtime's own pass finds it.
 _EXIT_POLL_SECONDS = (0.05, 0.2, 0.5, 1.0, 2.0, 5.0)
+
+
+class _EndChanges(TypedDict, total=False):
+    """The fields a caller may override when ending one workflow run."""
+
+    finished_at: str | None
+    previous_source_digest: str | None
 
 
 def run_outcome(
@@ -106,12 +113,38 @@ class RunEndings:
                 while any(works(runtime, job) for job in jobs):  # noqa: ASYNC110 - no event for a job's end
                     await asyncio.sleep(_STOP_POLL_SECONDS)
 
+    def _write_ending(
+        self,
+        run: WorkflowRun,
+        state: WorkflowRunState,
+        error: str | None,
+        finished_at: str | None,
+        *,
+        previous_source_digest: str | None,
+        has_previous_source_digest: bool,
+        runtime_seconds_left: float | None,
+    ) -> WorkflowRun:
+        """Save one ending state with only the optional fields its caller supplied."""
+        update = partial(
+            self.live.store.update_run,
+            run.run_id,
+            run.epoch,
+            state=state,
+            error=error,
+            finished_at=finished_at,
+        )
+        if has_previous_source_digest:
+            update = partial(update, previous_source_digest=previous_source_digest)
+        if runtime_seconds_left is not None:
+            update = partial(update, runtime_seconds_left=runtime_seconds_left)
+        return update()
+
     async def end_run(
         self,
         run: WorkflowRun,
         state: WorkflowRunState,
         error: str | None,
-        **changes: object,
+        **changes: Unpack[_EndChanges],
     ) -> WorkflowRun:
         """End *run*: stop its node tasks, read each unsettled node from its handle, store the state, wake waiters.
 
@@ -158,7 +191,9 @@ class RunEndings:
                     # What the completed script no longer reaches leaves the run's current view.
                     await asyncio.to_thread(self.live.store.mark_stale, run.run_id, run.epoch)
                 at = current.finished_at or utc_timestamp()
-                changes = {"state": state, "error": error, "finished_at": at, **self.live.time_left(current), **changes}
+                finished_at = changes.get("finished_at", at)
+                previous_source_digest = changes.get("previous_source_digest")
+                remaining = self.live.time_left(current)
                 attempt = current.script_run_id or ""
 
                 def forget(written: asyncio.Future[WorkflowRun]) -> None:
@@ -166,7 +201,16 @@ class RunEndings:
                         self.live.launched.pop(attempt, None)
 
                 end = asyncio.ensure_future(
-                    asyncio.to_thread(self.live.store.update_run, run.run_id, run.epoch, **changes),
+                    asyncio.to_thread(
+                        self._write_ending,
+                        run,
+                        state,
+                        error,
+                        finished_at,
+                        previous_source_digest=previous_source_digest,
+                        has_previous_source_digest="previous_source_digest" in changes,
+                        runtime_seconds_left=remaining.get("runtime_seconds_left"),
+                    ),
                 )
                 # What is kept per attempt goes with the write: a task cancelled at the commit leaves none of it behind.
                 end.add_done_callback(forget)
@@ -191,7 +235,9 @@ class RunEndings:
             WorkflowRunState.CANCELLED: WorkflowNodeState.CANCELLED,
         }
         end = ends.get(child.state, WorkflowNodeState.FAILED)
-        error = None if end is WorkflowNodeState.COMPLETED else {"kind": child.state.value, "message": child.error}
+        error: dict[str, object] | None = (
+            None if end is WorkflowNodeState.COMPLETED else {"kind": child.state.value, "message": child.error}
+        )
         with suppress(SupersededAttemptError, WorkflowRunStoreError):
             outer = self.live.store.get_run(str(child.parent_run_id))
             key = f"{child.parent_node_key}/{child.run_id}"
@@ -219,7 +265,12 @@ class RunEndings:
                 async with self.live.condition(run_id):
                     run = self.live.store.get_run(run_id)
                     if charge := self.live.time_left(run):
-                        run = await asyncio.to_thread(self.live.store.update_run, run_id, epoch, **charge)
+                        run = await asyncio.to_thread(
+                            self.live.store.update_run,
+                            run_id,
+                            epoch,
+                            runtime_seconds_left=charge["runtime_seconds_left"],
+                        )
                 left = run.runtime_seconds_left
             if left is not None:
                 # An attempt that had ended already is judged as the pass judges it, before the run is stopped.
