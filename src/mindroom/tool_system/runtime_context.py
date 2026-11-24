@@ -311,7 +311,6 @@ class ToolRuntimeContext:
             ).workspace.root
 
         from mindroom.runtime_resolution import resolve_agent_storage  # noqa: PLC0415
-        from mindroom.workspaces import resolve_agent_workspace_from_state_path  # noqa: PLC0415
 
         storage = resolve_agent_storage(
             self.agent_name,
@@ -319,13 +318,7 @@ class ToolRuntimeContext:
             self.runtime_paths,
             execution_identity=self.execution_identity,
         )
-        return resolve_agent_workspace_from_state_path(
-            self.agent_name,
-            self.config,
-            runtime_paths=self.runtime_paths,
-            state_storage_path=storage.state_root,
-            use_state_storage_path=storage.execution.policy.private_workspace_enabled,
-        ).root
+        return storage.workspace(self.config, self.runtime_paths).root
 
 
 @dataclass(frozen=True, slots=True)

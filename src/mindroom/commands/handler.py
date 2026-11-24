@@ -68,7 +68,6 @@ from mindroom.tool_system.worker_routing import build_requester_execution_identi
 from mindroom.workflow_runs.answers import answer_command
 from mindroom.workflow_runs.graph import redacted_title
 from mindroom.workflow_runs.saved import SavedWorkflow, list_saved
-from mindroom.workspaces import resolve_agent_workspace_from_state_path
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable, Sequence
@@ -206,13 +205,7 @@ async def _workflows_command(
                     context.runtime_paths,
                     execution_identity=identity,
                 )
-                workspace = resolve_agent_workspace_from_state_path(
-                    name,
-                    context.config,
-                    runtime_paths=context.runtime_paths,
-                    state_storage_path=storage.state_root,
-                    use_state_storage_path=storage.execution.policy.private_workspace_enabled,
-                ).root
+                workspace = storage.workspace(context.config, context.runtime_paths).root
                 with suppress(OSError, ValueError):
                     saved.extend((name, item) for item in list_saved(workspace))
         return _format_workflows_listing(runs, saved)

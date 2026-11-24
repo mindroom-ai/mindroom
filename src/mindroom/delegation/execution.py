@@ -89,7 +89,6 @@ from mindroom.tool_system.runtime_context import (
 from mindroom.tool_system.tool_function import POLICY_CONFIRMATION_APPROVAL_TYPE
 from mindroom.turn_continuation import continuation_decision_from_tools, stopped_calls
 from mindroom.turn_model import ModelScope, resolve_turn_model
-from mindroom.workspaces import resolve_agent_workspace_from_state_path
 
 logger = get_logger(__name__)
 
@@ -589,13 +588,7 @@ def _prepare_delegation_output(
     It neither scaffolds nor reconciles the caller's workspace.
     """
     storage = resolve_agent_storage(identity.agent_name, config, runtime_paths, execution_identity=identity)
-    workspace = resolve_agent_workspace_from_state_path(
-        identity.agent_name,
-        config,
-        runtime_paths=runtime_paths,
-        state_storage_path=storage.state_root,
-        use_state_storage_path=storage.execution.policy.private_workspace_enabled,
-    )
+    workspace = storage.workspace(config, runtime_paths)
     policy = ToolOutputFilePolicy.from_runtime(
         workspace.root,
         runtime_paths,
