@@ -906,7 +906,12 @@ class WorkflowStack:
         """Submit one node, wait until it settles, and return its result or raise `NodeFailed`."""
         receipt = await self.submit(key, kind, args, meta)
         while receipt.state not in _SETTLED_STATES:
-            receipt = await nodes_module.node_receipt(self.engine, self.attempt, receipt.id, wait=SETTLE_TIMEOUT_SECONDS)
+            receipt = await nodes_module.node_receipt(
+                self.engine,
+                self.attempt,
+                receipt.id,
+                wait=SETTLE_TIMEOUT_SECONDS,
+            )
         if receipt.state != "completed":
             raise NodeFailed(receipt)
         return receipt.result

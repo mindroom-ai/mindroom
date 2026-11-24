@@ -344,7 +344,10 @@ async def test_attempt_that_failed_starts_no_queued_call_and_keeps_no_places(sta
 
     await stack.finish_attempt(error="KeyError: 'x'")
 
-    assert (stack.counting_tool.lines, [st.places for st in stack.engine._runs.values() if st.places is not None]) == (["a"], [])
+    assert (stack.counting_tool.lines, [st.places for st in stack.engine._runs.values() if st.places is not None]) == (
+        ["a"],
+        [],
+    )
     assert stack.store.get_run(stack.run_id).state is WorkflowRunState.FAILED
 
 

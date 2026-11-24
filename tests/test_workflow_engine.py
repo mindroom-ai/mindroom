@@ -367,7 +367,9 @@ async def test_request_that_was_let_in_before_its_attempt_was_replaced_gets_no_r
 async def test_read_that_waited_for_a_call_while_its_attempt_was_replaced_gets_no_receipt(stack: WorkflowStack) -> None:
     """A read is held until its call has ended, which the end of its attempt does too: then it is no longer served."""
     old, node = stack.attempt, _dispatched_node(stack)
-    read = asyncio.create_task(nodes_module.node_receipt(stack.engine, old, f"n{node.seq}", wait=SETTLE_TIMEOUT_SECONDS))
+    read = asyncio.create_task(
+        nodes_module.node_receipt(stack.engine, old, f"n{node.seq}", wait=SETTLE_TIMEOUT_SECONDS),
+    )
     await asyncio.sleep(0.05)
 
     await stack.end_attempt(ScriptRunState.FAILED)
@@ -613,7 +615,12 @@ async def test_failed_exit_keeps_the_reported_error_or_the_end_of_the_output(tmp
     """A traceback the script posted is the run's error; a process that died without one leaves its last output."""
     with workflow_stack(tmp_path) as stack:
         await stack.start()
-        await nodes_module.finish(stack.engine, stack.attempt, result=None, error="Traceback: the tide table was empty.")
+        await nodes_module.finish(
+            stack.engine,
+            stack.attempt,
+            result=None,
+            error="Traceback: the tide table was empty.",
+        )
         await stack.end_attempt(ScriptRunState.FAILED)
         reported = await stack.engine.wait(stack.run_id)
 

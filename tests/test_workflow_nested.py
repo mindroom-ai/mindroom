@@ -661,12 +661,12 @@ async def test_gate_that_answers_just_after_its_run_ended_queues_no_agent(gated:
     run, node = gated.store.get_run(gated.run_id), gated.store.get_node(gated.run_id, "@0")
     await gated.engine.cancel(run.run_id, reason="Stopped.")
     assert node is not None
-    assert (gated.engine._runs.get(run.run_id) is None or gated.engine._runs[run.run_id].places is None)
+    assert gated.engine._runs.get(run.run_id) is None or gated.engine._runs[run.run_id].places is None
 
     async def passed() -> Any:  # noqa: ANN401
         return SimpleNamespace(state=ScriptCallState.COMPLETED, grant=None, result=None, metadata=None)
 
     await nodes_module.start_gated(gated.engine, run, node, passed)
 
-    assert (gated.engine._runs.get(run.run_id) is None or gated.engine._runs[run.run_id].places is None)
+    assert gated.engine._runs.get(run.run_id) is None or gated.engine._runs[run.run_id].places is None
     assert _agent_jobs(gated) == 0
