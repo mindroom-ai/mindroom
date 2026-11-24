@@ -75,21 +75,11 @@ class ProviderLimitAccount:
 
     def to_dict(self) -> dict[str, object]:
         """Serialize to the wire contract account shape."""
-        optional = {
-            k: v
-            for k, v in (
-                ("account_label", self.account_label),
-                ("plan", self.plan),
-                ("unavailable_reason", self.unavailable_reason),
-                ("checked_at", self.checked_at),
-            )
-            if v is not None
-        }
-        return {
-            "id": self.id,
-            "provider": self.provider,
-            "display_name": self.display_name,
-            **optional,
+        out: dict[str, object] = {"id": self.id, "provider": self.provider, "display_name": self.display_name}
+        for key in ("account_label", "plan", "unavailable_reason", "checked_at"):
+            if (value := getattr(self, key)) is not None:
+                out[key] = value
+        return out | {
             "model_keys": list(self.model_keys),
             "windows": [window.to_dict() for window in self.windows],
             "stale": self.stale,
@@ -171,6 +161,14 @@ def clear_cache() -> None:
     _IN_FLIGHT.clear()
 
 
+def _passive_as_probe(spec: AccountSpec) -> ProbeResult | None:
+    if spec.probe_kind not in {"codex", "claude_code"}:
+        return None
+    if (passive := get_passive_windows(spec.probe_kind, spec.scope_key)) is None:
+        return None
+    return ProbeResult(windows=passive.windows, observed_at=passive.observed_at, succeeded=True)
+
+
 def _build_account(
     spec: AccountSpec,
     probe: ProbeResult,
@@ -181,68 +179,32 @@ def _build_account(
     cost_usd_7d: float | None,
     record_last_good: bool = True,
 ) -> ProviderLimitAccount:
-    windows, plan, label, reason, checked, stale = (), None, None, probe.unavailable_reason, format_utc_iso(now), False
     last_good_key = (runtime_key, spec.id, spec.scope_key)
+    chosen: ProbeResult | None = None
+    stale = False
     if probe.succeeded:
         if record_last_good:
             _put_bounded(_LAST_GOOD, last_good_key, probe, max_entries=_MAX_LAST_GOOD_ENTRIES)
-        windows, plan, label, reason, checked = (
-            probe.windows,
-            probe.plan,
-            probe.account_label,
-            None,
-            format_utc_iso(probe.observed_at or now),
-        )
+        chosen = probe
     elif probe.unavailable_reason in {"unsupported", "not_signed_in"}:
-        if (
-            spec.probe_kind == "codex"
-            and probe.unavailable_reason == "not_signed_in"
-            and (passive := get_passive_windows("codex", spec.scope_key))
-        ):
-            windows, plan, label, reason, checked, stale = (
-                passive.windows,
-                passive.plan,
-                passive.plan,
-                None,
-                format_utc_iso(passive.observed_at),
-                True,
-            )
+        if spec.probe_kind == "codex" and probe.unavailable_reason == "not_signed_in":
+            chosen = _passive_as_probe(spec)
+            stale = chosen is not None
     else:
-        candidates = [last] if (last := _LAST_GOOD.get(last_good_key)) is not None else []
-        if spec.probe_kind in {"codex", "claude_code"} and (
-            passive := get_passive_windows(spec.probe_kind, spec.scope_key)
-        ):
-            candidates.append(
-                ProbeResult(
-                    windows=passive.windows,
-                    plan=passive.plan,
-                    account_label=passive.plan,
-                    observed_at=passive.observed_at,
-                    succeeded=True,
-                ),
-            )
+        candidates = [c for c in (_LAST_GOOD.get(last_good_key), _passive_as_probe(spec)) if c is not None]
         if candidates:
-            best = max(candidates, key=lambda item: item.observed_at or datetime.min.replace(tzinfo=UTC))
-            windows, plan, label, reason, checked, stale = (
-                best.windows,
-                best.plan,
-                best.account_label,
-                None,
-                format_utc_iso(best.observed_at or now),
-                True,
-            )
-        else:
-            reason = probe.unavailable_reason or "probe_failed"
+            chosen = max(candidates, key=lambda item: item.observed_at or datetime.min.replace(tzinfo=UTC))
+            stale = True
     return ProviderLimitAccount(
         id=spec.id,
         provider=spec.provider,
         display_name=spec.display_name,
-        account_label=label,
-        plan=plan,
+        account_label=chosen.account_label if chosen else None,
+        plan=chosen.plan if chosen else None,
         model_keys=spec.model_keys,
-        windows=windows,
-        unavailable_reason=reason,
-        checked_at=checked,
+        windows=chosen.windows if chosen else (),
+        unavailable_reason=None if chosen else (probe.unavailable_reason or "probe_failed"),
+        checked_at=format_utc_iso((chosen.observed_at if chosen else None) or now),
         stale=stale,
         tokens_7d=tokens_7d,
         cost_usd_7d=cost_usd_7d,

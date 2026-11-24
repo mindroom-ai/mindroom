@@ -223,8 +223,8 @@ def test_wire_contract_fixture_round_trip() -> None:
     assert "request_id" not in rest_payload
 
 
-def test_limit_store_codex_and_claude_parsing() -> None:
-    """Passive store parses case-insensitive Codex headers, Claude buckets, and ignores NaN/garbage."""
+def test_limit_store_codex_and_claude_parsing(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Passive store parses case-insensitive Codex headers, Claude buckets, enforces bounded LRU, and ignores NaN."""
     limit_store.record_codex_headers(
         "scope-codex-a",
         {
@@ -275,6 +275,17 @@ def test_limit_store_codex_and_claude_parsing() -> None:
         ("five_hour", "5-hour window", 38.0, 300),
         ("seven_day_sonnet", "7-day Sonnet", 15.0, 10080),
     ]
+
+    # Bounded LRU promotes accessed entries and evicts the least recently used scope.
+    limit_store.clear()
+    monkeypatch.setattr(limit_store, "_MAX_SCOPES", 2)
+    for scope in ("scope-1", "scope-2"):
+        limit_store.record_codex_headers(scope, {"x-codex-primary-used-percent": "10"}, now=FIXED_NOW)
+    assert limit_store.get_passive_windows("codex", "scope-1") is not None
+    limit_store.record_codex_headers("scope-3", {"x-codex-primary-used-percent": "20"}, now=FIXED_NOW)
+    assert limit_store.get_passive_windows("codex", "scope-2") is None
+    assert limit_store.get_passive_windows("codex", "scope-1") is not None
+    assert limit_store.get_passive_windows("codex", "scope-3") is not None
 
 
 @pytest.mark.asyncio
@@ -813,60 +824,6 @@ async def test_openrouter_auth_header_override_and_zero_limit(
 
 
 @pytest.mark.asyncio
-async def test_payg_accounts_group_by_credential_and_route_shared_model_to_unattributed(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Two distinct PAYG keys on the same provider/model ID become distinct accounts and stay unattributed."""
-    daily = (
-        UsageDailyBreakdownRow(
-            date="2026-11-23",
-            totals=TokenCounts(input_tokens=1000, output_tokens=500, total_tokens=1500),
-            run_count=1,
-            model_breakdown=(
-                UsageModelBreakdownRow(
-                    model_provider="Anthropic",
-                    model="claude-haiku-4-5",
-                    totals=TokenCounts(input_tokens=1000, output_tokens=500, total_tokens=1500),
-                    run_count=1,
-                ),
-            ),
-        ),
-    )
-    monkeypatch.setattr(provider_limits, "collect_admin_usage", lambda **_kw: _empty_report(daily))
-    config = Config(
-        models={
-            "haiku_a": ModelConfig(
-                provider="anthropic",
-                id="claude-haiku-4-5",
-                api_key="sk-ant-key-one",
-                pricing=ModelPricing(input=1.0, output=5.0),
-            ),
-            "haiku_b": ModelConfig(
-                provider="anthropic",
-                id="claude-haiku-4-5",
-                api_key="sk-ant-key-two",
-                pricing=ModelPricing(input=1.0, output=5.0),
-            ),
-        },
-    )
-    snapshot = await get_provider_usage_snapshot(
-        config=config,
-        runtime_paths=test_runtime_paths(tmp_path),
-        now=FIXED_NOW,
-    )
-    payload_text = json.dumps(snapshot.to_dict())
-    assert "sk-ant-key-" not in payload_text
-    by_id = {acct.id: acct for acct in snapshot.accounts}
-    assert set(by_id) == {"anthropic:default", "anthropic:2"}
-    assert by_id["anthropic:default"].tokens_7d == 0
-    assert by_id["anthropic:2"].tokens_7d == 0
-    assert snapshot.unattributed_tokens_7d == 1500
-    assert snapshot.unattributed_cost_usd_7d == pytest.approx(0.0035)
-    assert snapshot.daily_7d[0].unattributed_tokens == 1500
-
-
-@pytest.mark.asyncio
 async def test_claude_get_usage_low_percent_display_name_null_limits_and_unrelated_edit_fallback(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1002,15 +959,15 @@ async def test_openrouter_request_params_authorization_and_x_api_key_overrides(
     assert by_id["openrouter:1"].plan == "Credit cap"
     assert by_id["openrouter:2"].plan == "Credit cap"
     assert by_id["openrouter:custom"].plan == "Pay-as-you-go"
-    assert by_id["openrouter:custom:2"].plan == "Pay-as-you-go"
+    assert by_id["openrouter:custom"].model_keys == ("or_conflict", "or_unreadable_xkey")
 
 
 @pytest.mark.asyncio
-async def test_payg_same_credential_across_api_key_and_headers_groups_into_one_account(
+async def test_payg_models_group_by_provider_route_without_leaking_secrets(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Models sharing the exact same secret via api_key, X-Api-Key, and Authorization Bearer group into one account."""
+    """Non-OpenRouter PAYG models group cleanly by provider route (<route>:default) and never leak keys/projects."""
     daily = (
         UsageDailyBreakdownRow(
             date="2026-11-23",
@@ -1027,24 +984,28 @@ async def test_payg_same_credential_across_api_key_and_headers_groups_into_one_a
         ),
     )
     monkeypatch.setattr(provider_limits, "collect_admin_usage", lambda **_kw: _empty_report(daily))
-    shared_key = "sk-ant-same-billing-account"
     config = Config(
         models={
-            "haiku_key": ModelConfig(
+            "haiku_a": ModelConfig(
                 provider="anthropic",
                 id="claude-haiku-4-5",
-                api_key=shared_key,
+                api_key="sk-ant-key-one",
                 pricing=ModelPricing(input=1.0, output=5.0),
             ),
-            "haiku_xkey": ModelConfig(
+            "haiku_b": ModelConfig(
                 provider="anthropic",
                 id="claude-haiku-4-5",
-                extra_kwargs={"default_headers": {"X-Api-Key": shared_key}},
+                api_key="sk-ant-key-two",
             ),
-            "haiku_bearer": ModelConfig(
-                provider="anthropic",
-                id="claude-haiku-4-5",
-                extra_kwargs={"request_params": {"extra_headers": {"Authorization": f"Bearer {shared_key}"}}},
+            "vertex_a": ModelConfig(
+                provider="google",
+                id="gemini-2.5-pro",
+                extra_kwargs={"vertexai": True, "project_id": "gcp-proj-alpha"},
+            ),
+            "vertex_b": ModelConfig(
+                provider="gemini",
+                id="gemini-2.5-flash",
+                extra_kwargs={"vertexai": True, "client_params": {"project": "gcp-proj-beta"}},
             ),
         },
     )
@@ -1053,10 +1014,15 @@ async def test_payg_same_credential_across_api_key_and_headers_groups_into_one_a
         runtime_paths=test_runtime_paths(tmp_path),
         now=FIXED_NOW,
     )
-    assert [acct.id for acct in snapshot.accounts] == ["anthropic:default"]
-    assert snapshot.accounts[0].model_keys == ("haiku_bearer", "haiku_key", "haiku_xkey")
-    assert snapshot.accounts[0].tokens_7d == 2500
-    assert snapshot.accounts[0].cost_usd_7d == pytest.approx(0.0045)
+    payload_text = json.dumps(snapshot.to_dict())
+    for secret in ("sk-ant-key-", "gcp-proj-alpha", "gcp-proj-beta"):
+        assert secret not in payload_text
+    by_id = {acct.id: acct for acct in snapshot.accounts}
+    assert set(by_id) == {"anthropic:default", "google:default"}
+    assert by_id["anthropic:default"].model_keys == ("haiku_a", "haiku_b")
+    assert by_id["anthropic:default"].tokens_7d == 2500
+    assert by_id["anthropic:default"].cost_usd_7d == pytest.approx(0.0045)
+    assert by_id["google:default"].model_keys == ("vertex_a", "vertex_b")
     assert snapshot.unattributed_tokens_7d == 0
 
 
@@ -1331,66 +1297,6 @@ async def test_openrouter_anthropic_sdk_env_overrides_ignore_dotenv_and_secret_f
     auth, acct = await _probe("proc-token", process_env={"ANTHROPIC_AUTH_TOKEN": "tok-proc-env"})
     assert auth == ["Bearer tok-proc-env"]
     assert acct.id == "openrouter:1"
-
-
-@pytest.mark.asyncio
-async def test_google_vertex_distinct_project_ids_group_separately_with_opaque_ids(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Keyless Google Vertex models on different projects get distinct opaque IDs and keep shared usage unattributed."""
-    daily = (
-        UsageDailyBreakdownRow(
-            date="2026-11-23",
-            totals=TokenCounts(input_tokens=3000, output_tokens=1000, total_tokens=4000),
-            run_count=1,
-            model_breakdown=(
-                UsageModelBreakdownRow(
-                    model_provider="Google",
-                    model="gemini-2.5-pro",
-                    totals=TokenCounts(input_tokens=3000, output_tokens=1000, total_tokens=4000),
-                    run_count=1,
-                ),
-            ),
-        ),
-    )
-    monkeypatch.setattr(provider_limits, "collect_admin_usage", lambda **_kw: _empty_report(daily))
-    paths = resolve_primary_runtime_paths(
-        config_path=tmp_path / "config.yaml",
-        storage_path=tmp_path / "storage",
-        process_env={"GOOGLE_CLOUD_PROJECT": "gcp-proj-alpha"},
-    )
-    config = Config(
-        models={
-            "vertex_alpha_env": ModelConfig(
-                provider="google",
-                id="gemini-2.5-pro",
-                extra_kwargs={"vertexai": True},
-                pricing=ModelPricing(input=1.25, output=10.0),
-            ),
-            "vertex_alpha_explicit": ModelConfig(
-                provider="google",
-                id="gemini-2.5-flash",
-                extra_kwargs={"vertexai": True, "project_id": "gcp-proj-alpha"},
-            ),
-            "vertex_beta": ModelConfig(
-                provider="google",
-                id="gemini-2.5-pro",
-                extra_kwargs={"vertexai": True, "client_params": {"project": "gcp-proj-beta"}},
-            ),
-        },
-    )
-    snapshot = await get_provider_usage_snapshot(config=config, runtime_paths=paths, now=FIXED_NOW)
-    payload_text = json.dumps(snapshot.to_dict())
-    assert "gcp-proj-alpha" not in payload_text
-    assert "gcp-proj-beta" not in payload_text
-    by_id = {acct.id: acct for acct in snapshot.accounts}
-    assert set(by_id) == {"google:default", "google:2"}
-    assert by_id["google:default"].model_keys == ("vertex_alpha_env", "vertex_alpha_explicit")
-    assert by_id["google:2"].model_keys == ("vertex_beta",)
-    assert by_id["google:default"].tokens_7d == 0
-    assert by_id["google:2"].tokens_7d == 0
-    assert snapshot.unattributed_tokens_7d == 4000
 
 
 @pytest.mark.asyncio

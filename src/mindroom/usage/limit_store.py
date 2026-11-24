@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import math
 import threading
-from dataclasses import dataclass
+from collections import OrderedDict
+from contextlib import suppress
+from dataclasses import dataclass, fields
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
@@ -31,12 +33,13 @@ __all__ = [
 ]
 
 WindowKind = Literal["session", "weekly", "monthly"]
-_CLAUDE_MODEL_LABELS = {
-    "opus": "Opus",
-    "sonnet": "Sonnet",
-    "haiku": "Haiku",
-    "oauth_apps": "OAuth apps",
-    "cowork": "Cowork",
+_MAX_SCOPES = 64
+_CLAUDE_MODEL_LABELS = {"oauth_apps": "OAuth apps"}
+_CLAUDE_BUCKETS: dict[str, tuple[str, WindowKind, str, int | None]] = {
+    "five_hour": ("five_hour", "session", "5-hour window", 300),
+    "seven_day": ("seven_day", "weekly", "7-day window", 10080),
+    "overage": ("overage", "monthly", "Extra usage", None),
+    "extra_usage": ("extra_usage", "monthly", "Extra usage", None),
 }
 _WINDOW_ORDER = {"five_hour": 0, "seven_day": 1, "credit_limit": 3, "extra_usage": 3, "overage": 3}
 
@@ -56,23 +59,7 @@ class PassiveWindow:
 
     def to_dict(self) -> dict[str, object]:
         """Serialize to the wire contract window shape."""
-        base: dict[str, object] = {
-            "id": self.id,
-            "kind": self.kind,
-            "label": self.label,
-            "used_percent": self.used_percent,
-            "remaining_percent": self.remaining_percent,
-        }
-        extra = {
-            k: v
-            for k, v in (
-                ("window_duration_mins", self.window_duration_mins),
-                ("resets_at", self.resets_at),
-                ("detail", self.detail),
-            )
-            if v is not None
-        }
-        return {**base, **extra}
+        return {f.name: val for f in fields(self) if (val := getattr(self, f.name)) is not None}
 
 
 @dataclass(frozen=True, slots=True)
@@ -81,18 +68,10 @@ class PassiveLimitReading:
 
     windows: tuple[PassiveWindow, ...]
     observed_at: datetime
-    plan: str | None = None
-
-
-@dataclass(slots=True)
-class _ScopeState:
-    windows: dict[str, PassiveWindow]
-    observed_at: datetime
-    plan: str | None = None
 
 
 _LOCK = threading.Lock()
-_STORE: dict[tuple[str, str], _ScopeState] = {}
+_STORE: OrderedDict[tuple[str, str], tuple[dict[str, PassiveWindow], datetime]] = OrderedDict()
 
 
 def _utc(now: datetime | None) -> datetime:
@@ -107,34 +86,25 @@ def format_utc_iso(dt: datetime) -> str:
 
 def finite_float(value: object) -> float | None:
     """Parse a finite float from int/float/str, rejecting booleans, NaN, and Inf."""
-    if isinstance(value, bool) or value is None:
-        return None
-    try:
-        parsed = float(value) if isinstance(value, (int, float, str)) else math.nan
-    except ValueError:
-        return None
-    return parsed if math.isfinite(parsed) else None
+    if isinstance(value, (int, float, str)) and not isinstance(value, bool):
+        with suppress(ValueError):
+            return parsed if math.isfinite(parsed := float(value)) else None
+    return None
 
 
 def parse_reset_timestamp(value: object) -> str | None:
     """Convert unix seconds or an ISO-8601 string to canonical UTC ISO-8601."""
-    parsed: datetime | None = None
     if (numeric := finite_float(value)) is not None:
         if numeric > 0:
-            try:
-                parsed = datetime.fromtimestamp(numeric, tz=UTC)
-            except (OverflowError, OSError, ValueError):
-                parsed = None
+            with suppress(OverflowError, OSError, ValueError):
+                return format_utc_iso(datetime.fromtimestamp(numeric, tz=UTC))
     elif isinstance(value, str) and (text := value.strip()):
-        try:
-            parsed = datetime.fromisoformat(f"{text[:-1]}+00:00" if text.endswith(("Z", "z")) else text)
-        except ValueError:
-            parsed = None
-    return None if parsed is None else format_utc_iso(parsed)
+        with suppress(ValueError):
+            return format_utc_iso(datetime.fromisoformat(f"{text[:-1]}+00:00" if text.endswith(("Z", "z")) else text))
+    return None
 
 
 def build_window(
-    *,
     window_id: str,
     kind: WindowKind,
     label: str,
@@ -145,16 +115,7 @@ def build_window(
 ) -> PassiveWindow:
     """Create a clamped, consistently rounded window."""
     used = round(max(0.0, min(100.0, used_percent)), 1)
-    return PassiveWindow(
-        id=window_id,
-        kind=kind,
-        label=label,
-        used_percent=used,
-        remaining_percent=round(100.0 - used, 1),
-        window_duration_mins=window_duration_mins,
-        resets_at=resets_at,
-        detail=detail,
-    )
+    return PassiveWindow(window_id, kind, label, used, round(100.0 - used, 1), window_duration_mins, resets_at, detail)
 
 
 def normalize_codex_scope_key(codex_home: str | Path | None) -> str:
@@ -181,20 +142,12 @@ def codex_window_metadata(slot: str, duration_mins: int | None) -> tuple[str, Wi
 def claude_window_metadata(bucket: str) -> tuple[str, WindowKind, str, int | None]:
     """Return ``(id, kind, label, window_duration_mins)`` for one Claude Code rate-limit bucket."""
     normalized = bucket.strip().lower().replace("-", "_")
-    if normalized == "five_hour":
-        return ("five_hour", "session", "5-hour window", 300)
-    if normalized == "seven_day":
-        return ("seven_day", "weekly", "7-day window", 10080)
+    if known := _CLAUDE_BUCKETS.get(normalized):
+        return known
     if normalized.startswith("seven_day_"):
         suffix = normalized.removeprefix("seven_day_")
-        return (
-            normalized,
-            "weekly",
-            f"7-day {_CLAUDE_MODEL_LABELS.get(suffix, suffix.replace('_', ' ').title())}",
-            10080,
-        )
-    if normalized in {"overage", "extra_usage"}:
-        return (normalized, "monthly", "Extra usage", None)
+        label = _CLAUDE_MODEL_LABELS.get(suffix, suffix.replace("_", " ").title())
+        return (normalized, "weekly", f"7-day {label}", 10080)
     kind: WindowKind = (
         "weekly"
         if "seven" in normalized or "week" in normalized
@@ -220,11 +173,14 @@ def sort_windows(windows: tuple[PassiveWindow, ...] | list[PassiveWindow]) -> tu
 def _merge(provider: str, scope_key: str, windows: list[PassiveWindow], *, observed_at: datetime) -> None:
     if not windows:
         return
+    key = (provider, scope_key)
     with _LOCK:
-        state = _STORE.setdefault((provider, scope_key), _ScopeState(windows={}, observed_at=observed_at))
-        for window in windows:
-            state.windows[window.id] = window
-        state.observed_at = observed_at
+        merged = _STORE[key][0] if key in _STORE else {}
+        merged.update({w.id: w for w in windows})
+        _STORE[key] = (merged, observed_at)
+        _STORE.move_to_end(key)
+        while len(_STORE) > _MAX_SCOPES:
+            _STORE.popitem(last=False)
 
 
 def record_codex_headers(scope_key: str, headers: Mapping[str, object], *, now: datetime | None = None) -> None:
@@ -238,17 +194,9 @@ def record_codex_headers(scope_key: str, headers: Mapping[str, object], *, now: 
             continue
         raw_mins = finite_float(lowered.get(f"x-codex-{slot}-window-minutes"))
         duration = round(raw_mins) if raw_mins is not None and raw_mins > 0 else None
-        window_id, kind, label = codex_window_metadata(slot, duration)
-        parsed.append(
-            build_window(
-                window_id=window_id,
-                kind=kind,
-                label=label,
-                used_percent=used,
-                window_duration_mins=duration,
-                resets_at=parse_reset_timestamp(lowered.get(f"x-codex-{slot}-reset-at")),
-            ),
-        )
+        wid, kind, label = codex_window_metadata(slot, duration)
+        resets_at = parse_reset_timestamp(lowered.get(f"x-codex-{slot}-reset-at"))
+        parsed.append(build_window(wid, kind, label, used, duration, resets_at))
     _merge("codex", scope_key, parsed, observed_at=_utc(now))
 
 
@@ -265,29 +213,20 @@ def record_claude_rate_limit(
         return
     if (fraction := finite_float(utilization)) is None:
         return
-    window_id, kind, label, duration = claude_window_metadata(rate_limit_type)
-    window = build_window(
-        window_id=window_id,
-        kind=kind,
-        label=label,
-        used_percent=fraction * 100.0,
-        window_duration_mins=duration,
-        resets_at=parse_reset_timestamp(resets_at),
-    )
+    wid, kind, label, duration = claude_window_metadata(rate_limit_type)
+    window = build_window(wid, kind, label, fraction * 100.0, duration, parse_reset_timestamp(resets_at))
     _merge("claude_code", scope_key, [window], observed_at=_utc(now))
 
 
 def get_passive_windows(provider: str, scope_key: str) -> PassiveLimitReading | None:
     """Return the latest passively observed windows for ``(provider, scope_key)``, or None."""
+    key = (provider, scope_key)
     with _LOCK:
-        state = _STORE.get((provider, scope_key))
-        if state is None or not state.windows:
+        state = _STORE.get(key)
+        if state is None or not state[0]:
             return None
-        return PassiveLimitReading(
-            windows=sort_windows(list(state.windows.values())),
-            observed_at=state.observed_at,
-            plan=state.plan,
-        )
+        _STORE.move_to_end(key)
+        return PassiveLimitReading(windows=sort_windows(list(state[0].values())), observed_at=state[1])
 
 
 def clear() -> None:

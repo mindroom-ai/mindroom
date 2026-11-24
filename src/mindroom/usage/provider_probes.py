@@ -140,17 +140,8 @@ def _parse_codex_payload(data: Mapping[str, Any], now: datetime) -> ProbeResult:
         resets_at = parse_reset_timestamp(entry.get("reset_at") or entry.get("resets_at"))
         if resets_at is None and (after := finite_float(entry.get("reset_after_seconds"))) and after > 0:
             resets_at = format_utc_iso(now + timedelta(seconds=after))
-        window_id, kind, label = codex_window_metadata(slot, duration)
-        windows.append(
-            build_window(
-                window_id=window_id,
-                kind=kind,
-                label=label,
-                used_percent=used,
-                window_duration_mins=duration,
-                resets_at=resets_at,
-            ),
-        )
+        wid, kind, label = codex_window_metadata(slot, duration)
+        windows.append(build_window(wid, kind, label, used, duration, resets_at))
     ok = bool(windows or plan)
     return ProbeResult(
         windows=sort_windows(windows),
@@ -210,36 +201,19 @@ async def probe_openrouter(api_key: str | None, now: datetime) -> ProbeResult:
     reset_kind = str(data.get("limit_reset") or "").lower()
     kind: WindowKind = "session" if reset_kind == "daily" else ("weekly" if reset_kind == "weekly" else "monthly")
     if limit <= 0:
-        window = build_window(
-            window_id="credit_limit",
-            kind=kind,
-            label="Credit limit",
-            used_percent=100.0,
-            detail="$0.00 / $0.00 left",
-        )
-        return ProbeResult(
-            windows=(window,),
-            plan="Credit cap",
-            account_label="Credit cap",
-            observed_at=now,
-            succeeded=True,
-        )
-    rem_raw, usage_raw = finite_float(data.get("limit_remaining")), finite_float(data.get("usage"))
-    if rem_raw is not None:
-        remaining = max(0.0, rem_raw)
-        used = max(0.0, limit - remaining)
-    elif usage_raw is not None:
-        used = max(0.0, usage_raw)
-        remaining = max(0.0, limit - used)
+        used_pct, remaining, cap = 100.0, 0.0, 0.0
     else:
-        used, remaining = 0.0, limit
-    window = build_window(
-        window_id="credit_limit",
-        kind=kind,
-        label="Credit limit",
-        used_percent=(used / limit) * 100.0,
-        detail=f"${remaining:.2f} / ${limit:.2f} left",
-    )
+        rem_raw, usage_raw = finite_float(data.get("limit_remaining")), finite_float(data.get("usage"))
+        if rem_raw is not None:
+            remaining = max(0.0, rem_raw)
+            used = max(0.0, limit - remaining)
+        elif usage_raw is not None:
+            used = max(0.0, usage_raw)
+            remaining = max(0.0, limit - used)
+        else:
+            used, remaining = 0.0, limit
+        used_pct, cap = (used / limit) * 100.0, limit
+    window = build_window("credit_limit", kind, "Credit limit", used_pct, detail=f"${remaining:.2f} / ${cap:.2f} left")
     return ProbeResult(
         windows=(window,),
         plan="Credit cap",
@@ -285,14 +259,15 @@ def _model_scoped_entries(scoped: object) -> list[tuple[str, Mapping[str, Any]]]
     for raw_entry in scoped:
         if (entry := _as_mapping(raw_entry)) is None:
             continue
-        raw_name = (
-            entry.get("id")
-            or entry.get("rate_limit_type")
-            or entry.get("model")
-            or entry.get("name")
-            or entry.get("display_name")
+        raw_name = next(
+            (
+                v
+                for k in ("id", "rate_limit_type", "model", "name", "display_name")
+                if isinstance(v := entry.get(k), str) and v.strip()
+            ),
+            None,
         )
-        if isinstance(raw_name, str) and raw_name.strip():
+        if raw_name is not None:
             entries.append((_model_scoped_bucket(raw_name), entry))
     return entries
 
@@ -321,32 +296,22 @@ def _parse_claude_usage(
 ) -> tuple[PassiveWindow, ...] | UnavailableReason:
     if payload.get("rate_limits_available") is False:
         return "unsupported"
-    if "rate_limits" in payload:
-        rate_limits = _as_mapping(payload.get("rate_limits"))
-        if rate_limits is None:
-            return "probe_failed"
-    elif _as_mapping(payload.get("five_hour")) is not None or _as_mapping(payload.get("seven_day")) is not None:
-        rate_limits = payload
-    else:
+    rate_limits = (
+        _as_mapping(payload.get("rate_limits"))
+        if "rate_limits" in payload
+        else (payload if _as_mapping(payload.get("five_hour")) or _as_mapping(payload.get("seven_day")) else None)
+    )
+    if rate_limits is None:
         return "probe_failed"
 
-    entries = _collect_claude_entries(rate_limits)
     windows: list[PassiveWindow] = []
-    for bucket, entry in entries:
+    for bucket, entry in _collect_claude_entries(rate_limits):
         if (used := _claude_percent(entry)) is None:
             continue
         wid, kind, default_label, duration = claude_window_metadata(bucket)
         label = _model_scoped_label(entry, default_label) if bucket.startswith("seven_day_") else default_label
-        windows.append(
-            build_window(
-                window_id=wid,
-                kind=kind,
-                label=label,
-                used_percent=used,
-                window_duration_mins=duration,
-                resets_at=parse_reset_timestamp(entry.get("resets_at") or entry.get("resetsAt")),
-            ),
-        )
+        resets_at = parse_reset_timestamp(entry.get("resets_at") or entry.get("resetsAt"))
+        windows.append(build_window(wid, kind, label, used, duration, resets_at))
     extra = _as_mapping(rate_limits.get("extra_usage")) or _as_mapping(payload.get("extra_usage"))
     if extra is not None and extra.get("is_enabled", extra.get("enabled", True)) is not False:
         used_credits, monthly_limit = finite_float(extra.get("used_credits")), finite_float(extra.get("monthly_limit"))
@@ -356,20 +321,12 @@ def _parse_claude_usage(
             else _claude_percent(extra)
         )
         if used_extra is not None:
+            resets_at = parse_reset_timestamp(extra.get("resets_at") or extra.get("resetsAt"))
             detail = extra.get("detail") if isinstance(extra.get("detail"), str) else None
             windows.append(
-                build_window(
-                    window_id="extra_usage",
-                    kind="monthly",
-                    label="Extra usage",
-                    used_percent=used_extra,
-                    resets_at=parse_reset_timestamp(extra.get("resets_at") or extra.get("resetsAt")),
-                    detail=detail,
-                ),
+                build_window("extra_usage", "monthly", "Extra usage", used_extra, resets_at=resets_at, detail=detail),
             )
-    if not windows:
-        return "probe_failed"
-    return sort_windows(windows)
+    return sort_windows(windows) if windows else "probe_failed"
 
 
 async def _claude_control_rpc(
@@ -467,13 +424,7 @@ async def probe_claude_code(cli_path: str | None, now: datetime) -> ProbeResult:
                 parsed = _parse_claude_usage(usage_data)
                 if isinstance(parsed, str):
                     return ProbeResult(unavailable_reason=parsed)
-                return ProbeResult(
-                    windows=parsed,
-                    plan=plan,
-                    account_label=plan,
-                    observed_at=now,
-                    succeeded=True,
-                )
+                return ProbeResult(windows=parsed, plan=plan, account_label=plan, observed_at=now, succeeded=True)
         except Exception:
             return ProbeResult(unavailable_reason="probe_failed")
         finally:
