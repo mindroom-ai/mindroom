@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 
 from nio import AuthenticatedToDeviceEvent
 
-from mindroom.desktop.bridge import DesktopBridge, DesktopBridgePolicy
+from mindroom.desktop.bridge import DesktopBridge, DesktopBridgePolicy, DesktopControllerPolicy
 from mindroom.desktop.command_journal import desktop_journal_path
 from mindroom.desktop.filesystem import DesktopFilesystem
 from mindroom.desktop.native_config import require_supported_local_access
@@ -42,10 +42,27 @@ class DesktopWorkerStoppedError(RuntimeError):
         super().__init__("A desktop worker stopped unexpectedly.")
 
 
+async def _verify_controller_device(client: nio.AsyncClient, controller: PinnedMatrixDevice) -> None:
+    """Check one pinned controller's current identity on Matrix."""
+    await resolve_pinned_device(client, controller)
+
+
 async def _verify_controller_then_publish_keys(client: nio.AsyncClient, controller: PinnedMatrixDevice) -> None:
     """Check the pinned controller's current identity before publishing this device's encryption keys."""
     await resolve_pinned_device(client, controller)
     await prepare_desktop_client(client)
+
+
+def controller_policies_from_config(config: NativeDesktopConfig) -> tuple[DesktopControllerPolicy, ...]:
+    """Build per-controller bridge policies from a saved native configuration."""
+    return tuple(
+        DesktopControllerPolicy(
+            controller=entry.controller,
+            allowed_requester_ids=frozenset(entry.allowed_requester_ids),
+            allowed_agent_names=frozenset(entry.allowed_agent_names),
+        )
+        for entry in config.controllers
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,6 +76,7 @@ class DesktopBridgeSessionDeps:
     prepare_client: Callable[[nio.AsyncClient, PinnedMatrixDevice], Awaitable[None]] = (
         _verify_controller_then_publish_keys
     )
+    verify_controller: Callable[[nio.AsyncClient, PinnedMatrixDevice], Awaitable[None]] = _verify_controller_device
 
 
 @dataclass(eq=False)
@@ -69,8 +87,17 @@ class DesktopBridgeSession:
     browser: PlaywrightMCPBrowserProvider | None
     workers: tuple[asyncio.Task[None], ...]
     _resources: AsyncExitStack = field(repr=False)
+    _deps: DesktopBridgeSessionDeps = field(default_factory=DesktopBridgeSessionDeps, repr=False)
     _closing: asyncio.Task[None] | None = field(default=None, init=False, repr=False)
     _live: bool = field(default=True, init=False, repr=False)
+
+    async def verify_controller(self, controller: PinnedMatrixDevice) -> None:
+        """Verify one pinned controller device on this live Matrix client."""
+        await self._deps.verify_controller(self.bridge.client, controller)
+
+    def update_controllers(self, config: NativeDesktopConfig) -> dict[str, object]:
+        """Hot-reload the live bridge's controller policies from saved config."""
+        return self.bridge.update_controllers(controller_policies_from_config(config))
 
     @property
     def live(self) -> bool:
@@ -139,6 +166,8 @@ async def start_desktop_bridge_session(
             bridge.grant_local_shell(shell_auto_approve_seconds)
         client.add_to_device_callback(bridge.on_to_device_event, AuthenticatedToDeviceEvent)
         resources.callback(client.to_device_callbacks.remove, client.to_device_callbacks[-1])
+        for entry in config.controllers[1:]:
+            await deps.verify_controller(client, entry.controller)
         await deps.prepare_client(client, config.controller)
         transport = DesktopTransport(owner.source, wait_for_capacity=bridge.wait_for_capacity)
         workers = (
@@ -152,7 +181,7 @@ async def start_desktop_bridge_session(
             # The startup failure is the outcome; a release that also failed is secondary.
             logger.exception("desktop_bridge_session_rollback_failed")
         raise
-    return DesktopBridgeSession(bridge, browser, workers, resources)
+    return DesktopBridgeSession(bridge, browser, workers, resources, deps)
 
 
 async def _build_bridge(
@@ -213,6 +242,7 @@ async def _build_bridge(
             browser_enabled=config.browser.enabled,
             allowed_file_roots=config.files.roots,
             shell_enabled=config.shell.enabled,
+            controllers=controller_policies_from_config(config),
         ),
         browser_provider=browser,
         filesystem=filesystem,
@@ -240,6 +270,7 @@ __all__ = [
     "DesktopBridgeSession",
     "DesktopBridgeSessionDeps",
     "DesktopWorkerStoppedError",
+    "controller_policies_from_config",
     "first_worker_exit",
     "start_desktop_bridge_session",
 ]

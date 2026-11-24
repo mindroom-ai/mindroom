@@ -15,11 +15,18 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, BinaryIO, Protocol, cast
 
-from mindroom.desktop.command_journal import DesktopCommandJournalError, check_controller_binding
+from mindroom.desktop.command_journal import (
+    DesktopCommandJournalError,
+    check_controller_binding,
+    controller_journal_key,
+)
 from mindroom.desktop.local_dashboard import local_dashboard_configuration
 from mindroom.desktop.login_method import DesktopLoginMethod
 from mindroom.desktop.native_config import (
+    NativeBrowserConfig,
+    NativeCaptureConfig,
     NativeConfigError,
+    NativeControllerEntry,
     NativeDesktopConfig,
     load_native_config,
     native_config_path,
@@ -43,6 +50,7 @@ if TYPE_CHECKING:
     from mindroom.desktop.bridge import DesktopBridge
     from mindroom.desktop.bridge_session import DesktopBridgeSession, DesktopBridgeSessionDeps
     from mindroom.desktop.playwright_mcp import PlaywrightMCPBrowserProvider
+    from mindroom.matrix.device_identity import PinnedMatrixDevice
 
 
 _CAPABILITIES = ("observe", "control", "browser", "files", "shell")
@@ -69,8 +77,14 @@ class _NativeBridgeRuntimeProtocol(Protocol):
     async def start(self) -> None: ...
     async def stop(self) -> None: ...
     def status(self) -> dict[str, object]: ...
-    def grant_control(self, duration_seconds: int | None = None, *, computer: bool = False) -> dict[str, object]: ...
-    def revoke_control(self) -> dict[str, object]: ...
+    def grant_control(
+        self,
+        duration_seconds: int | None = None,
+        *,
+        computer: bool = False,
+        controller_key: str | None = None,
+    ) -> dict[str, object]: ...
+    def revoke_control(self, *, controller_key: str | None = None) -> dict[str, object]: ...
     def decide_shell(
         self,
         command_id: str,
@@ -79,9 +93,17 @@ class _NativeBridgeRuntimeProtocol(Protocol):
         auto_approve_seconds: int,
         auto_approve_until_revoked: bool = False,
     ) -> dict[str, object]: ...
-    def grant_shell(self, duration_seconds: int | None = None, *, until_revoked: bool = False) -> dict[str, object]: ...
-    def revoke_shell(self) -> dict[str, object]: ...
+    def grant_shell(
+        self,
+        duration_seconds: int | None = None,
+        *,
+        until_revoked: bool = False,
+        controller_key: str | None = None,
+    ) -> dict[str, object]: ...
+    def revoke_shell(self, *, controller_key: str | None = None) -> dict[str, object]: ...
     def kill_shell_handle(self, handle: str) -> dict[str, object]: ...
+    async def verify_controller(self, entry: NativeControllerEntry) -> None: ...
+    def update_controllers(self, config: NativeDesktopConfig) -> dict[str, object]: ...
     async def connect_browser(self) -> None: ...
     async def disconnect_browser(self) -> None: ...
 
@@ -138,7 +160,7 @@ class NativeDesktopHost:
                 NativeProtocolError(exc.code, str(exc)).to_payload() if exc.code != "configuration_missing" else None
             )
         else:
-            if self._config is not None and self._config.controller != config.controller:
+            if self._config is not None and _primary_controller(self._config) != _primary_controller(config):
                 self._pairing_state = "unpaired"
             self._config = config
             self._config_error = None
@@ -170,15 +192,44 @@ class NativeDesktopHost:
         if self._helper_state == "stopping":
             bridge_state = "stopping"
         browser_configured = bool(config and config.browser.enabled)
+        primary = _primary_controller(config)
+        raw_shell = runtime_status.get(
+            "shell",
+            {
+                "enabled": bool(config and config.shell.enabled),
+                "pending": None,
+                "auto_approve_remaining_seconds": 0,
+                "auto_approve_until_revoked": False,
+                "active_request_id": None,
+                "handles": [],
+            },
+        )
+        shell_status_payload = dict(cast("dict[str, object]", raw_shell))
+        shell_status_payload["ready"] = bool(shell_status_payload.get("enabled")) and bridge_state in {
+            "observe_only",
+            "control",
+        }
+        shell_status_payload["controllers"] = _shell_controllers_status(config, runtime_status)
         return {
             "config": {
                 "state": "ready" if config is not None else ("invalid" if self._config_error else "missing"),
                 "revision": config.revision if config is not None else self._config_error_revision,
                 "enabled": config.enabled if config is not None else False,
-                "controller_user_id": config.controller.user_id if config is not None else None,
-                "controller_device_id": config.controller.device_id if config is not None else None,
+                "controller_user_id": primary.user_id if primary is not None else None,
+                "controller_device_id": primary.device_id if primary is not None else None,
                 "allowed_requester_ids": list(config.allowed_requester_ids) if config is not None else [],
                 "allowed_agent_names": list(config.allowed_agent_names) if config is not None else [],
+                "controllers": [
+                    {
+                        "controller_key": controller_journal_key(entry.controller),
+                        "user_id": entry.controller.user_id,
+                        "device_id": entry.controller.device_id,
+                        "ed25519": entry.controller.ed25519,
+                        "allowed_requester_ids": list(entry.allowed_requester_ids),
+                        "allowed_agent_names": list(entry.allowed_agent_names),
+                    }
+                    for entry in (config.controllers if config is not None else ())
+                ],
                 "allowed_app_ids": list(config.allowed_app_ids) if config is not None else [],
                 "file_roots": [str(root) for root in config.files.roots] if config is not None else [],
                 "shell_enabled": config.shell.enabled if config is not None else False,
@@ -189,7 +240,7 @@ class NativeDesktopHost:
                 "homeserver": session_identity.get("homeserver"),
                 "user_id": session_identity.get("user_id"),
                 "device_id": session_identity.get("device_id"),
-                "controller_fingerprint": config.controller.ed25519 if config is not None else None,
+                "controller_fingerprint": primary.ed25519 if primary is not None else None,
             },
             "helper": {"state": self._helper_state, "version": self._helper_version},
             "bridge": {
@@ -202,19 +253,10 @@ class NativeDesktopHost:
                 "lease_remaining_seconds": runtime_status.get("lease_remaining_seconds", 0),
                 "lease_expires_at_ms": runtime_status.get("lease_expires_at_ms"),
                 "control_scope": runtime_status.get("control_scope", "saved_apps"),
+                "controllers": _authority_controllers_status(config, runtime_status),
             },
             "permissions": _permission_status(),
-            "shell": runtime_status.get(
-                "shell",
-                {
-                    "enabled": bool(config and config.shell.enabled),
-                    "pending": None,
-                    "auto_approve_remaining_seconds": 0,
-                    "auto_approve_until_revoked": False,
-                    "active_request_id": None,
-                    "handles": [],
-                },
-            ),
+            "shell": shell_status_payload,
             "browser": {
                 "configured": browser_configured,
                 "executable_path": str(config.browser.executable_path)
@@ -323,16 +365,23 @@ class NativeDesktopHost:
             else:
                 raw_config = parameters.get("config")
                 config = NativeDesktopConfig.from_payload(raw_config)
-                # Folder and shell authority carries over only for the same controller.
-                previous = self._config if self._config and self._config.controller == config.controller else None
+                # Folder and shell authority carries over only for the same primary controller.
+                previous_primary = _primary_controller(self._config)
+                current_primary = _primary_controller(config)
+                previous = (
+                    self._config
+                    if self._config is not None and previous_primary is not None and previous_primary == current_primary
+                    else None
+                )
                 if previous is not None and "files" not in cast("dict[str, object]", raw_config):
                     config = replace(config, files=previous.files, shell=previous.shell)
                 else:
                     config = config.with_canonical_new_roots(previous.files.roots if previous else ())
-            try:
-                check_controller_binding(self._runtime_paths.storage_root, config.controller)
-            except DesktopCommandJournalError as exc:
-                raise NativeProtocolError("invalid_request", str(exc)) from exc
+            if (primary := _primary_controller(config)) is not None:
+                try:
+                    check_controller_binding(self._runtime_paths.storage_root, primary)
+                except DesktopCommandJournalError as exc:
+                    raise NativeProtocolError("invalid_request", str(exc)) from exc
             expected_revision = _required_int(parameters, "expected_revision", minimum=0)
             if action == "finish_setup":
                 from mindroom.desktop.session import desktop_session_path
@@ -367,6 +416,87 @@ class NativeDesktopHost:
                     config,
                     expected_revision=expected_revision,
                 )
+            self._last_error = None
+            return {"status": self.status()}
+        if action == "upsert_controller":
+            _expect_keys(
+                parameters,
+                {"expected_revision", "controller", "allowed_requester_ids", "allowed_agent_names"},
+            )
+            expected_revision = _required_int(parameters, "expected_revision", minimum=0)
+            entry = NativeControllerEntry.from_payload(
+                {
+                    "controller": parameters.get("controller"),
+                    "allowed_requester_ids": parameters.get("allowed_requester_ids"),
+                    "allowed_agent_names": parameters.get("allowed_agent_names"),
+                },
+            )
+            try:
+                check_controller_binding(self._runtime_paths.storage_root, entry.controller)
+            except DesktopCommandJournalError as exc:
+                raise NativeProtocolError("invalid_request", str(exc)) from exc
+            updated = (
+                self._config.with_upserted_controller(entry)
+                if self._config is not None
+                else NativeDesktopConfig(
+                    revision=0,
+                    enabled=False,
+                    controllers=(entry,),
+                    allowed_app_ids=(),
+                    capture=NativeCaptureConfig(),
+                    browser=NativeBrowserConfig(),
+                )
+            )
+            if expected_revision != updated.revision:
+                raise NativeProtocolError(
+                    "revision_conflict",
+                    "Native desktop configuration changed; reload it and try again.",
+                )
+            runtime = self._runtime
+            if runtime is not None:
+                try:
+                    await runtime.verify_controller(entry)
+                except NativeProtocolError:
+                    raise
+                except Exception as exc:
+                    raise NativeProtocolError(
+                        "controller_verification_failed",
+                        str(exc) or "Could not verify the controller device on Matrix.",
+                        recovery="Check that the controller device exists and matches the pinned key, then retry.",
+                        retryable=True,
+                    ) from exc
+            self._config = save_native_config(
+                native_config_path(self._runtime_paths.storage_root),
+                updated,
+                expected_revision=expected_revision,
+            )
+            if runtime is not None and self._runtime is runtime:
+                runtime.update_controllers(self._config)
+            self._last_error = None
+            return {"status": self.status()}
+        if action == "remove_controller":
+            _expect_keys(parameters, {"expected_revision", "controller_key"})
+            expected_revision = _required_int(parameters, "expected_revision", minimum=0)
+            controller_key = _required_text(parameters, "controller_key")
+            updated = self._require_config().with_removed_controller(controller_key)
+            self._config = save_native_config(
+                native_config_path(self._runtime_paths.storage_root),
+                updated,
+                expected_revision=expected_revision,
+            )
+            runtime = self._runtime
+            if runtime is not None and self._runtime is runtime:
+                if not self._config.controllers:
+                    self._helper_state = "stopping"
+                    try:
+                        await runtime.stop()
+                    finally:
+                        if self._runtime is runtime:
+                            self._runtime = None
+                            self._release_host_lock()
+                        self._helper_state = "running"
+                else:
+                    runtime.update_controllers(self._config)
             self._last_error = None
             return {"status": self.status()}
         if action == "import_setup":
@@ -473,22 +603,28 @@ class NativeDesktopHost:
             return {"status": self.status()}
         if action == "grant_control":
             # The whole computer is granted only until revoked; a duration grants only the saved apps.
+            grant_params, controller_key = _optional_controller_key(parameters)
             computer = (
-                parameters == {"until_revoked": True, "scope": "computer"} and parameters["until_revoked"] is True
+                grant_params == {"until_revoked": True, "scope": "computer"} and grant_params["until_revoked"] is True
             )
             if not computer:
-                _expect_keys(parameters, {"duration_seconds"})
+                _expect_keys(grant_params, {"duration_seconds"})
             try:
                 self._require_runtime().grant_control(
-                    None if computer else _required_int(parameters, "duration_seconds", minimum=60, maximum=3600),
+                    None if computer else _required_int(grant_params, "duration_seconds", minimum=60, maximum=3600),
                     computer=computer,
+                    controller_key=controller_key,
                 )
             except ValueError as exc:
                 raise NativeProtocolError("control_denied", str(exc)) from exc
             return {"status": self.status()}
         if action == "revoke_control":
-            _expect_keys(parameters, set())
-            self._require_runtime().revoke_control()
+            revoke_params, controller_key = _optional_controller_key(parameters)
+            _expect_keys(revoke_params, set())
+            try:
+                self._require_runtime().revoke_control(controller_key=controller_key)
+            except ValueError as exc:
+                raise NativeProtocolError("control_denied", str(exc)) from exc
             return {"status": self.status()}
         if action == "decide_shell":
             _expect_keys(
@@ -523,10 +659,11 @@ class NativeDesktopHost:
                 raise NativeProtocolError("shell_denied", str(exc)) from exc
             return {"status": self.status()}
         if action == "grant_shell":
-            if set(parameters) == {"until_revoked"} and parameters["until_revoked"] is True:
+            grant_params, controller_key = _optional_controller_key(parameters)
+            if set(grant_params) == {"until_revoked"} and grant_params["until_revoked"] is True:
                 duration_seconds = None
-            elif set(parameters) == {"duration_seconds"}:
-                duration_seconds = _required_int(parameters, "duration_seconds", minimum=60, maximum=3600)
+            elif set(grant_params) == {"duration_seconds"}:
+                duration_seconds = _required_int(grant_params, "duration_seconds", minimum=60, maximum=3600)
             else:
                 raise NativeProtocolError(
                     "invalid_request",
@@ -534,15 +671,20 @@ class NativeDesktopHost:
                 )
             runtime = self._require_runtime()
             try:
-                runtime.grant_shell(duration_seconds, until_revoked=duration_seconds is None)
+                runtime.grant_shell(
+                    duration_seconds,
+                    until_revoked=duration_seconds is None,
+                    controller_key=controller_key,
+                )
             except ValueError as exc:
                 raise NativeProtocolError("shell_denied", str(exc)) from exc
             return {"status": self.status()}
         if action == "revoke_shell":
-            _expect_keys(parameters, set())
+            revoke_params, controller_key = _optional_controller_key(parameters)
+            _expect_keys(revoke_params, set())
             runtime = self._require_runtime()
             try:
-                runtime.revoke_shell()
+                runtime.revoke_shell(controller_key=controller_key)
             except ValueError as exc:
                 raise NativeProtocolError("shell_denied", str(exc)) from exc
             return {"status": self.status()}
@@ -715,13 +857,23 @@ class NativeBridgeRuntime:
             }
         return {"gui_mode": "stopped", "control_available": False, "browser_connected": False}
 
-    def grant_control(self, duration_seconds: int | None = None, *, computer: bool = False) -> dict[str, object]:
+    def grant_control(
+        self,
+        duration_seconds: int | None = None,
+        *,
+        computer: bool = False,
+        controller_key: str | None = None,
+    ) -> dict[str, object]:
         """Grant a bounded lease over the saved apps, or control of the whole computer until revoked or stopped."""
-        return self._required_bridge().grant_local_control(duration_seconds, computer=computer)
+        return self._required_bridge().grant_local_control(
+            duration_seconds,
+            computer=computer,
+            controller_key=controller_key,
+        )
 
-    def revoke_control(self) -> dict[str, object]:
+    def revoke_control(self, *, controller_key: str | None = None) -> dict[str, object]:
         """Revoke new local control actions."""
-        return self._required_bridge().revoke_local_control()
+        return self._required_bridge().revoke_local_control(controller_key=controller_key)
 
     def decide_shell(
         self,
@@ -739,17 +891,37 @@ class NativeBridgeRuntime:
             auto_approve_until_revoked=auto_approve_until_revoked,
         )
 
-    def grant_shell(self, duration_seconds: int | None = None, *, until_revoked: bool = False) -> dict[str, object]:
+    def grant_shell(
+        self,
+        duration_seconds: int | None = None,
+        *,
+        until_revoked: bool = False,
+        controller_key: str | None = None,
+    ) -> dict[str, object]:
         """Enable local auto-approval for a bounded duration or until revoked or stopped."""
-        return self._required_bridge().grant_local_shell(duration_seconds, until_revoked=until_revoked)
+        return self._required_bridge().grant_local_shell(
+            duration_seconds,
+            until_revoked=until_revoked,
+            controller_key=controller_key,
+        )
 
-    def revoke_shell(self) -> dict[str, object]:
-        """Revoke local shell authority and kill every handle; an active command stops promptly."""
-        return self._required_bridge().revoke_local_shell()
+    def revoke_shell(self, *, controller_key: str | None = None) -> dict[str, object]:
+        """Revoke local shell authority and kill handles for one or all controllers."""
+        return self._required_bridge().revoke_local_shell(controller_key=controller_key)
 
     def kill_shell_handle(self, handle: str) -> dict[str, object]:
         """Kill one handle from any caller; its owner's check reports it killed."""
         return self._required_bridge().kill_local_shell_handle(handle)
+
+    async def verify_controller(self, entry: NativeControllerEntry) -> None:
+        """Verify one pinned controller device on this running Matrix client."""
+        await self._required_session().verify_controller(entry.controller)
+
+    def update_controllers(self, config: NativeDesktopConfig) -> dict[str, object]:
+        """Hot-reload live bridge controllers from saved config without dropping handles."""
+        session = self._required_session()
+        self._config = config
+        return session.update_controllers(config)
 
     async def connect_browser(self) -> None:
         """Connect the configured installed-profile extension."""
@@ -762,11 +934,14 @@ class NativeBridgeRuntime:
     def _live_session(self) -> DesktopBridgeSession | None:
         return self._session if self._session is not None and self._session.live else None
 
-    def _required_bridge(self) -> DesktopBridge:
+    def _required_session(self) -> DesktopBridgeSession:
         session = self._live_session()
         if session is None:
             raise ValueError("The desktop bridge is not running.")
-        return session.bridge
+        return session
+
+    def _required_bridge(self) -> DesktopBridge:
+        return self._required_session().bridge
 
     def _required_browser(self) -> PlaywrightMCPBrowserProvider:
         session = self._live_session()
@@ -1052,10 +1227,77 @@ async def run_native_stdio(runtime_paths: RuntimePaths, *, helper_version: str) 
     )
 
 
+def _primary_controller(config: NativeDesktopConfig | None) -> PinnedMatrixDevice | None:
+    return config.controllers[0].controller if config is not None and config.controllers else None
+
+
+def _authority_controllers_status(
+    config: NativeDesktopConfig | None,
+    runtime_status: dict[str, object],
+) -> dict[str, dict[str, object]]:
+    live = runtime_status.get("controllers")
+    if isinstance(live, dict):
+        return {
+            str(key): {
+                "control_available": bool(entry.get("control_available", False)),
+                "control_scope": entry.get("control_scope", "saved_apps"),
+                "lease_remaining_seconds": entry.get("lease_remaining_seconds", 0),
+                "lease_expires_at_ms": entry.get("lease_expires_at_ms"),
+            }
+            for key, entry in live.items()
+            if isinstance(entry, dict)
+        }
+    return {
+        controller_journal_key(entry.controller): {
+            "control_available": False,
+            "control_scope": "saved_apps",
+            "lease_remaining_seconds": 0,
+            "lease_expires_at_ms": None,
+        }
+        for entry in (config.controllers if config is not None else ())
+    }
+
+
+def _shell_controllers_status(
+    config: NativeDesktopConfig | None,
+    runtime_status: dict[str, object],
+) -> dict[str, dict[str, object]]:
+    live = runtime_status.get("controllers")
+    if isinstance(live, dict):
+        result: dict[str, dict[str, object]] = {}
+        for key, entry in live.items():
+            shell_entry = entry.get("shell") if isinstance(entry, dict) else None
+            if isinstance(shell_entry, dict):
+                result[str(key)] = {
+                    "auto_approve_remaining_seconds": shell_entry.get("auto_approve_remaining_seconds", 0),
+                    "auto_approve_until_revoked": bool(shell_entry.get("auto_approve_until_revoked", False)),
+                }
+        if result or not (config and config.controllers):
+            return result
+    return {
+        controller_journal_key(entry.controller): {
+            "auto_approve_remaining_seconds": 0,
+            "auto_approve_until_revoked": False,
+        }
+        for entry in (config.controllers if config is not None else ())
+    }
+
+
+def _optional_controller_key(parameters: dict[str, object]) -> tuple[dict[str, object], str | None]:
+    if "controller_key" not in parameters:
+        return parameters, None
+    controller_key = _required_text(parameters, "controller_key")
+    return {key: value for key, value in parameters.items() if key != "controller_key"}, controller_key
+
+
 def _permission_status() -> dict[str, object]:
     unknown = {"state": "unknown", "can_request": sys.platform == "darwin", "recovery": None}
     if sys.platform != "darwin":
-        return {"accessibility": unknown.copy(), "screen_recording": unknown.copy()}
+        return {
+            "accessibility": unknown.copy(),
+            "screen_recording": unknown.copy(),
+            "gui_permissions_ready": False,
+        }
     try:
         import ApplicationServices
         import Quartz
@@ -1063,7 +1305,11 @@ def _permission_status() -> dict[str, object]:
         accessibility = bool(ApplicationServices.AXIsProcessTrusted())  # ty: ignore[missing-attribute]
         screen_recording = bool(Quartz.CGPreflightScreenCaptureAccess())  # ty: ignore[missing-attribute]
     except (ImportError, AttributeError):
-        return {"accessibility": unknown.copy(), "screen_recording": unknown.copy()}
+        return {
+            "accessibility": unknown.copy(),
+            "screen_recording": unknown.copy(),
+            "gui_permissions_ready": False,
+        }
     return {
         "accessibility": {
             "state": "granted" if accessibility else "missing",
@@ -1075,6 +1321,7 @@ def _permission_status() -> dict[str, object]:
             "can_request": True,
             "recovery": None if screen_recording else "Grant Screen Recording in System Settings > Privacy & Security.",
         },
+        "gui_permissions_ready": accessibility and screen_recording,
     }
 
 

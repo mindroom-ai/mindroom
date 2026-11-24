@@ -34,6 +34,26 @@ class DesktopProviderError(RuntimeError):
     """One local desktop operation was rejected or failed."""
 
 
+def missing_macos_desktop_permissions() -> tuple[str, ...]:
+    """Return missing macOS GUI permissions without prompting."""
+    if sys.platform != "darwin":
+        return ()
+    try:
+        import ApplicationServices  # noqa: PLC0415
+        import Quartz  # noqa: PLC0415
+
+        accessibility_allowed = bool(ApplicationServices.AXIsProcessTrusted())  # ty: ignore[missing-attribute]
+        screen_recording_allowed = bool(Quartz.CGPreflightScreenCaptureAccess())  # ty: ignore[missing-attribute]
+    except (ImportError, AttributeError):
+        return ()
+    missing: list[str] = []
+    if not accessibility_allowed:
+        missing.append("Accessibility")
+    if not screen_recording_allowed:
+        missing.append("Screen Recording")
+    return tuple(missing)
+
+
 def request_macos_desktop_permissions() -> tuple[str, ...]:
     """Request the macOS permissions needed by the Desktop bridge."""
     if sys.platform != "darwin":
@@ -681,5 +701,6 @@ __all__ = [
     "DesktopProviderError",
     "PyAutoGuiDesktopProvider",
     "ScreenCapture",
+    "missing_macos_desktop_permissions",
     "request_macos_desktop_permissions",
 ]

@@ -26,12 +26,14 @@ from mindroom.desktop.accessibility import (
 from mindroom.desktop.bridge import (
     DesktopBridge,
     DesktopBridgePolicy,
+    DesktopControllerPolicy,
     _DesktopBridgeStoppedError,
     _run_macos_application_events,
 )
 from mindroom.desktop.command_journal import (
     DesktopCommandJournalError,
     check_controller_binding,
+    controller_journal_key,
     desktop_journal_path,
 )
 from mindroom.desktop.filesystem import DesktopFilesystem
@@ -2603,3 +2605,243 @@ async def test_bridge_rejects_reference_observed_by_another_allowed_requester(tr
     assert not _response(transport).ok
     assert "scope" in _response(transport).error
     assert provider.calls == [("get_app_state", APP_ID)]
+
+
+def _controller_event(controller: PinnedMatrixDevice, command: DesktopCommand) -> AuthenticatedToDeviceEvent:
+    return AuthenticatedToDeviceEvent(
+        source={"content": command.to_content()},
+        sender=controller.user_id,
+        type=DESKTOP_COMMAND_EVENT_TYPE,
+        authenticated_sender=AuthenticatedDevice(
+            controller.user_id,
+            controller.device_id,
+            "controller-curve-key",
+            controller.ed25519,
+        ),
+    )
+
+
+def _match_pinned(_client: object, event: AuthenticatedToDeviceEvent, expected: PinnedMatrixDevice) -> bool:
+    sender = event.authenticated_sender
+    return (sender.user_id, sender.device_id, sender.ed25519) == (
+        expected.user_id,
+        expected.device_id,
+        expected.ed25519,
+    )
+
+
+def _two_controller_bridge(
+    *,
+    provider: FakeProvider,
+    shell: DesktopShell | None = None,
+) -> tuple[DesktopBridge, PinnedMatrixDevice, PinnedMatrixDevice, DesktopControllerPolicy, DesktopControllerPolicy]:
+    ctrl_a = PinnedMatrixDevice("@ctrl-a:example.org", "DEV_A", "key-a")
+    ctrl_b = PinnedMatrixDevice("@ctrl-b:example.org", "DEV_B", "key-b")
+    policy_a = DesktopControllerPolicy(ctrl_a, frozenset({ALICE}), frozenset({"agent_a"}))
+    policy_b = DesktopControllerPolicy(ctrl_b, frozenset({BOB}), frozenset({"agent_b"}))
+    bridge = DesktopBridge(
+        client=object(),
+        provider=provider,
+        policy=DesktopBridgePolicy(
+            controller=ctrl_a,
+            allowed_requester_ids=frozenset({ALICE}),
+            allowed_agent_names=frozenset({"agent_a"}),
+            allowed_app_ids=frozenset({APP_ID}),
+            shell_enabled=shell is not None,
+            controllers=(policy_a, policy_b),
+        ),
+        shell=shell,
+        clock=lambda: NOW_SECONDS,
+        monotonic_clock=lambda: NOW_SECONDS,
+    )
+    return bridge, ctrl_a, ctrl_b, policy_a, policy_b
+
+
+@pytest.mark.asyncio
+async def test_two_controllers_per_controller_full_access_isolation(
+    transport: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """GUI control, computer scope, and shell auto-approval granted to controller A never leak to controller B."""
+    monkeypatch.setattr("mindroom.desktop.bridge.authenticated_sender_matches", _match_pinned)
+    provider = FakeProvider(running_apps=[DesktopApp(OTHER_APP_ID, "Terminal", True)])
+    bridge, ctrl_a, ctrl_b, _, _ = _two_controller_bridge(provider=provider, shell=_local_shell())
+    key_a, key_b = controller_journal_key(ctrl_a), controller_journal_key(ctrl_b)
+
+    async def send(ctrl: PinnedMatrixDevice, command: DesktopCommand) -> DesktopResponse:
+        await _handle(bridge, _controller_event(ctrl, command))
+        return _response(transport)
+
+    try:
+        # Cross-controller allowlist must not form a cross-product.
+        cross = await send(
+            ctrl_a,
+            _command("status", request_id="cross", sequence=1, requester_id=BOB, agent_name="agent_b"),
+        )
+        assert not cross.ok
+        assert "not allowed" in cross.error
+
+        # Grant full computer control + shell auto-approve ONLY to controller A.
+        bridge.grant_control(computer=True, controller_key=key_a)
+        bridge.grant_local_shell(until_revoked=True, controller_key=key_a)
+
+        launch_a = await send(
+            ctrl_a,
+            _command(
+                "launch_app",
+                request_id="la",
+                sequence=2,
+                requester_id=ALICE,
+                agent_name="agent_a",
+                parameters={"app": OTHER_APP_ID},
+            ),
+        )
+        assert launch_a.ok
+        assert ("launch_app", OTHER_APP_ID) in provider.calls
+
+        shell_a = replace(
+            _run_shell("printf from-a > a.txt", tmp_path, request_id="sh-a", sequence=3, requester_id=ALICE),
+            agent_name="agent_a",
+        )
+        assert (await send(ctrl_a, shell_a)).ok
+        assert (tmp_path / "a.txt").read_text() == "from-a"
+
+        # Agent-facing status reflects each controller's own live grants.
+        st_a = (
+            await send(
+                ctrl_a,
+                _command("status", request_id="st-a", sequence=4, requester_id=ALICE, agent_name="agent_a"),
+            )
+        ).result["bridge"]
+        st_b = (
+            await send(
+                ctrl_b,
+                _command("status", request_id="st-b", sequence=1, requester_id=BOB, agent_name="agent_b"),
+            )
+        ).result["bridge"]
+        assert (st_a["control_available"], st_a["control_scope"], st_a["shell"]["auto_approve_until_revoked"]) == (
+            True,
+            "computer",
+            True,
+        )
+        assert (st_b["control_available"], st_b["control_scope"], st_b["shell"]["auto_approve_until_revoked"]) == (
+            False,
+            "saved_apps",
+            False,
+        )
+
+        # Controller B is refused GUI control on both unsaved and saved apps.
+        for seq, target_app, expected_error in ((2, OTHER_APP_ID, "allowlist"), (3, APP_ID, "observe-only")):
+            refused = await send(
+                ctrl_b,
+                _command(
+                    "launch_app",
+                    request_id=f"lb-{seq}",
+                    sequence=seq,
+                    requester_id=BOB,
+                    agent_name="agent_b",
+                    parameters={"app": target_app},
+                ),
+            )
+            assert not refused.ok
+            assert expected_error in refused.error
+
+        # Controller B shell still awaits approval; approve one background handle for B and start one for A.
+        bg_b = replace(
+            _run_shell("sleep 30", tmp_path, request_id="bg-b", sequence=4, requester_id=BOB),
+            agent_name="agent_b",
+            expires_at_ms=round((NOW_SECONDS + 60) * 1000),
+        )
+        await bridge.on_to_device_event(_controller_event(ctrl_b, bg_b))
+        exec_b = asyncio.create_task(bridge.execute_pending(shell_starts=True))
+        assert (await _wait_for_pending_shell(bridge))["request_id"] == "bg-b"
+        bridge.decide_local_shell("bg-b", approved=True, auto_approve_seconds=0)
+        await exec_b
+        await bridge.deliver_pending()
+        handle_b = str(_response(transport).result["handle"])
+
+        bg_a = replace(
+            _run_shell("sleep 30", tmp_path, request_id="bg-a", sequence=5, requester_id=ALICE),
+            agent_name="agent_a",
+            expires_at_ms=round((NOW_SECONDS + 60) * 1000),
+        )
+        assert (await send(ctrl_a, bg_a)).result["handle"] != handle_b
+
+        # Grant B, revoke ONLY A: A loses GUI & shell handle while B's grant and handle survive.
+        bridge.grant_control(60, controller_key=key_b)
+        bridge.revoke_control(controller_key=key_a)
+        bridge.revoke_local_shell(controller_key=key_a)
+
+        after_a = await send(
+            ctrl_a,
+            _command(
+                "launch_app",
+                request_id="la-after",
+                sequence=6,
+                requester_id=ALICE,
+                agent_name="agent_a",
+                parameters={"app": APP_ID},
+            ),
+        )
+        assert not after_a.ok
+        assert "observe-only" in after_a.error
+        check_b = await send(
+            ctrl_b,
+            replace(_handle_command("check_shell", handle_b, sequence=5, requester_id=BOB), agent_name="agent_b"),
+        )
+        assert check_b.ok
+        assert check_b.result["state"] == "running"
+        assert bridge.local_status()["controllers"][key_b]["control_available"] is True
+    finally:
+        await bridge.stop()
+        bridge.close()
+
+
+@pytest.mark.asyncio
+async def test_responses_route_back_to_issuing_controller(
+    transport: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Responses deliver to the exact controller that issued each command, even for matching request/session IDs."""
+    monkeypatch.setattr("mindroom.desktop.bridge.authenticated_sender_matches", _match_pinned)
+    bridge, ctrl_a, ctrl_b, _, policy_b = _two_controller_bridge(provider=FakeProvider())
+    try:
+        cmd_a = _command(
+            "status",
+            request_id="same-req",
+            session_id="same-sess",
+            sequence=1,
+            requester_id=ALICE,
+            agent_name="agent_a",
+        )
+        cmd_b = _command(
+            "status",
+            request_id="same-req",
+            session_id="same-sess",
+            sequence=1,
+            requester_id=BOB,
+            agent_name="agent_b",
+        )
+        await bridge.on_to_device_event(_controller_event(ctrl_a, cmd_a))
+        await bridge.on_to_device_event(_controller_event(ctrl_b, cmd_b))
+        await _execute(bridge)
+        await bridge.deliver_pending()
+        assert [call.args[1] for call in transport.await_args_list] == [ctrl_a, ctrl_b]
+
+        # Removing controller A revokes its access and ignores further commands from A while B continues working.
+        bridge.grant_control(computer=True, controller_key=controller_journal_key(ctrl_a))
+        bridge.update_controllers((policy_b,))
+        transport.reset_mock()
+        await bridge.on_to_device_event(
+            _controller_event(ctrl_a, replace(cmd_a, request_id="after-remove", sequence=2)),
+        )
+        await bridge.on_to_device_event(
+            _controller_event(ctrl_b, replace(cmd_b, request_id="after-remove", sequence=2)),
+        )
+        await _execute(bridge)
+        await bridge.deliver_pending()
+        assert [call.args[1] for call in transport.await_args_list] == [ctrl_b]
+    finally:
+        await bridge.stop()
+        bridge.close()

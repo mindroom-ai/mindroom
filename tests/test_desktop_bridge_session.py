@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import sys
 import time
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, Mock
 from uuid import uuid4
@@ -28,16 +29,18 @@ from mindroom.desktop.native_config import (
     NativeBrowserConfig,
     NativeCaptureConfig,
     NativeConfigError,
+    NativeControllerEntry,
     NativeDesktopConfig,
     NativeFilesConfig,
     NativeShellConfig,
 )
-from mindroom.desktop.protocol import DESKTOP_COMMAND_EVENT_TYPE
+from mindroom.desktop.protocol import DESKTOP_COMMAND_EVENT_TYPE, DesktopCommand, DesktopResponse
 from mindroom.desktop.shell import DesktopShell, DesktopShellError, DesktopShellRequest
 from mindroom.matrix.device_identity import PinnedMatrixDevice
 from tests.desktop_helpers import (
     SAVED_SESSION,
     FakeMatrixOwner,
+    FakeProvider,
     IdleSource,
     ManualBridge,
     offline_session_deps,
@@ -502,3 +505,119 @@ async def test_default_matrix_preparation_checks_the_pinned_controller_before_pu
     await DesktopBridgeSessionDeps().prepare_client(client, controller)
 
     assert calls == [("resolve", client, controller), ("prepare", client)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("login_environment")
+async def test_shell_first_start_succeeds_without_gui_permissions(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Shell-first startup succeeds with primary-screen + shell even when macOS GUI permissions are missing."""
+    monkeypatch.setattr("mindroom.desktop.provider.sys.platform", "darwin")
+    monkeypatch.setitem(sys.modules, "ApplicationServices", SimpleNamespace(AXIsProcessTrusted=lambda: False))
+    monkeypatch.setitem(sys.modules, "Quartz", SimpleNamespace(CGPreflightScreenCaptureAccess=lambda: False))
+    monkeypatch.setattr("mindroom.desktop.bridge_session.PyAutoGuiDesktopProvider", lambda **_kw: FakeProvider())
+    monkeypatch.setattr("mindroom.desktop.bridge._run_macos_application_events", asyncio.Event().wait)
+    monkeypatch.setattr("mindroom.desktop.bridge_session.DesktopBridge", ManualBridge)
+    monkeypatch.setattr("mindroom.desktop.bridge.authenticated_sender_matches", lambda *_a: True)
+    monkeypatch.setattr("mindroom.desktop.bridge.resolve_pinned_device", AsyncMock())
+    sent = AsyncMock()
+    monkeypatch.setattr("mindroom.desktop.bridge.send_encrypted_to_device", sent)
+
+    session = await _start(
+        tmp_path,
+        _config(apps=("primary-screen",)),
+        offline_session_deps(FakeMatrixOwner()),
+    )
+    bridge = session.bridge
+    try:
+        # Both full computer control and shell auto-approve grants succeed immediately while TCC is pending.
+        assert bridge.grant_control(computer=True)["control_scope"] == "computer"
+        assert bridge.grant_local_shell(until_revoked=True)["shell"]["auto_approve_until_revoked"] is True
+
+        async def run_command(action: str, seq: int, parameters: dict[str, object]) -> DesktopResponse:
+            now_ms = round(time.time() * 1000)
+            cmd = DesktopCommand(
+                f"req-{seq}",
+                "sess-1",
+                seq,
+                now_ms,
+                now_ms + 60_000,
+                action,
+                "@person:example.org",
+                "mind",
+                parameters,
+            )
+            event = AuthenticatedToDeviceEvent(
+                source={"content": cmd.to_content()},
+                sender=_CONTROLLER.user_id,
+                type=DESKTOP_COMMAND_EVENT_TYPE,
+                authenticated_sender=AuthenticatedDevice(
+                    _CONTROLLER.user_id,
+                    _CONTROLLER.device_id,
+                    "curve",
+                    _CONTROLLER.ed25519,
+                ),
+            )
+            await bridge.on_to_device_event(event)
+            await asyncio.gather(bridge.execute_pending(shell_starts=False), bridge.execute_pending(shell_starts=True))
+            await bridge.deliver_pending()
+            return DesktopResponse.from_content(sent.await_args.kwargs["content"])
+
+        shell_resp = await run_command(
+            "run_shell",
+            1,
+            {"command": "printf ok", "cwd": str(tmp_path), "timeout_seconds": 5},
+        )
+        assert shell_resp.ok
+        assert shell_resp.result["output"] == "ok"
+
+        for seq, action in ((2, "get_app_state"), (3, "screenshot")):
+            gui_resp = await run_command(action, seq, {"app": "primary-screen"})
+            assert not gui_resp.ok
+            assert "Screen Recording" in gui_resp.error
+            assert "shell commands remain available" in gui_resp.error.lower()
+
+        # Shell continues working after GUI permission errors.
+        after_resp = await run_command(
+            "run_shell",
+            4,
+            {"command": "printf still-live", "cwd": str(tmp_path), "timeout_seconds": 5},
+        )
+        assert after_resp.ok
+        assert after_resp.result["output"] == "still-live"
+    finally:
+        await session.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("login_environment")
+async def test_start_verifies_all_configured_controllers_before_publishing_keys(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Startup verifies every pinned controller's device keys before publishing local encryption keys."""
+    ctrl_2 = PinnedMatrixDevice("@controller2:example.org", "CLOUD2", "fingerprint-2")
+    config = _config(apps=()).with_upserted_controller(
+        NativeControllerEntry(ctrl_2, ("@bob:example.org",), ("helper",)),
+    )
+    calls: list[tuple[str, object]] = []
+
+    async def fake_resolve(_client: object, device: PinnedMatrixDevice) -> None:
+        calls.append(("resolve", device))
+
+    async def fake_prepare(_client: object) -> None:
+        calls.append(("prepare", None))
+
+    monkeypatch.setattr("mindroom.desktop.bridge_session.resolve_pinned_device", fake_resolve)
+    monkeypatch.setattr("mindroom.desktop.bridge_session.prepare_desktop_client", fake_prepare)
+    owner = FakeMatrixOwner()
+    deps = DesktopBridgeSessionDeps(open_client=owner.open)
+    session = await _start(tmp_path, config, deps)
+    try:
+        resolved = [item[1] for item in calls if item[0] == "resolve"]
+        assert set(resolved) == {_CONTROLLER, ctrl_2}
+        assert calls[-1] == ("prepare", None)
+    finally:
+        await session.close()

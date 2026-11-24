@@ -78,6 +78,14 @@ class NativeControllerEntry:
         _validate_text_items(self.allowed_requester_ids, "allowed requester")
         _validate_text_items(self.allowed_agent_names, "allowed agent")
 
+    @classmethod
+    def from_payload(cls, raw: object) -> NativeControllerEntry:
+        """Parse one strict controller entry payload."""
+        entry_raw = _mapping(raw, "controller entry")
+        if set(entry_raw) != _CONTROLLER_ENTRY_KEYS:
+            raise NativeConfigError("invalid_request", "Native desktop controller entry has unsupported fields.")
+        return _controller_entry_from_fields(entry_raw)
+
 
 @dataclass(frozen=True, slots=True)
 class NativeCaptureConfig:
@@ -489,13 +497,7 @@ def _controllers_from_payload(raw: object) -> tuple[NativeControllerEntry, ...]:
             "invalid_request",
             f"Native desktop controllers must be a list of at most {_MAX_CONTROLLERS} entries.",
         )
-    entries: list[NativeControllerEntry] = []
-    for item in raw:
-        entry_raw = _mapping(item, "controller entry")
-        if set(entry_raw) != _CONTROLLER_ENTRY_KEYS:
-            raise NativeConfigError("invalid_request", "Native desktop controller entry has unsupported fields.")
-        entries.append(_controller_entry_from_fields(entry_raw))
-    return tuple(entries)
+    return tuple(NativeControllerEntry.from_payload(item) for item in raw)
 
 
 def _resolve_controllers(
