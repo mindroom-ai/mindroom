@@ -25,7 +25,7 @@ from mindroom.credentials.environment import get_secret_from_env
 from mindroom.llm.errors import QUOTA_EXHAUSTED, InvalidRequest, ProviderError
 from mindroom.llm.provider import Capabilities, ModelIdentity
 from mindroom.model_defaults import GOOGLE_PROVIDER_DEFAULT_SAMPLING_MODEL_SUFFIXES
-from mindroom.providers.assistant_turn import TurnTimer, finished_turn
+from mindroom.providers.assistant_turn import ABNORMAL_STOP_REASONS, TurnTimer, finished_turn
 from mindroom.providers.credentials import gemini_uses_vertexai, model_api_key
 from mindroom.providers.errors import classify_provider_error, missing_api_key_error, provider_failure
 from mindroom.providers.extra_kwargs import settings_from_extra_kwargs, settings_params
@@ -160,6 +160,7 @@ class GeminiProvider:
         """Return the events that end a reply Gemini ended, or raise its malformed call."""
         if (malformed := malformed_tool_call_error(reply, provider=self.identity.provider)) is not None:
             raise malformed
+        resolved_stop = stop_reason(reply)
         return finished_turn(
             self.identity,
             timer,
@@ -168,7 +169,8 @@ class GeminiProvider:
             tool_calls=reply.tool_calls,
             provider_data=reply_provider_data(reply),
             usage=reply.usage,
-            stop_reason=stop_reason(reply),
+            stop_reason=resolved_stop,
+            raw_stop_reason=reply.finish_reason if resolved_stop in ABNORMAL_STOP_REASONS else None,
         )
 
     def _request_config(

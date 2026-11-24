@@ -224,6 +224,7 @@ def _log_usage(
     usage: MessageMetrics | None,
     served_provider: str | None,
     stop_reason: StopReason | None,
+    raw_stop_reason: str | None,
     context: Mapping[str, Any],
 ) -> None:
     identity = inner.identity
@@ -237,6 +238,8 @@ def _log_usage(
         payload["served_provider"] = served_provider
     if stop_reason is not None:
         payload["stop_reason"] = stop_reason
+    if raw_stop_reason is not None:
+        payload["raw_stop_reason"] = raw_stop_reason
     payload |= _attribution(context)
     if usage is not None:
         counts = usage.tokens
@@ -306,6 +309,7 @@ async def logged_stream(inner: ModelProvider, request: ModelRequest, *, log: Req
     reported = ReportedUsage()
     served_provider: str | None = None
     stop_reason: StopReason | None = None
+    raw_stop_reason: str | None = None
     try:
         events = inner.stream(request)
         async with closing_async_stream(events):
@@ -314,12 +318,13 @@ async def logged_stream(inner: ModelProvider, request: ModelRequest, *, log: Req
                 if isinstance(event, TurnCompleted):
                     served_provider = _served_provider(event.message.provider_data)
                     stop_reason = event.stop_reason
+                    raw_stop_reason = event.raw_stop_reason
                 yield event
     finally:
         # A report whose counters are all zero is one the provider did not make.
         usage = received if (received := reported.received) is not None and received.reported else None
         try:
-            _log_usage(inner, log, usage, served_provider, stop_reason, context)
+            _log_usage(inner, log, usage, served_provider, stop_reason, raw_stop_reason, context)
             if logged_path is not None and usage is not None:
                 response: dict[str, Any] = {
                     "timestamp": datetime.now().astimezone().isoformat(),

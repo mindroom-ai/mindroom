@@ -68,6 +68,18 @@ def test_model_safeguard_refusal_gives_actionable_guidance() -> None:
     assert "stop_reason" not in message
 
 
+def test_model_safeguard_refusal_includes_provider_code_when_present() -> None:
+    """A safeguard refusal carrying a native provider code names that code in the user-facing message."""
+    error = ModelSafeguardRefusal(provider="openrouter", usage=MessageMetrics(), provider_code="RECITATION")
+
+    message = get_user_friendly_error_message(error, "mind")
+
+    assert message == (
+        "[mind] ⚠️ This model's safeguards blocked the request (RECITATION). "
+        "Choose a different model (`/model list`) or revise the prompt, then try again."
+    )
+
+
 def test_only_the_typed_refusal_gets_the_refusal_reply() -> None:
     """An error that merely carries the refusal's text is no refusal, since every refusal reaches the reply typed."""
     error = RuntimeError(MODEL_SAFEGUARD_REFUSAL_MESSAGE)
