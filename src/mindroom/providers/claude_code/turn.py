@@ -27,9 +27,9 @@ from mindroom.llm.provider import ReasoningDelta, TextDelta, ToolCallReady, Usag
 from mindroom.llm.usage import add_usage
 from mindroom.providers.anthropic.wire import parse_claude_usage, stop_reason_of
 from mindroom.providers.assistant_turn import finished_turn
-from mindroom.providers.claude_code.bridge import TOOL_PREFIX
 from mindroom.providers.claude_code.prompt import answer_of
 from mindroom.providers.claude_code.session import NOT_SIGNED_IN
+from mindroom.providers.claude_code.tool_naming import TOOL_PREFIX
 from mindroom.providers.errors import classify_provider_error
 
 if TYPE_CHECKING:
