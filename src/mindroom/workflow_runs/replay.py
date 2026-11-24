@@ -25,9 +25,9 @@ def result_digest(result: object) -> str:
 
 
 def split_key(key: str) -> tuple[str, int]:
-    """Split a node key `lane@index` into its lane and index."""
+    """Split a node key `lane@index` (or child key `lane@index?<hash>`) into its lane and index."""
     lane, _, index = key.rpartition("@")
-    return lane, int(index)
+    return lane, int(index.partition("?")[0])
 
 
 def parent_group(lane: str) -> str | None:

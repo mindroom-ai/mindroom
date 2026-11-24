@@ -199,9 +199,16 @@ def waited_for_approval(job: BackgroundJob) -> bool:
     return is_workflow_node_job(job) and job.adapter.get("wait") == "approval"
 
 
+def waited_for_user(job: BackgroundJob) -> bool:
+    """Return whether the job is a workflow run's call waiting on its own `ask_user` question."""
+    return is_workflow_node_job(job) and job.adapter.get("wait") == "user"
+
+
 def _stopped_while_working(job: BackgroundJob) -> bool:
-    """Return whether a job that a restart stopped was at work, or waited as `waited_for_approval` says."""
-    return job.status == "running" or (job.status == "awaiting_approval" and waited_for_approval(job))
+    """Return whether a job that a restart stopped was at work, or waited on a workflow approval or user question."""
+    return job.status == "running" or (
+        job.status == "awaiting_approval" and (waited_for_approval(job) or waited_for_user(job))
+    )
 
 
 @dataclass(frozen=True, slots=True)

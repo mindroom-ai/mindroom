@@ -39,12 +39,14 @@ class WorkflowPeerTools(Toolkit):
                 self.list_peers,
                 self.get_shared_state,
                 self.set_shared_state,
+                self.ask_user,
             ],
             instructions=(
                 "You are running inside a workflow run with peer agents. "
                 "Use send_peer_message(to, text) and read_peer_messages(wait_seconds=...) to coordinate by peer name "
                 "(or '*' for all unfinished peers, 'script' for the workflow script), list_peers() to see peer names "
-                "and statuses, and get_shared_state / set_shared_state to share JSON values across the run."
+                "and statuses, get_shared_state / set_shared_state to share JSON values across the run, and "
+                "ask_user(question, options=None) to ask the requester a question directly."
             ),
         )
 
@@ -159,6 +161,33 @@ class WorkflowPeerTools(Toolkit):
             updated_by=ref.name,
         )
         return json.dumps(result)
+
+    async def ask_user(self, question: str, options: list[str] | None = None) -> str:
+        """Ask the workflow requester a question in the thread and wait for their answer.
+
+        Args:
+            question: Question text to show on the question card.
+            options: Optional list of answer choices; omit for free-text answers.
+
+        """
+        engine, run_id, node, *_rest = _binding()
+        ask_key = engine.child_question_key(node.key, question, options)
+        if (saved := await asyncio.to_thread(engine.child_question_answer, run_id, ask_key)) is not None:
+            return saved
+        runtime = engine.agents()
+        job_id = node.links.get("job_id")
+        if runtime is None or not isinstance(job_id, str) or runtime.jobs.retained_job(job_id) is None:
+            return await engine.ask_child_question(run_id, node, question, options)
+        await runtime.jobs.save_adapter(job_id, wait="user")
+        try:
+            async with runtime.jobs.human_decision_wait(job_id):
+                answer = await engine.ask_child_question(run_id, node, question, options)
+        except Exception:
+            await runtime.jobs.save_adapter(job_id, wait=None)
+            raise
+        # Cleared only on normal return (not CancelledError), so a shutdown keeps wait="user" for recovery.
+        await runtime.jobs.save_adapter(job_id, wait=None)
+        return answer
 
 
 def _binding() -> tuple[WorkflowEngine, str, WorkflowNode, NodeRef, tuple[str, ...], str, str]:

@@ -130,8 +130,9 @@ The script defines `def main(args):` and returns the final report, a string or a
   shell() returns at most the last 50 KiB of output; redirect to a file and read it for more.
 - phase(title) groups the calls that follow; log(text) shows a progress line. run(name, args) calls a saved workflow inside this one.
 - Agents in a run can talk to each other: each automatically has the tools send_peer_message(to, text),
-  read_peer_messages(wait_seconds=0), list_peers(), get_shared_state(key=None) and set_shared_state(key, value),
-  addressed by the name you gave them ("*" reaches every unfinished agent, "script" reaches the script).
+  read_peer_messages(wait_seconds=0), list_peers(), get_shared_state(key=None), set_shared_state(key, value),
+  and ask_user(question, options=None), addressed by the name you gave them ("*" reaches every unfinished agent,
+  "script" reaches the script).
   Say in each prompt whom to talk to. The script joins in with send(to, text), inbox(wait_seconds=0),
   state.get(key, default=None) and state.set(key, value); agents read and write the same state.
 

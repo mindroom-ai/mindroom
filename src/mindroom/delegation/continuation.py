@@ -33,7 +33,7 @@ from mindroom.delegation.state import (
 from mindroom.history.interrupted_replay import render_stopped_attempt
 from mindroom.history.run_checkpoint import INTERRUPTED_CALL_RESULT, is_recovered_run
 from mindroom.tool_jobs.approvals import supersede_job_approvals
-from mindroom.tool_jobs.runtime import waited_for_approval
+from mindroom.tool_jobs.runtime import waited_for_approval, waited_for_user
 from mindroom.tool_system.events import format_tool_completed_event
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
 from mindroom.tool_system.plugins import config_plugins
@@ -96,9 +96,10 @@ async def continued_subagent_job(job: BackgroundJob, runtime: ToolJobRuntime) ->
     context = require_tool_runtime_context()
     config, runtime_paths, owner = context.current_config, context.runtime_paths, job.owner
     continuations = job.adapter.get(_CONTINUATIONS_KEY, 0)
-    # A job that waited for a run inside its agent's run had not begun its turn: no restart cut that turn short.
+    # A job waiting on a nested run, approval, or its own ask_user was not cut short by work retries.
     for_run = job.adapter.get("wait") == _WAITS_FOR_RUN
-    if continuations >= _RESTART_CONTINUATION_LIMIT and not (for_run or waited_for_approval(job)):
+    for_user = waited_for_user(job)
+    if continuations >= _RESTART_CONTINUATION_LIMIT and not (for_run or for_user or waited_for_approval(job)):
         return f"restarts already cut it short {continuations + 1} times"
     child = await _stopped_turn(job, config, runtime_paths)
     if isinstance(child, str):
@@ -179,7 +180,7 @@ async def continued_subagent_job(job: BackgroundJob, runtime: ToolJobRuntime) ->
             job,
             child,
             prompt=prompt,
-            continuations=continuations + (not for_run),
+            continuations=continuations + (not for_run and not for_user),
             paused=paused is not None,
             receipts=receipts,
         )

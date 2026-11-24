@@ -406,7 +406,8 @@ async def await_child(  # noqa: C901
             raise AgentNotReadyError(_NOT_READABLE_YET)
         if (job.status == "awaiting_approval") != waiting:
             waiting = not waiting
-            await on_waiting("approval" if waiting else None, left)
+            reason = ("user" if job.adapter.get("wait") == "user" else "approval") if waiting else None
+            await on_waiting(reason, left)
         elif left is not None and left <= 0 and job.status not in TERMINAL_STATUSES:
             # Asked once; the job's end then says what the turn had done.
             timed_out, left = True, None

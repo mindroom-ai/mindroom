@@ -1131,6 +1131,109 @@ class WorkflowEngine:
                 with suppress(ScriptRuntimeUnavailableError, SupersededAttemptError):
                     await self._asked(run, node or light, run.epoch)
 
+    @staticmethod
+    def child_question_key(node_key: str, question: str, options: list[str] | None) -> str:
+        """Return the deterministic `ask` node key under *node_key* for an agent's own `ask_user` call."""
+        return f"{node_key}?{result_digest([question, options])[:12]}"
+
+    def child_question_answer(self, run_id: str, ask_key: str) -> str | None:
+        """Return the stored answer for *ask_key* if already answered, else None."""
+        saved = self.store.get_node(run_id, ask_key)
+        if saved is not None and saved.state is WorkflowNodeState.COMPLETED:
+            return str(saved.result)
+        return None
+
+    async def _ensure_child_question(
+        self,
+        run: WorkflowRun,
+        parent: WorkflowNode,
+        ask_key: str,
+        request: dict[str, object],
+    ) -> WorkflowNode:
+        """Return an existing answered/open child `ask` node (re-stamped to this attempt) or create a new one."""
+        saved = self.store.get_node(run.run_id, ask_key)
+        if saved is not None and saved.state in (WorkflowNodeState.COMPLETED, WorkflowNodeState.WAITING):
+            if saved.attempt != run.attempt or saved.stale:
+                stamp = partial(self.store.update_node, run.run_id, ask_key, saved.generation, run.epoch)
+                with suppress(SupersededAttemptError):
+                    await asyncio.to_thread(partial(stamp, attempt=run.attempt, stale=False))
+            return saved
+        if run.state in TERMINAL_RUN_STATES or run.run_id in self._stopping:
+            raise WorkflowRunStoreError(_NOT_ANSWERED)
+        ask_node = WorkflowNode(
+            run_id=run.run_id,
+            key=ask_key,
+            kind="ask",
+            lane=parent.lane,
+            idx=parent.idx,
+            digest=node_digest("ask", request),
+            request=request,
+            generation=1 if saved is None else saved.generation + 1,
+            state=WorkflowNodeState.WAITING,
+            waiting_on="user",
+            attempt=run.attempt,
+            label=node_label("ask", request),
+            phase=parent.phase,
+            group_key=parent.key,
+            started_at=utc_timestamp(),
+        )
+        return await asyncio.to_thread(partial(self.store.put_node, ask_node, run.epoch, dirty_after=False))
+
+    @staticmethod
+    def _validate_question_options(options: list[str] | None) -> None:
+        if options is None:
+            return
+        if not (isinstance(options, list) and options and all(isinstance(o, str) and o.strip() for o in options)):
+            msg = "options must be a list of strings, such as ['Yes', 'No']."
+            raise WorkflowRunStoreError(msg)
+        if len(options) > MAX_OPTIONS or any(len(o.encode()) > MAX_OPTION_BYTES for o in options):
+            raise WorkflowRunStoreError(_TOO_MANY_OPTIONS)
+
+    async def ask_child_question(
+        self,
+        run_id: str,
+        parent: WorkflowNode,
+        question: str,
+        options: list[str] | None,
+    ) -> str:
+        """Post (or reattach to) an agent's own question card, release its slot while waiting, and return the answer."""
+        self._validate_question_options(options)
+        ask_key = self.child_question_key(parent.key, question, options)
+        request: dict[str, object] = {"question": question, "options": options}
+        condition, released, cancelled = self._condition(run_id), False, False
+        try:
+            async with condition:
+                run = self.store.get_run(run_id)
+                ask_node = await self._ensure_child_question(run, parent, ask_key, request)
+                if ask_node.state is WorkflowNodeState.COMPLETED:
+                    return str(ask_node.result)
+                with suppress(ScriptRuntimeUnavailableError):
+                    await self._asked(run, ask_node, run.epoch)
+                self._leave(run_id, parent.key)
+                released = True
+                await self._restate(run_id)
+                condition.notify_all()
+                while True:
+                    current = self.store.get_node(run_id, ask_key)
+                    if current is None or current.state is WorkflowNodeState.CANCELLED:
+                        raise WorkflowRunStoreError(_NOT_ANSWERED)
+                    if current.state is WorkflowNodeState.COMPLETED:
+                        return str(current.result)
+                    run = self.store.get_run(run_id)
+                    if run_id in self._stopping or run.state in TERMINAL_RUN_STATES:
+                        raise WorkflowRunStoreError(_NOT_ANSWERED)
+                    if "event_id" not in current.links:
+                        with suppress(ScriptRuntimeUnavailableError, SupersededAttemptError):
+                            await self._asked(run, current, run.epoch)
+                    with suppress(TimeoutError):
+                        await asyncio.wait_for(condition.wait(), RECHECK_SECONDS)
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
+        finally:
+            if released and not cancelled:
+                await self._reacquire_place(run_id, parent.key)
+
     async def answer(self, run_id: str, key: str, generation: int, answer: str) -> bool:
         """Complete the question at *key* with a person's *answer*; false when that generation no longer waits.
 
@@ -1628,7 +1731,7 @@ class WorkflowEngine:
                 dead = await asyncio.to_thread(record_deadlock, self.store, run_id, op_id=op_id)
                 condition.notify_all()
                 return dead
-            if self._closed or run_id in self._stopping or self.store.get_run(run_id).state in TERMINAL_RUN_STATES:
+            if run_id in self._stopping or self.store.get_run(run_id).state in TERMINAL_RUN_STATES:
                 return [], None
             remaining = deadline - loop.time()
             if remaining <= 0:
