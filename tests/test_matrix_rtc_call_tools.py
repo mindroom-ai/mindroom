@@ -20,7 +20,7 @@ from agno.tools.function import Function, ToolResult
 from agno.tools.toolkit import Toolkit
 
 from mindroom.agent_loop.build import AgentBuild, AgentSurface, prompt_for_turn
-from mindroom.agent_loop.prompt import MARKDOWN_OUTPUT_FORMAT, PromptSpec
+from mindroom.agent_loop.prompt import MARKDOWN_OUTPUT_FORMAT, MATRIX_MARKDOWN_OUTPUT_FORMAT, PromptSpec
 from mindroom.agent_loop.spec import AgentSpec
 from mindroom.agent_loop.tools import offered_toolkits
 from mindroom.agents import create_agent
@@ -225,13 +225,22 @@ def _build(*toolkits: Toolkit, policy: tuple[ToolMiddleware, ...] = (), role: st
 
 
 def test_a_call_s_build_leaves_out_the_chat_s_markdown_format() -> None:
-    """A call speaks its replies, so its build drops the Markdown line the chat prompt states."""
+    """A call speaks its replies, so its build drops the Markdown block the chat prompt states."""
     build = _build()
-    chat = replace(build, prompt=replace(build.prompt, markdown=True, turn_context="Today."))
+    chat = replace(
+        build,
+        prompt=replace(
+            build.prompt,
+            markdown=True,
+            markdown_format=MATRIX_MARKDOWN_OUTPUT_FORMAT,
+            turn_context="Today.",
+        ),
+    )
 
-    assert MARKDOWN_OUTPUT_FORMAT in system_text(prompt_for_turn(chat))
+    assert MATRIX_MARKDOWN_OUTPUT_FORMAT in system_text(prompt_for_turn(chat))
     instructions = _call_instructions(_spoken(chat))
     assert MARKDOWN_OUTPUT_FORMAT not in instructions
+    assert MATRIX_MARKDOWN_OUTPUT_FORMAT not in instructions
     assert instructions == "<your_role>\nTHE CHAT ROLE\n</your_role>\n\nToday."
 
 
@@ -391,7 +400,8 @@ async def test_call_agent_keeps_chat_tool_surface_and_refuses_text_chat_function
     chat_functions = _functions(chat_build)
 
     assert list(call_functions) == list(chat_functions)
-    assert MARKDOWN_OUTPUT_FORMAT in system_text(prompt_for_turn(chat_build))
+    assert MATRIX_MARKDOWN_OUTPUT_FORMAT in system_text(prompt_for_turn(chat_build))
+    assert MATRIX_MARKDOWN_OUTPUT_FORMAT not in system_text(prompt_for_turn(call_build))
     assert system_text(prompt_for_turn(call_build)) == system_text(
         prompt_for_turn(replace(chat_build, prompt=replace(chat_build.prompt, markdown=False))),
     )

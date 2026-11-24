@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.agent_loop.prompt import PromptSpec, render_system_messages
+from mindroom.agent_loop.prompt import MARKDOWN_OUTPUT_FORMAT, PromptSpec, render_system_messages
 from mindroom.teams.spec import TeamMode
 
 if TYPE_CHECKING:
@@ -81,14 +81,15 @@ def render_leader_system_messages(
     *,
     identity: str,
     markdown: bool,
+    markdown_format: str = MARKDOWN_OUTPUT_FORMAT,
     tool_instructions: Sequence[str],
     turn_context: str,
 ) -> tuple[Message, ...]:
     """Return the leader's system messages for ``members`` in ``mode``.
 
     ``identity`` is the team's rendered identity (``TEAM_LEADER_IDENTITY_CONTEXT_TEMPLATE``, or its
-    ``OPENAI_COMPAT_`` form in the OpenAI-compatible API), ``markdown`` whether the prompt states the chat's Markdown
-    output format, as an agent's does, ``tool_instructions`` the leader's toolkit instructions in offer order, and
+    ``OPENAI_COMPAT_`` form in the OpenAI-compatible API), ``markdown`` whether the prompt states ``markdown_format``,
+    as an agent's does, ``tool_instructions`` the leader's toolkit instructions in offer order, and
     ``turn_context`` the turn part: the date and session context and any appended system enrichment.
     """
     delegation = (
@@ -109,6 +110,7 @@ def render_leader_system_messages(
         PromptSpec(
             role=identity,
             markdown=markdown,
+            markdown_format=markdown_format,
             instructions=(team,),
             tool_instructions=tuple(tool_instructions),
             turn_context=turn_context,
