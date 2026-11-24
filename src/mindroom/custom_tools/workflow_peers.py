@@ -13,7 +13,7 @@ from mindroom.delegation.state import child_execution_identity
 from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.invocation import current_tool_call
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
-from mindroom.workflow_runs.peers import NodeRef, get_state, list_peers, peer_op_id, set_state
+from mindroom.workflow_runs.peers import NodeRef, get_state, list_peers, peer_op_id, set_state, valid_wait_seconds
 from mindroom.workflow_runs.store import WorkflowRunStoreError
 
 if TYPE_CHECKING:
@@ -109,13 +109,11 @@ class WorkflowPeerTools(Toolkit):
         Waiting (`wait_seconds > 0`) releases your concurrency slot and ends when mail arrives or after `wait_seconds`
         with `"messages": []` and `"note": "No message arrived within <N> s."`. Prefer short waits (10 to 30 s) in a bounded loop over one long wait.
         """
-        if isinstance(wait_seconds, bool) or wait_seconds < 0:
-            msg = "wait_seconds must be a non-negative number."
-            raise WorkflowRunStoreError(msg)
+        wait = valid_wait_seconds(wait_seconds)
         engine, run_id, node, ref, op_id = self._bound("read_peer_messages", {"wait_seconds": wait_seconds})
         names = (node.name, "*") if node.name else ("*",)
         return json.dumps(
-            await engine.ask.wait_for_messages(run_id, ref, float(wait_seconds), op_id=op_id, names=names),
+            await engine.ask.wait_for_messages(run_id, ref, wait, op_id=op_id, names=names),
         )
 
     async def list_peers(self) -> str:

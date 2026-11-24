@@ -2681,6 +2681,7 @@ expose = [
     "send",
     "session_turn_message",
     "set_state",
+    "valid_wait_seconds",
     "withdraw_unread",
 ]
 

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import math
 from contextlib import suppress
 from dataclasses import replace
 from functools import partial
@@ -20,7 +19,7 @@ from mindroom.workflow_runs.models import (
     WorkflowRun,
 )
 from mindroom.workflow_runs.notices import RETRY_SECONDS
-from mindroom.workflow_runs.peers import NodeRef, read_call
+from mindroom.workflow_runs.peers import NodeRef, read_call, valid_wait_seconds
 from mindroom.workflow_runs.peers import send as send_peer_message
 from mindroom.workflow_runs.questions import MAX_OPTION_BYTES, MAX_OPTIONS, show_question
 from mindroom.workflow_runs.replay import node_digest, result_digest
@@ -246,9 +245,7 @@ class RunInteractions:
         names: tuple[str, ...],
     ) -> dict[str, object]:
         """Read unread messages, or wait on *run_id*'s condition without holding a concurrency slot."""
-        if isinstance(wait_seconds, bool) or not math.isfinite(wait_seconds) or wait_seconds < 0:
-            msg = "wait_seconds must be a finite non-negative number."
-            raise WorkflowRunStoreError(msg)
+        wait_seconds = valid_wait_seconds(wait_seconds)
         read_fn = partial(read_call, self.live.store, run_id, op_id=op_id, reader=reader, names=names)
         condition, deadline, cancelled = self.live.condition(run_id), self.live.clock() + wait_seconds, False
         async with condition:
@@ -307,6 +304,7 @@ class RunInteractions:
 
     async def wait_inbox(self, run: WorkflowRun, node: WorkflowNode, epoch: int, wait_seconds: float) -> None:
         """Wait for a script's `inbox()` message call and settle its node when mail arrives or the deadline expires."""
+        wait_seconds = valid_wait_seconds(wait_seconds)
         reader = NodeRef("script", 1, "script")
         op_id = f"{node.key}:{node.generation}"
         read_fn = partial(read_call, self.live.store, run.run_id, op_id=op_id, reader=reader, names=("script",))

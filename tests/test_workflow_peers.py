@@ -1605,3 +1605,24 @@ async def test_non_finite_peer_wait_seconds_is_refused_and_records_nothing(
         workflow_sdk.inbox(True)
     with pytest.raises(workflow_sdk.WorkflowError, match="finite"):
         workflow_sdk.inbox(bad_wait)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("bad_wait", [float("nan"), float("inf"), float("-inf"), -1.0, True, "bad"])
+async def test_raw_gateway_inbox_rejects_invalid_wait_seconds_and_records_nothing(
+    stack: WorkflowStack,
+    bad_wait: object,
+) -> None:
+    """Raw inbox node submissions reject non-finite, negative, bool, and non-numeric wait_seconds without waiting."""
+    receipt = await stack.submit("@0", "inbox", {"wait_seconds": bad_wait})
+    assert receipt.state == WorkflowNodeState.FAILED
+    assert receipt.error is not None
+    assert "finite" in str(receipt.error["message"])
+    with closing(sqlite3.connect(stack.store.database_path)) as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM workflow_peer_calls WHERE run_id = ?",
+            (stack.run_id,),
+        ).fetchone() == (0,)
+        assert conn.execute("SELECT COUNT(*) FROM workflow_cursors WHERE run_id = ?", (stack.run_id,)).fetchone() == (
+            0,
+        )

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 from collections import Counter
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -218,6 +219,19 @@ def set_state(
     return cast("dict[str, object]", _once(store, run_id, op_id, _effect))
 
 
+def valid_wait_seconds(value: object) -> float:
+    """Return *value* as a finite non-negative float, or raise `WorkflowRunStoreError`."""
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, int | float)
+        or not math.isfinite(wait := float(value))
+        or wait < 0
+    ):
+        msg = "wait_seconds must be a finite non-negative number."
+        raise WorkflowRunStoreError(msg)
+    return wait
+
+
 def script_op(
     store: WorkflowRunStore,
     run_id: str,
@@ -233,7 +247,7 @@ def script_op(
         return True, send(store, run_id, op_id=op_id, sender=NodeRef(key, gen, "script"), to=to, text=text)
     if kind == "inbox":
         raw = args.get("wait_seconds")
-        wait = max(0.0, float(raw)) if isinstance(raw, int | float) and not isinstance(raw, bool) else 0.0
+        wait = 0.0 if raw is None else valid_wait_seconds(raw)
         reader = NodeRef("script", 1, "script")
         got = read_call(store, run_id, op_id=op_id, reader=reader, names=("script",), record_empty=wait <= 0)
         return (True, got) if got is not None else (False, wait)
