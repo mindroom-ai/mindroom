@@ -21,7 +21,8 @@ event_journal:
 rooms:
   lobby:
     description: Welcome lobby; join or send !personal to create your personal room.
-    # lobby is invite-only and unlisted by default; list the Matrix users to invite (or set join_policy: public).
+    # lobby is invite-only and unlisted by default; list the Matrix users to invite
+    # (setting join_policy: public gives every user who joins a personal agent billed to your model key).
     invite_users:
       - "@alice:example.com"
 
@@ -76,7 +77,6 @@ personal_agents:
           defer: true
           overrides: {enable_show_canvas: true, enable_canvas_libraries: true}
         - {name: usage_stats, defer: true}  # Omit admin_scope so each user sees only their own usage
-        - {name: matrix_voice_message, defer: true}
         - {name: report_publishing, defer: true}
         - {name: google_scholar, defer: true}
         - {name: desktop, defer: true}
@@ -89,6 +89,7 @@ personal_agents:
         - {name: compact_context, defer: true}
         - {name: callback_manager, defer: true}
         # Optional integrations (defer when adding):
+        # - {name: matrix_voice_message, defer: true}  # Requires OPENAI_API_KEY or an OpenRouter TTS model override
         # - gmail / google_calendar / google_drive / google_sheets, github, slack
         # - exa (API-backed web search) or duckduckgo (keyless web search)
         # - matrix_user (requires MATRIX_USER_APPSERVICE_TOKEN or _FILE from an appservice covering the intended human users)

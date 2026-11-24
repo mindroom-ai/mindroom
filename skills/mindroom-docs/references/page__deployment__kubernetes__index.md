@@ -175,7 +175,7 @@ On the Tuwunel chart, mount the complete registration YAML from a Secret through
 
 For a ready-to-copy multi-user deployment with dedicated Kubernetes workers, per-user personal agents, Agent Keys (`egressBroker`), and semantic file memory, start from [`values-multi-user.example.yaml`](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/values-multi-user.example.yaml) and [`config-multi-user.example.yaml`](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/config-multi-user.example.yaml):
 
-1. Create the namespace and required Secrets (`mindroom-secrets` with `MATRIX_REGISTRATION_TOKEN` and `OPENROUTER_API_KEY`; `mindroom-sandbox-proxy` with `MINDROOM_SANDBOX_PROXY_TOKEN`), passing secrets from files rather than command-line literals:
+1. Create the namespace and required Secrets (`mindroom-secrets` with `MATRIX_REGISTRATION_TOKEN` and `OPENROUTER_API_KEY`; `mindroom-sandbox-proxy` with `MINDROOM_SANDBOX_PROXY_TOKEN`), writing the secret files without trailing newlines (for example `printf '%s'`) rather than passing literals on the command line:
 
    ```bash
    kubectl create namespace mindroom
@@ -199,7 +199,8 @@ For a ready-to-copy multi-user deployment with dedicated Kubernetes workers, per
    ```
 
 Because `config.yaml` is mounted via `subPath`, updating the `mindroom-config` ConfigMap does not update in place; run `kubectl -n mindroom rollout restart deployment/mindroom-runtime` after changes.
-For self-service Agent Keys (`egressBroker.enabled: true`), set `MINDROOM_PUBLIC_URL` via `env.extra` to your reachable HTTPS runtime URL and see [Self-service for users](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#self-service-for-users) (in-chat key-request cards also require `MINDROOM_COMPUTER_ALLOWED_ORIGINS` and `mindroom_openid_audience` on Tuwunel).
+For self-service Agent Keys (`egressBroker.enabled: true`), set `MINDROOM_PUBLIC_URL` via `env.extra` to your reachable HTTPS runtime URL, set `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS` for Connections portal sign-in from a self-hosted MindRoom Chat, and see [Self-service for users](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#self-service-for-users).
+In-chat key-request cards also require `MINDROOM_COMPUTER_ALLOWED_ORIGINS` and `mindroom_openid_audience` on Tuwunel.
 
 The preset requests `ReadWriteMany` storage so dedicated workers can schedule across nodes.
 Kubernetes cannot upgrade a bound `ReadWriteOnce` PVC to `ReadWriteMany` in place, and `helm upgrade` fails if an existing bound PVC's `accessModes` changes — create a new RWX claim, migrate data, and point `storage.existingClaim` at it (with `storage.create: false`), or keep `ReadWriteOnce` with `workers.kubernetes.colocateWithControlPlaneNode: true` on single-node/RWO clusters.

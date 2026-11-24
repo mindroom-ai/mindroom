@@ -52,9 +52,12 @@ env:
   #   # the egress broker returns Connections links.
   #   - name: MINDROOM_PUBLIC_URL
   #     value: "https://assistant.example.com"
-  #   # JSON array of trusted MindRoom Chat origins; used by both Worker Computer and
-  #   # MindRoom Chat Connections / in-chat Agent Keys cards (in-chat key-request cards
-  #   # also require mindroom_openid_audience on Tuwunel).
+  #   # JSON array of self-hosted MindRoom Chat origins allowed for Connections portal sign-in
+  #   # (unset allows only hosted https://chat.mindroom.chat with homeserver token binding).
+  #   - name: MINDROOM_CONNECTIONS_ALLOWED_ORIGINS
+  #     value: '["https://chat.example.com"]'
+  #   # JSON array of trusted MindRoom Chat origins for Worker Computer and in-chat Agent Keys cards
+  #   # (in-chat cards also require mindroom_openid_audience token binding on Tuwunel).
   #   - name: MINDROOM_COMPUTER_ALLOWED_ORIGINS
   #     value: '["https://chat.example.com"]'
 
