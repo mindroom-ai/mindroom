@@ -307,14 +307,14 @@ Every agent running inside a workflow automatically receives the run-scoped `wor
 
 ```text
 send_peer_message(to, text)        send to an agent's name, "*" (all unfinished agents), or "script"
-read_peer_messages(wait_seconds=0) return unread messages as [{from, text, sent_at}]; waits for the first one
+read_peer_messages(wait_seconds=0) return {messages: [{from, text, sent_at}], note?}; waits for the first one
 list_peers()                       return id, name, status and label of every current agent and session in the run
 get_shared_state(key=None)         read one shared-state key or all keys
 set_shared_state(key, value)       write a JSON value under key (last write wins)
 ask_user(question, options=None)   ask the run's requester with the same question card as the script
 ```
 
-The script participates under the name `script` with `send(to, text)`, `inbox(wait_seconds=0)`, `state.get(key, default=None)` and `state.set(key, value)`.
+The script participates under the name `script` with `send(to, text)`, `inbox(wait_seconds=0)` (returns `[{from, text, sent_at}]`), `state.get(key, default=None)` and `state.set(key, value)`.
 
 ```python
 from mindroom.workflow import agent, parallel
@@ -345,7 +345,7 @@ def main(args):
 - **Reruns.** When an agent runs again as a new generation, unread outgoing messages from its earlier generation are withdrawn, and the new generation starts its read cursor at 0 so it sees what its predecessor saw.
 - **Waiting and deadlocks.** `read_peer_messages(wait_seconds)` and `inbox(wait_seconds)` wake on the first message and have no ceiling on `wait_seconds`.
   While waiting, the node releases its concurrency slot and shows `waiting` on `peer` (which does not mark the run as waiting for a person).
-  When every unfinished agent is waiting on `peer`, nothing is `queued` or `running`, and no script lane can still act, every waiter returns `[]` with `note: "Every agent is waiting for a message and nobody is left to send one."`
+  A wait can end early when every unfinished agent is waiting on `peer`, nothing is `queued` or `running`, and no script lane can still act: agents receive `{"messages": [], "note": "Every agent is waiting for a message and nobody is left to send one."}` and the script's `inbox()` returns `[]`.
 - **Size limit.** A message or shared-state value over 1 MiB is refused with `Too large (<n> bytes, limit 1 MiB). Write it to a workspace file and send the path.`
 - **Visibility.** Everything workflow agents say or send each other is visible to the room, so run workflows in a private room for private work.
   Graph frames and the finished run card carry only message-count `edges` (`{"from", "to", "kind": "message", "count"}`), never message text.

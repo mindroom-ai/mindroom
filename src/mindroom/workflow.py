@@ -698,7 +698,7 @@ def send(to: str, text: str) -> dict[str, object]:
 
 
 def inbox(wait_seconds: float = 0) -> list[dict[str, object]]:
-    """Return messages agents sent to "script", waiting up to wait_seconds for the first one."""
+    """Return messages sent to "script" as [{from, text, sent_at}]; waiting can end early with [] on deadlock."""
     _current_lane()
     wait = float(wait_seconds)
     if not math.isfinite(wait) or wait < 0:
