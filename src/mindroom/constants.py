@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from functools import cached_property
 from pathlib import Path
 from types import MappingProxyType
-from typing import TypeGuard, cast, overload
+from typing import Literal, TypeGuard, cast, overload
 
 from dotenv import dotenv_values
 
@@ -136,6 +136,9 @@ def is_workspace_env_overlay_name_allowed(name: str) -> bool:
     return runtime_env_policy.is_shell_passthrough_allowed_env_name(name)
 
 
+EnvValueSource = Literal["process_env", "env_file"]
+
+
 @dataclass(frozen=True)
 class RuntimePaths:
     """Resolved runtime context shared across the process.
@@ -182,18 +185,31 @@ class RuntimePaths:
         plain = self.plain_env_value((name,))
         return default if plain is None else plain[0]
 
+    def plain_env_value_with_source(self, names: Sequence[str]) -> tuple[str, str, EnvValueSource] | None:
+        """Return the first usable value of ``names``, the variable that set it, and which layer supplied it.
+
+        Searches the process env before the `.env` file. A blank or unedited starter-template placeholder value counts
+        as unset, so an exported one does not hide a `.env` value.
+        """
+        layers: tuple[tuple[EnvValueSource, Mapping[str, str]], ...] = (
+            ("process_env", self.process_env),
+            ("env_file", self.env_file_values),
+        )
+        for source, layer in layers:
+            for name in names:
+                value = layer.get(name, "")
+                if not runtime_env_policy.is_unset_env_value(name, value):
+                    return value, name, source
+        return None
+
     def plain_env_value(self, names: Sequence[str]) -> tuple[str, str] | None:
         """Return the first usable value of ``names`` in the process env, then the `.env`, and the variable that set it.
 
         A blank or unedited starter-template placeholder value counts as unset, so an exported one does not hide a
         `.env` value.
         """
-        for layer in (self.process_env, self.env_file_values):
-            for name in names:
-                value = layer.get(name, "")
-                if not runtime_env_policy.is_unset_env_value(name, value):
-                    return value, name
-        return None
+        resolved = self.plain_env_value_with_source(names)
+        return None if resolved is None else (resolved[0], resolved[1])
 
     def first_env_value(self, names: Sequence[str]) -> tuple[str, str] | None:
         """Return the first usable value of ``names`` and the variable that supplied it.

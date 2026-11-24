@@ -179,6 +179,54 @@ def test_env_value_counts_blank_and_placeholder_values_as_unset(
 
 
 @pytest.mark.parametrize(
+    ("process_env", "env_file", "names", "expected"),
+    [
+        ({}, "", ("ANTHROPIC_API_KEY",), None),
+        ({"ANTHROPIC_API_KEY": "sk-proc"}, "", ("ANTHROPIC_API_KEY",), ("sk-proc", "ANTHROPIC_API_KEY", "process_env")),
+        ({}, "ANTHROPIC_API_KEY=sk-file\n", ("ANTHROPIC_API_KEY",), ("sk-file", "ANTHROPIC_API_KEY", "env_file")),
+        (
+            {"ANTHROPIC_API_KEY": "sk-proc"},
+            "ANTHROPIC_API_KEY=sk-file\n",
+            ("ANTHROPIC_API_KEY",),
+            ("sk-proc", "ANTHROPIC_API_KEY", "process_env"),
+        ),
+        (
+            {"ANTHROPIC_API_KEY": "  "},
+            "ANTHROPIC_API_KEY=sk-file\n",
+            ("ANTHROPIC_API_KEY",),
+            ("sk-file", "ANTHROPIC_API_KEY", "env_file"),
+        ),
+        (
+            {"ANTHROPIC_API_KEY": "your-anthropic-key-here"},
+            "ANTHROPIC_API_KEY=sk-file\n",
+            ("ANTHROPIC_API_KEY",),
+            ("sk-file", "ANTHROPIC_API_KEY", "env_file"),
+        ),
+        (
+            {"SECONDARY": "from-proc"},
+            "PRIMARY=from-file\n",
+            ("PRIMARY", "SECONDARY"),
+            ("from-proc", "SECONDARY", "process_env"),
+        ),
+    ],
+)
+def test_plain_env_value_with_source_reports_winning_layer(
+    tmp_path: Path,
+    process_env: dict[str, str],
+    env_file: str,
+    names: tuple[str, ...],
+    expected: tuple[str, str, constants.EnvValueSource] | None,
+) -> None:
+    """`plain_env_value_with_source` reports the winning layer with the same precedence as `plain_env_value`."""
+    if env_file:
+        (tmp_path / ".env").write_text(env_file, encoding="utf-8")
+    runtime_paths = constants.resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env=process_env)
+
+    assert runtime_paths.plain_env_value_with_source(names) == expected
+    assert runtime_paths.plain_env_value(names) == (None if expected is None else (expected[0], expected[1]))
+
+
+@pytest.mark.parametrize(
     ("file_text", "expected"),
     [("", True), ("MATRIX_SSL_VERIFY=false\n", False)],
 )
