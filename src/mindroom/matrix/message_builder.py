@@ -338,6 +338,15 @@ def _image_not_sent_note(attrs: list[tuple[str, str | None]]) -> str | None:
     return escape(f"⚠️ Image not sent: {alt} (no uploaded file)")
 
 
+def _sanitize_attribute_value(attr_name: str, attr_value: str) -> str | None:
+    if attr_name in _URL_ATTRIBUTES:
+        allowed_schemes = _ALLOWED_HREF_SCHEMES if attr_name == "href" else _ALLOWED_URL_SCHEMES
+        return _sanitize_url_attribute(attr_value, allowed_schemes)
+    if attr_name == "style":
+        return _sanitize_style_attribute(attr_value)
+    return attr_value
+
+
 def _format_sanitized_attributes(tag_name: str, attrs: list[tuple[str, str | None]]) -> str:
     allowed_attributes = _ALLOWED_FORMATTED_BODY_ATTRIBUTES.get(tag_name, frozenset())
     sanitized_attributes: list[str] = []
@@ -352,19 +361,12 @@ def _format_sanitized_attributes(tag_name: str, attrs: list[tuple[str, str | Non
             sanitized_attributes.append(" open")
             continue
         if attr_value is None:
+            if normalized_attr_name == "data-mx-spoiler":
+                sanitized_attributes.append(" data-mx-spoiler")
             continue
-        sanitized_value = attr_value
-        if normalized_attr_name in _URL_ATTRIBUTES:
-            allowed_schemes = _ALLOWED_HREF_SCHEMES if normalized_attr_name == "href" else _ALLOWED_URL_SCHEMES
-            sanitized_url = _sanitize_url_attribute(attr_value, allowed_schemes)
-            if sanitized_url is None:
-                continue
-            sanitized_value = sanitized_url
-        elif normalized_attr_name == "style":
-            sanitized_style = _sanitize_style_attribute(attr_value)
-            if sanitized_style is None:
-                continue
-            sanitized_value = sanitized_style
+        sanitized_value = _sanitize_attribute_value(normalized_attr_name, attr_value)
+        if sanitized_value is None:
+            continue
         sanitized_attributes.append(f' {normalized_attr_name}="{escape(sanitized_value, quote=True)}"')
     return "".join(sanitized_attributes)
 

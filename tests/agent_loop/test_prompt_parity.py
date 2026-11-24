@@ -194,7 +194,14 @@ def test_agent_markdown_format_uses_matrix_rules_only_inside_matrix(
     plain_text = system_text(prompt_for_turn(plain_build))
 
     assert MATRIX_MARKDOWN_OUTPUT_FORMAT in matrix_text
+    assert "blank lines around inner Markdown" in matrix_text
+    assert "<span data-mx-spoiler>...</span>" in matrix_text
+    assert "<https://matrix.to/#/!room_id>" in matrix_text
+    assert "<https://matrix.to/#/!room_id/$event_id>" in matrix_text
+    assert "never wrap links in backticks" in matrix_text
     assert MARKDOWN_OUTPUT_FORMAT in outside_text
     assert MATRIX_MARKDOWN_OUTPUT_FORMAT not in outside_text
     assert "Mermaid fences" not in outside_text
+    assert "<span data-mx-spoiler>" not in outside_text
+    assert "<https://matrix.to/#/!room_id>" not in outside_text
     assert MARKDOWN_OUTPUT_FORMAT not in plain_text

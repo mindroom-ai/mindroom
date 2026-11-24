@@ -33,7 +33,8 @@ On phones, side panels cover the conversation instead of sitting beside it, and 
 
 The composer enables Markdown by default (toggle **Markdown Formatting** in **Settings** > **Chats**) and offers a **Formatting** toolbar for headings, bold, italic, underline, strikethrough, inline code, spoilers, block quotes, code blocks, and lists.
 In the composer, you can write `**bold**`, `*italic*` or `_italic_`, `~~strikethrough~~`, `` `inline code` ``, fenced code blocks (```` ```lang ````), `||spoiler||`, links, headings, quotes, lists, tables, `$inline$` math (no spaces just inside `$`), and `$$display$$` math on its own line.
-Received replies also render `<details><summary>...</summary>...</details>` collapsibles, syntax-highlighted code blocks (with copy, line-wrap, and expand/collapse controls), scrollable tables, and KaTeX math.
+Received replies also render `<details><summary>...</summary>...</details>` collapsibles, `<span data-mx-spoiler>...</span>` spoilers (the backend Markdown renderer leaves `||spoiler||` literal), syntax-highlighted code blocks (with copy, line-wrap, and expand/collapse controls), scrollable tables, and KaTeX math.
+In messages, `<https://matrix.to/#/!room_id>` renders as an in-app room pill, `<https://matrix.to/#/!room_id/$event_id>` opens the target thread or message in-app as an auto-labeled pill, and `[title](https://matrix.to/#/!room_id/$event_id)` keeps its custom link label.
 Mermaid fences, GitHub callouts (`> [!NOTE]`), footnotes, and external `https://` image URLs are not rendered in chat Markdown.
 
 Drag and drop files into the composer or select **Attach files** to send images, videos, audio, and files.
