@@ -20,8 +20,6 @@ if TYPE_CHECKING:
 
 #: A search's whole budget: embedding the query, waiting for the collection, and ranking it.
 _SEARCH_TIMEOUT_SECONDS = 30.0
-#: Embed at most this many leading query characters, the default document chunk size: a whole long prompt can exceed an embedder's input limit.
-_MAX_QUERY_EMBED_CHARS = 5000
 #: Searches wait on collection locks and load matrices here, never in the event loop's shared default executor.
 _search_threads = ThreadPoolExecutor(4, thread_name_prefix="knowledge-search")
 
@@ -37,9 +35,14 @@ class PublishedIndexReader:
     max_matrix_bytes: int | None = None
 
     async def asearch(self, query: str, *, limit: int) -> list[SearchHit]:
-        """Embed under the caller's credentials, then run the hybrid search on a search thread, all within a deadline."""
+        """Embed under the caller's credentials, then run the hybrid search on a search thread, all within a deadline.
+
+        Only the query's first chunk-size characters are embedded, a length the embedder already took for every
+        indexed chunk: a whole long prompt can exceed its input limit. The hybrid search gets the whole query.
+        """
+        embedded_query = query[: int(self.settings.chunk_size)] if self.settings.chunk_size else query
         async with asyncio.timeout(_SEARCH_TIMEOUT_SECONDS):
-            embedding = (await self.embedder.aembed([query[:_MAX_QUERY_EMBED_CHARS]], purpose="query"))[0]
+            embedding = (await self.embedder.aembed([embedded_query], purpose="query"))[0]
             return await asyncio.get_running_loop().run_in_executor(
                 _search_threads,
                 self._search,

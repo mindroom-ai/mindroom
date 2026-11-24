@@ -114,10 +114,11 @@ async def test_a_long_query_is_embedded_truncated_but_searched_in_full(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A prompt longer than the cap embeds only its leading characters; the hybrid search gets all of it."""
+    """A prompt longer than a chunk embeds only its first chunk-size characters; the hybrid search gets all of it."""
     embedder = _Embedder()
     reader = _reader(tmp_path, embedder)
-    query = "x" * (index_reader_module._MAX_QUERY_EMBED_CHARS * 2) + " alpha"
+    chunk_size = int(reader.settings.chunk_size)
+    query = "x" * (chunk_size * 2) + " alpha"
     searched: list[str] = []
     search = KnowledgeCollection.search
 
@@ -129,6 +130,6 @@ async def test_a_long_query_is_embedded_truncated_but_searched_in_full(
 
     hits = await reader.asearch(query, limit=1)
 
-    assert embedder.texts == [query[: index_reader_module._MAX_QUERY_EMBED_CHARS]]
+    assert embedder.texts == [query[:chunk_size]]
     assert searched == [query]
     assert [hit.content for hit in hits] == ["alpha"]
