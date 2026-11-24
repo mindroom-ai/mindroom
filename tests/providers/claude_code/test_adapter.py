@@ -1400,15 +1400,6 @@ async def test_a_later_turn_of_a_process_must_start_with_exactly_mindrooms_tools
             id="a retracted message",
         ),
         pytest.param(
-            [
-                {"tools": [{"id": "toolu_x", "raw_name": "Bash", "input": {"command": "id"}, "denied": True}]},
-                {"text": "never"},
-            ],
-            ProviderUnavailable,
-            "Bash",
-            id="an unoffered tool",
-        ),
-        pytest.param(
             [{"tools": [call("toolu_a", "a"), call("toolu_a", "b")]}, {"text": "never"}],
             ProviderError,
             "toolu_a twice",
@@ -1433,6 +1424,23 @@ async def test_an_unusable_call_fails_before_any_call_is_handed_over(
     assert raised.value.retryable == (error_type is ProviderUnavailable)
     assert not any(isinstance(event, ToolCallReady | TurnCompleted) for event in events)
     assert len(cli.events("exit")) == 1
+
+
+@pytest.mark.parametrize("name", ["Bash", "lookup"], ids=["another tool", "an offered tool without its prefix"])
+async def test_a_call_to_a_tool_mindroom_did_not_offer_is_left_to_claude_code(tmp_path: Path, name: str) -> None:
+    """Claude Code answers such a call with an error itself, so the model can correct it and the turn goes on."""
+    steps = [{"tools": [{"id": "toolu_x", "raw_name": name, "input": {}, "denied": True}]}, {"text": "Done."}]
+    cli = fake_cli(tmp_path, {"turns": [steps]})
+    events: list[StreamEvent] = []
+    request = ModelRequest(messages=[user("Look up the markers.")], tools=[LOOKUP])
+
+    await asyncio.wait_for(drain_into(events, cli.provider(), request), 10)
+
+    assert not any(isinstance(event, ToolCallReady) for event in events)
+    completed = [event for event in events if isinstance(event, TurnCompleted)]
+    assert len(completed) == 1
+    assert completed[0].message.content == "Done."
+    assert completed[0].message.tool_calls in (None, [])
 
 
 # --- which process a request may continue or close --------------------------------------------------------------------

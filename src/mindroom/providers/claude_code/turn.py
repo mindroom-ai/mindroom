@@ -25,6 +25,7 @@ from mindroom.llm.errors import QUOTA_EXHAUSTED, AuthenticationFailed, ProviderE
 from mindroom.llm.messages import stored_tool_call
 from mindroom.llm.provider import ReasoningDelta, TextDelta, ToolCallReady, UsageReported
 from mindroom.llm.usage import add_usage
+from mindroom.logging_config import get_logger
 from mindroom.providers.anthropic.wire import parse_claude_usage, stop_reason_of
 from mindroom.providers.assistant_turn import finished_turn
 from mindroom.providers.claude_code.prompt import answer_of
@@ -45,6 +46,8 @@ if TYPE_CHECKING:
     from mindroom.providers.claude_code.session import LiveSession
 
 __all__ = ["ResultsOutrun", "read_step"]
+
+logger = get_logger(__name__)
 
 # This route counts stream deltas and the process-wide ledger. The claude_agent tool instead attributes each
 # completed turn's result usage across its models; a shared reader would conflate the two accounting rules.
@@ -187,6 +190,10 @@ class _Step:
                 return self._think(piece["thinking"])
         return []
 
+    def _keep_call(self, block: ToolUseBlock, session: LiveSession) -> None:
+        if (call := _tool_call(block, session)) is not None:
+            self.calls.append(call)
+
     def _assistant(self, message: AssistantMessage, session: LiveSession) -> list[ModelEvent]:
         """Keep a complete block's tool call; a message that did not stream also gives its text and its usage."""
         if message.error is not None:
@@ -200,7 +207,7 @@ class _Step:
         events: list[ModelEvent] = []
         for block in message.content:
             if isinstance(block, ToolUseBlock):
-                self.calls.append(_tool_call(block, session))
+                self._keep_call(block, session)
             elif self.seen[message.message_id]:
                 continue
             elif isinstance(block, TextBlock) and block.text:
@@ -214,15 +221,14 @@ class _Step:
         return events
 
 
-def _tool_call(block: ToolUseBlock, session: LiveSession) -> dict[str, Any]:
-    """Return the call of a MindRoom tool the model wrote, which the process then waits on."""
+def _tool_call(block: ToolUseBlock, session: LiveSession) -> dict[str, Any] | None:
+    """Return the call of a MindRoom tool the model wrote, which the process then waits on; None for any other."""
     short = block.name.removeprefix(TOOL_PREFIX)
     name = session.bridge.names.get(short) if block.name.startswith(TOOL_PREFIX) else None
-    # Claude Code would answer a call MindRoom cannot run itself, and the model would go on.
     if name is None:
-        # The model may not name it again in a new process, which the retry of the request starts.
-        msg = f"Claude called {block.name}, which MindRoom did not offer."
-        raise ProviderUnavailable(msg, provider=session.provider)
+        # The process has only MindRoom's tools, so Claude Code answers this call with an error the model can correct.
+        logger.warning("claude_code_unoffered_tool_called", tool=block.name)
+        return None
     if not session.bridge.made(block.id, short, block.input):
         msg = f"Claude wrote the tool call {block.id} twice."
         raise ProviderError(msg, provider=session.provider)
