@@ -24,7 +24,7 @@ from mindroom.config.main import (
     format_invalid_config_message,
     load_config_or_user_error,
 )
-from mindroom.config.models import ToolConfigEntry
+from mindroom.config.models import ToolConfigEntry, unsupported_level_message
 from mindroom.config.schema_hints import redaction_marker_location
 from mindroom.config.tool_aliases import canonical_tool_name, canonical_tool_names
 from mindroom.entity_resolution import entity_identity_registry
@@ -1396,7 +1396,10 @@ class ConfigManagerTools(Toolkit):
 
         # Check model
         if config.models and agent.model not in config.models:
-            warnings.append(f"Model '{agent.model}' not in configured models: {', '.join(config.models)}")
+            warnings.append(
+                unsupported_level_message(config.models, agent.model)
+                or f"Model '{agent.model}' not in configured models: {', '.join(config.models)}",
+            )
 
         # Format results
         output = [f"## Validation Results for '{agent_name}':\n"]

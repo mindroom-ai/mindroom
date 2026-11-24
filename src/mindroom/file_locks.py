@@ -117,7 +117,7 @@ def current_inherited_file_lock() -> InheritedFileLockCapability | None:
 
 def _open_lock_file(lock_path: Path) -> TextIO:
     lock_path.parent.mkdir(parents=True, exist_ok=True)
-    return lock_path.open("a", encoding="utf-8")
+    return lock_path.open("a+", encoding="utf-8")
 
 
 @contextmanager

@@ -255,6 +255,21 @@ def _only_validation_error(raw: dict[str, object]) -> tuple[tuple[str | int, ...
     return tuple(error["loc"]), error["msg"]
 
 
+@pytest.mark.parametrize("tool_name", ["triggers", "external_trigger_manager"])
+@pytest.mark.parametrize("flags", [{"defer": True}, {"defer": True, "initial": True}])
+def test_config_allows_deferred_triggers_and_alias(tool_name: str, flags: dict[str, bool]) -> None:
+    """Opt-in triggers toolkit and its external_trigger_manager alias support deferral."""
+    raw = _base_config_data()
+    raw["agents"]["code"]["tools"] = [{tool_name: flags}]  # type: ignore[index]
+
+    config = Config.model_validate(raw)
+    entries = config.agents["code"].tools
+    assert len(entries) == 1
+    assert entries[0].name == "triggers"
+    assert entries[0].defer is True
+    assert entries[0].initial is flags.get("initial", False)
+
+
 @pytest.mark.parametrize("tool_name", sorted(_DEFER_PROHIBITED_CONTROL_TOOLS))
 def test_config_rejects_deferred_control_plane_tools(tool_name: str) -> None:
     """Control-plane tools are injected by runtime policy and cannot be lazy-loading units."""

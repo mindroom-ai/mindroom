@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom.llm.messages import is_media_follow_up, stable_serialize, system_text, tool_result_view
 from mindroom.providers.anthropic.wire import image_block
+from mindroom.providers.claude_code.tool_naming import called_name
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -43,12 +44,12 @@ def _history_blocks(message: Message, provider: str, names: dict[str, str]) -> l
     """Return one earlier message as tagged text; the images of a user message or a tool result stay real blocks.
 
     No ``<`` of the message stays one, so nothing it says reads as a tag. ``names`` holds each tool call's tool,
-    which names its result.
+    which names its result. Tools are named as Claude calls them, since Claude copies the names it sees here.
     """
     if message.role == "tool":
         result = tool_result_view(message)
         name = names.get(result.call_id or "", result.name)
-        output = {"id": result.call_id, "name": name, "output": result.content}
+        output = {"id": result.call_id, "name": _history_name(name), "output": result.content}
         if result.is_error:
             output["is_error"] = True
         return [_text(f"<tool-result>\n{_json(output)}\n</tool-result>"), *_images(message, provider)]
@@ -60,7 +61,7 @@ def _history_blocks(message: Message, provider: str, names: dict[str, str]) -> l
         _json(
             {
                 "id": call["id"],
-                "name": call["function"]["name"],
+                "name": _history_name(call["function"]["name"]),
                 "input": _arguments(call["function"].get("arguments")),
             },
         )
@@ -70,6 +71,11 @@ def _history_blocks(message: Message, provider: str, names: dict[str, str]) -> l
     said = "\n".join(texts).replace("<", "&lt;")
     parts = [said, *(f"<tool-call>\n{call}\n</tool-call>" for call in calls)]
     return [_text("\n".join(["<assistant>", *filter(None, parts), "</assistant>"]))]
+
+
+def _history_name(name: object) -> object:
+    """Return the name Claude calls the tool by; a stored call may lack a usable name, which stays as stored."""
+    return called_name(name) if isinstance(name, str) and name else name
 
 
 def _json(value: object) -> str:

@@ -127,6 +127,11 @@ async def test_subagent_model_selection(
         assert record["child_agent_name"] == (agent_name or "leader")
         assert record["caller_agent_name"] == "leader"
         assert json.loads(handles[0].read_text())["child"]["model_name"] == expected_model
+    elif model == "alternate@xhigh":
+        assert "Cannot delegate: unsupported level 'xhigh' for alternate; supported: low, high." in result
+        assert built_models == []
+        assert not records
+        assert not handles
     else:
         assert "Unknown model" in result
         assert "alternate" in result

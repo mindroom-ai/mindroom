@@ -101,10 +101,12 @@ _FUNCTION_INSTRUCTIONS: dict[str, str] = {
     ),
     "show_canvas": (
         "show_canvas(...) shows a canvas: a web page you write yourself, which cannot load any "
-        "website. Use it to present results (dashboards, reports, slides) or to let the user choose or fill "
-        "something in; their answer comes back as their next message. For a quick choice between a few "
-        "options, just ask in your reply. Prefer inline=True, which shows the page in the conversation, "
-        "for anything the user should see or answer in the flow; use the panel for what stays open beside it."
+        "website. Use it to present visual results (diagrams, charts, dashboards, reports, slides) or to let "
+        "the user choose or fill something in; their answer comes back as their next message. Prefer "
+        "show_canvas over ASCII art or Mermaid fences, since chat Markdown does not render Mermaid. For a "
+        "quick choice between a few options, just ask in your reply. Prefer inline=True, which shows the page "
+        "in the conversation, for anything the user should see or answer in the flow; use the panel for what "
+        "stays open beside it."
     ),
     "read_canvas_state": (
         "read_canvas_state(canvas_event_id) reads what the user last did in a canvas you showed with "

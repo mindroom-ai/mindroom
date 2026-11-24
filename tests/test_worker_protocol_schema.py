@@ -24,25 +24,27 @@ from mindroom.workers import protocol
 _SCHEMA_DIGESTS = {
     9: "d6320479ed4156c12809f20bf04ebe9252c180c7a7965f46a898680301c59cf3",
     10: "4c9c192cd2a5ab1b39fcba118d538f96a827766174175ccbe2f7f935934819da",
+    11: "b1265dfe3c60ab47d8da1c3a318ba313f519e8f8c9501b1019b1a4cfa2318d92",
+    12: "25d680524f1632af22f889aa725da1d9efa512dc2cda7e6080b8563d54961e45",
 }
 # The opt-in fields of each wire model, with the worker protocol that was current when each one was added.
 _OPT_IN_FIELDS = {
     "ExecuteRequest": {"structured_result": 8},
     "ExecuteResponse": {"metadata": 8},
 }
-# What a call that asks for nothing new sends and gets back at protocol 10, as main renders them without any opt-in
+# What a call that asks for nothing new sends and gets back at protocol 12, as main renders them without any opt-in
 # field.
 _PLAIN_REQUEST = (
-    '{"protocol":10,"worker_key":null,"worker_scope":null,"routing_agent_name":null,"execution_identity":null,'
+    '{"protocol":12,"worker_key":null,"worker_scope":null,"routing_agent_name":null,"execution_identity":null,'
     '"private_agent_names":null,"config_snapshot":null,"base_dir":null,"tool_name":"shell",'
     '"function_name":"run_shell_command","args":[],"kwargs":{"args":"echo hi"},"lease_id":null,'
     '"tool_config_overrides":{},"tool_init_overrides":{},"execution_env":{},'
     '"environment":{"set_names":[],"unset_names":[],"path_prepend":[]},"extra_env_passthrough":null,'
-    '"request_id":null,"run_as_job":false,"stream_io":false}'
+    '"request_id":null,"run_as_job":false,"stream_io":false,"sandbox":false,"shell_scope_id":null}'
 )
 _PLAIN_ANSWERS = (
-    '{"ok":true,"result":"hi","error":null,"failure_kind":null}',
-    '{"ok":false,"result":null,"error":"boom","failure_kind":"tool"}',
+    '{"ok":true,"result":"hi","error":null,"failure_kind":null,"shell_backgrounded":false}',
+    '{"ok":false,"result":null,"error":"boom","failure_kind":"tool","shell_backgrounded":false}',
 )
 
 
@@ -154,7 +156,7 @@ def test_response_serialization_schema_preserves_properties() -> None:
 def test_a_plain_call_is_byte_identical_to_the_wire_before_the_opt_in_fields() -> None:
     """A call that asks for nothing new sends and gets the bodies a peer from before the opt-in fields knows."""
     request = protocol.ExecuteRequest(
-        protocol=10,
+        protocol=12,
         tool_name="shell",
         function_name="run_shell_command",
         kwargs={"args": "echo hi"},
@@ -179,4 +181,4 @@ def test_a_call_that_opts_in_carries_its_field_which_an_older_peer_refuses() -> 
     assert answer.model_dump(mode="json")["metadata"] == {"exit_code": 3}
     assert protocol.ExecuteResponse.model_validate_json(answer.model_dump_json()) == answer
     with pytest.raises(ValidationError, match="unknown_field"):
-        protocol.CancelRequest.model_validate({"protocol": 10, "request_id": "r", "unknown_field": True})
+        protocol.CancelRequest.model_validate({"protocol": 12, "request_id": "r", "unknown_field": True})

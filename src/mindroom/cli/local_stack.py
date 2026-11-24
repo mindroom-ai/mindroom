@@ -25,8 +25,8 @@ if TYPE_CHECKING:
 
     from mindroom.constants import RuntimePaths
 
-_CINNY_DEFAULT_IMAGE = "ghcr.io/mindroom-ai/mindroom-chat:latest"
-_CINNY_DEFAULT_CONTAINER = "mindroom-cinny-local"
+_CHAT_DEFAULT_IMAGE = "ghcr.io/mindroom-ai/mindroom-chat:latest"
+_CHAT_DEFAULT_CONTAINER = "mindroom-chat-local"
 
 
 def _httpx_get(url: str) -> httpx.Response:
@@ -52,22 +52,22 @@ def local_stack_setup(
         "--server-name",
         help="Matrix server name (default: inferred from --homeserver-url hostname).",
     ),
-    cinny_port: int = typer.Option(
+    chat_port: int = typer.Option(
         8080,
-        "--cinny-port",
+        "--chat-port",
         min=1,
         max=65535,
         help="Local host port for the MindRoom Chat container.",
     ),
-    cinny_image: str = typer.Option(
-        _CINNY_DEFAULT_IMAGE,
-        "--cinny-image",
+    chat_image: str = typer.Option(
+        _CHAT_DEFAULT_IMAGE,
+        "--chat-image",
         help="Docker image for MindRoom Chat.",
     ),
-    cinny_container_name: str = typer.Option(
-        _CINNY_DEFAULT_CONTAINER,
-        "--cinny-container-name",
-        help="Container name for MindRoom Chat (legacy default retained for compatibility).",
+    chat_container_name: str = typer.Option(
+        _CHAT_DEFAULT_CONTAINER,
+        "--chat-container-name",
+        help="Container name for MindRoom Chat.",
     ),
     skip_synapse: bool = typer.Option(
         False,
@@ -94,29 +94,29 @@ def local_stack_setup(
 
     _wait_for_service(matrix_versions_url(homeserver_url), "Synapse", response_has_matrix_versions)
 
-    cinny_config_path = _write_local_cinny_config(
+    chat_config_path = _write_local_chat_config(
         homeserver_url,
         inferred_server_name,
         runtime_paths,
     )
-    print_literal("MindRoom Chat config written: ", cinny_config_path)
+    print_literal("MindRoom Chat config written: ", chat_config_path)
 
-    cinny_url = f"http://localhost:{cinny_port}"
-    _start_cinny_container(
-        cinny_container_name=cinny_container_name,
-        cinny_port=cinny_port,
-        cinny_config_path=cinny_config_path,
-        cinny_image=cinny_image,
+    chat_url = f"http://localhost:{chat_port}"
+    _start_chat_container(
+        chat_container_name=chat_container_name,
+        chat_port=chat_port,
+        chat_config_path=chat_config_path,
+        chat_image=chat_image,
     )
-    _wait_for_service(f"{cinny_url}/config.json", "MindRoom Chat")
+    _wait_for_service(f"{chat_url}/config.json", "MindRoom Chat")
 
     _print_local_stack_summary(
         homeserver_url=homeserver_url,
-        cinny_url=cinny_url,
+        chat_url=chat_url,
         server_name=inferred_server_name,
         config_path=runtime_paths.config_path,
         persist_env=persist_env,
-        cinny_container_name=cinny_container_name,
+        chat_container_name=chat_container_name,
         synapse_dir=synapse_dir,
         skip_synapse=skip_synapse,
     )
@@ -131,7 +131,7 @@ def _infer_server_name(homeserver_url: str) -> str:
     return parsed.hostname
 
 
-def _write_local_cinny_config(
+def _write_local_chat_config(
     homeserver_url: str,
     server_name: str,
     runtime_paths: RuntimePaths,
@@ -151,7 +151,7 @@ def _write_local_cinny_config(
         "sidebar": {"showExploreCommunity": False, "showAddSpace": False},
         "auth": {"hideServerPickerWhenSingle": True},
     }
-    target = runtime_paths.storage_root / "local" / "cinny-config.json"
+    target = runtime_paths.storage_root / "local" / "chat-config.json"
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(f"{json.dumps(config, indent=2)}\n", encoding="utf-8")
     return target
@@ -191,29 +191,29 @@ def _start_synapse_stack(synapse_dir: Path) -> None:
         raise typer.Exit(1)
 
 
-def _start_cinny_container(
+def _start_chat_container(
     *,
-    cinny_container_name: str,
-    cinny_port: int,
-    cinny_config_path: Path,
-    cinny_image: str,
+    chat_container_name: str,
+    chat_port: int,
+    chat_config_path: Path,
+    chat_image: str,
 ) -> None:
     """Start (or replace) the local MindRoom Chat container."""
-    _run_command(["docker", "rm", "-f", cinny_container_name])
+    _run_command(["docker", "rm", "-f", chat_container_name])
 
     run_cmd = [
         "docker",
         "run",
         "-d",
         "--name",
-        cinny_container_name,
+        chat_container_name,
         "--restart",
         "unless-stopped",
         "-p",
-        f"{cinny_port}:80",
+        f"{chat_port}:80",
         "-v",
-        f"{cinny_config_path}:/app/config.json:ro",
-        cinny_image,
+        f"{chat_config_path}:/app/config.json:ro",
+        chat_image,
     ]
     result = _run_command(run_cmd)
     if result.returncode != 0:
@@ -246,18 +246,18 @@ def _wait_for_service(
 def _print_local_stack_summary(
     *,
     homeserver_url: str,
-    cinny_url: str,
+    chat_url: str,
     server_name: str,
     config_path: Path,
     persist_env: bool,
-    cinny_container_name: str,
+    chat_container_name: str,
     synapse_dir: Path,
     skip_synapse: bool,
 ) -> None:
     """Print final setup instructions."""
     console.print("\n[green]Local stack is ready.[/green]")
     print_literal("  Synapse: ", homeserver_url)
-    console.print(f"  MindRoom Chat: {cinny_url}")
+    console.print(f"  MindRoom Chat: {chat_url}")
     print_literal("  Server:  ", server_name)
     env_values = _local_matrix_env_values(homeserver_url, server_name)
     if persist_env:
@@ -270,7 +270,7 @@ def _print_local_stack_summary(
         console.print("\nRun MindRoom backend against this stack:")
         print_literal("  ", f"{assignments} uv run mindroom run")
     console.print("\nStop commands:")
-    print_literal("  ", f"docker rm -f {cinny_container_name}")
+    print_literal("  ", f"docker rm -f {chat_container_name}")
     if not skip_synapse:
         print_literal("  ", f"cd {synapse_dir} && docker compose down")
 

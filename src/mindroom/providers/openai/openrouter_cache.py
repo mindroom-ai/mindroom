@@ -1,13 +1,16 @@
-"""Apply the Claude prompt-cache ladder to OpenRouter Chat Completions requests.
+"""Apply explicit prompt-cache breakpoints to OpenRouter Chat Completions requests.
 
-OpenRouter forwards ``cache_control`` markers on content parts and function tools to Anthropic-family upstreams,
-which cache only up to explicit breakpoints, so only model ids routed to Anthropic are marked. Placement follows
-:mod:`mindroom.providers.cache_ladder`: the stable system prompt (the first system message), the two newest cacheable
-messages, and the last tool, with one TTL and at most four markers.
+OpenRouter forwards ``cache_control`` markers to Anthropic- and Gemini-family upstreams:
+- Anthropic models get the Claude ladder from :mod:`mindroom.providers.cache_ladder`: the stable system prompt (the
+  first system message), the two newest cacheable messages, and the last tool, with one TTL and at most four markers.
+- Gemini models get a single ``{"type": "ephemeral"}`` marker (no ``ttl``) on the newest cacheable message block,
+  because OpenRouter uses only the last breakpoint for Gemini. Non-system messages still normalize to text parts so the
+  prefix stays byte-identical as the marker moves.
 """
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
 from mindroom.providers.cache_ladder import (
@@ -16,33 +19,54 @@ from mindroom.providers.cache_ladder import (
     mark_message_cache_rungs,
     prompt_cache_control,
 )
+from mindroom.providers.names import is_openrouter_gemini_model
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
 __all__ = [
+    "OpenRouterPromptCache",
     "contains_cache_marker",
-    "openrouter_prompt_cache_control",
+    "openrouter_prompt_cache",
     "request_kwargs_with_prompt_cache",
     "takes_automatic_markers",
 ]
 
 _ANTHROPIC_MODEL_PREFIXES = ("anthropic/", "~anthropic/")
+_GEMINI_MESSAGE_RUNG_COUNT = 1
 _SYSTEM_ROLES = frozenset({"system", "developer"})
 # Roles whose non-empty string content is sent as a text part on the automatic cache path.
 _TEXT_PART_ROLES = frozenset({"user", "assistant", "tool"})
 
 
-def openrouter_prompt_cache_control(
+@dataclass(frozen=True, slots=True)
+class OpenRouterPromptCache:
+    """Automatic prompt-cache placement for one OpenRouter upstream family."""
+
+    cache_control: dict[str, str]
+    full_ladder: bool
+
+
+def openrouter_prompt_cache(
     model_id: str,
     *,
     cache_system_prompt: bool,
     extended_cache_time: bool,
-) -> dict[str, str] | None:
-    """Return the breakpoint marker for an Anthropic-routed model, or None when caching does not apply."""
-    if not cache_system_prompt or not model_id.startswith(_ANTHROPIC_MODEL_PREFIXES):
+) -> OpenRouterPromptCache | None:
+    """Return the breakpoint plan for an Anthropic- or Gemini-routed model, or None when caching does not apply."""
+    if not cache_system_prompt:
         return None
-    return prompt_cache_control(extended_cache_time=extended_cache_time)
+    if model_id.startswith(_ANTHROPIC_MODEL_PREFIXES):
+        return OpenRouterPromptCache(
+            cache_control=prompt_cache_control(extended_cache_time=extended_cache_time),
+            full_ladder=True,
+        )
+    if is_openrouter_gemini_model(model_id):
+        return OpenRouterPromptCache(
+            cache_control=prompt_cache_control(extended_cache_time=False),
+            full_ladder=False,
+        )
+    return None
 
 
 def _with_marked_system_prompt(
@@ -91,32 +115,35 @@ def takes_automatic_markers(request_kwargs: dict[str, Any]) -> bool:
 
 def request_kwargs_with_prompt_cache(
     request_kwargs: dict[str, Any],
-    cache_control: dict[str, str],
+    prompt_cache: OpenRouterPromptCache,
     system: Sequence[str],
 ) -> dict[str, Any]:
-    """Return Chat Completions kwargs with Claude ladder breakpoints; ``system`` holds the request's system texts.
+    """Return Chat Completions kwargs with OpenRouter prompt-cache breakpoints; ``system`` holds the system texts.
 
     A request that does not take the automatic markers (``takes_automatic_markers``) is left untouched, so they never
-    exceed the limit or mix TTLs with authored ones. Otherwise the system prompt, conversation rungs, and last tool
-    take markers in that order, at most four.
+    exceed the limit or mix TTLs with authored ones. Anthropic gets the four-marker Claude ladder (system, two
+    conversation rungs, last tool); Gemini gets one ``ephemeral`` marker on the newest cacheable message block.
     """
     if not takes_automatic_markers(request_kwargs):
         return request_kwargs
     messages = request_kwargs["messages"]
+    cache_control = prompt_cache.cache_control
     # One system marker, the message rungs, and one tool marker always fit the four-marker limit.
     prepared = messages.copy()
     system_count = 0
     while system_count < len(prepared) and prepared[system_count].get("role") in _SYSTEM_ROLES:
         system_count += 1
-    if system_count:
+    if system_count and prompt_cache.full_ladder:
         prepared[0] = _with_marked_system_prompt(prepared[0], system, cache_control)
 
     # Keep the text-part form even after a marker moves so the cached prefix stays byte-identical.
     candidates = [_with_text_part_content(message) for message in prepared[system_count:]]
-    prepared[system_count:] = mark_message_cache_rungs(candidates, cache_control, MESSAGE_RUNG_COUNT)
+    rung_budget = MESSAGE_RUNG_COUNT if prompt_cache.full_ladder else _GEMINI_MESSAGE_RUNG_COUNT
+    prepared[system_count:] = mark_message_cache_rungs(candidates, cache_control, rung_budget)
     prepared_kwargs = {**request_kwargs, "messages": prepared}
 
-    marked_tools, tools_marked = mark_last_tool(request_kwargs.get("tools"), cache_control)
-    if tools_marked:
-        prepared_kwargs["tools"] = marked_tools
+    if prompt_cache.full_ladder:
+        marked_tools, tools_marked = mark_last_tool(request_kwargs.get("tools"), cache_control)
+        if tools_marked:
+            prepared_kwargs["tools"] = marked_tools
     return prepared_kwargs

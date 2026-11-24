@@ -35,9 +35,14 @@ class PublishedIndexReader:
     max_matrix_bytes: int | None = None
 
     async def asearch(self, query: str, *, limit: int) -> list[SearchHit]:
-        """Embed under the caller's credentials, then run the hybrid search on a search thread, all within a deadline."""
+        """Embed under the caller's credentials, then run the hybrid search on a search thread, all within a deadline.
+
+        Only the query's first chunk-size characters are embedded, a length the embedder already took for every
+        indexed chunk: a whole long prompt can exceed its input limit. The hybrid search gets the whole query.
+        """
+        embedded_query = query[: int(self.settings.chunk_size)] if self.settings.chunk_size else query
         async with asyncio.timeout(_SEARCH_TIMEOUT_SECONDS):
-            embedding = (await self.embedder.aembed([query], purpose="query"))[0]
+            embedding = (await self.embedder.aembed([embedded_query], purpose="query"))[0]
             return await asyncio.get_running_loop().run_in_executor(
                 _search_threads,
                 self._search,

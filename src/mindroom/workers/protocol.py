@@ -33,9 +33,11 @@ from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerSco
 # 9: so does a worker a reply's calls name (`named=<id>` in its key).
 # 10: a shell call with `stream_io` streams its command's raw output as frames before its result line, and
 #     /execute/{request_id}/stdin writes the command's stdin.
+# 11: a shell call with `sandbox` runs in sandbox mode: empty execution env, no workspace env hook, writable worker HOME.
+# 12: scoped shell calls carry `shell_scope_id`, report `shell_backgrounded`, and stop on /execute/shell-scope/kill.
 # A wire model change bumps this, except an opt-in field declared with ``exclude_if``;
 # `tests/test_worker_protocol_schema.py` pins each version's schema.
-WORKER_PROTOCOL_VERSION = 10
+WORKER_PROTOCOL_VERSION = 12
 
 FailureKind = Literal["tool", "worker"]
 
@@ -109,6 +111,10 @@ class ExecuteRequest(WorkerRoute):
     run_as_job: bool = False
     # A shell call whose command's stdout and stderr stream as raw bytes while it runs, for `workers run`.
     stream_io: bool = False
+    # A sandboxed named-worker call: strips call env, workspace env hook, and shared credentials, with writable HOME.
+    sandbox: bool = False
+    # Turn-scoped shell background owner ID for auto-backgrounding non-job shell calls.
+    shell_scope_id: str | None = Field(default=None, max_length=64)
     # The caller stores the result itself: no size moves it to a workspace file, and the answer carries `metadata`.
     structured_result: bool = Field(default=False, exclude_if=operator.not_)
 
@@ -180,6 +186,7 @@ class ExecuteResponse(_WireModel):
     result: Any | None = None
     error: str | None = None
     failure_kind: FailureKind | None = None
+    shell_backgrounded: bool = False
     # What the tool reported about a structured result, such as a command's exit status.
     metadata: dict[str, Any] | None = Field(default=None, exclude_if=operator.not_)
 
@@ -216,3 +223,16 @@ class CancelResponse(_WireModel):
     """Whether the request was running when its cancel arrived."""
 
     cancelled: bool
+
+
+class KillShellScopeRequest(_WireModel):
+    """Stop every auto-backgrounded shell process owned by one turn scope."""
+
+    protocol: int = WORKER_PROTOCOL_VERSION
+    shell_scope_id: str = Field(min_length=1, max_length=64)
+
+
+class KillShellScopeResponse(_WireModel):
+    """Acknowledgment that scoped shell processes were stopped."""
+
+    ok: bool = True

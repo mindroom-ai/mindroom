@@ -71,7 +71,7 @@ class MindroomDevParams(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     ISSUE_REF: str
-    REPO: Literal["mindroom", "cinny", "nixos", "tuwunel"]
+    REPO: Literal["mindroom", "mindroom-chat", "nixos", "tuwunel"]
     BRANCH: str = ""
     N_REVIEWERS: int = Field(default=8, ge=1)
     IMPLEMENTER_AGENT: str = ""

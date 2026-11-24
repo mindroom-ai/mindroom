@@ -48,6 +48,7 @@ from mindroom.workers.backends.kubernetes_pod_names import (
 from mindroom.workers.models import (
     LABEL_TAILNET_SSH,
     LABEL_TAILNET_SSH_RELEASE,
+    LABEL_WORKER_SANDBOX,
     SCRIPT_RESOURCE_PROFILE_NAMES,
     WORKER_SSH_PORT,
 )
@@ -518,7 +519,7 @@ class KubernetesWorkerBackendConfig:
         if self.worker_port == WORKER_SSH_PORT:
             msg = f"{_PORT_ENV} cannot be {WORKER_SSH_PORT}; that port is reserved for SSH."
             raise WorkerBackendError(msg)
-        for label in (LABEL_TAILNET_SSH, LABEL_TAILNET_SSH_RELEASE):
+        for label in (LABEL_TAILNET_SSH, LABEL_TAILNET_SSH_RELEASE, LABEL_WORKER_SANDBOX):
             if label in self.extra_labels:
                 msg = f"{_EXTRA_LABELS_JSON_ENV} must not set {label}; MindRoom sets it on eligible workers."
                 raise WorkerBackendError(msg)
@@ -671,6 +672,20 @@ def configured_named_workers_max(runtime_paths: RuntimePaths) -> int:
         return int(raw)
     except ValueError:
         return _DEFAULT_NAMED_WORKERS_MAX
+
+
+def configured_runtime_class_name(runtime_paths: RuntimePaths) -> str | None:
+    """Read the configured Kubernetes RuntimeClass name without loading the full backend config."""
+    return read_env(runtime_env_values(runtime_paths), _RUNTIME_CLASS_NAME_ENV) or None
+
+
+def sandbox_mount_dir_runtime_class_refusal(runtime_class_name: str) -> str:
+    """Return the refusal message when sandbox ``mount_dir`` is requested under a RuntimeClass."""
+    return (
+        f"mount_dir is not supported when workers.kubernetes.runtimeClassName is set ({runtime_class_name!r}) "
+        "because runtimes such as gVisor do not preserve host inode numbers for mount verification; "
+        "use sandbox=true without mount_dir."
+    )
 
 
 def kubernetes_backend_config_signature(

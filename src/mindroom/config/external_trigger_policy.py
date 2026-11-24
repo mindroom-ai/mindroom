@@ -13,6 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 _ENV_VAR_NAME_PATTERN = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 _GITHUB_REPO_PATTERN = re.compile(r"^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$")
 _EVENT_SOURCE_KEY_PATTERN = re.compile(r"^[A-Za-z0-9_-]{1,64}$")
+_HTTP_HEADER_NAME_PATTERN = re.compile(r"^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$")
 _SERVER_DNS_LABEL_PATTERN = re.compile(r"^[A-Za-z0-9-]{1,63}$")
 _SERVER_IPV6_LITERAL_PATTERN = re.compile(r"^[0-9A-Fa-f:.]{2,45}$")
 _ED25519_PUBLIC_KEY_BYTES = 32
@@ -28,6 +29,22 @@ def _strip_non_empty(value: str, *, field_name: str) -> str:
 
 def _validate_non_empty_list_items(values: list[str], *, field_name: str) -> list[str]:
     return [_strip_non_empty(item, field_name=field_name) for item in values]
+
+
+def _validate_secret_env_name(value: str) -> str:
+    stripped = _strip_non_empty(value, field_name="secret_env")
+    if _ENV_VAR_NAME_PATTERN.fullmatch(stripped) is None:
+        msg = "secret_env must match ^[A-Z_][A-Z0-9_]*$"
+        raise ValueError(msg)
+    return stripped
+
+
+def _validate_header_name(value: str, *, field_name: str) -> str:
+    stripped = _strip_non_empty(value, field_name=field_name)
+    if _HTTP_HEADER_NAME_PATTERN.fullmatch(stripped) is None:
+        msg = f"{field_name} must be a valid ASCII HTTP header name without whitespace or colons"
+        raise ValueError(msg)
+    return stripped
 
 
 def _is_valid_port(port: str) -> bool:
@@ -196,11 +213,7 @@ class GitHubEventSourceConfig(BaseModel):
     @classmethod
     def validate_secret_env(cls, value: str) -> str:
         """Require a valid uppercase environment variable name, never a secret value."""
-        stripped = _strip_non_empty(value, field_name="secret_env")
-        if _ENV_VAR_NAME_PATTERN.fullmatch(stripped) is None:
-            msg = "secret_env must match ^[A-Z_][A-Z0-9_]*$"
-            raise ValueError(msg)
-        return stripped
+        return _validate_secret_env_name(value)
 
     @field_validator("allowed_repos")
     @classmethod
@@ -294,8 +307,97 @@ class Ed25519EventSourceConfig(BaseModel):
         return _validate_matrix_user_ids(values, field_name="subscribers entry")
 
 
+class HmacEventSourceConfig(BaseModel):
+    """Generic HMAC-SHA256 webhook event source configuration."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: Literal["hmac"] = Field(default="hmac", description="Event source type for generic HMAC-SHA256 webhooks")
+    secret_env: str = Field(description="Environment variable name holding the HMAC webhook secret")
+    signature_header: str = Field(
+        default="X-Webhook-Signature-256",
+        description="HTTP header name carrying the HMAC-SHA256 signature",
+    )
+    signature_prefix: str = Field(
+        default="sha256=",
+        description="Optional prefix before the hex digest; empty string means bare hex",
+    )
+    kind_header: str | None = Field(
+        default=None,
+        description="Optional HTTP header name carrying the event kind",
+    )
+    kind_field: str = Field(
+        default="kind",
+        description="JSON field or dot-path carrying the event kind when kind_header is unset",
+    )
+    event_id_header: str | None = Field(
+        default=None,
+        description="Optional HTTP header name carrying a deduplication event ID",
+    )
+    allowed_kinds: list[str] = Field(
+        default_factory=list,
+        description="Optional allowlist of accepted event kinds",
+    )
+    subscribers: list[str] = Field(
+        default_factory=list,
+        description="Matrix user IDs allowed to subscribe reactive triggers to this source",
+    )
+    max_body_bytes: int = Field(
+        default=262144,
+        ge=1024,
+        le=1048576,
+        description="Maximum accepted webhook body size in bytes",
+    )
+
+    @field_validator("secret_env")
+    @classmethod
+    def validate_secret_env(cls, value: str) -> str:
+        """Require a valid uppercase environment variable name, never a secret value."""
+        return _validate_secret_env_name(value)
+
+    @field_validator("signature_header")
+    @classmethod
+    def validate_signature_header(cls, value: str) -> str:
+        """Require a valid ASCII HTTP header name."""
+        return _validate_header_name(value, field_name="signature_header")
+
+    @field_validator("kind_header")
+    @classmethod
+    def validate_kind_header(cls, value: str | None) -> str | None:
+        """Require a valid ASCII HTTP header name when specified."""
+        return None if value is None else _validate_header_name(value, field_name="kind_header")
+
+    @field_validator("event_id_header")
+    @classmethod
+    def validate_event_id_header(cls, value: str | None) -> str | None:
+        """Require a valid ASCII HTTP header name when specified."""
+        return None if value is None else _validate_header_name(value, field_name="event_id_header")
+
+    @field_validator("kind_field")
+    @classmethod
+    def validate_kind_field(cls, value: str) -> str:
+        """Require a non-empty JSON field name or dot-path with non-empty segments."""
+        stripped = _strip_non_empty(value, field_name="kind_field")
+        if any(not segment.strip() for segment in stripped.split(".")):
+            msg = "kind_field must not contain empty path segments"
+            raise ValueError(msg)
+        return stripped
+
+    @field_validator("allowed_kinds")
+    @classmethod
+    def validate_allowed_kinds(cls, values: list[str]) -> list[str]:
+        """Reject empty allowed_kinds entries."""
+        return _validate_non_empty_list_items(values, field_name="allowed_kinds entry")
+
+    @field_validator("subscribers")
+    @classmethod
+    def validate_subscribers(cls, values: list[str]) -> list[str]:
+        """Require valid Matrix user IDs for subscribers."""
+        return _validate_matrix_user_ids(values, field_name="subscribers entry")
+
+
 ExternalEventSourceConfig = Annotated[
-    GitHubEventSourceConfig | Ed25519EventSourceConfig,
+    GitHubEventSourceConfig | Ed25519EventSourceConfig | HmacEventSourceConfig,
     Field(discriminator="kind"),
 ]
 

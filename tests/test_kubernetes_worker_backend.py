@@ -32,6 +32,7 @@ from structlog.testing import capture_logs
 from mindroom.config.main import Config, load_config
 from mindroom.constants import (
     DEFAULT_WORKER_GRANTABLE_CREDENTIALS,
+    STARTUP_MANIFEST_SANDBOX_MOUNT,
     RuntimePaths,
     deserialize_runtime_paths,
     resolve_primary_runtime_paths,
@@ -75,16 +76,20 @@ from mindroom.workers.backends.kubernetes import (
 from mindroom.workers.backends.kubernetes_resources import (
     _ANNOTATION_PRIVATE_AGENT_NAMES,
     _ANNOTATION_RUNNER_TOKEN_HASH,
+    _ANNOTATION_SANDBOX,
     _ANNOTATION_STARTUP_MANIFEST_HASH,
     _ANNOTATION_STATE_SCOPE_WORKER_KEY,
     ANNOTATION_TEMPLATE_HASH,
     ANNOTATION_WORKER_KEY,
+    parse_sandbox_annotation,
     worker_auth_token,
 )
 from mindroom.workers.models import (
+    LABEL_WORKER_SANDBOX,
     WorkerHandle,
     WorkerLaunchConfig,
     WorkerReadyProgress,
+    WorkerSandboxConfig,
     WorkerSpec,
     WorkerSshEndpoint,
 )
@@ -8453,3 +8458,566 @@ def test_kubernetes_pinned_worker_has_no_mark(tmp_path: Path) -> None:
     assert _container_ports(apps_api.created_bodies[0]) == [{"containerPort": 8766, "name": "api"}]
     assert core_api.created_bodies[0]["spec"]["ports"] == [_API_PORT]
     assert handle.ssh_endpoint is None
+
+
+def test_kubernetes_sandbox_empty_scratch_strips_mounts_credentials_and_stamps_label(tmp_path: Path) -> None:
+    """Empty-scratch sandbox omits workspace, shared, knowledge, and mirrored credentials, and stamps its label."""
+    storage_root = tmp_path / "storage"
+    kb_dir = storage_root / "kb" / "docs"
+    kb_dir.mkdir(parents=True)
+    workspace = storage_root / "agents" / "general" / "workspace"
+    workspace.mkdir(parents=True)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n"
+        "  default:\n"
+        "    provider: openai\n"
+        "    id: gpt-4o\n"
+        "agents:\n"
+        "  general:\n"
+        "    display_name: General\n"
+        "    worker_scope: user_agent\n"
+        "    knowledge_bases: [docs]\n"
+        "knowledge_bases:\n"
+        "  docs:\n"
+        f"    path: {kb_dir}\n",
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_primary_runtime_paths(config_path=config_path, storage_path=storage_root)
+    create_shared_directory(runtime_paths, owner="general", name="shared_out")
+    creds_manager = kubernetes_backend_module.get_runtime_credentials_manager(runtime_paths)
+    creds_manager.save_credentials("openai", {"api_key": "sk-secret"})
+
+    backend, apps_api, _core_api = _backend(
+        runtime_paths=runtime_paths,
+        applied_config=load_config(runtime_paths),
+        worker_grantable_credentials=frozenset({"openai"}),
+    )
+    user_agent_key = "v1:tenant-123:user_agent:@alice:example.org:general"
+    normal_key = named_worker_key(user_agent_key, "a" * 32)
+    sandbox_key = named_worker_key(user_agent_key, "b" * 32)
+    normal_spec = WorkerSpec(
+        normal_key,
+        private_agent_names=frozenset(),
+        state_scope_worker_key=user_agent_key,
+    )
+    sandbox_spec = WorkerSpec(
+        sandbox_key,
+        private_agent_names=frozenset(),
+        state_scope_worker_key=user_agent_key,
+        sandbox=WorkerSandboxConfig(),
+        mirror_grantable_credentials=False,
+    )
+
+    normal_handle = backend.ensure_worker(normal_spec, now=10.0)
+    sandbox_handle = backend.ensure_worker(sandbox_spec, now=11.0)
+    cached_handle = backend.ensure_worker(sandbox_spec, now=12.0)
+    assert cached_handle.worker_key == sandbox_handle.worker_key
+    assert len(apps_api.created_bodies) == 2
+
+    normal_body, sandbox_body = apps_api.created_bodies
+    normal_mount_paths = [
+        m["mountPath"] for m in normal_body["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
+    ]
+    assert any("agents/general/workspace" in path for path in normal_mount_paths)
+    assert any("shared_out" in path for path in normal_mount_paths)
+    assert any("kb/docs" in path for path in normal_mount_paths)
+    assert LABEL_WORKER_SANDBOX not in normal_body["metadata"]["labels"]
+    assert _ANNOTATION_SANDBOX not in normal_body["metadata"]["annotations"]
+    assert sandbox_body["metadata"]["labels"][LABEL_WORKER_SANDBOX] == "true"
+    assert sandbox_body["spec"]["template"]["metadata"]["labels"][LABEL_WORKER_SANDBOX] == "true"
+    assert LABEL_WORKER_SANDBOX not in sandbox_body["spec"]["selector"]["matchLabels"]
+    assert parse_sandbox_annotation(sandbox_body["metadata"]["annotations"]) == WorkerSandboxConfig()
+
+    sandbox_mounts = sandbox_body["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
+    mount_paths = [mount["mountPath"] for mount in sandbox_mounts]
+    assert not any("agents/general/workspace" in path for path in mount_paths)
+    assert not any("shared_out" in path for path in mount_paths)
+    assert not any("kb/docs" in path for path in mount_paths)
+    assert "/tmp" in mount_paths  # noqa: S108
+    assert len(sandbox_mounts) == 4
+
+    normal_shared = worker_root_path(storage_root, normal_handle.worker_key) / ".shared_credentials"
+    sandbox_shared = worker_root_path(storage_root, sandbox_handle.worker_key) / ".shared_credentials"
+    assert any(path.name.startswith("openai") for path in normal_shared.iterdir())
+    assert list(sandbox_shared.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    ("mount_dir", "read_only", "expected_subpath"),
+    [
+        ("scratch/job1", False, "agents/general/workspace/scratch/job1"),
+        ("scratch/job1", True, "agents/general/workspace/scratch/job1"),
+    ],
+)
+def test_kubernetes_sandbox_mount_dir_mounts_only_requested_subpath(
+    tmp_path: Path,
+    mount_dir: str,
+    read_only: bool,
+    expected_subpath: str,
+) -> None:
+    """mount_dir mounts only that validated workspace subpath (RW or RO) and strips shared/knowledge mounts."""
+    storage_root = tmp_path / "storage"
+    (storage_root / "agents" / "general" / "workspace" / "scratch" / "job1").mkdir(parents=True)
+    kb_dir = storage_root / "kb" / "docs"
+    kb_dir.mkdir(parents=True)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n"
+        "  default:\n"
+        "    provider: openai\n"
+        "    id: gpt-4o\n"
+        "agents:\n"
+        "  general:\n"
+        "    display_name: General\n"
+        "    worker_scope: user_agent\n"
+        "    knowledge_bases: [docs]\n"
+        "knowledge_bases:\n"
+        "  docs:\n"
+        f"    path: {kb_dir}\n",
+        encoding="utf-8",
+    )
+    runtime_paths = resolve_primary_runtime_paths(config_path=config_path, storage_path=storage_root)
+    create_shared_directory(runtime_paths, owner="general", name="shared_out")
+    backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths, applied_config=load_config(runtime_paths))
+    user_agent_key = "v1:tenant-123:user_agent:@alice:example.org:general"
+    sandbox_key = named_worker_key(user_agent_key, "c" * 32)
+    sandbox = WorkerSandboxConfig(mount_dir=mount_dir, mount_read_only=read_only)
+    spec = WorkerSpec(
+        sandbox_key,
+        private_agent_names=frozenset(),
+        state_scope_worker_key=user_agent_key,
+        sandbox=sandbox,
+        mirror_grantable_credentials=False,
+    )
+
+    backend.ensure_worker(spec, now=10.0)
+    body = apps_api.created_bodies[0]
+    mounts = body["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
+    workspace_mounts = [m for m in mounts if m.get("subPath", "").startswith("agents/")]
+    assert len(workspace_mounts) == 1
+    assert workspace_mounts[0]["subPath"] == expected_subpath
+    assert workspace_mounts[0]["mountPath"] == f"/app/worker/{expected_subpath}"
+    assert workspace_mounts[0].get("readOnly") is (True if read_only else None)
+    assert not any("shared_out" in m["mountPath"] or "kb/docs" in m["mountPath"] for m in mounts)
+    assert body["spec"]["template"]["metadata"]["labels"][LABEL_WORKER_SANDBOX] == "true"
+    assert parse_sandbox_annotation(body["metadata"]["annotations"]) == sandbox
+
+
+def test_kubernetes_sandbox_mount_dir_refuses_missing_file_and_symlink(tmp_path: Path) -> None:
+    """Root, hidden/dot-prefixed, missing, file, or symlinked mount_dir raises WorkerBackendError without creating dirs."""
+    storage_root = tmp_path / "storage"
+    workspace = storage_root / "agents" / "general" / "workspace"
+    workspace.mkdir(parents=True)
+    (workspace / ".mindroom").mkdir()
+    (workspace / ".config").mkdir()
+    (workspace / "a" / ".git").mkdir(parents=True)
+    (workspace / "not_a_dir.txt").write_text("x", encoding="utf-8")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (workspace / "escape_link").symlink_to(outside)
+    user_agent_key = "v1:tenant-123:user_agent:@alice:example.org:general"
+    runtime_paths = resolve_primary_runtime_paths(config_path=Path("config.yaml"), storage_path=storage_root)
+    backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths)
+
+    for bad_dir, expected_pattern in (
+        (".", "not the workspace root"),
+        (".mindroom", "hidden or dot-prefixed"),
+        (".config", "hidden or dot-prefixed"),
+        ("a/.git", "hidden or dot-prefixed"),
+        ("missing/sub", "real directory without symlinks"),
+        ("not_a_dir.txt", "real directory without symlinks"),
+        ("escape_link", "real directory without symlinks"),
+    ):
+        spec = WorkerSpec(
+            named_worker_key(user_agent_key, "d" * 32),
+            private_agent_names=frozenset(),
+            state_scope_worker_key=user_agent_key,
+            sandbox=WorkerSandboxConfig(mount_dir=bad_dir),
+            mirror_grantable_credentials=False,
+        )
+        with pytest.raises(WorkerBackendError, match=expected_pattern):
+            backend.ensure_worker(spec, now=10.0)
+    assert not (workspace / "missing").exists()
+    assert apps_api.created_bodies == []
+
+
+def test_kubernetes_sandbox_reconcile_preserves_sandbox_and_blocks_extra_label(tmp_path: Path) -> None:
+    """Reconciliation preserves sandbox mounts/labels via annotation, and extra_labels cannot forge the label."""
+    storage_root = tmp_path / "storage"
+    (storage_root / "agents" / "general" / "workspace" / "sub").mkdir(parents=True)
+    runtime_paths = resolve_primary_runtime_paths(config_path=Path("config.yaml"), storage_path=storage_root)
+    backend, apps_api, _core_api = _backend(
+        runtime_paths=runtime_paths,
+        reconcile_pod_templates=True,
+    )
+    with pytest.raises(WorkerBackendError, match=r"must not set mindroom\.ai/worker-sandbox"):
+        replace(backend.config, extra_labels={"mindroom.ai/tenant": "test", LABEL_WORKER_SANDBOX: "true"})
+
+    user_agent_key = "v1:tenant-123:user_agent:@alice:example.org:general"
+    sandbox = WorkerSandboxConfig(mount_dir="sub", mount_read_only=True)
+    sandbox_key = named_worker_key(user_agent_key, "f" * 32)
+    spec = WorkerSpec(
+        sandbox_key,
+        private_agent_names=frozenset(),
+        state_scope_worker_key=user_agent_key,
+        sandbox=sandbox,
+        mirror_grantable_credentials=False,
+    )
+    handle = backend.ensure_worker(spec, now=10.0)
+    deployment = apps_api.deployments[handle.worker_id]
+    deployment.spec.replicas = 0
+    deployment.metadata.annotations["mindroom.ai/worker-status"] = "idle"
+    deployment.metadata.annotations[ANNOTATION_TEMPLATE_HASH] = "stale-hash"
+
+    assert (
+        backend._is_reconcile_candidate(
+            deployment,
+            handle=backend._handle_from_deployment(deployment, now=20.0),
+            launch=_launch_of(backend),
+            scaled_down=False,
+        )
+        is True
+    )
+    reconciled = backend._reconcile_worker_deployment(backend._handle_from_deployment(deployment, now=20.0), now=20.0)
+    assert reconciled is not None
+    reconciled_body = apps_api.created_bodies[-1]
+    assert reconciled_body["metadata"]["labels"][LABEL_WORKER_SANDBOX] == "true"
+    assert parse_sandbox_annotation(reconciled_body["metadata"]["annotations"]) == sandbox
+    workspace_mounts = [
+        m
+        for m in reconciled_body["spec"]["template"]["spec"]["containers"][0]["volumeMounts"]
+        if m.get("subPath", "").startswith("agents/")
+    ]
+    assert workspace_mounts == [
+        {
+            "name": "worker-storage",
+            "mountPath": "/app/worker/agents/general/workspace/sub",
+            "subPath": "agents/general/workspace/sub",
+            "readOnly": True,
+        },
+    ]
+
+
+def test_kubernetes_sandbox_startup_manifest_pins_mount_inode(tmp_path: Path) -> None:
+    """Startup manifest pins sandbox_mount path + inode for mount_dir and omits it otherwise."""
+    storage_root = tmp_path / "storage"
+    mounted_dir = storage_root / "agents" / "general" / "workspace" / "scratch" / "job1"
+    mounted_dir.mkdir(parents=True)
+    expected_ino = os.lstat(mounted_dir).st_ino
+    user_agent_key = "v1:tenant-123:user_agent:@alice:example.org:general"
+    runtime_paths = resolve_primary_runtime_paths(config_path=Path("config.yaml"), storage_path=storage_root)
+    backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths)
+
+    mounted_key = named_worker_key(user_agent_key, "a" * 32)
+    mounted_sandbox = WorkerSandboxConfig(mount_dir="scratch/job1", mount_read_only=True)
+    mounted_handle = backend.ensure_worker(
+        WorkerSpec(
+            mounted_key,
+            private_agent_names=frozenset(),
+            state_scope_worker_key=user_agent_key,
+            sandbox=mounted_sandbox,
+            mirror_grantable_credentials=False,
+        ),
+        now=10.0,
+    )
+    mounted_manifest = _load_startup_manifest(backend, worker_key=mounted_key)
+    assert mounted_manifest[STARTUP_MANIFEST_SANDBOX_MOUNT] == {
+        "path": "/app/worker/agents/general/workspace/scratch/job1",
+        "ino": expected_ino,
+    }
+
+    deployment = apps_api.deployments[mounted_handle.worker_id]
+    assert (
+        backend._resources.deployment_template_drifted(
+            deployment,
+            worker_key=mounted_key,
+            worker_id=mounted_handle.worker_id,
+            state_subpath=backend._state_subpath(mounted_key),
+            launch=_launch_of(backend),
+            private_agent_names=frozenset(),
+            state_scope_worker_key=user_agent_key,
+            sandbox=mounted_sandbox,
+        )
+        is False
+    )
+    # Swapping the directory changes its inode and is detected as template drift.
+    mounted_dir.rename(mounted_dir.with_name("job1-old"))
+    mounted_dir.mkdir()
+    assert os.lstat(mounted_dir).st_ino != expected_ino
+    assert (
+        backend._resources.deployment_template_drifted(
+            deployment,
+            worker_key=mounted_key,
+            worker_id=mounted_handle.worker_id,
+            state_subpath=backend._state_subpath(mounted_key),
+            launch=_launch_of(backend),
+            private_agent_names=frozenset(),
+            state_scope_worker_key=user_agent_key,
+            sandbox=mounted_sandbox,
+        )
+        is True
+    )
+
+    # Empty-scratch sandbox and ordinary non-sandboxed worker omit sandbox_mount.
+    scratch_key = named_worker_key(user_agent_key, "b" * 32)
+    backend.ensure_worker(
+        WorkerSpec(
+            scratch_key,
+            private_agent_names=frozenset(),
+            state_scope_worker_key=user_agent_key,
+            sandbox=WorkerSandboxConfig(),
+            mirror_grantable_credentials=False,
+        ),
+        now=10.0,
+    )
+    assert STARTUP_MANIFEST_SANDBOX_MOUNT not in _load_startup_manifest(backend, worker_key=scratch_key)
+
+    backend.ensure_worker(WorkerSpec(user_agent_key, private_agent_names=frozenset()), now=10.0)
+    assert STARTUP_MANIFEST_SANDBOX_MOUNT not in _load_startup_manifest(backend, worker_key=user_agent_key)
+
+
+def test_kubernetes_sandbox_pod_filters_extra_env_and_authenticated_proxy_urls(tmp_path: Path) -> None:
+    """Sandbox pods keep only safe infra vars and credential-free proxies; ordinary workers stay unchanged."""
+    storage_root = tmp_path / "storage"
+    (storage_root / "agents" / "general" / "workspace").mkdir(parents=True)
+    user_agent_key = "v1:tenant-123:user_agent:@alice:example.org:general"
+    runtime_paths = resolve_primary_runtime_paths(config_path=Path("config.yaml"), storage_path=storage_root)
+    extra_env = {
+        "HTTP_PROXY": "http://egress.cluster.local:3128",
+        "https_proxy": "https://egress.cluster.local:8443",
+        "ALL_PROXY": "socks5://egress.cluster.local:1080",
+        "NO_PROXY": "localhost,127.0.0.1,.svc",
+        "no_proxy": "localhost",
+        "SSL_CERT_FILE": "/etc/ssl/certs/ca-certificates.crt",
+        "TZ": "UTC",
+        "MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS": "240",
+        "HTTPS_PROXY": "http://user:secret@proxy.internal:3128",
+        "http_proxy": "token@proxy.internal:3128",
+        "all_proxy": "http://[::1",
+        "CUSTOM_API_SECRET": "top-secret-value",
+        "MINDROOM_CUSTOM_EXTRA": "should-be-dropped-on-sandbox",
+    }
+    backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths, extra_env=extra_env)
+
+    sandbox_key = named_worker_key(user_agent_key, "e" * 32)
+    backend.ensure_worker(
+        WorkerSpec(
+            sandbox_key,
+            private_agent_names=frozenset(),
+            state_scope_worker_key=user_agent_key,
+            sandbox=WorkerSandboxConfig(),
+            mirror_grantable_credentials=False,
+        ),
+        now=10.0,
+    )
+    sandbox_body = apps_api.created_bodies[-1]
+    sandbox_env = {
+        entry["name"]: entry.get("value") for entry in sandbox_body["spec"]["template"]["spec"]["containers"][0]["env"]
+    }
+    assert sandbox_env["HTTP_PROXY"] == "http://egress.cluster.local:3128"
+    assert sandbox_env["https_proxy"] == "https://egress.cluster.local:8443"
+    assert sandbox_env["ALL_PROXY"] == "socks5://egress.cluster.local:1080"
+    assert sandbox_env["NO_PROXY"] == "localhost,127.0.0.1,.svc"
+    assert sandbox_env["no_proxy"] == "localhost"
+    assert sandbox_env["SSL_CERT_FILE"] == "/etc/ssl/certs/ca-certificates.crt"
+    assert sandbox_env["TZ"] == "UTC"
+    assert sandbox_env["MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS"] == "240"
+    for stripped in ("HTTPS_PROXY", "http_proxy", "all_proxy", "CUSTOM_API_SECRET", "MINDROOM_CUSTOM_EXTRA"):
+        assert stripped not in sandbox_env
+    sandbox_manifest_env = _load_startup_manifest(backend, worker_key=sandbox_key)["runtime_paths"]["process_env"]
+    assert "MINDROOM_CUSTOM_EXTRA" not in sandbox_manifest_env
+    assert sandbox_manifest_env["MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS"] == "240"
+    assert "top-secret-value" not in json.dumps(sandbox_manifest_env)
+
+    backend.ensure_worker(WorkerSpec(user_agent_key, private_agent_names=frozenset()), now=10.0)
+    ordinary_body = apps_api.created_bodies[-1]
+    ordinary_env = {
+        entry["name"]: entry.get("value") for entry in ordinary_body["spec"]["template"]["spec"]["containers"][0]["env"]
+    }
+    for key, value in extra_env.items():
+        assert ordinary_env[key] == value
+    ordinary_manifest_env = _load_startup_manifest(backend, worker_key=user_agent_key)["runtime_paths"]["process_env"]
+    assert ordinary_manifest_env["MINDROOM_CUSTOM_EXTRA"] == "should-be-dropped-on-sandbox"
+
+
+def test_kubernetes_sandbox_mount_dir_fails_fast_when_runtime_class_name_is_set(tmp_path: Path) -> None:
+    """Kubernetes backend refuses mount_dir when runtimeClassName is set (e.g. gVisor) while empty scratch succeeds."""
+    storage_root = tmp_path / "storage"
+    (storage_root / "agents" / "general" / "workspace" / "scratch" / "job1").mkdir(parents=True)
+    user_agent_key = "v1:tenant-123:user_agent:@alice:example.org:general"
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=Path("config.yaml"),
+        storage_path=storage_root,
+        process_env={
+            "MINDROOM_KUBERNETES_WORKER_IMAGE": "ghcr.io/mindroom-ai/mindroom:latest",
+            "MINDROOM_KUBERNETES_WORKER_STORAGE_PVC_NAME": "mindroom-storage",
+            "MINDROOM_KUBERNETES_WORKER_RUNTIME_CLASS_NAME": "gvisor",
+        },
+    )
+    config_from_env = KubernetesWorkerBackendConfig.from_runtime(runtime_paths)
+    assert config_from_env.runtime_class_name == "gvisor"
+    backend, apps_api, _core_api = _backend(
+        runtime_paths=runtime_paths,
+        runtime_class_name=config_from_env.runtime_class_name,
+    )
+
+    mounted_spec = WorkerSpec(
+        named_worker_key(user_agent_key, "a" * 32),
+        private_agent_names=frozenset(),
+        state_scope_worker_key=user_agent_key,
+        sandbox=WorkerSandboxConfig(mount_dir="scratch/job1"),
+        mirror_grantable_credentials=False,
+    )
+    with pytest.raises(WorkerBackendError, match=r"runtimeClassName.*gvisor.*sandbox=true without mount_dir"):
+        backend.ensure_worker(mounted_spec, now=10.0)
+    assert apps_api.created_bodies == []
+
+    scratch_key = named_worker_key(user_agent_key, "b" * 32)
+    scratch_spec = WorkerSpec(
+        scratch_key,
+        private_agent_names=frozenset(),
+        state_scope_worker_key=user_agent_key,
+        sandbox=WorkerSandboxConfig(),
+        mirror_grantable_credentials=False,
+    )
+    backend.ensure_worker(scratch_spec, now=10.0)
+    assert len(apps_api.created_bodies) == 1
+    assert apps_api.created_bodies[0]["spec"]["template"]["spec"]["runtimeClassName"] == "gvisor"
+    assert STARTUP_MANIFEST_SANDBOX_MOUNT not in _load_startup_manifest(backend, worker_key=scratch_key)
+
+
+def test_kubernetes_sandbox_startup_manifest_uses_minimal_allowlist(tmp_path: Path) -> None:
+    """Sandbox startup_manifest.json excludes primary process_env and env_file_values; ordinary workers keep them."""
+    storage_root = tmp_path / "storage"
+    (storage_root / "agents" / "general" / "workspace").mkdir(parents=True)
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("models: {}\nagents: {}\n", encoding="utf-8")
+    (tmp_path / ".env").write_text("MINDROOM_DEPLOY_KEY=env-file-secret\n", encoding="utf-8")
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=storage_root,
+        process_env={"MINDROOM_DEPLOY_KEY": "process-env-secret"},
+    )
+    assert runtime_paths.process_env["MINDROOM_DEPLOY_KEY"] == "process-env-secret"
+    assert runtime_paths.env_file_values["MINDROOM_DEPLOY_KEY"] == "env-file-secret"
+
+    backend, _apps_api, _core_api = _backend(
+        runtime_paths=runtime_paths,
+        extra_env={"MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS": "180"},
+    )
+    user_agent_key = "v1:tenant-123:user_agent:@alice:example.org:general"
+    sandbox_key = named_worker_key(user_agent_key, "c" * 32)
+    backend.ensure_worker(
+        WorkerSpec(
+            sandbox_key,
+            private_agent_names=frozenset(),
+            state_scope_worker_key=user_agent_key,
+            sandbox=WorkerSandboxConfig(),
+            mirror_grantable_credentials=False,
+        ),
+        now=10.0,
+    )
+    sandbox_manifest = _load_startup_manifest(backend, worker_key=sandbox_key)
+    serialized_sandbox_manifest = json.dumps(sandbox_manifest)
+    assert "MINDROOM_DEPLOY_KEY" not in serialized_sandbox_manifest
+    assert "process-env-secret" not in serialized_sandbox_manifest
+    assert "env-file-secret" not in serialized_sandbox_manifest
+    assert sandbox_manifest["runtime_paths"]["env_file_values"] == {}
+    sandbox_process_env = sandbox_manifest["runtime_paths"]["process_env"]
+    assert sandbox_process_env["MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS"] == "180"
+    assert sandbox_process_env["MINDROOM_KUBERNETES_WORKER_STORAGE_SUBPATH_PREFIX"] == "workers"
+
+    backend.ensure_worker(WorkerSpec(user_agent_key, private_agent_names=frozenset()), now=10.0)
+    ordinary_manifest = _load_startup_manifest(backend, worker_key=user_agent_key)
+    assert ordinary_manifest["runtime_paths"]["process_env"]["MINDROOM_DEPLOY_KEY"] == "process-env-secret"
+    assert ordinary_manifest["runtime_paths"]["env_file_values"]["MINDROOM_DEPLOY_KEY"] == "env-file-secret"
+
+
+def test_kubernetes_sandbox_omits_extra_containers_and_extra_volumes(tmp_path: Path) -> None:
+    """Sandbox pods omit ordinary-worker extra_containers and extra_volumes, while ordinary pods preserve them."""
+    storage_root = tmp_path / "storage"
+    (storage_root / "agents" / "general" / "workspace").mkdir(parents=True)
+    runtime_paths = resolve_primary_runtime_paths(config_path=Path("config.yaml"), storage_path=storage_root)
+    backend, apps_api, _core_api = _backend(
+        runtime_paths=runtime_paths,
+        extra_containers=({"name": "sidecar-proxy", "image": "example.com/sidecar:1"},),
+        extra_volumes=({"name": "sidecar-secret", "emptyDir": {}},),
+    )
+    user_agent_key = "v1:tenant-123:user_agent:@alice:example.org:general"
+    sandbox_key = named_worker_key(user_agent_key, "d" * 32)
+    backend.ensure_worker(
+        WorkerSpec(
+            sandbox_key,
+            private_agent_names=frozenset(),
+            state_scope_worker_key=user_agent_key,
+            sandbox=WorkerSandboxConfig(),
+            mirror_grantable_credentials=False,
+        ),
+        now=10.0,
+    )
+    sandbox_pod_spec = apps_api.created_bodies[-1]["spec"]["template"]["spec"]
+    assert [container["name"] for container in sandbox_pod_spec["containers"]] == ["sandbox-runner"]
+    assert [volume["name"] for volume in sandbox_pod_spec["volumes"]] == ["worker-storage", "worker-tmp"]
+
+    backend.ensure_worker(WorkerSpec(user_agent_key, private_agent_names=frozenset()), now=10.0)
+    ordinary_pod_spec = apps_api.created_bodies[-1]["spec"]["template"]["spec"]
+    assert [container["name"] for container in ordinary_pod_spec["containers"]] == ["sandbox-runner", "sidecar-proxy"]
+    assert [volume["name"] for volume in ordinary_pod_spec["volumes"]] == [
+        "worker-storage",
+        "worker-tmp",
+        "sidecar-secret",
+    ]
+
+
+def test_kubernetes_sandbox_mounted_ready_cache_rechecks_rotated_mount_dir(tmp_path: Path) -> None:
+    """Rotating or symlinking mount_dir invalidates the ready-worker cache instead of reusing a stale mount."""
+    storage_root = tmp_path / "storage"
+    workspace = storage_root / "agents" / "general" / "workspace"
+    build_dir = workspace / "build"
+    build_dir.mkdir(parents=True)
+    original_ino = os.lstat(build_dir).st_ino
+
+    runtime_paths = resolve_primary_runtime_paths(config_path=Path("config.yaml"), storage_path=storage_root)
+    backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths)
+    user_agent_key = "v1:tenant-123:user_agent:@alice:example.org:general"
+    sandbox_key = named_worker_key(user_agent_key, "e" * 32)
+    spec = WorkerSpec(
+        sandbox_key,
+        private_agent_names=frozenset(),
+        state_scope_worker_key=user_agent_key,
+        sandbox=WorkerSandboxConfig(mount_dir="build"),
+        mirror_grantable_credentials=False,
+    )
+
+    backend.ensure_worker(spec, now=10.0)
+    assert len(apps_api.created_bodies) == 1
+    first_template_hash = apps_api.created_bodies[-1]["metadata"]["annotations"][ANNOTATION_TEMPLATE_HASH]
+    assert (
+        _load_startup_manifest(backend, worker_key=sandbox_key)[STARTUP_MANIFEST_SANDBOX_MOUNT]["ino"] == original_ino
+    )
+
+    # Unchanged mount_dir still hits the ready-worker cache without re-applying the Deployment.
+    backend.ensure_worker(spec, now=12.0)
+    assert len(apps_api.created_bodies) == 1
+    assert apps_api.deleted_names == []
+
+    # Rotating build -> build-old and creating a new build changes the inode, invalidating the cache.
+    rotated_dir = workspace / "build-old"
+    build_dir.rename(rotated_dir)
+    build_dir.mkdir()
+    new_ino = os.lstat(build_dir).st_ino
+    assert new_ino != original_ino
+
+    backend.ensure_worker(spec, now=14.0)
+    assert len(apps_api.created_bodies) == 2
+    assert len(apps_api.deleted_names) == 1
+    second_template_hash = apps_api.created_bodies[-1]["metadata"]["annotations"][ANNOTATION_TEMPLATE_HASH]
+    assert second_template_hash != first_template_hash
+    assert _load_startup_manifest(backend, worker_key=sandbox_key)[STARTUP_MANIFEST_SANDBOX_MOUNT]["ino"] == new_ino
+
+    # Replacing mount_dir with a symlink fails closed instead of reusing the cached ready worker.
+    build_dir.rmdir()
+    build_dir.symlink_to(rotated_dir)
+    with pytest.raises(WorkerBackendError, match="symlink"):
+        backend.ensure_worker(spec, now=16.0)

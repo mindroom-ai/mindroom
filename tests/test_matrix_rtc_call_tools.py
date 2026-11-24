@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import os
 import threading
+import time
 from contextlib import asynccontextmanager
 from dataclasses import replace
+from pathlib import Path
 from threading import Event
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any, cast
@@ -17,7 +20,7 @@ from agno.tools.function import Function, ToolResult
 from agno.tools.toolkit import Toolkit
 
 from mindroom.agent_loop.build import AgentBuild, AgentSurface, prompt_for_turn
-from mindroom.agent_loop.prompt import MARKDOWN_OUTPUT_FORMAT, PromptSpec
+from mindroom.agent_loop.prompt import MARKDOWN_OUTPUT_FORMAT, MATRIX_MARKDOWN_OUTPUT_FORMAT, PromptSpec
 from mindroom.agent_loop.spec import AgentSpec
 from mindroom.agent_loop.tools import offered_toolkits
 from mindroom.agents import create_agent
@@ -56,6 +59,7 @@ from mindroom.memory import MemoryPromptParts
 from mindroom.message_target import MessageTarget
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.session_storage.store import ConversationStore
+from mindroom.shell.background_scope import ShellBackgroundScope
 from mindroom.tool_jobs.execution import agent_tool_middleware
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
 from mindroom.tool_jobs.runtime import register_background_runtime
@@ -86,7 +90,6 @@ from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
-    from pathlib import Path
 
     from mindroom.constants import RuntimePaths
     from mindroom.history.interrupted_replay import InterruptedReplaySnapshot
@@ -222,13 +225,22 @@ def _build(*toolkits: Toolkit, policy: tuple[ToolMiddleware, ...] = (), role: st
 
 
 def test_a_call_s_build_leaves_out_the_chat_s_markdown_format() -> None:
-    """A call speaks its replies, so its build drops the Markdown line the chat prompt states."""
+    """A call speaks its replies, so its build drops the Markdown block the chat prompt states."""
     build = _build()
-    chat = replace(build, prompt=replace(build.prompt, markdown=True, turn_context="Today."))
+    chat = replace(
+        build,
+        prompt=replace(
+            build.prompt,
+            markdown=True,
+            markdown_format=MATRIX_MARKDOWN_OUTPUT_FORMAT,
+            turn_context="Today.",
+        ),
+    )
 
-    assert MARKDOWN_OUTPUT_FORMAT in system_text(prompt_for_turn(chat))
+    assert MATRIX_MARKDOWN_OUTPUT_FORMAT in system_text(prompt_for_turn(chat))
     instructions = _call_instructions(_spoken(chat))
     assert MARKDOWN_OUTPUT_FORMAT not in instructions
+    assert MATRIX_MARKDOWN_OUTPUT_FORMAT not in instructions
     assert instructions == "<your_role>\nTHE CHAT ROLE\n</your_role>\n\nToday."
 
 
@@ -245,6 +257,7 @@ def _wrap(function: Function, *, middleware: tuple[ToolMiddleware, ...] = ()):  
         agent_name=AGENT,
         authorize_operation=_authorized_call_operation,
         usage_owner=_USAGE_OWNER,
+        shell_scope=ShellBackgroundScope(),
         connect=_unconnected,
     )
 
@@ -346,6 +359,7 @@ async def test_realtime_call_tool_does_not_run_after_authorization_is_revoked() 
         agent_name=AGENT,
         authorize_operation=denied_operation,
         usage_owner=_USAGE_OWNER,
+        shell_scope=ShellBackgroundScope(),
         connect=_unconnected,
     )
 
@@ -386,7 +400,8 @@ async def test_call_agent_keeps_chat_tool_surface_and_refuses_text_chat_function
     chat_functions = _functions(chat_build)
 
     assert list(call_functions) == list(chat_functions)
-    assert MARKDOWN_OUTPUT_FORMAT in system_text(prompt_for_turn(chat_build))
+    assert MATRIX_MARKDOWN_OUTPUT_FORMAT in system_text(prompt_for_turn(chat_build))
+    assert MATRIX_MARKDOWN_OUTPUT_FORMAT not in system_text(prompt_for_turn(call_build))
     assert system_text(prompt_for_turn(call_build)) == system_text(
         prompt_for_turn(replace(chat_build, prompt=replace(chat_build.prompt, markdown=False))),
     )
@@ -2406,3 +2421,70 @@ def test_an_interrupted_voice_reply_drops_the_tools_its_fold_summarized() -> Non
 
     assert state.run_metadata["source"] == "voice"
     assert [tool.tool_call_id for tool in state.completed_tools] == ["after"]
+
+
+@pytest.mark.asyncio
+async def test_realtime_call_tools_bind_shell_background_scope_and_close_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Realtime call tools run inside a ShellBackgroundScope that tooling.close() stops alongside toolkits."""
+    from mindroom.shell.background_scope import (  # noqa: PLC0415
+        BackgroundLogPolicy,
+        ShellBackgroundScope,
+        current_shell_background_scope,
+    )
+    from mindroom.shell.execution import run_command  # noqa: PLC0415
+
+    log: list[str] = []
+    observed: dict[str, Any] = {}
+
+    async def run_bg() -> str:
+        scope = current_shell_background_scope()
+        assert isinstance(scope, ShellBackgroundScope)
+        result = await run_command(
+            scope.records,
+            namespace=f"shell-scope:{scope.scope_id}",
+            argv=["bash", "-c", "echo voice-start; sleep 30"],
+            env=dict(os.environ),
+            cwd=str(tmp_path),
+            tail=10,
+            timeout=0.15,
+            on_timeout="background",
+            background_log=BackgroundLogPolicy(log_dir=str(tmp_path / "logs")),
+        )
+        assert result.handle is not None
+        record = scope.records[result.handle]
+        observed["scope"] = scope
+        observed["pid"] = record.pid
+        observed["log_path"] = record._log_path
+        return result.message
+
+    build = _connected_build(log, runner=("run_bg", run_bg))
+    tooling = await _call_tools_over(build, tmp_path, monkeypatch)
+    tools = dict(zip(_tool_names(tooling.tools), tooling.tools, strict=True))
+
+    output = await tools["run_bg"]({})
+    assert "Still running" in output
+    scope = observed["scope"]
+    pid = observed["pid"]
+    os.kill(pid, 0)
+    assert not scope.closed
+    assert len(scope.records) == 1
+
+    assert tooling.close is not None
+    await tooling.close()
+
+    assert scope.closed
+    assert scope.records == {}
+    assert log == ["runner connect", "runner close"]
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            break
+        await asyncio.sleep(0.02)
+    else:
+        pytest.fail(f"Process {pid} remained alive after tooling.close()")
+    assert "[MindRoom: stopped when turn ended]" in Path(observed["log_path"]).read_text(encoding="utf-8")

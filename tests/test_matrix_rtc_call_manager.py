@@ -762,7 +762,7 @@ async def test_oldest_member_on_a_foreign_service_blocks_the_call_under_either_s
             assert state.session is None
             assert state.retry_task is None
             assert state.logical_call is not None
-            assert state.logical_call.join_blocked
+            assert state.logical_call.join_block is not None
         client.get_openid_token.assert_not_awaited()
 
         await _reconcile_roster(manager, client, room)
@@ -2350,7 +2350,7 @@ async def test_agent_failure_during_the_sfu_connect_ends_the_join_before_its_mem
     assert _call_state(manager).session is None
     assert _call_state(manager).retry_task is None
     assert _call_state(manager).logical_call is not None
-    assert _call_state(manager).logical_call.join_blocked
+    assert _call_state(manager).logical_call.join_block is not None
 
 
 @pytest.mark.asyncio
@@ -2514,7 +2514,9 @@ async def test_agent_that_failed_before_a_media_error_is_skipped_not_retried(
     await asyncio.wait_for(_deliver(manager, manager.on_room_event(_room(), _member_unknown_event())), timeout=1)
     await _wait_until(lambda: bridge.closed)
     await _wait_until(
-        lambda: _call_state(manager).logical_call is not None and _call_state(manager).logical_call.join_blocked,
+        lambda: (
+            _call_state(manager).logical_call is not None and _call_state(manager).logical_call.join_block is not None
+        ),
     )
 
     assert _call_state(manager).session is None
@@ -2666,6 +2668,126 @@ async def test_a_batch_of_loss_records_ends_a_denied_call_once(tmp_path: Path, *
 
     assert bridge.closes == 1
     assert _call_state(manager).session is None
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_manager_uses_reloaded_call_profile_on_next_call(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An idle call manager picks up an edited live profile on the next call without restarting."""
+    tooling_kwargs: dict[str, object] = {}
+
+    async def fake_tools(**kwargs: object) -> CallAgentTooling:
+        tooling_kwargs.update(kwargs)
+        return CallAgentTooling(
+            tools=(),
+            instructions="",
+            responder=AsyncMock(return_value=CallAgentResponse("ok")),
+            get_system_prompt=AsyncMock(return_value="System prompt."),
+            execution_identity=_call_execution_identity_from_tool_kwargs(kwargs),
+        )
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.build_call_tools", fake_tools)
+    monkeypatch.setattr(
+        "mindroom.matrix_rtc.call_backends.get_api_key_for_service",
+        lambda service, _paths: "sk-live" if service == "openai_live" else None,
+    )
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event())
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path, _live_config(agent_model="old-model"))
+
+    reloaded = _live_config(agent_model="local")
+    reloaded.calls.profiles["live"].voice = "cedar"
+    manager.update_config(reloaded)
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+
+    options = bridge.agent_options
+    assert isinstance(options, LiveVoiceAgentOptions)
+    assert options.voice == "cedar"
+    assert tooling_kwargs["active_model_name"] == "local"
+    assert tooling_kwargs["config"] is reloaded
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_update_config_retries_waiting_caller_after_missing_credential_is_fixed(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Fixing a broken call credential retries a waiting caller blocked by the earlier config failure."""
+    monkeypatch.setattr(
+        "mindroom.matrix_rtc.call_backends.get_api_key_for_service",
+        lambda service, _paths: "sk-openai" if service == "openai" else None,
+    )
+    room = _room()
+    client = _client()
+    client.rooms = {ROOM_ID: room}
+    client.room_get_state.return_value = _state_response(_remote_member_event())
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path, _config(credentials_service="missing"))
+
+    await _deliver(manager, manager.on_room_event(room, _member_unknown_event()))
+    logical_call = _call_state(manager).logical_call
+    assert logical_call is not None
+    assert logical_call.join_block == "config"
+    assert bridge.connected_grant is None
+
+    # A reload with the credential still missing fails and blocks as a config failure again.
+    still_missing = _config(credentials_service="missing")
+    still_missing.agents["helper"].display_name = "Helper Renamed"
+    manager.update_config(still_missing)
+    await asyncio.gather(*list(manager._background_tasks))
+    assert bridge.connected_grant is None
+    assert logical_call.join_block == "config"
+
+    # Fixing the credential clears the config block and connects the still-waiting caller.
+    manager.update_config(_config(credentials_service="openai"))
+    await asyncio.gather(*list(manager._background_tasks))
+    while tasks := tuple(manager._reconcile_tasks.values()):
+        await asyncio.gather(*tasks)
+
+    assert bridge.connected_grant is not None
+    assert _call_state(manager).session is not None
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_update_config_does_not_reopen_deliberately_ended_session(tmp_path: Path) -> None:
+    """Editing a call profile must not reopen a call session that ended non-retryably."""
+    room = _room()
+    client = _client()
+    client.rooms = {ROOM_ID: room}
+    client.room_get_state.return_value = _state_response(_remote_member_event())
+    bridges: list[FakeBridge] = []
+    manager = _manager(client, FakeBridge(), tmp_path, _config(), bridge_factory=_bridge_per_session(bridges))
+
+    await _deliver(manager, manager.on_room_event(room, _member_unknown_event()))
+    assert len(bridges) == 1
+    assert bridges[0].connected_grant is not None
+    assert bridges[0].agent_options is not None
+    assert bridges[0].agent_options.on_session_terminated is not None
+
+    bridges[0].agent_options.on_session_terminated(False)
+    await asyncio.gather(*list(manager._background_tasks))
+    logical_call = _call_state(manager).logical_call
+    assert bridges[0].closed
+    assert _call_state(manager).session is None
+    assert logical_call is not None
+    assert logical_call.join_block == "terminal"
+
+    reloaded = _config()
+    reloaded.calls.profiles["realtime"].voice = "cedar"
+    manager.update_config(reloaded)
+    await asyncio.gather(*list(manager._background_tasks))
+    while tasks := tuple(manager._reconcile_tasks.values()):
+        await asyncio.gather(*tasks)
+
+    assert len(bridges) == 1
+    assert _call_state(manager).session is None
+    assert logical_call.join_block == "terminal"
     await manager.shutdown()
 
 
@@ -5369,6 +5491,7 @@ async def test_call_retries_reuse_per_call_session_id(
             room.room_id,
             requester_id=members[0].user_id,
             session_id=logical_call.agent_session_id,
+            call_config=manager._call_config,
         )
         return next(results)
 
@@ -5681,7 +5804,7 @@ async def test_nonretryable_terminal_close_stays_quarantined_until_next_call(tmp
     assert _call_state(manager).session is None
     logical_call = _call_state(manager).logical_call
     assert logical_call is not None
-    assert logical_call.join_blocked
+    assert logical_call.join_block is not None
 
     client.room_get_state.return_value = _state_response()
     await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
@@ -5723,7 +5846,7 @@ async def test_nonretryable_terminal_close_reopens_when_the_caller_rejoins(tmp_p
     rejoined_call = _call_state(manager).logical_call
     assert rejoined_call is not None
     assert rejoined_call is not abandoned_call
-    assert not rejoined_call.join_blocked
+    assert rejoined_call.join_block is None
     await manager.shutdown()
 
 

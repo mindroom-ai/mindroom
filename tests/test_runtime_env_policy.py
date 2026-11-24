@@ -666,3 +666,48 @@ def test_smtp_url_is_secret_env() -> None:
     assert runtime_env_policy.isolated_worker_runtime_env({"MINDROOM_SMTP_URL": "x"}) == {}
     assert not runtime_env_policy.is_shell_passthrough_allowed_env_name("MINDROOM_SMTP_URL")
     assert not runtime_env_policy.is_worker_extra_env_name("MINDROOM_SMTP_URL")
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("http://proxy.example:3128", True),
+        ("http://proxy.example:3128/", True),
+        ("https://proxy.example:8443", True),
+        ("socks5://proxy.example:1080", True),
+        ("socks5h://proxy.example:1080", True),
+        ("proxy.example:3128", True),
+        ("https://proxy.example/?access_token=secret", False),
+        ("http://proxy.example/token", False),
+        ("http://proxy.example/#frag", False),
+        ("http://proxy.example/;param=secret", False),
+        ("ftp://proxy.example:21", False),
+        ("http://user:pass@proxy.example:3128", False),
+        ("socks5h://proxy.example:1080/?access_token=secret", False),
+        ("http://proxy.example:badport", False),
+        ("", False),
+    ],
+)
+def test_is_credential_free_proxy_url(url: str, expected: bool) -> None:
+    """Proxy URL allowlist accepts only credential-free http/https/socks5/socks5h origin URLs."""
+    assert runtime_env_policy.is_credential_free_proxy_url(url) is expected
+
+
+def test_sandbox_proxy_env_filters_reject_query_path_fragment_and_unsupported_schemes() -> None:
+    """Sandbox proxy filters drop URLs carrying query strings, paths, fragments, or unsupported schemes."""
+    env = {
+        "HTTP_PROXY": "http://proxy.example:3128/",
+        "HTTPS_PROXY": "https://proxy.example/?access_token=secret",
+        "http_proxy": "http://proxy.example/token",
+        "https_proxy": "http://proxy.example/#frag",
+        "ALL_PROXY": "ftp://proxy.example:21",
+        "all_proxy": "socks5h://proxy.example:1080",
+        "NO_PROXY": "localhost,.svc",
+    }
+    expected = {
+        "HTTP_PROXY": "http://proxy.example:3128/",
+        "all_proxy": "socks5h://proxy.example:1080",
+        "NO_PROXY": "localhost,.svc",
+    }
+    assert runtime_env_policy.strip_authenticated_proxy_env(env) == expected
+    assert runtime_env_policy.sandbox_worker_extra_env(env) == expected

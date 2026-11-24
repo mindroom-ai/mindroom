@@ -96,10 +96,52 @@ def test_earlier_turns_become_tagged_history_before_the_new_user_message() -> No
     history, _, current = text.partition("</conversation-checkpoint>")
     assert history.startswith("<conversation-checkpoint>")
     assert "<user>\nWhat is the marker for a?\n</user>" in history
-    assert tagged_json(history, "tool-call") == [{"id": "call-1", "name": "lookup", "input": {"key": "a"}}]
-    assert tagged_json(history, "tool-result") == [{"id": "call-1", "name": "lookup", "output": "LILAC-HERON"}]
+    assert tagged_json(history, "tool-call") == [
+        {"id": "call-1", "name": "mcp__mindroom__lookup", "input": {"key": "a"}},
+    ]
+    assert tagged_json(history, "tool-result") == [
+        {"id": "call-1", "name": "mcp__mindroom__lookup", "output": "LILAC-HERON"},
+    ]
     assert "<assistant>\nIt is LILAC-HERON.\n</assistant>" in history
     assert current.strip() == "And for b?"
+
+
+def test_rebuilt_history_names_each_tool_as_claude_code_calls_it() -> None:
+    """Claude copies the names history shows, and a bare or uncut name is not a tool Claude Code has."""
+    long_name = "b" * 90
+    _system, blocks = rebuild_input(
+        [
+            Message(role="user", content="Look it up."),
+            Message(role="assistant", tool_calls=[tool_call(long_name, "call-1", key="a")]),
+            Message(role="tool", content="x", tool_call_id="call-1", tool_name=long_name),
+            Message(role="user", content="Again."),
+        ],
+        _PROVIDER,
+    )
+
+    called = "mcp__mindroom__" + _short_name(long_name)
+    text = _text(blocks)
+    assert [call["name"] for call in tagged_json(text, "tool-call")] == [called]
+    assert [result["name"] for result in tagged_json(text, "tool-result")] == [called]
+
+
+@pytest.mark.parametrize("name", [None, 7])
+def test_rebuilt_history_keeps_a_call_without_a_usable_name(name: object) -> None:
+    """A provider can store a call without a name or with a malformed one; rebuilding its history must not fail."""
+    unnamed = {"id": "call-1", "type": "function", "function": {"name": name, "arguments": "{}"}}
+    _system, blocks = rebuild_input(
+        [
+            Message(role="user", content="Look it up."),
+            Message(role="assistant", tool_calls=[unnamed]),
+            Message(role="tool", content="refused", tool_call_id="call-1"),
+            Message(role="user", content="Again."),
+        ],
+        _PROVIDER,
+    )
+
+    text = _text(blocks)
+    assert [call["name"] for call in tagged_json(text, "tool-call")] == [name]
+    assert [result["name"] for result in tagged_json(text, "tool-result")] == [name]
 
 
 def test_nothing_a_rebuilt_conversation_said_can_close_its_checkpoint_or_pose_as_a_turn() -> None:
@@ -154,7 +196,9 @@ def test_a_rebuilt_tool_result_is_named_by_the_call_it_answers() -> None:
         _PROVIDER,
     )
 
-    assert tagged_json(_text(blocks), "tool-result") == [{"id": "call-1", "name": "lookup", "output": "x"}]
+    assert tagged_json(_text(blocks), "tool-result") == [
+        {"id": "call-1", "name": "mcp__mindroom__lookup", "output": "x"},
+    ]
 
 
 def test_history_that_ends_on_tool_results_asks_claude_to_continue_from_them() -> None:
@@ -168,7 +212,9 @@ def test_history_that_ends_on_tool_results_asks_claude_to_continue_from_them() -
     )
 
     text = _text(blocks)
-    assert tagged_json(text, "tool-result") == [{"id": "call-1", "name": "lookup", "output": "boom", "is_error": True}]
+    assert tagged_json(text, "tool-result") == [
+        {"id": "call-1", "name": "mcp__mindroom__lookup", "output": "boom", "is_error": True},
+    ]
     assert text.endswith("Continue from the results above.")
 
 

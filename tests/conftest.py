@@ -1,6 +1,7 @@
 """Test configuration and fixtures for MindRoom tests."""
 
 import asyncio
+import fcntl
 import gc
 import ipaddress
 import json
@@ -4724,3 +4725,22 @@ def create_agno_2_sessions_db(path: "Path") -> "Path":
     finally:
         connection.close()
     return path
+
+
+@pytest.fixture
+def flock_access_modes(monkeypatch: pytest.MonkeyPatch) -> list[int]:
+    """Record the access mode of every descriptor locked with flock, while still taking the real lock.
+
+    NFS emulates flock with POSIX locks: a shared lock needs a readable descriptor and an exclusive
+    lock a writable one, so lock descriptors must be opened read-write to work on NFS.
+    """
+    modes: list[int] = []
+    real_flock = fcntl.flock
+
+    def recording_flock(fd: int, operation: int) -> None:
+        if operation != fcntl.LOCK_UN:
+            modes.append(fcntl.fcntl(fd, fcntl.F_GETFL) & os.O_ACCMODE)
+        real_flock(fd, operation)
+
+    monkeypatch.setattr(fcntl, "flock", recording_flock)
+    return modes

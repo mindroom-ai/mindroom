@@ -19,10 +19,13 @@ from mindroom.api.sandbox_runner import (
     app_runner_token,
     app_runtime_config,
     app_runtime_paths,
+    app_sandbox_mount,
+    close_inprocess_shell_scopes,
     initialize_sandbox_runner_app,
     load_config_from_startup_runtime,
     start_eager_worker_setup,
     startup_runner_token_from_env,
+    startup_sandbox_mount_from_env,
     validate_runner_token,
 )
 from mindroom.api.sandbox_runner import router as sandbox_runner_router
@@ -54,14 +57,17 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     except TypeError:
         runner_token = startup_runner_token_from_env()
         runtime_paths, config = load_config_from_startup_runtime()
+        sandbox_mount = startup_sandbox_mount_from_env()
     else:
         config = app_runtime_config(app)
         runner_token = app_runner_token(app)
+        sandbox_mount = app_sandbox_mount(app)
     initialize_sandbox_runner_app(
         app,
         runtime_paths,
         config=config,
         runner_token=runner_token,
+        sandbox_mount=sandbox_mount,
     )
     computer = None
     dedicated_key = sandbox_exec.runner_dedicated_worker_key(runtime_paths)
@@ -91,6 +97,7 @@ async def _lifespan(app: FastAPI) -> AsyncIterator[None]:
     finally:
         if eager_setup is not None:
             eager_setup.cancel()
+        close_inprocess_shell_scopes()
         await close_worker_terminals(app)
         await stop_worker_ssh(app)
         await close_worker_services(app)

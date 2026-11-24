@@ -27,9 +27,9 @@ from mindroom.llm.provider import ReasoningDelta, TextDelta, ToolCallReady, Usag
 from mindroom.llm.usage import add_usage
 from mindroom.providers.anthropic.wire import parse_claude_usage, stop_reason_of
 from mindroom.providers.assistant_turn import finished_turn
-from mindroom.providers.claude_code.bridge import TOOL_PREFIX
 from mindroom.providers.claude_code.prompt import answer_of
 from mindroom.providers.claude_code.session import NOT_SIGNED_IN
+from mindroom.providers.claude_code.tool_naming import TOOL_PREFIX
 from mindroom.providers.errors import classify_provider_error
 
 if TYPE_CHECKING:
@@ -113,7 +113,7 @@ class _Step:
             if message.subtype == "init":
                 session.inventoried = _only_mindrooms_tools(message.data, session)
         elif isinstance(message, RateLimitEvent):
-            session.rejected = message.rate_limit_info
+            session.record_rate_limit(message.rate_limit_info)
         elif isinstance(message, UserMessage):
             # Claude Code says which tool results it took before its model goes on with them.
             blocks = message.content if isinstance(message.content, list) else []

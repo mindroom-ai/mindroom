@@ -39,6 +39,8 @@ _PART_KINDS: dict[str, MediaKind] = {
     "image_url": "image",
     "input_image": "image",
     "input_audio": "audio",
+    "video_url": "video",
+    "input_video": "video",
     "file": "file",
     "input_file": "file",
 }
@@ -207,10 +209,10 @@ def _files_named(names: set[str], messages: Sequence[Message], *, chat: bool) ->
 
 
 def _media_at_urls(text: str, messages: Sequence[Message]) -> frozenset[str]:
-    """Return the ids of the images and files sent by URL whose URL ``text`` quotes."""
+    """Return the ids of the images, videos, and files sent by URL whose URL ``text`` quotes."""
     return frozenset(
         item.id
         for message in messages
-        for item in (*(message.images or ()), *(message.files or ()))
+        for item in (*(message.images or ()), *(message.videos or ()), *(message.files or ()))
         if item.url and item.url in text
     )

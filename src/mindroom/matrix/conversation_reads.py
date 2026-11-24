@@ -51,6 +51,10 @@ logger = get_logger(__name__)
 # "nothing recent" rather than a page-by-page search.
 _LATEST_SENDER_MESSAGE_WINDOW_MESSAGES = 50
 
+# Bounded refetch passes for a strict read when a streaming edit replaces a
+# pending revision while its refetch is in flight.
+_MAX_STRICT_READ_REFRESH_PASSES = 3
+
 
 class ThreadReadMode(Enum):
     """Why one caller is reading a conversation, in the caller's own terms.
@@ -352,6 +356,11 @@ class ConversationReader:
     ) -> ConversationPage:
         """Return a complete bounded page, hydrating and refetching as needed.
 
+        Retries resolving up to a small bound when a newer revision moves the
+        pending debt underneath an in-flight refetch (for example, a streaming
+        sidecar edit landing during download), while failing after one pass
+        when the debt is unchanged.
+
         Raises ``ConversationReadError`` rather than returning a page with
         content missing. A caller building a prompt cannot tell an omitted
         message from a conversation that never had one, so silently dropping it
@@ -359,21 +368,26 @@ class ConversationReader:
         """
         with _homeserver_failure_fails_the_read(room_id, thread_id):
             await self.hydrator.ensure_hydrated(room_id=room_id, thread_id=thread_id)
-            page = await self.store.read_conversation(
-                room_id=room_id,
-                thread_id=thread_id,
-                limit=limit,
-                before=before,
-            )
-            if not page.refresh_pending:
-                return page
-            await self.hydrator.resolve_refreshes(page.refresh_pending)
         page = await self.store.read_conversation(
             room_id=room_id,
             thread_id=thread_id,
             limit=limit,
             before=before,
         )
+        for _ in range(_MAX_STRICT_READ_REFRESH_PASSES):
+            if not page.refresh_pending:
+                return page
+            pending = page.refresh_pending
+            with _homeserver_failure_fails_the_read(room_id, thread_id):
+                await self.hydrator.resolve_refreshes(pending)
+            page = await self.store.read_conversation(
+                room_id=room_id,
+                thread_id=thread_id,
+                limit=limit,
+                before=before,
+            )
+            if page.refresh_pending == pending:
+                break
         if page.refresh_pending:
             msg = (
                 f"Conversation {room_id}/{thread_id} has "

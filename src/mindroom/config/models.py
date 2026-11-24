@@ -69,7 +69,6 @@ _DEFER_PROHIBITED_CONTROL_TOOLS = frozenset(
         "dynamic_tools",
         "self_config",
         "skill_manage",
-        "triggers",
     },
 )
 
@@ -1037,6 +1036,19 @@ def split_model_reference(reference: str) -> tuple[str, str | None]:
     """Split a model reference ``name@level`` into the model name and the level, which is None without ``@``."""
     name, separator, level = reference.partition("@")
     return name, level if separator else None
+
+
+def unsupported_level_message(models: Mapping[str, ModelConfig], reference: object) -> str | None:
+    """Describe why ``name@level`` is rejected when ``name`` exists but ``level`` is not one of its levels."""
+    if not isinstance(reference, str):
+        return None
+    name, level = split_model_reference(reference)
+    if level is None or (model := models.get(name)) is None:
+        return None
+    if model.reasoning is not None and level in model.reasoning.levels:
+        return None
+    supported = ", ".join(model.reasoning.levels) if model.reasoning else "none"
+    return f"unsupported level {level!r} for {name}; supported: {supported}"
 
 
 class ModelTable(dict[str, ModelConfig]):

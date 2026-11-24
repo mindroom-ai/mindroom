@@ -14,6 +14,7 @@ Generated from `docs/` via `.github/scripts/generate_skill_references.py`.
 |  | Home | `index.md` | `index.md` | `page__index.md` |
 |  | Showcase | `showcase.md` | `showcase/index.md` | `page__showcase__index.md` |
 | Get Started | Install & First Run | `getting-started.md` | `getting-started/index.md` | `page__getting-started__index.md` |
+| Get Started | MindRoom Chat | `mindroom-chat.md` | `mindroom-chat/index.md` | `page__mindroom-chat__index.md` |
 | Get Started | macOS App | `installation/macos-app.md` | `installation/macos-app/index.md` | `page__installation__macos-app__index.md` |
 | Get Started | iOS App | `ios.md` | `ios/index.md` | `page__ios__index.md` |
 | Get Started | Dashboard | `dashboard.md` | `dashboard/index.md` | `page__dashboard__index.md` |
@@ -103,6 +104,7 @@ Generated from `docs/` via `.github/scripts/generate_skill_references.py`.
 | Deployment | Agent Keys | `deployment/egress-broker.md` | `deployment/egress-broker/index.md` | `page__deployment__egress-broker__index.md` |
 | Deployment | Approved Egress | `deployment/approved-egress.md` | `deployment/approved-egress/index.md` | `page__deployment__approved-egress__index.md` |
 | Deployment | Trusted Upstream Auth | `deployment/trusted-upstream-auth.md` | `deployment/trusted-upstream-auth/index.md` | `page__deployment__trusted-upstream-auth__index.md` |
+| Deployment | OIDC & Single Sign-On | `deployment/oidc-sso.md` | `deployment/oidc-sso/index.md` | `page__deployment__oidc-sso__index.md` |
 | Deployment | Cloudflare Access & Tunnel | `deployment/cloudflare-access.md` | `deployment/cloudflare-access/index.md` | `page__deployment__cloudflare-access__index.md` |
 | Deployment | Data Storage & Journal | `deployment/storage.md` | `deployment/storage/index.md` | `page__deployment__storage__index.md` |
 | Deployment | Config Bundles | `deployment/config-bundles.md` | `deployment/config-bundles/index.md` | `page__deployment__config-bundles__index.md` |

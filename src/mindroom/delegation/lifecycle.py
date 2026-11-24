@@ -17,6 +17,7 @@ from mindroom.ai_run_metadata import model_payload, prior_usage_by_run, prompt_i
 from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowed_for_responder
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.budgets.pricing import model_prices, run_cost_usd
+from mindroom.config.models import unsupported_level_message
 from mindroom.constants import runtime_matrix_homeserver
 from mindroom.delegation.activity import ActivityFeed
 from mindroom.delegation.audit import (
@@ -49,6 +50,7 @@ from mindroom.llm.runs import RunRecord, RunStatus
 from mindroom.logging_config import get_logger
 from mindroom.redaction import redact_sensitive_text
 from mindroom.requester_identity import is_access_checked_requester_id
+from mindroom.shell.background_scope import shell_background_scope
 from mindroom.tool_jobs.control import job_stopped_by_shutdown
 from mindroom.tool_system.progress import cap_report, report_tool_progress
 from mindroom.tool_system.registry import builtin_tool_registry
@@ -487,11 +489,12 @@ async def child_run_context(
         # The operator's current setting decides, not the snapshot the parent's response started with.
         placement = child_placement(child, live_delegation_config(config), runtime_paths)
         # The child's run collects what its subagents cost, a resumed run too, which has no turn of its own.
-        with (
-            dedicated_worker_placement(child.session_id, placement),
-            receiving_subagent_cost(observation.subagent_cost),
-        ):
-            yield observation
+        async with shell_background_scope():
+            with (
+                dedicated_worker_placement(child.session_id, placement),
+                receiving_subagent_cost(observation.subagent_cost),
+            ):
+                yield observation
     except BaseException as error:
         cancelled = isinstance(error, asyncio.CancelledError)
         reason = "Delegation cancelled." if cancelled else redact_sensitive_text(failure_text(error))
@@ -758,8 +761,10 @@ def authorize_delegation(  # noqa: PLR0911
     if depth >= MAX_DELEGATION_DEPTH:
         return "Cannot delegate: the maximum delegation depth was reached."
     if model is not None and (not isinstance(model, str) or model not in active_config.models):
+        reason = unsupported_level_message(active_config.models, model)
         available_models = ", ".join(sorted(active_config.models))
-        return f"Cannot delegate: Unknown model '{model}'. Available models: {available_models}."
+        detail = reason or f"Unknown model '{model}'. Available models: {available_models}"
+        return f"Cannot delegate: {detail}."
     return active_config
 
 

@@ -36,14 +36,19 @@ def minimal_bash_toolkit(
     ) -> str | ToolValue:
         """Run a Bash command and return its output.
 
-        Start servers and other long work detached with ``nohup cmd > out.log 2>&1 &`` and read the log in later
-        commands. Wait for something inside one command, such as ``until <check>; do sleep 10; done`` with a
-        ``timeout``, not with repeated ``sleep`` calls: every call is a model turn.
+        By default the call waits at most 120 seconds in the foreground. A command still running after 120 seconds
+        (with ``timeout`` omitted or > 120) moves to the background and returns its PID, live log path, and
+        wait/stop commands; it stops automatically after ``timeout`` (if set) or when the turn ends, and cannot make
+        new ``mindroom-agent`` CLI calls after handoff. Start servers or work meant to outlive the turn detached with
+        ``nohup cmd > out.log 2>&1 &`` and read the log in later commands. Wait for something inside one command,
+        such as ``until <check>; do sleep 10; done`` with a ``timeout``, not with repeated ``sleep`` calls: every
+        call is a model turn.
 
         Args:
             command: The Bash command to run.
-            timeout: Seconds after which the command and every process it started are stopped, returning the output
-                so far; null stops it after 120 seconds, or never when it runs as part of a background job.
+            timeout: Seconds after which the command and every process it started are stopped. Values <= 120 stop
+                the command inline and return the output so far; null or > 120 moves it to the background after 120
+                seconds and stops it after ``timeout`` (if set) or when the turn ends.
             tail: The number of output lines to return.
 
         """

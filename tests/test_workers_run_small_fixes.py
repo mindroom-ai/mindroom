@@ -327,6 +327,7 @@ def _install_fake_worker_proxy(
                 kwargs={"args": ["sleep", "60"]},
             ),
             handle,
+            None,
         ),
     )
     monkeypatch.setattr("mindroom.tool_system.sandbox_proxy.httpx.Client", _FakeHttpClient)

@@ -8,6 +8,7 @@ import threading
 import time
 from contextvars import copy_context
 from dataclasses import replace
+from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
 import httpx
@@ -40,13 +41,14 @@ from mindroom.tool_system.worker_routing import (
 from mindroom.workers import named as named_module
 from mindroom.workers.backend import WorkerBackendError
 from mindroom.workers.backends import kubernetes as kubernetes_backend_module
-from mindroom.workers.models import WorkerHandle, WorkerSpec
+from mindroom.workers.models import WorkerHandle, WorkerSandboxConfig, WorkerSpec
 from mindroom.workers.named import (
     NamedWorkerCall,
     NamedWorkerError,
     ensure_named_worker,
     named_worker_call,
     named_workers_refusal,
+    sandbox_mount_relative_path,
 )
 from mindroom.workers.runtime import idle_worker_cleanup_owner
 from tests.authorization_helpers import make_test_tool_runtime_context
@@ -59,7 +61,6 @@ from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Callable, Iterator
-    from pathlib import Path
 
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
@@ -203,6 +204,9 @@ def _call(
     name: object,
     resource_profile: object = None,
     *,
+    sandbox: object = None,
+    mount_dir: object = None,
+    mount_read_only: object = None,
     turn_id: str | None = _TURN,
     agent_name: str | None = "code",
     config: Config | None = _CONFIG,
@@ -210,6 +214,9 @@ def _call(
     call = named_worker_call(
         name,
         resource_profile,
+        sandbox=sandbox,
+        mount_dir=mount_dir,
+        mount_read_only=mount_read_only,
         agent_name=agent_name,
         config=config,
         runtime_paths=runtime_paths,
@@ -222,7 +229,8 @@ def _call(
 def _run(backend: object, call: NamedWorkerCall, normal_key: str = _ALICE) -> WorkerHandle:
     """Reach the worker ``call`` names beside ``normal_key``, as one routed shell call does."""
     spec = call.worker_spec(WorkerSpec(normal_key, private_agent_names=frozenset()))
-    return ensure_named_worker(cast("WorkerBackend", backend), spec, call)
+    handle, _admitted_spec = ensure_named_worker(cast("WorkerBackend", backend), spec, call)
+    return handle
 
 
 async def _retired(backend: _FakeBackend) -> list[str]:
@@ -282,7 +290,8 @@ async def _name_at_the_same_time(
         call = _call(runtime_paths, "e2e-0", profile)
         spec = call.worker_spec(WorkerSpec(_ALICE, private_agent_names=frozenset()))
         named.wait(SETTLE_TIMEOUT_SECONDS)
-        return ensure_named_worker(cast("WorkerBackend", backend), spec, call)
+        handle, _admitted_spec = ensure_named_worker(cast("WorkerBackend", backend), spec, call)
+        return handle
 
     async with execution_resources(response=True):
         return await asyncio.gather(*(asyncio.to_thread(run, profile) for profile in profiles), return_exceptions=True)
@@ -657,10 +666,197 @@ def test_a_call_names_a_worker_only_with_usable_arguments_inside_a_reply(
 
 
 def test_a_call_that_names_no_worker_asks_for_none(runtime_paths: RuntimePaths) -> None:
-    """Without the two arguments a call runs in its normal worker, whatever its agent may do."""
+    """Without a named-worker request, including default false booleans, a call runs in its normal worker."""
     assert (
         named_worker_call(None, None, agent_name="code", config=None, runtime_paths=runtime_paths, turn_id=None) is None
     )
+    assert (
+        named_worker_call(
+            None,
+            None,
+            sandbox=False,
+            mount_read_only=False,
+            agent_name="code",
+            config=None,
+            runtime_paths=runtime_paths,
+            turn_id=None,
+        )
+        is None
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("name", "kwargs", "message"),
+    [
+        (None, {"sandbox": True}, "set worker too"),
+        (None, {"mount_dir": "scratch"}, "set worker too"),
+        (None, {"mount_read_only": True}, "set worker too"),
+        (None, {"sandbox": "true"}, "sandbox must be a boolean"),
+        (None, {"mount_dir": 123}, "mount_dir must be a workspace-relative directory path string"),
+        (None, {"mount_read_only": "yes"}, "mount_read_only must be a boolean"),
+        ("s1", {"sandbox": False, "mount_dir": "scratch"}, "mount_dir always runs in sandbox mode"),
+        ("s1", {"mount_read_only": True}, "mount_read_only requires mount_dir"),
+        ("s1", {"sandbox": True, "mount_read_only": True}, "mount_read_only requires mount_dir"),
+        ("s1", {"mount_dir": ""}, "Invalid mount_dir"),
+        ("s1", {"mount_dir": "   "}, "Invalid mount_dir"),
+        ("s1", {"mount_dir": "/etc"}, "Invalid mount_dir"),
+        ("s1", {"mount_dir": "../escape"}, "Invalid mount_dir"),
+        ("s1", {"mount_dir": "a/../b"}, "Invalid mount_dir"),
+        ("s1", {"mount_dir": "$HOME/sub"}, "Invalid mount_dir"),
+        ("s1", {"mount_dir": "~/sub"}, "Invalid mount_dir"),
+        ("s1", {"mount_dir": "a\x00b"}, "NUL bytes"),
+        ("s1", {"mount_dir": "."}, "not the workspace root"),
+        ("s1", {"mount_dir": "./"}, "not the workspace root"),
+        ("s1", {"mount_dir": ".mindroom"}, "hidden or dot-prefixed"),
+        ("s1", {"mount_dir": ".config"}, "hidden or dot-prefixed"),
+        ("s1", {"mount_dir": "a/.git"}, "hidden or dot-prefixed"),
+        ("s1", {"mount_dir": "./.mindroom"}, "hidden or dot-prefixed"),
+    ],
+)
+async def test_sandbox_argument_validation(
+    runtime_paths: RuntimePaths,
+    name: object,
+    kwargs: dict[str, object],
+    message: str,
+) -> None:
+    """Invalid sandbox, mount_dir, and mount_read_only combinations raise NamedWorkerError."""
+    async with execution_resources(response=True):
+        with pytest.raises(NamedWorkerError, match=message):
+            named_worker_call(
+                name,
+                None,
+                agent_name="code",
+                config=_CONFIG,
+                runtime_paths=runtime_paths,
+                turn_id=_TURN,
+                **kwargs,
+            )
+
+
+@pytest.mark.asyncio
+async def test_sandbox_options_lock_on_first_call_and_reuse_without_repeating(
+    runtime_paths: RuntimePaths,
+    backend: _FakeBackend,
+) -> None:
+    """First admission locks sandbox settings; follow-up calls reuse them and reject mismatches."""
+    async with execution_resources(response=True):
+        first_call = _call(runtime_paths, "sbx", mount_dir="./scratch/job1/", mount_read_only=True)
+        assert first_call.sandbox == WorkerSandboxConfig(mount_dir="scratch/job1", mount_read_only=True)
+        assert first_call.sandbox_specified is True
+
+        first_spec_in = first_call.worker_spec(WorkerSpec(_ALICE, private_agent_names=frozenset()))
+        assert first_spec_in.mirror_grantable_credentials is False
+        first_handle, first_admitted = ensure_named_worker(cast("WorkerBackend", backend), first_spec_in, first_call)
+        assert first_admitted.sandbox == WorkerSandboxConfig(mount_dir="scratch/job1", mount_read_only=True)
+        assert first_admitted.mirror_grantable_credentials is False
+
+        # Follow-up omitting sandbox flags inherits the locked sandbox and still strips credential mirroring.
+        followup_call = _call(runtime_paths, "sbx")
+        assert followup_call.sandbox is None
+        assert followup_call.sandbox_specified is False
+        followup_spec_in = followup_call.worker_spec(WorkerSpec(_ALICE, private_agent_names=frozenset()))
+        followup_handle, followup_admitted = ensure_named_worker(
+            cast("WorkerBackend", backend),
+            followup_spec_in,
+            followup_call,
+        )
+        assert followup_handle.worker_key == first_handle.worker_key
+        assert followup_admitted.sandbox == WorkerSandboxConfig(mount_dir="scratch/job1", mount_read_only=True)
+        assert followup_admitted.mirror_grantable_credentials is False
+
+        # Repeating the exact same sandbox options is allowed.
+        same_call = _call(runtime_paths, "sbx", sandbox=True, mount_dir="scratch/job1", mount_read_only=True)
+        _run(backend, same_call)
+
+        # Any conflicting sandbox option is refused, including sandbox=False or different mount_dir/RO.
+        for bad_kwargs in (
+            {"sandbox": False},
+            {"sandbox": True},
+            {"mount_dir": "scratch/job1"},
+            {"mount_dir": "scratch/job2", "mount_read_only": True},
+        ):
+            with pytest.raises(NamedWorkerError, match="was started in sandbox mode"):
+                _run(backend, _call(runtime_paths, "sbx", **bad_kwargs))
+
+        # Unsandboxed worker refuses later sandbox=True.
+        _run(backend, _call(runtime_paths, "plain"))
+        with pytest.raises(NamedWorkerError, match="was started without sandbox mode"):
+            _run(backend, _call(runtime_paths, "plain", sandbox=True))
+
+
+def test_sandbox_mount_relative_path_validates_directory_without_symlinks(tmp_path: Path) -> None:
+    """Pre-validation accepts non-hidden subdirectories and rejects root, hidden dirs, missing paths, files, and symlinks."""
+    workspace = tmp_path / "agents" / "code" / "workspace"
+    sub = workspace / "scratch" / "job1"
+    sub.mkdir(parents=True)
+    (workspace / ".mindroom").mkdir()
+    (workspace / ".config").mkdir()
+    (workspace / "a" / ".git").mkdir(parents=True)
+    (workspace / "file.txt").write_text("hi", encoding="utf-8")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (workspace / "link").symlink_to(outside)
+
+    assert (
+        sandbox_mount_relative_path(
+            storage_root=tmp_path,
+            worker_key=_ALICE,
+            private_agent_names=frozenset(),
+            config=_CONFIG,
+            sandbox=WorkerSandboxConfig(mount_dir=None),
+        )
+        is None
+    )
+    with pytest.raises(NamedWorkerError, match="not the workspace root"):
+        sandbox_mount_relative_path(
+            storage_root=tmp_path,
+            worker_key=_ALICE,
+            private_agent_names=frozenset(),
+            config=_CONFIG,
+            sandbox=WorkerSandboxConfig(mount_dir="."),
+        )
+    for hidden_dir in (".mindroom", ".config", "a/.git"):
+        with pytest.raises(NamedWorkerError, match="hidden or dot-prefixed"):
+            sandbox_mount_relative_path(
+                storage_root=tmp_path,
+                worker_key=_ALICE,
+                private_agent_names=frozenset(),
+                config=_CONFIG,
+                sandbox=WorkerSandboxConfig(mount_dir=hidden_dir),
+            )
+    assert sandbox_mount_relative_path(
+        storage_root=tmp_path,
+        worker_key=_ALICE,
+        private_agent_names=frozenset(),
+        config=_CONFIG,
+        sandbox=WorkerSandboxConfig(mount_dir="scratch/job1"),
+    ) == Path("agents/code/workspace/scratch/job1")
+
+    with pytest.raises(NamedWorkerError, match="does not exist"):
+        sandbox_mount_relative_path(
+            storage_root=tmp_path,
+            worker_key=_ALICE,
+            private_agent_names=frozenset(),
+            config=_CONFIG,
+            sandbox=WorkerSandboxConfig(mount_dir="missing"),
+        )
+    with pytest.raises(NamedWorkerError, match="real directory without symlinks"):
+        sandbox_mount_relative_path(
+            storage_root=tmp_path,
+            worker_key=_ALICE,
+            private_agent_names=frozenset(),
+            config=_CONFIG,
+            sandbox=WorkerSandboxConfig(mount_dir="file.txt"),
+        )
+    with pytest.raises(NamedWorkerError, match="without symlinks"):
+        sandbox_mount_relative_path(
+            storage_root=tmp_path,
+            worker_key=_ALICE,
+            private_agent_names=frozenset(),
+            config=_CONFIG,
+            sandbox=WorkerSandboxConfig(mount_dir="link"),
+        )
 
 
 @pytest.mark.parametrize(
@@ -1177,7 +1373,7 @@ def test_the_shell_offers_named_workers_only_to_an_agent_that_may_run_them(
     assert function is not None
 
     offered = set(function.parameters["properties"])
-    assert ({"worker", "resource_profile"} <= offered) is enabled
+    assert ({"worker", "resource_profile", "sandbox", "mount_dir", "mount_read_only"} <= offered) is enabled
     assert {"args", "tail", "timeout"} <= offered
     assert ("mindroom-agent workers run" in (function.description or "")) is enabled
 
@@ -1244,9 +1440,14 @@ async def test_a_shell_outside_a_worker_refuses_to_name_one(tmp_path: Path) -> N
         worker_target=None,
     )
 
-    result = await _offered_entrypoint(shell, "run_shell_command")("true", worker="e2e-0")
-
+    entrypoint = _offered_entrypoint(shell, "run_shell_command")
+    result = await entrypoint("true", worker="e2e-0")
     assert result.startswith("Error: `worker` and `resource_profile` need a shell that runs in a worker")
+    assert (await entrypoint("true", sandbox=True)).startswith(
+        "Error: `worker` and `resource_profile` need a shell that runs in a worker",
+    )
+    # Models filling default false booleans without worker still run as an ordinary local shell call.
+    assert await entrypoint(["echo", "ok"], sandbox=False, mount_read_only=False) == "ok"
 
 
 @pytest.mark.asyncio
@@ -1499,3 +1700,337 @@ async def test_named_workers_a_restart_left_behind_count_until_the_first_mainten
         # A worker this process started stays through its passes.
         restarted.maintain_workers()
         assert apps_api.deployments[started.worker_id].spec.replicas == 1
+
+
+@pytest.mark.asyncio
+async def test_sandboxed_shell_proxy_strips_all_trust_surfaces_including_followups(
+    tmp_path: Path,
+    backend: _FakeBackend,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sandboxed calls and flagless follow-ups strip CLI token, Agent Keys, env secrets, and leases."""
+    from mindroom.egress_broker import service as egress_service  # noqa: PLC0415
+    from mindroom.tool_system.tool_environment import ToolEnvironment, collected_tool_environment  # noqa: PLC0415
+
+    storage_root = tmp_path / "storage"
+    mount_sub = storage_root / "agents" / "code" / "workspace" / "scratch" / "job1"
+    mount_sub.mkdir(parents=True)
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=storage_root,
+        process_env={
+            "MINDROOM_WORKER_BACKEND": "kubernetes",
+            "MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS": "30",
+            "MY_SECRET": "super-secret-value",
+        },
+    )
+    broker_calls: list[object] = []
+    monkeypatch.setattr(sandbox_proxy_module, "egress_broker_enabled", lambda _paths: True)
+    monkeypatch.setattr(sandbox_proxy_module, "egress_agent_scope", lambda _cfg, _name, _paths: "scope-1")
+    monkeypatch.setattr(
+        egress_service,
+        "execution_env_for_worker",
+        lambda *_args, **_kwargs: broker_calls.append(1) or {"HTTPS_PROXY": "http://broker", "BROKER_KEY": "k"},
+    )
+
+    posts = _route_through(monkeypatch, backend)
+    captured_lease_args: list[tuple[object, object]] = []
+    real_execute = sandbox_proxy_module.execute_worker_proxy_request
+
+    def _spy_execute(**kwargs: Any) -> object:  # noqa: ANN401
+        captured_lease_args.append((kwargs["credentials_manager"], kwargs["worker_grantable_credentials"]))
+        return real_execute(**kwargs)
+
+    monkeypatch.setattr(sandbox_proxy_module, "execute_worker_proxy_request", _spy_execute)
+
+    target = resolve_worker_target("user_agent", "code", _identity(), private_agent_names=frozenset())
+    shell = get_tool_by_name(
+        "shell",
+        runtime_paths,
+        tools=builtin_tool_registry(),
+        runs_in_worker=True,
+        runtime_config=_CONFIG,
+        tool_config_overrides={"extra_env_passthrough": "MY_SECRET"},
+        worker_target=target,
+    )
+    call_shell = _offered_entrypoint(shell, "run_shell_command")
+    cli_grant = "cli-secret"
+    call_env = ToolEnvironment(
+        values={"MINDROOM_AGENT_CLI_TOKEN": cli_grant, "TEMP_SECRET": "temp-val"},
+        pass_through=("MY_SECRET",),
+    )
+
+    with (
+        idle_worker_cleanup_owner(),
+        tool_runtime_context(_tool_context(runtime_paths)),
+        collected_tool_environment(call_env),
+    ):
+        async with execution_resources(response=True):
+            # Default false booleans with worker=None still run as a normal shell call.
+            await call_shell("echo plain", sandbox=False, mount_read_only=False)
+            assert len(broker_calls) == 1
+            assert (posts[-1][1]["sandbox"], posts[-1][1]["execution_env"]["MINDROOM_AGENT_CLI_TOKEN"]) == (
+                False,
+                cli_grant,
+            )
+            assert posts[-1][1]["execution_env"]["HTTPS_PROXY"] == "http://broker"
+            assert captured_lease_args[-1][1] is not None
+
+            # Pre-validation fails fast before admission or backend provisioning.
+            specs_before = len(backend.specs)
+            with pytest.raises(NamedWorkerError, match="does not exist"):
+                await call_shell("ls", worker="sbx-missing", mount_dir="no-such-dir")
+            for bad_worker, bad_kwargs in [
+                ("sbx-rw-out", {"mount_dir": "scratch/job1"}),
+                ("sbx-ro-out", {"mount_dir": "scratch/job1", "mount_read_only": True}),
+                ("sbx-empty-out", {"sandbox": True}),
+            ]:
+                with pytest.raises(
+                    NamedWorkerError,
+                    match="mindroom_output_path is not supported in a sandboxed named worker",
+                ):
+                    await call_shell("ls", worker=bad_worker, mindroom_output_path="out.txt", **bad_kwargs)
+            assert len(backend.specs) == specs_before
+
+            # Call 1: RO mount_dir sandbox.
+            await call_shell("ls", worker="sbx-dir", mount_dir="scratch/job1", mount_read_only=True)
+            # Call 2: follow-up omitting all sandbox flags must still strip everything and resolve locked base_dir.
+            await call_shell("pwd", worker="sbx-dir")
+            # Call 3: follow-up omitting mount_read_only still refuses mindroom_output_path.
+            with pytest.raises(
+                NamedWorkerError,
+                match="mindroom_output_path is not supported in a sandboxed named worker",
+            ):
+                await call_shell("ls", worker="sbx-dir", mindroom_output_path="out.txt")
+
+            # Empty-scratch sandbox also refuses mindroom_output_path on flagless follow-ups.
+            await call_shell("pwd", worker="sbx-empty", sandbox=True)
+            await call_shell("pwd", worker="sbx-empty")
+            with pytest.raises(
+                NamedWorkerError,
+                match="mindroom_output_path is not supported in a sandboxed named worker",
+            ):
+                await call_shell("pwd", worker="sbx-empty", mindroom_output_path="out.txt")
+
+    # Agent Keys broker was never invoked for any sandboxed call (still 1 from plain call).
+    assert len(broker_calls) == 1
+    for idx, expected_base_dir in [
+        (1, "agents/code/workspace/scratch/job1"),
+        (2, "agents/code/workspace/scratch/job1"),
+        (3, None),
+        (4, None),
+    ]:
+        _url, body = posts[idx]
+        assert (
+            body["sandbox"],
+            body["base_dir"],
+            body["execution_env"],
+            body["extra_env_passthrough"],
+            body["environment"],
+            captured_lease_args[idx],
+        ) == (
+            True,
+            expected_base_dir,
+            {},
+            None,
+            {"set_names": [], "unset_names": [], "path_prepend": []},
+            (None, None),
+        )
+        assert "extra_env_passthrough" not in body["tool_config_overrides"]
+        assert "extra_env_passthrough" not in body["tool_init_overrides"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "sandbox_args",
+    [{"sandbox": True}, {"mount_dir": "sub"}, {"mount_read_only": True}],
+)
+async def test_cli_catalog_explains_sandbox_arguments_when_named_workers_hidden(
+    runtime_paths: RuntimePaths,
+    sandbox_args: dict[str, object],
+) -> None:
+    """When named workers are unavailable, sandbox params produce the named-worker refusal instead of generic invalid args."""
+    from mindroom.tool_system.agent_tool_calls import _invalid_arguments_reason  # noqa: PLC0415
+    from mindroom.tool_system.tool_access import ToolKey  # noqa: PLC0415
+    from tests.test_agent_tool_calls import _catalog  # noqa: PLC0415
+
+    disabled = Config(agents={"code": AgentConfig(display_name="Code", named_workers=0, worker_scope="user_agent")})
+    target = resolve_worker_target("user_agent", "code", _identity(), private_agent_names=frozenset())
+    shell = get_tool_by_name(
+        "shell",
+        runtime_paths,
+        tools=builtin_tool_registry(),
+        runs_in_worker=True,
+        runtime_config=disabled,
+        worker_target=target,
+    )
+    catalog = await _catalog(runtime_paths.storage_root, [replace(adapt_toolkit(shell, key="shell"), name="shell")])
+    catalog.runtime_context = _tool_context(runtime_paths, config=disabled)
+    binding = await catalog.bind(ToolKey("shell", "run_shell_command"))
+    reason = _invalid_arguments_reason(binding, {"args": "true", **sandbox_args})
+    assert "Named workers are off for this agent" in reason
+
+
+@pytest.mark.asyncio
+async def test_named_worker_mount_dir_fails_fast_when_runtime_class_name_is_set(tmp_path: Path) -> None:
+    """mount_dir fails fast under runtimeClassName (e.g. gVisor), while empty-scratch sandbox=True succeeds."""
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env={
+            "MINDROOM_WORKER_BACKEND": "kubernetes",
+            "MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS": "30",
+            "MINDROOM_KUBERNETES_WORKER_RUNTIME_CLASS_NAME": "gvisor",
+        },
+    )
+    with idle_worker_cleanup_owner():
+        async with execution_resources(response=True):
+            with pytest.raises(NamedWorkerError, match=r"runtimeClassName.*gvisor.*sandbox=true without mount_dir"):
+                named_worker_call(
+                    "sbx-dir",
+                    None,
+                    mount_dir="scratch/job1",
+                    agent_name="code",
+                    config=_CONFIG,
+                    runtime_paths=runtime_paths,
+                    turn_id=_TURN,
+                )
+            empty_call = named_worker_call(
+                "sbx-empty",
+                None,
+                sandbox=True,
+                agent_name="code",
+                config=_CONFIG,
+                runtime_paths=runtime_paths,
+                turn_id=_TURN,
+            )
+            assert empty_call is not None
+            assert empty_call.sandbox == WorkerSandboxConfig(mount_dir=None, mount_read_only=False)
+
+
+@pytest.mark.asyncio
+async def test_sandboxed_writable_mount_dir_rewrites_saved_output_receipt_paths(
+    tmp_path: Path,
+    backend: _FakeBackend,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Auto-saved receipts from writable mount_dir sandboxes always prefix mount_dir, and explicit output_path is refused."""
+    storage_root = tmp_path / "storage"
+    agent_workspace = storage_root / "agents" / "code" / "workspace"
+    scratch_mount = agent_workspace / "scratch" / "job1"
+    nested_outputs_mount = agent_workspace / "mindroom_tool_outputs"
+    for mount_dir_path, rel_path, content in [
+        (scratch_mount, "mindroom_tool_outputs/2026-11-23/auto.txt", "scratch auto output"),
+        (scratch_mount, "mindroom_tool_outputs/2026-11-23/followup.txt", "scratch followup output"),
+        (nested_outputs_mount, "mindroom_tool_outputs/2026-11-23/nested.txt", "nested mount output"),
+    ]:
+        saved_file = mount_dir_path / rel_path
+        saved_file.parent.mkdir(parents=True, exist_ok=True)
+        saved_file.write_text(content, encoding="utf-8")
+
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=storage_root,
+        process_env={
+            "MINDROOM_WORKER_BACKEND": "kubernetes",
+            "MINDROOM_WORKER_CLEANUP_INTERVAL_SECONDS": "30",
+        },
+    )
+    responses = iter(
+        [
+            {
+                "ok": True,
+                "result": {
+                    "mindroom_tool_output": {
+                        "status": "saved_to_file",
+                        "path": "mindroom_tool_outputs/2026-11-23/auto.txt",
+                        "bytes": 2048,
+                        "format": "text",
+                        "preview": "hello preview",
+                    },
+                },
+            },
+            {
+                "ok": True,
+                "result": {
+                    "mindroom_tool_output": {
+                        "status": "saved_to_file",
+                        "path": "mindroom_tool_outputs/2026-11-23/followup.txt",
+                        "bytes": 128,
+                        "format": "text",
+                    },
+                },
+            },
+            {
+                "ok": True,
+                "result": {
+                    "mindroom_tool_output": {
+                        "status": "saved_to_file",
+                        "path": "mindroom_tool_outputs/2026-11-23/nested.txt",
+                        "bytes": 64,
+                        "format": "text",
+                    },
+                },
+            },
+        ],
+    )
+    _route_through(monkeypatch, backend, responder=lambda _url, _body: next(responses))
+    target = resolve_worker_target("user_agent", "code", _identity(), private_agent_names=frozenset())
+    shell = get_tool_by_name(
+        "shell",
+        runtime_paths,
+        tools=builtin_tool_registry(),
+        runs_in_worker=True,
+        runtime_config=_CONFIG,
+        worker_target=target,
+    )
+    call_shell = _offered_entrypoint(shell, "run_shell_command")
+
+    with idle_worker_cleanup_owner(), tool_runtime_context(_tool_context(runtime_paths)):
+        async with execution_resources(response=True):
+            auto_saved = await call_shell("cat big.log", worker="sbx-rw", mount_dir="scratch/job1")
+            # Explicit mindroom_output_path is refused even on a writable mount_dir follow-up.
+            with pytest.raises(
+                NamedWorkerError,
+                match="mindroom_output_path is not supported in a sandboxed named worker",
+            ):
+                await call_shell("echo done", worker="sbx-rw", mindroom_output_path="reports/out.txt")
+            # Follow-up omitting mount_dir still translates auto-saved receipt paths using the admitted sandbox.
+            followup_saved = await call_shell("cat big2.log", worker="sbx-rw")
+            # Even when mount_dir itself is "mindroom_tool_outputs", the mount-relative path is always prefixed.
+            nested_saved = await call_shell("cat big3.log", worker="sbx-nested", mount_dir="mindroom_tool_outputs")
+
+    assert auto_saved == {
+        "mindroom_tool_output": {
+            "status": "saved_to_file",
+            "path": "scratch/job1/mindroom_tool_outputs/2026-11-23/auto.txt",
+            "bytes": 2048,
+            "format": "text",
+            "preview": "[worker: sbx-rw, started]\nhello preview",
+        },
+    }
+    assert followup_saved == {
+        "mindroom_tool_output": {
+            "status": "saved_to_file",
+            "path": "scratch/job1/mindroom_tool_outputs/2026-11-23/followup.txt",
+            "bytes": 128,
+            "format": "text",
+        },
+    }
+    assert nested_saved == {
+        "mindroom_tool_output": {
+            "status": "saved_to_file",
+            "path": "mindroom_tool_outputs/mindroom_tool_outputs/2026-11-23/nested.txt",
+            "bytes": 64,
+            "format": "text",
+        },
+    }
+    assert (agent_workspace / auto_saved["mindroom_tool_output"]["path"]).read_text(
+        encoding="utf-8",
+    ) == "scratch auto output"
+    assert (agent_workspace / followup_saved["mindroom_tool_output"]["path"]).read_text(
+        encoding="utf-8",
+    ) == "scratch followup output"
+    assert (agent_workspace / nested_saved["mindroom_tool_output"]["path"]).read_text(
+        encoding="utf-8",
+    ) == "nested mount output"

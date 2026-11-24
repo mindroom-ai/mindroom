@@ -24,13 +24,20 @@ from mindroom.script_runs import shim as script_run_shim
 from mindroom.script_runs.wire import ScriptWorkerError
 from mindroom.shell import execution as shell_execution_module
 from mindroom.shell import supervisor as shell_supervisor
-from mindroom.shell.execution import ShellRunResult, run_command, shell_request_budget_seconds
+from mindroom.shell.background_scope import BackgroundLogPolicy
+from mindroom.shell.execution import (
+    ShellRunResult,
+    run_command,
+    shell_request_budget_seconds,
+)
 from mindroom.shell.supervisor import (
     SHELL_SUPERVISOR_SOCKET_ENV,
     _handle_connection,
+    _kill_namespace_via_supervisor,
     _ShellSupervisorManager,
     check_command_via_supervisor,
     kill_command_via_supervisor,
+    kill_shell_supervisor_namespace,
     parse_shell_supervisor_kill,
     parse_shell_supervisor_status,
     run_command_via_supervisor,
@@ -105,16 +112,12 @@ def test_invalid_result_metadata_cannot_claim_output_ownership(payload: dict[str
 
 
 @contextlib.asynccontextmanager
-async def _running_server(
-    registry: dict[str, ProcessRecord],
-    deadline_tasks: set[asyncio.Task[None]] | None = None,
-) -> AsyncIterator[str]:
+async def _running_server(registry: dict[str, ProcessRecord]) -> AsyncIterator[str]:
     runtime_dir = Path(tempfile.mkdtemp(prefix="mindroom-shell-test-"))
     socket_path = str(runtime_dir / "s.sock")
     handle_reservations: set[str] = set()
-    tracked_deadline_tasks = deadline_tasks if deadline_tasks is not None else set()
     server = await asyncio.start_unix_server(
-        partial(_handle_connection, registry, handle_reservations, tracked_deadline_tasks),
+        partial(_handle_connection, registry, handle_reservations),
         path=socket_path,
     )
     try:
@@ -122,9 +125,6 @@ async def _running_server(
     finally:
         server.close()
         await server.wait_closed()
-        for task in tracked_deadline_tasks:
-            task.cancel()
-        await asyncio.gather(*tracked_deadline_tasks, return_exceptions=True)
         shutil.rmtree(runtime_dir, ignore_errors=True)
 
 
@@ -308,8 +308,7 @@ async def test_monitor_records_exit_when_process_group_cleanup_is_not_permitted(
 
     await shell_execution_module._monitor_process(
         registry,
-        handle,
-        process,
+        record,
         stdout_reader,
         stderr_reader,
     )
@@ -358,7 +357,6 @@ async def test_invalid_process_deadline_returns_structured_error(runtime_seconds
 async def test_process_deadlines_are_independent_and_leave_ordinary_background_calls_running(tmp_path: Path) -> None:
     """Each maximum runtime kills only its original process group and drains its timer."""
     registry: dict[str, ProcessRecord] = {}
-    deadline_tasks: set[asyncio.Task[None]] = set()
     resistant_handle = f"shell:{'a' * 32}"
     completed_handle = f"shell:{'b' * 32}"
     cancelled_handle = f"shell:{'c' * 32}"
@@ -370,7 +368,7 @@ async def test_process_deadlines_are_independent_and_leave_ordinary_background_c
         "time.sleep(300)"
     )
 
-    async with _running_server(registry, deadline_tasks) as socket_path:
+    async with _running_server(registry) as socket_path:
         resistant = await _run(
             socket_path,
             [sys.executable, "-c", resistant_script, str(ready_path)],
@@ -414,11 +412,9 @@ async def test_process_deadlines_are_independent_and_leave_ordinary_background_c
             assert "FINISHED" in await _wait_for_finished(socket_path, resistant_handle)
             assert "exit code -9" in await _check(socket_path, resistant_handle)
             assert "RUNNING" in await _check(socket_path, ordinary_handle)
-            for _ in range(20):
-                if not deadline_tasks:
-                    break
-                await asyncio.sleep(0.05)
-            assert deadline_tasks == set()
+            for handle in (resistant_handle, completed_handle, cancelled_handle):
+                monitor = registry[handle]._monitor_task
+                assert monitor is None or monitor.done()
         finally:
             await _kill(socket_path, resistant_handle, force=True)
             await _kill(socket_path, cancelled_handle, force=True)
@@ -1358,3 +1354,110 @@ async def test_supervised_launch_passes_the_launch_contract_and_reports_a_refusa
         launch_contract.WORKSPACE_ROOT_ENV: str(tmp_path),
         launch_contract.ENTRY_ENV: "script",
     }
+
+
+@pytest.mark.asyncio
+async def test_supervisor_background_log_kill_namespace_and_per_namespace_cap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Supervisor supports background_log, per-namespace caps, and kill_namespace isolation."""
+    registry: dict[str, ProcessRecord] = {}
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    policy = BackgroundLogPolicy(log_dir=str(workspace / ".mindroom" / "shell"), display_root=str(workspace))
+    monkeypatch.setattr(shell_execution_module, "MAX_BACKGROUNDED", 1)
+
+    async with _running_server(registry) as socket_path:
+        first = await run_command_via_supervisor(
+            socket_path,
+            namespace="shell-scope:a",
+            argv=["bash", "-c", "echo alpha; sleep 30"],
+            env=dict(os.environ),
+            cwd=str(workspace),
+            tail=10,
+            timeout=0.2,
+            on_timeout="background",
+            background_log=policy,
+        )
+        rejected = await run_command_via_supervisor(
+            socket_path,
+            namespace="shell-scope:a",
+            argv=["bash", "-c", "sleep 30"],
+            env=dict(os.environ),
+            cwd=str(workspace),
+            tail=10,
+            timeout=0.2,
+            on_timeout="background",
+            background_log=policy,
+        )
+        other = await run_command_via_supervisor(
+            socket_path,
+            namespace="shell-scope:b",
+            argv=["bash", "-c", "sleep 30"],
+            env=dict(os.environ),
+            cwd=str(workspace),
+            tail=10,
+            timeout=0.2,
+            on_timeout="background",
+            background_log=policy,
+        )
+        assert first.handle is not None
+        assert other.handle is not None
+        assert "Still running after 0.2s; moved to the background" in first.message
+        assert "Log: .mindroom/shell/" in first.message
+        assert "Too many backgrounded processes (1/1)" in rejected.message
+        first_pid = registry[first.handle].pid
+        first_log = Path(registry[first.handle]._log_path or "")
+        other_pid = registry[other.handle].pid
+
+        try:
+            await asyncio.to_thread(_kill_namespace_via_supervisor, socket_path, namespace="shell-scope:a")
+            assert first.handle not in registry
+            assert other.handle in registry
+            await _assert_pid_dead(first_pid)
+            assert "[MindRoom: stopped when turn ended]" in first_log.read_text(encoding="utf-8")
+            os.kill(other_pid, 0)
+        finally:
+            await asyncio.to_thread(_kill_namespace_via_supervisor, socket_path, namespace="shell-scope:b")
+            await _assert_pid_dead(other_pid)
+
+
+def test_kill_shell_supervisor_namespace_never_spawns_supervisor(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Killing a namespace is a no-op without spawning when no supervisor is running."""
+    spawned: list[bool] = []
+    monkeypatch.setattr(_ShellSupervisorManager, "_spawn", lambda _self: spawned.append(True))
+    monkeypatch.setattr(shell_supervisor, "_manager", None)
+
+    kill_shell_supervisor_namespace("shell-scope:missing")
+    _ShellSupervisorManager().kill_namespace("shell-scope:missing")
+    assert spawned == []
+
+
+def test_shell_subprocess_dispatch_context_caps_auto_background_budget(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Scoped shell dispatch caps foreground wait budget even when timeout > 120."""
+    socket_path = str(tmp_path / "test.sock")
+    monkeypatch.setattr(shell_supervisor, "ensure_shell_supervisor", lambda: socket_path)
+    assert shell_request_budget_seconds("shell", "run_shell_command", {"timeout": 600}, auto_background=True) == 150.0
+    prepared = sandbox_runner_module.PreparedSandboxRunnerExecuteRequest(
+        tool_name="shell",
+        function_name="run_shell_command",
+        kwargs={"timeout": 600},
+        shell_scope_id="scope-1",
+    )
+    subprocess_context = sandbox_runner_module._PreparedSandboxSubprocessContext(
+        python_executable=sys.executable,
+        subprocess_env={"PATH": "/usr/bin"},
+        subprocess_cwd=None,
+        template_env={"PATH": "/usr/bin"},
+    )
+
+    _, timeout_seconds = sandbox_runner_module._shell_subprocess_dispatch_context(
+        prepared,
+        subprocess_context,
+        120.0,
+    )
+    assert timeout_seconds == 150.0

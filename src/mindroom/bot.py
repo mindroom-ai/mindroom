@@ -68,6 +68,7 @@ from mindroom.runtime_shutdown import (
 from mindroom.timestamp_formatting import format_timestamp_ms
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import ToolRuntimeSupport
+from mindroom.usage.limits_receiver import register_provider_usage_receiver
 
 from . import constants
 from .active_runs import ActiveRunPublisher
@@ -755,6 +756,10 @@ class AgentBot:
                     logger=self.logger,
                 ),
                 turn_policy=self._turn_policy,
+                active_runs=None if self.agent_name == ROUTER_AGENT_NAME else self._active_runs,
+                can_publish_active_run=lambda room_id: (
+                    contact_room(self.config, self.runtime_paths, room_id, self.agent_name) is None
+                ),
             ),
         )
         self._turn_dispatcher = TurnDispatcher(
@@ -1759,6 +1764,13 @@ class AgentBot:
                 runtime_paths=self.runtime_paths,
                 config_getter=lambda: self.config,
                 membership_index=self._runtime_view.agent_reply_memberships,
+                answers_in_room=lambda room_id: self.orchestrator.room_poster(room_id) is self,
+                callback_wrapper=partial(_create_best_effort_task_wrapper, owner=self._runtime_view),
+            )
+            register_provider_usage_receiver(
+                client=client,
+                runtime_paths=self.runtime_paths,
+                config_getter=lambda: self.config,
                 answers_in_room=lambda room_id: self.orchestrator.room_poster(room_id) is self,
                 callback_wrapper=partial(_create_best_effort_task_wrapper, owner=self._runtime_view),
             )

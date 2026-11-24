@@ -2,15 +2,17 @@
 
 from __future__ import annotations
 
+import functools
 import inspect
 import json
 import os
 import re
 import shlex
 import subprocess
+import tempfile
 from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Literal, cast
 
 from mindroom.constants import (
     WORKSPACE_HOME_CONTRACT_ENV_NAMES,
@@ -21,7 +23,12 @@ from mindroom.constants import (
 )
 from mindroom.path_confinement import resolve_path_within_root
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
-from mindroom.shell.execution import run_command, shell_call_timeout
+from mindroom.shell.background_scope import BackgroundLogPolicy, current_shell_background_scope
+from mindroom.shell.execution import (
+    default_run_timeout_seconds,
+    run_command,
+    shell_call_timeout,
+)
 from mindroom.shell.output_capture import ShellOutputDestination
 from mindroom.shell.supervisor import SHELL_SUPERVISOR_SOCKET_ENV, run_command_via_supervisor
 from mindroom.terminal.lines import PROMPT_COMMAND
@@ -131,7 +138,10 @@ _NAMED_WORKERS_NOTE = (
     "command, not detached from it. Give each worker its own output directory, and its own git worktree when it "
     "changes a checkout. Build or install what every worker needs once in the workspace before fanning out, "
     "because package caches start empty in each worker. Network access granted with `request_network_access` "
-    "does not reach named workers."
+    "does not reach named workers. Set `sandbox=true` (empty scratch) or `mount_dir` (one non-hidden "
+    "workspace-relative subdirectory, optionally with `mount_read_only=true`) on the first call for a name to run "
+    "that worker in isolated sandbox mode without shared directories, knowledge bases, credentials, env secrets, "
+    "or CLI grants."
 )
 _NO_NAMED_WORKERS_ERROR = (
     "Error: `worker` and `resource_profile` need a shell that runs in a worker on the kubernetes worker backend, "
@@ -470,7 +480,9 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
             """Describe ``run_shell_command`` with where and how it runs, offering named workers only where it may."""
             cwd_note = _WORKDIR_CWD_NOTE if self._beside_workdir else _WORKSPACE_CWD_NOTE
             notes = (cwd_note, _WORKING_METHOD_NOTE) if self.base_dir is not None else (_WORKING_METHOD_NOTE,)
-            hidden = () if self._named_workers else ("worker", "resource_profile")
+            hidden = (
+                () if self._named_workers else ("worker", "resource_profile", "sandbox", "mount_dir", "mount_read_only")
+            )
             properties = {
                 name: value for name, value in function.parameters["properties"].items() if name not in hidden
             }
@@ -547,6 +559,22 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
                 return _NO_NAMED_WORKERS_ERROR
             return None
 
+        def _background_log_policy(self) -> BackgroundLogPolicy:
+            log_root = self._workspace_dir or self.base_dir
+            if log_root is None:
+                return BackgroundLogPolicy(
+                    log_dir=str(Path(tempfile.gettempdir()) / f"mindroom-shell-logs-{os.getuid()}"),
+                )
+            display_root = (
+                str(self.base_dir.resolve())
+                if self.base_dir is not None and not self._beside_workdir and log_root == self.base_dir
+                else None
+            )
+            return BackgroundLogPolicy(
+                log_dir=str(log_root.resolve() / ".mindroom" / "shell"),
+                display_root=display_root,
+            )
+
         async def run_shell_command(
             self,
             args: list[str] | str,
@@ -554,30 +582,34 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
             timeout: int | None = None,  # noqa: ASYNC109
             worker: str | None = None,
             resource_profile: ScriptResourceProfileName | None = None,
+            sandbox: bool | None = None,
+            mount_dir: str | None = None,
+            mount_read_only: bool | None = None,
         ) -> str | ToolOutputFileHandled:
             """Runs a shell command and returns the output or error.
 
             The last ``tail`` lines of stdout, then of stderr, are returned; on
-            non-zero exit, all of stderr is kept. A command still running after
-            ``timeout`` seconds is stopped with the processes it started, and its
-            output so far is returned. Without ``timeout``, a call that runs as part
-            of a background job has no time limit; that includes every call that
-            accepts ``background_after`` and, with background jobs on, a subagent's
-            calls for its delegated task, whether or not its caller waits for it. A
-            call that accepts ``background_after`` and leaves it unset returns a job
-            handle after 120 seconds while its command runs on. Any other command
-            stops after 120 seconds. Set ``timeout`` on a command that might not
-            end on its own, such as a watcher or a test run that can hang. Start a
-            server or anything else meant to keep running with
-            ``nohup cmd > out.log 2>&1 &``, which keeps running after the command
-            ends; in the foreground it would keep the call running until its job is
-            cancelled. Wait for something inside one command, such as
+            non-zero exit, all of stderr is kept. By default the call waits at
+            most 120 seconds in the foreground. A call with ``timeout`` <= 120
+            stops the command and the processes it started after ``timeout``
+            seconds and returns its output so far. When a command is still running
+            after 120 seconds: a call that accepts ``background_after`` (with it
+            unset) returns a job handle while the command runs on until
+            completion, its ``timeout``, or job cancellation; any other call
+            (including subagent calls) moves the command to the background,
+            returns its PID, live log path, and wait/stop commands, and stops it
+            automatically when ``timeout`` (if set) expires or when the turn ends.
+            Set ``timeout`` on a command that might not end on its own, such as a
+            watcher or a test run that can hang. Start a server or anything else
+            meant to outlive the turn detached with ``nohup cmd > out.log 2>&1 &``.
+            Wait for something inside one command, such as
             ``until <check>; do sleep 10; done`` with a ``timeout``, not with
             repeated ``sleep`` calls: every call is a model turn.
 
             With ``mindroom_output_path``, capture the complete supported output
-            within the redirect byte limit instead of applying ``tail``; a stopped
-            command saves no file.
+            within the redirect byte limit instead of applying ``tail``; a managed
+            top-level job still saves it on completion, whereas a command stopped
+            or backgrounded in the current turn saves no file.
 
             Command strings use non-login Bash with the prepared execution environment.
             Use explicit ``["bash", "-lc", command]`` only when login startup is needed.
@@ -585,17 +617,35 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
             Args:
                 args: The command to run as a shell command string or a list of argv strings.
                 tail: The number of lines to return from the output.
-                timeout: Seconds after which the command is stopped; null uses the default limit.
+                timeout: Seconds after which the command and its process group are stopped.
+                    Values <= 120 stop the command inline; null or > 120 waits 120s in the
+                    foreground and then continues in the background (until completion,
+                    ``timeout``, or turn/job end).
                 worker: Name of a worker of its own to run the command in, 1 to 32 lowercase letters, digits, or
                     hyphens; null runs it in your normal worker.
                 resource_profile: CPU and memory size of the named worker, small, standard, or large, set by the
                     first call that names it; null gives it the normal worker size.
+                sandbox: Run the named worker in isolated sandbox mode (ephemeral scratch only unless mount_dir is
+                    set, without credentials, Agent Keys, env secrets, or mindroom-agent CLI grants).
+                mount_dir: Workspace-relative subdirectory to mount inside the sandboxed named worker (e.g.
+                    "scratch/job1"; workspace root "." and hidden dot-prefixed segments like ".mindroom" or ".git" are
+                    refused). Always enables sandbox mode. Writable mount_dir still allows modifying repo-local files
+                    such as .git/hooks if your normal worker later runs git there.
+                mount_read_only: Mount mount_dir read-only; requires mount_dir.
 
             Returns:
                 The command output or an error message.
 
             """
-            refusal = self._refusal(named_worker=worker is not None or resource_profile is not None)
+            refusal = self._refusal(
+                named_worker=(
+                    worker is not None
+                    or resource_profile is not None
+                    or sandbox is True
+                    or mount_dir is not None
+                    or mount_read_only is True
+                ),
+            )
             if refusal is not None:
                 return _not_started(refusal)
             try:
@@ -625,37 +675,36 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
                 if output_request is not None and output_request.path is not None
                 else None
             )
-            stop_after = shell_call_timeout(timeout)
-            if self._supervisor_socket is not None:
-                result = await run_command_via_supervisor(
-                    self._supervisor_socket,
-                    namespace=_SHELL_NAMESPACE,
-                    argv=argv,
-                    env=subprocess_env,
-                    cwd=cwd,
-                    tail=tail,
-                    timeout=stop_after,
-                    on_timeout="kill",
-                    on_progress=report_tool_progress,
-                    output_destination=output_destination,
-                    launch_failure_exits=worker is not None,
-                )
-            else:
-                result = await run_command(
-                    {},
-                    namespace=_SHELL_NAMESPACE,
-                    argv=argv,
-                    env=subprocess_env,
-                    cwd=cwd,
+            scope = current_shell_background_scope()
+            wait_limit = default_run_timeout_seconds()
+            bg_scope = scope if scope is not None and (timeout is None or timeout > wait_limit) else None
+            on_timeout: Literal["background", "kill"] = "background" if bg_scope is not None else "kill"
+            runner = (
+                functools.partial(run_command_via_supervisor, self._supervisor_socket)
+                if self._supervisor_socket is not None
+                else functools.partial(
+                    run_command,
+                    bg_scope.records if bg_scope is not None else {},
                     # Never the terminal MindRoom runs in, where a prompting command would wait forever.
                     stdin=subprocess.DEVNULL,
-                    tail=tail,
-                    timeout=stop_after,
-                    on_timeout="kill",
-                    on_progress=report_tool_progress,
-                    output_destination=output_destination,
-                    launch_failure_exits=worker is not None,
                 )
+            )
+            result = await runner(
+                namespace=f"shell-scope:{bg_scope.scope_id}" if bg_scope is not None else _SHELL_NAMESPACE,
+                argv=argv,
+                env=subprocess_env,
+                cwd=cwd,
+                tail=tail,
+                timeout=wait_limit if bg_scope is not None else shell_call_timeout(timeout),
+                on_timeout=on_timeout,
+                on_progress=report_tool_progress,
+                output_destination=output_destination,
+                launch_failure_exits=worker is not None,
+                max_runtime_seconds=timeout if bg_scope is not None else None,
+                background_log=self._background_log_policy() if bg_scope is not None else None,
+            )
+            if bg_scope is not None and result.handle is not None:
+                bg_scope.had_backgrounded = True
             if result.return_code is not None:
                 report_tool_metadata(exit_code=result.return_code)
             if worker is not None and result.execution_error:

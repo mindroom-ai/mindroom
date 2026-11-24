@@ -111,7 +111,14 @@ def _run_docs(snapshot: SubagentSnapshot, *, previews: bool, text_cut: int = 0) 
         md = append_stream_text(md, marker, marker=True)
     tools = serialize_tool_trace(entries)
     if not previews:
-        tools = tuple({"type": entry["type"], "tool_name": entry["tool_name"]} for entry in tools)
+        tools = tuple(
+            {
+                "type": entry["type"],
+                "tool_name": entry["tool_name"],
+                **({"is_error": True} if entry.get("is_error") else {}),
+            }
+            for entry in tools
+        )
     tools = tuple({**entry, "started_at": at} for entry, at in zip(tools, started, strict=True))
     status = "streaming" if snapshot.status in _WORKING_STATUSES else "pending"
     return LiveDocs(md=md, reasoning="", tools=tools, status=status, activity="")

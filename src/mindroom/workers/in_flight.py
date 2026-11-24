@@ -12,7 +12,7 @@ from mindroom.tool_system.worker_routing import worker_log_id
 from mindroom.workers.backend import WorkerBackendError
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
 
     from mindroom.workers.backend import WorkerBackend
 
@@ -23,19 +23,34 @@ _lock = threading.Lock()
 _in_flight: Counter[tuple[str | None, str]] = Counter()
 
 
-@contextmanager
-def worker_call_in_flight(backend: WorkerBackend, worker_key: str) -> Iterator[None]:
-    """Count one call on a worker while it runs; a long call outlasts any idle timeout."""
+def acquire_worker_in_flight(backend: WorkerBackend, worker_key: str) -> Callable[[], None]:
+    """Count one active use of *worker_key* and return an idempotent release function."""
     key = (backend.cleanup_locator, worker_key)
     with _lock:
         _in_flight[key] += 1
-    try:
-        yield
-    finally:
+    released = False
+
+    def release() -> None:
+        nonlocal released
         with _lock:
+            if released:
+                return
+            released = True
             _in_flight[key] -= 1
             if not _in_flight[key]:
                 del _in_flight[key]
+
+    return release
+
+
+@contextmanager
+def worker_call_in_flight(backend: WorkerBackend, worker_key: str) -> Iterator[None]:
+    """Count one call on a worker while it runs; a long call outlasts any idle timeout."""
+    release = acquire_worker_in_flight(backend, worker_key)
+    try:
+        yield
+    finally:
+        release()
 
 
 def touch_workers_in_flight(backend: WorkerBackend) -> None:

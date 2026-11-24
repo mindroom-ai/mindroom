@@ -33,6 +33,7 @@ from mindroom.runtime_env_policy import (
     is_trusted_tool_runtime_env_file_name,
     sandbox_runner_runtime_state_env,
     sandbox_subprocess_system_env,
+    strip_authenticated_proxy_env,
 )
 from mindroom.tool_system.worker_routing import worker_dir_name
 from mindroom.vendor_telemetry import vendor_telemetry_env_values
@@ -210,6 +211,7 @@ def tool_runtime_paths_with_request_env(
     *,
     include_base_execution_env: bool = True,
     trusted_env_overlay: Mapping[str, str] | None = None,
+    sandbox: bool = False,
 ) -> RuntimePaths:
     """Return runtime paths overlaid with one tool-request env snapshot."""
     protected_env_names = _protected_dedicated_worker_execution_env_names(runtime_paths)
@@ -241,6 +243,9 @@ def tool_runtime_paths_with_request_env(
     if trusted_env_overlay:
         env_file_values.update(trusted_env_overlay)
         process_env.update(trusted_env_overlay)
+    if sandbox:
+        process_env = strip_authenticated_proxy_env(process_env)
+        env_file_values = strip_authenticated_proxy_env(env_file_values)
     return constants.RuntimePaths(
         config_path=runtime_paths.config_path,
         config_dir=runtime_paths.config_dir,
@@ -377,17 +382,19 @@ def resolve_subprocess_worker_context(
 def subprocess_env_for_request(
     base_env: dict[str, str] | None,
     execution_env: dict[str, str],
+    *,
+    sandbox: bool = False,
 ) -> dict[str, str] | None:
     """Overlay request execution env onto one subprocess env snapshot."""
     if base_env is None:
         return None
     if not execution_env:
-        return base_env
+        return strip_authenticated_proxy_env(base_env) if sandbox else base_env
 
     env = dict(base_env)
     env.update(execution_env)
     env.update(vendor_telemetry_env_values())
-    return env
+    return strip_authenticated_proxy_env(env) if sandbox else env
 
 
 def subprocess_worker_command(

@@ -9,6 +9,7 @@ if TYPE_CHECKING:
     import nio
 
 _FALLBACK_STATUS = {"M_FORBIDDEN": 403, "M_NOT_FOUND": 404}
+TRANSIENT_HOMESERVER_HTTP_STATUSES = frozenset({502, 503, 504})
 
 
 class StateFailure(StrEnum):
@@ -37,3 +38,14 @@ def state_failure(response: nio.ErrorResponse) -> StateFailure:
     if status == 404 and response.status_code == "M_NOT_FOUND" and isinstance(response, nio.RoomGetStateEventError):
         return StateFailure.MISSING
     return StateFailure.TRANSIENT
+
+
+def response_http_status(response: object) -> int | None:
+    """Return the integer HTTP status of a Matrix response, if known."""
+    http_status = getattr(response, "http_status", None)
+    return http_status if isinstance(http_status, int) and not isinstance(http_status, bool) else None
+
+
+def is_transient_homeserver_status(http_status: int | None) -> bool:
+    """Return whether an HTTP status indicates a transient homeserver gateway/restart failure."""
+    return http_status in TRANSIENT_HOMESERVER_HTTP_STATUSES

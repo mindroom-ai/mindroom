@@ -40,6 +40,9 @@ The default values render a self-contained Deployment, Service, ConfigMap, runti
 A real deployment should provide a useful config and Matrix settings.
 The dashboard and API are fully privileged, so the chart gives the primary a generated `MINDROOM_API_KEY`, and the install notes show how to read it.
 
+For a ready-to-copy multi-user deployment (dedicated Kubernetes workers, per-user personal agents, Agent Keys, and semantic file memory), start from [`values-multi-user.example.yaml`](values-multi-user.example.yaml) and its companion [`config-multi-user.example.yaml`](config-multi-user.example.yaml).
+Create the `mindroom-config` ConfigMap from the companion config, update the placeholder Matrix settings and Secrets, and install with `-f values-multi-user.yaml`.
+
 ## Rollout Progress Deadline
 
 Set `progressDeadlineSeconds` to a positive integer to customize the MindRoom Deployment's rollout progress budget, including scheduling, image initialization, and startup probes.
@@ -134,13 +137,14 @@ eventCache:
 ```
 
 When `config.create` is enabled and `config.data` is empty, the chart renders a minimal config whose `event_journal` section follows `eventCache`.
-When using `config.existingConfigMap` or custom `config.data`, keep that config's `event_journal` settings aligned with the chart values.
+When using `config.existingConfigMap` or custom `config.data`, keep that config's `event_journal` settings aligned with the chart values: for PostgreSQL, set `event_journal.backend: postgres` (`event_journal.database_url_env` already defaults to the chart-injected `MINDROOM_EVENT_CACHE_DATABASE_URL`).
 The runtime config rejects unknown top-level keys, so a `cache` section makes MindRoom refuse to start.
 
 ## Config Sources
 
 By default the chart keeps the existing ConfigMap behavior.
 Omit `config.source` or set `config.source: configMap` to mount a chart-created or existing ConfigMap at `config.mountPath`.
+Changing `config.existingConfigMap` to a different ConfigMap name updates the pod template and rolls the Deployment, whereas editing `config.data` or the contents of the same `config.existingConfigMap` does not roll the pod or hot-reload automatically because the ConfigMap is mounted with `subPath` and has no config-checksum pod annotation; run `kubectl rollout restart deployment/<fullname>` after `helm upgrade`.
 Set `config.source: file` when another init container or content bundle places `agent-config.yaml` on the runtime filesystem before MindRoom starts.
 In file mode, `config.path` must be an absolute container path.
 In file mode, the chart does not render or mount the runtime config ConfigMap.

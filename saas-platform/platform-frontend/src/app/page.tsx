@@ -10,7 +10,7 @@ import { PlausibleAnalytics } from '@/components/PlausibleAnalytics'
 import { AgentAvatar, type AvatarName } from '@/components/landing/AgentAvatar'
 import { MindRoomLogo } from '@/components/MindRoomLogo'
 import { useLiquidGlass } from '@/components/glass/useLiquidGlass'
-import { buildCinnyLoginUrl } from '@/lib/cinny'
+import { buildChatLoginUrl } from '@/lib/chat'
 import { loadInstance } from '@/lib/instance-resource'
 import { createClient } from '@/lib/supabase/client'
 import {
@@ -471,7 +471,7 @@ function useChatUrl(): string {
       .then(() => createClient().auth.getSession())
       .then(({ data: { session } }) => (session ? loadInstance(session.user.id) : null))
       .then((instance) => {
-        if (active && instance?.matrix_server_url) setUrl(buildCinnyLoginUrl(instance.matrix_server_url))
+        if (active && instance?.matrix_server_url) setUrl(buildChatLoginUrl(instance.matrix_server_url))
       })
       .catch(() => {})
     return () => {

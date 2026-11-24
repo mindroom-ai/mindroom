@@ -23,6 +23,7 @@ SCRIPT_RESOURCE_PROFILE_NAMES: frozenset[ScriptResourceProfileName] = frozenset(
 WORKER_SSH_PORT = 2222
 LABEL_TAILNET_SSH = "mindroom.ai/tailnet-ssh"
 LABEL_TAILNET_SSH_RELEASE = "mindroom.ai/tailnet-ssh-release"
+LABEL_WORKER_SANDBOX = "mindroom.ai/worker-sandbox"
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,6 +61,14 @@ class WorkerLaunchConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class WorkerSandboxConfig:
+    """Sandbox isolation for a named worker: optional workspace-relative directory mount and read-only flag."""
+
+    mount_dir: str | None = None
+    mount_read_only: bool = False
+
+
+@dataclass(frozen=True, slots=True)
 class WorkerSpec:
     """Stable worker request resolved from worker-routing semantics.
 
@@ -74,6 +83,7 @@ class WorkerSpec:
     mirror_grantable_credentials: bool = True
     state_scope_worker_key: str | None = None
     resource_profile: ScriptResourceProfileName | None = None
+    sandbox: WorkerSandboxConfig | None = None
     wait_for_setup: bool = field(default=True, compare=False)
 
 
@@ -152,6 +162,7 @@ SANDBOX_RUNNER_API_ROOT = "/api/sandbox-runner"
 _API_ROUTES = {
     "script-run": "scripts/run",
     "execute-cancel": "execute/cancel",
+    "shell-scope-kill": "execute/shell-scope/kill",
 }
 
 
@@ -175,6 +186,7 @@ def worker_api_endpoint(
         "script-run",
         "scripts",
         "execute-cancel",
+        "shell-scope-kill",
     ],
 ) -> str:
     """Return the API endpoint for one worker operation."""

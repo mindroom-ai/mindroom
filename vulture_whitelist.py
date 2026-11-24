@@ -349,6 +349,7 @@ _.validate_private_git_knowledge_paths  # unused method (src/mindroom/config/mai
 get_status  # unused function (src/mindroom/api/homeassistant_integration.py)
 reindex_knowledge  # unused function (src/mindroom/api/knowledge.py)
 cancel_tool_call  # unused function (src/mindroom/api/sandbox_runner.py)
+kill_shell_scope  # FastAPI route (src/mindroom/api/sandbox_runner.py)
 view_file_in_worker  # FastAPI route (src/mindroom/api/sandbox_runner.py)
 write_command_stdin  # FastAPI route (src/mindroom/api/sandbox_runner.py)
 listening_ports  # FastAPI route (src/mindroom/api/worker_preview.py)

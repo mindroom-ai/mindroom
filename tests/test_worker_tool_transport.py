@@ -413,7 +413,10 @@ def test_a_plain_worker_call_whose_result_could_not_be_sent_fails_as_it_always_d
 
     with pytest.raises(RuntimeError, match="The result is larger than the worker may send"):
         _worker_shell(tmp_path, "true")
-    assert (len(worker_requests), answers[0].keys()) == (1, {"ok", "result", "error", "failure_kind"})
+    assert (len(worker_requests), answers[0].keys()) == (
+        1,
+        {"ok", "result", "error", "failure_kind", "shell_backgrounded"},
+    )
 
 
 @pytest.mark.asyncio

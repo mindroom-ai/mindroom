@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from mindroom.commands.model_commands import available_models_text
+from mindroom.config.models import unsupported_level_message
 from mindroom.matrix.client_room_admin import room_admin_power_user
 from mindroom.room_settings import MODEL, classify_room_model, refresh_room_setting, write_room_setting
 from mindroom.steward_duties import setting_write_failure_message
@@ -61,7 +62,8 @@ async def handle_room_model_command(  # noqa: PLR0911 - one answer per outcome
                 return "❌ Could not read this room's model setting. Try again."
             return _show_room_model(config, read.value)
         if requested.lower() not in _RESET_ARGUMENTS:
-            return f"❌ Unknown model `{requested}`. Available models:\n{available_models_text(config)}"
+            reason = unsupported_level_message(config.models, requested) or f"Unknown model `{requested}`"
+            return f"❌ {reason}. Available models:\n{available_models_text(config)}"
 
     if await room_admin_power_user(client, room_id, (requester_user_id, sender_user_id)) is None:
         return "❌ Room admin only."

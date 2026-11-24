@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Mapping
+from contextlib import suppress
 from dataclasses import dataclass, replace
 from functools import partial
 from typing import TYPE_CHECKING, Any
@@ -35,6 +37,7 @@ from mindroom.providers.openai.responses_wire import (
 from mindroom.token_counting.families import counter_for_model
 from mindroom.token_counting.requests import route_context_key, route_request_tokens
 from mindroom.tool_system.context_bound_streams import closing_async_stream
+from mindroom.usage.limit_store import normalize_codex_scope_key, record_codex_headers
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -201,6 +204,11 @@ class ResponsesAdapter:
         timer: TurnTimer,
     ) -> AsyncIterator[StreamEvent]:
         sdk_stream = await client.responses.create(**with_large_fields_untyped(kwargs, ("input", "tools")))
+        if self.wire.route == "codex":
+            headers = getattr(getattr(sdk_stream, "response", None), "headers", None)
+            if isinstance(headers, Mapping):
+                with suppress(Exception):
+                    record_codex_headers(normalize_codex_scope_key(self.settings.codex_home), headers)
         try:
             async for event in sdk_stream:
                 if (usage := usage_report(event)) is not None:

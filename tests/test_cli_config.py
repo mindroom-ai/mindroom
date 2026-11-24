@@ -714,6 +714,7 @@ class TestConfigInit:
             {"match": "manage_config", "action": "require_approval"},
             {"match": "manage_agent", "action": "require_approval"},
             {"match": "manage_team", "action": "require_approval"},
+            {"match": "matrix_user_write", "action": "require_approval"},
         ]
         # Background tool jobs are on by default, so the starter leaves the setting out.
         assert "background_tool_jobs" not in config
@@ -6287,7 +6288,7 @@ class TestLocalStackSetup:
         setup = ["local-stack-setup", "--synapse-dir", str(synapse_dir), "--homeserver-url", homeserver]
 
         persisted = _invoke_with_runtime(
-            [*setup, "--server-name", server_name, "--cinny-container-name", container],
+            [*setup, "--server-name", server_name, "--chat-container-name", container],
             cfg,
             storage_path=storage_path,
         )
@@ -6297,7 +6298,7 @@ class TestLocalStackSetup:
         lines = persisted.output.splitlines()
         assert f"Starting Synapse stack from {synapse_dir}..." in lines
         assert any(line.startswith(f"Waiting for Synapse: {homeserver}/") for line in lines), lines
-        assert f"MindRoom Chat config written: {storage_path / 'local' / 'cinny-config.json'}" in lines
+        assert f"MindRoom Chat config written: {storage_path / 'local' / 'chat-config.json'}" in lines
         assert f"  Synapse: {homeserver}" in lines
         assert f"  Server:  {server_name}" in lines
         assert f"  Env:     {narrow_markup_dir / '.env'}" in lines
@@ -6332,7 +6333,7 @@ class TestLocalStackSetup:
         assert f"Error: Failed to start Synapse stack: Cannot start {text}" in failed
         assert any(line.startswith(f"Error: Synapse did not become healthy at {homeserver}/") for line in unhealthy)
 
-    def test_starts_synapse_and_cinny_containers(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_starts_synapse_and_chat_containers(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Command starts Synapse compose and the MindRoom Chat container."""
         synapse_dir = tmp_path / "matrix"
         synapse_dir.mkdir()
@@ -6361,10 +6362,10 @@ class TestLocalStackSetup:
                 "local-stack-setup",
                 "--synapse-dir",
                 str(synapse_dir),
-                "--cinny-port",
+                "--chat-port",
                 "18080",
-                "--cinny-container-name",
-                "mindroom-cinny-test",
+                "--chat-container-name",
+                "mindroom-chat-test",
             ],
             cfg,
             storage_path=storage_path,
@@ -6376,9 +6377,9 @@ class TestLocalStackSetup:
         assert any(cmd[:3] == ["docker", "run", "-d"] for cmd in commands)
         assert any(cmd[-1] == "ghcr.io/mindroom-ai/mindroom-chat:latest" for cmd in commands)
 
-        cinny_config = storage_path / "local" / "cinny-config.json"
-        assert cinny_config.exists()
-        config = json.loads(cinny_config.read_text())
+        chat_config = storage_path / "local" / "chat-config.json"
+        assert chat_config.exists()
+        config = json.loads(chat_config.read_text())
         assert config["homeserverList"] == ["http://localhost:8008"]
         assert config["featuredCommunities"]["rooms"] == ["#lobby:localhost"]
 
@@ -6416,6 +6417,7 @@ class TestLocalStackSetup:
 
         assert result.exit_code == 0
         assert ["docker", "compose", "up", "-d"] not in commands
+        assert ["docker", "rm", "-f", "mindroom-chat-local"] in commands
         assert any(cmd[:3] == ["docker", "run", "-d"] for cmd in commands)
 
     @pytest.mark.parametrize(
