@@ -2247,23 +2247,47 @@ def _two_call_agents_config(change: Callable[[dict[str, Any]], object] | None = 
             id="tool-approval",
         ),
         pytest.param(lambda d: d["models"]["default"].update(id="new-default"), set(), id="agent-model-definition"),
-        pytest.param(lambda d: d["calls"]["profiles"]["realtime"].update(voice="cedar"), {"general"}, id="voice"),
+        pytest.param(lambda d: d["calls"]["profiles"]["realtime"].update(voice="cedar"), set(), id="voice"),
         pytest.param(
             lambda d: d["calls"]["profiles"]["realtime"].update(model="gpt-realtime-new"),
-            {"general"},
+            set(),
             id="realtime-model",
         ),
-        pytest.param(lambda d: d["models"]["call"].update(id="new-call-model"), {"writer"}, id="profile-model"),
-        pytest.param(lambda d: d["calls"]["agents"].update(general="cascaded"), {"general"}, id="profile-assignment"),
+        pytest.param(lambda d: d["models"]["call"].update(id="new-call-model"), set(), id="profile-model"),
+        pytest.param(
+            lambda d: d["calls"]["agents"].update(general="cascaded"),
+            {"general"},
+            id="backend-change-profile-assignment",
+        ),
+        pytest.param(
+            lambda d: d["calls"]["profiles"]["realtime"].update(backend="live"),
+            {"general"},
+            id="backend-change-on-profile",
+        ),
         pytest.param(
             lambda d: d["calls"]["agents"].update(general="realtime-copy"),
-            {"general"},
-            id="equal-profile-assignment",
+            set(),
+            id="same-backend-profile-assignment",
         ),
         pytest.param(
             lambda d: d["calls"].update(livekit_service_url="https://livekit.example.org"),
-            {"general", "writer"},
+            set(),
             id="livekit-service-url",
+        ),
+        pytest.param(
+            lambda d: d["calls"]["agents"].update(helper="realtime"),
+            {"helper"},
+            id="add-call-agent",
+        ),
+        pytest.param(
+            lambda d: d["calls"]["agents"].pop("writer"),
+            {"writer"},
+            id="remove-call-agent",
+        ),
+        pytest.param(
+            lambda d: d["calls"].update(enabled=False),
+            {"general", "writer"},
+            id="calls-disabled",
         ),
     ],
 )
@@ -2273,7 +2297,7 @@ def test_config_update_plan_restarts_call_agents_for_their_call_setup_or_a_call_
     expected_call_restarts: set[str],
     in_call: frozenset[str],
 ) -> None:
-    """Idle call agents restart only for their own call setup; an agent in a call restarts for any change."""
+    """Idle call agents restart only for construction-time call setup; an agent in a call restarts for any change."""
     running_entities = {ROUTER_AGENT_NAME, "general", "writer", "helper"}
 
     plan = build_config_update_plan(
@@ -2282,7 +2306,7 @@ def test_config_update_plan_restarts_call_agents_for_their_call_setup_or_a_call_
         bots=_call_bots(running_entities, in_call=in_call),
     )
 
-    assert plan.restart & {"general", "writer"} == expected_call_restarts | in_call
+    assert plan.restart & {"general", "writer", "helper"} == expected_call_restarts | in_call
 
 
 def test_a_knowledge_graph_change_leaves_an_agent_in_a_call_running() -> None:
@@ -2414,8 +2438,52 @@ def test_config_update_plan_restarts_call_agent_when_worker_routing_changes() ->
 
 
 @pytest.mark.parametrize("backend", ["cascaded", "live"])
-def test_config_update_plan_restarts_delegated_call_agent_when_referenced_model_changes(backend: str) -> None:
-    """A delegated call agent rebuilds when its named model definition changes."""
+@pytest.mark.parametrize("in_call", [frozenset(), frozenset({"general"})], ids=["idle", "in-call"])
+def test_config_update_plan_restarts_delegated_call_agent_only_in_call_when_profile_model_changes(
+    backend: str,
+    in_call: frozenset[str],
+) -> None:
+    """Editing a call profile's agent_model/model leaves an idle agent running and restarts one in a call."""
+    models = {
+        "default": ModelConfig(provider="openai", id="default-model"),
+        "call": ModelConfig(provider="openai", id="call-model"),
+        "local": ModelConfig(provider="openai", id="local-model"),
+    }
+    old_config = _runtime_bound_config(
+        Config(
+            agents={"general": AgentConfig(display_name="General Agent")},
+            models=models,
+            calls=_delegated_calls_for("general", model="call", backend=backend),
+            router=RouterConfig(model="default"),
+        ),
+    )
+    new_config = _runtime_bound_config(
+        Config(
+            agents={"general": AgentConfig(display_name="General Agent")},
+            models=models,
+            calls=_delegated_calls_for("general", model="local", backend=backend),
+            router=RouterConfig(model="default"),
+        ),
+    )
+    running_entities = {"general"}
+
+    plan = build_config_update_plan(
+        current_config=old_config,
+        new_config=new_config,
+        bots=_call_bots(running_entities, in_call=in_call),
+    )
+
+    assert plan.restart == in_call
+    assert plan.requires_response_drain is bool(in_call)
+
+
+@pytest.mark.parametrize("backend", ["cascaded", "live"])
+@pytest.mark.parametrize("in_call", [frozenset(), frozenset({"general"})], ids=["idle", "in-call"])
+def test_config_update_plan_restarts_delegated_call_agent_when_referenced_model_changes(
+    backend: str,
+    in_call: frozenset[str],
+) -> None:
+    """Editing a call profile's referenced model leaves an idle agent running and restarts one in a call."""
     old_config = _runtime_bound_config(
         Config(
             agents={"general": AgentConfig(display_name="General Agent")},
@@ -2438,15 +2506,16 @@ def test_config_update_plan_restarts_delegated_call_agent_when_referenced_model_
             router=RouterConfig(model="default"),
         ),
     )
-    running_entities = {ROUTER_AGENT_NAME, "general"}
+    running_entities = {"general"}
 
     plan = build_config_update_plan(
         current_config=old_config,
         new_config=new_config,
-        bots=_call_bots(running_entities),
+        bots=_call_bots(running_entities, in_call=in_call),
     )
 
-    assert plan.restart == {"general"}
+    assert plan.restart == in_call
+    assert plan.requires_response_drain is bool(in_call)
 
 
 @pytest.mark.parametrize("backend", ["cascaded", "live"])

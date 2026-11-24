@@ -2670,6 +2670,47 @@ async def test_a_batch_of_loss_records_ends_a_denied_call_once(tmp_path: Path, *
 
 
 @pytest.mark.asyncio
+async def test_manager_uses_reloaded_call_profile_on_next_call(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """An idle call manager picks up an edited live profile on the next call without restarting."""
+    tooling_kwargs: dict[str, object] = {}
+
+    async def fake_tools(**kwargs: object) -> CallAgentTooling:
+        tooling_kwargs.update(kwargs)
+        return CallAgentTooling(
+            tools=(),
+            instructions="",
+            responder=AsyncMock(return_value=CallAgentResponse("ok")),
+            get_system_prompt=AsyncMock(return_value="System prompt."),
+            execution_identity=_call_execution_identity_from_tool_kwargs(kwargs),
+        )
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_manager.build_call_tools", fake_tools)
+    monkeypatch.setattr(
+        "mindroom.matrix_rtc.call_backends.get_api_key_for_service",
+        lambda service, _paths: "sk-live" if service == "openai_live" else None,
+    )
+    client = _client()
+    client.room_get_state.return_value = _state_response(_remote_member_event())
+    bridge = FakeBridge()
+    manager = _manager(client, bridge, tmp_path, _live_config(agent_model="old-model"))
+
+    reloaded = _live_config(agent_model="local")
+    reloaded.calls.profiles["live"].voice = "cedar"
+    manager.update_config(reloaded)
+    await _deliver(manager, manager.on_room_event(_room(), _member_unknown_event()))
+
+    options = bridge.agent_options
+    assert isinstance(options, LiveVoiceAgentOptions)
+    assert options.voice == "cedar"
+    assert tooling_kwargs["active_model_name"] == "local"
+    assert tooling_kwargs["config"] is reloaded
+    await manager.shutdown()
+
+
+@pytest.mark.asyncio
 @pytest.mark.usefixtures("enforce_turn_authorization")
 async def test_manager_uses_reloaded_reply_policy(tmp_path: Path) -> None:
     """Authorization-only reloads must replace the call manager's live config."""

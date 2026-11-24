@@ -260,24 +260,11 @@ def _authored_outside_knowledge_graph(config: Config) -> dict[str, object]:
     return authored
 
 
-def _call_manager_signature(config: Config, agent_name: str) -> object | None:
-    """Return the call settings one agent's call manager is built from."""
+def _call_manager_signature(config: Config, agent_name: str) -> str | None:
+    """Return the construction-time call settings one agent's call manager is built from."""
     if not config.calls.enabled or agent_name not in config.calls.agents:
         return None
-    profile = config.calls.resolve_agent_config(agent_name)
-    model_name = None
-    if profile.backend == "cascaded":
-        model_name = profile.model
-    elif profile.backend == "live":
-        model_name = profile.agent_model
-    model = config.models.get(model_name) if model_name is not None else None
-    return (
-        config.calls.livekit_service_url,
-        config.calls.agents[agent_name],
-        profile.model_dump(exclude_none=True),
-        # Budgets read prices at each spend refresh, so a price edit leaves the call manager as it is.
-        model.model_dump(exclude_none=True, exclude={"pricing"}) if model is not None else None,
-    )
+    return config.calls.resolve_agent_config(agent_name).backend
 
 
 def _get_changed_agents(
