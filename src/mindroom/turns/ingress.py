@@ -597,7 +597,12 @@ class TurnIngress:
             or not facts.origin.may_answer_interactive_prompt
         ):
             return 0.0
-        context = await self.deps.resolver.extract_dispatch_context(room, event, thread_id=key.thread_id)
+        context = await self.deps.resolver.extract_dispatch_context(
+            room,
+            event,
+            thread_id=key.thread_id,
+            requester_id=facts.run_requester_id,
+        )
         selected = self.deps.turn_policy.adaptive_participation(
             context=context,
             room=room,

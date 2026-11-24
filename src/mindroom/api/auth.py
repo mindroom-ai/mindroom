@@ -54,7 +54,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from mindroom.api.connections_session_cookie import ConnectionsSession
-    from mindroom.constants import RuntimePaths
+    from mindroom.constants import EnvValueSource, RuntimePaths
 
 logger = get_logger(__name__)
 router = APIRouter(tags=["auth"])
@@ -152,6 +152,7 @@ class _ApiAuthSettings:
     supabase_anon_key: str | None
     account_id: str | None
     mindroom_api_key: str | None
+    mindroom_api_key_source: EnvValueSource | None = None
     public_url: str | None = None
     dashboard_origin: str | None = None
     platform_sso_url: str | None = None
@@ -196,11 +197,15 @@ def _build_auth_settings(runtime_paths: RuntimePaths) -> _ApiAuthSettings:
     if dashboard is not None and (public is None or urlsplit(public).netloc == urlsplit(dashboard).netloc):
         msg = "MINDROOM_DASHBOARD_URL must name another host or port than MINDROOM_PUBLIC_URL, which must be set"
         raise ValueError(msg)
+    resolved_api_key = runtime_paths.plain_env_value_with_source(("MINDROOM_API_KEY",))
+    mindroom_api_key = None if resolved_api_key is None else resolved_api_key[0]
+    mindroom_api_key_source = None if resolved_api_key is None else resolved_api_key[2]
     return _ApiAuthSettings(
         supabase_url=runtime_paths.env_value("SUPABASE_URL"),
         supabase_anon_key=runtime_paths.env_value("SUPABASE_ANON_KEY"),
         account_id=runtime_paths.env_value("ACCOUNT_ID"),
-        mindroom_api_key=runtime_paths.env_value("MINDROOM_API_KEY"),
+        mindroom_api_key=mindroom_api_key,
+        mindroom_api_key_source=mindroom_api_key_source,
         public_url=runtime_paths.env_value("MINDROOM_PUBLIC_URL"),
         dashboard_origin=dashboard,
         platform_sso_url=_env_text(runtime_paths, "MINDROOM_PLATFORM_SSO_URL"),
@@ -711,9 +716,26 @@ def login_redirect_for_request(request: Request, *, next_path: str | None = None
     return None
 
 
+def _standalone_login_key_hint(
+    runtime_paths: RuntimePaths,
+    api_key_source: EnvValueSource | None,
+) -> str:
+    """Return the login page hint paragraph for where `MINDROOM_API_KEY` is configured."""
+    if api_key_source == "process_env":
+        return "<p>Check <code>MINDROOM_API_KEY</code> in the environment configured for your MindRoom service.</p>"
+    if api_key_source == "env_file":
+        env_path = html.escape(str(runtime_paths.env_path))
+        return f"<p>Find it in <code>{env_path}</code> as <code>MINDROOM_API_KEY=...</code>.</p>"
+    return (
+        "<p>Check <code>MINDROOM_API_KEY</code> in the environment configured for your MindRoom service "
+        "or in the <code>.env</code> file beside <code>config.yaml</code>.</p>"
+    )
+
+
 def _render_standalone_login_page(
     next_path: str,
     runtime_paths: RuntimePaths,
+    api_key_source: EnvValueSource | None = None,
 ) -> str:
     """Return the standalone dashboard login page."""
     next_path_js = (
@@ -724,7 +746,7 @@ def _render_standalone_login_page(
         .replace("\u2028", "\\u2028")
         .replace("\u2029", "\\u2029")
     )
-    env_path = html.escape(str(runtime_paths.env_path))
+    key_hint = _standalone_login_key_hint(runtime_paths, api_key_source)
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -793,7 +815,7 @@ def _render_standalone_login_page(
   <form id="login-form">
     <h1>MindRoom Dashboard</h1>
     <p>Enter the dashboard API key to continue.</p>
-    <p>Find it in <code>{env_path}</code> as <code>MINDROOM_API_KEY=...</code>.</p>
+    {key_hint}
     <input id="api-key" name="api-key" type="password" autocomplete="current-password" autofocus>
     <button type="submit">Continue</button>
     <div id="error" role="alert"></div>
@@ -1278,4 +1300,10 @@ async def standalone_login(request: Request, next: str = "/") -> Response:  # no
     if await request_has_frontend_access(request):
         return RedirectResponse(next_path)
 
-    return HTMLResponse(_render_standalone_login_page(next_path, auth_state.runtime_paths))
+    return HTMLResponse(
+        _render_standalone_login_page(
+            next_path,
+            auth_state.runtime_paths,
+            api_key_source=auth_state.settings.mindroom_api_key_source,
+        ),
+    )

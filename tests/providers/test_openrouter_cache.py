@@ -1,4 +1,4 @@
-"""OpenRouter Chat Completions requests carry explicit cache breakpoints for Anthropic- and Gemini-routed models."""
+"""OpenRouter Chat Completions requests carry the Claude cache ladder only for Anthropic-routed models."""
 
 from __future__ import annotations
 
@@ -11,7 +11,6 @@ import pytest
 from mindroom.hooks.enrichment import render_transient_context
 from mindroom.llm.messages import Message, system_text
 from mindroom.llm.provider import ModelRequest, RequestOverrides, ToolSpec, TurnCompleted
-from mindroom.providers.openai.chat import ChatAdapter
 from tests.providers.openai_family_support import golden_provider
 
 if TYPE_CHECKING:
@@ -283,7 +282,7 @@ async def test_multimodal_user_content_marks_its_text_part(tmp_path: Path) -> No
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "model_id",
-    ["deepseek/deepseek-v4.1-flash", "openai/gpt-6-astra", "z-ai/glm-5.3", "google/gemma-4-31b-it"],
+    ["deepseek/deepseek-v4.1-flash", "openai/gpt-6-astra", "z-ai/glm-5.3", "google/gemini-3.8-flash"],
 )
 async def test_other_model_families_keep_the_plain_request(tmp_path: Path, model_id: str) -> None:
     """Implicitly cached upstreams keep the plain request format."""
@@ -341,133 +340,3 @@ async def test_caching_needs_no_configuration(tmp_path: Path) -> None:
     payload, _ = await _send(tmp_path, [Message(role="system", content=_SHARED), Message(role="user", content="Hi")])
 
     assert _markers(payload) == [_ONE_HOUR, _ONE_HOUR]
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "model_id",
-    [
-        "google/gemini-4-neon",
-        "google/gemini-3.8-flash:thinking",
-        "~google/gemini-pro-latest",
-        "Google/Gemini-4-Neon",
-    ],
-)
-async def test_a_gemini_route_gets_one_ephemeral_marker_on_the_newest_block(tmp_path: Path, model_id: str) -> None:
-    """Gemini routes get one ephemeral marker (no TTL) on the newest block, with no system or tool markers."""
-    conversation = _conversation()
-
-    payload, _ = await _send(tmp_path, conversation, tools=_TOOLS, model_id=model_id)
-
-    messages = payload["messages"]
-    assert messages[0]["content"] == system_text(conversation)
-    assert messages[-1]["content"] == [{"type": "text", "text": "Summarize it.", "cache_control": _FIVE_MINUTES}]
-    assert messages[-2]["content"] == [{"type": "text", "text": "Found it."}]
-    assert messages[1]["content"] == [{"type": "text", "text": "Look something up."}]
-    assert messages[3]["content"] == [{"type": "text", "text": json.dumps({"result": "Lookup result."})}]
-    assert all("cache_control" not in tool for tool in payload["tools"])
-    assert _markers(payload) == [_FIVE_MINUTES]
-
-
-@pytest.mark.asyncio
-async def test_gemini_tool_loop_moves_the_tail_marker_and_keeps_the_prefix_byte_identical(tmp_path: Path) -> None:
-    """As a Gemini tool loop advances, the single marker moves to the new tail while earlier messages stay identical."""
-    first = [Message(role="system", content=_SHARED), Message(role="user", content="Look something up.")]
-    second = [*first, *_lookup("call_1")]
-    third = [*second, *_lookup("call_2")]
-    requests = [
-        (await _send(tmp_path / f"r{index}", messages, tools=_TOOLS, model_id="google/gemini-4-neon"))[0]
-        for index, messages in enumerate((first, second, third), start=1)
-    ]
-
-    assert [_markers(payload) for payload in requests] == [[_FIVE_MINUTES]] * 3
-    assert requests[0]["messages"][-1]["content"][-1]["cache_control"] == _FIVE_MINUTES
-    assert requests[1]["messages"][-1] == {
-        "role": "tool",
-        "tool_call_id": "call_1",
-        "content": [{"type": "text", "text": json.dumps({"result": "Lookup result."}), "cache_control": _FIVE_MINUTES}],
-    }
-    assert requests[2]["messages"][-1] == {
-        "role": "tool",
-        "tool_call_id": "call_2",
-        "content": [{"type": "text", "text": json.dumps({"result": "Lookup result."}), "cache_control": _FIVE_MINUTES}],
-    }
-    assert _markers(requests[2]["messages"][3]) == []
-
-    r1, r2, r3 = (payload["messages"] for payload in requests)
-    for messages in (r1, r2, r3):
-        for message in messages:
-            if isinstance(content := message.get("content"), list):
-                for part in content:
-                    part.pop("cache_control", None)
-    assert json.dumps(r2[: len(r1)]) == json.dumps(r1)
-    assert json.dumps(r3[: len(r2)]) == json.dumps(r2)
-
-
-@pytest.mark.asyncio
-async def test_gemini_skips_transient_context_and_respects_opt_outs(tmp_path: Path) -> None:
-    """Gemini skips transient blocks, honors all opt-outs, and never enables system updates."""
-    transient = render_transient_context(["Current memory."])
-    with_transient = [
-        Message(role="system", content=_SHARED),
-        Message(role="user", content="Durable prompt."),
-        Message(role="user", content=transient),
-    ]
-    marked, _ = await _send(tmp_path / "transient", with_transient, model_id="google/gemini-4-neon")
-    assert marked["messages"][1:] == [
-        {"role": "user", "content": [{"type": "text", "text": "Durable prompt.", "cache_control": _FIVE_MINUTES}]},
-        {"role": "user", "content": [{"type": "text", "text": transient}]},
-    ]
-
-    disabled, _ = await _send(
-        tmp_path / "disabled",
-        _conversation(),
-        tools=_TOOLS,
-        model_id="google/gemini-4-neon",
-        cache_system_prompt=False,
-    )
-    opted_out, _ = await _send(
-        tmp_path / "opted-out",
-        _conversation(),
-        tools=_TOOLS,
-        model_id="google/gemini-4-neon",
-        overrides=RequestOverrides(prompt_cache=False),
-    )
-    authored_tools = [
-        {
-            "type": "function",
-            "function": {"name": "first", "parameters": {"type": "object"}},
-            "cache_control": _ONE_HOUR,
-        },
-    ]
-    authored, _ = await _send(
-        tmp_path / "authored",
-        _conversation(),
-        tools=_TOOLS,
-        model_id="google/gemini-4-neon",
-        request_params={"tools": deepcopy(authored_tools)},
-    )
-    assert _markers(disabled) == []
-    assert _markers(opted_out) == []
-    assert _markers(authored) == [_ONE_HOUR]
-    assert isinstance(authored["messages"][1]["content"], str)
-
-    reply = {"status": 200, "headers": {"content-type": "text/event-stream"}, "sse": _STREAM}
-    sys_update_dir = tmp_path / "sys-update"
-    sys_update_dir.mkdir()
-    built = golden_provider(
-        {
-            "input": {
-                "model_config": {
-                    "provider": "openrouter",
-                    "id": "google/gemini-4-neon",
-                    "extra_kwargs": {"api_key": "test-key"},
-                },
-            },
-            "response_raw": reply,
-        },
-        sys_update_dir,
-    )
-    assert isinstance(built.adapter, ChatAdapter)
-    assert built.adapter.capabilities.system_updates is None
-    assert not built.adapter.takes_system_update(ModelRequest(messages=_conversation()))

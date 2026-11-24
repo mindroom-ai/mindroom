@@ -24,6 +24,8 @@ from claude_agent_sdk import (
     CLINotFoundError,
     RateLimitEvent,
     SystemMessage,
+    ToolResultBlock,
+    UserMessage,
 )
 
 from mindroom import __version__
@@ -134,6 +136,8 @@ class LiveSession:
             message = messages.get_nowait()
             if isinstance(message, RateLimitEvent):
                 self.record_rate_limit(message.rate_limit_info)
+            elif isinstance(message, UserMessage) and (refused := _ignored_refusal(message, bridge)) is not None:
+                bridge.ignored -= refused
             elif not isinstance(message, SystemMessage):
                 bridge.failure = f"Claude Code did not wait for MindRoom ({type(message).__name__})"
         if bridge.failure is None and not all(call.made.done() for call in bridge.calls.values()):
@@ -143,11 +147,28 @@ class LiveSession:
     async def send(self, blocks: list[dict[str, Any]]) -> None:
         """Send one user message, which starts a turn."""
         self.inventoried, self.counted = False, {}
+        self.bridge.ignored.clear()
         try:
             await self.process.client.query(user_message(blocks))
         except ClaudeSDKError as error:
             msg = f"Claude Code stopped: {error}"
             raise ProviderUnavailable(msg, provider=self.provider) from error
+
+
+def _ignored_refusal(message: UserMessage, bridge: ToolBridge) -> set[str] | None:
+    """Return the ignored call ids refused by ``message``, or None if it carries anything else."""
+    if not isinstance(message.content, list) or not message.content:
+        return None
+    ids = {
+        block.tool_use_id
+        for block in message.content
+        if isinstance(block, ToolResultBlock)
+        and block.is_error is True
+        and block.tool_use_id in bridge.ignored
+        and block.tool_use_id not in bridge.calls
+        and block.tool_use_id not in bridge.unconfirmed
+    }
+    return ids if len(ids) == len(message.content) else None
 
 
 def _startup_error(info: dict[str, Any] | None, provider: str) -> AuthenticationFailed | None:

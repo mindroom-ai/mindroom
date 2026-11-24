@@ -234,8 +234,15 @@ def _view_attachment(  # noqa: PLR0911
             room_id=context.room_id,
             thread_id=context.resolved_thread_id,
         )
-        # The turn's own attachments were scoped when it was given them, a forked thread's parents included.
-        given = attachment.attachment_id in context.attachment_ids and attachment.room_id == context.room_id
+        # The turn's own attachments were scoped when it was given them, vetted fork parents included.
+        in_vetted_fork_parent = (
+            attachment.room_id is not None
+            and attachment.thread_id is not None
+            and (attachment.room_id, attachment.thread_id) in context.fork_parent_scopes
+        )
+        given = attachment.attachment_id in context.attachment_ids and (
+            attachment.room_id == context.room_id or in_vetted_fork_parent
+        )
         if not (allowed or given):
             return media_error("Attachment is outside the authorized conversation context.", metadata=metadata)
         return image_result(payload, metadata=metadata)

@@ -164,11 +164,25 @@ jobs:
           fi
           NOTARIZE=1 macos/build-macos-app.sh --dmg
           ditto -c -k --keepParent dist/macos/MindRoom.app dist/macos/MindRoom.zip
+      # Notarizing MindRoom.dmg notarizes every nested Mach-O binary by CDHash,
+      # including MindRoom Desktop Helper.app; archive it only after notarization succeeds.
+      - name: Package signed desktop helper
+        run: |
+          macos/verify-desktop-helper.sh "dist/macos/MindRoom.app/Contents/Helpers/MindRoom Desktop Helper.app"
+          tar -C dist/macos/MindRoom.app/Contents/Helpers -czf dist/macos/MindRoom-Desktop-Helper-arm64.tar.gz "MindRoom Desktop Helper.app"
+          (cd dist/macos && shasum -a 256 MindRoom-Desktop-Helper-arm64.tar.gz > MindRoom-Desktop-Helper-arm64.tar.gz.sha256)
+          (cd dist/macos && shasum -a 256 -c MindRoom-Desktop-Helper-arm64.tar.gz.sha256)
       - name: Upload macOS app to GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG_NAME: ${{ inputs.release_ref }}
-        run: gh release upload "$TAG_NAME" dist/macos/MindRoom.dmg dist/macos/MindRoom.zip --clobber
+        run: |
+          gh release upload "$TAG_NAME" \
+            dist/macos/MindRoom.dmg \
+            dist/macos/MindRoom.zip \
+            dist/macos/MindRoom-Desktop-Helper-arm64.tar.gz \
+            dist/macos/MindRoom-Desktop-Helper-arm64.tar.gz.sha256 \
+            --clobber
       - name: Update Sparkle appcast
         env:
           GH_TOKEN: ${{ github.token }}

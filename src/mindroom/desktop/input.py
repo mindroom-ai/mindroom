@@ -1,7 +1,17 @@
 """Shared finite policy for application-local input: the apps it may never target, keys, and scroll directions."""
 
 # MindRoom's own windows grant shell auto-approval, control leases, and app access, so agent input must never reach them.
-MINDROOM_APP_IDS = frozenset({"chat.mindroom.menubar", "chat.mindroom.desktophelper"})
+MINDROOM_APP_IDS = frozenset(
+    {
+        "chat.mindroom.menubar",
+        "chat.mindroom.desktophelper",
+        "chat.mindroom.app",
+        "chat.mindroom.app.helper",
+        "chat.mindroom.app.helper.Renderer",
+        "chat.mindroom.app.helper.GPU",
+        "chat.mindroom.app.helper.Plugin",
+    },
+)
 
 DESKTOP_SAFE_KEYS = frozenset(
     {

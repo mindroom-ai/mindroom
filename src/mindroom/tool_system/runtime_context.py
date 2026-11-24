@@ -29,7 +29,7 @@ from mindroom.tool_system.worker_routing import (
 from mindroom.workers.placements import placement_for_session
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+    from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Iterator
     from pathlib import Path
 
     import nio
@@ -156,6 +156,8 @@ class ToolRuntimeContext:
     # The agent turn the calls run in, and in a delegated child's turn the turn that delegated it; None outside a turn.
     turn_id: str | None = None
     parent_turn_id: str | None = None
+    # Vetted fork parent ``(room_id, thread_id)`` scopes loaded into this turn's history.
+    fork_parent_scopes: frozenset[tuple[str, str]] = frozenset()
 
     @property
     def current_config(self) -> Config:
@@ -360,6 +362,7 @@ class ToolRuntimeSupport:
         agent_name: str | None = None,
         active_model_name: str | None = None,
         attachment_ids: list[str] | tuple[str, ...] | None = None,
+        fork_parent_scopes: Collection[tuple[str, str]] = (),
         correlation_id: str | None = None,
         source_envelope: MessageEnvelope | None = None,
         turn_id: str | None = None,
@@ -385,6 +388,7 @@ class ToolRuntimeSupport:
             room=self.resolver.cached_room(target.room_id),
             storage_path=self.storage_path,
             attachment_ids=tuple(attachment_ids or ()),
+            fork_parent_scopes=frozenset(fork_parent_scopes),
             hooks=replace(self.hook_context.bindings(), registry=plugins.hooks),
             correlation_id=correlation_id,
             turn_id=turn_id,
@@ -406,6 +410,7 @@ class ToolRuntimeSupport:
         agent_name: str | None = None,
         active_model_name: str | None = None,
         attachment_ids: list[str] | tuple[str, ...] | None = None,
+        fork_parent_scopes: Collection[tuple[str, str]] = (),
         correlation_id: str | None = None,
         source_envelope: MessageEnvelope | None = None,
         turn_id: str,
@@ -417,6 +422,7 @@ class ToolRuntimeSupport:
             agent_name=agent_name,
             active_model_name=active_model_name,
             attachment_ids=attachment_ids,
+            fork_parent_scopes=fork_parent_scopes,
             correlation_id=correlation_id,
             source_envelope=source_envelope,
             turn_id=turn_id,

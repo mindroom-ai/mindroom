@@ -322,6 +322,7 @@ class ToolJobRuntimeCoordinator:
                 origin=job.adapter.get("origin", {}),
                 depth=job.depth,
                 authority=job.adapter.get("authority", {}),
+                runtime_paths=self.runtime_paths,
             )
         ):
             return "denied"
@@ -380,6 +381,7 @@ class ToolJobRuntimeCoordinator:
                 origin=function_provenance(tool, arguments),
                 depth=len(edges),
                 authority=dict(tool.authority),
+                runtime_paths=self.runtime_paths,
             )
         if not allowed:
             msg = "Tool execution is no longer authorized for this caller."

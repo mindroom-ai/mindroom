@@ -15,13 +15,14 @@ from mindroom.entity_resolution import entity_identity_registry
 from mindroom.history.interrupted_replay import render_stopped_attempt
 from mindroom.hooks import EnrichmentItem, render_enrichment_block
 from mindroom.matrix.client_visible_messages import replace_visible_message
-from mindroom.matrix.thread_forks import fork_reference
+from mindroom.matrix.member_display_names import room_member_display_names
+from mindroom.matrix.thread_forks import fork_parent_scopes, fork_reference
 from mindroom.memory import strip_user_turn_time_prefix
 from mindroom.teams.presentation import strip_team_display
 from mindroom.user_turn_time import prefix_user_turn_time
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
     from mindroom.bot_runtime_view import BotRuntimeView
     from mindroom.config.main import Config
@@ -116,23 +117,79 @@ def thread_fork_item(
     thread_history: Sequence[ResolvedVisibleMessage],
     thread_id: str | None,
     config: Config,
+    *,
+    room_id: str | None = None,
+    runtime: BotRuntimeView | None = None,
 ) -> EnrichmentItem | None:
-    """Tell a fork's turn which thread it was forked from, whose messages its history starts with."""
-    reference = None if thread_id is None else fork_reference(thread_history, thread_id)
+    """Tell a fork's turn which thread it was forked from when that prefix is loaded in history."""
+    reference = None if thread_id is None else fork_reference(thread_history, thread_id, room_id=room_id)
     if reference is None:
         return None
-    parent_thread_id, fork_point_event_id = reference
+    parent_room_id = None if room_id is None else reference.resolved_room_id(room_id)
+    if not any(
+        message.event_id == reference.event_id
+        and (parent_room_id is None or (room_id if message.room_id is None else message.room_id) == parent_room_id)
+        for message in thread_history
+    ):
+        return None
+    if room_id is not None and reference.is_cross_room(room_id):
+        assert parent_room_id is not None
+        parent_room_name = None if runtime is None else _cached_room_display_name(runtime, parent_room_id)
+        parent_room_label = f"{parent_room_name!r} (room ID {parent_room_id})" if parent_room_name else parent_room_id
+        text = config.render_prompt(
+            "CROSS_ROOM_THREAD_FORK_CONTEXT_TEMPLATE",
+            parent_room_id=parent_room_id,
+            parent_room_label=parent_room_label,
+            parent_thread_id=reference.thread_id,
+            fork_point_event_id=reference.event_id,
+        )
+    else:
+        text = config.render_prompt(
+            "THREAD_FORK_CONTEXT_TEMPLATE",
+            parent_thread_id=reference.thread_id,
+            fork_point_event_id=reference.event_id,
+        )
     return EnrichmentItem(
         key="thread_fork",
         minimal_required=True,
-        text=config.render_prompt(
-            "THREAD_FORK_CONTEXT_TEMPLATE",
-            parent_thread_id=parent_thread_id,
-            fork_point_event_id=fork_point_event_id,
-        ),
+        text=text,
         cache_policy="stable",
         persist=False,
     )
+
+
+def merge_fork_parent_display_names(
+    target_display_names: Mapping[str, str],
+    *,
+    thread_history: Sequence[ResolvedVisibleMessage],
+    room_id: str,
+    thread_id: str | None,
+    runtime: BotRuntimeView,
+) -> Mapping[str, str]:
+    """Merge fallback member display names from authorized cross-room fork parents behind target-room names."""
+    client = runtime.client
+    if client is None or thread_id is None:
+        return target_display_names
+    parent_rooms = {
+        parent_room_id
+        for parent_room_id, _ in fork_parent_scopes(thread_history, thread_id, room_id=room_id)
+        if parent_room_id != room_id
+    }
+    if not parent_rooms:
+        return target_display_names
+    ordered_parent_rooms = dict.fromkeys(
+        message.room_id for message in thread_history if message.room_id in parent_rooms
+    )
+    merged: dict[str, str] = {}
+    for parent_room_id in ordered_parent_rooms:
+        assert parent_room_id is not None
+        parent_room = client.rooms.get(parent_room_id)
+        if parent_room is not None:
+            merged.update(room_member_display_names(parent_room))
+    if not merged:
+        return target_display_names
+    merged.update(target_display_names)
+    return merged
 
 
 def with_matrix_message_target(

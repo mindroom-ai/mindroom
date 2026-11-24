@@ -73,7 +73,7 @@ def resolve_scoped_attachments(
     *,
     room_id: str | None = None,
     thread_id: str | None = None,
-    parent_thread_ids: Collection[str] = (),
+    parent_scopes: Collection[tuple[str, str]] = (),
 ) -> list[AttachmentRecord]:
     """Resolve attachment IDs into records scoped to the current context.
 
@@ -89,7 +89,7 @@ def resolve_scoped_attachments(
             attachment_records,
             room_id=room_id,
             thread_id=thread_id,
-            parent_thread_ids=parent_thread_ids,
+            parent_scopes=parent_scopes,
         )
         rejected_count = len(rejected)
         if rejected:

@@ -1475,6 +1475,7 @@ async def test_refresh_model_history_after_lock_refreshes_empty_thread_history(t
     mock_fetch_thread_history.assert_awaited_once_with(
         "!room:localhost",
         "$thread",
+        requester_id="@user:localhost",
     )
     assert request.thread_history == fresh_history
 

@@ -20,7 +20,15 @@ DESKTOP_COMMAND_EVENT_TYPE = "io.mindroom.desktop.command.v2"
 DESKTOP_RESPONSE_EVENT_TYPE = "io.mindroom.desktop.response.v2"
 DESKTOP_PAIRING_CLAIM_EVENT_TYPE = "io.mindroom.desktop.pairing_claim.v1"
 DESKTOP_PAIRING_ACCEPTED_EVENT_TYPE = "io.mindroom.desktop.pairing_accepted.v1"
+DESKTOP_SETUP_REQUEST_EVENT_TYPE = "io.mindroom.desktop.setup_request.v1"
+DESKTOP_SETUP_OFFER_EVENT_TYPE = "io.mindroom.desktop.setup_offer.v1"
+DESKTOP_PAIRING_CONFIRM_EVENT_TYPE = "io.mindroom.desktop.pairing_confirm.v1"
+DESKTOP_PAIRING_CONFIRMED_EVENT_TYPE = "io.mindroom.desktop.pairing_confirmed.v1"
+DESKTOP_DISCONNECT_REQUEST_EVENT_TYPE = "io.mindroom.desktop.disconnect_request.v1"
+DESKTOP_DISCONNECT_CONFIRMED_EVENT_TYPE = "io.mindroom.desktop.disconnect_confirmed.v1"
 DESKTOP_PROTOCOL_VERSION = 2
+_PAIRING_V1_VERSION = 1
+_MIN_PAIRING_NONCE_CHARS = 16
 MAX_COMMAND_TTL_MS = 120_000
 MAX_SCREENSHOT_BYTES = 10 * 1024 * 1024
 MAX_SHELL_OUTPUT_BYTES = 10 * 1024 * 1024
@@ -228,6 +236,195 @@ def desktop_pairing_verification(token: str, device_ed25519: str) -> str:
     """Derive a terminal-visible confirmation bound to one claimed device key."""
     digest = hashlib.sha256(f"{token}\0{device_ed25519}".encode()).hexdigest()
     return digest[:_PAIRING_VERIFICATION_HEX_CHARS].upper()
+
+
+@dataclass(frozen=True, slots=True)
+class DesktopSetupRequest:
+    """One authenticated Chat device request to initiate Olm Desktop pairing."""
+
+    nonce: str
+    agent_name: str
+
+    def to_content(self) -> dict[str, object]:
+        """Serialize one setup request for Olm delivery."""
+        return {"v": _PAIRING_V1_VERSION, "nonce": self.nonce, "agent_name": self.agent_name}
+
+    @classmethod
+    def from_content(cls, raw: object) -> DesktopSetupRequest:
+        """Parse one strict setup request."""
+        nonce, agent_name = _pairing_agent_request_fields(raw, "setup request")
+        return cls(nonce=nonce, agent_name=agent_name)
+
+
+@dataclass(frozen=True, slots=True)
+class DesktopSetupOffer:
+    """Controller Olm reply carrying either a short-lived setup code or an ineligibility error."""
+
+    nonce: str
+    agent_name: str
+    eligible: bool
+    homeserver: str | None = None
+    user_id: str | None = None
+    code: str | None = None
+    cloudflare_access: bool = False
+    error: str | None = None
+
+    def to_content(self) -> dict[str, object]:
+        """Serialize one setup offer for Olm delivery."""
+        content: dict[str, object] = {
+            "v": _PAIRING_V1_VERSION,
+            "nonce": self.nonce,
+            "agent_name": self.agent_name,
+            "eligible": self.eligible,
+            "cloudflare_access": self.cloudflare_access,
+        }
+        if self.homeserver is not None:
+            content["homeserver"] = self.homeserver
+        if self.user_id is not None:
+            content["user_id"] = self.user_id
+        if self.code is not None:
+            content["code"] = self.code
+        if self.error is not None:
+            content["error"] = self.error
+        return content
+
+    @classmethod
+    def from_content(cls, raw: object) -> DesktopSetupOffer:
+        """Parse one strict setup offer enforcing eligibility invariants."""
+        content = _object_mapping(raw, "setup offer")
+        _require_pairing_v1_version(content, "setup offer")
+        nonce = _pairing_nonce(content, "setup offer")
+        agent_name = _bounded_identifier(content, "agent_name", "setup offer")
+        eligible = _required_bool(content, "eligible", "setup offer")
+        cloudflare_access_raw = content.get("cloudflare_access", False)
+        if not isinstance(cloudflare_access_raw, bool):
+            msg = "setup offer.cloudflare_access must be a boolean."
+            raise DesktopProtocolError(msg)
+        error = _optional_error(content, "setup offer")
+        if eligible:
+            if error is not None:
+                msg = "Eligible desktop setup offers must not include an error."
+                raise DesktopProtocolError(msg)
+            homeserver: str | None = _setup_homeserver(content)
+            user_id: str | None = _bounded_str(content, "user_id", "setup offer", max_length=512)
+            code: str | None = _bounded_str(content, "code", "setup offer", max_length=256)
+        else:
+            if error is None:
+                msg = "Ineligible desktop setup offers must include an error."
+                raise DesktopProtocolError(msg)
+            if content.get("code") is not None:
+                msg = "Ineligible desktop setup offers must not include a pairing code."
+                raise DesktopProtocolError(msg)
+            homeserver = _setup_homeserver(content) if content.get("homeserver") is not None else None
+            user_id = (
+                _bounded_str(content, "user_id", "setup offer", max_length=512)
+                if content.get("user_id") is not None
+                else None
+            )
+            code = None
+        return cls(
+            nonce=nonce,
+            agent_name=agent_name,
+            eligible=eligible,
+            homeserver=homeserver,
+            user_id=user_id,
+            code=code,
+            cloudflare_access=cloudflare_access_raw,
+            error=error,
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class DesktopPairingConfirm:
+    """Initiating Chat device confirmation binding one claimed helper device to the pairing token."""
+
+    nonce: str
+    token: str
+    verification: str
+    device_id: str
+    device_ed25519: str
+
+    def to_content(self) -> dict[str, object]:
+        """Serialize one pairing confirmation request for Olm delivery."""
+        return {
+            "v": _PAIRING_V1_VERSION,
+            "nonce": self.nonce,
+            "token": self.token,
+            "verification": self.verification,
+            "device_id": self.device_id,
+            "device_ed25519": self.device_ed25519,
+        }
+
+    @classmethod
+    def from_content(cls, raw: object) -> DesktopPairingConfirm:
+        """Parse one strict pairing confirmation request."""
+        content = _object_mapping(raw, "pairing confirm")
+        _require_pairing_v1_version(content, "pairing confirm")
+        return cls(
+            nonce=_pairing_nonce(content, "pairing confirm"),
+            token=_bounded_str(content, "token", "pairing confirm", max_length=256),
+            verification=_bounded_str(content, "verification", "pairing confirm", max_length=64),
+            device_id=_bounded_str(content, "device_id", "pairing confirm", max_length=256),
+            device_ed25519=_bounded_str(content, "device_ed25519", "pairing confirm", max_length=256),
+        )
+
+
+@dataclass(frozen=True, slots=True)
+class DesktopPairingConfirmed:
+    """Controller Olm reply reporting whether pairing confirmation succeeded."""
+
+    nonce: str
+    agent_name: str
+    ok: bool
+    error: str | None = None
+
+    def to_content(self) -> dict[str, object]:
+        """Serialize one pairing confirmation reply."""
+        return _pairing_status_content(self.nonce, self.agent_name, ok=self.ok, error=self.error)
+
+    @classmethod
+    def from_content(cls, raw: object) -> DesktopPairingConfirmed:
+        """Parse one strict pairing confirmation reply."""
+        nonce, agent_name, ok, error = _pairing_status_fields(raw, "pairing confirmation")
+        return cls(nonce=nonce, agent_name=agent_name, ok=ok, error=error)
+
+
+@dataclass(frozen=True, slots=True)
+class DesktopDisconnectRequest:
+    """One authenticated Chat device request to disconnect an agent's Desktop pairing."""
+
+    nonce: str
+    agent_name: str
+
+    def to_content(self) -> dict[str, object]:
+        """Serialize one disconnect request for Olm delivery."""
+        return {"v": _PAIRING_V1_VERSION, "nonce": self.nonce, "agent_name": self.agent_name}
+
+    @classmethod
+    def from_content(cls, raw: object) -> DesktopDisconnectRequest:
+        """Parse one strict disconnect request."""
+        nonce, agent_name = _pairing_agent_request_fields(raw, "disconnect request")
+        return cls(nonce=nonce, agent_name=agent_name)
+
+
+@dataclass(frozen=True, slots=True)
+class DesktopDisconnectConfirmed:
+    """Controller Olm reply reporting whether disconnect succeeded."""
+
+    nonce: str
+    agent_name: str
+    ok: bool
+    error: str | None = None
+
+    def to_content(self) -> dict[str, object]:
+        """Serialize one disconnect confirmation reply."""
+        return _pairing_status_content(self.nonce, self.agent_name, ok=self.ok, error=self.error)
+
+    @classmethod
+    def from_content(cls, raw: object) -> DesktopDisconnectConfirmed:
+        """Parse one strict disconnect confirmation reply."""
+        nonce, agent_name, ok, error = _pairing_status_fields(raw, "disconnect confirmation")
+        return cls(nonce=nonce, agent_name=agent_name, ok=ok, error=error)
 
 
 @dataclass(frozen=True, slots=True)
@@ -488,17 +685,90 @@ def _require_protocol_version(content: dict[str, object]) -> None:
         raise DesktopProtocolError(msg)
 
 
+def _require_pairing_v1_version(content: dict[str, object], label: str) -> None:
+    version = _required_int(content, "v", label)
+    if version != _PAIRING_V1_VERSION:
+        msg = f"Unsupported {label} version: {version}."
+        raise DesktopProtocolError(msg)
+
+
+def _required_bool(content: dict[str, object], key: str, label: str) -> bool:
+    value = content.get(key)
+    if not isinstance(value, bool):
+        msg = f"{label}.{key} must be a boolean."
+        raise DesktopProtocolError(msg)
+    return value
+
+
+def _pairing_nonce(content: dict[str, object], label: str) -> str:
+    value = _bounded_str(content, "nonce", label, max_length=128)
+    if len(value) < _MIN_PAIRING_NONCE_CHARS or any(ch.isspace() for ch in value):
+        msg = f"{label}.nonce must be between {_MIN_PAIRING_NONCE_CHARS} and 128 non-blank characters."
+        raise DesktopProtocolError(msg)
+    return value
+
+
+def _optional_error(content: dict[str, object], label: str) -> str | None:
+    error = content.get("error")
+    if error is None:
+        return None
+    if not isinstance(error, str) or not error.strip() or len(error) > 1024:
+        msg = f"{label}.error must be a non-empty string up to 1024 characters when present."
+        raise DesktopProtocolError(msg)
+    return error
+
+
+def _pairing_agent_request_fields(raw: object, label: str) -> tuple[str, str]:
+    content = _object_mapping(raw, label)
+    _require_pairing_v1_version(content, label)
+    return _pairing_nonce(content, label), _bounded_identifier(content, "agent_name", label)
+
+
+def _pairing_status_content(nonce: str, agent_name: str, *, ok: bool, error: str | None) -> dict[str, object]:
+    content: dict[str, object] = {
+        "v": _PAIRING_V1_VERSION,
+        "nonce": nonce,
+        "agent_name": agent_name,
+        "ok": ok,
+    }
+    if error is not None:
+        content["error"] = error
+    return content
+
+
+def _pairing_status_fields(raw: object, label: str) -> tuple[str, str, bool, str | None]:
+    content = _object_mapping(raw, label)
+    _require_pairing_v1_version(content, label)
+    nonce = _pairing_nonce(content, label)
+    agent_name = _bounded_identifier(content, "agent_name", label)
+    ok = _required_bool(content, "ok", label)
+    error = _optional_error(content, label)
+    if ok and error is not None:
+        msg = f"Successful {label} must not include an error."
+        raise DesktopProtocolError(msg)
+    if not ok and error is None:
+        msg = f"Failed {label} must include an error."
+        raise DesktopProtocolError(msg)
+    return nonce, agent_name, ok, error
+
+
 __all__ = [
     "DESKTOP_APP_ACTIONS",
     "DESKTOP_BROWSER_ACTIONS",
     "DESKTOP_COMMAND_EVENT_TYPE",
     "DESKTOP_CONTROL_ACTIONS",
+    "DESKTOP_DISCONNECT_CONFIRMED_EVENT_TYPE",
+    "DESKTOP_DISCONNECT_REQUEST_EVENT_TYPE",
     "DESKTOP_FILE_ACTIONS",
     "DESKTOP_PAIRING_ACCEPTED_EVENT_TYPE",
     "DESKTOP_PAIRING_CLAIM_EVENT_TYPE",
+    "DESKTOP_PAIRING_CONFIRMED_EVENT_TYPE",
+    "DESKTOP_PAIRING_CONFIRM_EVENT_TYPE",
     "DESKTOP_PROTOCOL_VERSION",
     "DESKTOP_RESPONSE_EVENT_TYPE",
     "DESKTOP_SAFE_KEYS",
+    "DESKTOP_SETUP_OFFER_EVENT_TYPE",
+    "DESKTOP_SETUP_REQUEST_EVENT_TYPE",
     "DESKTOP_SHELL_ACTIONS",
     "MAX_COMMAND_TTL_MS",
     "MAX_INLINE_RESPONSE_BYTES",
@@ -508,13 +778,19 @@ __all__ = [
     "SHELL_OUTPUT_MIME_TYPE",
     "DesktopAction",
     "DesktopCommand",
+    "DesktopDisconnectConfirmed",
+    "DesktopDisconnectRequest",
     "DesktopMediaKind",
     "DesktopObservationMode",
     "DesktopPairingAccepted",
     "DesktopPairingClaim",
+    "DesktopPairingConfirm",
+    "DesktopPairingConfirmed",
     "DesktopProtocolError",
     "DesktopResponse",
     "DesktopSetupDescriptor",
+    "DesktopSetupOffer",
+    "DesktopSetupRequest",
     "EncryptedDesktopMedia",
     "desktop_observation_mode",
     "desktop_pairing_verification",

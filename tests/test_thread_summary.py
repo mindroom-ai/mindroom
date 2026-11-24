@@ -294,8 +294,10 @@ class _RoomState:
     title_rules: dict[str, object] | Exception | nio.RoomGetStateEventError | None = None
     # The room's thread_summary_model setting, served the same way.
     title_model: dict[str, object] | Exception | nio.RoomGetStateEventError | None = None
+    _client: AsyncMock | None = field(default=None, init=False)
 
     def serve(self, client: AsyncMock) -> None:
+        self._client = client
         client.room_get_state.side_effect = self.room_get_state
         client.room_get_state_event.side_effect = self.room_get_state_event
         client.room_put_state.side_effect = self.room_put_state
@@ -326,10 +328,17 @@ class _RoomState:
         failure = self._count_read()
         if failure is not None:
             return failure
-        events = [
+        events: list[dict[str, object]] = [
             {"type": THREAD_TAGS_EVENT_TYPE, "state_key": key, "content": content}
             for key, content in self.events.items()
         ]
+        rooms = self._client.rooms if self._client is not None and isinstance(self._client.rooms, dict) else {}
+        room = rooms.get(room_id)
+        if room is not None:
+            events.extend(
+                {"type": "m.room.member", "state_key": user_id, "content": {"membership": "join"}}
+                for user_id in room.users
+            )
         return nio.RoomGetStateResponse(events=events, room_id=room_id)
 
     async def room_get_state_event(
@@ -350,9 +359,11 @@ class _RoomState:
             return nio.RoomGetStateEventResponse(rules, event_type, state_key, room_id)
         if event_type == THREAD_TAGS_EVENT_TYPE:
             return self._tag_event(room_id, state_key)
-        if event_type == "m.room.create":
-            return nio.RoomGetStateEventResponse({"room_version": "10"}, event_type, state_key, room_id)
-        content = {"users": {self.user_id: self.power_level}, "state_default": 50}
+        static_state: dict[str, dict[str, object]] = {
+            "m.room.create": {"room_version": "10"},
+            "m.room.history_visibility": {"history_visibility": "shared"},
+        }
+        content = static_state.get(event_type, {"users": {self.user_id: self.power_level}, "state_default": 50})
         return nio.RoomGetStateEventResponse(content, event_type, state_key, room_id)
 
     def _tag_event(self, room_id: str, state_key: str) -> nio.RoomGetStateEventResponse | nio.RoomGetStateEventError:
@@ -994,6 +1005,78 @@ class TestMaybeGenerateThreadSummary:
         # Only a title a model writes reads the room's title settings, both at once.
         state_reads = [call.args[1] for call in self.client.room_get_state_event.await_args_list]
         assert state_reads.count(ROOM_SETTINGS_EVENT_TYPE) == 2 * len(model.requests)
+
+    @pytest.mark.parametrize(
+        ("authorized", "expected_title", "expected_model_calls"),
+        [
+            (True, "Source trip plan (forked)", 0),
+            (False, "Prompt title (forked)", 1),
+        ],
+        ids=["authorized-copies-parent-title", "denied-falls-back-to-prompt-title"],
+    )
+    async def test_cross_room_fork_provisional_title_enforces_authorization(
+        self,
+        *,
+        authorized: bool,
+        expected_title: str,
+        expected_model_calls: int,
+    ) -> None:
+        """Cross-room provisional title copies parent title only when authorized, else falls back to prompt text."""
+        source_room_id = "!source:localhost"
+        model = self._summarizer(_title("Prompt title"))
+        self.client.user_id = "@mindroom_router:localhost"
+        source_room = nio.MatrixRoom(source_room_id, self.client.user_id)
+        source_room.members_synced = True
+        source_room.add_member(self.client.user_id, "Router", None)
+        source_room.add_member("@user0:localhost", "User 0", None)
+        target_room = nio.MatrixRoom(_ROOM, self.client.user_id)
+        target_room.members_synced = True
+        target_room.add_member(self.client.user_id, "Router", None)
+        target_room.add_member("@user0:localhost", "User 0", None)
+        if not authorized:
+            target_room.add_member("@outsider:localhost", "Outsider", None)
+        self.client.rooms = {source_room_id: source_room, _ROOM: target_room}
+
+        parent = _make_thread_history(2)
+        parent.append(_make_summary_notice_message(_THREAD, message_count=2, summary="Source trip plan"))
+        fork_root = ResolvedVisibleMessage.synthetic(
+            sender="@user0:localhost",
+            body="carry on in target",
+            timestamp=1700000000,
+            event_id="$fork",
+            content={
+                "body": "carry on in target",
+                FORK_CONTENT_KEY: {"room_id": source_room_id, "thread_id": _THREAD, "event_id": "$event1"},
+            },
+        )
+        pages = {}
+        for key, messages in (((source_room_id, _THREAD), parent), ((_ROOM, "$fork"), [fork_root])):
+            serve_conversation_reader(self.conversation_reader, messages, room_id=key[0], thread_id=key[1])
+            pages[key] = self.conversation_reader.read_strict.return_value
+
+        async def read(*, room_id: str, thread_id: str, **_kwargs: object) -> object:
+            return pages[(room_id, thread_id)]
+
+        self.conversation_reader.read.side_effect = read
+        self.conversation_reader.read_strict.side_effect = read
+
+        await automatic.maybe_generate_prompt_summary(
+            self.client,
+            _ROOM,
+            "$fork",
+            _mock_config(),
+            self.rp,
+            prompt_event_ids=("$fork",),
+            prompt="carry on in target",
+            conversation_reader=self.conversation_reader,
+            entity_name="router",
+            membership_index=AgentReplyMembershipIndex(),
+            requester_id="@user0:localhost",
+        )
+
+        (sent,) = _sent_summaries(self.client)
+        assert sent["summary"] == expected_title
+        assert len(model.requests) == expected_model_calls
 
     @pytest.mark.parametrize("parent_title", ["Trip plan", None], ids=["parent-title", "untitled-parent"])
     async def test_a_batch_starting_a_fork_gets_only_its_parents_title(self, parent_title: str | None) -> None:

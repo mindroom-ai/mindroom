@@ -1097,6 +1097,37 @@ async def test_desktop_rule_unchanged(tmp_path: Path, owner_account_joined: bool
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_desktop_named_agent_owns_command_in_multi_agent_room(tmp_path: Path) -> None:
+    """`/desktop setup <agent>` in a multi-agent room is owned only by the named Desktop agent."""
+    access = ResponderAccessConfig(users=[_SENDER])
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "general": AgentConfig(display_name="General", access=access),
+                "research": AgentConfig(display_name="Research", access=access, tools=["desktop"]),
+            },
+            router=RouterConfig(access=ResponderAccessConfig(users=["@owner:localhost"], current_room_members=False)),
+        ),
+        test_runtime_paths(tmp_path),
+    )
+    room = _room_with_members(
+        _SENDER,
+        *(_entity_id(config, name).full_id for name in ("general", "research", ROUTER_AGENT_NAME)),
+    )
+    client = AsyncMock()
+    client.joined_members.return_value = nio.JoinedMembersResponse(
+        members=[nio.RoomMember(user_id, None, None) for user_id in room.users],
+        room_id=room.room_id,
+    )
+    assert await ensure_room_membership_synced(client, room, sender_id=_SENDER)
+    room.update_summary(nio.RoomSummary(invited_member_count=0, joined_member_count=len(room.users)))
+
+    assert await _command_owners(config, "!desktop setup research", {"general": room, "research": room}) == ["research"]
+    assert await _command_owners(config, "!desktop setup", {"general": room, "research": room}) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
 async def test_router_access_denies_untargeted_command(tmp_path: Path) -> None:
     """`router.access` gates a command aimed at nobody as it gates routing, and no command aimed at an agent."""
     config = _router_access_denies_everyone(tmp_path)

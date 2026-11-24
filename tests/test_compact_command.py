@@ -1487,7 +1487,8 @@ async def test_compaction_defers_when_target_history_is_not_ready(  # noqa: C901
         monkeypatch.setattr(session_context_module, "remove_history_of_redacted_events", record_gap)
     elif boundary in {"degraded", "read_failed", "rejoin_during_read"}:
 
-        async def fail_read(_room: str, _thread: str) -> None:
+        async def fail_read(_room: str, _thread: str, *, requester_id: str | None = None) -> None:
+            del requester_id
             if boundary == "rejoin_during_read":
                 await admit_room_membership(store, ROOM, "leave")
                 await admit_room_membership(store, ROOM, "join")
@@ -1504,7 +1505,7 @@ async def test_compaction_defers_when_target_history_is_not_ready(  # noqa: C901
     await asyncio.wait_for(await _start_fold(target), 30)
     assert not build.call_count
     if boundary in {"degraded", "read_failed", "rejoin_during_read"}:
-        thread_read.assert_awaited_once_with(ROOM, THREAD)
+        thread_read.assert_awaited_once_with(ROOM, THREAD, requester_id=ALICE)
     if boundary == "first_recovery_check":
         load.assert_not_called()
     if boundary == "after_scrub":

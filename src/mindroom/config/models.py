@@ -610,6 +610,14 @@ class DefaultsConfig(BaseModel):
         default=False,
         description="Default setting for allowing agents to modify their own configuration",
     )
+    desktop_pairing: Literal["self_service", "explicit_only", "disabled"] = Field(
+        default="self_service",
+        description=(
+            "Desktop pairing policy for agents: 'self_service' lets requesters pair any concrete agent and "
+            "activates the desktop tool only for paired requesters, 'explicit_only' requires agents to declare "
+            "the desktop tool, and 'disabled' disables desktop pairing for all agents"
+        ),
+    )
     max_preload_file_chars: int = Field(
         default=30000,
         ge=1,

@@ -186,12 +186,42 @@ def _attachment_record_in_message_scope(
     *,
     room_id: str | None,
 ) -> bool:
-    if room_id is not None and record.room_id != room_id:
+    expected_room_id = message.room_id if message.room_id is not None else room_id
+    if expected_room_id is not None and record.room_id != expected_room_id:
         return False
     # A record belongs to the thread of the message that references it:
     # thread members match by thread ID, thread roots by their own event ID,
     # and room-level messages only see room-level (thread-less) records.
     return record.thread_id in (message.thread_id, message.event_id)
+
+
+def parent_attachment_refs_in_history(
+    thread_history: Sequence[ResolvedVisibleMessage],
+    *,
+    room_id: str,
+    parent_scopes: Collection[tuple[str, str]],
+) -> tuple[tuple[str, str, str], ...]:
+    """Return ordered ``(room_id, thread_id, attachment_id)`` refs carried by in-cut parent messages."""
+    refs: list[tuple[str, str, str]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for message in thread_history:
+        message_room_id = room_id if message.room_id is None else message.room_id
+        parent_thread_id = next(
+            (
+                scope_thread_id
+                for scope_room_id, scope_thread_id in parent_scopes
+                if scope_room_id == message_room_id and _thread_history_message_in_scope(message, scope_thread_id)
+            ),
+            None,
+        )
+        if parent_thread_id is None:
+            continue
+        for attachment_id in _attachment_ids_for_visible_message(message):
+            ref = (message_room_id, parent_thread_id, attachment_id)
+            if ref not in seen:
+                seen.add(ref)
+                refs.append(ref)
+    return tuple(refs)
 
 
 def attachment_records_for_visible_message(
@@ -1170,24 +1200,25 @@ def filter_attachments_for_context(
     *,
     room_id: str,
     thread_id: str | None = None,
-    parent_thread_ids: Collection[str] = (),
+    parent_scopes: Collection[tuple[str, str]] = (),
 ) -> tuple[list[AttachmentRecord], list[str]]:
     """Keep only attachments registered for the current room/thread context, or a forked thread's parents."""
+    allowed_parent_scopes = set(parent_scopes)
     allowed_records: list[AttachmentRecord] = []
     rejected_attachment_ids: list[str] = []
     for record in attachment_records:
-        if record.room_id != room_id:
-            rejected_attachment_ids.append(record.attachment_id)
-            continue
-
         if thread_id is None:
-            if record.thread_id is None:
+            if record.room_id == room_id and record.thread_id is None:
                 allowed_records.append(record)
             else:
                 rejected_attachment_ids.append(record.attachment_id)
             continue
 
-        if record.thread_id == thread_id or record.thread_id in parent_thread_ids:
+        if (record.room_id == room_id and record.thread_id == thread_id) or (
+            record.room_id is not None
+            and record.thread_id is not None
+            and (record.room_id, record.thread_id) in allowed_parent_scopes
+        ):
             allowed_records.append(record)
         else:
             rejected_attachment_ids.append(record.attachment_id)
@@ -1311,33 +1342,40 @@ async def register_thread_history_media_attachments(
     room_id: str,
     thread_id: str | None,
     thread_history: Sequence[ResolvedVisibleMessage],
-    parent_thread_ids: Collection[str] = (),
+    parent_scopes: Collection[tuple[str, str]] = (),
 ) -> list[str]:
     """Register unannotated image/file/video events visible in thread history.
 
-    Media from a forked thread's parents registers under the parent thread it was sent in.
+    Media from a forked thread's parents registers under the true parent room and thread it was sent in.
     The turn's download budget goes to the newest media first, so older media
     that keeps failing cannot hold back newer media turn after turn.
     """
+    allowed_parent_scopes = set(parent_scopes)
     attachment_ids: list[str] = []
     seen_attachment_ids: set[str] = set()
     downloads = 0
     for message in reversed(thread_history):
-        message_thread_id = thread_id
-        if not _thread_history_message_in_scope(message, thread_id):
+        message_room_id = room_id if message.room_id is None else message.room_id
+        if message_room_id == room_id and _thread_history_message_in_scope(message, thread_id):
+            message_thread_id: str | None = thread_id
+        else:
             message_thread_id = next(
-                (t for t in parent_thread_ids if _thread_history_message_in_scope(message, t)),
+                (
+                    parent_thread_id
+                    for parent_room_id, parent_thread_id in allowed_parent_scopes
+                    if parent_room_id == message_room_id and _thread_history_message_in_scope(message, parent_thread_id)
+                ),
                 None,
             )
             if message_thread_id is None:
                 continue
-        event = _media_event_from_thread_history_message(room_id, message)
+        event = _media_event_from_thread_history_message(message_room_id, message)
         if event is None:
             continue
         attachment_record, downloaded = await _register_thread_history_media_attachment(
             client,
             storage_path,
-            room_id=room_id,
+            room_id=message_room_id,
             thread_id=message_thread_id,
             event=event,
             may_download=downloads < _MAX_HISTORY_MEDIA_DOWNLOADS_PER_TURN,

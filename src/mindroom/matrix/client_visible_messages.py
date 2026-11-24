@@ -69,6 +69,7 @@ class ResolvedVisibleMessage:
     latest_event_id: str
     stream_status: str | None = None
     edited_timestamp: int | None = None
+    room_id: str | None = None
     thread_id_known: bool = True
     """Whether ``thread_id`` is a fact about this message rather than an absence of one.
 
@@ -112,6 +113,7 @@ class ResolvedVisibleMessage:
         timestamp: int = 0,
         content: dict[str, Any] | None = None,
         thread_id: str | None = None,
+        room_id: str | None = None,
     ) -> ResolvedVisibleMessage:
         """Build a synthetic visible message for non-Matrix history inputs."""
         message = cls(
@@ -122,6 +124,7 @@ class ResolvedVisibleMessage:
             content=content or {"body": body},
             thread_id=thread_id,
             latest_event_id=event_id,
+            room_id=room_id,
         )
         message.refresh_stream_status()
         return message

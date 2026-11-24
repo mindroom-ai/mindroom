@@ -198,20 +198,34 @@ def mentions_another_participant(
     return True if mentioned_agents or has_non_agent_mentions else None
 
 
+def _local_thread_history(
+    thread_history: Sequence[ResolvedVisibleMessage],
+    room_id: str | None,
+) -> Sequence[ResolvedVisibleMessage]:
+    """Exclude foreign cross-room fork prefix rows while keeping same-room messages and same-room forks."""
+    if room_id is None:
+        return thread_history
+    return [msg for msg in thread_history if msg.room_id is None or msg.room_id == room_id]
+
+
 def get_agents_in_thread(
     thread_history: Sequence[ResolvedVisibleMessage],
     config: Config,
     runtime_paths: RuntimePaths,
+    *,
+    room_id: str | None = None,
 ) -> list[MatrixID]:
     """Get list of unique agents that have participated in thread.
 
     Note: The owner account is excluded from the participant list as it's not
-    a conversation participant.
+    a conversation participant. When ``room_id`` is provided, foreign cross-room
+    fork prefix rows are ignored so destination-local participation governs routing.
 
     Preserves the order of first participation while preventing duplicates.
     """
     registry = entity_identity_registry(config, runtime_paths)
-    return _agents_from_user_ids(dict.fromkeys(msg.sender for msg in thread_history), registry)
+    local_history = _local_thread_history(thread_history, room_id)
+    return _agents_from_user_ids(dict.fromkeys(msg.sender for msg in local_history), registry)
 
 
 def _agents_from_user_ids(user_ids: Iterable[str], registry: EntityIdentityRegistry) -> list[MatrixID]:
@@ -230,17 +244,25 @@ def has_multiple_non_agent_users_in_thread(
     runtime_paths: RuntimePaths,
     *,
     current_sender_id: str | None = None,
+    room_id: str | None = None,
 ) -> bool:
     """Return True when more than one non-agent user has posted in the thread.
 
     Senders that are MindRoom agents or listed in ``config.bot_accounts`` are
     excluded from the count. Human bridge aliases count as their canonical
-    identity, without changing the original message sender.
+    identity, without changing the original message sender. Cross-room fork
+    prefix messages (whose ``room_id`` differs from ``room_id``) are ignored so
+    destination-local participation governs routing.
     Each distinct sender is classified once: long threads repeat a few
     senders, and classifying one is far costlier than reading a message.
     """
     non_agent_senders: set[str] = set()
-    senders = dict.fromkeys([current_sender_id, *(msg.sender for msg in thread_history)])
+    senders = dict.fromkeys(
+        [
+            current_sender_id,
+            *(msg.sender for msg in _local_thread_history(thread_history, room_id)),
+        ],
+    )
     for sender in senders:
         if sender and is_human_requester_id(sender, config, runtime_paths):
             non_agent_senders.add(resolve_human_requester_alias(sender, config, runtime_paths))
@@ -257,10 +279,11 @@ def thread_requires_explicit_agent_targeting(
     runtime_paths: RuntimePaths,
     membership_index: AgentReplyMembershipIndex,
     available_responders_in_room: Sequence[MatrixID] | None = None,
+    room_id: str | None = None,
 ) -> bool:
     """Return whether a thread already has visible ownership or multiple human participants."""
     sender_visible_responders = filter_thread_agents_for_sender(
-        get_agents_in_thread(thread_history, config, runtime_paths),
+        get_agents_in_thread(thread_history, config, runtime_paths, room_id=room_id),
         sender_id,
         config,
         runtime_paths,
@@ -274,6 +297,7 @@ def thread_requires_explicit_agent_targeting(
         config,
         runtime_paths,
         current_sender_id=sender_id,
+        room_id=room_id,
     )
 
 
@@ -304,8 +328,13 @@ def get_all_mentioned_agents_in_thread(
     thread_history: Sequence[ResolvedVisibleMessage],
     config: Config,
     runtime_paths: RuntimePaths,
+    *,
+    room_id: str | None = None,
 ) -> list[MatrixID]:
     """Get all unique agent MatrixIDs the thread's messages count as mentioning; see ``history_mentioned_user_ids``.
+
+    When ``room_id`` is provided, foreign cross-room fork prefix rows are ignored so
+    parent-room mentions do not implicitly form teams in the destination room.
 
     Preserves the order of first mention while preventing duplicates.
     """
@@ -313,7 +342,7 @@ def get_all_mentioned_agents_in_thread(
     seen_ids: set[str] = set()
     registry = entity_identity_registry(config, runtime_paths)
 
-    for msg in thread_history:
+    for msg in _local_thread_history(thread_history, room_id):
         user_ids = history_mentioned_user_ids(msg.content, config, runtime_paths)
         agents = _agents_from_user_ids(user_ids, registry)
 
@@ -335,14 +364,15 @@ def _decide_thread_agent_response(
     membership_index: AgentReplyMembershipIndex,
     available_responders: Sequence[MatrixID],
     agents_in_thread: Sequence[MatrixID] | None,
+    room_id: str,
 ) -> AgentResponseDecision:
     """Decide unmentioned thread continuation for an available agent."""
-    if has_multiple_non_agent_users_in_thread(thread_history, config, runtime_paths):
+    if has_multiple_non_agent_users_in_thread(thread_history, config, runtime_paths, room_id=room_id):
         return AgentResponseDecision(False, "multiple_non_agent_users_in_thread")
 
     thread_agents = agents_in_thread
     if thread_agents is None:
-        thread_agents = get_agents_in_thread(thread_history, config, runtime_paths)
+        thread_agents = get_agents_in_thread(thread_history, config, runtime_paths, room_id=room_id)
     sender_visible_thread_agents = filter_thread_agents_for_sender(
         thread_agents,
         sender_id,
@@ -459,4 +489,5 @@ def decide_agent_response(
         membership_index=membership_index,
         available_responders=available_responders,
         agents_in_thread=agents_in_thread,
+        room_id=room.room_id,
     )

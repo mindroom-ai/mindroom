@@ -199,9 +199,23 @@ def test_agent_markdown_format_uses_matrix_rules_only_inside_matrix(
     assert "<https://matrix.to/#/!room_id>" in matrix_text
     assert "<https://matrix.to/#/!room_id/$event_id>" in matrix_text
     assert "never wrap links in backticks" in matrix_text
+    assert (
+        "everything up through your last tool call (thoughts, tool calls, and earlier output) folds away" in matrix_text
+    )
+    assert "self-contained final answer after your last tool call" in matrix_text
     assert MARKDOWN_OUTPUT_FORMAT in outside_text
     assert MATRIX_MARKDOWN_OUTPUT_FORMAT not in outside_text
     assert "Mermaid fences" not in outside_text
     assert "<span data-mx-spoiler>" not in outside_text
     assert "<https://matrix.to/#/!room_id>" not in outside_text
+    assert (
+        "everything up through your last tool call (thoughts, tool calls, and earlier output) folds away"
+        not in outside_text
+    )
+    assert "self-contained final answer after your last tool call" not in outside_text
     assert MARKDOWN_OUTPUT_FORMAT not in plain_text
+    assert (
+        "everything up through your last tool call (thoughts, tool calls, and earlier output) folds away"
+        not in plain_text
+    )
+    assert "self-contained final answer after your last tool call" not in plain_text

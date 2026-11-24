@@ -30,7 +30,7 @@ from mindroom.providers.openai.chat_wire import (
 )
 from mindroom.providers.openai.errors import provider_error, rejected_media, sdk_failures
 from mindroom.providers.openai.openrouter_cache import (
-    openrouter_prompt_cache,
+    openrouter_prompt_cache_control,
     request_kwargs_with_prompt_cache,
     takes_automatic_markers,
 )
@@ -41,7 +41,6 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
     from mindroom.llm.provider import Capabilities, ModelIdentity, ModelRequest, StreamEvent, TokenCounter
-    from mindroom.providers.openai.openrouter_cache import OpenRouterPromptCache
     from mindroom.providers.openai.settings import ChatSettings
     from mindroom.token_counting.requests import RequestParts
 
@@ -130,17 +129,16 @@ class ChatAdapter:
         automatic markers off (``takes_automatic_markers``). The attachments are left out of the body it checks: their
         parts carry no marker, and reading them belongs to the send, whose pipeline stands in for one it cannot read.
         """
-        prompt_cache = self._prompt_cache(request)
-        if prompt_cache is None or not prompt_cache.full_ladder:
+        if self._cache_control(request) is None:
             return False
         bare = [replace(message, images=None, audio=None, videos=None, files=None) for message in request.messages]
         return takes_automatic_markers(self._chat_kwargs(replace(request, messages=bare)))
 
-    def _prompt_cache(self, request: ModelRequest) -> OpenRouterPromptCache | None:
+    def _cache_control(self, request: ModelRequest) -> dict[str, str] | None:
         if self.wire.route != "openrouter":
             return None
-        # OpenRouter forwards explicit cache breakpoints to Anthropic and Gemini upstreams.
-        return openrouter_prompt_cache(
+        # OpenRouter forwards Claude cache breakpoints to Anthropic upstreams.
+        return openrouter_prompt_cache_control(
             self.identity.id,
             cache_system_prompt=self.settings.cache_system_prompt and request.overrides.prompt_cache,
             extended_cache_time=self.settings.extended_cache_time,
@@ -161,10 +159,10 @@ class ChatAdapter:
 
     def _request_kwargs(self, request: ModelRequest) -> dict[str, Any]:
         kwargs = self._chat_kwargs(request)
-        # Prompt caching runs on the final body.
-        if (prompt_cache := self._prompt_cache(request)) is None:
+        # The cache ladder runs on the final body.
+        if (cache_control := self._cache_control(request)) is None:
             return kwargs
-        return request_kwargs_with_prompt_cache(kwargs, prompt_cache, system_texts(request.messages))
+        return request_kwargs_with_prompt_cache(kwargs, cache_control, system_texts(request.messages))
 
     async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
         """Send one Chat Completions request and yield its deltas, usage, and finished turn."""

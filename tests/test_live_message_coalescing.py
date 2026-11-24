@@ -6922,7 +6922,9 @@ def _resolver_mention_context(
         *,
         thread_id: str | None,
         payload_metadata: DispatchPayloadMetadata | None = None,
+        requester_id: str | None = None,
     ) -> MessageContext:
+        del requester_id
         if captured_event_ids is not None:
             captured_event_ids.append(event.event_id)
         mentioned_agents, _am_i_mentioned = bot._conversation_resolver.pre_hydration_mentions(

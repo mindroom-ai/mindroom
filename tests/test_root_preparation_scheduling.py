@@ -379,11 +379,18 @@ async def test_controller_prepares_independent_roots_without_changing_reply_targ
         *,
         thread_id: str | None,
         payload_metadata: DispatchPayloadMetadata | None = None,
+        requester_id: str | None = None,
     ) -> MessageContext:
         started[event.event_id].set()
         if event.event_id == "$a":
             await release.wait()
-        return await original_extract(room, event, thread_id=thread_id, payload_metadata=payload_metadata)
+        return await original_extract(
+            room,
+            event,
+            thread_id=thread_id,
+            payload_metadata=payload_metadata,
+            requester_id=requester_id,
+        )
 
     monkeypatch.setattr(resolver, "extract_dispatch_context", extract)
     try:

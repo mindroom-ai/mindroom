@@ -45,7 +45,7 @@ from mindroom.matrix.event_info import EventInfo
 from mindroom.matrix.media import is_matrix_media_msgtype
 from mindroom.matrix.member_display_names import room_member_display_names
 from mindroom.matrix.thread_diagnostics import is_thread_history_degraded
-from mindroom.matrix.thread_forks import fork_parent_thread_id
+from mindroom.matrix.thread_forks import fork_parent_thread_id, fork_reference
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
 from mindroom.reply_turn.request import ResponseRequest
 from mindroom.response_admission import ResponseAdmissionRefusedError
@@ -119,6 +119,43 @@ _SCHEDULED_RUN_INTENTS = frozenset({TurnIntent.SCHEDULED_FIRE, TurnIntent.ROUTER
 _PER_RUN_MODEL_INTENTS = _SCHEDULED_RUN_INTENTS | {TurnIntent.HOOK_DISPATCH}
 
 
+def _same_room_fork_parent_thread_id(
+    thread_history: Sequence[ResolvedVisibleMessage],
+    thread_id: str,
+    *,
+    room_id: str,
+) -> str | None:
+    """Return the parent thread ID only when ``thread_id`` is a same-room fork."""
+    reference = fork_reference(thread_history, thread_id, room_id=room_id)
+    if reference is None or reference.is_cross_room(room_id):
+        return None
+    return reference.thread_id
+
+
+def _coalesced_prompt_summary_inputs(
+    turn: PreparedTurn,
+    thread_id: str,
+    thread_history: Sequence[ResolvedVisibleMessage],
+) -> tuple[str | None, tuple[str, ...]] | None:
+    """Resolve ``(prompt, prompt_event_ids)`` for a coalesced first turn, or None to skip."""
+    prompt_event_ids = turn.handled_turn.source_event_ids
+    if thread_id not in prompt_event_ids:
+        return None
+    if _same_room_fork_parent_thread_id(thread_history, thread_id, room_id=turn.room.room_id) is not None:
+        # A same-room fork's first title is its parent's, which needs no prompt, only its root.
+        return None, (thread_id,)
+    if turn.payload.raw_audio_fallback:
+        if fork_parent_thread_id(thread_history, thread_id) is None:
+            return None
+        return None, (thread_id,)
+    # A batch (say attachments, then the text sent with them) is titled from
+    # each source's own prompt, without the coalescing wrapper. The voice flag
+    # covers the whole batch, so a typed text may start with its prefix.
+    source_prompts = turn.handled_turn.source_event_prompts or {}
+    prompt = "\n".join(source_prompts[event_id] for event_id in prompt_event_ids if event_id in source_prompts)
+    return prompt, prompt_event_ids
+
+
 def _apply_root_thread_model(
     deps: TurnDispatchDeps,
     turn: PreparedTurn,
@@ -163,7 +200,7 @@ def _apply_root_thread_model(
         root_timestamp_ms=timestamp_ms if root is None else root.timestamp_ms,
         model_name=choice.model,
         entity_names=names,
-        parent_thread_id=fork_parent_thread_id(thread_history, thread_id),
+        parent_thread_id=_same_room_fork_parent_thread_id(thread_history, thread_id, room_id=turn.room.room_id),
     )
 
 
@@ -176,7 +213,7 @@ def _inherit_fork_thread_models(
     """Give a fork's first turn a snapshot of its parent thread's models, before any model of the turn resolves."""
     if thread_id is None or thread_id not in turn.handled_turn.source_event_ids:
         return
-    parent_thread_id = fork_parent_thread_id(thread_history, thread_id)
+    parent_thread_id = _same_room_fork_parent_thread_id(thread_history, thread_id, room_id=turn.room.room_id)
     if parent_thread_id is None:
         return
     try:
@@ -466,22 +503,10 @@ class TurnDispatcher:
             prompt = None
             prompt_event_ids = routed_event_ids
         elif turn.handled_turn.is_coalesced:
-            if thread_id not in prompt_event_ids:
+            coalesced = _coalesced_prompt_summary_inputs(turn, thread_id, prepared.dispatch.context.thread_history)
+            if coalesced is None:
                 return
-            if fork_parent_thread_id(prepared.dispatch.context.thread_history, thread_id) is not None:
-                # A fork's first title is its parent's, which needs no prompt, only its root.
-                prompt = None
-                prompt_event_ids = (thread_id,)
-            elif turn.payload.raw_audio_fallback:
-                return
-            else:
-                # A batch (say attachments, then the text sent with them) is titled from
-                # each source's own prompt, without the coalescing wrapper. The voice flag
-                # covers the whole batch, so a typed text may start with its prefix.
-                source_prompts = turn.handled_turn.source_event_prompts or {}
-                prompt = "\n".join(
-                    source_prompts[event_id] for event_id in prompt_event_ids if event_id in source_prompts
-                )
+            prompt, prompt_event_ids = coalesced
         elif thread_id != turn.event.event_id or turn.payload.raw_audio_fallback:
             return
         else:
@@ -504,6 +529,7 @@ class TurnDispatcher:
                 conversation_reader=self.deps.resolver.deps.conversation_reader,
                 entity_name=self.deps.agent_name,
                 membership_index=self.deps.runtime.agent_reply_memberships,
+                requester_id=turn.facts.run_requester_id,
             ),
             name=f"prompt_summary_{turn.room.room_id}_{thread_id}",
             owner=self.deps.runtime,
@@ -992,6 +1018,7 @@ class TurnDispatcher:
                 context_event,
                 thread_id=target.source_thread_id,
                 payload_metadata=turn.payload,
+                requester_id=requester_user_id,
             )
             context_path = "normal" if turn.command is None else "command"
         emit_elapsed_timing(

@@ -57,6 +57,7 @@ def _tool_context(
     tmp_path: Path,
     *,
     attachment_ids: tuple[str, ...] = (),
+    fork_parent_scopes: frozenset[tuple[str, str]] = frozenset(),
     process_env: dict[str, str] | None = None,
 ) -> ToolRuntimeContext:
     client = MagicMock()
@@ -92,6 +93,7 @@ def _tool_context(
         conversation_reader=conversation_reader,
         storage_path=tmp_path,
         attachment_ids=attachment_ids,
+        fork_parent_scopes=fork_parent_scopes,
     )
 
 
@@ -264,13 +266,31 @@ async def test_get_attachment_view_returns_image_media(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("room_id", "viewable"), [("!room:localhost", True), ("!other:localhost", False)])
+@pytest.mark.parametrize(
+    ("room_id", "in_turn_ids", "parent_scopes", "viewable"),
+    [
+        ("!room:localhost", True, frozenset(), True),
+        ("!other:localhost", True, frozenset({("!other:localhost", "$parent:localhost")}), True),
+        ("!other:localhost", True, frozenset(), False),
+        ("!other:localhost", True, frozenset({("!other:localhost", "$different_parent:localhost")}), False),
+        ("!other:localhost", False, frozenset({("!other:localhost", "$parent:localhost")}), False),
+    ],
+    ids=[
+        "same-room-fork",
+        "cross-room-fork-in-parent-scopes",
+        "other-room-listed-without-parent-scope",
+        "other-room-listed-wrong-parent-thread",
+        "other-room-runtime-id-only",
+    ],
+)
 async def test_get_attachment_view_shows_an_image_the_turn_was_given_from_another_thread_of_its_room(
     tmp_path: Path,
     room_id: str,
+    in_turn_ids: bool,
+    parent_scopes: frozenset[tuple[str, str]],
     viewable: bool,
 ) -> None:
-    """A forked thread's turn is given its parent's images, so viewing one works; another room's image stays out."""
+    """Vetted fork attachments (same- or cross-room) are viewable; arbitrary other-room IDs stay out."""
     image_bytes = base64.b64decode(
         "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1cAAAAASUVORK5CYII=",
     )
@@ -286,8 +306,15 @@ async def test_get_attachment_view_shows_an_image_the_turn_was_given_from_anothe
         thread_id="$parent:localhost",
     )
     assert attachment is not None
+    context = _tool_context(
+        tmp_path,
+        attachment_ids=("att_parent",) if in_turn_ids else (),
+        fork_parent_scopes=parent_scopes,
+    )
+    if not in_turn_ids:
+        context.runtime_attachment_ids.append("att_parent")
 
-    with tool_runtime_context(_tool_context(tmp_path, attachment_ids=("att_parent",))):
+    with tool_runtime_context(context):
         result = await toolkit_offers(AttachmentTools(), "get_attachment").entrypoint(
             attachment_id="att_parent",
             view=True,

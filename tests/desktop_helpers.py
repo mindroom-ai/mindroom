@@ -137,11 +137,13 @@ class FakeMatrixOwner:
 def offline_session_deps(
     owner: FakeMatrixOwner,
     prepare_client: Callable[[nio.AsyncClient, PinnedMatrixDevice], Awaitable[None]] | None = None,
+    verify_controller: Callable[[nio.AsyncClient, PinnedMatrixDevice], Awaitable[None]] | None = None,
 ) -> DesktopBridgeSessionDeps:
     """Open `owner` instead of Matrix; the controller check passes unless `prepare_client` says otherwise."""
     return DesktopBridgeSessionDeps(
         open_client=cast("Callable", owner.open),
         prepare_client=prepare_client or AsyncMock(),
+        verify_controller=verify_controller or AsyncMock(),
     )
 
 

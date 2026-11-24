@@ -1690,6 +1690,185 @@ async def test_matrix_message_read_of_a_fork_starts_with_its_parent_up_to_the_fo
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("authorized", [True, False], ids=["authorized", "denied-outsider"])
+async def test_matrix_message_read_cross_room_fork_auth_room_id_and_edit_options(*, authorized: bool) -> None:
+    """Cross-room thread reads enforce fork auth, stamp room_id on prefix rows, and omit foreign edit_options."""
+    tool = MatrixMessageTools()
+    source_room_id = "!source:localhost"
+    ctx = _make_context(thread_id=None, requester_id="@user:localhost")
+    target_room = ctx.client.rooms[ctx.room_id]
+    target_room.add_member("@user:localhost", "User", None)
+    if not authorized:
+        target_room.add_member("@outsider:localhost", "Outsider", None)
+    source_room = nio.MatrixRoom(source_room_id, ctx.client.user_id)
+    source_room.members_synced = True
+    source_room.add_member(ctx.client.user_id, "General Agent", None)
+    source_room.add_member("@user:localhost", "User", None)
+    ctx.client.rooms[source_room_id] = source_room
+    ctx.client.room_get_state_event = AsyncMock(
+        side_effect=lambda room_id, event_type, state_key="": (
+            nio.RoomGetStateEventResponse(
+                {"history_visibility": ctx.client.rooms[room_id].history_visibility},
+                event_type,
+                state_key,
+                room_id,
+            )
+            if event_type == "m.room.history_visibility" and room_id in ctx.client.rooms
+            else nio.RoomGetStateEventError("not found", status_code="M_NOT_FOUND")
+        ),
+    )
+    ctx.client.room_get_state = AsyncMock(
+        side_effect=lambda room_id: (
+            nio.RoomGetStateResponse(
+                room_id=room_id,
+                events=[
+                    {"type": "m.room.member", "state_key": user_id, "content": {"membership": "join"}}
+                    for user_id in ctx.client.rooms[room_id].users
+                ],
+            )
+            if room_id in ctx.client.rooms
+            else nio.RoomGetStateError("forbidden")
+        ),
+    )
+
+    reference = {FORK_CONTENT_KEY: {"room_id": source_room_id, "thread_id": "$parent", "event_id": "$kept"}}
+    threads = {
+        (source_room_id, "$parent"): [
+            make_visible_message(event_id="$parent", sender="@user:localhost", body="source root"),
+            make_visible_message(event_id="$kept", thread_id="$parent", sender=ctx.client.user_id, body="source bot"),
+            make_visible_message(event_id="$later", thread_id="$parent", sender="@user:localhost", body="after cut"),
+        ],
+        (ctx.room_id, "$fork"): [
+            make_visible_message(event_id="$fork", sender="@user:localhost", content={"body": "forked", **reference}),
+            make_visible_message(event_id="$reply", thread_id="$fork", sender=ctx.client.user_id, body="target bot"),
+        ],
+    }
+
+    async def read(_reader: object, room_id: str, thread_id: str) -> ThreadHistoryResult:
+        return thread_history_result(threads[(room_id, thread_id)], is_full_history=True)
+
+    with (
+        tool_runtime_context(ctx),
+        patch("mindroom.custom_tools.matrix_conversation_operations.complete_thread_history", side_effect=read),
+    ):
+        payload = json.loads(await tool.matrix_message(action="read", thread_id="$fork"))
+
+    assert payload["status"] == "ok"
+    if not authorized:
+        assert [message["event_id"] for message in payload["messages"]] == ["$fork", "$reply"]
+        assert all("room_id" not in message for message in payload["messages"])
+        assert [option["event_id"] for option in payload["edit_options"]] == ["$reply", "$fork"]
+        return
+
+    assert [message["event_id"] for message in payload["messages"]] == ["$parent", "$kept", "$fork", "$reply"]
+    assert [message.get("room_id") for message in payload["messages"]] == [
+        source_room_id,
+        source_room_id,
+        None,
+        None,
+    ]
+    assert [option["event_id"] for option in payload["edit_options"]] == ["$reply", "$fork"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("case", "expect_prefix"),
+    [
+        ("output_unencrypted", False),
+        ("output_has_outsider", False),
+        ("output_authorized", True),
+    ],
+)
+async def test_matrix_message_read_from_room_c_checks_output_room_encryption_and_audience(
+    *,
+    case: str,
+    expect_prefix: bool,
+) -> None:
+    """Reading Room B's fork of Room A from Room C enforces encryption and audience against Room C."""
+    tool = MatrixMessageTools()
+    room_a_id = "!room-a:localhost"
+    room_b_id = "!room-b:localhost"
+    ctx = _make_context(thread_id=None, requester_id="@user:localhost")
+    ctx.client.olm = MagicMock()
+    room_c = ctx.client.rooms[ctx.room_id]
+    room_c.members_synced = True
+    room_c.encrypted = case != "output_unencrypted"
+    room_c.add_member("@user:localhost", "User", None)
+    if case == "output_has_outsider":
+        room_c.add_member("@outsider:localhost", "Outsider", None)
+
+    room_a = nio.MatrixRoom(room_a_id, ctx.client.user_id)
+    room_a.members_synced = True
+    room_a.encrypted = True
+    room_a.add_member(ctx.client.user_id, "General Agent", None)
+    room_a.add_member("@user:localhost", "User", None)
+
+    room_b = nio.MatrixRoom(room_b_id, ctx.client.user_id)
+    room_b.members_synced = True
+    room_b.encrypted = True
+    room_b.add_member(ctx.client.user_id, "General Agent", None)
+    room_b.add_member("@user:localhost", "User", None)
+
+    ctx.client.rooms[room_a_id] = room_a
+    ctx.client.rooms[room_b_id] = room_b
+    ctx.client.room_get_state_event = AsyncMock(
+        side_effect=lambda room_id, event_type, state_key="": (
+            nio.RoomGetStateEventResponse(
+                {"history_visibility": ctx.client.rooms[room_id].history_visibility},
+                event_type,
+                state_key,
+                room_id,
+            )
+            if event_type == "m.room.history_visibility" and room_id in ctx.client.rooms
+            else nio.RoomGetStateEventError("not found", status_code="M_NOT_FOUND")
+        ),
+    )
+    ctx.client.room_get_state = AsyncMock(
+        side_effect=lambda room_id: (
+            nio.RoomGetStateResponse(
+                room_id=room_id,
+                events=[
+                    {"type": "m.room.member", "state_key": user_id, "content": {"membership": "join"}}
+                    for user_id in ctx.client.rooms[room_id].users
+                ],
+            )
+            if room_id in ctx.client.rooms
+            else nio.RoomGetStateError("forbidden")
+        ),
+    )
+
+    reference = {FORK_CONTENT_KEY: {"room_id": room_a_id, "thread_id": "$parent-a", "event_id": "$kept-a"}}
+    threads = {
+        (room_a_id, "$parent-a"): [
+            make_visible_message(event_id="$parent-a", sender="@user:localhost", body="secret room A root"),
+            make_visible_message(event_id="$kept-a", thread_id="$parent-a", sender=ctx.client.user_id, body="A reply"),
+        ],
+        (room_b_id, "$fork-b"): [
+            make_visible_message(event_id="$fork-b", sender="@user:localhost", content={"body": "forked", **reference}),
+            make_visible_message(event_id="$reply-b", thread_id="$fork-b", sender=ctx.client.user_id, body="B reply"),
+        ],
+    }
+
+    async def read(_reader: object, room_id: str, thread_id: str) -> ThreadHistoryResult:
+        return thread_history_result(threads[(room_id, thread_id)], is_full_history=True)
+
+    with (
+        tool_runtime_context(ctx),
+        patch("mindroom.custom_tools.matrix_conversation_operations.complete_thread_history", side_effect=read),
+    ):
+        payload = json.loads(await tool.matrix_message(action="read", room_id=room_b_id, thread_id="$fork-b"))
+
+    assert payload["status"] == "ok"
+    if not expect_prefix:
+        assert [message["event_id"] for message in payload["messages"]] == ["$fork-b", "$reply-b"]
+        assert all("room_id" not in message for message in payload["messages"])
+        return
+
+    assert [message["event_id"] for message in payload["messages"]] == ["$parent-a", "$kept-a", "$fork-b", "$reply-b"]
+    assert [message.get("room_id") for message in payload["messages"]] == [room_a_id, room_a_id, None, None]
+
+
+@pytest.mark.asyncio
 async def test_matrix_message_read_preserves_notice_messages() -> None:
     """Thread reads should surface notice msgtypes unchanged."""
     tool = MatrixMessageTools()

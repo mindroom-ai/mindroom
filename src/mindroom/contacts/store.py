@@ -203,6 +203,11 @@ def agent_contacts(
     ]
 
 
+def is_contact_room(runtime_paths: RuntimePaths, room_id: str) -> bool:
+    """Return whether ``room_id`` belongs to any recorded contact, in any status."""
+    return any(record.room_id == room_id for record in read_contacts(runtime_paths).contacts)
+
+
 def owner_contacts(runtime_paths: RuntimePaths, owner: str) -> list[tuple[ContactRecord, SideName]]:
     """Return the owner's contacts that are not removed, each with the owner's side, in the order they were asked."""
     return [

@@ -1833,6 +1833,57 @@ def test_fallback_thread_history_matches_thread_root_attachments(tmp_path: Path)
     assert not messages[0].images
 
 
+def test_fallback_thread_history_renders_cross_room_fork_parent_attachments(tmp_path: Path) -> None:
+    """Authorized cross-room fork prefix rows annotate attachments registered in their true source room."""
+    image_path = tmp_path / "src.png"
+    image_path.write_bytes(b"\x89PNG\r\n\x1a\n")
+    record = register_local_attachment(
+        tmp_path,
+        image_path,
+        kind="image",
+        attachment_id="att_src",
+        filename="src.png",
+        room_id="!source:localhost",
+        thread_id="$src_root",
+    )
+    assert record is not None
+
+    messages = _build_thread_history_messages_for_test(
+        "Current request",
+        [
+            make_visible_message(
+                sender="@alice:localhost",
+                body="source image",
+                event_id="$src_img",
+                thread_id="$src_root",
+                room_id="!source:localhost",
+                content={ATTACHMENT_IDS_KEY: ["att_src"]},
+            ),
+            make_visible_message(
+                sender="@alice:localhost",
+                body="target message trying to forge source id",
+                event_id="$target_msg",
+                thread_id="$fork",
+                content={ATTACHMENT_IDS_KEY: ["att_src"]},
+            ),
+        ],
+        response_sender_id="@mindroom_team:localhost",
+        config=_config(),
+        attachment_context=_ThreadAttachmentContext(storage_path=tmp_path, room_id="!room:localhost"),
+    ).in_request_order()
+
+    assert messages[0].content == render_msg_tag(
+        sender="@alice:localhost",
+        body='source image\n[attachments: att_src (image, "src.png")]',
+        event_id="$src_img",
+    )
+    assert messages[1].content == render_msg_tag(
+        sender="@alice:localhost",
+        body="target message trying to forge source id",
+        event_id="$target_msg",
+    )
+
+
 def test_fallback_thread_history_strips_visible_tool_markers_from_the_agents_own_messages() -> None:
     """Visible Matrix tool markers should not train the model to echo fake tool calls."""
     messages = _build_thread_history_messages_for_test(
