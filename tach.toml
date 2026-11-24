@@ -1051,6 +1051,7 @@ visibility = [
     "mindroom.knowledge_graph.clients",
     "mindroom.knowledge.chunk_context",
     "mindroom.history.mid_turn_compaction",
+    "mindroom.trace_audit.auditor",
 ]
 
 [[modules]]
@@ -3923,6 +3924,7 @@ visibility = [
     "mindroom.history.interrupted_replay",
     "mindroom.history.conversation_text",
     "mindroom.listening.turn",
+    "mindroom.trace_audit.signals",
 ]
 
 [[modules]]
@@ -10248,6 +10250,7 @@ visibility = [
     "mindroom.automations.exploration",
     "mindroom.history.conversation_text",
     "mindroom.reply_turn.locked_turn",
+    "mindroom.trace_audit.source",
 ]
 
 [[modules]]
@@ -10629,6 +10632,7 @@ visibility = [
     "mindroom.loop_hooks",
     "mindroom.response_turn",
     "mindroom.delegation.continuation",
+    "mindroom.trace_audit.signals",
 ]
 
 [[modules]]
@@ -10981,4 +10985,56 @@ depends_on = [
     "mindroom.custom_tools.triggers",
     "mindroom.tool_system.declarations",
     "mindroom.tool_system.registration",
+]
+
+[[modules]]
+path = "mindroom.trace_audit"
+depends_on = [
+    "mindroom.trace_audit.auditor",
+    "mindroom.trace_audit.models",
+    "mindroom.trace_audit.pipeline",
+    "mindroom.trace_audit.signals",
+    "mindroom.trace_audit.source",
+]
+
+[[modules]]
+path = "mindroom.trace_audit.models"
+depends_on = []
+
+[[modules]]
+path = "mindroom.trace_audit.signals"
+depends_on = [
+    "mindroom.history.run_checkpoint",
+    "mindroom.hooks.enrichment",
+    "mindroom.prompt_message_tags",
+    "mindroom.trace_audit.models",
+]
+
+[[modules]]
+path = "mindroom.trace_audit.source"
+depends_on = [
+    "mindroom.automations.steps",
+    "mindroom.constants",
+    "mindroom.llm",
+    "mindroom.session_storage.schema",
+    "mindroom.trace_audit.models",
+]
+
+[[modules]]
+path = "mindroom.trace_audit.auditor"
+depends_on = [
+    "mindroom.agent_loop.helper",
+    "mindroom.helper_usage",
+    "mindroom.providers.registry",
+    "mindroom.trace_audit.models",
+    "mindroom.trace_audit.signals",
+]
+
+[[modules]]
+path = "mindroom.trace_audit.pipeline"
+depends_on = [
+    "mindroom.trace_audit.auditor",
+    "mindroom.trace_audit.models",
+    "mindroom.trace_audit.signals",
+    "mindroom.trace_audit.source",
 ]

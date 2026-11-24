@@ -37,6 +37,7 @@ type IndependentUsageKind = Literal[
     "schedule_parse",
     "team_mode",
     "thread_summary",
+    "trace_audit",
     "voice_dictation",
     "voice_normalization",
     "voice_transcription",
