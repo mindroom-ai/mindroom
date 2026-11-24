@@ -128,11 +128,20 @@ _TRANSIENT_NAMES = frozenset(
 
 
 # Wording of a rejection that names the credentials without a 401 status, such as Gemini's 400 "API key not valid",
-# Anthropic's 403 permission error that names the API key, and a 403 "not authorized": an API key, or a word of the
-# auth family in either spelling. Each is a whole word of the lowercased text, one not inside a longer run of letters or
-# digits, so ``invalid_auth`` holds ``auth`` while an ``author`` property, an ``authority``, or ``oauth`` holds none.
+# Anthropic's 403 permission error that names the API key, and a 403 "not authorized": an API key, ``auth``,
+# ``unauth*``, ``authenticat*``, ``authori[sz]e``/``authori[sz]ing``/``authori[sz]ation``, or negated ``authori[sz]ed``.
+# Positive ``authorized``/``authorised`` alone is excluded so policy refusals such as "authorized security work" stay
+# non-auth errors. Whole-word boundaries keep ``invalid_auth`` matching while excluding ``author``, ``authority``, and
+# ``oauth``.
 _CREDENTIAL_WORDING = re.compile(
-    r"(?<![a-z0-9])(?:(?:un)?auth(?:enticat[a-z]*|ori[sz][a-z]*)?|api[ _]?keys?)(?![a-z0-9])",
+    r"(?<![a-z0-9])(?:"
+    r"api[ _-]?keys?"
+    r"|unauth(?:enticat[a-z]*|ori[sz][a-z]*)?"
+    r"|auth(?:enticat[a-z]*|ori[sz](?:ations?|es?|ing))?"
+    r"|(?:not|cannot|no[\s_-]+longer|"
+    "(?:is|are|was|were|ca|could|wo|would|should|has|have|had)n['\u2019]t)"
+    r"[\s_-]+(?:(?:be|been)[\s_-]+)?authori[sz]ed"
+    r")(?![a-z0-9])",
 )
 
 # How OpenAI words the 429 of a request larger than the account's tokens-per-minute limit, which it sends with the
