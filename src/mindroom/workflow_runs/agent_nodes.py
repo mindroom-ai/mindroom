@@ -318,8 +318,8 @@ async def launch_child(
         node = replace(node, state=WorkflowNodeState.RUNNING, handle=handle, links=links)
         stamp = partial(store.update_node, run.run_id, node.key, node.generation, epoch)
         if not queued:
-            node = await asyncio.to_thread(partial(store.put_node, node, epoch, dirty_after=True))
-        elif not await asyncio.to_thread(partial(stamp, state=node.state, handle=handle, links=links)):
+            node = await asyncio.to_thread(store.put_node, node, epoch, dirty_after=True)
+        elif not await asyncio.to_thread(stamp, state=node.state, handle=handle, links=links):
             # The node that waited for its place has an end by now: its run ended.
             raise AgentNodeError(_NODE_ENDED)
         try:
@@ -338,23 +338,15 @@ async def launch_child(
             raise AgentNodeError(str(exc)) from exc
     await jobs.release_wait(job_id, claim)
     node = replace(node, handle=replace(handle, dispatched=True))
-    await asyncio.to_thread(partial(stamp, handle=node.handle))
+    await asyncio.to_thread(stamp, handle=node.handle)
     if session is not None:
-        session_links = {
+        links = {
             "subagent_id": child.subagent_id,
             "agent": target.agent_name,
             "model": child.model_name,
             "tip": f"{node.key}:{node.generation}",
         }
-        update_session = partial(
-            store.update_node,
-            run.run_id,
-            session.key,
-            session.generation,
-            epoch,
-            links=session_links,
-        )
-        await asyncio.to_thread(update_session)
+        await asyncio.to_thread(store.update_node, run.run_id, session.key, session.generation, epoch, links=links)
     return node
 
 

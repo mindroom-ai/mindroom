@@ -839,8 +839,7 @@ class WorkflowEngine:
                 stamp["phase"] = phase
             if regrouped := members != saved.members:
                 stamp["members"] = members
-            restamp = partial(self.store.update_node, run.run_id, key, saved.generation, epoch, dirty_after=regrouped)
-            await asyncio.to_thread(partial(restamp, **stamp))
+            await self._stamp(saved, epoch, dirty_after=regrouped, **stamp)
             if action == "raise_indeterminate":
                 # It may have run, so nothing is dispatched until a resume names it.
                 return replace(_receipt(saved), state=WorkflowNodeState.FAILED)
@@ -965,7 +964,7 @@ class WorkflowEngine:
             else:
                 if not done:
                     waiting = replace(node, state=WorkflowNodeState.WAITING, waiting_on="peer", ended_at=None)
-                    wait_node = await asyncio.to_thread(partial(self.store.put_node, waiting, epoch, dirty_after=True))
+                    wait_node = await asyncio.to_thread(self.store.put_node, waiting, epoch, dirty_after=True)
                     self._spawn(run.run_id, self._wait_inbox(run, wait_node, epoch, float(value)))
                     return _receipt(wait_node)
                 node = replace(node, result=value)
@@ -991,8 +990,7 @@ class WorkflowEngine:
         # A value, a group and an error have ended when they are submitted, so no restart finds one half done. What earlier
         # attempts left after the call runs again in any attempt, which the same write marks in the store.
         ended_at = None if kind == "ask" else node.started_at
-        put = partial(self.store.put_node, replace(node, ended_at=ended_at), epoch, dirty_after=True)
-        node = await asyncio.to_thread(put)
+        node = await asyncio.to_thread(self.store.put_node, replace(node, ended_at=ended_at), epoch, dirty_after=True)
         if node.state is WorkflowNodeState.WAITING:
             await self._restate(run.run_id)
         return _receipt(await self._asked(run, node, epoch))
@@ -1014,8 +1012,7 @@ class WorkflowEngine:
         if event_id is None:
             raise ScriptRuntimeUnavailableError(_NOT_ASKED)
         links = {**node.links, "event_id": event_id}
-        stamp = partial(self.store.update_node, run.run_id, node.key, node.generation, epoch)
-        await asyncio.to_thread(partial(stamp, links=links))
+        await self._stamp(node, epoch, links=links)
         return replace(node, links=links)
 
     async def _close_card(
@@ -1088,9 +1085,7 @@ class WorkflowEngine:
             run, saved = self.store.get_run(run_id), self.store.get_node(run_id, ask_key)
             if saved is not None and saved.state in (WorkflowNodeState.COMPLETED, WorkflowNodeState.WAITING):
                 if saved.attempt != run.attempt or saved.stale:
-                    stamp = partial(self.store.update_node, run_id, ask_key, saved.generation, run.epoch)
-                    with suppress(SupersededAttemptError):
-                        await asyncio.to_thread(partial(stamp, attempt=run.attempt, stale=False))
+                    await self._stamp(saved, run.epoch, ignore=True, attempt=run.attempt, stale=False)
                 ask_node = saved
             elif run.state in TERMINAL_RUN_STATES or run_id in self._stopping:
                 raise WorkflowRunStoreError(_NOT_ANSWERED)
@@ -1113,7 +1108,7 @@ class WorkflowEngine:
                     group_key=parent.key,
                     started_at=utc_timestamp(),
                 )
-                ask_node = await asyncio.to_thread(partial(self.store.put_node, ask_node, run.epoch, dirty_after=False))
+                ask_node = await asyncio.to_thread(self.store.put_node, ask_node, run.epoch, dirty_after=False)
             if ask_node.state is WorkflowNodeState.COMPLETED:
                 return str(ask_node.result)
             self._leave(run_id, parent.key)
@@ -1157,8 +1152,7 @@ class WorkflowEngine:
             asked = waits and "event_id" in node.links and context is not None and not isinstance(context, str)
             if run.state in TERMINAL_RUN_STATES or node is None or node.generation != generation or not asked:
                 return False
-            settle = partial(self.store.settle_node, run_id, key, generation, run.epoch)
-            if not await asyncio.to_thread(partial(settle, state=WorkflowNodeState.COMPLETED, result=answer)):
+            if not await self._settle(node, run.epoch, state=WorkflowNodeState.COMPLETED, result=answer):
                 return False
             await self._restate(run_id)
             condition.notify_all()
@@ -1191,7 +1185,7 @@ class WorkflowEngine:
                     self._leave(run.run_id, node.key)
                 raise
         queued = replace(node, state=WorkflowNodeState.QUEUED)
-        queued = await asyncio.to_thread(partial(self.store.put_node, queued, run.epoch, dirty_after=dirty_after))
+        queued = await asyncio.to_thread(self.store.put_node, queued, run.epoch, dirty_after=dirty_after)
         if not over:
             self._enqueue_place(run, queued.key, partial(dispatch, queued, queued=True))
         return _receipt(queued)
@@ -1294,7 +1288,7 @@ class WorkflowEngine:
         restart or a stop meanwhile finds a call that never ran. The caller holds the run's lock.
         """
         queued = replace(node, state=WorkflowNodeState.QUEUED)
-        node = await asyncio.to_thread(partial(self.store.put_node, queued, run.epoch, dirty_after=True))
+        node = await asyncio.to_thread(self.store.put_node, queued, run.epoch, dirty_after=True)
         if not await self._check_budget(run):
             gate = partial(self._broker_outcome, attempt, node, run.epoch, tool_call, gate_only=True)
             self._spawn(run.run_id, self._start_gated(run, node, gate))
@@ -1319,9 +1313,7 @@ class WorkflowEngine:
                 start = partial(self._dispatch_agent, run, node, timeout=None, queued=True)
                 self._enqueue_place(run, node.key, start)
             else:
-                settle = partial(self.store.settle_node, run.run_id, node.key, node.generation, run.epoch)
-                with suppress(SupersededAttemptError):
-                    await asyncio.to_thread(partial(settle, state=outcome[0], error=outcome[2]))
+                await self._settle(node, run.epoch, state=outcome[0], error=outcome[2], ignore=True)
         await self._notify(run.run_id)
 
     async def nest(self, child: WorkflowRun) -> None:
@@ -1443,12 +1435,11 @@ class WorkflowEngine:
         handle = DispatchHandle("broker", f"{attempt.run_id}:{call_id}", dispatched=False, same_as=same_as)
         node = replace(node, state=WorkflowNodeState.RUNNING, handle=handle)
         if queued:
-            stamp = partial(self.store.update_node, run.run_id, node.key, node.generation, run.epoch)
-            if not await asyncio.to_thread(partial(stamp, state=node.state, handle=handle)):
+            if not await self._stamp(node, run.epoch, state=node.state, handle=handle):
                 # The node that waited for its place has an end by now: its run ended.
                 raise SupersededAttemptError(_RUN_ENDED)
         else:
-            node = await asyncio.to_thread(partial(self.store.put_node, node, run.epoch, dirty_after=same_as is None))
+            node = await asyncio.to_thread(self.store.put_node, node, run.epoch, dirty_after=same_as is None)
         call = partial(self._broker_outcome, attempt, node, run.epoch, tool_call, call_id=call_id)
         # The call has its task before anything else may fail: a saved call nobody runs would never end.
         self._spawn(run.run_id, self._run_tool_node(node, run.epoch, call))
@@ -1575,9 +1566,7 @@ class WorkflowEngine:
         op_id = f"{node.key}:{node.generation}"
         wait = partial(self.wait_for_messages, run.run_id, reader, wait_seconds, op_id=op_id, names=("script",))
         outcome = await wait(holds_slot=False)
-        settle = partial(self.store.settle_node, run.run_id, node.key, node.generation, epoch)
-        with suppress(SupersededAttemptError):
-            await asyncio.to_thread(partial(settle, state=WorkflowNodeState.COMPLETED, result=outcome))
+        await self._settle(node, epoch, state=WorkflowNodeState.COMPLETED, result=outcome, ignore=True)
         await self._notify(run.run_id)
 
     async def _prepare_turn(
@@ -1663,11 +1652,10 @@ class WorkflowEngine:
             raise ScriptRuntimeUnavailableError(str(exc)) from exc
         except AgentNodeError as exc:
             # Nothing ran. The node is saved already when the job runtime refused the job it names.
-            end = {"state": WorkflowNodeState.FAILED, "error": {"kind": "refused", "message": str(exc)}}
-            settle = partial(self.store.settle_node, run.run_id, node.key, node.generation, run.epoch, **end)
-            if not await asyncio.to_thread(settle) and not queued:
-                refused = replace(node, **end, ended_at=utc_timestamp())
-                await asyncio.to_thread(partial(self.store.put_node, refused, run.epoch, dirty_after=True))
+            error: dict[str, object] = {"kind": "refused", "message": str(exc)}
+            if not await self._settle(node, run.epoch, state=WorkflowNodeState.FAILED, error=error) and not queued:
+                refused = replace(node, state=WorkflowNodeState.FAILED, error=error, ended_at=utc_timestamp())
+                await asyncio.to_thread(self.store.put_node, refused, run.epoch, dirty_after=True)
             self._leave(run.run_id, node.key)
             return _receipt(cast("WorkflowNode", self.store.get_node(run.run_id, node.key)))
         except BaseException:
@@ -1809,7 +1797,6 @@ class WorkflowEngine:
         made = bool(node.links.get("made")) or any(used.get("tool_calls") for used in usage.values())
         stopping = node.run_id in self._stopping
         outcome: _Outcome | str | WorkflowNode
-        settle = partial(self.store.settle_node, node.run_id, node.key, node.generation, epoch)
         further = None
         try:
             # A turn that no restart continued worked in the attempt that started it, whichever attempt reads it. What
@@ -1837,7 +1824,7 @@ class WorkflowEngine:
                     further = outcome
                 else:
                     state, result, error = outcome
-                    await asyncio.to_thread(partial(settle, state=state, result=result, error=error))
+                    await self._settle(node, epoch, state=state, result=result, error=error)
                 if claim is not None:
                     await runtime.jobs.acknowledge_wait(node.handle.ref, claim)
         finally:
@@ -1906,9 +1893,7 @@ class WorkflowEngine:
         if left is not None and node.handle is not None:
             until = None if on else time.time() + left
             changes["handle"] = replace(node.handle, work_left=left if on else None, work_until=until)
-        stamp = partial(self.store.update_node, node.run_id, node.key, node.generation, epoch)
-        with suppress(SupersededAttemptError):
-            await asyncio.to_thread(partial(stamp, **changes))
+        await self._stamp(node, epoch, ignore=True, **changes)
         await self._notify(node.run_id)
 
     async def _reconcile(  # noqa: C901
@@ -1925,12 +1910,11 @@ class WorkflowEngine:
         run has ended and `_stop_agents` waited for the job: it is read as it stands, and so is one that did not
         end in time. The caller holds the run's lock.
         """
-        settle = partial(self.store.settle_node, node.run_id, node.key, node.generation, epoch)
         if node.kind == "ask":
             # A question outlives its attempt and not its run: nothing of it ran, and its card says it is closed.
             if stop:
                 error = {"kind": "cancelled", "message": _NOT_ANSWERED}
-                await asyncio.to_thread(partial(settle, state=WorkflowNodeState.CANCELLED, error=error))
+                await self._settle(node, epoch, state=WorkflowNodeState.CANCELLED, error=error)
                 await self._close_card(run, node, "cancelled")
             return not stop
         if node.handle is None or node.handle.kind == "run":
@@ -1941,7 +1925,7 @@ class WorkflowEngine:
             error = {"kind": "cancelled", "message": _RUN_ENDED} if stop else _INTERRUPTED
             if node.handle is not None:
                 await self.cancel(node.handle.ref, reason=_RUN_ENDED)
-            await asyncio.to_thread(partial(settle, state=end, error=error))
+            await self._settle(node, epoch, state=end, error=error)
             return False
         if node.handle.kind != "job":
             await asyncio.to_thread(self.settle_from_handle, node, epoch)
@@ -1974,7 +1958,7 @@ class WorkflowEngine:
             # anything. A handle without the mark that its job was handed over proves nothing either, since the job
             # starts before that mark is saved.
             state, _, error = _indeterminate(node)
-            await asyncio.to_thread(partial(settle, state=state, error=error))
+            await self._settle(node, epoch, state=state, error=error)
         return False
 
     async def _restate(self, run_id: str) -> None:
@@ -2002,7 +1986,7 @@ class WorkflowEngine:
                 state = WorkflowRunState.WAITING if waits else WorkflowRunState.RUNNING
                 if state is not run.state:
                     changes = {"state": state, **self._time_left(run, span)}
-                    partial(self.store.update_run, run_id, run.epoch, when=SERVED_RUN_STATES)(**changes)
+                    self.store.update_run(run_id, run.epoch, when=SERVED_RUN_STATES, **changes)
                     return True
         return False
 
@@ -2066,7 +2050,7 @@ class WorkflowEngine:
         """
         run = await self._current_run(attempt)
         report = partial(self.store.update_run, run.run_id, run.epoch, when=SERVED_RUN_STATES)
-        await asyncio.to_thread(partial(report, result=result, error=error, finished_at=utc_timestamp()))
+        await asyncio.to_thread(report, result=result, error=error, finished_at=utc_timestamp())
         self._spawn(run.run_id, self._observe_exit(run.run_id, attempt.run_id))
 
     def settle_from_handle(self, node: WorkflowNode, epoch: int) -> WorkflowNodeState:
@@ -2088,12 +2072,29 @@ class WorkflowEngine:
             except ScriptRunNotFoundError:
                 started = None
             outcome = _unless_proven(node, started, (WorkflowNodeState.FAILED, None, _INTERRUPTED))
+        return self._settle_broker(node, epoch, outcome)
+
+    def _settle_broker(self, node: WorkflowNode, epoch: int, outcome: _Outcome) -> WorkflowNodeState:
         if outcome[0] is WorkflowNodeState.COMPLETED and (interrupted := self._nested_interrupted(node)) is not None:
             outcome = interrupted
         state, result, error = outcome
         settle = partial(self.store.settle_node, node.run_id, node.key, node.generation, epoch)
         settle(state=state, result=result, error=error, dirty_after=_changed(node, outcome))
         return state
+
+    async def _stamp(self, node: WorkflowNode, epoch: int, *, ignore: bool = False, **changes: object) -> bool:
+        return await self._fenced(self.store.update_node, node, epoch, ignore, **changes)
+
+    async def _settle(self, node: WorkflowNode, epoch: int, *, ignore: bool = False, **changes: object) -> bool:
+        return await self._fenced(self.store.settle_node, node, epoch, ignore, **changes)
+
+    async def _fenced(self, op: Callable[..., bool], n: WorkflowNode, epoch: int, ignore: bool, **kw: object) -> bool:
+        try:
+            return await asyncio.to_thread(op, n.run_id, n.key, n.generation, epoch, **kw)
+        except SupersededAttemptError:
+            if not ignore:
+                raise
+            return False
 
     def _condition(self, run_id: str) -> asyncio.Condition:
         condition = self._changed.get(run_id)
@@ -2178,17 +2179,10 @@ class WorkflowEngine:
         _CALLING_NODE.set((node.run_id, node.key, node.generation))
         try:
             outcome = await call()
-            if outcome[0] is WorkflowNodeState.COMPLETED:
-                interrupted = await asyncio.to_thread(self._nested_interrupted, node)
-                if interrupted is not None:
-                    outcome = interrupted
-            dirty = _changed(node, outcome)
             await hold("before_settle")
-            state, result, error = outcome
-            settle = partial(self.store.settle_node, node.run_id, node.key, node.generation, epoch)
             # A run that moved on meanwhile reads the call's receipt itself.
             with suppress(SupersededAttemptError):
-                await asyncio.to_thread(settle, state=state, result=result, error=error, dirty_after=dirty)
+                await asyncio.to_thread(self._settle_broker, node, epoch, outcome)
             await self._finish_call(node.run_id, node.key)
         finally:
             self._leave(node.run_id, node.key)
@@ -2205,7 +2199,7 @@ class WorkflowEngine:
                 async with self._condition(run_id):
                     run = self.store.get_run(run_id)
                     if charge := self._time_left(run):
-                        run = await asyncio.to_thread(partial(self.store.update_run, run_id, epoch, **charge))
+                        run = await asyncio.to_thread(self.store.update_run, run_id, epoch, **charge)
                 left = run.runtime_seconds_left
             if left is not None:
                 # An attempt that had ended already is judged as the pass judges it, before the run is stopped.
@@ -2321,8 +2315,7 @@ class WorkflowEngine:
                     if not written.cancelled() and written.exception() is None:
                         self._launched.pop(attempt, None)
 
-                write = partial(self.store.update_run, run.run_id, run.epoch, **changes)
-                end = asyncio.ensure_future(asyncio.to_thread(write))
+                end = asyncio.ensure_future(asyncio.to_thread(self.store.update_run, run.run_id, run.epoch, **changes))
                 # What is kept per attempt goes with the write: a task cancelled at the commit leaves none of it behind.
                 end.add_done_callback(forget)
                 ended = await asyncio.shield(end)
