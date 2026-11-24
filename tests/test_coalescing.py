@@ -30,7 +30,11 @@ from mindroom.coalescing.gate import (
     ReadyPendingEvent,
 )
 from mindroom.coalescing.ingress_lanes import LaneDelivery, ReceiptLaneKey
-from mindroom.coalescing.policy import pending_events_sent_together, submission_marker
+from mindroom.coalescing.policy import (
+    pending_events_sent_together,
+    submission_marker,
+    submission_marker_from_source,
+)
 from mindroom.commands.parsing import CommandType
 from mindroom.config.main import Config
 from mindroom.constants import DURABLE_DELIVERY_ID_KEY, SUBMISSION_CONTENT_KEY
@@ -145,10 +149,16 @@ def _coalescing_gate_is_idle(gate: CoalescingGate) -> bool:
     return not gate._gates
 
 
-def _voice_pending(event_id: str, body: str, origin_server_ts: int) -> PendingEvent:
+def _voice_pending(
+    event_id: str,
+    body: str,
+    origin_server_ts: int,
+    *,
+    submission: object = None,
+) -> PendingEvent:
     """Wrap one normalized voice transcript as pending voice ingress."""
     return make_pending_event(
-        _text_event(event_id, body, origin_server_ts),
+        _text_event(event_id, body, origin_server_ts, submission=submission),
         nio.MatrixRoom("!room:localhost", "@mindroom:localhost"),
         source_kind=VOICE_SOURCE_KIND,
     )
@@ -1763,6 +1773,7 @@ def test_submission_marker_reads_a_missing_more_as_final() -> None:
     assert submission_marker(marked) == ("upload-1", False)
     assert submission_marker(_image_pending("$two:localhost", 1_000_000, submission=_open())) == ("upload-1", True)
     assert submission_marker(_image_pending("$three:localhost", 1_000_000)) is None
+    assert submission_marker_from_source("not-a-mapping") is None
 
 
 @pytest.mark.asyncio
@@ -1935,12 +1946,16 @@ async def test_edit_cannot_give_an_opening_model_pick_a_replacement_relation() -
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("later_thread_id", [None, "$other-thread:localhost"])
+@pytest.mark.parametrize(
+    ("later_thread_id", "later_submission_id"),
+    [(None, None), ("$other-thread:localhost", None), ("$other-thread:localhost", "upload-2")],
+)
 async def test_an_expired_submission_does_not_wait_for_later_lane_work(
     monkeypatch: pytest.MonkeyPatch,
     later_thread_id: str | None,
+    later_submission_id: str | None,
 ) -> None:
-    """At its bound a submission answers what was admitted, without waiting on the sender's later unresolved events."""
+    """At its bound a submission answers what was admitted, without waiting on unrelated or other-submission work."""
     monkeypatch.setattr(gate_module, "_SUBMISSION_WAIT_SECONDS", 0.05)
     gate, batches = _recording_gate(60.0)
     owner = RequesterCoalescingOwner("@user:localhost")
@@ -1952,13 +1967,14 @@ async def test_an_expired_submission_does_not_wait_for_later_lane_work(
         await asyncio.sleep(0.02)
         later_slot = gate.enter_lane(ReceiptLaneKey(room_id=key.room_id, sender_id=owner.requester_user_id))
         if later_thread_id is not None:
-            # A later upload in another thread whose normalization has not finished.
-            later = _image_pending("$later:localhost", 1_000_020)
+            sub = _final(later_submission_id) if later_submission_id is not None else None
+            later = _image_pending("$later:localhost", 1_000_020, submission=sub)
             gate.submit_lane_slot(
                 later_slot,
                 key=CoalescingKey("!room:localhost", later_thread_id, owner),
                 source_event_id="$later:localhost",
                 ready_task=asyncio.create_task(_ready_after(release, later)),
+                submission_id=later_submission_id,
             )
         # Otherwise the later event's conversation is still being looked up.
         await _wait_for(
@@ -1970,6 +1986,117 @@ async def test_an_expired_submission_does_not_wait_for_later_lane_work(
     if later_thread_id is None:
         gate.release_lane_slot(later_slot)
     release.set()
+    await gate.drain_all()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("upload_thread_id", "voice_thread_id", "via_ready_caption"),
+    [
+        (None, "$upload:localhost", False),
+        ("$thread:localhost", "$thread:localhost", False),
+        ("$thread:localhost", "$thread:localhost", True),
+    ],
+)
+async def test_open_submission_waits_past_bound_for_in_flight_same_submission_slot(
+    monkeypatch: pytest.MonkeyPatch,
+    upload_thread_id: str | None,
+    voice_thread_id: str,
+    *,
+    via_ready_caption: bool,
+) -> None:
+    """An open submission waits past its bound for a same-submission voice or ready-in-lane caption."""
+    monkeypatch.setattr(gate_module, "_SUBMISSION_WAIT_SECONDS", 0.05)
+    gate, batches = _recording_gate(60.0)
+    owner = RequesterCoalescingOwner("@user:localhost")
+    lane_key = ReceiptLaneKey(room_id="!room:localhost", sender_id=owner.requester_user_id)
+    follow_key = CoalescingKey("!room:localhost", voice_thread_id, owner)
+    release = asyncio.Event()
+
+    with capture_logs() as logs:
+        await _admit_ready(
+            gate,
+            CoalescingKey("!room:localhost", upload_thread_id, owner),
+            _image_pending("$upload:localhost", 1_000_000, submission=_open()),
+        )
+        slot = gate.enter_lane(lane_key)
+        if via_ready_caption:
+            gate.submit_lane_slot(
+                slot,
+                key=CoalescingKey("!room:localhost", "$other:localhost", owner),
+                source_event_id="$blocker:localhost",
+                ready_task=asyncio.create_task(_none_after(release)),
+            )
+            caption_slot = gate.enter_lane(lane_key)
+            caption = _pending(_text_event("$follow:localhost", "caption", 1_000_380, submission=_final()))
+            gate.submit_lane_slot(
+                caption_slot,
+                key=follow_key,
+                source_event_id="$follow:localhost",
+                ready_result=ReadyPendingEvent(pending_event=caption),
+            )
+            assert caption_slot.delivery is not None
+            assert caption_slot.delivery.submission_id == "upload-1"
+        else:
+            voice = _voice_pending("$follow:localhost", "what happens here?", 1_000_380, submission=_final())
+            gate.submit_lane_slot(
+                slot,
+                key=follow_key,
+                source_event_id="$follow:localhost",
+                ready_task=asyncio.create_task(_ready_after(release, voice)),
+                submission_id="upload-1",
+            )
+        await asyncio.sleep(0.12)
+        assert batches == []
+        assert not [log for log in logs if log["event"] == "coalescing_gate_submission_timed_out"]
+
+        release.set()
+        await _wait_for(lambda: _dispatched_source_count(batches) == 2)
+
+    assert len(batches) == 1
+    assert batches[0].coalescing_key.thread_id == voice_thread_id
+    assert list(batches[0].handled_turn.source_event_ids) == ["$upload:localhost", "$follow:localhost"]
+    assert not [log for log in logs if log["event"] == "coalescing_gate_submission_timed_out"]
+    await gate.drain_all()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("voice_more", [None, True])
+async def test_open_submission_flushes_once_when_in_flight_same_submission_slot_stays_open(
+    monkeypatch: pytest.MonkeyPatch,
+    voice_more: bool | None,
+) -> None:
+    """Settling to None or an expired more=True after the bound flushes once and logs one timeout."""
+    monkeypatch.setattr(gate_module, "_SUBMISSION_WAIT_SECONDS", 0.05)
+    gate, batches = _recording_gate(60.0)
+    owner = RequesterCoalescingOwner("@user:localhost")
+    key = CoalescingKey("!room:localhost", "$thread:localhost", owner)
+    release = asyncio.Event()
+    voice = _voice_pending("$voice:localhost", "still more", 1_000_380, submission=_open())
+    ready_task = asyncio.create_task(_none_after(release) if voice_more is None else _ready_after(release, voice))
+    expected_ids = ["$upload:localhost"] if voice_more is None else ["$upload:localhost", "$voice:localhost"]
+
+    with capture_logs() as logs:
+        await _admit_ready(gate, key, _image_pending("$upload:localhost", 1_000_000, submission=_open()))
+        voice_slot = gate.enter_lane(ReceiptLaneKey(room_id=key.room_id, sender_id=owner.requester_user_id))
+        gate.submit_lane_slot(
+            voice_slot,
+            key=key,
+            source_event_id="$voice:localhost",
+            ready_task=ready_task,
+            submission_id="upload-1",
+        )
+        await asyncio.sleep(0.12)
+        assert batches == []
+        assert not [log for log in logs if log["event"] == "coalescing_gate_submission_timed_out"]
+
+        release.set()
+        await _wait_for(lambda: [list(batch.handled_turn.source_event_ids) for batch in batches] == [expected_ids])
+
+    timed_out = [log for log in logs if log["event"] == "coalescing_gate_submission_timed_out"]
+    assert len(timed_out) == 1
+    assert timed_out[0]["submission_id"] == "upload-1"
+    assert timed_out[0]["pending_count"] == len(expected_ids)
     await gate.drain_all()
 
 
