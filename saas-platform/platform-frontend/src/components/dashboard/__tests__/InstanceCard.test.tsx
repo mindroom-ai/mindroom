@@ -237,7 +237,7 @@ describe('InstanceCard', () => {
       expect(screen.getByText('#1')).toBeInTheDocument()
     })
 
-    it('should link chat access through Cinny with the homeserver prefilled', () => {
+    it('should link chat access through MindRoom Chat with the homeserver prefilled', () => {
       render(<InstanceCard instance={mockInstance} />)
 
       const chatLink = screen.getByRole('link', { name: /Open Chat Interface/i })

@@ -83,6 +83,7 @@ from mindroom.matrix.room_history_reads import (
     missing_outbox_delivery_copy_indices_via_room_messages,
 )
 from mindroom.matrix.segmented_messages import first_segment_target_bytes, segment_matrix_content
+from mindroom.matrix.state_failures import is_transient_homeserver_status
 from mindroom.message_target import MessageTarget
 from mindroom.reply_lifecycle import Outcome as ReplyOutcome
 from mindroom.reply_lifecycle import ProgressConfirmation as ReplyProgressConfirmation
@@ -396,6 +397,10 @@ def _reply_row_wire_content(claimed: MatrixDelivery) -> dict[str, Any]:
 
 class _DeliveryRefusedError(RuntimeError):
     """Matrix declined one outbox delivery, leaving it unacknowledged."""
+
+    def __init__(self, message: str, *, failure: MatrixDeliveryFailure | None = None) -> None:
+        super().__init__(message)
+        self.failure = failure
 
 
 class _DeliveryObservationError(RuntimeError):
@@ -716,13 +721,14 @@ class DeliveryGateway:
             operation=operation,
             transaction_id=transaction_id,
             content_is_prepared=True,
+            transient_failure_recoverable=True,
         )
         if isinstance(outcome, MatrixDeliveryFailure):
             detail = _matrix_delivery_failure_reason(outcome)
             if outcome.kind in _PERMANENT_MATRIX_DELIVERY_FAILURES:
                 raise PermanentDeliveryError(detail)
             msg = f"Matrix refused {what} for turn {claimed.delivery_id!r} stage {claimed.stage.value!r}: {detail}"
-            raise _DeliveryRefusedError(msg)
+            raise _DeliveryRefusedError(msg, failure=outcome)
         return outcome
 
     async def _observe_matrix_event(
@@ -987,8 +993,8 @@ class DeliveryGateway:
                 ),
                 turn_key=request.delivery_turn_key,
             )
-        except _DeliveryRefusedError:
-            return None
+        except _DeliveryRefusedError as exc:
+            return exc.failure
         if event_id is None:
             # The delivery was withdrawn by membership or ended in an explicit
             # permanent failure, so there is nothing left for recovery to send.
@@ -1047,7 +1053,7 @@ class DeliveryGateway:
             wrapped_text = new_text or str(content.get("body", ""))
             if isinstance(prepared, MatrixDeliveryFailure):
                 if prepared.kind is not MatrixDeliveryFailureKind.PAYLOAD_TOO_LARGE:
-                    raise _DeliveryRefusedError(_matrix_delivery_failure_reason(prepared))
+                    raise _DeliveryRefusedError(_matrix_delivery_failure_reason(prepared), failure=prepared)
                 failure_reason = _matrix_delivery_failure_reason(prepared)
             else:
                 payload = prepared.content
@@ -1063,6 +1069,7 @@ class DeliveryGateway:
             )
 
         recorded: list[ReplyRowEnqueue] = []
+        refused_failure: MatrixDeliveryFailure | None = None
 
         def enqueued(row: ReplyRowEnqueue) -> None:
             # Before any send can fail, so a retry knows the span moved on.
@@ -1088,8 +1095,9 @@ class DeliveryGateway:
                 enqueue=write.enqueue,
                 on_enqueued=enqueued,
             )
-        except _DeliveryRefusedError:
+        except _DeliveryRefusedError as exc:
             # Refused before or while sending: what was recorded still ran its transaction.
+            refused_failure = exc.failure
             delivery = ReplyRowDelivery(enqueue=recorded[0] if recorded else None)
         if delivery.enqueue is not None:
             await self._run_reply_effects(delivery.enqueue.applied.post_commit)
@@ -1098,7 +1106,7 @@ class DeliveryGateway:
                 # refused: it resolves to the row already recorded.
                 raise ReplyWriteRefusedError(delivery.enqueue.transition)
         if delivery.event_id is None:
-            return None
+            return refused_failure
         reply = None if write.handle is None else write.handle.reply
         if reply is None or reply.event_id is None:
             # The reply's create bound its event when Matrix acknowledged it; the span reads it from here on.
@@ -1619,11 +1627,12 @@ class DeliveryGateway:
         if isinstance(outcome, DeliveredMatrixEvent):
             self.deps.logger.info("Sent response", event_id=outcome.event_id, **resolved_target.log_context)
             return outcome.event_id
-        self.deps.logger.error(
-            "Failed to send response to room",
-            error=_matrix_delivery_failure_reason(outcome)
-            if isinstance(outcome, MatrixDeliveryFailure)
-            else "durable Matrix delivery was refused",
+        self._log_delivery_failure(
+            outcome,
+            durable=request.delivery_turn_id is not None or request.reply_write is not None,
+            failed_event="Failed to send response to room",
+            deferred_event="Deferred durable Matrix delivery to outbox recovery",
+            refused_error="durable Matrix delivery was refused",
             **resolved_target.log_context,
         )
         return None
@@ -1698,15 +1707,39 @@ class DeliveryGateway:
         if isinstance(outcome, DeliveredMatrixEvent):
             self.deps.logger.info("Edited message", event_id=request.event_id, **target.log_context)
             return True
-        self.deps.logger.error(
-            "Failed to edit message",
+        self._log_delivery_failure(
+            outcome,
+            durable=request.reply_write is not None,
+            failed_event="Failed to edit message",
+            deferred_event="Deferred durable Matrix edit to outbox recovery",
+            refused_error="durable Matrix edit was refused",
             event_id=request.event_id,
-            error=_matrix_delivery_failure_reason(outcome)
-            if isinstance(outcome, MatrixDeliveryFailure)
-            else "durable Matrix edit was refused",
             **target.log_context,
         )
         return False
+
+    def _log_delivery_failure(
+        self,
+        outcome: MatrixDeliveryFailure | None,
+        *,
+        durable: bool,
+        failed_event: str,
+        deferred_event: str,
+        refused_error: str,
+        **log_context: object,
+    ) -> None:
+        http_status = outcome.status if isinstance(outcome, MatrixDeliveryFailure) else None
+        if durable and is_transient_homeserver_status(http_status):
+            self.deps.logger.warning(deferred_event, http_status=http_status, **log_context)
+            return
+        self.deps.logger.error(
+            failed_event,
+            error=_matrix_delivery_failure_reason(outcome)
+            if isinstance(outcome, MatrixDeliveryFailure)
+            else refused_error,
+            http_status=http_status,
+            **log_context,
+        )
 
     async def deliver_final(
         self,

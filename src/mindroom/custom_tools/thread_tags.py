@@ -178,6 +178,7 @@ class ThreadTagsTools(Toolkit):
             context,
             room_id=resolved_room_id,
             thread_id=thread_id,
+            allow_standalone_root=True,
         )
         if thread_target.error is not None:
             return self._payload(
@@ -280,6 +281,7 @@ class ThreadTagsTools(Toolkit):
                 room_id=resolved_room_id,
                 thread_id=effective_thread_id,
                 allow_context_fallback=False,
+                allow_standalone_root=True,
             )
             if thread_target.error is not None:
                 return self._payload(
@@ -477,6 +479,7 @@ class ThreadTagsTools(Toolkit):
             room_id=resolved_room_id,
             thread_id=effective_thread_id,
             allow_context_fallback=False,
+            allow_standalone_root=True,
         )
         if thread_target.error is not None:
             return self._payload(

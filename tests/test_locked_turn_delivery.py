@@ -100,9 +100,10 @@ class _FakeHomeserver:
         operation: str = "send_message",
         transaction_id: str | None = None,
         content_is_prepared: bool = False,
+        transient_failure_recoverable: bool = False,
     ) -> MatrixSendOutcome:
         """Accept one send, deduplicating on transaction ID like a homeserver."""
-        del operation, content_is_prepared
+        del operation, content_is_prepared, transient_failure_recoverable
         if content.get("body") == "Thinking...":
             self.placeholder_sends.append((transaction_id, content.get(STREAM_STATUS_KEY)))
         if transaction_id is not None and transaction_id in self._event_id_by_transaction:

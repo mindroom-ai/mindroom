@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import nullcontext
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 from mindroom.coalescing.batch import PendingEvent, requester_coalescing_key
 from mindroom.coalescing.gate import ReadyPendingEvent
 from mindroom.coalescing.ingress_lanes import IngressRetryError
+from mindroom.coalescing.policy import submission_marker_from_source
 from mindroom.constants import VOICE_RAW_AUDIO_FALLBACK_KEY
 from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
 from mindroom.dispatch_recovery_context import turn_dispatch_recovery_active
@@ -17,9 +19,12 @@ from mindroom.thread_utils import mentions_another_participant
 from mindroom.turns.queued_notice import mark_waiting_for_approval
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     import nio
     import structlog
 
+    from mindroom.active_runs import ActiveRunPublisher
     from mindroom.bot_runtime_view import BotRuntimeView
     from mindroom.coalescing.ingress_ticket import IngressTicket
     from mindroom.constants import RuntimePaths
@@ -35,6 +40,13 @@ if TYPE_CHECKING:
     from mindroom.voice.readiness import VoiceReadiness
 
 
+_VOICE_HANDOFF_GRACE_SECONDS = 3.0
+
+
+def _allow_active_run(_room_id: str) -> bool:
+    return True
+
+
 @dataclass(frozen=True)
 class VoiceIngressDeps:
     """Collaborators needed to admit voice messages."""
@@ -48,6 +60,8 @@ class VoiceIngressDeps:
     delivery_gateway: DeliveryGateway
     readiness: VoiceReadiness
     turn_policy: TurnPolicy
+    active_runs: ActiveRunPublisher | None = None
+    can_publish_active_run: Callable[[str], bool] = _allow_active_run
 
 
 @dataclass
@@ -84,6 +98,7 @@ class VoiceIngress:
         if prepared is not None:
             voice_target = voice_target.with_thread_root(prepared.thread_id)
         admission_key = requester_coalescing_key(room.room_id, coalescing_thread_id, facts.lane_requester_id)
+        marker = submission_marker_from_source(event.source)
 
         ready_task = asyncio.create_task(
             self._ready_voice_event(
@@ -93,10 +108,16 @@ class VoiceIngress:
                 voice_target=voice_target,
                 coalescing_thread_id=coalescing_thread_id,
                 dispatch_timing=dispatch_timing,
+                already_prepared=prepared is not None,
             ),
             name=f"voice_ready:{room.room_id}:{event.event_id}",
         )
-        ticket.admit_ready(admission_key, ready_task, source_event_id=event.event_id)
+        ticket.admit_ready(
+            admission_key,
+            ready_task,
+            source_event_id=event.event_id,
+            submission_id=marker.submission_id if marker is not None else None,
+        )
         return TurnDispatchOutcome.DEFERRED
 
     async def _ready_voice_event(
@@ -108,55 +129,69 @@ class VoiceIngress:
         voice_target: MessageTarget,
         coalescing_thread_id: str | None,
         dispatch_timing: DispatchPipelineTiming | None,
+        already_prepared: bool = False,
     ) -> ReadyPendingEvent:
         """Normalize a raw voice event after its conversation key is fixed; its lane holds the turn claim."""
         queued_notice_reservation = None
+        lease_cm = (
+            self.deps.active_runs.track(room.room_id, voice_target.resolved_thread_id)
+            if (
+                self.deps.active_runs is not None
+                and not already_prepared
+                and self.deps.runtime.config.voice.enabled
+                and self.deps.can_publish_active_run(room.room_id)
+            )
+            else nullcontext()
+        )
         try:
-            normalized_event = await self.deps.readiness.prepare(
-                room=room,
-                event=event,
-                target=voice_target,
-                coalescing_thread_id=coalescing_thread_id,
-                dispatch_timing=dispatch_timing,
-            )
-            envelope = self.deps.resolver.build_envelope(event=normalized_event, facts=facts, target=voice_target)
-            may_be_for_me = not self.deps.turn_policy.not_for_this_agent(
-                room,
-                normalized_event.source,
-                voice_target,
-                envelope,
-            )
-            for_another_participant = mentions_another_participant(
-                normalized_event.source,
-                self.deps.matrix_id,
-                self.deps.runtime.config,
-                self.deps.runtime_paths,
-                room=room,
-            )
-            # A running response hears of a voice message only once it is transcribed, so its judge reads the
-            # transcript. Without one, what the message says and whom it mentions stay unknown.
-            transcribed = normalized_event.source["content"].get(VOICE_RAW_AUDIO_FALLBACK_KEY) is not True
-            if may_be_for_me:
-                conversations = self.deps.response_runner.lifecycle_coordinator
-                queued_notice_reservation = conversations.reserve_waiting_human_message(
-                    target=voice_target,
-                    response_envelope=envelope,
-                    mentions_nobody=transcribed and for_another_participant is None,
-                    transcript=normalized_event.body if transcribed else None,
-                    mode=mid_turn_mode(event.source.get("content")),
-                )
-            ready = ReadyPendingEvent(
-                pending_event=PendingEvent(
-                    event=replace(
-                        normalized_event,
-                        turn_dispatch_recovery=turn_dispatch_recovery_active(),
-                        for_another_participant=for_another_participant,
-                    ),
+            async with lease_cm as lease:
+                normalized_event = await self.deps.readiness.prepare(
                     room=room,
-                    facts=facts,
-                    notice=queued_notice_reservation,
-                ),
-            )
+                    event=event,
+                    target=voice_target,
+                    coalescing_thread_id=coalescing_thread_id,
+                    dispatch_timing=dispatch_timing,
+                )
+                envelope = self.deps.resolver.build_envelope(event=normalized_event, facts=facts, target=voice_target)
+                may_be_for_me = not self.deps.turn_policy.not_for_this_agent(
+                    room,
+                    normalized_event.source,
+                    voice_target,
+                    envelope,
+                )
+                for_another_participant = mentions_another_participant(
+                    normalized_event.source,
+                    self.deps.matrix_id,
+                    self.deps.runtime.config,
+                    self.deps.runtime_paths,
+                    room=room,
+                )
+                # A running response hears of a voice message only once it is transcribed, so its judge reads the
+                # transcript. Without one, what the message says and whom it mentions stay unknown.
+                transcribed = normalized_event.source["content"].get(VOICE_RAW_AUDIO_FALLBACK_KEY) is not True
+                if may_be_for_me:
+                    conversations = self.deps.response_runner.lifecycle_coordinator
+                    queued_notice_reservation = conversations.reserve_waiting_human_message(
+                        target=voice_target,
+                        response_envelope=envelope,
+                        mentions_nobody=transcribed and for_another_participant is None,
+                        transcript=normalized_event.body if transcribed else None,
+                        mode=mid_turn_mode(event.source.get("content")),
+                    )
+                ready = ReadyPendingEvent(
+                    pending_event=PendingEvent(
+                        event=replace(
+                            normalized_event,
+                            turn_dispatch_recovery=turn_dispatch_recovery_active(),
+                            for_another_participant=for_another_participant,
+                        ),
+                        room=room,
+                        facts=facts,
+                        notice=queued_notice_reservation,
+                    ),
+                )
+                if lease is not None and may_be_for_me:
+                    lease.release_delay_seconds = _VOICE_HANDOFF_GRACE_SECONDS
         except IngressRetryError:
             raise
         except Exception as exc:

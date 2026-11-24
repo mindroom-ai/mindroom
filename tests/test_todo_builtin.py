@@ -776,18 +776,18 @@ def test_workspace_templates_render_jinja_conditionals_and_filters(tmp_path: Pat
         "deploy",
         _template_text(
             "deploy",
-            "  - title: \"{% if REPO == 'cinny' %}Deploy Cinny{% else %}No deploy for {{ REPO }}{% endif %}\"\n"
+            "  - title: \"{% if REPO == 'mindroom-chat' %}Deploy MindRoom Chat{% else %}No deploy for {{ REPO }}{% endif %}\"\n"
             "  - title: \"Push {{ BRANCH | default('main') | upper }}\"\n"
             "    depends_on: [1]\n",
         ),
     )
 
     with tool_runtime_context(_tool_context(config)):
-        cinny = tool.apply_template(name="deploy", params={"REPO": "cinny"}, dry_run=True)
+        mindroom_chat = tool.apply_template(name="deploy", params={"REPO": "mindroom-chat"}, dry_run=True)
         other = tool.apply_template(name="deploy", params={"REPO": "x"}, dry_run=True)
 
-    assert "- 1. [medium] Deploy Cinny" in cinny
-    assert "- 2. [medium] Push MAIN (depends on 1)" in cinny
+    assert "- 1. [medium] Deploy MindRoom Chat" in mindroom_chat
+    assert "- 2. [medium] Push MAIN (depends on 1)" in mindroom_chat
     assert "- 1. [medium] No deploy for x" in other
 
 

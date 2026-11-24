@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import enum
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from mindroom.constants import SUBMISSION_CONTENT_KEY
 from mindroom.dispatch_handoff import DispatchEvent, is_media_dispatch_event
@@ -50,13 +50,13 @@ def pending_event_is_text(pending_event: PendingEvent) -> bool:
     return pending_event.event.raw_event is None
 
 
-def submission_marker(pending_event: PendingEvent) -> SubmissionMarker | None:
-    """Return the composer submission marker one event carries, or None for an unmarked or malformed one.
+def submission_marker_from_source(source: Mapping[str, Any]) -> SubmissionMarker | None:
+    """Return the composer submission marker one Matrix event source carries, or None if unmarked or malformed.
 
     A marker is a mapping with a non-empty string ``id`` and an optional bool
     ``more``, read as False when missing; anything else is no marker.
     """
-    content = pending_event.event.source.get("content")
+    content = source.get("content") if isinstance(source, Mapping) else None
     marker = content.get(SUBMISSION_CONTENT_KEY) if isinstance(content, Mapping) else None
     if not isinstance(marker, Mapping):
         return None
@@ -65,6 +65,11 @@ def submission_marker(pending_event: PendingEvent) -> SubmissionMarker | None:
     if not isinstance(submission_id, str) or not submission_id or type(more) is not bool:
         return None
     return SubmissionMarker(submission_id, more)
+
+
+def submission_marker(pending_event: PendingEvent) -> SubmissionMarker | None:
+    """Return the composer submission marker one event carries, or None for an unmarked or malformed one."""
+    return submission_marker_from_source(pending_event.event.source)
 
 
 def pending_events_sent_together(earlier: PendingEvent, later: PendingEvent, *, window_seconds: float) -> bool:

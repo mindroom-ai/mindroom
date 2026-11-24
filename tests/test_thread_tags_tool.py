@@ -175,6 +175,7 @@ async def test_tag_thread_defaults_to_context_thread_id(repeat_room_id: bool) ->
         context.relations,
         context.room_id,
         "$ctx-thread:localhost",
+        allow_standalone_root=True,
     )
     mock_set.assert_awaited_once_with(
         context.client,
@@ -245,6 +246,7 @@ async def test_tag_thread_explicit_thread_id_overrides_same_room_context() -> No
         context.relations,
         context.room_id,
         "$explicit-event:localhost",
+        allow_standalone_root=True,
     )
     mock_set.assert_awaited_once_with(
         context.client,
@@ -287,6 +289,7 @@ async def test_untag_thread_defaults_to_context_thread_id(repeat_room_id: bool) 
         context.relations,
         context.room_id,
         "$ctx-thread:localhost",
+        allow_standalone_root=True,
     )
     mock_remove.assert_awaited_once_with(
         context.client,
@@ -385,6 +388,7 @@ async def test_untag_thread_explicit_thread_id_overrides_same_room_context() -> 
         context.relations,
         context.room_id,
         "$explicit-event:localhost",
+        allow_standalone_root=True,
     )
     mock_remove.assert_awaited_once_with(
         context.client,
@@ -427,6 +431,7 @@ async def test_list_thread_tags_defaults_to_context_thread_id() -> None:
         context.relations,
         context.room_id,
         "$ctx-thread:localhost",
+        allow_standalone_root=True,
     )
     mock_list.assert_awaited_once_with(
         context.client,
@@ -468,6 +473,7 @@ async def test_list_thread_tags_explicit_thread_id_overrides_same_room_context()
         context.relations,
         context.room_id,
         "$explicit-event:localhost",
+        allow_standalone_root=True,
     )
     mock_list.assert_awaited_once_with(
         context.client,
@@ -601,6 +607,7 @@ async def test_tag_thread_normalizes_explicit_thread_id_before_write() -> None:
         context.relations,
         context.room_id,
         "$reply-event:localhost",
+        allow_standalone_root=True,
     )
     mock_set.assert_awaited_once_with(
         context.client,

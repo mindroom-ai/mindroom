@@ -274,6 +274,7 @@ def test_a_z_ai_429_fails_at_once_only_when_its_code_says_the_account_cannot_pay
         ("An error occurred.", "server_error", None, ProviderUnavailable),
         ("Unexpected upstream failure", None, "api_error", ProviderUnavailable),
         ("Overloaded", None, "overloaded_error", ProviderUnavailable),
+        ("Our servers are currently overloaded. Please try again later.", None, None, ProviderUnavailable),
         # A retry cannot make the request fit, so the context window outranks a transient name, not a status.
         ("This model's maximum context length is 128000 tokens.", None, "api_error", ContextWindowExceeded),
         ("This model's maximum context length is 128000 tokens.", "503", None, ProviderUnavailable),

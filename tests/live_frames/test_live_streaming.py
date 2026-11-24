@@ -105,6 +105,7 @@ class _Edits:
         _event_id: str,
         content: dict[str, Any],
         _text: str,
+        **_kwargs: object,
     ) -> DeliveredMatrixEvent:
         self.contents.append(content)
         return DeliveredMatrixEvent(event_id=f"$edit{len(self.contents)}", content_sent=dict(content))
@@ -124,6 +125,7 @@ def _records() -> FakeReplyRecords:
         _event_id: str,
         content: dict[str, Any],
         _text: str,
+        **_kwargs: object,
     ) -> DeliveredMatrixEvent:
         return await _deliver(content)
 
@@ -690,10 +692,10 @@ async def test_an_approval_pause_with_a_finished_compaction_pending_survives_ref
     first_edit_landed = asyncio.Event()
     record_edit = edits.edit
 
-    async def refuse_after_the_first(*args: Any) -> DeliveredMatrixEvent | None:  # noqa: ANN401
+    async def refuse_after_the_first(*args: Any, **kwargs: Any) -> DeliveredMatrixEvent | None:  # noqa: ANN401
         if first_edit_landed.is_set():
             return None
-        delivered = await record_edit(*args)
+        delivered = await record_edit(*args, **kwargs)
         first_edit_landed.set()
         return delivered
 
@@ -1395,11 +1397,11 @@ async def test_frames_are_recorded_only_after_the_edit_in_flight_landed(tmp_path
     in_flight = asyncio.Event()
     release = asyncio.Event()
 
-    async def edit(*args: Any) -> DeliveredMatrixEvent:  # noqa: ANN401
+    async def edit(*args: Any, **kwargs: Any) -> DeliveredMatrixEvent:  # noqa: ANN401
         if edits.contents:
             in_flight.set()
             await release.wait()
-        return await edits.edit(*args)
+        return await edits.edit(*args, **kwargs)
 
     async def stopped_while_a_checkpoint_is_in_flight() -> None:
         async with stream_progress_edits(

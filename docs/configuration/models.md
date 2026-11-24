@@ -771,7 +771,7 @@ models:
 ```
 
 Write `name@level` wherever a model name is accepted to run that model at one of its levels: agent, team, and router `model`, `room_models`, `!model sol@xhigh`, `!room_model sol@low`, a client's model picker, `run_subagent`, scheduled tasks, and the `thread_model` tool.
-`sol@high` here is the same as `sol`, and a level the model does not list is an unknown model.
+`sol@high` here is the same as `sol`, and a level the model does not list is rejected with the levels that model supports.
 A reply at a non-default level shows its model as `<display name> (<level>)`, such as `Sol (xhigh)`.
 `!model list` and the `thread_model` tool's `list_models()` show each model's levels and default.
 

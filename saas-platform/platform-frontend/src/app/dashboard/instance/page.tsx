@@ -8,7 +8,7 @@ import { planAction, planState } from '@/lib/plan-state'
 import { Loader2, RefreshCw, CheckCircle, AlertCircle, Clock, Play, Pause, ExternalLink, Server, MessageCircle, Globe } from 'lucide-react'
 import { provisionInstance, startInstance, stopInstance, restartInstance as apiRestartInstance, type Instance } from '@/lib/api'
 import { getCachedInstance, loadInstance } from '@/lib/instance-resource'
-import { buildCinnyLoginUrl } from '@/lib/cinny'
+import { buildChatLoginUrl } from '@/lib/chat'
 import { getRuntimeConfig } from '@/lib/runtime-config'
 import { logger } from '@/lib/logger'
 import { Card, CardHeader, CardSection } from '@/components/ui/Card'
@@ -420,7 +420,7 @@ function InstanceDetails({ userId, authLoading }: { userId: string | null; authL
                   </div>
                 </div>
                 <a
-                  href={buildCinnyLoginUrl(instance.matrix_server_url)}
+                  href={buildChatLoginUrl(instance.matrix_server_url)}
                   target="_blank"
                   rel="noopener noreferrer"
                   className="flex items-center justify-center gap-2 px-4 py-2 border border-gray-300 dark:border-gray-600 dark:text-gray-300 rounded-lg hover:bg-gray-50 dark:hover:bg-gray-600 transition-colors whitespace-nowrap"

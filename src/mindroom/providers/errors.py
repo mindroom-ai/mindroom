@@ -110,6 +110,8 @@ _QUOTA_EXHAUSTED_WORDING = (
 _AUTHENTICATION_ERROR_TYPE = "authentication_error"
 # Anthropic reports an overloaded model with this error type, with or without a 529 status.
 _OVERLOADED_ERROR_TYPE = "overloaded_error"
+# Wording providers (Anthropic, OpenAI Codex) use when overloaded without a transient status or error type.
+_OVERLOADED_WORDING = (_OVERLOADED_ERROR_TYPE, "currently overloaded")
 # The names providers give a transient failure: Anthropic's error types, where ``timeout_error`` is a gateway
 # timeout, the types OpenAI-compatible servers send, and the Responses codes.
 _TRANSIENT_NAMES = frozenset(
@@ -255,7 +257,9 @@ def classify_provider_error(  # noqa: PLR0911 - one return per rule
         return typed(AuthenticationFailed)
     if client_side and _is_context_window_error(lowered, code=code):
         return typed(ContextWindowExceeded)
-    if (names & _TRANSIENT_NAMES or _OVERLOADED_ERROR_TYPE in lowered) and status not in _HTTP_CLIENT_ERROR_RANGE:
+    if (
+        names & _TRANSIENT_NAMES or any(wording in lowered for wording in _OVERLOADED_WORDING)
+    ) and status not in _HTTP_CLIENT_ERROR_RANGE:
         return typed(ProviderUnavailable)
     if client_side and _CREDENTIAL_WORDING.search(lowered):
         return typed(AuthenticationFailed)

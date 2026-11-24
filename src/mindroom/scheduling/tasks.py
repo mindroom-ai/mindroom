@@ -32,6 +32,7 @@ from mindroom.approval.tool_approval import (
     scheduled_call_offers_any_arguments,
     toolkit_approval_alias,
 )
+from mindroom.config.models import unsupported_level_message
 from mindroom.config.resolution import entity_timezone
 from mindroom.constants import SCHEDULED_TASK_EVENT_TYPE
 from mindroom.entity_resolution import entity_identity_registry, persisted_bot_user_ids
@@ -73,6 +74,7 @@ logger = get_logger(__name__)
 
 # Maximum length for message preview in task listings
 _MESSAGE_PREVIEW_LENGTH = 50
+_SCHEDULE_PARSE_TIMEOUT_SECONDS = 300.0
 
 # Reasons shown on a scheduled tool call's approval card when its task changes.
 SCHEDULE_CANCELLED_REASON = "Schedule cancelled."
@@ -922,19 +924,31 @@ async def _parse_workflow_schedule(
 
     provider = provider_registry.build_model_provider(config, runtime_paths, "default")
 
+    parse_timeout = asyncio.timeout(_SCHEDULE_PARSE_TIMEOUT_SECONDS)
     try:
-        response = await complete_prompt(
-            provider,
-            prompt,
-            instructions=["Parse scheduling requests into structured workflows"],
-            schema=ScheduledWorkflow,
-        )
+        async with parse_timeout:
+            response = await complete_prompt(
+                provider,
+                prompt,
+                instructions=["Parse scheduling requests into structured workflows"],
+                schema=ScheduledWorkflow,
+            )
         await record_system_usage(response.usage, runtime_paths=runtime_paths, kind="schedule_parse")
     except ModelSafeguardRefusal as refusal:
         logger.warning("Schedule parser model refused the request", request=request)
         msg = f"The schedule parser model declined this request ({refusal})."
         raise SchedulingError(msg) from refusal
     except Exception as e:
+        if isinstance(e, TimeoutError) and parse_timeout.expired():
+            logger.exception(
+                "Timed out parsing workflow schedule",
+                request=request,
+                timeout_seconds=_SCHEDULE_PARSE_TIMEOUT_SECONDS,
+            )
+            _raise_parse_failure(
+                f"Timed out parsing the schedule request after {int(_SCHEDULE_PARSE_TIMEOUT_SECONDS)}s",
+                "Try a simpler format like 'Daily at 9am, check my email'",
+            )
         logger.exception("Error parsing workflow schedule", error=str(e), request=request)
         _raise_parse_failure(
             f"Error parsing schedule: {failure_text(e)}",
@@ -1066,8 +1080,10 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
     if model is not None:
         selected_model = model.strip() or None
     if selected_model is not None and selected_model not in runtime.config.models:
-        available = ", ".join(sorted(runtime.config.models))
-        msg = f"Unknown model: {selected_model}. Available models: {available}"
+        msg = unsupported_level_message(runtime.config.models, selected_model)
+        if msg is None:
+            available = ", ".join(sorted(runtime.config.models))
+            msg = f"Unknown model: {selected_model}. Available models: {available}"
         raise SchedulingError(msg)
 
     client = runtime.client

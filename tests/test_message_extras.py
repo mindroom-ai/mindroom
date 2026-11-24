@@ -12,7 +12,7 @@ from mindroom.matrix.message_extras import (
 )
 
 
-def test_build_message_extras_content_uses_cinny_schema() -> None:
+def test_build_message_extras_content_uses_mindroom_chat_schema() -> None:
     """Message extras should match the schema rendered by MindRoom Chat."""
     content = build_message_extras_content(
         [

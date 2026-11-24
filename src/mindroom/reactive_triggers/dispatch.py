@@ -25,7 +25,12 @@ from mindroom.reactive_triggers.models import (
     ThreadTagSourceSpec,
 )
 from mindroom.reactive_triggers.store import ReactiveTriggerStore, ReactiveTriggerStoreError
-from mindroom.requester_identity import equivalent_requester_ids, is_human_requester_id
+from mindroom.requester_identity import (
+    equivalent_requester_ids,
+    is_human_requester_id,
+    is_persisted_managed_entity_id,
+    managed_entity_user_ids,
+)
 
 if TYPE_CHECKING:
     import nio
@@ -198,7 +203,7 @@ async def _check_room_source_access(
     ):
         return DispatchResult(status="skipped", reason="source_room_not_joined")
 
-    owner_rejection = _check_room_source_owner_authorization(
+    owner_rejection = check_room_source_owner_authorization(
         rule=rule,
         source_room_id=source_room_id,
         source_bot=source_bot,
@@ -212,10 +217,11 @@ async def _check_room_source_access(
     if not isinstance(source, RoomMessageSourceSpec) or not event.actor:
         return None
     return _check_room_source_sender(
+        rule=rule,
+        source=source,
         actor=event.actor,
         source_room_id=source_room_id,
         source_bot=source_bot,
-        fallback_agent_name=rule.target.agent,
         config=config,
         runtime_paths=runtime_paths,
         memberships=memberships,
@@ -228,7 +234,7 @@ def _observed_room_for_bot(source_bot: AgentBot | None, room_id: str) -> nio.Mat
     return rooms.get(room_id) if isinstance(rooms, Mapping) else None
 
 
-def _check_room_source_owner_authorization(
+def check_room_source_owner_authorization(
     *,
     rule: ReactiveTriggerRecord,
     source_room_id: str,
@@ -237,6 +243,7 @@ def _check_room_source_owner_authorization(
     runtime_paths: RuntimePaths,
     memberships: AgentReplyMembershipIndex,
 ) -> DispatchResult | None:
+    """Verify that the trigger owner is authorized in the watched source room."""
     candidates: list[str] = []
     source_agent_name = getattr(source_bot, "agent_name", None)
     if isinstance(source_agent_name, str) and source_agent_name:
@@ -271,15 +278,24 @@ def _check_room_source_owner_authorization(
 
 def _check_room_source_sender(
     *,
+    rule: ReactiveTriggerRecord,
+    source: RoomMessageSourceSpec,
     actor: str,
     source_room_id: str,
     source_bot: AgentBot | None,
-    fallback_agent_name: str,
     config: Config,
     runtime_paths: RuntimePaths,
     memberships: AgentReplyMembershipIndex,
 ) -> DispatchResult | None:
-    source_agent_name = getattr(source_bot, "agent_name", None) or fallback_agent_name
+    if actor in managed_entity_user_ids(rule.target.agent, config, runtime_paths):
+        return DispatchResult(status="skipped", reason="source_sender_is_target")
+    if source.include_bots:
+        if is_persisted_managed_entity_id(actor, config, runtime_paths):
+            return None
+    elif not is_human_requester_id(actor, config, runtime_paths):
+        return DispatchResult(status="skipped", reason="source_sender_not_human")
+
+    source_agent_name = getattr(source_bot, "agent_name", None) or rule.target.agent
     observed_room = _observed_room_for_bot(source_bot, source_room_id)
     try:
         sender_allowed = is_sender_allowed_for_agent_reply_in_room(

@@ -980,6 +980,24 @@ def test_mcp_dispatch_identity_includes_remote_operation_and_binding() -> None:
     assert read != grant_operation(changed, "files_call_tool", {"tool_name": "read", "arguments": {}})
 
 
+def test_triggers_grant_operation_binds_to_action() -> None:
+    """Timed grants for the unified `triggers` tool must be scoped per action."""
+    config = Config()
+    list_op = grant_operation(config, "triggers", {"action": "list"})
+    delete_op = grant_operation(config, "triggers", {"action": "delete", "trigger_id": "t1"})
+    rotate_op = grant_operation(config, "triggers", {"action": "rotate_key", "trigger_id": "t1"})
+    assert list_op is not None
+    assert delete_op is not None
+    assert rotate_op is not None
+    assert list_op == grant_operation(config, "triggers", {"action": " list "})
+    assert len({list_op, delete_op, rotate_op}) == 3
+    assert len({list_op.key, delete_op.key, rotate_op.key}) == 3
+    assert grant_operation(config, "triggers", {}) is None
+    assert grant_operation(config, "triggers", {"action": ""}) is None
+    assert grant_operation(config, "triggers", {"action": "   "}) is None
+    assert grant_operation(config, "triggers", {"action": 123}) is None
+
+
 @pytest.mark.parametrize("seconds", [300, 600, 1800])
 def test_timed_wire_round_trip_keeps_original_card(seconds: int) -> None:
     """A custom threaded action targets the reply card, not the thread root."""
