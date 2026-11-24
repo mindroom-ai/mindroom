@@ -297,14 +297,15 @@ class WorkflowTools(Toolkit, ManagedJobToolkit):
         listed = await asyncio.to_thread(engine.store.nodes, run.run_id, light=True)
         shown = {"active": LIVE_NODE_STATES, "failed": _FAILED, "all": frozenset(WorkflowNodeState)}[nodes]
         # What each call used, over every time it ran; a call that asked no model has none.
-        used = await asyncio.to_thread(engine.store.node_usage, run.run_id)
+        summary = await asyncio.to_thread(engine.store.usage_summary, run.run_id, attempt=run.attempt)
+        used = summary.by_node
         status: dict[str, Any] = {
             "run_id": run.run_id,
             "title": run.title,
             "status": run.state.value,
             "attempt": run.attempt,
             "counts": dict(Counter(node.state.value for node in listed)),
-            "usage": await asyncio.to_thread(engine.run_usage, run.run_id),
+            "usage": await asyncio.to_thread(engine.run_usage, run.run_id, root_summary=summary),
             "waiting": [
                 {"id": f"n{node.seq}", "label": node.label, "waiting_on": node.waiting_on}
                 for node in listed

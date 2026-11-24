@@ -188,7 +188,7 @@ async def test_continuation_usage_is_added_once(stack: WorkflowStack) -> None:
     await stack.end_attempt(ScriptRunState.FAILED)
     await stack.resume(stack.run_id)
     assert (await stack.submit("@0", "agent", _PROMPT)).cached
-    totals = stack.store.usage_totals(stack.run_id)
+    totals = stack.store.usage_summary(stack.run_id).totals
     assert (totals["input_tokens"], totals["output_tokens"], totals["tool_calls"]) == (12, 5, 1)
 
 

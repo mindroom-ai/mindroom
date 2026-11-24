@@ -238,7 +238,7 @@ async def test_nested_run_cost_is_in_the_parent_total_once(stack: WorkflowStack)
 
     assert (inner["cost_usd"], outer["cost_usd"]) == (pytest.approx(0.30), pytest.approx(0.50))
     assert (outer["attempt_cost_usd"], outer["input_tokens"]) == (pytest.approx(0.50), 500_000)
-    assert stack.store.usage_totals(parent)["cost_usd"] == pytest.approx(0.20)
+    assert stack.store.usage_summary(parent).totals["cost_usd"] == pytest.approx(0.20)
     # The nested run is part of the attempt that started it: the next attempt of the outer run has spent nothing.
     await stack.end_attempt(ScriptRunState.FAILED)
     await stack.resume(parent)

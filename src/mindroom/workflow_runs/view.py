@@ -299,10 +299,11 @@ class RunViews:
         if run.attempt == 0:
             return None
         nodes = store.nodes(run_id, light=True)
-        used = store.node_usage(run_id)
-        usage = self.engine.run_usage(run_id)
+        summary = store.usage_summary(run_id, attempt=run.attempt)
+        used = summary.by_node
+        usage = self.engine.run_usage(run_id, root_summary=summary)
         open_agents = sum(node.kind in AGENT_KINDS and node.state in UNSETTLED_NODE_STATES for node in nodes)
-        usage["projected_cost_usd"] = projected_cost_usd(store.turn_costs(run_id), open_agents, usage["cost_usd"])
+        usage["projected_cost_usd"] = projected_cost_usd(summary.turn_costs, open_agents, usage["cost_usd"])
         inside = {
             f"{child.parent_node_key}/{child.run_id}": Counter(
                 node.state.value for node in store.nodes(child.run_id, light=True) if node.kind != "group"

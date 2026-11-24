@@ -87,7 +87,7 @@ async def test_agent_node_runs_a_child_job_and_saves_the_raw_answer_and_usage(st
     assert node.links == ids | {"agent": "watcher", "model": "default"}
     listed = json.loads(await stack.call("get_workflow", run_id=stack.run_id, nodes="all"))["nodes"]
     assert [shown["links"] for shown in listed] == [node.links]
-    totals = stack.store.usage_totals(stack.run_id)
+    totals = stack.store.usage_summary(stack.run_id).totals
     assert (totals["input_tokens"], totals["output_tokens"]) == (11, 3)
 
 

@@ -6,7 +6,7 @@ import json
 import shutil
 import sqlite3
 from contextlib import contextmanager
-from dataclasses import asdict, fields, replace
+from dataclasses import asdict, dataclass, fields, replace
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
@@ -57,6 +57,16 @@ _TERMINAL_STATE_VALUES = tuple(sorted(TERMINAL_RUN_STATES))
 _TERMINAL_STATE_PLACEHOLDERS = ", ".join("?" * len(_TERMINAL_STATE_VALUES))
 
 type UsageTotals = dict[str, float | bool]
+
+
+@dataclass(frozen=True, slots=True)
+class UsageSummary:
+    """One read of a run's usage ledger: run totals, one attempt's cost, per-node sums, and priced own-turn costs."""
+
+    totals: UsageTotals
+    attempt_cost_usd: float
+    by_node: dict[str, UsageTotals]
+    turn_costs: list[float]
 
 
 class WorkflowRunStoreError(ValueError):
@@ -420,29 +430,33 @@ class WorkflowRunStore:
             )
         return inserted.rowcount == 1
 
-    def usage_totals(self, run_id: str, *, attempt: int | None = None) -> UsageTotals:
-        """Sum a run's usage, of every attempt or of one."""
-        return _totals(
-            usage for _key, _turn, entry_attempt, usage in self._usage(run_id) if attempt in (None, entry_attempt)
-        )
-
-    def node_usage(self, run_id: str) -> dict[str, UsageTotals]:
-        """Sum a run's usage per node key, over every generation of the node."""
+    def usage_summary(self, run_id: str, *, attempt: int | None = None) -> UsageSummary:
+        """Read *run_id*'s usage ledger once: totals, optional *attempt* cost, per-node sums, and priced own turns."""
+        with self.read_connection() as connection:
+            rows = connection.execute(
+                "SELECT key, turn, attempt, usage_json FROM workflow_usage WHERE run_id = ?",
+                (run_id,),
+            ).fetchall()
+        all_entries: list[dict[str, Any]] = []
+        attempt_entries: list[dict[str, Any]] = []
         by_key: dict[str, list[dict[str, Any]]] = {}
-        for key, _turn, _attempt, usage in self._usage(run_id):
-            by_key.setdefault(key, []).append(usage)
-        return {key: _totals(entries) for key, entries in by_key.items()}
-
-    def turn_costs(self, run_id: str) -> list[float]:
-        """Return what each finished model turn of the run's own agents cost; a turn without a price is left out.
-
-        What the subagents of a turn cost is no turn of the run's.
-        """
-        return [
-            cost
-            for _key, turn, _attempt, usage in self._usage(run_id)
-            if "sub:" not in str(turn) and (cost := usage.get("cost_usd")) is not None
-        ]
+        turn_costs: list[float] = []
+        for row in rows:
+            used = json.loads(row["usage_json"])
+            all_entries.append(used)
+            if attempt is None or row["attempt"] == attempt:
+                attempt_entries.append(used)
+            by_key.setdefault(row["key"], []).append(used)
+            if "sub:" not in str(row["turn"]) and (cost := used.get("cost_usd")) is not None:
+                turn_costs.append(cost)
+        totals = _totals(all_entries)
+        attempt_cost = float(totals["cost_usd"]) if attempt is None else float(_totals(attempt_entries)["cost_usd"])
+        return UsageSummary(
+            totals=totals,
+            attempt_cost_usd=attempt_cost,
+            by_node={key: _totals(entries) for key, entries in by_key.items()},
+            turn_costs=turn_costs,
+        )
 
     def append_log(self, run_id: str, epoch: int, text: str) -> None:
         """Append one line to a run's log, for the holder of *epoch*."""
@@ -564,14 +578,6 @@ class WorkflowRunStore:
                 params,
             ).fetchall()
         return [_node_from_row(row) for row in rows]
-
-    def _usage(self, run_id: str) -> list[tuple[str, int | str, int, dict[str, Any]]]:
-        with self.read_connection() as connection:
-            rows = connection.execute(
-                "SELECT key, turn, attempt, usage_json FROM workflow_usage WHERE run_id = ?",
-                (run_id,),
-            ).fetchall()
-        return [(row["key"], row["turn"], row["attempt"], json.loads(row["usage_json"])) for row in rows]
 
     def _migrate(self) -> None:
         with self.write_transaction() as connection:

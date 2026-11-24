@@ -2534,6 +2534,7 @@ from = ["mindroom.workflow_runs.store"]
 expose = [
     "SCHEMA_VERSION",
     "SupersededAttemptError",
+    "UsageSummary",
     "UsageTotals",
     "WorkflowRunConflictError",
     "WorkflowRunNotFoundError",

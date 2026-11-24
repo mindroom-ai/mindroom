@@ -238,7 +238,7 @@ async def test_agent_that_waits_through_two_stops_is_resumed_once_and_its_usage_
     await cards.decide("c1")
 
     assert await waiting == "sent"
-    totals = gated.store.usage_totals(gated.run_id)
+    totals = gated.store.usage_summary(gated.run_id).totals
     assert (totals["input_tokens"], totals["output_tokens"], totals["tool_calls"]) == (12, 5, 1)
     assert (gated.counting_tool.lines, _node(gated).generation) == (["a"], 1)
 

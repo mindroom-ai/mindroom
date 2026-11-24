@@ -124,7 +124,7 @@ async def test_subagent_of_a_workflow_agent_is_counted_once(stack: WorkflowStack
     # The agent's two requests and its subagent's one: 0.50, not the 0.80 that its rolled-up total would add to.
     assert _costs(stack) == (pytest.approx(0.50), pytest.approx(0.50), False)
     assert _ledger(stack) == [("@0", 1, "1"), ("@0", 1, "sub")]
-    assert stack.store.node_usage(stack.run_id)["@0"]["cost_usd"] == pytest.approx(0.50)
+    assert stack.store.usage_summary(stack.run_id).by_node["@0"]["cost_usd"] == pytest.approx(0.50)
 
 
 @pytest.mark.asyncio
@@ -199,7 +199,7 @@ async def test_total_with_a_priced_and_an_unpriced_subagent_is_a_lower_bound_and
     assert await stack.result("@0", "agent", _PROMPT) == "both"
     assert await stack.result("@1", "agent", {"prompt": "Ask somebody who is not there."}) == "declined"
 
-    by_node = stack.store.node_usage(stack.run_id)
+    by_node = stack.store.usage_summary(stack.run_id).by_node
     assert (by_node["@0"]["cost_usd"], by_node["@0"]["cost_unknown"]) == (pytest.approx(0.60), True)
     assert (by_node["@1"]["cost_usd"], by_node["@1"]["cost_unknown"]) == (pytest.approx(0.20), False)
 
@@ -366,7 +366,7 @@ async def test_cut_short_stream_with_output_and_no_usage_report_keeps_cost_unkno
     assert await stack.result("@0", "agent", _PROMPT) == "continued"
 
     assert _costs(stack) == (pytest.approx(0.20), pytest.approx(0.20), True)
-    assert stack.store.turn_costs(stack.run_id) == [pytest.approx(0.20)]
+    assert stack.store.usage_summary(stack.run_id).turn_costs == [pytest.approx(0.20)]
 
 
 @pytest.mark.asyncio

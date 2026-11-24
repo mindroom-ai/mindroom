@@ -107,7 +107,7 @@ if TYPE_CHECKING:
     from mindroom.script_runs.models import ScriptRunRecord
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.workflow_runs.models import NodeRequest
-    from mindroom.workflow_runs.store import WorkflowRunStore
+    from mindroom.workflow_runs.store import UsageSummary, WorkflowRunStore
 
 logger = get_logger(__name__)
 
@@ -687,14 +687,14 @@ class WorkflowEngine:
         """Return whether a call of this primary waits for the run it owns as *owner*, and so starts its attempts."""
         return self._attending[owner] > 0
 
-    def run_usage(self, run_id: str) -> dict[str, Any]:
+    def run_usage(self, run_id: str, *, root_summary: UsageSummary | None = None) -> dict[str, Any]:
         """Return what a run used so far and what its current attempt cost, with the runs inside it, each once.
 
         A nested run is part of the attempt that started it.
         """
         run = self.store.get_run(run_id)
-        used: dict[str, Any] = dict(self.store.usage_totals(run_id))
-        used["attempt_cost_usd"] = self.store.usage_totals(run_id, attempt=run.attempt)["cost_usd"]
+        summary = root_summary or self.store.usage_summary(run_id, attempt=run.attempt)
+        used: dict[str, Any] = {**summary.totals, "attempt_cost_usd": summary.attempt_cost_usd}
         for child in self.store.child_runs(run_id):
             inner = self.run_usage(child.run_id)
             for name in ("input_tokens", "output_tokens", "tool_calls", "cost_usd"):

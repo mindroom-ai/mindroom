@@ -950,7 +950,7 @@ async def test_opening_pre_peer_v1_store_adds_peer_tables_idempotently(stack: Wo
     nodes = reopened.nodes(stack.run_id, light=True)
     graph = graph_rows(
         nodes,
-        reopened.node_usage(stack.run_id),
+        reopened.usage_summary(stack.run_id).by_node,
         peers.message_edges(reopened, stack.run_id, nodes),
         reopened.log(stack.run_id, 50),
     )

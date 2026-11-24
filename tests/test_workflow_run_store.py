@@ -194,7 +194,7 @@ def test_prune_keeps_a_run_inside_a_run_for_as_long_as_the_run_around_it(tmp_pat
     assert store.prune("2001-01-01T00:00:00Z") == 0
     store.update_run(_RUN_A, 0, state=WorkflowRunState.COMPLETED, finished_at="2001-06-01T00:00:00Z")
     assert store.prune("2001-01-01T00:00:00Z") == 0
-    assert store.usage_totals(_RUN_B)["cost_usd"] == pytest.approx(0.3)
+    assert store.usage_summary(_RUN_B).totals["cost_usd"] == pytest.approx(0.3)
 
     assert store.prune("2002-01-01T00:00:00Z") == 2
     # A run whose outer run is gone has nobody to count it: it goes by its own age.
@@ -535,9 +535,9 @@ def test_usage_is_append_only_and_deduplicated(tmp_path: Path) -> None:
     assert store.add_usage(node.run_id, node.key, 1, 1, 1, {"cost_usd": 0.5, "input_tokens": 10})
     assert not store.add_usage(node.run_id, node.key, 1, 1, 1, {"cost_usd": 0.5, "input_tokens": 10})
     store.add_usage(node.run_id, node.key, 2, 1, 2, {"cost_usd": 0.25})  # a rerun in attempt 2
-    assert store.usage_totals(node.run_id)["cost_usd"] == 0.75
-    assert store.usage_totals(node.run_id, attempt=2)["cost_usd"] == 0.25
-    assert store.usage_totals(node.run_id) == {
+    assert store.usage_summary(node.run_id).totals["cost_usd"] == 0.75
+    assert store.usage_summary(node.run_id, attempt=2).attempt_cost_usd == 0.25
+    assert store.usage_summary(node.run_id).totals == {
         "input_tokens": 10,
         "output_tokens": 0,
         "tool_calls": 0,
@@ -555,15 +555,15 @@ def test_unknown_price_marks_totals_unknown(tmp_path: Path) -> None:
     store.add_usage(node.run_id, "@1", 1, 2, 1, {"input_tokens": 1, "cost_usd": 0.125})
     priced = {"input_tokens": 0, "output_tokens": 7, "tool_calls": 2, "cost_usd": 0.5, "cost_unknown": False}
     unpriced = {"input_tokens": 4, "output_tokens": 4, "tool_calls": 0, "cost_usd": 0.125, "cost_unknown": True}
-    assert store.node_usage(node.run_id) == {"@0": priced, "@1": unpriced}
-    assert store.usage_totals(node.run_id) == {
+    assert store.usage_summary(node.run_id).by_node == {"@0": priced, "@1": unpriced}
+    assert store.usage_summary(node.run_id).totals == {
         "input_tokens": 4,
         "output_tokens": 11,
         "tool_calls": 2,
         "cost_usd": 0.625,
         "cost_unknown": True,
     }
-    assert store.usage_totals(_RUN_B) == {
+    assert store.usage_summary(_RUN_B).totals == {
         "input_tokens": 0,
         "output_tokens": 0,
         "tool_calls": 0,
@@ -664,10 +664,10 @@ def test_prune_removes_only_old_finished_runs(tmp_path: Path) -> None:
     assert store.prune("2026-11-05T00:00:00Z") == 1
     assert sorted(run.run_id for run in store.list_runs()) == [_RUN_B, _RUN_C]
     assert (store.nodes(_RUN_A), store.log(_RUN_A)) == ([], [])
-    assert store.usage_totals(_RUN_A)["cost_usd"] == 0.0
+    assert store.usage_summary(_RUN_A).totals["cost_usd"] == 0.0
     for run_id in (_RUN_B, _RUN_C):
         assert len(store.nodes(run_id)) == 1
-        assert store.usage_totals(run_id)["cost_usd"] == 1.0
+        assert store.usage_summary(run_id).totals["cost_usd"] == 1.0
         assert store.log(run_id) == ["placeholder line"]
     assert store.prune("2026-11-05T00:00:00Z") == 0
 
@@ -1021,4 +1021,4 @@ def test_turn_costs_are_those_of_the_runs_own_priced_turns(tmp_path: Path) -> No
     for turn, cost in ((1, 0.6), (2, 0.0), ("cut:run", 0.3), ("sub:del", 9.0), (3, None)):
         store.add_usage(_RUN_A, "@0", 1, turn, 1, {"cost_usd": cost})
 
-    assert sorted(store.turn_costs(_RUN_A)) == [0.0, 0.3, 0.6]
+    assert sorted(store.usage_summary(_RUN_A).turn_costs) == [0.0, 0.3, 0.6]

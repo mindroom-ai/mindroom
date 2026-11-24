@@ -150,7 +150,7 @@ async def test_second_turn_continues_the_same_child_as_its_own_job(stack: Workfl
     assert _user_texts(model.requests[1]) == ["Step one", "Step two"]
 
     # Each turn recorded its own usage entry.
-    usage_by_node = stack.store.node_usage(stack.run_id)
+    usage_by_node = stack.store.usage_summary(stack.run_id).by_node
     assert (usage_by_node["@1"]["input_tokens"], usage_by_node["@1"]["output_tokens"]) == (10, 4)
     assert (usage_by_node["@2"]["input_tokens"], usage_by_node["@2"]["output_tokens"]) == (15, 6)
 
