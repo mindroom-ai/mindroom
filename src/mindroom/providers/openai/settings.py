@@ -79,7 +79,7 @@ class ChatSettings:
     azure_deployment: str | None = None
     azure_ad_token: str | None = field(default=None, metadata=SECRET)
     azure_ad_token_provider: Any = field(default=None, metadata=SECRET)
-    # OpenRouter: model routing and explicit prompt-cache breakpoints for Anthropic- and Gemini-routed ids.
+    # OpenRouter: model routing and the Claude prompt-cache ladder for Anthropic-routed ids.
     models: list[str] | None = None
     cache_system_prompt: bool = True
     extended_cache_time: bool = True
