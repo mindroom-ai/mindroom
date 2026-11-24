@@ -47,7 +47,7 @@ from mindroom.tool_system.worker_routing import (
     serialize_tool_execution_identity,
 )
 from mindroom.workflow_runs import engine as engine_module
-from mindroom.workflow_runs.engine import SupersededAttemptError, WorkflowLimits
+from mindroom.workflow_runs.engine import SupersededAttemptError
 from mindroom.workflow_runs.models import NodeRequest, WorkflowNodeState, WorkflowRunState
 from mindroom.workflow_runs.recovery import AUTO_RESUME_REASONS
 from mindroom.workflow_runs.store import WorkflowRunNotFoundError, WorkflowRunStoreError
@@ -65,6 +65,7 @@ if TYPE_CHECKING:
     from mindroom.script_runs.models import ScriptCallRecord, ScriptRunRecord
     from mindroom.tool_jobs.runtime import BackgroundJob
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
+    from mindroom.workflow_runs.limits import WorkflowLimits
     from mindroom.workflow_runs.models import WorkflowRun
 
 _A = tool_args("counter", "append", line="a")

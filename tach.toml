@@ -2669,6 +2669,26 @@ expose = [
 ]
 
 [[modules]]
+path = "mindroom.workflow_runs.limits"
+depends_on = [
+    "mindroom.delegation.state",
+    "mindroom.workflow_runs.models",
+    "mindroom.workflow_runs.store",
+]
+
+[[interfaces]]
+from = ["mindroom.workflow_runs.limits"]
+expose = [
+    "WorkflowLimits",
+    "budget_exceeded",
+    "ceiling",
+    "fits_ceiling",
+    "limit_reached",
+    "run_usage",
+    "usd",
+]
+
+[[modules]]
 path = "mindroom.workflow_runs.engine"
 depends_on = [
     "mindroom.delegation.personas",
@@ -2677,6 +2697,7 @@ depends_on = [
     "mindroom.workflow_runs.agent_nodes",
     "mindroom.workflow_runs.faults",
     "mindroom.workflow_runs.graph",
+    "mindroom.workflow_runs.limits",
     "mindroom.workflow_runs.models",
     "mindroom.workflow_runs.notices",
     "mindroom.workflow_runs.peers",
@@ -2694,10 +2715,7 @@ expose = [
     "ResumeAccess",
     "SupersededAttemptError",
     "WorkflowEngine",
-    "WorkflowLimits",
     "calling_node",
-    "ceiling",
-    "limit_reached",
     "nested_key",
 ]
 
@@ -2758,6 +2776,7 @@ depends_on = [
     "mindroom.live_frames.workflow",
     "mindroom.workflow_runs.faults",
     "mindroom.workflow_runs.graph",
+    "mindroom.workflow_runs.limits",
     "mindroom.workflow_runs.models",
     "mindroom.workflow_runs.notices",
     "mindroom.workflow_runs.peers",
@@ -2803,6 +2822,7 @@ depends_on = [
     "mindroom.tool_system.worker_routing",
     "mindroom.workflow_runs.answers",
     "mindroom.workflow_runs.engine",
+    "mindroom.workflow_runs.limits",
     "mindroom.workflow_runs.models",
     "mindroom.workflow_runs.peers",
     "mindroom.workflow_runs.replay",
@@ -10248,7 +10268,6 @@ depends_on = [
     "mindroom.tool_system.tool_function",
 ]
 visibility = [
-    "mindroom.delegation.continuation",
     "mindroom.delegation.job_approvals",
     "mindroom.orchestration.tool_job_runtime",
     "mindroom.tool_jobs.execution",

@@ -20,6 +20,7 @@ from mindroom.providers.identity import model_identity
 from mindroom.script_runs.models import ScriptRunState
 from mindroom.workflow_runs import agent_nodes
 from mindroom.workflow_runs import engine as engine_module
+from mindroom.workflow_runs.limits import run_usage
 from mindroom.workflow_runs.models import WorkflowNodeState
 from mindroom.workflow_runs.store import SupersededAttemptError
 from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool_call, usage
@@ -70,7 +71,7 @@ async def unpriced(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncIter
 
 
 def _costs(stack: WorkflowStack) -> tuple[float, float, bool]:
-    used = stack.engine.run_usage(stack.run_id)
+    used = run_usage(stack.store, stack.run_id)
     return used["cost_usd"], used["attempt_cost_usd"], used["cost_unknown"]
 
 
@@ -95,7 +96,7 @@ async def test_rerun_does_not_erase_what_the_first_generation_cost(stack: Workfl
     assert await stack.result("@0", "agent", _PROMPT) == "second"
 
     assert _costs(stack) == (pytest.approx(0.50), pytest.approx(0.10), False)
-    used = stack.engine.run_usage(stack.run_id)
+    used = run_usage(stack.store, stack.run_id)
     assert (used["input_tokens"], used["output_tokens"], used["tool_calls"]) == (500_000, 0, 0)
 
 
@@ -244,7 +245,7 @@ async def test_unpriced_model_marks_the_total_unknown(unpriced: WorkflowStack) -
 
     assert await unpriced.result("@0", "agent", _PROMPT) == "hi"
 
-    used = unpriced.engine.run_usage(unpriced.run_id)
+    used = run_usage(unpriced.store, unpriced.run_id)
     assert (used["input_tokens"], used["output_tokens"]) == (11, 3)
     assert (used["cost_usd"], used["attempt_cost_usd"], used["cost_unknown"]) == (0.0, 0.0, True)
 
@@ -341,7 +342,7 @@ async def test_failed_unmetered_turn_after_a_tool_call_keeps_its_call_and_unknow
 
     assert (stopped.value.kind, unpriced.counting_tool.lines) == ("indeterminate", ["a"])
     assert _ledger(unpriced) == [("@0", 1, "1")]
-    used = unpriced.engine.run_usage(unpriced.run_id)
+    used = run_usage(unpriced.store, unpriced.run_id)
     assert (used["tool_calls"], used["cost_usd"], used["cost_unknown"]) == (1, 0.0, True)
 
 

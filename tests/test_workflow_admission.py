@@ -22,7 +22,7 @@ from mindroom.script_runs import manager as manager_module
 from mindroom.script_runs.models import ScriptRunState
 from mindroom.script_runs.reasons import MAX_RUNTIME_EXCEEDED, RUNTIME_RESTARTED
 from mindroom.workflow_runs import engine as engine_module
-from mindroom.workflow_runs.engine import WorkflowLimits
+from mindroom.workflow_runs.limits import WorkflowLimits
 from mindroom.workflow_runs.models import WorkflowRunState
 from tests.conftest import SETTLE_TIMEOUT_SECONDS
 from tests.tool_job_helpers import wait_for_status

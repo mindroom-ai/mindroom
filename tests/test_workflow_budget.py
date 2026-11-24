@@ -17,7 +17,7 @@ from mindroom.script_runs.reasons import PLUGIN_TOOLS_CHANGED
 from mindroom.tool_jobs.runtime import TERMINAL_STATUSES
 from mindroom.workflow_runs import agent_nodes
 from mindroom.workflow_runs import engine as engine_module
-from mindroom.workflow_runs.engine import WorkflowLimits
+from mindroom.workflow_runs.limits import WorkflowLimits, run_usage
 from mindroom.workflow_runs.models import WorkflowNodeState, WorkflowRunState
 from tests.fakes.scripted_model import Await, answer, usage
 from tests.workflow_helpers import CallFailed, WorkflowStack, tool_args, workflow_stack
@@ -129,7 +129,7 @@ async def test_cost_limit_lets_running_calls_finish_starts_no_new_node_and_ends_
         assert "job_id" not in node.links
     assert len(model.requests) == 2
     assert _questions(stack) == []
-    assert stack.engine.run_usage(stack.run_id)["cost_usd"] == pytest.approx(1.8)
+    assert run_usage(stack.store, stack.run_id)["cost_usd"] == pytest.approx(1.8)
 
     await stack.views.show(stack.run_id)
     assert _cards(stack)[-1]["status"] == "interrupted"
@@ -210,7 +210,7 @@ async def test_further_turn_of_an_agent_stops_at_the_limit_without_starting_corr
     assert len(model.requests) == 1
     assert _states(stack)["@0"] == "cancelled"
     assert stack.store.get_run(stack.run_id).error == "Stopped at the cost limit ($0.60 of $0.50)."
-    assert stack.engine.run_usage(stack.run_id)["cost_usd"] == pytest.approx(0.6)
+    assert run_usage(stack.store, stack.run_id)["cost_usd"] == pytest.approx(0.6)
 
     await stack.resume(stack.run_id, max_cost_usd=1.0)
     assert await stack.result("@0", "agent", ask) == {"ok": True}
@@ -356,7 +356,7 @@ async def test_nested_run_stops_at_ancestors_cost_limit_and_parent_stops_too(sta
     ended_parent = stack.store.get_run(parent)
     assert (ended_parent.state, ended_parent.error) == (WorkflowRunState.INTERRUPTED, reason)
     assert len(model.requests) == 1
-    assert stack.engine.run_usage(parent)["cost_usd"] == pytest.approx(0.20)
+    assert run_usage(stack.store, parent)["cost_usd"] == pytest.approx(0.20)
     queued_parent = stack.store.get_node(parent, "@1")
     assert queued_parent is not None
     assert (queued_parent.state, queued_parent.handle) == (WorkflowNodeState.CANCELLED, None)
@@ -428,7 +428,7 @@ async def test_raising_parent_limit_continues_stopped_nested_child(stack: Workfl
         ),
     )
     assert [run.run_id for run in stack.store.child_runs(parent)] == [child.run_id]
-    assert stack.engine.run_usage(parent)["attempt_cost_usd"] == pytest.approx(0.0)
+    assert run_usage(stack.store, parent)["attempt_cost_usd"] == pytest.approx(0.0)
 
     stack.run_id = child.run_id
     first_replayed = await stack.submit("@0", "agent", {"prompt": "First"})
@@ -476,7 +476,7 @@ async def test_delegation_submitted_after_cost_limit_does_not_request_approval(
             await gated.until(lambda: bool(gated.counting_tool.lines))
             model = gated.child_script(answer("first", _usd(0.20)))
             assert await gated.result("@1", "agent", {"prompt": "First"}) == "first"
-            assert gated.engine.run_usage(gated.run_id)["cost_usd"] == pytest.approx(0.20)
+            assert run_usage(gated.store, gated.run_id)["cost_usd"] == pytest.approx(0.20)
 
             delegate = tool_args("delegate", "run_subagent", agent_name="helper", task="Do more work.")
             receipt = await gated.submit("@2", "tool", delegate)

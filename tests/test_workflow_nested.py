@@ -24,7 +24,7 @@ from mindroom.script_runs.models import ScriptCallState, ScriptRunState
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.workflow_runs import agent_nodes
 from mindroom.workflow_runs import engine as engine_module
-from mindroom.workflow_runs.engine import WorkflowLimits
+from mindroom.workflow_runs.limits import WorkflowLimits, run_usage
 from mindroom.workflow_runs.models import WorkflowNodeState, WorkflowRunState
 from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool_call, usage
 from tests.workflow_helpers import NodeFailed, WorkflowStack, tool_args, workflow_stack
@@ -234,7 +234,7 @@ async def test_nested_run_cost_is_in_the_parent_total_once(stack: WorkflowStack)
     await _report(stack, child.run_id, "the nested report")
     assert (await _settled(stack, receipt)).result == "done"
 
-    inner, outer = stack.engine.run_usage(child.run_id), stack.engine.run_usage(parent)
+    inner, outer = run_usage(stack.store, child.run_id), run_usage(stack.store, parent)
 
     assert (inner["cost_usd"], outer["cost_usd"]) == (pytest.approx(0.30), pytest.approx(0.50))
     assert (outer["attempt_cost_usd"], outer["input_tokens"]) == (pytest.approx(0.50), 500_000)
@@ -242,11 +242,11 @@ async def test_nested_run_cost_is_in_the_parent_total_once(stack: WorkflowStack)
     # The nested run is part of the attempt that started it: the next attempt of the outer run has spent nothing.
     await stack.end_attempt(ScriptRunState.FAILED)
     await stack.resume(parent)
-    resumed = stack.engine.run_usage(parent)
+    resumed = run_usage(stack.store, parent)
     assert (resumed["cost_usd"], resumed["attempt_cost_usd"]) == (pytest.approx(0.50), 0.0)
     # The run inside ended long ago for the retention pass, and its outer run lives: what it spent stays counted.
     assert stack.store.prune("9999-01-01T00:00:00Z") == 0
-    assert stack.engine.run_usage(parent)["cost_usd"] == pytest.approx(0.50)
+    assert run_usage(stack.store, parent)["cost_usd"] == pytest.approx(0.50)
 
 
 @pytest.mark.asyncio
@@ -275,7 +275,7 @@ async def test_agent_that_a_restart_continued_is_charged_for_the_turn_it_cut_sho
     await stack.continue_agents()
 
     assert await stack.result("@0", "agent", _PROMPT) == "continued"
-    used = stack.engine.run_usage(stack.run_id)
+    used = run_usage(stack.store, stack.run_id)
     assert (used["input_tokens"], used["cost_unknown"]) == (300_000, False)
     assert (used["cost_usd"], used["attempt_cost_usd"]) == (pytest.approx(0.60), pytest.approx(0.20))
 
@@ -309,7 +309,7 @@ async def test_cut_short_turn_on_an_unpriced_model_with_a_priced_subagent_leaves
     await stack.continue_agents()
 
     assert await stack.result("@0", "agent", _PROMPT) == "continued"
-    used = stack.engine.run_usage(stack.run_id)
+    used = run_usage(stack.store, stack.run_id)
     assert (used["cost_usd"], used["attempt_cost_usd"], used["cost_unknown"]) == (
         pytest.approx(0.50),
         pytest.approx(0.20),

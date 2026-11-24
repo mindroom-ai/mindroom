@@ -40,7 +40,8 @@ from mindroom.tool_system.tool_hooks import dispatch_external_tool_hooks
 from mindroom.tool_system.worker_routing import serialize_tool_execution_identity
 from mindroom.workers.models import ScriptResourceProfileName  # noqa: TC001 - the tool schema reads it at runtime.
 from mindroom.workflow_runs.answers import handle_workflow_answer
-from mindroom.workflow_runs.engine import WorkflowLimits, calling_node, ceiling, limit_reached, nested_key
+from mindroom.workflow_runs.engine import calling_node, nested_key
+from mindroom.workflow_runs.limits import WorkflowLimits, ceiling, limit_reached, run_usage
 from mindroom.workflow_runs.models import (
     LIVE_NODE_STATES,
     TERMINAL_RUN_STATES,
@@ -305,7 +306,7 @@ class WorkflowTools(Toolkit, ManagedJobToolkit):
             "status": run.state.value,
             "attempt": run.attempt,
             "counts": dict(Counter(node.state.value for node in listed)),
-            "usage": await asyncio.to_thread(engine.run_usage, run.run_id, root_summary=summary),
+            "usage": await asyncio.to_thread(run_usage, engine.store, run.run_id, root_summary=summary),
             "waiting": [
                 {"id": f"n{node.seq}", "label": node.label, "waiting_on": node.waiting_on}
                 for node in listed
@@ -712,7 +713,7 @@ async def handle_workflow_control(
         async with jobs.admission(job_id):
             max_cost = content.get("max_cost_usd")
             if max_cost is None and run.max_cost_usd is not None:
-                spent = (await asyncio.to_thread(workflows.run_usage, run.run_id))["cost_usd"]
+                spent = (await asyncio.to_thread(run_usage, workflows.store, run.run_id))["cost_usd"]
                 if limit_reached(spent, run.max_cost_usd):
                     max_cost = spent + run.max_cost_usd
             arguments = {"run_id": run.run_id, "max_cost_usd": max_cost}

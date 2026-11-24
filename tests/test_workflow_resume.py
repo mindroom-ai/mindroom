@@ -20,7 +20,8 @@ from mindroom.approval.tool_approval import ToolApprovalDecision
 from mindroom.script_runs.models import ScriptRunState, utc_timestamp
 from mindroom.script_runs.reasons import PLUGIN_TOOLS_CHANGED, RUNTIME_RESTARTED
 from mindroom.workflow_runs import engine as engine_module
-from mindroom.workflow_runs.engine import SupersededAttemptError, WorkflowLimits
+from mindroom.workflow_runs.engine import SupersededAttemptError
+from mindroom.workflow_runs.limits import WorkflowLimits
 from mindroom.workflow_runs.models import DispatchHandle, NodeRequest, WorkflowNode, WorkflowNodeState, WorkflowRunState
 from mindroom.workflow_runs.store import WorkflowRunStoreError
 from tests.test_tool_result_transform import _broken, _registry

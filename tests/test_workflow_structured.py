@@ -17,6 +17,7 @@ from mindroom.script_runs.models import ScriptRunState
 from mindroom.workflow_runs import agent_nodes
 from mindroom.workflow_runs import engine as engine_module
 from mindroom.workflow_runs.agent_nodes import turn_job_id
+from mindroom.workflow_runs.limits import run_usage
 from mindroom.workflow_runs.models import WorkflowNodeState
 from mindroom.workflow_runs.replay import node_digest
 from mindroom.workflow_runs.structured import (
@@ -201,7 +202,7 @@ async def test_second_turn_fixes_the_answer_in_the_same_session_with_its_own_job
         "Your answer did not match the schema: no JSON value found. Reply with only the corrected fenced json block."
     ) in _last_said(model)
     assert (node.links["turn"], node.links["job_id"]) == (2, turn_job_id(run, "@0", 1, 2))
-    assert stack.engine.run_usage(stack.run_id)["cost_usd"] == pytest.approx(0.2)
+    assert run_usage(stack.store, stack.run_id)["cost_usd"] == pytest.approx(0.2)
 
 
 @pytest.mark.asyncio
@@ -304,7 +305,7 @@ async def test_schema_that_cannot_be_applied_to_an_answer_ends_the_call_and_save
     # The call has its end first, and then the wait that read the turn gives the job back.
     await stack.until(lambda: not stack.jobs.awaited_job_ids())
     assert len(model.requests) == 1
-    assert stack.engine.run_usage(stack.run_id)["cost_usd"] == pytest.approx(0.1)
+    assert run_usage(stack.store, stack.run_id)["cost_usd"] == pytest.approx(0.1)
 
 
 class _Forgetful:

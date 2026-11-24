@@ -18,7 +18,7 @@ from mindroom.approval import manager as approval_manager
 from mindroom.event_journal import BackgroundApprovalDecision
 from mindroom.script_runs.models import ScriptRunState
 from mindroom.workflow_runs import engine as engine_module
-from mindroom.workflow_runs.engine import WorkflowLimits
+from mindroom.workflow_runs.limits import WorkflowLimits
 from mindroom.workflow_runs.models import WorkflowNodeState, WorkflowRunState
 from tests.fakes.scripted_model import Await, answer, calls, tool_call
 from tests.tool_job_helpers import JobApprovalCards

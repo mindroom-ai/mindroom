@@ -5,13 +5,12 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
-import math
 import secrets
 import time
 from collections import Counter, deque
 from contextlib import suppress
 from contextvars import ContextVar, copy_context
-from dataclasses import asdict, dataclass, field, replace
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from functools import partial
 from typing import TYPE_CHECKING, Any, Literal, cast
@@ -55,6 +54,15 @@ from mindroom.workflow_runs.agent_nodes import (
 )
 from mindroom.workflow_runs.faults import hold
 from mindroom.workflow_runs.graph import node_label
+from mindroom.workflow_runs.limits import (
+    WorkflowLimits,
+    budget_exceeded,
+    ceiling,
+    fits_ceiling,
+    limit_reached,
+    run_usage,
+    usd,
+)
 from mindroom.workflow_runs.models import (
     LIVE_NODE_STATES,
     RECHECK_SECONDS,
@@ -107,7 +115,7 @@ if TYPE_CHECKING:
     from mindroom.script_runs.models import ScriptRunRecord
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.workflow_runs.models import NodeRequest
-    from mindroom.workflow_runs.store import UsageSummary, WorkflowRunStore
+    from mindroom.workflow_runs.store import WorkflowRunStore
 
 logger = get_logger(__name__)
 
@@ -145,11 +153,9 @@ _NO_MATCH = "Agent '{name}' did not return JSON matching the schema after {turns
 _CORRECTING = "The agent of this call is correcting its answer. Try again in a moment."
 _NOT_ASKED = "The question could not be posted in the run's thread yet. Try again in a moment."
 _NOT_ANSWERED = "The run ended before the question was answered."
-_OVER_BUDGET = "Stopped at the cost limit (${spent} of ${limit})."
 _TOO_MANY_OPTIONS = "A question takes at most 20 options of at most 200 bytes each."
 _NO_SESSIONS = 'A workflow script cannot call delegate.{function} yet. Start a fresh agent with agent() or tool("delegate", "run_subagent", ...).'
 _SESSION_BUSY = "Session '{name}' is already in a turn. Wait for it or spawn another agent."
-_FILTERED_TURN = "A turn that is limited to some of its agent's tools cannot start or resume a workflow."
 # The node of the script's tool call that the current task runs, for a call of the `workflow` toolkit made in it.
 _CALLING_NODE: ContextVar[tuple[str, str, int] | None] = ContextVar("workflow_calling_node", default=None)
 
@@ -169,63 +175,6 @@ def nested_key(outer: tuple[str, str, int], source: bytes, args: object) -> str:
     return "nested:" + hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
 
 
-def ceiling(context: ToolRuntimeContext, *saved: Mapping[str, object] | None) -> dict[str, object] | None:
-    """Return the persona a run is saved with: what the turn in *context* and every persona of *saved* all keep.
-
-    *saved* is the run's own persona when the turn resumes it, and its outer run's when the turn starts it inside
-    that run. A run so never has more than the turn that started it, nor more than a narrower one that resumed it.
-    A turn that a filter narrows keeps a list no persona holds, so it is refused.
-    """
-    if context.tool_function_filter is not None:
-        raise WorkflowRunStoreError(_FILTERED_TURN)
-    kept = context.persona
-    for other in (SubagentPersona.from_dict(persona) for persona in saved if persona is not None):
-        kept = (
-            other
-            if kept is None
-            else replace(
-                kept,
-                tools=_both(kept.tools, other.tools, toolkits=True),
-                skills=_both(kept.kept_skills, other.kept_skills),
-                knowledge=_both(kept.kept_knowledge, other.kept_knowledge),
-            )
-        )
-    return asdict(kept) if kept is not None else None
-
-
-def _covers(side: tuple[str, ...] | None, name: str, *, toolkits: bool = False) -> bool:
-    return side is None or name in side or (toolkits and name.partition(".")[0] in side)
-
-
-def _both(
-    one: tuple[str, ...] | None,
-    other: tuple[str, ...] | None,
-    *,
-    toolkits: bool = False,
-) -> tuple[str, ...] | None:
-    """Return the names both lists hold, where None holds every name and a toolkit holds each of its functions."""
-    if one is None or other is None:
-        return other if one is None else one
-    return tuple(
-        name
-        for name in dict.fromkeys((*one, *other))
-        if _covers(one, name, toolkits=toolkits) and _covers(other, name, toolkits=toolkits)
-    )
-
-
-def _within(actual: tuple[str, ...] | None, cap: tuple[str, ...] | None, *, toolkits: bool = False) -> bool:
-    return cap is None or (actual is not None and all(_covers(cap, name, toolkits=toolkits) for name in actual))
-
-
-def _fits_ceiling(persona: SubagentPersona | None, cap: SubagentPersona) -> bool:
-    """Return whether *persona* stays within *cap*, using the same coverage rule as `ceiling()`."""
-    return (
-        _within(None if persona is None else persona.tools, cap.tools, toolkits=True)
-        and _within(None if persona is None else persona.kept_skills, cap.kept_skills)
-        and _within(None if persona is None else persona.kept_knowledge, cap.kept_knowledge)
-    )
-
-
 # How long the end of a run waits for its agents' cancelled jobs, all together, before each node is settled as it
 # stands: one whose job has not ended is one nobody could read.
 _STOP_SECONDS, _STOP_POLL_SECONDS = 30.0, 0.05
@@ -236,18 +185,6 @@ _RATE_WAIT_SECONDS = 1.0
 _EXIT_POLL_SECONDS = (0.05, 0.2, 0.5, 1.0, 2.0, 5.0)
 
 type _Outcome = tuple[WorkflowNodeState, object, dict[str, object] | None]
-
-
-@dataclass(frozen=True, slots=True)
-class WorkflowLimits:
-    """The limits one `workflow` toolkit sets for the runs it starts."""
-
-    max_concurrent_runs: int = 8
-    max_runtime_hours: float = 72
-    max_tool_calls_per_minute: int = 600
-    max_concurrent_agents: int | None = None
-    # What a run may be projected to cost before its card says it is large; 0 never says so for its cost.
-    large_run_notice_usd: float = 10
 
 
 @dataclass(slots=True)
@@ -544,11 +481,11 @@ class WorkflowEngine:
             raise WorkflowRunStoreError(msg)
         effective_limit = run.max_cost_usd if max_cost_usd is None else max_cost_usd
         if effective_limit is not None:
-            spent = self.run_usage(run_id)["cost_usd"]
+            spent = run_usage(self.store, run_id)["cost_usd"]
             if limit_reached(spent, effective_limit):
                 msg = (
-                    f"Run {run_id} has already spent ${_usd(spent)} (limit ${_usd(effective_limit)}). "
-                    f"Pass max_cost_usd above ${_usd(spent)} to resume it."
+                    f"Run {run_id} has already spent ${usd(spent)} (limit ${usd(effective_limit)}). "
+                    f"Pass max_cost_usd above ${usd(spent)} to resume it."
                 )
                 raise WorkflowRunStoreError(msg)
         try:
@@ -686,27 +623,6 @@ class WorkflowEngine:
     def attended(self, owner: str | None) -> bool:
         """Return whether a call of this primary waits for the run it owns as *owner*, and so starts its attempts."""
         return self._attending[owner] > 0
-
-    def run_usage(self, run_id: str, *, root_summary: UsageSummary | None = None) -> dict[str, Any]:
-        """Return what a run used so far and what its current attempt cost, with the runs inside it, each once.
-
-        A nested run is part of the attempt that started it.
-        """
-        run = self.store.get_run(run_id)
-        summary = root_summary or self.store.usage_summary(run_id, attempt=run.attempt)
-        used: dict[str, Any] = {**summary.totals, "attempt_cost_usd": summary.attempt_cost_usd}
-        for child in self.store.child_runs(run_id):
-            inner = self.run_usage(child.run_id)
-            for name in ("input_tokens", "output_tokens", "tool_calls", "cost_usd"):
-                used[name] += inner[name]
-            used["cost_unknown"] = used["cost_unknown"] or inner["cost_unknown"]
-            group = self.store.get_node(run_id, f"{child.parent_node_key}/{child.run_id}")
-            if group is not None and group.attempt == run.attempt:
-                if group.generation == 1:
-                    used["attempt_cost_usd"] += inner["cost_usd"]
-                elif child.state is not WorkflowRunState.STARTING:
-                    used["attempt_cost_usd"] += inner["attempt_cost_usd"]
-        return used
 
     async def settle(self, run: WorkflowRun, *, replay: bool = False) -> WorkflowRun:
         """End the attempt of *run* if its process has ended, and return the run as that leaves it.
@@ -1587,7 +1503,7 @@ class WorkflowEngine:
                     run.persona
                     and child is not None
                     and child.child_agent_name == run.agent_name
-                    and not _fits_ceiling(child.persona, SubagentPersona.from_dict(run.persona))
+                    and not fits_ceiling(child.persona, SubagentPersona.from_dict(run.persona))
                 )
                 if child is not None and (child.workflow_node_key, child.workflow_generation) in allowed and fits:
                     return child, message
@@ -1706,22 +1622,11 @@ class WorkflowEngine:
             self._drop_slot(node.run_id, node.key)
             raise
 
-    def _budget_exceeded(self, run: WorkflowRun) -> str | None:
-        """Return the stop reason when *run* or any ancestor has reached its `max_cost_usd`, else None."""
-        current: WorkflowRun | None = run
-        while current is not None:
-            if current.max_cost_usd is not None:
-                spent = self.run_usage(current.run_id)["cost_usd"]
-                if limit_reached(spent, current.max_cost_usd):
-                    return _OVER_BUDGET.format(spent=_usd(spent), limit=_usd(current.max_cost_usd))
-            current = self.store.get_run(current.parent_run_id) if current.parent_run_id is not None else None
-        return None
-
     async def _check_budget(self, run: WorkflowRun) -> bool:
         """Return whether *run* or an ancestor reached its cost limit; drop queued work and stop once idle."""
         if run.state not in SERVED_RUN_STATES or (run.max_cost_usd is None and run.parent_run_id is None):
             return False
-        if (reason := await asyncio.to_thread(self._budget_exceeded, run)) is None:
+        if (reason := await asyncio.to_thread(budget_exceeded, self.store, run)) is None:
             return False
         if (places := self._places.get(run.run_id)) is not None:
             places.queued.clear()
@@ -1823,7 +1728,7 @@ class WorkflowEngine:
             left = handle.work_left if handle.work_until is None else max(0.0, handle.work_until - time.time())
             try:
                 if (
-                    reason := await asyncio.to_thread(self._budget_exceeded, self.store.get_run(node.run_id))
+                    reason := await asyncio.to_thread(budget_exceeded, self.store, self.store.get_run(node.run_id))
                 ) is not None:
                     stopped: _Outcome = WorkflowNodeState.CANCELLED, None, {"kind": "cancelled", "message": reason}
                     return _unless_proven(node, made, stopped)
@@ -2418,16 +2323,6 @@ def _receipt(node: WorkflowNode) -> NodeReceipt:
 
 def _broker_call_id(node: WorkflowNode) -> str:
     return uuid5(NAMESPACE_OID, f"{node.run_id}:{node.key}:{node.generation}").hex
-
-
-def limit_reached(spent: float, limit: float) -> bool:
-    """Return whether *spent* has reached *limit*, tolerating binary float drift on summed turn costs."""
-    return spent >= limit or math.isclose(spent, limit, rel_tol=1e-9, abs_tol=0.0)
-
-
-def _usd(amount: float) -> str:
-    """Return an amount of money as a person reads it: two decimal places, and more for one under a cent."""
-    return f"{amount:.2f}" if amount >= 0.01 or amount == 0 else f"{amount:.6f}".rstrip("0")
 
 
 def _indeterminate(node: WorkflowNode, said: object = None) -> _Outcome:

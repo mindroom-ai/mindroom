@@ -47,7 +47,7 @@ from mindroom.tool_system.agno_toolkits import adapt_toolkit, toolkit_function_n
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.tool_function import ToolGate
-from mindroom.workflow_runs.engine import WorkflowLimits, ceiling
+from mindroom.workflow_runs.limits import WorkflowLimits, ceiling
 from mindroom.workflow_runs.models import WorkflowRunState
 from tests.access_schema_support import with_responder_access
 from tests.conftest import SETTLE_TIMEOUT_SECONDS

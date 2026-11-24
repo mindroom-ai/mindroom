@@ -66,7 +66,8 @@ from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_con
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import serialize_tool_execution_identity
 from mindroom.workflow_runs.agent_nodes import AgentRuntime
-from mindroom.workflow_runs.engine import WorkflowEngine, WorkflowLimits
+from mindroom.workflow_runs.engine import WorkflowEngine
+from mindroom.workflow_runs.limits import WorkflowLimits
 from mindroom.workflow_runs.models import (
     TERMINAL_RUN_STATES,
     NodeReceipt,
