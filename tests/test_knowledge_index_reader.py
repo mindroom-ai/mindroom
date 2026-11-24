@@ -24,9 +24,11 @@ if TYPE_CHECKING:
 class _Embedder:
     def __init__(self, *, stall: bool = False) -> None:
         self.stall = stall
+        self.texts: list[str] = []
 
     async def aembed(self, texts: Sequence[str], *, purpose: str) -> list[list[float]]:
         del purpose
+        self.texts.extend(texts)
         if self.stall:
             await asyncio.Event().wait()
         return [[1.0, 0.0] for _text in texts]
@@ -105,3 +107,29 @@ async def test_a_stalled_embedder_times_out(tmp_path: Path, monkeypatch: pytest.
 
     with pytest.raises(TimeoutError):
         await reader.asearch("alpha", limit=1)
+
+
+@pytest.mark.asyncio
+async def test_a_long_query_is_embedded_truncated_but_searched_in_full(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A prompt longer than a chunk embeds only its first chunk-size characters; the hybrid search gets all of it."""
+    embedder = _Embedder()
+    reader = _reader(tmp_path, embedder)
+    chunk_size = int(reader.settings.chunk_size)
+    query = "x" * (chunk_size * 2) + " alpha"
+    searched: list[str] = []
+    search = KnowledgeCollection.search
+
+    def recording_search(self: KnowledgeCollection, *args: object, **kwargs: object) -> object:
+        searched.append(str(kwargs["query"]))
+        return search(self, *args, **kwargs)
+
+    monkeypatch.setattr(KnowledgeCollection, "search", recording_search)
+
+    hits = await reader.asearch(query, limit=1)
+
+    assert embedder.texts == [query[:chunk_size]]
+    assert searched == [query]
+    assert [hit.content for hit in hits] == ["alpha"]
