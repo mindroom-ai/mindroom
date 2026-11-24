@@ -197,7 +197,7 @@ class _Gateway:
         route: str,
         body: dict[str, object] | None = None,
         *,
-        extra_headers: dict[str, str] | None = None,
+        state: str | None = None,
     ) -> object:
         data = None if body is None else json.dumps(body, allow_nan=False, separators=(",", ":")).encode()
         faults = 0
@@ -206,7 +206,7 @@ class _Gateway:
                 "Authorization": f"Bearer {self._token}",
                 "Content-Type": "application/json",
                 "X-Workflow-Runnable": _runnable_header(),
-                **(extra_headers or {}),
+                **({"X-Workflow-State": state} if state is not None else {}),
             }
             request = urllib.request.Request(  # noqa: S310 - the launcher sets the gateway URL.
                 f"{self._base}/{route}",
@@ -246,8 +246,7 @@ class _Gateway:
     def poll(self, node_id: str, *, state: str | None = None) -> dict[str, object]:
         """Return the node's receipt, held by the gateway until the node changes or the wait is over."""
         route = f"nodes/{urllib.parse.quote(node_id, safe='')}?wait={_NODE_WAIT_SECONDS}"
-        extra = {"X-Workflow-State": state} if state is not None else None
-        return cast("dict[str, object]", self._request("GET", route, extra_headers=extra))
+        return cast("dict[str, object]", self._request("GET", route, state=state))
 
     def result(self, node_id: str) -> object:
         return self._request("GET", f"results/{urllib.parse.quote(node_id, safe='')}")
@@ -321,10 +320,8 @@ def _call(
                 receipt = gateway.poll(node_id, state=str(receipt["state"]))
         if receipt["state"] == "completed":
             return gateway.result(node_id) if receipt.get("result_ref") else receipt.get("result")
-        error_type = (
-            AgentError if kind in {"agent", "turn", "session"} else ToolError if kind == "tool" else WorkflowError
-        )
-        raise _failure(receipt, error_type)
+        errs = {"agent": AgentError, "turn": AgentError, "session": AgentError, "tool": ToolError}
+        raise _failure(receipt, errs.get(kind, WorkflowError))
     finally:
         _runnable_change(1)
 
@@ -526,13 +523,7 @@ def _fan_out(
     if not calls:
         return []
     active = min(len(calls), max_concurrent or _MAX_ACTIVE_LANES, _MAX_ACTIVE_LANES)
-    lanes = _Lanes(
-        threading.Semaphore(active),
-        [None] * len(calls),
-        parent=_local.lanes,
-        live=len(calls),
-        unstarted=len(calls),
-    )
+    lanes = _Lanes(threading.Semaphore(active), [None] * len(calls), _local.lanes, len(calls), len(calls))
     threads: list[threading.Thread] = []
     started = 0
     _runnable_change(len(calls) - 1)
@@ -576,24 +567,17 @@ class _Lanes:
     errors: dict[int, BaseException] = field(default_factory=dict)
     stopped: list[BaseException] = field(default_factory=list)
 
-    def _maybe_park_parent(self) -> bool:
-        if (
-            self.working == 0
-            and self.unstarted == 0
-            and self.live > 0
-            and self.parent is not None
-            and self.parent_state == "held"
-        ):
-            self.parent_state = "parked"
-            return True
-        return False
-
-    def park(self) -> None:
-        """Release this lane's place while waiting; cascade to enclosing fan-out when every child lane is parked."""
-        self.places.release()
+    def park(self, *, finished: bool = False, was_parked: bool = False) -> None:
+        """Release this lane's place while waiting or ending; cascade to parent when all child lanes are parked."""
+        if not was_parked:
+            self.places.release()
         with _lanes_cond:
-            self.working -= 1
-            cascade = self._maybe_park_parent()
+            self.working -= 0 if was_parked else 1
+            self.live -= 1 if finished else 0
+            idle = self.working == 0 and self.unstarted == 0 and self.live > 0
+            cascade = bool(self.parent and self.parent_state == "held" and idle)
+            if cascade:
+                self.parent_state = "parked"
         if cascade and self.parent is not None:
             self.parent.park()
 
@@ -606,13 +590,12 @@ class _Lanes:
 
     def restore_parent(self) -> None:
         """Reacquire the enclosing fan-out place if this fan-out parked it."""
-        reacquire = False
         with _lanes_cond:
             while self.parent_state == "acquiring":
                 _lanes_cond.wait()
-            if self.parent is not None and self.parent_state == "parked":
+            reacquire = self.parent is not None and self.parent_state == "parked"
+            if reacquire:
                 self.parent_state = "acquiring"
-                reacquire = True
         if reacquire and self.parent is not None:
             self.parent.unpark()
             with _lanes_cond:
@@ -635,17 +618,8 @@ class _Lanes:
                 _gateway().submit(_next_key(), "error", report, {"phase": lane.phase} if lane.phase else {})
         finally:
             _runnable_change(-1)
-            was_parked = _local.parked
-            _local.parked = False
-            if not was_parked:
-                self.places.release()
-            with _lanes_cond:
-                if not was_parked:
-                    self.working -= 1
-                self.live -= 1
-                cascade = self._maybe_park_parent()
-            if cascade and self.parent is not None:
-                self.parent.park()
+            was_parked, _local.parked = _local.parked, False
+            self.park(finished=True, was_parked=was_parked)
 
 
 def ask_user(question: str, options: list[str] | None = None) -> str:
