@@ -508,7 +508,7 @@ Matrix sync callback
 | `matrix/member_display_names.py` | Current member display names snapshotted from the synced nio room cache for model-facing `<msg>` tags |
 | `matrix/typing.py` | Typing indicator utilities |
 | `matrix/avatar.py` | Avatar management |
-| `commands/` | Chat command parsing (`!help`, `!schedule`, `!config`, etc.) |
+| `commands/` | Chat command parsing (`!help`, `!list_schedules`, `!config`, etc.) |
 | `commands/config_commands.py` | Chat-based config commands (`!config`) |
 | `commands/config_confirmation.py` | Interactive config confirmation workflows |
 | `voice/handler.py` | Voice message download, transcription, mention normalization, and ASR cleanup; `transcribe_speech`, shared by voice messages, call transcripts, and dictation |
