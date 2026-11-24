@@ -21,22 +21,26 @@ event_journal:
 rooms:
   lobby:
     description: Welcome lobby; join or send !personal to create your personal room.
+    # lobby is invite-only and unlisted by default; list the Matrix users to invite (or set join_policy: public).
+    invite_users:
+      - "@alice:example.com"
 
 personal_agents:
   mind:
-    # Start each user's workspace empty instead of copying the ~16 KB default starter files.
-    # Point at a mounted slim starter folder (for example /app/starter-workspace) to pre-seed files.
+    # Start each user's workspace empty instead of loading ~16 KB of prompt text from the 6 default starter files.
+    # Point at a slim starter folder mounted via extraVolumes / extraVolumeMounts to pre-seed files.
     workspace_template: null
     agent:
       display_name: "{user_first_name}'s Mind"
       role: Personal assistant for {user_display_name}.
       model: default
       worker_scope: user_agent
-      worker_tools: [shell, file, python, browser]
+      worker_tools: [shell, filesystem, browser]
       dedicated_subagent_workers: true
       # Per-user named worker limit; size alongside MINDROOM_KUBERNETES_NAMED_WORKERS_MAX (default 16).
       named_workers: 4
-      # Grants terminal shell input to room members; use `watch` or `none` if room members are untrusted.
+      # For personal agents, only users admitted by `access` (the owner by default) can type;
+      # widening `access` exposes shell input — use `watch` or `none` if others are untrusted.
       terminals: type
       knowledge_graph: true
       skill_learning: {enabled: true, model: fast}
@@ -62,7 +66,7 @@ personal_agents:
         - scheduler
         - todo
         - matrix_message
-        - {name: file, defer: true}
+        - {name: filesystem, defer: true}
         - {name: browser, defer: true}
         - {name: website, defer: true}
         - {name: egress_credentials, defer: true}
@@ -85,9 +89,10 @@ personal_agents:
         - {name: compact_context, defer: true}
         - {name: callback_manager, defer: true}
         # Optional integrations (defer when adding):
-        # - gmail / google_calendar / google_drive / google_sheets
-        # - github, slack, exa (replace duckduckgo for web search)
-        # - matrix_user (requires matrix.managedAccountAuth: appservice), approved_egress
+        # - gmail / google_calendar / google_drive / google_sheets, github, slack
+        # - exa (API-backed web search) or duckduckgo (keyless web search)
+        # - matrix_user (requires MATRIX_USER_APPSERVICE_TOKEN or _FILE from an appservice covering the intended human users)
+        # - approved_egress (must be listed here because include_default_tools is false; set approvedEgress.manageRuntimeConfig: false in Helm values when wiring per-agent)
         # - mcp_<server_id> for OAuth-backed remote MCP servers configured under mcp_servers:
 
 personal_rooms:
@@ -121,7 +126,8 @@ tool_approval:
     # - match: example_*
     #   action: require_approval
 
-# Optional shared team agent (shared worker; no per-user tools, knowledge graph, or skill learning):
+# Optional shared team agent (shared worker; omit knowledge_graph and skill_learning so shared
+# conversations don't feed learned skills or a shared graph; its Drive connection is shared across lobby users):
 # agents:
 #   team_helper:
 #     display_name: Team Helper
@@ -133,4 +139,4 @@ tool_approval:
 #     tools:
 #       - name: google_drive
 #         defer: true
-#         overrides: {download_file: false}
+#         overrides: {download_file: false, write: false}
