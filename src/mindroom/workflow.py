@@ -714,6 +714,24 @@ def _submit_group(key: str, args: dict[str, object], lane: _Lane, members: list[
         raise _failure(group, ToolError)
 
 
+def _load_main(raw: bytes, filename: str, module_name: str) -> Callable[[object], object]:
+    """Execute *raw* as *module_name* with `__file__ = filename`, no active lane, and return its `main`."""
+    module = types.ModuleType(module_name)
+    module.__file__ = filename
+    sys.modules[module_name] = module
+    _local.lane = None
+    _local.loading = True
+    try:
+        # No lane exists while the module body runs, so an SDK call there fails before it submits a node.
+        exec(compile(raw, filename, "exec"), module.__dict__)  # noqa: S102
+    finally:
+        _local.loading = False
+    main = module.__dict__.get("main")
+    if not callable(main):
+        raise WorkflowError(_NO_MAIN)
+    return main
+
+
 def run(name: str, args: object = None) -> object:
     """Run the saved workflow `workflows/<name>.py` inside this run and return what its main(args) returns."""
     lane = _current_lane()
@@ -725,20 +743,9 @@ def run(name: str, args: object = None) -> object:
     child_path = f"{lane.path}/{key.rpartition('@')[2]}:run"
     _submit_group(key, {"op": "run", "name": name, "source_sha256": sha256}, lane, [child_path])
     module_name = f"__workflow_run_{name}_{child_path}__"
-    module = types.ModuleType(module_name)
-    module.__file__ = f"workflows/{name}.py"
     saved_lane = _local.lane
-    sys.modules[module_name] = module
     try:
-        _local.lane = None
-        _local.loading = True
-        try:
-            exec(compile(raw, module.__file__, "exec"), module.__dict__)  # noqa: S102
-        finally:
-            _local.loading = False
-        main = module.__dict__.get("main")
-        if not callable(main):
-            raise WorkflowError(_NO_MAIN)
+        main = _load_main(raw, f"workflows/{name}.py", module_name)
         _local.lane = _Lane(child_path, phase=lane.phase)
         return main(args)
     finally:
@@ -753,14 +760,7 @@ def run_workflow(source_path: str) -> None:
     """
     gateway = _gateway()
     try:
-        module = types.ModuleType("__workflow__")
-        module.__file__ = source_path
-        sys.modules["__workflow__"] = module
-        # No lane exists while the module body runs, so an SDK call there fails before it submits a node.
-        exec(compile(Path(source_path).read_bytes(), source_path, "exec"), module.__dict__)  # noqa: S102
-        main = module.__dict__.get("main")
-        if not callable(main):
-            raise WorkflowError(_NO_MAIN)  # noqa: TRY301 - reported like any failure of the script.
+        main = _load_main(Path(source_path).read_bytes(), source_path, "__workflow__")
         args = gateway.run_info()["args"]
         _local.lane = _Lane("")
         try:
