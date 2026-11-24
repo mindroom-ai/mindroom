@@ -10960,6 +10960,7 @@ depends_on = [
 path = "mindroom.reactive_triggers.management"
 depends_on = [
     "mindroom.reactive_triggers.models",
+    "mindroom.reactive_triggers.store",
     "mindroom.thread_tags",
 ]
 

@@ -212,7 +212,7 @@ def _seed_room_a_triggers(harness: _Harness) -> tuple[str, ...]:
         description="Deploy notifications",
         config=harness.config,
     )
-    harness.external_store.record_fired("wh_deploy", expected_uid=wh_key.uid, fired_at=1_764_000_000)
+    harness.external_store.record_fired("wh_deploy", fired_at=1_764_000_000)
 
     wh_cap = harness.external_store.create_single_use_capability_record(
         trigger_id="wh_once",

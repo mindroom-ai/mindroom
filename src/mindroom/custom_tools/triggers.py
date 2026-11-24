@@ -45,8 +45,8 @@ from mindroom.reactive_triggers.external_sources import (
     validate_subscription_against_source,
 )
 from mindroom.reactive_triggers.management import (
-    authorize_trigger_actor,
     delete_trigger_sync,
+    is_trigger_owner,
     read_thread_tag_present,
     refresh_reactive_state_on_reenable,
     set_trigger_enabled_sync,
@@ -533,21 +533,24 @@ class TriggersTools(Toolkit):
         if context.orchestrator is not None:
             context.orchestrator.reactive_triggers.notify_work()
 
-    @staticmethod
+    @classmethod
     def _require_reactive_owner_or_admin(
+        cls,
         context: ToolRuntimeContext,
         record: ReactiveTriggerRecord,
         *,
         verb: str = "changed",
     ) -> None:
-        authorize_trigger_actor(
+        if not is_trigger_owner(
             context.requester_id,
             record.owner_user_id,
             context.config,
             context.runtime_paths,
-            allow_admin=True,
-            verb=verb,
-        )
+        ) and not cls._is_admin(
+            context,
+        ):
+            msg = f"trigger can only be {verb} by its owner or an external trigger admin"
+            raise ReactiveTriggerStoreError(msg)
 
     async def _create_reactive_rule(
         self,
@@ -1024,16 +1027,13 @@ class TriggersTools(Toolkit):
     async def _set_enabled(self, context: ToolRuntimeContext, args: _TriggerParams) -> str:
         resolved_trigger_id = _require_non_empty_arg(args["trigger_id"], "trigger_id", "set_enabled")
         target_enabled = False if args["enabled"] is None else args["enabled"]
-        external_store = ExternalTriggerStore(context.runtime_paths)
-        reactive_store = ReactiveTriggerStore(context.runtime_paths)
-
         refreshed_tag_present: bool | None = None
         if target_enabled:
             reactive_record = await run_blocking_until_complete(
                 lambda: (
                     None
-                    if _has_external_trigger(external_store, resolved_trigger_id)
-                    else reactive_store.get_trigger(resolved_trigger_id)
+                    if _has_external_trigger(ExternalTriggerStore(context.runtime_paths), resolved_trigger_id)
+                    else ReactiveTriggerStore(context.runtime_paths).get_trigger(resolved_trigger_id)
                 ),
             )
             if reactive_record is not None and not reactive_record.enabled:
@@ -1042,15 +1042,13 @@ class TriggersTools(Toolkit):
         updated = await run_blocking_until_complete(
             partial(
                 set_trigger_enabled_sync,
-                external_store,
-                reactive_store,
+                context.runtime_paths,
+                context.config,
                 resolved_trigger_id,
                 enabled=target_enabled,
                 actor_user_id=context.requester_id,
-                config=context.config,
-                runtime_paths=context.runtime_paths,
-                allow_admin=True,
                 refreshed_tag_present=refreshed_tag_present,
+                authorize_reactive=partial(self._require_reactive_owner_or_admin, context),
             ),
         )
         if isinstance(updated, ExternalTriggerRecord):
@@ -1061,20 +1059,17 @@ class TriggersTools(Toolkit):
 
     async def _delete_trigger(self, context: ToolRuntimeContext, args: _TriggerParams) -> str:
         resolved_trigger_id = _require_non_empty_arg(args["trigger_id"], "trigger_id", "delete")
-
-        def _delete() -> str:
-            delete_trigger_sync(
-                ExternalTriggerStore(context.runtime_paths),
-                ReactiveTriggerStore(context.runtime_paths),
+        await run_blocking_until_complete(
+            partial(
+                delete_trigger_sync,
+                context.runtime_paths,
+                context.config,
                 resolved_trigger_id,
                 actor_user_id=context.requester_id,
-                config=context.config,
-                runtime_paths=context.runtime_paths,
-                allow_admin=True,
-            )
-            return self._payload("ok", action="delete", trigger_id=resolved_trigger_id)
-
-        return await run_blocking_until_complete(_delete)
+                authorize_reactive=partial(self._require_reactive_owner_or_admin, context),
+            ),
+        )
+        return self._payload("ok", action="delete", trigger_id=resolved_trigger_id)
 
     async def _rotate_key(self, context: ToolRuntimeContext, args: _TriggerParams) -> str:
         resolved_trigger_id = _require_non_empty_arg(args["trigger_id"], "trigger_id", "rotate_key")
