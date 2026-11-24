@@ -445,6 +445,30 @@ def test_google_docs_format_document_rejects_unsupported_operations(tmp_path: Pa
     assert service.documents_resource.batch_update_calls == []
 
 
+def test_google_docs_format_document_rejects_link_fields_in_text_style(tmp_path: Path) -> None:
+    tool, service = _connected_tool(tmp_path)
+
+    result = json.loads(
+        tool.google_docs_format_document(
+            "document-id",
+            "tab-2",
+            "revision-1",
+            [
+                {
+                    "type": "text_style",
+                    "start_index": 1,
+                    "end_index": 8,
+                    "style": {"bold": True},
+                    "fields": ["link.url"],
+                },
+            ],
+        ),
+    )
+
+    assert result == {"error": "Google Docs formatting text_style cannot set links; use hyperlink"}
+    assert service.documents_resource.batch_update_calls == []
+
+
 def test_google_docs_config_flags_control_registered_functions(tmp_path: Path) -> None:
     tool = GoogleDocsTools(
         runtime_paths=_runtime_paths(tmp_path),

@@ -114,7 +114,7 @@ def _formatting_request(operation: object, tab_id: str) -> dict[str, object]:
         _require_operation_keys(operation, {"type", "start_index", "end_index", "style", "fields"})
         style = _formatting_style(operation)
         fields = _formatting_fields(operation)
-        if "link" in style or "link" in fields.split(","):
+        if "link" in style or any(field == "link" or field.startswith("link.") for field in fields.split(",")):
             msg = "text_style cannot set links; use hyperlink"
             raise ValueError(msg)
         return {
