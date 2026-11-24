@@ -49,20 +49,13 @@ def may_have_written(started: bool | None) -> bool:
     return started is not False
 
 
-def decide(
-    saved: WorkflowNode | None,
-    digest: str,
-    *,
-    dirty: bool,
-    rerun: bool,
-    cached: bool,
-) -> _Action:
+def decide(saved: WorkflowNode | None, digest: str, *, cached: bool) -> _Action:
     """Decide what a submitted call does, given the reconciled node from an earlier attempt."""
     if saved is None:
         return "run"
-    if saved.state is WorkflowNodeState.INDETERMINATE and not rerun:
-        return "raise_indeterminate"
-    if rerun or dirty or saved.digest != digest:
+    if saved.state is WorkflowNodeState.INDETERMINATE:
+        return "run" if not saved.digest else "raise_indeterminate"
+    if saved.digest != digest:
         return "run"
     if saved.state in LIVE_NODE_STATES:
         return "attach"

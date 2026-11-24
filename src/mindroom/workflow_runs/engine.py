@@ -798,7 +798,7 @@ class WorkflowEngine:
             condition.notify_all()
             return receipt
 
-    async def _admit_gated(  # noqa: C901, PLR0911, PLR0912, PLR0915
+    async def _admit_gated(
         self,
         run: WorkflowRun,
         epoch: int,
@@ -806,86 +806,108 @@ class WorkflowEngine:
         request: NodeRequest,
     ) -> NodeReceipt:
         """Decide and save one call for the attempt that began with *epoch*, which every write here names."""
-        key, kind, meta = request.key, request.kind, request.meta
         if run.epoch != epoch or run.state not in SERVED_RUN_STATES or run.run_id in self._stopping:
             # Before anything is kept for the attempt: one that the run left behind leaves nothing behind here.
             msg = f"Run {run.run_id} takes no more calls from attempt {attempt.run_id}."
             raise SupersededAttemptError(msg)
-        turn_ctx = self._turn_context(run, key, request.args) if kind == "turn" else None
-        session = None if turn_ctx is None else turn_ctx.session
-        digest = node_digest(kind, request.args) if turn_ctx is None else turn_ctx.digest
-        members = _members(meta) if kind == "group" else None
-        saved = self.store.get_node(run.run_id, key)
-        # A saved call with '' was named by a resume; one with DIRTY_DIGEST follows a call that ran in a later attempt.
-        cached, dirty, rerun = (
-            meta.get("cached") is not False,
-            saved is not None and saved.digest == DIRTY_DIGEST,
-            saved is not None and not saved.digest,
-        )
-        if saved is not None and saved.attempt == run.attempt and not saved.stale:
-            # A request the script sent twice never repeats work, not even failed work.
-            return _receipt(await self._asked(run, saved, epoch))
+        turn_ctx = self._turn_context(run, request.key, request.args) if request.kind == "turn" else None
+        digest = node_digest(request.kind, request.args) if turn_ctx is None else turn_ctx.digest
+        members = _members(request.meta) if request.kind == "group" else None
+        saved, previous, reused = await self._resolve_saved(run, epoch, request, turn_ctx, digest, members)
+        if reused is not None:
+            return reused
+        return await self._dispatch_new(run, epoch, attempt, request, turn_ctx, digest, members, saved, previous)
+
+    async def _resolve_saved(
+        self,
+        run: WorkflowRun,
+        epoch: int,
+        request: NodeRequest,
+        turn_ctx: _TurnContext | None,
+        digest: str,
+        members: list[str] | None,
+    ) -> tuple[WorkflowNode | None, WorkflowNode | None, NodeReceipt | None]:
+        """Apply the replay rules to any saved row at `request.key`; return `(saved, previous, reused_receipt)`."""
+        saved = self.store.get_node(run.run_id, request.key)
+        if saved is None:
+            return None, None, None
+        if saved.attempt == run.attempt and not saved.stale:
+            return saved, None, _receipt(await self._asked(run, saved, epoch))
         live, handle = False, None
-        if saved is not None and saved.state in LIVE_NODE_STATES:
-            # Left live by an attempt that ended: its handle says how it ended, or that its job still runs, before
-            # any rule may run it again.
+        if saved.state in LIVE_NODE_STATES:
             live, handle = await self._reconcile(run, saved, epoch), saved.handle
-            saved = self.store.get_node(run.run_id, key)
-        action = decide(saved, digest, dirty=dirty, rerun=rerun, cached=cached)
-        if live and action == "run" and saved is not None and saved.kind == "ask":
-            # The question the call asked before is no longer the call's: nobody can answer its card.
+            saved = cast("WorkflowNode", self.store.get_node(run.run_id, request.key))
+        cached = request.meta.get("cached") is not False
+        action = decide(saved, digest, cached=cached)
+        if action != "run":
+            return saved, None, await self._reuse_saved(run, epoch, saved, request.meta, members, action)
+        if live and saved.kind == "ask":
             await self._close_card(run, saved, "cancelled")
-        if live and action == "run" and handle is not None:
-            # The call that replaces a node whose job still runs stops that job, and nothing waits for its end
-            # under the run's lock: the script's SDK asks again, and what the stopped turn did decides then. One
-            # that called a tool is not replaced unasked either.
+        if live and handle is not None:
             await cast("AgentRuntime", self.agents()).jobs.request_cancel(handle.ref)
             raise ScriptRuntimeUnavailableError(_STOPPING)
-        if saved is not None and action != "run":
-            # Reused: the node is this attempt's now, and a fan-out whose items changed dirties what follows it.
-            stamp: dict[str, object] = {"attempt": run.attempt, "stale": False, "cached": action == "hit"}
-            if (phase := cast("str | None", meta.get("phase"))) != saved.phase:
-                stamp["phase"] = phase
-            if regrouped := members != saved.members:
-                stamp["members"] = members
-            await self._stamp(saved, epoch, dirty_after=regrouped, **stamp)
-            if action == "raise_indeterminate":
-                # It may have run, so nothing is dispatched until a resume names it.
-                return replace(_receipt(saved), state=WorkflowNodeState.FAILED)
-            if action == "attach":
-                # The job an earlier attempt started still runs: this attempt waits for it, and starts none. The run
-                # waits for a person if that job does, which the attempt's start did not know. A question an earlier
-                # attempt asked is still open, and is not asked again.
-                if saved.kind == "ask":
-                    await self._asked(run, saved, epoch)
-                else:
-                    self._wait_for_agent(run, saved, epoch)
-                await self._restate(run.run_id)
-            return replace(_receipt(saved), cached=action == "hit")
-        # The completed node this call replaces although no rule before it said so: the call itself changed, or it
-        # runs on every resume.
-        completed = saved is not None and saved.state is WorkflowNodeState.COMPLETED and not (dirty or rerun)
-        previous = saved if completed else None
-        changed = previous is not None and previous.digest != digest
+        marked = saved.digest in ("", DIRTY_DIGEST)
+        previous = saved if saved.state is WorkflowNodeState.COMPLETED and not marked else None
         lineage_reran = turn_ctx is not None and any(not turn.cached for turn in turn_ctx.earlier)
         if (
             previous is not None
-            and changed
+            and previous.digest != digest
             and cached
             and not lineage_reran
             and run.source_digest == run.previous_source_digest
         ):
-            notice = _CHANGED_WITHOUT_EDIT.format(seq=previous.seq)
-            await asyncio.to_thread(self.store.append_log, run.run_id, epoch, notice)
+            msg = _CHANGED_WITHOUT_EDIT.format(seq=previous.seq)
+            await asyncio.to_thread(self.store.append_log, run.run_id, epoch, msg)
+        return saved, previous, None
+
+    async def _reuse_saved(
+        self,
+        run: WorkflowRun,
+        epoch: int,
+        saved: WorkflowNode,
+        meta: dict[str, object],
+        members: list[str] | None,
+        action: str,
+    ) -> NodeReceipt:
+        """Adopt a saved node for this attempt (`hit`, `attach`, or `raise_indeterminate`)."""
+        stamp: dict[str, object] = {"attempt": run.attempt, "stale": False, "cached": action == "hit"}
+        if (phase := cast("str | None", meta.get("phase"))) != saved.phase:
+            stamp["phase"] = phase
+        if regrouped := members != saved.members:
+            stamp["members"] = members
+        await self._stamp(saved, epoch, dirty_after=regrouped, **stamp)
+        if action == "raise_indeterminate":
+            return replace(_receipt(saved), state=WorkflowNodeState.FAILED)
+        if action == "attach":
+            if saved.kind == "ask":
+                await self._asked(run, saved, epoch)
+            else:
+                self._wait_for_agent(run, saved, epoch)
+            await self._restate(run.run_id)
+        return replace(_receipt(saved), cached=action == "hit")
+
+    async def _dispatch_new(
+        self,
+        run: WorkflowRun,
+        epoch: int,
+        attempt: ScriptRunRecord,
+        request: NodeRequest,
+        turn_ctx: _TurnContext | None,
+        digest: str,
+        members: list[str] | None,
+        saved: WorkflowNode | None,
+        previous: WorkflowNode | None,
+    ) -> NodeReceipt:
+        """Create and dispatch (or save as settled/failed) a new generation of `request.key`."""
+        key, kind, meta = request.key, request.kind, request.meta
         lane, index = split_key(key)
         generation = 1 if saved is None else saved.generation + 1
-        # A script's `tool("delegate", ...)` is the agent call it stands for, with a gate before it.
         grant, arguments = _tool_grant(request.args) if kind == "tool" else (None, request.args)
         delegated = grant is not None and grant.toolkit_name == "delegate"
         shown, asked = ("agent", delegated_request(arguments)) if delegated else (kind, request.args)
         node_name = cast("str | None", meta.get("name"))
-        if session is not None:
-            node_name = session.name or cast("str | None", session.request.get("name")) or node_name
+        if turn_ctx is not None:
+            node_name = turn_ctx.session.name or node_name
         elif shown == "session":
             node_name = cast("str | None", asked.get("name")) or node_name
         node = WorkflowNode(
@@ -903,43 +925,20 @@ class WorkflowEngine:
             name=node_name,
             phase=cast("str | None", meta.get("phase")),
             members=members,
-            session_key=None if session is None else session.key,
+            session_key=None if turn_ctx is None else turn_ctx.session.key,
             started_at=utc_timestamp(),
         )
-        # Before a tool call is saved or sent anywhere, whether it is a tool's or an agent's behind a gate.
-        if grant is not None:
-            access = self.authorize(run, grant)
-            if access is None:
-                raise ScriptRuntimeUnavailableError(_OWNER_NOT_READY)
-        else:
-            access = None
-        if isinstance(access, str):
-            # Refused: nothing ran, and the node ends as it is submitted, below.
-            node = replace(node, state=WorkflowNodeState.FAILED, error={"kind": "failed", "message": access})
-        elif shown == "agent" and (bad_schema := schema_failure(asked)) is not None:
-            node = replace(node, state=WorkflowNodeState.FAILED, error={"kind": "schema", "message": bad_schema})
-        elif delegated and grant is not None and grant.function_name != RUN_SUBAGENT:
-            refused = {"kind": "refused", "message": _NO_SESSIONS.format(function=grant.function_name)}
-            node = replace(node, state=WorkflowNodeState.FAILED, error=refused)
-        elif (
-            shown == "turn"
-            and turn_ctx is not None
-            and any(other.key != key and other.state in LIVE_NODE_STATES for other in turn_ctx.in_attempt)
-        ):
-            busy = _SESSION_BUSY.format(name=node_name or session.key)
-            node = replace(node, state=WorkflowNodeState.FAILED, error={"kind": "failed", "message": busy})
-        elif (
-            shown == "turn"
-            and session is not None
-            and (bad_schema := schema_failure({**session.request, **asked})) is not None
-        ):
-            node = replace(node, state=WorkflowNodeState.FAILED, error={"kind": "schema", "message": bad_schema})
-        elif shown in ("agent", "turn"):
-            if saved is not None:
-                await asyncio.to_thread(withdraw_unread, self.store, run.run_id, key, saved.generation)
+        if (error := self._new_call_error(run, node, grant, delegated, turn_ctx)) is not None:
+            failed = replace(node, state=WorkflowNodeState.FAILED, error=error, ended_at=node.started_at)
+            return _receipt(await asyncio.to_thread(self.store.put_node, failed, epoch, dirty_after=True))
+        if saved is not None and shown in ("agent", "turn", "send"):
+            await asyncio.to_thread(withdraw_unread, self.store, run.run_id, key, saved.generation)
+        if shown in ("agent", "turn"):
+            if grant is not None:
+                return await self._ask_gate(run, attempt, node, (grant, arguments))
             follow_up = None
-            if shown == "turn" and turn_ctx is not None:
-                mail_call = partial(
+            if turn_ctx is not None:
+                mail = partial(
                     session_turn_message,
                     self.store,
                     run.run_id,
@@ -948,24 +947,47 @@ class WorkflowEngine:
                     generation,
                     str(asked["message"]),
                 )
-                turn_msg = await asyncio.to_thread(mail_call, prev_turn=turn_ctx.prev)
+                turn_msg = await asyncio.to_thread(mail, prev_turn=turn_ctx.prev)
                 follow_up, prompt = await self._prepare_turn(run, turn_ctx, saved, turn_msg)
                 node = replace(node, request={**asked, "prompt": prompt, "effective_message": turn_msg})
             dispatch = partial(self._dispatch_agent, run, timeout=_timeout(meta), follow_up=follow_up)
-            start = partial(self._enter, run, node, dispatch)
-            return await (self._ask_gate(run, attempt, node, (grant, arguments)) if grant is not None else start())
-        elif grant is not None:
-            same_as = None
-            if previous is not None and not cached:
-                # A check that runs on every resume, also one whose arguments were edited, in a lane that was clean.
-                same_as = result_digest(await asyncio.to_thread(self.store.whole_result, previous))
+            return await self._enter(run, node, dispatch)
+        if grant is not None:
+            cached = meta.get("cached") is not False
+            same_as = (
+                result_digest(await asyncio.to_thread(self.store.whole_result, previous))
+                if previous is not None and not cached
+                else None
+            )
             start = partial(self._dispatch_tool, run, attempt, tool_call=(grant, arguments), same_as=same_as)
             return await self._enter(run, node, start, dirty_after=same_as is None)
-        elif kind in ("send", "inbox", "state"):
-            if kind == "send" and saved is not None:
-                await asyncio.to_thread(withdraw_unread, self.store, run.run_id, key, saved.generation)
+        return await self._save_immediate(run, epoch, node, request)
+
+    async def _save_immediate(
+        self,
+        run: WorkflowRun,
+        epoch: int,
+        node: WorkflowNode,
+        request: NodeRequest,
+    ) -> NodeReceipt:
+        """Save a non-dispatched call (`ask`, `send`, `inbox`, `state`, `value`, `error`, `group`, `session`)."""
+        kind = request.kind
+        if kind == "ask":
+            self._validate_question_options(request.args.get("options"))
+            over = await self._check_budget(run)
+            ask_node = replace(
+                node,
+                state=WorkflowNodeState.QUEUED if over else WorkflowNodeState.WAITING,
+                waiting_on=None if over else "user",
+                ended_at=None,
+            )
+            ask_node = await asyncio.to_thread(self.store.put_node, ask_node, epoch, dirty_after=True)
+            if ask_node.state is WorkflowNodeState.WAITING:
+                await self._restate(run.run_id)
+            return _receipt(await self._asked(run, ask_node, epoch))
+        if kind in ("send", "inbox", "state"):
             try:
-                call = partial(script_op, self.store, run.run_id, key, generation, kind, request.args)
+                call = partial(script_op, self.store, run.run_id, node.key, node.generation, kind, request.args)
                 done, value = await asyncio.to_thread(call)
             except WorkflowRunStoreError as exc:
                 node = replace(node, state=WorkflowNodeState.FAILED, error={"kind": "failed", "message": str(exc)})
@@ -976,32 +998,45 @@ class WorkflowEngine:
                     self._spawn(run.run_id, self._wait_inbox(run, wait_node, epoch, float(value)))
                     return _receipt(wait_node)
                 node = replace(node, result=value)
-        elif kind == "ask":
-            raw_options = request.args.get("options")
-            self._validate_question_options([str(option) for option in raw_options] if raw_options else None)
-            # A question waits for its answer and holds no place, unless the run is already over its cost limit.
-            over = await self._check_budget(run)
-            node = replace(
-                node,
-                state=WorkflowNodeState.QUEUED if over else WorkflowNodeState.WAITING,
-                waiting_on=None if over else "user",
-            )
         elif kind == "value":
             node = replace(node, result=_value(request.args))
         elif kind == "error":
-            # What the script's own code raised in a lane of a fan-out: nothing ran, and the run shows where.
             message = f"{request.args.get('type')}: {request.args.get('message')}"
             node = replace(node, state=WorkflowNodeState.FAILED, error={"kind": "error", "message": message})
         elif kind not in ("group", "session"):
             msg = f"This MindRoom cannot run a '{kind}' call in a workflow yet."
             raise WorkflowRunStoreError(msg)
-        # A value, a group and an error have ended when they are submitted, so no restart finds one half done. What earlier
-        # attempts left after the call runs again in any attempt, which the same write marks in the store.
-        ended_at = None if kind == "ask" else node.started_at
-        node = await asyncio.to_thread(self.store.put_node, replace(node, ended_at=ended_at), epoch, dirty_after=True)
-        if node.state is WorkflowNodeState.WAITING:
-            await self._restate(run.run_id)
-        return _receipt(await self._asked(run, node, epoch))
+        done_node = replace(node, ended_at=node.started_at)
+        return _receipt(await asyncio.to_thread(self.store.put_node, done_node, epoch, dirty_after=True))
+
+    def _new_call_error(
+        self,
+        run: WorkflowRun,
+        node: WorkflowNode,
+        grant: ScriptToolGrant | None,
+        delegated: bool,
+        turn_ctx: _TurnContext | None,
+    ) -> dict[str, object] | None:
+        """Return a terminal error dict if a new tool/agent/turn call is refused before dispatch, else None."""
+        if grant is not None:
+            access = self.authorize(run, grant)
+            if access is None:
+                raise ScriptRuntimeUnavailableError(_OWNER_NOT_READY)
+            if isinstance(access, str):
+                return {"kind": "failed", "message": access}
+        if delegated and grant is not None and grant.function_name != RUN_SUBAGENT:
+            return {"kind": "refused", "message": _NO_SESSIONS.format(function=grant.function_name)}
+        if (
+            node.kind == "turn"
+            and turn_ctx is not None
+            and any(other.key != node.key and other.state in LIVE_NODE_STATES for other in turn_ctx.in_attempt)
+        ):
+            return {"kind": "failed", "message": _SESSION_BUSY.format(name=node.name or turn_ctx.session.key)}
+        if node.kind in ("agent", "turn"):
+            schema_src = {**turn_ctx.session.request, **node.request} if turn_ctx is not None else node.request
+            if (bad_schema := schema_failure(schema_src)) is not None:
+                return {"kind": "schema", "message": bad_schema}
+        return None
 
     def poster(self, run: WorkflowRun) -> nio.AsyncClient | None:
         """Return the client of the bot that serves *run*, which posts for it, or None while the run may not act."""
@@ -1045,7 +1080,7 @@ class WorkflowEngine:
                     await self._asked(run, node or light, run.epoch)
 
     @staticmethod
-    def _validate_question_options(options: list[str] | None) -> None:
+    def _validate_question_options(options: object) -> None:
         if options is None:
             return
         if not (isinstance(options, list) and options and all(isinstance(o, str) and o.strip() for o in options)):

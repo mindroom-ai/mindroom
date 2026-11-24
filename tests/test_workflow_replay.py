@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from mindroom.workflow_runs.models import WorkflowNode, WorkflowNodeState
 from mindroom.workflow_runs.replay import (
+    DIRTY_DIGEST,
     decide,
     node_digest,
     parent_group,
@@ -52,55 +53,48 @@ def _indeterminate(key: str, digest: str, attempt: int) -> WorkflowNode:
 
 def test_completed_same_digest_hits_and_live_attaches() -> None:
     """A finished call returns its saved result, and work that is still alive is joined."""
-    assert decide(_done("@0", "d", attempt=1), "d", dirty=False, rerun=False, cached=True) == "hit"
-    assert decide(_waiting("@0", "d", attempt=1), "d", dirty=False, rerun=False, cached=True) == "attach"
-    assert decide(_running("@0", "d", attempt=1), "d", dirty=False, rerun=False, cached=True) == "attach"
+    assert decide(_done("@0", "d", attempt=1), "d", cached=True) == "hit"
+    assert decide(_waiting("@0", "d", attempt=1), "d", cached=True) == "attach"
+    assert decide(_running("@0", "d", attempt=1), "d", cached=True) == "attach"
 
 
 def test_indeterminate_raises_until_rerun_names_it() -> None:
     """A call whose end is unknown is never issued again unless a person names it."""
-    node = _indeterminate("@0", "d", attempt=1)
-    assert decide(node, "d", dirty=False, rerun=False, cached=True) == "raise_indeterminate"
-    assert decide(node, "d", dirty=False, rerun=True, cached=True) == "run"
+    assert decide(_indeterminate("@0", "d", attempt=1), "d", cached=True) == "raise_indeterminate"
+    assert decide(_indeterminate("@0", "", attempt=1), "d", cached=True) == "run"
 
 
 def test_indeterminate_raises_with_a_changed_digest_and_in_a_dirty_lane() -> None:
     """Neither an edited call nor a dirty lane nor `cached=False` turns an unknown end into a retry."""
-    node = _indeterminate("@0", "d", attempt=1)
-    for digest, dirty, cached in (("other", False, True), ("d", True, True), ("other", True, False)):
-        decision = decide(node, digest, dirty=dirty, rerun=False, cached=cached)
-        assert decision == "raise_indeterminate"
-        assert decide(node, digest, dirty=dirty, rerun=True, cached=cached) == "run"
+    for saved_digest, digest, cached in (
+        ("d", "other", True),
+        (DIRTY_DIGEST, "d", True),
+        (DIRTY_DIGEST, "other", False),
+    ):
+        assert decide(_indeterminate("@0", saved_digest, attempt=1), digest, cached=cached) == "raise_indeterminate"
+        assert decide(_indeterminate("@0", "", attempt=1), digest, cached=cached) == "run"
 
 
 def test_live_node_with_changed_digest_dirty_or_rerun_runs() -> None:
     """A reconciled live node whose call changed, is dirty, or was named for rerun is replaced."""
-    node = _running("@0", "d", attempt=1)
-    for digest, dirty, rerun in (
-        ("other", False, False),
-        ("d", True, False),
-        ("d", False, True),
-        ("other", True, True),
-    ):
-        assert decide(node, digest, dirty=dirty, rerun=rerun, cached=True) == "run"
+    for saved_digest, digest in (("d", "other"), (DIRTY_DIGEST, "d"), ("", "d"), ("", "other")):
+        assert decide(_running("@0", saved_digest, attempt=1), digest, cached=True) == "run"
 
 
 def test_changed_digest_dirty_lane_and_failed_node_run_as_the_next_generation() -> None:
     """A call that must run replaces its saved node, and a first call has nothing to replace."""
-    node = _done("@0", "d", attempt=1)
-    assert decide(None, "d", dirty=False, rerun=False, cached=True) == "run"
-    assert decide(None, "d", dirty=True, rerun=True, cached=True) == "run"
-    assert decide(node, "other", dirty=False, rerun=False, cached=True) == "run"
-    assert decide(node, "d", dirty=True, rerun=False, cached=True) == "run"
-    assert decide(node, "d", dirty=False, rerun=True, cached=True) == "run"
+    assert decide(None, "d", cached=True) == "run"
+    assert decide(_done("@0", "d", attempt=1), "other", cached=True) == "run"
+    assert decide(_done("@0", DIRTY_DIGEST, attempt=1), "d", cached=True) == "run"
+    assert decide(_done("@0", "", attempt=1), "d", cached=True) == "run"
     for ended in (_failed_node("@0", "d", attempt=1), _node("@0", "d", 1, WorkflowNodeState.CANCELLED)):
-        assert decide(ended, "d", dirty=False, rerun=False, cached=True) == "run"
+        assert decide(ended, "d", cached=True) == "run"
 
 
 def test_cached_false_runs_a_completed_node() -> None:
     """`cached=False` runs a finished call again, and still joins one that is alive."""
-    assert decide(_done("@0", "d", attempt=1), "d", dirty=False, rerun=False, cached=False) == "run"
-    assert decide(_waiting("@0", "d", attempt=1), "d", dirty=False, rerun=False, cached=False) == "attach"
+    assert decide(_done("@0", "d", attempt=1), "d", cached=False) == "run"
+    assert decide(_waiting("@0", "d", attempt=1), "d", cached=False) == "attach"
 
 
 def test_keys_split_into_lane_and_index_and_lanes_name_their_group() -> None:
