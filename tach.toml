@@ -2772,6 +2772,21 @@ from = ["mindroom.workflow_runs.dispatch"]
 expose = ["NodeDispatcher"]
 
 [[modules]]
+path = "mindroom.workflow_runs.endings"
+depends_on = [
+    "mindroom.workflow_runs.agent_dispatch",
+    "mindroom.workflow_runs.models",
+    "mindroom.workflow_runs.store",
+]
+
+[[interfaces]]
+from = ["mindroom.workflow_runs.endings"]
+expose = [
+    "RunEndings",
+    "run_outcome",
+]
+
+[[modules]]
 path = "mindroom.workflow_runs.engine"
 depends_on = [
     "mindroom.delegation.personas",
@@ -2780,6 +2795,7 @@ depends_on = [
     "mindroom.workflow_runs.agent_nodes",
     "mindroom.workflow_runs.coordination",
     "mindroom.workflow_runs.dispatch",
+    "mindroom.workflow_runs.endings",
     "mindroom.workflow_runs.graph",
     "mindroom.workflow_runs.interactions",
     "mindroom.workflow_runs.limits",

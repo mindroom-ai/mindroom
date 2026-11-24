@@ -34,6 +34,7 @@ from mindroom.tool_jobs.client_cancel import conversation_jobs
 from mindroom.tool_jobs.conversation import ConversationKey
 from mindroom.tool_jobs.publication import _jobs_state_content
 from mindroom.workflow_runs import agent_nodes
+from mindroom.workflow_runs import endings as endings_module
 from mindroom.workflow_runs import engine as engine_module
 from mindroom.workflow_runs.models import DispatchHandle, WorkflowNodeState, WorkflowRunState
 from mindroom.workflow_runs.store import SupersededAttemptError
@@ -472,7 +473,7 @@ async def test_a_stop_does_not_wait_forever_for_an_agent_that_does_not_end(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The run ends after a bounded wait, and the node of a turn nobody could read is not one to run again."""
-    monkeypatch.setattr(engine_module, "_STOP_SECONDS", 0.1)
+    monkeypatch.setattr(endings_module, "_STOP_SECONDS", 0.1)
     _hanging(stack)
     await stack.submit("@0", "agent", _PROMPT)
     job_id = stack.node_job("@0").job_id
@@ -499,7 +500,7 @@ async def test_a_stop_waits_for_all_its_agents_together_and_not_under_the_runs_l
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """One deadline for every agent of the run, not one each; meanwhile the run's lock is free and no call gets in."""
-    monkeypatch.setattr(engine_module, "_STOP_SECONDS", 0.6)
+    monkeypatch.setattr(endings_module, "_STOP_SECONDS", 0.6)
     stack.child_script(*([Await(asyncio.Event().wait), *answer("late")] for _ in range(4)))
     for index in range(4):
         await stack.submit(f"@{index}", "agent", {"prompt": f"Task {index}"})
@@ -541,7 +542,7 @@ async def test_a_run_that_ends_starts_no_agent_in_the_place_its_stopped_agent_le
 
     The place the first gives up, while the end of the run still waits for the second, starts no third agent.
     """
-    monkeypatch.setattr(engine_module, "_STOP_SECONDS", 0.5)
+    monkeypatch.setattr(endings_module, "_STOP_SECONDS", 0.5)
     await stack.start(max_concurrent=2)
     stack.child_script(*([Await(asyncio.Event().wait), *answer("late")] for _ in range(2)))
     for key in ("@0", "@1"):
@@ -576,7 +577,7 @@ async def test_the_pass_that_ends_a_stopped_jobs_run_neither_cuts_that_end_short
     pass comes to first has a stopped job and an agent that does not end, and the other run only waits for its
     next attempt.
     """
-    monkeypatch.setattr(engine_module, "_STOP_SECONDS", 2.5)
+    monkeypatch.setattr(endings_module, "_STOP_SECONDS", 2.5)
     second = stack.run_id
     await stack.scripts.end(stack.attempt.run_id, ScriptRunState.INTERRUPTED, reason=PLUGIN_TOOLS_CHANGED)
     first = (await stack.start()).run_id
