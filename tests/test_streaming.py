@@ -111,6 +111,7 @@ class _FakeGateway:
         event_id: str,
         new_content: dict[str, Any],
         new_text: str,
+        **_kwargs: object,
     ) -> DeliveredMatrixEvent:
         self._record(_GatewayOp(kind="edit", content=dict(new_content), display_text=new_text, event_id=event_id))
         return DeliveredMatrixEvent(event_id=f"$edit_{len(self.ops)}", content_sent=dict(new_content))
@@ -746,6 +747,7 @@ async def test_placeholder_ack_waits_for_answer_ack_before_marking_substantive(c
         _event_id: str,
         new_content: dict[str, Any],
         _new_text: str,
+        **_kwargs: object,
     ) -> DeliveredMatrixEvent:
         delivered_bodies.append(new_content["body"])
         return DeliveredMatrixEvent(event_id="$answer-edit", content_sent=dict(new_content))
@@ -1154,6 +1156,7 @@ async def test_a_failed_progress_edit_is_retried_at_the_update_cadence_not_on_th
         _event_id: str,
         new_content: dict[str, Any],
         new_text: str,
+        **_kwargs: object,
     ) -> DeliveredMatrixEvent | None:
         edits.append(new_text)
         if len(edits) == 1:

@@ -26,7 +26,7 @@ import uuid
 from collections import deque
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
 from mindroom.agent_cli.shell_contract import SHELL_FUNCTION
 from mindroom.shell.background_scope import (
@@ -59,7 +59,12 @@ MAX_BACKGROUNDED = 16
 _MAX_TOTAL_BACKGROUNDED = 128
 _MAX_OUTPUT_LINES = 10_000
 _MAX_OUTPUT_BYTES = 50 * 1024
-_STREAM_READ_CHUNK_BYTES = 8192
+_STREAM_READ_CHUNK_BYTES = 65536
+# Pause pipe reads briefly after each burst once an uncapped redirect is not active and the buffer is rotating.
+_CAPPED_STREAM_BURST_READS = 16
+_CAPPED_STREAM_SMALL_READ_BYTES = 4096
+_CAPPED_STREAM_BULK_FREE_BYTES = 256 * 1024 * 1024
+_CAPPED_STREAM_PACE_SECONDS = 0.02
 # The most bytes of a streamed command's output handed on at once.
 _STREAM_CHUNK_BYTES = 32 * 1024
 # Once a streamed command's process group was killed, only what its pipes still held is read. More bytes than pipes
@@ -77,14 +82,21 @@ _CALLER_HANDLE_RE = re.compile(r"shell:[0-9a-f]{32}")
 _APPEND_SEQUENCE = itertools.count(1)
 
 
+class _OutputChunk(NamedTuple):
+    text: str
+    byte_len: int
+    newlines: int
+
+
 @dataclass
 class _OutputBuffer:
     """Bound shell output by both line count and encoded byte size."""
 
     max_lines: int = _MAX_OUTPUT_LINES
     max_bytes: int = _MAX_OUTPUT_BYTES
-    chunks: deque[str] = field(default_factory=deque)
+    chunks: deque[_OutputChunk] = field(default_factory=deque)
     byte_count: int = 0
+    retained_newlines: int = 0
     # Which caps dropped output, and every line the command printed, so a notice can say what was left out.
     bytes_capped: bool = False
     lines_capped: bool = False
@@ -105,28 +117,36 @@ class _OutputBuffer:
         if self._log_file is not None:
             self._log_file.write(text)
         self.last_append = next(_APPEND_SEQUENCE)
-        self.newlines += text.count("\n")
+        newline_count = text.count("\n")
+        self.newlines += newline_count
         self.open_line = not text.endswith("\n")
 
         encoded = text.encode("utf-8", errors="replace")
         if len(encoded) > self.max_bytes:
+            self.chunks.clear()
+            self.byte_count = 0
+            self.retained_newlines = 0
             text = encoded[-self.max_bytes :].decode("utf-8", errors="ignore")
             encoded = text.encode("utf-8", errors="replace")
+            newline_count = text.count("\n")
             self.bytes_capped = True
 
-        self.chunks.append(text)
-        self.byte_count += len(encoded)
+        if text:
+            byte_len = len(encoded)
+            self.chunks.append(_OutputChunk(text, byte_len, newline_count))
+            self.byte_count += byte_len
+            self.retained_newlines += newline_count
 
-        while self.chunks and self.byte_count > self.max_bytes:
-            removed = self.chunks.popleft()
-            self.byte_count -= len(removed.encode("utf-8", errors="replace"))
-            self.bytes_capped = True
-
+        self._trim_to_max_bytes()
         self._trim_to_max_lines()
+
+    def text(self) -> str:
+        """Return the retained output text."""
+        return "".join(chunk.text for chunk in self.chunks)
 
     def lines(self) -> list[str]:
         """Return every retained line; a final newline ends the last line rather than starting another."""
-        text = "".join(self.chunks)
+        text = self.text()
         return text.removesuffix("\n").split("\n") if text else []
 
     def render(self, *, tail: int | None = None) -> str:
@@ -158,19 +178,60 @@ class _OutputBuffer:
         return f"[{'; '.join(cuts)}. {advice}]", "\n".join(shown)
 
     def __len__(self) -> int:
-        return len(self.lines())
+        if not self.chunks:
+            return 0
+        return self.retained_newlines + (not self.chunks[-1].text.endswith("\n"))
 
-    def _trim_to_max_lines(self) -> None:
-        text = "".join(self.chunks)
-        lines = text.split("\n")
-        # A final newline ends the last line rather than starting another, and stays for the next append.
-        keep = self.max_lines + text.endswith("\n")
-        if len(lines) <= keep:
+    def _trim_to_max_bytes(self) -> None:
+        excess = self.byte_count - self.max_bytes
+        if excess <= 0:
             return
 
-        text = "\n".join(lines[-keep:])
-        self.chunks = deque([text])
-        self.byte_count = len(text.encode("utf-8", errors="replace"))
+        while self.chunks and self.chunks[0].byte_len <= excess:
+            removed = self.chunks.popleft()
+            self.byte_count -= removed.byte_len
+            self.retained_newlines -= removed.newlines
+            excess -= removed.byte_len
+
+        if excess > 0 and self.chunks:
+            head = self.chunks.popleft()
+            self.byte_count -= head.byte_len
+            self.retained_newlines -= head.newlines
+            tail = head.text.encode("utf-8", errors="replace")[excess:].decode("utf-8", errors="ignore")
+            if tail:
+                tail_bytes = len(tail.encode("utf-8", errors="replace"))
+                tail_newlines = tail.count("\n")
+                self.chunks.appendleft(_OutputChunk(tail, tail_bytes, tail_newlines))
+                self.byte_count += tail_bytes
+                self.retained_newlines += tail_newlines
+
+        self.bytes_capped = True
+
+    def _trim_to_max_lines(self) -> None:
+        drop = len(self) - self.max_lines
+        if drop <= 0:
+            return
+
+        while self.chunks and (
+            self.chunks[0].newlines < drop or (self.chunks[0].newlines == drop and self.chunks[0].text.endswith("\n"))
+        ):
+            removed = self.chunks.popleft()
+            self.byte_count -= removed.byte_len
+            self.retained_newlines -= removed.newlines
+            drop -= removed.newlines
+
+        if drop > 0 and self.chunks:
+            head = self.chunks.popleft()
+            self.byte_count -= head.byte_len
+            self.retained_newlines -= head.newlines
+            tail = head.text.split("\n", drop)[-1]
+            if tail:
+                tail_bytes = len(tail.encode("utf-8", errors="replace"))
+                tail_newlines = head.newlines - drop
+                self.chunks.appendleft(_OutputChunk(tail, tail_bytes, tail_newlines))
+                self.byte_count += tail_bytes
+                self.retained_newlines += tail_newlines
+
         self.lines_capped = True
 
 
@@ -208,7 +269,10 @@ def _progress_lines(buffer: _OutputBuffer) -> str:
 
     It is reported whole, so whoever shows its tail can mask a credential whose label sits above the tail.
     """
-    return "\n".join(line.rstrip("\r").rsplit("\r", 1)[-1] for line in "".join(buffer.chunks).rstrip("\n").split("\n"))
+    text = buffer.text().rstrip("\n")
+    if "\r" not in text:
+        return text
+    return "\n".join(line.rstrip("\r").rsplit("\r", 1)[-1] for line in text.split("\n"))
 
 
 class _OutputProgress:
@@ -749,7 +813,7 @@ def _seed_background_log(
     """Write buffered foreground stdout and stderr into a newly opened background log file."""
     prev_ended_newline = True
     for buf, stream in ((stdout_buf, ""), (stderr_buf, "stderr")):
-        raw = "".join(buf.chunks)
+        raw = buf.text()
         if not raw:
             continue
         if not prev_ended_newline:
@@ -1100,6 +1164,41 @@ def _sweep_stale_records(registry: dict[str, ProcessRecord]) -> None:
         registry.pop(h, None)
 
 
+async def _pace_capped_stream(stream: asyncio.StreamReader) -> None:
+    """Pause pipe reads while sleeping so a fast writer does not wake epoll between capped reads."""
+    transport = getattr(stream, "_transport", None)
+    paused_transport: Any | None = None
+    if transport is not None and not transport.is_closing() and not getattr(stream, "_paused", False):
+        with contextlib.suppress(NotImplementedError):
+            transport.pause_reading()
+            paused_transport = transport
+    try:
+        await asyncio.sleep(_CAPPED_STREAM_PACE_SECONDS)
+    finally:
+        if paused_transport is not None and not paused_transport.is_closing() and not getattr(stream, "_paused", False):
+            paused_transport.resume_reading()
+
+
+def _count_capped_read(
+    buf: _OutputBuffer,
+    capture: CapturedShellStream | None,
+    stream: asyncio.StreamReader,
+    chunk_len: int,
+    capped_bytes: int,
+    capped_reads: int,
+) -> tuple[int, int]:
+    """Update rotating-stream counters once output is capped without an active capture."""
+    if (
+        (buf.bytes_capped or buf.lines_capped)
+        and (capture is None or capture.error is not None)
+        and not stream.at_eof()
+    ):
+        capped_bytes += chunk_len
+        if chunk_len < _CAPPED_STREAM_SMALL_READ_BYTES or capped_bytes >= _CAPPED_STREAM_BULK_FREE_BYTES:
+            capped_reads += 1
+    return capped_bytes, capped_reads
+
+
 async def _read_stream(
     stream: asyncio.StreamReader | None,
     buf: _OutputBuffer,
@@ -1111,6 +1210,8 @@ async def _read_stream(
 
     try:
         decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
+        capped_reads = 0
+        capped_bytes = 0
         while True:
             chunk = await stream.read(_STREAM_READ_CHUNK_BYTES)
             if not chunk:
@@ -1119,6 +1220,17 @@ async def _read_stream(
             buf.append(text)
             if capture is not None:
                 capture.append(text)
+            capped_bytes, capped_reads = _count_capped_read(
+                buf,
+                capture,
+                stream,
+                len(chunk),
+                capped_bytes,
+                capped_reads,
+            )
+            if capped_reads >= _CAPPED_STREAM_BURST_READS:
+                capped_reads = 0
+                await _pace_capped_stream(stream)
 
         final = decoder.decode(b"", final=True)
         buf.append(final)

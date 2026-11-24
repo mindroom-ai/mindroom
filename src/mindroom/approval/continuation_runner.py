@@ -130,6 +130,7 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
     from contextlib import AbstractAsyncContextManager
 
+    from mindroom.active_runs import ActiveRunPublisher
     from mindroom.delivery_gateway import ResponseIdentity
     from mindroom.event_journal.approval_signals import EndedApproval
     from mindroom.history.types import HistoryScope
@@ -233,6 +234,7 @@ class ApprovalContinuationRunner:
     lifecycle_coordinator: ResponseLifecycleCoordinator = field(repr=False)
     # Which sources a response waits on in place for a minimal-mode decision.
     cli_waiters: CliWaiters = field(repr=False)
+    active_runs: ActiveRunPublisher | None = field(default=None, repr=False)
     _approval_execution: AgentApprovalExecution = field(init=False, repr=False)
     _cli_approval_waits: CliApprovalWaits = field(init=False, repr=False)
 
@@ -1234,7 +1236,12 @@ class ApprovalContinuationRunner:
         )
         paused_answer = _paused_answer()
         with approval_receipt_context((*continuation.earlier_calls, *continuation.calls), run_id=continuation.run_id):
-            async with response_typing_indicator(self.locked.client(), request, response_run_id=continuation.run_id):
+            async with response_typing_indicator(
+                self.locked.client(),
+                request,
+                response_run_id=continuation.run_id,
+                active_runs=self.active_runs,
+            ):
                 if continuation.entity_kind == "team":
                     team_model_name = continuation_model(
                         self.deps.runtime.config,

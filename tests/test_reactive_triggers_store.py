@@ -967,3 +967,100 @@ def test_list_due_firings_isolates_corrupt_event_json_row(tmp_path: Path) -> Non
     with closing(sqlite3.connect(store.db_path)) as conn:
         row = conn.execute("SELECT status, error_message FROM trigger_firings WHERE dedupe_key = '$bad'").fetchone()
     assert row == ("failed", "corrupt_event_json")
+
+
+def test_update_trigger_preserves_uid_stats_cursors_checkpoints_and_thread_keys(tmp_path: Path) -> None:
+    """update_trigger updates mutable columns/spec atomically while preserving rule_uid, stats, and auxiliary tables."""
+    store = ReactiveTriggerStore(_runtime_paths(tmp_path))
+    rec = _make_record(trigger_id="upd_rule", once=False, cooldown_seconds=10, max_fires_per_hour=5)
+    store.create_trigger(
+        rec,
+        initial_cursor=RoomCursor(created_ts=5000, logical_event_id="$c0"),
+        initial_checkpoint=ThreadCheckpoint(tag_present=True, state_event_id="$s0", updated_at=100.0),
+    )
+    store.save_thread_key_binding("upd_rule", "tk1", "$root1", expected_rule_uid=rec.rule_uid)
+    store.enqueue_firing("upd_rule", "$e1", _make_event(event_id="$e1"))
+    assert store.claim_firing(1, now=2000.0) == "claimed"
+    assert store.mark_delivered(1, "$sent1", now=2001.0) is True
+
+    modified = rec.model_copy(
+        update={
+            "description": "updated desc",
+            "once": True,
+            "cooldown_seconds": 90,
+            "max_fires_per_hour": 12,
+            "expires_at": 9999.0,
+            "fire_count": 0,
+            "last_fired_at": None,
+            "updated_at": 3000.0,
+        },
+    )
+    assert store.update_trigger(modified, expected_rule_uid="wrong_uid") is None
+    updated = store.update_trigger(modified, expected_rule_uid=rec.rule_uid)
+    assert updated is not None
+    assert updated.rule_uid == rec.rule_uid
+    assert updated.description == "updated desc"
+    assert updated.once is True
+    assert updated.cooldown_seconds == 90
+    assert updated.max_fires_per_hour == 12
+    assert updated.expires_at == 9999.0
+    assert updated.fire_count == 1
+    assert updated.last_fired_at == 2000.0
+    assert store.get_room_cursor("upd_rule") == RoomCursor(created_ts=5000, logical_event_id="$c0")
+    cp = store.get_thread_checkpoint("upd_rule")
+    assert cp is not None
+    assert cp.tag_present is True
+    assert store.get_thread_key_binding("upd_rule", "tk1") == "$root1"
+
+
+def test_list_firings_filters_orders_desc_and_clamps_limit(tmp_path: Path) -> None:
+    """list_firings orders by id DESC, filters by trigger_id and owner_user_id, and clamps limit to [1, 100]."""
+    store = ReactiveTriggerStore(_runtime_paths(tmp_path))
+    store.create_trigger(_make_record(trigger_id="r_alice", owner_user_id=_OWNER))
+    store.create_trigger(_make_record(trigger_id="r_bob", owner_user_id="@bob:example.org"))
+    store.enqueue_firing("r_alice", "$a1", _make_event(event_id="$a1"))
+    store.enqueue_firing("r_bob", "$b1", _make_event(event_id="$b1"))
+    store.enqueue_firing("r_alice", "$a2", _make_event(event_id="$a2"))
+
+    all_firings = store.list_firings()
+    assert [f.dedupe_key for f in all_firings] == ["$a2", "$b1", "$a1"]
+    assert [f.dedupe_key for f in store.list_firings(before_id=all_firings[0].id)] == ["$b1", "$a1"]
+    assert [f.dedupe_key for f in store.list_firings(owner_user_id=_OWNER, before_id=all_firings[0].id)] == ["$a1"]
+    assert [f.dedupe_key for f in store.list_firings(owner_user_id=_OWNER)] == ["$a2", "$a1"]
+    assert [f.dedupe_key for f in store.list_firings(owner_user_id="@bob:example.org")] == ["$b1"]
+    assert [f.dedupe_key for f in store.list_firings(trigger_id="r_alice", limit=1)] == ["$a2"]
+    assert [f.dedupe_key for f in store.list_firings(limit=0)] == ["$a2"]
+    assert [f.dedupe_key for f in store.list_firings(trigger_ids=["r_alice"])] == ["$a2", "$a1"]
+    assert [r.trigger_id for r in store.list_triggers_with_firings(owner_user_ids=[_OWNER])] == ["r_alice"]
+
+
+def test_update_trigger_preserves_live_enabled_and_disabled_reason_by_default(tmp_path: Path) -> None:
+    """update_trigger(update_enabled=False) keeps live enabled/disabled_reason synced in columns and spec_json."""
+    store = ReactiveTriggerStore(_runtime_paths(tmp_path))
+    rec = _make_record(trigger_id="once_race", once=True)
+    store.create_trigger(rec)
+    store.enqueue_firing("once_race", "$e1", _make_event(event_id="$e1"))
+    # Concurrent claim consumes once=True and disables the row live in SQLite
+    assert store.claim_firing(1, now=2000.0) == "claimed"
+
+    # An unrelated update built from the stale enabled=True snapshot must NOT re-enable the trigger
+    stale_update = rec.model_copy(update={"description": "new desc", "enabled": True, "disabled_reason": None})
+    preserved = store.update_trigger(stale_update, expected_rule_uid=rec.rule_uid)
+    assert preserved is not None
+    assert preserved.description == "new desc"
+    assert preserved.enabled is False
+    assert preserved.disabled_reason == "once_consumed"
+    # Verify spec_json itself was synced with the live enabled/disabled_reason inside the transaction
+    with store._read_connection() as conn:
+        raw_spec = conn.execute(
+            "SELECT spec_json FROM reactive_triggers WHERE trigger_id = ?",
+            ("once_race",),
+        ).fetchone()
+    assert raw_spec is not None
+    spec_record = ReactiveTriggerRecord.model_validate_json(str(raw_spec["spec_json"]))
+    assert (spec_record.enabled, spec_record.disabled_reason) == (False, "once_consumed")
+
+    # Explicitly setting update_enabled=True does re-enable the trigger in both columns and spec_json
+    reenabled = store.update_trigger(stale_update, expected_rule_uid=rec.rule_uid, update_enabled=True)
+    assert reenabled is not None
+    assert (reenabled.enabled, reenabled.disabled_reason) == (True, None)

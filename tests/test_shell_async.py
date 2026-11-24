@@ -25,17 +25,21 @@ from mindroom.shell.background_scope import (
     shell_background_scope,
 )
 from mindroom.shell.execution import (
+    _CAPPED_STREAM_BURST_READS,
     _MAX_OUTPUT_BYTES,
     ProcessRecord,
     _background_rejection,
     _format_auto_background_message,
     _OutputBuffer,
     _OutputProgress,
+    _pace_capped_stream,
     _progress_lines,
+    _read_stream,
     kill_namespace_records,
     run_command,
     shell_request_budget_seconds,
 )
+from mindroom.shell.output_capture import CapturedShellStream, ShellOutputDestination
 from mindroom.tool_jobs.control import JobControl, job_control_context
 from mindroom.tool_system.agno_toolkits import toolkit_function
 from mindroom.tool_system.metadata import get_tool_by_name
@@ -1483,3 +1487,225 @@ async def test_sigterm_to_backgrounded_leader_still_kills_sigterm_ignoring_child
         if child_pid is not None:
             with contextlib.suppress(ProcessLookupError, PermissionError):
                 os.kill(child_pid, signal.SIGKILL)
+
+
+@pytest.mark.parametrize(
+    ("chunks", "max_bytes", "max_lines", "expected_lines"),
+    [
+        (("1\n2", "\n3"), 100, 2, ["2", "3"]),
+        (("1\n2", "\n3\n"), 100, 2, ["2", "3"]),
+        (("1\n2\n", "3\n4\n"), 100, 2, ["3", "4"]),
+        (("a", "b\n", "c", "d\n", "e"), 100, 2, ["cd", "e"]),
+        (("1\n2\n3\n4\n5\n",), 8, 2, ["4", "5"]),
+        (("1\n2\n3\n4\n", "5\n6\n7\n8"), 10, 3, ["6", "7", "8"]),
+        (("1\n", "\U0001f389"), 2, 1, []),
+        (("\U0001f389ab", "cd"), 6, 5, ["abcd"]),
+        (("aaaaaaaaaa\n", "b\n"), 10, 5, ["aaaaaaa", "b"]),
+    ],
+)
+def test_output_buffer_matches_naive_reference_trimming(
+    chunks: tuple[str, ...],
+    max_bytes: int,
+    max_lines: int,
+    expected_lines: list[str],
+) -> None:
+    """Incremental line/byte trimming matches naive whole-buffer trimming across chunk boundaries."""
+    buf = _OutputBuffer(max_lines=max_lines, max_bytes=max_bytes)
+    ref_text, ref_bytes_capped, ref_lines_capped = "", False, False
+    for raw in chunks:
+        buf.append(raw)
+        ref_text += raw
+        encoded = ref_text.encode("utf-8", errors="replace")
+        if len(encoded) > max_bytes:
+            ref_text = encoded[-max_bytes:].decode("utf-8", errors="ignore")
+            ref_bytes_capped = True
+        split = ref_text.split("\n")
+        keep = max_lines + ref_text.endswith("\n")
+        if len(split) > keep:
+            ref_text = "\n".join(split[-keep:])
+            ref_lines_capped = True
+        ref_bytes = len(ref_text.encode("utf-8", errors="replace"))
+        ref_lines = ref_text.removesuffix("\n").split("\n") if ref_text else []
+        assert (buf.text(), buf.lines(), len(buf)) == (ref_text, ref_lines, len(ref_lines))
+        assert (buf.byte_count, buf.retained_newlines) == (ref_bytes, ref_text.count("\n"))
+        assert (buf.bytes_capped, buf.lines_capped) == (ref_bytes_capped, ref_lines_capped)
+    assert buf.lines() == expected_lines
+
+
+def test_progress_lines_handles_plain_and_carriage_return_output() -> None:
+    """Plain output skips carriage-return splitting while redrawn lines still collapse to their last state."""
+    plain, redrawn = _OutputBuffer(), _OutputBuffer()
+    assert _progress_lines(plain) == ""
+    plain.append("line 1\nline 2\n\n")
+    redrawn.append("step 1\rstep 2\n10%\r50%\r100%\r\ndone\r\r\n")
+    assert _progress_lines(plain) == "line 1\nline 2"
+    assert _progress_lines(redrawn) == "step 2\n100%\ndone"
+
+
+@pytest.mark.asyncio
+async def test_output_buffer_and_run_command_preserve_tail_after_64kib_chunk_and_followup() -> None:
+    """A tiny write after a full 50 KiB retained chunk slices the head bytes instead of evicting the whole chunk."""
+    block = "".join(f"{i:04d}:" + "x" * 58 + "\n" for i in range(1024))
+    expected_tail = [*(f"{i:04d}:" + "x" * 58 for i in range(925, 1024)), "done"]
+    buf = _OutputBuffer()
+    buf.append(block)
+    buf.append("done\n")
+    buf_lines = buf.render(tail=100).splitlines()
+    assert buf_lines[0].startswith("[Showing the last 100 of 1025 lines; output truncated to the last 51200 bytes.")
+    assert buf_lines[1:] == expected_tail
+
+    script = (
+        "import sys, time\n"
+        "sys.stdout.write(''.join(f'{i:04d}:' + 'x' * 58 + '\\n' for i in range(1024)))\n"
+        "sys.stdout.flush()\n"
+        "time.sleep(0.05)\n"
+        "sys.stdout.write('done\\n')\n"
+    )
+    result = await run_command(
+        {},
+        namespace="test",
+        argv=[sys.executable, "-c", script],
+        env=dict(os.environ),
+        cwd=None,
+        tail=100,
+        timeout=5.0,
+        on_timeout="kill",
+    )
+    cmd_lines = result.message.splitlines()
+    assert cmd_lines[0].startswith("[Showing the last 100 of 1025 lines; output truncated to the last 51200 bytes.")
+    assert cmd_lines[1:] == expected_tail
+
+
+@pytest.mark.asyncio
+async def test_read_stream_paces_only_capped_bursts_without_active_capture(tmp_path: Path) -> None:
+    """Capped reads pace once per burst when capture is absent/errored; transport pauses around sleep."""
+    pace_calls = 0
+
+    async def fake_pace(_stream: asyncio.StreamReader) -> None:
+        nonlocal pace_calls
+        pace_calls += 1
+
+    def make_stream(payload: bytes) -> asyncio.StreamReader:
+        reader = asyncio.StreamReader()
+        reader.feed_data(payload)
+        reader.feed_eof()
+        return reader
+
+    sub_burst = b"x" * (8 * (_CAPPED_STREAM_BURST_READS + 1))
+    one_burst = b"x" * (8 * (_CAPPED_STREAM_BURST_READS + 2))
+    with (
+        patch("mindroom.shell.execution._STREAM_READ_CHUNK_BYTES", 8),
+        patch("mindroom.shell.execution._pace_capped_stream", side_effect=fake_pace),
+    ):
+        await _read_stream(make_stream(b"12345678"), _OutputBuffer(max_bytes=16))
+        await _read_stream(make_stream(sub_burst), _OutputBuffer(max_bytes=8))
+        active = CapturedShellStream(ShellOutputDestination(str(tmp_path), "out.txt", max_bytes=1024))
+        await _read_stream(make_stream(one_burst), _OutputBuffer(max_bytes=8), active)
+        active.file.close()
+        assert pace_calls == 0
+
+        await _read_stream(make_stream(one_burst), _OutputBuffer(max_bytes=8))
+        assert pace_calls == 1
+
+        overflow = CapturedShellStream(ShellOutputDestination(str(tmp_path), "err.txt", max_bytes=10))
+        await _read_stream(make_stream(one_burst), _OutputBuffer(max_bytes=8), overflow)
+        overflow.file.close()
+        assert overflow.error is not None
+        assert pace_calls == 2
+
+    pace_calls = 0
+    bulk_under_free = b"x" * (65536 * (_CAPPED_STREAM_BURST_READS + 2))
+    bulk_two_bursts_past_free = b"x" * (65536 * (3 + 2 * _CAPPED_STREAM_BURST_READS + 1))
+    with patch("mindroom.shell.execution._pace_capped_stream", side_effect=fake_pace):
+        await _read_stream(make_stream(bulk_under_free), _OutputBuffer())
+        assert pace_calls == 0
+        with patch("mindroom.shell.execution._CAPPED_STREAM_BULK_FREE_BYTES", 256 * 1024):
+            await _read_stream(make_stream(bulk_two_bursts_past_free), _OutputBuffer())
+        assert pace_calls == 2
+
+    events: list[str] = []
+
+    class _FakeTransport(asyncio.ReadTransport):
+        def is_closing(self) -> bool:
+            return False
+
+        def pause_reading(self) -> None:
+            events.append("pause")
+
+        def resume_reading(self) -> None:
+            events.append("resume")
+
+    async def fake_sleep(_delay: float) -> None:
+        events.append("sleep")
+
+    with patch("mindroom.shell.execution.asyncio.sleep", side_effect=fake_sleep):
+        reader = asyncio.StreamReader()
+        reader.set_transport(_FakeTransport())
+        await _pace_capped_stream(reader)
+        assert events == ["pause", "sleep", "resume"]
+        events.clear()
+        await _pace_capped_stream(asyncio.StreamReader())
+        assert events == ["sleep"]
+
+
+@pytest.mark.asyncio
+async def test_spinning_stdout_writer_does_not_starve_event_loop_cpu() -> None:
+    """A continuously flushing subprocess stays well below event-loop CPU saturation and stops cleanly."""
+    script = "import sys; w=sys.stdout.write; f=sys.stdout.flush\nwhile True: w('>>> \\n'); f()"
+    t0, c0 = time.perf_counter(), time.process_time()
+    result = await run_command(
+        {},
+        namespace="test",
+        argv=[sys.executable, "-u", "-c", script],
+        env=dict(os.environ),
+        cwd=None,
+        tail=10,
+        timeout=1.5,
+        on_timeout="kill",
+        on_progress=lambda _text: None,
+    )
+    cpu, wall = time.process_time() - c0, time.perf_counter() - t0
+    assert result.message.startswith("Stopped after 1.5s.")
+    assert ">>> " in result.message
+    assert cpu / wall < 0.30, f"Expected low event-loop CPU ratio, got {cpu:.3f}s / {wall:.3f}s"
+
+
+@pytest.mark.asyncio
+async def test_fast_exiting_large_output_command_keeps_final_lines(tmp_path: Path) -> None:
+    """A fast-exiting command writing over 50 KiB finishes cleanly without truncating its final lines."""
+    entrypoint = _get_run_shell_command_function(_get_toolkit(tmp_path)).entrypoint
+    result = await entrypoint(
+        [sys.executable, "-c", "for i in range(2000): print(f'line-{i:04d}:' + 'x' * 40)"],
+        tail=5,
+    )
+    assert "of 2000 lines; output truncated to the last 51200 bytes." in result
+    assert result.endswith("line-1998:" + "x" * 40 + "\nline-1999:" + "x" * 40)
+
+
+@pytest.mark.asyncio
+async def test_finite_bulk_writer_finishes_quickly_with_intact_tail() -> None:
+    """An 8 MiB burst of 1 KiB lines plus a 100-line tail finishes quickly with all 100 tail lines intact."""
+    script = (
+        "import sys\n"
+        "w = sys.stdout.write\n"
+        "line = 'x' * 1023 + '\\n'\n"
+        "for _ in range(8192): w(line)\n"
+        "for i in range(99): w(f'tail-{i:03d}\\n')\n"
+        "w('done\\n')\n"
+    )
+    t0 = time.perf_counter()
+    result = await run_command(
+        {},
+        namespace="test",
+        argv=[sys.executable, "-c", script],
+        env=dict(os.environ),
+        cwd=None,
+        tail=100,
+        timeout=5.0,
+        on_timeout="kill",
+    )
+    wall = time.perf_counter() - t0
+    lines = result.message.splitlines()
+    assert wall < 3.0, f"Expected 8 MiB bulk writer to finish well under 3s, took {wall:.2f}s"
+    assert lines[0].startswith("[Showing the last 100 of 8292 lines; output truncated to the last 51200 bytes.")
+    assert lines[1:] == [*(f"tail-{i:03d}" for i in range(99)), "done"]

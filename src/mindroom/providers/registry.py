@@ -10,6 +10,7 @@ from __future__ import annotations
 from functools import partial
 from typing import TYPE_CHECKING, Any, cast, get_args
 
+from mindroom.config.models import unsupported_level_message
 from mindroom.llm.errors import AuthenticationFailed
 from mindroom.logging_config import get_logger
 from mindroom.providers.anthropic.settings import ACCEPTED_KEYS as CLAUDE_ACCEPTED_KEYS
@@ -77,8 +78,10 @@ def configured_model(config: Config, runtime_paths: RuntimePaths, model_name: st
     A key written as ``${NAME}`` becomes that runtime env variable's value, and stays as written when it is unset.
     """
     if model_name not in config.models:
-        available = ", ".join(sorted(config.models))
-        msg = f"Unknown model: {model_name}. Available models: {available}"
+        msg = unsupported_level_message(config.models, model_name)
+        if msg is None:
+            available = ", ".join(sorted(config.models))
+            msg = f"Unknown model: {model_name}. Available models: {available}"
         raise ValueError(msg)
     model_config = model_with_dashboard_key(model_name, config.models[model_name], runtime_paths)
     return resolve_api_key_reference(apply_reasoning_level(model_config), runtime_paths)

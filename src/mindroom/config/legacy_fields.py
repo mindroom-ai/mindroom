@@ -6,7 +6,18 @@ from fnmatch import fnmatchcase
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from collections.abc import Collection, Iterable, Mapping, Sequence
+    from collections.abc import Callable, Collection, Iterable, Mapping, Sequence
+    from typing import Protocol
+
+    class _ApprovalRule(Protocol):
+        @property
+        def match(self) -> str: ...
+        @property
+        def action(self) -> str | None: ...
+        @property
+        def script(self) -> str | None: ...
+        @property
+        def timeout_days(self) -> float | None: ...
 
 # LEGACY_COMPAT: Scalar knowledge_base agent configuration.
 # Legacy format: Agent config accepted scalar knowledge_base instead of knowledge_bases.
@@ -257,7 +268,7 @@ _RETIRED_FILE_SETTINGS = {
 }
 
 
-# LEGACY_COMPAT: Approval rules written for the file tool's retired function names.
+# LEGACY_COMPAT: Approval rules written for Agno FileTools function names.
 # Legacy format: a tool_approval.rules[].match glob matching save_file, replace_file_chunk, read_file_chunk,
 #   list_files, search_files, or search_content, the functions of Agno's FileTools.
 # Last legacy release: v2026.11.447; replacement: unreleased; the filesystem toolkit names them write_file,
@@ -280,20 +291,134 @@ def approval_rule_a_file_rename_escapes(globs: Sequence[str], offered_elsewhere:
     return None
 
 
-def retired_file_setting(settings: Mapping[str, object]) -> tuple[str, str] | None:
-    """Return the first Agno FileTools setting or retired function filter in ``settings``, and what replaces it."""
+# LEGACY_COMPAT: Retired individual functions of the triggers (external_trigger_manager) toolkit.
+# Legacy format: triggers / external_trigger_manager exposed 8 separate functions (watch_room, watch_thread,
+#   subscribe_event, create_trigger, list_triggers, disable_trigger, delete_trigger, rotate_trigger_key), which
+#   could appear in tool_approval.rules[].match globs or include_tools/exclude_tools overrides.
+# Last legacy release: v2026.11.480; replacement: unreleased; all 8 were collapsed into a single `triggers`
+#   function taking an `action` parameter.
+# Handling: When the config enables `triggers` (or its alias `external_trigger_manager`), allow configs with an
+#   explicit exact `triggers` rule deciding `triggers`, and otherwise reject tool_approval.rules when any retired
+#   function's effective decision differs from `triggers`'s effective decision (regardless of other toolkits);
+#   also reject include_tools or exclude_tools naming a retired trigger function on a triggers entry, naming `triggers`.
+# Coverage:
+#   tests/test_triggers_tool.py::test_an_approval_rule_that_stops_deciding_a_retired_trigger_function_fails,
+#   tests/test_triggers_tool.py::test_an_earlier_approval_rule_that_takes_triggers_from_a_retired_gate_fails,
+#   tests/test_triggers_tool.py::test_approval_rules_that_decide_triggers_load,
+#   tests/test_triggers_tool.py::test_retired_trigger_approval_check_skips_configs_without_triggers,
+#   tests/test_triggers_tool.py::test_retired_trigger_approval_rule_weakening_require_approval_default_fails,
+#   tests/test_triggers_tool.py::test_retired_trigger_approval_rule_changing_timeout_days_fails,
+#   tests/test_triggers_tool.py::test_retired_trigger_include_exclude_overrides_fail_config_load.
+RETIRED_TRIGGER_FUNCTIONS: dict[str, str] = {
+    "watch_room": "triggers",
+    "watch_thread": "triggers",
+    "subscribe_event": "triggers",
+    "create_trigger": "triggers",
+    "list_triggers": "triggers",
+    "disable_trigger": "triggers",
+    "delete_trigger": "triggers",
+    "rotate_trigger_key": "triggers",
+}
+
+
+def _effective_approval_decision(
+    rule: _ApprovalRule | None,
+    *,
+    default: str,
+    default_timeout_days: float,
+) -> tuple[str | None, str | None, float | None]:
+    if rule is None:
+        return (default, None, None if default == "auto_approve" else default_timeout_days)
+    timeout_days = (
+        None
+        if rule.action == "auto_approve"
+        else (rule.timeout_days if rule.timeout_days is not None else default_timeout_days)
+    )
+    return (rule.action, rule.script, timeout_days)
+
+
+def retired_trigger_approval_error(
+    rules: Sequence[_ApprovalRule],
+    default: str,
+    default_timeout_days: float = 7.0,
+) -> str | None:
+    """Return a migration error when approval rules decide `triggers` differently from a retired trigger function."""
+    first_new = next((index for index, rule in enumerate(rules) if fnmatchcase("triggers", rule.match)), None)
+    if first_new is not None and rules[first_new].match == "triggers":
+        return None
+    new_decision = _effective_approval_decision(
+        rules[first_new] if first_new is not None else None,
+        default=default,
+        default_timeout_days=default_timeout_days,
+    )
+    for old in RETIRED_TRIGGER_FUNCTIONS:
+        first_old = next((index for index, rule in enumerate(rules) if fnmatchcase(old, rule.match)), None)
+        old_decision = _effective_approval_decision(
+            rules[first_old] if first_old is not None else None,
+            default=default,
+            default_timeout_days=default_timeout_days,
+        )
+        if old_decision != new_decision:
+            if first_old is not None:
+                return (
+                    f"tool_approval.rules[{first_old}].match {rules[first_old].match!r} decided {old}; "
+                    f"{old} is now triggers, which now gets a different approval decision; "
+                    "rewrite the rules for triggers."
+                )
+            if first_new is not None:
+                return (
+                    f"tool_approval.rules[{first_new}].match {rules[first_new].match!r} now decides triggers, "
+                    f"changing tool_approval.default {default!r} that previously decided {old}; "
+                    "rewrite the rules for triggers."
+                )
+    return None
+
+
+def _retired_function_filter(
+    settings: Mapping[str, object],
+    renames: Mapping[str, str],
+    *,
+    guidance_for: Callable[[str, str], str],
+) -> tuple[str, str] | None:
     for key in ("include_tools", "exclude_tools"):
         value = settings.get(key)
         names = value.replace("\n", ",").split(",") if isinstance(value, str) else value
         for name in names if isinstance(names, list) else ():
-            if isinstance(name, str) and (new := RETIRED_FILE_FUNCTIONS.get(name.strip())):
-                return f"{key}: {name.strip()}", f"use `filesystem: {{{key}: [{new}]}}`"
+            if isinstance(name, str) and (new := renames.get(name.strip())):
+                return f"{key}: {name.strip()}", guidance_for(key, new)
+    return None
+
+
+def retired_file_setting(settings: Mapping[str, object]) -> tuple[str, str] | None:
+    """Return the first Agno FileTools setting or retired function filter in ``settings``, and what replaces it."""
+    if (
+        retired := _retired_function_filter(
+            settings,
+            RETIRED_FILE_FUNCTIONS,
+            guidance_for=lambda key, new: f"use `filesystem: {{{key}: [{new}]}}`",
+        )
+    ) is not None:
+        return retired
     return next(((field, guidance) for field, guidance in _RETIRED_FILE_SETTINGS.items() if field in settings), None)
+
+
+def retired_trigger_setting(settings: Mapping[str, object]) -> tuple[str, str] | None:
+    """Return the first retired trigger function filter in ``settings``, and its migration guidance."""
+    return _retired_function_filter(
+        settings,
+        RETIRED_TRIGGER_FUNCTIONS,
+        guidance_for=lambda _key, new: (
+            f"`{new}` is now a single unified function with an `action` parameter; "
+            "remove the per-function filter and use `tool_approval.rules` matching `triggers` if gating is needed"
+        ),
+    )
 
 
 def retired_tool_override(tool_name: str, overrides: Mapping[str, object]) -> tuple[str, str] | None:
     """Return the first rejected retired field an entry of ``tool_name`` authors, and its replacement guidance."""
     if tool_name == "filesystem" and (retired := retired_file_setting(overrides)) is not None:
+        return retired
+    if tool_name == "triggers" and (retired := retired_trigger_setting(overrides)) is not None:
         return retired
     rejected = _REJECTED_TOOL_OVERRIDES | _REJECTED_TOOL_OVERRIDES_BY_TOOL.get(tool_name, {})
     return next(((field, guidance) for field, guidance in rejected.items() if field in overrides), None)

@@ -67,7 +67,7 @@ def matches_external_event(spec: ExternalEventSourceSpec, event: TriggerEvent) -
     if event.source_type != "external_event" or event.source_id != spec.source_id or event.kind != spec.kind:
         return False
     for key, expected in spec.match.items():
-        actual = _lookup_data_key(event.data, key)
+        actual = lookup_data_key(event.data, key, _MISSING)
         if actual is _MISSING or type(actual) is not type(expected) or actual != expected:
             return False
     return True
@@ -118,15 +118,15 @@ def _matches_bounded_pattern(pattern: str, text: str, *, room_id: str) -> bool:
         return False
 
 
-def _lookup_data_key(data: Mapping[str, Any], key: str) -> object:
+def lookup_data_key(data: Mapping[str, Any], key: str, default: object = None) -> object:
     """Look up a direct or dot-traversed key strictly within structured event data."""
     if key in data:
         return data[key]
     if "." not in key:
-        return _MISSING
+        return default
     current: object = data
     for segment in key.split("."):
         if not isinstance(current, Mapping) or segment not in current:
-            return _MISSING
+            return default
         current = current[segment]
     return current

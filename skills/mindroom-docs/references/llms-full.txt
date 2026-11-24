@@ -2752,13 +2752,14 @@ An agent's system prompt has a stable part (identity, role, instructions, worksp
 Cache reads and writes appear in usage metrics as cached and cache-write input tokens.
 
 The `anthropic`, `bedrock_claude`, and `vertexai_claude` providers enable prompt caching with a one-hour lifetime by default.
-The `openrouter` provider caches the same way for model IDs that route to Anthropic, such as `anthropic/claude-sonnet-5.5` and `~anthropic/claude-sonnet-latest`, using OpenRouter [`cache_control` breakpoints](https://openrouter.ai/docs/guides/best-practices/prompt-caching); other OpenRouter model families cache implicitly.
-Set `extra_kwargs.cache_system_prompt: false` to turn off MindRoom's Claude cache breakpoints, or `extra_kwargs.extended_cache_time: false` to use the five-minute lifetime.
+The `openrouter` provider caches the same way for model IDs that route to Anthropic, such as `anthropic/claude-sonnet-5.5` and `~anthropic/claude-sonnet-latest`, using OpenRouter [`cache_control` breakpoints](https://openrouter.ai/docs/guides/best-practices/prompt-caching).
+For Gemini model IDs on `openrouter`, such as `google/gemini-4-neon`, MindRoom sends one `ephemeral` marker (no `ttl`) on the newest cacheable message; other OpenRouter model families cache implicitly.
+Set `extra_kwargs.cache_system_prompt: false` to turn off MindRoom's cache breakpoints on Anthropic and Gemini routes, or `extra_kwargs.extended_cache_time: false` to use the five-minute lifetime on Claude routes.
 
 The `openai` Responses API and `codex` providers rely on provider-managed caching; on the public OpenAI API, GPT-5.6 and later also get an explicit cache breakpoint after the stable part of the system prompt.
 See [OpenAI's prompt caching guide](https://developers.openai.com/api/docs/guides/prompt-caching) for eligibility and accounting.
 Set `extra_kwargs.cache_system_prompt: false` on a Responses model to send no explicit breakpoint.
-Chat Completions providers other than OpenRouter Claude routes keep their usual request format.
+Chat Completions providers other than OpenRouter Claude and Gemini routes keep their usual request format.
 
 Kimi Code caches repeated request prefixes automatically and reports them as `cached_tokens`.
 For `codex` and `kimi`, conversations share a `prompt_cache_key` per agent and requester within one MindRoom storage path, account, and channel, while different agents and requesters stay separate.
@@ -2869,7 +2870,7 @@ models:
 ```
 
 Write `name@level` wherever a model name is accepted to run that model at one of its levels: agent, team, and router `model`, `room_models`, `!model sol@xhigh`, `!room_model sol@low`, a client's model picker, `run_subagent`, scheduled tasks, and the `thread_model` tool.
-`sol@high` here is the same as `sol`, and a level the model does not list is an unknown model.
+`sol@high` here is the same as `sol`, and a level the model does not list is rejected with the levels that model supports.
 A reply at a non-default level shows its model as `<display name> (<level>)`, such as `Sol (xhigh)`.
 `!model list` and the `thread_model` tool's `list_models()` show each model's levels and default.
 
@@ -6457,7 +6458,7 @@ The responder's model receives the media directly, so it must support that input
 Models without that support can still work with the file through the [`attachments` tool](#the-attachments-tool).
 When a provider rejects inline media, MindRoom retries without it and tells the agent the content was not inspected; see [Media Fallback](https://docs.mindroom.chat/images/#media-fallback).
 Some provider integrations never send certain media kinds, so MindRoom leaves those out from the start with the same note.
-Only models using the `google` provider receive video, Claude and OpenAI Responses models (including Codex) also receive no audio, Ollama and Groq models receive only images, and Cerebras models receive no media.
+Only models using the `google` provider, the `openrouter` provider, or OpenAI Responses at OpenRouter's endpoint (`https://openrouter.ai/api/v1`) receive video, Claude and OpenAI Responses models (including Codex) also receive no audio, Ollama and Groq models receive only images, and Cerebras models receive no media.
 Claude models (the `anthropic`, `vertexai_claude`, and `bedrock_claude` providers) and models using the `google` provider read documents only as PDF or text; other file types, such as Office files and archives, reach them as a note naming the file type.
 
 ## Files Sent with Text
@@ -9557,7 +9558,7 @@ These configurations fail validation:
 - `initial: true` without `defer: true` fails with `Tool entry initial=true requires defer=true`.
 - Deferral is per agent, so `defaults.tools` entries reject both flags with `defaults.tools does not support defer or initial flags: <tools>`.
 - Presets such as [`openclaw_compat`](https://docs.mindroom.chat/openclaw/) cannot be deferred; set the flags on the individual member tools instead.
-- The control-plane tools `agent_manager`, `contacts`, `delegate`, `dynamic_tools`, `external_trigger_manager`, `self_config`, and `skill_manage` cannot be deferred and fail with `'<tool>' is a control-plane tool and cannot be deferred; defer/initial are only valid on runtime tools.`
+- The control-plane tools `agent_manager`, `contacts`, `delegate`, `dynamic_tools`, `self_config`, and `skill_manage` cannot be deferred and fail with `'<tool>' is a control-plane tool and cannot be deferred; defer/initial are only valid on runtime tools.`
 
 ## Native Server-Side Tool Search
 
@@ -14421,7 +14422,7 @@ todos:
     priority: high
 ```
 
-Values can use inline Jinja, such as `{{ NAME }}`, `{% if REPO == 'cinny' %}...{% endif %}`, and `{{ BRANCH | default('main') }}`.
+Values can use inline Jinja, such as `{{ NAME }}`, `{% if REPO == 'mindroom-chat' %}...{% endif %}`, and `{{ BRANCH | default('main') }}`.
 Outside Linux, workspace templates may only substitute `{{ NAME }}`.
 YAML aliases, `%TAG` directives, and collections nested more than 64 levels deep are refused.
 
@@ -22019,12 +22020,13 @@ Triggers let MindRoom wake an agent or team automatically in response to events�
 
 Use them for:
 
-- **Reactive triggers**, created with the `triggers` toolkit (`watch_room`, `watch_thread`, `subscribe_event`), to watch Matrix rooms with optional cheap triage, react when a thread resolves or changes tags, or subscribe to shared external event sources such as GitHub webhooks.
-- **Direct signed triggers**, created with `triggers.create_trigger`, to give a dedicated watcher its own `POST /api/triggers/<trigger_id>` endpoint authenticated with an Ed25519 signature.
+- **Reactive triggers**, created with the unified `triggers(action=...)` tool (`watch_room`, `watch_thread`, `subscribe_event`), to watch Matrix rooms with optional cheap triage, react when a thread resolves or changes tags, or subscribe to shared external event sources such as GitHub or generic HMAC webhooks.
+- **Direct signed triggers**, created with `triggers(action="create", ...)`, to give a dedicated watcher its own `POST /api/triggers/<trigger_id>` endpoint authenticated with an Ed25519 signature.
 - **Single-use [agent callbacks](#agent-callbacks)**, created with the `callback_manager` tool, to give a background task a Bash/curl script that wakes the originating agent and thread once.
 
-`triggers` is the canonical toolkit name.
-`external_trigger_manager` remains a backward-compatible alias in `config.yaml`, so existing configurations and `create_trigger` workflows keep working unchanged.
+`triggers` is the canonical toolkit name and exposes a single `triggers(action=...)` function.
+`external_trigger_manager` remains a backward-compatible alias in `config.yaml`.
+Both `triggers: {defer: true}` and `external_trigger_manager: {defer: true}` are supported when using [dynamic tools](https://docs.mindroom.chat/tools/dynamic-tools/).
 
 Triggers are created and managed by tool calls in a live Matrix conversation, not in `config.yaml` (except shared [external event sources](#shared-external-event-sources), which admins declare under `external_trigger_policy.event_sources`).
 Trigger records are stored in the primary runtime's [control state](https://docs.mindroom.chat/deployment/storage/#data-persistence) (`reactive_triggers.db` for reactive triggers, alongside direct trigger records and replay claims).
@@ -22032,7 +22034,7 @@ Agent workers and sandbox runners do not receive the control state path.
 
 ## Configuration
 
-Add `triggers` (or its alias `external_trigger_manager`) to agents that may create and manage triggers.
+Add `triggers` (or its alias `external_trigger_manager`) to agents that may create and manage triggers. You can defer it with `{defer: true}` to keep its schema out of context until needed.
 
 ```yaml
 agents:
@@ -22042,7 +22044,7 @@ agents:
     model: default
     rooms: [lobby]
     tools:
-      - triggers
+      - triggers: {defer: true}
 
 external_trigger_policy:
   enabled: true
@@ -22094,7 +22096,7 @@ Only a trigger's owner can rotate the key of a direct trigger for a [personal ag
 Both lists match canonical identities after `authorization.aliases` resolution.
 Every trigger function needs a human requester, so agents and bot accounts get no trigger authority, even when listed.
 
-To stop users from creating or modifying triggers without review, add [tool approval](https://docs.mindroom.chat/tool-approval/) rules for `watch_room`, `watch_thread`, `subscribe_event`, `create_trigger`, `rotate_trigger_key`, `disable_trigger`, and `delete_trigger`.
+To stop users from creating or modifying triggers without review, add a [tool approval](https://docs.mindroom.chat/tool-approval/) rule for `triggers`.
 
 ## Reactive Triggers
 
@@ -22108,11 +22110,12 @@ Reactive triggers run inside the primary runtime's unified pipeline:
 
 A non-match or failed triage creates neither a Matrix message nor an agent turn, and never consumes a `once=True` trigger.
 
-### Watching a room (`watch_room`)
+### Watching a room (`action="watch_room"`)
 
-`watch_room` watches new visible messages arriving in a Matrix room.
+`triggers(action="watch_room", ...)` watches new visible messages arriving in a Matrix room.
 At creation, MindRoom records the room's current journal head so older history is never replayed.
-Messages authored by MindRoom bots or stamped as trigger-originated (`reactive_trigger` or `external_trigger`) are skipped automatically to prevent loops.
+Messages stamped as trigger-originated (`reactive_trigger` or `external_trigger`) are always skipped to prevent loops.
+By default (`include_bots=False`), bot and agent messages are skipped; pass `include_bots=True` to watch other configured MindRoom agents (or allowed external bots) while unconditionally blocking messages from the trigger's own target agent (or any member of a target team).
 
 | Argument | Default | Meaning |
 | --- | --- | --- |
@@ -22121,6 +22124,7 @@ Messages authored by MindRoom bots or stamped as trigger-originated (`reactive_t
 | `thread_id` | none | Restrict matching to messages inside this thread root. |
 | `senders` | any | Optional list of Matrix sender IDs (matched with `authorization.aliases`). |
 | `pattern` | none | Optional case-insensitive regex (max 256 chars), evaluated with a strict search timeout over the first 4,096 characters. |
+| `include_bots` | `false` | When `true`, allow messages from other configured MindRoom agents (once the owner's source-room membership and authorization pass) and authorized external bots; messages from the target agent or target team members and trigger-generated messages are always skipped. Avoid creating mutual `include_bots=true` rules between two agents that reply to each other (`max_fires_per_hour` and `cooldown_seconds` cap runaway loops if both fire). |
 | `triage_instructions` | none | Optional plain-English criteria for [cheap tool-less triage](#cheap-tool-less-triage) (max 1,000 chars). |
 | `triage_model` | none | Configured model alias from `models`; required when `triage_instructions` is set and `triage_provider="llm"`. |
 | `triage_provider` | `"llm"` | Triage backend: `"llm"`, `"typesafe"`, or `"openai_decisions"`. |
@@ -22137,9 +22141,9 @@ Messages authored by MindRoom bots or stamped as trigger-originated (`reactive_t
 | `trigger_id` | auto (`tr_<12 hex>`) | Optional custom ID matching `^[A-Za-z0-9_-]{1,64}$`. |
 | `description` | `""` | Human-readable purpose. |
 
-### Watching a thread tag (`watch_thread`)
+### Watching a thread tag (`action="watch_thread"`)
 
-`watch_thread` watches a thread's `com.mindroom.thread.tags` state event—for example, waking an agent in thread B as soon as thread A is marked `resolved`.
+`triggers(action="watch_thread", ...)` watches a thread's `com.mindroom.thread.tags` state event—for example, waking an agent in thread B as soon as thread A is marked `resolved`.
 
 At creation, MindRoom reads the thread's current tag state into a checkpoint without firing.
 If the tag is already in the requested state (`transition="added"` when already present, or `"removed"` when already absent), `watch_thread` succeeds, reports `already_in_state: true`, and fires only on a future transition.
@@ -22164,9 +22168,9 @@ Live tag updates fire immediately, and offline transitions that remain in the ne
 | `trigger_id` | auto (`tr_<12 hex>`) | Optional custom ID matching `^[A-Za-z0-9_-]{1,64}$`. |
 | `description` | `""` | Human-readable purpose. |
 
-### Subscribing to shared event sources (`subscribe_event`)
+### Subscribing to shared event sources (`action="subscribe_event"`)
 
-`subscribe_event` attaches a reactive trigger to a named source configured under `external_trigger_policy.event_sources` (such as GitHub PR merges or shared Ed25519 fan-out events).
+`triggers(action="subscribe_event", ...)` attaches a reactive trigger to a named source configured under `external_trigger_policy.event_sources` (such as GitHub PR merges, generic HMAC-SHA256 webhooks, or shared Ed25519 fan-out events). Call `triggers(action="list")` to discover which event sources you are authorized to subscribe to.
 The requester must be listed in that source's `subscribers` (or be a trigger/platform administrator), and `kind` and `match` are validated against the source's `allowed_events`, `allowed_repos`, or `allowed_kinds`.
 
 | Argument | Default | Meaning |
@@ -22283,6 +22287,47 @@ Attacker-controlled free text (such as PR titles and bodies) is isolated in `tit
     MindRoom uses `X-GitHub-Delivery` as each rule's `dedupe_key` (retained in SQLite until finished firings are pruned after 30 days), which deduplicates genuine GitHub redeliveries.
     Because headers and timestamps are unsigned by GitHub, keep the webhook endpoint behind TLS and keep the webhook secret private so an eavesdropper cannot replay a captured body under a fabricated `X-GitHub-Delivery` header.
 
+### Generic HMAC-SHA256 webhooks (`kind: hmac`)
+
+Configure a generic HMAC-SHA256 source for any webhook provider that signs the raw request body with a shared secret (such as Linear, custom services, or internal alert relays):
+
+```yaml
+external_trigger_policy:
+  event_sources:
+    linear:
+      kind: hmac
+      secret_env: LINEAR_WEBHOOK_SECRET
+      signature_header: Linear-Signature
+      signature_prefix: ""
+      kind_field: type
+      event_id_header: Linear-Delivery
+      allowed_kinds:
+        - Issue
+        - Comment
+      subscribers:
+        - "@alice:example.org"
+      max_body_bytes: 262144
+```
+
+| Field | Default | Valid values | Meaning |
+| --- | --- | --- | --- |
+| `kind` | `"hmac"` | `"hmac"` | Selects generic HMAC-SHA256 webhook verification and normalization. |
+| `secret_env` | required | `^[A-Z_][A-Z0-9_]*$` | Environment variable name holding the shared HMAC secret. |
+| `signature_header` | `"X-Webhook-Signature-256"` | Valid ASCII HTTP header name | Header carrying the HMAC-SHA256 digest (matched case-insensitively). |
+| `signature_prefix` | `"sha256="` | Any string (`""` for bare hex) | Prefix stripped before comparing the lowercase hex digest. |
+| `kind_header` | none | Valid ASCII HTTP header name | Optional header holding the event `kind` (takes precedence over `kind_field`). |
+| `kind_field` | `"kind"` | Non-empty JSON key or dot-path | JSON string field used as `kind` when `kind_header` is unset. |
+| `event_id_header` | none | Valid ASCII HTTP header name | Optional header used as deduplication `event_id`; falls back to payload `event_id`/`id` or `sha256:<body-hash>`. |
+| `allowed_kinds` | `[]` (any) | Non-empty strings | Optional allowlist of accepted `kind` values. |
+| `subscribers` | `[]` | Matrix user IDs | Non-admin users allowed to subscribe rules to this source. |
+| `max_body_bytes` | `262144` | 1024 to 1048576 | Maximum accepted webhook body size in bytes. |
+
+Verified HMAC webhooks populate `event.data` with the parsed JSON object and extract optional string `actor`, `title`, `summary`, and `text` fields when present.
+
+!!! note "HMAC headers are unsigned"
+    Generic HMAC-SHA256 verification signs only the raw HTTP request body, not HTTP headers such as `kind_header` or `event_id_header`.
+    For replay-sensitive sources, prefer `kind_field` and a body-level `event_id` (or `id`) field so event classification and deduplication are bound to the signed payload, and keep the endpoint behind TLS with a private shared secret.
+
 ### Shared Ed25519 fan-out (`kind: ed25519`)
 
 Configure a shared Ed25519 source when one trusted watcher emits structured events that multiple users or rules should subscribe to:
@@ -22325,8 +22370,8 @@ Senders use the same `MINDROOM-TRIGGER-V1` signature format and JSON payload sha
 | Status | Cause |
 | --- | --- |
 | `202` | Event verified, normalized, and fanned out (`matched_rules` may be `0` if no rule matched or all matching rules already saw `event_id`). |
-| `400` | Malformed JSON or missing required GitHub headers/fields (`X-GitHub-Delivery`, `X-GitHub-Event`, `repository.full_name`). |
-| `401` | Invalid GitHub HMAC signature or invalid/expired Ed25519 signature. |
+| `400` | Malformed JSON, missing required webhook headers/fields, disallowed `kind` on `hmac`, or oversized `event_id`. |
+| `401` | Invalid GitHub/`hmac` HMAC-SHA256 signature or invalid/expired Ed25519 signature. |
 | `403` | GitHub event type or repository is not in `allowed_events` / `allowed_repos`. |
 | `404` | Unknown `source_id`, or `external_trigger_policy.enabled` / `reactive_enabled` is `false`. |
 | `409` | Reused Ed25519 signature nonce. |
@@ -22347,10 +22392,11 @@ For a dedicated single-target watcher that posts directly to `/api/triggers/<tri
    The command prints `private_key`, `public_key`, and `public_key_fingerprint`.
    Keep the private key only in the watcher runtime.
 
-2. In a Matrix conversation with the agent, give it the printed `public_key` and ask it to call `triggers.create_trigger` (also reachable under the `external_trigger_manager` alias).
+2. In a Matrix conversation with the agent, give it the printed `public_key` and ask it to call `triggers(action="create", ...)`.
 
    ```json
    {
+     "action": "create",
      "trigger_id": "campground",
      "public_key": "BASE64_PUBLIC_KEY_FROM_KEYGEN",
      "key_id": "campground-main",
@@ -22365,7 +22411,7 @@ For a dedicated single-target watcher that posts directly to `/api/triggers/<tri
 
 3. Have the watcher send events with `mindroom trigger send` and the same `key_id`, as shown in [Sending Events](#sending-events).
 
-### `create_trigger` arguments
+### `action="create"` arguments
 
 | Argument | Default | Meaning |
 | --- | --- | --- |
@@ -22390,14 +22436,17 @@ Shared agents and teams can only be targeted in rooms already configured for the
 A [private agent](https://docs.mindroom.chat/configuration/agents/#private-instances), [personal agent](https://docs.mindroom.chat/personal-agents/), or [created agent](https://docs.mindroom.chat/personal-agents/#created-agents-and-self-updates) creating its own trigger may also target its current room when no agent or team lists that room in `rooms`, such as a personal room.
 Triggers never create rooms or make agents join rooms.
 
-### Managing triggers
+### Managing, inspecting, and testing triggers
 
-The `triggers` toolkit (and its `external_trigger_manager` alias) provides unified management functions across both direct signed triggers and reactive triggers, available to the trigger owner and administrators:
+The `triggers(action=...)` tool provides unified lifecycle, observability, and testing actions available to the trigger owner and administrators:
 
-- `list_triggers(include_disabled=True)` lists the requester's direct and reactive triggers, or every trigger for administrators.
-- `disable_trigger(trigger_id, enabled=False)` disables a direct or reactive trigger; pass `enabled=True` to re-enable it.
-- `delete_trigger(trigger_id)` removes a direct or reactive trigger.
-- `rotate_trigger_key(trigger_id, public_key, key_id="default")` replaces the signing key on a direct Ed25519 trigger.
+- `triggers(action="list", include_disabled=True)` lists the requester's direct and reactive triggers (or every trigger for administrators) along with `event_sources` metadata for configured sources the requester may subscribe to (never exposing secrets or keys).
+- `triggers(action="update", trigger_id=..., ...)` updates a reactive trigger in place (`prompt`, `description`, `pattern`, `senders`, `include_bots`, `match`, `triage_*`, `cooldown_seconds`, `max_fires_per_hour`, `expires_in_hours`, `once`, `enabled`) while preserving `rule_uid`, `fire_count`, `last_fired_at`, room cursors, thread checkpoints, and thread-key bindings. Pass `pattern=""` or `triage_instructions=""` to clear them, `senders=[]` to clear sender filtering, or omit (`None`) to keep existing values.
+- `triggers(action="set_enabled", trigger_id=..., enabled=False)` disables a direct or reactive trigger; pass `enabled=True` to re-enable it.
+- `triggers(action="delete", trigger_id=...)` removes a direct or reactive trigger.
+- `triggers(action="rotate_key", trigger_id=..., public_key=..., key_id="default")` replaces the signing key on a direct Ed25519 trigger.
+- `triggers(action="history", trigger_id=None, limit=20)` returns recent reactive firing rows (ordered newest-first, `limit` clamped to `1..100`) with status, triage reason, error message, Matrix event ID, and a compact event preview (text truncated to 240 chars).
+- `triggers(action="test", trigger_id=..., text=None, actor=None, kind=None, sample_data=None)` dry-runs deterministic matching and optional live triage on a reactive trigger without writing to SQLite, consuming `once`/cooldown/rate-limit quotas, or posting to Matrix.
 
 ## Sending Events
 
@@ -22455,7 +22504,7 @@ mindroom trigger send support-inbox \
 ```
 
 Choose a key that names the upstream conversation, not the message, such as a ticket ID, an upstream thread timestamp, or a direct-message channel ID.
-A key stays bound to its thread for 7 days after its most recent delivery; after that, or after `rotate_trigger_key`, the next delivery with the key opens a new thread.
+A key stays bound to its thread for 7 days after its most recent delivery; after that, or after `triggers(action="rotate_key", ...)`, the next delivery with the key opens a new thread.
 If two deliveries with a new key arrive together, one may receive `409 External trigger thread is being opened by another delivery`; retry it as a fresh signed request with the same `event_id` and it joins the thread.
 `thread_key` has no effect on triggers with a fixed `target_thread_id` or without `new_thread`.
 
@@ -22564,7 +22613,7 @@ The [Docker Compose `static_runner` sandbox](https://docs.mindroom.chat/deployme
 The script needs only Bash and curl.
 It posts the summary to the room and thread where the callback was minted, which wakes the agent.
 After a successful delivery the callback is used up and the script deletes itself; if delivery fails, the script remains so it can be run again.
-Unused callbacks never expire, so delete abandoned ones with `triggers.delete_trigger` (or `external_trigger_manager.delete_trigger`).
+Unused callbacks never expire, so delete abandoned ones with `triggers(action="delete", trigger_id=...)`.
 
 ### Network Access
 
@@ -23307,6 +23356,7 @@ Every environment variable is listed in [Configuration — Environment Variables
 ## Related Setup
 
 - [Bridges](https://docs.mindroom.chat/deployment/bridges/) - connect Telegram and other messaging platforms to Matrix.
+- [OIDC & Single Sign-On](https://docs.mindroom.chat/deployment/oidc-sso/) - sign in to self-hosted Tuwunel and MindRoom Chat with Pocket ID, Authelia, Authentik, Keycloak, or another OIDC provider.
 - [Cloudflare Access & Tunnel](https://docs.mindroom.chat/deployment/cloudflare-access/) - Chat, Matrix, calls, and the runtime on one host behind Cloudflare Access.
 - [Connect Google Accounts](https://docs.mindroom.chat/deployment/google-services-user-oauth/) - Google tools on a paired local install, with no Google Cloud setup.
 - [Google OAuth Apps & Scopes](https://docs.mindroom.chat/deployment/google-services-oauth/) - your own Google OAuth client for remote, public, or shared deployments.
@@ -23563,8 +23613,101 @@ To run execution tools in isolated workers, see [Sandbox Proxy Isolation](https:
 
 # Kubernetes Deployment
 
-This page covers running MindRoom on Kubernetes with Helm: the available charts, a runtime-only install, worker backends for isolated tool execution, and backup and restore.
+This page covers running MindRoom on Kubernetes with Helm: a local `kind` quick start, the available charts, a production runtime-only install, worker backends for isolated tool execution, and backup and restore.
 For the hosted multi-tenant platform (platform and instance charts), see [SaaS Platform](https://docs.mindroom.chat/deployment/saas-platform/).
+
+## Quick Start: Local kind Cluster
+
+Deploy MindRoom and a standalone Tuwunel Matrix homeserver on a local [`kind`](https://kind.sigs.k8s.io/) cluster and verify a live agent reply (no `sudo` required).
+
+**Before you start:**
+
+- Docker running, with [`kind`](https://kind.sigs.k8s.io/docs/user/quick-start/#installation), [`kubectl`](https://kubernetes.io/docs/tasks/tools/), and [`helm`](https://helm.sh/docs/intro/install/) on your `PATH`.
+- `git`, `python3`, and `openssl`.
+- `OPENAI_API_KEY` exported (for other providers, see [Provider API Keys from Kubernetes Secrets](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#provider-api-keys-from-kubernetes-secrets)).
+
+### 1. Create the cluster and Secrets
+
+```bash
+: "${OPENAI_API_KEY:?export OPENAI_API_KEY first}" && \
+git clone https://github.com/mindroom-ai/mindroom.git "$HOME/mindroom" && \
+cd "$HOME/mindroom" && \
+kind create cluster --name mindroom && \
+kubectl create namespace mindroom && \
+openssl rand -hex 32 | tr -d '\n' | kubectl -n mindroom create secret generic matrix-registration --from-file=MATRIX_REGISTRATION_TOKEN=/dev/stdin && \
+printf %s "$OPENAI_API_KEY" | kubectl -n mindroom create secret generic llm-credentials --from-file=OPENAI_API_KEY=/dev/stdin
+```
+
+### 2. Install Tuwunel
+
+Install the homeserver first with `mindroom.local` as the local server name (Tuwunel fixes `serverName` on first start and cannot change it without wiping its database):
+
+```bash
+cd "$HOME/mindroom"
+helm upgrade --install matrix ./cluster/k8s/tuwunel --namespace mindroom \
+  --set tuwunel.serverName=mindroom.local \
+  --set tuwunel.registrationToken.existingSecret=matrix-registration \
+  --wait --timeout 10m
+```
+
+### 3. Install the MindRoom runtime
+
+This values file configures one model, one agent (`helper`), and one room (`lobby`).
+`join_policy: public` lets the test user join `#lobby:mindroom.local` (see [Authorization](https://docs.mindroom.chat/authorization/#responder-access)).
+Custom `config.data` must also set `event_journal.backend: postgres` so MindRoom uses the chart's bundled PostgreSQL journal:
+
+```bash
+cd "$HOME/mindroom"
+helm upgrade --install mindroom-runtime ./cluster/k8s/runtime --namespace mindroom -f - --wait --timeout 10m <<'YAML'
+matrix:
+  homeserverUrl: http://matrix-mindroom-tuwunel.mindroom.svc.cluster.local:8008
+  serverName: mindroom.local
+  registrationToken:
+    existingSecret: matrix-registration
+providerCredentials:
+  - provider: openai
+    existingSecret: llm-credentials
+    key: OPENAI_API_KEY
+config:
+  data: |
+    models:
+      default:
+        provider: openai
+        id: gpt-6-luna
+    rooms:
+      lobby:
+        display_name: Lobby
+        description: Quick-start chat room
+        join_policy: public
+    agents:
+      helper:
+        display_name: Helper
+        role: A concise, helpful assistant.
+        rooms: [lobby]
+    event_journal:
+      backend: postgres
+YAML
+```
+
+### 4. Chat with the agent
+
+```bash
+cd "$HOME/mindroom" && python3 cluster/k8s/kind/chat_check.py
+```
+
+Expected output: `Reply from @mindroom_helper: pong` (wording may vary; exit status `0` is the check).
+[`chat_check.py`](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/kind/chat_check.py) port-forwards Tuwunel, registers a throwaway test user from the `matrix-registration` Secret, joins `#lobby:mindroom.local`, and waits for `@mindroom_helper`'s reply.
+
+### Uninstall
+
+```bash
+kind delete cluster --name mindroom
+```
+
+### Next steps
+
+For production clusters, continue with [Runtime-Only Deployment](#runtime-only-deployment) (external ConfigMaps, PVCs, and Secrets), [Worker Backends](#worker-backends) (dedicated Kubernetes workers), and [Backup and Restore](#backup-and-restore).
+To provision the hosted multi-tenant platform on Hetzner Cloud, see [SaaS Platform](https://docs.mindroom.chat/deployment/saas-platform/) and [`cluster/terraform/terraform-k8s/`](https://github.com/mindroom-ai/mindroom/blob/main/cluster/terraform/terraform-k8s/README.md).
 
 ## Charts
 
@@ -23578,6 +23721,8 @@ For the hosted multi-tenant platform (platform and instance charts), see [SaaS P
 | Platform | `cluster/k8s/platform/` | SaaS control plane (API, frontend, provisioner) |
 
 ## Prerequisites
+
+These apply to production clusters; for a local try, use the [quick start](#quick-start-local-kind-cluster).
 
 - A Kubernetes cluster (tested with k3s via kube-hetzner)
 - `kubectl` and `helm`
@@ -25868,6 +26013,198 @@ Host the dashboard on the app's public origin or on [its own host](#dashboard-on
 | `403 OAuth link does not belong to the current user` | Open the conversation link while signed in as the requester who received it |
 | Connections portal errors | See [Connections troubleshooting](https://docs.mindroom.chat/connections-portal/#troubleshooting) |
 
+# OIDC & Single Sign-On
+
+Self-hosted deployments running MindRoom's Tuwunel fork (`mindroom-tuwunel`) can delegate Matrix sign-in to any OpenID Connect (OIDC) identity provider that supports Authorization Code with PKCE (`S256`), `client_secret_post`, and a UserInfo endpoint returning `sub`, including Pocket ID, Authelia, Authentik, and Keycloak.
+Tuwunel exposes the same configured identity provider to `m.login.sso` clients (such as MindRoom Chat) and to next-generation Matrix OIDC clients (such as Element X) through its built-in OIDC authorization server.
+
+This page covers configuring Tuwunel, wiring Docker Compose (`mindroom-stack`) or Kubernetes, running an SSO-only homeserver without breaking MindRoom's agent accounts, configuring MindRoom Chat, routing a reverse proxy, and authenticating to the MindRoom dashboard.
+Hosted `mindroom.chat` uses MindRoom's own configured SSO providers; bringing your own identity provider applies to self-hosted homeservers.
+
+## Identity Provider Requirements
+
+Create a **confidential** OAuth 2.0 / OIDC client in your identity provider:
+
+- **Client authentication:** Confidential client with a `client_secret` (Tuwunel requires `client_secret` or `client_secret_file`; public clients without a secret are not supported).
+- **Grant and flow:** Authorization Code flow (`response_type=code`) with PKCE (`S256`) and `client_secret_post` (providers that only accept `client_secret_basic` are not supported).
+- **UserInfo endpoint:** After exchanging the authorization code, Tuwunel queries the discovered UserInfo endpoint and requires a JSON response containing `sub`.
+- **Scopes:** `openid`, `email`, and `profile` (Tuwunel's default).
+- **Callback / redirect URI:** Register this exact URL with your identity provider:
+
+```text
+https://<your-matrix-host>/_matrix/client/unstable/login/sso/callback/<client_id>
+```
+
+Tuwunel discovers endpoints automatically from `<issuer_url>/.well-known/openid-configuration`.
+Keep `client_id` and `issuer_url` unchanged after users begin signing in, because Tuwunel binds stored user identities to them.
+
+## Configure Tuwunel
+
+The examples below use [Pocket ID](https://pocket-id.org/) as a concrete self-hosted OIDC provider; substitute your own `brand`, `name`, and `issuer_url` for Authelia, Authentik, Keycloak, or another OIDC provider.
+
+=== "tuwunel.toml"
+
+    ```toml
+    [global.well_known]
+    client = "https://matrix.example.com"
+
+    [[global.identity_provider]]
+    brand = "PocketID"
+    name = "Pocket ID"
+    client_id = "<client_id>"
+    client_secret_file = "/etc/tuwunel/oidc_client_secret"  # or client_secret = "<client_secret>"
+    issuer_url = "https://id.example.com"
+    callback_url = "https://matrix.example.com/_matrix/client/unstable/login/sso/callback/<client_id>"
+    ```
+
+=== "Docker Compose (mindroom-stack)"
+
+    In [`mindroom-stack`](https://github.com/mindroom-ai/mindroom-stack), set `CLIENT_HOMESERVER_URL=https://matrix.example.com` in `.env` (which sets `TUWUNEL_WELL_KNOWN__CLIENT`) and add your provider in a `compose.override.yaml`:
+
+    ```yaml
+    services:
+      tuwunel:
+        environment:
+          TUWUNEL_IDENTITY_PROVIDER__0__BRAND: "PocketID"
+          TUWUNEL_IDENTITY_PROVIDER__0__NAME: "Pocket ID"
+          TUWUNEL_IDENTITY_PROVIDER__0__CLIENT_ID: "${OIDC_CLIENT_ID}"
+          TUWUNEL_IDENTITY_PROVIDER__0__CLIENT_SECRET: "${OIDC_CLIENT_SECRET}"
+          TUWUNEL_IDENTITY_PROVIDER__0__ISSUER_URL: "https://id.example.com"
+          TUWUNEL_IDENTITY_PROVIDER__0__CALLBACK_URL: "https://matrix.example.com/_matrix/client/unstable/login/sso/callback/${OIDC_CLIENT_ID}"
+    ```
+
+    Put `OIDC_CLIENT_ID` and `OIDC_CLIENT_SECRET` in `.env`, or mount a secret file and use `TUWUNEL_IDENTITY_PROVIDER__0__CLIENT_SECRET_FILE`.
+    Multiple providers use sequential indexes (`__0__`, `__1__`, and so on).
+
+    > [!WARNING]
+    > `mindroom-stack` defaults to open local registration (`TUWUNEL_ALLOW_REGISTRATION: "true"`) and grants local users access to the shell-enabled `Mind` agent.
+    > Adding an identity provider does not turn off password registration, and hiding Chat's Register link does not enforce it server-side.
+    > Before exposing the stack beyond localhost, restrict agent access in `config/config.yaml`, limit who can create accounts through SSO (at your IdP, or via the provider's `registration = false` or `registration_rules`), and close open password registration in one of two ways (turning off registration alone stops MindRoom from creating new password-based agent accounts):
+    >
+    > - Keep password-based agents with token-gated registration: add `TUWUNEL_REGISTRATION_TOKEN` (or `TUWUNEL_REGISTRATION_TOKEN_FILE`) and `TUWUNEL_YES_I_AM_VERY_VERY_SURE_I_WANT_AN_OPEN_REGISTRATION_SERVER_PRONE_TO_ABUSE: "false"` to `services.tuwunel.environment`, and the matching `MATRIX_REGISTRATION_TOKEN` to `services.mindroom.environment`.
+    > - Or switch MindRoom to [`appservice` mode](#disabling-password-login-sso-only) before setting `TUWUNEL_ALLOW_REGISTRATION: "false"` (and optionally `TUWUNEL_AUTHENTICATION__LOGIN__WITH_PASSWORD: "false"` for SSO-only sign-in).
+
+=== "Kubernetes (Helm)"
+
+    The [Tuwunel chart](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/tuwunel/README.md#oidc-login) renders `[[global.identity_provider]]` and mounts the client secret from a Kubernetes Secret:
+
+    ```yaml
+    tuwunel:
+      serverName: example.com
+      clientBaseUrl: https://matrix.example.com
+      oidc:
+        enabled: true
+        brand: PocketID
+        name: Pocket ID
+        issuer: https://id.example.com
+        clientId: <client_id>
+        clientSecret:
+          existingSecret: matrix-oidc
+          key: OIDC_CLIENT_SECRET
+        scope: [openid, profile, email]
+    ```
+
+### Matching Existing Matrix Accounts
+
+By default, Tuwunel creates a new Matrix account on a user's first SSO sign-in if the claimed username already belongs to an existing account.
+To attach SSO logins to existing accounts on an identity provider where you control the matched claims (self-hosting alone is not enough if users can choose another person's username or email):
+
+- Set `trusted = true` (with `userid_claims`, such as `["preferred_username"]` or `["sub"]`, matching your Matrix localparts) so Tuwunel signs the user into the matching existing account.
+  Never set `trusted = true` on public providers such as Google or GitHub, or on any provider where users can freely pick the matched claim, because it enables account takeover.
+- Or map specific addresses explicitly to full local Matrix user IDs with `assigned_accounts = { "alice@example.com" = "@alice:example.com" }`.
+  Do not combine this with `trusted = true`, and use it only with an OIDC client restricted to your own organization or paired with an organization-specific `assigned_accounts_claims` check (such as `{ hd = "example.com" }`) set before the first sign-in.
+
+See the `mindroom-tuwunel` [Identity Providers guide](https://github.com/mindroom-ai/mindroom-tuwunel/blob/main/docs/authentication/providers.md) for the full option reference, registration rules, and provider-specific guides for Authelia, Authentik, Keycloak, and MAS.
+
+## Disabling Password Login (SSO-Only)
+
+By default, MindRoom registers and logs in its agent, team, and router accounts with passwords (`MATRIX_MANAGED_ACCOUNT_AUTH=password`).
+Turning off password login on Tuwunel (`authentication.login.with_password = false` or `TUWUNEL_AUTHENTICATION__LOGIN__WITH_PASSWORD="false"`) refuses password registration and fresh password logins for every account; existing agents with valid stored device tokens can restart, but fresh installs and new agents or devices fail until you switch MindRoom to [`appservice` mode](https://docs.mindroom.chat/matrix/#agent-users):
+
+1. Create an application-service registration file (for example `mindroom-appservice.yaml`) whose exclusive `users` namespace matches every MindRoom-managed account, including any custom `matrix_username` or `mindroom_user.username`:
+
+    ```yaml
+    id: mindroom
+    url: null
+    as_token: <long-random-secret>
+    hs_token: <another-long-random-secret>
+    sender_localpart: mindroom-appservice
+    namespaces:
+      users:
+        - exclusive: true
+          # Widen this regex (for example "^@(mindroom_.*|custom_bot):example\\.com$")
+          # if you set custom matrix_username or mindroom_user.username values.
+          regex: "^@mindroom_.*:example\\.com$"
+    ```
+
+2. Mount or place that `.yaml` file in a directory readable by Tuwunel and set `appservice_dir = "/etc/tuwunel/appservices"` (`TUWUNEL_APPSERVICE_DIR="/etc/tuwunel/appservices"`).
+3. Configure MindRoom with `MATRIX_MANAGED_ACCOUNT_AUTH=appservice` and `MATRIX_APPSERVICE_TOKEN` (or `MATRIX_APPSERVICE_TOKEN_FILE`) matching `as_token`, and leave `MATRIX_REGISTRATION_TOKEN` unset.
+4. Disable password login on Tuwunel:
+
+    ```toml
+    [global.authentication.login]
+    with_password = false
+    ```
+
+    Or via environment variable: `TUWUNEL_AUTHENTICATION__LOGIN__WITH_PASSWORD="false"`.
+
+On Kubernetes, see [Passwordless MindRoom Accounts](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/tuwunel/README.md#passwordless-mindroom-accounts) and [Matrix Managed Account Authentication](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#matrix-managed-account-authentication).
+
+## MindRoom Chat
+
+MindRoom Chat supports custom OIDC providers out of the box on web, iOS, and Android through Matrix's `m.login.sso` flow (including SSO interactive authentication for sensitive actions).
+Every custom provider Tuwunel advertises on `/_matrix/client/v3/login` appears automatically as a **Continue with `<name>`** button (custom `mxc://` `icon` images display only if the homeserver serves unauthenticated media, which Tuwunel disables by default; Apple, Google, and GitHub use MindRoom Chat's bundled marks, and Apple uses **Sign in with Apple**).
+
+Optional settings in MindRoom Chat's `config.json` (`client-config.json` in `mindroom-stack`):
+
+```json
+{
+  "defaultHomeserver": 0,
+  "homeserverList": ["https://matrix.example.com"],
+  "allowCustomHomeservers": false,
+  "auth": {
+    "hideServerPickerWhenSingle": true,
+    "allowRegistration": false,
+    "disablePasswordLogin": true
+  }
+}
+```
+
+- `auth.disablePasswordLogin: true` hides the password form when password login is off.
+- `auth.allowRegistration: false` hides the Register link when accounts are created on first SSO sign-in.
+- Listing your homeserver in `homeserverList` (or setting `allowCustomHomeservers: false`) avoids the unlisted-server trust prompt before SSO redirects.
+
+See [MindRoom Chat sign-in configuration](https://github.com/mindroom-ai/mindroom-chat/blob/main/docs/configuration.md#sign-in) for all client options.
+
+## Next-Gen OIDC Clients (Element X) & Reverse Proxy
+
+Once `[global.well_known].client` and at least one `[[global.identity_provider]]` are configured, Tuwunel also activates its built-in OIDC authorization server (MSC3861 / MSC2965) for clients such as Element X.
+Your reverse proxy must forward all of these paths to Tuwunel (`:8008`):
+
+| Path | Used by |
+| --- | --- |
+| `/_matrix/*` | Matrix client, SSO redirect/callback, and federation APIs |
+| `/_tuwunel/oidc/*`, `/_tuwunel/sso/*` (or `/_tuwunel/*`) | Tuwunel's OIDC endpoints and SSO interactive-auth assets (`sso.css`, `complete.js`) |
+| `/.well-known/openid-configuration` | OIDC discovery document |
+| `/.well-known/matrix/client`, `/.well-known/matrix/server` | Matrix client and server discovery (unless served separately) |
+
+Additional notes:
+
+- To allow both local password accounts and your OIDC provider on Tuwunel's built-in OIDC login page, set `[global.authentication.oidc].native_auth = true` (`TUWUNEL_AUTHENTICATION__OIDC__NATIVE_AUTH="true"`).
+- If you restrict dynamic client registration with `authentication.oidc.registration_allowed_redirect_hosts`, include the exact redirect hosts or private-use schemes your clients use (for example `["element.io", "io.element.android"]` for Element X on iOS and Android; hosts match exactly rather than by subdomain, so list any web client's exact host too).
+- When MindRoom Chat and Tuwunel share one origin, exclude `/_tuwunel` from Chat's service-worker navigation fallback so `/_tuwunel/oidc/*` pages reach Tuwunel instead of the cached SPA (see [Service Worker](https://docs.mindroom.chat/deployment/cloudflare-access/#service-worker)).
+- See Tuwunel's [OIDC Authorization Server guide](https://github.com/mindroom-ai/mindroom-tuwunel/blob/main/docs/authentication/oidc-server.md) for token lifetimes, PKCE, and client-approval settings.
+
+## MindRoom Dashboard & API
+
+The MindRoom dashboard and API (port `8765`) do not run a direct OIDC login flow.
+Choose the dashboard authentication boundary that matches your deployment:
+
+- **API key + optional Chat sign-in:** Keep `MINDROOM_API_KEY` set whenever no upstream auth proxy fronts MindRoom; unsetting it leaves the dashboard in open standalone mode instead of SSO-only mode.
+  With `TUWUNEL_MINDROOM_OPENID_AUDIENCE=true` (default in `mindroom-stack`), `MINDROOM_PUBLIC_URL` set to the MindRoom portal origin (`CLIENT_MINDROOM_URL` in `mindroom-stack`), and any public self-hosted Chat origin listed in `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS`, users signed in to MindRoom Chat via OIDC who have access to at least one agent or its credentials (other than `access.current_room_members`, which does not apply in a browser) can open `/connections` using Matrix OpenID tokens, and accounts in `administrators` can also reach dashboard routes from that session (see [Connections Portal](https://docs.mindroom.chat/connections-portal/#sessions-and-dashboard-access)).
+- **OIDC auth proxy:** Place an OIDC-capable reverse proxy that attaches a raw signed JWT header without a `Bearer ` prefix (such as `oauth2-proxy` backed by Pocket ID, or [Cloudflare Access](https://docs.mindroom.chat/deployment/cloudflare-access/)) in front of MindRoom and enable [Trusted Upstream Browser Auth](https://docs.mindroom.chat/deployment/trusted-upstream-auth/) (`MINDROOM_TRUSTED_UPSTREAM_*`).
+  Unless `MINDROOM_CONNECTIONS_AGENT` (a private agent with `private.per: user` or `user_agent`) is set, every user admitted by the proxy gets dashboard operator access, so either restrict the proxy policy to operators or set `MINDROOM_CONNECTIONS_AGENT` to limit the dashboard to `administrators` (see [Security Boundary](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#security-boundary)).
+
 # Cloudflare Access & Tunnel
 
 This page puts MindRoom Chat, the Tuwunel homeserver, MatrixRTC calls, and the MindRoom runtime on one host behind [Cloudflare Access](https://developers.cloudflare.com/cloudflare-one/access-controls/), reached through a [Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/networks/connectors/cloudflare-tunnel/).
@@ -27692,52 +28029,45 @@ mindroom local-stack-setup --synapse-dir /path/to/mindroom/local/matrix
  Start local Synapse + MindRoom Chat using Docker only.
 
 ╭─ Options ──────────────────────────────────────────────────────────────────────────────╮
-│ --synapse-dir                                 PATH                 Directory           │
-│                                                                    containing Synapse  │
-│                                                                    docker-compose.yml  │
-│                                                                    (core MindRoom      │
-│                                                                    repo:               │
-│                                                                    local/matrix).      │
-│                                                                    [default:           │
-│                                                                    local/matrix]       │
-│ --homeserver-url                              TEXT                 Homeserver URL that │
-│                                                                    MindRoom Chat and   │
-│                                                                    MindRoom should     │
-│                                                                    use.                │
-│                                                                    [default:           │
-│                                                                    http://localhost:8… │
-│ --server-name                                 TEXT                 Matrix server name  │
-│                                                                    (default: inferred  │
-│                                                                    from                │
-│                                                                    --homeserver-url    │
-│                                                                    hostname).          │
-│ --cinny-port                                  INTEGER RANGE        Local host port for │
-│                                               [1<=x<=65535]        the MindRoom Chat   │
-│                                                                    container.          │
-│                                                                    [default: 8080]     │
-│ --cinny-image                                 TEXT                 Docker image for    │
-│                                                                    MindRoom Chat.      │
-│                                                                    [default:           │
-│                                                                    ghcr.io/mindroom-a… │
-│ --cinny-container-n…                          TEXT                 Container name for  │
-│                                                                    MindRoom Chat       │
-│                                                                    (legacy default     │
-│                                                                    retained for        │
-│                                                                    compatibility).     │
-│                                                                    [default:           │
-│                                                                    mindroom-cinny-loc… │
-│ --skip-synapse                                                     Skip starting       │
-│                                                                    Synapse (assume it  │
-│                                                                    is already          │
-│                                                                    running).           │
-│ --persist-env             --no-persist-env                         Persist Matrix      │
-│                                                                    local dev settings  │
-│                                                                    to .env next to     │
-│                                                                    config.yaml.        │
-│                                                                    [default:           │
-│                                                                    persist-env]        │
-│ --help                -h                                           Show this message   │
-│                                                                    and exit.           │
+│ --synapse-dir                                 PATH                Directory containing │
+│                                                                   Synapse              │
+│                                                                   docker-compose.yml   │
+│                                                                   (core MindRoom repo: │
+│                                                                   local/matrix).       │
+│                                                                   [default:            │
+│                                                                   local/matrix]        │
+│ --homeserver-url                              TEXT                Homeserver URL that  │
+│                                                                   MindRoom Chat and    │
+│                                                                   MindRoom should use. │
+│                                                                   [default:            │
+│                                                                   http://localhost:80… │
+│ --server-name                                 TEXT                Matrix server name   │
+│                                                                   (default: inferred   │
+│                                                                   from                 │
+│                                                                   --homeserver-url     │
+│                                                                   hostname).           │
+│ --chat-port                                   INTEGER RANGE       Local host port for  │
+│                                               [1<=x<=65535]       the MindRoom Chat    │
+│                                                                   container.           │
+│                                                                   [default: 8080]      │
+│ --chat-image                                  TEXT                Docker image for     │
+│                                                                   MindRoom Chat.       │
+│                                                                   [default:            │
+│                                                                   ghcr.io/mindroom-ai… │
+│ --chat-container-na…                          TEXT                Container name for   │
+│                                                                   MindRoom Chat.       │
+│                                                                   [default:            │
+│                                                                   mindroom-chat-local] │
+│ --skip-synapse                                                    Skip starting        │
+│                                                                   Synapse (assume it   │
+│                                                                   is already running). │
+│ --persist-env             --no-persist-env                        Persist Matrix local │
+│                                                                   dev settings to .env │
+│                                                                   next to config.yaml. │
+│                                                                   [default:            │
+│                                                                   persist-env]         │
+│ --help                -h                                          Show this message    │
+│                                                                   and exit.            │
 ╰────────────────────────────────────────────────────────────────────────────────────────╯
 
 

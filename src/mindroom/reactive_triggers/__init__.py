@@ -21,6 +21,7 @@ from mindroom.reactive_triggers.external_sources import (
     validate_subscription_against_source,
     verify_and_normalize_ed25519_event,
     verify_and_normalize_github_webhook,
+    verify_and_normalize_hmac_webhook,
 )
 from mindroom.reactive_triggers.matching import (
     REACTIVE_TRIGGER_DEDUPE_KEY,
@@ -111,4 +112,5 @@ __all__ = (
     "validate_subscription_against_source",
     "verify_and_normalize_ed25519_event",
     "verify_and_normalize_github_webhook",
+    "verify_and_normalize_hmac_webhook",
 )

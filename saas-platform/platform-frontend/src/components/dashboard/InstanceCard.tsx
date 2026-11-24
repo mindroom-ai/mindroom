@@ -4,7 +4,7 @@ import { useState } from 'react'
 import type { Instance } from '@/hooks/useInstance'
 import type { Subscription } from '@/hooks/useSubscription'
 import { provisionInstance } from '@/lib/api'
-import { buildCinnyLoginUrl } from '@/lib/cinny'
+import { buildChatLoginUrl } from '@/lib/chat'
 import { Card, CardHeader } from '@/components/ui/Card'
 import { logger } from '@/lib/logger'
 import { planAction, planState } from '@/lib/plan-state'
@@ -219,7 +219,7 @@ export function InstanceCard({
   const frontendHost = getHostname(instance.frontend_url)
   const backendHost = getHostname(instance.backend_url)
   const chatInterfaceUrl = instance.matrix_server_url
-    ? buildCinnyLoginUrl(instance.matrix_server_url)
+    ? buildChatLoginUrl(instance.matrix_server_url)
     : null
   const lastSynced = instance.kubernetes_synced_at
     ? formatRelativeTime(instance.kubernetes_synced_at)

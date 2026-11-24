@@ -649,13 +649,14 @@ An agent's system prompt has a stable part (identity, role, instructions, worksp
 Cache reads and writes appear in usage metrics as cached and cache-write input tokens.
 
 The `anthropic`, `bedrock_claude`, and `vertexai_claude` providers enable prompt caching with a one-hour lifetime by default.
-The `openrouter` provider caches the same way for model IDs that route to Anthropic, such as `anthropic/claude-sonnet-5.5` and `~anthropic/claude-sonnet-latest`, using OpenRouter [`cache_control` breakpoints](https://openrouter.ai/docs/guides/best-practices/prompt-caching); other OpenRouter model families cache implicitly.
-Set `extra_kwargs.cache_system_prompt: false` to turn off MindRoom's Claude cache breakpoints, or `extra_kwargs.extended_cache_time: false` to use the five-minute lifetime.
+The `openrouter` provider caches the same way for model IDs that route to Anthropic, such as `anthropic/claude-sonnet-5.5` and `~anthropic/claude-sonnet-latest`, using OpenRouter [`cache_control` breakpoints](https://openrouter.ai/docs/guides/best-practices/prompt-caching).
+For Gemini model IDs on `openrouter`, such as `google/gemini-4-neon`, MindRoom sends one `ephemeral` marker (no `ttl`) on the newest cacheable message; other OpenRouter model families cache implicitly.
+Set `extra_kwargs.cache_system_prompt: false` to turn off MindRoom's cache breakpoints on Anthropic and Gemini routes, or `extra_kwargs.extended_cache_time: false` to use the five-minute lifetime on Claude routes.
 
 The `openai` Responses API and `codex` providers rely on provider-managed caching; on the public OpenAI API, GPT-5.6 and later also get an explicit cache breakpoint after the stable part of the system prompt.
 See [OpenAI's prompt caching guide](https://developers.openai.com/api/docs/guides/prompt-caching) for eligibility and accounting.
 Set `extra_kwargs.cache_system_prompt: false` on a Responses model to send no explicit breakpoint.
-Chat Completions providers other than OpenRouter Claude routes keep their usual request format.
+Chat Completions providers other than OpenRouter Claude and Gemini routes keep their usual request format.
 
 Kimi Code caches repeated request prefixes automatically and reports them as `cached_tokens`.
 For `codex` and `kimi`, conversations share a `prompt_cache_key` per agent and requester within one MindRoom storage path, account, and channel, while different agents and requesters stay separate.
@@ -766,7 +767,7 @@ models:
 ```
 
 Write `name@level` wherever a model name is accepted to run that model at one of its levels: agent, team, and router `model`, `room_models`, `!model sol@xhigh`, `!room_model sol@low`, a client's model picker, `run_subagent`, scheduled tasks, and the `thread_model` tool.
-`sol@high` here is the same as `sol`, and a level the model does not list is an unknown model.
+`sol@high` here is the same as `sol`, and a level the model does not list is rejected with the levels that model supports.
 A reply at a non-default level shows its model as `<display name> (<level>)`, such as `Sol (xhigh)`.
 `!model list` and the `thread_model` tool's `list_models()` show each model's levels and default.
 

@@ -42,6 +42,7 @@ from mindroom.logging_config import get_logger
 from mindroom.matrix.encrypted_event_metadata import encryption_visible_metadata
 from mindroom.matrix.media import durable_session_closed, prepare_media_upload, upload_content_uri, upload_media_bytes
 from mindroom.matrix.message_builder import markdown_to_html
+from mindroom.matrix.state_failures import is_transient_homeserver_status, response_http_status
 from mindroom.matrix_identifiers import has_agent_username
 from mindroom.tool_system.events import has_placeholder_body, tool_markers_out_of_text
 
@@ -748,10 +749,14 @@ async def upload_json_sidecar(
 
         # Check if upload was successful
         if not isinstance(upload_result, nio.UploadResponse):
-            logger.error(
+            http_status = response_http_status(upload_result)
+            # Durable uploads wait out 502/503/504 in upload_media_bytes; non-durable sends fall back to an inline or truncated preview.
+            log = logger.warning if not durable and is_transient_homeserver_status(http_status) else logger.error
+            log(
                 "large_message_sidecar_upload_failed",
                 room_id=room_id,
                 error=str(upload_result),
+                http_status=http_status,
             )
             return None, None
 

@@ -38,7 +38,7 @@ from mindroom.native_compaction import (
 from mindroom.providers.errors import classify_provider_error
 from mindroom.providers.openai.chat_wire import function_definition, sdk_call_kwargs
 from mindroom.providers.openai.codex_auth import codex_installation_metadata, codex_session_headers
-from mindroom.providers.openai.media import responses_file_part, responses_image_part
+from mindroom.providers.openai.media import responses_file_part, responses_image_part, responses_video_part
 from mindroom.providers.openai.response_replay import RESPONSE_OUTPUT_KEY, assistant_replay_items
 from mindroom.providers.openai.schema import strict_response_schema
 from mindroom.providers.openai.settings import CODEX_REJECTED_FIELDS
@@ -231,7 +231,7 @@ def request_replay(wire: ResponsesWire, request: ModelRequest) -> ResponsesRepla
 
 
 def _prompt_item(message: Message, provider: str) -> dict[str, Any]:
-    """Return a system or user message as a Responses input message with its images and files."""
+    """Return a system or user message as a Responses input message with its images, videos, and files."""
     item: dict[str, Any] = {"role": "developer" if message.role == "system" else "user"}
     if message.content is not None:
         item["content"] = message.content
@@ -239,6 +239,15 @@ def _prompt_item(message: Message, provider: str) -> dict[str, Any]:
         item["content"] = [
             {"type": "input_text", "text": message.content},
             *(part for image in message.images if (part := responses_image_part(image, provider=provider)) is not None),
+        ]
+    if video_parts := [
+        part for video in message.videos or () if (part := responses_video_part(video, provider=provider)) is not None
+    ]:
+        content = item.get("content")
+        # A copy, so the stored message's own content list never takes the video parts.
+        item["content"] = [
+            *(content if isinstance(content, list) else [{"type": "input_text", "text": content or ""}]),
+            *video_parts,
         ]
     if message.files:
         content = item.get("content")

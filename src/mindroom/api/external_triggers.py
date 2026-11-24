@@ -19,6 +19,7 @@ from mindroom.config.external_trigger_policy import (
     Ed25519EventSourceConfig,
     ExternalEventSourceConfig,
     GitHubEventSourceConfig,
+    HmacEventSourceConfig,
 )
 from mindroom.delivery_replay import (
     DeliveryEventClaim,
@@ -57,6 +58,7 @@ from mindroom.reactive_triggers.external_sources import (
     fan_out_external_event,
     verify_and_normalize_ed25519_event,
     verify_and_normalize_github_webhook,
+    verify_and_normalize_hmac_webhook,
 )
 from mindroom.reactive_triggers.store import ReactiveTriggerStore, ReactiveTriggerStoreError
 from mindroom.response_admission import (
@@ -642,6 +644,14 @@ async def _verify_and_normalize_event_source(
     try:
         if isinstance(source, GitHubEventSourceConfig):
             return verify_and_normalize_github_webhook(
+                source_id=source_id,
+                source=source,
+                headers=request.headers,
+                body=body,
+                runtime_paths=runtime_paths,
+            )
+        if isinstance(source, HmacEventSourceConfig):
+            return verify_and_normalize_hmac_webhook(
                 source_id=source_id,
                 source=source,
                 headers=request.headers,

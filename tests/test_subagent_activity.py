@@ -264,11 +264,13 @@ def test_a_completion_without_a_start_appends_a_done_row() -> None:
 
 
 def test_failed_tool_call_is_an_error_row() -> None:
-    """A failed call ends in state error."""
+    """A failed call ends in state error and preserves `is_error` on its public entry."""
     a = _activity()
     a.tool_started(ToolStarted(call=_call("c1")), now=1.0)
     a.tool_completed(ToolCompleted(call=_call("c1", result="boom", is_error=True)))
-    assert a.snapshot().items[0].state == "error"
+    (item,) = a.snapshot().items
+    assert item.tool is not None
+    assert (item.state, item.tool.type, item.tool.is_error) == ("error", "tool_call_completed", True)
 
 
 def test_text_past_6000_characters_is_cut_to_the_newest_5000() -> None:
@@ -452,6 +454,36 @@ def test_terminal_status_sets_ended_at_and_running_clears_it() -> None:
     for terminal in ("completed", "cancelled", "denied"):
         a.set_status(terminal, 8)
         assert a.snapshot().ended_at == 8
+
+
+@pytest.mark.parametrize(
+    ("status", "interrupted", "expected"),
+    [
+        ("running", False, ("running", "tool_call_started", False, {"c2"})),
+        ("paused", False, ("running", "tool_call_started", False, {"c2"})),
+        ("awaiting_approval", False, ("running", "tool_call_started", False, {"c2"})),
+        ("completed", False, ("done", "tool_call_completed", False, set())),
+        ("failed", True, ("error", "tool_call_completed", True, set())),
+        ("cancelled", False, ("error", "tool_call_completed", True, set())),
+        ("denied", False, ("error", "tool_call_completed", True, set())),
+    ],
+)
+def test_status_change_settles_only_terminal_running_tools(
+    status: _SubagentStatus,
+    interrupted: bool,
+    expected: tuple[str, str, bool, set[str]],
+) -> None:
+    """Terminal statuses settle running tools (keeping `started_at`); non-terminal ones leave them open."""
+    a = _activity()
+    a.tool_started(ToolStarted(call=_call("c1")), now=10.0)
+    a.tool_completed(ToolCompleted(call=_call("c1", result="ok")))
+    a.tool_started(ToolStarted(call=_call("c2")), now=20.0)
+    a.set_status(status, 30.0, interrupted_by_restart=interrupted)
+    done_item, item = a.snapshot().items
+    assert done_item.tool is not None
+    assert item.tool is not None
+    assert (done_item.state, done_item.tool.is_error, item.started_at) == ("done", False, 20.0)
+    assert (item.state, item.tool.type, item.tool.is_error, a._running_calls) == expected
 
 
 def test_workflow_children_report_source_workflow() -> None:

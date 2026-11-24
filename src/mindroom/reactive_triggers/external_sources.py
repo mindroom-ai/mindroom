@@ -15,6 +15,7 @@ from mindroom.config.external_trigger_policy import (
     Ed25519EventSourceConfig,
     ExternalEventSourceConfig,
     GitHubEventSourceConfig,
+    HmacEventSourceConfig,
 )
 from mindroom.credentials.environment import get_secret_from_env
 from mindroom.delivery_replay import DeliveryReplayStore, DeliveryReplayStoreError
@@ -25,7 +26,7 @@ from mindroom.external_triggers.auth import (
 )
 from mindroom.external_triggers.models import ExternalTriggerPayload
 from mindroom.external_triggers.policy import is_external_trigger_administrator
-from mindroom.reactive_triggers.matching import matches_external_event
+from mindroom.reactive_triggers.matching import lookup_data_key, matches_external_event
 from mindroom.reactive_triggers.models import ExternalEventSourceSpec, TriggerEvent
 from mindroom.requester_identity import equivalent_requester_ids
 
@@ -119,7 +120,7 @@ def validate_subscription_against_source(
         return
 
     if (
-        isinstance(source, Ed25519EventSourceConfig)
+        isinstance(source, (Ed25519EventSourceConfig, HmacEventSourceConfig))
         and source.allowed_kinds
         and stripped_kind not in source.allowed_kinds
     ):
@@ -155,7 +156,9 @@ def check_external_event_source_access(
         ):
             return "source_grant_revoked"
     elif (
-        isinstance(source, Ed25519EventSourceConfig) and source.allowed_kinds and event.kind not in source.allowed_kinds
+        isinstance(source, (Ed25519EventSourceConfig, HmacEventSourceConfig))
+        and source.allowed_kinds
+        and event.kind not in source.allowed_kinds
     ):
         return "source_grant_revoked"
     return None
@@ -295,6 +298,68 @@ def verify_and_normalize_ed25519_event(
     )
 
 
+def verify_and_normalize_hmac_webhook(
+    *,
+    source_id: str,
+    source: HmacEventSourceConfig,
+    headers: Mapping[str, str],
+    body: bytes,
+    runtime_paths: RuntimePaths,
+    now: float | None = None,
+) -> TriggerEvent:
+    """Verify a generic HMAC-SHA256 webhook and normalize it into a TriggerEvent."""
+    normalized_headers = {name.lower(): value for name, value in headers.items()}
+
+    secret = get_secret_from_env(source.secret_env, runtime_paths=runtime_paths)
+    if secret is None or not secret.strip():
+        msg = "HMAC webhook secret is not configured"
+        raise ExternalSourceUnavailableError(msg)
+
+    _verify_hmac_signature(
+        normalized_headers,
+        header_name=source.signature_header,
+        prefix=source.signature_prefix,
+        body=body,
+        secret=secret,
+    )
+
+    payload = _parse_json_object(body, source_label="HMAC webhook")
+
+    if source.kind_header is not None:
+        resolved_kind = normalized_headers.get(source.kind_header.lower(), "").strip()
+        if not resolved_kind:
+            msg = f"Missing {source.kind_header} header"
+            raise ExternalSourceBadRequestError(msg)
+    else:
+        raw_kind = lookup_data_key(payload, source.kind_field)
+        if not isinstance(raw_kind, str) or not raw_kind.strip():
+            msg = f"Missing or invalid {source.kind_field!r} event kind in HMAC webhook payload"
+            raise ExternalSourceBadRequestError(msg)
+        resolved_kind = raw_kind.strip()
+
+    if source.allowed_kinds and resolved_kind not in source.allowed_kinds:
+        msg = "Event kind is not allowed for this event source"
+        raise ExternalSourceBadRequestError(msg)
+
+    event_id = _resolve_hmac_event_id(normalized_headers, source=source, payload=payload, body=body)
+    if len(event_id.encode("utf-8")) > _MAX_GITHUB_DELIVERY_BYTES:
+        msg = "Event ID exceeds maximum length"
+        raise ExternalSourceBadRequestError(msg)
+
+    return TriggerEvent(
+        source_type="external_event",
+        source_id=source_id,
+        kind=resolved_kind,
+        event_id=event_id,
+        timestamp=time.time() if now is None else now,
+        actor=_optional_str(payload.get("actor")),
+        title=_clip_text(_optional_str(payload.get("title")), _MAX_TITLE_CHARS),
+        summary=_clip_text(_optional_str(payload.get("summary")), _MAX_SUMMARY_CHARS),
+        text=_clip_text(_optional_str(payload.get("text")), _MAX_SUMMARY_CHARS),
+        data=dict(payload),
+    )
+
+
 def fan_out_external_event(
     *,
     source_id: str,
@@ -342,14 +407,53 @@ def _verify_github_signature(headers: Mapping[str, str], *, body: bytes, secret:
         raise ExternalSourceAuthError(msg)
 
 
-def _parse_json_object(body: bytes) -> dict[str, Any]:
+def _verify_hmac_signature(
+    headers: Mapping[str, str],
+    *,
+    header_name: str,
+    prefix: str,
+    body: bytes,
+    secret: str,
+) -> None:
+    raw_signature = headers.get(header_name.lower(), "").strip()
+    if not raw_signature or (prefix and not raw_signature.startswith(prefix)):
+        msg = "Invalid HMAC webhook signature"
+        raise ExternalSourceAuthError(msg)
+    provided = raw_signature.removeprefix(prefix).lower() if prefix else raw_signature.lower()
+    expected = hmac.new(secret.encode("utf-8"), body, hashlib.sha256).hexdigest()
+    if not hmac.compare_digest(expected.encode("ascii"), provided.encode("utf-8", "surrogateescape")):
+        msg = "Invalid HMAC webhook signature"
+        raise ExternalSourceAuthError(msg)
+
+
+def _resolve_hmac_event_id(
+    headers: Mapping[str, str],
+    *,
+    source: HmacEventSourceConfig,
+    payload: Mapping[str, Any],
+    body: bytes,
+) -> str:
+    if source.event_id_header is not None:
+        header_id = headers.get(source.event_id_header.lower(), "").strip()
+        if header_id:
+            return header_id
+    for key in ("event_id", "id"):
+        candidate = payload.get(key)
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+        if isinstance(candidate, int) and not isinstance(candidate, bool):
+            return str(candidate)
+    return f"sha256:{hashlib.sha256(body).hexdigest()[:32]}"
+
+
+def _parse_json_object(body: bytes, *, source_label: str = "GitHub webhook") -> dict[str, Any]:
     try:
         parsed = json.loads(body)
     except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        msg = "GitHub webhook body must be valid JSON"
+        msg = f"{source_label} body must be valid JSON"
         raise ExternalSourceBadRequestError(msg) from exc
     if not isinstance(parsed, dict):
-        msg = "GitHub webhook body must be a JSON object"
+        msg = f"{source_label} body must be a JSON object"
         raise ExternalSourceBadRequestError(msg)
     return parsed
 

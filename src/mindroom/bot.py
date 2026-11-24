@@ -70,6 +70,7 @@ from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import ToolRuntimeSupport
 
 from . import constants
+from .active_runs import ActiveRunPublisher
 from .agent_cli.cli_approval_waits import CliWaiters
 from .approval.continuation_runner import ApprovalContinuationRunner
 from .background_tasks import create_background_task, wait_for_background_tasks
@@ -301,6 +302,7 @@ class AgentBot:
     _local_membership_lock: asyncio.Lock
     _ingestion_admission_progress: asyncio.Event
     _sync_continuity_store: SyncContinuityStore
+    _active_runs: ActiveRunPublisher
 
     def __init__(
         self,
@@ -421,6 +423,7 @@ class AgentBot:
             msg = f"Missing Matrix ID for {self.agent_name!r} during runtime initialization"
             raise PermanentMatrixStartupError(msg)
         runtime_matrix_id = self.matrix_id
+        self._active_runs = ActiveRunPublisher(get_client=lambda: self.client, user_id=runtime_matrix_id.full_id)
         self._journal_principal_id = journal_principal_id(self.agent_name, runtime_matrix_id.full_id)
         # One database holds every principal, so the runtime's one store serves this bot's view. The runtime closes it.
         self._journal_store = self.orchestrator.event_journal_store()
@@ -746,6 +749,10 @@ class AgentBot:
                     logger=self.logger,
                 ),
                 turn_policy=self._turn_policy,
+                active_runs=None if self.agent_name == ROUTER_AGENT_NAME else self._active_runs,
+                can_publish_active_run=lambda room_id: (
+                    contact_room(self.config, self.runtime_paths, room_id, self.agent_name) is None
+                ),
             ),
         )
         self._turn_dispatcher = TurnDispatcher(
@@ -1077,6 +1084,7 @@ class AgentBot:
             locked=locked_turns,
             lifecycle_coordinator=lifecycle_coordinator,
             cli_waiters=self._cli_waiters,
+            active_runs=self._active_runs,
         )
         self._response_runner = ResponseRunner(
             locked=locked_turns,
@@ -1084,6 +1092,7 @@ class AgentBot:
             inbox=inbox,
             lifecycle_coordinator=lifecycle_coordinator,
             cli_waiters=self._cli_waiters,
+            active_runs=self._active_runs,
         )
 
     def retry_approval_sources(self, room_id: str, source_event_ids: tuple[str, ...]) -> None:
@@ -1227,6 +1236,8 @@ class AgentBot:
 
     async def _publish_server_state(self, room_id: str) -> None:
         if self.client is not None:
+            if self.agent_name != ROUTER_AGENT_NAME:
+                self._active_runs.schedule_startup_sweep((room_id,))
             await publish_server_state(self.client, room_id, self._server_state_content(self.config))
 
     def _server_state_content(self, config: Config) -> dict[str, object]:
@@ -1705,6 +1716,7 @@ class AgentBot:
         self._sending_device_id = client.device_id or None
         try:
             self.orchestrator.validate_managed_entity_identities()
+            self._active_runs.reopen()
             self._runtime_view.mark_runtime_started()
             await self._room_lifecycle.restore_pending_join_decrypt_fences()
             await ensure_entity_avatar(client, self.agent_name, self.config, self.runtime_paths, logger=self.logger)
@@ -2038,11 +2050,14 @@ class AgentBot:
         self._delivery_recovery_wake.set()
         if shutdown_intent.stop_reason == "shutdown":
             self.begin_process_shutdown()
+            self._active_runs.cancel()
             if self.client is not None:
                 cast(
                     _ProcessShutdownMatrixClient,  # noqa: TC006 - runtime reference proves the private protocol is live
                     self.client,
                 ).begin_process_shutdown_transport_fence()
+        else:
+            await self._active_runs.shutdown()
         shutdown_budget = self._sync_shutdown_budget
         if shutdown_budget is None:
             shutdown_budget = ShutdownBudget.start(SYNC_SHUTDOWN_PREPARATION_TIMEOUT_SECONDS)

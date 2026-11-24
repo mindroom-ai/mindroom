@@ -4,8 +4,101 @@ icon: simple/kubernetes
 
 # Kubernetes Deployment
 
-This page covers running MindRoom on Kubernetes with Helm: the available charts, a runtime-only install, worker backends for isolated tool execution, and backup and restore.
+This page covers running MindRoom on Kubernetes with Helm: a local `kind` quick start, the available charts, a production runtime-only install, worker backends for isolated tool execution, and backup and restore.
 For the hosted multi-tenant platform (platform and instance charts), see [SaaS Platform](saas-platform.md).
+
+## Quick Start: Local kind Cluster
+
+Deploy MindRoom and a standalone Tuwunel Matrix homeserver on a local [`kind`](https://kind.sigs.k8s.io/) cluster and verify a live agent reply (no `sudo` required).
+
+**Before you start:**
+
+- Docker running, with [`kind`](https://kind.sigs.k8s.io/docs/user/quick-start/#installation), [`kubectl`](https://kubernetes.io/docs/tasks/tools/), and [`helm`](https://helm.sh/docs/intro/install/) on your `PATH`.
+- `git`, `python3`, and `openssl`.
+- `OPENAI_API_KEY` exported (for other providers, see [Provider API Keys from Kubernetes Secrets](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#provider-api-keys-from-kubernetes-secrets)).
+
+### 1. Create the cluster and Secrets
+
+```bash
+: "${OPENAI_API_KEY:?export OPENAI_API_KEY first}" && \
+git clone https://github.com/mindroom-ai/mindroom.git "$HOME/mindroom" && \
+cd "$HOME/mindroom" && \
+kind create cluster --name mindroom && \
+kubectl create namespace mindroom && \
+openssl rand -hex 32 | tr -d '\n' | kubectl -n mindroom create secret generic matrix-registration --from-file=MATRIX_REGISTRATION_TOKEN=/dev/stdin && \
+printf %s "$OPENAI_API_KEY" | kubectl -n mindroom create secret generic llm-credentials --from-file=OPENAI_API_KEY=/dev/stdin
+```
+
+### 2. Install Tuwunel
+
+Install the homeserver first with `mindroom.local` as the local server name (Tuwunel fixes `serverName` on first start and cannot change it without wiping its database):
+
+```bash
+cd "$HOME/mindroom"
+helm upgrade --install matrix ./cluster/k8s/tuwunel --namespace mindroom \
+  --set tuwunel.serverName=mindroom.local \
+  --set tuwunel.registrationToken.existingSecret=matrix-registration \
+  --wait --timeout 10m
+```
+
+### 3. Install the MindRoom runtime
+
+This values file configures one model, one agent (`helper`), and one room (`lobby`).
+`join_policy: public` lets the test user join `#lobby:mindroom.local` (see [Authorization](../authorization.md#responder-access)).
+Custom `config.data` must also set `event_journal.backend: postgres` so MindRoom uses the chart's bundled PostgreSQL journal:
+
+```bash
+cd "$HOME/mindroom"
+helm upgrade --install mindroom-runtime ./cluster/k8s/runtime --namespace mindroom -f - --wait --timeout 10m <<'YAML'
+matrix:
+  homeserverUrl: http://matrix-mindroom-tuwunel.mindroom.svc.cluster.local:8008
+  serverName: mindroom.local
+  registrationToken:
+    existingSecret: matrix-registration
+providerCredentials:
+  - provider: openai
+    existingSecret: llm-credentials
+    key: OPENAI_API_KEY
+config:
+  data: |
+    models:
+      default:
+        provider: openai
+        id: gpt-6-luna
+    rooms:
+      lobby:
+        display_name: Lobby
+        description: Quick-start chat room
+        join_policy: public
+    agents:
+      helper:
+        display_name: Helper
+        role: A concise, helpful assistant.
+        rooms: [lobby]
+    event_journal:
+      backend: postgres
+YAML
+```
+
+### 4. Chat with the agent
+
+```bash
+cd "$HOME/mindroom" && python3 cluster/k8s/kind/chat_check.py
+```
+
+Expected output: `Reply from @mindroom_helper: pong` (wording may vary; exit status `0` is the check).
+[`chat_check.py`](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/kind/chat_check.py) port-forwards Tuwunel, registers a throwaway test user from the `matrix-registration` Secret, joins `#lobby:mindroom.local`, and waits for `@mindroom_helper`'s reply.
+
+### Uninstall
+
+```bash
+kind delete cluster --name mindroom
+```
+
+### Next steps
+
+For production clusters, continue with [Runtime-Only Deployment](#runtime-only-deployment) (external ConfigMaps, PVCs, and Secrets), [Worker Backends](#worker-backends) (dedicated Kubernetes workers), and [Backup and Restore](#backup-and-restore).
+To provision the hosted multi-tenant platform on Hetzner Cloud, see [SaaS Platform](saas-platform.md) and [`cluster/terraform/terraform-k8s/`](https://github.com/mindroom-ai/mindroom/blob/main/cluster/terraform/terraform-k8s/README.md).
 
 ## Charts
 
@@ -19,6 +112,8 @@ For the hosted multi-tenant platform (platform and instance charts), see [SaaS P
 | Platform | `cluster/k8s/platform/` | SaaS control plane (API, frontend, provisioner) |
 
 ## Prerequisites
+
+These apply to production clusters; for a local try, use the [quick start](#quick-start-local-kind-cluster).
 
 - A Kubernetes cluster (tested with k3s via kube-hetzner)
 - `kubectl` and `helm`

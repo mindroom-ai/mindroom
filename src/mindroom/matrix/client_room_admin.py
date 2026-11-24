@@ -16,6 +16,7 @@ import nio
 
 from mindroom.logging_config import get_logger
 from mindroom.matrix.event_types import (
+    ACTIVE_RUNS_EVENT_TYPE,
     AUTO_APPROVE_WINDOWS_EVENT_TYPE,
     BACKGROUND_JOBS_EVENT_TYPE,
     CALL_MEMBER_EVENT_TYPE,
@@ -26,7 +27,12 @@ from mindroom.matrix.joined_members import read_joined_members
 from mindroom.matrix.room_power import ROOM_ADMIN_POWER_LEVEL, has_privileged_creators, user_power_level
 from mindroom.matrix.room_reconciliation import RoomStateSnapshot, read_room_creators, read_state_event
 from mindroom.matrix.state import resolve_room_id
-from mindroom.matrix.state_failures import StateFailure, state_failure
+from mindroom.matrix.state_failures import (
+    StateFailure,
+    is_transient_homeserver_status,
+    response_http_status,
+    state_failure,
+)
 from mindroom.thread_tags import THREAD_TAGS_EVENT_TYPE
 
 if TYPE_CHECKING:
@@ -49,6 +55,7 @@ _MANAGED_ROOM_EVENT_POWER_LEVELS = {
     CALL_MEMBER_EVENT_TYPE: 0,
     # Matrix lets a user write a state key that starts with @ only when it is that user's own ID.
     BACKGROUND_JOBS_EVENT_TYPE: 0,
+    ACTIVE_RUNS_EVENT_TYPE: 0,
     MINDROOM_SERVER_EVENT_TYPE: 0,
     # The room's steward publishes the room's !auto_approve windows and MindRoom accounts, with whatever power it has.
     AUTO_APPROVE_WINDOWS_EVENT_TYPE: 0,
@@ -900,7 +907,9 @@ async def get_joined_rooms(client: nio.AsyncClient) -> list[str] | None:
     response = await client.joined_rooms()
     if isinstance(response, nio.JoinedRoomsResponse):
         return list(response.rooms)
-    logger.error("matrix_joined_rooms_fetch_failed", error=str(response))
+    http_status = response_http_status(response)
+    log = logger.warning if is_transient_homeserver_status(http_status) else logger.error
+    log("matrix_joined_rooms_fetch_failed", error=str(response), http_status=http_status)
     return None
 
 

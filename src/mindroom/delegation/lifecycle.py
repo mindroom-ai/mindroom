@@ -17,6 +17,7 @@ from mindroom.ai_run_metadata import model_payload, prior_usage_by_run, prompt_i
 from mindroom.authorization import is_sender_allowed_for_responder
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.budgets.pricing import model_prices, run_cost_usd
+from mindroom.config.models import unsupported_level_message
 from mindroom.constants import runtime_matrix_homeserver
 from mindroom.delegation.activity import ActivityFeed
 from mindroom.delegation.audit import (
@@ -690,8 +691,10 @@ def authorize_delegation(  # noqa: PLR0911
     if depth >= MAX_DELEGATION_DEPTH:
         return "Cannot delegate: the maximum delegation depth was reached."
     if model is not None and (not isinstance(model, str) or model not in active_config.models):
+        reason = unsupported_level_message(active_config.models, model)
         available_models = ", ".join(sorted(active_config.models))
-        return f"Cannot delegate: Unknown model '{model}'. Available models: {available_models}."
+        detail = reason or f"Unknown model '{model}'. Available models: {available_models}"
+        return f"Cannot delegate: {detail}."
     return active_config
 
 

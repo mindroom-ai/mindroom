@@ -18,6 +18,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
+from structlog.testing import capture_logs
 
 from mindroom import reply_lifecycle as rl
 from mindroom.cancellation import current_task_is_process_shutdown, request_task_cancel
@@ -4471,3 +4472,48 @@ async def test_a_route_lookup_gives_up_at_its_page_bound(tmp_path: Path) -> None
 
     assert await gateway.sent_route(_ROOM_ID, ["$question"]) is None
     assert requests.await_count == 10
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("delivery_turn_id", "http_status", "expect_warning"),
+    [
+        ("$cause", 502, True),
+        ("$cause", 503, True),
+        ("$cause", 504, True),
+        ("$cause", 403, False),
+        ("$cause", None, False),
+        (None, 502, False),
+    ],
+)
+async def test_durable_send_transient_http_status_logs_deferred_warning(
+    tmp_path: Path,
+    delivery_turn_id: str | None,
+    http_status: int | None,
+    expect_warning: bool,
+) -> None:
+    """Durable 502/503/504 sends log deferred warning; non-durable 502 and non-transient sends stay error."""
+    gateway = _gateway(tmp_path)
+    gateway.deps.runtime.client.room_send = AsyncMock(
+        return_value=nio.RoomSendError("unknown error", room_id=_ROOM_ID, http_status=http_status),
+    )
+    target = MessageTarget.resolve(_ROOM_ID, None, "$cause")
+    with capture_logs() as logs:
+        result = await gateway.send_text(
+            SendTextRequest(target=target, response_text="hello", delivery_turn_id=delivery_turn_id),
+        )
+    assert result is None
+    send_logs = [entry for entry in logs if entry["event"] == "matrix_message_send_failed"]
+    assert [(entry["log_level"], entry["http_status"]) for entry in send_logs] == [
+        ("warning" if expect_warning else "error", http_status),
+    ]
+    if expect_warning:
+        gateway.deps.logger.warning.assert_called_once()
+        args, kwargs = gateway.deps.logger.warning.call_args
+        assert "outbox recovery" in args[0]
+        assert kwargs["http_status"] == http_status
+        gateway.deps.logger.error.assert_not_called()
+    else:
+        gateway.deps.logger.error.assert_called_once()
+        _, kwargs = gateway.deps.logger.error.call_args
+        assert kwargs["http_status"] == http_status
