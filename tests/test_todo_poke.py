@@ -747,6 +747,55 @@ async def test_poke_escapes_markdown_prose_while_keeping_metadata_plain(tmp_path
 
 
 @pytest.mark.asyncio
+async def test_poke_escapes_leading_markdown_block_markers_without_mangling_prose(tmp_path: Path) -> None:
+    """Leading block markers stay inside one list item in HTML while normal punctuation stays unescaped."""
+    todo_root = tmp_path / "todo"
+    _write_thread(
+        todo_root,
+        "scope",
+        items=[
+            _item("b1", title="# Documentation", priority="critical"),
+            _item("b2", title="- nested", priority="high"),
+            _item("b3", title="+ nested", priority="high"),
+            _item("b4", title="1. Run tests", priority="medium"),
+            _item("b5", title="2) Run tests", priority="low"),
+        ],
+    )
+    sent_metadata: list[dict[str, Any]] = []
+    deps, _queried_rooms, sent = _deps(todo_root, sent_metadata=sent_metadata)
+
+    assert await scan_todo_pokes(TodoPokePolicy(quiet_seconds=0), deps) == 1
+
+    body = sent[0][1]
+    assert body.splitlines() == [
+        "@code **5 todos ready** — continue with these actionable items:",
+        "- \\# Documentation — Critical · `b1`",
+        "- \\- nested — High · `b2`",
+        "- \\+ nested — High · `b3`",
+        "- 1\\. Run tests — Medium · `b4`",
+        "- 2\\) Run tests — Low · `b5`",
+    ]
+    rendered_html = markdown_to_html(body)
+    assert "<h1>" not in rendered_html
+    assert "<ol>" not in rendered_html
+    assert rendered_html.count("<ul>") == 1
+    assert rendered_html.count("<li>") == 5
+    assert [item["title"] for item in sent_metadata[0]["items"]] == [
+        "# Documentation",
+        "- nested",
+        "+ nested",
+        "1. Run tests",
+        "2) Run tests",
+    ]
+    # Multi-# headings also stay plain list items, while mid-sentence punctuation and #issue stay clean.
+    assert todo_poke_module._escape_markdown_prose("## Subheading") == "\\## Subheading"
+    assert "<h2>" not in markdown_to_html(f"- {todo_poke_module._escape_markdown_prose('## Subheading')} — Low · `b6`")
+    assert todo_poke_module._escape_markdown_prose("Ship v2.4 (job 91c4e82a) for #123") == (
+        "Ship v2.4 (job 91c4e82a) for #123"
+    )
+
+
+@pytest.mark.asyncio
 async def test_scan_applies_quiet_and_initial_idle_gates(tmp_path: Path) -> None:
     """Recently changed or currently busy scopes should not query schedules or send."""
     todo_root = tmp_path / "todo"

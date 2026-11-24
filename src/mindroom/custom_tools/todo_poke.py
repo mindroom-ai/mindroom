@@ -62,6 +62,8 @@ _VISIBLE_ITEM_LIMIT = 5
 _RETRY_BACKSTOP_SECONDS = 60 * 60
 _MAX_UNCHANGED_REPOKES = 3
 _MARKDOWN_PROSE_ESCAPE_RE = re.compile(r"([\\`*_\[\]~<>])")
+_LEADING_BLOCK_MARKER_RE = re.compile(r"^([+-](?=\s|$)|#(?=#{0,5}(?:\s|$)))")
+_LEADING_ORDERED_LIST_RE = re.compile(r"^(\d+)([.)])(?=\s|$)")
 
 
 class TodoPokeDeliveryUnavailableError(RuntimeError):
@@ -497,7 +499,9 @@ def _literal_code_text(text: str) -> str:
 
 def _escape_markdown_prose(text: str) -> str:
     safe_text = " ".join(text.split()).replace("@", "@\u200b")
-    return _MARKDOWN_PROSE_ESCAPE_RE.sub(r"\\\1", safe_text)
+    escaped = _MARKDOWN_PROSE_ESCAPE_RE.sub(r"\\\1", safe_text)
+    escaped = _LEADING_BLOCK_MARKER_RE.sub(r"\\\1", escaped)
+    return _LEADING_ORDERED_LIST_RE.sub(r"\1\\\2", escaped)
 
 
 def _ordered_actionable_items(scope: _TodoPokeScope) -> list[TodoItemSnapshot]:
