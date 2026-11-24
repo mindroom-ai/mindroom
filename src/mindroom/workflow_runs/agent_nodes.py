@@ -204,7 +204,7 @@ def _workflow_source_kind(
     while current is not None and current.run_id not in seen:
         seen.add(current.run_id)
         for job_id in (current.job_id, current.origin_job_id):
-            if job_id is not None and (job := jobs.retained_job(job_id)) is not None and job.source_kind is not None:
+            if job_id is not None and (job := jobs.retained_job(job_id)) is not None:
                 return job.source_kind
         if current.parent_run_id is None:
             break

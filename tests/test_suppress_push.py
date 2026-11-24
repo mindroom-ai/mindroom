@@ -512,6 +512,51 @@ async def test_silent_workflow_child_approval_preserves_source_kind_and_isolates
         # Silent query surfaces Needs You (False); visible query still sees its own running work (True).
         assert not await has_working_jobs_for_conversation(runtime, silent_key)
         assert await has_working_jobs_for_conversation(runtime, visible_key)
+
+        # Clicking Resume starts a visible workflow job (source_kind=None) on the same run: its retained
+        # current job_id must win over the silent origin_job_id so the resumed child's approval surfaces
+        # on the visible conversation instead of staying hidden as silent_scheduled.
+        await _start_forever(
+            runtime,
+            "resumed_workflow",
+            owner,
+            kind="workflow",
+            adapter={"workflow": "nightly"},
+            source_kind=None,
+        )
+        resumed_run = replace(run, job_id="resumed_workflow", owner="resumed_workflow")
+        resumed_node = store.put_node(
+            WorkflowNode(
+                run_id=run.run_id,
+                key="@1",
+                kind="agent",
+                lane="main",
+                idx=1,
+                digest="d2",
+                request={"agent": "code", "prompt": "resume check"},
+                attempt=0,
+                label="resume check",
+            ),
+            epoch=run.epoch,
+        )
+        with patch("mindroom.workflow_runs.agent_nodes.delegation_call_job", side_effect=fake_delegation_job):
+            resumed_launched = await launch_child(
+                context,
+                resumed_run,
+                resumed_node,
+                run.epoch,
+                store=store,
+                jobs=runtime,
+            )
+
+        assert resumed_launched.handle is not None
+        resumed_child_id = resumed_launched.handle.ref
+        await wait_for_status(runtime, resumed_child_id, "awaiting_approval")
+        resumed_child = runtime.retained_job(resumed_child_id)
+        assert resumed_child is not None
+        assert resumed_child.source_kind is None
+        assert seen_context_source_kinds == [SILENT_SCHEDULE_SOURCE_KIND, None]
+        assert not await has_working_jobs_for_conversation(runtime, visible_key)
     finally:
         await runtime.shutdown()
 
