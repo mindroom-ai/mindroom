@@ -4337,6 +4337,7 @@ visibility = [
     "mindroom.custom_tools.matrix_user_writes",
     "mindroom.orchestration.tool_job_runtime",
     "mindroom.email_invites.receiver",
+    "mindroom.matrix.thread_fork_access",
 ]
 
 [[modules]]
@@ -4418,6 +4419,7 @@ visibility = [
     "mindroom.room_tree.note",
     "mindroom.email_invites.policy",
     "mindroom.custom_tools.email_invite",
+    "mindroom.matrix.thread_fork_access",
 ]
 
 [[modules]]
@@ -6507,6 +6509,17 @@ visibility = [
 [[modules]]
 path = "mindroom.matrix.room_membership"
 depends_on = []
+
+[[modules]]
+path = "mindroom.matrix.thread_fork_access"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.contacts.store",
+    "mindroom.entity_resolution",
+    "mindroom.matrix.client_delivery",
+    "mindroom.matrix.client_room_admin",
+    "mindroom.matrix.room_membership",
+]
 
 [[modules]]
 path = "mindroom.voice.visible_voice_echo"
