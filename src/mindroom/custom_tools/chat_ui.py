@@ -106,7 +106,8 @@ _FUNCTION_INSTRUCTIONS: dict[str, str] = {
         "show_canvas over ASCII art or Mermaid fences, since chat Markdown does not render Mermaid. For a "
         "quick choice between a few options, just ask in your reply. Prefer inline=True, which shows the page "
         "in the conversation, for anything the user should see or answer in the flow; use the panel for what "
-        "stays open beside it."
+        "stays open beside it. A new canvas is posted as a separate message below your reply text, so refer "
+        "to it as below (never above)."
     ),
     "read_canvas_state": (
         "read_canvas_state(canvas_event_id) reads what the user last did in a canvas you showed with "
@@ -484,6 +485,8 @@ class ChatUITools(Toolkit):
         see or answer in the flow: charts, diagrams, mockups, pickers, short forms,
         multi-step questions. Use the panel for what stays open beside the
         conversation: dashboards, slides, long documents, pages the user returns to.
+        A new canvas is posted as a separate message below your reply text, so refer
+        to it as below (never above).
         Inline, leave ``html`` and ``body`` without a background, card, title banner
         or side padding; give charts fixed pixel heights; do not use ``vh`` units or
         ``height:100%`` on ``html`` or ``body``. The page restarts when it scrolls out
