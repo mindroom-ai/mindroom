@@ -153,7 +153,7 @@ async def test_omitted_worker_tools_honors_environment(
     assert (await _invoke(agent, "run_shell_command", args=["unused"])).endswith(expected[0])
     assert await _invoke(agent, "add", a=1, b=2) == expected[1]
     if expected == ("local:shell", "local:calculator"):
-        assert "No tools use a worker runtime." in agent.prompt.role
+        assert "- All tools run in the primary MindRoom runtime." in agent.prompt.role
 
 
 @pytest.mark.asyncio
@@ -194,7 +194,7 @@ async def test_reasoning_retains_primary_run_state(
     assert not result.is_error
     assert context.session_state["reasoning_steps"]
     assert proxy_targets == []
-    assert "No tools use a worker runtime." in agent.prompt.role
+    assert "- All tools run in the primary MindRoom runtime." in agent.prompt.role
 
 
 @pytest.mark.asyncio
@@ -344,7 +344,7 @@ async def test_primary_runtime_tool_stays_local_after_real_materialization(
 
     result = json.loads(await _invoke(agent, "get_my_usage"))
     assert result["code"] == "context_unavailable"
-    assert "No tools use a worker runtime." in agent.prompt.role
+    assert "- All tools run in the primary MindRoom runtime." in agent.prompt.role
 
 
 @pytest.mark.asyncio
@@ -418,7 +418,7 @@ async def test_room_context_tool_uses_primary_matrix_client(
     assert result.content == "No scheduled tasks found."
     client.room_get_state.assert_awaited_once_with(target.room_id)
     assert proxy_targets == []
-    assert "No tools use a worker runtime." in agent.prompt.role
+    assert "- All tools run in the primary MindRoom runtime." in agent.prompt.role
 
 
 @pytest.mark.asyncio

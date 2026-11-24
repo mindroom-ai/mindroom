@@ -30,7 +30,6 @@ from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.sandbox_proxy import tool_placement
 from mindroom.tool_system.worker_routing import build_tool_execution_identity
 from mindroom.workers.backend_kinds import worker_backend_kind
-from mindroom.workspaces import resolve_agent_workspace_from_state_path
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Collection, Iterator
@@ -249,13 +248,7 @@ def _workspace(
 ) -> AgentWorkspace:
     identity = room_execution_identity(name, requester_id, room_id, config, runtime_paths)
     storage = resolve_agent_storage(name, config, runtime_paths, identity)
-    workspace = resolve_agent_workspace_from_state_path(
-        name,
-        config,
-        runtime_paths=runtime_paths,
-        state_storage_path=storage.state_root,
-        use_state_storage_path=storage.execution.policy.private_workspace_enabled,
-    )
+    workspace = storage.workspace(config, runtime_paths)
     tools = config_plugins(config, runtime_paths).tools
     agent_tools = resolve_agent_tools(config, name, tools)
     # Each toolkit's settings, as the agent's turn builds it, decide which of its functions it offers, and its

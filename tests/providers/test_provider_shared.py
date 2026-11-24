@@ -309,6 +309,48 @@ def test_an_error_event_without_a_status_is_classified_by_its_name_and_wording(
     assert (error.status_code, error.code, error.provider_code) == (None, None, code)
 
 
+_CYBERSECURITY_REFUSAL = (
+    "This content was flagged for possible cybersecurity risk. If this seems wrong, try rephrasing your request. "
+    "If you\u2019re doing authorized security work that requires more cyber permissive safeguards, "
+    "apply for Daybreak access."
+)
+
+
+@pytest.mark.parametrize(
+    ("status", "message", "expected"),
+    [
+        (400, _CYBERSECURITY_REFUSAL, InvalidRequest),
+        (403, _CYBERSECURITY_REFUSAL, ProviderError),
+        (None, _CYBERSECURITY_REFUSAL, ProviderError),
+        (400, "Flagged content. Apply for access if you are doing authorised security work.", InvalidRequest),
+        (403, "Not authorized to invoke this model", AuthenticationFailed),
+        (403, "Not authorised to invoke this model", AuthenticationFailed),
+        (403, "error: not_authorized", AuthenticationFailed),
+        (403, "error: not-authorized", AuthenticationFailed),
+        (403, "This key isn't authorized for this model", AuthenticationFailed),
+        (403, "Your credentials aren't authorized for this endpoint", AuthenticationFailed),
+        (403, "This request cannot be authorized", AuthenticationFailed),
+        (403, "The request could not be authorized", AuthenticationFailed),
+        (403, "Unauthorized request", AuthenticationFailed),
+        (403, "Unauthorised request", AuthenticationFailed),
+        (403, "Authentication failed", AuthenticationFailed),
+        (403, "Authorization failed", AuthenticationFailed),
+        (403, "invalid_auth: token expired", AuthenticationFailed),
+        (400, "invalid api key", AuthenticationFailed),
+        (400, "invalid x-api-key header", AuthenticationFailed),
+    ],
+)
+def test_positive_authorized_wording_is_not_classified_as_authentication_failure(
+    status: int | None,
+    message: str,
+    expected: type[ProviderError],
+) -> None:
+    """Policy refusals mentioning authorized work stay non-auth errors, while real auth wording still fails auth."""
+    error = classify_provider_error(message, provider="Test", status_code=status)
+
+    assert type(error) is expected
+
+
 @pytest.mark.parametrize(
     ("message", "code", "expected"),
     [

@@ -98,8 +98,9 @@ def get_user_friendly_error_message(
     )
 
     if isinstance(error, ModelSafeguardRefusal):
+        reason_hint = f" ({error.provider_code})" if error.provider_code else ""
         return (
-            f"{agent_prefix}⚠️ This model's safeguards blocked the request. "
+            f"{agent_prefix}⚠️ This model's safeguards blocked the request{reason_hint}. "
             "Choose a different model (`/model list`) or revise the prompt, then try again."
         )
     if needs_provider_key(error):

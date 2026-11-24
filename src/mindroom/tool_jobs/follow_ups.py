@@ -6,7 +6,7 @@ import hashlib
 import re
 from typing import TYPE_CHECKING
 
-from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
+from mindroom.dispatch_source import MESSAGE_SOURCE_KIND, SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.event_journal import EventClass, EventKind, InboundEvent
 from mindroom.hooks.context import MessageEnvelope
 from mindroom.message_target import MessageTarget
@@ -36,7 +36,8 @@ def _follow_up_event_id(key: ConversationKey, jobs: Sequence[BackgroundJob], str
     The name ends with ``streak``, how many follow-ups in a row it is, so a job its turn starts can count it from the
     job's own source after the follow-up settled.
     """
-    conversation = "\n".join((key.recipient, key.room_id, key.thread_id or "", key.requester_id))
+    parts = (key.recipient, key.room_id, key.thread_id or "", key.requester_id)
+    conversation = "\n".join((*parts, "silent") if key.silent else parts)
     jobs_digest = _digest(",".join(sorted(job.job_id for job in jobs)))
     return f"{_FOLLOW_UP_ID_PREFIX}{_digest(conversation)}:{jobs_digest}:{streak}"
 
@@ -54,6 +55,9 @@ def follow_up_event(
     now_ms: int,
 ) -> InboundEvent:
     """Return a follow-up's journal source, which is not a Matrix event."""
+    source: dict[str, object] = {"requester_id": key.requester_id}
+    if key.silent:
+        source["silent"] = True
     return InboundEvent(
         event_id=follow_up_id,
         room_id=key.room_id,
@@ -62,7 +66,7 @@ def follow_up_event(
         event_class=EventClass.ACTIONABLE,
         sender=sender_id,
         origin_server_ts=now_ms,
-        source={"requester_id": key.requester_id},
+        source=source,
     )
 
 
@@ -73,7 +77,7 @@ def follow_up_key(event: JournalEvent, recipient: str) -> ConversationKey:
         room_id=event.room_id,
         thread_id=event.thread_id,
         requester_id=str(event.source["requester_id"]),
-        silent=False,
+        silent=event.source.get("silent") is True,
     )
 
 
@@ -109,7 +113,7 @@ def follow_up_envelope(
             sender_kind=SenderKind.MANAGED_ENTITY,
             requester_kind=SenderKind.MANAGED_ENTITY if requester_entity_name is not None else SenderKind.USER,
             intent=TurnIntent.JOB_FOLLOW_UP,
-            source_kind=MESSAGE_SOURCE_KIND,
+            source_kind=SILENT_SCHEDULE_SOURCE_KIND if key.silent else MESSAGE_SOURCE_KIND,
             trust=TurnTrust.TRUSTED_INTERNAL,
         ),
     )

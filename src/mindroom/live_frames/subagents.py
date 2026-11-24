@@ -14,7 +14,7 @@ from contextvars import Context
 from dataclasses import dataclass
 from functools import partial
 from time import monotonic
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any, Protocol
 
 from mindroom.background_tasks import create_background_task
 from mindroom.delegation.state import TERMINAL_CHILD_STATUSES
@@ -62,6 +62,27 @@ _RELAY_OFF_SECONDS = 60.0
 _MAX_MODEL_CHARACTERS = 200
 
 type _Frame = dict[str, object]
+
+
+class FrameStream(Protocol):
+    """One run's frames as the publisher of its account and room sends them, whatever they show."""
+
+    # Whether the stream's latest state has not gone out yet.
+    dirty: bool
+
+    @property
+    def status(self) -> str:
+        """The latest status of the run."""
+
+    @property
+    def ended(self) -> bool:
+        """Whether the run has ended, so the next frame is the stream's last."""
+
+    def keepalive_at(self) -> float:
+        """Return when the run owes clients its next snapshot though nothing changed; `math.inf` for never."""
+
+    async def send_next(self, client: nio.AsyncClient, room_id: str, now: float) -> LiveSendOutcome | None:
+        """Send the latest state as the next frame; return the outcome, None when there was nothing to send."""
 
 
 def _run_docs(snapshot: SubagentSnapshot, *, previews: bool, text_cut: int = 0) -> LiveDocs:
@@ -137,22 +158,70 @@ def _trimmed(before: SubagentSnapshot, after: SubagentSnapshot) -> bool:
     return after.items_dropped != before.items_dropped or (oldest is not None and not now_oldest.startswith(oldest))
 
 
-@dataclass
-class _Stream:
-    """One run's frames: its stream id, the highest sequence number used, its latest snapshot, and what landed."""
+@dataclass(kw_only=True)
+class RunFrameStream[Landed]:
+    """Shared envelope, watermark, and send/ack transition for one live run stream."""
 
     sid: str
+    seq: int = -1
+    dirty: bool = True
+    # The view of the last frame that landed; None makes the next frame a snapshot.
+    landed: Landed | None = None
+    snapshot_at: float = 0.0
+
+    def envelope(self, run: str, meta: object, **part: object) -> _Frame:
+        """Return the next frame envelope carrying *meta* and either `snapshot` or `delta`."""
+        return {"v": FRAME_VERSION, "run": run, "sid": self.sid, "seq": self.seq + 1, "meta": meta, **part}
+
+    async def send_frame(
+        self,
+        client: nio.AsyncClient,
+        room_id: str,
+        frame: _Frame,
+        now: float,
+        *,
+        txn_prefix: str,
+        event_type: str,
+        view: Landed,
+    ) -> LiveSendOutcome:
+        """Send *frame* with the next sequence number and update watermark state from the outcome."""
+        self.seq += 1
+        outcome = await send_live_frame(
+            client,
+            room_id,
+            frame,
+            transaction_id=f"{txn_prefix}.{self.sid}.{self.seq}",
+            event_type=event_type,
+        )
+        if outcome is LiveSendOutcome.SENT:
+            self.landed = view
+            if "snapshot" in frame:
+                self.snapshot_at = now
+        elif outcome is LiveSendOutcome.RETRY:
+            self.landed = None
+            self.dirty = True
+        return outcome
+
+
+@dataclass(kw_only=True)
+class _Stream(RunFrameStream["tuple[SubagentSnapshot, LiveDocs]"]):
+    """One subagent run's frames: its latest snapshot, preview toggle, and last snapshot fit."""
+
     snapshot: SubagentSnapshot
     previews: bool
-    seq: int = -1
-    # Whether the latest snapshot has not gone out yet.
-    dirty: bool = True
-    # The snapshot and documents of the last frame that landed; None makes the next frame a snapshot.
-    landed: tuple[SubagentSnapshot, LiveDocs] | None = None
-    snapshot_at: float = 0.0
     # How the last snapshot fitted the size limit: whether it kept the previews and how much of the oldest text it
     # cut. Deltas keep that fit, so they stay appends.
     fit: tuple[bool, int] = (True, 0)
+
+    @property
+    def status(self) -> str:
+        """The latest status of the run."""
+        return self.snapshot.status
+
+    @property
+    def ended(self) -> bool:
+        """Whether the run has ended."""
+        return self.snapshot.status in TERMINAL_CHILD_STATUSES
 
     def keepalive_at(self) -> float:
         """Return when a working run owes clients its next snapshot; never for a paused or ended one."""
@@ -184,22 +253,15 @@ class _Stream:
             frame = self._frame(snapshot, delta=delta)
             if not fits(frame):
                 frame, docs = self._fitted_snapshot(snapshot, fits)
-        self.seq += 1
-        outcome = await send_live_frame(
+        return await self.send_frame(
             client,
             room_id,
             frame,
-            transaction_id=f"subagents.{self.sid}.{self.seq}",
+            now,
+            txn_prefix="subagents",
             event_type=_SUBAGENT_EVENT_TYPE,
+            view=(snapshot, docs),
         )
-        if outcome is LiveSendOutcome.SENT:
-            self.landed = (snapshot, docs)
-            if "snapshot" in frame:
-                self.snapshot_at = now
-        elif outcome is LiveSendOutcome.RETRY:
-            self.landed = None
-            self.dirty = True
-        return outcome
 
     def _frame(
         self,
@@ -209,19 +271,15 @@ class _Stream:
         delta: _Frame | None = None,
     ) -> _Frame:
         """Return the next frame of the run's stream, carrying either a whole snapshot, ``docs``, or a ``delta``."""
-        frame: _Frame = {"v": FRAME_VERSION, "run": snapshot.delegation_id, "sid": self.sid, "seq": self.seq + 1}
         meta = _run_meta(snapshot, full=docs is not None)
         if snapshot.usage is not None:
             # Not in ``_run_meta``, whose change alone sends a snapshot: each tool call changes the usage, and its
             # frame stays the delta that adds its row.
             meta["usage"] = dict(snapshot.usage)
-        frame["meta"] = meta
         if docs is not None:
-            frame["snapshot"] = docs.to_json()
-        else:
-            assert delta, "a delta frame carries at least one change"
-            frame["delta"] = delta
-        return frame
+            return self.envelope(snapshot.delegation_id, meta, snapshot=docs.to_json())
+        assert delta, "a delta frame carries at least one change"
+        return self.envelope(snapshot.delegation_id, meta, delta=delta)
 
     def _fitted_snapshot(self, snapshot: SubagentSnapshot, fits: Callable[[_Frame], bool]) -> tuple[_Frame, LiveDocs]:
         """Return a snapshot frame within the size limit: without previews if need be, then without the oldest text.
@@ -255,7 +313,7 @@ class _Stream:
 
 
 class _Publisher:
-    """Send the frames of every sub-agent run one account shows in one room, within one budget.
+    """Send the frames of every run one account shows in one room, a sub-agent's or a workflow's, within one budget.
 
     One send is in flight at a time and sends are at least 125 ms apart, serving the runs with something to send in
     turn. A run's stream ends after the frame of its end, or when the room refuses one of its frames; such a run sends
@@ -273,27 +331,31 @@ class _Publisher:
         self._room_id = key[1]
         self._client = client
         self._homeserver_url = homeserver_url
-        self._streams: dict[str, _Stream] = {}
+        self._streams: dict[str, FrameStream] = {}
         # The latest status of each unfinished run whose frame the room refused.
         self._refused: dict[str, str] = {}
         self._wake = asyncio.Event()
         self._task: asyncio.Task[None] | None = None
 
-    def update(self, snapshot: SubagentSnapshot, *, previews: bool) -> None:
-        """Queue a run's latest snapshot for its next frame, starting the publisher when it is idle."""
-        run = snapshot.delegation_id
+    def stop(self, run: str) -> None:
+        """Close *run*'s stream without disturbing the publisher's other runs."""
+        self._streams.pop(run, None)
+        self._refused.pop(run, None)
+        self._wake.set()
+
+    def update(self, run: str, status: str, *, ended: bool, put: Callable[[Any], FrameStream]) -> None:
+        """Queue a run's latest state for its next frame, starting the publisher when it is idle.
+
+        *put* returns the run's stream with that state: a new one for None, else the one it is handed.
+        """
         refused = self._refused.get(run)
         if refused is not None:
-            resumed = refused == "paused" and snapshot.status != "paused"
-            if snapshot.status not in TERMINAL_CHILD_STATUSES and not resumed:
-                self._refused[run] = snapshot.status
+            resumed = refused == "paused" and status != "paused"
+            if not ended and not resumed:
+                self._refused[run] = status
                 return
             del self._refused[run]
-        stream = self._streams.get(run)
-        if stream is None:
-            self._streams[run] = _Stream(sid=new_publisher_id(), snapshot=snapshot, previews=previews)
-        else:
-            stream.snapshot, stream.previews, stream.dirty = snapshot, previews, True
+        self._streams[run] = put(self._streams.get(run))
         self._wake.set()
         if self._task is None or self._task.done():
             # Outside any turn's context: the frames of every run in the room go out from here.
@@ -332,7 +394,8 @@ class _Publisher:
             client_missing = False
             outcome = await self._send_next(client)
             if outcome is None:
-                await self._wait()
+                if self._streams:
+                    await self._wait()
             else:
                 # A failed send waits longer, so a homeserver failing every send at once, as through a proxy while it
                 # restarts, is not asked again every 125 ms.
@@ -347,10 +410,12 @@ class _Publisher:
             outcome = await stream.send_next(client, self._room_id, now) if due else None
             if outcome is None:
                 continue
+            if self._streams.get(run) is not stream:
+                return outcome
             del self._streams[run]
-            ended = stream.snapshot.status in TERMINAL_CHILD_STATUSES
+            ended = stream.ended
             if outcome is LiveSendOutcome.STOP and not ended:
-                self._refused[run] = stream.snapshot.status
+                self._refused[run] = stream.status
             elif stream.dirty or not ended:
                 # A run that ended while its refused frame was in flight still gets its end's one attempt.
                 self._streams[run] = stream
@@ -385,10 +450,51 @@ def publish(
     ``client`` returns the account's live client at each send. For a minute after the homeserver's relay check failed or
     said no, a snapshot that would start a publisher is dropped; publishers already sending keep going.
     """
+
+    def put(stream: _Stream | None) -> _Stream:
+        if stream is None:
+            return _Stream(sid=new_publisher_id(), snapshot=snapshot, previews=previews)
+        stream.snapshot, stream.previews, stream.dirty = snapshot, previews, True
+        return stream
+
+    ended = snapshot.status in TERMINAL_CHILD_STATUSES
+    publish_stream(
+        account,
+        room_id,
+        snapshot.delegation_id,
+        snapshot.status,
+        ended=ended,
+        put=put,
+        client=client,
+        homeserver_url=homeserver_url,
+    )
+
+
+def publish_stream(
+    account: str,
+    room_id: str,
+    run: str,
+    status: str,
+    *,
+    ended: bool,
+    put: Callable[[Any], FrameStream],
+    client: Callable[[], nio.AsyncClient | None],
+    homeserver_url: str,
+) -> None:
+    """Queue the latest state of ``run`` as frames from ``account`` in ``room_id``, paced with the account's others there.
+
+    ``put`` returns the run's stream with that state (`_Publisher.update`).
+    """
     publisher = _PUBLISHERS.get((account, room_id))
     if publisher is None:
         if monotonic() < _RELAY_OFF_UNTIL.get(homeserver_url, -math.inf):
             return
         publisher = _Publisher((account, room_id), client=client, homeserver_url=homeserver_url)
         _PUBLISHERS[(account, room_id)] = publisher
-    publisher.update(snapshot, previews=previews)
+    publisher.update(run, status, ended=ended, put=put)
+
+
+def stop_stream(account: str, room_id: str, run: str) -> None:
+    """Close ``run``'s stream on ``(account, room_id)``'s publisher, if one is open."""
+    if (publisher := _PUBLISHERS.get((account, room_id))) is not None:
+        publisher.stop(run)

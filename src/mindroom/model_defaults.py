@@ -317,7 +317,12 @@ CONFIG_INIT_MODEL_PRESETS: Mapping[str, ModelPreset] = MappingProxyType(
         "anthropic": ModelPreset("anthropic", _ANTHROPIC_SONNET, 1_000_000),
         "bedrock_claude": ModelPreset("bedrock_claude", _AWS_BEDROCK_CLAUDE_OPUS, 1_000_000),
         "azure": ModelPreset("azure", _AZURE_OPENAI_DEFAULT_DEPLOYMENT),
-        "claude_code": ModelPreset("claude_code", _ANTHROPIC_SONNET, _CLAUDE_CODE_CONTEXT_WINDOW),
+        "claude_code": ModelPreset(
+            "claude_code",
+            _ANTHROPIC_SONNET,
+            _CLAUDE_CODE_CONTEXT_WINDOW,
+            display_name="Claude Sonnet 5.5",
+        ),
         "codex": ModelPreset("codex", _CODEX_GPT, _CODEX_CONTEXT_WINDOW, reasoning_effort="medium", display_name="Sol"),
         "kimi": ModelPreset("kimi", _KIMI, 1_048_576),
         "llama_cpp": ModelPreset("llama_cpp", LLAMA_CPP_GEMMA, 128_000),
@@ -369,7 +374,26 @@ CONFIG_INIT_MODEL_ALTERNATIVES: Mapping[str, tuple[tuple[str, ModelPreset], ...]
 # Extra named models that config init writes next to `models.default`.
 CONFIG_INIT_ADDITIONAL_MODELS: Mapping[str, tuple[tuple[str, ModelPreset], ...]] = MappingProxyType(
     {
-        "claude_code": (("haiku", ModelPreset("claude_code", _ANTHROPIC_HAIKU, _CLAUDE_CODE_CONTEXT_WINDOW)),),
+        "claude_code": (
+            (
+                "opus",
+                ModelPreset(
+                    "claude_code",
+                    _ANTHROPIC_OPUS,
+                    _CLAUDE_CODE_CONTEXT_WINDOW,
+                    display_name="Claude Opus 5.5",
+                ),
+            ),
+            (
+                "haiku",
+                ModelPreset(
+                    "claude_code",
+                    _ANTHROPIC_HAIKU,
+                    _CLAUDE_CODE_CONTEXT_WINDOW,
+                    display_name="Claude Haiku 5.5",
+                ),
+            ),
+        ),
         "codex": (
             (
                 "astra",

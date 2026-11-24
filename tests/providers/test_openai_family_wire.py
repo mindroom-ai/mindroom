@@ -33,6 +33,7 @@ from mindroom.error_handling import get_user_friendly_error_message
 from mindroom.history.request_size import RequestSizer
 from mindroom.history.summary_call import generate_compaction_summary
 from mindroom.llm.errors import (
+    MALFORMED_TOOL_CALL,
     AuthenticationFailed,
     ContextWindowExceeded,
     InvalidRequest,
@@ -68,7 +69,8 @@ from mindroom.providers.openai.response_replay import RESPONSE_OUTPUT_KEY
 from mindroom.providers.openai.responses import ResponsesAdapter
 from mindroom.providers.openai.responses_wire import ResponsesStream
 from mindroom.providers.pipeline import retry as retry_stage
-from mindroom.providers.pipeline.media import FALLBACK_MARKER
+from mindroom.providers.pipeline.guidance_retry import MALFORMED_FUNCTION_CALL_GUIDANCE
+from mindroom.providers.pipeline.media import ANSWERED_AUDIO_MARKER, FALLBACK_MARKER
 from mindroom.redaction import redact_sensitive_data
 from mindroom.token_counting.counts import count
 from mindroom.token_counting.requests import MEDIA_ALLOWANCE_TOKENS, RequestParts
@@ -368,6 +370,220 @@ async def test_chat_finish_reason_maps_to_stop_reason(tmp_path: Path, finish_rea
 
     assert turn.stop_reason == stop
     assert "finish_reason" not in (turn.message.provider_data or {})
+
+
+def _openrouter_choice_chunk(
+    delta: dict[str, Any],
+    *,
+    finish_reason: str | None = None,
+    native_finish_reason: str | None = None,
+) -> dict[str, Any]:
+    choice: dict[str, Any] = {"index": 0, "delta": delta, "finish_reason": finish_reason}
+    if native_finish_reason is not None:
+        choice["native_finish_reason"] = native_finish_reason
+    return {
+        "data": {
+            "id": "gen-or-1",
+            "object": "chat.completion.chunk",
+            "created": 1,
+            "model": "google/gemini-4-neon",
+            "choices": [choice],
+        },
+    }
+
+
+@pytest.mark.asyncio
+async def test_openrouter_recitation_finish_reason_maps_to_content_filter_and_logs(tmp_path: Path) -> None:
+    """OpenRouter reasoning-only + finish_reason='error', native_finish_reason='RECITATION' becomes content_filter."""
+    reply = _streamed_chat(
+        _openrouter_choice_chunk({"reasoning": "Thinking..."}),
+        _openrouter_choice_chunk({}, finish_reason="error", native_finish_reason="RECITATION"),
+        _DONE,
+    )
+    model_cfg = {"provider": "openrouter", "id": "google/gemini-4-neon", "api_key": "k"}
+
+    adapter_dir = tmp_path / "adapter"
+    adapter_dir.mkdir()
+    built = _Built(adapter_dir, model_cfg, reply)
+    with capture_logs() as adapter_logs:
+        events = [event async for event in built.adapter.stream(ModelRequest(messages=[_user()]))]
+
+    completed = events[-1]
+    assert isinstance(completed, TurnCompleted)
+    assert (completed.stop_reason, completed.raw_stop_reason) == ("content_filter", "RECITATION")
+    assert completed.message.reasoning_content == "Thinking..."
+    assert completed.message.content is None
+    assert "finish_reason" not in (completed.message.provider_data or {})
+    assert "native_finish_reason" not in (completed.message.provider_data or {})
+    assert any(
+        entry["event"] == "chat_abnormal_finish"
+        and entry["finish_reason"] == "error"
+        and entry["native_finish_reason"] == "RECITATION"
+        and entry["stop_reason"] == "content_filter"
+        for entry in adapter_logs
+    )
+
+    wrapped_dir = tmp_path / "wrapped"
+    wrapped_dir.mkdir()
+    wrapped = _Built(wrapped_dir, model_cfg, reply)
+    with capture_logs() as pipe_logs, pytest.raises(ModelSafeguardRefusal) as raised:
+        await _turn(wrapped, ModelRequest(messages=[_user()]))
+
+    assert raised.value.provider_code == "RECITATION"
+    assert "RECITATION" in str(raised.value)
+    assert len(wrapped.requests) == 1
+    [usage_line] = [entry for entry in pipe_logs if entry["event"] == "LLM usage"]
+    assert (usage_line["stop_reason"], usage_line["raw_stop_reason"]) == ("content_filter", "RECITATION")
+
+
+@pytest.mark.asyncio
+async def test_openrouter_malformed_function_call_triggers_guidance_retry_before_commit(tmp_path: Path) -> None:
+    """OpenRouter MALFORMED_FUNCTION_CALL raises MALFORMED_TOOL_CALL and retries with guidance when uncommitted."""
+    model_cfg = {"provider": "openrouter", "id": "google/gemini-4-neon", "api_key": "k"}
+    malformed = _streamed_chat(
+        _openrouter_choice_chunk({}, finish_reason="error", native_finish_reason="MALFORMED_FUNCTION_CALL"),
+        _DONE,
+    )
+    ok = _chat_reply(_chunk({"content": "Fixed."}, finish_reason="stop"))
+
+    adapter_dir = tmp_path / "adapter"
+    adapter_dir.mkdir()
+    built = _Built(adapter_dir, model_cfg, malformed)
+    with pytest.raises(ProviderError) as raised:
+        await _adapter_turn(built, ModelRequest(messages=[_user()]))
+    assert (raised.value.code, raised.value.provider_code) == (MALFORMED_TOOL_CALL, "MALFORMED_FUNCTION_CALL")
+
+    sent: list[httpx2.Request] = []
+    replies = iter([malformed, ok])
+
+    def respond(request: httpx2.Request) -> httpx.Response:
+        sent.append(request)
+        return encoded_response(next(replies))
+
+    pipe_dir = tmp_path / "pipe"
+    pipe_dir.mkdir()
+    provider = pipeline_provider(openai_family_adapter(model_cfg, pipe_dir, respond))
+    turn = await complete(provider, ModelRequest(messages=[_user()]))
+
+    assert turn.content == "Fixed."
+    assert len(sent) == 2
+    second_messages = json.loads(sent[1].content)["messages"]
+    assert second_messages[-1]["content"] == MALFORMED_FUNCTION_CALL_GUIDANCE
+
+
+@pytest.mark.asyncio
+async def test_openrouter_generic_error_finish_reason_retries_uncommitted_and_fails_when_committed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Generic finish_reason='error' raises ProviderUnavailable: retries uncommitted, fails immediately after delta."""
+    monkeypatch.setattr(retry_stage, "_retry_delay_seconds", lambda _attempt: 0.0)
+    model_cfg = {"provider": "openrouter", "id": "google/gemini-4-neon", "api_key": "k"}
+    uncommitted_error = _streamed_chat(_openrouter_choice_chunk({}, finish_reason="error"), _DONE)
+    ok = _chat_reply(_chunk({"content": "Recovered."}, finish_reason="stop"))
+
+    sent: list[httpx2.Request] = []
+    replies = iter([uncommitted_error, ok])
+
+    def respond(request: httpx2.Request) -> httpx.Response:
+        sent.append(request)
+        return encoded_response(next(replies))
+
+    retry_dir = tmp_path / "retry"
+    retry_dir.mkdir()
+    provider = pipeline_provider(openai_family_adapter(model_cfg, retry_dir, respond))
+    turn = await complete(provider, ModelRequest(messages=[_user()]))
+    assert (turn.content, len(sent)) == ("Recovered.", 2)
+
+    committed_error = _streamed_chat(
+        _openrouter_choice_chunk({"reasoning": "Started thinking..."}),
+        _openrouter_choice_chunk({}, finish_reason="error"),
+        _DONE,
+    )
+    committed_dir = tmp_path / "committed"
+    committed_dir.mkdir()
+    committed = _Built(committed_dir, model_cfg, committed_error)
+    with pytest.raises(ProviderUnavailable) as raised:
+        await _turn(committed, ModelRequest(messages=[_user()]))
+    assert raised.value.provider_code == "error"
+    assert len(committed.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_openrouter_top_level_sse_error_takes_precedence_over_recitation_finish_reason(tmp_path: Path) -> None:
+    """A terminal SSE chunk with both top-level error (502) and choice RECITATION fails via SDK ProviderUnavailable."""
+    reply = _streamed_chat(
+        {
+            "data": {
+                "id": "gen-or-mixed",
+                "object": "chat.completion.chunk",
+                "created": 1,
+                "model": "google/gemini-4-neon",
+                "error": {"code": 502, "message": "Provider returned error"},
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {},
+                        "finish_reason": "error",
+                        "native_finish_reason": "RECITATION",
+                    },
+                ],
+            },
+        },
+        _DONE,
+    )
+    model_cfg = {"provider": "openrouter", "id": "google/gemini-4-neon", "api_key": "k"}
+    built = _Built(tmp_path, model_cfg, reply)
+
+    with pytest.raises(ProviderUnavailable):
+        await _adapter_turn(built, ModelRequest(messages=[_user()]))
+
+
+@pytest.mark.asyncio
+async def test_chat_unknown_finish_reason_without_native_reason_falls_back_to_finish_reason(tmp_path: Path) -> None:
+    """An unknown finish_reason without native_finish_reason surfaces as incomplete with raw_stop_reason set."""
+    reply = _streamed_chat(_chunk({"content": "Partial"}, finish_reason="eos"), _DONE)
+    built = _Built(tmp_path, _OPENAI_CHAT, reply)
+
+    events = [event async for event in built.adapter.stream(ModelRequest(messages=[_user()]))]
+
+    completed = events[-1]
+    assert isinstance(completed, TurnCompleted)
+    assert (completed.stop_reason, completed.raw_stop_reason) == ("incomplete", "eos")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("event_type", "status", "incomplete_details", "expected_stop", "expected_raw"),
+    [
+        ("response.completed", "completed", None, "end", None),
+        ("response.incomplete", "incomplete", {"reason": "max_output_tokens"}, "output_limit", "max_output_tokens"),
+        ("response.incomplete", "incomplete", {"reason": "content_filter"}, "content_filter", "content_filter"),
+        ("response.incomplete", "incomplete", None, "incomplete", "incomplete"),
+    ],
+    ids=["completed", "max-output-tokens", "content-filter", "incomplete-without-details"],
+)
+async def test_responses_stop_populates_raw_stop_reason_only_when_abnormal(
+    tmp_path: Path,
+    event_type: str,
+    status: str,
+    incomplete_details: dict[str, Any] | None,
+    expected_stop: str,
+    expected_raw: str | None,
+) -> None:
+    """Abnormal Responses stops carry ``incomplete_details.reason`` (falling back to status); normal stops omit it."""
+    ended = {
+        "type": event_type,
+        "sequence_number": 9,
+        "response": _response(status, incomplete_details=incomplete_details),
+    }
+    built = _Built(tmp_path, _OPENAI_RESPONSES, _responses_reply(*_text_events("Partial"), ended))
+
+    events = [event async for event in built.adapter.stream(ModelRequest(messages=[_user()]))]
+
+    completed = events[-1]
+    assert isinstance(completed, TurnCompleted)
+    assert (completed.stop_reason, completed.raw_stop_reason) == (expected_stop, expected_raw)
 
 
 @pytest.mark.asyncio
@@ -1020,6 +1236,41 @@ async def test_a_chat_route_sends_audio_and_file_attachments_inline(tmp_path: Pa
         },
         {"type": "file", "file": {"filename": "report.pdf", "file_data": f"data:application/pdf;base64,{pdf}"}},
     ]
+
+
+@pytest.mark.asyncio
+async def test_openrouter_chat_sends_voice_audio_only_before_an_assistant_message(tmp_path: Path) -> None:
+    """Request 1 carries ``input_audio``; requests 2 and 3 carry a byte-identical text note without audio."""
+    voice_path = tmp_path / "att_voice.wav"
+    voice_path.write_bytes(b"RIFF\x24\x00\x00\x00WAVEfmt synthetic")
+    voice = Message(
+        role="user",
+        content="🎤 Check the tests.",
+        audio=[Audio(id="att_voice", filepath=str(voice_path), mime_type="audio/wav")],
+    )
+    call_1 = Message(
+        role="assistant",
+        tool_calls=[{"id": "call_1", "type": "function", "function": {"name": "run", "arguments": "{}"}}],
+    )
+    tool_1 = Message(role="tool", tool_call_id="call_1", content="ok")
+    call_2 = Message(
+        role="assistant",
+        tool_calls=[{"id": "call_2", "type": "function", "function": {"name": "run", "arguments": "{}"}}],
+    )
+    tool_2 = Message(role="tool", tool_call_id="call_2", content="ok")
+    config = {"provider": "openrouter", "id": "google/gemini-4-neon", "api_key": "test-key"}
+    built = _Built(tmp_path, config, _chat_reply(_chunk({"content": "ok"}, finish_reason="stop")))
+
+    await _turn(built, ModelRequest(messages=[voice]))
+    await _turn(built, ModelRequest(messages=[voice, call_1, tool_1]))
+    await _turn(built, ModelRequest(messages=[voice, call_1, tool_1, call_2, tool_2]))
+
+    first, second, third = (built.body(i)["messages"][0] for i in range(3))
+    assert any(part.get("type") == "input_audio" for part in first["content"])
+    assert isinstance(second["content"], str)
+    assert ANSWERED_AUDIO_MARKER in second["content"]
+    assert "audio (att_voice)" in second["content"]
+    assert json.dumps(second, sort_keys=True) == json.dumps(third, sort_keys=True)
 
 
 @pytest.mark.asyncio

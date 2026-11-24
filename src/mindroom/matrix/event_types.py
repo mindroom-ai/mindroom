@@ -19,5 +19,16 @@ MINDROOM_ACCOUNTS_EVENT_TYPE = "io.mindroom.accounts"
 # It keeps the default state level, so MindRoom Chat trusts a binding only ordinary members cannot write.
 # Chat folds voice echoes from that bound account and from accounts listed in its trusted roster.
 ROUTER_BINDING_EVENT_TYPE = "io.mindroom.router"
+# The live graph of a workflow run: ephemeral frames, sent as `io.mindroom.subagents` frames are.
+WORKFLOW_FRAME_EVENT_TYPE = "io.mindroom.workflow"
+# The card of a workflow run: a notice of the run's agent that carries the run under this content key, and is edited.
+WORKFLOW_RUN_CONTENT_KEY = "io.mindroom.workflow_run"
+# The card of a workflow run's question to its requester: a notice that carries the question under this content key.
+WORKFLOW_QUESTION_CONTENT_KEY = "io.mindroom.workflow_question"
+# A person's answer to such a card, `{run, node, option | text}` as a reply to it, and why one did not count.
+WORKFLOW_ANSWER_EVENT_TYPE = "io.mindroom.workflow_answer"
+WORKFLOW_ANSWER_REJECTED_EVENT_TYPE = "io.mindroom.workflow_answer_rejected"
+# What a person's client sends to act on a workflow run: `{run, action}` in the run's thread.
+WORKFLOW_CONTROL_EVENT_TYPE = "io.mindroom.workflow_control"
 # Room admins set per-room MindRoom settings, one state event per setting keyed by its name, content `{"value": ...}`.
 ROOM_SETTINGS_EVENT_TYPE = "io.mindroom.room_settings"

@@ -6,6 +6,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from enum import StrEnum
+from typing import Literal
 from uuid import UUID
 
 from mindroom.workers.models import process_worker_key
@@ -67,6 +68,8 @@ class ScriptRunRecord:
     worker_backend_locator: str | None = None
     snapshot_locator: str | None = None
     recovery_signature: str | None = None
+    workflow_run_id: str | None = None
+    """The workflow run this script run is an attempt of; `None` for a plain script."""
     name: str | None = None
     local_unsafe: bool = False
     resource_profile: str | None = None
@@ -83,6 +86,18 @@ class ScriptRunRecord:
     output: str = ""
     cancel_requested_at: str | None = None
     cancellation_reason: str | None = None
+
+    @property
+    def entry(self) -> Literal["script", "workflow"]:
+        """What the shim does with the source: run it as `__main__`, or hand it to the workflow SDK."""
+        return "script" if self.workflow_run_id is None else "workflow"
+
+    def launch_allows(self, grant: ScriptToolGrant) -> bool:
+        """Whether the launch lets the run call *grant*; the owner's live tools are checked at every call besides.
+
+        A plain script may call only its launch snapshot; a workflow attempt answers to the live tools alone.
+        """
+        return self.workflow_run_id is not None or grant in self.grants
 
     @property
     def accepts_calls(self) -> bool:
@@ -102,6 +117,10 @@ class ScriptCallRecord:
     created_at: str
     result: object | None = None
     error: object | None = None
+    effect_started_at: str | None = None
+    """Set after hooks and approval, right before the tool is invoked; unset, the call provably never ran."""
+    metadata: dict[str, object] | None = None
+    """Structured facts the tool reported about its result, such as a command's `exit_code`."""
 
 
 @dataclass(frozen=True, slots=True)

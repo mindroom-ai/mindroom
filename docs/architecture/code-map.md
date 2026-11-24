@@ -243,7 +243,9 @@ Matrix sync callback
 | `orchestration/call_transcripts_runtime.py` | The call transcript service in the runtime: the steward it reads each room through and the poster it posts through, the loop that checks calls every 15 seconds (while call transcripts are off, only holding calls to the one-day limit), the service the API routes reach, and the agent call in a room, read through the agent answering calls there |
 | `orchestration/tool_job_runtime.py` | Managed job lifecycle: recovery, revocation, published jobs state, follow-ups, and retention |
 | `orchestration/script_runtime.py` | Background script lifecycle: startup recovery of preserved runs, reload revocation, maintenance passes, the published worker lease, and when script tools are served |
+| `orchestration/workflow_runtime.py` | Builds the workflow store and engine on the script runtime, ties the engine's life to the orchestrator's, and follows each script-runtime pass by settling runs whose attempts ended, resuming interrupted ones with their owner's live context, and pruning runs past the script retention |
 | `custom_tools/script.py` | `script` agent tool: start, inspect, cancel, and list the requester's background scripts |
+| `custom_tools/workflow.py` | `workflow` agent tool: reserve a workflow run and start it as its background job or wait for it inline, read, cancel or resume the requester's runs, continue a run's job after a restart, and resume a run for its requester's control event |
 | `script_runs/manager.py` | Starts, polls, and cancels script runs in a worker or unsafe-local, and finalizes their cleanup |
 | `script_runs/store.py` | The primary-only SQLite store of script runs and their tool-call receipts, with atomic state transitions |
 | `script_runs/legacy_schema.py` | Script-run columns that older releases' databases lack |
@@ -257,8 +259,22 @@ Matrix sync callback
 | `script_runs/shim.py` | Import-light entry point that verifies a run's snapshot inside the script process and runs its source |
 | `script_runs/wire.py` | The primary-worker script protocol: its version, request and response models, normalized receipts, and error |
 | `script_runs/worker_client.py` | The primary's HTTP client for a worker's script routes |
+| `workflow_runs/models.py` | Workflow run and node records, their states, dispatch handles, and the run ID |
+| `workflow_runs/store.py` | The SQLite store of workflow runs, nodes, usage entries, and log lines, with versioned migrations, spilled large results, and the epoch that every write of an attempt must name |
+| `workflow_runs/replay.py` | Pure replay rules: a call's digest, lane keys, what a submitted call does with the node saved at its key, dirty lanes, and stale nodes |
+| `workflow_runs/engine.py` | The workflow engine: a run's attempts on the script runtime and the one check that admits each, per-run coordination state and concurrency places, working time, ending an attempt or run, and the run's state from its attempt |
+| `workflow_runs/nodes.py` | Script gateway calls and node dispatch: admitting and replaying saved calls on resume, tool nodes and delegated gates on the broker with their dispatch handles, reconciling unsettled nodes from their handles, and observing script exit after finish |
+| `workflow_runs/interactions.py` | Human questions and peer waits on the engine: posting and closing question cards, child agent `ask_user` waits and requester answers, and peer message send/wait and script `inbox()` waits |
+| `workflow_runs/agent_nodes.py` | The agents of a workflow run: an `agent()` or session turn call started as a subagent job under the rules of `run_subagent`, the wait for that job with working time and approval waits, schema correction retries, settling the node from the child's own runs, and live node prompts |
+| `workflow_runs/recovery.py` | Which interruptions of an attempt resume its run on its own, and the pass that deletes intents no job holds, records how ended attempts left their runs, and replays the runs that no unfinished job owns |
+| `workflow_runs/faults.py` | What live tests of workflow runs hold and read: named barriers at which a tool call waits while a crash test holds them, and the frames and cards a run showed, kept as JSON lines |
+| `workflow_runs/answers.py` | What a run posts in its thread and how people answer it: signable thread notices measured as edits and sent with retries, question IDs and cards posted idempotently and edited when closed, which answers count and why one does not, the client's answer event with its rejection, and `!answer` |
+| `workflow_runs/structured.py` | Structured agent output: checks a call's JSON Schema, builds the prompt that asks for a matching value, reads the value from an answer, and says what is wrong with it |
+| `workflow_runs/graph.py` | Pure graph model of a run for people: the `meta`, node, group and edge rows, the snapshot fitted to one event by priority, and the delta between two graphs |
+| `workflow_runs/view.py` | What people see of a run: follows the store's writes, builds the run's view from what is saved, queues its graph frames, posts and edits its card until it says how the run ended, and posts the questions whose card could not be sent |
 | `api/sandbox_runner_scripts.py` | Worker routes that launch, poll, and signal a run under the worker's supervisor |
 | `api/script_gateway.py` | Capability-authenticated HTTP gateway scripts call tools through, and the listener helper the second listeners beside the API share |
+| `api/workflow_gateway.py` | Capability-authenticated routes a workflow attempt's script calls for its run, nodes, results, log, and report, served on both listeners |
 | `tailnet_ssh/store.py` | Primary-only ledger of link IDs, hostnames, and host keys by worker key |
 | `tailnet_ssh/projection.py` | The `sshd_config`, `authorized_keys`, and host key the primary writes into a worker's read-only `.runtime/ssh/` |
 | `tailnet_ssh/links.py` | Lists authorized shell targets by worker, admits connections to the exact worker, and records SSH activity |
@@ -267,6 +283,7 @@ Matrix sync callback
 | `api/worker_ssh.py` | Authenticated runner `/ssh/start` route that stores the worker's shell launch and starts sshd on port 2222 |
 | `config/tailnet_ssh.py` | The operator's exact tailnet login and SSH public keys per Matrix user, including public key validation |
 | `script_sdk.py` | The standard-library `MindRoomTools` client a script calls tools with |
+| `workflow.py` | The standard-library SDK a workflow script imports: lanes and call keys, the gateway client, `tool`, `shell`, `phase`, `log`, and the loader that calls `main(args)` |
 | `workspaces.py` | Agent workspace scaffolding, template seeding, and context file resolution |
 | `worker_computer/worker_browser.py` | Serializes dedicated-worker headless browser calls, retains browser resources, and owns configuration/environment retirement and shutdown cleanup |
 | `agents.py` | `create_agent`: builds one configured agent's toolkits, prompt, model provider, and surface into an `AgentBuild` |
@@ -535,7 +552,7 @@ Matrix sync callback
 | `plugin_worker_relay.py` | The primary's client of a dedicated worker's runner relay, which plugin routes and tools open through `plugin_http.worker_relay` to reach their worker services by name or the agent's servers by port |
 | `worker_computer/agent_browser.py` | A worker service's own CDP session on the agent's browser page: an allowlist of watching commands, acting ones only under the Computer's control lease, following the agent between pages, and releasing held input |
 | `plugin_worker_services.py` | The primary's side of plugin worker services: the declaration plugins import, ensure and stop through the target's worker, and stopping the started ones when plugins reload or MindRoom stops |
-| `tool_system/progress.py` | Live progress a running tool call reports to whatever owns it |
+| `tool_system/progress.py` | Live progress a running tool call reports to whatever owns it, and the facts about its result, such as an exit status, that a caller storing the result whole collects |
 | `tool_system/dedicated_threads.py` | One thread per blocking call of a background job or worker proxy call, outside the bounded shared pools |
 | `workers/in_flight.py` | Workers with a call in flight, which idle cleanup refreshes before it runs |
 | `workers/named.py` | The workers a reply's shell calls name: the reply's ownership of them until it and its background jobs end, the limits a new one is admitted under, and their removal |
@@ -560,6 +577,7 @@ Matrix sync callback
 | `live_frames/publisher.py` | One streaming reply's frame loop: a frame per tick when its documents changed, periodic snapshots, and the watermark its durable writes carry |
 | `live_frames/transport.py` | Whether the homeserver relays live frames, whether a frame fits the size limit as it goes out, and sending one frame, Megolm-encrypted in encrypted rooms, over the MSC2477 ephemeral route |
 | `live_frames/subagents.py` | The `io.mindroom.subagents` frame format of a sub-agent run's transcript and status, and the publisher that sends the runs one account shows in a room within one budget |
+| `live_frames/workflow.py` | The `io.mindroom.workflow` frames of a workflow run's graph: a fitted snapshot, deltas between, sent through the sub-agent publisher of the run's account and room |
 | `prompts.py` | Built-in prompt defaults and prompt override registry |
 | `attachments/storage.py` | Attachment persistence, registration, and context-scoped resolution |
 | `attachments/ids.py` | Leaf attachment-ID helpers kept free of matrix-client imports |

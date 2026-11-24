@@ -31,6 +31,7 @@ from mindroom.constants import (
     STREAM_STATUS_KEY,
     STREAM_VISIBLE_BODY_KEY,
     STREAM_WARMUP_SUFFIX_KEY,
+    TODO_POKE_CONTENT_KEY,
     TOOL_TRACE_CONTENT_KEY,
     VISIBLE_ROUTER_VOICE_ECHO_KEY,
     VOICE_RAW_AUDIO_FALLBACK_KEY,
@@ -84,6 +85,7 @@ _SIDECAR_ONLY_MINDROOM_KEYS = frozenset(
     {
         "io.mindroom.long_text",
         CALL_TRANSCRIPT_CONTENT_KEY,
+        TODO_POKE_CONTENT_KEY,
         TOOL_TRACE_CONTENT_KEY,
         REASONING_CONTENT_KEY,
         STREAM_VISIBLE_BODY_KEY,
@@ -276,6 +278,20 @@ def _delivery_event_size_calculator(
         )
 
     return calculate
+
+
+def fits_one_event(client: nio.AsyncClient, room_id: str, content: dict[str, Any], *, room_encrypted: bool) -> bool:
+    """Return whether a message goes out as it is: within the limit of its kind, and one event once it is encrypted.
+
+    An event without text, such as a hidden route, has nothing a sidecar could carry: only the event limit binds it.
+    """
+    is_edit = is_edit_message(content)
+    source_content = content["m.new_content"] if is_edit and "m.new_content" in content else content
+    size_limit = EDIT_MESSAGE_SIZE_LIMIT if is_edit else _NORMAL_MESSAGE_LIMIT
+    delivery_size = _delivery_event_size_calculator(client, room_id=room_id, room_encrypted=room_encrypted)
+    if "body" in source_content and calculate_event_size(content) > size_limit:
+        return False
+    return delivery_size(content) <= _MATRIX_EVENT_HARD_LIMIT
 
 
 def is_edit_message(content: dict[str, Any]) -> bool:
@@ -924,9 +940,11 @@ async def prepare_large_message(
         when this coroutine completed without yielding.
 
     """
+    encrypted_delivery_safe = room_encrypted or prepare_for_encrypted_delivery
+    if fits_one_event(client, room_id, content, room_encrypted=encrypted_delivery_safe):
+        return content
     is_edit = is_edit_message(content)
     size_limit = EDIT_MESSAGE_SIZE_LIMIT if is_edit else _NORMAL_MESSAGE_LIMIT
-    encrypted_delivery_safe = room_encrypted or prepare_for_encrypted_delivery
     calculate_delivery_event_size = _delivery_event_size_calculator(
         client,
         room_id=room_id,
@@ -934,10 +952,6 @@ async def prepare_large_message(
     )
     current_size = calculate_event_size(content)
     source_content = content["m.new_content"] if is_edit and "m.new_content" in content else content
-    # An event without text, such as a hidden route, has nothing a sidecar could carry: only the event limit binds it.
-    textless = "body" not in source_content
-    if (textless or current_size <= size_limit) and calculate_delivery_event_size(content) <= _MATRIX_EVENT_HARD_LIMIT:
-        return content
 
     # The sidecar holds the message as it was built, tool markers in its text, as every reader takes it.
     preview_source, preview_text, fallback_text = _large_message_preview(

@@ -193,3 +193,26 @@ def test_piped_answers_survive_the_typeahead_discard(monkeypatch: pytest.MonkeyP
         interactive._discard_typeahead()
 
         assert piped_input.readline() == "n\n"
+
+
+def test_select_skips_separator_with_arrow_keys_and_piped_input(keys: Callable[[str], None]) -> None:
+    """Separators act as non-selectable dividers in arrow-key prompts."""
+    choices = (
+        ("codex", "Codex"),
+        interactive.Separator("Other providers"),
+        ("openai", "OpenAI"),
+    )
+    keys(_DOWN + _ENTER)
+    assert interactive.select("Provider?", choices) == "openai"
+
+
+def test_select_skips_separator_when_piped() -> None:
+    """Piped line prompts omit separators from click.Choice and use the first selectable choice as default."""
+    choices = (
+        interactive.Separator("Recommended"),
+        ("codex", "Codex"),
+        interactive.Separator("Other providers"),
+        ("openai", "OpenAI"),
+    )
+    with CliRunner().isolation(input="\n"):
+        assert interactive.select("Provider?", choices) == "codex"

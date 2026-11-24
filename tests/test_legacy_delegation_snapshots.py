@@ -53,8 +53,12 @@ _MODEL_DEFAULTED_CHILD_FIELDS: dict[str, object] = {
     "worker_resource_profile": None,
     "cost_usd": None,
     "subagents_cost_usd": None,
+    "subagents_cost_unknown": False,
     "tool_started_at": {},
     "title": "",
+    "workflow_run_id": None,
+    "workflow_node_key": None,
+    "workflow_generation": None,
 }
 _CHILD_FIELDS = {field.name for field in fields(DelegationChild)} - set(_MODEL_DEFAULTED_CHILD_FIELDS)
 _PAUSED_NOTICE = "I have tools to execute, but I need confirmation."

@@ -32,7 +32,6 @@ from mindroom.tool_system.worker_routing import (
     parse_tool_execution_identity_payload,
     serialize_tool_execution_identity,
 )
-from mindroom.workspaces import resolve_agent_workspace_from_state_path
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping
@@ -543,14 +542,7 @@ def _resolve_workspace(
     )
     # Record lookup must not seed templates or reconcile knowledge with a
     # retained storage-only config during cancellation or restart recovery.
-    workspace = resolve_agent_workspace_from_state_path(
-        agent_name,
-        config,
-        runtime_paths=runtime_paths,
-        state_storage_path=resolved.state_root,
-        use_state_storage_path=resolved.execution.policy.private_workspace_enabled,
-    )
-    return workspace.root, resolved.state_root
+    return resolved.workspace(config, runtime_paths).root, resolved.state_root
 
 
 def _utc_timestamp() -> str:

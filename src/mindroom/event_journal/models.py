@@ -71,6 +71,9 @@ class EventKind(StrEnum):
     COMPACTION = "compaction"
     # A person asks from their client to cancel background jobs.
     JOB_CANCEL = "job_cancel"
+    # A person acts on a workflow run from their client: resumes it, or answers its question.
+    WORKFLOW_CONTROL = "workflow_control"
+    WORKFLOW_ANSWER = "workflow_answer"
 
 
 # Kinds whose work outlives its callback, because the callback only starts a

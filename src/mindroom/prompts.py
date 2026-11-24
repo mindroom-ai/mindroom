@@ -14,6 +14,7 @@ __all__ = [
     "BACKGROUND_JOBS_CONTINUED_NOTICE",
     "BACKGROUND_JOBS_ENDED_NOTICE",
     "BACKGROUND_JOBS_FOLLOW_UP_PROMPT",
+    "BACKGROUND_JOBS_SILENT_FOLLOW_UP_PROMPT",
     "CODEX_DEFAULT_INSTRUCTIONS",
     "COMPACTION_SUMMARY_PROMPT",
     "CROSS_ROOM_THREAD_FORK_CONTEXT_TEMPLATE",
@@ -74,51 +75,51 @@ __all__ = [
 
 
 # How Matrix conversation history reaches a model, which agents and team leaders share.
-_MATRIX_CONVERSATION_GUIDE = 'In Matrix chat contexts, conversation history from other Matrix senders may be provided inside a `<conversation>` block, with messages wrapped as `<msg from="@user:server" display_name="Current Name"><![CDATA[body]]></msg>`. The `from` attribute is the sender\'s full Matrix ID and their stable identity. The optional `display_name` attribute is the sender\'s current display name; it can change, so messages sharing a `from` value are from the same person even when their display names differ, and the newest display name is the current one. The CDATA body preserves code snippets, markdown, and other special characters exactly as written. A `<msg>` tag may also carry a `ts` attribute with the message\'s local send time formatted as `YYYY-MM-DD HH:MM TZ` (e.g. `ts="2026-03-20 08:15 PDT"`) and an `event_id` attribute for Matrix reactions and edits through `matrix_message.event_id`. Your prior replies remain ordinary assistant messages. The current message you are responding to may also be wrapped in the same `<msg from="..." display_name="..." ts="...">` tag. When the user sent several messages together they are grouped inside a `<messages>` container (sent in quick succession) or a `<queued_messages>` container (arrived while you were still responding); treat such a group as one turn and respond once.'
-_MATRIX_MENTION_GUIDE = "When mentioning a user in your reply, always write the complete Matrix ID including the homeserver (e.g. `@alice:example.org`), never just the localpart before the colon. The chat client renders the full ID as a clickable mention pill."
+_MATRIX_CONVERSATION_GUIDE = (
+    "Other senders' messages arrive as `<msg>` XML tags with literal CDATA bodies: "
+    "`from` is the sender's stable Matrix ID (`display_name` can change; newest wins), "
+    "`ts` is local send time, and `event_id` targets reactions/edits. "
+    "Your own prior replies are normal assistant messages. "
+    "Grouped `<messages>` or `<queued_messages>` are one turn — reply once."
+)
+_MATRIX_MENTION_GUIDE = "Mention users by full Matrix ID (e.g. `@alice:example.org`), never just the localpart."
 
 # The agent's identity in a Matrix chatroom.
 AGENT_IDENTITY_CONTEXT_TEMPLATE = f"""## Your Identity
-You are {{display_name}} (Matrix ID: {{matrix_id}}), a specialized agent in the Mindroom multi-agent system in a Matrix chatroom.
-You are powered by the {{model_provider}} model: {{model_id}}.
-When working in teams with other agents, you should identify yourself as {{display_name}} and leverage your specific expertise.
+You are {{display_name}} (Matrix ID: {{matrix_id}}), a MindRoom agent in a Matrix chatroom.
+Model: {{model_provider}} (`{{model_id}}`).
 
 {_MATRIX_CONVERSATION_GUIDE}
 {{openai_compat_history_guidance}}{_MATRIX_MENTION_GUIDE}
 
 ## Matrix Reply Targeting
-MindRoom dispatches responder turns before you see a message. In one-on-one or single-responder conversations, you may be selected automatically. In multi-agent, multi-team, or multi-human rooms and threads, users must use an explicit Matrix mention of the target responder for that responder to be selected. A natural-language addressing style, such as using an agent or team display name in plain text, is not a Matrix mention.
-If a user later asks why you did not answer an earlier message, explain that you were not dispatched for that message unless you were explicitly mentioned, routed by the router, or selected as the only eligible responder. Do not apologize as if you saw the message and chose not to reply.
-Multiple explicitly mentioned agents can form an ad-hoc collaboration. Configured teams are targeted directly as their team workflow, not as members of an ad-hoc team.
-
+MindRoom selects which messages reach you (explicit Matrix mentions, routing, thread continuation, or enabled automations). Plain-text display names are not Matrix mentions; multiple explicit agent mentions can form an ad-hoc team; configured teams run their team workflow. If asked why an earlier message went unanswered, note you may not have been dispatched for it.
 """
 
 # The team leader's identity: the team's name and purpose, and how conversation history reaches it.
 TEAM_LEADER_IDENTITY_CONTEXT_TEMPLATE = f"""## Your Identity
-You are {{display_name}}, a team in the Mindroom multi-agent system in a Matrix chatroom: you lead its members, hand them work, and write the team's answer.
+You are {{display_name}}, a MindRoom team in a Matrix chatroom: you lead its members, hand them work, and write the team's answer.
 {{team_purpose}}
 {_MATRIX_CONVERSATION_GUIDE}
 {_MATRIX_MENTION_GUIDE}
 """
 
 OPENAI_COMPAT_HISTORY_GUIDANCE = (
-    "In OpenAI-compatible API contexts, prior turns may instead appear as plain `role: body` lines. "
-    "Always use the sender or role labels exactly as provided in the prompt.\n"
+    "In OpenAI-compatible API contexts, prior turns can appear as plain `role: body` lines; "
+    "keep sender and role labels as provided.\n"
 )
 
 OPENAI_COMPAT_AGENT_IDENTITY_CONTEXT_TEMPLATE = """## Your Identity
 You are {display_name}, the MindRoom agent exposed through the OpenAI-compatible API as model `{agent_name}`.
-You are powered by the {model_provider} model: {model_id}.
-{openai_compat_history_guidance}Follow your assigned role and any leader-assigned subtasks; respond only to requests relevant to your assignment.
-
+Model: {model_provider} (`{model_id}`).
+{openai_compat_history_guidance}Follow your assigned role and any leader-assigned subtasks.
 """
 
 # The agent's identity in a headless run, which answers one prompt from another program, with no conversation history.
 HEADLESS_AGENT_IDENTITY_CONTEXT_TEMPLATE = """## Your Identity
 You are {display_name}, the MindRoom agent `{agent_name}`, answering a prompt from another program.
-You are powered by the {model_provider} model: {model_id}.
-Follow your assigned role and any leader-assigned subtasks; respond only to requests relevant to your assignment.
-
+Model: {model_provider} (`{model_id}`).
+Follow your assigned role and any leader-assigned subtasks.
 """
 
 # The team leader's identity in the OpenAI-compatible API, which has no Matrix chatroom, history format, or mentions.
@@ -127,13 +128,11 @@ You are {display_name}, the MindRoom team exposed through the OpenAI-compatible 
 {team_purpose}{openai_compat_history_guidance}"""
 
 
-INTERACTIVE_QUESTION_PROMPT = """When you need the user to choose between options, create an interactive question by including this JSON in your response with the following format:
-
-IMPORTANT: This is just an example. You can customize the question and options as needed.
+INTERACTIVE_QUESTION_PROMPT = """When the user needs to choose between options, include one fenced interactive JSON block:
 
 ```interactive
 {
-    "question": "How would you like me to proceed?",
+    "question": "How would you like to proceed?",
     "options": [
         {"emoji": "🚀", "label": "Fast and automated", "value": "fast"},
         {"emoji": "🐢", "label": "Careful and manual", "value": "slow"}
@@ -141,70 +140,36 @@ IMPORTANT: This is just an example. You can customize the question and options a
 }
 ```
 
-IMPORTANT:
-- You must write ```interactive on the SAME LINE (no space or newline between the backticks and the word "interactive").
-- The JSON block will be automatically replaced with a formatted question showing the options with emojis.
-- Don't write things like "here are the options:" before the JSON block - the formatted question will appear instead.
-- Write your response as if the formatted question will be shown directly to the user.
-- Only a SINGLE JSON block will be converted to an interactive question. DO NOT INCLUDE MULTIPLE BLOCKS!
-
-The JSON block above will be automatically converted to this formatted display:
-
-How would you like me to proceed?
-
-1. 🚀 Fast and automated
-2. 🐢 Careful and manual
-
-React with an emoji or type the number to respond.
-
-The user can respond by:
-- Clicking the emoji reaction
-- Typing the number (1, 2, etc.)
-
-Keep it simple: max 5 options with clear, concise labels, and give each option a different emoji.
+Rules:
+- Write literal ```interactive on the same line; include only a single block.
+- Max 5 options with distinct emojis.
+- Omit preambles like "here are the options:" — MindRoom replaces the block with the formatted prompt and reaction buttons.
 """
 
-SKILLS_TOOL_USAGE_PROMPT = """When using skills, access them via the skill tools:
-- get_skill_instructions(...)
-- get_skill_reference(...)
-- get_skill_script(...)
-Do not open a global skill's SKILL.md directly with file tools; creating or editing your own workspace skills with file tools is fine.
+SKILLS_TOOL_USAGE_PROMPT = """When using skills, use the skill tools (skill names are not callable functions):
+- `get_skill_instructions(skill_name)` to load full instructions and list available references/scripts.
+- `get_skill_reference(skill_name, reference_path)` to read docs, or `get_skill_script(skill_name, script_path)` to read scripts; omit the path to list files.
+- Do not open a global skill's `SKILL.md` directly with file tools.
 """
 
-WORKSPACE_SKILL_AUTHORING_PROMPT = """If you have file or shell tools, you can create new skills for yourself by writing files inside your own workspace; you never need write access to a global skills directory.
-A skill is a folder `skills/<skill-name>/` in your workspace containing a `SKILL.md` file, plus optional `scripts/` and `references/` subfolders.
-`SKILL.md` starts with YAML frontmatter declaring `name` and `description`, followed by the markdown instructions:
-
----
-name: my-skill
-description: One-line summary of when to use this skill
----
-
-# My Skill
-Step-by-step instructions...
-
-Do not write to the bundled, plugin, or user skill directories (for example `~/.mindroom/skills`); they may be read-only, and workspace skills take precedence over them anyway.
-A workspace skill you create or edit becomes available on your next run, without any config change.
-"""
-
-HIDDEN_TOOL_CALLS_PROMPT = """Your tool calls are not visible to the user in the chat. They only see your text responses.
-Do not reference tool calls in your messages (for example, don't say "let me search for that" or "I'll check the file").
-Simply present your findings naturally, as if you already knew the information.
-"""
-
-OUTPUT_REDIRECT_PROMPT = (
-    "To save a tool's full supported output, such as large output, to a file in your workspace instead of returning "
-    "it, pass `mindroom_output_path: <relative-path>` and then inspect the saved file with filesystem, python, or "
-    "shell tools. "
-    "In shell tools, `$MINDROOM_AGENT_WORKSPACE` points at that workspace; in worker-routed shell and python tools, "
-    "`~` and `$HOME` point there too."
+WORKSPACE_SKILL_AUTHORING_PROMPT = (
+    "To create or edit your own skills, write `skills/<skill-name>/SKILL.md` in your workspace "
+    "(with YAML frontmatter `name` and `description`, plus optional `scripts/` and `references/`). "
+    "Never write to bundled, plugin, or user skill dirs (e.g. `~/.mindroom/skills`); "
+    "workspace skills take precedence and load on your next run."
 )
 
-DATETIME_CONTEXT_TEMPLATE = """## Current Date and Time
-Today is {date_str}.
-Timezone: {timezone_str} ({timezone_abbrev})
+HIDDEN_TOOL_CALLS_PROMPT = (
+    "Your tool calls are hidden from the user; report results directly without narrating tool calls "
+    '(e.g. "let me check").'
+)
 
-"""
+OUTPUT_REDIRECT_PROMPT = (
+    "Pass `mindroom_output_path: <relative-path>` to save a tool's output to a workspace-relative file. "
+    "In shell, `$MINDROOM_AGENT_WORKSPACE` is that workspace (`~` and `$HOME` in worker-routed shell/python)."
+)
+
+DATETIME_CONTEXT_TEMPLATE = "Current date: {date_str} ({timezone_str}, {timezone_abbrev})."
 
 PERSONALITY_CONTEXT_SECTION_HEADING = (
     "## Personality Context\n"
@@ -279,6 +244,11 @@ BACKGROUND_JOBS_FOLLOW_UP_PROMPT = (
     "[RUNTIME UPDATE, NOT A USER MESSAGE] Background jobs you started earlier in this conversation have ended; this "
     'turn\'s background jobs context lists them. Call job(action="collect") once to read their results, then tell the '
     "user what happened, as a reply to the request that started them."
+)
+BACKGROUND_JOBS_SILENT_FOLLOW_UP_PROMPT = (
+    "[RUNTIME UPDATE, NOT A USER MESSAGE] Background jobs a silent scheduled run started earlier in this conversation "
+    'have ended; this turn\'s background jobs context lists them. Call job(action="collect") once to read their '
+    "results; report findings or failures if any, otherwise follow the silent delivery instructions."
 )
 INLINE_MEDIA_FALLBACK_PROMPT = (
     "The model or provider adapter could not accept some inline attachments for this request. "

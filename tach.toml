@@ -787,11 +787,13 @@ depends_on = [
     "mindroom.agent_run_context",
     "mindroom.agents",
     "mindroom.ai_run_metadata",
+    "mindroom.ai_runtime",
     "mindroom.approval.resume",
     "mindroom.delegation.execution",
     "mindroom.delegation.lifecycle",
     "mindroom.delegation.state",
     "mindroom.execution_preparation",
+    "mindroom.failure_text",
     "mindroom.history.interrupted_replay",
     "mindroom.history.mid_turn_compaction",
     "mindroom.history.native",
@@ -939,6 +941,7 @@ depends_on = [
     "mindroom.custom_tools.dynamic_workflow",
     "mindroom.custom_tools.job",
     "mindroom.custom_tools.memory",
+    "mindroom.custom_tools.workflow_peers",
     "mindroom.entity_resolution",
     "mindroom.hooks",
     "mindroom.mcp.toolkit",
@@ -1254,6 +1257,7 @@ depends_on = [
     "mindroom.mid_turn",
 ]
 visibility = [
+    "mindroom.ai",
     "mindroom.tool_jobs.runtime",
     "mindroom.loop_hooks",
     "mindroom.response_lifecycle",
@@ -1307,7 +1311,7 @@ depends_on = ["mindroom.llm", "mindroom.providers.names"]
 [[modules]]
 path = "mindroom.providers.key_checks"
 depends_on = []
-visibility = ["mindroom.cli.doctor", "mindroom.api.provider_setup"]
+visibility = ["mindroom.cli.doctor", "mindroom.cli.setup_detection", "mindroom.api.provider_setup"]
 
 [[modules]]
 path = "mindroom.metadata_merge"
@@ -2111,9 +2115,25 @@ depends_on = [
 path = "mindroom.api.script_gateway"
 depends_on = [
     "mindroom.api.agent_cli",
+    "mindroom.api.workflow_gateway",
     "mindroom.bounded_bytes",
     "mindroom.json_utils",
 ]
+
+[[modules]]
+path = "mindroom.api.workflow_gateway"
+depends_on = [
+    "mindroom.bounded_bytes",
+    "mindroom.json_utils",
+    "mindroom.workflow_runs.engine",
+    "mindroom.workflow_runs.models",
+    "mindroom.workflow_runs.nodes",
+    "mindroom.workflow_runs.store",
+]
+
+[[interfaces]]
+from = ["mindroom.api.workflow_gateway"]
+expose = ["bind_workflow_engine", "router"]
 
 [[modules]]
 path = "mindroom.api.main"
@@ -2158,6 +2178,7 @@ depends_on = [
     "mindroom.api.request_body_limit",
     "mindroom.api.schedules",
     "mindroom.api.script_gateway",
+    "mindroom.api.workflow_gateway",
     "mindroom.api.secret_requests",
     "mindroom.api.skills",
     "mindroom.api.tailnet_ssh_gateway",
@@ -2467,12 +2488,17 @@ depends_on = [
 
 [[modules]]
 path = "mindroom.script_runs.shim"
-depends_on = ["mindroom.path_confinement", "mindroom.script_runs.launch_contract"]
+depends_on = ["mindroom.path_confinement", "mindroom.workflow", "mindroom.script_runs.launch_contract"]
 
 # The shim and the script SDK import it inside script processes, so it stays standard-library only.
 [[modules]]
 path = "mindroom.script_runs.launch_contract"
 depends_on = []
+
+# The workflow SDK runs inside script processes too, under the same rule.
+[[modules]]
+path = "mindroom.workflow"
+depends_on = ["mindroom.script_runs.launch_contract"]
 
 [[modules]]
 path = "mindroom.script_runs.supervised"
@@ -2496,6 +2522,423 @@ depends_on = []
 [[modules]]
 path = "mindroom.script_runs.recovery"
 depends_on = ["mindroom.script_runs.wire"]
+
+[[modules]]
+path = "mindroom.workflow_runs.models"
+depends_on = []
+
+[[interfaces]]
+from = ["mindroom.workflow_runs.models"]
+expose = [
+    "DispatchHandle",
+    "LIVE_NODE_STATES",
+    "LIVE_RUN_STATES",
+    "NodeReceipt",
+    "NodeRequest",
+    "RECHECK_SECONDS",
+    "SERVED_RUN_STATES",
+    "TERMINAL_RUN_STATES",
+    "UNSETTLED_NODE_STATES",
+    "WorkflowNode",
+    "WorkflowNodeState",
+    "WorkflowRun",
+    "WorkflowRunState",
+    "new_workflow_run_id",
+    "validated_workflow_run_id",
+]
+
+[[modules]]
+path = "mindroom.workflow_runs.store"
+depends_on = ["mindroom.workflow_runs.models", "mindroom.workflow_runs.replay"]
+
+[[interfaces]]
+from = ["mindroom.workflow_runs.store"]
+expose = [
+    "SCHEMA_VERSION",
+    "SupersededAttemptError",
+    "UsageSummary",
+    "UsageTotals",
+    "WorkflowRunConflictError",
+    "WorkflowRunNotFoundError",
+    "WorkflowRunStore",
+    "WorkflowRunStoreError",
+    "owned_run",
+]
+
+[[modules]]
+path = "mindroom.workflow_runs.replay"
+depends_on = ["mindroom.workflow_runs.models"]
+
+[[interfaces]]
+from = ["mindroom.workflow_runs.replay"]
+expose = [
+    "CALLING_NODE",
+    "DIRTY_DIGEST",
+    "INTERRUPTED",
+    "NO_AGENTS",
+    "OUT_OF_TIME",
+    "OWNER_NOT_READY",
+    "Outcome",
+    "RUN_ENDED",
+    "TIMED_PREFIX",
+    "call_outcome",
+    "calling_node",
+    "changed",
+    "decide",
+    "indeterminate",
+    "may_have_written",
+    "nested_key",
+    "node_digest",
+    "parent_group",
+    "receipt",
+    "result_digest",
+    "split_key",
+    "unless_proven",
+]
+
+[[modules]]
+path = "mindroom.workflow_runs.structured"
+depends_on = ["mindroom.json_utils"]
+visibility = ["mindroom.workflow_runs.agent_nodes"]
+
+[[interfaces]]
+from = ["mindroom.workflow_runs.structured"]
+expose = ["SCHEMA_TURNS", "SchemaError", "check_schema", "extract_json", "schema_prompt", "validation_error"]
+
+[[modules]]
+path = "mindroom.workflow_runs.graph"
+depends_on = ["mindroom.workflow_runs.models", "mindroom.workflow_runs.replay"]
+
+[[interfaces]]
+from = ["mindroom.workflow_runs.graph"]
+expose = [
+    "AGENT_KINDS",
+    "LOG_LINES",
+    "REPLACE",
+    "Graph",
+    "fit_snapshot",
+    "graph_delta",
+    "graph_meta",
+    "graph_rows",
+    "node_label",
+    "projected_cost_usd",
+    "redacted_title",
+]
+
+[[modules]]
+path = "mindroom.workflow_runs.faults"
+depends_on = []
+
+[[interfaces]]
+from = ["mindroom.workflow_runs.faults"]
+expose = ["capture", "hold"]
+
+[[modules]]
+path = "mindroom.workflow_runs.recovery"
+depends_on = ["mindroom.workflow_runs.models", "mindroom.workflow_runs.store"]
+
+[[interfaces]]
+from = ["mindroom.workflow_runs.recovery"]
+expose = ["AUTO_RESUME_REASONS", "NO_ACCESS", "recover_runs"]
+
+[[modules]]
+path = "mindroom.workflow_runs.agent_nodes"
+depends_on = [
+    "mindroom.ai",
+    "mindroom.ai_run_metadata",
+    "mindroom.delegation.background",
+    "mindroom.delegation.cost",
+    "mindroom.delegation.execution",
+    "mindroom.delegation.lifecycle",
+    "mindroom.delegation.recovery",
+    "mindroom.delegation.state",
+    "mindroom.delegation.targets",
+    "mindroom.llm",
+    "mindroom.runtime_resolution",
+    "mindroom.tool_jobs.runtime",
+    "mindroom.tool_system.output_files",
+    "mindroom.tool_system.runtime_context",
+    "mindroom.tool_system.worker_routing",
+    "mindroom.workflow_runs.limits",
+    "mindroom.workflow_runs.models",
+    "mindroom.workflow_runs.replay",
+    "mindroom.workflow_runs.store",
+    "mindroom.workflow_runs.structured",
+]
+
+[[interfaces]]
+from = ["mindroom.workflow_runs.agent_nodes"]
+expose = [
+    "AgentNodeError",
+    "AgentRuntime",
+    "await_child",
+    "delegated_request",
+    "dispatch_agent",
+    "first_prompt",
+    "launch_child",
+    "load_follow_up_child",
+    "node_prompt",
+    "node_waits",
+    "schema_failure",
+    "settle_agent",
+    "wait_for_agent",
+    "works",
+]
+
+[[modules]]
+path = "mindroom.workflow_runs.peers"
+depends_on = [
+    "mindroom.workflow_runs.models",
+    "mindroom.workflow_runs.store",
+]
+
+[[interfaces]]
+from = ["mindroom.workflow_runs.peers"]
+expose = [
+    "MAX_PEER_BYTES",
+    "NodeRef",
+    "PeerTooLargeError",
+    "PeerUnreachableError",
+    "all_messages",
+    "all_state",
+    "get_state",
+    "list_peers",
+    "message_edges",
+    "peer_op_id",
+    "read_call",
+    "script_op",
+    "send",
+    "session_turn_message",
+    "set_state",
+    "valid_wait_seconds",
+    "withdraw_unread",
+]
+
+[[modules]]
+path = "mindroom.workflow_runs.limits"
+depends_on = [
+    "mindroom.delegation.state",
+    "mindroom.workflow_runs.models",
+    "mindroom.workflow_runs.store",
+]
+
+[[interfaces]]
+from = ["mindroom.workflow_runs.limits"]
+expose = [
+    "WorkflowLimits",
+    "budget_exceeded",
+    "ceiling",
+    "fits_ceiling",
+    "limit_reached",
+    "run_usage",
+    "usd",
+]
+
+[[modules]]
+path = "mindroom.workflow_runs.interactions"
+depends_on = [
+    "mindroom.workflow_runs.answers",
+    "mindroom.workflow_runs.graph",
+    "mindroom.workflow_runs.models",
+    "mindroom.workflow_runs.peers",
+    "mindroom.workflow_runs.replay",
+    "mindroom.workflow_runs.store",
+]
+
+[[interfaces]]
+from = ["mindroom.workflow_runs.interactions"]
+expose = [
+    "answer",
+    "ask_child_question",
+    "asked",
+    "close_card",
+    "peer_send",
+    "poster",
+    "retry_question_cards",
+    "validate_question_options",
+    "wait_for_messages",
+    "wait_inbox",
+]
+
+[[modules]]
+path = "mindroom.workflow_runs.nodes"
+depends_on = [
+    "mindroom.delegation.state",
+    "mindroom.workflow_runs.agent_nodes",
+    "mindroom.workflow_runs.faults",
+    "mindroom.workflow_runs.graph",
+    "mindroom.workflow_runs.interactions",
+    "mindroom.workflow_runs.limits",
+    "mindroom.workflow_runs.models",
+    "mindroom.workflow_runs.peers",
+    "mindroom.workflow_runs.replay",
+    "mindroom.workflow_runs.saved",
+    "mindroom.workflow_runs.store",
+]
+
+[[interfaces]]
+from = ["mindroom.workflow_runs.nodes"]
+expose = [
+    "admit",
+    "append_log",
+    "finish",
+    "node_by_id",
+    "node_receipt",
+    "node_record",
+    "reconcile",
+    "resolve_source",
+    "run_info",
+    "saved_source",
+    "settle_from_handle",
+    "start_gated",
+    "submit_node",
+]
+
+[[modules]]
+path = "mindroom.workflow_runs.engine"
+depends_on = [
+    "mindroom.delegation.personas",
+    "mindroom.workflow_runs.agent_nodes",
+    "mindroom.workflow_runs.interactions",
+    "mindroom.workflow_runs.limits",
+    "mindroom.workflow_runs.models",
+    "mindroom.workflow_runs.nodes",
+    "mindroom.workflow_runs.recovery",
+    "mindroom.workflow_runs.replay",
+    "mindroom.workflow_runs.store",
+]
+
+[[interfaces]]
+from = ["mindroom.workflow_runs.engine"]
+expose = [
+    "ResumeAccess",
+    "SupersededAttemptError",
+    "WorkflowEngine",
+]
+
+[[modules]]
+path = "mindroom.workflow_runs.answers"
+depends_on = [
+    "mindroom.matrix.client_delivery",
+    "mindroom.workflow_runs.models",
+    "mindroom.workflow_runs.store",
+]
+
+[[interfaces]]
+from = ["mindroom.workflow_runs.answers"]
+expose = [
+    "MAX_OPTIONS",
+    "MAX_OPTION_BYTES",
+    "RETRY_SECONDS",
+    "answer_command",
+    "answer_question",
+    "clip",
+    "handle_workflow_answer",
+    "notice",
+    "notice_fits",
+    "options_text",
+    "question_id",
+    "send_notice",
+    "show_question",
+]
+
+[[modules]]
+path = "mindroom.workflow_runs.saved"
+depends_on = [
+    "mindroom.atomic_file",
+    "mindroom.path_confinement",
+    "mindroom.script_runs.launch_contract",
+]
+
+[[interfaces]]
+from = ["mindroom.workflow_runs.saved"]
+expose = [
+    "SAVED_WORKFLOW_NAME_RE",
+    "SavedWorkflow",
+    "WORKFLOWS_DIR",
+    "list_saved",
+    "save_source",
+    "validate_workflow_name",
+]
+
+[[modules]]
+path = "mindroom.workflow_runs.view"
+depends_on = [
+    "mindroom.live_frames.subagents",
+    "mindroom.live_frames.workflow",
+    "mindroom.workflow_runs.answers",
+    "mindroom.workflow_runs.faults",
+    "mindroom.workflow_runs.graph",
+    "mindroom.workflow_runs.interactions",
+    "mindroom.workflow_runs.limits",
+    "mindroom.workflow_runs.models",
+    "mindroom.workflow_runs.peers",
+    "mindroom.workflow_runs.store",
+]
+
+[[interfaces]]
+from = ["mindroom.workflow_runs.view"]
+expose = ["RunViews"]
+
+[[modules]]
+path = "mindroom.orchestration.workflow_runtime"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.custom_tools.workflow",
+    "mindroom.tool_jobs.runtime",
+    "mindroom.workflow_runs.agent_nodes",
+    "mindroom.workflow_runs.engine",
+    "mindroom.workflow_runs.recovery",
+    "mindroom.workflow_runs.store",
+    "mindroom.workflow_runs.view",
+]
+visibility = ["mindroom.orchestrator"]
+
+[[modules]]
+path = "mindroom.custom_tools.workflow"
+depends_on = [
+    "mindroom.config.main",
+    "mindroom.config.resolution",
+    "mindroom.constants",
+    "mindroom.delegation.lifecycle",
+    "mindroom.matrix.state",
+    "mindroom.tool_jobs.control",
+    "mindroom.tool_jobs.results",
+    "mindroom.tool_jobs.runtime",
+    "mindroom.tool_jobs.settings",
+    "mindroom.tool_system.authoring",
+    "mindroom.tool_system.invocation",
+    "mindroom.tool_system.metadata",
+    "mindroom.tool_system.plugins",
+    "mindroom.tool_system.runtime_context",
+    "mindroom.tool_system.tool_hooks",
+    "mindroom.tool_system.worker_routing",
+    "mindroom.workflow_runs.answers",
+    "mindroom.workflow_runs.limits",
+    "mindroom.workflow_runs.models",
+    "mindroom.workflow_runs.nodes",
+    "mindroom.workflow_runs.peers",
+    "mindroom.workflow_runs.replay",
+    "mindroom.workflow_runs.saved",
+    "mindroom.workflow_runs.store",
+]
+
+[[modules]]
+path = "mindroom.custom_tools.workflow_peers"
+depends_on = [
+    "mindroom.delegation.lifecycle",
+    "mindroom.delegation.state",
+    "mindroom.tool_system.authoring",
+    "mindroom.tool_system.invocation",
+    "mindroom.tool_system.runtime_context",
+    "mindroom.workflow_runs.interactions",
+    "mindroom.workflow_runs.peers",
+    "mindroom.workflow_runs.store",
+]
+
+[[interfaces]]
+from = ["mindroom.custom_tools.workflow_peers"]
+expose = ["WorkflowPeerTools"]
 
 [[modules]]
 path = "mindroom.api.schedules"
@@ -2980,6 +3423,7 @@ depends_on = [
     "mindroom.cancellation",
     "mindroom.history.types",
     "mindroom.llm",
+    "mindroom.tool_system.context_bound_streams",
 ]
 
 [[modules]]
@@ -3408,6 +3852,7 @@ depends_on = ["mindroom.cancellation", "mindroom.matrix.client_session", "mindro
 path = "mindroom.orchestration.script_runtime"
 depends_on = [
     "mindroom.approval.manager",
+    "mindroom.delegation.lifecycle",
     "mindroom.orchestration.runtime",
     "mindroom.origins",
     "mindroom.response_activity",
@@ -3458,6 +3903,7 @@ depends_on = [
     "mindroom.orchestration.call_transcripts_runtime",
     "mindroom.orchestration.computer_runtime",
     "mindroom.orchestration.plugin_http_runtime",
+    "mindroom.orchestration.workflow_runtime",
     "mindroom.agent_reply_membership_sync",
     "mindroom.agents",
     "mindroom.api.main",
@@ -4358,6 +4804,7 @@ visibility = [
     "mindroom.orchestration.tool_job_runtime",
     "mindroom.email_invites.receiver",
     "mindroom.matrix.thread_fork_access",
+    "mindroom.workflow_runs.answers",
 ]
 
 [[modules]]
@@ -5321,6 +5768,7 @@ depends_on = [
     "mindroom.constants",
     "mindroom.conversation_resolver",
     "mindroom.conversation_state_writer",
+    "mindroom.custom_tools.workflow",
     "mindroom.delivery_gateway",
     "mindroom.desktop.pairing_receiver",
     "mindroom.edit_regenerator",
@@ -5392,6 +5840,7 @@ depends_on = [
     "mindroom.cli.help_format",
     "mindroom.cli.interactive",
     "mindroom.cli.owner",
+    "mindroom.cli.setup_wizard",
     "mindroom.config.main",
     "mindroom.config.yaml_includes",
     "mindroom.constants",
@@ -5443,6 +5892,7 @@ visibility = [
     "mindroom.cli.connect",
     "mindroom.cli.main",
     "mindroom.cli.service",
+    "mindroom.cli.setup_wizard",
 ]
 
 [[modules]]
@@ -5452,6 +5902,25 @@ visibility = [
     "mindroom.cli.config",
     "mindroom.cli.connect",
 ]
+
+[[modules]]
+path = "mindroom.cli.setup_detection"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.providers.claude_code",
+    "mindroom.providers.key_checks",
+    "mindroom.providers.openai",
+]
+visibility = ["mindroom.cli.setup_wizard"]
+
+[[modules]]
+path = "mindroom.cli.setup_wizard"
+depends_on = [
+    "mindroom.cli.interactive",
+    "mindroom.cli.setup_detection",
+    "mindroom.constants",
+]
+visibility = ["mindroom.cli.config"]
 
 [[modules]]
 path = "mindroom.cli.doctor"
@@ -5718,6 +6187,11 @@ depends_on = [
 [[modules]]
 path = "mindroom.commands.handler"
 depends_on = [
+    "mindroom.runtime_resolution",
+    "mindroom.tool_system.worker_routing",
+    "mindroom.workflow_runs.answers",
+    "mindroom.workflow_runs.graph",
+    "mindroom.workflow_runs.saved",
     "mindroom.tool_jobs.client_cancel",
     "mindroom.tool_jobs.runtime",
     "mindroom.commands.mode_commands",
@@ -5832,6 +6306,7 @@ path = "mindroom.tool_system.context_bound_streams"
 depends_on = []
 visibility = [
     "mindroom.approval.execution",
+    "mindroom.history.summary_call",
     "mindroom.approval.resume",
     "mindroom.agent_loop",
     "mindroom.teams",
@@ -6006,6 +6481,7 @@ depends_on = [
     "mindroom.atomic_file",
     "mindroom.constants",
     "mindroom.tool_system.agno_toolkits",
+    "mindroom.tool_system.progress",
 ]
 
 [[modules]]
@@ -6148,7 +6624,9 @@ visibility = [
     "mindroom.api.sandbox_execute_stream",
     "mindroom.api.sandbox_runner",
     "mindroom.tool_system.worker_proxy_client",
+    "mindroom.tool_system.sandbox_proxy",
     "mindroom.tool_system.tool_hooks",
+    "mindroom.tool_system.output_files",
 ]
 
 [[modules]]
@@ -6249,6 +6727,7 @@ path = "mindroom.tool_system.sandbox_proxy"
 depends_on = [
     "mindroom.tool_system.media_transport",
     "mindroom.tool_system.output_files",
+    "mindroom.tool_system.progress",
     "mindroom.tool_system.media_attachments",
     "mindroom.constants",
     "mindroom.tool_system.declarations",
@@ -7251,6 +7730,7 @@ from = ["mindroom.config.memory"]
 expose = [
     "ConversationRef",
     "MemoryAutoFlushService",
+    "MemoryNotFoundError",
     "MemoryPromptParts",
     "add_agent_memory",
     "append_agent_daily_memory",
@@ -8410,7 +8890,16 @@ depends_on = [
     "mindroom.llm",
     "mindroom.tool_system.events",
 ]
-visibility = ["mindroom.delegation.lifecycle"]
+visibility = ["mindroom.delegation.lifecycle", "mindroom.live_frames.workflow", "mindroom.workflow_runs.view"]
+
+[[modules]]
+path = "mindroom.live_frames.workflow"
+depends_on = [
+    "mindroom.live_frames.subagents",
+    "mindroom.workflow_runs.faults",
+    "mindroom.workflow_runs.graph",
+    "mindroom.workflow_runs.models",
+]
 
 [[modules]]
 path = "mindroom.delegation.targets"
@@ -8424,7 +8913,11 @@ depends_on = [
     "mindroom.tool_system.plugins",
     "mindroom.tool_system.runtime_context",
 ]
-visibility = ["mindroom.custom_tools.delegate", "mindroom.delegation.execution"]
+visibility = [
+    "mindroom.custom_tools.delegate",
+    "mindroom.delegation.execution",
+    "mindroom.workflow_runs.agent_nodes",
+]
 
 [[modules]]
 path = "mindroom.delegation.personas"
@@ -8622,7 +9115,7 @@ visibility = ["mindroom.loop_hooks"]
 [[modules]]
 path = "mindroom.json_utils"
 depends_on = []
-visibility = ["mindroom.judgment.client", "mindroom.judgment.llm", "mindroom.participation_hook", "mindroom.private_storage.private_instance_identity_store", "mindroom.api.mcp_scim", "mindroom.api.script_gateway", "mindroom.agent_cli.json_io"]
+visibility = ["mindroom.judgment.client", "mindroom.judgment.llm", "mindroom.participation_hook", "mindroom.private_storage.private_instance_identity_store", "mindroom.api.mcp_scim", "mindroom.api.script_gateway", "mindroom.api.workflow_gateway", "mindroom.agent_cli.json_io", "mindroom.workflow_runs.structured"]
 
 [[modules]]
 path = "mindroom.providers.tool_policy"
@@ -8794,6 +9287,8 @@ depends_on = [
     "mindroom.tool_jobs.control",
 ]
 visibility = [
+    "mindroom.custom_tools.workflow",
+    "mindroom.custom_tools.workflow_peers",
     "mindroom.ai",
     "mindroom.custom_tools.delegate",
     "mindroom.custom_tools.dynamic_workflow",
@@ -8803,9 +9298,11 @@ visibility = [
     "mindroom.delegation.recovery",
     "mindroom.tool_system.agent_tools",
     "mindroom.orchestration.tool_job_runtime",
+    "mindroom.orchestration.script_runtime",
     "mindroom.delegation.targets",
     "mindroom.delegation.continuation",
     "mindroom.loop_hooks",
+    "mindroom.workflow_runs.agent_nodes",
 ]
 
 [[modules]]
@@ -8834,6 +9331,7 @@ visibility = [
     "mindroom.delegation.execution",
     "mindroom.delegation.targets",
     "mindroom.delegation.continuation",
+    "mindroom.workflow_runs.agent_nodes",
 ]
 
 [[modules]]
@@ -9455,6 +9953,7 @@ visibility = [
     "mindroom.orchestration.tool_job_runtime",
     "mindroom.tool_jobs.consumption",
     "mindroom.delegation.continuation",
+    "mindroom.workflow_runs.agent_nodes",
     "mindroom.response_runner",
 ]
 
@@ -9474,6 +9973,7 @@ depends_on = [
     "mindroom.tool_system.progress",
 ]
 visibility = [
+    "mindroom.custom_tools.workflow",
     "mindroom.tool_jobs.publication",
     "mindroom.commands.handler",
     "mindroom.tool_jobs.client_cancel",
@@ -9482,6 +9982,7 @@ visibility = [
     "mindroom.custom_tools.delegate",
     "mindroom.custom_tools.job",
     "mindroom.delegation.background",
+    "mindroom.delegation.continuation",
     "mindroom.delegation.recovery",
     "mindroom.orchestration.tool_job_runtime",
     "mindroom.response_runner",
@@ -9493,6 +9994,8 @@ visibility = [
     "mindroom.tool_jobs.notices",
     # A secret request waits on its card as an approval does, so a Stop cancels its job.
     "mindroom.secret_request_cards",
+    "mindroom.orchestration.workflow_runtime",
+    "mindroom.workflow_runs.agent_nodes",
 ]
 
 [[modules]]
@@ -9508,6 +10011,7 @@ visibility = [
 path = "mindroom.tool_jobs.control"
 depends_on = []
 visibility = [
+    "mindroom.custom_tools.workflow",
     "mindroom.delegation.execution",
     "mindroom.delegation.lifecycle",
     "mindroom.delegation.recovery",
@@ -9532,6 +10036,8 @@ depends_on = [
     "mindroom.tool_jobs.approvals",
     "mindroom.tool_jobs.publication",
     "mindroom.custom_tools.job",
+    "mindroom.custom_tools.workflow",
+    "mindroom.custom_tools.workflow_peers",
     "mindroom.delegation.background",
     "mindroom.delegation.lifecycle",
     "mindroom.delegation.recovery",
@@ -9569,6 +10075,7 @@ depends_on = [
     "mindroom.delegation.state",
     "mindroom.history.interrupted_replay",
     "mindroom.history.run_checkpoint",
+    "mindroom.tool_jobs.runtime",
     "mindroom.tool_system.events",
     "mindroom.tool_system.output_files",
     "mindroom.tool_system.plugins",
@@ -9593,8 +10100,8 @@ path = "mindroom.tool_jobs.execution"
 depends_on = [
     "mindroom.active_runs",
     "mindroom.agent_loop",
-    "mindroom.custom_tools.delegate",
     "mindroom.custom_tools.job",
+    "mindroom.custom_tools.workflow_peers",
     "mindroom.failure_text",
     "mindroom.llm",
     "mindroom.reply_scope",
@@ -9694,6 +10201,7 @@ visibility = [
 path = "mindroom.tool_jobs.results"
 depends_on = ["mindroom.llm", "mindroom.tool_jobs.legacy_results", "mindroom.tool_system.tool_function"]
 visibility = [
+    "mindroom.custom_tools.workflow",
     "mindroom.delegation.background",
     "mindroom.tool_jobs.execution",
     "mindroom.tool_jobs.consumption",
@@ -10469,6 +10977,7 @@ visibility = ["mindroom.cli.config"]
 path = "mindroom.tool_jobs.settings"
 depends_on = ["mindroom.tool_jobs.instances"]
 visibility = [
+    "mindroom.custom_tools.workflow",
     "mindroom.agents",
     "mindroom.ai",
     "mindroom.api.config_lifecycle",

@@ -30,7 +30,14 @@ from mindroom.agent_loop.tools import (
     plan_tool_batch,
     tool_result_message,
 )
-from mindroom.llm.errors import incomplete_stream_error
+from mindroom.llm.errors import (
+    ContextWindowExceeded,
+    ModelOutputLimitError,
+    ModelSafeguardRefusal,
+    ProviderError,
+    incomplete_stream_error,
+    incomplete_turn_error,
+)
 from mindroom.llm.events import ToolCompleted, ToolProgress, ToolStarted
 from mindroom.llm.messages import (
     AGGREGATE_USAGE_KEY,
@@ -528,8 +535,7 @@ async def _stream_turn(
                     reported.observe(event)
                 elif isinstance(event, TurnCompleted):
                     turn = event
-        if turn is None:
-            raise incomplete_stream_error(provider=identity.provider)
+        turn = _validate_completed_turn(turn, provider=identity.provider)
         answered = turn.message.provider_data or {}
         if not answered.get(REWRITTEN_ATTEMPT_KEY) and REQUEST_IDENTITY_KEY not in answered:
             # Digesting a long history would stall the replies sharing the event loop; the turn is still this stream's.
@@ -549,6 +555,49 @@ async def _stream_turn(
                 usage_sums_attempts(turn.message.provider_data) if turn is not None else reported.sums_attempts
             )
             _keep_cut_off(messages, metrics, identity, billed, "".join(shown), sums_attempts=sums_attempts)
+
+
+def _validate_completed_turn(turn: TurnCompleted | None, *, provider: str) -> TurnCompleted:
+    """Return ``turn`` once validated, raising when the stream ended without a turn or with an abnormal stop."""
+    if turn is None:
+        raise incomplete_stream_error(provider=provider)
+    stop = turn.stop_reason
+    msg = turn.message
+    has_text = bool(msg.get_content_string().strip())
+    has_calls = bool(msg.tool_calls)
+    if not has_calls and has_text:
+        return turn
+    detail = f" ({turn.raw_stop_reason})" if turn.raw_stop_reason else ""
+    if stop == "tool_use" and not has_calls:
+        error_msg = f"Model stopped with tool_use{detail} but returned no tool calls"
+        raise ProviderError(error_msg, provider=provider, provider_code=turn.raw_stop_reason)
+    phase = "completing tool calls" if has_calls else "producing output"
+    if stop in {"content_filter", "refusal"}:
+        raise ModelSafeguardRefusal(
+            provider=provider,
+            usage=msg.metrics,
+            message=f"Model stopped with {stop}{detail} before {phase}",
+            provider_code=turn.raw_stop_reason,
+        )
+    if stop == "incomplete":
+        raise incomplete_turn_error(
+            provider=provider,
+            raw_stop_reason=turn.raw_stop_reason,
+            phase=phase,
+        )
+    if stop == "output_limit" and not has_calls:
+        if turn.raw_stop_reason == "model_context_window_exceeded":
+            error_msg = "Model stopped with model_context_window_exceeded before producing output"
+            raise ContextWindowExceeded(error_msg, provider=provider, provider_code=turn.raw_stop_reason)
+        has_reasoning = bool(msg.reasoning_content or msg.redacted_reasoning_content)
+        while_reasoning = " while reasoning" if has_reasoning else ""
+        lower_effort = ", lower reasoning effort," if has_reasoning else ""
+        error_msg = (
+            f"The model hit its output token limit{while_reasoning} before producing any text or tool calls. "
+            f"Ask for the work in smaller steps{lower_effort} or raise the model's output token limit."
+        )
+        raise ModelOutputLimitError(error_msg)
+    return turn
 
 
 def _keep_cut_off(

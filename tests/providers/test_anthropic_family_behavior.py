@@ -345,7 +345,7 @@ async def test_cut_off_response_keeps_its_tool_calls_and_stops_at_the_output_lim
     }
     wire = Wire(sse_reply([truncated], stop_reason="max_tokens"))
     completed = await claude_turn(route_provider("anthropic", tmp_path, wire), ModelRequest(messages=_user()))
-    assert completed.stop_reason == "output_limit"
+    assert (completed.stop_reason, completed.raw_stop_reason) == ("output_limit", "max_tokens")
     assert completed.message.tool_calls == [
         {"id": "toolu_1", "type": "function", "function": {"name": "save_file", "arguments": '{"name": "notes.md"}'}},
     ]
@@ -372,7 +372,7 @@ async def test_refusal_completes_with_the_refusal_stop_reason(tmp_path: Path) ->
     wire = Wire(sse_reply([], stop_reason="refusal"))
     provider = route_provider("anthropic", tmp_path, wire)
     completed = await claude_turn(provider, ModelRequest(messages=_user()))
-    assert completed.stop_reason == "refusal"
+    assert (completed.stop_reason, completed.raw_stop_reason) == ("refusal", "refusal")
     assert completed.message.content is None
     # Every Claude turn stores its blocks, so a reply without any still reads as one with nothing to replay.
     assert (completed.message.provider_data or {})["claude_blocks"] == []
@@ -754,7 +754,7 @@ async def test_direct_route_sends_strict_tools_and_schemas_under_the_structured_
     assert body["output_config"]["format"]["type"] == "json_schema"
     assert body["output_config"]["format"]["schema"]["additionalProperties"] is False
     assert completed.message.content == '{"city": "Paris"}'
-    assert completed.stop_reason == "end"
+    assert (completed.stop_reason, completed.raw_stop_reason) == ("end", None)
 
 
 @pytest.mark.asyncio
