@@ -30,7 +30,7 @@ from mindroom.delegation.state import (
     SPENT_RUNS_KEY,
     SubagentPersona,
 )
-from mindroom.delegation.targets import resolve_follow_up_target, resolve_fresh_target
+from mindroom.delegation.targets import DelegationTarget, resolve_follow_up_target, resolve_fresh_target
 from mindroom.llm.messages import CUT_OFF_TEXT_KEY, is_own_model_message
 from mindroom.llm.runs import RunStatus
 from mindroom.runtime_resolution import resolve_agent_runtime
@@ -49,7 +49,6 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.delegation.state import DelegationChild
-    from mindroom.delegation.targets import DelegationTarget
     from mindroom.llm.runs import RunRecord, ToolExecution
     from mindroom.llm.usage import RunMetrics
     from mindroom.tool_jobs.runtime import BackgroundJob, JobClaim, ToolJobRuntime
@@ -155,7 +154,7 @@ async def _resolve_child_target(
     *,
     prompt: str,
     session: WorkflowNode | None,
-    follow_up: str | None,
+    follow_up: DelegationChild | None,
     correction: str | None,
     previous: DelegationChild | None,
 ) -> tuple[DelegationTarget, DelegationChild | None, str, dict[str, object]]:
@@ -166,19 +165,11 @@ async def _resolve_child_target(
     if session is not None:
         arguments["task"] = prompt
     if correction is None and follow_up is not None:
-        call_args: dict[str, object] = {"subagent_id": follow_up, "message": prompt}
+        call_args: dict[str, object] = {"subagent_id": follow_up.subagent_id, "message": prompt}
         if OUTPUT_PATH_ARGUMENT in arguments:
             call_args[OUTPUT_PATH_ARGUMENT] = arguments[OUTPUT_PATH_ARGUMENT]
-        target = await resolve_follow_up_target(
-            call_args,
-            owner=owner,
-            config=config,
-            runtime_paths=paths,
-            depth=run.depth,
-        )
-        if isinstance(target, str):
-            raise AgentNodeError(target)
-        return target, target.previous_child, CONTINUE_SUBAGENT, call_args
+        target = DelegationTarget(follow_up.child_agent_name, prompt, previous_child=follow_up)
+        return target, follow_up, CONTINUE_SUBAGENT, call_args
     cap = SubagentPersona.from_dict(run.persona) if run.persona else None
     if cap is not None and arguments.get("agent_name") in (None, caller) and not arguments.get("profile"):
         # A copy of a narrowed agent is that agent again: its prompt, and at most what it was left with.
@@ -213,7 +204,7 @@ async def launch_child(
     correction: str | None = None,
     made: bool = False,
     session: WorkflowNode | None = None,
-    follow_up: str | None = None,
+    follow_up: DelegationChild | None = None,
 ) -> WorkflowNode:
     """Start the job of one agent turn of *run* in its owner's *context*, and return the node as saved with its handle.
 
@@ -331,12 +322,7 @@ async def launch_child(
     node = replace(node, handle=replace(handle, dispatched=True))
     await asyncio.to_thread(store.update_node, run.run_id, node.key, node.generation, epoch, handle=node.handle)
     if session is not None:
-        links = {
-            "subagent_id": child.subagent_id,
-            "agent": target.agent_name,
-            "model": child.model_name,
-            "tip": f"{node.key}:{node.generation}",
-        }
+        links = {"subagent_id": child.subagent_id, "agent": target.agent_name, "model": child.model_name}
         await asyncio.to_thread(store.update_node, run.run_id, session.key, session.generation, epoch, links=links)
     return node
 

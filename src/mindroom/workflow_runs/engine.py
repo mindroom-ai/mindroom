@@ -97,6 +97,7 @@ if TYPE_CHECKING:
 
     import nio
 
+    from mindroom.delegation.state import DelegationChild
     from mindroom.script_runs.broker import ScriptToolBroker
     from mindroom.script_runs.manager import ScriptResourceProfileName, ScriptRunManager
     from mindroom.script_runs.models import ScriptRunRecord
@@ -253,6 +254,17 @@ class _Places:
     working: set[str] = field(default_factory=set)
     queued: deque[tuple[str, Callable[[], Awaitable[object]]]] = field(default_factory=deque)
     waking: int = 0
+
+
+@dataclass(frozen=True, slots=True)
+class _TurnContext:
+    """Resolved session, live sibling turns, earlier turns, last completed turn, and digest for one `turn` call."""
+
+    session: WorkflowNode
+    in_attempt: list[WorkflowNode]
+    earlier: list[WorkflowNode]
+    prev: WorkflowNode | None
+    digest: str
 
 
 # What the saved owner of a run has now in the run's conversation: its live context once access is confirmed,
@@ -799,10 +811,9 @@ class WorkflowEngine:
             # Before anything is kept for the attempt: one that the run left behind leaves nothing behind here.
             msg = f"Run {run.run_id} takes no more calls from attempt {attempt.run_id}."
             raise SupersededAttemptError(msg)
-        if kind == "turn":
-            session, all_turns, in_attempt, earlier, digest = self._turn_context(run, key, request.args)
-        else:
-            session, all_turns, in_attempt, earlier, digest = None, [], [], [], node_digest(kind, request.args)
+        turn_ctx = self._turn_context(run, key, request.args) if kind == "turn" else None
+        session = None if turn_ctx is None else turn_ctx.session
+        digest = node_digest(kind, request.args) if turn_ctx is None else turn_ctx.digest
         members = _members(meta) if kind == "group" else None
         saved = self.store.get_node(run.run_id, key)
         # A saved call with '' was named by a resume; one with DIRTY_DIGEST follows a call that ran in a later attempt.
@@ -856,7 +867,7 @@ class WorkflowEngine:
         completed = saved is not None and saved.state is WorkflowNodeState.COMPLETED and not (dirty or rerun)
         previous = saved if completed else None
         changed = previous is not None and previous.digest != digest
-        lineage_reran = any(not turn.cached for turn in earlier)
+        lineage_reran = turn_ctx is not None and any(not turn.cached for turn in turn_ctx.earlier)
         if (
             previous is not None
             and changed
@@ -912,8 +923,8 @@ class WorkflowEngine:
             node = replace(node, state=WorkflowNodeState.FAILED, error=refused)
         elif (
             shown == "turn"
-            and session is not None
-            and any(other.key != key and other.state in LIVE_NODE_STATES for other in in_attempt)
+            and turn_ctx is not None
+            and any(other.key != key and other.state in LIVE_NODE_STATES for other in turn_ctx.in_attempt)
         ):
             busy = _SESSION_BUSY.format(name=node_name or session.key)
             node = replace(node, state=WorkflowNodeState.FAILED, error={"kind": "failed", "message": busy})
@@ -927,19 +938,18 @@ class WorkflowEngine:
             if saved is not None:
                 await asyncio.to_thread(withdraw_unread, self.store, run.run_id, key, saved.generation)
             follow_up = None
-            if shown == "turn" and session is not None:
-                prev_turn = next((t for t in reversed(earlier) if t.state is WorkflowNodeState.COMPLETED), None)
+            if shown == "turn" and turn_ctx is not None:
                 mail_call = partial(
                     session_turn_message,
                     self.store,
                     run.run_id,
-                    session,
+                    turn_ctx.session,
                     key,
                     generation,
                     str(asked["message"]),
                 )
-                turn_msg = await asyncio.to_thread(mail_call, prev_turn=prev_turn)
-                follow_up, prompt = await self._prepare_turn(run, session, all_turns, earlier, saved, turn_msg)
+                turn_msg = await asyncio.to_thread(mail_call, prev_turn=turn_ctx.prev)
+                follow_up, prompt = await self._prepare_turn(run, turn_ctx, saved, turn_msg)
                 node = replace(node, request={**asked, "prompt": prompt, "effective_message": turn_msg})
             dispatch = partial(self._dispatch_agent, run, timeout=_timeout(meta), follow_up=follow_up)
             start = partial(self._enter, run, node, dispatch)
@@ -1433,12 +1443,7 @@ class WorkflowEngine:
         await self._restate(run.run_id)
         return _receipt(node)
 
-    def _turn_context(
-        self,
-        run: WorkflowRun,
-        key: str,
-        args: dict[str, object],
-    ) -> tuple[WorkflowNode, list[WorkflowNode], list[WorkflowNode], list[WorkflowNode], str]:
+    def _turn_context(self, run: WorkflowRun, key: str, args: dict[str, object]) -> _TurnContext:
         """Resolve a `turn` call's session, its earlier turns in this attempt, and its lineage-hashed digest."""
         session_key, turn_num = args.get("session"), args.get("turn")
         session = self.store.get_node(run.run_id, session_key) if isinstance(session_key, str) else None
@@ -1448,18 +1453,22 @@ class WorkflowEngine:
         if type(turn_num) is not int or turn_num < 1:
             msg = "Session turn number must be a whole number of at least 1."
             raise WorkflowRunStoreError(msg)
-        all_turns = self.store.session_turns(run.run_id, session.key)
-        in_attempt = [turn for turn in all_turns if turn.attempt == run.attempt and not turn.stale]
+        in_attempt = [
+            turn
+            for turn in self.store.session_turns(run.run_id, session.key)
+            if turn.attempt == run.attempt and not turn.stale
+        ]
         earlier = sorted(
             (turn for turn in in_attempt if turn.key != key and int(turn.request["turn"]) < turn_num),
             key=lambda turn: (int(turn.request["turn"]), turn.seq),
         )
+        prev = next((t for t in reversed(earlier) if t.state is WorkflowNodeState.COMPLETED), None)
         lineage = [
             (session.digest, session.generation),
             *((turn.key, turn.digest, turn.generation) for turn in earlier),
         ]
         digest = result_digest({"kind": "turn", "args": args, "lineage": lineage})
-        return session, all_turns, in_attempt, earlier, digest
+        return _TurnContext(session, in_attempt, earlier, prev, digest)
 
     async def peer_send(self, run_id: str, *, op_id: str, sender: NodeRef, to: str, text: str) -> dict[str, object]:
         """Send one peer message in a single transaction and wake any waiters of *run_id*."""
@@ -1551,52 +1560,35 @@ class WorkflowEngine:
     async def _prepare_turn(
         self,
         run: WorkflowRun,
-        session: WorkflowNode,
-        all_turns: list[WorkflowNode],
-        earlier: list[WorkflowNode],
+        turn_ctx: _TurnContext,
         saved: WorkflowNode | None,
         message: str,
-    ) -> tuple[str | None, str]:
+    ) -> tuple[DelegationChild | None, str]:
         """Decide whether a session turn continues the saved child or starts a fresh child with a transcript."""
-        completed = [turn for turn in earlier if turn.state is WorkflowNodeState.COMPLETED]
-        prev = completed[-1] if completed else None
+        completed = [turn for turn in turn_ctx.earlier if turn.state is WorkflowNodeState.COMPLETED]
+        prev = turn_ctx.prev
         prev_sub = prev.links.get("subagent_id") if prev is not None else None
-        retry = (
-            saved
-            if saved is not None and saved.state in (WorkflowNodeState.FAILED, WorkflowNodeState.CANCELLED)
-            else None
-        )
-        valid_tips = {f"{prev.key}:{prev.generation}"} if prev is not None else set()
-        ignored = {prev.key} if prev is not None else set()
-        if retry is not None and not retry.links.get("made"):
-            valid_tips.add(f"{retry.key}:{retry.generation}")
-            ignored.add(retry.key)
-        can_continue = (
-            prev is not None
-            and prev_sub is not None
-            and session.links.get("subagent_id") == prev_sub
-            and session.links.get("tip") in valid_tips
-            and not any(
-                other.key not in ignored
-                and int(other.request["turn"]) >= int(prev.request["turn"])
-                and other.links.get("subagent_id") == prev_sub
-                for other in all_turns
-            )
-        )
-        if can_continue and prev_sub is not None:
+        if prev is not None and isinstance(prev_sub, str):
             context = self.authorize(run)
             if context is None:
                 raise ScriptRuntimeUnavailableError(_OWNER_NOT_READY)
             if not isinstance(context, str):
                 child = await load_follow_up_child(context, run, prev_sub)
-                if child is None or (
+                allowed = {(prev.key, prev.generation)}
+                if (
+                    saved is not None
+                    and saved.state in (WorkflowNodeState.FAILED, WorkflowNodeState.CANCELLED)
+                    and not saved.links.get("made")
+                ):
+                    allowed.add((saved.key, saved.generation))
+                fits = not (
                     run.persona
+                    and child is not None
                     and child.child_agent_name == run.agent_name
                     and not _fits_ceiling(child.persona, SubagentPersona.from_dict(run.persona))
-                ):
-                    can_continue = False
-        if can_continue:
-            return prev_sub, message
+                )
+                if child is not None and (child.workflow_node_key, child.workflow_generation) in allowed and fits:
+                    return child, message
         if not completed:
             return None, message
         history = [
@@ -1616,7 +1608,7 @@ class WorkflowEngine:
         node: WorkflowNode,
         *,
         timeout: float | None,  # noqa: ASYNC109 - the seconds of work the turn gets, not a deadline of this call.
-        follow_up: str | None = None,
+        follow_up: DelegationChild | None = None,
     ) -> NodeReceipt:
         """Start the job of an agent node and wait for it as the engine's own task; a refusal is the node's end.
 
@@ -1656,7 +1648,7 @@ class WorkflowEngine:
         turn: int = 1,
         correction: str | None = None,
         made: bool = False,
-        follow_up: str | None = None,
+        follow_up: DelegationChild | None = None,
     ) -> WorkflowNode:
         """Authorize and start one turn of an agent node; turn 1 logs the label-vs-agent notice when applicable."""
         context, runtime = self.authorize(run), self.agents()
