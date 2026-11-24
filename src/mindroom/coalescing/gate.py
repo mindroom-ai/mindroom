@@ -1310,10 +1310,14 @@ class CoalescingGate:
     ) -> None:
         # Follow-up owners have no receipt lane; only requester-owned bursts
         # wait for same-sender lane work still resolving inside the window.
-        # A submission that reached its bound still waits for matching in-flight
-        # lane work from the same submission, but not unrelated later lane work.
+        # A completed marked submission already received its final event in lane
+        # FIFO order, so any remaining lane work belongs to a later turn.
+        # An open submission that reached its bound still waits for matching
+        # in-flight lane work from the same submission, not unrelated later work.
+        run_limit = self._front_run_limit(key, gate)
+        front_submission = self._front_submission(gate, run_limit=run_limit)
         lane_key = ReceiptLaneKey.for_coalescing_owner(key.room_id, key.owner)
-        if lane_key is not None:
+        if lane_key is not None and not (front_submission is not None and not front_submission.more):
             admitted_lane_slot_ids = {id(queued.lane_slot) for queued in gate.queue if queued.lane_slot is not None}
             window_slots = self._lanes.undelivered_in_window(
                 lane_key,
@@ -1326,7 +1330,7 @@ class CoalescingGate:
                 return
 
         if debounce_result.timed_out_submission_id is not None:
-            self._report_submission_timeout(key, gate, run_limit=self._front_run_limit(key, gate))
+            self._report_submission_timeout(key, gate, run_limit=run_limit)
 
         parallel_root = self._allows_parallel_root_preparation(key)
         if parallel_root:

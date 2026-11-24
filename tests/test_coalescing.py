@@ -2101,6 +2101,62 @@ async def test_open_submission_flushes_once_when_in_flight_same_submission_slot_
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("upload_thread_id", "voice_thread_id"),
+    [(None, "$upload:localhost"), ("$thread:localhost", "$thread:localhost")],
+)
+async def test_completed_submission_after_bound_does_not_wait_for_later_unresolved_voice(
+    monkeypatch: pytest.MonkeyPatch,
+    upload_thread_id: str | None,
+    voice_thread_id: str,
+) -> None:
+    """Once an overdue submission's final voice settles, it dispatches without waiting on later unrelated lane work."""
+    monkeypatch.setattr(gate_module, "_SUBMISSION_WAIT_SECONDS", 0.05)
+    gate, batches = _recording_gate(60.0)
+    owner = RequesterCoalescingOwner("@user:localhost")
+    lane_key = ReceiptLaneKey(room_id="!room:localhost", sender_id=owner.requester_user_id)
+    release_voice_a = asyncio.Event()
+    release_voice_b = asyncio.Event()
+
+    with capture_logs() as logs:
+        await _admit_ready(
+            gate,
+            CoalescingKey("!room:localhost", upload_thread_id, owner),
+            _image_pending("$upload:localhost", 1_000_000, submission=_open()),
+        )
+        voice_a_slot = gate.enter_lane(lane_key)
+        voice_a = _voice_pending("$voice-a:localhost", "first submission", 1_000_380, submission=_final())
+        gate.submit_lane_slot(
+            voice_a_slot,
+            key=CoalescingKey("!room:localhost", voice_thread_id, owner),
+            source_event_id="$voice-a:localhost",
+            ready_task=asyncio.create_task(_ready_after(release_voice_a, voice_a)),
+            submission_id="upload-1",
+        )
+        other_slot = gate.enter_lane(lane_key)
+        voice_b = _voice_pending("$voice-b:localhost", "other thread", 1_000_500)
+        gate.submit_lane_slot(
+            other_slot,
+            key=CoalescingKey("!room:localhost", "$other-thread:localhost", owner),
+            source_event_id="$voice-b:localhost",
+            ready_task=asyncio.create_task(_ready_after(release_voice_b, voice_b)),
+        )
+        await asyncio.sleep(0.12)
+        assert batches == []
+
+        release_voice_a.set()
+        await _wait_for(lambda: _dispatched_source_count(batches) == 2)
+
+    assert not other_slot.settled.is_set()
+    assert len(batches) == 1
+    assert batches[0].coalescing_key.thread_id == voice_thread_id
+    assert list(batches[0].handled_turn.source_event_ids) == ["$upload:localhost", "$voice-a:localhost"]
+    assert not [log for log in logs if log["event"] == "coalescing_gate_submission_timed_out"]
+    release_voice_b.set()
+    await gate.drain_all()
+
+
+@pytest.mark.asyncio
 async def test_plain_text_is_not_held_by_an_open_upload_for_another_participant() -> None:
     """Text for this agent queued just before an open upload for another participant is its own turn and answers at once."""
     gate, batches = _recording_gate(60.0)
