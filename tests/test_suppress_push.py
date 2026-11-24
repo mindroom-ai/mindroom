@@ -36,9 +36,13 @@ from mindroom.tool_jobs.follow_ups import (
     next_follow_up_id,
 )
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
-from mindroom.tool_jobs.runtime import BackgroundOutcome, register_background_runtime
+from mindroom.tool_jobs.runtime import BackgroundOutcome, JobSpec, register_background_runtime
 from mindroom.tool_system.events import FailedReply
-from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
+from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context, tool_runtime_context
+from mindroom.tool_system.worker_routing import serialize_tool_execution_identity
+from mindroom.workflow_runs.agent_nodes import launch_child
+from mindroom.workflow_runs.models import WorkflowNode, WorkflowRun, new_workflow_run_id
+from mindroom.workflow_runs.store import WorkflowRunStore
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.bot_helpers import unique_room_send_responses
 from tests.conftest import (
@@ -62,6 +66,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.bot import AgentBot
+    from mindroom.delegation.state import DelegationChild
     from mindroom.response_turn import ResponseTurnContext, TurnSinks
     from mindroom.tool_jobs.runtime import ToolJobRuntime
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -126,6 +131,7 @@ async def _start_forever(
     *,
     kind: str = "tool",
     adapter: dict[str, Any] | None = None,
+    source_kind: str = "message",
 ) -> None:
     async def forever() -> BackgroundOutcome:
         await asyncio.Event().wait()
@@ -140,6 +146,7 @@ async def _start_forever(
         adapter=adapter or {},
         owner=owner,
         operation=forever,
+        source_kind=source_kind,
     )
 
 
@@ -410,6 +417,101 @@ async def test_workflow_node_awaiting_approval_does_not_suppress_push(tmp_path: 
             adapter={"child": {"workflow_run_id": "wf-1"}, "wait": "approval"},
         )
         assert not await has_working_jobs_for_conversation(runtime, key)
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_silent_workflow_child_approval_preserves_source_kind_and_isolates_visible_conversation(
+    tmp_path: Path,
+) -> None:
+    """Workflow-node children inherit a silent parent workflow's source_kind without leaking into visible turns."""
+    runtime = await tool_job_runtime(tmp_path)
+    context = _matrix_message_context(tmp_path)
+    context.config.agents["general"].tools = ["workflow"]
+    context.config.agents["general"].delegate_to = ["code"]
+    owner = context.execution_identity
+    visible_key = _conversation_key(owner, silent=False)
+    silent_key = _conversation_key(owner, silent=True)
+    store = WorkflowRunStore(tmp_path / "workflow_runs.sqlite3")
+    seen_context_source_kinds: list[str | None] = []
+
+    def fake_delegation_job(child: DelegationChild, *, job_id: str, **_kwargs: object) -> JobSpec:
+        active_ctx = get_tool_runtime_context()
+        seen_context_source_kinds.append(None if active_ctx is None else active_ctx.source_kind)
+        return JobSpec(
+            tool_name="run_subagent",
+            kind="delegation",
+            adapter={"child": {"workflow_run_id": child.workflow_run_id}, "wait": "approval"},
+            operation=partial(awaiting_approval, runtime, job_id),
+        )
+
+    try:
+        # Running silent parent workflow + independent visible running job.
+        await _start_forever(
+            runtime,
+            "silent_workflow",
+            owner,
+            kind="workflow",
+            adapter={"workflow": "nightly"},
+            source_kind=SILENT_SCHEDULE_SOURCE_KIND,
+        )
+        await _start_forever(runtime, "visible_job", owner)
+        assert await has_working_jobs_for_conversation(runtime, silent_key)
+        assert await has_working_jobs_for_conversation(runtime, visible_key)
+
+        run, _ = store.reserve_run(
+            WorkflowRun(
+                run_id=new_workflow_run_id(),
+                agent_name=context.agent_name,
+                owner_user_id=context.requester_id,
+                room_id=context.room_id,
+                thread_root_event_id=context.resolved_thread_id,
+                execution_identity=serialize_tool_execution_identity(owner),
+                persona=None,
+                title=None,
+                source="pass",
+                source_digest="digest",
+                args=None,
+                max_concurrent=4,
+                max_cost_usd=None,
+                resource_profile=None,
+                runtime_seconds_left=None,
+                origin_job_id="silent_workflow",
+                owner="silent_workflow",
+                job_id="silent_workflow",
+            ),
+        )
+        node = store.put_node(
+            WorkflowNode(
+                run_id=run.run_id,
+                key="@0",
+                kind="agent",
+                lane="main",
+                idx=0,
+                digest="d1",
+                request={"agent": "code", "prompt": "check"},
+                attempt=0,
+                label="check",
+            ),
+            epoch=run.epoch,
+        )
+        # Rebuilt workflow contexts arrive with source_kind=None; launch_child must inherit the parent job's.
+        assert context.source_kind is None
+        with patch("mindroom.workflow_runs.agent_nodes.delegation_call_job", side_effect=fake_delegation_job):
+            launched = await launch_child(context, run, node, run.epoch, store=store, jobs=runtime)
+
+        assert launched.handle is not None
+        child_job_id = launched.handle.ref
+        await wait_for_status(runtime, child_job_id, "awaiting_approval")
+        child_job = runtime.retained_job(child_job_id)
+        assert child_job is not None
+        assert child_job.source_kind == SILENT_SCHEDULE_SOURCE_KIND
+        assert seen_context_source_kinds == [SILENT_SCHEDULE_SOURCE_KIND]
+
+        # Silent query surfaces Needs You (False); visible query still sees its own running work (True).
+        assert not await has_working_jobs_for_conversation(runtime, silent_key)
+        assert await has_working_jobs_for_conversation(runtime, visible_key)
     finally:
         await runtime.shutdown()
 

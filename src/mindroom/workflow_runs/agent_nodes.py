@@ -191,6 +191,30 @@ async def _resolve_child_target(
     return target, previous, RUN_SUBAGENT, arguments
 
 
+def _workflow_source_kind(
+    run: WorkflowRun,
+    *,
+    store: WorkflowRunStore,
+    jobs: ToolJobRuntime,
+    fallback: str | None,
+) -> str | None:
+    """Return the owning workflow job's ``source_kind``, walking nested runs when needed."""
+    current: WorkflowRun | None = run
+    seen: set[str] = set()
+    while current is not None and current.run_id not in seen:
+        seen.add(current.run_id)
+        for job_id in (current.job_id, current.origin_job_id):
+            if job_id is not None and (job := jobs.retained_job(job_id)) is not None and job.source_kind is not None:
+                return job.source_kind
+        if current.parent_run_id is None:
+            break
+        try:
+            current = store.get_run(current.parent_run_id)
+        except ValueError:
+            break
+    return fallback
+
+
 async def launch_child(
     context: ToolRuntimeContext,
     run: WorkflowRun,
@@ -225,6 +249,9 @@ async def launch_child(
     # A further turn whose first child is no longer kept starts an agent that never saw the task.
     prompt = first_prompt(node) if correction is None else correction
     prompt = prompt if correction is None or previous is not None else f"{first_prompt(node)}\n\n{correction}"
+    source_kind = _workflow_source_kind(run, store=store, jobs=jobs, fallback=context.source_kind)
+    if source_kind is not None and context.source_kind != source_kind:
+        context = replace(context, source_kind=source_kind)
     config, paths, caller = context.current_config, context.runtime_paths, run.agent_name
     with tool_runtime_context(context):
         target, previous, tool_name, call_args = await _resolve_child_target(
@@ -306,7 +333,13 @@ async def launch_child(
         node = saved
         try:
             # In the owner's context, which the job's task keeps: the child runs in the run's conversation.
-            _, claim = await jobs.start_spec(job_id, spec, owner=owner, depth=run.depth)
+            _, claim = await jobs.start_spec(
+                job_id,
+                spec,
+                owner=owner,
+                depth=run.depth,
+                source_kind=source_kind,
+            )
         except JobAccessError as exc:
             raise AgentNodeError(str(exc)) from exc
     await jobs.release_wait(job_id, claim)

@@ -879,6 +879,7 @@ class ToolJobRuntime:
         *,
         owner: ToolExecutionIdentity,
         depth: int,
+        source_kind: str | None = None,
     ) -> tuple[BackgroundJob, JobClaim | None]:
         """Start a prepared *spec* as *job_id* for *owner* at *depth*, passing the live adapter reference."""
         return await self.start(
@@ -887,6 +888,7 @@ class ToolJobRuntime:
             depth=depth,
             kind=spec.kind,
             toolkit_name=spec.toolkit_name,
+            source_kind=source_kind,
             adapter=spec.adapter,
             owner=owner,
             operation=spec.operation,
