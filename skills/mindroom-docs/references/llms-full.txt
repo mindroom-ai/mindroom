@@ -496,13 +496,18 @@ Before you start:
 uvx mindroom run
 ```
 
-When no config exists and MindRoom runs in a terminal, it asks a few setup questions:
+When no config exists and MindRoom runs in a terminal, it checks for local logins (`claude`, `codex`, `kimi`), provider API keys in your environment, and running local Ollama chat models, then asks a few setup questions:
 
-1. Pick a model provider from the menu (default OpenAI).
-2. For Anthropic, OpenAI, or OpenRouter, paste the API key; input is hidden.
-   Press Enter to skip, then connect the provider later through the [dashboard](https://docs.mindroom.chat/dashboard/#connect-your-ai-provider), or add the key to `~/.mindroom/.env` and restart `mindroom run`.
-   MindRoom does not ask when the key is already set in your environment.
-   Other presets print their remaining step instead, such as `codex login`, `ollama pull`, or the Azure, Bedrock, or Vertex AI settings to add to `~/.mindroom/.env` before restarting.
+1. Pick a model provider from the menu.
+   Detected logins, keys, and running Ollama models appear at the top; when both Claude Code and Codex are signed in, `Claude + Codex` is offered as the recommended combined preset and lets you pick `Mind`'s default model (`Claude Sonnet 5.5`, `Codex Sol`, or `Claude Opus 5.5`).
+   When nothing is detected, the default menu starts with OpenAI.
+2. Finish provider setup when needed:
+   - For Anthropic, OpenAI, or OpenRouter, paste the API key (input is hidden).
+     MindRoom verifies it with a cheap, non-billable check (unless a custom endpoint variable such as `OPENAI_BASE_URL` is set) and lets you retry or press Enter to skip, then connect later through the [dashboard](https://docs.mindroom.chat/dashboard/#connect-your-ai-provider) or by editing `~/.mindroom/.env` and restarting `mindroom run`.
+     MindRoom does not ask when the key is already set in your environment.
+   - For `codex` or `claude_code` when the CLI is installed but signed out, MindRoom offers to run `codex login` or `claude auth login` inline.
+   - For `ollama` when local chat models are already pulled, pick the default model directly from your pulled models.
+   - Other presets print their remaining step instead, such as `ollama pull` or the Azure, Bedrock, or Vertex AI settings to add to `~/.mindroom/.env` before restarting.
 
 MindRoom then writes `~/.mindroom/config.yaml` and `~/.mindroom/.env` with hosted Matrix defaults (`MATRIX_HOMESERVER=https://mindroom.chat`) and a starter `Mind` agent in a `Personal` room.
 
@@ -2600,10 +2605,17 @@ models:
   default:
     provider: claude_code
     id: claude-sonnet-5-5
+    display_name: Claude Sonnet 5.5
+    context_window: 200000
+  opus:
+    provider: claude_code
+    id: claude-opus-5-5
+    display_name: Claude Opus 5.5
     context_window: 200000
   haiku:
     provider: claude_code
     id: claude-haiku-5-5
+    display_name: Claude Haiku 5.5
     context_window: 200000
 
 router:
@@ -2615,7 +2627,8 @@ defaults:
 
 The `id` is any model ID or alias Claude Code takes for `--model`, such as `claude-opus-5-5` or `opus`, within what the plan includes.
 `extra_kwargs` accepts `cli_path`, the `claude` executable to run, and `effort`, one of `low`, `medium`, `high`, `xhigh`, or `max`.
-Without `cli_path`, MindRoom runs the `claude` on its `PATH`; set `cli_path` when the service's `PATH` does not include it.
+Without `cli_path`, MindRoom runs the `claude` on its `PATH`; interactive setup (`mindroom run` or `mindroom config init` in a terminal) pins `cli_path` when it detects `claude`, while non-interactive `--provider claude_code` keeps the config portable.
+Set `cli_path` manually when a service's `PATH` does not include it.
 MindRoom's storage directory must allow executing files for this provider.
 MindRoom never reads Claude Code's credentials, ignores an authored `api_key`, and does not accept a token, endpoint, or headers for this provider.
 MindRoom removes inherited `ANTHROPIC_*`, `CLAUDE_CODE_*`, `CLAUDE_BG_AUTH_SNAPSHOT_PATH`, and `CLAUDE_AUTO_BACKGROUND_TASKS` variables from Claude Code's environment (except settings MindRoom explicitly allows), so Claude Code never uses an `ANTHROPIC_API_KEY` exported for other models.
@@ -3379,10 +3392,12 @@ Edits, reactions, and redactions belong to the same thread as the message they t
 
 ## Forked Threads
 
-A client can fork a thread: the new thread's root carries an `io.mindroom.fork` reference with the parent thread's ID and the last parent message the fork includes.
+A client can fork a thread within the same room or into another room: the new thread's root carries an `io.mindroom.fork` reference with `thread_id`, `event_id` (the last parent message the fork includes), and an optional `room_id` naming the immediate parent's room when crossing rooms.
 Agents in the fork, and `matrix_message` reads of it, see the parent's messages up to that fork point, then the fork's own messages, and a parent message after the fork point is never included.
-An agent that answered in the parent counts as a participant of the fork.
-Agents in the fork can use the attachments of the threads it forks from.
+For same-room forks, an agent that answered in the parent counts as a participant of the fork and the fork inherits the parent's per-thread model overrides; for cross-room forks, participation, multi-human detection, reply mode, and default models follow the target room instead.
+Cross-room parent reads (agent turns, `matrix_message` reads, and provisional titles) fail closed: neither room may be a contact room, the reading agent, the current requester, the fork-root author, and every human joined or invited to the target room must currently be joined to the parent room, the target room must not have `world_readable` history visibility, and encrypted parent rooms cannot cross into unencrypted target rooms.
+When a cross-room hop is denied, agents omit the parent's messages, title, and attachments while still answering normally in the target thread.
+Agents in an authorized fork can use the attachments carried by its parent prefix up to the fork point.
 An edit of a fork's root must keep `io.mindroom.fork` in its `m.new_content`, or agents treat the fork as a plain thread from then on.
 Only the conversation is inherited: tags and other per-thread state stay on the parent, and the fork starts with its own session runs and no compaction summaries from the parent.
 Moving a fork to another room copies only the fork's own messages.
@@ -6582,7 +6597,7 @@ Earlier attachments appear in the conversation history as annotations, and the a
 [attachments: att_def456 (image, "house.jpg")]
 ```
 
-Attachment IDs are scoped to their room and thread, so an ID from one conversation cannot be used in another, except that a [forked thread](https://docs.mindroom.chat/configuration/threads/#forked-threads) can use its parent's.
+Attachment IDs are scoped to their room and thread, so an ID from one conversation cannot be used in another, except that an authorized [forked thread](https://docs.mindroom.chat/configuration/threads/#forked-threads) (same-room or cross-room) can use attachments carried by its parent prefix up to the fork point, while each attachment stays registered under its original room and thread.
 Within a conversation, an authorized response can open files uploaded by any participant.
 When a message's file is replaced by an edit, later turns use the new file under a new attachment ID.
 
@@ -10563,6 +10578,9 @@ agents:
 | --- | --- | --- | --- |
 | `timeout_seconds` | number | `30` | From 1 to 120; bounds each call and each shell-output download. `run_shell` always waits up to 120 seconds so the person at the computer has time to decide. |
 
+By default, `defaults.desktop_pairing` is `self_service`, so authorized users can pair their computer with any concrete agent without statically listing `desktop` in `tools` (the tool activates automatically once paired).
+Set `defaults.desktop_pairing: explicit_only` to restrict pairing to agents that explicitly configure `desktop`, or `disabled` to refuse new pairings while still allowing existing pairings to disconnect.
+
 Never put device identity fields in agent YAML for the `desktop` tool; each user pairs their own computer through chat.
 Pairings are already scoped to one requester and one agent, so add `private: {per: user_agent}` only when the agent's whole runtime and state should also be requester-private.
 The tool needs a live Matrix room and runs in the primary agent process, so it is unavailable in [OpenAI-compatible API](https://docs.mindroom.chat/openai-api/) runs.
@@ -10583,8 +10601,7 @@ To drive the user's signed-in browser, also configure the [`browser`](https://do
 Only the same requester with the same agent can confirm or use the pairing.
 Until pairing is confirmed, `desktop` calls return a setup-required result while the agent's other tools keep working, and the model cannot register or replace a device itself.
 
-Repeating setup for the same controller keeps saved browser, capture, folder, and shell choices, and keeps app choices unless you supply new app IDs.
-Setup for a different controller starts without saved folders or shell access; after the bridge has started once, see **Change the cloud controller** under [Operations](#operations).
+Repeating setup for the same controller or rotating an existing controller device replaces that entry in place and keeps saved browser, capture, folder, and shell choices (and keeps app choices unless you supply new app IDs). When only one controller is saved, setting up a different controller user replaces it and resets saved local access; when multiple controllers are already saved, `mindroom desktop setup` refuses a brand-new controller user so you do not silently wipe or share existing saved access.
 If the saved session belongs to a different homeserver or Matrix user than the setup command names, setup exits without pairing; pass `--storage-path` for a separate setup or run `mindroom desktop login --replace`.
 The separate `mindroom desktop login` and `mindroom desktop pair` commands remain available for manual recovery.
 
@@ -10779,7 +10796,7 @@ For app-level control of the browser window, or for Safari and other browsers, a
 - **Local allowlists**: Only applications selected locally can be listed, launched, inspected, captured, or controlled, unless full control is live, which covers every app.
   An allowed app can still open a link or document in another app, which the bridge cannot then inspect or control unless that app is also allowlisted.
   Allowlisting a browser exposes whichever window and tab is selected, not one website.
-- **MindRoom is excluded**: MindRoom itself (`chat.mindroom.menubar`) and its desktop helper (`chat.mindroom.desktophelper`) can never be allowlisted or targeted under full control, because their windows grant shell auto-approval, control, and app access.
+- **MindRoom is excluded**: MindRoom's own apps (`chat.mindroom.menubar`, `chat.mindroom.app`) and their helpers (`chat.mindroom.desktophelper`, `chat.mindroom.app.helper*`) can never be allowlisted or targeted under full control, because their windows grant shell auto-approval, control, and app access.
 - **No remote authority**: Cloud configuration, chat messages, and model output cannot enable control or full control, extend a lease, change local allowlists or folders, enable shell commands, or approve one.
 - **Ending control**: **Revoke** in the macOS app or its menu, **Stop Access**, or stopping the terminal bridge ends input; the pointer position never does.
 - **Local audit log**: The bridge logs each completed or rejected command without its parameters, values, or typed text.
@@ -10962,8 +10979,8 @@ Adding `run_shell` to the set adds a chat confirmation before the request is sen
 - **Rotate the local device**: Run `mindroom desktop login --replace`, revoke the old device in your Matrix account settings, then run `!desktop rotate` in the agent chat and follow its pairing command.
   `--replace` does not revoke the old device by itself.
   If a `browser` tool uses the desktop target, update its `device_id` and `device_ed25519` settings to the new device, or its calls fail.
-- **Change the cloud controller**: Once the bridge has started, setup, the macOS app, and `mindroom desktop run` refuse a different controller identity with `Desktop journal belongs to a different controller.`
-  Use `--storage-path` with a new directory for `mindroom desktop login`, `mindroom desktop setup`, and `mindroom desktop run`; the new setup does not carry over pending commands or outcomes, and the macOS app has no migration action.
+- **Add or change cloud controllers**: The v2 command journal (`commands.sqlite3`) and `v: 2` native config isolate command history and allowlists per controller inside one storage directory, so a single bridge can serve multiple paired cloud controllers or rotate an existing controller device without switching `--storage-path`.
+  Use the native helper's `upsert_controller` and `remove_controller` actions (used by MindRoom Chat) to add or remove controllers while keeping existing saved access intact. Run `mindroom desktop setup` (or the legacy macOS menu bar app) to re-pair or rotate an existing controller in place, or to replace a single-controller setup; when multiple controllers are configured, adding another agent requires `upsert_controller` or MindRoom Chat.
 - **Identity mismatch**: A device ID or Ed25519 mismatch is a hard failure; treat it as a rotation or possible substitution and do not bypass it.
 - **Stop**: `Ctrl+C` in the terminal or **Stop Access** in the macOS app stops the bridge and its shell commands.
   An app or browser action already in progress can still finish, so observe local state before retrying it.
@@ -27744,7 +27761,7 @@ For hosted MindRoom Chat, `mindroom run` runs this setup interactively on first 
 | --- | --- |
 | `--path`, `-p` | Where to write `config.yaml`; `.env` goes in the same directory. Defaults to the auto-detected location, usually `~/.mindroom/config.yaml`. |
 | `--matrix-server` | Where MindRoom creates Matrix users and rooms: `mindroom.chat` (hosted, default) or `self-hosted` (your own homeserver). |
-| `--provider` | Default model provider: `anthropic`, `azure`, `bedrock_claude`, `claude_code`, `codex`, `kimi`, `llama.cpp`, `ollama`, `openai`, `openrouter`, or `vertexai_claude`; defaults to `openai`, except that `self-hosted` in a terminal asks. |
+| `--provider` | Default model provider: `anthropic`, `azure`, `bedrock_claude`, `claude_code`, `codex`, `kimi`, `llama.cpp`, `ollama`, `openai`, `openrouter`, or `vertexai_claude`. Omitting it in an interactive terminal (without `--no-input` or `--print`) runs the provider auto-detection wizard for both `mindroom.chat` and `self-hosted`; piped `self-hosted` still prompts for the preset, while non-interactive `mindroom.chat` defaults to `openai`. |
 | `--print` | Print the generated `config.yaml` with syntax highlighting without writing `config.yaml`, `.env`, or starter workspace files. |
 | `--no-input` | Never prompt: keep an existing `config.yaml` unchanged, create anything missing, and use `openai` unless `--provider` is given. |
 | `--force` | Overwrite without asking: replaces `config.yaml`, `.env` (including API keys and pairing credentials), the Mind starter workspace files such as `MEMORY.md` and `USER.md`, and the `AGENTS.md` beside the config; back up anything you want to keep first. |
@@ -27773,7 +27790,7 @@ Some presets need a local login or server before MindRoom can answer:
 - `codex`: run `codex login` first; see [Codex Models](https://docs.mindroom.chat/configuration/models/#codex-models-with-chatgpt-login) for the generated models.
 - `kimi`: run `kimi` and `/login` first; see [Kimi Models](https://docs.mindroom.chat/configuration/models/#kimi-models-with-kimi-code-login).
 - `claude_code`: run `claude auth login` first; see [Claude Models with a Claude Subscription](https://docs.mindroom.chat/configuration/models/#claude-models-with-a-claude-subscription).
-- `ollama`: generates `gemma4` as `default` and `qwen3.8:27b` as `qwen3_8_27b`, each loaded with a 32,768-token context (see [Ollama Context Size](https://docs.mindroom.chat/configuration/models/#ollama-context-size) to change it), with `OLLAMA_HOST=http://localhost:11434`; pull both models first with `ollama pull gemma4` and `ollama pull qwen3.8:27b`.
+- `ollama`: in an interactive terminal with Ollama running and chat models already pulled, lets you pick from your pulled models; otherwise generates `gemma4` as `default` and `qwen3.8:27b` as `qwen3_8_27b`, each loaded with a 32,768-token context (see [Ollama Context Size](https://docs.mindroom.chat/configuration/models/#ollama-context-size) to change it), with `OLLAMA_HOST=http://localhost:11434` (pull both models first with `ollama pull gemma4` and `ollama pull qwen3.8:27b`).
 - `llama.cpp`: generates Unsloth GGUF models for a llama.cpp server at `http://localhost:8080/v1`; start it with one of the configured model refs:
 
 ```bash

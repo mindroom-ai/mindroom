@@ -5,6 +5,7 @@ from __future__ import annotations
 import ipaddress
 import json
 import os
+import re
 import shutil
 import subprocess
 from concurrent.futures import Future, ThreadPoolExecutor, wait
@@ -20,7 +21,7 @@ from mindroom import constants
 from mindroom.credentials.environment import get_secret_from_env
 from mindroom.model_defaults import OLLAMA_HOST_DEFAULT
 from mindroom.providers.claude_code.launcher import SCRUB_NAMES, SCRUB_PREFIXES
-from mindroom.providers.key_checks import PROVIDER_KEY_CHECKS
+from mindroom.providers.key_checks import PROVIDER_KEY_CHECKS, provider_endpoint_variables
 from mindroom.providers.openai.codex_auth import codex_login_status
 from mindroom.providers.openai.kimi_auth import kimi_login_status
 
@@ -50,10 +51,14 @@ _DETECTION_ORDER = ("claude_code", "codex", "kimi", "openai", "anthropic", "open
 
 _CLAUDE_SUBSCRIPTIONS = {
     "pro": "Claude Pro",
-    "max": "Claude Max",
     "team": "Claude Team",
     "enterprise": "Claude Enterprise",
 }
+_CLAUDE_MAX_PLAN_RE = re.compile(r"^(?:claude\s+)?max(?:[\s_]+(\d+x))?$", re.IGNORECASE)
+_EMBEDDING_MODEL_RE = re.compile(
+    r"(?:embed|(?:^|[/._-])(?:bge-|all-minilm|e5-|paraphrase-multilingual))",
+    re.IGNORECASE,
+)
 _CODEX_PLANS = {
     "pro": "ChatGPT Pro",
     "plus": "ChatGPT Plus",
@@ -79,7 +84,7 @@ _INLINE_LOGIN_SPECS: dict[str, tuple[str, tuple[str, ...]]] = {
 
 @dataclass(frozen=True, slots=True)
 class OllamaModelInfo:
-    """One pulled model reported by a reachable Ollama server."""
+    """One pulled chat model reported by a reachable Ollama server."""
 
     name: str
     size_bytes: int | None = None
@@ -176,9 +181,22 @@ def verify_provider_api_key(
     preset: str,
     api_key: str,
     *,
+    runtime_paths: RuntimePaths | None = None,
     timeout_seconds: float = _API_KEY_CHECK_TIMEOUT_SECONDS,
 ) -> KeyCheckResult:
     """Verify an API key using the provider's cheap read-only endpoint without logging or echoing the key."""
+    label = _SUMMARY_LABELS.get(preset, preset)
+    if not api_key.isascii() or any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in api_key):
+        return KeyCheckResult(status="rejected", detail=f"{label} API key contains invalid characters.")
+    if (
+        runtime_paths is not None
+        and (env_key := constants.env_key_for_provider(preset))
+        and (endpoint_vars := provider_endpoint_variables(env_key, runtime_paths))
+    ):
+        return KeyCheckResult(
+            status="inconclusive",
+            detail=f"Custom endpoint configured ({', '.join(endpoint_vars)}); skipping {label} key check.",
+        )
     check = PROVIDER_KEY_CHECKS.get(preset)
     if check is None:
         return KeyCheckResult(status="inconclusive", detail="No verification endpoint for this provider.")
@@ -189,9 +207,8 @@ def verify_provider_api_key(
         return KeyCheckResult(status="inconclusive", detail="Could not reach provider.")
     if 200 <= response.status_code < 300:
         return KeyCheckResult(status="valid")
-    if response.status_code in {401, 403}:
-        return KeyCheckResult(status="rejected", detail=f"HTTP {response.status_code}")
-    return KeyCheckResult(status="inconclusive", detail=f"HTTP {response.status_code}")
+    status: KeyCheckStatus = "rejected" if response.status_code in {401, 403} else "inconclusive"
+    return KeyCheckResult(status=status, detail=f"HTTP {response.status_code}")
 
 
 def inline_cli_login_command(preset: str) -> str | None:
@@ -200,12 +217,20 @@ def inline_cli_login_command(preset: str) -> str | None:
     return spec[0] if spec else None
 
 
-def run_inline_cli_login(preset: str, cli_path: str) -> bool:
+def run_inline_cli_login(preset: str, cli_path: str, *, runtime_paths: RuntimePaths | None = None) -> bool:
     """Run the provider CLI's interactive login attached to the current terminal; return whether it exited 0."""
     spec = _INLINE_LOGIN_SPECS.get(preset)
     if spec is None:
         return False
-    env = _scrubbed_claude_env() if preset == "claude_code" else None
+    env: dict[str, str] | None = None
+    if preset == "claude_code":
+        env = _scrubbed_claude_env()
+    elif (
+        preset == "codex"
+        and runtime_paths is not None
+        and (codex_home := (runtime_paths.env_value("CODEX_HOME") or "").strip())
+    ):
+        env = {**os.environ, "CODEX_HOME": codex_home}
     try:
         return subprocess.run([cli_path, *spec[1]], env=env, check=False).returncode == 0
     except OSError:
@@ -248,13 +273,16 @@ def _format_codex_plan(plan_type: str | None) -> str:
     return cleaned if lowered.startswith("chatgpt") else _CODEX_PLANS.get(lowered, f"ChatGPT {cleaned.title()}")
 
 
-def _format_claude_subscription(raw_subscription: object) -> str:
+def _format_claude_subscription(raw_subscription: object) -> str | None:
+    """Return a clean label only for paid Claude subscription plans, or None for free/unsupported plans."""
     if not isinstance(raw_subscription, str) or not (cleaned := raw_subscription.strip()):
-        return "signed in"
-    lowered = cleaned.lower()
-    if lowered in _CLAUDE_SUBSCRIPTIONS:
-        return _CLAUDE_SUBSCRIPTIONS[lowered]
-    return cleaned if lowered.startswith("claude ") else f"Claude {cleaned}"
+        return None
+    normalized = cleaned.lower().removeprefix("claude ").strip()
+    if normalized in _CLAUDE_SUBSCRIPTIONS:
+        return _CLAUDE_SUBSCRIPTIONS[normalized]
+    if match := _CLAUDE_MAX_PLAN_RE.fullmatch(cleaned):
+        return f"Claude Max {match.group(1).lower()}" if match.group(1) else "Claude Max"
+    return None
 
 
 def _probe_codex(runtime_paths: RuntimePaths) -> DetectedProvider | None:
@@ -290,8 +318,8 @@ def _probe_claude_code(*, timeout_seconds: float) -> DetectedProvider | None:
         and payload.get("loggedIn") is True
         and payload.get("authMethod") == "claude.ai"
         and payload.get("apiProvider") == "firstParty"
+        and (detail := _format_claude_subscription(payload.get("subscriptionType"))) is not None
     ):
-        detail = _format_claude_subscription(payload.get("subscriptionType"))
         return DetectedProvider("claude_code", True, detail, cli_path=cli_path)
     return installed_only
 
@@ -315,50 +343,81 @@ def _is_loopback_host(hostname: str | None) -> bool:
         return False
 
 
-def _parse_ollama_models(payload: object) -> tuple[OllamaModelInfo, ...] | None:
+def _normalize_ollama_host(raw_host: str) -> tuple[str, str] | None:
+    """Normalize an Ollama host matching Ollama SDK defaults (`http://` and default port when omitted)."""
+    default_port = urlsplit(OLLAMA_HOST_DEFAULT).port or 11434
+    scheme, sep, hostport = raw_host.partition("://")
+    if not sep:
+        scheme, hostport, port = "http", raw_host, default_port
+    elif scheme == "http":
+        port = 80
+    elif scheme == "https":
+        port = 443
+    else:
+        return None
+    try:
+        parsed = urlsplit(f"{scheme}://{hostport}")
+        resolved_port = parsed.port or port
+    except ValueError:
+        return None
+    if not (hostname := parsed.hostname):
+        return None
+    host_literal = f"[{hostname}]" if ":" in hostname else hostname
+    path = parsed.path.strip("/")
+    base = f"{scheme}://{host_literal}:{resolved_port}"
+    return (f"{base}/{path}" if path else base), hostname
+
+
+def _parse_ollama_models(payload: object) -> tuple[tuple[OllamaModelInfo, ...], int] | None:
+    """Return `(chat_models, total_model_count)` from `/api/tags`, excluding obvious embedding-only models."""
     if not isinstance(payload, dict) or not isinstance(raw_models := payload.get("models"), list):
         return None
-    models: list[OllamaModelInfo] = []
+    chat_models: list[OllamaModelInfo] = []
     seen: set[str] = set()
+    total_count = 0
     for entry in raw_models:
         if not isinstance(entry, dict) or not isinstance(raw_name := entry.get("name"), str):
             continue
         if not (name := raw_name.strip()) or name in seen:
             continue
         seen.add(name)
+        total_count += 1
+        if _EMBEDDING_MODEL_RE.search(name):
+            continue
         raw_size = entry.get("size")
         size_bytes = raw_size if isinstance(raw_size, int) and not isinstance(raw_size, bool) else None
-        models.append(OllamaModelInfo(name=name, size_bytes=size_bytes))
-    return tuple(models)
+        chat_models.append(OllamaModelInfo(name=name, size_bytes=size_bytes))
+    return tuple(chat_models), total_count
 
 
 def _probe_ollama(runtime_paths: RuntimePaths, *, timeout_seconds: float) -> DetectedProvider | None:
     configured_host = (runtime_paths.env_value("OLLAMA_HOST") or "").strip()
-    raw_host = configured_host or OLLAMA_HOST_DEFAULT
-    host = raw_host if "://" in raw_host else f"http://{raw_host}"
-    parsed = urlsplit(host)
-    if (
-        parsed.scheme not in {"http", "https"}
-        or not parsed.netloc
-        or (not configured_host and not _is_loopback_host(parsed.hostname))
-    ):
+    normalized = _normalize_ollama_host(configured_host or OLLAMA_HOST_DEFAULT)
+    if normalized is None:
+        return None
+    host, hostname = normalized
+    is_loopback = _is_loopback_host(hostname)
+    if not configured_host and not is_loopback:
         return None
     try:
-        response = httpx.get(
-            f"{host.rstrip('/')}/api/tags",
+        with httpx.Client(
             timeout=min(_OLLAMA_PROBE_TIMEOUT_SECONDS, timeout_seconds),
             follow_redirects=False,
-        )
-        payload = response.json() if response.status_code == 200 else None
+            trust_env=not is_loopback,
+        ) as client:
+            response = client.get(f"{host}/api/tags")
+            payload = response.json() if response.status_code == 200 else None
     except (httpx.HTTPError, OSError, ValueError):
         return None
-    if (models := _parse_ollama_models(payload)) is None:
+    if (parsed := _parse_ollama_models(payload)) is None:
         return None
-    if not models:
-        return DetectedProvider("ollama", False, "running (no models pulled)")
+    chat_models, total_count = parsed
+    if not chat_models:
+        detail = "running (no chat models pulled)" if total_count > 0 else "running (no models pulled)"
+        return DetectedProvider("ollama", False, detail)
     detail = (
-        ", ".join(model.name for model in models)
-        if len(models) <= 3
-        else f"{models[0].name}, {models[1].name}, +{len(models) - 2} more"
+        ", ".join(model.name for model in chat_models)
+        if len(chat_models) <= 3
+        else f"{chat_models[0].name}, {chat_models[1].name}, +{len(chat_models) - 2} more"
     )
-    return DetectedProvider("ollama", True, detail, ollama_models=models)
+    return DetectedProvider("ollama", True, detail, ollama_models=chat_models)

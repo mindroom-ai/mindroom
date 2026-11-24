@@ -36,12 +36,12 @@ def kimi_login_status(*, kimi_home: str | Path | None) -> bool:
             credentials = json.load(credentials_file)
     except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return False
-    if not isinstance(credentials, dict):
+    access_token = credentials.get("access_token") if isinstance(credentials, dict) else None
+    if not isinstance(credentials, dict) or not isinstance(access_token, str) or not access_token.strip():
         return False
-    has_usable_access = bool(credentials.get("access_token")) and _usable_access_token(credentials) is not None
     refresh_token = credentials.get("refresh_token")
     has_refresh = isinstance(refresh_token, str) and bool(refresh_token.strip())
-    return has_usable_access or has_refresh
+    return _usable_access_token(credentials) is not None or has_refresh
 
 
 def borrow_kimi_token(*, kimi_home: str | Path | None) -> str:

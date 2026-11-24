@@ -12,9 +12,9 @@ import shlex
 import shutil
 import subprocess
 import textwrap
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path  # noqa: TC003
-from typing import TYPE_CHECKING, Literal, NamedTuple
+from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
 import typer
 from rich.console import Console
@@ -611,15 +611,22 @@ def config_init(
             raise typer.Exit(0)
 
     selected_matrix_server, explicit_preset = _parse_config_init_flags(matrix_server, provider=provider)
-    interactive_wizard = explicit_preset is None and not print_config and not no_input and terminal_is_interactive()
+    replace_env_file = False if print_config else _should_replace_env_file(env_path, force=force, no_input=no_input)
+    # When overwriting `.env`, detect/check against process env only so keys about to be wiped do not skip prompts.
+    detection_runtime = replace(runtime_paths, env_file_values={}) if replace_env_file else runtime_paths
+    can_prompt = explicit_preset is None and not print_config and not no_input
+    interactive_wizard = can_prompt and terminal_is_interactive()
     if interactive_wizard:
         console.print(section("Model provider"))
         selection, provider_api_key = _resolve_interactive_setup(
-            runtime_paths,
+            detection_runtime,
             explicit_preset=None,
             interactive=True,
             for_config_init=True,
         )
+    elif can_prompt and selected_matrix_server == "self-hosted":
+        selection = _default_model_selection(_prompt_provider_preset())
+        provider_api_key = None
     else:
         selection = _default_model_selection(explicit_preset or "openai")
         provider_api_key = None
@@ -639,10 +646,13 @@ def config_init(
         selected_matrix_server,
         selection.primary_preset,
         force=force,
-        replace_env_file=_should_replace_env_file(env_path, force=force, no_input=no_input),
+        replace_env_file=replace_env_file,
         keep_existing_config=keep_existing_config,
         provider_api_key=provider_api_key,
         model_selection=selection,
+        ollama_host=((detection_runtime.env_value("OLLAMA_HOST") or "").strip() or None)
+        if interactive_wizard
+        else None,
     )
     if interactive_wizard:
         _print_setup_summary(selection)
@@ -692,6 +702,7 @@ def create_first_run_config(
         replace_env_file=False,
         provider_api_key=provider_api_key,
         model_selection=selection,
+        ollama_host=((runtime_paths.env_value("OLLAMA_HOST") or "").strip() or None) if interactive else None,
     )
     _print_setup_summary(selection)
     if not selection.ready and (setup := _PROVIDER_PRESETS[selection.primary_preset].setup) is not None:
@@ -706,8 +717,9 @@ def _print_setup_summary(selection: StarterModelSelection) -> None:
     default_label = selection.default_model.display_name or selection.default_model.id
     models = [f"default ({default_label})", *(name for name, _ in selection.additional_models)]
     router_model = selection.helper_model or "default"
+    header = "Setup ready" if selection.ready else "Setup created"
     status = "[green]ready[/green]" if selection.ready else "[yellow]needs setup[/yellow]"
-    console.print("\n[bold]Setup ready[/bold]")
+    console.print(f"\n[bold]{header}[/bold]")
     print_literal("  Models: ", ", ".join(models))
     console.print(f"  Router: {router_model}")
     console.print(f"  Status: {status}")
@@ -753,7 +765,7 @@ def _prompt_provider_key(
             _print_skipped_key_hint(env_key, runtime_paths.env_path, for_config_init=for_config_init)
             return None, False
         with console.status(f"Verifying {preset.label} API key..."):
-            check = verify_provider_api_key(selected_preset, value)
+            check = verify_provider_api_key(selected_preset, value, runtime_paths=runtime_paths)
         if check.status == "valid":
             console.print(f"[green]✓[/green] Verified key with {preset.label}.")
             return value, True
@@ -763,7 +775,10 @@ def _prompt_provider_key(
                 f"[red]✗[/red] {preset.label} rejected that API key{reason}. Try again, or press Enter to skip.",
             )
             continue
-        console.print("[yellow]Could not verify key right now; saving anyway.[/yellow]")
+        if check.detail.startswith("Custom endpoint configured"):
+            console.print(f"[yellow]{escape(check.detail)} Saving anyway.[/yellow]")
+        else:
+            console.print("[yellow]Could not verify key right now; saving anyway.[/yellow]")
         return value, True
 
 
@@ -797,6 +812,7 @@ def _write_starter_setup(
     keep_existing_config: bool = False,
     provider_api_key: str | None = None,
     model_selection: StarterModelSelection | None = None,
+    ollama_host: str | None = None,
 ) -> bool:
     """Write `.env`, the starter config, Mind workspace, and agent docs; return whether `.env` changed.
 
@@ -805,7 +821,6 @@ def _write_starter_setup(
     target = runtime_paths.config_path
     storage_root = runtime_paths.storage_root
     content = _starter_config(runtime_paths, matrix_server, selected_preset, model_selection=model_selection)
-    ollama_host = (runtime_paths.env_value("OLLAMA_HOST") or "").strip() or None
     env_changed = _write_env_file(
         runtime_paths.env_path,
         matrix_server,
@@ -1261,10 +1276,15 @@ def _combined_claude_codex_selection(
     )
 
 
+_YAML_RESERVED_KEYS = frozenset({"true", "false", "yes", "no", "on", "off", "null", "y", "n"})
+
+
 def _ollama_model_key(model_name: str, used: set[str]) -> str:
     """Return a clean, unique YAML model key for a pulled Ollama model name."""
     base = model_name.removesuffix(":latest")
     slug = re.sub(r"[^a-zA-Z0-9]+", "_", base.lower()).strip("_") or "model"
+    if not slug[0].isalpha() or slug in _YAML_RESERVED_KEYS:
+        slug = f"ollama_{slug}"
     candidate = slug
     suffix = 2
     while candidate in used:
@@ -1308,14 +1328,19 @@ def _detected_provider_badge(detected: DetectedProvider) -> str:
     return f"○ {detected.status_detail}"
 
 
+def _prompt_provider_preset() -> _ProviderPreset:
+    """Ask for a starter provider preset in default menu order without detection."""
+    width = max(len(info.label) for info in _PROVIDER_PRESETS.values()) + 2
+    return select(
+        "Which model provider should your agents use?",
+        [(preset, f"{info.label:<{width}}{info.needs}") for preset, info in _PROVIDER_PRESETS.items()],
+    )
+
+
 def _prompt_provider_choice(snapshot: DetectionSnapshot) -> _ProviderMenuChoice:
     """Show the starter provider menu, ordering detected ready/installed providers first."""
     if not snapshot.providers:
-        width = max(len(info.label) for info in _PROVIDER_PRESETS.values()) + 2
-        return select(
-            "Which model provider should your agents use?",
-            [(preset, f"{info.label:<{width}}{info.needs}") for preset, info in _PROVIDER_PRESETS.items()],
-        )
+        return _prompt_provider_preset()
 
     width = max(len("Claude + Codex"), *(len(info.label) for info in _PROVIDER_PRESETS.values())) + 2
     choices: list[tuple[_ProviderMenuChoice, str] | Separator] = []
@@ -1361,7 +1386,7 @@ def _maybe_run_inline_cli_login(
     cmd = inline_cli_login_command(preset)
     if cmd is None or not confirm(f"Not signed in yet. Run `{cmd}` now?", default=True):
         return detected
-    if not run_inline_cli_login(preset, detected.cli_path):
+    if not run_inline_cli_login(preset, detected.cli_path, runtime_paths=runtime_paths):
         console.print(f"[yellow]`{cmd}` did not finish signing in; you can run it later.[/yellow]")
         return detected
     refreshed = detect_single_provider(preset, runtime_paths)
@@ -1474,42 +1499,40 @@ def _finalize_interactive_choice(
     return _default_model_selection(choice, ready=key_ready), api_key
 
 
-def _yaml_scalar(value: str) -> str:
-    """Return a YAML-safe scalar, keeping simple strings bare and JSON-quoting anything ambiguous."""
-    if (
-        re.fullmatch(r"[A-Za-z0-9._/@:+-]+", value)
-        and not value.startswith("-")
-        and value.lower() not in {"true", "false", "null", "yes", "no", "on", "off"}
-        and any(ch.isalpha() or ch in "/:" for ch in value)
-    ):
-        return value
-    return json.dumps(value)
-
-
-def _model_settings_block(model_preset: ModelPreset, *, claude_cli_path: str | None = None) -> str:
-    """Render the YAML settings of one generated model config."""
-    lines = [
-        f"provider: {model_preset.provider}",
-        f"id: {_yaml_scalar(model_preset.id)}",
-    ]
+def _model_config_dict(model_preset: ModelPreset, *, claude_cli_path: str | None = None) -> dict[str, Any]:
+    """Build the YAML-serializable mapping for one generated model entry."""
+    data: dict[str, Any] = {"provider": model_preset.provider, "id": model_preset.id}
     if model_preset.display_name is not None:
-        lines.append(f"display_name: {model_preset.display_name}")
+        data["display_name"] = model_preset.display_name
     if model_preset.context_window is not None:
-        lines.append(f"context_window: {model_preset.context_window}")
-    extra_kwargs: list[str] = []
+        data["context_window"] = model_preset.context_window
+    extra_kwargs: dict[str, Any] = {}
     if model_preset.provider == "llama_cpp":
-        extra_kwargs.extend([f"api_key: {LOCAL_OPENAI_API_KEY_DEFAULT}", f"base_url: {LLAMA_CPP_BASE_URL_DEFAULT}"])
+        extra_kwargs["api_key"] = LOCAL_OPENAI_API_KEY_DEFAULT
+        extra_kwargs["base_url"] = LLAMA_CPP_BASE_URL_DEFAULT
     if model_preset.provider == "ollama" and model_preset.context_window is not None:
         # Ollama loads a model with its own, often small, context unless the request sets one, so ask for the window.
-        extra_kwargs.extend(["options:", f"  num_ctx: {model_preset.context_window}"])
+        extra_kwargs["options"] = {"num_ctx": model_preset.context_window}
     if model_preset.provider == "claude_code" and claude_cli_path:
-        extra_kwargs.append(f"cli_path: {_yaml_scalar(claude_cli_path)}")
+        extra_kwargs["cli_path"] = claude_cli_path
     if model_preset.reasoning_effort is not None:
-        extra_kwargs.append(f"reasoning_effort: {model_preset.reasoning_effort}")
+        extra_kwargs["reasoning_effort"] = model_preset.reasoning_effort
     if extra_kwargs:
-        lines.append("extra_kwargs:")
-        lines.extend(f"  {line}" for line in extra_kwargs)
-    return textwrap.indent("\n".join(lines), "    ")
+        data["extra_kwargs"] = extra_kwargs
+    return data
+
+
+def _models_template_block(selection: StarterModelSelection) -> str:
+    """Render the indented YAML entries under `models:` via MindRoom's safe YAML dumper."""
+    from mindroom import yaml_io  # noqa: PLC0415
+
+    models: dict[str, dict[str, Any]] = {
+        "default": _model_config_dict(selection.default_model, claude_cli_path=selection.claude_cli_path),
+    }
+    for name, model_preset in selection.additional_models:
+        models[name] = _model_config_dict(model_preset, claude_cli_path=selection.claude_cli_path)
+    dumped = yaml_io.safe_dump(models, default_flow_style=False, sort_keys=False, allow_unicode=True)
+    return textwrap.indent(dumped.rstrip("\n"), "  ")
 
 
 def _commented_model_options_template_block(provider_preset: _ProviderPreset | None) -> str:
@@ -1547,11 +1570,7 @@ def _full_template(
     Requester-private agents remain an opt-in advanced config surface.
     """
     selection = model_selection or _default_model_selection(provider_preset)
-    model_block = _model_settings_block(selection.default_model, claude_cli_path=selection.claude_cli_path)
-    additional_models_block = "".join(
-        f"\n  {name}:\n{_model_settings_block(model_preset, claude_cli_path=selection.claude_cli_path)}"
-        for name, model_preset in selection.additional_models
-    )
+    models_block = _models_template_block(selection)
     commented_model_options_block = _commented_model_options_template_block(selection.commented_alternatives_preset)
     helper_model = selection.helper_model
     router_model = helper_model or "default"
@@ -1575,8 +1594,7 @@ def _full_template(
 # Docs: https://docs.mindroom.chat/
 
 models:
-  default:
-{model_block}{additional_models_block}{commented_model_options_block}
+{models_block}{commented_model_options_block}
 
 mcp_servers:
   # Reads and sends Matrix messages as the account you log in with.
@@ -1887,7 +1905,7 @@ def _preset_api_key_env(provider_preset: _ProviderPreset) -> str | None:
 
 
 def _ollama_env_template(*, uses_detected_models: bool, ollama_host: str | None) -> str:
-    header = f"# Ollama local model server\nOLLAMA_HOST={ollama_host or OLLAMA_HOST_DEFAULT if uses_detected_models else OLLAMA_HOST_DEFAULT}"
+    header = f"# Ollama local model server\nOLLAMA_HOST={ollama_host or OLLAMA_HOST_DEFAULT}"
     if uses_detected_models:
         return header
     return (

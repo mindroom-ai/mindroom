@@ -58,12 +58,12 @@ def codex_login_status(*, codex_home: str | Path | None) -> CodexLoginStatus:
     if not isinstance(auth, dict) or auth.get("auth_mode") != "chatgpt":
         return CodexLoginStatus(signed_in=False)
     tokens = auth.get("tokens")
-    if not isinstance(tokens, dict):
+    access_token = tokens.get("access_token") if isinstance(tokens, dict) else None
+    if not isinstance(tokens, dict) or not isinstance(access_token, str) or not access_token.strip():
         return CodexLoginStatus(signed_in=False)
-    has_usable_access = bool(tokens.get("access_token")) and _usable_access_token(tokens) is not None
     refresh_token = tokens.get("refresh_token")
     has_refresh = isinstance(refresh_token, str) and bool(refresh_token.strip())
-    if not (has_usable_access or has_refresh):
+    if _usable_access_token(tokens) is None and not has_refresh:
         return CodexLoginStatus(signed_in=False)
     return CodexLoginStatus(signed_in=True, plan_type=_codex_plan_type(tokens))
 
