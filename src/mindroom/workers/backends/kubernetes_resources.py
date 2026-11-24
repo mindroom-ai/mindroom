@@ -41,6 +41,7 @@ from mindroom.runtime_env_policy import (
     SANDBOX_RUNTIME_ENV_BY_KEY,
     VENDOR_TELEMETRY_ENV_VALUES,
     isolated_worker_runtime_env,
+    sandbox_worker_extra_env,
     worker_extra_env,
 )
 from mindroom.tool_system.worker_routing import (
@@ -50,6 +51,7 @@ from mindroom.tool_system.worker_routing import (
 )
 from mindroom.workers.backend import WorkerBackendError, WorkerStartTimeoutError
 from mindroom.workers.backends._dedicated_worker_common import (
+    ScopedWorkspaceMount,
     SharedDirectoryMount,
     agent_names_addressed_by_worker_key,
     plan_scoped_workspace_mounts,
@@ -67,13 +69,23 @@ from mindroom.workers.backends.dedicated_launch import (
     dedicated_worker_startup_runtime_paths,
     write_dedicated_worker_startup_manifest,
 )
-from mindroom.workers.backends.kubernetes_config import resolve_kubeconfig_paths, validated_kubernetes_object
+from mindroom.workers.backends.kubernetes_config import (
+    resolve_kubeconfig_paths,
+    sandbox_mount_dir_runtime_class_refusal,
+    validated_kubernetes_object,
+)
 from mindroom.workers.backends.kubernetes_pod_names import (
     SANDBOX_RUNNER_CONTAINER_NAME,
     WORKER_STORAGE_VOLUME_NAME,
     WORKER_TMP_VOLUME_NAME,
 )
-from mindroom.workers.models import LABEL_TAILNET_SSH, LABEL_TAILNET_SSH_RELEASE, WORKER_SSH_PORT
+from mindroom.workers.models import (
+    LABEL_TAILNET_SSH,
+    LABEL_TAILNET_SSH_RELEASE,
+    LABEL_WORKER_SANDBOX,
+    WORKER_SSH_PORT,
+    WorkerSandboxConfig,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -109,6 +121,7 @@ ANNOTATION_TEMPLATE_HASH = "mindroom.ai/template-hash"
 _ANNOTATION_PRIVATE_AGENT_NAMES = "mindroom.ai/private-agent-names"
 _ANNOTATION_STATE_SCOPE_WORKER_KEY = "mindroom.ai/state-scope-worker-key"
 _ANNOTATION_RESOURCE_PROFILE = "mindroom.ai/resource-profile"
+_ANNOTATION_SANDBOX = "mindroom.ai/worker-sandbox"
 # The template hash this release wrote, so a template an older release rewrote after a downgrade reads as old.
 ANNOTATION_WORKSPACE_TEMPLATE_HASH = "mindroom.ai/workspace-template-hash"
 
@@ -483,6 +496,41 @@ def parse_resource_profile_annotation(annotations: dict[str, str]) -> str | None
     return value or None
 
 
+def parse_sandbox_annotation(annotations: dict[str, str]) -> WorkerSandboxConfig | None:
+    """Parse the persisted sandbox config, ``None`` for ordinary workers."""
+    raw = annotations.get(_ANNOTATION_SANDBOX)
+    if not raw:
+        return None
+    try:
+        parsed = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        msg = f"Invalid {_ANNOTATION_SANDBOX} annotation: {exc}"
+        raise WorkerBackendError(msg) from exc
+    if not isinstance(parsed, dict):
+        msg = f"Invalid {_ANNOTATION_SANDBOX} annotation: expected object."
+        raise WorkerBackendError(msg)
+    mount_dir = parsed.get("mount_dir")
+    mount_read_only = parsed.get("mount_read_only", False)
+    if (mount_dir is not None and not isinstance(mount_dir, str)) or not isinstance(mount_read_only, bool):
+        msg = f"Invalid {_ANNOTATION_SANDBOX} annotation fields."
+        raise WorkerBackendError(msg)
+    return WorkerSandboxConfig(mount_dir=mount_dir, mount_read_only=mount_read_only)
+
+
+def _sandbox_mount_pin(
+    workspace_mounts: tuple[ScopedWorkspaceMount, ...],
+    sandbox: WorkerSandboxConfig | None,
+) -> dict[str, object] | None:
+    """Return the startup-manifest path and inode pin for a sandbox with ``mount_dir``, else None."""
+    if sandbox is None or sandbox.mount_dir is None:
+        return None
+    if len(workspace_mounts) != 1 or workspace_mounts[0].ino is None:
+        msg = "Sandboxed mount_dir must resolve to a single directory with a pinned inode."
+        raise WorkerBackendError(msg)
+    mount = workspace_mounts[0]
+    return {"path": str(mount.worker_visible_path), "ino": mount.ino}
+
+
 def _labels(*, extra_labels: dict[str, str], worker_id: str) -> dict[str, str]:
     labels = {
         _LABEL_COMPONENT: _LABEL_COMPONENT_VALUE,
@@ -779,6 +827,7 @@ class KubernetesResourceManager:
         private_agent_names: frozenset[str] | None = None,
         state_scope_worker_key: str | None = None,
         resource_profile: str | None = None,
+        sandbox: WorkerSandboxConfig | None = None,
         recreate: bool = False,
     ) -> tuple[bool, bool]:
         """Create-or-patch one worker Deployment, recreating it for pod-template drift or when asked.
@@ -796,6 +845,7 @@ class KubernetesResourceManager:
             private_agent_names=private_agent_names,
             state_scope_worker_key=state_scope_worker_key,
             resource_profile=resource_profile,
+            sandbox=sandbox,
         )
         desired_metadata = cast("dict[str, object]", manifest.get("metadata", {}))
         ssh = cast("dict[str, str]", desired_metadata["labels"]).get(LABEL_TAILNET_SSH) == "true"
@@ -1216,12 +1266,22 @@ class KubernetesResourceManager:
         private_agent_names: frozenset[str] | None,
         state_scope_worker_key: str | None = None,
         resource_profile: str | None = None,
+        sandbox: WorkerSandboxConfig | None = None,
     ) -> bool:
         """Return whether one Deployment's recorded pod template differs from the one ``launch`` renders."""
+        workspace_mounts = self._plan_workspace_mounts_for_template(
+            worker_key,
+            private_agent_names=private_agent_names,
+            agent_policies=launch.agent_policies,
+            state_scope_worker_key=state_scope_worker_key,
+            sandbox=sandbox,
+        )
         startup_manifest_hash = self._startup_manifest_hash(
             worker_key=worker_key,
             state_subpath=state_subpath,
             launch=launch,
+            sandbox=sandbox,
+            sandbox_mount=_sandbox_mount_pin(workspace_mounts, sandbox),
         )
         template = self._pod_template(
             worker_key=worker_key,
@@ -1232,6 +1292,8 @@ class KubernetesResourceManager:
             private_agent_names=private_agent_names,
             state_scope_worker_key=state_scope_worker_key,
             resource_profile=resource_profile,
+            sandbox=sandbox,
+            workspace_mounts=workspace_mounts,
         )
         recorded_hash = dict(deployment.metadata.annotations or {}).get(ANNOTATION_TEMPLATE_HASH)
         return recorded_hash != _template_hash(template)
@@ -1247,6 +1309,8 @@ class KubernetesResourceManager:
         private_agent_names: frozenset[str] | None,
         state_scope_worker_key: str | None = None,
         resource_profile: str | None = None,
+        sandbox: WorkerSandboxConfig | None = None,
+        workspace_mounts: tuple[ScopedWorkspaceMount, ...] | None = None,
     ) -> dict[str, object]:
         resolved_state_scope_worker_key = resolve_state_scope_worker_key(worker_key, state_scope_worker_key)
         # Per-user overrides follow the owning scope, so a CLI turn gets its requester's resources.
@@ -1274,6 +1338,8 @@ class KubernetesResourceManager:
             if self.config.tailnet_ssh_release_id is not None:
                 worker_labels[LABEL_TAILNET_SSH_RELEASE] = self.config.tailnet_ssh_release_id
             container_ports.append({"containerPort": WORKER_SSH_PORT, "name": "ssh"})
+        if sandbox is not None:
+            worker_labels[LABEL_WORKER_SANDBOX] = "true"
         template_spec: dict[str, object] = {
             "serviceAccountName": self.config.service_account_name,
             "automountServiceAccountToken": False,
@@ -1299,6 +1365,7 @@ class KubernetesResourceManager:
                         worker_key=worker_key,
                         worker_id=worker_id,
                         state_subpath=state_subpath,
+                        sandbox=sandbox,
                     ),
                     "volumeMounts": self._volume_mounts(
                         worker_key,
@@ -1306,6 +1373,8 @@ class KubernetesResourceManager:
                         private_agent_names,
                         launch=launch,
                         state_scope_worker_key=state_scope_worker_key,
+                        sandbox=sandbox,
+                        workspace_mounts=workspace_mounts,
                     ),
                     "readinessProbe": {
                         "httpGet": {"path": "/healthz", "port": "api"},
@@ -1342,14 +1411,15 @@ class KubernetesResourceManager:
                     },
                 },
             ],
-            "volumes": self._volumes(),
+            "volumes": self._volumes(sandbox=sandbox),
         }
-        containers = cast("list[dict[str, object]]", template_spec["containers"])
-        _extend_unique_named_pod_entries(
-            containers,
-            self.config.extra_containers,
-            field_name="extra_containers",
-        )
+        if sandbox is None:
+            containers = cast("list[dict[str, object]]", template_spec["containers"])
+            _extend_unique_named_pod_entries(
+                containers,
+                self.config.extra_containers,
+                field_name="extra_containers",
+            )
         if self.config.runtime_class_name is not None:
             template_spec["runtimeClassName"] = self.config.runtime_class_name
         # Added only when configured so the default template, and its hash, stay unchanged.
@@ -1378,11 +1448,21 @@ class KubernetesResourceManager:
         private_agent_names: frozenset[str] | None = None,
         state_scope_worker_key: str | None = None,
         resource_profile: str | None = None,
+        sandbox: WorkerSandboxConfig | None = None,
     ) -> dict[str, object]:
+        workspace_mounts = self._plan_workspace_mounts_for_template(
+            worker_key,
+            private_agent_names=private_agent_names,
+            agent_policies=launch.agent_policies,
+            state_scope_worker_key=state_scope_worker_key,
+            sandbox=sandbox,
+        )
         startup_manifest_hash = self.write_startup_manifest(
             worker_key=worker_key,
             state_subpath=state_subpath,
             launch=launch,
+            sandbox=sandbox,
+            sandbox_mount=_sandbox_mount_pin(workspace_mounts, sandbox),
         )
         template = self._pod_template(
             worker_key=worker_key,
@@ -1393,6 +1473,8 @@ class KubernetesResourceManager:
             private_agent_names=private_agent_names,
             state_scope_worker_key=state_scope_worker_key,
             resource_profile=resource_profile,
+            sandbox=sandbox,
+            workspace_mounts=workspace_mounts,
         )
         # The Deployment carries its pods' labels, the tailnet SSH mark among them; its selector never has the mark.
         template_labels = cast("dict[str, dict[str, str]]", template["metadata"])["labels"]
@@ -1420,6 +1502,14 @@ class KubernetesResourceManager:
             desired_annotations[_ANNOTATION_RESOURCE_PROFILE] = resource_profile
         else:
             desired_annotations.pop(_ANNOTATION_RESOURCE_PROFILE, None)
+        if sandbox is not None:
+            desired_annotations[_ANNOTATION_SANDBOX] = json.dumps(
+                {"mount_dir": sandbox.mount_dir, "mount_read_only": sandbox.mount_read_only},
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+        else:
+            desired_annotations.pop(_ANNOTATION_SANDBOX, None)
         metadata["annotations"] = desired_annotations
 
         return {
@@ -1439,6 +1529,7 @@ class KubernetesResourceManager:
         worker_key: str,
         worker_id: str,
         state_subpath: str,
+        sandbox: WorkerSandboxConfig | None = None,
     ) -> list[dict[str, object]]:
         layout = self._worker_layout(state_subpath)
         # No PATH or VIRTUAL_ENV here: the long-lived runner resolves uv, node,
@@ -1448,7 +1539,11 @@ class KubernetesResourceManager:
             {"name": name, "value": value}
             for name, value in dedicated_worker_runner_env(layout, worker_key=worker_key).items()
         ]
-        extra_env = worker_extra_env(self.config.extra_env)
+        extra_env = (
+            sandbox_worker_extra_env(self.config.extra_env)
+            if sandbox is not None
+            else worker_extra_env(self.config.extra_env)
+        )
         env: list[dict[str, object]] = [
             *runner_env,
             {"name": "HOME", "value": layout.dedicated_root},
@@ -1499,12 +1594,15 @@ class KubernetesResourceManager:
         worker_key: str,
         state_subpath: str,
         launch: WorkerLaunchConfig,
+        sandbox: WorkerSandboxConfig | None = None,
+        sandbox_mount: Mapping[str, object] | None = None,
     ) -> str:
         """Return the content hash of one worker's startup manifest without writing it."""
         return dedicated_worker_startup_manifest_hash(
-            self._worker_runtime_paths(worker_key=worker_key, state_subpath=state_subpath),
+            self._worker_runtime_paths(worker_key=worker_key, state_subpath=state_subpath, sandbox=sandbox),
             tool_validation_snapshot=launch.tool_validation_snapshot,
             eager_setup_plugins=launch.worker_preload_plugins,
+            sandbox_mount=sandbox_mount,
         )
 
     def write_startup_manifest(
@@ -1513,13 +1611,16 @@ class KubernetesResourceManager:
         worker_key: str,
         state_subpath: str,
         launch: WorkerLaunchConfig,
+        sandbox: WorkerSandboxConfig | None = None,
+        sandbox_mount: Mapping[str, object] | None = None,
     ) -> str:
         """Write one worker's startup manifest into its state directory and return the manifest's hash."""
         return write_dedicated_worker_startup_manifest(
             (self.storage_root / state_subpath).resolve(),
-            self._worker_runtime_paths(worker_key=worker_key, state_subpath=state_subpath),
+            self._worker_runtime_paths(worker_key=worker_key, state_subpath=state_subpath, sandbox=sandbox),
             tool_validation_snapshot=launch.tool_validation_snapshot,
             eager_setup_plugins=launch.worker_preload_plugins,
+            sandbox_mount=sandbox_mount,
         )
 
     def _worker_layout(self, state_subpath: str) -> DedicatedWorkerLayout:
@@ -1535,20 +1636,38 @@ class KubernetesResourceManager:
             worker_port=self.config.worker_port,
         )
 
-    def _worker_runtime_paths(self, *, worker_key: str, state_subpath: str) -> RuntimePaths:
+    def _worker_runtime_paths(
+        self,
+        *,
+        worker_key: str,
+        state_subpath: str,
+        sandbox: WorkerSandboxConfig | None = None,
+    ) -> RuntimePaths:
         # Kubernetes passes on only what isolated workers may inherit, so its manifests keep fewer
         # provider settings than Docker's; the runner recovers the shared storage root from the subpath prefix.
-        isolated = constants.isolated_runtime_paths(self.runtime_paths)
+        extra_env = (
+            sandbox_worker_extra_env(self.config.extra_env)
+            if sandbox is not None
+            else worker_extra_env(self.config.extra_env)
+        )
         worker_env = {
             _KUBERNETES_STORAGE_SUBPATH_PREFIX_ENV: self.config.storage_subpath_prefix,
-            **worker_extra_env(self.config.extra_env),
+            **extra_env,
             **VENDOR_TELEMETRY_ENV_VALUES,
         }
+        worker_runtime_env = isolated_worker_runtime_env(worker_env)
+        if sandbox is not None:
+            process_env = worker_runtime_env
+            env_file_values: Mapping[str, str] = {}
+        else:
+            isolated = constants.isolated_runtime_paths(self.runtime_paths)
+            process_env = {**isolated.process_env, **worker_runtime_env}
+            env_file_values = isolated.env_file_values
         return dedicated_worker_startup_runtime_paths(
             self._worker_layout(state_subpath),
             worker_key=worker_key,
-            process_env={**isolated.process_env, **isolated_worker_runtime_env(worker_env)},
-            env_file_values=isolated.env_file_values,
+            process_env=process_env,
+            env_file_values=env_file_values,
         )
 
     def _volume_mounts(
@@ -1559,6 +1678,8 @@ class KubernetesResourceManager:
         *,
         launch: WorkerLaunchConfig,
         state_scope_worker_key: str | None = None,
+        sandbox: WorkerSandboxConfig | None = None,
+        workspace_mounts: tuple[ScopedWorkspaceMount, ...] | None = None,
     ) -> list[dict[str, object]]:
         agent_policies = launch.agent_policies
         mounts = self._scoped_storage_mounts(
@@ -1567,30 +1688,34 @@ class KubernetesResourceManager:
             private_agent_names=private_agent_names,
             agent_policies=agent_policies,
             state_scope_worker_key=state_scope_worker_key,
+            sandbox=sandbox,
+            workspace_mounts=workspace_mounts,
         )
-        mounts.extend(
-            {
-                "name": WORKER_STORAGE_VOLUME_NAME,
-                "mountPath": str(shared_mount.worker_visible_path),
-                "subPath": str(shared_mount.local_path.relative_to(self.storage_root)),
-                **({"readOnly": True} if shared_mount.read_only else {}),
-            }
-            for shared_mount in self.plan_shared_directory_mounts(
-                worker_key,
-                state_scope_worker_key=state_scope_worker_key,
-                agent_policies=agent_policies,
+        if sandbox is None:
+            mounts.extend(
+                {
+                    "name": WORKER_STORAGE_VOLUME_NAME,
+                    "mountPath": str(shared_mount.worker_visible_path),
+                    "subPath": str(shared_mount.local_path.relative_to(self.storage_root)),
+                    **({"readOnly": True} if shared_mount.read_only else {}),
+                }
+                for shared_mount in self.plan_shared_directory_mounts(
+                    worker_key,
+                    state_scope_worker_key=state_scope_worker_key,
+                    agent_policies=agent_policies,
+                )
             )
-        )
         mounts.append({"name": WORKER_TMP_VOLUME_NAME, "mountPath": "/tmp"})  # noqa: S108
-        mounts.extend(
-            self._knowledge_storage_mounts(
-                worker_key,
-                config=launch.config,
-                agent_policies=agent_policies,
-                mounted_storage_root=Path(self.config.storage_mount_path),
-                existing_mounts=tuple(mounts),
-            ),
-        )
+        if sandbox is None:
+            mounts.extend(
+                self._knowledge_storage_mounts(
+                    worker_key,
+                    config=launch.config,
+                    agent_policies=agent_policies,
+                    mounted_storage_root=Path(self.config.storage_mount_path),
+                    existing_mounts=tuple(mounts),
+                ),
+            )
         validate_unique_worker_visible_paths(
             (str(mount["mountPath"]) for mount in mounts),
             worker_key=worker_key,
@@ -1598,7 +1723,7 @@ class KubernetesResourceManager:
         )
         return mounts
 
-    def _volumes(self) -> list[dict[str, object]]:
+    def _volumes(self, *, sandbox: WorkerSandboxConfig | None = None) -> list[dict[str, object]]:
         volumes: list[dict[str, object]] = [
             {
                 "name": WORKER_STORAGE_VOLUME_NAME,
@@ -1609,11 +1734,12 @@ class KubernetesResourceManager:
                 "emptyDir": {"sizeLimit": self.config.tmp_size_limit or _WORKER_TMP_SIZE_LIMIT},
             },
         ]
-        _extend_unique_named_pod_entries(
-            volumes,
-            self.config.extra_volumes,
-            field_name="extra_volumes",
-        )
+        if sandbox is None:
+            _extend_unique_named_pod_entries(
+                volumes,
+                self.config.extra_volumes,
+                field_name="extra_volumes",
+            )
         return volumes
 
     def _worker_node_name_or_none(self) -> str | None:
@@ -1676,12 +1802,16 @@ class KubernetesResourceManager:
         private_agent_names: frozenset[str] | None,
         agent_policies: Mapping[str, ResolvedAgentPolicy],
         state_scope_worker_key: str | None = None,
+        sandbox: WorkerSandboxConfig | None = None,
+        workspace_mounts: tuple[ScopedWorkspaceMount, ...] | None = None,
     ) -> list[dict[str, object]]:
         mounts = self._workspace_storage_mounts(
             worker_key,
             private_agent_names=private_agent_names,
             agent_policies=agent_policies,
             state_scope_worker_key=state_scope_worker_key,
+            sandbox=sandbox,
+            workspace_mounts=workspace_mounts,
         )
         mounts.append(
             {
@@ -1728,6 +1858,26 @@ class KubernetesResourceManager:
             resolved_agent_policies=agent_policies,
         )
 
+    def _plan_workspace_mounts_for_template(
+        self,
+        worker_key: str,
+        *,
+        private_agent_names: frozenset[str] | None,
+        agent_policies: Mapping[str, ResolvedAgentPolicy],
+        state_scope_worker_key: str | None,
+        sandbox: WorkerSandboxConfig | None = None,
+    ) -> tuple[ScopedWorkspaceMount, ...]:
+        if sandbox is not None and sandbox.mount_dir is not None and self.config.runtime_class_name is not None:
+            raise WorkerBackendError(sandbox_mount_dir_runtime_class_refusal(self.config.runtime_class_name))
+        return plan_scoped_workspace_mounts(
+            worker_key=resolve_state_scope_worker_key(worker_key, state_scope_worker_key),
+            local_shared_storage_root=self.storage_root,
+            worker_visible_shared_storage_root=Path(self.config.storage_mount_path),
+            private_agent_names=private_agent_names,
+            resolved_agent_policies=agent_policies,
+            sandbox=sandbox,
+        )
+
     def _workspace_storage_mounts(
         self,
         worker_key: str,
@@ -1735,20 +1885,28 @@ class KubernetesResourceManager:
         private_agent_names: frozenset[str] | None,
         agent_policies: Mapping[str, ResolvedAgentPolicy],
         state_scope_worker_key: str | None,
+        sandbox: WorkerSandboxConfig | None = None,
+        workspace_mounts: tuple[ScopedWorkspaceMount, ...] | None = None,
     ) -> list[dict[str, object]]:
+        planned_mounts = (
+            self._plan_workspace_mounts_for_template(
+                worker_key,
+                private_agent_names=private_agent_names,
+                agent_policies=agent_policies,
+                state_scope_worker_key=state_scope_worker_key,
+                sandbox=sandbox,
+            )
+            if workspace_mounts is None
+            else workspace_mounts
+        )
         return [
             {
                 "name": WORKER_STORAGE_VOLUME_NAME,
                 "mountPath": str(workspace_mount.worker_visible_path),
                 "subPath": str(workspace_mount.local_path.relative_to(self.storage_root)),
+                **({"readOnly": True} if workspace_mount.read_only else {}),
             }
-            for workspace_mount in plan_scoped_workspace_mounts(
-                worker_key=resolve_state_scope_worker_key(worker_key, state_scope_worker_key),
-                local_shared_storage_root=self.storage_root,
-                worker_visible_shared_storage_root=Path(self.config.storage_mount_path),
-                private_agent_names=private_agent_names,
-                resolved_agent_policies=agent_policies,
-            )
+            for workspace_mount in planned_mounts
         ]
 
     def _knowledge_storage_mounts(

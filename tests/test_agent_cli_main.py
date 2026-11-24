@@ -655,3 +655,36 @@ def test_a_background_script_cannot_run_commands_in_named_workers(capsys, monkey
     assert output.out == ""
     assert "A named worker belongs to a reply in a conversation" in output.err
     assert "background script" in output.err
+
+
+def test_workers_run_passes_sandbox_flags_and_omits_unset_flags(monkeypatch) -> None:
+    """Sandbox flags map directly to tool arguments; omitted flags stay absent so follow-ups inherit locked settings."""
+    sent = _worker_client(monkeypatch, *command_frames(b"ok\n"))
+    assert main(["workers", "run", "sbx", "--sandbox", "--", "echo", "hi"]) == 0
+    assert sent[0]["arguments"] == {
+        "args": ["echo", "hi"],
+        "worker": "sbx",
+        "timeout": 3600,
+        "tail": 100,
+        "sandbox": True,
+    }
+
+    sent = _worker_client(monkeypatch, *command_frames(b"ok\n"))
+    assert main(["workers", "run", "sbx", "--mount-dir", "scratch/job1", "--mount-read-only", "--", "ls"]) == 0
+    assert sent[0]["arguments"] == {
+        "args": ["ls"],
+        "worker": "sbx",
+        "timeout": 3600,
+        "tail": 100,
+        "mount_dir": "scratch/job1",
+        "mount_read_only": True,
+    }
+
+    sent = _worker_client(monkeypatch, *command_frames(b"ok\n"))
+    assert main(["workers", "run", "sbx", "--", "pwd"]) == 0
+    assert sent[0]["arguments"] == {
+        "args": ["pwd"],
+        "worker": "sbx",
+        "timeout": 3600,
+        "tail": 100,
+    }

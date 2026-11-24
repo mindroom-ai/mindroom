@@ -926,6 +926,7 @@ def test_proxy_wraps_tool_calls(monkeypatch: pytest.MonkeyPatch) -> None:
         "extra_env_passthrough": None,
         "run_as_job": False,
         "stream_io": False,
+        "sandbox": False,
     }
     assert captured["headers"] == {"x-mindroom-sandbox-token": "test-token"}
 
@@ -4155,19 +4156,19 @@ def test_proxy_holds_manager_lease_through_success_bookkeeping(
             lease_active = False
             events.append("exit")
 
-    def _fake_worker_route(**route: Any) -> tuple[WorkerRoute, WorkerHandle | None]:  # noqa: ANN401
+    def _fake_worker_route(**route: Any) -> tuple[WorkerRoute, WorkerHandle | None, None]:  # noqa: ANN401
         assert route["runtime_paths"] is not None
         assert route["tool_name"] == "calculator"
         assert route["function_name"] == "add"
         assert route["worker_manager"] is worker_manager
         events.append("build")
-        return WorkerRoute(protocol=WORKER_PROTOCOL_VERSION, worker_key="worker-key"), worker_handle
+        return WorkerRoute(protocol=WORKER_PROTOCOL_VERSION, worker_key="worker-key"), worker_handle, None
 
     def _fake_lease_primary_worker_manager(*_args: object, **_kwargs: object) -> _FakeLease:
         return _FakeLease()
 
     monkeypatch.setattr(sandbox_proxy_module, "lease_primary_worker_manager", _fake_lease_primary_worker_manager)
-    monkeypatch.setattr(sandbox_proxy_module, "worker_route", _fake_worker_route)
+    monkeypatch.setattr(sandbox_proxy_module, "_worker_route_with_sandbox", _fake_worker_route)
     monkeypatch.setattr(
         "mindroom.tool_system.sandbox_proxy.httpx.Client",
         _recording_client_class(
@@ -4249,18 +4250,18 @@ def test_proxy_holds_manager_lease_through_failure_bookkeeping(
             lease_active = False
             events.append("exit")
 
-    def _fake_worker_route(**route: Any) -> tuple[WorkerRoute, WorkerHandle | None]:  # noqa: ANN401
+    def _fake_worker_route(**route: Any) -> tuple[WorkerRoute, WorkerHandle | None, None]:  # noqa: ANN401
         assert route["tool_name"] == "calculator"
         assert route["function_name"] == "add"
         assert route["worker_manager"] is worker_manager
         events.append("build")
-        return WorkerRoute(protocol=WORKER_PROTOCOL_VERSION, worker_key="worker-key"), worker_handle
+        return WorkerRoute(protocol=WORKER_PROTOCOL_VERSION, worker_key="worker-key"), worker_handle, None
 
     def _fake_lease_primary_worker_manager(*_args: object, **_kwargs: object) -> _FakeLease:
         return _FakeLease()
 
     monkeypatch.setattr(sandbox_proxy_module, "lease_primary_worker_manager", _fake_lease_primary_worker_manager)
-    monkeypatch.setattr(sandbox_proxy_module, "worker_route", _fake_worker_route)
+    monkeypatch.setattr(sandbox_proxy_module, "_worker_route_with_sandbox", _fake_worker_route)
     monkeypatch.setattr(
         "mindroom.tool_system.sandbox_proxy.httpx.Client",
         _recording_client_class(
@@ -6082,8 +6083,8 @@ def test_proxy_leases_worker_manager_from_backend_settings_and_grants_from_build
     monkeypatch.setattr(sandbox_proxy_module, "lease_primary_worker_manager", _fake_lease_primary_worker_manager)
     monkeypatch.setattr(
         sandbox_proxy_module,
-        "worker_route",
-        lambda **_kwargs: (WorkerRoute(protocol=WORKER_PROTOCOL_VERSION), None),
+        "_worker_route_with_sandbox",
+        lambda **_kwargs: (WorkerRoute(protocol=WORKER_PROTOCOL_VERSION), None, None),
     )
     monkeypatch.setattr(sandbox_proxy_module, "execute_worker_proxy_request", _fake_execute_worker_proxy_request)
 
@@ -6569,7 +6570,7 @@ async def test_worker_call_cancelled_before_dispatch_is_never_sent(monkeypatch: 
     preparing = threading.Event()
     release = threading.Event()
     finished = threading.Event()
-    worker_route = sandbox_proxy_module.worker_route
+    worker_route = sandbox_proxy_module._worker_route_with_sandbox
     execute = sandbox_proxy_module.execute_worker_proxy_request
 
     def slow_routing(**kwargs: object) -> object:
@@ -6583,7 +6584,7 @@ async def test_worker_call_cancelled_before_dispatch_is_never_sent(monkeypatch: 
         finally:
             finished.set()
 
-    monkeypatch.setattr(sandbox_proxy_module, "worker_route", slow_routing)
+    monkeypatch.setattr(sandbox_proxy_module, "_worker_route_with_sandbox", slow_routing)
     monkeypatch.setattr(sandbox_proxy_module, "execute_worker_proxy_request", tracked_execute)
     call = asyncio.create_task(entrypoint("echo never"))
     assert await asyncio.to_thread(preparing.wait, 10)

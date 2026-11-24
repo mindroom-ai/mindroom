@@ -71,7 +71,7 @@ async def test_r1_queued_and_cold_start_cancel_report_never_ran(
     def fake_lease(_rp: object, _pc: object) -> Iterator[_FakeWorkerManager]:
         yield _FakeWorkerManager(handle)
 
-    def blocking_build(*_args: object, **_kwargs: object) -> tuple[ExecuteRequest, WorkerHandle]:
+    def blocking_build(*_args: object, **_kwargs: object) -> tuple[ExecuteRequest, WorkerHandle, None]:
         in_warmup.set()
         release_warmup.wait(timeout=5.0)
         return (
@@ -83,6 +83,7 @@ async def test_r1_queued_and_cold_start_cancel_report_never_ran(
                 kwargs={"args": ["sleep", "60"]},
             ),
             handle,
+            None,
         )
 
     runtime_paths = resolve_primary_runtime_paths(

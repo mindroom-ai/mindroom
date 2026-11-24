@@ -20,7 +20,7 @@ class WorkerStartTimeoutError(WorkerBackendError):
 
 def mirrored_credential_services(spec: WorkerSpec, launch: WorkerLaunchConfig) -> frozenset[str]:
     """Return the shared credential services mirrored into the spec's dedicated worker launched from ``launch``."""
-    return launch.grantable_credentials if spec.mirror_grantable_credentials else frozenset()
+    return launch.grantable_credentials if spec.mirror_grantable_credentials and spec.sandbox is None else frozenset()
 
 
 def effective_idle_status(
