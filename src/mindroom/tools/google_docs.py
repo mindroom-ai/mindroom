@@ -85,7 +85,7 @@ if TYPE_CHECKING:
     ),
 )
 def google_docs_tools() -> type[GoogleDocsTools]:
-    """Return Google Docs tools for document creation, reading, and editing."""
+    """Return Google Docs tools for document creation, reading, editing, and formatting."""
     from mindroom.custom_tools.google_docs import GoogleDocsTools
 
     return GoogleDocsTools

@@ -383,7 +383,7 @@ def test_google_docs_format_document_scopes_supported_operations_to_one_tab_and_
                     "type": "hyperlink",
                     "start_index": 1,
                     "end_index": 8,
-                    "url": "https://example.test/plan",
+                    "url": " https://example.test/plan ",
                 },
             ],
         ),
@@ -427,6 +427,49 @@ def test_google_docs_format_document_scopes_supported_operations_to_one_tab_and_
         },
     ]
     assert result["tabId"] == "tab-2"
+
+
+def test_google_docs_format_document_supports_style_resets(tmp_path: Path) -> None:
+    tool, service = _connected_tool(tmp_path)
+
+    tool.google_docs_format_document(
+        "document-id",
+        "tab-2",
+        "revision-1",
+        [
+            {
+                "type": "paragraph_style",
+                "start_index": 1,
+                "end_index": 8,
+                "style": {},
+                "fields": ["namedStyleType"],
+            },
+            {
+                "type": "text_style",
+                "start_index": 1,
+                "end_index": 8,
+                "style": {},
+                "fields": ["bold"],
+            },
+        ],
+    )
+
+    assert service.documents_resource.batch_update_calls[0]["body"]["requests"] == [
+        {
+            "updateParagraphStyle": {
+                "range": {"startIndex": 1, "endIndex": 8, "tabId": "tab-2"},
+                "paragraphStyle": {},
+                "fields": "namedStyleType",
+            },
+        },
+        {
+            "updateTextStyle": {
+                "range": {"startIndex": 1, "endIndex": 8, "tabId": "tab-2"},
+                "textStyle": {},
+                "fields": "bold",
+            },
+        },
+    ]
 
 
 def test_google_docs_format_document_rejects_unsupported_operations(tmp_path: Path) -> None:

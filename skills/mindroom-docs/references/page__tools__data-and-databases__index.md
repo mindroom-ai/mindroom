@@ -301,7 +301,7 @@ tool_approval:
 
 ## [`google_docs`]
 
-`google_docs` creates, reads, and edits Google Docs through its own OAuth connection, separate from Google Drive.
+`google_docs` creates, reads, edits, and formats Google Docs through its own OAuth connection, separate from Google Drive.
 
 | Function | What it does |
 | --- | --- |
@@ -314,8 +314,9 @@ tool_approval:
 Each `document_id` accepts either a document ID or a full Google Docs URL.
 Every successful call returns the document's edit URL.
 `google_docs_format_document()` accepts only `paragraph_style`, `text_style`, `native_list`, `remove_native_list`, and `hyperlink` operations, and it applies the call's immutable `tab_id` to every operation.
-Style operations use a style object and explicit dotted field paths; use `hyperlink` for every link change.
-Put `native_list` operations after any operation whose indexes came from the preceding read, because Docs can remove leading tabs and shift later indexes.
+Style operations use a style object and explicit dotted field paths; an empty style resets the listed fields, and `hyperlink` sets a link.
+`paragraph_style` and `text_style` use `style` and `fields`, `native_list` uses `bullet_preset`, `remove_native_list` uses only its range, and `hyperlink` uses `url`.
+Put `native_list` operations after every operation whose indexes came from the preceding read, in descending start-index order when several list operations are needed, because Docs can remove leading tabs and shift later indexes.
 Read the document immediately before formatting it, then use its `revisionId` as `expected_revision_id`; Docs rejects the full batch if another edit changes the document first.
 If the account is not connected, the tool returns an `OAuthConnectionRequired` result with a connect link.
 Before public production use, the Docs scope needs Google verification; see [Production Verification Follow-up](https://docs.mindroom.chat/deployment/google-services-oauth/#production-verification-follow-up).
@@ -325,7 +326,7 @@ Before public production use, the Docs scope needs Google verification; see [Pro
 | `create_document` | `boolean` | `true` | Enable document creation. |
 | `read_document` | `boolean` | `true` | Enable structure and content reads. |
 | `edit_document` | `boolean` | `true` | Enable text insertion and replacement. |
-| `format_document` | `boolean` | `false` | Enable revision-checked formatting operations. |
+| `format_document` | `boolean` | `false` | Enable revision-checked formatting operations. Requires `read_document` to obtain the revision ID. |
 
 ## [`google_sheets`]
 

@@ -1066,7 +1066,7 @@ def test_google_docs_partial_create_401_preserves_non_retryable_result(
     assert "provider-controlled-partial-write-secret" not in result
 
 
-@pytest.mark.parametrize("operation", ["create", "read", "insert", "replace"])
+@pytest.mark.parametrize("operation", ["create", "read", "insert", "replace", "format"])
 def test_google_docs_provider_failures_preserve_status_without_provider_text(
     runtime_paths: RuntimePaths,
     operation: str,
@@ -1112,6 +1112,21 @@ def test_google_docs_provider_failures_preserve_status_without_provider_text(
         result = tool.google_docs_get_document("document-id")
     elif operation == "insert":
         result = tool.google_docs_insert_text("document-id", "text")
+    elif operation == "format":
+        result = tool.google_docs_format_document(
+            "document-id",
+            "tab-id",
+            "revision-id",
+            [
+                {
+                    "type": "text_style",
+                    "start_index": 1,
+                    "end_index": 5,
+                    "style": {"bold": True},
+                    "fields": ["bold"],
+                },
+            ],
+        )
     else:
         result = tool.google_docs_replace_text("document-id", "old", "new")
 

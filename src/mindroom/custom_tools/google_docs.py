@@ -86,8 +86,8 @@ def _formatting_style(operation: dict[str, object]) -> dict[str, object]:
         msg = "style must be an object"
         raise TypeError(msg)
     style = cast("dict[str, object]", style)
-    if not style or any(not isinstance(key, str) for key in style):
-        msg = "style must be a non-empty object with string field names"
+    if any(not isinstance(key, str) for key in style):
+        msg = "style must use string field names"
         raise ValueError(msg)
     return dict(style)
 
@@ -155,6 +155,7 @@ def _formatting_request(operation: object, tab_id: str) -> dict[str, object]:
     if not isinstance(url, str) or not url.strip():
         msg = "hyperlink requires a non-empty url"
         raise ValueError(msg)
+    url = url.strip()
     return {
         "updateTextStyle": {
             "range": _formatting_range(operation, tab_id),
@@ -460,10 +461,13 @@ class GoogleDocsTools(GoogleApiToolkit):
         """Apply supported formatting operations to one Google Doc tab at one exact revision.
 
         Supported operations are paragraph_style, text_style, native_list,
-        remove_native_list, and hyperlink. Each operation names a body-index
-        range with start_index and end_index. Style operations include a style
-        object and explicit dotted field paths, native_list includes bullet_preset,
-        and hyperlink includes url.
+        remove_native_list, and hyperlink. Every operation has type,
+        start_index, and end_index. paragraph_style and text_style also take
+        style and fields, native_list takes bullet_preset, and hyperlink takes
+        url. Style fields are explicit dotted Docs field paths, and an empty
+        style resets the listed fields. Run native_list operations after all
+        index-dependent operations, in descending start-index order when there
+        are several, because creating lists can shift later indexes.
 
         Args:
             document_id: Google Docs document ID.
