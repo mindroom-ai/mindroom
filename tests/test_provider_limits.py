@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import gc
 import json
 import os
 import stat
 import sys
+import threading
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,6 +18,7 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 from claude_agent_sdk import RateLimitEvent, RateLimitInfo
+from structlog.testing import capture_logs
 
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, ModelPricing
@@ -1399,3 +1402,238 @@ async def test_codex_transient_refresh_error_preserves_last_good_reading_while_a
     snap_revoked = await get_provider_usage_snapshot(config=config, runtime_paths=paths, now=FIXED_NOW)
     assert snap_revoked.accounts[0].unavailable_reason == "not_signed_in"
     assert snap_revoked.accounts[0].windows == ()
+
+
+def _haiku_day_report(tokens: int) -> UsageReport:
+    totals = TokenCounts(input_tokens=tokens, output_tokens=0, total_tokens=tokens)
+    row = UsageDailyBreakdownRow(
+        date="2026-11-23",
+        totals=totals,
+        run_count=1,
+        model_breakdown=(UsageModelBreakdownRow("Anthropic", "claude-haiku-4-5", totals, 1),),
+    )
+    return _empty_report((row,))
+
+
+def _acct(snap: ProviderUsageSnapshot, account_id: str) -> ProviderLimitAccount:
+    return next(acct for acct in snap.accounts if acct.id == account_id)
+
+
+def _setup_async_usage_env(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    collect_fn: Any,  # noqa: ANN401
+) -> tuple[Config, Any, list[float], list[int]]:
+    clock, probe_calls = [100.0], [0]
+
+    async def _fast_probe(_cli: str | None, now: datetime) -> provider_probes.ProbeResult:
+        probe_calls[0] += 1
+        window = build_window(window_id="five_hour", kind="session", label="5-hour window", used_percent=25.0)
+        return provider_probes.ProbeResult(
+            windows=(window,),
+            plan="Max 20x",
+            account_label="Max 20x",
+            observed_at=now,
+            succeeded=True,
+        )
+
+    monkeypatch.setattr(provider_limits, "_monotonic", lambda: clock[0])
+    monkeypatch.setattr(provider_limits, "probe_claude_code", _fast_probe)
+    monkeypatch.setattr(provider_limits, "collect_admin_usage", collect_fn)
+    config = Config(
+        models={
+            "opus": ModelConfig(provider="claude_code", id="claude-opus-4-6"),
+            "haiku": ModelConfig(
+                provider="anthropic",
+                id="claude-haiku-4-5",
+                pricing=ModelPricing(input=2.0, output=5.0),
+            ),
+        },
+    )
+    return config, test_runtime_paths(tmp_path), clock, probe_calls
+
+
+@pytest.mark.asyncio
+async def test_cold_slow_usage_scan_returns_partial_then_evicts_on_completion(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Slow cold 7d scan returns live windows with partial=True, caches partial during scan, then evicts on completion."""
+    scan_calls, scan_started, release_scan = [0], threading.Event(), threading.Event()
+
+    def _slow_collect(**_kw: object) -> UsageReport:
+        scan_calls[0] += 1
+        scan_started.set()
+        release_scan.wait(timeout=5.0)
+        return _haiku_day_report(1500)
+
+    config, paths, _clock, probe_calls = _setup_async_usage_env(monkeypatch, tmp_path, _slow_collect)
+    monkeypatch.setattr(provider_limits, "USAGE_REPORT_WAIT_SECONDS", 0.05)
+    try:
+        s1, s2 = await asyncio.gather(
+            get_provider_usage_snapshot(config=config, runtime_paths=paths, now=FIXED_NOW),
+            get_provider_usage_snapshot(config=config, runtime_paths=paths, now=FIXED_NOW),
+        )
+        assert s1 == s2
+        assert (s1.partial, probe_calls[0]) == (True, 1)
+        assert _acct(s1, "claude_code:default").windows[0].used_percent == 25.0
+        assert _acct(s1, "claude_code:default").stale is False
+        assert (_acct(s1, "anthropic:default").tokens_7d, _acct(s1, "anthropic:default").cost_usd_7d) == (0, None)
+        assert (s1.daily_7d, s1.unattributed_tokens_7d, s1.unattributed_cost_usd_7d) == ((), 0, None)
+
+        # Subsequent call during the scan reuses the cached partial snapshot without re-probing.
+        assert await get_provider_usage_snapshot(config=config, runtime_paths=paths, now=FIXED_NOW) == s1
+        assert probe_calls[0] == 1
+
+        inflight = list(provider_limits._USAGE_REPORT_IN_FLIGHT.get(asyncio.get_running_loop(), {}).values())
+        assert len(inflight) == 1
+        assert await asyncio.to_thread(scan_started.wait, 5.0)
+        release_scan.set()
+        await inflight[0]
+
+        # Partial snapshot entry was evicted on completion, so the next call immediately builds partial=False.
+        s4 = await get_provider_usage_snapshot(config=config, runtime_paths=paths, now=FIXED_NOW)
+        assert (s4.partial, scan_calls[0], probe_calls[0]) == (False, 1, 2)
+        assert _acct(s4, "claude_code:default").windows[0].used_percent == 25.0
+        assert _acct(s4, "anthropic:default").tokens_7d == 1500
+        assert _acct(s4, "anthropic:default").cost_usd_7d == pytest.approx(0.003)
+        assert s4.daily_7d[0].by_account == {"anthropic:default": 1500}
+    finally:
+        release_scan.set()
+
+
+@pytest.mark.asyncio
+async def test_stale_while_revalidate_returns_cached_7d_and_refreshes_in_background(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Expired 7d cache serves prior totals immediately while refreshing once in the background."""
+    scan_calls, refresh_started, release_refresh = [0], threading.Event(), threading.Event()
+
+    def _collect(**_kw: object) -> UsageReport:
+        scan_calls[0] += 1
+        if scan_calls[0] == 1:
+            return _haiku_day_report(1500)
+        refresh_started.set()
+        release_refresh.wait(timeout=5.0)
+        return _haiku_day_report(4200)
+
+    config, paths, clock, _probe_calls = _setup_async_usage_env(monkeypatch, tmp_path, _collect)
+    monkeypatch.setattr(provider_limits, "USAGE_REPORT_WAIT_SECONDS", 5.0)
+    loop = asyncio.get_running_loop()
+    try:
+        s1 = await get_provider_usage_snapshot(config=config, runtime_paths=paths, now=FIXED_NOW)
+        assert (s1.partial, _acct(s1, "anthropic:default").tokens_7d, scan_calls[0]) == (False, 1500, 1)
+
+        clock[0] += provider_limits.USAGE_REPORT_TTL_SECONDS
+        s2 = await asyncio.wait_for(
+            get_provider_usage_snapshot(config=config, runtime_paths=paths, now=FIXED_NOW),
+            timeout=1.0,
+        )
+        assert (s2.partial, _acct(s2, "anthropic:default").tokens_7d) == (False, 1500)
+        inflight = list(provider_limits._USAGE_REPORT_IN_FLIGHT.get(loop, {}).values())
+        assert len(inflight) == 1
+
+        # force_refresh during the scan reuses the same single-flight refresh; fresh report suppresses cooldown re-scans.
+        clock[0] += provider_limits.REFRESH_COOLDOWN_SECONDS
+        s2_force = await asyncio.wait_for(
+            get_provider_usage_snapshot(config=config, runtime_paths=paths, force_refresh=True, now=FIXED_NOW),
+            timeout=1.0,
+        )
+        assert (s2_force.partial, _acct(s2_force, "anthropic:default").tokens_7d) == (False, 1500)
+        assert list(provider_limits._USAGE_REPORT_IN_FLIGHT.get(loop, {}).values()) == inflight
+        assert await asyncio.to_thread(refresh_started.wait, 5.0)
+        release_refresh.set()
+        await inflight[0]
+        assert scan_calls[0] == 2
+
+        alt_config = Config(models={"haiku": ModelConfig(provider="anthropic", id="claude-haiku-4-5")})
+        clock[0] += provider_limits.REFRESH_COOLDOWN_SECONDS / 2
+        s_fresh = await get_provider_usage_snapshot(
+            config=alt_config,
+            runtime_paths=paths,
+            force_refresh=True,
+            now=FIXED_NOW,
+        )
+        assert (s_fresh.accounts[0].tokens_7d, scan_calls[0]) == (4200, 2)
+
+        # Once the snapshot cache TTL elapses, the next snapshot picks up the refreshed 7d totals.
+        clock[0] += provider_limits.CACHE_TTL_SECONDS
+        s3 = await get_provider_usage_snapshot(config=config, runtime_paths=paths, now=FIXED_NOW)
+        assert (s3.partial, _acct(s3, "anthropic:default").tokens_7d, scan_calls[0]) == (False, 4200, 2)
+        assert _acct(s3, "anthropic:default").cost_usd_7d == pytest.approx(0.0084)
+    finally:
+        release_refresh.set()
+
+
+@pytest.mark.asyncio
+async def test_failed_usage_scan_logs_warning_and_degrades_gracefully(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Failed 7d scans log a secret-free warning, degrade to partial=True on cold start, and retain stale reports."""
+    mode, release_fail = ["cold_fail"], threading.Event()
+    loop = asyncio.get_running_loop()
+    loop_errors: list[dict[str, Any]] = []
+    prev_handler = loop.get_exception_handler()
+    loop.set_exception_handler(lambda _loop, ctx: loop_errors.append(ctx))
+
+    def _collect(**_kw: object) -> UsageReport:
+        if mode[0] == "cold_fail":
+            msg = "sqlite failed secret-token-value"
+            raise RuntimeError(msg)
+        if mode[0] == "ok":
+            return _haiku_day_report(1500)
+        release_fail.wait(timeout=5.0)
+        msg = "disk read failed secret-db-path"
+        raise OSError(msg)
+
+    config, paths, clock, _probe_calls = _setup_async_usage_env(monkeypatch, tmp_path, _collect)
+    try:
+        with capture_logs() as cold_logs:
+            cold_snap = await get_provider_usage_snapshot(config=config, runtime_paths=paths, now=FIXED_NOW)
+        assert (cold_snap.partial, _acct(cold_snap, "claude_code:default").windows[0].used_percent) == (True, 25.0)
+        assert (_acct(cold_snap, "anthropic:default").tokens_7d, _acct(cold_snap, "anthropic:default").cost_usd_7d) == (
+            0,
+            None,
+        )
+        assert cold_snap.daily_7d == ()
+        assert [
+            (r["log_level"], r["error_type"]) for r in cold_logs if r.get("event") == "provider_usage_7d_scan_failed"
+        ] == [("warning", "RuntimeError")]
+        assert "secret-token-value" not in json.dumps(cold_logs)
+
+        # Warm the 7d cache, then let a stale-while-revalidate background refresh fail without failing the snapshot.
+        provider_limits.clear_cache()
+        mode[0] = "ok"
+        warm_snap = await get_provider_usage_snapshot(config=config, runtime_paths=paths, now=FIXED_NOW)
+        assert _acct(warm_snap, "anthropic:default").tokens_7d == 1500
+
+        mode[0] = "stale_fail"
+        clock[0] += provider_limits.USAGE_REPORT_TTL_SECONDS
+        with capture_logs() as stale_logs:
+            stale_snap = await get_provider_usage_snapshot(config=config, runtime_paths=paths, now=FIXED_NOW)
+            assert (
+                stale_snap.partial,
+                _acct(stale_snap, "claude_code:default").windows[0].used_percent,
+                _acct(stale_snap, "anthropic:default").tokens_7d,
+            ) == (False, 25.0, 1500)
+            inflight = list(provider_limits._USAGE_REPORT_IN_FLIGHT.get(loop, {}).values())
+            bg_done = asyncio.Event()
+            assert len(inflight) == 1
+            inflight.pop().add_done_callback(lambda _: bg_done.set())
+            release_fail.set()
+            await bg_done.wait()
+            gc.collect()
+            await asyncio.sleep(0)
+
+        assert [
+            (r["log_level"], r["error_type"]) for r in stale_logs if r.get("event") == "provider_usage_7d_scan_failed"
+        ] == [("warning", "OSError")]
+        assert "secret-db-path" not in json.dumps(stale_logs)
+        assert loop_errors == []
+        retained_report, _ = next(iter(provider_limits._USAGE_REPORT_CACHE.values()))
+        assert retained_report.daily_breakdown[0].totals.total_tokens == 1500
+    finally:
+        release_fail.set()
+        loop.set_exception_handler(prev_handler)
