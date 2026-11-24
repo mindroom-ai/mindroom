@@ -23,7 +23,11 @@ from mindroom.external_triggers.policy import is_external_trigger_administrator
 from mindroom.file_locks import advisory_file_lock
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.state import resolve_room_id
-from mindroom.requester_identity import is_human_requester_id, resolve_human_requester_alias
+from mindroom.requester_identity import (
+    equivalent_requester_ids,
+    is_human_requester_id,
+    resolve_human_requester_alias,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -43,6 +47,14 @@ class ExternalTriggerStoreError(RuntimeError):
 
 class ExternalTriggerRecordNotDeliverableError(ExternalTriggerStoreError):
     """Raised when a stored trigger is no longer deliverable under current config."""
+
+
+class ExternalTriggerNotFoundError(ExternalTriggerStoreError):
+    """Raised when a trigger record does not exist or no longer matches the expected UID."""
+
+
+class ExternalTriggerForbiddenError(ExternalTriggerStoreError):
+    """Raised when the caller is not authorized to mutate a trigger record."""
 
 
 class ExternalTriggerTarget(BaseModel):
@@ -105,6 +117,7 @@ class ExternalTriggerRecord(BaseModel):
     max_body_bytes: int = Field(ge=1024, le=262144)
     created_at: int
     updated_at: int
+    last_fired_at: int | None = None
 
     @field_validator("owner_user_id")
     @classmethod
@@ -236,6 +249,11 @@ class ExternalTriggerStore:
         """Return the on-disk trigger store path."""
         return self._store_path
 
+    def get_record(self, trigger_id: str) -> ExternalTriggerRecord | None:
+        """Return one trigger record by ID, or None if not found."""
+        with advisory_file_lock(self._lock_path, exclusive=False):
+            return self._read_records().triggers.get(trigger_id)
+
     def list_records(self, *, owner_user_id: str | None = None) -> list[ExternalTriggerRecord]:
         """Return trigger records, optionally filtered by owner."""
         with advisory_file_lock(self._lock_path, exclusive=False):
@@ -359,11 +377,20 @@ class ExternalTriggerStore:
         enabled: bool,
         actor_user_id: str,
         config: Config,
+        allow_admin: bool = True,
+        expected_uid: str | None = None,
     ) -> ExternalTriggerRecord:
         """Enable or disable one trigger record."""
         with advisory_file_lock(self._lock_path):
             records = self._read_records()
-            record = self._require_owned_record(records, trigger_id, actor_user_id, config)
+            record = self._require_owned_record(
+                records,
+                trigger_id,
+                actor_user_id,
+                config,
+                allow_admin=allow_admin,
+                expected_uid=expected_uid,
+            )
             updated = _validate_record_update(
                 record.model_copy(
                     update={"enabled": enabled, "version": record.version + 1, "updated_at": int(time.time())},
@@ -414,13 +441,44 @@ class ExternalTriggerStore:
             self._write_records(records)
             return updated
 
-    def delete_record(self, trigger_id: str, *, actor_user_id: str, config: Config) -> None:
+    def delete_record(
+        self,
+        trigger_id: str,
+        *,
+        actor_user_id: str,
+        config: Config,
+        allow_admin: bool = True,
+        expected_uid: str | None = None,
+    ) -> None:
         """Delete one trigger record."""
         with advisory_file_lock(self._lock_path):
             records = self._read_records()
-            self._require_owned_record(records, trigger_id, actor_user_id, config)
+            self._require_owned_record(
+                records,
+                trigger_id,
+                actor_user_id,
+                config,
+                allow_admin=allow_admin,
+                expected_uid=expected_uid,
+            )
             records.triggers.pop(trigger_id)
             self._write_records(records)
+
+    def record_fired(self, trigger_id: str, *, expected_uid: str, fired_at: int | None = None) -> None:
+        """Record one successful, non-duplicate delivery timestamp for a live trigger."""
+        timestamp = int(time.time()) if fired_at is None else fired_at
+        with advisory_file_lock(self._lock_path):
+            records = self._read_records()
+            record = records.triggers.get(trigger_id)
+            if record is None or record.uid != expected_uid:
+                return
+            next_last_fired_at = timestamp if record.last_fired_at is None else max(record.last_fired_at, timestamp)
+            if record.last_fired_at == next_last_fired_at:
+                return
+            records.triggers[trigger_id] = _validate_record_update(
+                record.model_copy(update={"last_fired_at": next_last_fired_at}),
+            )
+            self._write_records_only(records)
 
     def consume_single_use(self, trigger_id: str, *, expected_uid: str) -> None:
         """Delete the same single-use trigger that produced a delivery snapshot."""
@@ -492,18 +550,24 @@ class ExternalTriggerStore:
         trigger_id: str,
         actor_user_id: str,
         config: Config,
+        *,
+        allow_admin: bool = True,
+        expected_uid: str | None = None,
     ) -> ExternalTriggerRecord:
         record = records.triggers.get(trigger_id)
-        if record is None:
+        if record is None or (expected_uid is not None and record.uid != expected_uid):
             msg = f"external trigger not found: {trigger_id}"
-            raise ExternalTriggerStoreError(msg)
-        if actor_user_id != record.owner_user_id and not is_external_trigger_administrator(
-            config,
-            self._runtime_paths,
-            actor_user_id,
+            raise ExternalTriggerNotFoundError(msg)
+        actor_ids = equivalent_requester_ids(actor_user_id, config, self._runtime_paths)
+        if record.owner_user_id not in actor_ids and not (
+            allow_admin and is_external_trigger_administrator(config, self._runtime_paths, actor_user_id)
         ):
-            msg = "external trigger can only be changed by its owner or an external trigger admin"
-            raise ExternalTriggerStoreError(msg)
+            msg = (
+                "external trigger can only be changed by its owner or an external trigger admin"
+                if allow_admin
+                else "external trigger can only be changed by its owner"
+            )
+            raise ExternalTriggerForbiddenError(msg)
         return record
 
     def _validate_record_against_config(self, record: ExternalTriggerRecord, config: Config) -> None:
@@ -520,11 +584,8 @@ class ExternalTriggerStore:
             msg = "invalid external trigger store"
             raise ExternalTriggerStoreError(msg) from exc
 
-    def _write_records(self, records: _SerializedTriggerRecords, *, retained_scope: str | None = None) -> None:
-        """Publish ``records``, then drop the replay records of every scope but theirs and ``retained_scope``."""
-        live_scopes = {_replay_scope(record) for record in records.triggers.values()}
-        if retained_scope is not None:
-            live_scopes.add(retained_scope)
+    def _write_records_only(self, records: _SerializedTriggerRecords) -> None:
+        """Durably write ``records`` without modifying replay-scope retention."""
         try:
             write_json_file_durable(
                 self._store_path,
@@ -533,6 +594,17 @@ class ExternalTriggerStore:
                 indent=2,
                 sort_keys=True,
             )
+        except OSError as exc:
+            msg = "external trigger store is unavailable"
+            raise ExternalTriggerStoreError(msg) from exc
+
+    def _write_records(self, records: _SerializedTriggerRecords, *, retained_scope: str | None = None) -> None:
+        """Publish ``records``, then drop the replay records of every scope but theirs and ``retained_scope``."""
+        live_scopes = {_replay_scope(record) for record in records.triggers.values()}
+        if retained_scope is not None:
+            live_scopes.add(retained_scope)
+        self._write_records_only(records)
+        try:
             self._replay_store.retain_scopes(live_scopes)
         except OSError as exc:
             msg = "external trigger store is unavailable"

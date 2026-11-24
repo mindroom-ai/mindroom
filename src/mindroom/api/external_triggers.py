@@ -286,14 +286,18 @@ async def _claim_and_execute_trigger(
                 bound_root=bound_root,
             )
 
+    delivered_at = int(time.time())
     await _run_replay_store_call(
         replay_store.mark_event_delivered,
         snapshot.replay_scope,
         event_id,
-        now=int(time.time()),
+        now=delivered_at,
         ttl_seconds=_DELIVERED_EVENT_ID_TTL_SECONDS,
     )
-    await _consume_single_use_trigger(snapshot, runtime_paths)
+    if snapshot.delivery_mode == "single_use":
+        await _consume_single_use_trigger(snapshot, runtime_paths)
+    else:
+        await _record_external_trigger_fired(snapshot, runtime_paths, fired_at=delivered_at)
     return ExternalTriggerAcceptedResponse(
         accepted=True,
         duplicate=False,
@@ -455,6 +459,28 @@ async def _consume_single_use_trigger(snapshot: TriggerDeliverySnapshot, runtime
         )
     except ExternalTriggerStoreError as exc:
         raise HTTPException(status_code=503, detail="Single-use trigger could not be consumed") from exc
+
+
+async def _record_external_trigger_fired(
+    snapshot: TriggerDeliverySnapshot,
+    runtime_paths: RuntimePaths,
+    *,
+    fired_at: int,
+) -> None:
+    """Best-effort update of ``last_fired_at`` after a successful, non-duplicate webhook delivery."""
+    try:
+        await asyncio.to_thread(
+            _trigger_store(runtime_paths).record_fired,
+            snapshot.trigger_id,
+            expected_uid=snapshot.uid,
+            fired_at=fired_at,
+        )
+    except ExternalTriggerStoreError:
+        logger.warning(
+            "Failed to record external trigger last_fired_at after delivery",
+            trigger_id=snapshot.trigger_id,
+            exc_info=True,
+        )
 
 
 def _parse_payload(body: bytes) -> ExternalTriggerPayload:

@@ -1189,6 +1189,51 @@ def test_duplicate_event_id_returns_duplicate_response(
     assert second.json()["duplicate"] is True
 
 
+def test_webhook_delivery_records_last_fired_at_only_on_non_duplicate_success(
+    trigger_api: TriggerApiContext,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """last_fired_at is set on successful non-duplicate delivery and untouched on failure or duplicates."""
+    outcomes = iter([None, "$matrix-event"])
+
+    async def execute_external_trigger(**_kwargs: object) -> str | None:
+        return next(outcomes)
+
+    monkeypatch.setattr(
+        "mindroom.api.external_triggers.execute_external_trigger",
+        execute_external_trigger,
+    )
+    store = ExternalTriggerStore(trigger_api.runtime_paths)
+    body = _body()
+
+    failed = _post_signed(trigger_api, nonce="nonce-fail", body=body)
+    assert failed.status_code == 502
+    failed_record = store.get_record("campground")
+    assert failed_record is not None
+    assert failed_record.last_fired_at is None
+
+    delivered = _post_signed(trigger_api, nonce="nonce-ok", body=body)
+    assert delivered.status_code == 202
+    assert delivered.json()["duplicate"] is False
+    delivered_record = store.get_record("campground")
+    assert delivered_record is not None
+    first_fired_at = delivered_record.last_fired_at
+    assert first_fired_at is not None
+
+    later = first_fired_at + 10
+    monkeypatch.setattr(external_triggers_api.time, "time", lambda: float(later))
+    duplicate = trigger_api.client.post(
+        "/api/triggers/campground",
+        content=body,
+        headers=_sign(trigger_api.private_key, body=body, nonce="nonce-dup", timestamp=str(later)),
+    )
+    assert duplicate.status_code == 202
+    assert duplicate.json()["duplicate"] is True
+    after_dup = store.get_record("campground")
+    assert after_dup is not None
+    assert after_dup.last_fired_at == first_fired_at
+
+
 def test_thread_key_groups_new_thread_deliveries_into_one_matrix_thread(
     trigger_api: TriggerApiContext,
     monkeypatch: pytest.MonkeyPatch,
