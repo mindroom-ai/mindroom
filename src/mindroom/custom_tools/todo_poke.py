@@ -9,6 +9,7 @@ import asyncio
 import hashlib
 import json
 import math
+import re
 from collections.abc import Awaitable, Callable, Mapping
 from contextlib import suppress
 from dataclasses import dataclass, field
@@ -50,13 +51,17 @@ __all__ = [
 ]
 
 type _TodoScheduleQuery = Callable[[str, tuple[str, ...]], Awaitable[frozenset[str | None] | None]]
-type _TodoPokeSender = Callable[[str, str, str, str | None, str | None], Awaitable[str | None]]
+type _TodoPokeSender = Callable[
+    [str, str, str, str | None, str | None, Mapping[str, Any]],
+    Awaitable[str | None],
+]
 type _StateWarningKey = tuple[str, str]
 
 _POKE_STATE_FILENAME = "poke_state.json"
 _VISIBLE_ITEM_LIMIT = 5
 _RETRY_BACKSTOP_SECONDS = 60 * 60
 _MAX_UNCHANGED_REPOKES = 3
+_MARKDOWN_PROSE_ESCAPE_RE = re.compile(r"([\\`*_\[\]~<>])")
 
 
 class TodoPokeDeliveryUnavailableError(RuntimeError):
@@ -490,19 +495,52 @@ def _literal_code_text(text: str) -> str:
     return f"{fence}{safe_text}{fence}"
 
 
-def _format_poke_message(scope: _TodoPokeScope) -> str:
-    lines = [f"@{scope.assigned_agent} Todo work is ready. Continue with these actionable items:"]
-    ordered_items = sorted(
+def _escape_markdown_prose(text: str) -> str:
+    safe_text = " ".join(text.split()).replace("@", "@\u200b")
+    return _MARKDOWN_PROSE_ESCAPE_RE.sub(r"\\\1", safe_text)
+
+
+def _ordered_actionable_items(scope: _TodoPokeScope) -> list[TodoItemSnapshot]:
+    return sorted(
         scope.actionable_items,
         key=lambda item: (PRIORITY_ORDER[item.priority], item.item_id),
     )
+
+
+def _build_poke_metadata(scope: _TodoPokeScope) -> dict[str, Any]:
+    ordered_items = _ordered_actionable_items(scope)
+    return {
+        "version": 1,
+        "assigned_agent": scope.assigned_agent,
+        "items": [
+            {
+                "id": item.item_id,
+                "title": " ".join(item.title.split()),
+                "priority": item.priority,
+            }
+            for item in ordered_items[:_VISIBLE_ITEM_LIMIT]
+        ],
+        "total_count": len(ordered_items),
+    }
+
+
+def _format_poke_message(scope: _TodoPokeScope) -> str:
+    ordered_items = _ordered_actionable_items(scope)
+    total_count = len(ordered_items)
+    header = (
+        f"@{scope.assigned_agent} **1 todo ready** — continue with this actionable item:"
+        if total_count == 1
+        else f"@{scope.assigned_agent} **{total_count} todos ready** — continue with these actionable items:"
+    )
+    lines = [header]
     lines.extend(
-        f"- {_literal_code_text(item.item_id)} [{item.priority}] {_literal_code_text(item.title)}"
+        f"- {_escape_markdown_prose(item.title)} — {item.priority.capitalize()} · {_literal_code_text(item.item_id)}"
         for item in ordered_items[:_VISIBLE_ITEM_LIMIT]
     )
-    remaining = len(ordered_items) - _VISIBLE_ITEM_LIMIT
+    remaining = total_count - _VISIBLE_ITEM_LIMIT
     if remaining > 0:
-        lines.append(f"- …and {remaining} more actionable item(s).")
+        item_word = "item" if remaining == 1 else "items"
+        lines.append(f"- …and {remaining} more actionable {item_word}.")
     return "\n".join(lines)
 
 
@@ -620,6 +658,7 @@ async def _deliver_pokes(
                 _format_poke_message(scope),
                 scope.thread_id,
                 scope.requester_id,
+                _build_poke_metadata(scope),
             )
         except TodoPokeDeliveryUnavailableError:
             logger.debug(

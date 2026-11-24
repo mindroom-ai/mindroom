@@ -19,7 +19,7 @@ from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.matrix import MindRoomUserConfig
-from mindroom.constants import ORIGINAL_SENDER_KEY
+from mindroom.constants import ORIGINAL_SENDER_KEY, TODO_POKE_CONTENT_KEY
 from mindroom.custom_tools.todo_poke import (
     TodoPokeDeliveryUnavailableError,
     TodoPokeDeps,
@@ -34,6 +34,7 @@ from mindroom.hooks.sender import build_hook_message_sender
 from mindroom.ingress_validation import IngressValidator, IngressValidatorDeps
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent
+from mindroom.matrix.large_messages import _is_passthrough_preview_key
 from mindroom.orchestration.todo_poke_runtime import TodoPokeRuntimeCoordinator
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.turn_policy import TurnPolicy
@@ -194,17 +195,51 @@ async def test_assigned_agent_query_and_send_wiring(tmp_path: Path) -> None:
     )
     router_bot.hook_context.send_message.assert_not_awaited()
 
+    metadata = {
+        "version": 1,
+        "assigned_agent": "code",
+        "items": [{"id": "t1", "title": "Ship fix", "priority": "high"}],
+        "total_count": 1,
+    }
     agent_bot.hook_context.send_message.reset_mock()
-    await coordinator._send_poke("code", "!room:localhost", "@code Todo work is ready.", "$thread", "@alice:localhost")
+    await coordinator._send_poke(
+        "code",
+        "!room:localhost",
+        "@code **1 todo ready** — continue with this actionable item:\n- Ship fix — High · `t1`",
+        "$thread",
+        "@alice:localhost",
+        metadata,
+    )
 
     agent_bot.hook_context.send_message.assert_awaited_once_with(
         "!room:localhost",
-        "@code Todo work is ready.",
+        "@code **1 todo ready** — continue with this actionable item:\n- Ship fix — High · `t1`",
         "$thread",
         "todo_poke",
-        {ORIGINAL_SENDER_KEY: "@alice:localhost"},
+        {ORIGINAL_SENDER_KEY: "@alice:localhost", TODO_POKE_CONTENT_KEY: metadata},
         trigger_dispatch=True,
     )
+
+    agent_bot.hook_context.send_message.reset_mock()
+    with patch("mindroom.orchestration.todo_poke_runtime.mindroom_user_id", return_value=None):
+        await coordinator._send_poke(
+            "code",
+            "!room:localhost",
+            "@code **1 todo ready** — continue with this actionable item:\n- Ship fix — High · `t1`",
+            "$thread",
+            None,
+            metadata,
+        )
+
+    agent_bot.hook_context.send_message.assert_awaited_once_with(
+        "!room:localhost",
+        "@code **1 todo ready** — continue with this actionable item:\n- Ship fix — High · `t1`",
+        "$thread",
+        "todo_poke",
+        {TODO_POKE_CONTENT_KEY: metadata},
+        trigger_dispatch=True,
+    )
+    assert _is_passthrough_preview_key(TODO_POKE_CONTENT_KEY) is True
 
 
 @pytest.mark.usefixtures("enforce_turn_authorization")
@@ -343,9 +378,22 @@ async def test_poke_applies_assignee_access_policy_to_human_requester(tmp_path: 
         conversation_reader=make_conversation_reader_mock(),
     )
     coordinator = _coordinator(runtime_paths, config, {"secret": agent_bot})
+    poke_metadata = {
+        "version": 1,
+        "assigned_agent": "secret",
+        "items": [{"id": "t1", "title": "Review audit", "priority": "medium"}],
+        "total_count": 1,
+    }
     with patch("mindroom.matrix.client_delivery.send_message_result", new=send_message_result):
         for requester_id in ("@alice:localhost", "@mallory:localhost", None):
-            await coordinator._send_poke("secret", "!room:localhost", "@secret Todo work is ready.", None, requester_id)
+            await coordinator._send_poke(
+                "secret",
+                "!room:localhost",
+                "@secret **1 todo ready** — continue with this actionable item:\n- Review audit — Medium · `t1`",
+                None,
+                requester_id,
+                poke_metadata,
+            )
 
     config.defaults.enable_streaming = False
     runtime = BotRuntimeState(orchestrator=ready_runtime(config, runtime_paths))
@@ -390,6 +438,7 @@ async def test_poke_applies_assignee_access_policy_to_human_requester(tmp_path: 
         "@mallory:localhost",
         mindroom_user_id(config, runtime_paths),
     ]
+    assert [content[TODO_POKE_CONTENT_KEY] for content in sent_contents] == [poke_metadata] * 3
     authorized_facts = validator.classify(authorized_event, room_id=room.room_id)
     assert authorized_facts.lane_requester_id == "@alice:localhost"
     assert await validator.precheck_event(room, authorized_event, authorized_facts)

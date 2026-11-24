@@ -27,10 +27,11 @@ from mindroom.custom_tools.todo_poke import (
 )
 from mindroom.entity_resolution import current_entity_id
 from mindroom.matrix.mentions import parse_mentions_in_text
+from mindroom.matrix.message_builder import markdown_to_html
 from tests.conftest import bind_runtime_paths, test_runtime_paths
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
     from pathlib import Path
     from typing import Any
 
@@ -111,6 +112,7 @@ def _deps(
     schedule_error: Exception | None = None,
     send_results: list[str | None] | None = None,
     sent_requesters: list[str | None] | None = None,
+    sent_metadata: list[dict[str, Any]] | None = None,
 ) -> tuple[TodoPokeDeps, list[str], list[tuple[str, str, str | None]]]:
     queried_rooms: list[str] = []
     sent: list[tuple[str, str, str | None]] = []
@@ -128,10 +130,13 @@ def _deps(
         body: str,
         thread_id: str | None,
         requester_id: str | None,
+        metadata: Mapping[str, Any],
     ) -> str | None:
         sent.append((room_id, body, thread_id))
         if sent_requesters is not None:
             sent_requesters.append(requester_id)
+        if sent_metadata is not None:
+            sent_metadata.append(dict(metadata))
         if remaining_results:
             return remaining_results.pop(0)
         return f"$event-{len(sent)}"
@@ -183,8 +188,10 @@ async def test_scan_skips_malformed_unassigned_and_unconfigured_items(tmp_path: 
     assert delivered == 1
     assert queried_rooms == ["!room:localhost"]
     assert [entry[2] for entry in sent] == ["$thread"]
-    assert "@code Todo work is ready" in sent[0][1]
-    assert "`ready` [medium]" in sent[0][1]
+    assert sent[0][1].splitlines() == [
+        "@code **1 todo ready** — continue with this actionable item:",
+        "- Task ready — Medium · `ready`",
+    ]
     assert "blocked" not in sent[0][1]
     assert "removed" in idle_checks
 
@@ -203,15 +210,30 @@ async def test_poke_message_lists_actionable_items_by_priority_then_id(tmp_path:
             _item("a", priority="high"),
         ],
     )
-    deps, _queried_rooms, sent = _deps(todo_root)
+    sent_metadata: list[dict[str, Any]] = []
+    deps, _queried_rooms, sent = _deps(todo_root, sent_metadata=sent_metadata)
 
     assert await scan_todo_pokes(TodoPokePolicy(quiet_seconds=0), deps) == 1
 
-    assert sent[0][1].splitlines()[1:] == [
-        "- `d` [critical] `Task d`",
-        "- `a` [high] `Task a`",
-        "- `c` [high] `Task c`",
-        "- `b` [low] `Task b`",
+    assert sent[0][1].splitlines() == [
+        "@code **4 todos ready** — continue with these actionable items:",
+        "- Task d — Critical · `d`",
+        "- Task a — High · `a`",
+        "- Task c — High · `c`",
+        "- Task b — Low · `b`",
+    ]
+    assert sent_metadata == [
+        {
+            "version": 1,
+            "assigned_agent": "code",
+            "items": [
+                {"id": "d", "title": "Task d", "priority": "critical"},
+                {"id": "a", "title": "Task a", "priority": "high"},
+                {"id": "c", "title": "Task c", "priority": "high"},
+                {"id": "b", "title": "Task b", "priority": "low"},
+            ],
+            "total_count": 4,
+        },
     ]
 
 
@@ -240,6 +262,7 @@ async def test_scan_routes_room_io_through_assigned_candidates(tmp_path: Path) -
         body: str,
         thread_id: str | None,
         _requester_id: str | None,
+        _metadata: Mapping[str, Any],
     ) -> str:
         send_calls.append((agent_name, room_id, body, thread_id))
         return "$event"
@@ -259,8 +282,8 @@ async def test_scan_routes_room_io_through_assigned_candidates(tmp_path: Path) -
         ("code", "!room:localhost", "$thread"),
         ("reviewer", "!room:localhost", "$thread"),
     ]
-    assert "@code Todo work is ready" in send_calls[0][2]
-    assert "@reviewer Todo work is ready" in send_calls[1][2]
+    assert "@code **1 todo ready**" in send_calls[0][2]
+    assert "@reviewer **1 todo ready**" in send_calls[1][2]
 
 
 @pytest.mark.asyncio
@@ -290,6 +313,7 @@ async def test_scan_skips_only_room_without_joined_candidate(tmp_path: Path) -> 
         _body: str,
         _thread_id: str | None,
         _requester_id: str | None,
+        _metadata: Mapping[str, Any],
     ) -> str:
         send_calls.append((agent_name, room_id))
         return "$event"
@@ -330,6 +354,7 @@ async def test_unavailable_delivery_does_not_consume_attempt_or_cooldown(tmp_pat
         _body: str,
         _thread_id: str | None,
         _requester_id: str | None,
+        _metadata: Mapping[str, Any],
     ) -> str:
         sender_calls.append(agent_name)
         if agent_name == "code":
@@ -379,7 +404,7 @@ async def test_scan_skips_duplicate_or_invalid_timestamp_items(
     deps, _queried_rooms, sent = _deps(todo_root)
 
     assert await scan_todo_pokes(TodoPokePolicy(quiet_seconds=0), deps) == 1
-    assert "`ready` [medium] `Valid item`" in sent[0][1]
+    assert "- Valid item — Medium · `ready`" in sent[0][1]
     assert "Duplicate item" not in sent[0][1]
     assert "Naive item" not in sent[0][1]
     assert "Overflow item" not in sent[0][1]
@@ -575,7 +600,7 @@ async def test_scan_rejects_unsafe_assignee_identifiers_before_idle_check(tmp_pa
 
     assert await scan_todo_pokes(TodoPokePolicy(quiet_seconds=0), deps) == 1
     assert idle_checks == ["code"]
-    assert "@code Todo work is ready" in sent[0][1]
+    assert "@code **1 todo ready**" in sent[0][1]
     assert "unsafe" not in sent[0][1]
 
 
@@ -609,16 +634,22 @@ async def test_poke_titles_cannot_inject_agent_team_or_matrix_mentions(tmp_path:
             _item("matrix", title="Ask @outside:localhost"),
         ],
     )
-    deps, _queried_rooms, sent = _deps(todo_root)
+    sent_metadata: list[dict[str, Any]] = []
+    deps, _queried_rooms, sent = _deps(todo_root, sent_metadata=sent_metadata)
 
     assert await scan_todo_pokes(TodoPokePolicy(quiet_seconds=0), deps) == 1
 
     body = sent[0][1]
     _plain_text, mentioned_user_ids, _markdown_text = parse_mentions_in_text(body, config, runtime_paths)
     assert mentioned_user_ids == [current_entity_id("code", runtime_paths).full_id]
-    assert "`Ask @\u200breviewer`" in body
-    assert "`Ask @\u200bdev`" in body
-    assert "`Ask @\u200boutside:localhost`" in body
+    assert "- Ask @\u200breviewer — Medium · `agent`" in body
+    assert "- Ask @\u200bdev — Medium · `team`" in body
+    assert "- Ask @\u200boutside:localhost — Medium · `matrix`" in body
+    assert [item["title"] for item in sent_metadata[0]["items"]] == [
+        "Ask @reviewer",
+        "Ask @outside:localhost",
+        "Ask @dev",
+    ]
 
 
 @pytest.mark.parametrize(
@@ -636,6 +667,83 @@ async def test_poke_titles_cannot_inject_agent_team_or_matrix_mentions(tmp_path:
 def test_literal_code_text_uses_safe_fences_and_edge_padding(text: str, expected: str) -> None:
     """Literal todo text must normalize whitespace, grow its fence, and pad ambiguous backtick edges."""
     assert todo_poke_module._literal_code_text(text) == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("total_items", "expected_overflow"),
+    [
+        (6, "- …and 1 more actionable item."),
+        (7, "- …and 2 more actionable items."),
+    ],
+    ids=["single-overflow", "plural-overflow"],
+)
+async def test_poke_overflow_formats_singular_and_plural_and_caps_metadata(
+    tmp_path: Path,
+    total_items: int,
+    expected_overflow: str,
+) -> None:
+    """Overflow uses singular/plural prose and keeps structured metadata capped to visible items with total_count."""
+    todo_root = tmp_path / "todo"
+    _write_thread(
+        todo_root,
+        "scope",
+        items=[_item(f"t{index}", title=f"Task {index}") for index in range(1, total_items + 1)],
+    )
+    sent_metadata: list[dict[str, Any]] = []
+    deps, _queried_rooms, sent = _deps(todo_root, sent_metadata=sent_metadata)
+
+    assert await scan_todo_pokes(TodoPokePolicy(quiet_seconds=0), deps) == 1
+
+    lines = sent[0][1].splitlines()
+    assert lines[0] == f"@code **{total_items} todos ready** — continue with these actionable items:"
+    assert len(lines) == 7
+    assert lines[-1] == expected_overflow
+    assert sent_metadata[0]["total_count"] == total_items
+    assert [item["id"] for item in sent_metadata[0]["items"]] == ["t1", "t2", "t3", "t4", "t5"]
+
+
+@pytest.mark.asyncio
+async def test_poke_escapes_markdown_prose_while_keeping_metadata_plain(tmp_path: Path) -> None:
+    """Untrusted titles escape Markdown and @mentions in fallback prose but stay plain normalized text in metadata."""
+    todo_root = tmp_path / "todo"
+    raw_title = "  Check\n\t`code` *em* _sub_ [link](https://example.test) ~~del~~ <tag> > quote \\ @reviewer  "
+    _write_thread(todo_root, "scope", items=[_item("t1", title=raw_title, priority="high")])
+    sent_metadata: list[dict[str, Any]] = []
+    deps, _queried_rooms, sent = _deps(todo_root, sent_metadata=sent_metadata)
+
+    assert await scan_todo_pokes(TodoPokePolicy(quiet_seconds=0), deps) == 1
+
+    expected_prose = (
+        "Check \\`code\\` \\*em\\* \\_sub\\_ \\[link\\](https://example.test) "
+        "\\~\\~del\\~\\~ \\<tag\\> \\> quote \\\\ @\u200breviewer"
+    )
+    body = sent[0][1]
+    assert body.splitlines() == [
+        "@code **1 todo ready** — continue with this actionable item:",
+        f"- {expected_prose} — High · `t1`",
+    ]
+    rendered_html = markdown_to_html(body)
+    assert "<code>code</code>" not in rendered_html
+    assert "<em>" not in rendered_html
+    assert '<a href="https://example.test"' not in rendered_html
+    assert "<del>" not in rendered_html
+    assert "<tag>" not in rendered_html
+    assert "<blockquote>" not in rendered_html
+    assert sent_metadata == [
+        {
+            "version": 1,
+            "assigned_agent": "code",
+            "items": [
+                {
+                    "id": "t1",
+                    "title": "Check `code` *em* _sub_ [link](https://example.test) ~~del~~ <tag> > quote \\ @reviewer",
+                    "priority": "high",
+                },
+            ],
+            "total_count": 1,
+        },
+    ]
 
 
 @pytest.mark.asyncio
@@ -807,9 +915,10 @@ async def test_delivery_outcome_time_owns_cooldown_and_backstop_windows(tmp_path
         body: str,
         thread_id: str | None,
         requester_id: str | None,
+        metadata: Mapping[str, Any],
     ) -> str | None:
         current_time[0] += timedelta(minutes=20)
-        return await base_deps.sender(agent_name, room_id, body, thread_id, requester_id)
+        return await base_deps.sender(agent_name, room_id, body, thread_id, requester_id, metadata)
 
     deps = replace(
         base_deps,
