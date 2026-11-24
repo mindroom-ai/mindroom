@@ -76,9 +76,11 @@ class WorkflowPeerTools(Toolkit):
         ]
         instructions = (
             "You are inside a workflow run. Use send_peer_message(to, text) and "
-            "read_peer_messages(wait_seconds=0) to talk with peers by name ('*' for all live peers, "
+            "read_peer_messages(wait_seconds=0) (returns only unread mail and advances your cursor; prefer short "
+            "waits of 10 to 30 s in a bounded loop) to talk with peers by name ('*' for all live peers, "
             "'script' for the script), list_peers() to inspect peers, get_shared_state()/set_shared_state() "
-            "for shared JSON state, and ask_user(question, options=None) to ask the requester."
+            "for shared JSON values (not JSON strings; last write wins, so pick one writer per key), "
+            "and ask_user(question, options=None) to ask the requester."
         )
         super().__init__(name="workflow_peers", tools=tools, instructions=instructions)
 
@@ -105,10 +107,10 @@ class WorkflowPeerTools(Toolkit):
         return json.dumps(await engine.peer_send(run_id, op_id=op_id, sender=ref, to=to, text=text))
 
     async def read_peer_messages(self, wait_seconds: float = 0) -> str:
-        """Return unread messages as `{"messages": [{"from", "text", "sent_at"}], "note"?: ...}`.
+        """Return only unread messages since your last read (advancing the cursor) as `{"messages": [{"from", "text", "sent_at"}], "note"?: ...}`.
 
         Waiting (`wait_seconds > 0`) releases your concurrency slot and ends when mail arrives or after `wait_seconds`
-        with `"messages": []` and `"note": "No message arrived within <N> s."`. Use a sensible `wait_seconds` to avoid long idle waits.
+        with `"messages": []` and `"note": "No message arrived within <N> s."`. Prefer short waits (10 to 30 s) in a bounded loop over one long wait.
         """
         if isinstance(wait_seconds, bool) or wait_seconds < 0:
             msg = "wait_seconds must be a non-negative number."
@@ -123,13 +125,13 @@ class WorkflowPeerTools(Toolkit):
         return json.dumps({"peers": await asyncio.to_thread(list_peers, engine.store, run_id)})
 
     async def get_shared_state(self, key: str | None = None) -> str:
-        """Read one shared-state key (`{key, found, value}`) or all shared-state keys when `key` is omitted."""
+        """Read one shared-state key (`{"key", "found", "value"}`) or all keys (`{key: value, ...}`) when `key` is omitted."""
         engine, run_id, _, _, op_id = self._bound("get_shared_state", {"key": key})
         val = await asyncio.to_thread(get_state, engine.store, run_id, op_id=op_id, key=key)
         return json.dumps(val if key is None else {"key": key, **val})
 
     async def set_shared_state(self, key: str, value: Any) -> str:  # noqa: ANN401 - arbitrary JSON value
-        """Write a JSON value (up to 1 MiB) to this run's shared state under `key` (last write wins)."""
+        """Write any JSON value (dict, list, or primitive, not a JSON string; up to 1 MiB) under `key`. Last write wins, so pick one writer per key."""
         engine, run_id, _, ref, op_id = self._bound("set_shared_state", {"key": key, "value": value})
         call = partial(set_state, engine.store, run_id, op_id=op_id, key=key, value=value, updated_by=ref.name)
         return json.dumps(await asyncio.to_thread(call))

@@ -105,6 +105,15 @@ The script defines `def main(args):` and returns the final report, a string or a
             dev.ask(f"Fix and commit.\\n\\nTests:\\n{tests.output}\\n\\nReview:\\n{review}")
         return "Not approved after 5 rounds:\\n" + review
 
+    def negotiate(feature):                      # two peers negotiating via messages, one shared-state writer
+        parallel([
+            lambda: agent(f"Propose a JSON API for {feature} to 'frontend' via send_peer_message; poll read_peer_messages(20) "
+                          "up to 4 rounds. Once agreed, call set_shared_state('contract', <dict>) and send DONE.", name="backend"),
+            lambda: agent("Poll read_peer_messages(20) up to 4 rounds for 'backend', reply via send_peer_message with feedback "
+                          "or AGREE, and stop on DONE. Leave shared state to 'backend'.", name="frontend"),
+        ])
+        return state.get("contract")             # or have another agent call get_shared_state("contract")
+
 - agent(prompt, *, schema=None, name=None, agent=None, model=None, system=None, tools=None, skills=None, knowledge=None,
         profile=None, minimal=False, timeout=None, output_path=None, dedicated_worker=False, resource_profile=None)
   runs one agent turn and returns its answer: text, or parsed JSON when schema (a JSON Schema dict) is given.
@@ -133,11 +142,15 @@ The script defines `def main(args):` and returns the final report, a string or a
   read_peer_messages(wait_seconds=0), list_peers(), get_shared_state(key=None), set_shared_state(key, value),
   and ask_user(question, options=None), addressed by the name you gave them ("*" reaches every unfinished agent,
   "script" reaches the script).
-  Say in each prompt whom to talk to. read_peer_messages(wait_seconds=0) and inbox(wait_seconds=0) return
-  {messages: [{from, text, sent_at}], note?}; waiting frees the slot and ends when mail arrives or after wait_seconds
-  with note "No message arrived within <N> s." (use a sensible wait_seconds and the run's own limits to avoid long idle waits).
+  Say in each prompt whom to talk to. read_peer_messages(wait_seconds=0) and inbox(wait_seconds=0) return only
+  unread messages since the last read as {messages: [{from, text, sent_at}], note?} and advance the cursor;
+  waiting frees the slot and ends when mail arrives or after wait_seconds with note "No message arrived within <N> s."
+  Prefer short waits in a bounded loop (e.g. 10 to 30 s per wait for a fixed number of rounds) over one long wait.
   Messages to a peer that has not started yet are held until it reads. The script joins in with send(to, text),
   inbox(wait_seconds=0), state.get(key, default=None) and state.set(key, value); agents read and write the same state.
+  set_shared_state(key, value) and state.set(key, value) take any JSON value (dict, list, primitive; not a JSON string)
+  with last-write-wins semantics, so pick one writer per key. get_shared_state(key) returns {key, found, value}
+  (or {key: value, ...} when key is omitted), whereas script state.get(key, default=None) returns the value directly.
 
 Every agent, tool and shell call is saved with its result. The Python between the calls runs again on every resume,
 so do writes (files, git, HTTP) through shell(), tool() or an agent, never with plain Python.

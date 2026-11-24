@@ -674,7 +674,7 @@ def send(to: str, text: str) -> dict[str, object]:
 
 
 def inbox(wait_seconds: float = 0) -> dict[str, object]:
-    """Return unread mail sent to "script" as {messages, note?}; waits end on mail or after wait_seconds with note."""
+    """Return only unread mail sent to "script" (advancing the cursor) as {messages, note?}; waits end on mail or after wait_seconds with note. Prefer short waits (10 to 30 s) in a bounded loop."""
     _current_lane()
     wait = float(wait_seconds)
     if not math.isfinite(wait) or wait < 0:
@@ -688,14 +688,14 @@ class state:  # noqa: N801 - public SDK namespace matching the spec (`state.get`
 
     @staticmethod
     def get(key: str, default: object = None) -> object:
-        """Return the shared value stored under *key*, or *default* when absent."""
+        """Return the shared JSON value stored under *key* directly, or *default* when absent (unlike agent get_shared_state, which returns {key, found, value})."""
         _current_lane()
         entry = cast("dict[str, object]", _call("state", {"op": "get", "key": str(key)}))
         return entry["value"] if entry.get("found") else default
 
     @staticmethod
     def set(key: str, value: object) -> None:
-        """Store *value* under *key* in the run's shared state; last write wins."""
+        """Store any JSON value (dict, list, or primitive, not a JSON string) under *key* in shared state; last write wins, so pick one writer per key."""
         _current_lane()
         json.dumps(value, allow_nan=False)
         _call("state", {"op": "set", "key": str(key), "value": value})
