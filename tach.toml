@@ -7715,6 +7715,7 @@ from = ["mindroom.config.memory"]
 expose = [
     "ConversationRef",
     "MemoryAutoFlushService",
+    "MemoryNotFoundError",
     "MemoryPromptParts",
     "add_agent_memory",
     "append_agent_daily_memory",
