@@ -639,7 +639,11 @@ class ConversationResolver:
             history,
             room_id=room_id,
             thread_id=thread_id,
-            read_thread=lambda parent_id: self._read_thread_messages(room_id, parent_id, mode=mode),
+            read_thread=lambda parent_room_id, parent_id: self._read_thread_messages(
+                parent_room_id,
+                parent_id,
+                mode=mode,
+            ),
             logger=self.deps.logger,
         )
 

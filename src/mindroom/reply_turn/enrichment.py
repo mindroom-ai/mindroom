@@ -121,7 +121,7 @@ def thread_fork_item(
     reference = None if thread_id is None else fork_reference(thread_history, thread_id)
     if reference is None:
         return None
-    parent_thread_id, fork_point_event_id = reference
+    parent_thread_id, fork_point_event_id = reference.thread_id, reference.event_id
     return EnrichmentItem(
         key="thread_fork",
         minimal_required=True,

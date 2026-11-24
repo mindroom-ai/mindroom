@@ -549,7 +549,7 @@ class MatrixMessageOperations:
             await complete_thread_history(reader, room_id, thread_id),
             room_id=room_id,
             thread_id=thread_id,
-            read_thread=lambda parent_id: complete_thread_history(reader, room_id, parent_id),
+            read_thread=lambda parent_room_id, parent_id: complete_thread_history(reader, parent_room_id, parent_id),
             logger=logger,
         )
         recent_messages = thread_messages[-read_limit:]
