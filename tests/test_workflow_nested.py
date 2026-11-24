@@ -23,6 +23,7 @@ from mindroom.script_runs.broker import ScriptRuntimeUnavailableError, ScriptToo
 from mindroom.script_runs.models import ScriptCallState, ScriptRunState
 from mindroom.tool_system.runtime_context import get_tool_runtime_context
 from mindroom.workflow_runs import agent_nodes
+from mindroom.workflow_runs import dispatch as dispatch_module
 from mindroom.workflow_runs import engine as engine_module
 from mindroom.workflow_runs.limits import WorkflowLimits, run_usage
 from mindroom.workflow_runs.models import WorkflowNodeState, WorkflowRunState
@@ -633,7 +634,7 @@ async def test_script_tool_delegate_above_the_rate_limit_waits_and_then_runs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The gate of a delegated call is a tool call of the script: above the calls per minute it waits, as they do."""
-    monkeypatch.setattr(engine_module, "_RATE_WAIT_SECONDS", 0.02)
+    monkeypatch.setattr(dispatch_module, "_RATE_WAIT_SECONDS", 0.02)
     stack.limits = WorkflowLimits(max_tool_calls_per_minute=1)
     await stack.start()
     assert await stack.result("@0", "tool", tool_args("counter", "text", size=1)) == "x"
@@ -665,7 +666,7 @@ async def test_gate_that_answers_just_after_its_run_ended_queues_no_agent(gated:
     async def passed() -> Any:  # noqa: ANN401
         return SimpleNamespace(state=ScriptCallState.COMPLETED, grant=None, result=None, metadata=None)
 
-    await gated.engine._start_gated(run, node, passed)
+    await gated.engine.dispatch.start_gated(run, node, passed)
 
     assert run.run_id not in gated.engine.live.places
     assert _agent_jobs(gated) == 0

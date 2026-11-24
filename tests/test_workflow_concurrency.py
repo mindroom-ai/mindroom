@@ -18,6 +18,7 @@ from mindroom.approval import manager as approval_manager
 from mindroom.event_journal import BackgroundApprovalDecision
 from mindroom.script_runs.models import ScriptRunState
 from mindroom.workflow_runs import agent_dispatch as agent_dispatch_module
+from mindroom.workflow_runs import dispatch as dispatch_module
 from mindroom.workflow_runs import engine as engine_module
 from mindroom.workflow_runs.limits import WorkflowLimits
 from mindroom.workflow_runs.models import WorkflowNodeState, WorkflowRunState
@@ -419,7 +420,7 @@ async def test_workflow_tool_calls_run_in_parallel(stack: WorkflowStack) -> None
 @pytest.mark.asyncio
 async def test_tool_rate_limit_delays_and_does_not_fail(stack: WorkflowStack, monkeypatch: pytest.MonkeyPatch) -> None:
     """A call above the attempt's calls per minute waits until the minute has room for it, and then runs."""
-    monkeypatch.setattr(engine_module, "_RATE_WAIT_SECONDS", 0.02)
+    monkeypatch.setattr(dispatch_module, "_RATE_WAIT_SECONDS", 0.02)
     stack.limits = WorkflowLimits(max_tool_calls_per_minute=2)
     await stack.start()
     assert [await stack.result(f"@{n}", "tool", _COUNT) for n in range(2)] == [1, 2]

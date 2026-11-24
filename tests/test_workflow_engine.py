@@ -109,7 +109,7 @@ def _claim(stack: WorkflowStack) -> None:
 
 def _settled(stack: WorkflowStack, node: WorkflowNode) -> tuple[WorkflowNodeState, object, str | None]:
     """Settle *node* from its handle; return the state, the saved result and the saved error kind."""
-    state = stack.engine.settle_from_handle(node, stack.store.get_run(stack.run_id).epoch)
+    state = stack.engine.dispatch.settle_from_handle(node, stack.store.get_run(stack.run_id).epoch)
     saved = stack.store.get_node(stack.run_id, node.key)
     assert saved is not None
     assert saved.state is state
