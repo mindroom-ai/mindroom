@@ -21,6 +21,7 @@ from mindroom.approval.tool_approval import (
 )
 from mindroom.authorization import is_sender_allowed_for_agent_reply_in_room
 from mindroom.background_tasks import run_coroutine_until_complete
+from mindroom.delegation.lifecycle import accessed_entities, bot_in_room
 from mindroom.logging_config import get_logger
 from mindroom.message_target import MessageTarget
 from mindroom.origins import configured_public_url
@@ -49,6 +50,7 @@ from mindroom.script_runs.reasons import (
     RUNTIME_SHUTDOWN,
     SCRIPT_TOOL_REMOVED,
     WORKER_CONFIGURATION_CHANGED,
+    WORKFLOW_TOOL_REMOVED,
 )
 from mindroom.script_runs.recovery import run_matches_recovery_signature, script_process_authority
 from mindroom.script_runs.store import ScriptRunStore, ScriptRunStoreError
@@ -63,7 +65,7 @@ from mindroom.workers.backend_kinds import worker_backend_kind
 from .runtime import cancel_task, create_logged_task
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Awaitable, Callable, Sequence
 
     from mindroom.bot import AgentBot
     from mindroom.config.main import Config
@@ -73,6 +75,9 @@ if TYPE_CHECKING:
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
     from mindroom.workers.backend import WorkerBackend
+    from mindroom.workflow_runs.models import WorkflowRun
+
+    type _OwnedRun = ScriptRunRecord | WorkflowRun
 
 logger = get_logger(__name__)
 
@@ -200,22 +205,50 @@ class _LiveScriptRuntimeResolver:
     worker_backend_provider: Callable[[ScriptRunRecord], WorkerBackend | None]
     approval_provider: Callable[[], _BackgroundApprovalManager | None] = approval_manager.get_approval_store
 
-    def is_authorized(self, run: ScriptRunRecord, *, config: Config | None = None) -> bool | None:
-        """Return confirmed authority, denial, or transient live-runtime unavailability."""
-        bot = self.bot_provider(run.agent_name)
-        if bot is None or not bot.running:
+    def is_authorized(
+        self,
+        run: _OwnedRun,
+        *,
+        config: Config | None = None,
+        require_resolved_membership: bool = False,
+    ) -> bool | None:
+        """Return confirmed authority, denial, or transient live-runtime unavailability.
+
+        With *require_resolved_membership*, room membership that is still loading raises instead of denying.
+        """
+        bot = self.serving_bot(run, config)
+        if bot is None:
             return None
         current_config = bot.config if config is None else config
-        return is_sender_allowed_for_agent_reply_in_room(
-            run.owner_user_id,
-            run.agent_name,
-            current_config,
-            run.room_id,
-            self.runtime_paths,
-            bot.orchestrator.agent_reply_memberships,
+        entities = {run.agent_name}
+        if run.entry == "workflow":
+            # A run acts through the bot that serves it, which must still be in the run's room, and its requester
+            # must still reach the run's agent as well as that bot's: an agent's bot is no grant for another agent.
+            joined = bot_in_room(bot, run.room_id)
+            if not joined:
+                return joined
+            entities = accessed_entities(current_config, _serving_entity(run, current_config), run.agent_name)
+        return all(
+            is_sender_allowed_for_agent_reply_in_room(
+                run.owner_user_id,
+                entity,
+                current_config,
+                run.room_id,
+                self.runtime_paths,
+                bot.orchestrator.agent_reply_memberships,
+                require_resolved_membership=require_resolved_membership,
+            )
+            for entity in sorted(entities)
         )
 
-    def resolve(self, run: ScriptRunRecord, *, correlation_id: str) -> ToolRuntimeContext:
+    def serving_bot(self, run: _OwnedRun, config: Config | None = None) -> AgentBot | None:
+        """Return the running bot that answers for *run*, None while it or the bot of the run's agent is not running."""
+        bot = self.bot_provider(run.agent_name)
+        if bot is not None and bot.running and run.entry == "workflow":
+            bot = self.bot_provider(_serving_entity(run, config or bot.config))
+        return bot if bot is not None and bot.running else None
+
+    def resolve(self, run: _OwnedRun, *, correlation_id: str) -> ToolRuntimeContext:
         """Rebuild a context only from the exact durable Matrix execution identity."""
         identity = _run_execution_identity(run)
         if (
@@ -229,8 +262,8 @@ class _LiveScriptRuntimeResolver:
         ):
             msg = "Background script execution identity does not match its durable owner."
             raise ValueError(msg)
-        bot = self.bot_provider(run.agent_name)
-        if bot is None or not bot.running:
+        bot = self.serving_bot(run)
+        if bot is None:
             msg = f"Agent runtime '{run.agent_name}' is restarting."
             raise _ScriptRuntimeUnavailableError(msg)
         target = MessageTarget(
@@ -363,6 +396,8 @@ class ScriptRuntimeLifecycle:
     pass_timeout_seconds: float = 30.0
     pass_concurrency: int = 4
     reconcile_interval_seconds: float = 30.0
+    # Runs after each pass has recorded which runs ended; the workflow engine ends its runs from it.
+    after_reconcile: Callable[[], Awaitable[None]] | None = None
     _api_ready: asyncio.Event = field(default_factory=asyncio.Event, init=False, repr=False)
     _started: bool = field(default=False, init=False, repr=False)
     _start_requested: bool = field(default=False, init=False, repr=False)
@@ -595,15 +630,21 @@ class ScriptRuntimeLifecycle:
             for agent_name in continuing_agents
             if current_config.agents[agent_name].private != new_config.agents[agent_name].private
         }
+        configs = (current_config, new_config)
+        # A run's entry is also the name of the tool that launches it, so each tool's removal revokes its own runs.
         script_tool_removals = {
-            agent_name
+            (agent_name, entry)
             for agent_name in continuing_agents
-            if _agent_has_script_tool(current_config, agent_name) and not _agent_has_script_tool(new_config, agent_name)
+            for entry in ("script", "workflow")
+            if _agent_has_tool(current_config, agent_name, entry) and not _agent_has_tool(new_config, agent_name, entry)
         }
+        # What the worker of a tool the agent keeps may do changed. A tool that was removed revokes only its own runs.
         process_authority_changes = {
             agent_name
             for agent_name in continuing_agents
-            if script_process_authority(current_config, agent_name) != script_process_authority(new_config, agent_name)
+            for entry in ("script", "workflow")
+            if None not in (old_new := [script_process_authority(c, agent_name, entry) for c in configs])
+            and old_new[0] != old_new[1]
         }
         if (
             not removed_agents
@@ -652,7 +693,7 @@ class ScriptRuntimeLifecycle:
         *,
         removed_agents: set[str],
         isolation_changes: set[str],
-        script_tool_removals: set[str],
+        script_tool_removals: set[tuple[str, str]],
         process_authority_changes: set[str],
         authorization_config: Config | None,
         plugins_changed: bool,
@@ -664,11 +705,17 @@ class ScriptRuntimeLifecycle:
             if authorization_config is not None
             and self.resolver.is_authorized(run, config=authorization_config) is not True
         }
-        affected_agents = removed_agents | isolation_changes | script_tool_removals | process_authority_changes
+        affected_agents = removed_agents | isolation_changes | process_authority_changes
         affected = (
             runs
             if plugins_changed
-            else [run for run in runs if run.run_id in unauthorized_ids or run.agent_name in affected_agents]
+            else [
+                run
+                for run in runs
+                if run.run_id in unauthorized_ids
+                or run.agent_name in affected_agents
+                or (run.agent_name, run.entry) in script_tool_removals
+            ]
         )
         await self._interrupt_runs(
             affected,
@@ -850,6 +897,8 @@ class ScriptRuntimeLifecycle:
                     )
 
         await asyncio.gather(*(reconcile_run(run) for run in runs))
+        if self.after_reconcile is not None:
+            await self.after_reconcile()
 
     async def _startup_cleanup_pass(self) -> None:
         """Adopt compatible surviving workers and retire other inherited ownership."""
@@ -1192,7 +1241,20 @@ def build_script_runtime(
     )
 
 
-def _run_execution_identity(run: ScriptRunRecord) -> ToolExecutionIdentity:
+def _serving_entity(run: _OwnedRun, config: Config) -> str:
+    """Return whose bot and whose access answer for a workflow *run* or attempt.
+
+    A member of a configured team that started it in that team is reached through the team, and an agent that another
+    agent ran as its child through that agent: the run saved that bot as its transport, so the same bot rebuilds its
+    context.
+    """
+    recipient = _run_execution_identity(run).recipient
+    team = config.teams.get(recipient)
+    through = recipient in config.agents if team is None else run.agent_name in team.agents
+    return recipient if through else run.agent_name
+
+
+def _run_execution_identity(run: _OwnedRun) -> ToolExecutionIdentity:
     """Parse the durable Matrix execution identity a run was launched with."""
     return parse_tool_execution_identity_payload(
         run.execution_identity,
@@ -1200,9 +1262,9 @@ def _run_execution_identity(run: ScriptRunRecord) -> ToolExecutionIdentity:
     )
 
 
-def _agent_has_script_tool(config: Config, agent_name: str) -> bool:
-    """Return whether one agent's effective tool surface includes script controls."""
-    return "script" in config.resolve_agent(agent_name).tools.tool_names
+def _agent_has_tool(config: Config, agent_name: str, tool_name: str) -> bool:
+    """Return whether one agent's effective tool surface includes the tool that launches its scripts or workflows."""
+    return tool_name in config.resolve_agent(agent_name).tools.tool_names
 
 
 def _reload_reason_for(
@@ -1210,7 +1272,7 @@ def _reload_reason_for(
     *,
     removed_agents: set[str],
     isolation_changes: set[str],
-    script_tool_removals: set[str],
+    script_tool_removals: set[tuple[str, str]],
     process_authority_changes: set[str],
     plugins_changed: bool,
 ) -> str:
@@ -1220,8 +1282,8 @@ def _reload_reason_for(
         return OWNER_AGENT_REMOVED
     if run.agent_name in isolation_changes:
         return AGENT_ISOLATION_CHANGED
-    if run.agent_name in script_tool_removals:
-        return SCRIPT_TOOL_REMOVED
+    if (run.agent_name, run.entry) in script_tool_removals:
+        return SCRIPT_TOOL_REMOVED if run.entry == "script" else WORKFLOW_TOOL_REMOVED
     if run.agent_name in process_authority_changes:
         return WORKER_CONFIGURATION_CHANGED
     return OWNER_AUTHORIZATION_REVOKED

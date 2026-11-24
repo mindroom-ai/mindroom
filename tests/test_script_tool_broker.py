@@ -65,6 +65,7 @@ from mindroom.script_runs.store import (
     mint_script_capability,
 )
 from mindroom.tool_system import sandbox_proxy
+from mindroom.tool_system.progress import report_tool_metadata
 from mindroom.tool_system.tool_hooks import run_sync_tool_entrypoint
 from mindroom.tool_system.worker_routing import (
     ResolvedWorkerTarget,
@@ -666,6 +667,49 @@ async def test_script_broker_runs_normal_hook_and_wire_result_path(tmp_path: Pat
     assert receipt.state is ScriptCallState.COMPLETED
     assert receipt.result == '{"operation": "addition", "result": 3.0}'
     assert events == ["tool:before_call", "tool:environment:calculator.add", "tool:after_call"]
+
+
+@pytest.mark.asyncio
+async def test_script_call_receipt_records_that_the_tool_was_invoked(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only workflow calls stamp effect_started_at; plain script calls keep main's middleware."""
+
+    class ReportingCalculator(_Calculator):
+        def add(self, a: int, b: int) -> object:
+            report_tool_metadata(exit_code=a + b)
+            return "done"
+
+    _replace_calculator_toolkit(monkeypatch, ReportingCalculator)
+    broker, token = _broker(tmp_path, events=[])
+    denying, _denying_token = _broker(
+        tmp_path / "denied",
+        events=[],
+        require_approval=True,
+        approval_decision=ToolApprovalDecision(approved=False, reason="Not this sum."),
+    )
+
+    plain = await _call_through_gateway(broker, _request(), token)
+    workflow_run = broker.store.get_run("run-1")
+    workflow_receipt = await broker.execute_for_workflow(
+        workflow_run,
+        call_id="call-wf",
+        grant=ScriptToolGrant("calculator", "add"),
+        arguments={"a": 1, "b": 2},
+    )
+    denied = await denying.execute_for_workflow(
+        denying.store.get_run("run-1"),
+        call_id="call-wf-denied",
+        grant=ScriptToolGrant("calculator", "add"),
+        arguments={"a": 1, "b": 2},
+    )
+
+    assert (plain.result, plain.effect_started_at, plain.metadata) == ("done", None, None)
+    assert workflow_receipt.effect_started_at is not None
+    assert (workflow_receipt.result, workflow_receipt.metadata) == ("done", None)
+    assert broker.store.get_call("run-1", "call-wf") == workflow_receipt
+    assert (denied.state, denied.effect_started_at, denied.metadata) == (ScriptCallState.FAILED, None, None)
 
 
 @pytest.mark.asyncio
@@ -1716,6 +1760,33 @@ async def test_lifecycle_shutdown_bounds_and_preserves_cancelled_sync_cleanup(
 
 
 @pytest.mark.asyncio
+async def test_plain_script_calls_stay_serialized(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The calls of a plain script run one at a time, as before a workflow's calls ran side by side."""
+    release = asyncio.Event()
+    entered: list[int] = []
+
+    class SerialToolkit(_Calculator):
+        async def add(self, a: int, b: int) -> int:
+            del a
+            entered.append(b)
+            await release.wait()
+            return b
+
+    _replace_calculator_toolkit(monkeypatch, SerialToolkit)
+    broker, token = _broker(tmp_path, events=[])
+    for call_id, b in (("first", 2), ("second", 3), ("third", 4)):
+        await broker.accept_authenticated(_request(call_id=call_id, b=b), f"Bearer {token}")
+    tasks = list(broker._tasks.values())
+    for _ in range(20):
+        await asyncio.sleep(0.01)
+
+    assert entered == [2]
+    release.set()
+    assert [(await task).state for task in tasks] == [ScriptCallState.COMPLETED] * 3
+    assert entered == [2, 3, 4]
+
+
+@pytest.mark.asyncio
 async def test_queued_script_call_rechecks_durable_revocation_after_run_lock(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -2240,6 +2311,7 @@ def test_a_receipt_the_store_cannot_publish_settles_indeterminate(
         state=state,
         result=3 if completed else None,
         error=None if completed else broker_module._INDETERMINATE_ERROR,
+        metadata=None,
     )
 
     assert receipt.state is ScriptCallState.INDETERMINATE

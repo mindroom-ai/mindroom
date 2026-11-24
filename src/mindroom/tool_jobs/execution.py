@@ -10,11 +10,9 @@ MindRoom agent's included, keeps the synchronous leaves it starts owned by the j
 from __future__ import annotations
 
 import asyncio
-import hashlib
-import json
 from contextlib import nullcontext
 from copy import deepcopy
-from dataclasses import asdict, dataclass, replace
+from dataclasses import dataclass, replace
 from functools import partial
 from typing import TYPE_CHECKING, Any
 
@@ -22,6 +20,7 @@ from mindroom.active_runs import pause_current_active_run
 from mindroom.agent_loop.model_loop import SendRequest
 from mindroom.background_tasks import wait_for_future_until_complete
 from mindroom.custom_tools.job import JobTools
+from mindroom.custom_tools.workflow_peers import WorkflowPeerTools
 from mindroom.failure_text import failure_text
 from mindroom.llm.runs import denial_note_for
 from mindroom.logging_config import get_logger
@@ -50,7 +49,14 @@ from mindroom.tool_jobs.execution_authority import (
 from mindroom.tool_jobs.provenance import function_provenance
 from mindroom.tool_jobs.resources import current_execution_resources
 from mindroom.tool_jobs.results import ToolResultPayload, encode_result_payload, encode_tool_result
-from mindroom.tool_jobs.runtime import BackgroundOutcome, JobSpec, format_job_handle, get_background_runtime
+from mindroom.tool_jobs.runtime import (
+    BackgroundOutcome,
+    JobSpec,
+    ManagedJobToolkit,
+    call_job_id,
+    format_job_handle,
+    get_background_runtime,
+)
 from mindroom.tool_jobs.settings import toolkit_is_background_excluded
 from mindroom.tool_system.agent_tool_calls import cli_dispatch_active
 from mindroom.tool_system.agno_toolkits import requires_connect
@@ -126,7 +132,8 @@ def _declares_background_after(parameters: Mapping[str, Any]) -> bool:
 def approval_can_run_as_job(function: ToolFunction, toolkit: AnyToolkit) -> bool:
     """Whether a function of ``toolkit`` without a gate of its own can ask a rule's approval as its call's job."""
     return not (
-        isinstance(toolkit, JobTools)
+        # A toolkit that prepares its calls' jobs is asked only once the call has its approval, as any call is.
+        isinstance(toolkit, JobTools | WorkflowPeerTools | ManagedJobToolkit)
         or function.controls_run
         # A connection opened for one run must finish its calls inside that run.
         or requires_connect(toolkit)
@@ -149,7 +156,7 @@ def wait_mode(tool: JobTool, *, depth: int, context: ToolRuntimeContext) -> Tool
     ``context`` is the turn's tool context, whose configuration decides whether the call's toolkit is excluded.
     """
     if (
-        isinstance(tool.toolkit, JobTools)
+        isinstance(tool.toolkit, JobTools | WorkflowPeerTools)
         or _is_background_job_excluded(tool, context)
         # A connection opened for one run must finish its calls inside that run.
         or requires_connect(tool.toolkit)
@@ -240,6 +247,9 @@ def offered_definitions(actor: JobActor, definitions: Sequence[ToolSpec]) -> tup
 
 def _default_wait(function: ToolFunction) -> float | None:
     """Return how long a managed call of ``function`` that sets no budget waits, None until completion."""
+    if function.registered_toolkit == "workflow" and function.name in ("start_workflow", "resume_workflow"):
+        # A workflow run takes as long as its agents do, so the call that starts or resumes one returns its handle at once.
+        return 0.0
     return shell_job_wait_seconds(function.registered_toolkit, function.name)
 
 
@@ -363,14 +373,12 @@ async def _call_job(
 ) -> JobSpec:
     """Return the job one managed call runs as; a call refused before it runs fails with why.
 
-    ``detached`` holds the call's application arguments on copies of its context: a tool's job runs it, and a subagent
-    call's toolkit prepares its child from it in the reply, so the job is known as that child from its start. A call
-    whose function asks for its approval as its job's first phase (``ToolGate.JOB``) asks before it runs.
+    ``detached`` holds the call's application arguments on copies of its context: a tool's job runs it, and a toolkit
+    that prepares its calls' jobs (``ManagedJobToolkit``) prepares this one from it in the reply, as a subagent call's
+    toolkit prepares its child, so the job is known as that child from its start. A call whose function asks for its
+    approval as its job's first phase (``ToolGate.JOB``) asks before it runs.
     """
-    # The delegate toolkit imports the agent runtime, which imports this module.
-    from mindroom.custom_tools.delegate import DelegateTools  # noqa: PLC0415
-
-    if isinstance(job_call.tool.toolkit, DelegateTools):
+    if isinstance(job_call.tool.toolkit, ManagedJobToolkit):
         job = await job_call.tool.toolkit.managed_job(
             function.name,
             dict(detached.arguments),
@@ -379,7 +387,8 @@ async def _call_job(
         )
         if isinstance(job, str):
             raise _JobCallError(job)
-        return job
+        if job is not None:
+            return job
     # The job's state changes are read against the copy it starts from, so a key a sibling adds to the live state
     # after that copy never reads as deleted by this job.
     baseline = deepcopy(detached.context.session_state)
@@ -433,8 +442,7 @@ async def _run_managed_call(
     if not run_id or not call_id:
         msg = "Managed tool execution requires an exact run and tool-call identity"
         raise ValueError(msg)
-    identity = {"owner": asdict(owner), "run_id": run_id, "tool_call_id": call_id}
-    job_id = hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()
+    job_id = call_job_id(owner, run_id, call_id)
     detached = _detached(job_call)
     # The reply records the call before its job starts, as an inline call's hooks do; the job body runs unrecorded.
     record_return = await record_call(function.name, dict(detached.arguments))
@@ -443,35 +451,47 @@ async def _run_managed_call(
     job: JobSpec | None = None
     reference: ExecutionResourceReference | None = None
     try:
-        job = await _call_job(
-            inner,
-            function,
-            job_call,
-            detached,
-            scope,
-            owner,
-            job_id=job_id,
-        )
-        reference = scope.resources.acquire()
-        span = current_span()
-        _, claim = await runtime.start(
-            job_id,
-            tool_name=job.tool_name,
-            depth=depth,
-            kind=job.kind,
-            toolkit_name=job.toolkit_name,
-            source_event_id=context.membership_turn_id,
-            source_kind=context.source_kind,
-            adapter=job.adapter,
-            owner=owner,
-            operation=partial(_releasing, reference, job.operation, function.name),
-            cancel=job.cancel,
-            reattach=True,
-            # A Stop of the reply making the call refuses the job every later approval, and a stopped span starts none.
-            reply_id=None if span is None else span.reply_id,
-            reply_stop_order=None if span is None else span.reply.stop_receipt_order,
-            span_stopped=None if span is None else span.stopped,
-        )
+        # Deliveries of one call take turns from preparing the job to the runtime's answer.
+        async with runtime.admission(job_id):
+            job = await _call_job(
+                inner,
+                function,
+                job_call,
+                detached,
+                scope,
+                owner,
+                job_id=job_id,
+            )
+            reference = scope.resources.acquire()
+            span = current_span()
+            # A workflow run's job is tied to no reply, so a later Stop of the reply that started it ends no run.
+            reply = None if span is None or job.kind == "workflow" else span
+            try:
+                _, claim = await runtime.start(
+                    job_id,
+                    tool_name=job.tool_name,
+                    depth=depth,
+                    kind=job.kind,
+                    toolkit_name=job.toolkit_name,
+                    source_event_id=context.membership_turn_id,
+                    source_kind=context.source_kind,
+                    adapter=job.adapter,
+                    owner=owner,
+                    operation=partial(_releasing, reference, job.operation, function.name),
+                    cancel=job.cancel,
+                    reattach=True,
+                    # A Stop of the reply making the call refuses the job every later approval, and a stopped span
+                    # starts none.
+                    reply_id=None if reply is None else reply.reply_id,
+                    reply_stop_order=None if reply is None else reply.reply.stop_receipt_order,
+                    span_stopped=None if span is None else span.stopped,
+                )
+            except BaseException:
+                if job.refused is not None and runtime.retained_job(job_id) is None:
+                    # No job has this ID, so nothing owns what preparing it wrote: a refused or cancelled start
+                    # takes it back, and holds the lock until it is gone.
+                    await wait_for_future_until_complete(asyncio.ensure_future(job.refused()))
+                raise
         waited = await runtime.wait(
             job_id,
             owner=owner,
@@ -486,7 +506,7 @@ async def _run_managed_call(
             pause_on_human_wait=pause_current_active_run,
         )
         if waited.claim is None:
-            value, error = format_job_handle(waited.job), None
+            value, error = (job.handle or format_job_handle)(waited.job), None
         else:
             value, payload = await consume_tool_job(
                 runtime,
@@ -507,9 +527,10 @@ async def _run_managed_call(
         await record_return(ToolOutcome(content=failure_text(failure), is_error=True))
         raise
     finally:
+        admitted = job is not None and runtime.owns_execution(job_id, job.adapter)
         if not retained:
             await runtime.release_wait(job_id, claim)
-        if reference is not None and job is not None and not runtime.owns_execution(job_id, job.adapter):
+        if reference is not None and job is not None and not admitted:
             await reference.release()
     if error is not None:
         raise _JobCallError(error)

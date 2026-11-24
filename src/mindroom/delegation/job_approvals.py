@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 
 from mindroom.approval.response import identify_approval_tools, plan_approval_calls
 from mindroom.delegation.lifecycle import live_delegation_config, report_child_approval_wait
-from mindroom.delegation.state import child_card_id
+from mindroom.delegation.state import APPROVAL_TOOLKITS_KEY, child_card_id
 from mindroom.event_journal import ApprovalDecision
 from mindroom.response_turn import paused_attempt_from_response
 from mindroom.tool_jobs.approvals import ask_job_approvals
@@ -39,6 +39,10 @@ async def request_child_approvals(
 
     Returns the planned calls the child resumes with, each approved, or denied with its reason.
     """
+    if child.workflow_run_id is not None:
+        asked = {tool.tool_name for tool in response.tools or () if tool.is_paused}
+        owners = [[*call, toolkit] for call, toolkit in toolkit_owners.items() if call[1] in asked]
+        await runtime.save_adapter(job_id, wait="approval", **{APPROVAL_TOOLKITS_KEY: owners})
     paused = paused_attempt_from_response(
         response,
         toolkit_owners=toolkit_owners,
@@ -78,6 +82,8 @@ async def request_child_approvals(
     )
     if gated:
         report_child_approval_wait(child, awaiting=False)
+    if child.workflow_run_id is not None:
+        await runtime.save_adapter(job_id, wait=None)
     return tuple(
         replace(
             call,

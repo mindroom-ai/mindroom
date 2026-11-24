@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+from contextlib import suppress
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Protocol
 
@@ -41,6 +43,7 @@ from mindroom.matrix.room_membership import room_membership_is_complete
 from mindroom.message_target import MessageTarget
 from mindroom.model_selection import MODEL_SELECTION_CONTENT_KEY
 from mindroom.requester_identity import is_platform_administrator, resolve_human_requester_alias
+from mindroom.runtime_resolution import resolve_agent_storage
 from mindroom.scheduling.errors import SchedulingError, refused_for_power
 from mindroom.scheduling.tasks import (
     SchedulingRuntime,
@@ -61,9 +64,13 @@ from mindroom.tool_jobs.client_cancel import (
 from mindroom.tool_jobs.runtime import get_background_runtime
 from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.plugins import config_plugins
+from mindroom.tool_system.worker_routing import build_requester_execution_identity
+from mindroom.workflow_runs.answers import answer_command
+from mindroom.workflow_runs.graph import redacted_title
+from mindroom.workflow_runs.saved import SavedWorkflow, list_saved
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Iterable
+    from collections.abc import Awaitable, Callable, Iterable, Sequence
 
     import nio
     import structlog
@@ -81,6 +88,8 @@ if TYPE_CHECKING:
     from mindroom.tool_jobs.runtime import BackgroundJob
     from mindroom.tool_system.plugins import PluginReloadResult
     from mindroom.tool_system.registry import ToolRegistry
+    from mindroom.workflow_runs.engine import WorkflowEngine
+    from mindroom.workflow_runs.models import WorkflowRun
 
 logger = get_logger(__name__)
 
@@ -128,6 +137,80 @@ async def _background_jobs_command(
         request=JobCancelRequest(job_id=command.args["job_id"], thread_id=thread_id),
         may_cancel=may_cancel,
     )
+
+
+def _format_workflows_listing(
+    runs: Sequence[WorkflowRun],
+    saved: Sequence[tuple[str, SavedWorkflow]],
+) -> str:
+    """Format recent workflow runs and saved workflows for chat output (`!workflows`)."""
+    sections: list[str] = []
+    if runs:
+        lines = [
+            f"- {run.agent_name}: `{run.run_id}` ({run.state.value}, attempt {run.attempt})"
+            + (f": {title}" if (title := redacted_title(run.title)) else "")
+            for run in runs
+        ]
+        sections.append("Workflow runs:\n" + "\n".join(lines))
+    if saved:
+        lines = [
+            f"- {agent}: `{item.name}`"
+            + (f": {item.description}" if item.description else "")
+            + (f" (args: {', '.join(f'`{arg}`' for arg in item.args)})" if item.args else "")
+            for agent, item in saved
+        ]
+        sections.append("Saved workflows:\n" + "\n".join(lines))
+    return "\n\n".join(sections) or "No workflow runs or saved workflows here."
+
+
+async def _workflows_command(
+    context: CommandHandlerContext,
+    room: nio.MatrixRoom,
+    requester_user_id: str,
+    thread_id: str | None,
+) -> str:
+    """List the requester's workflow runs here and the saved workflows of workflow-enabled agents in the room."""
+    if context.workflow_engine is None:
+        return "Workflows are not running here."
+    candidate_entities = await context.responder_candidates_for_room(room, requester_user_id)
+    engine = context.workflow_engine
+
+    def load_listing() -> str:
+        runs = engine.store.list_runs(
+            owner_user_id=requester_user_id,
+            room_id=room.room_id,
+            thread_root_event_id=thread_id,
+            top_level_only=True,
+            limit=20,
+        )
+        saved: list[tuple[str, SavedWorkflow]] = []
+        if candidate_entities:
+            registry = entity_identity_registry(context.config, context.runtime_paths)
+            agents = dict.fromkeys(
+                name
+                for entity_id in candidate_entities
+                if (name := registry.current_entity_name_for_user_id(entity_id.full_id, include_router=False))
+                and name in context.config.agents
+                and "workflow" in context.config.resolve_agent(name).tools.tool_names
+            )
+            for name in sorted(agents):
+                identity = build_requester_execution_identity(
+                    agent_name=name,
+                    runtime_paths=context.runtime_paths,
+                    requester_id=requester_user_id,
+                )
+                storage = resolve_agent_storage(
+                    name,
+                    context.config,
+                    context.runtime_paths,
+                    execution_identity=identity,
+                )
+                workspace = storage.workspace(context.config, context.runtime_paths).root
+                with suppress(OSError, ValueError):
+                    saved.extend((name, item) for item in list_saved(workspace))
+        return _format_workflows_listing(runs, saved)
+
+    return await asyncio.to_thread(load_listing)
 
 
 def _scheduling_runtime(context: CommandHandlerContext, room: nio.MatrixRoom) -> SchedulingRuntime:
@@ -193,6 +276,8 @@ class CommandHandlerContext:
     # Whether the room's steward holds the power to write one state event type: (room_id, event_type).
     steward_may_write_state: Callable[[str, str], bool]
     budget_monitor: BudgetMonitor | None = None
+    # Takes `!answer` for the questions of workflow runs.
+    workflow_engine: WorkflowEngine | None = None
     admit_compaction: AdmitCompaction | None = None
 
 
@@ -475,6 +560,21 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
         # A command sent outside any thread speaks for the whole room, though its reply opens a thread.
         thread_id = context.stable_target.source_thread_id
         response_text = await _background_jobs_command(context, room, command, requester_user_id, thread_id)
+
+    elif command.type == CommandType.ANSWER:
+        response_text = "Workflows are not running here."
+        if context.workflow_engine is not None:
+            response_text = await answer_command(
+                context.workflow_engine,
+                room_id=room.room_id,
+                thread_id=context.stable_target.source_thread_id,
+                sender=requester_user_id,
+                text=command.args["text"],
+            )
+
+    elif command.type == CommandType.WORKFLOWS:
+        thread_id = context.stable_target.source_thread_id
+        response_text = await _workflows_command(context, room, requester_user_id, thread_id)
 
     elif command.type == CommandType.CONFIG:
         authorization = context.config.authorization

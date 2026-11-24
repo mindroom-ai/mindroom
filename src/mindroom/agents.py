@@ -28,6 +28,7 @@ from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.custom_tools.attachments import AttachmentTools
 from mindroom.custom_tools.computer_announcement import computer_announcement_middleware
 from mindroom.custom_tools.job import JobTools
+from mindroom.custom_tools.workflow_peers import WorkflowPeerTools
 from mindroom.delegation.personas import (
     caller_toolkit_names,
     persona_allows,
@@ -1246,6 +1247,23 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
     )
     if controls is not None:
         entries.append(_job_controls_entry(controls))
+    peer_tools = WorkflowPeerTools.build(enabled=not disable_runtime_capabilities)
+    if peer_tools is not None:
+        peer_adapted = adapt_toolkit(peer_tools, key=peer_tools.name)
+        if tool_function_filter is not None:
+            peer_adapted = _keep_functions(peer_adapted, tool_function_filter)
+        peer_adapted = apply_tool_approval_capability(
+            peer_adapted,
+            peer_tools,
+            config,
+            tools=agent_tools.tools,
+            registered_tool_name=peer_tools.name,
+            resumable=supports_native_tool_approval,
+            approvals_as_jobs=False,
+        )
+        if peer_adapted.functions:
+            entries.append(_ToolkitEntry(adapted=peer_adapted, toolkit=peer_tools))
+            local_tool_names.append(peer_tools.name)
     built = [
         *entries,
         *_generated_entries(

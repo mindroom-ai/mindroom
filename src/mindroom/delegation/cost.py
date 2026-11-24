@@ -48,9 +48,13 @@ def stored_by_id(metadata: Mapping[str, Any] | None, key: str, sum_key: str) -> 
 
 @dataclass
 class SubagentCost:
-    """The priced cost of the subagent turns one turn received, by delegation id, so a receipt it holds twice counts once."""
+    """The priced cost of the subagent turns one turn received, by delegation id, so a receipt it holds twice counts once.
+
+    `unknown` says that it received a turn whose cost nobody knows, so `usd` is a lower bound.
+    """
 
     receipts: dict[str, float] = field(default_factory=dict)
+    unknown: bool = False
 
     @property
     def usd(self) -> float | None:
@@ -80,6 +84,8 @@ def receive_subagent_cost(delegation_id: str, usd: float | None) -> None:
     cost = _RECEIVING.get()
     if cost is not None and usd is not None:
         cost.add({delegation_id: usd})
+    elif cost is not None:
+        cost.unknown = True
 
 
 def received_subagent_cost_usd() -> float | None:

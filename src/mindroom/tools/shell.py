@@ -48,7 +48,7 @@ from mindroom.tool_system.output_files import (
     current_tool_output_file_request,
     current_tool_workdir,
 )
-from mindroom.tool_system.progress import report_tool_progress
+from mindroom.tool_system.progress import report_tool_metadata, report_tool_progress
 from mindroom.tool_system.registration import register_tool_with_metadata
 from mindroom.tool_system.tool_environment import ToolEnvironment, current_tool_environment
 from mindroom.tool_system.tool_schema import closed_parameters
@@ -170,6 +170,12 @@ def _looks_like_shell_command_line(command: str) -> bool:
     if any(char.isspace() for char in command):
         return True
     return any(char in _SHELL_COMMAND_LINE_CHARS for char in command)
+
+
+def _not_started(refusal: str) -> str:
+    """Answer a call refused before any command ran, and report that, so a caller that stores results can tell."""
+    report_tool_metadata(not_started=True)
+    return refusal
 
 
 def _normalize_shell_args(args: object) -> list[str]:
@@ -641,16 +647,17 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
                 ),
             )
             if refusal is not None:
-                return refusal
+                return _not_started(refusal)
             try:
                 command_args = _normalize_shell_args(args)
             except ValueError as exc:
+                refused = _not_started(f"Error: {exc}")
                 if worker is not None:
                     raise
-                return f"Error: {exc}"
+                return refused
             if timeout is not None and timeout <= 0:
                 # A model may mean "no limit" or "run in the background"; either way, stopping at once helps nobody.
-                msg = "timeout must be a positive number of seconds; omit it for the default limit."
+                msg = _not_started("timeout must be a positive number of seconds; omit it for the default limit.")
                 if worker is not None:
                     raise ValueError(msg)
                 return f"Error: {msg}"
@@ -698,6 +705,8 @@ def shell_tools() -> type[Toolkit]:  # noqa: C901 - one toolkit class with its f
             )
             if bg_scope is not None and result.handle is not None:
                 bg_scope.had_backgrounded = True
+            if result.return_code is not None:
+                report_tool_metadata(exit_code=result.return_code)
             if worker is not None and result.execution_error:
                 raise ValueError(result.message)
             return ToolOutputFileHandled(result.message) if result.output_file_handled else result.message

@@ -26,13 +26,16 @@ class _RecoveringScriptBackend(Protocol):
 _RECOVERY_SIGNATURE_VERSION = "v2"
 
 
-def script_process_authority(config: Config, agent_name: str) -> dict[str, object] | None:
-    """Project configuration that determines one script worker's process authority."""
+def script_process_authority(config: Config, agent_name: str, entry: str) -> dict[str, object] | None:
+    """Project configuration that determines one script worker's process authority.
+
+    *entry* is the tool that started the run, `script` or `workflow`: an agent without it has no authority for it.
+    """
     agent = config.agents.get(agent_name)
     if agent is None:
         return None
     resolved = config.resolve_agent(agent_name)
-    if "script" not in resolved.tools.tool_names:
+    if entry not in resolved.tools.tool_names:
         return None
     knowledge_paths = sorted(config.get_knowledge_base_config(base_id).path for base_id in resolved.knowledge_base_ids)
     return {
@@ -51,11 +54,14 @@ def script_recovery_signature(
     gateway_url: str,
     resource_profile: str | None = None,
 ) -> str | None:
-    """Bind one recoverable launch to its worker authority, private scope and gateway."""
+    """Bind one recoverable launch to its worker authority, private scope and gateway.
+
+    Only a plain script's process is ever recovered, so the authority is that of the `script` tool.
+    """
     if (
         not isinstance(backend, _RecoveringScriptBackend)
         or not gateway_url
-        or (process_authority := script_process_authority(config, agent_name)) is None
+        or (process_authority := script_process_authority(config, agent_name, "script")) is None
     ):
         return None
     payload = {

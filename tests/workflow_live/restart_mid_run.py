@@ -1,0 +1,101 @@
+"""Restart a live backend the graceful way in the middle of a workflow run, and count what happened.
+
+Usage, from the checkout, after `just live up --backend <checkout>` in `~/repos/dev` (README.md has every step):
+
+    python3 -m tests.workflow_live.restart_mid_run [--writes 6] [--after 3] [--slot N]
+
+The run appends `--writes` lines to a file, one call each, and sleeps in Python between them, so no call is in flight
+most of the time.
+When `--after` calls have completed the script stops the backend with SIGTERM, starts it again, waits for the run to
+end, and prints
+
+    lines=<lines in the file> nodes=<completed calls>/<calls> attempt=<attempts of the run> run=<how the run ended>
+    deliveries=<follow-up turns that delivered the run's job> reports=<replies with its result>
+
+Expected with the defaults: `lines=6 nodes=6/6 attempt=2 run=completed deliveries=1 reports=1`.
+It exits 0 when every write happened once, the run completed on a second attempt, and one reply carries its result.
+Standard library only; Linux only.
+"""
+
+from __future__ import annotations
+
+import argparse
+import secrets
+import sys
+import time
+
+from tests.workflow_live.kill_after_write import (
+    Deployment,
+    LiveError,
+    add_send_options,
+    counter_lines,
+    outcome,
+    say,
+    start_run,
+    until,
+)
+
+_WRITE_MANY = """\
+import time
+
+from mindroom.workflow import shell
+
+
+def main(args):
+    for index in range({writes}):
+        shell(f"echo {{index}} >> {counter}")
+        time.sleep(4)
+    return {{"report": "{report}"}}
+"""
+
+
+def main() -> int:
+    """Run the restart once and print its result line; exit 0 when it is the expected one."""
+    parser = argparse.ArgumentParser(description=(__doc__ or "").split("\n", 1)[0])
+    parser.add_argument("--writes", type=int, default=6, help="how many lines the run appends")
+    parser.add_argument("--after", type=int, default=3, help="restart once this many calls have completed")
+    parser.add_argument("--slot", type=int, help="the live deployment's slot (default: the only ready one)")
+    add_send_options(parser)
+    parser.add_argument("--settle", type=float, default=90, help="seconds to wait for reports after the run ended")
+    args = parser.parse_args()
+    dev = args.dev if args.send == "ask" else None
+    deployment = Deployment.find(args.slot)
+    token = f"tide{secrets.token_hex(6)}"
+    counter = f"counter_{token}.txt"
+    # Only the run's result holds this word: the file's name and the call do not, so no other reply repeats it.
+    report = f"harbor{secrets.token_hex(6)}"
+
+    backend = deployment.backend()
+    # A running backend reloads the edit some time later; one started after it has the toolkit before it is asked.
+    if deployment.give_workflow_toolkit() or "MINDROOM_WORKFLOW_FAULT_DIR" in backend.environment:
+        backend.stop()
+        backend.start()
+    root = start_run(deployment, _WRITE_MANY.format(writes=args.writes, counter=counter, report=report), token, dev)
+
+    def enough_done() -> bool:
+        found = deployment.run(token)
+        return found is not None and sum(node["state"] == "completed" for node in found[1]) >= args.after
+
+    until(f"{args.after} completed calls", enough_done, 600)
+    say(f"{args.after} calls completed; restarting the backend (process {backend.pid})")
+    backend.stop()
+    backend.start()
+    say("the backend is back; waiting for the run to end")
+    run, nodes = deployment.ended_run(token, 600)
+    time.sleep(args.settle)
+    completed = sum(node["state"] == "completed" for node in nodes)
+    line = (
+        f"lines={counter_lines(deployment, counter)} nodes={completed}/{len(nodes)} {outcome(deployment, run)} "
+        f"reports={deployment.replies_with(root, report)}"
+    )
+    print(line, flush=True)
+    writes = args.writes
+    return 0 if line == f"lines={writes} nodes={writes}/{writes} attempt=2 run=completed deliveries=1 reports=1" else 1
+
+
+if __name__ == "__main__":
+    try:
+        sys.exit(main())
+    except LiveError as error:
+        say(str(error))
+        sys.exit(1)
