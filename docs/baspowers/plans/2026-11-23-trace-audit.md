@@ -1,5 +1,9 @@
 # Passive Trace Auditor, Friction-Triggered Skill Learning & Backtest Implementation Plan
 
+> **Status (pre-merge / superseded):** The offline eval CLI (`evals/trace_audit/`) was removed prior to merge.
+> Stage 1 was simplified to material friction signals only, and `review_audit_cluster` lives in `src/mindroom/skill_learning/audit_reviewer.py`.
+> The original implementation plan below is retained for historical context.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: implement this plan task-by-task with the skill named in **Execution**. Steps use checkbox (`- [ ]`) syntax.
 
 **Execution:** baspowers:subagent-driven-development — four well-bounded tasks with clean interfaces and independent test suites, implemented on `gemini4_neon@xhigh` (`minimal: true`) followed by real-data backtest and Opus+Astra whole-branch review.

@@ -30,7 +30,7 @@ _SENT_BY_YOU_RE = re.compile(r"""<msg\b[^>]*\bsent_by_you=(["'])true\1[^>]*><!\[
 _MAX_JSON_ERROR_CHARS = 65_536
 _WINDOW_SECONDS = 86_400.0
 _TERMINAL_STATUSES = frozenset({"COMPLETED", "ERROR", "CANCELLED"})
-_SHELL_TOOLS = frozenset({"run_shell_command", "bash", "shell"})
+SHELL_TOOLS = frozenset({"run_shell_command", "bash", "shell"})
 _READER_TOOLS = frozenset(
     {
         "read_file",
@@ -96,7 +96,7 @@ def first_human_text(messages: tuple[RunMessageRecord, ...]) -> str:
 
 
 def _extract_operation(tool_name: str, tool_args: dict[str, Any]) -> str:
-    if tool_name.rsplit(".", 1)[-1] in _SHELL_TOOLS:
+    if tool_name.rsplit(".", 1)[-1] in SHELL_TOOLS:
         return ""
     for key in ("action", "operation", "method"):
         val = tool_args.get(key)

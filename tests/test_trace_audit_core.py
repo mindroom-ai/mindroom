@@ -378,15 +378,15 @@ def test_source_read_only_exclusions_and_symlink_refusal(tmp_path: Path) -> None
     real_root = tmp_path / "real_root"
     ro_dir = real_root / "sessions"
     ro_dir.mkdir(parents=True)
-    db_path = ro_dir / "harry.db"
+    db_path = ro_dir / "assistant.db"
     _seed_v8_db(
         db_path,
-        "harry",
+        "assistant",
         sessions=[
             {"session_id": "!roomA:example.com:$t1"},
             {"session_id": "!roomB:example.com:$t2"},
             {"session_id": "!roomA:example.com:$t1:dynamic_workflow:wf1"},
-            {"session_id": "delegate:harry:harry:abc123"},
+            {"session_id": "delegate:assistant:assistant:abc123"},
             {"session_id": "!roomA:example.com:$auto_thread"},
             {"session_id": "!roomA:example.com:$contact"},
         ],
@@ -403,7 +403,7 @@ def test_source_read_only_exclusions_and_symlink_refusal(tmp_path: Path) -> None
             _db_run("child_run", "!roomA:example.com:$t1", 4, parent_run_id="keep_1"),
             _db_run("room_b_run", "!roomB:example.com:$t2"),
             _db_run("wf_run", "!roomA:example.com:$t1:dynamic_workflow:wf1"),
-            _db_run("del_run", "delegate:harry:harry:abc123"),
+            _db_run("del_run", "delegate:assistant:assistant:abc123"),
             _db_run("auto_thread_run", "!roomA:example.com:$auto_thread"),
             _db_run("contact_run", "!roomA:example.com:$contact"),
         ],
@@ -422,11 +422,11 @@ def test_source_read_only_exclusions_and_symlink_refusal(tmp_path: Path) -> None
     dangling.symlink_to(ro_dir / "missing.db")
     linked_parent = tmp_path / "linked_sessions"
     linked_parent.symlink_to(ro_dir)
-    for bad in (db_link, dangling, linked_parent / "harry.db"):
+    for bad in (db_link, dangling, linked_parent / "assistant.db"):
         with pytest.raises(ValueError, match="link"):
-            load_audited_sessions(bad, "harry")
+            load_audited_sessions(bad, "assistant")
         with pytest.raises(ValueError, match="link"):
-            load_removed_run_ids(bad, "harry")
+            load_removed_run_ids(bad, "assistant")
 
     ancestor_link = tmp_path / "ancestor_link"
     ancestor_link.symlink_to(real_root)
@@ -436,8 +436,8 @@ def test_source_read_only_exclusions_and_symlink_refusal(tmp_path: Path) -> None
     try:
         before = db_path.stat()
         sessions = load_audited_sessions(
-            ancestor_link / "sessions" / "harry.db",
-            "harry",
+            ancestor_link / "sessions" / "assistant.db",
+            "assistant",
             since_ts=NOW - 30 * DAY,
             excluded_sessions=frozenset({"!roomA:example.com:$auto_thread"}),
             allowed_room_id="!roomA:example.com",
@@ -447,7 +447,7 @@ def test_source_read_only_exclusions_and_symlink_refusal(tmp_path: Path) -> None
         assert [r.run_id for r in sessions[0].runs] == ["keep_1"]
         assert sessions[0].runs[0].tools[0].tool_name == "run_shell_command"
         assert len(sessions[0].runs[0].messages) == 2
-        assert load_removed_run_ids(db_path, "harry") == frozenset({"removed_run"})
+        assert load_removed_run_ids(db_path, "assistant") == frozenset({"removed_run"})
         after = db_path.stat()
         assert (after.st_mtime_ns, after.st_size) == (before.st_mtime_ns, before.st_size)
     finally:
@@ -485,7 +485,8 @@ async def test_evidence_card_bounds_redaction_and_tool_free_llm_judge() -> None:
 
     assert len(card.rendered) <= 4_000
     assert len(card.failure_sequence) == 6
-    assert all(len(e.truncated_error) <= 240 and e.recovered for e in card.failure_sequence)
+    assert all(len(e.truncated_error) <= 240 for e in card.failure_sequence)
+    assert [e.recovered for e in card.failure_sequence] == [True, False, False, False, False, False]
     assert len(card.snippets) <= 4
     assert all(len(s.text) <= 280 for s in card.snippets)
     assert card.loaded_skills == ("python-testing",)
@@ -563,14 +564,14 @@ async def test_evidence_card_bounds_redaction_and_tool_free_llm_judge() -> None:
 @pytest.mark.asyncio
 async def test_pipeline_clustering_room_isolation_cooldown_pruning_and_content_free_state(tmp_path: Path) -> None:
     """Pipeline clusters per room, persists cooldown before learner call, prunes removed runs, and stays content-free."""
-    db_path, state_path = tmp_path / "harry.db", tmp_path / "trace_audit.json"
+    db_path, state_path = tmp_path / "assistant.db", tmp_path / "trace_audit.json"
     private_phrase = "UNIQUE_PRIVATE_USER_PHRASE_XYZ"
     private_cmd = "./client-orchid-release --prod PRIVATE_ARG_999"
     s_a1, s_a2, s_b1 = "!roomA:example.com:$z_first", "!roomA:example.com:$a_second", "!roomB:example.com:$t1"
 
     _seed_v8_db(
         db_path,
-        "harry",
+        "assistant",
         sessions=[{"session_id": s_a1}, {"session_id": s_b1}],
         runs=[
             _db_run("a1_r1", s_a1, 1, NOW - 4000),
@@ -610,9 +611,9 @@ async def test_pipeline_clustering_room_isolation_cooldown_pruning_and_content_f
     ) -> AuditPassResult:
         return await run_audit_pass(
             db_path=db_path,
-            storage_name="harry",
+            storage_name="assistant",
             state_path=state_path,
-            scope_key="agent:harry",
+            scope_key="agent:assistant",
             judge_fn=fake_judge,
             now=now,
             allowed_room_id=allowed_room_id,
@@ -626,7 +627,7 @@ async def test_pipeline_clustering_room_isolation_cooldown_pruning_and_content_f
     # Add 2nd distinct session in Room A (alphabetically earlier than $z_first, newer timestamp) -> promotes!
     _seed_v8_db(
         db_path,
-        "harry",
+        "assistant",
         sessions=[{"session_id": s_a2, "created_at": NOW - 2000, "updated_at": NOW - 1500}],
         runs=[{"run_id": "a2_r1", "session_id": s_a2, "seq": 1, "created_at": NOW - 2000, "updated_at": NOW - 1500}],
         tools=[("a2_r1", idx, _fail_row(f"a2_{idx}", command=private_cmd)) for idx in (0, 1)],
@@ -670,7 +671,7 @@ async def test_pipeline_clustering_room_isolation_cooldown_pruning_and_content_f
     assert set(json.loads(raw_state)) >= {"session_cursors", "findings", "cooldowns", "metrics"}
 
     # Tombstoning a previously audited run in _log_removed prunes its finding from state on the next pass.
-    _seed_v8_db(db_path, "harry", removed=[("a2_r1", s_a2)])
+    _seed_v8_db(db_path, "assistant", removed=[("a2_r1", s_a2)])
     res_pruned = await run_pass(NOW + 15 * DAY + 7200, nominate_fn=None)
     assert res_pruned.actionable_clusters == ()
     assert "a2_r1" not in {f["run_id"] for f in json.loads(state_path.read_text(encoding="utf-8"))["findings"]}
@@ -742,3 +743,151 @@ async def test_pipeline_window_budget_cursor_deferral_and_per_card_error_isolati
     assert (calls, p2.incidents_audited, len(p2.actionable_clusters)) == (["r_bad", "r_ok_2"], 2, 1)
     saved2 = json.loads(state_path.read_text(encoding="utf-8"))
     assert (saved2["session_cursors"][s2], saved2["session_cursors"][s3]) == (2, 1)
+
+
+def test_evidence_card_shell_recovery_requires_matching_command() -> None:
+    """Shell failures only mark [recovered] when the same command succeeds, not on unrelated shell commands."""
+    unrelated_run = _run(
+        "r_unrelated",
+        tools=(
+            _tool("run_shell_command", ord_idx=0, args={"command": "pytest tests/"}, result="Exit code 1\nfailed"),
+            _tool(
+                "tools.run_shell_command",
+                ord_idx=1,
+                args={"command": "pytest tests/"},
+                result="Exit code 1\nfailed",
+            ),
+            _tool("run_shell_command", ord_idx=2, args={"command": "pwd"}, result="/workspace"),
+            _tool("tools.run_shell_command", ord_idx=3, args={"command": "pwd"}, result="/workspace"),
+        ),
+    )
+    unrelated_sess = _session((unrelated_run,))
+    unrelated_card = build_evidence_card(detect_session_incidents(unrelated_sess, now=NOW)[0], unrelated_sess)
+    assert [e.recovered for e in unrelated_card.failure_sequence] == [False, False]
+    assert "[recovered]" not in unrelated_card.rendered
+
+    retry_run = _run(
+        "r_retry",
+        tools=(
+            _tool("bash", ord_idx=0, args={"command": "pytest tests/"}, result="Exit code 1\nfailed"),
+            _tool("bash", ord_idx=1, args={"command": "ruff check src/"}, result="Exit code 1\nlint error"),
+            _tool("bash", ord_idx=2, args={"command": "pytest tests/"}, result="1 passed"),
+        ),
+    )
+    retry_sess = _session((retry_run,))
+    retry_card = build_evidence_card(detect_session_incidents(retry_sess, now=NOW)[0], retry_sess)
+    assert [e.recovered for e in retry_card.failure_sequence] == [True, False]
+    failure_lines = [line for line in retry_card.rendered.splitlines() if line.strip().startswith("#")]
+    assert len(failure_lines) == 2
+    assert "[recovered]" in failure_lines[0]
+    assert "[recovered]" not in failure_lines[1]
+
+    # Non-shell tools still match recovery by (tool_name, operation) even when args change.
+    non_shell_run = _run(
+        "r_non_shell",
+        tools=(
+            _tool(
+                "matrix_room",
+                ord_idx=0,
+                args={"action": "create", "name": "bad"},
+                result='{"errcode": "M_UNKNOWN"}',
+            ),
+            _tool(
+                "matrix_room",
+                ord_idx=1,
+                args={"action": "create", "name": "bad2"},
+                result='{"errcode": "M_UNKNOWN"}',
+            ),
+            _tool("matrix_room", ord_idx=2, args={"action": "create", "name": "good"}, result='{"room_id": "!ok:x"}'),
+        ),
+    )
+    non_shell_sess = _session((non_shell_run,))
+    non_shell_card = build_evidence_card(detect_session_incidents(non_shell_sess, now=NOW)[0], non_shell_sess)
+    assert [e.recovered for e in non_shell_card.failure_sequence] == [True, True]
+
+
+@pytest.mark.asyncio
+async def test_pipeline_cancellation_preserves_completed_findings_and_resumes(tmp_path: Path) -> None:
+    """Cancelling Stage 2 mid-batch persists finished findings without advancing cursors so the next pass resumes."""
+    db_path, state_path = tmp_path / "cancel.db", tmp_path / "state.json"
+    s1, s2 = "!roomA:example.com:$s1", "!roomA:example.com:$s2"
+    _seed_v8_db(
+        db_path,
+        "assistant",
+        sessions=[
+            {"session_id": s1, "created_at": NOW - 4000, "updated_at": NOW - 3000},
+            {"session_id": s2, "created_at": NOW - 2500, "updated_at": NOW - 2000},
+        ],
+        runs=[
+            _db_run("r1", s1, 1, NOW - 4000, status="ERROR", error="fail 1"),
+            _db_run("r2", s1, 2, NOW - 3500, status="ERROR", error="fail 2"),
+            _db_run("r3", s2, 1, NOW - 2500, status="ERROR", error="fail 3"),
+        ],
+    )
+
+    second_started = asyncio.Event()
+    never_set = asyncio.Event()
+    pass1_calls: list[str] = []
+
+    async def slow_on_second_judge(card: EvidenceCard) -> AuditFinding:
+        pass1_calls.append(card.run_id)
+        if len(pass1_calls) == 2:
+            second_started.set()
+            await never_set.wait()
+        return _finding(
+            category="verification_gap",
+            remedy="verify_outcome",
+            root_cause="Missing check.",
+            proposed_rule="Check output.",
+        )
+
+    settings = TraceAuditSettings(max_audits_per_run=5, min_cluster_sessions=2, audit_concurrency=1)
+    task = asyncio.create_task(
+        run_audit_pass(
+            db_path=db_path,
+            storage_name="assistant",
+            state_path=state_path,
+            scope_key="agent:assistant",
+            judge_fn=slow_on_second_judge,
+            now=NOW,
+            settings=settings,
+        ),
+    )
+    await second_started.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert pass1_calls == ["r1", "r2"]
+    assert state_path.exists()
+    saved_mid = json.loads(state_path.read_text(encoding="utf-8"))
+    assert [f["run_id"] for f in saved_mid["findings"]] == ["r1"]
+    assert saved_mid["session_cursors"] == {}
+
+    pass2_calls: list[str] = []
+
+    async def resume_judge(card: EvidenceCard) -> AuditFinding:
+        pass2_calls.append(card.run_id)
+        return _finding(
+            category="verification_gap",
+            remedy="verify_outcome",
+            root_cause="Missing check.",
+            proposed_rule="Check output.",
+        )
+
+    res2 = await run_audit_pass(
+        db_path=db_path,
+        storage_name="assistant",
+        state_path=state_path,
+        scope_key="agent:assistant",
+        judge_fn=resume_judge,
+        now=NOW + 60,
+        settings=settings,
+    )
+    assert pass2_calls == ["r2", "r3"]
+    assert (res2.incidents_audited, {f.run_id for f in res2.findings}) == (2, {"r2", "r3"})
+    assert len(res2.actionable_clusters) == 1
+    assert (res2.actionable_clusters[0].distinct_sessions, res2.actionable_clusters[0].occurrence_count) == (2, 3)
+    saved_after = json.loads(state_path.read_text(encoding="utf-8"))
+    assert {f["run_id"] for f in saved_after["findings"]} == {"r1", "r2", "r3"}
+    assert saved_after["session_cursors"] == {s1: 2, s2: 1}

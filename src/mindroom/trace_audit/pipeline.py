@@ -174,6 +174,7 @@ async def _audit_selected(
     scope_key: str,
     cfg: TraceAuditSettings,
     allowed_room_id: str | None = None,
+    completed: list[FindingRecord] | None = None,
 ) -> tuple[list[FindingRecord], dict[str, int]]:
     cap = max(0, cfg.max_audits_per_run)
     selected = candidates[:cap]
@@ -209,7 +210,7 @@ async def _audit_selected(
         )
         tool_name, operation, kind, family = sig
         eff_scope = _effective_scope(scope_key, session.room_id or allowed_room_id)
-        return FindingRecord(
+        record = FindingRecord(
             cluster_key=_cluster_key(eff_scope, finding, tool_name=tool_name, operation=operation, kind=kind),
             scope_key=eff_scope,
             session_id=inc.session_id,
@@ -228,6 +229,9 @@ async def _audit_selected(
             has_verified_fix=finding.has_verified_fix,
             target_skill=finding.target_skill,
         )
+        if completed is not None:
+            completed.append(record)
+        return record
 
     raw_records = await asyncio.gather(*(_audit_one(inc, session) for inc, session in selected))
     records = [record for record in raw_records if record is not None]
@@ -310,17 +314,25 @@ async def run_audit_pass(
         state.findings = [f for f in state.findings if f.run_id not in removed_ids]
     already_audited = {f.run_id for f in state.findings}
     candidates = [pair for pair in candidates if pair[0].run_id not in already_audited]
-    new_findings, deferred_min_seq = (
-        await _audit_selected(
-            candidates,
-            judge_fn=judge_fn,
-            scope_key=scope_key,
-            cfg=cfg,
-            allowed_room_id=allowed_room_id,
-        )
-        if judge_fn is not None
-        else ([], {})
-    )
+    completed_findings: list[FindingRecord] = []
+    if judge_fn is not None:
+        try:
+            new_findings, deferred_min_seq = await _audit_selected(
+                candidates,
+                judge_fn=judge_fn,
+                scope_key=scope_key,
+                cfg=cfg,
+                allowed_room_id=allowed_room_id,
+                completed=completed_findings,
+            )
+        except asyncio.CancelledError:
+            if completed_findings:
+                state.findings.extend(completed_findings)
+                _prune_state(state, now=current_ts, settings=cfg)
+                _save_state(state_path, state)
+            raise
+    else:
+        new_findings, deferred_min_seq = [], {}
     if judge_fn is not None:
         state.findings.extend(new_findings)
         for sid, seq in max_seq.items():

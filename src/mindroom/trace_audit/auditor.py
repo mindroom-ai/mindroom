@@ -32,7 +32,7 @@ from mindroom.trace_audit.models import (
     Incident,
     sanitize_target_skill,
 )
-from mindroom.trace_audit.signals import classify_tool_execution, first_human_text
+from mindroom.trace_audit.signals import SHELL_TOOLS, classify_tool_execution, first_human_text
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
@@ -40,6 +40,7 @@ if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.llm.provider import ModelProvider
+    from mindroom.trace_audit.models import ToolOutcome
 
 logger = get_logger(__name__)
 
@@ -84,10 +85,16 @@ def _loaded_skills(session: AuditedSession, up_to_seq: int) -> tuple[str, ...]:
     return tuple(seen)
 
 
+def _recovery_key(out: ToolOutcome) -> tuple[str, str]:
+    if out.tool_name.rsplit(".", 1)[-1] in SHELL_TOOLS:
+        return (out.tool_name, out.args_digest)
+    return (out.tool_name, out.operation)
+
+
 def _failure_entries(window: list[AuditedRun]) -> tuple[int, tuple[FailureSequenceEntry, ...]]:
     indexed = [(i, classify_tool_execution(t)) for i, t in enumerate(t for run in window for t in run.tools)]
     last_ok: dict[tuple[str, str], int] = {
-        (out.tool_name, out.operation): idx for idx, out in indexed if not out.is_failure and out.kind == "ok"
+        _recovery_key(out): idx for idx, out in indexed if not out.is_failure and out.kind == "ok"
     }
     entries = [
         FailureSequenceEntry(
@@ -97,7 +104,7 @@ def _failure_entries(window: list[AuditedRun]) -> tuple[int, tuple[FailureSequen
             kind=out.kind,
             diagnostic_family=out.diagnostic_family,
             truncated_error=_redact_clip(out.error_excerpt, MAX_FAILURE_ERROR_CHARS),
-            recovered=last_ok.get((out.tool_name, out.operation), -1) > idx,
+            recovered=last_ok.get(_recovery_key(out), -1) > idx,
         )
         for idx, out in indexed
         if out.is_failure
