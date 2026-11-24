@@ -2628,7 +2628,6 @@ depends_on = [
 [[interfaces]]
 from = ["mindroom.workflow_runs.agent_nodes"]
 expose = [
-    "EARLIER_TURN",
     "AgentNodeError",
     "AgentRuntime",
     "await_child",

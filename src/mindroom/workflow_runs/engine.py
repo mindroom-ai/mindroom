@@ -40,7 +40,6 @@ from mindroom.script_runs.store import (
 )
 from mindroom.tool_jobs.runtime import TERMINAL_STATUSES
 from mindroom.workflow_runs.agent_nodes import (
-    EARLIER_TURN,
     AgentNodeError,
     AgentRuntime,
     await_child,
@@ -1771,38 +1770,24 @@ class WorkflowEngine:
             raise ScriptRuntimeUnavailableError(_NO_AGENTS)
         try:
             waits = partial(self._node_waits, node, epoch) if block else None
-            (kind, text), usage, claim, continued = await await_child(run, node, runtime, on_waiting=waits)
+            (kind, text), usage, claim = await await_child(run, node, runtime, on_waiting=waits)
         except ScriptRuntimeUnavailableError:
             raise
         except Exception as exc:
             logger.exception("workflow_agent_outcome_unreadable", run_id=node.run_id, key=node.key)
             # What the turn did is unknown, so its call is not one to run again without being asked to.
-            (kind, text), usage, claim, continued = ("indeterminate", str(exc)), {}, None, False
+            (kind, text), usage, claim = ("indeterminate", str(exc)), [], None
         # A further turn of the node is an entry of its own, and the node keeps whether any turn started a tool call.
         turn = int(node.links.get("turn", 1))
-        usage = {turn if key == 1 else key: used for key, used in usage.items()}
-        made = bool(node.links.get("made")) or any(used.get("tool_calls") for used in usage.values())
+        made = bool(node.links.get("made")) or any(used.get("tool_calls") for _, _, used in usage)
         stopping = node.run_id in self._stopping
         outcome: _Outcome | str | WorkflowNode
         further = None
         try:
-            # A turn that no restart continued worked in the attempt that started it, whichever attempt reads it. What
-            # a restart cut short is of the attempt before the one that reads the turn's end, even if it left no row.
             with suppress(SupersededAttemptError):
-                for entry, used in usage.items():
-                    earlier = str(entry).startswith(EARLIER_TURN)
-                    attempt = run.attempt - earlier if continued else node.attempt
-                    add = partial(
-                        self.store.add_usage,
-                        node.run_id,
-                        node.key,
-                        node.generation,
-                        entry,
-                        attempt,
-                        used,
-                        epoch=epoch,
-                    )
-                    await asyncio.to_thread(add)
+                add = partial(self.store.add_usage, node.run_id, node.key, node.generation, epoch=epoch)
+                for entry, attempt, used in usage:
+                    await asyncio.to_thread(add, entry, attempt, used)
                 outcome = _turn_outcome(node, kind, text, last=turn >= SCHEMA_TURNS, made=made, stopping=stopping)
                 if isinstance(outcome, str):
                     correct = partial(self._correct, run, node, epoch, outcome, turn=turn + 1, made=made)
