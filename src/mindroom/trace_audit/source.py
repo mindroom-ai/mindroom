@@ -1,4 +1,4 @@
-"""Strictly read-only SQLite reader for MindRoom v8 conversation logs and usage rows."""
+"""Strictly read-only SQLite reader for MindRoom v8 conversation logs."""
 
 from __future__ import annotations
 
@@ -183,9 +183,6 @@ def _build_run(
             "",
         )
     )
-    metrics = record.get("metrics")
-    raw_dur = metrics.get("duration") if isinstance(metrics, dict) else None
-    duration = float(raw_dur) if isinstance(raw_dur, (int, float)) and not isinstance(raw_dur, bool) else None
     raw_error = record.get("error")
     return AuditedRun(
         run_id=rid,
@@ -194,7 +191,6 @@ def _build_run(
         status=status,
         created_at=created,
         updated_at=updated,
-        duration_seconds=duration,
         error=raw_error if isinstance(raw_error, str) and raw_error.strip() else None,
         content=content,
         tools=tuple(tools),
@@ -232,7 +228,6 @@ def _read_terminal_runs(
     valid_sessions: AbstractSet[str],
     removed_ids: AbstractSet[str],
     since_ts: float | None,
-    until_ts: float | None,
 ) -> dict[str, list[tuple[str, str, str, int, float, float, dict[str, Any], dict[str, Any]]]]:
     by_session: dict[str, list[tuple[str, str, str, int, float, float, dict[str, Any], dict[str, Any]]]] = defaultdict(
         list,
@@ -246,11 +241,6 @@ def _read_terminal_runs(
     if since_ts is not None:
         clauses.append("COALESCE(created_at, 0) >= ?")
         params.append(since_ts)
-    if until_ts is not None:
-        clauses.append("COALESCE(created_at, 0) <= ?")
-        params.append(until_ts)
-        clauses.append("COALESCE(updated_at, created_at, 0) <= ?")
-        params.append(until_ts)
     query = (
         f"SELECT run_id, session_id, status, seq, created_at, updated_at, metadata, record "  # noqa: S608
         f"FROM {quote_identifier(names.log_runs)} "
@@ -270,28 +260,11 @@ def _read_terminal_runs(
     return by_session
 
 
-def latest_run_timestamp(db_path: Path, storage_name: str) -> float:
-    """Return the latest terminal top-level agent run timestamp in the database, or ``0.0`` if empty."""
-    _validated_db_path(db_path)
-    if not db_path.exists():
-        return 0.0
-    names = TableNames(storage_name)
-    with _open_read_only(db_path) as conn:
-        if names.log_runs not in table_names(conn):
-            return 0.0
-        row = conn.execute(
-            f"SELECT MAX(COALESCE(updated_at, created_at)) FROM {quote_identifier(names.log_runs)} "  # noqa: S608
-            "WHERE parent_run_id IS NULL AND kind = 'agent' AND status IN ('COMPLETED', 'ERROR', 'CANCELLED')",
-        ).fetchone()
-    return float(row[0]) if row and isinstance(row[0], (int, float)) else 0.0
-
-
 def load_audited_sessions(
     db_path: Path,
     storage_name: str,
     *,
     since_ts: float | None = None,
-    until_ts: float | None = None,
     excluded_sessions: AbstractSet[str] = frozenset(),
     allowed_room_id: str | None = None,
     contact_session_check: Callable[[str], bool] | None = None,
@@ -324,7 +297,6 @@ def load_audited_sessions(
             valid_sessions=session_rows.keys(),
             removed_ids=removed,
             since_ts=since_ts,
-            until_ts=until_ts,
         )
         kept: list[tuple[str, str | None, dict[str, Any], float, float]] = []
         kept_run_ids: list[str] = []
@@ -343,9 +315,7 @@ def load_audited_sessions(
             session_id=sid,
             room_id=room_id,
             created_at=min(created, built[0].created_at),
-            last_updated_at=max(r.updated_at for r in built)
-            if until_ts is not None
-            else max(updated, *(r.updated_at for r in built)),
+            last_updated_at=max(updated, *(r.updated_at for r in built)),
             runs=tuple(built),
             metadata=meta,
         )
@@ -358,6 +328,7 @@ def load_audited_sessions(
 
 def load_removed_run_ids(db_path: Path, storage_name: str) -> frozenset[str]:
     """Return run IDs recorded in ``_log_removed`` strictly read-only."""
+    _validated_db_path(db_path)
     if not db_path.exists():
         return frozenset()
     names = TableNames(storage_name)
@@ -368,44 +339,3 @@ def load_removed_run_ids(db_path: Path, storage_name: str) -> frozenset[str]:
             str(rid)
             for (rid,) in conn.execute(f"SELECT run_id FROM {quote_identifier(names.log_removed)}")  # noqa: S608
         )
-
-
-def load_usage_rows(
-    db_path: Path,
-    storage_name: str,
-    *,
-    kind: str | None = None,
-    since_ts: float | None = None,
-    until_ts: float | None = None,
-) -> list[dict[str, Any]]:
-    """Read usage ledger snapshots from ``<storage_name>_sessions_usage`` strictly read-only."""
-    _validated_db_path(db_path)
-    if not db_path.exists():
-        return []
-    names = TableNames(storage_name)
-    with _open_read_only(db_path) as conn:
-        if names.usage not in table_names(conn):
-            return []
-        rows = conn.execute(
-            f"SELECT session_id, run_id, usage_data FROM {quote_identifier(names.usage)} ORDER BY id",  # noqa: S608
-        ).fetchall()
-
-    results: list[dict[str, Any]] = []
-    for session_id, run_id, raw_usage in rows:
-        payload = _json_dict(raw_usage)
-        if not payload or (kind is not None and (payload.get("kind") or "run") != kind):
-            continue
-        raw_ts = (
-            payload.get("updated_at")
-            if isinstance(payload.get("updated_at"), (int, float))
-            else payload.get("created_at")
-        )
-        if since_ts is not None and (not isinstance(raw_ts, (int, float)) or float(raw_ts) < since_ts):
-            continue
-        if until_ts is not None and (not isinstance(raw_ts, (int, float)) or float(raw_ts) > until_ts):
-            continue
-        entry = {**payload, "session_id": payload.get("session_id", str(session_id))}
-        if run_id is not None:
-            entry.setdefault("run_id", str(run_id))
-        results.append(entry)
-    return results

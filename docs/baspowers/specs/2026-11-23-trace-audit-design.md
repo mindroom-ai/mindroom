@@ -1,5 +1,9 @@
 # Passive Trace Auditor, Friction-Triggered Skill Learning & Real-Data Backtest
 
+> **Status (pre-merge):** `evals/trace_audit/` was run offline for validation and removed before merge.
+> Stage 1 was simplified to material friction signals only (no clean-run sampling or heuristic regex/allowlist tables).
+> The original design document below is retained for historical context.
+
 ## Problem & Intent
 
 MindRoom's existing `skill_learning` triggers blindly every `review_interval` (default 10) model replies using an in-memory counter. On 30 days of real production data (a personal-assistant agent, 233 active sessions, 732 runs, 8,299 tool calls):

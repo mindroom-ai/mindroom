@@ -6058,14 +6058,6 @@
           "title": "Min Idle Seconds",
           "type": "integer"
         },
-        "sample_rate": {
-          "default": 0.02,
-          "description": "Fraction of clean runs sampled per pass",
-          "maximum": 1.0,
-          "minimum": 0.0,
-          "title": "Sample Rate",
-          "type": "number"
-        },
         "max_audits_per_run": {
           "default": 12,
           "description": "Max evidence cards audited per pass",

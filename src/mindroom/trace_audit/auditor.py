@@ -87,9 +87,7 @@ def _loaded_skills(session: AuditedSession, up_to_seq: int) -> tuple[str, ...]:
 def _failure_entries(window: list[AuditedRun]) -> tuple[int, tuple[FailureSequenceEntry, ...]]:
     indexed = [(i, classify_tool_execution(t)) for i, t in enumerate(t for run in window for t in run.tools)]
     last_ok: dict[tuple[str, str], int] = {
-        (out.tool_name, out.operation): idx
-        for idx, out in indexed
-        if not out.is_failure and out.kind in {"ok", "benign_exit_1"}
+        (out.tool_name, out.operation): idx for idx, out in indexed if not out.is_failure and out.kind == "ok"
     }
     entries = [
         FailureSequenceEntry(
@@ -107,11 +105,10 @@ def _failure_entries(window: list[AuditedRun]) -> tuple[int, tuple[FailureSequen
     return len(indexed), tuple(entries)
 
 
-def _build_snippets(incident: Incident, trigger: AuditedRun) -> tuple[EvidenceSnippet, ...]:
+def _build_snippets(trigger: AuditedRun) -> tuple[EvidenceSnippet, ...]:
     pairs = [
         ("user_ask", first_human_text(trigger.messages)),
         ("assistant_reply", trigger.content),
-        ("user_correction", incident.correction_text or ""),
         ("run_error", trigger.error or ""),
     ]
     return tuple(
@@ -130,7 +127,7 @@ def build_evidence_card(incident: Incident, session: AuditedSession) -> Evidence
 
     loaded_skills = _loaded_skills(session, trigger.seq)
     tool_count, failure_sequence = _failure_entries(window)
-    snippets = _build_snippets(incident, trigger)
+    snippets = _build_snippets(trigger)
 
     lines = [
         f"Reasons: {', '.join(incident.reasons)}",

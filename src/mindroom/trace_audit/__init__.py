@@ -33,7 +33,7 @@ from mindroom.trace_audit.models import (
 )
 from mindroom.trace_audit.pipeline import run_audit_pass
 from mindroom.trace_audit.signals import classify_tool_execution, detect_session_incidents
-from mindroom.trace_audit.source import latest_run_timestamp, load_audited_sessions, load_usage_rows
+from mindroom.trace_audit.source import load_audited_sessions
 
 __all__ = [
     "AuditCategory",
@@ -62,9 +62,7 @@ __all__ = [
     "classify_tool_execution",
     "complete_tool_free_structured",
     "detect_session_incidents",
-    "latest_run_timestamp",
     "load_audited_sessions",
-    "load_usage_rows",
     "make_llm_audit_judge",
     "run_audit_pass",
 ]

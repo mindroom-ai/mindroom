@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import statistics
 import time
 from collections import Counter, defaultdict
 from typing import TYPE_CHECKING, Any
@@ -37,7 +36,6 @@ logger = get_logger(__name__)
 
 _STATE_VERSION = 1
 _SECONDS_PER_DAY = 86_400.0
-_MIN_BASELINE_RUNS = 20
 _ACTIONABLE_VERDICTS = frozenset({"actionable", "unverified_claim"})
 _MAX_CLUSTER_EXCERPTS = 5
 _METRIC_KEYS = (
@@ -46,7 +44,6 @@ _METRIC_KEYS = (
     "scanned_runs",
     "incidents_detected",
     "incidents_audited",
-    "clean_samples_audited",
     "clusters_promoted",
 )
 
@@ -145,11 +142,8 @@ def _scan_sessions(
     cursors: dict[str, int],
     *,
     now: float,
-    scope_key: str,
     cfg: TraceAuditSettings,
 ) -> tuple[int, int, dict[str, int], list[tuple[Incident, AuditedSession]]]:
-    counts = [len(run.tools) for session in sessions for run in session.runs]
-    median_tools = float(statistics.median(counts)) if len(counts) >= _MIN_BASELINE_RUNS else None
     scanned_sessions, scanned_runs = 0, 0
     max_seq: dict[str, int] = {}
     candidates: list[tuple[Incident, AuditedSession]] = []
@@ -167,11 +161,7 @@ def _scan_sessions(
             session,
             now=now,
             min_idle_seconds=cfg.min_idle_seconds,
-            median_tools=median_tools,
-            baseline_run_count=len(counts),
             after_seq=last_seq,
-            sample_rate=cfg.sample_rate,
-            sample_salt=scope_key,
         )
         candidates.extend((inc, session) for inc in found)
     return scanned_sessions, scanned_runs, max_seq, candidates
@@ -184,17 +174,9 @@ async def _audit_selected(
     scope_key: str,
     cfg: TraceAuditSettings,
     allowed_room_id: str | None = None,
-) -> tuple[list[FindingRecord], dict[str, int], int]:
-    friction = [pair for pair in candidates if not pair[0].is_clean_sample]
-    clean = [pair for pair in candidates if pair[0].is_clean_sample]
-    clean_cap = (
-        min(cfg.max_clean_samples_per_run, max(0, cfg.max_audits_per_run - 1))
-        if friction
-        else min(cfg.max_clean_samples_per_run, cfg.max_audits_per_run)
-    )
-    selected_clean = clean[:clean_cap]
-    friction_cap = max(0, cfg.max_audits_per_run - len(selected_clean))
-    selected = [*friction[:friction_cap], *selected_clean]
+) -> tuple[list[FindingRecord], dict[str, int]]:
+    cap = max(0, cfg.max_audits_per_run)
+    selected = candidates[:cap]
     deferred_min_seq: dict[str, int] = {}
 
     def _defer(inc: Incident) -> None:
@@ -202,7 +184,7 @@ async def _audit_selected(
         if prev is None or inc.run_seq < prev:
             deferred_min_seq[inc.session_id] = inc.run_seq
 
-    for inc, _ in friction[friction_cap:]:
+    for inc, _ in candidates[cap:]:
         _defer(inc)
 
     sem = asyncio.Semaphore(max(1, cfg.audit_concurrency))
@@ -249,10 +231,7 @@ async def _audit_selected(
 
     raw_records = await asyncio.gather(*(_audit_one(inc, session) for inc, session in selected))
     records = [record for record in raw_records if record is not None]
-    clean_audited = sum(
-        1 for (inc, _), record in zip(selected, raw_records, strict=True) if inc.is_clean_sample and record is not None
-    )
-    return records, deferred_min_seq, clean_audited
+    return records, deferred_min_seq
 
 
 async def _promote_clusters(
@@ -298,8 +277,6 @@ async def run_audit_pass(
     contact_session_check: Callable[[str], bool] | None = None,
     settings: TraceAuditSettings | None = None,
     nominate_fn: NominateClusterFn | None = None,
-    since_ts: float | None = None,
-    until_ts: float | None = None,
 ) -> AuditPassResult:
     """Execute one passive trace-audit pass: Stage 1 scan, Stage 2 audit, clustering, and promotion."""
     cfg = settings or TraceAuditSettings()
@@ -307,7 +284,7 @@ async def run_audit_pass(
     state = _load_state(state_path)
     _prune_state(state, now=current_ts, settings=cfg)
 
-    effective_since = since_ts if since_ts is not None else current_ts - cfg.window_days * _SECONDS_PER_DAY
+    since_ts = current_ts - cfg.window_days * _SECONDS_PER_DAY
     cursor_snapshot = dict(state.session_cursors)
 
     def _load_and_scan() -> tuple[int, int, dict[str, int], list[tuple[Incident, AuditedSession]], frozenset[str]]:
@@ -315,8 +292,7 @@ async def run_audit_pass(
         sessions = load_audited_sessions(
             db_path,
             storage_name,
-            since_ts=effective_since,
-            until_ts=until_ts,
+            since_ts=since_ts,
             excluded_sessions=excluded_sessions,
             allowed_room_id=allowed_room_id,
             contact_session_check=contact_session_check,
@@ -325,7 +301,6 @@ async def run_audit_pass(
             sessions,
             cursor_snapshot,
             now=current_ts,
-            scope_key=scope_key,
             cfg=cfg,
         )
         return scanned_s, scanned_r, max_s, cands, removed_ids
@@ -335,7 +310,7 @@ async def run_audit_pass(
         state.findings = [f for f in state.findings if f.run_id not in removed_ids]
     already_audited = {f.run_id for f in state.findings}
     candidates = [pair for pair in candidates if pair[0].run_id not in already_audited]
-    new_findings, deferred_min_seq, clean_audited = (
+    new_findings, deferred_min_seq = (
         await _audit_selected(
             candidates,
             judge_fn=judge_fn,
@@ -344,7 +319,7 @@ async def run_audit_pass(
             allowed_room_id=allowed_room_id,
         )
         if judge_fn is not None
-        else ([], {}, 0)
+        else ([], {})
     )
     if judge_fn is not None:
         state.findings.extend(new_findings)
@@ -359,7 +334,6 @@ async def run_audit_pass(
         ("scanned_runs", scanned_runs),
         ("incidents_detected", len(candidates)),
         ("incidents_audited", len(new_findings)),
-        ("clean_samples_audited", clean_audited),
     ):
         state.metrics[key] += delta
 
@@ -382,7 +356,6 @@ async def run_audit_pass(
         scanned_runs=scanned_runs,
         incidents_detected=len(candidates),
         incidents_audited=len(new_findings),
-        clean_samples_audited=clean_audited,
         findings=tuple(new_findings),
         actionable_clusters=tuple(actionable),
         promoted_clusters=tuple(promoted),

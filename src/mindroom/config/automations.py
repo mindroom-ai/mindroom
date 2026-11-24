@@ -157,7 +157,6 @@ class TraceAuditAutomation(_ScheduledAutomation):
         ),
     )
     min_idle_seconds: int = Field(default=600, ge=0, le=86_400, description="Idle seconds before a session is audited")
-    sample_rate: float = Field(default=0.02, ge=0.0, le=1.0, description="Fraction of clean runs sampled per pass")
     max_audits_per_run: int = Field(default=12, ge=1, le=100, description="Max evidence cards audited per pass")
     min_cluster_sessions: int = Field(default=2, ge=1, le=50, description="Distinct sessions needed to promote")
     cooldown_days: int = Field(default=14, ge=0, le=365, description="Days before a promoted cluster may re-promote")

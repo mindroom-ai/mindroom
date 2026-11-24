@@ -83,7 +83,6 @@ async def _run_trace_audit(ctx: AutomationContext, entry: TraceAuditAutomation, 
 
     settings = TraceAuditSettings(
         min_idle_seconds=entry.min_idle_seconds,
-        sample_rate=entry.sample_rate,
         max_audits_per_run=entry.max_audits_per_run,
         min_cluster_sessions=entry.min_cluster_sessions,
         cooldown_days=entry.cooldown_days,

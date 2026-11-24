@@ -11,7 +11,6 @@ from pydantic import BaseModel, Field, field_validator
 
 type ToolOutcomeKind = Literal[
     "ok",
-    "benign_exit_1",
     "approval_denied",
     "interrupted",
     "tool_error",
@@ -26,11 +25,6 @@ type IncidentReason = Literal[
     "repeat_tool_error",
     "multi_tool_error",
     "tool_loop",
-    "single_tool_error",
-    "settled_cancel",
-    "user_correction",
-    "tool_outlier",
-    "clean_sample",
 ]
 type AuditVerdict = Literal["actionable", "transient_env", "benign", "unverified_claim", "no_issue"]
 type AuditCategory = Literal["tool_misuse", "verification_gap", "retry_loop", "user_preference", "skill_bug", "other"]
@@ -98,14 +92,12 @@ class AuditedRun:
     status: str
     created_at: float
     updated_at: float
-    duration_seconds: float | None = None
     error: str | None = None
     content: str = ""
     tools: tuple[ToolExecutionRecord, ...] = ()
     messages: tuple[RunMessageRecord, ...] = ()
     failing_tools: dict[str, int] = field(default_factory=dict)
     metadata: dict[str, Any] = field(default_factory=dict)
-    has_interrupted_checkpoint: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,9 +142,7 @@ class Incident:
     created_at: float
     window_run_ids: tuple[str, ...]
     reasons: tuple[IncidentReason, ...]
-    is_clean_sample: bool = False
     failures: tuple[ToolOutcome, ...] = ()
-    correction_text: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -274,8 +264,6 @@ class TraceAuditSettings:
     """Tuning parameters for one passive trace-audit pass."""
 
     min_idle_seconds: int = 600
-    sample_rate: float = 0.02
-    max_clean_samples_per_run: int = 2
     max_audits_per_run: int = 12
     min_cluster_sessions: int = 2
     cooldown_days: int = 14
@@ -293,7 +281,6 @@ class AuditPassResult:
     scanned_runs: int
     incidents_detected: int
     incidents_audited: int
-    clean_samples_audited: int
     findings: tuple[FindingRecord, ...]
     actionable_clusters: tuple[FailureCluster, ...]
     promoted_clusters: tuple[FailureCluster, ...]
