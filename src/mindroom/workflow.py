@@ -145,12 +145,14 @@ class _Lane:
 
 class _Local(threading.local):
     lane: _Lane | None = None
-    # The place the thread's lane holds among the active lanes of its fan-out, given up while its call waits.
-    place: threading.Semaphore | None = None
+    # The enclosing fan-out whose admission place this thread holds, given up while its call waits.
+    lanes: _Lanes | None = None
+    parked: bool = False
     loading: bool = False
 
 
 _local = _Local()
+_lanes_cond = threading.Condition()
 _runnable_lock = threading.Lock()
 _runnable_seq, _runnable_count = 0, 0
 
@@ -303,17 +305,18 @@ def _call(
     meta = {"cached": cached, "phase": lane.phase, "label": label, "name": name, "timeout": timeout}
     gateway = _gateway()
     node_key = _next_key() if key is None else key
+    receipt = gateway.submit(node_key, kind, args, {k: value for k, value in meta.items() if value is not None})
     _runnable_change(-1)
     try:
-        receipt = gateway.submit(node_key, kind, args, {k: value for k, value in meta.items() if value is not None})
         node_id = str(receipt["id"])
         # A call that waits for a person or peer is no active lane of its fan-out: the next lane starts in its place,
         # and the call takes a place again before it goes on.
-        place, waiting = _local.place, False
+        owner, waiting = _local.lanes, False
         while receipt["state"] not in _SETTLED_STATES or waiting:
-            if place is not None and waiting != (receipt["state"] == "waiting"):
+            if owner is not None and waiting != (receipt["state"] == "waiting"):
                 waiting = not waiting
-                (place.release if waiting else place.acquire)()
+                _local.parked = waiting
+                (owner.park if waiting else owner.unpark)()
             if receipt["state"] not in _SETTLED_STATES:
                 receipt = gateway.poll(node_id, state=str(receipt["state"]))
         if receipt["state"] == "completed":
@@ -523,7 +526,13 @@ def _fan_out(
     if not calls:
         return []
     active = min(len(calls), max_concurrent or _MAX_ACTIVE_LANES, _MAX_ACTIVE_LANES)
-    lanes = _Lanes(threading.Semaphore(active), [None] * len(calls))
+    lanes = _Lanes(
+        threading.Semaphore(active),
+        [None] * len(calls),
+        parent=_local.lanes,
+        live=len(calls),
+        unstarted=len(calls),
+    )
     threads: list[threading.Thread] = []
     started = 0
     _runnable_change(len(calls) - 1)
@@ -534,6 +543,9 @@ def _fan_out(
             if lanes.stopped:
                 lanes.places.release()
                 break
+            with _lanes_cond:
+                lanes.unstarted -= 1
+                lanes.working += 1
             started += 1
             work = (position, call, _Lane(members[position], phase=lane.phase))
             threads.append(threading.Thread(target=lanes.run, args=work, daemon=True))
@@ -541,6 +553,7 @@ def _fan_out(
         for thread in threads:
             thread.join()
     finally:
+        lanes.restore_parent()
         _runnable_change(1 - (len(calls) - started))
     if lanes.stopped:
         raise lanes.stopped[0]
@@ -555,12 +568,60 @@ class _Lanes:
 
     places: threading.Semaphore
     results: list[object]
+    parent: _Lanes | None = None
+    live: int = 0
+    unstarted: int = 0
+    working: int = 0
+    parent_state: str = "held"
     errors: dict[int, BaseException] = field(default_factory=dict)
     stopped: list[BaseException] = field(default_factory=list)
 
+    def _maybe_park_parent(self) -> bool:
+        if (
+            self.working == 0
+            and self.unstarted == 0
+            and self.live > 0
+            and self.parent is not None
+            and self.parent_state == "held"
+        ):
+            self.parent_state = "parked"
+            return True
+        return False
+
+    def park(self) -> None:
+        """Release this lane's place while waiting; cascade to enclosing fan-out when every child lane is parked."""
+        self.places.release()
+        with _lanes_cond:
+            self.working -= 1
+            cascade = self._maybe_park_parent()
+        if cascade and self.parent is not None:
+            self.parent.park()
+
+    def unpark(self) -> None:
+        """Reacquire enclosing fan-out place (if cascaded) and then this fan-out's place before resuming."""
+        self.restore_parent()
+        self.places.acquire()
+        with _lanes_cond:
+            self.working += 1
+
+    def restore_parent(self) -> None:
+        """Reacquire the enclosing fan-out place if this fan-out parked it."""
+        reacquire = False
+        with _lanes_cond:
+            while self.parent_state == "acquiring":
+                _lanes_cond.wait()
+            if self.parent is not None and self.parent_state == "parked":
+                self.parent_state = "acquiring"
+                reacquire = True
+        if reacquire and self.parent is not None:
+            self.parent.unpark()
+            with _lanes_cond:
+                self.parent_state = "held"
+                _lanes_cond.notify_all()
+
     def run(self, position: int, call: Callable[[], object], lane: _Lane) -> None:
         """Run one call in *lane* on this thread, and keep its result or its failure under its position."""
-        _local.lane, _local.place = lane, self.places
+        _local.lane, _local.lanes, _local.parked = lane, self, False
         try:
             self.results[position] = call()
         except SystemExit as error:
@@ -574,7 +635,17 @@ class _Lanes:
                 _gateway().submit(_next_key(), "error", report, {"phase": lane.phase} if lane.phase else {})
         finally:
             _runnable_change(-1)
-            self.places.release()
+            was_parked = _local.parked
+            _local.parked = False
+            if not was_parked:
+                self.places.release()
+            with _lanes_cond:
+                if not was_parked:
+                    self.working -= 1
+                self.live -= 1
+                cascade = self._maybe_park_parent()
+            if cascade and self.parent is not None:
+                self.parent.park()
 
 
 def ask_user(question: str, options: list[str] | None = None) -> str:

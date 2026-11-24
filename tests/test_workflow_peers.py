@@ -24,7 +24,8 @@ from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.turn_model import ModelScope, resolve_turn_model
 from mindroom.workflow_runs import agent_nodes, peers
 from mindroom.workflow_runs import engine as engine_module
-from mindroom.workflow_runs.models import WorkflowRunState
+from mindroom.workflow_runs.answers import answer_question
+from mindroom.workflow_runs.models import TERMINAL_RUN_STATES, WorkflowNode, WorkflowNodeState, WorkflowRunState
 from mindroom.workflow_runs.peers import (
     DEADLOCK_NOTE,
     NodeRef,
@@ -76,6 +77,7 @@ async def local_stack(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncI
         bound_worker_launch_config(stack.context.config),
     ):
         assert isinstance(stack, LocalWorkflowStack)
+        stack.show()
         stack.gateway_url = stack.scripts.gateway_url = f"http://127.0.0.1:{port}/api/script-gateway"
         stack.served = stack.app()
         stack.continues = coordinator_module._continues
@@ -306,6 +308,17 @@ async def test_everyone_waiting_returns_with_the_note_instead_of_hanging(stack: 
     await stack.submit("/0:p0@0", "agent", {"prompt": "a", "name": "a"}, meta={"name": "a"})
     await stack.submit("/0:p1@0", "agent", {"prompt": "b", "name": "b"}, meta={"name": "b"})
     both_submitted.set()
+    await stack.until(
+        lambda: all(
+            (n := stack.store.get_node(stack.run_id, k)) is not None and n.waiting_on == "peer"
+            for k in ("/0:p0@0", "/0:p1@0")
+        ),
+    )
+    # Before the 2s grace elapses, neither waiter has deadlocked; advancing the fake clock past 2s unblocks both.
+    stack.now += 1.0
+    await asyncio.sleep(0.05)
+    assert not seen_tool_results
+    stack.now += 1.5
 
     res_a, res_b = await asyncio.wait_for(
         asyncio.gather(
@@ -777,3 +790,141 @@ async def test_woken_peer_waiting_for_slot_or_unread_message_is_not_deadlock(sta
     assert "note" not in got_frontend[0]
     assert [m["text"] for m in got_backend[0]["messages"]] == ["ack"]
     assert "note" not in got_backend[0]
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Local workflow runs are Linux only.")
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pause", [0.0, 0.3])
+async def test_real_sdk_script_sends_after_agent_finishes_no_false_deadlock(
+    local_stack: LocalWorkflowStack,
+    pause: float,
+) -> None:
+    """Opus B1: a script lane finishing agent() and then calling send() does not falsely deadlock a waiting peer."""
+    seen: list[dict[str, Any]] = []
+
+    def _handle(req: ModelRequest) -> list[ScriptStep]:
+        prompt = _user_texts(req)[0]
+        outs = _tool_outputs(req)
+        if prompt == "quick a":
+            return answer("a-done")
+        if not outs:
+            return calls(tool_call("read_peer_messages", "r1", wait_seconds=600))
+        seen.append(outs[0])
+        return answer("b-done")
+
+    _route_agents(local_stack, _handle)
+    script = (
+        "import time\n"
+        "from mindroom.workflow import agent, parallel, send\n"
+        "def lane_a():\n"
+        "    r = agent('quick a', name='a')\n"
+        f"    time.sleep({pause})\n"
+        "    send('b', 'hi from script')\n"
+        "    return r\n"
+        "def main(args):\n"
+        "    return parallel([lane_a, lambda: agent('wait b', name='b')])\n"
+    )
+    run = await local_stack.start(source=script)
+    await asyncio.wait_for(
+        local_stack.until(lambda: local_stack.store.get_run(run.run_id).state in TERMINAL_RUN_STATES),
+        timeout=SETTLE_TIMEOUT_SECONDS,
+    )
+    ended = local_stack.store.get_run(run.run_id)
+    assert ended.state is WorkflowRunState.COMPLETED, ended.error
+    assert len(seen) == 1
+    assert "note" not in seen[0], seen
+    assert [m["text"] for m in seen[0]["messages"]] == ["hi from script"]
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Local workflow runs are Linux only.")
+@pytest.mark.asyncio
+async def test_lone_agent_after_child_ask_user_gets_deadlock_note(local_stack: LocalWorkflowStack) -> None:
+    """Astra blocker 2: a lone agent calling ask_user then read_peer_messages still receives the deadlock note."""
+    seen: list[dict[str, Any]] = []
+
+    def _handle(req: ModelRequest) -> list[ScriptStep]:
+        tools = [m.content for m in req.messages if m.role == "tool" and isinstance(m.content, str)]
+        if len(tools) == 0:
+            return calls(tool_call("ask_user", "q1", question="Continue?"))
+        if len(tools) == 1:
+            assert tools[0] == "yes"
+            return calls(tool_call("read_peer_messages", "r1", wait_seconds=3))
+        seen.append(json.loads(tools[1]))
+        return answer("done")
+
+    _route_agents(local_stack, _handle)
+    script = "from mindroom.workflow import agent\ndef main(args):\n    return agent('solo', name='solo')\n"
+    run = await local_stack.start(source=script)
+
+    def _open_ask() -> WorkflowNode | None:
+        return next(
+            (
+                n
+                for n in local_stack.store.nodes(run.run_id)
+                if n.kind == "ask" and n.state is WorkflowNodeState.WAITING and "event_id" in n.links
+            ),
+            None,
+        )
+
+    await asyncio.wait_for(local_stack.until(_open_ask), timeout=SETTLE_TIMEOUT_SECONDS)
+    ask = _open_ask()
+    assert ask is not None
+    assert (
+        await answer_question(
+            local_stack.engine,
+            run_id=run.run_id,
+            node_id=f"n{ask.seq}",
+            sender=local_stack.context.requester_id,
+            room_id=local_stack.context.room_id,
+            thread_id=local_stack.context.thread_id,
+            card_event_id=ask.links["event_id"],
+            option=None,
+            text="yes",
+        )
+        == "accepted"
+    )
+    await asyncio.wait_for(
+        local_stack.until(lambda: local_stack.store.get_run(run.run_id).state in TERMINAL_RUN_STATES),
+        timeout=SETTLE_TIMEOUT_SECONDS,
+    )
+    ended = local_stack.store.get_run(run.run_id)
+    assert ended.state is WorkflowRunState.COMPLETED, ended.error
+    assert len(seen) == 1
+    assert seen[0].get("note") == DEADLOCK_NOTE, seen
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="Local workflow runs are Linux only.")
+@pytest.mark.asyncio
+async def test_nested_foreach_reader_releases_outer_slot_for_sender(local_stack: LocalWorkflowStack) -> None:
+    """Astra blocker 3: a nested foreach whose reader parks on peer releases the outer max_concurrent=1 slot."""
+    got: list[dict[str, Any]] = []
+
+    def _handle(req: ModelRequest) -> list[ScriptStep]:
+        outs = _tool_outputs(req)
+        if not outs:
+            return calls(tool_call("read_peer_messages", "r1", wait_seconds=600))
+        got.append(outs[0])
+        return answer("read-ok")
+
+    _route_agents(local_stack, _handle)
+    script = (
+        "from mindroom.workflow import agent, foreach, send\n"
+        "def role(kind):\n"
+        "    if kind == 'read':\n"
+        "        return foreach([1], lambda _: agent('wait', name='reader'))[0]\n"
+        "    send('reader', 'go')\n"
+        "    return 'sent'\n"
+        "def main(args):\n"
+        "    return foreach(['read', 'send'], role, max_concurrent=1)\n"
+    )
+    run = await local_stack.start(source=script, max_concurrent=1)
+    await asyncio.wait_for(
+        local_stack.until(lambda: local_stack.store.get_run(run.run_id).state in TERMINAL_RUN_STATES),
+        timeout=SETTLE_TIMEOUT_SECONDS,
+    )
+    ended = local_stack.store.get_run(run.run_id)
+    assert ended.state is WorkflowRunState.COMPLETED, ended.error
+    assert ended.result == ["read-ok", "sent"]
+    assert len(got) == 1
+    assert "note" not in got[0]
+    assert [m["text"] for m in got[0]["messages"]] == ["go"]
