@@ -2162,13 +2162,16 @@ async def test_bridge_refuses_permissive_command_journal(tmp_path: Path, transpo
         )
 
 
-def test_setup_binding_check_accepts_only_the_controller_the_bridge_journal_records(tmp_path: Path) -> None:
-    """Setup's read-only pre-check agrees with the bridge on where its journal lives and whom it is bound to."""
-    DesktopBridge(object(), FakeProvider(), _policy(), journal_path=desktop_journal_path(tmp_path)).close()
+def test_setup_binding_check_accepts_multiple_controllers_and_rejects_corrupt_journal(tmp_path: Path) -> None:
+    """Setup's read-only pre-check accepts multi-controller v2 journals and fails closed on corruption."""
+    journal_path = desktop_journal_path(tmp_path)
+    DesktopBridge(object(), FakeProvider(), _policy(), journal_path=journal_path).close()
 
     check_controller_binding(tmp_path, CONTROLLER)
-    with pytest.raises(DesktopCommandJournalError, match="different controller"):
-        check_controller_binding(tmp_path, replace(CONTROLLER, device_id="OTHER"))
+    check_controller_binding(tmp_path, replace(CONTROLLER, device_id="OTHER"))
+    journal_path.write_bytes(b"corrupt")
+    with pytest.raises(DesktopCommandJournalError):
+        check_controller_binding(tmp_path, CONTROLLER)
 
 
 OTHER_APP_ID = "com.example.Terminal"

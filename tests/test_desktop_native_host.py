@@ -433,22 +433,18 @@ def test_host_status_returns_persisted_browser_settings(tmp_path: Path) -> None:
     ("field", "value"),
     [("user_id", "@other:example.org"), ("device_id", "OTHER"), ("ed25519", "other-key")],
 )
-def test_configure_rejects_controller_changes_without_altering_owned_work(
+def test_configure_allows_controller_changes_without_altering_existing_journal_work(
     tmp_path: Path,
     existing_config: bool,
     field: str,
     value: str,
 ) -> None:
     host = _host(tmp_path)
-    config_path = tmp_path / "desktop_bridge" / "native_config.json"
     if existing_config:
         asyncio.run(host.handle(_request("configure", expected_revision=0, config=_config_payload())))
-    original_config = config_path.read_bytes() if existing_config else None
     journal_path = tmp_path / "desktop_bridge" / "commands.sqlite3"
-    journal = DesktopCommandJournal.load(
-        journal_path,
-        controller_key='["@controller:example.org", "DEVICE", "key"]',
-    )
+    original_key = '["@controller:example.org", "DEVICE", "key"]'
+    journal = DesktopCommandJournal.load(journal_path, controller_key=original_key)
     command = DesktopCommand("request", "session", 1, 1000, 31000, "status", "@person:example.org", "assistant")
     journal.admit(command, "a" * 64)
     journal.close()
@@ -457,15 +453,32 @@ def test_configure_rejects_controller_changes_without_altering_owned_work(
     payload["revision"] = int(existing_config)
     cast("dict[str, str]", payload["controller"])[field] = value
 
-    with pytest.raises(NativeProtocolError, match="different controller") as caught:
-        asyncio.run(host.handle(_request("configure", expected_revision=int(existing_config), config=payload)))
+    result = asyncio.run(host.handle(_request("configure", expected_revision=int(existing_config), config=payload)))
+
+    assert result["status"]["config"]["revision"] == int(existing_config) + 1
+    assert journal_path.read_bytes() == original_journal
+    restored = DesktopCommandJournal.load(journal_path, controller_key=original_key)
+    assert [entry.command for entry in restored.queued()] == [command]
+    restored.close()
+
+
+def test_configure_rejects_corrupt_journal_without_altering_config(tmp_path: Path) -> None:
+    host = _host(tmp_path)
+    config_path = tmp_path / "desktop_bridge" / "native_config.json"
+    asyncio.run(host.handle(_request("configure", expected_revision=0, config=_config_payload())))
+    original_config = config_path.read_bytes()
+    journal_path = tmp_path / "desktop_bridge" / "commands.sqlite3"
+    journal_path.write_bytes(b"corrupt")
+    journal_path.chmod(0o600)
+    payload = _config_payload()
+    payload.update(revision=1, allowed_app_ids=["com.example.Other"])
+
+    with pytest.raises(NativeProtocolError) as caught:
+        asyncio.run(host.handle(_request("configure", expected_revision=1, config=payload)))
 
     assert caught.value.code == "invalid_request"
-    assert journal_path.read_bytes() == original_journal
-    assert config_path.exists() == existing_config
-    if existing_config:
-        assert config_path.read_bytes() == original_config
-    assert host.status()["config"]["revision"] == int(existing_config)
+    assert config_path.read_bytes() == original_config
+    assert host.status()["config"]["revision"] == 1
 
 
 def test_configure_same_controller_preserves_journal_and_saves_app_changes(tmp_path: Path) -> None:

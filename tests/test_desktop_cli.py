@@ -399,26 +399,32 @@ def test_desktop_setup_repairs_malformed_or_exposed_config(
     assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
 
-@pytest.mark.parametrize(("journal_device_id", "accepted"), [("CLOUD", True), ("OTHER", False)])
+@pytest.mark.parametrize(("journal_state", "accepted"), [("CLOUD", True), ("OTHER", True), ("corrupt", False)])
 @pytest.mark.usefixtures("cli_runtime")
-def test_desktop_setup_pairs_only_the_controller_the_bridge_journal_is_bound_to(
+def test_desktop_setup_validates_journal_and_allows_additional_controllers(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
-    journal_device_id: str,
+    journal_state: str,
     *,
     accepted: bool,
 ) -> None:
-    """Setup refuses, before pairing, a controller that the existing command journal would reject at run time."""
+    """Setup accepts additional controllers against a valid v2 journal and refuses a corrupt journal before pairing."""
     save_desktop_session(
         tmp_path / "desktop_bridge" / "matrix_session.json",
         DesktopMatrixSession("https://matrix.example.org", "@alice:example.org", "DESKTOP", "saved-token"),
     )
-    DesktopCommandJournal.load(
-        desktop_journal_path(tmp_path),
-        controller_key=controller_journal_key(
-            PinnedMatrixDevice("@computer:example.org", journal_device_id, "cloud-fingerprint"),
-        ),
-    ).close()
+    journal_path = desktop_journal_path(tmp_path)
+    if journal_state == "corrupt":
+        journal_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        journal_path.write_bytes(b"corrupt")
+        journal_path.chmod(0o600)
+    else:
+        DesktopCommandJournal.load(
+            journal_path,
+            controller_key=controller_journal_key(
+                PinnedMatrixDevice("@computer:example.org", journal_state, "cloud-fingerprint"),
+            ),
+        ).close()
     pair = MagicMock()
     monkeypatch.setattr(desktop_cli, "desktop_pair", pair)
 
@@ -426,7 +432,6 @@ def test_desktop_setup_pairs_only_the_controller_the_bridge_journal_is_bound_to(
 
     assert result.exit_code == (0 if accepted else 1), result.output
     assert pair.called is accepted
-    assert ("different controller" in result.output) is not accepted
     assert native_config_path(tmp_path).exists() is accepted
 
 

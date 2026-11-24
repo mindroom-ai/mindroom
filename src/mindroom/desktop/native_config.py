@@ -17,7 +17,7 @@ from mindroom.durable_write import create_directory_durable, write_json_file_dur
 from mindroom.file_locks import advisory_file_lock
 from mindroom.matrix.device_identity import PinnedMatrixDevice
 
-_TOP_LEVEL_KEYS = frozenset(
+_V1_TOP_LEVEL_KEYS = frozenset(
     {
         "v",
         "revision",
@@ -30,7 +30,21 @@ _TOP_LEVEL_KEYS = frozenset(
         "browser",
     },
 )
-_EXTENDED_KEYS = _TOP_LEVEL_KEYS | {"files", "shell"}
+_V1_EXTENDED_KEYS = _V1_TOP_LEVEL_KEYS | {"files", "shell"}
+_V2_TOP_LEVEL_KEYS = frozenset(
+    {
+        "v",
+        "revision",
+        "enabled",
+        "controllers",
+        "allowed_app_ids",
+        "capture",
+        "browser",
+    },
+)
+_V2_EXTENDED_KEYS = _V2_TOP_LEVEL_KEYS | {"files", "shell"}
+_CONTROLLER_ENTRY_KEYS = frozenset({"controller", "allowed_requester_ids", "allowed_agent_names"})
+_MAX_CONTROLLERS = 64
 _MAX_ROOTS = 32
 _MAX_ROOT_LENGTH = 4_096
 # Folder reads confine through POSIX descriptors; shell commands need process groups and the login account.
@@ -49,6 +63,20 @@ class NativeConfigError(ValueError):
         super().__init__(message)
         self.code = code
         self.revision = revision
+
+
+@dataclass(frozen=True, slots=True)
+class NativeControllerEntry:
+    """One pinned controller and its local requester/agent allowlist."""
+
+    controller: PinnedMatrixDevice
+    allowed_requester_ids: tuple[str, ...]
+    allowed_agent_names: tuple[str, ...]
+
+    def __post_init__(self) -> None:
+        """Validate non-empty unique requester and agent allowlists."""
+        _validate_text_items(self.allowed_requester_ids, "allowed requester")
+        _validate_text_items(self.allowed_agent_names, "allowed agent")
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,20 +111,67 @@ class NativeShellConfig:
     enabled: bool = False
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, init=False)
 class NativeDesktopConfig:
     """Complete non-secret configuration for one helper."""
 
     revision: int
     enabled: bool
-    controller: PinnedMatrixDevice
-    allowed_requester_ids: tuple[str, ...]
-    allowed_agent_names: tuple[str, ...]
     allowed_app_ids: tuple[str, ...]
     capture: NativeCaptureConfig
     browser: NativeBrowserConfig
     files: NativeFilesConfig = field(default_factory=NativeFilesConfig)
     shell: NativeShellConfig = field(default_factory=NativeShellConfig)
+    controllers: tuple[NativeControllerEntry, ...] = ()
+
+    def __init__(
+        self,
+        *,
+        revision: int,
+        enabled: bool,
+        allowed_app_ids: tuple[str, ...],
+        capture: NativeCaptureConfig,
+        browser: NativeBrowserConfig,
+        files: NativeFilesConfig | None = None,
+        shell: NativeShellConfig | None = None,
+        controllers: tuple[NativeControllerEntry, ...] | None = None,
+        controller: PinnedMatrixDevice | None = None,
+        allowed_requester_ids: tuple[str, ...] | None = None,
+        allowed_agent_names: tuple[str, ...] | None = None,
+    ) -> None:
+        """Accept either multi-controller entries or single-controller fields."""
+        resolved_controllers = _resolve_controllers(
+            controllers=controllers,
+            controller=controller,
+            allowed_requester_ids=allowed_requester_ids,
+            allowed_agent_names=allowed_agent_names,
+            enabled=enabled,
+        )
+        object.__setattr__(self, "revision", revision)
+        object.__setattr__(self, "enabled", enabled)
+        object.__setattr__(self, "allowed_app_ids", allowed_app_ids)
+        object.__setattr__(self, "capture", capture)
+        object.__setattr__(self, "browser", browser)
+        object.__setattr__(self, "files", NativeFilesConfig() if files is None else files)
+        object.__setattr__(self, "shell", NativeShellConfig() if shell is None else shell)
+        object.__setattr__(self, "controllers", resolved_controllers)
+
+    @property
+    def controller(self) -> PinnedMatrixDevice:
+        """Primary controller for single-controller callers."""
+        if not self.controllers:
+            raise NativeConfigError("configuration_missing", "Native desktop configuration has no paired controllers.")
+        return self.controllers[0].controller
+
+    @property
+    def allowed_requester_ids(self) -> tuple[str, ...]:
+        """Allowed requester IDs for the primary controller."""
+        return self.controllers[0].allowed_requester_ids if self.controllers else ()
+
+    @property
+    def allowed_agent_names(self) -> tuple[str, ...]:
+        """Allowed agent names for the primary controller."""
+        return self.controllers[0].allowed_agent_names if self.controllers else ()
 
     @property
     def has_local_capability(self) -> bool:
@@ -105,10 +180,15 @@ class NativeDesktopConfig:
 
     @classmethod
     def from_payload(cls, raw: object, *, validate_browser_paths: bool = True) -> NativeDesktopConfig:
-        """Parse a strict version-one configuration without checking saved root availability."""
+        """Parse a strict v1 or v2 configuration without checking saved root availability."""
         payload = _mapping(raw, "configuration")
         version = payload.get("v")
-        if set(payload) not in {_TOP_LEVEL_KEYS, _EXTENDED_KEYS} or type(version) is not int or version != 1:
+        keys = set(payload)
+        if type(version) is int and version == 1 and keys in {_V1_TOP_LEVEL_KEYS, _V1_EXTENDED_KEYS}:
+            controllers = (_controller_entry_from_fields(payload),)
+        elif type(version) is int and version == 2 and keys in {_V2_TOP_LEVEL_KEYS, _V2_EXTENDED_KEYS}:
+            controllers = _controllers_from_payload(payload.get("controllers"))
+        else:
             raise NativeConfigError(
                 "invalid_request",
                 "Native desktop configuration has unsupported fields or version.",
@@ -117,17 +197,6 @@ class NativeDesktopConfig:
         enabled = payload.get("enabled")
         if not isinstance(enabled, bool):
             raise NativeConfigError("invalid_request", "Native desktop enabled must be a boolean.")
-        controller_raw = _mapping(payload.get("controller"), "controller")
-        if set(controller_raw) != {"user_id", "device_id", "ed25519"}:
-            raise NativeConfigError("invalid_request", "Native desktop controller must contain its exact identity.")
-        try:
-            controller = PinnedMatrixDevice(
-                user_id=_text(controller_raw.get("user_id"), "controller user_id"),
-                device_id=_text(controller_raw.get("device_id"), "controller device_id"),
-                ed25519=_text(controller_raw.get("ed25519"), "controller ed25519"),
-            )
-        except ValueError as exc:
-            raise NativeConfigError("invalid_request", str(exc)) from exc
         capture_raw = _mapping(payload.get("capture"), "capture")
         if set(capture_raw) != {"max_screenshot_width", "jpeg_quality"}:
             raise NativeConfigError("invalid_request", "Native desktop capture has unsupported fields.")
@@ -165,9 +234,7 @@ class NativeDesktopConfig:
         return cls(
             revision=revision,
             enabled=enabled,
-            controller=controller,
-            allowed_requester_ids=_text_tuple(payload.get("allowed_requester_ids"), "allowed requester"),
-            allowed_agent_names=_text_tuple(payload.get("allowed_agent_names"), "allowed agent"),
+            controllers=controllers,
             allowed_app_ids=_allowed_app_ids(payload.get("allowed_app_ids")),
             capture=capture,
             browser=browser,
@@ -205,19 +272,42 @@ class NativeDesktopConfig:
             raise NativeConfigError("invalid_request", "Native desktop roots must be unique canonical paths.")
         return replace(self, files=NativeFilesConfig(tuple(roots)))
 
+    def with_upserted_controller(self, entry: NativeControllerEntry) -> NativeDesktopConfig:
+        """Update an existing matching controller or append a new one; reject key changes for the same device."""
+        device_key = (entry.controller.user_id, entry.controller.device_id)
+        updated: list[NativeControllerEntry] = []
+        matched = False
+        for existing in self.controllers:
+            if (existing.controller.user_id, existing.controller.device_id) == device_key:
+                if existing.controller.ed25519 != entry.controller.ed25519:
+                    raise NativeConfigError(
+                        "invalid_request",
+                        "Native desktop controllers must not have conflicting keys for the same device.",
+                    )
+                updated.append(entry)
+                matched = True
+            else:
+                updated.append(existing)
+        if not matched:
+            updated.append(entry)
+        return replace(self, controllers=tuple(updated))
+
+    def with_removed_controller(self, controller_key: str) -> NativeDesktopConfig:
+        """Remove one controller matching ``controller_journal_key``; disable when removing the last controller."""
+        if not isinstance(controller_key, str) or not controller_key.strip():
+            raise NativeConfigError("invalid_request", "Native desktop controller key must be non-empty text.")
+        remaining = tuple(entry for entry in self.controllers if _controller_key(entry.controller) != controller_key)
+        if len(remaining) == len(self.controllers):
+            raise NativeConfigError("invalid_request", "Native desktop controller was not found.")
+        if not remaining:
+            return replace(self, enabled=False, controllers=())
+        return replace(self, controllers=remaining)
+
     def to_payload(self) -> dict[str, object]:
-        """Serialize the complete non-secret configuration."""
-        return {
-            "v": 1,
+        """Serialize as v1 for a single controller and v2 for zero or multiple controllers."""
+        common: dict[str, object] = {
             "revision": self.revision,
             "enabled": self.enabled,
-            "controller": {
-                "user_id": self.controller.user_id,
-                "device_id": self.controller.device_id,
-                "ed25519": self.controller.ed25519,
-            },
-            "allowed_requester_ids": list(self.allowed_requester_ids),
-            "allowed_agent_names": list(self.allowed_agent_names),
             "allowed_app_ids": list(self.allowed_app_ids),
             "capture": {
                 "max_screenshot_width": self.capture.max_screenshot_width,
@@ -231,6 +321,27 @@ class NativeDesktopConfig:
             },
             "files": {"roots": [str(root) for root in self.files.roots]},
             "shell": {"enabled": self.shell.enabled},
+        }
+        if len(self.controllers) == 1:
+            entry = self.controllers[0]
+            return {
+                "v": 1,
+                "controller": _controller_payload(entry.controller),
+                "allowed_requester_ids": list(entry.allowed_requester_ids),
+                "allowed_agent_names": list(entry.allowed_agent_names),
+                **common,
+            }
+        return {
+            "v": 2,
+            "controllers": [
+                {
+                    "controller": _controller_payload(entry.controller),
+                    "allowed_requester_ids": list(entry.allowed_requester_ids),
+                    "allowed_agent_names": list(entry.allowed_agent_names),
+                }
+                for entry in self.controllers
+            ],
+            **common,
         }
 
 
@@ -337,6 +448,129 @@ def save_native_config(
         return saved
 
 
+def _controller_key(controller: PinnedMatrixDevice) -> str:
+    """Return the canonical key matching ``command_journal.controller_journal_key``."""
+    return json.dumps([controller.user_id, controller.device_id, controller.ed25519])
+
+
+def _controller_payload(controller: PinnedMatrixDevice) -> dict[str, str]:
+    return {
+        "user_id": controller.user_id,
+        "device_id": controller.device_id,
+        "ed25519": controller.ed25519,
+    }
+
+
+def _controller_from_payload(raw: object) -> PinnedMatrixDevice:
+    controller_raw = _mapping(raw, "controller")
+    if set(controller_raw) != {"user_id", "device_id", "ed25519"}:
+        raise NativeConfigError("invalid_request", "Native desktop controller must contain its exact identity.")
+    try:
+        return PinnedMatrixDevice(
+            user_id=_text(controller_raw.get("user_id"), "controller user_id"),
+            device_id=_text(controller_raw.get("device_id"), "controller device_id"),
+            ed25519=_text(controller_raw.get("ed25519"), "controller ed25519"),
+        )
+    except ValueError as exc:
+        raise NativeConfigError("invalid_request", str(exc)) from exc
+
+
+def _controller_entry_from_fields(payload: dict[str, object]) -> NativeControllerEntry:
+    return NativeControllerEntry(
+        controller=_controller_from_payload(payload.get("controller")),
+        allowed_requester_ids=_text_tuple(payload.get("allowed_requester_ids"), "allowed requester"),
+        allowed_agent_names=_text_tuple(payload.get("allowed_agent_names"), "allowed agent"),
+    )
+
+
+def _controllers_from_payload(raw: object) -> tuple[NativeControllerEntry, ...]:
+    if not isinstance(raw, list) or len(raw) > _MAX_CONTROLLERS:
+        raise NativeConfigError(
+            "invalid_request",
+            f"Native desktop controllers must be a list of at most {_MAX_CONTROLLERS} entries.",
+        )
+    entries: list[NativeControllerEntry] = []
+    for item in raw:
+        entry_raw = _mapping(item, "controller entry")
+        if set(entry_raw) != _CONTROLLER_ENTRY_KEYS:
+            raise NativeConfigError("invalid_request", "Native desktop controller entry has unsupported fields.")
+        entries.append(_controller_entry_from_fields(entry_raw))
+    return tuple(entries)
+
+
+def _resolve_controllers(
+    *,
+    controllers: tuple[NativeControllerEntry, ...] | None,
+    controller: PinnedMatrixDevice | None,
+    allowed_requester_ids: tuple[str, ...] | None,
+    allowed_agent_names: tuple[str, ...] | None,
+    enabled: bool,
+) -> tuple[NativeControllerEntry, ...]:
+    resolved = () if controllers is None else tuple(controllers)
+    if controller is not None or allowed_requester_ids is not None or allowed_agent_names is not None:
+        if not resolved:
+            if controller is None:
+                raise NativeConfigError(
+                    "invalid_request",
+                    "Native desktop controller must be set when controller allowlists are provided.",
+                )
+            resolved = (
+                NativeControllerEntry(
+                    controller=controller,
+                    allowed_requester_ids=() if allowed_requester_ids is None else allowed_requester_ids,
+                    allowed_agent_names=() if allowed_agent_names is None else allowed_agent_names,
+                ),
+            )
+        else:
+            primary = resolved[0]
+            resolved = (
+                NativeControllerEntry(
+                    controller=primary.controller if controller is None else controller,
+                    allowed_requester_ids=(
+                        primary.allowed_requester_ids if allowed_requester_ids is None else allowed_requester_ids
+                    ),
+                    allowed_agent_names=(
+                        primary.allowed_agent_names if allowed_agent_names is None else allowed_agent_names
+                    ),
+                ),
+                *resolved[1:],
+            )
+    return _validate_controllers(resolved, enabled=enabled)
+
+
+def _validate_controllers(
+    controllers: tuple[NativeControllerEntry, ...],
+    *,
+    enabled: bool,
+) -> tuple[NativeControllerEntry, ...]:
+    if len(controllers) > _MAX_CONTROLLERS:
+        raise NativeConfigError(
+            "invalid_request",
+            f"Native desktop controllers must be a list of at most {_MAX_CONTROLLERS} entries.",
+        )
+    if enabled and not controllers:
+        raise NativeConfigError(
+            "invalid_request",
+            "Native desktop configuration must have at least one controller when enabled.",
+        )
+    seen_devices: dict[tuple[str, str], str] = {}
+    for entry in controllers:
+        device_key = (entry.controller.user_id, entry.controller.device_id)
+        existing_ed25519 = seen_devices.get(device_key)
+        if existing_ed25519 is not None:
+            if existing_ed25519 == entry.controller.ed25519:
+                raise NativeConfigError(
+                    "invalid_request",
+                    "Native desktop controllers must not contain duplicate entries.",
+                )
+            raise NativeConfigError(
+                "invalid_request",
+                "Native desktop controllers must not have conflicting keys for the same device.",
+            )
+        seen_devices[device_key] = entry.controller.ed25519
+    return controllers
+
+
 def _mapping(raw: object, label: str) -> dict[str, object]:
     if not isinstance(raw, dict) or any(not isinstance(key, str) for key in raw):
         raise NativeConfigError("invalid_request", f"Native desktop {label} must be a JSON object.")
@@ -349,15 +583,21 @@ def _text(raw: object, label: str) -> str:
     return raw
 
 
-def _text_tuple(raw: object, label: str, *, allow_empty: bool = False) -> tuple[str, ...]:
-    if not isinstance(raw, list) or len(raw) > 256:
+def _validate_text_items(items: tuple[str, ...], label: str, *, allow_empty: bool = False) -> tuple[str, ...]:
+    if len(items) > 256:
         raise NativeConfigError("invalid_request", f"Native desktop {label} must be a list of at most 256 entries.")
-    if not raw and not allow_empty:
+    if not items and not allow_empty:
         raise NativeConfigError("invalid_request", f"Native desktop {label} list must not be empty.")
-    values = tuple(_text(value, label) for value in raw)
+    values = tuple(_text(value, label) for value in items)
     if len(set(values)) != len(values):
         raise NativeConfigError("invalid_request", f"Native desktop {label} list must not contain duplicates.")
     return values
+
+
+def _text_tuple(raw: object, label: str, *, allow_empty: bool = False) -> tuple[str, ...]:
+    if not isinstance(raw, list) or len(raw) > 256:
+        raise NativeConfigError("invalid_request", f"Native desktop {label} must be a list of at most 256 entries.")
+    return _validate_text_items(tuple(raw), label, allow_empty=allow_empty)
 
 
 def _allowed_app_ids(raw: object) -> tuple[str, ...]:
@@ -420,6 +660,7 @@ __all__ = [
     "NativeBrowserConfig",
     "NativeCaptureConfig",
     "NativeConfigError",
+    "NativeControllerEntry",
     "NativeDesktopConfig",
     "NativeFilesConfig",
     "NativeShellConfig",

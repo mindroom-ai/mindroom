@@ -14,8 +14,10 @@ from pathlib import Path
 
 import pytest
 
+from mindroom.desktop.command_journal import controller_journal_key
 from mindroom.desktop.native_config import (
     NativeConfigError,
+    NativeControllerEntry,
     NativeDesktopConfig,
     NativeFilesConfig,
     NativeShellConfig,
@@ -23,6 +25,7 @@ from mindroom.desktop.native_config import (
     native_config_path,
     save_native_config,
 )
+from mindroom.matrix.device_identity import PinnedMatrixDevice
 
 
 def _payload(**updates: object) -> dict[str, object]:
@@ -345,3 +348,152 @@ def test_unsupported_config_path_cannot_be_repaired(
     assert caught.value.code == "invalid_request"
     assert path.lstat() == before
     assert target.read_text() == "{"
+
+
+def _v2_payload(controllers: list[dict[str, object]], **updates: object) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "v": 2,
+        "revision": 0,
+        "enabled": True,
+        "controllers": controllers,
+        "allowed_app_ids": ["com.example.Editor"],
+        "capture": {"max_screenshot_width": 1568, "jpeg_quality": 80},
+        "browser": {
+            "enabled": False,
+            "executable_path": None,
+            "user_data_dir": None,
+            "timeout_seconds": 90,
+        },
+    }
+    payload.update(updates)
+    return payload
+
+
+def _controller_entry_payload(
+    user_id: str = "@controller:example.org",
+    device_id: str = "DEVICE",
+    ed25519: str = "key",
+    *,
+    requesters: list[str] | None = None,
+    agents: list[str] | None = None,
+) -> dict[str, object]:
+    return {
+        "controller": {"user_id": user_id, "device_id": device_id, "ed25519": ed25519},
+        "allowed_requester_ids": ["@person:example.org"] if requesters is None else requesters,
+        "allowed_agent_names": ["assistant"] if agents is None else agents,
+    }
+
+
+def test_v1_payload_loads_into_single_controller_entry(tmp_path: Path) -> None:
+    path = native_config_path(tmp_path)
+    path.parent.mkdir(mode=0o700)
+    path.write_text(json.dumps(_payload(revision=2)), encoding="utf-8")
+    path.chmod(0o600)
+
+    loaded = load_native_config(path)
+    expected_entry = NativeControllerEntry(
+        controller=PinnedMatrixDevice("@controller:example.org", "DEVICE", "key"),
+        allowed_requester_ids=("@person:example.org",),
+        allowed_agent_names=("assistant",),
+    )
+    assert loaded.controllers == (expected_entry,)
+    assert loaded.controller == expected_entry.controller
+    assert loaded.allowed_requester_ids == expected_entry.allowed_requester_ids
+    assert loaded.allowed_agent_names == expected_entry.allowed_agent_names
+    assert loaded.to_payload()["v"] == 1
+
+    explicit_v2 = NativeDesktopConfig.from_payload(_v2_payload([_controller_entry_payload()], revision=2))
+    assert explicit_v2 == loaded
+    assert explicit_v2.to_payload()["v"] == 1
+
+
+def test_v2_roundtrip_and_upsert_remove_controller(tmp_path: Path) -> None:
+    path = native_config_path(tmp_path)
+    first = NativeControllerEntry(
+        controller=PinnedMatrixDevice("@controller:example.org", "DEVICE", "key"),
+        allowed_requester_ids=("@person:example.org",),
+        allowed_agent_names=("assistant",),
+    )
+    second = NativeControllerEntry(
+        controller=PinnedMatrixDevice("@other:example.org", "DEVICE_B", "key-b"),
+        allowed_requester_ids=("@alice:example.org",),
+        allowed_agent_names=("coder",),
+    )
+
+    cfg = NativeDesktopConfig.from_payload(_payload())
+    multi = cfg.with_upserted_controller(second)
+    assert multi.controllers == (first, second)
+    assert multi.controller == first.controller
+    assert multi.allowed_requester_ids == first.allowed_requester_ids
+    assert multi.allowed_agent_names == first.allowed_agent_names
+    assert multi.to_payload()["v"] == 2
+    assert "controller" not in multi.to_payload()
+
+    saved = save_native_config(path, multi, expected_revision=0)
+    assert json.loads(path.read_text(encoding="utf-8"))["v"] == 2
+    assert load_native_config(path) == saved
+
+    updated_first = NativeControllerEntry(
+        controller=first.controller,
+        allowed_requester_ids=("@person:example.org", "@bob:example.org"),
+        allowed_agent_names=("assistant", "reviewer"),
+    )
+    upserted = saved.with_upserted_controller(updated_first)
+    assert upserted.controllers == (updated_first, second)
+
+    one_left = upserted.with_removed_controller(controller_journal_key(first.controller))
+    assert one_left.enabled is True
+    assert one_left.controllers == (second,)
+    assert one_left.controller == second.controller
+    assert one_left.to_payload()["v"] == 1
+
+    empty = one_left.with_removed_controller(controller_journal_key(second.controller))
+    assert empty.enabled is False
+    assert empty.controllers == ()
+    assert empty.allowed_requester_ids == ()
+    assert empty.allowed_agent_names == ()
+    assert empty.to_payload()["v"] == 2
+    assert empty.to_payload()["controllers"] == []
+    with pytest.raises(NativeConfigError) as missing_controller:
+        _ = empty.controller
+    assert missing_controller.value.code == "configuration_missing"
+
+    saved_empty = save_native_config(path, empty, expected_revision=1)
+    assert load_native_config(path) == saved_empty
+
+    with pytest.raises(NativeConfigError) as unknown_remove:
+        saved.with_removed_controller("unknown-controller-key")
+    assert unknown_remove.value.code == "invalid_request"
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        _v2_payload([_controller_entry_payload(), _controller_entry_payload()]),
+        _v2_payload([_controller_entry_payload(), _controller_entry_payload(ed25519="different-key")]),
+        _v2_payload([], enabled=True),
+        _v2_payload([_controller_entry_payload()], v=3),
+        _v2_payload([_controller_entry_payload()], unknown=True),
+        _v2_payload([_controller_entry_payload()], controller={"user_id": "@a:b", "device_id": "D", "ed25519": "k"}),
+        _v2_payload([{**_controller_entry_payload(), "extra": True}]),
+        _v2_payload([_controller_entry_payload(requesters=[])]),
+        _v2_payload([_controller_entry_payload(agents=["dup", "dup"])]),
+        _v2_payload([_controller_entry_payload()], files={"roots": []}),
+    ],
+)
+def test_v2_rejects_invalid_and_duplicate_controller_payloads(payload: dict[str, object]) -> None:
+    with pytest.raises(NativeConfigError) as caught:
+        NativeDesktopConfig.from_payload(payload)
+    assert caught.value.code == "invalid_request"
+
+
+def test_upsert_rejects_mismatched_ed25519_for_same_device() -> None:
+    cfg = NativeDesktopConfig.from_payload(_payload())
+    conflicting = NativeControllerEntry(
+        controller=PinnedMatrixDevice("@controller:example.org", "DEVICE", "other-key"),
+        allowed_requester_ids=("@person:example.org",),
+        allowed_agent_names=("assistant",),
+    )
+    with pytest.raises(NativeConfigError) as caught:
+        cfg.with_upserted_controller(conflicting)
+    assert caught.value.code == "invalid_request"
