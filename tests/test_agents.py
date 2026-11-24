@@ -401,9 +401,7 @@ def test_create_agent_includes_matrix_reply_targeting_policy() -> None:
     assert "explicit Matrix mentions" in role
     assert "Plain-text display names are not Matrix mentions" in role
     assert "configured teams run their team workflow" in role
-    assert (
-        "If asked why you didn't answer an earlier unmentioned message, explain you weren't dispatched for it." in role
-    )
+    assert "If asked why an earlier message went unanswered, note you may not have been dispatched for it." in role
 
 
 def test_config_round_trips_structured_agent_tool_entries() -> None:
