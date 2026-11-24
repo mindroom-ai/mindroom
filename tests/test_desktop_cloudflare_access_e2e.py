@@ -489,7 +489,7 @@ def test_desktop_setup_pairs_through_cloudflare_access(tmp_path: Path) -> None:
             verification=verification,
         )
 
-    assert f"!desktop confirm {AGENT} {paired.token} {verification}" in paired.output
+    assert f"!desktop confirm {paired.token} {verification}" in paired.output
     assert homeserver.rejected == []
     assert homeserver.unhandled == []
     assert (confirmed.device_user_id, confirmed.device_id, confirmed.device_ed25519) == (

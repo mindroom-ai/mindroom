@@ -558,10 +558,21 @@ def test_setup_preserves_folder_shell_and_apps_when_repairing_or_rotating_contro
 
     assert other.exit_code == 0, other.output
     saved = load_native_config(path)
-    assert saved.controller.device_id == "OTHER"
+    assert [entry.controller.device_id for entry in saved.controllers] == ["OTHER"]
     assert saved.files.roots == (folder,)
     assert saved.shell.enabled is True
     assert saved.allowed_app_ids == initial.allowed_app_ids
+
+    different_user_args = _setup_args()
+    different_user_args[different_user_args.index("--controller-user-id") + 1] = "@other-agent:example.org"
+    different_user_args[different_user_args.index("--controller-device-id") + 1] = "OTHER_AGENT"
+    switched = CliRunner().invoke(desktop_cli.desktop_app, different_user_args)
+    assert switched.exit_code == 0, switched.output
+    after_switch = load_native_config(path)
+    assert [entry.controller.user_id for entry in after_switch.controllers] == ["@other-agent:example.org"]
+    assert after_switch.files.roots == ()
+    assert after_switch.shell.enabled is False
+    assert after_switch.allowed_app_ids == ()
 
 
 def test_folder_and_shell_run_skips_gui_dependencies(
@@ -693,7 +704,7 @@ def test_cli_setup_handles_empty_controllers_and_preserves_unrelated_controllers
 
     first = CliRunner().invoke(desktop_cli.desktop_app, [*_setup_args(), "--allow-app", "com.apple.TextEdit"])
     assert first.exit_code == 0, first.output
-    assert "!desktop confirm mind short-lived-code VERIFY-99" in first.output
+    assert "!desktop confirm short-lived-code VERIFY-99" in first.output
     saved_first = load_native_config(path)
     assert saved_first.revision == 2
     assert len(saved_first.controllers) == 1

@@ -71,7 +71,7 @@ To drive the user's signed-in browser, also configure the [`browser`](web-scrapi
 Only the same requester with the same agent can confirm or use the pairing.
 Until pairing is confirmed, `desktop` calls return a setup-required result while the agent's other tools keep working, and the model cannot register or replace a device itself.
 
-Repeating setup for the same controller, rotating a controller device, or adding another controller keeps saved browser, capture, folder, and shell choices, and keeps app choices unless you supply new app IDs.
+Repeating setup for the same controller or rotating an existing controller device replaces that entry in place and keeps saved browser, capture, folder, and shell choices (and keeps app choices unless you supply new app IDs). When only one controller is saved, setting up a different controller user replaces it and resets saved local access; when multiple controllers are already saved, `mindroom desktop setup` refuses a brand-new controller user so you do not silently wipe or share existing saved access.
 If the saved session belongs to a different homeserver or Matrix user than the setup command names, setup exits without pairing; pass `--storage-path` for a separate setup or run `mindroom desktop login --replace`.
 The separate `mindroom desktop login` and `mindroom desktop pair` commands remain available for manual recovery.
 
@@ -266,7 +266,7 @@ For app-level control of the browser window, or for Safari and other browsers, a
 - **Local allowlists**: Only applications selected locally can be listed, launched, inspected, captured, or controlled, unless full control is live, which covers every app.
   An allowed app can still open a link or document in another app, which the bridge cannot then inspect or control unless that app is also allowlisted.
   Allowlisting a browser exposes whichever window and tab is selected, not one website.
-- **MindRoom is excluded**: MindRoom itself (`chat.mindroom.menubar`) and its desktop helper (`chat.mindroom.desktophelper`) can never be allowlisted or targeted under full control, because their windows grant shell auto-approval, control, and app access.
+- **MindRoom is excluded**: MindRoom's own apps (`chat.mindroom.menubar`, `chat.mindroom.app`) and their helpers (`chat.mindroom.desktophelper`, `chat.mindroom.app.helper*`) can never be allowlisted or targeted under full control, because their windows grant shell auto-approval, control, and app access.
 - **No remote authority**: Cloud configuration, chat messages, and model output cannot enable control or full control, extend a lease, change local allowlists or folders, enable shell commands, or approve one.
 - **Ending control**: **Revoke** in the macOS app or its menu, **Stop Access**, or stopping the terminal bridge ends input; the pointer position never does.
 - **Local audit log**: The bridge logs each completed or rejected command without its parameters, values, or typed text.
@@ -449,8 +449,8 @@ Adding `run_shell` to the set adds a chat confirmation before the request is sen
 - **Rotate the local device**: Run `mindroom desktop login --replace`, revoke the old device in your Matrix account settings, then run `!desktop rotate` in the agent chat and follow its pairing command.
   `--replace` does not revoke the old device by itself.
   If a `browser` tool uses the desktop target, update its `device_id` and `device_ed25519` settings to the new device, or its calls fail.
-- **Add or change cloud controllers**: The v2 command journal (`commands.sqlite3`) isolates command history per controller inside one storage directory, so a single bridge can serve multiple paired cloud controllers or rotate an existing controller device without switching `--storage-path`.
-  Run `mindroom desktop setup` (or upsert/remove controllers in the macOS app) to add, rotate, or remove controllers while keeping existing local capabilities intact.
+- **Add or change cloud controllers**: The v2 command journal (`commands.sqlite3`) and `v: 2` native config isolate command history and allowlists per controller inside one storage directory, so a single bridge can serve multiple paired cloud controllers or rotate an existing controller device without switching `--storage-path`.
+  Use the native helper's `upsert_controller` and `remove_controller` actions (used by MindRoom Chat) to add or remove controllers while keeping existing saved access intact. Run `mindroom desktop setup` (or the legacy macOS menu bar app) to re-pair or rotate an existing controller in place, or to replace a single-controller setup; when multiple controllers are configured, adding another agent requires `upsert_controller` or MindRoom Chat.
 - **Identity mismatch**: A device ID or Ed25519 mismatch is a hard failure; treat it as a rotation or possible substitution and do not bypass it.
 - **Stop**: `Ctrl+C` in the terminal or **Stop Access** in the macOS app stops the bridge and its shell commands.
   An app or browser action already in progress can still finish, so observe local state before retrying it.

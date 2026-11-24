@@ -54,6 +54,10 @@ _POSIX_ONLY_ACCESS = (
     "screenshot observation of the `primary-screen` app. Turn them off with "
     "`mindroom desktop access --clear-folders --no-shell`."
 )
+_MULTI_CONTROLLER_LEGACY_ERROR = (
+    "Multiple controllers are configured; use upsert_controller or MindRoom Chat to add another agent "
+    "without changing existing saved access."
+)
 
 
 class NativeConfigError(ValueError):
@@ -351,6 +355,43 @@ class NativeDesktopConfig:
             ],
             **common,
         }
+
+
+def merge_single_controller_update(
+    existing: NativeDesktopConfig | None,
+    entry: NativeControllerEntry,
+    *,
+    promote_to_primary: bool = False,
+) -> tuple[tuple[NativeControllerEntry, ...], bool]:
+    """Apply a legacy single-controller update and return ``(controllers, preserve_local_access)``.
+
+    With ``<= 1`` saved controllers, replace directly and carry over local access only for the same
+    ``user_id``. With ``> 1`` saved controllers, replace a matching ``user_id`` (optionally promoted
+    to primary) while preserving unrelated controllers and local access, or refuse a brand-new
+    ``user_id``.
+    """
+    if existing is None or len(existing.controllers) <= 1:
+        same_user = bool(
+            existing
+            and existing.controllers
+            and existing.controllers[0].controller.user_id == entry.controller.user_id,
+        )
+        return (entry,), same_user
+    if not any(saved.controller.user_id == entry.controller.user_id for saved in existing.controllers):
+        raise NativeConfigError("invalid_request", _MULTI_CONTROLLER_LEGACY_ERROR)
+    if promote_to_primary:
+        others = tuple(saved for saved in existing.controllers if saved.controller.user_id != entry.controller.user_id)
+        return (entry, *others), True
+    updated: list[NativeControllerEntry] = []
+    inserted = False
+    for saved in existing.controllers:
+        if saved.controller.user_id == entry.controller.user_id:
+            if not inserted:
+                updated.append(entry)
+                inserted = True
+        else:
+            updated.append(saved)
+    return tuple(updated), True
 
 
 def native_config_path(storage_root: Path) -> Path:
@@ -667,6 +708,7 @@ __all__ = [
     "NativeFilesConfig",
     "NativeShellConfig",
     "load_native_config",
+    "merge_single_controller_update",
     "native_config_path",
     "require_supported_local_access",
     "save_native_config",

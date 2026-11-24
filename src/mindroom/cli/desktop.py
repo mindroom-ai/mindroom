@@ -414,14 +414,9 @@ def _claim_pairing(
         raise typer.Exit(1) from None
 
 
-def _print_pairing_confirmation(code: str, verification: str, *, agent_name: str | None = None) -> None:
-    command = (
-        f"!desktop confirm {agent_name} {code} {verification}"
-        if agent_name is not None
-        else f"!desktop confirm {code} {verification}"
-    )
+def _print_pairing_confirmation(code: str, verification: str) -> None:
     _console.print("[green]Pairing claim accepted.[/green] Return to the chat and run:")
-    _console.print(command, markup=False)
+    _console.print(f"!desktop confirm {code} {verification}", markup=False)
 
 
 @desktop_app.command("pair", rich_help_panel="Advanced")
@@ -552,11 +547,7 @@ def desktop_setup(
             cloudflare_access=cloudflare_access,
             matrix_http_headers_file=matrix_http_headers_file,
         )
-        _print_pairing_confirmation(
-            code,
-            verification,
-            agent_name=allow_agent[0] if len(allow_agent) == 1 else None,
-        )
+        _print_pairing_confirmation(code, verification)
         save_desktop_session(
             session_path,
             replace(session, cloudflare_access=cloudflare_access or session.cloudflare_access),
@@ -582,47 +573,34 @@ def _build_setup_config(
     entry: NativeControllerEntry,
     allow_app: list[str] | None,
 ) -> NativeDesktopConfig:
-    """Merge one setup controller into saved config, preserving unrelated controllers and saved capabilities."""
+    """Apply one CLI setup controller update with the shared single/multi-controller merge rule."""
     from mindroom.desktop.native_config import (  # noqa: PLC0415
         NativeBrowserConfig,
         NativeCaptureConfig,
         NativeDesktopConfig,
         NativeFilesConfig,
         NativeShellConfig,
+        merge_single_controller_update,
     )
 
-    if previous is None or not previous.controllers:
-        return NativeDesktopConfig(
+    controllers, preserve_local_access = merge_single_controller_update(previous, entry)
+    if preserve_local_access and previous is not None:
+        return replace(
+            previous,
             revision=base_revision,
             enabled=True,
-            controllers=(entry,),
-            allowed_app_ids=tuple(allow_app) if allow_app is not None else (),
-            capture=NativeCaptureConfig(),
-            browser=NativeBrowserConfig(),
-            files=NativeFilesConfig(),
-            shell=NativeShellConfig(),
+            controllers=controllers,
+            allowed_app_ids=tuple(allow_app) if allow_app is not None else previous.allowed_app_ids,
         )
-    if any(saved.controller == entry.controller for saved in previous.controllers):
-        next_controllers = previous.with_upserted_controller(entry).controllers
-    elif any(saved.controller.user_id == entry.controller.user_id for saved in previous.controllers):
-        controllers: list[NativeControllerEntry] = []
-        inserted = False
-        for saved in previous.controllers:
-            if saved.controller.user_id == entry.controller.user_id:
-                if not inserted:
-                    controllers.append(entry)
-                    inserted = True
-            else:
-                controllers.append(saved)
-        next_controllers = tuple(controllers)
-    else:
-        next_controllers = previous.with_upserted_controller(entry).controllers
-    return replace(
-        previous,
+    return NativeDesktopConfig(
         revision=base_revision,
         enabled=True,
-        controllers=next_controllers,
-        allowed_app_ids=tuple(allow_app) if allow_app is not None else previous.allowed_app_ids,
+        controllers=controllers,
+        allowed_app_ids=tuple(allow_app) if allow_app is not None else (),
+        capture=NativeCaptureConfig(),
+        browser=NativeBrowserConfig(),
+        files=NativeFilesConfig(),
+        shell=NativeShellConfig(),
     )
 
 

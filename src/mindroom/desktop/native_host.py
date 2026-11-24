@@ -30,6 +30,7 @@ from mindroom.desktop.native_config import (
     NativeControllerEntry,
     NativeDesktopConfig,
     load_native_config,
+    merge_single_controller_update,
     native_config_path,
     save_native_config,
 )
@@ -369,9 +370,24 @@ class NativeDesktopHost:
                 else:
                     raw_config = parameters.get("config")
                     config = NativeDesktopConfig.from_payload(raw_config)
-                    config, matched_existing = _merge_v1_configure(self._config, raw_config, config)
-                    # Folder and shell authority carries over only when saving an already-pinned controller.
-                    previous = self._config if matched_existing else None
+                    if isinstance(raw_config, dict) and raw_config.get("v") == 1:
+                        controllers, preserve_local_access = merge_single_controller_update(
+                            self._config,
+                            config.controllers[0],
+                            promote_to_primary=True,
+                        )
+                        config = replace(config, controllers=controllers)
+                    else:
+                        preserve_local_access = (
+                            self._config is not None
+                            and bool(config.controllers)
+                            and all(
+                                any(saved.controller == entry.controller for saved in self._config.controllers)
+                                for entry in config.controllers
+                            )
+                        )
+                    # Folder and shell authority carries over only when saving an already-pinned controller identity.
+                    previous = self._config if preserve_local_access else None
                     if previous is not None and "files" not in cast("dict[str, object]", raw_config):
                         config = replace(config, files=previous.files, shell=previous.shell)
                     else:
@@ -1298,39 +1314,15 @@ def _pair_result(
     device_ed25519: str,
     entry: NativeControllerEntry,
 ) -> dict[str, object]:
-    confirmation_command = (
-        f"!desktop confirm {entry.allowed_agent_names[0]} {code} {verification}"
-        if len(entry.allowed_agent_names) == 1
-        else f"!desktop confirm {code} {verification}"
-    )
-    return {
+    result: dict[str, object] = {
         "verification": verification,
-        "confirmation_command": confirmation_command,
+        "confirmation_command": f"!desktop confirm {code} {verification}",
         "device_id": device_id,
         "device_ed25519": device_ed25519,
     }
-
-
-def _merge_v1_configure(
-    existing: NativeDesktopConfig | None,
-    raw_config: object,
-    incoming: NativeDesktopConfig,
-) -> tuple[NativeDesktopConfig, bool]:
-    """Promote the configured v1 controller to primary while preserving unrelated pins after it."""
-    if existing is None or not existing.controllers:
-        return incoming, False
-    is_v1 = isinstance(raw_config, dict) and raw_config.get("v") == 1 and len(incoming.controllers) == 1
-    if not is_v1:
-        previous_primary = _primary_controller(existing)
-        current_primary = _primary_controller(incoming)
-        return incoming, previous_primary is not None and previous_primary == current_primary
-    entry = incoming.controllers[0]
-    exact_match = any(saved.controller == entry.controller for saved in existing.controllers)
-    device_key = (entry.controller.user_id, entry.controller.device_id)
-    other_entries = tuple(
-        saved for saved in existing.controllers if (saved.controller.user_id, saved.controller.device_id) != device_key
-    )
-    return replace(incoming, controllers=(entry, *other_entries)), exact_match
+    if len(entry.allowed_agent_names) == 1:
+        result["agent_confirmation_command"] = f"!desktop confirm {entry.allowed_agent_names[0]} {code} {verification}"
+    return result
 
 
 def _authority_controllers_status(

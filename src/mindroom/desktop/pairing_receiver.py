@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 from nio import AuthenticatedToDeviceEvent
 
+from mindroom.access_policy import resolve_responder_access
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.authorization import is_sender_allowed_for_responder
 from mindroom.constants import runtime_matrix_homeserver
@@ -98,9 +99,7 @@ class DesktopPairingReceiver:
         config = self._current_config()
         if config is None:
             return True
-        if self.agent_name not in config.agents:
-            return False
-        if not is_human_requester_id(sender_id, config, self.runtime_paths):
+        if self.agent_name not in config.agents or not is_human_requester_id(sender_id, config, self.runtime_paths):
             return False
         membership_index = self.membership_index if self.membership_index is not None else AgentReplyMembershipIndex()
         if is_sender_allowed_for_responder(
@@ -115,18 +114,20 @@ class DesktopPairingReceiver:
         rooms = getattr(self.client, "rooms", None)
         if not isinstance(rooms, Mapping):
             return False
-        return any(
-            sender_id in room.users
-            and sender_id not in getattr(room, "invited_users", ())
-            and is_sender_allowed_for_responder(
-                sender_id,
-                self.agent_name,
-                room.room_id,
-                config,
-                self.runtime_paths,
-                membership_index,
+        if self.membership_index is not None:
+            return any(
+                is_sender_allowed_for_responder(
+                    sender_id,
+                    self.agent_name,
+                    room.room_id,
+                    config,
+                    self.runtime_paths,
+                    self.membership_index,
+                )
+                for room in rooms.values()
             )
-            for room in rooms.values()
+        return resolve_responder_access(config, self.agent_name).current_room_members and any(
+            sender_id in room.users and sender_id not in getattr(room, "invited_users", ()) for room in rooms.values()
         )
 
     def _check_eligibility(self) -> str | None:

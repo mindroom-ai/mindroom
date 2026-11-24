@@ -27,6 +27,7 @@ from mindroom.desktop.native_config import (
     NativeBrowserConfig,
     NativeCaptureConfig,
     NativeConfigError,
+    NativeControllerEntry,
     NativeDesktopConfig,
     NativeFilesConfig,
     NativeShellConfig,
@@ -368,7 +369,7 @@ def test_desktop_setup_logs_in_only_when_needed(
     assert result.exit_code == 0, result.output
     assert login.called is not session_exists
     assert pair.call_args.kwargs["code"] == "short-code"
-    assert "!desktop confirm computer short-code VERIFY123" in result.output
+    assert "!desktop confirm short-code VERIFY123" in result.output
 
 
 @pytest.mark.parametrize(("content", "mode", "saved_revision"), [("{", 0o600, 0), (None, 0o644, 1)])
@@ -1099,20 +1100,22 @@ def test_desktop_plain_lines_keep_emoji_codes_as_written(capsys: pytest.CaptureF
 
 
 @pytest.mark.usefixtures("cli_runtime")
-def test_desktop_setup_additive_and_rotated_controllers_preserve_existing_capabilities(
+def test_desktop_setup_single_replace_multi_rotate_and_multi_refusal(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     empty_selected_root: Path,
 ) -> None:
-    """Adding or rotating a controller via CLI setup preserves saved apps, capture, browser, folders, and shell."""
+    """CLI setup replaces <=1 controller cleanly, rotates matching multi-controller user, and refuses brand-new multi user."""
     session_path = tmp_path / "desktop_bridge" / "matrix_session.json"
     save_desktop_session(
         session_path,
         DesktopMatrixSession("https://matrix.example.org", "@alice:example.org", "DESKTOP", "saved-token"),
     )
     ctrl_a = PinnedMatrixDevice("@computer:example.org", "CLOUD_A", "fp-a")
+    ctrl_a_rot = PinnedMatrixDevice("@computer:example.org", "CLOUD_A2", "fp-a2")
     ctrl_b = PinnedMatrixDevice("@coder:example.org", "CLOUD_B", "fp-b")
-    ctrl_a_rotated = PinnedMatrixDevice("@computer:example.org", "CLOUD_A2", "fp-a2")
+    ctrl_c = PinnedMatrixDevice("@researcher:example.org", "CLOUD_C", "fp-c")
+    config_file = native_config_path(tmp_path)
     initial = NativeDesktopConfig(
         revision=0,
         enabled=True,
@@ -1125,11 +1128,41 @@ def test_desktop_setup_additive_and_rotated_controllers_preserve_existing_capabi
         files=NativeFilesConfig((empty_selected_root,)),
         shell=NativeShellConfig(enabled=True),
     )
-    save_native_config(native_config_path(tmp_path), initial, expected_revision=0)
-    monkeypatch.setattr(desktop_cli, "_claim_pairing", MagicMock(return_value="VERIFY456"))
+    save_native_config(config_file, initial, expected_revision=0)
+    claim_mock = MagicMock(return_value="VERIFY456")
+    monkeypatch.setattr(desktop_cli, "_claim_pairing", claim_mock)
 
-    # Add second controller B without --allow-app -> preserves all saved capabilities and controller A.
-    add_result = runner.invoke(
+    # 1. Single-controller rotation (same user_id) replaces cleanly (no dead retired device) and keeps capabilities.
+    rotate_single = runner.invoke(
+        desktop_app,
+        [
+            "setup",
+            "--homeserver",
+            "https://matrix.example.org",
+            "--code",
+            "code-a2",
+            "--controller-user-id",
+            ctrl_a_rot.user_id,
+            "--controller-device-id",
+            ctrl_a_rot.device_id,
+            "--controller-ed25519",
+            ctrl_a_rot.ed25519,
+            "--allow-agent",
+            "computer",
+        ],
+    )
+    assert rotate_single.exit_code == 0, rotate_single.output
+    assert "!desktop confirm code-a2 VERIFY456" in rotate_single.output
+    after_single_rotate = load_native_config(config_file)
+    assert [entry.controller for entry in after_single_rotate.controllers] == [ctrl_a_rot]
+    assert after_single_rotate.allowed_app_ids == ("com.apple.TextEdit",)
+    assert after_single_rotate.capture == initial.capture
+    assert after_single_rotate.browser == initial.browser
+    assert after_single_rotate.files == initial.files
+    assert after_single_rotate.shell == initial.shell
+
+    # 2. Single-controller switch (different user_id) replaces cleanly and resets saved local access.
+    switch_single = runner.invoke(
         desktop_app,
         [
             "setup",
@@ -1147,45 +1180,86 @@ def test_desktop_setup_additive_and_rotated_controllers_preserve_existing_capabi
             "coder",
         ],
     )
-    assert add_result.exit_code == 0, add_result.output
-    assert "!desktop confirm coder code-b VERIFY456" in add_result.output
-    after_add = load_native_config(native_config_path(tmp_path))
-    assert [entry.controller for entry in after_add.controllers] == [ctrl_a, ctrl_b]
-    assert after_add.allowed_app_ids == ("com.apple.TextEdit",)
-    assert after_add.capture == initial.capture
-    assert after_add.browser == initial.browser
-    assert after_add.files == initial.files
-    assert after_add.shell == initial.shell
+    assert switch_single.exit_code == 0, switch_single.output
+    assert "!desktop confirm code-b VERIFY456" in switch_single.output
+    after_switch = load_native_config(config_file)
+    assert [entry.controller for entry in after_switch.controllers] == [ctrl_b]
+    assert after_switch.allowed_app_ids == ()
+    assert after_switch.files.roots == ()
+    assert after_switch.shell.enabled is False
 
-    # Rotate controller A with explicit --allow-app -> replaces A in place, keeps B and folders/shell/capture/browser.
-    rotate_result = runner.invoke(
+    # 3. Multi-controller config saved via upsert_controller (controllers [A, B]) with folders/shell.
+    multi = NativeDesktopConfig(
+        revision=after_switch.revision,
+        enabled=True,
+        controllers=(
+            NativeControllerEntry(ctrl_a, ("@alice:example.org",), ("computer",)),
+            NativeControllerEntry(ctrl_b, ("@alice:example.org",), ("coder",)),
+        ),
+        allowed_app_ids=("com.apple.TextEdit",),
+        capture=initial.capture,
+        browser=initial.browser,
+        files=initial.files,
+        shell=initial.shell,
+    )
+    save_native_config(config_file, multi, expected_revision=after_switch.revision)
+
+    # Rotating A in place preserves B and saved folders/shell/capture/browser.
+    rotate_multi = runner.invoke(
         desktop_app,
         [
             "setup",
             "--homeserver",
             "https://matrix.example.org",
             "--code",
-            "code-a2",
+            "code-a-multi",
             "--controller-user-id",
-            ctrl_a_rotated.user_id,
+            ctrl_a_rot.user_id,
             "--controller-device-id",
-            ctrl_a_rotated.device_id,
+            ctrl_a_rot.device_id,
             "--controller-ed25519",
-            ctrl_a_rotated.ed25519,
+            ctrl_a_rot.ed25519,
             "--allow-agent",
             "computer",
             "--allow-app",
             "com.apple.Notes",
         ],
     )
-    assert rotate_result.exit_code == 0, rotate_result.output
-    after_rotate = load_native_config(native_config_path(tmp_path))
-    assert [entry.controller for entry in after_rotate.controllers] == [ctrl_a_rotated, ctrl_b]
-    assert after_rotate.allowed_app_ids == ("com.apple.Notes",)
-    assert after_rotate.capture == initial.capture
-    assert after_rotate.browser == initial.browser
-    assert after_rotate.files == initial.files
-    assert after_rotate.shell == initial.shell
+    assert rotate_multi.exit_code == 0, rotate_multi.output
+    assert "!desktop confirm code-a-multi VERIFY456" in rotate_multi.output
+    after_multi_rotate = load_native_config(config_file)
+    assert [entry.controller for entry in after_multi_rotate.controllers] == [ctrl_a_rot, ctrl_b]
+    assert after_multi_rotate.allowed_app_ids == ("com.apple.Notes",)
+    assert after_multi_rotate.capture == initial.capture
+    assert after_multi_rotate.browser == initial.browser
+    assert after_multi_rotate.files == initial.files
+    assert after_multi_rotate.shell == initial.shell
+
+    # 4. Brand-new user_id C when multiple controllers already exist is cleanly refused without claiming or mutating config.
+    before_refusal = config_file.read_bytes()
+    claim_mock.reset_mock()
+    add_c = runner.invoke(
+        desktop_app,
+        [
+            "setup",
+            "--homeserver",
+            "https://matrix.example.org",
+            "--code",
+            "code-c",
+            "--controller-user-id",
+            ctrl_c.user_id,
+            "--controller-device-id",
+            ctrl_c.device_id,
+            "--controller-ed25519",
+            ctrl_c.ed25519,
+            "--allow-agent",
+            "researcher",
+        ],
+    )
+    assert add_c.exit_code == 1
+    assert "Multiple controllers are configured; use upsert_controller" in add_c.output
+    claim_mock.assert_not_called()
+    assert config_file.read_bytes() == before_refusal
 
 
 def test_desktop_run_holds_host_lock_and_refuses_when_already_locked(

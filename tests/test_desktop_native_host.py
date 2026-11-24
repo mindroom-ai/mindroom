@@ -624,6 +624,7 @@ def test_changed_local_root_must_exist_and_new_controller_gets_no_local_access(
     payload["controller"] = {"user_id": "@other:example.org", "device_id": "OTHER", "ed25519": "other-key"}
     asyncio.run(host.handle(_request("configure", expected_revision=2, config=payload)))
     saved = load_native_config(native_config_path(tmp_path))
+    assert [entry.controller.user_id for entry in saved.controllers] == ["@other:example.org"]
     assert saved.files.roots == ()
     assert saved.shell.enabled is False
 
@@ -2685,8 +2686,8 @@ async def test_pair_targets_selected_controller_when_stopped(
     expected_ver_b = desktop_pairing_verification("code-b", "stopped-ed25519")
     assert stopped_targets == [ctrl_2]
     assert stopped_b["verification"] == expected_ver_b
-    assert stopped_b["confirmation_command"] == f"!desktop confirm helper code-b {expected_ver_b}"
-    assert "agent_confirmation_command" not in stopped_b
+    assert stopped_b["confirmation_command"] == f"!desktop confirm code-b {expected_ver_b}"
+    assert stopped_b["agent_confirmation_command"] == f"!desktop confirm helper code-b {expected_ver_b}"
     assert stopped_b["device_id"] == "LOCAL"
     assert stopped_b["device_ed25519"] == "stopped-ed25519"
 
@@ -2777,8 +2778,8 @@ async def test_pair_targets_selected_controller_while_running_preserving_handles
         expected_ver = desktop_pairing_verification("code-b-live", live_fingerprint)
         assert live_claims == [(ctrl_2, "code-b-live")]
         assert live_result["verification"] == expected_ver
-        assert live_result["confirmation_command"] == f"!desktop confirm coder code-b-live {expected_ver}"
-        assert "agent_confirmation_command" not in live_result
+        assert live_result["confirmation_command"] == f"!desktop confirm code-b-live {expected_ver}"
+        assert live_result["agent_confirmation_command"] == f"!desktop confirm coder code-b-live {expected_ver}"
         assert live_result["device_id"] == "LOCAL"
         assert live_result["device_ed25519"] == live_fingerprint
         assert live_result["status"]["bridge"]["state"] == "observe_only"
@@ -2830,16 +2831,20 @@ async def test_config_mutations_refuse_already_running_when_other_host_holds_loc
 
 
 @pytest.mark.asyncio
-async def test_legacy_v1_configure_preserves_unrelated_secondary_controllers_and_handles_empty_previous(
+async def test_legacy_v1_configure_replaces_single_rotates_multi_and_refuses_new_multi_user(
     tmp_path: Path,
+    empty_selected_root: Path,
 ) -> None:
-    """Legacy v1 configure works when previous.controllers is empty and preserves unrelated secondary controllers."""
+    """Legacy v1 configure replaces <=1 controller cleanly, rotates matching multi-controller user, and refuses brand-new user."""
     ctrl_1 = PinnedMatrixDevice("@controller:example.org", "DEVICE", "key")
+    ctrl_1_rot = PinnedMatrixDevice("@controller:example.org", "DEVICE_ROT", "key-rot")
     ctrl_2 = PinnedMatrixDevice("@controller2:example.org", "DEVICE2", "key2")
+    ctrl_2_rot = PinnedMatrixDevice("@controller2:example.org", "DEVICE2_ROT", "key2-rot")
     ctrl_3 = PinnedMatrixDevice("@controller3:example.org", "DEVICE3", "key3")
     key_1 = controller_journal_key(ctrl_1)
+    key_1_rot = controller_journal_key(ctrl_1_rot)
     key_2 = controller_journal_key(ctrl_2)
-    key_3 = controller_journal_key(ctrl_3)
+    key_2_rot = controller_journal_key(ctrl_2_rot)
 
     host = _host(tmp_path, FakeRuntime())
     # Start with a saved v2 config having zero controllers.
@@ -2849,33 +2854,74 @@ async def test_legacy_v1_configure_preserves_unrelated_secondary_controllers_and
 
     # Legacy v1 configure on empty previous.controllers succeeds cleanly.
     await host.handle(_request("configure", expected_revision=2, config=_config_payload() | {"revision": 2}))
-    # Add secondary controller B.
-    await host.handle(_upsert_request(3, ctrl_2))
-    assert [c["controller_key"] for c in host.status()["config"]["controllers"]] == [key_1, key_2]
+    await host.handle(_local_access_request(3, [str(empty_selected_root)], enabled=True))
 
-    # Legacy v1 configure updating primary A preserves secondary B!
-    v1_update_a = _config_payload() | {"revision": 4, "allowed_app_ids": ["com.example.Updated"]}
-    updated = (await host.handle(_request("configure", expected_revision=4, config=v1_update_a)))["status"]
-    assert [c["controller_key"] for c in updated["config"]["controllers"]] == [key_1, key_2]
-    assert updated["config"]["allowed_app_ids"] == ["com.example.Updated"]
-
-    # Legacy v1 configure for secondary controller B promotes B to controllers[0] while preserving A!
-    v1_promote_b = _config_payload() | {
-        "revision": 5,
-        "controller": {"user_id": ctrl_2.user_id, "device_id": ctrl_2.device_id, "ed25519": ctrl_2.ed25519},
+    # Single-controller rotation (same user_id) replaces cleanly (no retired device left behind) and keeps files/shell.
+    v1_rotate_single = _config_payload() | {
+        "revision": 4,
+        "controller": {
+            "user_id": ctrl_1_rot.user_id,
+            "device_id": ctrl_1_rot.device_id,
+            "ed25519": ctrl_1_rot.ed25519,
+        },
     }
-    promoted = (await host.handle(_request("configure", expected_revision=5, config=v1_promote_b)))["status"]
-    assert [c["controller_key"] for c in promoted["config"]["controllers"]] == [key_2, key_1]
-    assert promoted["config"]["controller_user_id"] == ctrl_2.user_id
+    rotated_single = (await host.handle(_request("configure", expected_revision=4, config=v1_rotate_single)))["status"]
+    assert [c["controller_key"] for c in rotated_single["config"]["controllers"]] == [key_1_rot]
+    saved_single = load_native_config(native_config_path(tmp_path))
+    assert saved_single.files.roots == (empty_selected_root.resolve(),)
+    assert saved_single.shell.enabled is True
 
-    # Legacy v1 configure with a brand-new controller C promotes C to controllers[0] without wiping B or A.
-    v1_add_c = _config_payload() | {
+    # Add secondary controller B via upsert_controller.
+    await host.handle(_upsert_request(5, ctrl_2))
+    assert [c["controller_key"] for c in host.status()["config"]["controllers"]] == [key_1_rot, key_2]
+
+    # Multi-controller v1 configure updating A preserves B and keeps files/shell.
+    v1_update_a = _config_payload() | {
         "revision": 6,
+        "controller": {
+            "user_id": ctrl_1_rot.user_id,
+            "device_id": ctrl_1_rot.device_id,
+            "ed25519": ctrl_1_rot.ed25519,
+        },
+        "allowed_app_ids": ["com.example.Updated"],
+    }
+    updated = (await host.handle(_request("configure", expected_revision=6, config=v1_update_a)))["status"]
+    assert [c["controller_key"] for c in updated["config"]["controllers"]] == [key_1_rot, key_2]
+    assert updated["config"]["allowed_app_ids"] == ["com.example.Updated"]
+    assert load_native_config(native_config_path(tmp_path)).files.roots == (empty_selected_root.resolve(),)
+    assert load_native_config(native_config_path(tmp_path)).shell.enabled is True
+
+    # Multi-controller v1 configure rotating B (same user_id, new device) replaces B, promotes it to controllers[0],
+    # preserves A, and keeps files/shell unchanged.
+    v1_rotate_b = _config_payload() | {
+        "revision": 7,
+        "controller": {
+            "user_id": ctrl_2_rot.user_id,
+            "device_id": ctrl_2_rot.device_id,
+            "ed25519": ctrl_2_rot.ed25519,
+        },
+    }
+    promoted = (await host.handle(_request("configure", expected_revision=7, config=v1_rotate_b)))["status"]
+    assert [c["controller_key"] for c in promoted["config"]["controllers"]] == [key_2_rot, key_1_rot]
+    assert promoted["config"]["controller_user_id"] == ctrl_2_rot.user_id
+    saved_after_b = load_native_config(native_config_path(tmp_path))
+    assert saved_after_b.files.roots == (empty_selected_root.resolve(),)
+    assert saved_after_b.shell.enabled is True
+
+    # Multi-controller v1 configure with brand-new user_id C is refused without mutating native_config.json.
+    before_refusal = native_config_path(tmp_path).read_bytes()
+    v1_add_c = _config_payload() | {
+        "revision": 8,
         "controller": {"user_id": ctrl_3.user_id, "device_id": ctrl_3.device_id, "ed25519": ctrl_3.ed25519},
     }
-    added = (await host.handle(_request("configure", expected_revision=6, config=v1_add_c)))["status"]
-    assert [c["controller_key"] for c in added["config"]["controllers"]] == [key_3, key_2, key_1]
-    assert added["config"]["controller_user_id"] == ctrl_3.user_id
+    with pytest.raises(
+        NativeProtocolError,
+        match="Multiple controllers are configured; use upsert_controller",
+    ) as caught:
+        await host.handle(_request("configure", expected_revision=8, config=v1_add_c))
+    assert caught.value.code == "invalid_request"
+    assert native_config_path(tmp_path).read_bytes() == before_refusal
+    assert [c["controller_key"] for c in host.status()["config"]["controllers"]] == [key_2_rot, key_1_rot]
 
 
 def test_cli_desktop_run_holding_host_lock_blocks_native_remove_controller(

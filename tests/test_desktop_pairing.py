@@ -1873,3 +1873,136 @@ async def test_olm_pairing_receiver_authorizes_current_room_members_via_shared_r
         requester_id="@bob:example.org",
         agent_name="computer",
     ) == {"device_user_id": "@bob:example.org", "device_id": "HELP_B", "device_ed25519": "help-b-key"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_olm_pairing_receiver_authorizes_lazy_room_member_via_membership_index(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Under Sliding Sync $LAZY membership, a joined member absent from room.users is still authorized via membership_index."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = Config.validate_with_runtime(
+        {
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
+            "defaults": {"tools": []},
+            "agents": {
+                "computer": {
+                    "display_name": "Computer",
+                    "role": "Operate apps",
+                    "tools": ["desktop"],
+                    "access": {"users": [], "current_room_members": True, "members_of_rooms": []},
+                },
+            },
+        },
+        runtime_paths,
+    )
+    shared_room_id = "!lazy-shared:example.org"
+    other_room_id = "!other-agent-room:example.org"
+    observer_client = AsyncMock()
+    observer_client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=[shared_room_id, other_room_id])
+    observer_client.joined_members.side_effect = lambda room_id: (
+        joined_members_response(shared_room_id, "@bob:example.org")
+        if room_id == shared_room_id
+        else joined_members_response(other_room_id, "@carol:example.org")
+    )
+    memberships = AgentReplyMembershipIndex()
+    await refresh_memberships(memberships, config, runtime_paths, observer_client)
+
+    devices = {
+        "@bob:example.org": {"CHAT_B": _olm_device("chat-b-key")},
+        "@carol:example.org": {"CHAT_C": _olm_device("chat-c-key")},
+        "@invited:example.org": {"CHAT_I": _olm_device("chat-i-key")},
+    }
+    # Simulate Sliding Sync $LAZY: room.users omits @bob:example.org even though bob is joined in membership_index.
+    lazy_shared_room = SimpleNamespace(
+        room_id=shared_room_id,
+        users={"@invited:example.org": object()},
+        invited_users={"@invited:example.org": object()},
+    )
+    receiver, sent = _olm_receiver(
+        runtime_paths,
+        monkeypatch,
+        devices=devices,
+        agent_name="computer",
+        config=config,
+        rooms={shared_room_id: lazy_shared_room},
+        membership_index=memberships,
+    )
+
+    # Joined requester present in membership_index but absent from lazy room.users is authorized.
+    await receiver.on_event(
+        _olm_event(
+            sender="@bob:example.org",
+            device_id="CHAT_B",
+            ed25519="chat-b-key",
+            event_type=DESKTOP_SETUP_REQUEST_EVENT_TYPE,
+            content=DesktopSetupRequest(nonce="lazy-bob-01234567", agent_name="computer").to_content(),
+        ),
+    )
+    assert len(sent) == 1
+    offer = DesktopSetupOffer.from_content(sent.pop()[2])
+    assert offer.eligible is True
+    assert offer.code is not None
+
+    # Invited-only user stays rejected.
+    await receiver.on_event(
+        _olm_event(
+            sender="@invited:example.org",
+            device_id="CHAT_I",
+            ed25519="chat-i-key",
+            event_type=DESKTOP_SETUP_REQUEST_EVENT_TYPE,
+            content=DesktopSetupRequest(nonce="lazy-inv-01234567", agent_name="computer").to_content(),
+        ),
+    )
+    assert sent == []
+
+    # User joined only to a room this agent has NOT joined stays rejected.
+    await receiver.on_event(
+        _olm_event(
+            sender="@carol:example.org",
+            device_id="CHAT_C",
+            ed25519="chat-c-key",
+            event_type=DESKTOP_SETUP_REQUEST_EVENT_TYPE,
+            content=DesktopSetupRequest(nonce="lazy-carol-012345", agent_name="computer").to_content(),
+        ),
+    )
+    assert sent == []
+
+    # Fallback when membership_index is None: checks room.users while excluding invited_users.
+    fallback_room = SimpleNamespace(
+        room_id=shared_room_id,
+        users={"@bob:example.org": object(), "@invited:example.org": object()},
+        invited_users={"@invited:example.org": object()},
+    )
+    fallback_receiver, fallback_sent = _olm_receiver(
+        runtime_paths,
+        monkeypatch,
+        devices=devices,
+        agent_name="computer",
+        config=config,
+        rooms={shared_room_id: fallback_room},
+        membership_index=None,
+    )
+    await fallback_receiver.on_event(
+        _olm_event(
+            sender="@invited:example.org",
+            device_id="CHAT_I",
+            ed25519="chat-i-key",
+            event_type=DESKTOP_SETUP_REQUEST_EVENT_TYPE,
+            content=DesktopSetupRequest(nonce="fb-invited-012345", agent_name="computer").to_content(),
+        ),
+    )
+    assert fallback_sent == []
+    await fallback_receiver.on_event(
+        _olm_event(
+            sender="@bob:example.org",
+            device_id="CHAT_B",
+            ed25519="chat-b-key",
+            event_type=DESKTOP_SETUP_REQUEST_EVENT_TYPE,
+            content=DesktopSetupRequest(nonce="fb-bob-0123456789", agent_name="computer").to_content(),
+        ),
+    )
+    assert len(fallback_sent) == 1
+    assert DesktopSetupOffer.from_content(fallback_sent.pop()[2]).eligible is True
