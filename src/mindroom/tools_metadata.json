@@ -8932,6 +8932,19 @@
           "required": false,
           "type": "boolean",
           "validation": null
+        },
+        {
+          "authored_override": true,
+          "default": false,
+          "description": "Allow revision-checked formatting in one named document tab.",
+          "env": [],
+          "label": "Format Documents",
+          "name": "format_document",
+          "options": null,
+          "placeholder": null,
+          "required": false,
+          "type": "boolean",
+          "validation": null
         }
       ],
       "consumes_workspace_paths": false,
@@ -8941,7 +8954,7 @@
         "google-auth",
         "google-auth-httplib2"
       ],
-      "description": "Create, read, and edit documents through the connected user's Google Docs",
+      "description": "Create, read, edit, and format documents through the connected user's Google Docs",
       "display_name": "Google Docs",
       "docs_url": "https://docs.mindroom.chat/tools/data-and-databases/#google_docs",
       "executes_code": false,
@@ -8950,7 +8963,8 @@
         "google_docs_create_document",
         "google_docs_get_document",
         "google_docs_insert_text",
-        "google_docs_replace_text"
+        "google_docs_replace_text",
+        "google_docs_format_document"
       ],
       "helper_text": null,
       "icon": "SiGoogledocs",
