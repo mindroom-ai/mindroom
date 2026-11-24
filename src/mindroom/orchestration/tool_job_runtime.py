@@ -290,6 +290,7 @@ class ToolJobRuntimeCoordinator:
             origin=job.adapter.get("origin", {}),
             depth=job.depth,
             authority=job.adapter.get("authority", {}),
+            runtime_paths=self.runtime_paths,
         ):
             return "denied"
         if not _transport_allows_actor(config, owner.recipient, owner.agent_name):
@@ -343,6 +344,7 @@ class ToolJobRuntimeCoordinator:
             origin=origin,
             depth=len(edges),
             authority=dict(tool.authority),
+            runtime_paths=self.runtime_paths,
         ):
             msg = "Tool execution is no longer authorized for this caller."
             raise JobAccessError(msg)

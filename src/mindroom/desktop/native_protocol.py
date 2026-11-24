@@ -21,6 +21,8 @@ NATIVE_ACTIONS = frozenset(
         "status",
         "dashboard_configuration",
         "configure",
+        "upsert_controller",
+        "remove_controller",
         "set_allowed_apps",
         "set_browser_config",
         "set_local_access",

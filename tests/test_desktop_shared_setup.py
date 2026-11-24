@@ -15,6 +15,7 @@ from mindroom.desktop import native_config
 from mindroom.desktop.native_config import (
     NativeBrowserConfig,
     NativeCaptureConfig,
+    NativeControllerEntry,
     NativeDesktopConfig,
     NativeFilesConfig,
     NativeShellConfig,
@@ -534,14 +535,15 @@ def test_access_edit_loses_to_a_concurrent_app_save(
     assert saved.shell.enabled is False
 
 
-def test_setup_keeps_folder_and_shell_access_only_for_the_same_controller(
+def test_setup_preserves_folder_shell_and_apps_when_repairing_or_rotating_controller(
     shared_setup: SimpleNamespace,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Re-pairing the same controller keeps local access; a different controller starts without it."""
+    """Re-pairing or rotating a controller via CLI setup preserves saved apps, folders, and shell access."""
     path = native_config_path(shared_setup.storage_root)
     folder = _folder(shared_setup)
-    save_native_config(path, _with_local_access(_config(), folder), expected_revision=0)
+    initial = _with_local_access(_config(), folder)
+    save_native_config(path, initial, expected_revision=0)
     monkeypatch.setattr(desktop_cli, "_pair_desktop", AsyncMock(return_value="verification"))
 
     same = CliRunner().invoke(desktop_cli.desktop_app, _setup_args())
@@ -556,10 +558,21 @@ def test_setup_keeps_folder_and_shell_access_only_for_the_same_controller(
 
     assert other.exit_code == 0, other.output
     saved = load_native_config(path)
-    assert saved.controller.device_id == "OTHER"
-    assert saved.files.roots == ()
-    assert saved.shell.enabled is False
-    assert saved.allowed_app_ids == ()
+    assert [entry.controller.device_id for entry in saved.controllers] == ["OTHER"]
+    assert saved.files.roots == (folder,)
+    assert saved.shell.enabled is True
+    assert saved.allowed_app_ids == initial.allowed_app_ids
+
+    different_user_args = _setup_args()
+    different_user_args[different_user_args.index("--controller-user-id") + 1] = "@other-agent:example.org"
+    different_user_args[different_user_args.index("--controller-device-id") + 1] = "OTHER_AGENT"
+    switched = CliRunner().invoke(desktop_cli.desktop_app, different_user_args)
+    assert switched.exit_code == 0, switched.output
+    after_switch = load_native_config(path)
+    assert [entry.controller.user_id for entry in after_switch.controllers] == ["@other-agent:example.org"]
+    assert after_switch.files.roots == ()
+    assert after_switch.shell.enabled is False
+    assert after_switch.allowed_app_ids == ()
 
 
 def test_folder_and_shell_run_skips_gui_dependencies(
@@ -603,3 +616,116 @@ def test_shell_auto_approval_flag_needs_saved_shell_access_and_a_bounded_duratio
     if exit_code == 1:
         assert "mindroom desktop access --shell" in _shown(result.output)
     run_bridge.assert_not_called()
+
+
+def test_cli_run_with_explicit_controller_pin_narrows_and_unpinned_announces_all(
+    shared_setup: SimpleNamespace,
+    run_bridge: AsyncMock,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Explicit --controller-* flags narrow the run to only that controller; unpinned runs display all controllers."""
+    ctrl_a = PinnedMatrixDevice("@controller:example.org", "CLOUD_A", "fp-a")
+    ctrl_b = PinnedMatrixDevice("@controller2:example.org", "CLOUD_B", "fp-b")
+    two_ctrl = NativeDesktopConfig(
+        revision=0,
+        enabled=True,
+        controllers=(
+            NativeControllerEntry(ctrl_a, ("@alice:example.org",), ("agent_a",)),
+            NativeControllerEntry(ctrl_b, ("@bob:example.org",), ("agent_b",)),
+        ),
+        allowed_app_ids=("com.apple.TextEdit",),
+        capture=NativeCaptureConfig(),
+        browser=NativeBrowserConfig(),
+        shell=NativeShellConfig(enabled=True),
+    )
+    save_native_config(native_config_path(shared_setup.storage_root), two_ctrl, expected_revision=0)
+
+    pinned = CliRunner().invoke(
+        desktop_cli.desktop_app,
+        [
+            "run",
+            "--controller-user-id",
+            ctrl_b.user_id,
+            "--controller-device-id",
+            ctrl_b.device_id,
+            "--controller-ed25519",
+            ctrl_b.ed25519,
+            "--allow-agent",
+            "custom_b",
+            "--allow-control",
+            "--shell-auto-approve-minutes",
+            "5",
+        ],
+    )
+    assert pinned.exit_code == 0, pinned.output
+    pinned_cfg = run_bridge.await_args.kwargs["config"]
+    assert [entry.controller for entry in pinned_cfg.controllers] == [ctrl_b]
+    assert pinned_cfg.controllers[0].allowed_agent_names == ("custom_b",)
+    assert pinned_cfg.controllers[0].allowed_requester_ids == ("@bob:example.org",)
+    assert run_bridge.await_args.kwargs["allow_control"] is True
+    assert run_bridge.await_args.kwargs["shell_auto_approve_minutes"] == 5
+
+    unpinned = CliRunner().invoke(desktop_cli.desktop_app, ["run"])
+    assert unpinned.exit_code == 0, unpinned.output
+    unpinned_cfg = run_bridge.await_args.kwargs["config"]
+    assert [entry.controller for entry in unpinned_cfg.controllers] == [ctrl_a, ctrl_b]
+
+    desktop_cli._announce_bridge(
+        unpinned_cfg,
+        allow_control=False,
+        lease_minutes=15,
+        shell_auto_approve_minutes=None,
+    )
+    announced = capsys.readouterr().out
+    assert ctrl_a.user_id in announced
+    assert ctrl_a.device_id in announced
+    assert ctrl_b.user_id in announced
+    assert ctrl_b.device_id in announced
+
+
+def test_cli_setup_handles_empty_controllers_and_preserves_unrelated_controllers(
+    shared_setup: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Desktop setup handles empty previous.controllers and preserves unrelated controllers on update/rotation."""
+    path = native_config_path(shared_setup.storage_root)
+    monkeypatch.setattr(desktop_cli, "_pair_desktop", AsyncMock(return_value="VERIFY-99"))
+
+    # Empty v2 config (0 controllers, disabled) must be treated as fresh setup without crashing.
+    empty_v2 = NativeDesktopConfig(
+        revision=0,
+        enabled=False,
+        controllers=(),
+        allowed_app_ids=(),
+        capture=NativeCaptureConfig(),
+        browser=NativeBrowserConfig(),
+    )
+    save_native_config(path, empty_v2, expected_revision=0)
+
+    first = CliRunner().invoke(desktop_cli.desktop_app, [*_setup_args(), "--allow-app", "com.apple.TextEdit"])
+    assert first.exit_code == 0, first.output
+    assert "!desktop confirm short-lived-code VERIFY-99" in first.output
+    saved_first = load_native_config(path)
+    assert saved_first.revision == 2
+    assert len(saved_first.controllers) == 1
+
+    # Add a second unrelated controller B, then re-pair A -> B must be preserved!
+    ctrl_b = PinnedMatrixDevice("@controller2:example.org", "CLOUD_B", "fp-b")
+    with_b = saved_first.with_upserted_controller(
+        NativeControllerEntry(ctrl_b, ("@bob:example.org",), ("helper",)),
+    )
+    save_native_config(path, with_b, expected_revision=saved_first.revision)
+
+    repair_a = CliRunner().invoke(desktop_cli.desktop_app, _setup_args())
+    assert repair_a.exit_code == 0, repair_a.output
+    after_repair = load_native_config(path)
+    assert [e.controller.device_id for e in after_repair.controllers] == ["CLOUD", "CLOUD_B"]
+    assert after_repair.allowed_app_ids == ("com.apple.TextEdit",)
+
+    # Rotate A's device ID -> replaces A with A_ROTATED while preserving unrelated B!
+    rotate_args = _setup_args()
+    rotate_args[rotate_args.index("--controller-device-id") + 1] = "CLOUD_ROTATED"
+    rotated = CliRunner().invoke(desktop_cli.desktop_app, rotate_args)
+    assert rotated.exit_code == 0, rotated.output
+    after_rotate = load_native_config(path)
+    assert [e.controller.device_id for e in after_rotate.controllers] == ["CLOUD_ROTATED", "CLOUD_B"]

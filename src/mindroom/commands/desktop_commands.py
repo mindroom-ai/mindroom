@@ -10,7 +10,12 @@ from typing import TYPE_CHECKING
 
 from mindroom.constants import runtime_matrix_homeserver
 from mindroom.credentials.manager import get_runtime_credentials_manager
-from mindroom.desktop.configuration import DesktopConfigurationStatus, desktop_configuration_state
+from mindroom.desktop.configuration import (
+    DesktopConfigurationStatus,
+    desktop_configuration_state,
+    desktop_disconnect_error,
+    desktop_pairing_error,
+)
 from mindroom.desktop.credentials import (
     delete_desktop_credentials,
     load_desktop_credentials,
@@ -50,24 +55,83 @@ class DesktopCommandScope:
 
 def chat_pairing_desktop_error(config: Config, agent_name: str) -> str | None:
     """Return why an agent cannot own requester-scoped Desktop pairing."""
-    if agent_name not in config.agents:
-        return "Run this command while talking directly to a configured agent."
-    if "desktop" not in config.resolve_agent(agent_name).tools.tool_names:
-        return f"Agent '{agent_name}' does not declare the Desktop tool."
-    return None
+    return desktop_pairing_error(config, agent_name)
 
 
-def desktop_room_agent(config: Config, runtime_paths: RuntimePaths, room: nio.MatrixRoom, requester: str) -> str | None:
-    """Return the Desktop agent of a room that holds only the requester, that agent and accounts that answer nobody.
+@dataclass(frozen=True, slots=True)
+class _ParsedDesktopCommand:
+    operation: str
+    target_agent: str | None = None
+    token: str | None = None
+    verification: str | None = None
+    confirmed: bool = False
 
-    A MindRoom account that is no agent or team answers nobody, so it is no party to the room.
+
+def _parse_desktop_args(args_text: str) -> _ParsedDesktopCommand | None:
+    parts = args_text.split()
+    if not parts:
+        return _ParsedDesktopCommand(operation="status")
+    op, *rest = parts
+    result: _ParsedDesktopCommand | None = None
+    match op.lower(), rest:
+        case ("setup" | "rotate" | "status") as action, []:
+            result = _ParsedDesktopCommand(operation=action)
+        case ("setup" | "rotate" | "status") as action, [agent]:
+            result = _ParsedDesktopCommand(operation=action, target_agent=agent)
+        case "confirm", [token, verification]:
+            result = _ParsedDesktopCommand(operation="confirm", token=token, verification=verification)
+        case "confirm", [agent, token, verification]:
+            result = _ParsedDesktopCommand(
+                operation="confirm",
+                target_agent=agent,
+                token=token,
+                verification=verification,
+            )
+        case "disconnect", []:
+            result = _ParsedDesktopCommand(operation="disconnect", confirmed=False)
+        case "disconnect", [arg] if arg.lower() == "confirm":
+            result = _ParsedDesktopCommand(operation="disconnect", confirmed=True)
+        case "disconnect", [agent]:
+            result = _ParsedDesktopCommand(operation="disconnect", target_agent=agent, confirmed=False)
+        case "disconnect", [agent, arg] if arg.lower() == "confirm":
+            result = _ParsedDesktopCommand(operation="disconnect", target_agent=agent, confirmed=True)
+    return result
+
+
+def desktop_room_agent(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    room: nio.MatrixRoom,
+    requester: str,
+    *,
+    args_text: str = "",
+) -> str | None:
+    """Return the Desktop agent of a room holding only the requester and MindRoom accounts.
+
+    Without an explicit agent name in ``args_text``, the room must hold exactly one answering entity.
+    With an explicit agent name (such as ``setup <agent>``), multiple MindRoom agents may be in the room,
+    while any other human account is still refused.
     """
     registry = entity_identity_registry(config, runtime_paths)
     others = cached_member_ids(room) - {requester}
     names = [registry.current_entity_name_for_user_id(user_id) for user_id in others]
+    if None in names or not room_has_only(config, room, {requester, *others}):
+        return None
     answering = [name for name in names if name in config.agents or name in config.teams]
-    alone = None not in names and len(answering) == 1 and room_has_only(config, room, {requester, *others})
-    return answering[0] if alone and chat_pairing_desktop_error(config, answering[0]) is None else None
+    parsed = _parse_desktop_args(args_text)
+    target_agent = parsed.target_agent if parsed is not None else None
+    eligibility_check = (
+        desktop_disconnect_error
+        if parsed is not None and parsed.operation == "disconnect"
+        else chat_pairing_desktop_error
+    )
+    if target_agent is not None:
+        if target_agent not in answering:
+            return None
+        return target_agent if eligibility_check(config, target_agent) is None else None
+    if len(answering) != 1:
+        return None
+    return answering[0] if eligibility_check(config, answering[0]) is None else None
 
 
 def _validate_desktop_scope(scope: DesktopCommandScope) -> None:
@@ -85,7 +149,7 @@ def _load_desktop_credentials(scope: DesktopCommandScope) -> dict[str, object] |
     )
 
 
-def _setup_response(scope: DesktopCommandScope) -> str:
+def _setup_response(scope: DesktopCommandScope, *, explicit_agent: bool = False) -> str:
     _validate_desktop_scope(scope)
     controller = scope.controller_identity(scope.agent_name)
     pairing = create_desktop_pairing(
@@ -129,8 +193,13 @@ def _setup_response(scope: DesktopCommandScope) -> str:
         f"```json\n{json.dumps(descriptor.to_content(), indent=2)}\n```\n\n"
         "For terminal setup, run this command on your computer. It logs in if needed, claims the pairing, and saves setup for both the terminal and app:\n\n"
         f"```bash\n{setup_command}\n```\n\n"
-        "Then return here and run the exact `!desktop confirm ...` command it prints.\n\n"
-        "Current Desktop target remains unchanged until confirmation."
+        + (
+            f"Then return here and run `/desktop confirm {scope.agent_name} <code> <verification>` "
+            "using the code and verification it prints.\n\n"
+            if explicit_agent
+            else "Then return here and run the exact `!desktop confirm ...` command it prints.\n\n"
+        )
+        + "Current Desktop target remains unchanged until confirmation."
     )
 
 
@@ -199,13 +268,20 @@ def _confirm_response(scope: DesktopCommandScope, token: str, verification: str)
     )
 
 
-def _disconnect_response(scope: DesktopCommandScope, *, confirmed: bool) -> str:
+def _disconnect_response(
+    scope: DesktopCommandScope,
+    *,
+    confirmed: bool,
+    explicit_agent: bool = False,
+) -> str:
     if not confirmed:
-        return (
-            f"This removes your Desktop target for agent `{scope.agent_name}`. "
-            "Run `/desktop disconnect confirm` to continue."
+        confirm_cmd = (
+            f"/desktop disconnect {scope.agent_name} confirm" if explicit_agent else "/desktop disconnect confirm"
         )
-    _validate_desktop_scope(scope)
+        return f"This removes your Desktop target for agent `{scope.agent_name}`. Run `{confirm_cmd}` to continue."
+    eligibility_error = desktop_disconnect_error(scope.config, scope.agent_name)
+    if eligibility_error is not None:
+        raise DesktopPairingError(eligibility_error)
     delete_desktop_credentials(
         get_runtime_credentials_manager(scope.runtime_paths),
         requester_id=scope.requester_id,
@@ -216,21 +292,31 @@ def _disconnect_response(scope: DesktopCommandScope, *, confirmed: bool) -> str:
 
 def handle_desktop_command(args_text: str, *, scope: DesktopCommandScope) -> str:
     """Execute one requester-bound Desktop setup command."""
-    parts = args_text.split()
-    operation = parts[0].lower() if parts else "status"
+    parsed = _parse_desktop_args(args_text)
+    if parsed is None:
+        return (
+            "Usage: `/desktop setup [agent]`, `/desktop status [agent]`, "
+            "`/desktop confirm [agent] <code> <verification>`, "
+            "`/desktop rotate [agent]`, or `/desktop disconnect [agent] [confirm]`."
+        )
+    if parsed.target_agent is not None and parsed.target_agent != scope.agent_name:
+        return (
+            f"❌ Desktop setup failed: Desktop command targets agent '{parsed.target_agent}', not '{scope.agent_name}'."
+        )
     try:
-        if operation in {"setup", "rotate"} and len(parts) == 1:
-            response = _setup_response(scope)
-        elif operation == "status" and len(parts) <= 1:
+        if parsed.operation in {"setup", "rotate"}:
+            response = _setup_response(scope, explicit_agent=parsed.target_agent is not None)
+        elif parsed.operation == "status":
             response = _status_response(scope)
-        elif operation == "confirm" and len(parts) == 3:
-            response = _confirm_response(scope, parts[1], parts[2])
-        elif operation == "disconnect" and len(parts) in {1, 2}:
-            response = _disconnect_response(scope, confirmed=len(parts) == 2 and parts[1].lower() == "confirm")
+        elif parsed.operation == "confirm":
+            assert parsed.token is not None
+            assert parsed.verification is not None
+            response = _confirm_response(scope, parsed.token, parsed.verification)
         else:
-            response = (
-                "Usage: `/desktop setup`, `/desktop status`, `/desktop confirm <code> <verification>`, "
-                "`/desktop rotate`, or `/desktop disconnect [confirm]`."
+            response = _disconnect_response(
+                scope,
+                confirmed=parsed.confirmed,
+                explicit_agent=parsed.target_agent is not None,
             )
     except sqlite3.Error:
         return "❌ Desktop setup is temporarily unavailable. Please try again."

@@ -45,6 +45,8 @@ class PendingDesktopPairing:
     device_user_id: str | None
     device_id: str | None
     device_ed25519: str | None
+    initiator_device_id: str | None = None
+    initiator_ed25519: str | None = None
 
     @property
     def claimed(self) -> bool:
@@ -77,10 +79,16 @@ def _pairing_connection(runtime_paths: RuntimePaths) -> Iterator[sqlite3.Connect
                 expires_at INTEGER NOT NULL,
                 device_user_id TEXT,
                 device_id TEXT,
-                device_ed25519 TEXT
+                device_ed25519 TEXT,
+                initiator_device_id TEXT,
+                initiator_ed25519 TEXT
             )
             """,
         )
+        existing_columns = {row[1] for row in connection.execute("PRAGMA table_info(desktop_pairings)").fetchall()}
+        for column_name in ("initiator_device_id", "initiator_ed25519"):
+            if column_name not in existing_columns:
+                connection.execute(f"ALTER TABLE desktop_pairings ADD COLUMN {column_name} TEXT")
         with connection:
             yield connection
     finally:
@@ -96,9 +104,14 @@ def create_desktop_pairing(
     *,
     requester_id: str,
     agent_name: str,
+    initiator_device_id: str | None = None,
+    initiator_ed25519: str | None = None,
     now: int | None = None,
 ) -> DesktopPairingStart:
     """Create one single-use pairing token bound to requester plus agent."""
+    if (initiator_device_id is None) != (initiator_ed25519 is None):
+        msg = "Initiator device ID and ed25519 key must both be provided or both omitted."
+        raise DesktopPairingError(msg)
     current_time = int(time.time()) if now is None else now
     token = secrets.token_urlsafe(_PAIRING_TOKEN_BYTES)
     expires_at = current_time + _PAIRING_TTL_SECONDS
@@ -107,18 +120,28 @@ def create_desktop_pairing(
         connection.execute(
             """
             INSERT INTO desktop_pairings (
-                token_hash, requester_id, agent_name, expires_at
-            ) VALUES (?, ?, ?, ?)
+                token_hash, requester_id, agent_name, expires_at,
+                initiator_device_id, initiator_ed25519
+            ) VALUES (?, ?, ?, ?, ?, ?)
             """,
-            (_token_hash(token), requester_id, agent_name, expires_at),
+            (_token_hash(token), requester_id, agent_name, expires_at, initiator_device_id, initiator_ed25519),
         )
     return DesktopPairingStart(token=token, expires_at=expires_at)
 
 
 def _pending_pairing(
-    row: tuple[str, str, int, str | None, str | None, str | None],
+    row: tuple[str, str, int, str | None, str | None, str | None, str | None, str | None],
 ) -> PendingDesktopPairing:
-    requester_id, agent_name, expires_at, device_user_id, device_id, device_ed25519 = row
+    (
+        requester_id,
+        agent_name,
+        expires_at,
+        device_user_id,
+        device_id,
+        device_ed25519,
+        initiator_device_id,
+        initiator_ed25519,
+    ) = row
     return PendingDesktopPairing(
         requester_id=requester_id,
         agent_name=agent_name,
@@ -126,6 +149,8 @@ def _pending_pairing(
         device_user_id=device_user_id,
         device_id=device_id,
         device_ed25519=device_ed25519,
+        initiator_device_id=initiator_device_id,
+        initiator_ed25519=initiator_ed25519,
     )
 
 
@@ -139,7 +164,8 @@ def _load_pairing(
     row = connection.execute(
         """
         SELECT requester_id, agent_name, expires_at,
-               device_user_id, device_id, device_ed25519
+               device_user_id, device_id, device_ed25519,
+               initiator_device_id, initiator_ed25519
         FROM desktop_pairings WHERE token_hash = ?
         """,
         (_token_hash(token),),
@@ -167,6 +193,9 @@ def claim_desktop_pairing(
         if pending.agent_name != agent_name:
             msg = "Desktop pairing code belongs to another agent."
             raise DesktopPairingError(msg)
+        if pending.initiator_device_id is not None and device_user_id != pending.requester_id:
+            msg = "Desktop pairing code does not belong to this Matrix account."
+            raise DesktopPairingError(msg)
         claimed_identity = (pending.device_user_id, pending.device_id, pending.device_ed25519)
         new_identity = (device_user_id, device_id, device_ed25519)
         if pending.claimed and claimed_identity != new_identity:
@@ -187,6 +216,8 @@ def claim_desktop_pairing(
             device_user_id=device_user_id,
             device_id=device_id,
             device_ed25519=device_ed25519,
+            initiator_device_id=pending.initiator_device_id,
+            initiator_ed25519=pending.initiator_ed25519,
         )
 
 
@@ -197,6 +228,10 @@ def confirm_desktop_pairing(
     requester_id: str,
     agent_name: str,
     verification: str,
+    initiator_device_id: str | None = None,
+    initiator_ed25519: str | None = None,
+    expected_device_id: str | None = None,
+    expected_device_ed25519: str | None = None,
     now: int | None = None,
 ) -> PendingDesktopPairing:
     """Return one claimed pairing only in its original requester-agent conversation."""
@@ -206,8 +241,19 @@ def confirm_desktop_pairing(
     if pending.requester_id != requester_id or pending.agent_name != agent_name:
         msg = "Desktop pairing code does not belong to this requester and agent."
         raise DesktopPairingError(msg)
+    initiator = (pending.initiator_device_id, pending.initiator_ed25519)
+    caller = (initiator_device_id, initiator_ed25519)
+    if (any(initiator) or any(caller)) and (None in initiator or caller != initiator):
+        msg = "Desktop pairing must be confirmed from the initiating device."
+        raise DesktopPairingError(msg)
     if not pending.claimed:
         msg = "Desktop device has not claimed this pairing code yet."
+        raise DesktopPairingError(msg)
+    if expected_device_id is not None and pending.device_id != expected_device_id:
+        msg = "Desktop pairing device ID does not match the claimed local device."
+        raise DesktopPairingError(msg)
+    if expected_device_ed25519 is not None and pending.device_ed25519 != expected_device_ed25519:
+        msg = "Desktop pairing device key does not match the claimed local device."
         raise DesktopPairingError(msg)
     assert pending.device_ed25519 is not None
     expected_verification = desktop_pairing_verification(token, pending.device_ed25519)

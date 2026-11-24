@@ -29,7 +29,12 @@ logger = get_logger(__name__)
 _MAX_WARNING_DETAIL = 500
 
 
-def shell_status(shell: DesktopShell | None, caller: tuple[str, str] | None = None) -> dict[str, object]:
+def shell_status(
+    shell: DesktopShell | None,
+    caller: tuple[str, str] | None = None,
+    *,
+    controller_key: str | None = None,
+) -> dict[str, object]:
     """Describe local shell access; ``caller`` hides another caller's active request ID."""
     if shell is None:
         return {
@@ -40,16 +45,25 @@ def shell_status(shell: DesktopShell | None, caller: tuple[str, str] | None = No
             "active_request_id": None,
             "handles": [],
         }
-    return {"enabled": True, **shell.status(caller=caller)}
+    return {"enabled": True, **shell.status(caller=caller, controller_key=controller_key)}
 
 
-def caller_shell_status(shell: DesktopShell | None, command: DesktopCommand) -> dict[str, object]:
+def caller_shell_status(
+    shell: DesktopShell | None,
+    command: DesktopCommand,
+    *,
+    controller_key: str | None = None,
+) -> dict[str, object]:
     """Show another allowed caller only whether approval is pending, its own active ID, and its own handles."""
-    status = shell_status(shell, (command.requester_id, command.agent_name))
+    status = shell_status(shell, (command.requester_id, command.agent_name), controller_key=controller_key)
     return {
         **status,
         "pending": status["pending"] is not None,
-        "handles": shell.handles(command.requester_id, command.agent_name) if shell is not None else [],
+        "handles": (
+            shell.handles(command.requester_id, command.agent_name, controller_key=controller_key)
+            if shell is not None
+            else []
+        ),
     }
 
 
@@ -57,6 +71,8 @@ async def execute_shell(
     client: nio.AsyncClient,
     shell: DesktopShell | None,
     command: DesktopCommand,
+    *,
+    controller_key: str = "",
 ) -> dict[str, object]:
     """Start a command only after local approval, or read or stop one of the caller's own handles."""
     if shell is None:
@@ -67,13 +83,28 @@ async def execute_shell(
         reject_unexpected_parameters(parameters, allowed=frozenset({"handle", "offset"}))
         handle = required_str_parameter(parameters, "handle")
         offset = optional_int_parameter(parameters, "offset")
-        result = shell.check(command.requester_id, command.agent_name, handle, offset=offset)
+        result = shell.check(
+            command.requester_id,
+            command.agent_name,
+            handle,
+            offset=offset,
+            controller_key=controller_key,
+        )
         return await _shell_result(client, command, shell, result, offset=offset)
     if command.action == "kill_shell":
         reject_unexpected_parameters(parameters, allowed=frozenset({"handle", "force"}))
         handle = required_str_parameter(parameters, "handle")
         force = optional_bool_parameter(parameters, "force")
-        return {"state": shell.kill(command.requester_id, command.agent_name, handle, force=force), "handle": handle}
+        return {
+            "state": shell.kill(
+                command.requester_id,
+                command.agent_name,
+                handle,
+                force=force,
+                controller_key=controller_key,
+            ),
+            "handle": handle,
+        }
     reject_unexpected_parameters(parameters, allowed=frozenset({"command", "cwd", "timeout_seconds"}))
     timeout_seconds = optional_int_parameter(parameters, "timeout_seconds")
     request = DesktopShellRequest(
@@ -84,6 +115,7 @@ async def execute_shell(
         cwd=optional_str_parameter(parameters, "cwd", default=str(Path.home())),
         expires_at_ms=command.expires_at_ms,
         timeout_seconds=30 if timeout_seconds is None else timeout_seconds,
+        controller_key=controller_key,
     )
     return await _shell_result(client, command, shell, await shell.execute(request))
 

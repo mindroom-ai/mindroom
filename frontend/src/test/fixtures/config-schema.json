@@ -1854,6 +1854,17 @@
           "title": "Allow Self Config",
           "type": "boolean"
         },
+        "desktop_pairing": {
+          "default": "self_service",
+          "description": "Desktop pairing policy for agents: 'self_service' lets requesters pair any concrete agent and activates the desktop tool only for paired requesters, 'explicit_only' requires agents to declare the desktop tool, and 'disabled' disables desktop pairing for all agents",
+          "enum": [
+            "self_service",
+            "explicit_only",
+            "disabled"
+          ],
+          "title": "Desktop Pairing",
+          "type": "string"
+        },
         "max_preload_file_chars": {
           "default": 30000,
           "description": "Characters of each file inlined into the system prompt, context files and MEMORY.md alike; a longer file keeps its first whole lines within this limit",
@@ -6555,6 +6566,7 @@
         "allow_shell_without_worker": false,
         "worker_grantable_credentials": null,
         "allow_self_config": false,
+        "desktop_pairing": "self_service",
         "max_preload_file_chars": 30000,
         "automations": [],
         "tool_output_auto_save_threshold_bytes": 51200,

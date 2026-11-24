@@ -437,17 +437,25 @@ async def handle_command(  # noqa: C901, PLR0912, PLR0915
         response_text = _format_welcome_message(candidate_entities, context.config, context.runtime_paths)
 
     elif command.type == CommandType.DESKTOP:
+        args_text = command.args.get("args_text", "")
         if not room_membership_is_complete(room):
             response_text = "❌ Couldn't confirm this room's membership; try again in a moment."
         elif (
-            desktop_agent_name := desktop_room_agent(context.config, context.runtime_paths, room, requester_user_id)
+            desktop_agent_name := desktop_room_agent(
+                context.config,
+                context.runtime_paths,
+                room,
+                requester_user_id,
+                args_text=args_text,
+            )
         ) is None:
             response_text = (
-                "❌ Use `/desktop` in a private room containing only you and exactly one Desktop-enabled agent."
+                "❌ Use `/desktop` in a private room containing only you and one Desktop-enabled agent, "
+                "or specify the agent name (e.g. `/desktop setup <agent>`)."
             )
         else:
             response_text = handle_desktop_command(
-                command.args.get("args_text", ""),
+                args_text,
                 scope=DesktopCommandScope(
                     config=context.config,
                     runtime_paths=context.runtime_paths,

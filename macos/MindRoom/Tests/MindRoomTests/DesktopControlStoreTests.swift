@@ -56,18 +56,27 @@ final class DesktopControlStoreTests: XCTestCase {
     func testMindRoomItselfIsNeverOfferedAsAControllableApplication() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }
-        let bundle = root.appendingPathComponent("MindRoom.app")
-        let contents = bundle.appendingPathComponent("Contents")
-        try FileManager.default.createDirectory(at: contents, withIntermediateDirectories: true)
-        let info = ["CFBundleIdentifier": "chat.mindroom.menubar", "CFBundleName": "MindRoom", "CFBundlePackageType": "APPL"]
-        try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0)
-            .write(to: contents.appendingPathComponent("Info.plist"))
         let store = DesktopControlStore()
+        for identifier in [
+            "chat.mindroom.menubar",
+            "chat.mindroom.desktophelper",
+            "chat.mindroom.app",
+            "chat.mindroom.app.helper",
+            "chat.mindroom.app.helper.Renderer",
+            "chat.mindroom.app.helper.GPU",
+            "chat.mindroom.app.helper.Plugin",
+        ] {
+            let bundle = root.appendingPathComponent("\(identifier).app")
+            let contents = bundle.appendingPathComponent("Contents")
+            try FileManager.default.createDirectory(at: contents, withIntermediateDirectories: true)
+            let info = ["CFBundleIdentifier": identifier, "CFBundleName": "MindRoom", "CFBundlePackageType": "APPL"]
+            try PropertyListSerialization.data(fromPropertyList: info, format: .xml, options: 0)
+                .write(to: contents.appendingPathComponent("Info.plist"))
 
-        XCTAssertNil(store.addApplication(at: bundle))
-
-        XCTAssertFalse(store.selectedAppIDs.contains("chat.mindroom.menubar"))
-        XCTAssertEqual(store.errorMessage, "Choose a macOS application with a bundle identifier other than MindRoom itself.")
+            XCTAssertNil(store.addApplication(at: bundle), identifier)
+            XCTAssertFalse(store.selectedAppIDs.contains(identifier), identifier)
+            XCTAssertEqual(store.errorMessage, "Choose a macOS application with a bundle identifier other than MindRoom itself.")
+        }
         XCTAssertFalse(InstalledApplicationCatalog.applications().contains { InstalledApplicationCatalog.mindRoomIdentifiers.contains($0.id) })
     }
 

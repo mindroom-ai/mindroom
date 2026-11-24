@@ -7,6 +7,7 @@ from __future__ import annotations
 import os
 import plistlib
 import runpy
+import shlex
 import subprocess
 import sys
 from pathlib import Path
@@ -14,6 +15,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
+import yaml
 
 
 def _fake_macos_bin(tmp_path: Path, machine: str) -> Path:
@@ -172,3 +174,41 @@ def test_helper_spec_supplies_build_version_for_plist_stamping(monkeypatch: pyte
     info = plistlib.loads(plistlib.dumps(bundle.call_args.kwargs["info_plist"]))
     assert isinstance(info["CFBundleVersion"], str)
     assert info["CFBundleVersion"].isdigit()
+
+
+def test_release_workflow_publishes_signed_desktop_helper_tarball_and_sha256() -> None:
+    """Release workflow archives the signed notarized helper bundle, checksums it, and uploads both."""
+    workflow_path = Path(__file__).resolve().parents[1] / ".github" / "workflows" / "release.yml"
+    workflow = yaml.safe_load(workflow_path.read_text(encoding="utf-8"))
+    steps = workflow["jobs"]["build_macos_app"]["steps"]
+
+    def _locate(needle: str) -> tuple[int, int, str]:
+        for index, step in enumerate(steps):
+            run_script = step.get("run", "")
+            offset = run_script.find(needle)
+            if offset != -1:
+                return index, offset, run_script
+        msg = f"Did not find {needle!r} in build_macos_app steps"
+        raise AssertionError(msg)
+
+    build_pos = _locate("NOTARIZE=1 macos/build-macos-app.sh --dmg")
+    tar_command = (
+        "tar -C dist/macos/MindRoom.app/Contents/Helpers "
+        '-czf dist/macos/MindRoom-Desktop-Helper-arm64.tar.gz "MindRoom Desktop Helper.app"'
+    )
+    tar_pos = _locate(tar_command)
+    checksum_command = (
+        "cd dist/macos && "
+        "shasum -a 256 MindRoom-Desktop-Helper-arm64.tar.gz "
+        "> MindRoom-Desktop-Helper-arm64.tar.gz.sha256"
+    )
+    checksum_pos = _locate(checksum_command)
+    upload_pos = _locate("gh release upload")
+
+    assert build_pos[:2] < tar_pos[:2] < checksum_pos[:2] < upload_pos[:2]
+
+    upload_tokens = shlex.split(upload_pos[2].replace("\\\n", " "))
+    assert "dist/macos/MindRoom.dmg" in upload_tokens
+    assert "dist/macos/MindRoom.zip" in upload_tokens
+    assert "dist/macos/MindRoom-Desktop-Helper-arm64.tar.gz" in upload_tokens
+    assert "dist/macos/MindRoom-Desktop-Helper-arm64.tar.gz.sha256" in upload_tokens
