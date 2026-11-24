@@ -339,6 +339,7 @@ async def _execute_child(
         tools=context.plugins.tools,
         execution_identity=identity,
         delegation_depth=child.depth,
+        runtime_toolkits=("workflow_peers",) if child.workflow_run_id and child.workflow_node_key else (),
     )
     await settle_child_response(
         child,

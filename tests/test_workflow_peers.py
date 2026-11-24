@@ -17,6 +17,10 @@ import pytest_asyncio
 
 from mindroom.agents import create_agent
 from mindroom.api.script_gateway import serve_listener
+from mindroom.approval import manager as approval_manager
+from mindroom.approval.manager import BackgroundApprovalDecision
+from mindroom.approval.tool_owners import required_approval_tool_names
+from mindroom.config.approval import ToolApprovalConfig
 from mindroom.custom_tools.workflow import WorkflowTools
 from mindroom.custom_tools.workflow_peers import WorkflowPeerTools
 from mindroom.delegation.lifecycle import (
@@ -27,6 +31,7 @@ from mindroom.delegation.lifecycle import (
     start_child_turn,
 )
 from mindroom.delegation.state import DelegationChild, child_execution_identity
+from mindroom.event_journal import ApprovalCall, ApprovalDecision
 from mindroom.llm.messages import Message
 from mindroom.llm.provider import TurnCompleted
 from mindroom.orchestration import tool_job_runtime as coordinator_module
@@ -34,6 +39,7 @@ from mindroom.tool_jobs.execution import wait_mode
 from mindroom.tool_jobs.runtime import JobAccessError
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import tool_runtime_context
+from mindroom.tool_system.tool_function import ToolGate
 from mindroom.turn_model import ModelScope, resolve_turn_model
 from mindroom.workflow_runs import agent_nodes, peers
 from mindroom.workflow_runs import engine as engine_module
@@ -49,7 +55,7 @@ from mindroom.workflow_runs.store import WorkflowRunNotFoundError, WorkflowRunSt
 from tests.conftest import SETTLE_TIMEOUT_SECONDS, bound_worker_launch_config
 from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer, calls, tool_call
 from tests.test_workflow_local_integration import LocalWorkflowStack
-from tests.tool_job_helpers import toolkit_job_tools
+from tests.tool_job_helpers import JobApprovalCards, toolkit_job_tools
 from tests.workflow_helpers import NodeFailed, WorkflowStack, set_run, workflow_stack
 from tests.workflow_live import blind_authoring
 from tests.workflow_live.kill_after_write import Deployment
@@ -1406,3 +1412,150 @@ async def test_workflow_peers_refuses_caller_outside_bound_run(stack: WorkflowSt
                     stack.coordinator._authorize_execution(owner_a, job_tool)
         finally:
             config.agents["watcher"].tools = original_tools
+
+
+@pytest.mark.asyncio
+async def test_workflow_peers_approval_gates_and_withholding(stack: WorkflowStack) -> None:
+    """Operator tool_approval rules gate workflow_peers identically to configured tools, and withhold when non-resumable."""
+    config = stack.context.config.model_copy(
+        update={
+            "tool_approval": ToolApprovalConfig(
+                default="auto_approve",
+                rules=[
+                    {"match": "append", "action": "require_approval"},
+                    {"match": "set_shared_state", "action": "require_approval"},
+                ],
+            ),
+        },
+    )
+    wildcard_config = config.model_copy(update={"tool_approval": ToolApprovalConfig(default="require_approval")})
+    paths = stack.context.runtime_paths
+    child = await _start_workflow_child(stack, run_id=stack.run_id, node_key="@check", parent_run_id="p-chk")
+    owner = child_execution_identity(child)
+    plugins = config_plugins(config, paths)
+    turn_model = resolve_turn_model(config, paths, ModelScope(entity="watcher"), None)
+    provider = ScriptedModel(lambda _req: answer("ok"))
+
+    async def _build_fns(cfg: Any, *, resumable: bool) -> dict[str, Any]:  # noqa: ANN401
+        async with child_run_context(child, config=cfg, runtime_paths=paths):
+            built = create_agent(
+                "watcher",
+                cfg,
+                paths,
+                execution_identity=owner,
+                plugins=plugins,
+                knowledge=None,
+                model=turn_model,
+                provider=provider,
+                delegation_depth=1,
+                supports_native_tool_approval=resumable,
+            )
+        return {fn.name: fn for tk in built.spec.toolkits for fn in tk.functions}
+
+    resumable_fns = await _build_fns(config, resumable=True)
+    non_resumable_fns = await _build_fns(config, resumable=False)
+    assert resumable_fns["append"].gate is ToolGate.POLICY
+    assert resumable_fns["set_shared_state"].gate is ToolGate.POLICY
+    assert resumable_fns["send_peer_message"].gate is None
+    assert "append" not in non_resumable_fns
+    assert "set_shared_state" not in non_resumable_fns
+    assert "send_peer_message" in non_resumable_fns
+
+    wildcard_fns = await _build_fns(wildcard_config, resumable=True)
+    wildcard_non_resumable = await _build_fns(wildcard_config, resumable=False)
+    for peer_fn in ("send_peer_message", "set_shared_state", "ask_user"):
+        assert wildcard_fns[peer_fn].gate is ToolGate.POLICY
+        assert peer_fn not in wildcard_non_resumable
+
+    # Outside a workflow child (default runtime_toolkits=()), required_approval_tool_names refuses workflow_peers.
+    saved = ApprovalCall(
+        tool_call_id="c1",
+        tool_name="set_shared_state",
+        invoking_agent="watcher",
+        toolkit_name="workflow_peers",
+        arguments_digest="d",
+        expires_at_ns=0,
+        decision=ApprovalDecision.APPROVED,
+    )
+    with pytest.raises(RuntimeError, match="workflow_peers"):
+        await required_approval_tool_names(
+            "watcher",
+            (saved,),
+            config=config,
+            runtime_paths=paths,
+            tools=plugins.tools,
+            execution_identity=owner,
+            delegation_depth=1,
+        )
+
+
+@pytest.mark.asyncio
+async def test_workflow_peers_respects_tool_approval_policy_pause_approve_deny(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Live workflow child pauses gated peer writes until approved, and leaves state untouched before approval or on denial."""
+    monkeypatch.setattr(engine_module, "RECHECK_SECONDS", 0.05)
+    monkeypatch.setattr(agent_nodes, "RECHECK_SECONDS", 0.05)
+
+    with workflow_stack(
+        tmp_path,
+        extra_tools=("workflow",),
+        require_approval=("append", "set_shared_state"),
+    ) as gated:
+        await gated.open_jobs()
+        assert gated.coordinator is not None
+        gated.jobs.authorize_execution = gated.coordinator._authorize_execution
+        gated.script_agents(monkeypatch)
+        cards = JobApprovalCards(asyncio.get_running_loop().create_future(), gated.jobs.journal)
+        monkeypatch.setattr(approval_manager, "get_approval_store", lambda: cards)
+        await gated.start()
+        try:
+            # 1. Pause + approve: no state changes before approval; executes once after approval.
+            gated.child_script(
+                calls(tool_call("set_shared_state", "st1", key="contract", value={"v": 1})),
+                answer("saved"),
+            )
+            await gated.submit("@0", "agent", {"prompt": "save contract", "name": "backend"}, meta={"name": "backend"})
+            await asyncio.wait_for(cards.posted.wait(), 10)
+            await gated.until(lambda: gated.store.get_run(gated.run_id).state is WorkflowRunState.WAITING)
+
+            node0 = gated.store.get_node(gated.run_id, "@0")
+            assert node0 is not None
+            assert (node0.state, node0.waiting_on) == (WorkflowNodeState.WAITING, "approval")
+            assert peers.all_state(gated.store, gated.run_id) == {}
+
+            cards.decision.set_result(BackgroundApprovalDecision("approved", None))
+            assert (
+                await gated.result(
+                    "@0",
+                    "agent",
+                    {"prompt": "save contract", "name": "backend"},
+                    meta={"name": "backend"},
+                )
+                == "saved"
+            )
+            assert peers.all_state(gated.store, gated.run_id) == {"contract": {"v": 1}}
+
+            # 2. Deny: state remains untouched and the child finishes cleanly.
+            cards2 = JobApprovalCards(asyncio.get_running_loop().create_future(), gated.jobs.journal)
+            cards2.decision.set_result(BackgroundApprovalDecision("denied", "No overwrite"))
+            monkeypatch.setattr(approval_manager, "get_approval_store", lambda: cards2)
+            gated.child_script(
+                calls(tool_call("set_shared_state", "st2", key="contract", value={"v": 2})),
+                answer("denied-ok"),
+            )
+            assert (
+                await gated.result(
+                    "@1",
+                    "agent",
+                    {"prompt": "overwrite contract", "name": "backend2"},
+                    meta={"name": "backend2"},
+                )
+                == "denied-ok"
+            )
+            assert peers.all_state(gated.store, gated.run_id) == {"contract": {"v": 1}}
+        finally:
+            if not cards.decision.done():
+                cards.decision.cancel()
+            await gated.close()

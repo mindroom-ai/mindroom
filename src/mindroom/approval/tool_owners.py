@@ -12,7 +12,7 @@ from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_system.agent_tools import resolve_agent_tools, turn_keeps_room_tools
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Collection, Mapping, Sequence
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -119,6 +119,7 @@ async def required_approval_tool_names(
     tools: ToolRegistry,
     execution_identity: ToolExecutionIdentity,
     delegation_depth: int,
+    runtime_toolkits: Collection[str] = (),
 ) -> tuple[str, ...]:
     """Return the toolkits a saved approval recorded, after checking that the agent may still use each.
 
@@ -138,6 +139,11 @@ async def required_approval_tool_names(
     )
     required = sorted({call.toolkit_name for call in calls if call.toolkit_name is not None})
     for name in required:
+        if name in runtime_toolkits:
+            if agent_name not in config.agents:
+                msg = f"Saved approval toolkit {name!r} is no longer permitted; retry the request"
+                raise RuntimeError(msg)
+            continue
         # A call names its authored entry; the toolkits a preset or an implied tool brings in share that name.
         owned = [entry for entry in offered if (entry.authored_name or entry.name) == name]
         if not owned:
