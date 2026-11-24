@@ -494,3 +494,28 @@ async def test_queued_call_retrying_owner_readiness_does_not_start_on_stopping_r
     node = stack.store.get_node(stack.run_id, "@2")
     assert node is not None
     assert (node.state, node.handle, len(stack.models["watcher"].requests)) == (_CANCELLED, None, 2)
+
+
+@pytest.mark.asyncio
+async def test_start_queued_survives_places_cleared_during_budget_check(
+    stack: WorkflowStack,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Clearing state.places while check_budget awaits must not raise AttributeError in start_queued."""
+    await stack.start(max_concurrent=1)
+    places = stack.engine.places_for(stack.store.get_run(stack.run_id))
+    places.working.add("@1")
+    started = False
+
+    async def clear_places_during_budget(_run: object) -> bool:
+        stack.engine._runs[stack.run_id].places = None
+        return False
+
+    async def start() -> None:
+        nonlocal started
+        started = True
+
+    monkeypatch.setattr(stack.engine, "check_budget", clear_places_during_budget)
+    await stack.engine.start_queued(stack.run_id, "@1", start)
+    assert started
+    await stack.end_attempt(ScriptRunState.EXITED)

@@ -344,12 +344,12 @@ class WorkflowEngine:
                 try:
                     async with self.condition(run_id):
                         state = self._runs.get(run_id)
-                        if state is None or state.places is None or state.stopping:
+                        if state is None or (places := state.places) is None or state.stopping:
                             return
-                        state.places.working.discard(key)
+                        places.working.discard(key)
                         if await self.check_budget(self.store.get_run(run_id)):
                             return
-                        state.places.working.add(key)
+                        places.working.add(key)
                         await start()
                     break
                 except ScriptRuntimeUnavailableError:
