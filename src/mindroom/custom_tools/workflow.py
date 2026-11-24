@@ -545,11 +545,7 @@ class WorkflowTools(Toolkit, ManagedJobToolkit):
 
         # On a thread, where it waits for the store's writer. A call cancelled meanwhile takes back the intent it
         # wrote; the engine keeps an inline caller's cancellation away from here and ends the run itself.
-        made = current_tool_call() if outer is not None and running_child_run() is not None else None
-        call = (
-            (*outer, made.context.call_id) if outer is not None and made is not None and made.context.call_id else None
-        )
-        reserve = partial(store.reserve_run, intent, max_active=self.limits.max_concurrent_runs, call=call)
+        reserve = partial(store.reserve_run, intent, max_active=self.limits.max_concurrent_runs)
         run, created = await run_blocking_or_compensate(reserve, take_back)
         if outer is not None and created:
             await engine.nest(run)

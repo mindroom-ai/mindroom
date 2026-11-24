@@ -2,10 +2,8 @@
 
 from __future__ import annotations
 
-import re
 from dataclasses import replace
-from functools import partial
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 from mindroom.ai import run_delegated_child_response
 from mindroom.ai_run_metadata import prior_usage_by_run
@@ -40,14 +38,13 @@ from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import require_tool_runtime_context
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Sequence
+    from collections.abc import Sequence
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.delegation.state import ChildResponseRunner, DelegationChild
+    from mindroom.delegation.state import DelegationChild
     from mindroom.llm.runs import RunRecord
     from mindroom.tool_jobs.runtime import BackgroundJob, JobSpec, ToolJobRuntime
-    from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 # How many of a job's continuations its saved adapter counts, so the count survives further restarts.
 _CONTINUATIONS_KEY = "restart_continuations"
@@ -61,18 +58,6 @@ _RECEIPTS_KEY = "continuation_receipts"
 _RESTART_CONTINUATION_LIMIT = 2
 # How much of what the cut-short turn was sent the continuation prompt repeats.
 _MAX_TASK_CHARACTERS = 8_000
-# The call of a workflow run's agent that starts a run inside that run, which is never the model's to make again.
-_START_WORKFLOW = "start_workflow"
-# What stands in a continuation prompt for the report of such a run, until the job has waited for the run.
-_RUN_REPORT_MARK = "<<mindroom:workflow-run-report:{}>>"
-_RUN_REPORT_MARKS = re.compile(r"<<mindroom:workflow-run-report:(wf-[0-9a-f]{32})>>")
-# What the job's saved adapter says under `wait` while it waits for such runs, before its turn begins.
-_WAITS_FOR_RUN = "run"
-_NESTED_RESULT = (
-    "Your `start_workflow` call was not lost in the restart: the workflow run it started went on and has ended. "
-    "Do not call start_workflow for it again. This is the result of that call:\n"
-    "<start_workflow_result>\n{}\n</start_workflow_result>"
-)
 
 
 async def continued_subagent_job(job: BackgroundJob, runtime: ToolJobRuntime) -> JobSpec | str:
@@ -96,10 +81,9 @@ async def continued_subagent_job(job: BackgroundJob, runtime: ToolJobRuntime) ->
     context = require_tool_runtime_context()
     config, runtime_paths, owner = context.current_config, context.runtime_paths, job.owner
     continuations = job.adapter.get(_CONTINUATIONS_KEY, 0)
-    # A job waiting on a nested run, approval, or its own ask_user was not cut short by work retries.
-    for_run = job.adapter.get("wait") == _WAITS_FOR_RUN
+    # A job waiting on an approval or its own ask_user was not cut short by work retries.
     for_user = waited_for_user(job)
-    if continuations >= _RESTART_CONTINUATION_LIMIT and not (for_run or for_user or waited_for_approval(job)):
+    if continuations >= _RESTART_CONTINUATION_LIMIT and not (for_user or waited_for_approval(job)):
         return f"restarts already cut it short {continuations + 1} times"
     child = await _stopped_turn(job, config, runtime_paths)
     if isinstance(child, str):
@@ -164,9 +148,7 @@ async def continued_subagent_job(job: BackgroundJob, runtime: ToolJobRuntime) ->
         parent_run_id=None,
         tool_name=CONTINUE_SUBAGENT,
         arguments=arguments,
-        run_child=run_delegated_child_response
-        if child.workflow_run_id is None
-        else _after_nested_runs(child, context, partial(runtime.save_adapter, job.job_id)),
+        run_child=run_delegated_child_response,
         prompt=prompt,
         config=authorized,
         runtime_paths=runtime_paths,
@@ -180,7 +162,7 @@ async def continued_subagent_job(job: BackgroundJob, runtime: ToolJobRuntime) ->
             job,
             child,
             prompt=prompt,
-            continuations=continuations + (not for_run and not for_user),
+            continuations=continuations + (not for_user),
             paused=paused is not None,
             receipts=receipts,
         )
@@ -252,62 +234,10 @@ async def _sent_or_resumed(
     if waited_for_approval(job):
         await supersede_job_approvals(job)
     run = await read_child_run(child, config, runtime_paths)
-    prompt = await _continuation_prompt(job, child, run, config)
+    prompt = _continuation_prompt(job, child, run, config)
     if prompt is None:
         return "its turn's run holds calls recovery could not finish, as a run paused for a decision or a subagent does"
     return prompt, None, run
-
-
-def _after_nested_runs(
-    child: DelegationChild,
-    context: ToolRuntimeContext,
-    save: Callable[..., Awaitable[None]],
-) -> ChildResponseRunner:
-    """Return what runs the continued turn of a workflow run's agent: it waits for the runs its prompt names first.
-
-    Each mark of a run inside the agent's run is replaced by what that run delivers, as the call that started it
-    would have returned it. The saved prompt keeps the marks, and the job says that it waits (*save*), so a restart
-    during the wait finds a turn that had not begun and sends it the same prompt, to wait again.
-    """
-    outer = (child.workflow_run_id, child.workflow_node_key, child.workflow_generation)
-
-    async def run(turn: DelegationChild, *, prompt: str, **options: Any) -> str:  # noqa: ANN401 - the runner's own.
-        engine = context.orchestrator.workflow_engine if context.orchestrator is not None else None
-        waited_for = dict.fromkeys(_RUN_REPORT_MARKS.findall(prompt) if engine is not None else ())
-        if waited_for:
-            await save(wait=_WAITS_FOR_RUN)
-            for run_id in waited_for:
-                # Text of the task that only looks like a mark names no run inside this call, and stays.
-                if (report := await engine.nested_report(outer, run_id)) is not None:
-                    prompt = prompt.replace(_RUN_REPORT_MARK.format(run_id), report)
-            await save(wait=None)
-        return await run_delegated_child_response(turn, prompt=prompt, **options)
-
-    return run
-
-
-async def _nested_runs(child: DelegationChild, run: RunRecord) -> dict[str, str] | None:
-    """Return the run each cut-short `start_workflow` call of a workflow agent's turn provably started, by call ID.
-
-    Empty for a turn in which no such call was cut short, which goes on as any turn does. None when one of them
-    has no proof (`WorkflowEngine.nested_call`), or when a call of another tool was cut short beside them: then
-    nobody can say what the turn did, and it does not go on.
-    """
-    cut_short = [tool for tool in run.tools or () if tool.result == INTERRUPTED_CALL_RESULT]
-    if child.workflow_run_id is None or all(tool.tool_name != _START_WORKFLOW for tool in cut_short):
-        return {}
-    context = require_tool_runtime_context()
-    if context.orchestrator is None:
-        return None
-    outer = (child.workflow_run_id, child.workflow_node_key, child.workflow_generation)
-    prove = partial(context.orchestrator.workflow_engine.nested_call, context, outer)
-    found: dict[str, str] = {}
-    for tool in cut_short:
-        proven = await prove(tool.tool_call_id, tool.tool_args or {}) if tool.tool_name == _START_WORKFLOW else None
-        if proven is None:
-            return None
-        found[tool.tool_call_id] = proven
-    return found
 
 
 async def _stopped_turn(job: BackgroundJob, config: Config, runtime_paths: RuntimePaths) -> DelegationChild | str:
@@ -337,7 +267,7 @@ async def _stopped_turn(job: BackgroundJob, config: Config, runtime_paths: Runti
     return child
 
 
-async def _continuation_prompt(
+def _continuation_prompt(
     job: BackgroundJob,
     child: DelegationChild,
     run: RunRecord | None,
@@ -349,9 +279,7 @@ async def _continuation_prompt(
     recovery did not turn into history cannot continue. A turn that called no tool left nothing in history and is sent
     again what it was sent: its task, or the prompt of the continuation it was. Any other turn is sent the
     continuation note, what it was sent, and an account of its run's calls: the child's history limits apply to the
-    recovered run as to any turn, and may leave out both. A `start_workflow` call of a workflow run's agent that was
-    cut short is not left to the model: the run it started is named by a mark that the job replaces with that run's
-    report once it has waited for it (`_after_nested_runs`), and without proof of that run the turn does not go on.
+    recovered run as to any turn, and may leave out both.
     """
     sent = job.adapter.get(_PROMPT_KEY) or original_prompt(child)
     if child.workflow_run_id is not None:
@@ -359,9 +287,8 @@ async def _continuation_prompt(
     if child.delegation_id != delegation_child(job).delegation_id:
         return sent
     if run is None:
-        # The call of a workflow run goes on only on proof that its turn called no tool, which no run is not. A job
-        # that still waited for the runs its prompt names is: its turn had not begun.
-        return sent if child.workflow_run_id is None or job.adapter.get("wait") == _WAITS_FOR_RUN else None
+        # The call of a workflow run goes on only on proof that its turn called no tool, which no run is not.
+        return sent if child.workflow_run_id is None else None
     if not is_recovered_run(run):
         # The turn of a workflow run's agent that waited for approvals was settled as it stood: the calls it asked
         # about never ran, and it goes on while no other call of it is left without an end.
@@ -369,31 +296,26 @@ async def _continuation_prompt(
         waited = child.workflow_run_id is not None and RESTART_INTERRUPTION_REASON in results and None not in results
         if not waited:
             return None if run.tools else sent
-    nested = await _nested_runs(child, run)
-    if nested is None:
-        return None
     # The prompt of a workflow run's call is sent whole: what it asks for may stand at its end.
     clip = len(sent) > _MAX_TASK_CHARACTERS and child.workflow_run_id is None
     task = f"{sent[:_MAX_TASK_CHARACTERS]}…" if clip else sent
     note = config.get_prompt("SUBAGENT_RESTART_CONTINUATION_PROMPT")
     of_run = child.workflow_run_id is not None
-    account = _calls_account(run, nested, of_run=of_run) if len(run.tools or ()) > len(nested) else ""
-    results = [_NESTED_RESULT.format(_RUN_REPORT_MARK.format(run_id)) for run_id in dict.fromkeys(nested.values())]
-    parts = (note, f"<interrupted_task>\n{task}\n</interrupted_task>", account, *results)
+    account = _calls_account(run, of_run=of_run) if run.tools else ""
+    parts = (note, f"<interrupted_task>\n{task}\n</interrupted_task>", account)
     return "\n\n".join(part for part in parts if part)
 
 
-def _calls_account(run: RunRecord, nested: dict[str, str], *, of_run: bool) -> str:
+def _calls_account(run: RunRecord, *, of_run: bool) -> str:
     """Render the cut-short run's calls as the bounded account a replayed reply's prompt gets of its stopped attempt.
 
     The child's history replays the recovered run like any other turn, so its limits may leave the run's calls out;
-    the account names each call from its preview either way, and which ones were cut short. The calls in *nested*
-    started runs whose reports the prompt gives, so they are no calls to check. Only the turn of a workflow run's
-    agent (*of_run*) goes on from a wait for approvals, whose calls it leaves out.
+    the account names each call from its preview either way, and which ones were cut short. Only the turn of a
+    workflow run's agent (*of_run*) goes on from a wait for approvals, whose calls it leaves out.
     """
     finished, cut_short = [], []
     for tool in run.tools or ():
-        if (of_run and tool.result == RESTART_INTERRUPTION_REASON) or tool.tool_call_id in nested:
+        if of_run and tool.result == RESTART_INTERRUPTION_REASON:
             # A call that still waited for its approval never ran: the turn that goes on asks for it again.
             continue
         entry = replace(format_tool_completed_event(tool.call), call=None)

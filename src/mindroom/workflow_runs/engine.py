@@ -1394,56 +1394,6 @@ class WorkflowEngine:
         with suppress(SupersededAttemptError):
             await asyncio.to_thread(self.store.put_node, group, outer.epoch)
 
-    async def nested_call(
-        self,
-        context: ToolRuntimeContext,
-        outer: tuple[str, str, int],
-        call_id: str,
-        arguments: Mapping[str, Any],
-    ) -> str | None:
-        """Return the run inside a run that the `start_workflow` call *call_id* of an agent's turn provably started.
-
-        The proof is the call as it was saved with its run when it reserved it, for the script and the arguments
-        the call names now: a provider may use one call ID twice in a turn, and a script file may have changed
-        since. Without it the answer is None, and nobody can say what the call did.
-        """
-        try:
-            text = await self.resolve_source(context, arguments)
-        except ValueError:
-            return None
-        key = nested_key(outer, text, arguments.get("args"))
-        runs = await asyncio.to_thread(self.store.bound_runs, *outer, call_id)
-        return next((run.run_id for run in runs if run.origin_job_id == key), None)
-
-    async def nested_report(self, outer: tuple[str, str, int], run_id: str) -> str | None:
-        """Wait for a run inside the call *outer* as the call that started it did, and return what it delivers.
-
-        The wait is one more call of the run's owner: it starts the run's attempts while it waits, and when it is
-        cancelled and no other call is left, the run is cancelled with it. None for a run that is not inside that
-        call. A run that another call resumed since is that call's to wait for and to stop: the call that started
-        it gets the report its own attempt ended with, which the run kept.
-        """
-        try:
-            run = self.store.get_run(run_id)
-        except WorkflowRunNotFoundError:
-            return None
-        if (run.parent_run_id, run.parent_node_key) != outer[:2]:
-            return None
-        if run.owner != run.origin_job_id:
-            kept = run.claims.get(str(run.origin_job_id))
-            return _TAKEN.format(run_id) if kept is None else kept
-
-        async def found() -> WorkflowRun:
-            return run
-
-        access = self.owner_access(run)
-        attended = (
-            self.attend(str(run.owner), found, access)
-            if access is not None and not isinstance(access, str)
-            else self.wait(run_id)
-        )
-        return await self.delivery(await attended)
-
     async def delivery(self, run: WorkflowRun) -> str:
         """Return what an ended run delivers to whoever started it: its report, or why it did not finish.
 

@@ -10,7 +10,6 @@ import sqlite3
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import closing
 from dataclasses import replace
 from functools import partial
 from typing import TYPE_CHECKING
@@ -154,31 +153,6 @@ def test_reserve_is_idempotent_per_origin_job(tmp_path: Path) -> None:
     assert store.get_run(_RUN_A) == first
     with pytest.raises(WorkflowRunNotFoundError):
         store.get_run(_RUN_B)
-
-
-def test_reserve_binds_the_call_that_made_it_to_its_run_in_the_same_write(tmp_path: Path) -> None:
-    """The call that reserves a run inside a run is saved with that run, and so is each later call that finds it."""
-    store = WorkflowRunStore(tmp_path / "w.sqlite3")
-    store.reserve_run(_run(_RUN_A))
-    inside = {"origin_job_id": "nested:1", "parent_run_id": _RUN_A, "parent_node_key": "@0"}
-    made = (_RUN_A, "@0", 1, "call-1")
-
-    child, _ = store.reserve_run(_run(_RUN_B, **inside), call=made)
-    store.reserve_run(_run(_RUN_C, **inside), call=(_RUN_A, "@0", 1, "call-2"))
-    with pytest.raises(WorkflowRunConflictError):
-        store.reserve_run(_run(_RUN_C, **inside, args={"topic": "other"}), call=(_RUN_A, "@0", 1, "call-3"))
-
-    assert [run.run_id for run in store.bound_runs(*made)] == [child.run_id]
-    assert [run.run_id for run in store.bound_runs(_RUN_A, "@0", 1, "call-2")] == [child.run_id]
-    # A call that reserved nothing, and the same call ID in another generation of the node, are bound to nothing.
-    assert store.bound_runs(_RUN_A, "@0", 1, "call-3") == []
-    assert store.bound_runs(_RUN_A, "@0", 2, "call-1") == []
-    # The binding goes with the run it is made in.
-    store.update_run(_RUN_A, 0, state=WorkflowRunState.COMPLETED, finished_at="2000-01-01T00:00:00Z")
-    store.update_run(_RUN_B, 0, state=WorkflowRunState.COMPLETED, finished_at="2000-01-01T00:00:00Z")
-    assert store.prune("2001-01-01T00:00:00Z") == 2
-    with closing(sqlite3.connect(store.database_path)) as connection:
-        assert connection.execute("SELECT COUNT(*) FROM workflow_calls").fetchone() == (0,)
 
 
 def test_prune_keeps_a_run_inside_a_run_for_as_long_as_the_run_around_it(tmp_path: Path) -> None:

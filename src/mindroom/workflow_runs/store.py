@@ -106,15 +106,11 @@ class WorkflowRunStore:
         run: WorkflowRun,
         *,
         max_active: int | None = None,
-        call: tuple[str, str, int, str] | None = None,
     ) -> tuple[WorkflowRun, bool]:
         """Store *run*, or return the run its `origin_job_id` already reserved and `False`.
 
         A new top-level run is refused once its agent and owner have *max_active* live ones, counted in the write
-        that would store it, so racing starts never exceed the limit and a refused one leaves no row. *call* is the
-        tool call of an agent's turn that reserves a run inside a run: that run, the node and the generation the
-        agent is of, and the call's ID. The same write saves it with the run it gets, new or found, so a restart at
-        any moment finds either both or neither.
+        that would store it, so racing starts never exceed the limit and a refused one leaves no row.
         """
         validated_workflow_run_id(run.run_id)
         values = {**_row_values(asdict(run), _RUN_JSON_FIELDS), "reservation_digest": _reservation_digest(run)}
@@ -139,14 +135,7 @@ class WorkflowRunStore:
                 except sqlite3.IntegrityError as exc:
                     msg = f"Workflow run {run.run_id} already exists."
                     raise WorkflowRunConflictError(msg) from exc
-            if call is not None:
-                connection.execute("INSERT OR IGNORE INTO workflow_calls VALUES (?, ?, ?, ?, ?)", (*call, run.run_id))
         return run, row is None
-
-    def bound_runs(self, run_id: str, key: str, generation: int, call_id: str) -> list[WorkflowRun]:
-        """Return the runs that the tool call *call_id* of the agent of one generation of a node was saved with."""
-        where = "run_id IN (SELECT child_run_id FROM workflow_calls WHERE run_id = ? AND key = ? AND generation = ? AND call_id = ?)"
-        return self._select_runs(where, [run_id, key, generation, call_id])
 
     def delete_intent(self, run_id: str, owner: str | None, epoch: int) -> bool:
         """Delete a run that never got an attempt and is still *owner*'s at *epoch*; return whether one was deleted."""
@@ -839,14 +828,6 @@ _SCHEMA_STATEMENTS = (
     )
     """,
     "CREATE INDEX IF NOT EXISTS workflow_log_run_idx ON workflow_log(run_id, id)",
-    # The tool calls of agents that reserved runs inside their runs, each with the run it got.
-    """
-    CREATE TABLE IF NOT EXISTS workflow_calls (
-        run_id TEXT NOT NULL REFERENCES workflow_runs(run_id) ON DELETE CASCADE,
-        key TEXT NOT NULL, generation INTEGER NOT NULL, call_id TEXT NOT NULL, child_run_id TEXT NOT NULL,
-        PRIMARY KEY (run_id, key, generation, call_id, child_run_id)
-    )
-    """,
     # Saved workflow files snapshotted once per attempt for SDK run(name).
     """
     CREATE TABLE IF NOT EXISTS workflow_sources (
