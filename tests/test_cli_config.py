@@ -714,6 +714,7 @@ class TestConfigInit:
             {"match": "manage_config", "action": "require_approval"},
             {"match": "manage_agent", "action": "require_approval"},
             {"match": "manage_team", "action": "require_approval"},
+            {"match": "matrix_user_write", "action": "require_approval"},
         ]
         # Background tool jobs are on by default, so the starter leaves the setting out.
         assert "background_tool_jobs" not in config

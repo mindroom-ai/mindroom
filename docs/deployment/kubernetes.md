@@ -175,6 +175,22 @@ The hosted instance chart instead mounts provider keys as files under `/etc/secr
 For passwordless agent accounts ([`appservice` mode](../matrix.md#agent-users)), set `matrix.managedAccountAuth: appservice` and point `matrix.appserviceToken` at a Secret holding the registration's `as_token`, and leave `matrix.registrationToken` unset (see [Matrix Managed Account Authentication](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#matrix-managed-account-authentication)).
 On the Tuwunel chart, mount the complete registration YAML from a Secret through `tuwunel.appserviceRegistration`, whose `key` is also the mounted filename and must end in `.yaml` or `.yml`, and optionally disable password login with `login_with_password: false` in `tuwunel.settings` (see [Passwordless MindRoom Accounts](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/tuwunel/README.md#passwordless-mindroom-accounts)).
 
+### Multi-User Preset
+
+For a ready-to-copy multi-user deployment with dedicated Kubernetes workers, per-user personal agents, Agent Keys (`egressBroker`), and semantic file memory, start from [`values-multi-user.example.yaml`](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/values-multi-user.example.yaml) and [`config-multi-user.example.yaml`](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/config-multi-user.example.yaml):
+
+```bash
+kubectl -n mindroom create configmap mindroom-config \
+  --from-file=config.yaml=cluster/k8s/runtime/config-multi-user.example.yaml
+helm upgrade --install mindroom ./cluster/k8s/runtime \
+  --namespace mindroom \
+  --create-namespace \
+  -f values-multi-user.yaml
+```
+
+The preset requests `ReadWriteMany` storage so dedicated workers can schedule across nodes.
+Kubernetes cannot upgrade a bound `ReadWriteOnce` PVC to `ReadWriteMany` in place — create a new RWX claim and migrate data, or keep `ReadWriteOnce` with `workers.kubernetes.colocateWithControlPlaneNode: true` on single-node/RWO clusters.
+
 ### Chart Reference
 
 Each chart's README documents its full values: [runtime](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md), [Tuwunel](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/tuwunel/README.md), [client](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/client/README.md), and [MatrixRTC](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/matrixrtc/README.md).

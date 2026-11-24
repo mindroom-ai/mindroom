@@ -187,6 +187,8 @@ tool_approval:
     action: require_approval
   - match: manage_team
     action: require_approval
+  - match: matrix_user_write
+    action: require_approval
 defaults:
   tools:
   - scheduler

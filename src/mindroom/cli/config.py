@@ -1369,6 +1369,9 @@ tool_approval:
       action: require_approval
     - match: manage_team
       action: require_approval
+    # Ask before acting as the user on Matrix when the optional matrix_user toolkit is enabled.
+    - match: matrix_user_write
+      action: require_approval
 
 defaults:
   # Execution tools (shell, filesystem, python, docker) run directly in the
