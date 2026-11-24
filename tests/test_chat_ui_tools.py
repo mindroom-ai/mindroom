@@ -105,6 +105,16 @@ def test_chat_ui_tool_registered_and_exposes_only_bounded_arguments(tmp_path: Pa
     ]
 
 
+def test_show_canvas_instructions_prefer_canvas_over_ascii_and_mermaid() -> None:
+    """Canvas instructions tell agents to prefer show_canvas over ASCII art or Mermaid fences."""
+    default_instructions = ChatUITools().instructions
+    canvas_instructions = ChatUITools(enable_show_canvas=True).instructions
+
+    assert "show_canvas(" not in default_instructions
+    assert "diagrams, charts" in canvas_instructions
+    assert "Prefer show_canvas over ASCII art or Mermaid fences" in canvas_instructions
+
+
 def test_excluding_a_function_an_option_left_off_is_a_no_op(tmp_path: Path) -> None:
     """``show_canvas`` is declared but off by default, so excluding it keeps the toolkit and its other functions."""
     context = _context(tmp_path)

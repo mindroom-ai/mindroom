@@ -10,11 +10,18 @@ from typing import TYPE_CHECKING
 
 import pytest
 
-from mindroom.llm.messages import Message
+from mindroom.agent_loop.build import prompt_for_turn
+from mindroom.agent_loop.prompt import MARKDOWN_OUTPUT_FORMAT, MATRIX_MARKDOWN_OUTPUT_FORMAT
+from mindroom.config.agent import AgentConfig
+from mindroom.config.main import Config
+from mindroom.config.models import DefaultsConfig, ModelConfig
+from mindroom.llm.messages import Message, system_text
+from mindroom.teams.members import build_team_spec, resolve_exact_team_members
 from mindroom.teams.prompt import render_leader_system_messages
 from mindroom.teams.spec import TeamMode
 from tests.agno_parity.golden_files import render
 from tests.agno_parity.prompt_scenarios import golden_path, load_golden, record_scenario, regenerated_golden
+from tests.conftest import bind_runtime_paths, install_model_providers, test_runtime_paths, unstored_team_scope_context
 from tests.fakes.scripted_model import ScriptedModel
 from tests.teams.squad import squad
 
@@ -63,3 +70,68 @@ def test_the_leader_prompt_keeps_its_roster_stable_and_its_date_in_the_turn_part
     assert str(monday[0].content).startswith("<your_role>\nYou are Squad.\n</your_role>\n\n<team>\n")
     assert str(monday[0].content).endswith("</team>")
     assert (monday[1].content, tuesday[1].content) == ("Monday.", "Tuesday.")
+
+
+@pytest.mark.parametrize(
+    ("outside_matrix", "markdown", "expected", "absent"),
+    [
+        (False, True, MATRIX_MARKDOWN_OUTPUT_FORMAT, None),
+        (True, True, MARKDOWN_OUTPUT_FORMAT, MATRIX_MARKDOWN_OUTPUT_FORMAT),
+        (False, False, None, MARKDOWN_OUTPUT_FORMAT),
+    ],
+)
+def test_team_leader_and_members_use_matrix_markdown_format_only_inside_matrix(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    outside_matrix: bool,
+    markdown: bool,
+    expected: str | None,
+    absent: str | None,
+) -> None:
+    """Matrix team leaders and members emit Matrix Markdown rules; outside-Matrix teams emit generic Markdown."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "general": AgentConfig(
+                    display_name="GeneralAgent",
+                    role="General assistant",
+                    rooms=[],
+                    include_default_tools=False,
+                ),
+            },
+            defaults=DefaultsConfig(tools=[], markdown=markdown),
+            models={"default": ModelConfig(provider="openai", id="gpt-6-astra")},
+        ),
+        runtime_paths,
+    )
+    install_model_providers(monkeypatch, {"default": ScriptedModel([])})
+    members = resolve_exact_team_members(
+        ["general"],
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=None,
+        outside_matrix=outside_matrix,
+        refresh_scheduler=None,
+        active_model_names={"general": "default"},
+    )
+    team = build_team_spec(
+        members=members,
+        mode=TeamMode.COORDINATE,
+        config=config,
+        runtime_paths=runtime_paths,
+        scope_context=unstored_team_scope_context(config, ["general"], team_name=None),
+        execution_identity=None,
+        model_name="default",
+        configured_team_name=None,
+        timezone="UTC",
+        outside_matrix=outside_matrix,
+    )
+    member_prompt = system_text(prompt_for_turn(members.build("general", "default")))
+    leader_prompt = system_text(team.spec.leader.system_messages)
+
+    for text in (leader_prompt, member_prompt):
+        if expected is not None:
+            assert expected in text
+        if absent is not None:
+            assert absent not in text

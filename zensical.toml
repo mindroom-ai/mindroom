@@ -19,6 +19,7 @@ nav = [
   { "Showcase" = "showcase.md" },
   { "Get Started" = [
     { "Install & First Run" = "getting-started.md" },
+    { "MindRoom Chat" = "mindroom-chat.md" },
     { "macOS App" = "installation/macos-app.md" },
     { "iOS App" = "ios.md" },
     { "Dashboard" = "dashboard.md" },

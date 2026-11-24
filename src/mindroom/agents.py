@@ -13,7 +13,12 @@ from mindroom import constants
 from mindroom.agent_cli.cli_shell_agent import STANDARD_CLI_NOTE, standard_cli_eligible, wrap_native_shell_window
 from mindroom.agent_descriptions import describe_agent
 from mindroom.agent_loop.build import AgentBuild, AgentSurface
-from mindroom.agent_loop.prompt import PromptSpec, join_sections
+from mindroom.agent_loop.prompt import (
+    MARKDOWN_OUTPUT_FORMAT,
+    MATRIX_MARKDOWN_OUTPUT_FORMAT,
+    PromptSpec,
+    join_sections,
+)
 from mindroom.agent_loop.spec import AgentSpec
 from mindroom.agent_loop.tools import offered_toolkits, toolkit_instructions
 from mindroom.approval.tool_approval import tool_may_require_approval, toolkit_approval_alias
@@ -1771,6 +1776,7 @@ def create_agent(
         role=role_context.role,
         instructions=tuple(instructions),
         markdown=agent.markdown,
+        markdown_format=MARKDOWN_OUTPUT_FORMAT if outside_matrix else MATRIX_MARKDOWN_OUTPUT_FORMAT,
         tool_instructions=tool_assembly.instructions,
         turn_context=render_session_context(config, agent.timezone),
         skills_block=None if offered_skills is None else offered_skills.prompt_block(),
