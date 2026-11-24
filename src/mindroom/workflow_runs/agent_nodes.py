@@ -139,8 +139,8 @@ async def load_follow_up_child(
     context: ToolRuntimeContext,
     run: WorkflowRun,
     subagent_id: str,
-) -> DelegationChild | str | None:
-    """Load the settled child for *subagent_id*, or return the refusal string when continuation is refused."""
+) -> DelegationChild | None:
+    """Load the settled child for *subagent_id*, or return None when continuation is refused."""
     owner = parse_tool_execution_identity_payload(run.execution_identity)
     target = await resolve_follow_up_target(
         {"subagent_id": subagent_id, "message": ""},
@@ -149,7 +149,7 @@ async def load_follow_up_child(
         runtime_paths=context.runtime_paths,
         depth=run.depth,
     )
-    return target if isinstance(target, str) else target.previous_child
+    return None if isinstance(target, str) else target.previous_child
 
 
 async def _resolve_child_target(

@@ -15,6 +15,7 @@ import pytest_asyncio
 import mindroom.workflow as workflow_sdk
 from mindroom.delegation import execution as delegation_execution
 from mindroom.delegation.background import delegation_child
+from mindroom.delegation.sessions import subagent_sessions_dir
 from mindroom.delegation.state import SubagentPersona
 from mindroom.workflow_runs import agent_nodes
 from mindroom.workflow_runs import engine as engine_module
@@ -442,3 +443,22 @@ async def test_session_turn_delegation_hooks_receive_turn_message_not_session_na
         ("run_subagent", "Read draft"),
         ("continue_subagent", "Summarize draft"),
     ]
+
+
+@pytest.mark.asyncio
+async def test_refused_follow_up_falls_back_to_fresh_child_with_transcript(stack: WorkflowStack) -> None:
+    """When the saved child cannot be continued (e.g. session storage gone), the turn starts a fresh child with the transcript."""
+    model = stack.child_script(answer("a1"), answer("a2"))
+    await stack.result("@0", "session", {"name": "dev"}, meta={"name": "dev"})
+    assert await stack.result("@1", "turn", _turn_args("@0", 1, "Step one"), meta={"name": "dev"}) == "a1"
+    child1 = delegation_child(stack.node_job("@1"))
+    (subagent_sessions_dir(stack.context.runtime_paths) / f"{child1.subagent_id}.json").unlink()
+
+    assert await stack.result("@2", "turn", _turn_args("@0", 2, "Step two"), meta={"name": "dev"}) == "a2"
+    child2 = delegation_child(stack.node_job("@2"))
+    assert child2.subagent_id != child1.subagent_id
+    prompt2 = _user_texts(model.requests[1])[0]
+    assert prompt2.startswith("Earlier conversation:")
+    assert "Step one" in prompt2
+    assert "a1" in prompt2
+    assert prompt2.endswith("\n\nStep two")

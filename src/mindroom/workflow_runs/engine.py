@@ -1338,15 +1338,14 @@ class WorkflowEngine:
                 for other in all_turns
             )
         )
-        if can_continue and prev_sub is not None and run.persona:
+        if can_continue and prev_sub is not None:
             context = self.authorize(run)
             if context is None:
                 raise ScriptRuntimeUnavailableError(_OWNER_NOT_READY)
             if not isinstance(context, str):
                 child = await load_follow_up_child(context, run, prev_sub)
-                if (
-                    child is not None
-                    and not isinstance(child, str)
+                if child is None or (
+                    run.persona
                     and child.child_agent_name == run.agent_name
                     and not _fits_ceiling(child.persona, SubagentPersona.from_dict(run.persona))
                 ):
