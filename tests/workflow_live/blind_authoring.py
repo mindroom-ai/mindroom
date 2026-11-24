@@ -1,40 +1,37 @@
-"""Blind-authoring check: ask fresh models to write workflows from `start_workflow`'s description alone and run them.
+"""Blind-authoring check for workflow scripts across configured models (Plan Task 24).
 
-Usage, from the checkout, after `just live up --backend <checkout>` in `~/repos/dev` (README.md has every step):
-
-    uv run python -m tests.workflow_live.blind_authoring --model haiku --model opus --model sol [--slot N]
-
-For each configured model name and each of three tasks (scatter-and-join, bounded check loop, two named agents
-that negotiate directly), this script:
-1. Builds the live `start_workflow` tool description from the slot's config (and passes ONLY that description plus
-   the task sentence to the fresh model: no spec, no docs, no examples beyond the description itself).
-2. Saves the model's script into the Helper's workspace and runs it on the live backend with `start_workflow`.
-3. Prints PASS or FAIL per `(model, task)` together with the authored script and run outcome, exiting 0 only when
-   every pair completes successfully.
+Usage:
+  uv run python -m tests.workflow_live.blind_authoring --model haiku --model opus --model sol
 """
 
 from __future__ import annotations
 
 import argparse
 import asyncio
+import contextlib
 import json
 import re
 import secrets
+import sqlite3
 import sys
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from mindroom.config.main import Config
-from mindroom.constants import RuntimePaths
+from mindroom.config.main import load_config
+from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.workflow import WorkflowTools
 from mindroom.llm.messages import Message
-from mindroom.llm.provider import ModelRequest, TurnCompleted
+from mindroom.llm.provider import ModelRequest, TextDelta, TurnCompleted
 from mindroom.providers.registry import build_model_provider
+from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.turn_model import ModelScope, resolve_turn_model
 from tests.workflow_live.kill_after_write import Deployment, LiveError, add_send_options, say, until
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from mindroom.config.main import Config
+    from mindroom.constants import RuntimePaths
 
 
 @dataclass(frozen=True, slots=True)
@@ -90,17 +87,16 @@ def _extract_python(text: str) -> str:
 
 
 def _build_start_workflow_description(deployment: Deployment) -> tuple[Config, RuntimePaths, str]:
-    config_path = deployment.config_path
-    runtime_paths = RuntimePaths(
-        config_path=config_path,
-        config_dir=config_path.parent,
-        env_path=deployment.directory / ".env",
-        storage_root=deployment.directory / "storage",
-        control_state_root=deployment.directory / "control",
+    runtime_paths = resolve_runtime_paths(
+        config_path=deployment.directory / "config.yaml",
+        storage_path=deployment.directory / "storage",
     )
-    config = Config.from_yaml(config_path)
-    tools = WorkflowTools(runtime_config=config, agent_name=deployment.helper, runtime_paths=runtime_paths)
-    description = tools.start_workflow.__doc__ or ""
+    config = load_config(runtime_paths)
+    agent_name = "helper" if "helper" in config.agents else next(iter(config.agents))
+    room_id = str(deployment.live["lobby"]["roomId"])
+    toolkit = WorkflowTools(config, agent_name, room_id, runtime_paths)
+    functions = {function.name: function for function in adapt_toolkit(toolkit, key="workflow").functions}
+    description = functions["start_workflow"].description or ""
     return config, runtime_paths, description
 
 
@@ -125,10 +121,76 @@ async def _author_script(
         ),
     )
     reply_text = ""
+    deltas: list[str] = []
     async for event in provider.stream(request):
-        if isinstance(event, TurnCompleted) and event.message.content:
+        if isinstance(event, TextDelta):
+            deltas.append(event.text)
+        elif isinstance(event, TurnCompleted) and event.message.content:
             reply_text = str(event.message.content)
-    return _extract_python(reply_text)
+    return _extract_python(reply_text or "".join(deltas))
+
+
+def _peer_activity(deployment: Deployment, run_id: str) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    found = sorted((deployment.directory / "storage").glob("**/workflow_runs/workflow_runs.sqlite3"))
+    if not found:
+        return [], {}
+    with contextlib.closing(sqlite3.connect(f"file:{found[0]}?mode=ro", uri=True, timeout=10)) as connection:
+        connection.row_factory = sqlite3.Row
+        msg_rows = connection.execute(
+            "SELECT seq, sender_name, recipient_name, text FROM workflow_messages "
+            "WHERE run_id = ? AND withdrawn = 0 ORDER BY seq ASC",
+            (run_id,),
+        ).fetchall()
+        state_rows = connection.execute(
+            "SELECT key, value_json FROM workflow_state WHERE run_id = ? ORDER BY key ASC",
+            (run_id,),
+        ).fetchall()
+    messages = [dict(row) for row in msg_rows]
+    state = {str(row["key"]): json.loads(row["value_json"]) for row in state_rows}
+    return messages, state
+
+
+def _has_opposite_direction_exchange(messages: list[dict[str, Any]]) -> bool:
+    peer_msgs = [
+        (str(m.get("sender_name") or ""), str(m.get("recipient_name") or ""))
+        for m in messages
+        if m.get("sender_name") and m.get("sender_name") != "script"
+    ]
+    senders = {sender for sender, _ in peer_msgs}
+    for sender_a in senders:
+        for sender_b in senders:
+            if sender_a >= sender_b:
+                continue
+            a_to_b = any(s == sender_a and r in (sender_b, "*") for s, r in peer_msgs)
+            b_to_a = any(s == sender_b and r in (sender_a, "*") for s, r in peer_msgs)
+            if a_to_b and b_to_a:
+                return True
+    return False
+
+
+_MIN_AGENTS = {"scatter_join": 3, "bounded_check": 2, "negotiate": 3}
+
+
+def _verify_task(
+    task: AuthoringTask,
+    run: dict[str, Any],
+    nodes: list[dict[str, Any]],
+    messages: list[dict[str, Any]],
+    state: dict[str, Any],
+) -> tuple[bool, str]:
+    completed_agents = [
+        n for n in nodes if not n.get("stale") and n.get("kind") in ("agent", "turn") and n.get("state") == "completed"
+    ]
+    min_agents = _MIN_AGENTS.get(task.name, 1)
+    if run.get("state") != "completed":
+        return False, f"run ended in state={run.get('state')}"
+    if len(completed_agents) < min_agents:
+        return False, f"expected at least {min_agents} completed agent nodes, got {len(completed_agents)}"
+    if task.name == "negotiate" and not _has_opposite_direction_exchange(messages):
+        return False, f"expected opposite-direction peer messages, got {len(messages)} message(s)"
+    if task.name == "negotiate" and state.get("contract") is None:
+        return False, f"expected shared state key 'contract', got keys {sorted(state)}"
+    return True, "ok"
 
 
 def _start_with_args(
@@ -137,27 +199,18 @@ def _start_with_args(
     task_args: dict[str, object],
     token: str,
     dev: Path | None,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
     name = f"blind_{token}.py"
     deployment.workspace.mkdir(parents=True, exist_ok=True)
-    (deployment.workspace / name).write_text(source, encoding="utf-8")
+    marked_source = f"# blind_token={token}\n{source}"
+    (deployment.workspace / name).write_text(marked_source, encoding="utf-8")
     deployment.ask(
         f'Call the tool start_workflow with path="{name}" and args={json.dumps(task_args)}. '
         "Call it once and only once. Reply with the run ID it returns.",
         dev,
     )
-    run = until(f"workflow run for {name}", lambda: deployment.run(token), 120, 1)
-    return until(
-        f"completion of {run['run_id']}",
-        lambda: (
-            cur
-            if (cur := deployment.run(token)) is not None
-            and cur["state"] in {"completed", "failed", "cancelled", "interrupted"}
-            else None
-        ),
-        300,
-        2,
-    )
+    until(f"workflow run for {name}", lambda: deployment.run(token), 120, 1)
+    return deployment.ended_run(token, 300)
 
 
 def main() -> int:
@@ -190,17 +243,21 @@ def main() -> int:
             say(f"authoring model={model_name} task={task.name}")
             try:
                 script = asyncio.run(_author_script(config, runtime_paths, description, model_name, task))
-                ended = _start_with_args(deployment, script, task.args, token, dev)
-                passed = ended["state"] == "completed"
+                run, nodes = _start_with_args(deployment, script, task.args, token, dev)
+                messages, state = _peer_activity(deployment, str(run["run_id"]))
+                passed, reason = _verify_task(task, run, nodes, messages, state)
                 status = "PASS" if passed else "FAIL"
                 if not passed:
                     all_passed = False
-                print(f"=== {status}: model={model_name} task={task.name} state={ended['state']} ===")
+                print(
+                    f"=== {status}: model={model_name} task={task.name} state={run['state']} "
+                    f"agents={len(nodes)} messages={len(messages)} reason={reason} ===",
+                )
                 print(script.rstrip())
-                if ended.get("error"):
-                    print(f"--- error ---\n{ended['error']}")
+                if run.get("error"):
+                    print(f"--- error ---\n{run['error']}")
                 else:
-                    preview = json.dumps(ended.get("result"))[:300]
+                    preview = str(run.get("result_json") or "")[:300]
                     print(f"--- result ---\n{preview}")
             except (LiveError, Exception) as exc:
                 all_passed = False

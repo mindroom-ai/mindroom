@@ -18,6 +18,8 @@ from mindroom.agents import create_agent
 from mindroom.api.script_gateway import serve_listener
 from mindroom.custom_tools.workflow import WorkflowTools
 from mindroom.delegation.lifecycle import _CHILD_RUN, ChildRunObservation, prepare_child_turn
+from mindroom.llm.messages import Message
+from mindroom.llm.provider import TurnCompleted
 from mindroom.orchestration import tool_job_runtime as coordinator_module
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import tool_runtime_context
@@ -25,6 +27,7 @@ from mindroom.turn_model import ModelScope, resolve_turn_model
 from mindroom.workflow_runs import agent_nodes, peers
 from mindroom.workflow_runs import engine as engine_module
 from mindroom.workflow_runs.answers import answer_question
+from mindroom.workflow_runs.graph import graph_rows
 from mindroom.workflow_runs.models import TERMINAL_RUN_STATES, WorkflowNode, WorkflowNodeState, WorkflowRunState
 from mindroom.workflow_runs.peers import (
     DEADLOCK_NOTE,
@@ -38,6 +41,8 @@ from tests.conftest import SETTLE_TIMEOUT_SECONDS, bound_worker_launch_config
 from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer, calls, tool_call
 from tests.test_workflow_local_integration import LocalWorkflowStack
 from tests.workflow_helpers import NodeFailed, WorkflowStack, set_run, workflow_stack
+from tests.workflow_live import blind_authoring
+from tests.workflow_live.kill_after_write import Deployment
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
@@ -926,17 +931,41 @@ async def test_nested_foreach_reader_releases_outer_slot_for_sender(local_stack:
 
 
 @pytest.mark.asyncio
-async def test_opening_pre_peer_v1_store_adds_peer_tables_idempotently(tmp_path: Path) -> None:
-    """Astra blocker 1: opening a v1 store created without the 4 peer tables creates them so graph/send work."""
-    db_path = tmp_path / "legacy.sqlite3"
-    # Create a real store, then drop the 4 peer tables while keeping workflow_schema version=1.
-    WorkflowRunStore(db_path)
+async def test_opening_pre_peer_v1_store_adds_peer_tables_idempotently(stack: WorkflowStack) -> None:
+    """Astra blocker 1: opening a v1 store without the 4 peer tables adds them so viewing a plain run's graph and sending work."""
+    _route_agents(stack, lambda _req: answer("plain-ok"))
+    assert await stack.result("@0", "agent", {"prompt": "hi", "name": "solo"}, meta={"name": "solo"}) == "plain-ok"
+    await stack.finish_attempt(result="done")
+    db_path = stack.store.database_path
+
+    # Simulate a DB created by an earlier v1 build (no peer tables, schema version still 1).
     with closing(sqlite3.connect(db_path)) as conn:
         for table in ("workflow_messages", "workflow_cursors", "workflow_state", "workflow_peer_calls"):
             conn.execute(f"DROP TABLE {table}")
         conn.commit()
+
     reopened = WorkflowRunStore(db_path)
-    assert peers.message_edges(reopened, "wf-missing", []) == []
+    nodes = reopened.nodes(stack.run_id, light=True)
+    graph = graph_rows(
+        nodes,
+        reopened.node_usage(stack.run_id),
+        peers.message_edges(reopened, stack.run_id, nodes),
+        reopened.log(stack.run_id, 50),
+    )
+    assert graph.edges == []
+    assert any(row["label"] for row in graph.nodes)
+    sent = peers.send(
+        reopened,
+        stack.run_id,
+        op_id="post-upgrade",
+        sender=NodeRef("@s", 1, "script"),
+        to="future",
+        text="hi",
+    )
+    assert sent == {
+        "delivered": 0,
+        "held": True,
+    }
     with closing(sqlite3.connect(db_path)) as conn:
         tables = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE type = 'table'")}
     assert {"workflow_messages", "workflow_cursors", "workflow_state", "workflow_peer_calls"} <= tables
@@ -1039,3 +1068,107 @@ async def test_star_broadcast_freezes_recipients_at_send_time(stack: WorkflowSta
     gate_later.set()
     await stack.result("/0:p1@0", "agent", {"prompt": "live", "name": "live"}, meta={"name": "live"})
     await stack.result("/0:p2@0", "agent", {"prompt": "later", "name": "later"}, meta={"name": "later"})
+
+
+@pytest.mark.asyncio
+async def test_blind_authoring_harness_smoke_without_live_models(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Astra blocker: blind_authoring loads real config, uses adapted start_workflow description, markers, ended_run, and checks peer exchange."""
+    slot_dir = tmp_path / "slot-9"
+    storage_dir = slot_dir / "storage"
+    (storage_dir / "agents" / "helper" / "workspace").mkdir(parents=True)
+    (slot_dir / "config.yaml").write_text(
+        """models:
+  default:
+    provider: anthropic
+    id: claude-test
+agents:
+  helper:
+    display_name: Helper
+    role: Helper agent
+    model: default
+    rooms: ["!lobby:test"]
+    tools: [workflow]
+  deckhand:
+    display_name: Deckhand
+    role: Peer agent
+    model: default
+    rooms: ["!lobby:test"]
+""",
+        encoding="utf-8",
+    )
+    deployment = Deployment(
+        slot=9,
+        live={
+            "homeserver": "http://127.0.0.1:8008",
+            "lobby": {"roomId": "!lobby:test"},
+            "userId": "@u:test",
+            "accessToken": "tok",
+        },
+        directory=slot_dir,
+    )
+
+    config, runtime_paths, description = blind_authoring._build_start_workflow_description(deployment)
+    assert "send(to, text)" in description
+    assert "read_peer_messages" in description
+    assert "Models: default." in description
+    assert "Agents you can run with agent=: deckhand." in description
+
+    class _FakeProvider:
+        async def stream(self, request: ModelRequest) -> AsyncIterator[TurnCompleted]:
+            assert "start_workflow" in str(request.messages[-1].content)
+            yield TurnCompleted(
+                message=Message(
+                    role="assistant",
+                    content="```python\nfrom mindroom.workflow import agent\ndef main(args):\n    return 'ok'\n```",
+                ),
+            )
+
+    monkeypatch.setattr(blind_authoring, "build_model_provider", lambda *_a, **_kw: _FakeProvider())
+    negotiate = next(t for t in blind_authoring.TASKS if t.name == "negotiate")
+    script = await blind_authoring._author_script(config, runtime_paths, description, "default", negotiate)
+    assert script.startswith("from mindroom.workflow import agent")
+
+    # Exercise _start_with_args with a real SQLite store containing the marked source + peer messages + contract state.
+    db_path = storage_dir / "workflow_runs" / "workflow_runs.sqlite3"
+    store = WorkflowRunStore(db_path)
+    marker = "blind_negotiate_abcd"
+
+    def _fake_ask(text: str, _dev: Path | None) -> str:
+        written = (deployment.workspace / f"blind_{marker}.py").read_text(encoding="utf-8")
+        assert f"# blind_token={marker}\n" in written
+        assert f'path="blind_{marker}.py"' in text
+        with store.write_transaction() as conn:
+            conn.execute(
+                "INSERT INTO workflow_runs VALUES "
+                "(?, ?, ?, NULL, NULL, 0, 1, 'owner', '{}', 'helper', '@u:test', '!lobby:test', NULL, '{}', '{}', NULL, "
+                "?, 'd', NULL, '{}', 4, NULL, 0, NULL, NULL, 'completed', 1, 0, NULL, NULL, NULL, NULL, ?, NULL, "
+                "'2026-01-01T00:00:00Z', '2026-01-01T00:00:01Z')",
+                ("wf-1", "job-1", "res-1", written, json.dumps("ok")),
+            )
+            for seq, (key, name) in enumerate([("@0", "backend"), ("@1", "frontend"), ("@2", "integrator")], start=1):
+                conn.execute(
+                    "INSERT INTO workflow_nodes VALUES "
+                    "(?, ?, ?, 'agent', '', ?, 'd', '{}', 1, 1, 'running', NULL, '{}', 0, ?, ?, NULL, NULL, '[]', NULL, 0, "
+                    "'2026-01-01T00:00:00Z', '2026-01-01T00:00:01Z', ?, NULL, '{}', '{}')",
+                    ("wf-1", key, seq, seq, name, name, json.dumps("ok")),
+                )
+        peers.send(store, "wf-1", op_id="m1", sender=NodeRef("@0", 1, "backend"), to="frontend", text="propose v1")
+        peers.send(store, "wf-1", op_id="m2", sender=NodeRef("@1", 1, "frontend"), to="backend", text="accept v1")
+        peers.set_state(store, "wf-1", op_id="s1", key="contract", value={"endpoint": "/avatar"}, updated_by="backend")
+        with store.write_transaction() as conn:
+            conn.execute("UPDATE workflow_nodes SET state = 'completed' WHERE run_id = 'wf-1'")
+        return "$ev1"
+
+    monkeypatch.setattr(deployment, "ask", _fake_ask)
+    run, nodes = blind_authoring._start_with_args(deployment, script, negotiate.args, marker, None)
+    messages, state = blind_authoring._peer_activity(deployment, str(run["run_id"]))
+    assert blind_authoring._verify_task(negotiate, run, nodes, messages, state) == (True, "ok")
+
+    # A no-op completed run or one-way exchange must fail verification for negotiate.
+    passed_noop, _ = blind_authoring._verify_task(negotiate, run, nodes, [], {})
+    assert not passed_noop
+    passed_one_way, _ = blind_authoring._verify_task(negotiate, run, nodes, messages[:1], state)
+    assert not passed_one_way
