@@ -3315,3 +3315,191 @@ async def test_mentions_mode_keeps_departed_local_agent_behavior_while_ignoring_
         )
         fork_plan = await policy.plan_turn(target_room, fork_dispatch, has_active_response_for_target=lambda _t: False)
         assert fork_plan == DispatchPlan(kind="ignore")
+
+
+@pytest.mark.asyncio
+async def test_cross_room_parent_agent_does_not_claim_auto_destination_opener(tmp_path: Path) -> None:
+    """In an auto destination with two eligible agents, a parent-room reply defers to destination routing."""
+    from mindroom.config.agent import ParticipationConfig  # noqa: PLC0415
+
+    config = _runtime_bound_config(
+        Config(
+            agents={
+                "general": AgentConfig(
+                    display_name="General",
+                    rooms=["!source:localhost", "!target:localhost"],
+                    participation=ParticipationConfig(),
+                ),
+                "research": AgentConfig(display_name="Research", rooms=["!target:localhost"]),
+            },
+            rooms={"!target:localhost": RoomConfig(reply_mode="auto")},
+        ),
+        tmp_path,
+    )
+    paths = runtime_paths_for(config)
+    ids = entity_ids(config, paths)
+    general_user = AgentMatrixUser(
+        agent_name="general",
+        password=TEST_PASSWORD,
+        display_name="General",
+        user_id=ids["general"].full_id,
+    )
+    bot = make_test_agent_bot(general_user, config=config, runtime_paths=paths)
+    _wrap_extracted_collaborators(bot)
+    bot.client = _make_matrix_client_mock()
+    bot.client.user_id = general_user.user_id
+
+    target_room = _matrix_room(room_id="!target:localhost", own_user_id=general_user.user_id)
+    target_room.members_synced = True
+    target_room.add_member(general_user.user_id, "General", None)
+    target_room.add_member(ids["research"].full_id, "Research", None)
+    target_room.add_member("@alice:localhost", "Alice", None)
+    bot.client.rooms = {"!target:localhost": target_room}
+
+    fork_target = MessageTarget.resolve("!target:localhost", "$fork", "$fork")
+    cross_room_history = thread_history_result(
+        [
+            ResolvedVisibleMessage.synthetic(
+                sender="@alice:localhost",
+                body="source question",
+                event_id="$src1",
+                room_id="!source:localhost",
+            ),
+            ResolvedVisibleMessage.synthetic(
+                sender=ids["general"].full_id,
+                body="general answered in source",
+                event_id="$src2",
+                thread_id="$src1",
+                room_id="!source:localhost",
+            ),
+            ResolvedVisibleMessage.synthetic(
+                sender="@alice:localhost",
+                body="continue in target",
+                event_id="$fork",
+                content={
+                    "body": "continue in target",
+                    FORK_CONTENT_KEY: {"room_id": "!source:localhost", "thread_id": "$src1", "event_id": "$src2"},
+                },
+            ),
+        ],
+        is_full_history=True,
+    )
+    cross_room_dispatch = PreparedDispatch(
+        requester_user_id="@alice:localhost",
+        context=MessageContext(
+            am_i_mentioned=False,
+            is_thread=True,
+            thread_id="$fork",
+            thread_history=cross_room_history,
+            mentioned_agents=[],
+            has_non_agent_mentions=False,
+        ),
+        target=fork_target,
+        correlation_id="$fork",
+        envelope=replace(
+            _hook_envelope(body="continue in target", source_event_id="$fork", target=fork_target),
+            origin=message_origin(sender_id="@alice:localhost"),
+        ),
+    )
+
+    policy = unwrap_extracted_collaborator(bot._turn_policy)
+    # 1) Non-steward General must NOT unilaterally claim the unmentioned cross-room fork opener.
+    bot.orchestrator.room_steward = lambda _room_id: MagicMock(agent_name="research")
+    assert await policy.plan_turn(
+        target_room,
+        cross_room_dispatch,
+        has_active_response_for_target=lambda _t: False,
+    ) == DispatchPlan(kind="ignore")
+
+    # 2) As steward, General routes instead of unilaterally answering or skipping routing as "already owned".
+    bot.orchestrator.room_steward = lambda _room_id: bot
+    assert await policy.plan_turn(
+        target_room,
+        cross_room_dispatch,
+        has_active_response_for_target=lambda _t: False,
+    ) == DispatchPlan(kind="route")
+
+    # 3) Parent-room replies/mentions from BOTH agents do not form an implicit team in the destination room.
+    both_in_parent_history = thread_history_result(
+        [
+            *cross_room_history[:-1],
+            ResolvedVisibleMessage.synthetic(
+                sender=ids["research"].full_id,
+                body="research also replied in source",
+                event_id="$src3",
+                thread_id="$src1",
+                room_id="!source:localhost",
+            ),
+            cross_room_history[-1],
+        ],
+        is_full_history=True,
+    )
+    both_in_parent_dispatch = replace(
+        cross_room_dispatch,
+        context=replace(cross_room_dispatch.context, thread_history=both_in_parent_history),
+    )
+    assert await policy.plan_turn(
+        target_room,
+        both_in_parent_dispatch,
+        has_active_response_for_target=lambda _t: False,
+    ) == DispatchPlan(kind="route")
+
+    # 4) Adaptive participation does NOT treat parent-only replies as destination-thread participation.
+    multi_human_local_history = thread_history_result(
+        [
+            *cross_room_history,
+            ResolvedVisibleMessage.synthetic(
+                sender="@bob:localhost",
+                body="second human in target",
+                event_id="$local2",
+                thread_id="$fork",
+            ),
+        ],
+        is_full_history=True,
+    )
+    assert (
+        policy.adaptive_participation(
+            context=replace(cross_room_dispatch.context, thread_history=multi_human_local_history),
+            room=target_room,
+            requester_user_id="@alice:localhost",
+        )
+        is None
+    )
+
+    # 5) Same-room forks stay unchanged: General replying in a same-room parent continues owning the fork.
+    same_room_history = thread_history_result(
+        [
+            ResolvedVisibleMessage.synthetic(
+                sender="@alice:localhost",
+                body="same-room parent question",
+                event_id="$parent1",
+                room_id="!target:localhost",
+            ),
+            ResolvedVisibleMessage.synthetic(
+                sender=ids["general"].full_id,
+                body="general answered in same-room parent",
+                event_id="$parent2",
+                thread_id="$parent1",
+                room_id="!target:localhost",
+            ),
+            ResolvedVisibleMessage.synthetic(
+                sender="@alice:localhost",
+                body="continue in same-room fork",
+                event_id="$fork",
+                content={
+                    "body": "continue in same-room fork",
+                    FORK_CONTENT_KEY: {"thread_id": "$parent1", "event_id": "$parent2"},
+                },
+            ),
+        ],
+        is_full_history=True,
+    )
+    same_room_dispatch = replace(
+        cross_room_dispatch,
+        context=replace(cross_room_dispatch.context, thread_history=same_room_history),
+    )
+    assert await policy.plan_turn(
+        target_room,
+        same_room_dispatch,
+        has_active_response_for_target=lambda _t: False,
+    ) == DispatchPlan(kind="respond", response_action=ResponseAction(kind="individual"))

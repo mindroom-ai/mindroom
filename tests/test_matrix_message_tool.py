@@ -1717,6 +1717,13 @@ async def test_matrix_message_read_cross_room_fork_auth_room_id_and_edit_options
             else nio.RoomGetStateEventError("not found", status_code="M_NOT_FOUND")
         ),
     )
+    ctx.client.room_get_state = AsyncMock(
+        side_effect=lambda room_id: (
+            nio.RoomGetStateResponse(room_id=room_id, events=[])
+            if room_id in ctx.client.rooms
+            else nio.RoomGetStateError("forbidden")
+        ),
+    )
 
     reference = {FORK_CONTENT_KEY: {"room_id": source_room_id, "thread_id": "$parent", "event_id": "$kept"}}
     threads = {
@@ -1808,6 +1815,13 @@ async def test_matrix_message_read_from_room_c_checks_output_room_encryption_and
             )
             if event_type == "m.room.history_visibility" and room_id in ctx.client.rooms
             else nio.RoomGetStateEventError("not found", status_code="M_NOT_FOUND")
+        ),
+    )
+    ctx.client.room_get_state = AsyncMock(
+        side_effect=lambda room_id: (
+            nio.RoomGetStateResponse(room_id=room_id, events=[])
+            if room_id in ctx.client.rooms
+            else nio.RoomGetStateError("forbidden")
         ),
     )
 

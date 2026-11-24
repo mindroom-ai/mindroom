@@ -1236,6 +1236,13 @@ async def test_cross_room_fork_authorized_denied_and_deferred_to_strict(config: 
             else nio.RoomGetStateEventError("not found", status_code="M_NOT_FOUND")
         ),
     )
+    client.room_get_state = AsyncMock(
+        side_effect=lambda room_id: (
+            nio.RoomGetStateResponse(room_id=room_id, events=[])
+            if room_id in client.rooms
+            else nio.RoomGetStateError("forbidden")
+        ),
+    )
 
     # 1) Authorized: source and target share the same human requester and agent.
     source_room = _cross_room_matrix_room(_SOURCE_ROOM_ID, joined=(_BOT_USER_ID, _HUMAN_USER_ID))
@@ -1273,7 +1280,10 @@ async def test_cross_room_fork_authorized_denied_and_deferred_to_strict(config: 
     assert [m.event_id for m in denied_ctx.thread_history] == [_FORK]
     assert not denied_ctx.requires_model_history_refresh
     assert not denied_ctx.planning_thread_history_unavailable
-    reader.read_strict.assert_not_awaited()  # type: ignore[attr-defined]
+    assert [
+        (call.kwargs["room_id"], call.kwargs["thread_id"])
+        for call in reader.read_strict.await_args_list  # type: ignore[attr-defined]
+    ] == [(_ROOM_ID, _FORK)]
 
     # 3) DEFERRED in NONBLOCKING (source room membership incomplete) upgrades to STRICT and loads prefix.
     reader.read.reset_mock()  # type: ignore[attr-defined]

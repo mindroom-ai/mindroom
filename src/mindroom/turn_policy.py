@@ -197,12 +197,13 @@ class TurnPolicy:
             return participation
         return None
 
-    def _is_participating_thread_agent(self, context: MessageContext) -> bool:
-        """Only individual agents that have already replied may judge continuation."""
+    def _is_participating_thread_agent(self, context: MessageContext, *, room_id: str) -> bool:
+        """Only individual agents that have already replied in ``room_id`` may judge continuation."""
         return self.deps.agent_name in self.deps.runtime.config.agents and self.deps.matrix_id in get_agents_in_thread(
             context.planning_thread_history,
             self.deps.runtime.config,
             self.deps.runtime_paths,
+            room_id=room_id,
         )
 
     def _classify_candidates(self, room: nio.MatrixRoom, requester_id: str) -> ResponderCandidatePermissions:
@@ -224,7 +225,7 @@ class TurnPolicy:
     ) -> ParticipationConfig | None:
         """Select an authorized existing agent for a proven multi-human thread."""
         participation = self._adaptive_thread_participation(context, requester_user_id, room_id=room.room_id)
-        if participation is None or not self._is_participating_thread_agent(context):
+        if participation is None or not self._is_participating_thread_agent(context, room_id=room.room_id):
             return None
         candidates = self._classify_candidates(room, requester_user_id)
         available = self._filter_materializable_responders(candidates.allowed, self._responder_availability())
@@ -485,6 +486,7 @@ class TurnPolicy:
             planning_thread_history,
             self.deps.runtime.config,
             self.deps.runtime_paths,
+            room_id=room.room_id,
         )
         # Only a DM auto team depends on DM status, and it needs an unthreaded message
         # with several responders, so skip the homeserver lookup otherwise.
@@ -544,7 +546,7 @@ class TurnPolicy:
         elif mentioned_agents:
             aimed_at = [candidate for candidate in candidates if candidate in mentioned_agents]
         else:
-            in_thread = get_agents_in_thread(thread_history, config, self.deps.runtime_paths)
+            in_thread = get_agents_in_thread(thread_history, config, self.deps.runtime_paths, room_id=room.room_id)
             aimed_at = [candidate for candidate in candidates if candidate in in_thread]
             if len(aimed_at) != 1:
                 aimed_at = candidates if self._routing_admits(requester_user_id, room.room_id) else []
@@ -690,12 +692,12 @@ class TurnPolicy:
             return False
         # A thread whose history could not be read in full proves no reply, so it needs a mention too.
         # Exclude foreign cross-room fork prefix rows so a source-room reply does not bypass this room's mentions mode.
-        local_planning_history = [
-            message
-            for message in context.planning_thread_history
-            if message.room_id is None or message.room_id == dispatch.target.room_id
-        ]
-        if get_agents_in_thread(local_planning_history, self.deps.runtime.config, self.deps.runtime_paths):
+        if get_agents_in_thread(
+            context.planning_thread_history,
+            self.deps.runtime.config,
+            self.deps.runtime_paths,
+            room_id=dispatch.target.room_id,
+        ):
             return False
         return not self._should_queue_follow_up_in_active_response_thread(
             context=context,
@@ -819,7 +821,10 @@ class TurnPolicy:
         )
         if participation is None:
             return None
-        if not self._is_participating_thread_agent(dispatch.context) or self.deps.matrix_id not in available_responders:
+        if (
+            not self._is_participating_thread_agent(dispatch.context, room_id=dispatch.target.room_id)
+            or self.deps.matrix_id not in available_responders
+        ):
             return ResponseAction(kind="skip")
         # The agent stopped its running response for this message, so it answers it and carries on.
         return ResponseAction(kind="individual", participation=None if dispatch.stopped_reply else participation)
@@ -886,6 +891,7 @@ class TurnPolicy:
             planning_thread_history,
             self.deps.runtime.config,
             self.deps.runtime_paths,
+            room_id=room.room_id,
         )
         if team_action is None:
             # Use sender-visible responders here so explicit team requests can distinguish

@@ -554,6 +554,13 @@ class TestAgentBot(AgentBotTestBase):
                 else nio.RoomGetStateEventError("not found", status_code="M_NOT_FOUND")
             ),
         )
+        bot.client.room_get_state = AsyncMock(
+            side_effect=lambda room_id: (
+                nio.RoomGetStateResponse(room_id=room_id, events=[])
+                if room_id in bot.client.rooms
+                else nio.RoomGetStateError("forbidden")
+            ),
+        )
 
         await seed_thread_history(
             bot,

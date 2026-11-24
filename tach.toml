@@ -6520,7 +6520,6 @@ path = "mindroom.matrix.thread_fork_access"
 depends_on = [
     "mindroom.constants",
     "mindroom.contacts.store",
-    "mindroom.entity_resolution",
     "mindroom.matrix.client_delivery",
     "mindroom.matrix.client_room_admin",
     "mindroom.matrix.history_visibility",

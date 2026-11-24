@@ -86,6 +86,7 @@ from mindroom.hooks import MessageEnvelope, TurnOutcome
 from mindroom.interactive import InteractiveMetadata
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.presence import should_use_streaming
+from mindroom.matrix.thread_forks import fork_parent_scopes
 from mindroom.orchestration.runtime import (
     classify_cancel_source,
     current_task_is_process_shutdown,
@@ -1196,6 +1197,35 @@ class ApprovalContinuationRunner:
             execution_identity=continuation.execution_identity,
         )
 
+    async def _resume_fork_parent_scopes(
+        self,
+        continuation: ApprovalContinuation,
+        *,
+        target: MessageTarget,
+    ) -> frozenset[tuple[str, str]]:
+        """Re-resolve currently authorized fork parent scopes for a resumed thread turn."""
+        if target.resolved_thread_id is None or not continuation.attachment_ids:
+            return frozenset()
+        try:
+            history = await self.deps.resolver.fetch_thread_history(
+                target.room_id,
+                target.resolved_thread_id,
+                requester_id=continuation.requester_id,
+            )
+        except Exception as exc:
+            self.deps.logger.warning(
+                "Failed to refresh fork parent scopes for approval continuation; continuing without parent scopes",
+                room_id=target.room_id,
+                thread_id=target.resolved_thread_id,
+                error=str(exc),
+            )
+            return frozenset()
+        return fork_parent_scopes(
+            history,
+            target.resolved_thread_id,
+            room_id=target.room_id,
+        )
+
     async def _continue_entity_call(
         self,
         continuation: ApprovalContinuation,
@@ -1207,12 +1237,14 @@ class ApprovalContinuationRunner:
         cli_approval_handler: Callable[[PausedAttempt], Awaitable[tuple[RunRequirement, ...]]] | None,
     ) -> CompletedApprovalRun | PausedAttempt:
         execution_identity = continuation.execution_identity
+        resumed_fork_parent_scopes = await self._resume_fork_parent_scopes(continuation, target=target)
         tool_context = self.deps.tool_runtime.build_turn_context(
             target,
             user_id=continuation.requester_id,
             agent_name=continuation.entity_name,
             active_model_name=continuation.runtime_model_name,
             attachment_ids=continuation.attachment_ids,
+            fork_parent_scopes=resumed_fork_parent_scopes,
             correlation_id=correlation_id_for_request(request),
             source_envelope=request.response_envelope,
             turn_id=request.turn_id,

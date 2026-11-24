@@ -130,7 +130,6 @@ class ToolRuntimeContext:
     room: nio.MatrixRoom | None = None
     storage_path: Path | None = None
     attachment_ids: tuple[str, ...] = field(default_factory=tuple)
-    fork_parent_scopes: frozenset[tuple[str, str]] = frozenset()
     runtime_attachment_ids: list[str] = field(default_factory=list)
     runtime_media_attachments: dict[str, RuntimeEncryptedMediaAttachment] = field(default_factory=dict)
     # The turn's hook registry (its plugins' hooks) and its bot's Matrix capabilities when the turn started.
@@ -157,6 +156,8 @@ class ToolRuntimeContext:
     # The agent turn the calls run in, and in a delegated child's turn the turn that delegated it; None outside a turn.
     turn_id: str | None = None
     parent_turn_id: str | None = None
+    # Vetted fork parent ``(room_id, thread_id)`` scopes loaded into this turn's history.
+    fork_parent_scopes: frozenset[tuple[str, str]] = frozenset()
 
     @property
     def current_config(self) -> Config:
