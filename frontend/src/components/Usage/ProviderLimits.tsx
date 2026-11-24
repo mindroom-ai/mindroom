@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { AlertTriangle, Clock, Loader2, RefreshCw } from "lucide-react";
 import { Badge } from "@/components/ui/badge";
@@ -126,13 +126,19 @@ function LimitWindowRow({
 function AccountCard({
   account,
   nowMs,
+  partial = false,
+  loadingUsage = false,
 }: {
   account: ProviderLimitAccount;
   nowMs: number;
+  partial?: boolean;
+  loadingUsage?: boolean;
 }) {
   const planLabel = account.plan ?? account.account_label;
   const showStale =
     account.stale && account.unavailable_reason !== "not_signed_in";
+  const usageUnavailable =
+    partial && account.tokens_7d === 0 && account.cost_usd_7d === null;
   return (
     <Card>
       <CardContent className="space-y-3 p-4">
@@ -161,14 +167,24 @@ function AccountCard({
             )}
           </div>
           <div className="text-right text-xs tabular-nums">
-            <p className="font-medium">
-              {formatTokens(account.tokens_7d)} tokens
-            </p>
-            <p className="text-muted-foreground">
-              {account.cost_usd_7d !== null
-                ? `${formatUsd(account.cost_usd_7d, account.cost_estimated)} · 7d`
-                : "Last 7 days"}
-            </p>
+            {usageUnavailable ? (
+              <p className="text-muted-foreground">
+                {loadingUsage
+                  ? "Loading 7-day usage…"
+                  : "7-day usage unavailable"}
+              </p>
+            ) : (
+              <>
+                <p className="font-medium">
+                  {formatTokens(account.tokens_7d)} tokens
+                </p>
+                <p className="text-muted-foreground">
+                  {account.cost_usd_7d !== null
+                    ? `${formatUsd(account.cost_usd_7d, account.cost_estimated)} · 7d`
+                    : "Last 7 days"}
+                </p>
+              </>
+            )}
           </div>
         </div>
 
@@ -182,7 +198,10 @@ function AccountCard({
 
         {showStale && (
           <p className="flex items-center gap-1.5 text-xs text-amber-600 dark:text-amber-400">
-            <AlertTriangle className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
+            <AlertTriangle
+              className="h-3.5 w-3.5 shrink-0"
+              aria-hidden="true"
+            />
             <span>Showing cached reading after a failed refresh.</span>
           </p>
         )}
@@ -198,6 +217,8 @@ function AccountCard({
 }
 
 const PROVIDER_LIMITS_QUERY_KEY = ["provider-limits"] as const;
+const PARTIAL_POLL_INTERVAL_MS = 5_000;
+const MAX_PARTIAL_POLL_RETRIES = 6;
 
 function isAuthError(error: unknown): error is ProviderLimitsHttpError {
   return (
@@ -210,27 +231,57 @@ export function ProviderLimits() {
   const queryClient = useQueryClient();
   const [refreshing, setRefreshing] = useState(false);
   const [refreshError, setRefreshError] = useState<Error | null>(null);
+  const [partialPollExhausted, setPartialPollExhausted] = useState(false);
+  const partialPollCountRef = useRef(0);
   const [nowMs, setNowMs] = useState(() => Date.now());
   useEffect(() => {
     const timer = window.setInterval(() => setNowMs(Date.now()), 60_000);
     return () => window.clearInterval(timer);
   }, []);
-  const authError = isAuthError(refreshError) ? refreshError : null;
+  const refreshAuthError = isAuthError(refreshError) ? refreshError : null;
   const query = useQuery({
     queryKey: PROVIDER_LIMITS_QUERY_KEY,
-    queryFn: ({ signal }) => fetchProviderLimits(false, signal),
-    enabled: authError === null,
+    queryFn: async ({ signal }) => {
+      const result = await fetchProviderLimits(false, signal);
+      if (result.partial) {
+        partialPollCountRef.current += 1;
+        setPartialPollExhausted(
+          partialPollCountRef.current > MAX_PARTIAL_POLL_RETRIES,
+        );
+      } else {
+        partialPollCountRef.current = 0;
+        setPartialPollExhausted(false);
+      }
+      return result;
+    },
+    enabled: refreshAuthError === null,
     retry: false,
     staleTime: 60_000,
     gcTime: 0,
     refetchOnWindowFocus: false,
+    refetchInterval: (q) =>
+      !q.state.error &&
+      q.state.data?.partial &&
+      partialPollCountRef.current <= MAX_PARTIAL_POLL_RETRIES
+        ? PARTIAL_POLL_INTERVAL_MS
+        : false,
   });
+  const queryAuthError =
+    query.isError && isAuthError(query.error) ? query.error : null;
+  useEffect(() => {
+    if (queryAuthError) {
+      setRefreshError(queryAuthError);
+      queryClient.removeQueries({ queryKey: PROVIDER_LIMITS_QUERY_KEY });
+    }
+  }, [queryAuthError, queryClient]);
 
   const handleRefresh = async () => {
     setRefreshing(true);
     setRefreshError(null);
     try {
       const fresh = await fetchProviderLimits(true);
+      partialPollCountRef.current = fresh.partial ? 1 : 0;
+      setPartialPollExhausted(false);
       queryClient.setQueryData(PROVIDER_LIMITS_QUERY_KEY, fresh);
       setNowMs(Date.now());
     } catch (error) {
@@ -248,15 +299,23 @@ export function ProviderLimits() {
   };
 
   const handleRetry = () => {
+    partialPollCountRef.current = 0;
+    setPartialPollExhausted(false);
     setRefreshError(null);
     void query.refetch();
   };
 
+  const authError = refreshAuthError ?? queryAuthError;
   const snapshot = authError ? undefined : query.data;
   const blockingError =
-    authError?.message ?? (query.isError ? query.error.message : null);
+    authError?.message ??
+    (!snapshot && query.isError ? query.error.message : null);
   const nonBlockingError =
-    snapshot && !authError && refreshError ? refreshError.message : null;
+    snapshot && !authError
+      ? (refreshError?.message ?? (query.isError ? query.error.message : null))
+      : null;
+  const pollingUsage =
+    Boolean(snapshot?.partial) && !partialPollExhausted && !query.isError;
   const busy = query.isFetching || refreshing;
 
   return (
@@ -318,9 +377,29 @@ export function ProviderLimits() {
         </Card>
       ) : snapshot && snapshot.accounts.length > 0 ? (
         <>
+          {snapshot.partial && (
+            <p
+              role="status"
+              className="flex items-center gap-2 rounded-lg border border-border bg-muted/50 px-3 py-2 text-xs text-muted-foreground"
+            >
+              {pollingUsage && (
+                <Loader2
+                  className="h-3.5 w-3.5 shrink-0 animate-spin"
+                  aria-hidden="true"
+                />
+              )}
+              <span>7-day token totals are still loading or unavailable.</span>
+            </p>
+          )}
           <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
             {snapshot.accounts.map((account) => (
-              <AccountCard key={account.id} account={account} nowMs={nowMs} />
+              <AccountCard
+                key={account.id}
+                account={account}
+                nowMs={nowMs}
+                partial={snapshot.partial}
+                loadingUsage={pollingUsage}
+              />
             ))}
           </div>
           {snapshot.unattributed_tokens_7d > 0 && (
