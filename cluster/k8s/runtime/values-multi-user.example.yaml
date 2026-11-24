@@ -48,7 +48,13 @@ env:
   #   # personal_agents.mind.agent.named_workers in config.yaml.
   #   - name: MINDROOM_KUBERNETES_NAMED_WORKERS_MAX
   #     value: "16"
-  #   # Required when enabling workers.computerEnabled below (must be a JSON array).
+  #   # Reachable HTTPS runtime URL so MindRoom Chat discovers the runtime and
+  #   # the egress broker returns Connections links.
+  #   - name: MINDROOM_PUBLIC_URL
+  #     value: "https://assistant.example.com"
+  #   # JSON array of trusted MindRoom Chat origins; used by both Worker Computer and
+  #   # MindRoom Chat Connections / in-chat Agent Keys cards (in-chat key-request cards
+  #   # also require mindroom_openid_audience on Tuwunel).
   #   - name: MINDROOM_COMPUTER_ALLOWED_ORIGINS
   #     value: '["https://chat.example.com"]'
 
@@ -80,11 +86,11 @@ egressBroker:
 # Optional: human-approved worker egress proxy + isolated background-script gateway.
 # Requires a CNI enforcing Kubernetes NetworkPolicies (workers.kubernetes.networkPolicy.create
 # and egressProxy.networkPolicy.create default to true) and a pinned proxy image tag or digest.
-# Because personal_agents.mind sets include_default_tools: false, also add approved_egress to
-# mind's explicit tools list (and set manageRuntimeConfig: false below when wiring per-agent).
+# Because personal_agents.mind sets include_default_tools: false, add approved_egress explicitly
+# to mind's tools list, and keep manageRuntimeConfig: true (the default) so the chart still
+# enforces request_network_access: require_approval.
 # approvedEgress:
 #   enabled: true
-#   # manageRuntimeConfig: false
 #   image:
 #     tag: v0.1.10  # Pin a released tag or set digest
 #   allowlist:

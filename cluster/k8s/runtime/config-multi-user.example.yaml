@@ -59,7 +59,7 @@ personal_agents:
         instructions: Finish the active turn unless the new message cancels, corrects, or redirects the current work.
       delegate_to: [mind]
       include_default_tools: false
-      # Deliberately omits update_awareness (container images are pinned and upgraded via Helm).
+      # Deliberately omits update_awareness (upgrades are operator-managed via Helm).
       tools:
         - shell
         - memory
@@ -92,7 +92,7 @@ personal_agents:
         # - gmail / google_calendar / google_drive / google_sheets, github, slack
         # - exa (API-backed web search) or duckduckgo (keyless web search)
         # - matrix_user (requires MATRIX_USER_APPSERVICE_TOKEN or _FILE from an appservice covering the intended human users)
-        # - approved_egress (must be listed here because include_default_tools is false; set approvedEgress.manageRuntimeConfig: false in Helm values when wiring per-agent)
+        # - approved_egress (list explicitly here because include_default_tools is false; keep approvedEgress.manageRuntimeConfig: true so request_network_access stays gated)
         # - mcp_<server_id> for OAuth-backed remote MCP servers configured under mcp_servers:
 
 personal_rooms:
