@@ -210,7 +210,7 @@ class RunViews:
             # Else the run may not act now, or nobody can post for it: its next view tries again.
             self._publish_frame(run, account, meta, graph)
             shown = await self._card(run, meta, graph, client)
-            await self.engine.retry_question_cards(run_id)
+            await self.engine.ask.retry_question_cards(run_id)
         else:
             self._stop_frame(run_id)
         if run.state not in TERMINAL_RUN_STATES:

@@ -2716,6 +2716,23 @@ expose = [
 ]
 
 [[modules]]
+path = "mindroom.workflow_runs.interactions"
+depends_on = [
+    "mindroom.workflow_runs.coordination",
+    "mindroom.workflow_runs.graph",
+    "mindroom.workflow_runs.models",
+    "mindroom.workflow_runs.notices",
+    "mindroom.workflow_runs.peers",
+    "mindroom.workflow_runs.questions",
+    "mindroom.workflow_runs.replay",
+    "mindroom.workflow_runs.store",
+]
+
+[[interfaces]]
+from = ["mindroom.workflow_runs.interactions"]
+expose = ["RunInteractions"]
+
+[[modules]]
 path = "mindroom.workflow_runs.engine"
 depends_on = [
     "mindroom.delegation.personas",
@@ -2725,11 +2742,10 @@ depends_on = [
     "mindroom.workflow_runs.coordination",
     "mindroom.workflow_runs.faults",
     "mindroom.workflow_runs.graph",
+    "mindroom.workflow_runs.interactions",
     "mindroom.workflow_runs.limits",
     "mindroom.workflow_runs.models",
-    "mindroom.workflow_runs.notices",
     "mindroom.workflow_runs.peers",
-    "mindroom.workflow_runs.questions",
     "mindroom.workflow_runs.recovery",
     "mindroom.workflow_runs.saved",
     "mindroom.workflow_runs.structured",
@@ -2748,7 +2764,7 @@ expose = [
 [[modules]]
 path = "mindroom.workflow_runs.notices"
 depends_on = ["mindroom.matrix.client_delivery"]
-visibility = ["mindroom.workflow_runs.engine", "mindroom.workflow_runs.questions", "mindroom.workflow_runs.view"]
+visibility = ["mindroom.workflow_runs.interactions", "mindroom.workflow_runs.questions", "mindroom.workflow_runs.view"]
 
 [[interfaces]]
 from = ["mindroom.workflow_runs.notices"]
@@ -2757,7 +2773,7 @@ expose = ["RETRY_SECONDS", "clip", "notice", "notice_fits", "send_notice"]
 [[modules]]
 path = "mindroom.workflow_runs.questions"
 depends_on = ["mindroom.workflow_runs.notices"]
-visibility = ["mindroom.workflow_runs.answers", "mindroom.workflow_runs.engine"]
+visibility = ["mindroom.workflow_runs.answers", "mindroom.workflow_runs.interactions"]
 
 [[interfaces]]
 from = ["mindroom.workflow_runs.questions"]

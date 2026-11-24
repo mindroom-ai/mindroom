@@ -165,7 +165,7 @@ async def test_message_to_a_name_nobody_has_yet_is_held_and_delivered_when_it_st
     await stack.submit("/0:p0@0", "agent", {"prompt": "be", "name": "backend"}, meta={"name": "backend"})
     backend = _ref(stack, "/0:p0@0")
 
-    sent = await stack.engine.peer_send(
+    sent = await stack.engine.ask.peer_send(
         stack.run_id,
         op_id="op-1",
         sender=backend,
@@ -357,7 +357,7 @@ async def test_waiting_reader_returns_timeout_note_and_retries_persist_it(stack:
         {"wait_seconds": 15},
     )
     wait_task = asyncio.create_task(
-        stack.engine.wait_for_messages(
+        stack.engine.ask.wait_for_messages(
             stack.run_id,
             reader,
             15.0,
@@ -372,7 +372,7 @@ async def test_waiting_reader_returns_timeout_note_and_retries_persist_it(stack:
     first = await asyncio.wait_for(wait_task, timeout=SETTLE_TIMEOUT_SECONDS)
     expected = {"messages": [], "note": "No message arrived within 15 s."}
     assert first == expected
-    replayed = await stack.engine.wait_for_messages(
+    replayed = await stack.engine.ask.wait_for_messages(
         stack.run_id,
         reader,
         15.0,
