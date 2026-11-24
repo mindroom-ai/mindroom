@@ -3444,6 +3444,7 @@ depends_on = [
     "mindroom.cancellation",
     "mindroom.history.types",
     "mindroom.llm",
+    "mindroom.tool_system.context_bound_streams",
 ]
 
 [[modules]]
@@ -6327,6 +6328,7 @@ path = "mindroom.tool_system.context_bound_streams"
 depends_on = []
 visibility = [
     "mindroom.approval.execution",
+    "mindroom.history.summary_call",
     "mindroom.approval.resume",
     "mindroom.agent_loop",
     "mindroom.teams",

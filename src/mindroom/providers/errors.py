@@ -37,6 +37,8 @@ if TYPE_CHECKING:
     from mindroom.llm.provider import MediaKind
 
 __all__ = [
+    "GEMINI_FILTERED_FINISH_REASONS",
+    "MALFORMED_FUNCTION_CALL_FINISH_REASON",
     "CliLoginError",
     "classify_provider_error",
     "media_ids",
@@ -46,6 +48,21 @@ __all__ = [
     "provider_failure",
     "retry_after_seconds",
 ]
+
+# Gemini candidate finish reasons shared by the native Gemini adapter and OpenRouter's ``native_finish_reason``.
+MALFORMED_FUNCTION_CALL_FINISH_REASON = "MALFORMED_FUNCTION_CALL"
+GEMINI_FILTERED_FINISH_REASONS = frozenset(
+    {
+        "SAFETY",
+        "RECITATION",
+        "BLOCKLIST",
+        "PROHIBITED_CONTENT",
+        "SPII",
+        "IMAGE_SAFETY",
+        "IMAGE_PROHIBITED_CONTENT",
+        "IMAGE_RECITATION",
+    },
+)
 
 _RATE_LIMIT_STATUS = 429
 _UNAUTHORIZED_STATUS = 401

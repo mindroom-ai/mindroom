@@ -574,14 +574,14 @@ def _abnormal_turn_error(turn: TurnCompleted, *, provider: str) -> Exception | N
     has_reasoning = bool(msg.reasoning_content or msg.redacted_reasoning_content)
     detail = f" ({turn.raw_stop_reason})" if turn.raw_stop_reason else ""
 
+    if not has_calls and has_text:
+        return None
     if stop == "tool_use" and not has_calls:
         return ProviderError(
             f"Model stopped with tool_use{detail} but returned no tool calls",
             provider=provider,
             provider_code=turn.raw_stop_reason,
         )
-    if not has_calls and has_text:
-        return None
     phase = "completing tool calls" if has_calls else "producing output"
     if stop in {"content_filter", "refusal"}:
         return ModelSafeguardRefusal(

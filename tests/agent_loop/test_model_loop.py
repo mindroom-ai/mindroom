@@ -1495,6 +1495,20 @@ async def test_abnormal_stop_reasons_and_partial_tool_calls_fail_without_running
     with pytest.raises(ProviderError, match="tool_use"):
         await run_loop(spec(ScriptedModel([empty_tool_use]), toolkit(probe)), _prompt())
 
+    reasoning_only_tool_use = [
+        ReasoningEvent("Deciding..."),
+        TurnCompleted(message=Message(role="assistant", reasoning_content="Deciding..."), stop_reason="tool_use"),
+    ]
+    with pytest.raises(ProviderError, match="tool_use"):
+        await run_loop(spec(ScriptedModel([reasoning_only_tool_use]), toolkit(probe)), _prompt())
+
+    text_with_tool_use = [
+        TextDelta("Answer anyway."),
+        TurnCompleted(message=Message(role="assistant", content="Answer anyway."), stop_reason="tool_use"),
+    ]
+    _, text_record = await run_loop(spec(ScriptedModel([text_with_tool_use]), toolkit(probe)), _prompt())
+    assert text_record.content == "Answer anyway."
+
     filtered_call = calls(tool_call("probe", "c1", text="never"))
     filtered_call[-1] = replace(filtered_call[-1], stop_reason="content_filter", raw_stop_reason="SAFETY")
     with pytest.raises(ModelSafeguardRefusal) as refused:

@@ -30,6 +30,7 @@ from mindroom.llm.provider import (
 )
 from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.providers.assistant_turn import ThinkTagSplitter
+from mindroom.providers.errors import GEMINI_FILTERED_FINISH_REASONS, MALFORMED_FUNCTION_CALL_FINISH_REASON
 from mindroom.providers.names import is_openrouter_gemini_model
 from mindroom.providers.openai.media import chat_audio_part, chat_file_part, chat_image_part, chat_video_part
 from mindroom.providers.openai.schema import strict_response_schema
@@ -82,19 +83,6 @@ _CHAT_STOP_REASONS: dict[str, StopReason] = {
     "function_call": "tool_use",
     "content_filter": "content_filter",
 }
-_MALFORMED_FUNCTION_CALL = "MALFORMED_FUNCTION_CALL"
-_FILTERED_NATIVE_FINISH_REASONS = frozenset(
-    {
-        "SAFETY",
-        "RECITATION",
-        "BLOCKLIST",
-        "PROHIBITED_CONTENT",
-        "SPII",
-        "IMAGE_SAFETY",
-        "IMAGE_PROHIBITED_CONTENT",
-        "IMAGE_RECITATION",
-    },
-)
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -126,7 +114,7 @@ class ChatTurnParts:
 
 def chat_stop_reason(finish_reason: str | None, native_finish_reason: str | None = None) -> StopReason | None:
     """Map a Chat Completions ``finish_reason`` and native reason to the normalized stop vocabulary."""
-    if native_finish_reason in _FILTERED_NATIVE_FINISH_REASONS:
+    if native_finish_reason in GEMINI_FILTERED_FINISH_REASONS:
         return "content_filter"
     if native_finish_reason == "refusal":
         return "refusal"
@@ -137,7 +125,7 @@ def chat_stop_reason(finish_reason: str | None, native_finish_reason: str | None
 
 def chat_turn_error(parts: ChatTurnParts, *, provider: str) -> ProviderError | None:
     """Return the provider error for an abnormal Chat Completions finish reason, or None."""
-    if parts.native_finish_reason == _MALFORMED_FUNCTION_CALL:
+    if parts.native_finish_reason == MALFORMED_FUNCTION_CALL_FINISH_REASON:
         return ProviderError(
             f"Generation ended with finish reason: {parts.native_finish_reason}",
             provider=provider,
@@ -146,7 +134,7 @@ def chat_turn_error(parts: ChatTurnParts, *, provider: str) -> ProviderError | N
         )
     if (
         parts.finish_reason == "error"
-        and parts.native_finish_reason not in _FILTERED_NATIVE_FINISH_REASONS
+        and parts.native_finish_reason not in GEMINI_FILTERED_FINISH_REASONS
         and parts.native_finish_reason != "refusal"
     ):
         detail = f" ({parts.native_finish_reason})" if parts.native_finish_reason else ""

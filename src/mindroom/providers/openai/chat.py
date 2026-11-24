@@ -218,7 +218,7 @@ class ChatAdapter:
             usage=parts.usage,
             stop_reason=stop_reason,
             raw_stop_reason=(
-                parts.native_finish_reason
+                parts.native_finish_reason or parts.finish_reason
                 if stop_reason in {"content_filter", "incomplete", "output_limit", "refusal"}
                 else None
             ),

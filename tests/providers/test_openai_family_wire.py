@@ -510,6 +510,49 @@ async def test_openrouter_generic_error_finish_reason_retries_uncommitted_and_fa
 
 
 @pytest.mark.asyncio
+async def test_openrouter_top_level_sse_error_takes_precedence_over_recitation_finish_reason(tmp_path: Path) -> None:
+    """A terminal SSE chunk with both top-level error (502) and choice RECITATION fails via SDK ProviderUnavailable."""
+    reply = _streamed_chat(
+        {
+            "data": {
+                "id": "gen-or-mixed",
+                "object": "chat.completion.chunk",
+                "created": 1,
+                "model": "google/gemini-4-neon",
+                "error": {"code": 502, "message": "Provider returned error"},
+                "choices": [
+                    {
+                        "index": 0,
+                        "delta": {},
+                        "finish_reason": "error",
+                        "native_finish_reason": "RECITATION",
+                    },
+                ],
+            },
+        },
+        _DONE,
+    )
+    model_cfg = {"provider": "openrouter", "id": "google/gemini-4-neon", "api_key": "k"}
+    built = _Built(tmp_path, model_cfg, reply)
+
+    with pytest.raises(ProviderUnavailable):
+        await _adapter_turn(built, ModelRequest(messages=[_user()]))
+
+
+@pytest.mark.asyncio
+async def test_chat_unknown_finish_reason_without_native_reason_falls_back_to_finish_reason(tmp_path: Path) -> None:
+    """An unknown finish_reason without native_finish_reason surfaces as incomplete with raw_stop_reason set."""
+    reply = _streamed_chat(_chunk({"content": "Partial"}, finish_reason="eos"), _DONE)
+    built = _Built(tmp_path, _OPENAI_CHAT, reply)
+
+    events = [event async for event in built.adapter.stream(ModelRequest(messages=[_user()]))]
+
+    completed = events[-1]
+    assert isinstance(completed, TurnCompleted)
+    assert (completed.stop_reason, completed.raw_stop_reason) == ("incomplete", "eos")
+
+
+@pytest.mark.asyncio
 async def test_a_chat_content_filter_stop_is_a_safeguard_refusal(tmp_path: Path) -> None:
     """OpenRouter reports Claude's refusal as ``content_filter``; the reply must say so, not read as empty."""
     built = _Built(tmp_path, _OPENAI_CHAT, _chat_reply(_chunk({"content": ""}, finish_reason="content_filter")))

@@ -20,16 +20,18 @@ from mindroom.llm.errors import (
     ContextWindowExceeded,
     ModelSafeguardRefusal,
     ProviderError,
+    incomplete_stream_error,
 )
 from mindroom.llm.messages import Message
-from mindroom.llm.provider import ModelRequest, RequestOverrides, complete
+from mindroom.llm.provider import ModelRequest, ModelTurn, ReportedUsage, RequestOverrides, TurnCompleted
 from mindroom.logging_config import get_logger
 from mindroom.timing import timed
+from mindroom.tool_system.context_bound_streams import closing_async_stream
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
-    from mindroom.llm.provider import ModelProvider, ModelTurn
+    from mindroom.llm.provider import ModelProvider
     from mindroom.llm.usage import MessageMetrics
 
 logger = get_logger(__name__)
@@ -187,22 +189,41 @@ async def _request_summary(
     provider_done: asyncio.Future[None],
     on_usage: Callable[[MessageMetrics], Awaitable[None]] | None,
 ) -> ModelTurn:
-    """Send the summary request, then persist the usage it reported, a refused response's included."""
+    """Send the summary request, then persist the usage it reported, failed and refused responses included."""
+    reported = ReportedUsage()
+    completed: TurnCompleted | None = None
+    failure: Exception | None = None
     try:
-        turn: ModelTurn | ModelSafeguardRefusal = await complete(model, request)
-    except ModelSafeguardRefusal as refusal:
-        turn = refusal
+        events = model.stream(request)
+        async with closing_async_stream(events):
+            async for event in events:
+                reported.observe(event)
+                if isinstance(event, TurnCompleted):
+                    completed = event
+    except Exception as error:
+        failure = error
     finally:
         provider_done.set_result(None)
-    if on_usage is not None and turn.usage.reported:
+    if failure is None and completed is None:
+        failure = incomplete_stream_error(provider=model.identity.provider)
+
+    usage = (
+        completed.message.metrics
+        if completed is not None
+        else failure.usage
+        if isinstance(failure, ModelSafeguardRefusal)
+        else reported.received
+    )
+    if on_usage is not None and usage is not None and usage.reported:
         try:
-            await on_usage(turn.usage)
+            await on_usage(usage)
         except Exception as error:
             msg = "Could not persist compaction summary usage"
             raise _CompactionSummaryUsageError(msg) from error
-    if isinstance(turn, ModelSafeguardRefusal):
-        raise turn
-    return turn
+    if failure is not None:
+        raise failure
+    assert completed is not None
+    return ModelTurn(message=completed.message, stop_reason=completed.stop_reason)
 
 
 @timed("system_prompt_assembly.history_prepare.compaction.summary_model_request")
