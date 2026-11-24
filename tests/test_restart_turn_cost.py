@@ -1400,7 +1400,7 @@ async def test_a_continuation_starts_from_the_nested_jobs_its_cut_short_turn_s_r
         before_switch, _cut_short = worker_storage.list_runs(child.session_id)
         await _completed_research_job(runtime, nested_owner, "acknowledged")
         waited = await runtime.wait("acknowledged", owner=nested_owner, depth=0)
-        await runtime.acknowledge_wait("acknowledged", waited.claim, adapter={ACKNOWLEDGED_BY: before_switch.run_id})
+        await runtime._acknowledge_wait("acknowledged", waited.claim, adapter={ACKNOWLEDGED_BY: before_switch.run_id})
         await _completed_research_job(runtime, nested_owner, "unacknowledged")
 
     switch = tool_call("switch_thread_model", "sw", model_name="worker_model", when="after-toolcall")

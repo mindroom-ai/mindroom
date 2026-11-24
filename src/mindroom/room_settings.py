@@ -177,7 +177,7 @@ def _drop_legacy_override(setting: RoomSetting[Any], runtime_paths: RuntimePaths
         logger.warning("room_setting_legacy_override_kept", room_id=room_id, setting=setting.key, exc_info=True)
 
 
-async def state_event_content(response: object) -> dict[str, Any] | None:
+async def _state_event_content(response: object) -> dict[str, Any] | None:
     """Return the content of the state event a read found, None unless the homeserver answered with the event.
 
     Only a 200 carries the event. nio decodes a body that is no JSON, such as a proxy's page, as `{}`, which a cleared
@@ -213,7 +213,7 @@ async def read_room_text_setting(
     try:
         async with asyncio.timeout(_REQUEST_TIMEOUT_SECONDS):
             response = await client.room_get_state_event(room_id, ROOM_SETTINGS_EVENT_TYPE, key)
-            content = await state_event_content(response)
+            content = await _state_event_content(response)
     except Exception:
         logger.warning("room_setting_read_failed", room_id=room_id, setting=key, exc_info=True)
         return None
@@ -381,7 +381,7 @@ async def refresh_room_setting[T: str](  # noqa: PLR0911 - one outcome per answe
         logger.warning("room_setting_read_failed", room_id=room_id, setting=setting.key, exc_info=True)
         return SettingRead(ok=False, value=resolve_room_setting(setting, runtime_paths, room_id))
     # Only a read the homeserver answered with the event counts: a failed one keeps the copy and the override.
-    content = await state_event_content(response)
+    content = await _state_event_content(response)
     if content is not None:
         value = _value_from_content(setting, content)
     elif isinstance(response, nio.RoomGetStateEventError) and state_failure(response) is StateFailure.MISSING:

@@ -82,7 +82,7 @@ async def test_retention_preserves_pending_turns_and_conversation_approvals(
         operation=operation,
     )
     waited = await runtime.wait("old", owner=owner, depth=0)
-    await runtime.acknowledge_wait("old", waited.claim)
+    await runtime._acknowledge_wait("old", waited.claim)
     entry = runtime._entries["old"]
     entry.job = replace(entry.job, updated_at=(datetime.now(UTC) - timedelta(days=31)).isoformat())
     record = TurnRecord.create(("$original",), anchor_event_id="$original", completed=source == "answered")

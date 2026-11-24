@@ -1058,7 +1058,7 @@ class ToolJobRuntime:
 
         await run_coroutine_until_complete(release())
 
-    async def acknowledge_wait(
+    async def _acknowledge_wait(
         self,
         job_id: str,
         claim: JobClaim | None,

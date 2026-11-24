@@ -82,14 +82,14 @@ async def test_consumed_native_result_releases_live_child_and_discovery_payload(
         job_id = job_child().delegation_id
         waited = await runtime.wait(job_id, owner=job_owner(), depth=0)
         assert (await read_result_payload(runtime, waited.job)).value == delivered
-        await runtime.acknowledge_wait(job_id, waited.claim)
+        await runtime._acknowledge_wait(job_id, waited.claim)
         gc.collect()
         assert child_ref() is None
         discovered = await runtime.list_jobs(owner=job_owner(), depth=0)
         assert len(json.dumps([asdict(job) for job in discovered])) < 8192
         reread = await runtime.wait(job_id, owner=job_owner(), depth=0)
         assert (await read_result_payload(runtime, reread.job)).value == delivered
-        await runtime.acknowledge_wait(job_id, reread.claim)
+        await runtime._acknowledge_wait(job_id, reread.claim)
     finally:
         await runtime.shutdown()
 
@@ -109,7 +109,7 @@ async def test_native_result_expiry_after_restart_deletes_the_job(tmp_path: Path
 
     await start_delegation_job(runtime, child, owner=job_owner(), operation=operation)
     waited = await runtime.wait(child.delegation_id, owner=job_owner(), depth=0)
-    await runtime.acknowledge_wait(child.delegation_id, waited.claim)
+    await runtime._acknowledge_wait(child.delegation_id, waited.claim)
     await runtime.shutdown()
     restored = await tool_job_runtime(tmp_path)
 
@@ -192,7 +192,7 @@ async def test_timeout_and_cancelled_waiter_leave_one_child_alive(tmp_path: Path
         assert result.job.result == "answer"
         assert calls == 1
         assert pending_outcomes(runtime) == []
-        await runtime.acknowledge_wait(job.job_id, result.claim)
+        await runtime._acknowledge_wait(job.job_id, result.claim)
     finally:
         finish.set()
         await runtime.shutdown()
@@ -216,7 +216,7 @@ async def test_wait_claim_released_without_ack_keeps_outcome_pending(tmp_path: P
         waiting = await runtime.wait(job.job_id, owner=job_owner(), depth=0)
         assert waiting.claim is not None
         assert pending_outcomes(runtime) == []
-        await runtime.acknowledge_wait(job.job_id, waiting.claim)
+        await runtime._acknowledge_wait(job.job_id, waiting.claim)
         assert pending_outcomes(runtime) == []
         assert pending_outcome(runtime, job.job_id) is None
     finally:
@@ -663,7 +663,7 @@ async def test_closed_runtime_rejects_stale_parent_operations(tmp_path: Path, op
     try:
         await restored.recover()
         operations = {
-            "acknowledge_wait": lambda: runtime.acknowledge_wait(job.job_id, waiting.claim),
+            "acknowledge_wait": lambda: runtime._acknowledge_wait(job.job_id, waiting.claim),
             "lookup": lambda: lookup(runtime, job.job_id, owner=job_owner(), depth=0),
             "wait": lambda: runtime.wait(job.job_id, owner=job_owner(), depth=0),
             "cancel": lambda: cancel_settled(runtime, job.job_id, owner=job_owner(), depth=0),

@@ -11,7 +11,7 @@ import threading
 import time
 from contextlib import nullcontext
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Protocol, cast
 
 from mindroom.desktop.accessibility import (
     PRIMARY_SCREEN_APP_ID,
@@ -77,6 +77,21 @@ if TYPE_CHECKING:
     import nio
     from nio import AuthenticatedToDeviceEvent
 
+
+class _CoreFoundation(Protocol):
+    """The CoreFoundation run-loop surface the desktop bridge uses."""
+
+    kCFRunLoopDefaultMode: object  # noqa: N815
+
+    def CFRunLoopRunInMode(  # noqa: N802
+        self,
+        mode: object,
+        seconds: float,
+        _return_after_source_handled: bool,
+        /,
+    ) -> object: ...
+
+
 logger = get_logger(__name__)
 
 _MAX_FUTURE_SKEW_MS = 30_000
@@ -93,18 +108,17 @@ async def _run_macos_application_events() -> None:
         msg = "The macOS desktop bridge must run on the main thread."
         raise RuntimeError(msg)
 
-    from CoreFoundation import (  # noqa: PLC0415  # ty: ignore[import-not-found]
-        CFRunLoopRunInMode,
-        kCFRunLoopDefaultMode,
-    )
+    import CoreFoundation  # noqa: PLC0415  # ty: ignore[import-not-found]
     from objc import autorelease_pool  # noqa: PLC0415
 
+    # Runtime reference prevents Vulture treating the protocol as dead code.
+    core_foundation = cast(_CoreFoundation, CoreFoundation)  # noqa: TC006
     while True:
         # NSWorkspace and NSRunningApplication update only on the main Cocoa
         # run loop. Keep pumping while native worker threads wait for launches
         # and activation; a refresh only before dispatch cannot observe either.
         with autorelease_pool():
-            CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.0, False)
+            core_foundation.CFRunLoopRunInMode(core_foundation.kCFRunLoopDefaultMode, 0.0, False)
         await asyncio.sleep(0.05)
 
 

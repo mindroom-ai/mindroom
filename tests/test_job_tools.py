@@ -276,7 +276,7 @@ async def test_job_list_rediscovers_restart_outcomes_with_current_scope(tmp_path
         operation=operation,
     )
     waited = await runtime.wait("durable", owner=owner, depth=0)
-    await runtime.acknowledge_wait("durable", waited.claim)
+    await runtime._acknowledge_wait("durable", waited.claim)
     await runtime.shutdown()
     allowed = True
     runtime = await tool_job_runtime(tmp_path, grant=lambda _: "allowed" if allowed else "denied")
@@ -882,7 +882,7 @@ async def test_pending_outcomes_require_saved_consumption(tmp_path: Path) -> Non
         assert released.result == "tool failed"
         assert [job.job_id for job in pending_outcomes(runtime)] == ["quiet"]
         waited = await runtime.wait("quiet", owner=owner, depth=0)
-        await runtime.acknowledge_wait("quiet", waited.claim)
+        await runtime._acknowledge_wait("quiet", waited.claim)
         assert pending_outcome(runtime, "quiet") is None
         assert not pending_outcomes(runtime)
     finally:

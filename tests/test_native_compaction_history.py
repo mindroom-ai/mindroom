@@ -36,7 +36,7 @@ from mindroom.llm.usage import MessageMetrics, TokenCounts
 from mindroom.native_compaction import (
     ENCRYPTED_REPLAY_RESET_KEY,
     NATIVE_CHECKPOINT_KEY,
-    NativeReplay,
+    _NativeReplay,
     checkpoint_summary,
     native_replay,
     native_replay_messages,
@@ -998,17 +998,17 @@ def test_native_replay_starts_over_at_the_later_of_a_checkpoint_and_a_reset() ->
     checkpoint_first = [system, question, checkpoint, follow_up, reset, follow_up]
     reset_first = [system, question, reset, follow_up, checkpoint, follow_up]
 
-    def replayed(messages: list[Message], **kwargs: Any) -> NativeReplay:  # noqa: ANN401
+    def replayed(messages: list[Message], **kwargs: Any) -> _NativeReplay:  # noqa: ANN401
         return native_replay(messages, "route-1", **kwargs)
 
     # A reset after the checkpoint gives the checkpoint up: everything goes, rebuilt before the reset.
-    assert replayed(checkpoint_first, reset_scope="scope-1") == NativeReplay(checkpoint_first, 4, 4)
+    assert replayed(checkpoint_first, reset_scope="scope-1") == _NativeReplay(checkpoint_first, 4, 4)
     # A checkpoint after the reset stands for what precedes it, the reset included.
     after_checkpoint = [system, checkpoint, follow_up]
-    assert replayed(reset_first, reset_scope="scope-1") == NativeReplay(after_checkpoint, 0, 4)
+    assert replayed(reset_first, reset_scope="scope-1") == _NativeReplay(after_checkpoint, 0, 4)
     # Another route's reset, or a route that records none, leaves the checkpoint standing.
-    assert replayed(checkpoint_first, reset_scope="scope-2") == NativeReplay([system, *checkpoint_first[2:]], 0, 2)
+    assert replayed(checkpoint_first, reset_scope="scope-2") == _NativeReplay([system, *checkpoint_first[2:]], 0, 2)
     assert replayed(checkpoint_first).messages == native_replay_messages(checkpoint_first, "route-1")
     # A request resent without encrypted state replays everything rebuilt, and no earlier usage sizes it.
-    assert replayed(checkpoint_first, reset_scope="scope-1", stripped=True) == NativeReplay(checkpoint_first, 6, 6)
-    assert native_replay(checkpoint_first, None) == NativeReplay(checkpoint_first)
+    assert replayed(checkpoint_first, reset_scope="scope-1", stripped=True) == _NativeReplay(checkpoint_first, 6, 6)
+    assert native_replay(checkpoint_first, None) == _NativeReplay(checkpoint_first)

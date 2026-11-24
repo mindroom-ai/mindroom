@@ -16,7 +16,7 @@ from mindroom.terminal.session import TerminalError, TerminalLaunch, TerminalMan
 from tests.conftest import requires_linux
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
+    from collections.abc import AsyncIterator, Awaitable
     from pathlib import Path
 
     from mindroom.terminal.session import TerminalEvent, TerminalSession, TerminalViewer
@@ -176,6 +176,35 @@ async def test_an_ended_session_is_kept_for_the_idle_time_after_its_shell_exits(
 
     assert session.exit_code == 3
     assert loop.time() - ended_at >= 0.95
+
+
+async def test_closing_while_idle_waits_for_a_polled_exit_preserves_the_exit_state(
+    tmp_path: Path,
+    manager: TerminalManager,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Cancelling an idle watcher cannot cancel the exit task it was waiting for."""
+    monkeypatch.delattr(os, "pidfd_open", raising=False)
+    monkeypatch.setattr(session_module, "_EXIT_POLL_SECONDS", 0.5)
+    monkeypatch.setattr(session_module, "_IDLE_SECONDS", 0.1)
+    session = manager.open("owner", _launch(tmp_path), cols=80, rows=24)
+    shield_started = asyncio.Event()
+    original_shield = asyncio.shield
+
+    def track_shield(awaitable: Awaitable[object]) -> asyncio.Future[object]:
+        if awaitable is session._exit_task:
+            shield_started.set()
+        return original_shield(awaitable)
+
+    monkeypatch.setattr(session_module.asyncio, "shield", track_shield)
+    session.write(b"sleep 0.05; exit 4\n")
+
+    async with asyncio.timeout(10):
+        await shield_started.wait()
+        await manager.close("owner", session.id)
+
+    assert session.exit_code == 4
+    assert session._master_fd is None
 
 
 async def test_a_shell_with_no_input_and_no_viewer_is_hung_up_and_forgotten(

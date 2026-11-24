@@ -163,7 +163,7 @@ async def test_final_shutdown_waits_for_receipt_publication(tmp_path: Path, monk
         await runtime.shutdown()
 
     intercept_job_saves(monkeypatch, before=blocked_save)
-    acknowledging = asyncio.create_task(runtime.acknowledge_wait("receipt", waited.claim))
+    acknowledging = asyncio.create_task(runtime._acknowledge_wait("receipt", waited.claim))
     await asyncio.wait_for(writing.wait(), 30)
     shutdown = asyncio.create_task(close())
     try:
@@ -213,7 +213,7 @@ async def test_quiescence_fences_control_but_retains_receipts_and_storage(tmp_pa
             )
         with pytest.raises(runtime_module.JobAccessError, match="shutting down"):
             await cancel_settled(runtime, "quiesced", owner=job_owner(), depth=0)
-        await runtime.acknowledge_wait(job.job_id, waited.claim)
+        await runtime._acknowledge_wait(job.job_id, waited.claim)
         assert (await lookup(runtime, job.job_id, owner=job_owner(), depth=0)).consumed
     finally:
         await runtime.shutdown()
@@ -244,7 +244,7 @@ async def test_saved_outcome_keeps_its_payload_only_in_the_journal(tmp_path: Pat
         assert "payload tail" not in (await saved_jobs(tmp_path))["disk"].result
         assert "payload tail" not in repr(runtime._entries["disk"])
         assert (await read_result_payload(runtime, waited.job)).value == value
-        await runtime.acknowledge_wait("disk", waited.claim)
+        await runtime._acknowledge_wait("disk", waited.claim)
         assert "payload tail" not in repr(runtime._entries["disk"])
     finally:
         await runtime.shutdown()
@@ -271,7 +271,7 @@ async def test_settled_payload_is_written_once(tmp_path: Path, monkeypatch: pyte
         await start_job(runtime, "once", tool_name="tool", depth=0, adapter={}, owner=job_owner(), operation=operation)
         waited = await runtime.wait("once", owner=job_owner(), depth=0)
         if action == "acknowledge":
-            await runtime.acknowledge_wait("once", waited.claim)
+            await runtime._acknowledge_wait("once", waited.claim)
         else:
             await runtime.release_wait("once", waited.claim)
             await cancel_settled(runtime, "once", owner=job_owner(), depth=0)
@@ -347,7 +347,7 @@ async def test_restart_reattaches_a_saved_result_without_rewrites_or_rerun(
     await start_job(runtime, "consumed", tool_name="tool", depth=0, adapter={}, owner=job_owner(), operation=operation)
     waited = await runtime.wait("consumed", owner=job_owner(), depth=0)
     if acknowledged:
-        await runtime.acknowledge_wait("consumed", waited.claim)
+        await runtime._acknowledge_wait("consumed", waited.claim)
     else:
         await runtime.release_wait("consumed", waited.claim)
     await runtime.shutdown()
@@ -377,7 +377,7 @@ async def test_restart_reattaches_a_saved_result_without_rewrites_or_rerun(
         )
         assert (await read_result_payload(restored, reread.job)).value == value
         assert calls == 1
-        await restored.acknowledge_wait("consumed", reread.claim)
+        await restored._acknowledge_wait("consumed", reread.claim)
     finally:
         await restored.shutdown()
 
@@ -476,7 +476,7 @@ async def test_failed_cancellation_save_wakes_an_existing_waiter(
             assert waiter in done, "terminal write failure left the existing waiter asleep"
             waited = waiter.result()
             assert waited.job.status == "cancelled"
-        await runtime.acknowledge_wait("wake", waited.claim)
+        await runtime._acknowledge_wait("wake", waited.claim)
         saved = (await saved_jobs(tmp_path))["wake"]
         assert saved.consumed
         assert saved.status == "cancelled"
@@ -519,7 +519,7 @@ async def test_consumption_repairs_failed_cancellation_save_before_reread(
             with pytest.raises(OSError, match="terminal save failed"):
                 await cancel_settled(runtime, "cancel-retry", owner=job_owner(), depth=0)
         waited = await runtime.wait("cancel-retry", owner=job_owner(), depth=0)
-        await runtime.acknowledge_wait("cancel-retry", waited.claim)
+        await runtime._acknowledge_wait("cancel-retry", waited.claim)
         result = await cancel_settled(runtime, "cancel-retry", owner=job_owner(), depth=0)
         assert result.status == "cancelled"
         assert result.consumed
@@ -608,13 +608,13 @@ async def test_a_subagent_job_keeps_the_run_that_first_acknowledged_its_outcome(
         waited = await runtime.wait(job_id, owner=job_owner(), depth=0)
         assert not any(job_acknowledgers([waited.job]).values())
         acknowledged = {ACKNOWLEDGED_BY: "first-run"} if kind == "delegation" else None
-        await runtime.acknowledge_wait(job_id, waited.claim, adapter=acknowledged)
+        await runtime._acknowledge_wait(job_id, waited.claim, adapter=acknowledged)
     await runtime.shutdown()
     restored = await tool_job_runtime(tmp_path)
     try:
         await restored.recover()
         reread = await restored.wait("subagent", owner=job_owner(), depth=0)
-        await restored.acknowledge_wait("subagent", reread.claim, adapter={ACKNOWLEDGED_BY: "a-later-reader"})
+        await restored._acknowledge_wait("subagent", reread.claim, adapter={ACKNOWLEDGED_BY: "a-later-reader"})
         jobs = {job.job_id: job for job in restored.retained_jobs()}
         assert jobs["subagent"].consumed
         assert job_acknowledgers(jobs.values()) == {child["child"]["delegation_id"]: "first-run"}
@@ -648,7 +648,7 @@ async def test_an_instance_that_runs_no_jobs_reads_the_saved_ones_that_parse_and
         await runtime._store.accept("unparsable", "{}")
         assert [(job.job_id, job.consumed) for job in await runtime_module.saved_jobs(journal)] == [("kept", False)]
         # The runtime still owns the jobs, so its acknowledgement lands, and the next read finds it.
-        await runtime.acknowledge_wait("kept", waited.claim, adapter={ACKNOWLEDGED_BY: "first-run"})
+        await runtime._acknowledge_wait("kept", waited.claim, adapter={ACKNOWLEDGED_BY: "first-run"})
         assert list(job_acknowledgers(await runtime_module.saved_jobs(journal)).values()) == ["first-run"]
     finally:
         await journal.close()
@@ -665,7 +665,7 @@ async def test_expiry_rechecks_a_read_completed_during_source_lookup(tmp_path: P
 
     async def source_finished(job: runtime_module.BackgroundJob) -> bool:
         waited = await runtime.wait(job.job_id, owner=job_owner(), depth=0)
-        await runtime.acknowledge_wait(job.job_id, waited.claim)
+        await runtime._acknowledge_wait(job.job_id, waited.claim)
         return True
 
     try:
@@ -679,7 +679,7 @@ async def test_expiry_rechecks_a_read_completed_during_source_lookup(tmp_path: P
             operation=operation,
         )
         waited = await runtime.wait("reread", owner=job_owner(), depth=0)
-        await runtime.acknowledge_wait("reread", waited.claim)
+        await runtime._acknowledge_wait("reread", waited.claim)
         now = datetime.now(UTC)
         backdate_job(runtime, "reread", now - timedelta(days=30, seconds=1))
         await runtime.expire_ended(now=now, source_finished=source_finished)
@@ -717,7 +717,7 @@ async def test_result_expiry_deletes_only_old_ended_jobs_with_finished_sources(t
             )
             waited = await runtime.wait(name, owner=job_owner(), depth=0)
             if name != "unread":
-                await runtime.acknowledge_wait(name, waited.claim)
+                await runtime._acknowledge_wait(name, waited.claim)
             else:
                 await runtime.release_wait(name, waited.claim)
             if name != "recent":
@@ -776,7 +776,7 @@ async def test_a_result_its_own_call_returned_inline_expires_after_a_day(tmp_pat
             if name == "unread":
                 await runtime.release_wait(name, waited.claim)
             else:
-                await runtime.acknowledge_wait(name, waited.claim, returned_inline=name != "read")
+                await runtime._acknowledge_wait(name, waited.claim, returned_inline=name != "read")
     finally:
         await runtime.shutdown()
     restored = await tool_job_runtime(tmp_path)
@@ -844,7 +844,7 @@ async def test_conversation_lookup_follows_admission_recovery_and_expiry(tmp_pat
             await runtime.release_wait(job_id, waited.claim)
         assert await lookups(runtime) == ["a", "b", "c", "unsourced"]
         waited = await runtime.wait("a", owner=owner, depth=0)
-        await runtime.acknowledge_wait("a", waited.claim)
+        await runtime._acknowledge_wait("a", waited.claim)
         backdate_job(runtime, "a", datetime.now(UTC) - timedelta(days=31))
         # The conversation lookup skips consumed jobs, so only the index itself shows that expiry removed one.
         conversation = ("parent", "!room:test", "$root", "@alice:test")
@@ -894,11 +894,11 @@ async def test_listing_skips_calls_that_returned_their_outcome_to_their_own_call
             operation=completed,
         )
         waiting = await runtime.wait(job_id, owner=job_owner(), depth=0)
-        await runtime.acknowledge_wait(job_id, waiting.claim, returned_inline=returned_inline)
+        await runtime._acknowledge_wait(job_id, waiting.claim, returned_inline=returned_inline)
     assert [job.job_id for job in await runtime.list_jobs(owner=job_owner(), depth=0)] == ["collected"]
     # Reading the inline call's result again through job(action="wait") does not turn it into a job.
     rereading = await runtime.wait("inline", owner=job_owner(), depth=0)
-    await runtime.acknowledge_wait("inline", rereading.claim)
+    await runtime._acknowledge_wait("inline", rereading.claim)
     assert [job.job_id for job in await runtime.list_jobs(owner=job_owner(), depth=0)] == ["collected"]
     await runtime.shutdown()
     restored = await tool_job_runtime(tmp_path)
@@ -959,7 +959,7 @@ async def test_scoped_listing_keeps_consumed_outcomes_across_turns_and_restart(t
         operation=completed,
     )
     waiting = await runtime.wait(first.job_id, owner=job_owner(), depth=0)
-    await runtime.acknowledge_wait(first.job_id, waiting.claim)
+    await runtime._acknowledge_wait(first.job_id, waiting.claim)
     await start_job(
         runtime,
         "second",
@@ -1000,7 +1000,7 @@ async def test_recent_outcome_order_and_timestamps_survive_restart(tmp_path: Pat
     for job_id in ("zolder", "anewer"):
         await start_job(runtime, job_id, tool_name="read", depth=0, adapter={}, owner=job_owner(), operation=completed)
         waited = await runtime.wait(job_id, owner=job_owner(), depth=0)
-        await runtime.acknowledge_wait(job_id, waited.claim)
+        await runtime._acknowledge_wait(job_id, waited.claim)
     before = await runtime.list_jobs(owner=job_owner(), depth=0)
     assert [job.job_id for job in before] == ["anewer", "zolder"]
     await runtime.shutdown()
@@ -1701,10 +1701,10 @@ async def test_failed_receipt_save_preserves_the_previous_saved_job(
         with monkeypatch.context() as patch:
             intercept_job_saves(patch, before=fail_receipt)
             with pytest.raises(OSError, match="receipt save failed"):
-                await runtime.acknowledge_wait("atomic", waited.claim, adapter=acknowledged)
+                await runtime._acknowledge_wait("atomic", waited.claim, adapter=acknowledged)
             assert await saved_jobs(tmp_path) == before
             assert [job.adapter for job in runtime.retained_jobs()] == [adapter]
-        await runtime.acknowledge_wait("atomic", waited.claim, adapter=acknowledged)
+        await runtime._acknowledge_wait("atomic", waited.claim, adapter=acknowledged)
         assert (await saved_jobs(tmp_path))["atomic"].consumed
     finally:
         await runtime.shutdown()
@@ -1860,7 +1860,7 @@ async def test_reads_are_copies_and_consumption_hides_pending_results(
         assert listed[0].adapter == {"context": [1]}
         intercept_job_saves(monkeypatch)
         waited = await runtime.wait(job.job_id, owner=job_owner(), depth=0)
-        await runtime.acknowledge_wait(job.job_id, waited.claim)
+        await runtime._acknowledge_wait(job.job_id, waited.claim)
         assert pending_outcome(runtime, job.job_id) is None
         assert pending_outcomes(runtime) == []
         assert await runtime.read_payload(await lookup(runtime, job.job_id, owner=job_owner(), depth=0)) == {
@@ -2340,7 +2340,7 @@ async def test_operation_raising_cancellation_itself_settles_cancelled(tmp_path:
         )
         waited = await runtime.wait("self-cancelled", owner=job_owner(), depth=0)
         assert waited.job.status == "cancelled"
-        await runtime.acknowledge_wait("self-cancelled", waited.claim)
+        await runtime._acknowledge_wait("self-cancelled", waited.claim)
         saved = (await saved_jobs(tmp_path))["self-cancelled"]
         assert saved.status == "cancelled"
     finally:

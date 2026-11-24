@@ -11,7 +11,7 @@ import signal
 import sys
 import threading
 from contextlib import contextmanager
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 from uuid import uuid4
 
 import pytest
@@ -38,7 +38,7 @@ from tests.test_workers_run_small_fixes import _cli_with_stream, _FakeWorkerMana
 from tests.workers_run_frames import FakeStream, command_frames
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Awaitable, Callable, Iterator
     from pathlib import Path
 
 _TEST_TOKEN = "test-token"  # noqa: S105
@@ -97,12 +97,15 @@ async def test_r1_queued_and_cold_start_cancel_report_never_ran(
     async def local_placeholder(args: str) -> str:
         return args
 
-    proxied_shell = WorkerStandIns(
-        tool_name="shell",
-        runtime_paths=runtime_paths,
-        credentials_manager=None,
-        tools=builtin_tool_registry(),
-    )("run_shell_command", local_placeholder)
+    proxied_shell = cast(
+        "Callable[[str], Awaitable[object]]",
+        WorkerStandIns(
+            tool_name="shell",
+            runtime_paths=runtime_paths,
+            credentials_manager=None,
+            tools=builtin_tool_registry(),
+        )("run_shell_command", local_placeholder),
+    )
 
     outer_entered = asyncio.Event()
     release_outer = asyncio.Event()
