@@ -91,11 +91,17 @@ __all__ = [
 ]
 
 _CALL_UNAVAILABLE = "Background script call is unavailable."
-# What a workflow's call tells when it starts and stops waiting for a person; a plain script's call tells nobody.
-_APPROVAL_WAIT: ContextVar[Callable[[str | None], Awaitable[object]] | None] = ContextVar("approval_wait", default=None)
-# Whether the call being accepted stops where its tool would run: its caller starts the work the call stands for.
-# Only a workflow attempt's call says either; a plain script's call says nothing.
-_GATE_ONLY: ContextVar[bool | None] = ContextVar("gate_only", default=None)
+
+
+@dataclass(frozen=True, slots=True)
+class _WorkflowCall:
+    """Per-task broker context for a workflow attempt's call; absent for plain script calls."""
+
+    waits: Callable[[str | None], Awaitable[object]] | None = None
+    gate_only: bool = False
+
+
+_WORKFLOW_CALL: ContextVar[_WorkflowCall | None] = ContextVar("workflow_call", default=None)
 _OWNER_RUNTIME_UNAVAILABLE = "Background script owner runtime is temporarily unavailable."
 _INDETERMINATE_ERROR = {
     "kind": "indeterminate",
@@ -246,8 +252,8 @@ class ScriptToolBroker:
     _tasks: dict[tuple[str, str], asyncio.Task[ScriptCallRecord]] = field(default_factory=dict, init=False)
     _preparing: dict[tuple[str, str], int] = field(default_factory=dict, init=False)
     _preparation_changed: asyncio.Event = field(default_factory=asyncio.Event, init=False)
-    # How many calls of each run execute at one time: one of a script, and any number of a workflow attempt.
-    _run_locks: dict[str, asyncio.Semaphore] = field(default_factory=dict, init=False)
+    # Plain script calls serialize per run; workflow attempts enforce concurrency in WorkflowEngine.
+    _run_locks: dict[str, asyncio.Lock] = field(default_factory=dict, init=False)
     _cleanups: RetainedToolkitCleanups = field(
         default_factory=lambda: RetainedToolkitCleanups(failure_event="script_tool_cleanup_failed"),
         init=False,
@@ -461,14 +467,13 @@ class ScriptToolBroker:
         """
         request = ScriptToolCallRequest(run.run_id, call_id, grant, arguments)
         # The call's task is created in here and keeps the context it is created in.
-        token, gate = _APPROVAL_WAIT.set(waits), _GATE_ONLY.set(gate_only)
+        token = _WORKFLOW_CALL.set(_WorkflowCall(waits=waits, gate_only=gate_only))
         try:
             await run_coroutine_until_complete(
                 self._accept_prepared_call(request, authorization=None, authenticated=True),
             )
         finally:
-            _APPROVAL_WAIT.reset(token)
-            _GATE_ONLY.reset(gate)
+            _WORKFLOW_CALL.reset(token)
         task = self._tasks.get((run.run_id, call_id))
         if task is None:
             return await asyncio.to_thread(self.get_call, run.run_id, call_id)
@@ -512,10 +517,9 @@ class ScriptToolBroker:
             await self.cancel_run(run_id)
 
     async def _execute_claimed_call(self, call: ScriptCallRecord, arguments: dict[str, object]) -> ScriptCallRecord:
-        # A plain script's calls run one at a time. A workflow attempt's, which alone set whether they are a gate,
-        # take no lock here at all: the engine of their run is the one limit they have.
-        plain = _GATE_ONLY.get() is None
-        async with self._run_locks.setdefault(call.run_id, asyncio.Semaphore(1)) if plain else nullcontext():
+        # Plain script calls run one at a time; workflow attempts enforce concurrency in WorkflowEngine.
+        plain = _WORKFLOW_CALL.get() is None
+        async with self._run_locks.setdefault(call.run_id, asyncio.Lock()) if plain else nullcontext():
             try:
                 durable_run = await asyncio.to_thread(self.store.require_call_dispatch_allowed, call.run_id)
             except ScriptCapabilityError:
@@ -655,8 +659,12 @@ class ScriptToolBroker:
                 call_id=call.call_id,
             )
 
+            workflow_call = _WORKFLOW_CALL.get()
+            if workflow_call is None:
+                return await run_tool_call(function, arguments, call_context, middleware=(policy,))
+
             async def mark_effect_started(tool_call: ToolCall, call_next: ToolNext) -> object:
-                if _GATE_ONLY.get():
+                if workflow_call.gate_only:
                     # Past hooks and approval, which is all that was asked: the tool has no effect to start here.
                     return None
                 # Past hooks and approval: from here a crash leaves the call's outcome unknown.
@@ -864,7 +872,8 @@ def _validate_resolved_authority(
 
 async def _request_approval(runtime_resolver: ScriptRuntimeResolver, **request: Any) -> ToolApprovalDecision:  # noqa: ANN401
     """Ask for the requester's decision on one call, and tell the workflow call that waits for it while it does."""
-    waits = _APPROVAL_WAIT.get()
+    workflow_call = _WORKFLOW_CALL.get()
+    waits = None if workflow_call is None else workflow_call.waits
     if waits is None:
         return await runtime_resolver.request_approval(**request)
     await waits("approval")

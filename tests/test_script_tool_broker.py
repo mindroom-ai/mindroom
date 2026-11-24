@@ -674,7 +674,7 @@ async def test_script_call_receipt_records_that_the_tool_was_invoked(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A receipt says whether its tool was invoked; only a workflow node asks for the facts its tool reports."""
+    """Only workflow calls stamp effect_started_at; plain script calls keep main's middleware."""
 
     class ReportingCalculator(_Calculator):
         def add(self, a: int, b: int) -> object:
@@ -683,19 +683,32 @@ async def test_script_call_receipt_records_that_the_tool_was_invoked(
 
     _replace_calculator_toolkit(monkeypatch, ReportingCalculator)
     broker, token = _broker(tmp_path, events=[])
-    denying, denying_token = _broker(
+    denying, _denying_token = _broker(
         tmp_path / "denied",
         events=[],
         require_approval=True,
         approval_decision=ToolApprovalDecision(approved=False, reason="Not this sum."),
     )
 
-    receipt = await _call_through_gateway(broker, _request(), token)
-    denied = await _call_through_gateway(denying, _request(), denying_token)
+    plain = await _call_through_gateway(broker, _request(), token)
+    workflow_run = broker.store.get_run("run-1")
+    workflow_receipt = await broker.execute_for_workflow(
+        workflow_run,
+        call_id="call-wf",
+        grant=ScriptToolGrant("calculator", "add"),
+        arguments={"a": 1, "b": 2},
+    )
+    denied = await denying.execute_for_workflow(
+        denying.store.get_run("run-1"),
+        call_id="call-wf-denied",
+        grant=ScriptToolGrant("calculator", "add"),
+        arguments={"a": 1, "b": 2},
+    )
 
-    assert receipt.effect_started_at is not None
-    assert (receipt.result, receipt.metadata) == ("done", None)
-    assert broker.store.get_call("run-1", "call-1") == receipt
+    assert (plain.result, plain.effect_started_at, plain.metadata) == ("done", None, None)
+    assert workflow_receipt.effect_started_at is not None
+    assert (workflow_receipt.result, workflow_receipt.metadata) == ("done", None)
+    assert broker.store.get_call("run-1", "call-wf") == workflow_receipt
     assert (denied.state, denied.effect_started_at, denied.metadata) == (ScriptCallState.FAILED, None, None)
 
 
