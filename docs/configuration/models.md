@@ -417,10 +417,17 @@ models:
   default:
     provider: claude_code
     id: claude-sonnet-5-5
+    display_name: Claude Sonnet 5.5
+    context_window: 200000
+  opus:
+    provider: claude_code
+    id: claude-opus-5-5
+    display_name: Claude Opus 5.5
     context_window: 200000
   haiku:
     provider: claude_code
     id: claude-haiku-5-5
+    display_name: Claude Haiku 5.5
     context_window: 200000
 
 router:
@@ -432,7 +439,8 @@ defaults:
 
 The `id` is any model ID or alias Claude Code takes for `--model`, such as `claude-opus-5-5` or `opus`, within what the plan includes.
 `extra_kwargs` accepts `cli_path`, the `claude` executable to run, and `effort`, one of `low`, `medium`, `high`, `xhigh`, or `max`.
-Without `cli_path`, MindRoom runs the `claude` on its `PATH`; set `cli_path` when the service's `PATH` does not include it.
+Without `cli_path`, MindRoom runs the `claude` on its `PATH`; interactive setup (`mindroom run` or `mindroom config init` in a terminal) pins `cli_path` when it detects `claude`, while non-interactive `--provider claude_code` keeps the config portable.
+Set `cli_path` manually when a service's `PATH` does not include it.
 MindRoom's storage directory must allow executing files for this provider.
 MindRoom never reads Claude Code's credentials, ignores an authored `api_key`, and does not accept a token, endpoint, or headers for this provider.
 MindRoom removes inherited `ANTHROPIC_*`, `CLAUDE_CODE_*`, `CLAUDE_BG_AUTH_SNAPSHOT_PATH`, and `CLAUDE_AUTO_BACKGROUND_TASKS` variables from Claude Code's environment (except settings MindRoom explicitly allows), so Claude Code never uses an `ANTHROPIC_API_KEY` exported for other models.

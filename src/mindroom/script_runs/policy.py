@@ -43,8 +43,15 @@ _SCRIPT_RESTRICTED_TOOLKITS = frozenset(
         "skill_manage",
         # A script's calls rebuild the tool context without the turn's hook source, which Slack's write guard reads.
         "slack",
+        # A run is started by a turn, whose tool ceiling it keeps, or inside a run: a plain script is neither.
+        "workflow",
     },
 )
+
+
+# A workflow's calls may use the owner's other tools; these act on the calling turn (its context, its loaded tools, its
+# hook source, or its tool ceiling when launching a plain script or legacy dynamic workflow), and a script has none.
+_WORKFLOW_RESTRICTED_TOOLKITS = frozenset({"compact_context", "dynamic_tools", "dynamic_workflow", "script", "slack"})
 
 
 def resolve_script_launch_grants(context: ToolRuntimeContext) -> tuple[ScriptToolGrant, ...]:
@@ -76,6 +83,7 @@ def resolve_current_script_tool(
     context: ToolRuntimeContext,
     grant: ScriptToolGrant,
     *,
+    workflow: bool = False,
     rejected_toolkit_cleanup: Callable[[AnyToolkit], None] | None = None,
 ) -> CurrentScriptTool | None:
     """Build one requested live toolkit only when its granted function remains visible, adapting that function alone."""
@@ -83,7 +91,11 @@ def resolve_current_script_tool(
     if context.agent_name not in config.agents:
         return None
     tool_entry = next(
-        (entry for entry in _visible_script_tool_entries(context, config) if entry.name == grant.toolkit_name),
+        (
+            entry
+            for entry in _visible_script_tool_entries(context, config, workflow=workflow)
+            if entry.name == grant.toolkit_name
+        ),
         None,
     )
     if tool_entry is None:
@@ -106,16 +118,22 @@ def resolve_current_script_tool(
     return CurrentScriptTool(toolkit, function)
 
 
-def _visible_script_tool_entries(context: ToolRuntimeContext, config: Config) -> tuple[EffectiveToolConfig, ...]:
+def _visible_script_tool_entries(
+    context: ToolRuntimeContext,
+    config: Config,
+    *,
+    workflow: bool = False,
+) -> tuple[EffectiveToolConfig, ...]:
     if context.agent_name not in config.agents:
         msg = f"Background scripts require a configured agent owner; {context.agent_name!r} is not an agent."
         raise ValueError(msg)
     # The registry the call's tool hooks come from, so its toolkits and hooks share one generation.
     tools = context.plugins.tools
+    restricted = _WORKFLOW_RESTRICTED_TOOLKITS if workflow else _SCRIPT_RESTRICTED_TOOLKITS
     return tuple(
         entry
         for entry in resolve_agent_tools(config, context.agent_name, tools).candidates()
-        if entry.name in tools and entry.name not in _SCRIPT_RESTRICTED_TOOLKITS
+        if entry.name in tools and entry.name not in restricted
     )
 
 

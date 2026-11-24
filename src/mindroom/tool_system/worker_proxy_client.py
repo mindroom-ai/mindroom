@@ -22,7 +22,7 @@ from mindroom.credentials.policy import credential_service_policy
 from mindroom.logging_config import get_logger
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.tool_jobs.control import job_owns_execution
-from mindroom.tool_system.progress import report_tool_progress
+from mindroom.tool_system.progress import report_tool_metadata, report_tool_progress, structured_result_requested
 from mindroom.workers.in_flight import acquire_worker_in_flight
 from mindroom.workers.models import WorkerHandle, normalize_sandbox_runner_api_root, worker_api_endpoint
 from mindroom.workers.protocol import (
@@ -550,12 +550,18 @@ def _stream_execute_response(
     cancellation: WorkerCallCancellation | None,
     on_frame: Callable[[dict[str, object]], None] | None,
 ) -> dict[str, object] | None:
+    # Once sent, only the tool's own well-formed word says the call never started.
+    report_tool_metadata(not_started=False)
     with client.stream("POST", execute_url, json=payload, headers=headers, timeout=timeout) as response:
         try:
             response.raise_for_status()
         except httpx.HTTPStatusError as exc:
             response.read()
-            raise _WorkerHttpError(exc.response) from exc
+            refusal = _WorkerHttpError(exc.response)
+            # The worker's own refusal of the request; any other error may hide a call that ran.
+            refused = refusal.failure is not None and refusal.failure.failure_kind == "tool"
+            report_tool_metadata(not_started=refused)
+            raise refusal from exc
         return _read_execute_stream(
             response,
             deadline=deadline,
@@ -612,9 +618,11 @@ def execute_worker_proxy_request(
             )
             with client_factory(timeout=config.proxy_timeout_seconds) as client:
                 run_as_job = job_owns_execution()
-                sent: dict[str, object] = {"run_as_job": run_as_job}
-                if shell_scope is not None:
-                    sent["shell_scope_id"] = shell_scope.scope_id
+                sent: dict[str, object] = {
+                    "run_as_job": run_as_job,
+                    "structured_result": structured_result_requested(),
+                    **({"shell_scope_id": shell_scope.scope_id} if shell_scope is not None else {}),
+                }
                 sent.update(
                     _arm_cancellation_and_stdin(
                         cancellation,
@@ -704,6 +712,7 @@ def execute_worker_proxy_request(
                 in_flight_release()
     if worker_handle is not None:
         worker_manager.touch_worker(worker_handle.worker_key)
+    report_tool_metadata(**(answer.metadata or {}))
     return answer.result
 
 

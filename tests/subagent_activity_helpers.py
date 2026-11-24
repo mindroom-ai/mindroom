@@ -20,8 +20,10 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
 FRAME_ROOM_ID = "!room:example.org"
-_ACCOUNT = "@mindroom_lead:example.org"
-_HOMESERVER = "http://homeserver.test"
+FRAME_ACCOUNT = _ACCOUNT = "@mindroom_lead:example.org"
+FRAME_HOMESERVER = _HOMESERVER = "http://homeserver.test"
+# How each kind of frame names its transaction, before its stream's ID and sequence number.
+_TRANSACTIONS = {_SUBAGENT_EVENT_TYPE: "subagents", "io.mindroom.workflow": "workflow"}
 
 
 def make_snapshot(**overrides: Any) -> SubagentSnapshot:  # noqa: ANN401
@@ -59,12 +61,15 @@ class FrameRoom:
         self,
         *responses: nio.RoomSendEphemeralResponse | nio.RoomSendEphemeralError,
         encrypted: bool = False,
+        room_id: str = FRAME_ROOM_ID,
     ) -> None:
+        self.room_id = room_id
         self.client = make_matrix_client_mock(user_id=_ACCOUNT)
-        self.client.rooms = {FRAME_ROOM_ID: SimpleNamespace(encrypted=encrypted)}
+        self.client.rooms = {room_id: SimpleNamespace(encrypted=encrypted)}
         self.client.room_encrypt = AsyncMock(side_effect=self._encrypt)
         self.client.room_send_ephemeral = AsyncMock(side_effect=self._send)
         self.sent: list[dict[str, Any]] = []
+        self.sent_types: list[str] = []
         self.sent_bytes: list[int] = []
         self.sent_at: list[float] = []
         self.arrived = asyncio.Event()
@@ -100,9 +105,10 @@ class FrameRoom:
         tx_id: str,
     ) -> nio.RoomSendEphemeralResponse | nio.RoomSendEphemeralError:
         frame = self.encrypted.pop() if "encrypted" in content else content
-        assert (room_id, event_type) == (FRAME_ROOM_ID, _SUBAGENT_EVENT_TYPE)
-        assert tx_id == f"subagents.{frame['sid']}.{frame['seq']}"
+        assert room_id == self.room_id
+        assert tx_id == f"{_TRANSACTIONS[event_type]}.{frame['sid']}.{frame['seq']}"
         self.sent.append(frame)
+        self.sent_types.append(event_type)
         # The body nio sends: compact JSON with ASCII escapes.
         self.sent_bytes.append(len(Api.to_json(content)))
         self.sent_at.append(time.monotonic())

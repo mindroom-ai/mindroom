@@ -91,6 +91,23 @@ class ResolvedAgentStorage:
     state_root: Path
     session_state_root: Path
 
+    def workspace(
+        self,
+        config: Config,
+        runtime_paths: RuntimePaths,
+        *,
+        create: bool = False,
+    ) -> ResolvedAgentWorkspace:
+        """Resolve this storage scope's workspace without reconciling knowledge links."""
+        return resolve_agent_workspace_from_state_path(
+            self.execution.agent_name,
+            config,
+            runtime_paths=runtime_paths,
+            state_storage_path=self.state_root,
+            use_state_storage_path=self.execution.policy.private_workspace_enabled,
+            create=create,
+        )
+
 
 @dataclass(frozen=True)
 class ResolvedKnowledgeBinding:
@@ -244,14 +261,7 @@ def resolve_agent_runtime(
     if create:
         record_private_instance_owner(agent_name, resolved_execution, runtime_paths)
 
-    workspace = resolve_agent_workspace_from_state_path(
-        agent_name,
-        config,
-        runtime_paths=runtime_paths,
-        state_storage_path=state_root,
-        use_state_storage_path=resolved_execution.policy.private_workspace_enabled,
-        create=create,
-    )
+    workspace = resolved_storage.workspace(config, runtime_paths, create=create)
     if create or workspace.root.exists():
         workspace_knowledge_root = resolve_workspace_relative_path(
             workspace.root,

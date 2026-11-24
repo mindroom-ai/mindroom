@@ -8,13 +8,13 @@ from contextlib import asynccontextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 from uuid import uuid4
 
 from mindroom.agent_cli.session import CONFIG_RELOAD_CALL
 from mindroom.agent_loop.model_loop import SendRequest
 from mindroom.ai_run_metadata import model_payload, prior_usage_by_run, prompt_input_tokens, turn_usage
-from mindroom.authorization import is_sender_allowed_for_responder
+from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowed_for_responder
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.budgets.pricing import model_prices, run_cost_usd
 from mindroom.config.models import unsupported_level_message
@@ -67,6 +67,7 @@ if TYPE_CHECKING:
 
     from mindroom.agent_loop.model_loop import BeforeRequestHook, LoopState
     from mindroom.agent_modes import AgentMode
+    from mindroom.bot import AgentBot
     from mindroom.budgets.monitor import BudgetMonitor
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -83,7 +84,7 @@ logger = get_logger(__name__)
 
 MAX_DELEGATION_DEPTH = 3
 
-type _DelegationGrant = Literal["delegate", "dynamic_workflow"]
+type _DelegationGrant = Literal["delegate", "dynamic_workflow", "workflow"]
 
 
 @dataclass
@@ -478,7 +479,7 @@ async def child_run_context(
     # always hides its calls, so the nested child takes its parent's previews instead.
     context = get_tool_runtime_context()
     previews = parent.previews if parent is not None else context is not None and context.tool_calls_shown
-    received = SubagentCost(dict(receipts or {}))
+    received = SubagentCost(dict(receipts or {}), unknown=child.subagents_cost_unknown)
     observation = ChildRunObservation(child, audit, parent=parent, previews=previews, subagent_cost=received)
     _open_feed(observation, context)
     token = _CHILD_RUN.set(observation)
@@ -503,7 +504,7 @@ async def child_run_context(
             await flush_child_audit(audit)
         finally:
             try:
-                child.subagents_cost_usd = received.usd
+                child.subagents_cost_usd, child.subagents_cost_unknown = received.usd, received.unknown
                 response = observation.current_record()
                 if response is not None:
                     await settle_child_response(child, response, config=config, runtime_paths=runtime_paths)
@@ -559,7 +560,9 @@ async def observe_child_event(event: RunEvent) -> None:
 
 
 def delegation_grant(child: DelegationChild) -> _DelegationGrant:
-    """Name the caller permission that authorizes this child: its delegate allowlist or its workflow tool."""
+    """Name the caller permission that authorizes this child: its delegate allowlist, or the workflow tool it runs under."""
+    if child.workflow_run_id is not None:
+        return "workflow"
     return "dynamic_workflow" if child.persona is not None and child.persona.source_kind == "workflow" else "delegate"
 
 
@@ -570,7 +573,7 @@ def reload_stopped_child_result(child: DelegationChild, response: RunRecord) -> 
     A run a refused call marked that ended another way, as one cancelled while its command still ran, was not stopped.
     """
     reason = (response.metadata or {}).get(CONFIG_RELOAD_CALL) if response.status == RunStatus.completed else None
-    if reason is None or delegation_grant(child) == "dynamic_workflow":
+    if reason is None or delegation_grant(child) != "delegate":
         # A workflow participant cannot be continued outside its workflow.
         return reason
     resume = f'continue_subagent(subagent_id="{child.subagent_id}", message="continue")'
@@ -584,13 +587,75 @@ def caller_grants_child(caller_name: str, agent_name: str, config: Config, grant
         return False
     if grant == "delegate":
         return agent_name in caller.delegate_to
-    # The workflow tool is built in, so the built-in tools decide whether the caller is offered it.
-    return agent_name == caller_name and "dynamic_workflow" in caller_toolkit_names(
-        caller_name,
-        config,
-        builtin_tool_registry(),
-        delegation_depth=0,
+    # The workflow tools are built in, so the built-in tools decide whether the caller is offered one. Which agents
+    # a `workflow` run may run depends on its room, which only `workflow_runs_agent` is asked with.
+    offered = grant in caller_toolkit_names(caller_name, config, builtin_tool_registry(), delegation_depth=0)
+    return offered and (grant == "workflow" or agent_name == caller_name)
+
+
+def workflow_runs_agent(caller_name: str, agent_name: str, config: Config, joined: bool | None) -> bool | None:
+    """Return whether a workflow run of the caller may run the agent, apart from the requester's access to that agent.
+
+    Itself and the agents it may delegate to, always. Any other agent while its bot is in the run's room, which
+    *joined* says: None while that bot's rooms are not known, which is then the answer.
+    """
+    caller = config.agents.get(caller_name)
+    return agent_name == caller_name or (caller is not None and agent_name in caller.delegate_to) or joined
+
+
+class DelegationPendingError(Exception):
+    """Whether a workflow run may run an agent cannot be told yet: the question is to be asked again."""
+
+
+def accessed_entities(config: Config, recipient: str, actor: str) -> set[str]:
+    """Return the entities the requester must still reach: a configured team's access grants its exact members.
+
+    *recipient* is the bot that answers, and *actor* the agent that acts through it. An ordinary agent's bot is
+    no grant for another agent, so both are asked for.
+    """
+    team = config.teams.get(recipient)
+    if team is not None and actor in team.agents:
+        return {recipient}
+    return {recipient, actor}
+
+
+def bot_in_room(bot: AgentBot | None, room_id: str | None) -> bool | None:
+    """Return whether *bot* is in the room, None while it does not know its rooms.
+
+    A bot knows the rooms it is in once it has completed its first sync: one that is not built yet, or is still
+    logging in, is starting as well.
+    """
+    if bot is None or bot.client is None or not bot.first_sync_complete:
+        return None
+    return room_id in bot.client.rooms
+
+
+def _run_runs_agent(caller_name: str, agent_name: str, config: Config, context: ToolRuntimeContext | None) -> bool:
+    """Return whether a workflow run of the caller may run the agent now; raise while its bot cannot say yet.
+
+    Where no orchestrator holds the bots, nobody can say whether the agent's own bot is in the room, which is no.
+    """
+    orchestrator = context.orchestrator if context is not None else None
+    joined = (
+        bot_in_room(orchestrator.agent_bots.get(agent_name), context.room_id)
+        if context is not None and orchestrator is not None
+        else False
     )
+    runs = workflow_runs_agent(caller_name, agent_name, config, joined)
+    if runs is None:
+        msg = f"The bot of '{agent_name}' is still starting. Try again in a moment."
+        raise DelegationPendingError(msg)
+    return runs
+
+
+def _answers_requester(grant: _DelegationGrant, requester_id: str, agent_name: str, *access: Any) -> bool:  # noqa: ANN401
+    """Return whether the agent may reply to the requester; for a workflow run, raise while that is undecided."""
+    try:
+        options = {"require_resolved_membership": True} if grant == "workflow" else {}
+        return is_sender_allowed_for_responder(requester_id, agent_name, *access, **options)
+    except ReplyMembershipPendingError as exc:
+        msg = f"Whether '{agent_name}' may reply to you is still loading. Try again in a moment."
+        raise DelegationPendingError(msg) from exc
 
 
 def _target_refusal(
@@ -608,7 +673,8 @@ def _target_refusal(
         return None if agent_name == caller_name else self_only_refusal(agent_name)
     caller = config.agents.get(caller_name)
     allowed_targets = caller.delegate_to if caller is not None else []
-    if agent_name in allowed_targets:
+    if agent_name in allowed_targets or grant == "workflow":
+        # Which agents a workflow may run depends on the requester and the room, which `authorize_delegation` sees.
         return None
     return f"Cannot delegate to '{agent_name}'. Allowed subagents: {', '.join(allowed_targets)}."
 
@@ -668,11 +734,15 @@ def authorize_delegation(  # noqa: PLR0911
         return f"Cannot delegate to '{agent_name}': requester authorization is unavailable."
     if active_config is None or agent_name not in active_config.agents:
         return f"Cannot delegate to '{agent_name}': that agent is not allowed to reply to you."
-    if not caller_grants_child(caller_name, agent_name, active_config, grant):
+    if not caller_grants_child(caller_name, agent_name, active_config, grant) or (
+        grant == "workflow" and not _run_runs_agent(caller_name, agent_name, active_config, runtime_context)
+    ):
         return f"Cannot delegate to '{agent_name}': it is no longer an allowed target."
     # A workflow participant is the caller's own copy inside the caller's tool call, so the requester
-    # the caller already serves, possibly only through a team's access, keeps that access.
-    if grant == "delegate" and not is_sender_allowed_for_responder(
+    # the caller already serves, possibly only through a team's access, keeps that access. So does the copy of
+    # itself that a workflow run's script runs; any other agent of a run must answer the requester, as a subagent.
+    if (grant == "delegate" or (grant == "workflow" and agent_name != caller_name)) and not _answers_requester(
+        grant,
         requester_id,
         agent_name,
         authorization_room_id,
@@ -769,3 +839,24 @@ def prepare_child_turn(
         dedicated_worker=dedicated_worker,
         worker_resource_profile=worker_resource_profile,
     )
+
+
+def workflow_call_prompt(child: DelegationChild) -> str | None:
+    """Return the prompt of the workflow run's call that *child* is the agent of, None once nothing waits for it.
+
+    The task of such a child is only the label of its call. The run keeps the prompt, and the run's engine, which
+    the orchestrator of the current tool context holds, is asked for it.
+    """
+    context = get_tool_runtime_context()
+    if child.workflow_run_id is None or context is None or context.orchestrator is None:
+        return None
+    return context.orchestrator.workflow_engine.agent_dispatch.node_prompt(
+        child.workflow_run_id,
+        child.workflow_node_key,
+        child.workflow_generation,
+    )
+
+
+def original_prompt(child: DelegationChild) -> str:
+    """Return what the child's turn was first sent: its task, or for the agent of a workflow run its call's prompt."""
+    return workflow_call_prompt(child) or child.task

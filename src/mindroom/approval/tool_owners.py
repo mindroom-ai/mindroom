@@ -13,7 +13,7 @@ from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_system.agent_tools import resolve_agent_tools, turn_keeps_room_tools
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping, Sequence
+    from collections.abc import Collection, Mapping, Sequence
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -120,6 +120,7 @@ async def required_approval_tool_names(
     tools: ToolRegistry,
     execution_identity: ToolExecutionIdentity,
     delegation_depth: int,
+    runtime_toolkits: Collection[str] = (),
 ) -> tuple[str, ...]:
     """Return the toolkits a saved approval recorded, after checking that the agent may still use each.
 
@@ -139,6 +140,11 @@ async def required_approval_tool_names(
     )
     required = sorted({call.toolkit_name for call in calls if call.toolkit_name is not None})
     for name in required:
+        if name in runtime_toolkits:
+            if agent_name not in config.agents:
+                msg = f"Saved approval toolkit {name!r} is no longer permitted; retry the request"
+                raise RuntimeError(msg)
+            continue
         # A call names its authored entry; the toolkits a preset or an implied tool brings in share that name.
         owned = [entry for entry in offered if (entry.authored_name or entry.name) == name]
         if (
@@ -156,23 +162,44 @@ async def required_approval_tool_names(
             reason = "requires room context" if needs_room else "is no longer permitted"
             msg = f"Saved approval toolkit {name!r} {reason}; retry the request"
             raise RuntimeError(msg)
-        for entry in owned:
-            server_id = agent_tools.tools.mcp_server_id(entry.name)
-            if server_id is None:
-                continue
-            server_config = config.mcp_servers.get(server_id)
-            if server_config is None or not server_config.enabled:
-                msg = f"Saved approval toolkit {name!r} is unavailable; retry the request"
-                raise RuntimeError(msg)
-            await _warm_approval_mcp_catalog(
-                server_id,
-                entry.name,
-                agent_name=agent_name,
-                config=config,
-                runtime_paths=runtime_paths,
-                execution_identity=execution_identity,
-            )
+        await _warm_owned_mcp_servers(
+            tuple(entry.name for entry in owned),
+            toolkit_name=name,
+            agent_name=agent_name,
+            tools=agent_tools.tools,
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=execution_identity,
+        )
     return tuple(required)
+
+
+async def _warm_owned_mcp_servers(
+    entry_names: Sequence[str],
+    *,
+    toolkit_name: str,
+    agent_name: str,
+    tools: ToolRegistry,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity,
+) -> None:
+    for entry_name in entry_names:
+        server_id = tools.mcp_server_id(entry_name)
+        if server_id is None:
+            continue
+        server_config = config.mcp_servers.get(server_id)
+        if server_config is None or not server_config.enabled:
+            msg = f"Saved approval toolkit {toolkit_name!r} is unavailable; retry the request"
+            raise RuntimeError(msg)
+        await _warm_approval_mcp_catalog(
+            server_id,
+            entry_name,
+            agent_name=agent_name,
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=execution_identity,
+        )
 
 
 def _catalog_authority(config: Config, agent_name: str) -> dict[str, Any] | None:

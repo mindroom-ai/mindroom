@@ -7,10 +7,17 @@ of them added.
 
 from __future__ import annotations
 
+import operator
 from dataclasses import fields
 from typing import Annotated, Any, Literal
 
-from pydantic import AfterValidator, BaseModel, ConfigDict, Field, field_validator
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+)
 
 from mindroom.config.tool_aliases import canonical_tool_name
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope
@@ -28,7 +35,8 @@ from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerSco
 #     /execute/{request_id}/stdin writes the command's stdin.
 # 11: a shell call with `sandbox` runs in sandbox mode: empty execution env, no workspace env hook, writable worker HOME.
 # 12: scoped shell calls carry `shell_scope_id`, report `shell_backgrounded`, and stop on /execute/shell-scope/kill.
-# A wire model change bumps this; `tests/test_worker_protocol_schema.py` pins each version's schema.
+# A wire model change bumps this, except an opt-in field declared with ``exclude_if``;
+# `tests/test_worker_protocol_schema.py` pins each version's schema.
 WORKER_PROTOCOL_VERSION = 12
 
 FailureKind = Literal["tool", "worker"]
@@ -107,6 +115,8 @@ class ExecuteRequest(WorkerRoute):
     sandbox: bool = False
     # Turn-scoped shell background owner ID for auto-backgrounding non-job shell calls.
     shell_scope_id: str | None = Field(default=None, max_length=64)
+    # The caller stores the result itself: no size moves it to a workspace file, and the answer carries `metadata`.
+    structured_result: bool = Field(default=False, exclude_if=operator.not_)
 
 
 class SaveAttachmentRequest(WorkerRoute):
@@ -177,6 +187,8 @@ class ExecuteResponse(_WireModel):
     error: str | None = None
     failure_kind: FailureKind | None = None
     shell_backgrounded: bool = False
+    # What the tool reported about a structured result, such as a command's exit status.
+    metadata: dict[str, Any] | None = Field(default=None, exclude_if=operator.not_)
 
 
 class SaveAttachmentResponse(_WireModel):

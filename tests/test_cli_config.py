@@ -285,8 +285,17 @@ def test_first_run_setup_prints_the_env_and_config_paths_whole_on_one_line(
     )
     env_path = runtime_paths.env_path
 
+    from mindroom.cli.setup_detection import KeyCheckResult  # noqa: PLC0415
+
     config_cli.create_first_run_config(runtime_paths, provider="openai", interactive=False)
-    with patch.object(config_cli, "secret", return_value="sk-typed"):
+    with (
+        patch.object(config_cli, "secret", return_value="sk-typed"),
+        patch("mindroom.cli.setup_detection.detect_single_provider", return_value=None),
+        patch(
+            "mindroom.cli.setup_detection.verify_provider_api_key",
+            return_value=KeyCheckResult(status="valid"),
+        ),
+    ):
         config_cli.create_first_run_config(runtime_paths, provider="openai", interactive=True)
     config_cli.create_first_run_config(runtime_paths, provider="bedrock_claude", interactive=False)
 
@@ -1975,8 +1984,24 @@ class TestConfigInit:
 
         config = yaml.safe_load(target.read_text())
         assert config["models"] == {
-            "default": {"provider": "claude_code", "id": "claude-sonnet-5-5", "context_window": 200_000},
-            "haiku": {"provider": "claude_code", "id": "claude-haiku-5-5", "context_window": 200_000},
+            "default": {
+                "provider": "claude_code",
+                "id": "claude-sonnet-5-5",
+                "display_name": "Claude Sonnet 5.5",
+                "context_window": 200_000,
+            },
+            "opus": {
+                "provider": "claude_code",
+                "id": "claude-opus-5-5",
+                "display_name": "Claude Opus 5.5",
+                "context_window": 200_000,
+            },
+            "haiku": {
+                "provider": "claude_code",
+                "id": "claude-haiku-5-5",
+                "display_name": "Claude Haiku 5.5",
+                "context_window": 200_000,
+            },
         }
         loaded_config = load_config_yaml(target)
         assert loaded_config.router.model == "haiku"
@@ -3025,7 +3050,22 @@ class TestRunFirstRunSetup:
 
     @pytest.fixture(autouse=True)
     def _interactive_terminal(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from mindroom.cli.setup_detection import DetectionSnapshot, KeyCheckResult  # noqa: PLC0415
+
         monkeypatch.setattr("mindroom.cli.main.terminal_is_interactive", lambda: True)
+        # Isolate first-run tests from the developer machine's CLIs, local Ollama, and live API key checks.
+        monkeypatch.setattr(
+            "mindroom.cli.setup_detection.detect_available_providers",
+            lambda _runtime_paths, **_kwargs: DetectionSnapshot(),
+        )
+        monkeypatch.setattr(
+            "mindroom.cli.setup_detection.detect_single_provider",
+            lambda _preset, _runtime_paths, **_kwargs: None,
+        )
+        monkeypatch.setattr(
+            "mindroom.cli.setup_detection.verify_provider_api_key",
+            lambda _preset, _api_key, **_kwargs: KeyCheckResult(status="valid"),
+        )
         # On a platform without a service manager, first-run setup starts MindRoom in the terminal without asking.
         monkeypatch.setattr(
             "mindroom.cli.service._get_service_manager",

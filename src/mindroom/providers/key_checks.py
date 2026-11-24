@@ -6,6 +6,7 @@ Each is one cheap, non-billable authenticated read the provider rejects for a ke
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
 from mindroom.model_defaults import (
     ANTHROPIC_BASE_URL_DEFAULT,
@@ -16,7 +17,10 @@ from mindroom.model_defaults import (
     OPENROUTER_BASE_URL_DEFAULT,
 )
 
-__all__ = ["PROVIDER_KEY_CHECKS", "ProviderKeyCheck"]
+if TYPE_CHECKING:
+    from mindroom.constants import RuntimePaths
+
+__all__ = ["PROVIDER_KEY_CHECKS", "ProviderKeyCheck", "provider_endpoint_variables"]
 
 
 @dataclass(frozen=True, slots=True, kw_only=True)
@@ -57,3 +61,19 @@ PROVIDER_KEY_CHECKS: dict[str, ProviderKeyCheck] = {
     "cerebras": _bearer(f"{CEREBRAS_HOST_DEFAULT}/v1/models"),
     "groq": _bearer(f"{GROQ_HOST_DEFAULT}/openai/v1/models"),
 }
+
+
+def provider_endpoint_variables(env_key: str, runtime_paths: RuntimePaths) -> list[str]:
+    """Return the set endpoint variables of ``env_key``'s provider family, such as ``OPENAI_BASE_URL``.
+
+    Each is read as providers read it, so its ``<NAME>_FILE`` variable sets it and a blank export does not hide ``.env``.
+    """
+    family = env_key.removesuffix("API_KEY")
+    names = {name.removesuffix("_FILE") for name in (*runtime_paths.process_env, *runtime_paths.env_file_values)}
+    return sorted(
+        name
+        for name in names
+        if name.startswith(family)
+        and name.endswith(("_URL", "_HOST", "_ENDPOINT", "_API_BASE"))
+        and runtime_paths.first_env_value((name,))
+    )

@@ -43,6 +43,7 @@ from mindroom.matrix.provisioning_env import (
 )
 from mindroom.providers.credentials import model_uses_own_credential, unset_api_key_variable
 from mindroom.providers.key_checks import PROVIDER_KEY_CHECKS
+from mindroom.providers.key_checks import provider_endpoint_variables as _endpoint_variables
 from mindroom.providers.names import provider_route
 from mindroom.providers.ollama.settings import ollama_client_options
 from mindroom.providers.reasoning import apply_reasoning_level
@@ -253,22 +254,6 @@ def _endpoint_settings(value: object, path: str) -> list[str]:
         else:
             found.extend(_endpoint_settings(item, f"{path}.{key}"))
     return found
-
-
-def _endpoint_variables(env_key: str, runtime_paths: RuntimePaths) -> list[str]:
-    """Return the set endpoint variables of ``env_key``'s provider family, such as ``OPENAI_BASE_URL``.
-
-    Each is read as providers read it, so its ``<NAME>_FILE`` variable sets it and a blank export does not hide ``.env``.
-    """
-    family = env_key.removesuffix("API_KEY")
-    names = {name.removesuffix("_FILE") for name in (*runtime_paths.process_env, *runtime_paths.env_file_values)}
-    return sorted(
-        name
-        for name in names
-        if name.startswith(family)
-        and name.endswith(("_URL", "_HOST", "_ENDPOINT", "_API_BASE"))
-        and runtime_paths.first_env_value((name,))
-    )
 
 
 def _report_key_not_checked(subject: str, provider: str, key_name: str, reasons: Sequence[str]) -> bool:

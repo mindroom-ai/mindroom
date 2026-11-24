@@ -104,7 +104,13 @@ def _runtime_paths(
     )
 
 
-def _config(*, private: bool = False, private_scope: str = "user_agent", worker_scope: str = "user_agent") -> Config:
+def _config(
+    *,
+    private: bool = False,
+    private_scope: str = "user_agent",
+    worker_scope: str = "user_agent",
+    template_dir: str | None = None,
+) -> Config:
     watcher: dict[str, object] = {
         "display_name": "Watcher",
         "worker_scope": worker_scope,
@@ -112,7 +118,10 @@ def _config(*, private: bool = False, private_scope: str = "user_agent", worker_
     }
     if private:
         watcher.pop("worker_scope")
-        watcher["private"] = {"per": private_scope, "root": "private/watcher"}
+        private_cfg: dict[str, object] = {"per": private_scope, "root": "private/watcher"}
+        if template_dir is not None:
+            private_cfg["template_dir"] = template_dir
+        watcher["private"] = private_cfg
     return Config(
         agents={
             "watcher": watcher,
@@ -144,6 +153,7 @@ def _context(
     worker_scope: str = "user_agent",
     backend: str | None = None,
     isolated_script_gateway: bool = False,
+    template_dir: str | None = None,
 ) -> ToolRuntimeContext:
     runtime_paths = _runtime_paths(
         tmp_path,
@@ -151,7 +161,12 @@ def _context(
         backend=backend,
         isolated_script_gateway=isolated_script_gateway,
     )
-    config = _config(private=private, private_scope=private_scope, worker_scope=worker_scope)
+    config = _config(
+        private=private,
+        private_scope=private_scope,
+        worker_scope=worker_scope,
+        template_dir=template_dir,
+    )
     return make_test_tool_runtime_context(
         agent_name=agent_name,
         target=MessageTarget.resolve(
@@ -305,6 +320,7 @@ class _WorkerClient:
     launch_paths: dict[str, tuple[Path, Path]] = field(default_factory=dict)
     launch_state_scope_worker_keys: list[str | None] = field(default_factory=list)
     launch_config_snapshots: list[dict[str, object] | None] = field(default_factory=list)
+    launch_entries: list[str] = field(default_factory=list)
     cancel_observed_revocation: bool = False
     cancel_forces: list[bool] = field(default_factory=list)
     launched_run_ids: list[str] = field(default_factory=list)
@@ -329,12 +345,14 @@ class _WorkerClient:
         source_digest: str,
         gateway_url: str,
         max_runtime_seconds: int,
+        entry: str = "script",
         state_scope_worker_key: str | None = None,
         private_agent_names: tuple[str, ...] | None = None,
         config_snapshot: dict[str, object] | None = None,
     ) -> None:
         del source_digest, gateway_url, private_agent_names
         assert max_runtime_seconds > 0
+        self.launch_entries.append(entry)
         self.launch_state_scope_worker_keys.append(state_scope_worker_key)
         self.launch_config_snapshots.append(config_snapshot)
         starting = self.store.get_run(run_id)
@@ -3207,3 +3225,17 @@ async def test_a_refused_local_launch_fails_its_start_and_ends_its_run(
 
     [stored] = manager.store.list_runs()
     assert stored.state is ScriptRunState.INTERRUPTED
+
+
+@pytest.mark.asyncio
+async def test_path_launch_materializes_private_workspace_template(tmp_path: Path) -> None:
+    """Plain script path= launches materialize a fresh private workspace template before reading the file."""
+    template_dir = tmp_path / "watcher_template"
+    template_dir.mkdir()
+    (template_dir / "check.py").write_text("print('ok')\n", encoding="utf-8")
+
+    manager, _backend, _client = _manager(tmp_path)
+    context = _context(tmp_path, private=True, template_dir=str(template_dir))
+    run = await manager.run(context, path="check.py")
+
+    assert run.state is ScriptRunState.RUNNING

@@ -236,7 +236,7 @@ For hosted MindRoom Chat, `mindroom run` runs this setup interactively on first 
 | --- | --- |
 | `--path`, `-p` | Where to write `config.yaml`; `.env` goes in the same directory. Defaults to the auto-detected location, usually `~/.mindroom/config.yaml`. |
 | `--matrix-server` | Where MindRoom creates Matrix users and rooms: `mindroom.chat` (hosted, default) or `self-hosted` (your own homeserver). |
-| `--provider` | Default model provider: `anthropic`, `azure`, `bedrock_claude`, `claude_code`, `codex`, `kimi`, `llama.cpp`, `ollama`, `openai`, `openrouter`, or `vertexai_claude`; defaults to `openai`, except that `self-hosted` in a terminal asks. |
+| `--provider` | Default model provider: `anthropic`, `azure`, `bedrock_claude`, `claude_code`, `codex`, `kimi`, `llama.cpp`, `ollama`, `openai`, `openrouter`, or `vertexai_claude`. Omitting it in an interactive terminal (without `--no-input` or `--print`) runs the provider auto-detection wizard for both `mindroom.chat` and `self-hosted`; piped `self-hosted` still prompts for the preset, while non-interactive `mindroom.chat` defaults to `openai`. |
 | `--print` | Print the generated `config.yaml` with syntax highlighting without writing `config.yaml`, `.env`, or starter workspace files. |
 | `--no-input` | Never prompt: keep an existing `config.yaml` unchanged, create anything missing, and use `openai` unless `--provider` is given. |
 | `--force` | Overwrite without asking: replaces `config.yaml`, `.env` (including API keys and pairing credentials), the Mind starter workspace files such as `MEMORY.md` and `USER.md`, and the `AGENTS.md` beside the config; back up anything you want to keep first. |
@@ -265,7 +265,7 @@ Some presets need a local login or server before MindRoom can answer:
 - `codex`: run `codex login` first; see [Codex Models](configuration/models.md#codex-models-with-chatgpt-login) for the generated models.
 - `kimi`: run `kimi` and `/login` first; see [Kimi Models](configuration/models.md#kimi-models-with-kimi-code-login).
 - `claude_code`: run `claude auth login` first; see [Claude Models with a Claude Subscription](configuration/models.md#claude-models-with-a-claude-subscription).
-- `ollama`: generates `gemma4` as `default` and `qwen3.8:27b` as `qwen3_8_27b`, each loaded with a 32,768-token context (see [Ollama Context Size](configuration/models.md#ollama-context-size) to change it), with `OLLAMA_HOST=http://localhost:11434`; pull both models first with `ollama pull gemma4` and `ollama pull qwen3.8:27b`.
+- `ollama`: in an interactive terminal with Ollama running and chat models already pulled, lets you pick from your pulled models; otherwise generates `gemma4` as `default` and `qwen3.8:27b` as `qwen3_8_27b`, each loaded with a 32,768-token context (see [Ollama Context Size](configuration/models.md#ollama-context-size) to change it), with `OLLAMA_HOST=http://localhost:11434` (pull both models first with `ollama pull gemma4` and `ollama pull qwen3.8:27b`).
 - `llama.cpp`: generates Unsloth GGUF models for a llama.cpp server at `http://localhost:8080/v1`; start it with one of the configured model refs:
 
 ```bash

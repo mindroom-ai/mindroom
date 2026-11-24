@@ -12,7 +12,7 @@ import nio
 from mindroom.logging_config import get_logger
 from mindroom.matrix.event_types import BACKGROUND_JOBS_EVENT_TYPE
 from mindroom.matrix.state_failures import StateFailure, state_failure
-from mindroom.tool_jobs.runtime import TERMINAL_STATUSES
+from mindroom.tool_jobs.runtime import TERMINAL_STATUSES, is_workflow_node_job
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Sequence
@@ -47,11 +47,11 @@ class _PublishingBot(Protocol):
 def _job_state(job: BackgroundJob) -> dict[str, object]:
     # Room state is not encrypted, so it names the job and never carries its arguments, progress or results. Its only
     # other fields are opaque IDs a client joins to what it already holds: a subagent job's child and run, which that
-    # child's live frames name, and a tool job's call, which the reply's tool trace names.
+    # child's live frames name, a tool job's call, which the reply's tool trace names, and a workflow job's run.
     state: dict[str, object] = {
         "job_id": job.job_id,
         "thread_id": job.owner.resolved_thread_id,
-        "kind": "subagent" if job.kind == "delegation" else "tool",
+        "kind": {"delegation": "subagent", "workflow": "workflow"}.get(job.kind, "tool"),
         "tool": job.tool_name,
         "status": job.status,
         "started_at": job.created_at,
@@ -59,6 +59,8 @@ def _job_state(job: BackgroundJob) -> dict[str, object]:
     if job.kind == "delegation":
         child = job.adapter["child"]
         join_keys = {"subagent": child.get("subagent_id"), "run": child.get("delegation_id")}
+    elif job.kind == "workflow":
+        join_keys = {"workflow": job.adapter.get("workflow")}
     else:
         join_keys = {"tool_call_id": job.adapter.get("tool_call_id")}
     state.update({key: value for key, value in join_keys.items() if isinstance(value, str) and value})
@@ -82,6 +84,7 @@ def _jobs_state_content(
             job
             for job in jobs
             if job.status not in TERMINAL_STATUSES
+            and not is_workflow_node_job(job)
             and (
                 job.status != "running"
                 or job.job_id not in awaited
