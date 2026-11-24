@@ -54,6 +54,8 @@ class ScheduledTaskResponse(BaseModel):
     next_run_at: datetime | None = None
     cron_expression: str | None = None
     cron_description: str | None = None
+    timezone: str
+    cron_timezone: str | None = None
     description: str
     message: str
     history_limit: int | None = None
@@ -89,6 +91,7 @@ class UpdateScheduleRequest(BaseModel):
     schedule_type: Literal["once", "cron"] | None = None
     execute_at: datetime | None = None
     cron_expression: str | None = None
+    cron_timezone: str | None = None
     silent: bool | None = None
 
 
@@ -246,6 +249,7 @@ async def update_schedule(
                 schedule_type=request.schedule_type,
                 execute_at=request.execute_at,
                 cron_expression=request.cron_expression,
+                cron_timezone=request.cron_timezone,
                 silent=request.silent,
             )
             updated_task = await save_edited_scheduled_task(

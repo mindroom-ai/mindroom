@@ -366,7 +366,7 @@ export function Schedules() {
   };
 
   const handleSave = async () => {
-    if (!draft || !selectedTask) return;
+    if (!draft || !savedDraft || !selectedTask) return;
 
     const message = draft.message.trim();
     const description = draft.description.trim();
@@ -380,36 +380,50 @@ export function Schedules() {
       return;
     }
 
+    const nextDescription = description || message;
+    const savedMessage = savedDraft.message.trim();
+    const savedDescription = savedDraft.description.trim() || savedMessage;
+
     const payload: UpdateScheduleRequest = {
       room_id: draft.room_id,
-      message,
-      description: description || message,
-      schedule_type: draft.schedule_type,
-      silent: draft.silent,
     };
 
+    if (message !== savedMessage) {
+      payload.message = message;
+    }
+    if (nextDescription !== savedDescription) {
+      payload.description = nextDescription;
+    }
+    if (draft.silent !== savedDraft.silent) {
+      payload.silent = draft.silent;
+    }
+
     if (draft.schedule_type === "once") {
-      const executeAtIso = toUtcIso(draft.execute_at_input, timezone);
-      if (!executeAtIso) {
-        toast({
-          title: "Time required",
-          description: "Set a valid date and time for one-time schedules.",
-          variant: "destructive",
-        });
-        return;
+      if (draft.execute_at_input !== savedDraft.execute_at_input) {
+        const executeAtIso = toUtcIso(draft.execute_at_input, timezone);
+        if (!executeAtIso) {
+          toast({
+            title: "Time required",
+            description: "Set a valid date and time for one-time schedules.",
+            variant: "destructive",
+          });
+          return;
+        }
+        payload.execute_at = executeAtIso;
       }
-      payload.execute_at = executeAtIso;
     } else {
       const cronExpression = draft.cron_expression.trim();
-      if (!cronExpression) {
-        toast({
-          title: "Cron required",
-          description: "Cron schedules require a cron expression.",
-          variant: "destructive",
-        });
-        return;
+      if (cronExpression !== savedDraft.cron_expression.trim()) {
+        if (!cronExpression) {
+          toast({
+            title: "Cron required",
+            description: "Cron schedules require a cron expression.",
+            variant: "destructive",
+          });
+          return;
+        }
+        payload.cron_expression = cronExpression;
       }
-      payload.cron_expression = cronExpression;
     }
 
     setIsSaving(true);
@@ -599,7 +613,7 @@ export function Schedules() {
             emptySubtitle={
               isLoading
                 ? "Fetching scheduled tasks from Matrix state"
-                : "Create one with !schedule in Matrix"
+                : "Ask an agent in Matrix to schedule a task"
             }
             searchFilter={(item, searchTerm) => {
               const term = searchTerm.toLowerCase();
@@ -742,8 +756,12 @@ export function Schedules() {
                 </FieldGroup>
               ) : (
                 <FieldGroup
-                  label="Cron Expression"
-                  helperText="Format: minute hour day month weekday (for example: 0 9 * * 1-5)"
+                  label={`Cron Expression (${selectedTask.cron_timezone ?? "UTC (legacy)"})`}
+                  helperText={
+                    selectedTask.cron_description
+                      ? `${selectedTask.cron_description}. Format: minute hour day month weekday (for example: 0 9 * * 1-5)`
+                      : "Format: minute hour day month weekday (for example: 0 9 * * 1-5)"
+                  }
                   htmlFor="schedule-cron"
                 >
                   <Input
@@ -810,12 +828,9 @@ export function Schedules() {
                 <div className="flex items-start gap-2">
                   <CalendarClock className="h-4 w-4 mt-0.5 shrink-0" />
                   <p>
-                    To create new schedules, use Matrix commands like
-                    <span className="font-mono">
-                      {" "}
-                      !schedule daily at 9am ...
-                    </span>
-                    .
+                    To create or edit schedules from chat, ask an agent in
+                    Matrix in natural language (for example, &ldquo;Remind me
+                    every weekday at 9am to check the deployment&rdquo;).
                   </p>
                 </div>
               </div>

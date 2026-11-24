@@ -113,6 +113,7 @@ def make_test_scheduling_runtime(*args: Any, **kwargs: Any) -> SchedulingRuntime
     from mindroom.scheduling.tasks import SchedulingRuntime  # noqa: PLC0415
 
     _add_default_responder_candidate_resolver(kwargs)
+    kwargs.pop("agent_reply_memberships", None)
     return SchedulingRuntime(*args, **kwargs)
 
 

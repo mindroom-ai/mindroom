@@ -2834,17 +2834,13 @@ async def test_editing_a_pre_approved_task_through_tool_is_refused_before_parsin
         created_at=datetime.now(UTC),
         workflow=workflow,
     )
-    parse = AsyncMock()
-
     with (
         patch("mindroom.scheduling.tasks.get_scheduled_task", new=AsyncMock(return_value=record)),
-        patch("mindroom.scheduling.tasks._parse_workflow_schedule", new=parse),
         tool_runtime_context(context),
         pytest.raises(SchedulingError, match="cannot be edited; cancel it and schedule the call again"),
     ):
-        await SchedulerTools().edit_schedule(task_id="task1234", request="move it to 10am")
+        await SchedulerTools().edit_schedule(task_id="task1234", message="move it to 10am")
 
-    parse.assert_not_awaited()
     context.client.room_put_state.assert_not_awaited()
 
 

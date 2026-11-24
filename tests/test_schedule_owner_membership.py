@@ -761,7 +761,7 @@ async def test_running_schedule_stops_after_live_human_alias_revocation(  # noqa
     schedule_type: Literal["once", "cron"],
 ) -> None:
     """A joined bridge identity loses schedule authority when its live alias grant is removed."""
-    client, workflow, state = _owner_schedule(
+    client, _workflow, state = _owner_schedule(
         [{"membership": "leave"}],
         schedule_type=schedule_type,
         writer=_ALIAS_SCHEDULE_WRITER,
@@ -790,9 +790,6 @@ async def test_running_schedule_stops_after_live_human_alias_revocation(  # noqa
     client.room_get_state_event.side_effect = read_membership_across_reload
     delivered_owners: list[str | None] = []
 
-    async def parsed_workflow(*_args: object, **_kwargs: object) -> scheduling.ScheduledWorkflow:
-        return workflow
-
     async def deliver(
         _client: object,
         current: scheduling.ScheduledWorkflow,
@@ -802,7 +799,6 @@ async def test_running_schedule_stops_after_live_human_alias_revocation(  # noqa
         delivered_owners.append(current.created_by)
         raise asyncio.CancelledError
 
-    monkeypatch.setattr(scheduling, "_parse_workflow_schedule", parsed_workflow)
     monkeypatch.setattr(scheduling_executor, "execute_scheduled_workflow", deliver)
     monkeypatch.setattr(scheduling.uuid, "uuid4", lambda: _TASK_ID)
     journal = EventJournalStore.open_sqlite(tmp_path / "schedule-journal.sqlite3")
@@ -829,25 +825,15 @@ async def test_running_schedule_stops_after_live_human_alias_revocation(  # noqa
             config_provider=lambda: live_runtime.config,
             orchestrator=orchestrator,
         )
-        if schedule_type == "cron":
-            assert workflow.cron_schedule is not None
-            await scheduling_runtime.plan_recurring_occurrence(
-                runtime_paths,
-                homeserver=client.homeserver,
-                sender=client.user_id,
-                room_id="!test:server",
-                task_id=_TASK_ID,
-                workflow_json=workflow.model_dump_json(),
-                cron=workflow.cron_schedule.to_cron_string(),
-                now=datetime.now(UTC) - timedelta(minutes=2),
-                grace_seconds=300,
-            )
+        timing_kwargs: dict[str, Any] = {"delay_seconds": 1} if schedule_type == "once" else {"cron": "* * * * *"}
         response = await scheduling.schedule_task(
             runtime=build_scheduling_runtime_from_tool_runtime_context(context),
             room_id="!test:server",
             thread_id=None,
             scheduled_by="@alice:server",
-            full_text="Check the queue",
+            message="Check the queue",
+            new_thread=False,
+            **timing_kwargs,
         )
         assert f"**Task ID:** `{_TASK_ID}`" in response, response
         _runner, task = orchestrator.scheduled_tasks._runners[_TASK_ID]

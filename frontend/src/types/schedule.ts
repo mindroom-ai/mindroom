@@ -10,6 +10,8 @@ export interface ScheduleTask {
   next_run_at: string | null;
   cron_expression: string | null;
   cron_description: string | null;
+  timezone: string;
+  cron_timezone: string | null;
   description: string;
   message: string;
   history_limit: number | null;
@@ -39,6 +41,7 @@ export interface UpdateScheduleRequest {
   schedule_type?: ScheduleType;
   execute_at?: string;
   cron_expression?: string;
+  cron_timezone?: string;
   silent?: boolean;
 }
 

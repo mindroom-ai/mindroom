@@ -10,7 +10,7 @@ import sys
 from contextlib import closing
 from dataclasses import replace
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, get_args
 
 import pytest
 
@@ -30,6 +30,7 @@ from mindroom.session_storage.store import begun, connect_conversation_database
 from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key, worker_dir_name
 from mindroom.usage import stats_storage
+from mindroom.usage.stats import collect_admin_usage
 from mindroom.usage.stats_storage import (
     UsageRunNode,
     UsageSessionRow,
@@ -39,7 +40,14 @@ from mindroom.usage.stats_storage import (
     discover_self_usage_sources,
     iter_usage_storage_rows,
 )
-from mindroom.usage.storage import SYSTEM_USAGE_ENTITY, SYSTEM_USAGE_STORAGE_NAME
+from mindroom.usage.storage import (
+    RETIRED_USAGE_KINDS,
+    SYSTEM_USAGE_ENTITY,
+    SYSTEM_USAGE_OWNER,
+    SYSTEM_USAGE_STORAGE_NAME,
+    USAGE_KINDS,
+    IndependentUsageKind,
+)
 from tests.conftest import create_agno_2_sessions_db, persist_runs, persist_session
 from tests.session_storage.agno_layout import recorded_owner
 
@@ -991,3 +999,74 @@ def test_reader_merges_legacy_blob_with_runs_table(tmp_path: Path) -> None:
     assert [run.run_id for run in row.runs] == ["run-1", "run-2", "run-3"]
     assert row.runs[0].metrics == {"total_tokens": 99}
     assert row.runs[1].metrics == {"input_tokens": 2, "output_tokens": 2, "total_tokens": 4}
+
+
+def test_retired_schedule_parse_usage_rows_still_read_and_aggregate(tmp_path: Path) -> None:
+    """Historical `schedule_parse` helper rows in `system.db` still load and aggregate cleanly."""
+    assert "schedule_parse" not in get_args(IndependentUsageKind.__value__)
+    assert "schedule_parse" in RETIRED_USAGE_KINDS
+    assert "schedule_parse" in USAGE_KINDS
+
+    paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "mindroom_data",
+        process_env={},
+    )
+    database = paths.storage_root / SYSTEM_USAGE_STORAGE_NAME / "sessions" / f"{SYSTEM_USAGE_STORAGE_NAME}.db"
+    database.parent.mkdir(parents=True, exist_ok=True)
+    names = TableNames(SYSTEM_USAGE_STORAGE_NAME)
+    prepare_conversation_database(database, names, owner=SYSTEM_USAGE_OWNER)
+    run_payload = json.dumps(
+        {
+            "run_id": "schedule_parse:legacy-1",
+            "parent_run_id": None,
+            "team_id": None,
+            "user_id": None,
+            "model_provider": "OpenAI",
+            "model": "gpt-test",
+            "created_at": 1790000000,
+            "metrics": {
+                "input_tokens": 20,
+                "output_tokens": 5,
+                "total_tokens": 25,
+                "details": {
+                    "model": [
+                        {
+                            "input_tokens": 20,
+                            "output_tokens": 5,
+                            "total_tokens": 25,
+                            "id": "gpt-test",
+                            "provider": "OpenAI",
+                        },
+                    ],
+                },
+            },
+            "requests": [
+                {
+                    "created_at": 1790000000,
+                    "metrics": {"input_tokens": 20, "output_tokens": 5, "total_tokens": 25},
+                    "model": "gpt-test",
+                    "model_provider": "OpenAI",
+                },
+            ],
+            "kind": "schedule_parse",
+        },
+    )
+    with closing(connect_conversation_database(database)) as connection, begun(connection, write=True):
+        connection.execute(
+            f"INSERT INTO {quote_identifier(names.sessions)} "  # noqa: S608
+            "(session_id, created_at, updated_at) VALUES (?, ?, ?)",
+            ("schedule_parse", 1790000000, 1790000000),
+        )
+        connection.execute(
+            f"INSERT INTO {quote_identifier(names.usage)} "  # noqa: S608
+            "(session_id, run_id, usage_data) VALUES (?, ?, ?)",
+            ("schedule_parse", "schedule_parse:legacy-1", run_payload),
+        )
+
+    report = collect_admin_usage(config=Config(), runtime_paths=paths, include_requests=True)
+    assert report.totals.total_tokens == 25
+    assert report.totals.input_tokens == 20
+    assert report.totals.output_tokens == 5
+    assert report.request_breakdown is not None
+    assert [(row.kind, row.totals.total_tokens) for row in report.request_breakdown] == [("schedule_parse", 25)]

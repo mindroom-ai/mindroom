@@ -18,7 +18,6 @@ import re
 from contextlib import asynccontextmanager, contextmanager
 from copy import deepcopy
 from dataclasses import asdict, dataclass, field, replace
-from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
 from types import SimpleNamespace
@@ -57,7 +56,6 @@ from mindroom.response_turn import TurnSinks
 from mindroom.routing import suggest_responder
 from mindroom.routing_judgment import ResponderSelection
 from mindroom.runtime_state import clear_api_server_address, set_api_server_address
-from mindroom.scheduling.tasks import ScheduledWorkflow, _parse_workflow_schedule
 from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.session_storage.types import ConversationSession
 from mindroom.skill_learning.capture import SkillReviewCapture
@@ -766,19 +764,6 @@ async def _team_mode(config: Config, runtime_paths: RuntimePaths) -> None:
     assert mode == TeamMode.COORDINATE, mode
 
 
-async def _schedule_parse(config: Config, runtime_paths: RuntimePaths) -> None:
-    responders = entity_ids(config, runtime_paths)
-    workflow = await _parse_workflow_schedule(
-        "Every weekday at 9am, ask @assistant for the travel policy changes.",
-        config,
-        runtime_paths,
-        [responders["assistant"], responders["researcher"]],
-        current_time=datetime(2026, 9, 21, 14, 14, tzinfo=UTC),
-        timezone="UTC",
-    )
-    assert isinstance(workflow, ScheduledWorkflow), workflow
-
-
 async def _summarize(
     config: Config,
     runtime_paths: RuntimePaths,
@@ -1359,14 +1344,6 @@ SCENARIOS: dict[str, Scenario] = {
         "mindroom.teams.formation.select_ad_hoc_team_mode",
         _team_mode,
         '{"mode": "coordinate", "reasoning": "Separate sub-tasks."}',
-    ),
-    **_structured_helper(
-        "schedule_parse",
-        "mindroom.scheduling.tasks._parse_workflow_schedule",
-        _schedule_parse,
-        '{"schedule_type": "cron", "cron_schedule": {"minute": "0", "hour": "9", "day": "*", "month": "*", '
-        '"weekday": "1-5"}, "message": "@assistant What changed in the travel policy?", '
-        '"description": "Weekday travel policy check"}',
     ),
     **_structured_helper(
         "thread_summary",

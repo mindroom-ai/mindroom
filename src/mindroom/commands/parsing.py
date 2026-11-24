@@ -18,10 +18,8 @@ class CommandType(Enum):
 
     HELP = "help"
     RELOAD_PLUGINS = "reload_plugins"
-    SCHEDULE = "schedule"
     LIST_SCHEDULES = "list_schedules"
     CANCEL_SCHEDULE = "cancel_schedule"
-    EDIT_SCHEDULE = "edit_schedule"
     JOBS = "jobs"  # List the conversation's background jobs
     CANCEL_JOB = "cancel_job"  # Cancel background jobs
     CONFIG = "config"  # Configuration command
@@ -49,10 +47,8 @@ _COMMAND_DOCS = {
         "/compact [agent_or_team]",
         "Compact context now, after any in-progress reply in this conversation",
     ),
-    CommandType.SCHEDULE: ("/schedule <task>", "Schedule a task"),
     CommandType.LIST_SCHEDULES: ("/list_schedules", "List scheduled tasks"),
     CommandType.CANCEL_SCHEDULE: ("/cancel_schedule <id>", "Cancel a scheduled task"),
-    CommandType.EDIT_SCHEDULE: ("/edit_schedule <id> <task>", "Edit an existing scheduled task"),
     CommandType.JOBS: ("/jobs", "List the background jobs running here"),
     CommandType.CANCEL_JOB: ("/cancel_job <id|all>", "Cancel a background job, or all of them here"),
     CommandType.HELP: ("/help [topic]", "Get help"),
@@ -83,10 +79,9 @@ _COMMAND_DOCS = {
     CommandType.E2EE: ("/e2ee", "Show encryption diagnostics for this room"),
     CommandType.HI: ("/hi", "Show welcome message"),
 }
-_WELCOME_COMMAND_TYPES = (CommandType.HI, CommandType.SCHEDULE, CommandType.HELP)
+_WELCOME_COMMAND_TYPES = (CommandType.HI, CommandType.LIST_SCHEDULES, CommandType.HELP)
 _MAX_LEADING_MENTIONS = 16
 _COMPACT_COMMAND_DOC_OVERRIDES = {
-    CommandType.SCHEDULE: ("/schedule <time> <message>", "Schedule tasks and reminders"),
     CommandType.HELP: ("/help [topic]", "Get detailed help"),
     CommandType.HI: ("/hi", "Show this welcome message again"),
 }
@@ -133,9 +128,7 @@ def get_compact_command_entries(
 COMMAND_TYPES_WITH_SIDE_EFFECTS = frozenset(
     {
         CommandType.RELOAD_PLUGINS,
-        CommandType.SCHEDULE,
         CommandType.CANCEL_SCHEDULE,
-        CommandType.EDIT_SCHEDULE,
         CommandType.CANCEL_JOB,
         CommandType.DESKTOP,
         CommandType.MODEL,
@@ -176,10 +169,8 @@ class _CommandParser:
 
     HELP_PATTERN = re.compile(r"^!help(?:\s+(.+))?$", re.IGNORECASE)
     RELOAD_PLUGINS_PATTERN = re.compile(r"^!reload(?:-|_)plugins$", re.IGNORECASE)
-    SCHEDULE_PATTERN = re.compile(r"^!schedule\s+(.+)$", re.IGNORECASE | re.DOTALL)
     LIST_SCHEDULES_PATTERN = re.compile(r"^!(?:list|inspect)[_-]?schedules?$", re.IGNORECASE)
     CANCEL_SCHEDULE_PATTERN = re.compile(r"^!cancel[_-]?schedule\s+(.+)$", re.IGNORECASE)
-    EDIT_SCHEDULE_PATTERN = re.compile(r"^!edit[_-]?schedule\s+(\S+)\s+(.+)$", re.IGNORECASE | re.DOTALL)
     JOBS_PATTERN = re.compile(r"^!jobs$", re.IGNORECASE)
     CANCEL_JOB_PATTERN = re.compile(r"^!cancel[_-]?job\s+(\S+)$", re.IGNORECASE)
     CONFIG_PATTERN = re.compile(r"^!config(?:\s+(.+))?$", re.IGNORECASE)
@@ -208,7 +199,7 @@ class _CommandParser:
         (ENCRYPT_PATTERN, CommandType.ENCRYPT),
     )
 
-    def parse(self, message: str, mention_names: tuple[str, ...] = ()) -> Command | None:  # noqa: C901, PLR0911, PLR0912
+    def parse(self, message: str, mention_names: tuple[str, ...] = ()) -> Command | None:  # noqa: C901, PLR0911
         """Parse a message for commands.
 
         Args:
@@ -245,15 +236,6 @@ class _CommandParser:
         if self.RELOAD_PLUGINS_PATTERN.match(message):
             return Command(type=CommandType.RELOAD_PLUGINS, args={}, raw_text=raw_text)
 
-        match = self.SCHEDULE_PATTERN.match(message)
-        if match:
-            full_text = match.group(1).strip()
-            return Command(
-                type=CommandType.SCHEDULE,
-                args={"full_text": full_text},
-                raw_text=raw_text,
-            )
-
         if self.LIST_SCHEDULES_PATTERN.match(message):
             return Command(
                 type=CommandType.LIST_SCHEDULES,
@@ -283,16 +265,6 @@ class _CommandParser:
                 raw_text=raw_text,
             )
 
-        match = self.EDIT_SCHEDULE_PATTERN.match(message)
-        if match:
-            task_id = match.group(1).strip()
-            full_text = match.group(2).strip()
-            return Command(
-                type=CommandType.EDIT_SCHEDULE,
-                args={"task_id": task_id, "full_text": full_text},
-                raw_text=raw_text,
-            )
-
         for pattern, command_type in self._ARGS_TEXT_COMMANDS:
             if match := pattern.match(message):
                 return Command(type=command_type, args={"args_text": (match.group(1) or "").strip()}, raw_text=raw_text)
@@ -310,7 +282,7 @@ class _CommandParser:
         )
 
 
-def get_command_help(topic: str | None = None) -> str:  # noqa: C901, PLR0911, PLR0912
+def get_command_help(topic: str | None = None) -> str:  # noqa: C901, PLR0911
     """Get help text for commands.
 
     Args:
@@ -321,51 +293,24 @@ def get_command_help(topic: str | None = None) -> str:  # noqa: C901, PLR0911, P
 
     """
     if topic == "schedule":
-        return """**Schedule Command**
+        return """**Scheduling**
 
-Usage: `/schedule <time> <message>` - Schedule tasks, reminders, or agent/team workflows
+Ask any agent with the `scheduler` tool in natural language to create or edit one-time or recurring schedules.
 
-**Simple Reminders:**
-- `/schedule in 5 minutes Check the deployment`
-- `/schedule tomorrow at 3pm Send the weekly report`
-- `/schedule later Ping me about the meeting`
-- `ping me tomorrow about the meeting`
-- `remind me in 2 hours to review PRs`
+**Examples (just tell an agent):**
+- "Remind me in 15 minutes to check the deployment."
+- "Every weekday at 9am, ask @ops for the status report."
+- "Every 5 minutes, silently check the inbox for urgent mail with no history."
+- "Edit schedule abc123 to run at 10am instead."
 
-**Event-Driven Workflows (New!):** _(include a polling cadence — they check on a schedule)_
-- `/schedule Every 5 minutes, check if I got an email about "urgent"; if so, @phone_agent call me`
-- `/schedule Every 10 minutes, check whether Bitcoin dropped below $40k; if so, @crypto_agent notify me`
-- `/schedule Every minute, check if server CPU > 80%; if so, @ops_agent scale up`
-- `/schedule Every 15 minutes, check for mentions of our product on Reddit; if any, @analyst summarize them`
-- `/schedule Every 5 minutes, check for new email from my boss; if any, @notification_agent alert me immediately`
-
-**Agent and Team Workflows:**
-- `/schedule Daily at 9am, @finance give me a market analysis`
-- `/schedule Every Monday, @research AI news and @email_assistant send me a summary`
-- `/schedule tomorrow at 2pm, @email_assistant check my Gmail`
-
-**Recurring Tasks (Cron-style):**
-- `/schedule Every hour, @shell check server status`
-- `/schedule Daily at 9am, @finance market report`
-- `/schedule Weekly on Friday, @analyst prepare weekly summary`
-
-**Conversation Context Limits:**
-- `/schedule Every hour, @ops check deployment health with no history`
-- `/schedule Daily at 9am, @research summarize AI news with only the last 5 messages`
-
-**Silent Delivery:**
-- Add `silently` or `quietly` when a scheduled check should post only findings, failures, or messages explicitly sent by tools
-- `/schedule Every 5 minutes, quietly check the inbox for urgent messages and report only when one arrives`
-- Silent schedules hide their trigger and omit successful final responses that are empty or contain only `NO_REPLY`
-- Schedules remain visible by default
+**Schedule Management Commands:**
+- `/list_schedules` - List pending scheduled tasks in this room or thread
+- `/cancel_schedule <id>` - Cancel a scheduled task (or `/cancel_schedule all`)
 
 How it works:
-- **Time-based**: Executes at specific times or intervals
-- **Event-based**: Requires an explicit recurring polling cadence (e.g., "every 5 minutes")
-- **History limits**: Scheduled responders normally see full configured history; "with no history" uses none, and "last N messages" caps each run
-- Agents and teams receive clear instructions about conditions to check
-- Multiple agents collaborate when mentioned together; mention a team directly for its team workflow
-- Automated tasks are clearly marked and agents or teams follow up when they fire"""
+- Agents schedule one-time tasks (by timestamp or delay) and recurring 5-field cron tasks in local time (DST-safe)
+- Agents can configure per-run history limits, silent delivery, fresh threads per fire, and per-schedule model overrides
+- Use `/list_schedules` to find task IDs before editing with an agent or cancelling"""
 
     if topic in {"reload-plugins", "reload_plugins"}:
         return """**Reload Plugins Command**
@@ -401,25 +346,6 @@ Examples:
 - `/cancel_schedule all` - Cancel all scheduled tasks
 
 Use `/list_schedules` to see task IDs."""
-
-    if topic in {"edit", "edit_schedule"}:
-        return """**Edit Schedule Command**
-
-Usage: `/edit_schedule <id> <new task>` - Replace an existing scheduled task with new timing/content
-
-Alternative syntax: `/editschedule`, `/edit-schedule`
-
-Examples:
-- `/edit_schedule abc123 tomorrow at 9am @finance send market update`
-- `/edit_schedule task42 every weekday at 8am check build status`
-- `/edit_schedule task42 keep the same schedule but restore full history`
-- `/edit_schedule task42 every weekday at 8am check build status with no history`
-- `/edit_schedule task42 keep the same schedule but make this schedule silent`
-
-Omitted fields stay unchanged, including any existing history limit or silent-delivery mode.
-Use "restore full history" or "use unlimited history" to remove a history limit.
-Use "make this schedule silent" or "make this schedule visible" to change its delivery mode.
-Use `/list_schedules` to find task IDs before editing."""
 
     if topic == "config":
         return """**Config Command**
@@ -578,11 +504,10 @@ How it works:
 
 {commands_text}
 
-**Scheduling Features:**
-- Time-based and event-driven workflows
-- Recurring tasks with cron-style scheduling (daily, weekly, hourly)
-- Agent and team workflows - mention multiple agents for ad-hoc collaboration, or mention a team for its team workflow
-- Natural language time parsing - "tomorrow", "in 5 minutes", "every Monday"
+**Scheduling:**
+- Ask any agent in natural language to create or edit one-time or recurring schedules (via the `scheduler` tool)
+- Use `/list_schedules` and `/cancel_schedule <id>` to inspect or cancel schedules directly
+- Use `/help schedule` for more details
 
 For detailed help on a command, use: `/help <command>`
 

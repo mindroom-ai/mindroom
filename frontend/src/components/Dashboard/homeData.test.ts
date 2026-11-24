@@ -20,6 +20,8 @@ const task = (
   next_run_at: null,
   cron_expression: null,
   cron_description: null,
+  timezone: "UTC",
+  cron_timezone: null,
   description: id,
   message: id,
   history_limit: null,

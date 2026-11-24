@@ -41,6 +41,7 @@ from mindroom.scheduling.tasks import (
     get_scheduled_task,
     persist_scheduled_task_state,
     scheduled_call_workflow_digest,
+    scheduled_cron_timezone,
     scheduled_task_state_lock,
     task_records,
     withdraw_scheduled_call,
@@ -507,6 +508,7 @@ class _TaskRunner:
             cron=cron,
             now=now,
             grace_seconds=self.runtime.config_provider().scheduler_catch_up_grace_seconds,
+            cron_timezone=scheduled_cron_timezone(workflow),
         )
 
     async def _execute(
@@ -619,7 +621,12 @@ class _TaskRunner:
                     if outcome.status in {"retry", "held"}:
                         await asyncio.sleep(_TASK_STATE_POLL_INTERVAL_SECONDS)
                         continue
-                    await complete_recurring_occurrence(occurrence, cron_string, datetime.now(UTC))
+                    await complete_recurring_occurrence(
+                        occurrence,
+                        cron_string,
+                        datetime.now(UTC),
+                        cron_timezone=scheduled_cron_timezone(workflow),
+                    )
         except asyncio.CancelledError:
             with bound_log_context(**current_target.log_context):
                 logger.info("cron_task_cancelled", task_id=task_id)

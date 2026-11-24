@@ -45,6 +45,7 @@ def _task(
     history_limit: int | None = None,
     silent: bool = False,
     timezone: str | None = None,
+    cron_timezone: str | None = None,
 ) -> ScheduledTaskRecord:
     cron_schedule = None
     if cron_fields:
@@ -63,6 +64,7 @@ def _task(
         new_thread=new_thread,
         silent=silent,
         timezone=timezone,
+        cron_timezone=cron_timezone,
     )
     return ScheduledTaskRecord(
         task_id=task_id,
@@ -839,3 +841,83 @@ def test_edit_whose_state_write_is_refused_is_a_server_error(test_client: TestCl
 
     assert response.status_code == 500
     assert response.json()["detail"] == "I need moderator rights in this room to save schedules."
+
+
+def test_list_and_update_schedules_expose_and_preserve_cron_timezone(test_client: TestClient) -> None:
+    """GET exposes timezone/cron_timezone, PUT preserves cron_timezone when omitted, and validates it when sent."""
+    _record_test_room()
+    local_cron = _task(
+        "local123",
+        schedule_type="cron",
+        cron_fields={"minute": "0", "hour": "9", "day": "*", "month": "*", "weekday": "*"},
+        timezone="America/Los_Angeles",
+        cron_timezone="America/Los_Angeles",
+    )
+    legacy_cron = _task(
+        "legacy12",
+        schedule_type="cron",
+        cron_fields={"minute": "0", "hour": "9", "day": "*", "month": "*", "weekday": "*"},
+        timezone="America/Los_Angeles",
+        cron_timezone=None,
+    )
+
+    with (
+        _served_by(AsyncMock()),
+        patch("mindroom.api.schedules.get_scheduled_tasks_for_room", return_value=[local_cron, legacy_cron]),
+    ):
+        listed = test_client.get("/api/schedules")
+
+    assert listed.status_code == 200
+    by_id = {task["task_id"]: task for task in listed.json()["tasks"]}
+    assert by_id["local123"]["timezone"] == "America/Los_Angeles"
+    assert by_id["local123"]["cron_timezone"] == "America/Los_Angeles"
+    assert by_id["local123"]["cron_description"] == "At 09:00 (America/Los_Angeles)"
+    assert by_id["legacy12"]["timezone"] == "America/Los_Angeles"
+    assert by_id["legacy12"]["cron_timezone"] is None
+    assert by_id["legacy12"]["cron_description"] != "At 09:00 (America/Los_Angeles)"
+
+    # PUT editing cron_expression without cron_timezone preserves existing cron_timezone and created_by.
+    async def echo_save(
+        *,
+        workflow: ScheduledWorkflow,
+        existing_task: ScheduledTaskRecord,
+        **_kwargs: object,
+    ) -> ScheduledTaskRecord:
+        return ScheduledTaskRecord(
+            task_id=existing_task.task_id,
+            room_id=existing_task.room_id,
+            status="pending",
+            created_at=existing_task.created_at,
+            workflow=workflow,
+        )
+
+    save_mock = AsyncMock(side_effect=echo_save)
+    with (
+        _served_by(AsyncMock()),
+        patch("mindroom.api.schedules.require_scheduled_task", return_value=legacy_cron),
+        patch("mindroom.api.schedules.save_edited_scheduled_task", save_mock),
+    ):
+        keep_legacy = test_client.put(
+            "/api/schedules/legacy12",
+            json={"room_id": "test_room", "cron_expression": "30 10 * * *"},
+        )
+        upgrade_tz = test_client.put(
+            "/api/schedules/legacy12",
+            json={"room_id": "test_room", "cron_expression": "30 10 * * *", "cron_timezone": "Europe/Berlin"},
+        )
+        invalid_tz = test_client.put(
+            "/api/schedules/legacy12",
+            json={"room_id": "test_room", "cron_timezone": "Mars/Olympus"},
+        )
+
+    assert keep_legacy.status_code == 200
+    assert keep_legacy.json()["cron_timezone"] is None
+    assert keep_legacy.json()["created_by"] == "@user:localhost"
+
+    assert upgrade_tz.status_code == 200
+    assert upgrade_tz.json()["cron_timezone"] == "Europe/Berlin"
+    assert upgrade_tz.json()["cron_description"] == "At 10:30 (Europe/Berlin)"
+    assert upgrade_tz.json()["created_by"] == "@user:localhost"
+
+    assert invalid_tz.status_code == 400
+    assert "Unknown timezone" in invalid_tz.json()["detail"]

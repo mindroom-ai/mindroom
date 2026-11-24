@@ -636,8 +636,6 @@ def build_scheduling_runtime_from_tool_runtime_context(context: ToolRuntimeConte
         config=active_config,
         runtime_paths=context.runtime_paths,
         room=context.room,
-        conversation_reader=context.conversation_reader,
-        agent_reply_memberships=context.require_agent_reply_memberships(),
         responder_candidates_for_room=context.responder_candidates_for_current_room,
         task_runtime=context.orchestrator.scheduled_tasks if context.orchestrator is not None else None,
         agent_name=context.agent_name,

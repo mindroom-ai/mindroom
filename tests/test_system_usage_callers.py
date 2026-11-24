@@ -12,9 +12,6 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
-from mindroom.matrix.identity import MatrixID
-from mindroom.scheduling import tasks as scheduling
-from mindroom.scheduling.errors import SchedulingError
 from mindroom.thread_summary.generation import GeneratedSummary, generate_summary
 from mindroom.usage.stats import collect_admin_usage
 from tests.conftest import bind_runtime_paths, install_model_providers, test_runtime_paths
@@ -30,12 +27,11 @@ if TYPE_CHECKING:
     ("caller", "kind"),
     [
         ("routing", "routing"),
-        ("schedule", "schedule_parse"),
         ("topic", "room_topic"),
         ("summary", "thread_summary"),
     ],
 )
-async def test_internal_calls_retain_each_paid_run_even_when_output_is_rejected(  # noqa: C901, PLR0912, PLR0915 - four caller paths
+async def test_internal_calls_retain_each_paid_run_even_when_output_is_rejected(  # noqa: C901, PLR0912 - four caller paths
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     caller: str,
@@ -60,13 +56,6 @@ async def test_internal_calls_retain_each_paid_run_even_when_output_is_rejected(
 
     if caller == "routing":
         good_answer = json.dumps({"entity_name": "helper", "reasoning": "Matched"})
-    elif caller == "schedule":
-        good_answer = scheduling.ScheduledWorkflow(
-            schedule_type="cron",
-            cron_schedule=scheduling.CronSchedule(minute="0", hour="9"),
-            message="Check",
-            description="Check",
-        ).model_dump_json(exclude_unset=True)
     elif caller == "topic":
         good_answer = json.dumps({"topic": "A room topic"})
     else:
@@ -80,12 +69,6 @@ async def test_internal_calls_retain_each_paid_run_even_when_output_is_rejected(
 
         async def invoke() -> object:
             return await routing.suggest_responder("Help", ["helper"], config, paths)
-
-    elif caller == "schedule":
-        responders = [MatrixID(username="helper", domain="localhost")]
-
-        async def invoke() -> object:
-            return await scheduling._parse_workflow_schedule("Daily at 9", config, paths, responders, timezone="UTC")
 
     elif caller == "topic":
 
@@ -107,19 +90,13 @@ async def test_internal_calls_retain_each_paid_run_even_when_output_is_rejected(
     if caller == "routing":
         assert isinstance(valid, routing.ResponderSelection)
         assert valid.entity_name == "helper"
-    elif caller == "schedule":
-        assert isinstance(valid, scheduling.ScheduledWorkflow)
-        assert valid.schedule_type == "cron"
     elif caller == "topic":
         assert valid == "A room topic"
     else:
         assert valid == GeneratedSummary(summary="A summary")
     if storage_failure:
         return
-    if caller == "schedule":
-        with pytest.raises(SchedulingError, match="Failed to parse the schedule request"):
-            await invoke()
-    elif caller == "topic":
+    if caller == "topic":
         await invoke()
     else:
         assert await invoke() is None
