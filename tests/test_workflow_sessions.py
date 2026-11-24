@@ -13,6 +13,7 @@ import pytest
 import pytest_asyncio
 
 import mindroom.workflow as workflow_sdk
+from mindroom.delegation import execution as delegation_execution
 from mindroom.delegation.background import delegation_child
 from mindroom.delegation.state import SubagentPersona
 from mindroom.workflow_runs import agent_nodes
@@ -411,3 +412,33 @@ async def test_narrowed_resume_starts_a_capped_fresh_child_with_transcript(stack
     assert "a1" in prompt2
     assert prompt2.endswith("\n\nStep two")
     assert _user_texts(model2.requests[1]) == [prompt2, "Step three"]
+
+
+@pytest.mark.asyncio
+async def test_session_turn_delegation_hooks_receive_turn_message_not_session_name(
+    stack: WorkflowStack,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Delegation hooks see the turn's actual text while child job display labels stay the session name."""
+    seen: list[tuple[str, dict[str, object]]] = []
+    original = delegation_execution.before_delegation
+
+    async def record(**call: object) -> object:
+        seen.append((str(call["tool_name"]), dict(call["arguments"])))  # type: ignore[call-overload]
+        return await original(**call)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(delegation_execution, "before_delegation", record)
+    stack.child_script(answer("read it"), answer("summary"))
+
+    await stack.result("@0", "session", {"name": "reviewer"}, meta={"name": "reviewer"})
+    assert await stack.result("@1", "turn", _turn_args("@0", 1, "Read draft"), meta={"name": "reviewer"}) == "read it"
+    assert (
+        await stack.result("@2", "turn", _turn_args("@0", 2, "Summarize draft"), meta={"name": "reviewer"}) == "summary"
+    )
+
+    child1, child2 = delegation_child(stack.node_job("@1")), delegation_child(stack.node_job("@2"))
+    assert (child1.task, child2.task) == ("reviewer", "reviewer")
+    assert [(name, args.get("task") or args.get("message")) for name, args in seen] == [
+        ("run_subagent", "Read draft"),
+        ("continue_subagent", "Summarize draft"),
+    ]

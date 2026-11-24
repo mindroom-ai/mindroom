@@ -189,6 +189,7 @@ async def _resolve_child_target(
     node: WorkflowNode,
     owner: ToolExecutionIdentity,
     *,
+    prompt: str,
     session: WorkflowNode | None,
     follow_up: str | None,
     correction: str | None,
@@ -199,9 +200,9 @@ async def _resolve_child_target(
     source = session.request if session is not None else node.request
     arguments = {_RENAMED.get(name, name): value for name, value in source.items() if name in _OPTIONS}
     if session is not None:
-        arguments["task"] = node.label
+        arguments["task"] = prompt
     if correction is None and follow_up is not None:
-        call_args: dict[str, object] = {"subagent_id": follow_up, "message": node.label}
+        call_args: dict[str, object] = {"subagent_id": follow_up, "message": prompt}
         if OUTPUT_PATH_ARGUMENT in arguments:
             call_args[OUTPUT_PATH_ARGUMENT] = arguments[OUTPUT_PATH_ARGUMENT]
         target = await resolve_follow_up_target(
@@ -280,6 +281,7 @@ async def launch_child(
             run,
             node,
             owner,
+            prompt=prompt,
             session=session,
             follow_up=follow_up,
             correction=correction,
