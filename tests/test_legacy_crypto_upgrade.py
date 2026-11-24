@@ -242,12 +242,13 @@ def test_empty_crypto_store_without_transport_state_needs_no_preflight(tmp_path:
     )
 
 
-def test_missing_crypto_account_keeps_legacy_recovery(tmp_path: Path) -> None:
+@pytest.mark.parametrize("missing_mode", ["delete_rows", "drop_table"])
+def test_missing_crypto_account_keeps_legacy_recovery(tmp_path: Path, missing_mode: str) -> None:
     """A missing retained identity must block destructive transport cleanup."""
     _legacy_crypto(tmp_path, "pending")
     path = tmp_path / f"{ACCOUNT}_{DEVICE}.db"
     with closing(sqlite3.connect(path)) as connection:
-        connection.execute("DELETE FROM accounts")
+        connection.execute("DELETE FROM accounts" if missing_mode == "delete_rows" else "DROP TABLE accounts")
         connection.commit()
     with pytest.raises(LocalProtocolError, match="account is missing"):
         retire_legacy_crypto_recovery(path, user_id=ACCOUNT, device_id=DEVICE)

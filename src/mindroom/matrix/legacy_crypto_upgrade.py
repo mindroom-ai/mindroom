@@ -52,10 +52,14 @@ def retire_legacy_crypto_recovery(
             tables = {
                 row[0].lower() for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
             }
-            if tables & {"niodurablemeta", "nioingestmeta"} or "accounts" not in tables:
+            if tables & {"niodurablemeta", "nioingestmeta"}:
                 return
             transport_tables = tuple(table for table in _LEGACY_TRANSPORT_TABLES if table in tables)
-            accounts = connection.execute("SELECT user_id, device_id, account, shared FROM accounts").fetchall()
+            accounts = (
+                connection.execute("SELECT user_id, device_id, account, shared FROM accounts").fetchall()
+                if "accounts" in tables
+                else []
+            )
             if not accounts:
                 if any(
                     connection.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone() is not None  # noqa: S608
