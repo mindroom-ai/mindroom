@@ -90,12 +90,16 @@ _SESSION_BUSY = "Session '{name}' is already in a turn. Wait for it or spawn ano
 _STOPPING = "The agent this call replaces is stopping. Try again in a moment."
 _NOT_CONTINUED_YET = "The agent of this call has not been continued yet after a restart. Try again in a moment."
 _NOT_ANSWERED = "The run ended before the question was answered."
+# How long a tool call above its attempt's calls per minute waits before it asks for room again.
 _RATE_WAIT_SECONDS = 1.0
+# How long after its report a script's exit is looked for, before the script runtime's own pass finds it.
 _EXIT_POLL_SECONDS = (0.05, 0.2, 0.5, 1.0, 2.0, 5.0)
 
 
 @dataclass(frozen=True, slots=True)
 class _TurnContext:
+    """Resolved session, live sibling turns, earlier turns, last completed turn, and digest for one `turn` call."""
+
     session: WorkflowNode
     in_attempt: list[WorkflowNode]
     earlier: list[WorkflowNode]
@@ -108,11 +112,13 @@ def _broker_call_id(node: WorkflowNode) -> str:
 
 
 def _transcript_prompt(earlier: list[tuple[str, str]], message: str) -> str:
+    """Build the first prompt of a fresh session child from saved earlier exchanges and the new *message*."""
     sections = ["Earlier conversation:", *(f"User: {q}\nAssistant: {a}" for q, a in earlier)]
     return "\n\n".join(sections) + f"\n\n{message}"
 
 
 def _tool_grant(request: dict[str, object]) -> tuple[ScriptToolGrant, dict[str, object]]:
+    """Return the function a tool call's request names and its arguments; a request that names neither is refused."""
     arguments = request.get("arguments")
     if not isinstance(arguments, dict) or not all(isinstance(request.get(k), str) for k in ("toolkit", "function")):
         msg = "A tool call needs a toolkit, a function and its arguments."
@@ -121,11 +127,13 @@ def _tool_grant(request: dict[str, object]) -> tuple[ScriptToolGrant, dict[str, 
 
 
 def _timeout(meta: dict[str, object]) -> float | None:
+    """Return the seconds of work an agent call gives its turn, which is no part of what the call is."""
     seconds = meta.get("timeout")
     return float(seconds) if isinstance(seconds, (int, float)) and not isinstance(seconds, bool) else None
 
 
 def _members(meta: dict[str, object]) -> tuple[str, ...]:
+    """Return the ordered lanes a group's request names."""
     members = meta.get("members")
     if not isinstance(members, list) or not all(isinstance(member, str) for member in members):
         msg = "A group call needs the list of its members."
@@ -134,6 +142,7 @@ def _members(meta: dict[str, object]) -> tuple[str, ...]:
 
 
 def _value(args: dict[str, object]) -> object:
+    """Make the value a `now()` or `random()` call of a script gets, once: a resume returns the saved one."""
     if args.get("op") == "now":
         return datetime.now(UTC).isoformat()
     if args.get("op") == "random":
@@ -143,6 +152,7 @@ def _value(args: dict[str, object]) -> object:
 
 
 async def _current_run(engine: WorkflowEngine, attempt: ScriptRunRecord) -> WorkflowRun:
+    """Return the run *attempt* is the current attempt of."""
     if attempt.workflow_run_id is None:
         msg = f"{attempt.run_id} is not a workflow attempt."
         raise LookupError(msg)
@@ -164,13 +174,13 @@ def node_by_id(engine: WorkflowEngine, run_id: str, node_id: str) -> WorkflowNod
 
 
 async def run_info(engine: WorkflowEngine, attempt: ScriptRunRecord) -> dict[str, object]:
-    """Return the run ID, attempt number, and args for *attempt*."""
+    """Return what the attempt's script starts from."""
     run = await _current_run(engine, attempt)
     return {"run_id": run.run_id, "attempt": run.attempt, "args": run.args}
 
 
 async def resolve_source(engine: WorkflowEngine, context: ToolRuntimeContext, arguments: Mapping[str, Any]) -> bytes:
-    """Resolve inline `source`, workspace `path`, or saved workflow `name` bytes."""
+    """Return the script a start names: inline source, workspace file, or saved workflow."""
     source, path, name = arguments.get("source"), arguments.get("path"), arguments.get("name")
     if sum(value is not None for value in (source, path, name)) != 1:
         msg = "Give exactly one of source, path, or name."
@@ -211,8 +221,9 @@ async def saved_source(engine: WorkflowEngine, attempt: ScriptRunRecord, name: s
 
 
 async def submit_node(engine: WorkflowEngine, attempt: ScriptRunRecord, request: NodeRequest) -> NodeReceipt:
-    """Save and dispatch one script node call, or return its replayed/attached receipt."""
+    """Save and dispatch one call of the attempt's script, or return the receipt of the node its key has."""
     run = await _current_run(engine, attempt)
+    # The engine owns a call from its insert to its dispatch, so a caller that goes away strands no running node.
     return await asyncio.shield(engine.spawn(None, admit(engine, run, attempt, request)))
 
 
@@ -223,6 +234,8 @@ async def admit(
     request: NodeRequest,
 ) -> NodeReceipt:
     """Admit one call under the run's lock and wake waiters once recorded."""
+    # Held from the lookup to the dispatch: two requests with one key cannot both find it free, and the run
+    # cannot end in between.
     async with (condition := engine.condition(asked_run.run_id)):
         result = await _admit_gated(engine, engine.store.get_run(asked_run.run_id), asked_run.epoch, attempt, request)
         condition.notify_all()
@@ -236,7 +249,9 @@ async def _admit_gated(
     attempt: ScriptRunRecord,
     request: NodeRequest,
 ) -> NodeReceipt:
+    """Decide and save one call for the attempt that began with *epoch*, which every write here names."""
     if run.epoch != epoch or run.state not in SERVED_RUN_STATES or engine.is_stopping(run.run_id):
+        # Before anything is kept for the attempt: one that the run left behind leaves nothing behind here.
         msg = f"Run {run.run_id} takes no more calls from attempt {attempt.run_id}."
         raise SupersededAttemptError(msg)
     turn_ctx = _turn_context(engine, run, request.key, request.args) if request.kind == "turn" else None
@@ -257,6 +272,7 @@ async def _resolve_saved(
     digest: str,
     members: tuple[str, ...] | None,
 ) -> tuple[WorkflowNode | None, WorkflowNode | None, NodeReceipt | None]:
+    """Apply the replay rules to any saved row at `request.key`; return `(saved, previous, reused_receipt)`."""
     saved = engine.store.get_node(run.run_id, request.key)
     if saved is None:
         return None, None, None
@@ -303,6 +319,7 @@ async def _reuse_saved(
     members: tuple[str, ...] | None,
     action: str,
 ) -> NodeReceipt:
+    """Adopt a saved node for this attempt (`hit`, `attach`, or `raise_indeterminate`)."""
     stamp_fields: dict[str, object] = {"attempt": run.attempt, "stale": False, "cached": action == "hit"}
     if (phase := cast("str | None", meta.get("phase"))) != saved.phase:
         stamp_fields["phase"] = phase
@@ -328,6 +345,7 @@ def _new_call_error(
     delegated: bool,
     turn_ctx: _TurnContext | None,
 ) -> dict[str, object] | None:
+    """Return a terminal error dict if a new tool/agent/turn call is refused before dispatch, else None."""
     if grant is not None:
         access = engine.authorize(run, grant)
         if access is None:
@@ -361,6 +379,7 @@ async def _dispatch_new(
     saved: WorkflowNode | None,
     previous: WorkflowNode | None,
 ) -> NodeReceipt:
+    """Create and dispatch (or save as settled/failed) a new generation of `request.key`."""
     key, kind, meta = request.key, request.kind, request.meta
     lane, index = split_key(key)
     generation = 1 if saved is None else saved.generation + 1
@@ -433,6 +452,7 @@ async def _save_immediate(
     node: WorkflowNode,
     request: NodeRequest,
 ) -> NodeReceipt:
+    """Save a non-dispatched call (`ask`, `send`, `inbox`, `state`, `value`, `error`, `group`, `session`)."""
     kind = request.kind
     if kind == "ask":
         validate_question_options(request.args.get("options"))
@@ -480,6 +500,7 @@ async def _save_immediate(
 
 
 def _turn_context(engine: WorkflowEngine, run: WorkflowRun, key: str, args: dict[str, object]) -> _TurnContext:
+    """Resolve a `turn` call's session, its earlier turns in this attempt, and its lineage-hashed digest."""
     session_key, turn_num = args.get("session"), args.get("turn")
     session = engine.store.get_node(run.run_id, session_key) if isinstance(session_key, str) else None
     if session is None or session.kind != "session":
@@ -510,6 +531,7 @@ async def _prepare_turn(
     saved: WorkflowNode | None,
     message: str,
 ) -> tuple[DelegationChild | None, str]:
+    """Decide whether a session turn continues the saved child or starts a fresh child with a transcript."""
     completed = [turn for turn in turn_ctx.earlier if turn.state is WorkflowNodeState.COMPLETED]
     prev = turn_ctx.prev
     prev_sub = prev.links.get("subagent_id") if prev is not None else None
@@ -555,6 +577,11 @@ async def _ask_gate(
     node: WorkflowNode,
     tool_call: tuple[ScriptToolGrant, dict[str, object]],
 ) -> NodeReceipt:
+    """Save the agent call a script made through `tool()`, and ask the broker whether that tool call may be made.
+
+    The node is saved as a queued one is, with no handle: nothing is started before the gate answers, so a
+    restart or a stop meanwhile finds a call that never ran. The caller holds the run's lock.
+    """
     queued = replace(node, state=WorkflowNodeState.QUEUED)
     node = await asyncio.to_thread(engine.store.put_node, queued, run.epoch, dirty_after=True)
     if not await engine.check_budget(run):
@@ -569,11 +596,12 @@ async def start_gated(
     node: WorkflowNode,
     gate: Callable[[], Awaitable[Outcome]],
 ) -> None:
-    """Enqueue an agent call after its broker gate approves it, or settle it on refusal."""
+    """Start the agent of a call the broker let pass, in its turn among the run's calls; a refusal is its end."""
     outcome = await gate()
     async with engine.condition(run.run_id):
         now = await asyncio.to_thread(engine.store.get_run, run.run_id)
         if now.epoch != run.epoch or engine.is_stopping(run.run_id):
+            # The run ended while the gate was open: its end settled the call, and nothing of it starts now.
             return
         if outcome[0] is WorkflowNodeState.COMPLETED:
             if await engine.check_budget(now):
@@ -593,15 +621,25 @@ async def _dispatch_tool(
     tool_call: tuple[ScriptToolGrant, dict[str, object]],
     same_as: str | None,
 ) -> NodeReceipt:
+    """Save a tool node with the handle of its call, then run the call as the engine's own task.
+
+    With *same_as*, the digest of its earlier result, the call's lane is dirty only if it answers something else;
+    without, it ran because a rule said so, and its lane is dirty whatever it answers. The attempt's epoch is
+    the run's here, and the call's task keeps it.
+    """
     call_id = _broker_call_id(node)
+    # Saved before the dispatch, so a crash after the tool ran reads the broker's receipt for this call.
     handle = DispatchHandle("broker", f"{attempt.run_id}:{call_id}", dispatched=False, same_as=same_as)
     node = replace(node, state=WorkflowNodeState.RUNNING, handle=handle)
     saved = await asyncio.to_thread(engine.store.save_dispatched, node, run.epoch, dirty_after=same_as is None)
     if saved is None:
+        # The node that waited for its place has an end by now: its run ended.
         raise SupersededAttemptError(RUN_ENDED)
     node = saved
     call = partial(_broker_outcome, engine, attempt, node, run.epoch, tool_call)
+    # The call has its task before anything else may fail: a saved call nobody runs would never end.
     engine.spawn(run.run_id, _run_tool_node(engine, node, run.epoch, call))
+    # A run that waited for a person works again from here.
     await engine.restate(run.run_id)
     return receipt(node)
 
@@ -615,6 +653,7 @@ async def _broker_outcome(
     *,
     gate_only: bool = False,
 ) -> Outcome:
+    """Run one broker call for *node* within the rate limit and return its node outcome."""
     waits = partial(node_waits, engine, node, epoch, gate_only=gate_only)
     call = partial(
         engine.broker.execute_for_workflow,
@@ -640,10 +679,13 @@ async def _run_tool_node(
     epoch: int,
     call: Callable[[], Awaitable[Outcome]],
 ) -> None:
+    """Run one tool call and settle its node."""
+    # A `start_workflow` this call makes starts a run inside this one, under this node.
     CALLING_NODE.set((node.run_id, node.key, node.generation))
     try:
         outcome = await call()
         await hold("before_settle")
+        # A run that moved on meanwhile reads the call's receipt itself.
         with suppress(SupersededAttemptError):
             await asyncio.to_thread(_settle_broker, engine, node, epoch, outcome)
         await engine.release_slot(node.run_id, node.key)
@@ -653,12 +695,18 @@ async def _run_tool_node(
 
 
 def settle_from_handle(engine: WorkflowEngine, node: WorkflowNode, epoch: int) -> WorkflowNodeState:
-    """Reconcile a broker-dispatched node from its saved receipt without re-executing."""
+    """Settle a node an ended attempt left unsettled from the broker receipt its handle names; return its state.
+
+    The work is never done again here: a finished receipt is copied, and a call that never reached its tool fails
+    as safe to run again. *epoch* is the run's as whoever settles the node found it: the attempt that reached
+    the node again, or the look that ends the attempt.
+    """
     assert node.handle is not None
     script_run_id, _, call_id = node.handle.ref.partition(":")
     try:
         outcome = call_outcome(node, engine.scripts.store.get_call(script_run_id, call_id))
     except ScriptCallNotFoundError:
+        # No claim proves the call never started only while the attempt's records are still there to hold one.
         try:
             engine.scripts.store.get_run(script_run_id)
             started: bool | None = False
@@ -686,6 +734,7 @@ def _settle_broker(engine: WorkflowEngine, node: WorkflowNode, epoch: int, outco
 
 
 def _nested_interrupted(engine: WorkflowEngine, node: WorkflowNode) -> Outcome | None:
+    """Return a non-completed outcome when this generation's nested run ended interrupted."""
     if (node.request.get("toolkit"), node.request.get("function")) != ("workflow", "start_workflow"):
         return None
     for child in engine.store.child_runs(node.run_id):
@@ -706,14 +755,23 @@ async def reconcile(  # noqa: C901
     *,
     stop: bool = False,
 ) -> bool:
-    """Reconcile a live node from its handle under the run's lock; return whether its work still runs."""
+    """Settle a node that an ended attempt left live from what its handle names; return whether its job still runs.
+
+    A job that still runs is left as it is, for the attempt that reaches its node to wait for. With *stop* the
+    run has ended and `_stop_agents` waited for the job: it is read as it stands, and so is one that did not
+    end in time. The caller holds the run's lock.
+    """
     if node.kind == "ask":
+        # A question outlives its attempt and not its run: nothing of it ran, and its card says it is closed.
         if stop:
             error = {"kind": "cancelled", "message": _NOT_ANSWERED}
             await engine.settle_node(node, epoch, state=WorkflowNodeState.CANCELLED, error=error)
             await close_card(engine, run, node, "cancelled")
         return not stop
     if node.handle is None or node.handle.kind == "run":
+        # Still queued for a place when its attempt or its run ended: it started nothing. Or the group of a run
+        # inside this one, which does not outlive it and is reached only as it ends: the end of that run
+        # settles the group, or this does.
         end = WorkflowNodeState.CANCELLED if stop else WorkflowNodeState.FAILED
         error = {"kind": "cancelled", "message": RUN_ENDED} if stop else INTERRUPTED
         if node.handle is not None:
@@ -725,8 +783,11 @@ async def reconcile(  # noqa: C901
         return False
     runtime, job_id = engine.agents(), node.handle.ref
     if runtime is None and not stop:
+        # Nobody can say how the job stands: the script's SDK asks again.
         raise ScriptRuntimeUnavailableError(NO_AGENTS)
     if runtime is not None and not stop and any(job.job_id == job_id for job in runtime.jobs.awaiting_continuation()):
+        # A restart stopped the job, and whether it goes on is not decided: until then it is neither live nor
+        # ended, and the call must not attach to a job that may yet end without having done anything.
         raise ScriptRuntimeUnavailableError(_NOT_CONTINUED_YET)
     if runtime is not None and works(runtime, job_id):
         if not stop:
@@ -738,7 +799,11 @@ async def reconcile(  # noqa: C901
             await engine.check_budget(engine.store.get_run(run.run_id))
     except ScriptRuntimeUnavailableError:
         if not stop:
+            # The lock is not held while access resolves: the script's SDK asks again, and a Stop gets in.
             raise
+        # A Stop waits for nobody's access and for no job runtime: the turn it may not read may have done
+        # anything. A handle without the mark that its job was handed over proves nothing either, since the job
+        # starts before that mark is saved.
         state, _, error = indeterminate(node)
         await engine.settle_node(node, epoch, state=state, error=error)
     return False
@@ -752,10 +817,11 @@ async def node_receipt(
     wait: float,
     known_state: str | None = None,
 ) -> NodeReceipt:
-    """Return a node's receipt, long-polling up to *wait* seconds until settled or waiting changes."""
+    """Return a node's receipt, held up to *wait* seconds until it settles or enters/leaves `waiting`."""
     loop = asyncio.get_running_loop()
     deadline = loop.time() + wait
     while True:
+        # Asked again after each wait: the end of the attempt ends its calls too, and those are not its to read.
         run = await _current_run(engine, attempt)
         async with (condition := engine.condition(run.run_id)):
             saved = node_by_id(engine, run.run_id, node_id)
@@ -769,20 +835,22 @@ async def node_receipt(
 
 
 async def node_record(engine: WorkflowEngine, attempt: ScriptRunRecord, node_id: str) -> WorkflowNode:
-    """Return one node of *attempt*'s run for fetching its full result."""
+    """Return one node of the attempt's run, for its whole result."""
     return node_by_id(engine, (await _current_run(engine, attempt)).run_id, node_id)
 
 
 async def append_log(engine: WorkflowEngine, attempt: ScriptRunRecord, text: str) -> None:
-    """Append one progress line to *attempt*'s run."""
+    """Add one progress line to the attempt's run."""
     run = await _current_run(engine, attempt)
     await asyncio.to_thread(engine.store.append_log, run.run_id, run.epoch, text)
 
 
 async def _observe_exit(engine: WorkflowEngine, run_id: str, script_run_id: str) -> None:
+    """End the run soon after its script reported: look for the exit instead of waiting for the next pass."""
     for delay in _EXIT_POLL_SECONDS:
         await asyncio.sleep(delay)
         if (await engine.scripts.reconcile_durable(run_id=script_run_id)).state in TERMINAL_SCRIPT_RUN_STATES:
+            # Only the run that reported: another run's ended attempt is the next pass's to judge.
             with suppress(WorkflowRunNotFoundError):
                 run = await asyncio.to_thread(engine.store.get_run, run_id)
                 if run.script_run_id == script_run_id:
@@ -791,7 +859,11 @@ async def _observe_exit(engine: WorkflowEngine, run_id: str, script_run_id: str)
 
 
 async def finish(engine: WorkflowEngine, attempt: ScriptRunRecord, *, result: object, error: str | None) -> None:
-    """Store what `main(args)` returned or raised and watch for the attempt process to exit."""
+    """Store what the script's `main` returned or raised; the run ends when the attempt's process has.
+
+    Also for a run that shows `waiting`: a call an earlier attempt left with a person, which this attempt's
+    script did not reach, takes nothing from the report of the attempt the run serves.
+    """
     run = await _current_run(engine, attempt)
     report = partial(engine.store.update_run, run.run_id, run.epoch, when=SERVED_RUN_STATES)
     await asyncio.to_thread(report, result=result, error=error, finished_at=utc_timestamp())

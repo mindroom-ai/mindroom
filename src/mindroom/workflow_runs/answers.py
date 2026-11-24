@@ -1,4 +1,9 @@
-"""Workflow notices, question cards, and answers (client answer events and `!answer`)."""
+"""Workflow notices, question cards, and answers (client answer events and `!answer`).
+
+The one way a run's card and its questions reach the room. Every notice is content a homeserver signs, so it
+holds no float, and it is measured as the edit it is or will get, which carries its content twice. Also covers
+a question card's text and edits, which answers count, a client's answer event, and `!answer`.
+"""
 
 from __future__ import annotations
 
@@ -32,13 +37,17 @@ type AnswerOutcome = Literal[
     "not_an_option",
 ]
 
+# How long a send that failed waits before each further try: a homeserver that restarts, or a rate limit.
 RETRY_SECONDS = (0.5, 2.0)
+# What a question may offer, so that its card always is one event: a card cannot cut an option short, since the
+# answer is the option's own text.
 MAX_OPTIONS, MAX_OPTION_BYTES = 20, 200
+# What stands for a notice's event while one that was not posted yet is measured as the edit it will get.
 _NO_EVENT = "$" + "0" * 43
 _CUT = "... [truncated]"
+# How much of the question, answer and options the card shows: (chars, answer_chars, option_chars, body_option_chars).
 _ANSWER_CHARS = 500
 _ANSWER = re.compile(r"(?:(q[0-9a-f]{6})\s+)?(.+)", re.DOTALL)
-# (question_chars, answer_chars, option_chars, body_option_chars) ladders to fit one encrypted Matrix event.
 _OPEN_FITS: tuple[tuple[int, int, int | None, int | None], ...] = (
     (2000, _ANSWER_CHARS, None, None),
     (500, _ANSWER_CHARS, None, None),
@@ -58,14 +67,14 @@ _CLOSED_FITS: tuple[tuple[int, int, int | None, int | None], ...] = (
 
 
 def clip(text: str, chars: int) -> str:
-    """Return *text* in at most *chars* characters, marking truncation when cut."""
+    """Return *text* in at most *chars* characters, with a mark at the end of one that was cut."""
     if len(text) <= chars:
         return text
     return text[: chars - len(_CUT)] + _CUT if chars > len(_CUT) else text[:chars]
 
 
 def _signable(value: object) -> object:
-    """Convert floats to canonical decimal strings so homeservers can sign the event."""
+    """Return *value* as an event a homeserver signs may hold it: a float as a decimal string of six places at most."""
     if isinstance(value, float):
         return format_cost_usd(value)
     if isinstance(value, dict):
@@ -74,7 +83,7 @@ def _signable(value: object) -> object:
 
 
 def notice(run: WorkflowRun, text: str, key: str, content: dict[str, Any]) -> dict[str, Any]:
-    """Build a thread notice carrying signable *content* under *key*."""
+    """Return a notice in the run's thread that says *text* and carries *content* under *key*."""
     return build_message_content(
         text,
         thread_event_id=run.thread_root_event_id,
@@ -91,7 +100,7 @@ def notice_fits(
     *,
     as_edit: bool = True,
 ) -> bool:
-    """Return whether *message* fits one Matrix event in *run*'s room (measured as an edit when *as_edit*)."""
+    """Return whether *message* is one event in the run's room, as an edit of *event_id* when *as_edit*."""
     room = client.rooms.get(run.room_id)
     payload = (
         build_edit_event_content(event_id=event_id or _NO_EVENT, new_content=message, new_text=message["body"])
@@ -110,7 +119,11 @@ async def send_notice(
     transaction_id: str | None = None,
     retries: tuple[float, ...] = RETRY_SECONDS,
 ) -> str | None:
-    """Post *message* under *transaction_id* or edit *event_id*, retrying after *retries*; return its event ID."""
+    """Post *message*, or edit the notice at *event_id* to say it, and return the notice's event.
+
+    A post is sent under *transaction_id*, so one that is sent again is the same event. A send that fails is tried
+    again after each of *retries*; None says that it could not be sent now, and the caller's next look sends it.
+    """
     for wait in (*retries, None):
         if event_id is None:
             sent = await send_message_result(
@@ -130,12 +143,12 @@ async def send_notice(
 
 
 def question_id(run_id: str, seq: int, generation: int) -> str:
-    """Return the short ID (`q<6 hex>`) scoped to one run, node sequence, and generation."""
+    """Return the short ID a person answers a question by: no two runs, and no question and its rerun, share one."""
     return "q" + hashlib.sha256(f"{run_id}:{seq}:{generation}".encode()).hexdigest()[:6]
 
 
 def options_text(options: list[str]) -> str:
-    """Return a numbered option line accepted by `!answer`."""
+    """Return a question's options as a numbered line, which `!answer` takes the numbers of."""
     return " ".join(f"{number}. {option}" for number, option in enumerate(options, 1)) + "."
 
 
@@ -155,7 +168,11 @@ def question_content(
     answer_chars: int = _ANSWER_CHARS,
     option_chars: int | None = None,
 ) -> dict[str, Any]:
-    """Build the question card payload for *node* clipped to the given limits."""
+    """Return what the card of the `ask` call *node* says: the question, its options, and where it stands.
+
+    The card shows the first *chars* characters of the question and the start of a long answer; the call keeps
+    both whole. A closed edit may also clip its repeated options to fit one encrypted event.
+    """
     given = node.request.get("options")
     raw_options = [str(option) for option in given] if isinstance(given, list | tuple) else []
     return {
@@ -177,6 +194,7 @@ def _question_message(
     *,
     body_option_chars: int | None = None,
 ) -> dict[str, Any]:
+    """Return the card as a notice in the run's thread, with a text for a client that does not draw it."""
     qid = content["question_id"]
     text = f"Question {qid}: {content['text']}"
     if content["status"] == "open":
@@ -197,7 +215,12 @@ async def show_question(
     answer: str | None = None,
     retries: tuple[float, ...] = (),
 ) -> str | None:
-    """Post an open question card (idempotent via transaction ID) or edit an existing card to its closed state."""
+    """Post the card of a question, or edit it to say how the question ended; return its event, None when not sent.
+
+    The card is posted under a transaction ID made from the run, the call and its generation, so a primary that
+    stopped before it saved the event sends again and gets the same event. It shows as much of the question as
+    keeps it one event.
+    """
     as_edit = status != "open"
     event_id = node.links.get("event_id") if as_edit else None
     if as_edit and not isinstance(event_id, str):
@@ -220,7 +243,7 @@ async def show_question(
 
 
 def _open(node: WorkflowNode | None) -> bool:
-    """Return whether *node* is a posted question still waiting for a person."""
+    """Return whether *node* is a question that waits and that somebody was shown: one whose card was posted."""
     waits = node is not None and (node.state, node.waiting_on) == (WorkflowNodeState.WAITING, "user")
     return waits and node.kind == "ask" and "event_id" in node.links
 
@@ -237,7 +260,11 @@ async def answer_question(
     option: str | None,
     text: str | None,
 ) -> AnswerOutcome:
-    """Validate and record one requester answer to an open question card."""
+    """Answer the question of one `ask` call of a run, and return whether the answer counted or why it did not.
+
+    It counts only from the run's requester, in the run's room and thread, for the card of the call as it is now,
+    while the call waits. A question with options takes one of them as *option*, any other one free *text*.
+    """
     try:
         run = engine.store.get_run(run_id)
     except WorkflowRunNotFoundError:
@@ -263,7 +290,12 @@ async def handle_workflow_answer(
     agent_name: str,
     engine: Callable[[], WorkflowEngine],
 ) -> AnswerOutcome | None:
-    """Handle a client `io.mindroom.workflow_answer` event on the bot serving the run, replying on rejection."""
+    """Answer the question a client's answer event names, and tell its sender when the answer did not count.
+
+    The event is `{run, node, option | text}` in the run's thread, as a reply to the question's card. Every bot in
+    the room gets it: only the bot that serves the run acts (the others return None), and sends `{run, node, reason}`
+    as a reply to an answer that was not accepted.
+    """
     content, sender, workflows = event.source.get("content"), event.source.get("sender"), engine()
     if not isinstance(content, dict) or not isinstance(sender, str):
         return None
@@ -306,7 +338,11 @@ async def handle_workflow_answer(
 
 
 async def answer_command(engine: WorkflowEngine, *, room_id: str, thread_id: str | None, sender: str, text: str) -> str:
-    """Handle `!answer [id] <answer>` for *sender* in the current thread and return the command reply."""
+    """Answer an open question of *sender* in this thread for `!answer [id] <answer>`, and return the reply.
+
+    The ID names one question; without it the answer goes to the sender's only open question here. An option is
+    answered by its number or its text.
+    """
     match = _ANSWER.fullmatch(text.strip())
     named, answer = (match.group(1), match.group(2).strip()) if match else (None, "")
     if not answer or (named is None and _ANSWER.fullmatch(f"{answer} x").group(1)):  # type: ignore[union-attr]

@@ -31,13 +31,16 @@ _TOO_MANY_OPTIONS = "A question takes at most 20 options of at most 200 bytes ea
 
 
 def poster(engine: WorkflowEngine, run: WorkflowRun) -> nio.AsyncClient | None:
-    """Return the Matrix client that posts for *run*, or None while the run may not act."""
+    """Return the client of the bot that serves *run*, which posts for it, or None while the run may not act."""
     context = engine.authorize(run)
     return None if context is None or isinstance(context, str) else context.client
 
 
 async def asked(engine: WorkflowEngine, run: WorkflowRun, node: WorkflowNode, epoch: int) -> WorkflowNode:
-    """Post the question card for a waiting `ask` node without one yet, returning the stamped node."""
+    """Send the card of a question that waits and has none yet, and return the node with it.
+
+    While the card cannot be sent the request fails as a transport error does, which the script's SDK repeats.
+    """
     if node.kind != "ask" or node.state is not WorkflowNodeState.WAITING or "event_id" in node.links:
         return node
     client = poster(engine, run)
@@ -57,7 +60,7 @@ async def close_card(
     answer_text: str | None = None,
     retries: tuple[float, ...] = (),
 ) -> None:
-    """Edit a question card to show its closed status; best effort."""
+    """Show on a question's card that it was answered or that nobody can answer it any more; best effort."""
     if (client := poster(engine, run)) is not None:
         await show_question(client, run, node, status, answer_text, retries)
 
@@ -121,7 +124,7 @@ async def ask_child_question(
     question: str,
     options: list[str] | None,
 ) -> str:
-    """Post or reattach to an agent's question card, yielding its concurrency slot while waiting."""
+    """Post (or reattach to) an agent's own question card, release its slot while waiting, and return the answer."""
     validate_question_options(options)
     ask_key = f"{parent.key}?{parent.generation}:{result_digest([question, options])[:12]}"
     req: dict[str, object] = {"question": question, "options": options}
@@ -163,6 +166,7 @@ async def ask_child_question(
         if runtime is not None and isinstance(job_id, str) and runtime.jobs.retained_job(job_id)
         else None
     )
+    # Cleared only on normal/error exit (not CancelledError), so shutdown keeps wait="user" for recovery.
     clear_wait = None if wait_job is None else partial(wait_job[0].save_adapter, wait_job[1], wait=None)
     async with engine.yield_slot(run_id, parent.key, before_reacquire=clear_wait):
         if wait_job is None:
@@ -174,10 +178,15 @@ async def ask_child_question(
 
 
 async def answer(engine: WorkflowEngine, run_id: str, key: str, generation: int, answer_text: str) -> bool:
-    """Complete the open question at *key* with *answer_text*; return False when no longer waiting."""
+    """Complete the question at *key* with a person's *answer_text*; false when that generation no longer waits.
+
+    The answer is saved under the run's lock and epoch, as every write of the run is, also while no attempt
+    runs: the next attempt reads it back and does not ask again.
+    """
     async with (cond := engine.condition(run_id)):
         run, node = engine.store.get_run(run_id), engine.store.get_node(run_id, key)
         waits = node is not None and (node.state, node.waiting_on) == (WorkflowNodeState.WAITING, "user")
+        # An answer is an act of the run, to a card somebody was shown: both are checked as they are now.
         context = engine.authorize(run)
         ok = waits and "event_id" in node.links and context is not None and not isinstance(context, str)
         if run.state in TERMINAL_RUN_STATES or node is None or node.generation != generation or not ok:
@@ -186,6 +195,7 @@ async def answer(engine: WorkflowEngine, run_id: str, key: str, generation: int,
             return False
         await engine.restate(run_id)
         cond.notify_all()
+    # Without the lock, which no send to the room holds up for long.
     await close_card(engine, run, node, "answered", answer_text, RETRY_SECONDS)
     return True
 
@@ -276,7 +286,10 @@ async def wait_for_messages(
 
 
 async def wait_inbox(engine: WorkflowEngine, run: WorkflowRun, node: WorkflowNode, epoch: int, wait: float) -> None:
-    """Wait for a script's `inbox()` call and settle its node when mail arrives or the deadline expires."""
+    """Wait for a script's `inbox()` message call and settle its node when mail arrives or the deadline expires.
+
+    `script_op` already validated *wait*; raising here would leave the node waiting in a background task.
+    """
     reader = NodeRef("script", 1, "script")
     read_fn = partial(
         read_call,
