@@ -3536,9 +3536,9 @@ class TestTeamCompletion:
             f"<your_role>\n{opening}## Your Identity\nYou are Super Team, the MindRoom team exposed through the"
             " OpenAI-compatible API: you lead its members, hand them work, and write the team's answer.\n"
             "Team purpose: Collaborative engineering team\n"
-            "In OpenAI-compatible API contexts, prior turns may instead appear as plain `role: body` lines.",
+            "In OpenAI-compatible API contexts, prior turns can appear as plain `role: body` lines;",
         )
-        for matrix_text in ("Matrix chatroom", "<conversation>", "complete Matrix ID"):
+        for matrix_text in ("Matrix chatroom", "<msg>", "full Matrix ID"):
             assert matrix_text not in leader_prompt
         for member in built.spec.members:
             assert "the MindRoom agent exposed through the OpenAI-compatible API" in str(

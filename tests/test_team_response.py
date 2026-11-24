@@ -330,9 +330,10 @@ async def test_the_leader_reads_each_member_s_authored_role_and_its_own_identity
 
     leader_prompt = str(_leader(team).requests[0].messages[0].content)
     assert leader_prompt.startswith(
-        "<your_role>\n## Your Identity\nYou are Team (GeneralAgent, ResearchAgent), a team in the Mindroom",
+        "<your_role>\n## Your Identity\nYou are Team (GeneralAgent, ResearchAgent), a MindRoom team in a Matrix chatroom:",
     )
-    assert "<conversation>" in leader_prompt
+    assert "<msg>" in leader_prompt
+    assert "<conversation>" not in leader_prompt
     assert '<member id="general" name="GeneralAgent">\n  Role: Answers.\n</member>' in leader_prompt
     assert '<member id="research" name="ResearchAgent">\n  Role: Researches.\n</member>' in leader_prompt
     assert "Matrix ID: @mindroom_general" not in leader_prompt
@@ -628,7 +629,7 @@ async def test_system_enrichment_follows_the_leader_s_and_each_member_s_configur
     leader_system = system_text(_leader(team).requests[0].messages)
     member_system = system_text(team.models["general-model"].requests[0].messages)
     for system in (leader_system, member_system):
-        assert system.index("Timezone: UTC") < system.index('<item key="weather"') < system.index("72F and sunny")
+        assert system.index("(UTC, UTC).") < system.index('<item key="weather"') < system.index("72F and sunny")
 
 
 @pytest.mark.asyncio
