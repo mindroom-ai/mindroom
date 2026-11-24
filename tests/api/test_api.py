@@ -3540,12 +3540,93 @@ def test_frontend_redirects_to_login_when_api_key_auth_is_enabled(api_key_client
 
 
 def test_frontend_login_page_renders_for_api_key_auth(api_key_client: TestClient) -> None:
-    """Standalone API-key auth should expose a simple login form."""
+    """Standalone API-key auth from the process env should hint at the service environment."""
+    assert isinstance(api_key_client.app, FastAPI)
+    runtime_paths = main._app_runtime_paths(api_key_client.app)
     response = api_key_client.get("/login?next=/agents")
     assert response.status_code == 200
     assert "Enter the dashboard API key to continue" in response.text
-    assert "MINDROOM_API_KEY" in response.text
-    assert ".env" in response.text
+    assert (
+        "<p>Check <code>MINDROOM_API_KEY</code> in the environment configured for your MindRoom service.</p>"
+        in response.text
+    )
+    assert ".env" not in response.text
+    assert str(runtime_paths.env_path) not in response.text
+
+
+@pytest.mark.parametrize(
+    ("process_env", "expected_source", "expected_key"),
+    [
+        ({}, "env_file", "file-key"),
+        ({"MINDROOM_API_KEY": "process-key"}, "process_env", "process-key"),
+        ({"MINDROOM_API_KEY": ""}, "env_file", "file-key"),
+        ({"MINDROOM_API_KEY": "   "}, "env_file", "file-key"),
+    ],
+    ids=["env-file", "process-env-shadows-env-file", "blank-process-env", "whitespace-process-env"],
+)
+def test_frontend_login_page_hint_matches_api_key_source(
+    temp_config_file: Path,
+    process_env: dict[str, str],
+    expected_source: constants.EnvValueSource,
+    expected_key: str,
+) -> None:
+    """The login hint should point to whichever layer actually supplied `MINDROOM_API_KEY`."""
+    (temp_config_file.parent / ".env").write_text("MINDROOM_API_KEY=file-key\n", encoding="utf-8")
+    runtime_paths = constants.resolve_primary_runtime_paths(
+        config_path=temp_config_file,
+        process_env={"MINDROOM_OWNER_USER_ID": "@owner:example.org", **process_env},
+    )
+    main.initialize_api_app(main.app, runtime_paths)
+    bind_test_embedded_runtime(main.app)
+    config_lifecycle.load_config_into_app(main._app_runtime_paths(main.app), main.app)
+    response = TestClient(main.app, base_url="http://localhost").get("/login?next=/agents")
+
+    assert response.status_code == 200
+    auth_state = config_lifecycle.app_state(main.app).api_auth_state
+    assert auth_state is not None
+    assert (auth_state.settings.mindroom_api_key, auth_state.settings.mindroom_api_key_source) == (
+        expected_key,
+        expected_source,
+    )
+    if expected_source == "env_file":
+        assert (
+            f"<p>Find it in <code>{runtime_paths.env_path}</code> as <code>MINDROOM_API_KEY=...</code>.</p>"
+            in response.text
+        )
+        assert "environment configured for your MindRoom service" not in response.text
+    else:
+        assert (
+            "<p>Check <code>MINDROOM_API_KEY</code> in the environment configured for your MindRoom service.</p>"
+            in response.text
+        )
+        assert ".env" not in response.text
+        assert str(runtime_paths.env_path) not in response.text
+
+
+def test_frontend_login_page_falls_back_when_api_key_source_is_unavailable(api_key_client: TestClient) -> None:
+    """When key source metadata is unavailable, the login hint should cover both locations without leaking paths."""
+    assert isinstance(api_key_client.app, FastAPI)
+    runtime_paths = main._app_runtime_paths(api_key_client.app)
+    config_lifecycle.app_state(api_key_client.app).api_auth_state = auth.ApiAuthState(
+        runtime_paths=runtime_paths,
+        settings=auth._ApiAuthSettings(
+            supabase_url=None,
+            supabase_anon_key=None,
+            account_id=None,
+            mindroom_api_key="test-key",
+            mindroom_api_key_source=None,
+        ),
+        supabase_auth=None,
+    )
+
+    response = api_key_client.get("/login?next=/agents")
+
+    assert response.status_code == 200
+    assert (
+        "<p>Check <code>MINDROOM_API_KEY</code> in the environment configured for your MindRoom service "
+        "or in the <code>.env</code> file beside <code>config.yaml</code>.</p>" in response.text
+    )
+    assert str(runtime_paths.env_path) not in response.text
 
 
 def test_frontend_login_page_serializes_oauth_next_path_without_html_entities(
