@@ -13,7 +13,7 @@ import gc
 import html
 import inspect
 import json
-from contextlib import asynccontextmanager, contextmanager, suppress
+from contextlib import asynccontextmanager, contextmanager, nullcontext, suppress
 from dataclasses import dataclass, field, replace
 from datetime import timedelta
 from functools import partial
@@ -1339,7 +1339,13 @@ async def test_concurrent_requests_serialize_and_refresh_history_under_lock(tmp_
 
     refresh_calls = 0
 
-    async def fake_fetch(room_id: str, thread_id: str) -> ThreadHistoryResult:
+    async def fake_fetch(
+        room_id: str,
+        thread_id: str,
+        *,
+        requester_id: str | None = None,
+    ) -> ThreadHistoryResult:
+        del requester_id
         nonlocal refresh_calls
         assert (room_id, thread_id) == ("!room:localhost", "$thread")
         refresh_calls += 1
@@ -9049,3 +9055,352 @@ def test_job_follow_up_request_resolves_managed_entity_requester_kind(tmp_path: 
     assert human_origin.requester_kind is SenderKind.USER
     assert human_origin.active_human_requester_id == "@user:localhost"
     assert not human_origin.may_answer_interactive_prompt
+
+
+async def _seed_cross_room_fork_with_attachments(
+    bot: AgentBot,
+    tmp_path: Path,
+    *,
+    authorized: bool,
+    parent_attachment_ids: tuple[str, ...] = ("att_parent",),
+) -> tuple[str, str]:
+    """Configure a cross-room fork and register one vetted parent image and one unvetted other-room image."""
+    import base64  # noqa: PLC0415
+
+    from mindroom.attachments.storage import register_local_attachment  # noqa: PLC0415
+    from mindroom.constants import ATTACHMENT_IDS_KEY, FORK_CONTENT_KEY  # noqa: PLC0415
+    from tests.conftest import make_visible_message  # noqa: PLC0415
+    from tests.threading_helpers import seed_thread_history  # noqa: PLC0415
+
+    source_room_id, target_room_id = "!source:localhost", "!room:localhost"
+    source_room = nio.MatrixRoom(source_room_id, bot.client.user_id)
+    source_room.members_synced = True
+    source_room.add_member(bot.client.user_id, "General", None)
+    source_room.add_member("@user:localhost", "User", None)
+
+    target_room = nio.MatrixRoom(target_room_id, bot.client.user_id)
+    target_room.members_synced = True
+    target_room.add_member(bot.client.user_id, "General", None)
+    target_room.add_member("@user:localhost", "User", None)
+    if not authorized:
+        target_room.add_member("@outsider:localhost", "Outsider", None)
+
+    bot.client.rooms = {source_room_id: source_room, target_room_id: target_room}
+    bot.client.room_get_state = AsyncMock(
+        side_effect=lambda room_id: (
+            nio.RoomGetStateResponse(
+                room_id=room_id,
+                events=[
+                    {"type": "m.room.member", "state_key": user_id, "content": {"membership": "join"}}
+                    for user_id in bot.client.rooms[room_id].users
+                ],
+            )
+            if room_id in bot.client.rooms
+            else nio.RoomGetStateError("forbidden")
+        ),
+    )
+    bot.client.room_get_state_event = AsyncMock(
+        side_effect=lambda room_id, event_type, state_key="": (
+            nio.RoomGetStateEventResponse(
+                {"history_visibility": bot.client.rooms[room_id].history_visibility},
+                event_type,
+                state_key,
+                room_id,
+            )
+            if event_type == "m.room.history_visibility" and room_id in bot.client.rooms
+            else nio.RoomGetStateEventError("not found", status_code="M_NOT_FOUND")
+        ),
+    )
+    await seed_thread_history(
+        bot,
+        room_id=source_room_id,
+        thread_id="$parent",
+        messages=[
+            make_visible_message(
+                event_id="$parent",
+                sender="@user:localhost",
+                body="source with attachment",
+                content={"body": "source with attachment", ATTACHMENT_IDS_KEY: list(parent_attachment_ids)},
+            ),
+        ],
+    )
+    await seed_thread_history(
+        bot,
+        room_id=target_room_id,
+        thread_id="$fork",
+        messages=[
+            make_visible_message(
+                event_id="$fork",
+                sender="@user:localhost",
+                body="continue in target",
+                content={
+                    "body": "continue in target",
+                    FORK_CONTENT_KEY: {"room_id": source_room_id, "thread_id": "$parent", "event_id": "$parent"},
+                },
+            ),
+        ],
+    )
+    png_bytes = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1cAAAAASUVORK5CYII=",
+    )
+    for filename, att_id, room_id, thread_id in (
+        ("parent.png", "att_parent", source_room_id, "$parent"),
+        ("other.png", "att_other", "!other:localhost", "$other"),
+    ):
+        img_path = tmp_path / filename
+        img_path.write_bytes(png_bytes)
+        assert (
+            register_local_attachment(
+                bot.storage_path,
+                img_path,
+                kind="image",
+                attachment_id=att_id,
+                mime_type="image/png",
+                room_id=room_id,
+                thread_id=thread_id,
+            )
+            is not None
+        )
+    return source_room_id, target_room_id
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("authorized", [True, False], ids=["authorized-parent", "revoked-outsider"])
+async def test_approval_resume_restores_vetted_cross_room_fork_parent_scopes_for_get_attachment_view(
+    tmp_path: Path,
+    *,
+    authorized: bool,
+) -> None:
+    """Resumed approval turns rebuild fork_parent_scopes so vetted parent images stay viewable and unvetted ones fail."""
+    from mindroom.custom_tools.attachments import AttachmentTools  # noqa: PLC0415
+    from mindroom.tool_system.runtime_context import tool_runtime_context  # noqa: PLC0415
+    from mindroom.tool_system.tool_function import ToolValue  # noqa: PLC0415
+    from tests.agent_tool_helpers import toolkit_offers  # noqa: PLC0415
+
+    bot = _bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    await _admit_approval_source(runner.deps.replies.store)
+    _source_room_id, target_room_id = await _seed_cross_room_fork_with_attachments(
+        bot,
+        tmp_path,
+        authorized=authorized,
+    )
+
+    target = _target(thread_id="$fork")
+    identity = runner.deps.tool_runtime.build_execution_identity(target=target, user_id="@user:localhost")
+    continuation = approval_continuation(
+        approval_id="approval-fork-attachment",
+        room_id=target_room_id,
+        thread_id="$fork",
+        attachment_ids=("att_parent", "att_other"),
+        calls=(
+            ApprovalCall(
+                tool_call_id="call-1",
+                tool_name="get_attachment",
+                invoking_agent="general",
+                expires_at_ns=1,
+                decision=ApprovalDecision.APPROVED,
+                human_approval_required=True,
+            ),
+        ),
+        execution_identity=identity,
+    )
+    assert await paused_for_approval(runner.deps.replies.store, continuation) is not None
+    request = _plain_request(target, source_event_id="$source")
+
+    results: dict[str, object] = {}
+
+    async def continue_run(
+        *_args: object,
+        tool_context: ToolRuntimeContext,
+        **_kwargs: object,
+    ) -> CompletedApprovalRun:
+        with tool_runtime_context(tool_context):
+            get_attachment = toolkit_offers(AttachmentTools(), "get_attachment").entrypoint
+            results["parent"] = await get_attachment(attachment_id="att_parent", view=True)
+            results["other"] = await get_attachment(attachment_id="att_other", view=True)
+        return CompletedApprovalRun(response_text="done", metadata_content={})
+
+    with patch("mindroom.approval.execution.AgentApprovalExecution.continue_run", new=continue_run):
+        async with resumed_approval(bot, continuation) as claimed:
+            await runner.approvals._continue_entity_call(
+                claimed,
+                request=request,
+                target=target,
+                tool_trace_collector=[],
+                progress=None,
+                cli_approval_handler=None,
+            )
+
+    if authorized:
+        assert isinstance(results["parent"], ToolValue)
+        assert results["parent"].images
+    else:
+        assert "not available in this context" in str(results["parent"])
+    assert "not available in this context" in str(results["other"])
+
+
+def _register_test_pdfs(
+    bot: AgentBot,
+    tmp_path: Path,
+    *,
+    source_room_id: str,
+    target_room_id: str,
+) -> bytes:
+    """Register parent, same-room, and unrelated-room PDF attachments for approval-resume filtering tests."""
+    from mindroom.attachments.storage import register_local_attachment  # noqa: PLC0415
+
+    pdf_bytes = b"%PDF-1.4\n1 0 obj<<>>endobj\ntrailer<<>>\n%%EOF\n"
+    for filename, att_id, room_id, thread_id in (
+        ("parent.pdf", "att_parent_pdf", source_room_id, "$parent"),
+        ("local.pdf", "att_local_pdf", target_room_id, "$fork"),
+        ("other.pdf", "att_other_pdf", "!other:localhost", "$other"),
+    ):
+        pdf_path = tmp_path / filename
+        pdf_path.write_bytes(pdf_bytes)
+        assert (
+            register_local_attachment(
+                bot.storage_path,
+                pdf_path,
+                kind="file",
+                attachment_id=att_id,
+                mime_type="application/pdf",
+                room_id=room_id,
+                thread_id=thread_id,
+            )
+            is not None
+        )
+    return pdf_bytes
+
+
+def _assert_pdf_accessible(
+    results: dict[str, object],
+    prefix: str,
+    *,
+    workspace_dir: Path,
+    output_name: str,
+    pdf_bytes: bytes,
+) -> None:
+    """Assert view, inspect, and save-to-workspace all succeed for one PDF attachment."""
+    from mindroom.tool_system.tool_function import ToolValue  # noqa: PLC0415
+
+    viewed = results[f"{prefix}_view"]
+    assert isinstance(viewed, ToolValue)
+    assert viewed.files
+    assert viewed.files[0].mime_type == "application/pdf"
+    assert json.loads(str(results[f"{prefix}_inspect"]))["status"] == "ok"
+    assert json.loads(str(results[f"{prefix}_save"]))["status"] == "ok"
+    assert (workspace_dir / output_name).read_bytes() == pdf_bytes
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["authorized", "denied", "refresh-failed"])
+async def test_approval_resume_filters_foreign_parent_pdf_attachment_when_reauthorization_fails(
+    tmp_path: Path,
+    *,
+    mode: str,
+) -> None:
+    """Approval resume filters foreign parent PDF IDs on denial or refresh failure while keeping same-room attachments."""
+    from mindroom.custom_tools.attachments import AttachmentTools  # noqa: PLC0415
+    from mindroom.tool_system.runtime_context import tool_runtime_context  # noqa: PLC0415
+    from tests.agent_tool_helpers import toolkit_offers  # noqa: PLC0415
+
+    bot = _bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    await _admit_approval_source(runner.deps.replies.store)
+    source_room_id, target_room_id = await _seed_cross_room_fork_with_attachments(
+        bot,
+        tmp_path,
+        authorized=mode != "denied",
+        parent_attachment_ids=("att_parent_pdf",),
+    )
+    pdf_bytes = _register_test_pdfs(bot, tmp_path, source_room_id=source_room_id, target_room_id=target_room_id)
+    workspace_dir = tmp_path / "workspace"
+    workspace_dir.mkdir()
+
+    target = _target(thread_id="$fork")
+    identity = runner.deps.tool_runtime.build_execution_identity(target=target, user_id="@user:localhost")
+    continuation = approval_continuation(
+        approval_id=f"approval-fork-pdf-{mode}",
+        room_id=target_room_id,
+        thread_id="$fork",
+        attachment_ids=("att_parent_pdf", "att_local_pdf", "att_other_pdf"),
+        calls=(
+            ApprovalCall(
+                tool_call_id="call-1",
+                tool_name="get_attachment",
+                invoking_agent="general",
+                expires_at_ns=1,
+                decision=ApprovalDecision.APPROVED,
+                human_approval_required=True,
+            ),
+        ),
+        execution_identity=identity,
+    )
+    assert await paused_for_approval(runner.deps.replies.store, continuation) is not None
+    request = _plain_request(target, source_event_id="$source")
+    results: dict[str, object] = {}
+
+    async def continue_run(
+        *_args: object,
+        tool_context: ToolRuntimeContext,
+        **_kwargs: object,
+    ) -> CompletedApprovalRun:
+        results["attachment_ids"] = tool_context.attachment_ids
+        tools = AttachmentTools(tool_output_workspace_root=workspace_dir, runtime_paths=bot.runtime_paths)
+        with tool_runtime_context(tool_context):
+            get_attachment = toolkit_offers(tools, "get_attachment").entrypoint
+            for prefix, att_id, out_name in (
+                ("parent", "att_parent_pdf", "parent.pdf"),
+                ("local", "att_local_pdf", "local.pdf"),
+            ):
+                results[f"{prefix}_view"] = await get_attachment(attachment_id=att_id, view=True)
+                results[f"{prefix}_inspect"] = await get_attachment(attachment_id=att_id)
+                results[f"{prefix}_save"] = await get_attachment(attachment_id=att_id, mindroom_output_path=out_name)
+            results["other_view"] = await get_attachment(attachment_id="att_other_pdf", view=True)
+        return CompletedApprovalRun(response_text="done", metadata_content={})
+
+    refresh_patch = (
+        patch.object(
+            runner.deps.resolver,
+            "fetch_thread_history",
+            new=AsyncMock(side_effect=RuntimeError("matrix unavailable")),
+        )
+        if mode == "refresh-failed"
+        else nullcontext()
+    )
+    with (
+        refresh_patch,
+        patch("mindroom.approval.execution.AgentApprovalExecution.continue_run", new=continue_run),
+    ):
+        async with resumed_approval(bot, continuation) as claimed:
+            await runner.approvals._continue_entity_call(
+                claimed,
+                request=request,
+                target=target,
+                tool_trace_collector=[],
+                progress=None,
+                cli_approval_handler=None,
+            )
+
+    if mode == "authorized":
+        assert results["attachment_ids"] == ("att_parent_pdf", "att_local_pdf")
+        _assert_pdf_accessible(
+            results,
+            "parent",
+            workspace_dir=workspace_dir,
+            output_name="parent.pdf",
+            pdf_bytes=pdf_bytes,
+        )
+    else:
+        assert results["attachment_ids"] == ("att_local_pdf",)
+        for key in ("parent_view", "parent_inspect", "parent_save"):
+            payload = json.loads(str(results[key]))
+            assert payload["status"] == "error"
+            assert "not available in this context" in payload["message"]
+        assert not (workspace_dir / "parent.pdf").exists()
+
+    _assert_pdf_accessible(results, "local", workspace_dir=workspace_dir, output_name="local.pdf", pdf_bytes=pdf_bytes)
+    other_payload = json.loads(str(results["other_view"]))
+    assert other_payload["status"] == "error"
+    assert "not available in this context" in other_payload["message"]

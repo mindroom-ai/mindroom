@@ -764,7 +764,12 @@ async def test_handle_message_edit_reuses_persisted_target_and_thread_scope(
         )
         await finish_edit_regenerations(bot)
 
-    mock_context.assert_awaited_once_with(room, edit_event, thread_id=stored_target.resolved_thread_id)
+    mock_context.assert_awaited_once_with(
+        room,
+        edit_event,
+        thread_id=stored_target.resolved_thread_id,
+        requester_id="@user:example.com",
+    )
     mock_remove_stale_runs.assert_called_once()
     request = mock_generate_response.call_args.args[0]
     response_target = request.response_envelope.target

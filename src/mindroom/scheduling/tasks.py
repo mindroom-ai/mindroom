@@ -1106,7 +1106,7 @@ async def schedule_task(  # noqa: C901, PLR0912, PLR0915
                 msg = f"Could not read this thread's history: {e}"
                 raise SchedulingError(msg) from e
             available_responders = filter_thread_agents_for_sender(
-                get_agents_in_thread(thread_history, config, runtime_paths),
+                get_agents_in_thread(thread_history, config, runtime_paths, room_id=room_id),
                 scheduled_by,
                 config,
                 runtime_paths,

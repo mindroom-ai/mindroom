@@ -211,6 +211,7 @@ class EditRegenerator:
             room,
             event,
             thread_id=turn_record.conversation_target.resolved_thread_id,
+            requester_id=requester_user_id,
         )
         envelope = self.deps.resolver.build_envelope(
             event=event,

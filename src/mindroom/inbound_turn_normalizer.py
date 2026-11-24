@@ -12,6 +12,7 @@ from mindroom.attachments.media import attachment_records_to_media, resolve_scop
 from mindroom.attachments.storage import (
     format_attachments_prompt,
     format_voice_transcript_attachment_guidance,
+    parent_attachment_refs_in_history,
     parse_attachment_ids_from_thread_history,
     register_matrix_media_attachment,
     register_thread_history_media_attachments,
@@ -33,7 +34,7 @@ from mindroom.matrix.media import (
 )
 from mindroom.matrix.message_content import resolve_event_source_content
 from mindroom.matrix.sidecar_content import holds_unresolved_sidecar
-from mindroom.matrix.thread_forks import fork_parent_thread_ids
+from mindroom.matrix.thread_forks import fork_parent_scopes
 from mindroom.media_inputs import MediaInputs
 from mindroom.runtime_protocols import SupportsClientConfigMemberships  # noqa: TC001
 from mindroom.timing import emit_elapsed_timing
@@ -350,11 +351,20 @@ class InboundTurnNormalizer:
             else []
         )
         history_attachment_ids = parse_attachment_ids_from_thread_history(request.thread_history)
-        # A fork's turn may use the attachments of its parents' messages it shows, registered in those threads.
-        parent_thread_ids = (
-            fork_parent_thread_ids(request.thread_history, request.media_thread_id)
+        # A fork's turn may use the attachments of its parents' messages it shows, registered in those scopes.
+        parent_scopes = (
+            fork_parent_scopes(request.thread_history, request.media_thread_id, room_id=request.room_id)
             if request.media_thread_id is not None
             else frozenset()
+        )
+        parent_refs = (
+            parent_attachment_refs_in_history(
+                request.thread_history,
+                room_id=request.room_id,
+                parent_scopes=parent_scopes,
+            )
+            if parent_scopes
+            else ()
         )
         history_media_attachment_ids = await register_thread_history_media_attachments(
             self._client(),
@@ -362,7 +372,7 @@ class InboundTurnNormalizer:
             room_id=request.room_id,
             thread_id=request.media_thread_id,
             thread_history=request.thread_history,
-            parent_thread_ids=parent_thread_ids,
+            parent_scopes=parent_scopes,
         )
         trusted_current_attachment_ids = merge_attachment_ids(request.trusted_current_attachment_ids)
         attachment_ids = merge_attachment_ids(
@@ -370,6 +380,7 @@ class InboundTurnNormalizer:
             thread_attachment_ids,
             history_attachment_ids,
             history_media_attachment_ids,
+            [attachment_id for _, _, attachment_id in parent_refs],
         )
         scoped_attachment_ids = [
             attachment_id for attachment_id in attachment_ids if attachment_id not in trusted_current_attachment_ids
@@ -379,8 +390,20 @@ class InboundTurnNormalizer:
             scoped_attachment_ids,
             room_id=request.room_id,
             thread_id=request.media_thread_id,
-            parent_thread_ids=parent_thread_ids,
+            parent_scopes=parent_scopes,
         )
+        if parent_scopes:
+            parent_ref_set = frozenset(parent_refs)
+            scoped_records = [
+                record
+                for record in scoped_records
+                if (record.room_id == request.room_id and record.thread_id == request.media_thread_id)
+                or (
+                    record.room_id is not None
+                    and record.thread_id is not None
+                    and (record.room_id, record.thread_id, record.attachment_id) in parent_ref_set
+                )
+            ]
         trusted_records = (
             resolve_scoped_attachments(self.deps.storage_path, trusted_current_attachment_ids)
             if trusted_current_attachment_ids

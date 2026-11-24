@@ -428,6 +428,7 @@ async def _dispatch_fork_turn(
     source_event_ids: tuple[str, ...] = (_FORK_ID,),
     *,
     pick: str | None = None,
+    source_room_id: str | None = None,
 ) -> PreparedDispatch | None:
     """Prepare one turn of the fork ``_FORK_ID`` of ``THREAD_ID`` whose sources are ``source_event_ids``."""
     room = nio.MatrixRoom(room_id=ROOM_ID, own_user_id="@mindroom_code:localhost")
@@ -447,9 +448,12 @@ async def _dispatch_fork_turn(
             "runtime_device_id": "TESTDEVICE",
             "model": pick,
         }
+    fork_ref: dict[str, object] = {"thread_id": THREAD_ID, "event_id": "$parent-reply:localhost"}
+    if source_room_id is not None:
+        fork_ref["room_id"] = source_room_id
     fork_root = make_visible_message(
         event_id=_FORK_ID,
-        content={"body": "carry on", FORK_CONTENT_KEY: {"thread_id": THREAD_ID, "event_id": "$parent-reply:localhost"}},
+        content={"body": "carry on", FORK_CONTENT_KEY: fork_ref},
     )
     context = replace(_dispatch_context(bot), is_thread=True, thread_id=_FORK_ID, thread_history=[fork_root])
     bot._conversation_resolver.extract_dispatch_context = AsyncMock(return_value=context)
@@ -1961,3 +1965,43 @@ def test_ai_run_metadata_optional_model_display_name(
         assert "display_name" not in model
     else:
         assert model["display_name"] == expected_name
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("pick", "expected_code", "expected_router"),
+    [
+        (None, "default", "default"),
+        ("large", "large", "default"),
+    ],
+    ids=["no-pick-uses-target-default", "opening-pick-does-not-inherit-parent-router-model"],
+)
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_cross_room_fork_skips_parent_thread_model_inheritance(
+    tmp_path: Path,
+    pick: str | None,
+    expected_code: str,
+    expected_router: str,
+) -> None:
+    """A cross-room fork ignores parent thread model overrides while still honoring an explicit opening pick."""
+    bot = _fork_bot(tmp_path)
+    bot.config.agents["code"].access = ResponderAccessConfig(users=["@user:localhost"])
+    bot.config.router.access = ResponderAccessConfig(current_room_members=False)
+    set_thread_model_override(
+        bot._turn_dispatcher.deps.runtime_paths,
+        thread_id=THREAD_ID,
+        model_name="large",
+        entity_names=("code", "router"),
+        config=bot.config,
+    )
+
+    await _dispatch_fork_turn(bot, (_FORK_ID,), pick=pick, source_room_id="!other-room:localhost")
+
+    assert _fork_model(bot) == expected_code
+    router = resolve_turn_model(
+        bot.config,
+        runtime_paths_for(bot.config),
+        ModelScope(entity="router", room_id=ROOM_ID, thread_id=_FORK_ID),
+        None,
+    )
+    assert router.model_name == expected_router

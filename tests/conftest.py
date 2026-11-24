@@ -3193,6 +3193,7 @@ def make_visible_message(
     timestamp: int = 0,
     content: dict[str, object] | None = None,
     thread_id: str | None = None,
+    room_id: str | None = None,
 ) -> ResolvedVisibleMessage:
     """Build one typed visible message for thread/history tests."""
     resolved_content = dict(content) if isinstance(content, dict) else {}
@@ -3205,6 +3206,7 @@ def make_visible_message(
         timestamp=timestamp,
         content=resolved_content or None,
         thread_id=thread_id,
+        room_id=room_id,
     )
 
 

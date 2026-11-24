@@ -2722,6 +2722,7 @@ depends_on = [
     "mindroom.matrix.client_visible_messages",
     "mindroom.matrix.conversation_reads",
     "mindroom.matrix.guarded_rooms",
+    "mindroom.matrix.thread_fork_access",
     "mindroom.tool_system.events",
 ]
 visibility = [
@@ -3511,6 +3512,7 @@ from = ["mindroom.reply_turn.enrichment"]
 expose = [
     "interrupted_attempt_model_prompt",
     "matrix_message_target_item",
+    "merge_fork_parent_display_names",
     "prepare_memory_and_model_context",
     "thread_fork_item",
     "with_matrix_message_target",
@@ -4340,6 +4342,7 @@ visibility = [
     "mindroom.custom_tools.matrix_user_writes",
     "mindroom.orchestration.tool_job_runtime",
     "mindroom.email_invites.receiver",
+    "mindroom.matrix.thread_fork_access",
 ]
 
 [[modules]]
@@ -4351,6 +4354,7 @@ visibility = ["mindroom.custom_tools.matrix_voice_message"]
 path = "mindroom.matrix.history_visibility"
 depends_on = []
 visibility = [
+    "mindroom.matrix.thread_fork_access",
     "mindroom.orchestration.plugin_http_runtime",
     "mindroom.plugin_http",
 ]
@@ -5258,6 +5262,7 @@ depends_on = [
     "mindroom.matrix.conversation_reads",
     "mindroom.matrix.event_info",
     "mindroom.matrix.message_content",
+    "mindroom.matrix.thread_fork_access",
     "mindroom.matrix.thread_membership",
     "mindroom.runtime_protocols",
 ]
@@ -6369,6 +6374,7 @@ depends_on = [
     "mindroom.helper_usage",
     "mindroom.entity_resolution",
     "mindroom.matrix.conversation_reads",
+    "mindroom.matrix.thread_fork_access",
     "mindroom.thread_summary.notices",
     "mindroom.providers.registry",
     "mindroom.agent_loop.helper",
@@ -6520,6 +6526,17 @@ visibility = [
 [[modules]]
 path = "mindroom.matrix.room_membership"
 depends_on = []
+
+[[modules]]
+path = "mindroom.matrix.thread_fork_access"
+depends_on = [
+    "mindroom.constants",
+    "mindroom.contacts.store",
+    "mindroom.matrix.client_delivery",
+    "mindroom.matrix.history_visibility",
+    "mindroom.matrix.room_membership",
+    "mindroom.matrix.state_failures",
+]
 
 [[modules]]
 path = "mindroom.voice.visible_voice_echo"

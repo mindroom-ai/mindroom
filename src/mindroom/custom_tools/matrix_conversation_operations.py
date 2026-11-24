@@ -38,6 +38,7 @@ from mindroom.matrix.guarded_rooms import allowed_send
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_reaction_content
 from mindroom.matrix.message_extras import build_message_extras_content
+from mindroom.matrix.thread_fork_access import authorize_cross_room_fork_access
 from mindroom.matrix.thread_forks import with_fork_prefix
 from mindroom.requester_identity import is_human_requester_id
 from mindroom.tool_system.events import body_without_tool_markers, has_tool_trace, strip_visible_tool_markers
@@ -60,9 +61,15 @@ _DIRECT_INTERACTIVE_ERROR = "Interactive prompts are only supported in normal ag
 _CONTACT_TEXT_ONLY_ERROR = "Error: contact rooms accept text only"
 
 
-def _message_payload(message: ResolvedVisibleMessage) -> dict[str, object]:
+def _message_payload(
+    message: ResolvedVisibleMessage,
+    *,
+    room_id: str | None = None,
+) -> dict[str, object]:
     """Return one message for the agent, with its text free of tool display markers."""
     payload = message.to_dict()
+    if room_id is not None and message.room_id not in (None, room_id):
+        payload = {**payload, "room_id": message.room_id}
     if not has_tool_trace(message.content):
         return payload
     body = strip_visible_tool_markers(message.body)
@@ -516,11 +523,14 @@ class MatrixMessageOperations:
     def _build_edit_options(
         context: ToolRuntimeContext,
         *,
+        room_id: str | None = None,
         messages: Sequence[ResolvedVisibleMessage],
     ) -> list[dict[str, object]]:
         current_user_id = context.client.user_id
         options: list[dict[str, object]] = []
         for message in reversed(messages):
+            if room_id is not None and message.room_id not in (None, room_id):
+                continue
             event_id = message.event_id
             sender = message.sender
             can_edit = current_user_id is not None and sender == current_user_id
@@ -549,7 +559,18 @@ class MatrixMessageOperations:
             await complete_thread_history(reader, room_id, thread_id),
             room_id=room_id,
             thread_id=thread_id,
-            read_thread=lambda parent_id: complete_thread_history(reader, room_id, parent_id),
+            read_thread=lambda parent_room_id, parent_id: complete_thread_history(reader, parent_room_id, parent_id),
+            authorize_cross_room=lambda hop: authorize_cross_room_fork_access(
+                client=context.client,
+                config=context.config,
+                runtime_paths=context.runtime_paths,
+                hop=hop,
+                requester_id=context.requester_id,
+                nonblocking=False,
+                target_room=context.room if context.room is not None and context.room.room_id == room_id else None,
+                output_room_id=context.room_id,
+                output_room=context.room,
+            ),
             logger=logger,
         )
         recent_messages = thread_messages[-read_limit:]
@@ -559,8 +580,8 @@ class MatrixMessageOperations:
             room_id=room_id,
             thread_id=thread_id,
             limit=read_limit,
-            messages=[_message_payload(message) for message in recent_messages],
-            edit_options=self._build_edit_options(context, messages=recent_messages),
+            messages=[_message_payload(message, room_id=room_id) for message in recent_messages],
+            edit_options=self._build_edit_options(context, room_id=room_id, messages=recent_messages),
         )
 
     async def _message_edit(

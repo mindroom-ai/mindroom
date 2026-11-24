@@ -65,6 +65,7 @@ from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.judgment.cold_cache import idle_seconds_before_turn, select_cold_cache_model
 from mindroom.matrix.guarded_rooms import allowed_send, guarded_room
 from mindroom.matrix.presence import should_use_streaming
+from mindroom.matrix.thread_forks import fork_parent_scopes
 from mindroom.message_target import MessageTarget
 from mindroom.mid_turn_judgment import create_mid_turn_gate
 from mindroom.orchestration.runtime import (
@@ -97,6 +98,7 @@ from mindroom.reply_scope import (
 from mindroom.reply_turn.enrichment import (
     interrupted_attempt_model_prompt,
     matrix_message_target_item,
+    merge_fork_parent_display_names,
     prepare_memory_and_model_context,
     thread_fork_item,
     with_matrix_message_target,
@@ -256,6 +258,20 @@ def _turn_run_metadata(request: ResponseRequest) -> dict[str, Any]:
     if envelope.hook_source is not None:
         recorded[HOOK_SOURCE_RUN_METADATA_KEY] = envelope.hook_source
     return recorded
+
+
+def _request_fork_parent_scopes(
+    request: ResponseRequest,
+    target: MessageTarget,
+) -> frozenset[tuple[str, str]]:
+    """Return vetted fork parent ``(room_id, thread_id)`` scopes loaded in ``request.thread_history``."""
+    if target.resolved_thread_id is None:
+        return frozenset()
+    return fork_parent_scopes(
+        request.thread_history,
+        target.resolved_thread_id,
+        room_id=target.room_id,
+    )
 
 
 def _request_has_media(request: ResponseRequest) -> bool:
@@ -910,7 +926,7 @@ class ResponseRunner:
             return _COMPACTION_DEFERRED
         if (epoch := await self._compaction_epoch(room, origin, source, wait=True)) is None:
             return None
-        await read_fresh_thread_history(self.deps.resolver, target, strict=True)
+        await read_fresh_thread_history(self.deps.resolver, target, strict=True, requester_id=requester)
         budget = TurnBudget(self.deps.runtime.orchestrator.budgets, requester, log_fallback=False)
         plan = resolve_manual_compaction_plan(scope, config, paths, room, thread, budget)
         if isinstance(plan, str):
@@ -1102,7 +1118,13 @@ class ResponseRunner:
     ) -> ResponseTurnContext:
         """Build the inputs an agent turn and a team turn share; each adds its own."""
         target = runtime.tool_context.target
-        fork_item = thread_fork_item(thread_history, target.resolved_thread_id, self.deps.runtime.config)
+        fork_item = thread_fork_item(
+            thread_history,
+            target.resolved_thread_id,
+            self.deps.runtime.config,
+            room_id=request.room_id,
+            runtime=self.deps.runtime,
+        )
         if fork_item is not None:
             transient_enrichment_items = (*transient_enrichment_items, fork_item)
         return ResponseTurnContext(
@@ -1118,7 +1140,13 @@ class ResponseRunner:
             current_sender_id=request.response_envelope.origin.speaker_id,
             history_boundary_event_id=request.history_boundary_event_id,
             prompt_source_event_ids=request.prompt_source_event_ids,
-            member_display_names=request.member_display_names,
+            member_display_names=merge_fork_parent_display_names(
+                request.member_display_names,
+                thread_history=thread_history,
+                room_id=request.room_id,
+                thread_id=target.resolved_thread_id,
+                runtime=self.deps.runtime,
+            ),
             transient_enrichment_items=with_matrix_message_target(
                 transient_enrichment_items,
                 matrix_message_target_item(
@@ -1809,6 +1837,7 @@ class ResponseRunner:
             user_id=request.user_id or "",
             active_model_name=team_models.team_model_name,
             attachment_ids=request.attachment_ids,
+            fork_parent_scopes=_request_fork_parent_scopes(request, target),
             correlation_id=correlation_id_for_request(request),
             source_envelope=request.response_envelope,
             turn_id=request.turn_id,
@@ -2311,6 +2340,7 @@ class ResponseRunner:
             user_id=request.user_id,
             active_model_name=active_model_name,
             attachment_ids=request.attachment_ids,
+            fork_parent_scopes=_request_fork_parent_scopes(request, resolved_target),
             correlation_id=correlation_id_for_request(request),
             source_envelope=request.response_envelope,
             turn_id=request.turn_id,

@@ -49,6 +49,7 @@ from mindroom.approval.response import (
     publish_generation,
     require_ordered_pause_presentation,
 )
+from mindroom.attachments.storage import load_attachment, parent_attachment_refs_in_history
 from mindroom.authorization import is_sender_allowed_for_entity_replies_in_room
 from mindroom.background_tasks import run_coroutine_until_complete
 from mindroom.constants import (
@@ -86,6 +87,7 @@ from mindroom.hooks import MessageEnvelope, TurnOutcome
 from mindroom.interactive import InteractiveMetadata
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.presence import should_use_streaming
+from mindroom.matrix.thread_forks import fork_parent_scopes
 from mindroom.orchestration.runtime import (
     classify_cancel_source,
     current_task_is_process_shutdown,
@@ -1196,6 +1198,59 @@ class ApprovalContinuationRunner:
             execution_identity=continuation.execution_identity,
         )
 
+    async def _resume_fork_attachments(
+        self,
+        continuation: ApprovalContinuation,
+        *,
+        target: MessageTarget,
+    ) -> tuple[tuple[str, ...], frozenset[tuple[str, str]]]:
+        """Re-resolve authorized fork parent scopes and filter foreign attachment IDs for a resumed turn."""
+        if not continuation.attachment_ids:
+            return (), frozenset()
+        parent_scopes: frozenset[tuple[str, str]] = frozenset()
+        authorized_parent_refs: frozenset[tuple[str, str, str]] = frozenset()
+        if target.resolved_thread_id is not None:
+            try:
+                history = await self.deps.resolver.fetch_thread_history(
+                    target.room_id,
+                    target.resolved_thread_id,
+                    requester_id=continuation.requester_id,
+                )
+            except Exception as exc:
+                self.deps.logger.warning(
+                    "Failed to refresh fork parent scopes for approval continuation; continuing without parent scopes",
+                    room_id=target.room_id,
+                    thread_id=target.resolved_thread_id,
+                    error=str(exc),
+                )
+            else:
+                parent_scopes = fork_parent_scopes(
+                    history,
+                    target.resolved_thread_id,
+                    room_id=target.room_id,
+                )
+                if parent_scopes:
+                    authorized_parent_refs = frozenset(
+                        parent_attachment_refs_in_history(
+                            history,
+                            room_id=target.room_id,
+                            parent_scopes=parent_scopes,
+                        ),
+                    )
+        storage_path = self.deps.tool_runtime.storage_path
+        authorized_attachment_ids: list[str] = []
+        for attachment_id in continuation.attachment_ids:
+            record = load_attachment(storage_path, attachment_id)
+            if record is None:
+                continue
+            if record.room_id == target.room_id or (
+                record.room_id is not None
+                and record.thread_id is not None
+                and (record.room_id, record.thread_id, record.attachment_id) in authorized_parent_refs
+            ):
+                authorized_attachment_ids.append(attachment_id)
+        return tuple(authorized_attachment_ids), parent_scopes
+
     async def _continue_entity_call(
         self,
         continuation: ApprovalContinuation,
@@ -1207,12 +1262,17 @@ class ApprovalContinuationRunner:
         cli_approval_handler: Callable[[PausedAttempt], Awaitable[tuple[RunRequirement, ...]]] | None,
     ) -> CompletedApprovalRun | PausedAttempt:
         execution_identity = continuation.execution_identity
+        resumed_attachment_ids, resumed_fork_parent_scopes = await self._resume_fork_attachments(
+            continuation,
+            target=target,
+        )
         tool_context = self.deps.tool_runtime.build_turn_context(
             target,
             user_id=continuation.requester_id,
             agent_name=continuation.entity_name,
             active_model_name=continuation.runtime_model_name,
-            attachment_ids=continuation.attachment_ids,
+            attachment_ids=resumed_attachment_ids,
+            fork_parent_scopes=resumed_fork_parent_scopes,
             correlation_id=correlation_id_for_request(request),
             source_envelope=request.response_envelope,
             turn_id=request.turn_id,

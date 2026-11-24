@@ -300,7 +300,8 @@ _SIGNATURES = {
         "agent_reply_memberships, transport_agent_name, active_model_name, room, storage_path, attachment_ids, "
         "runtime_attachment_ids, runtime_media_attachments, hooks, correlation_id, message_received_depth, "
         "orchestrator, tool_function_filter, persona, membership, membership_turn_id, source_kind, config_provider, "
-        "cli_approval_handler, hook_source, tool_output_paths, tool_calls_shown, turn_id, parent_turn_id)"
+        "cli_approval_handler, hook_source, tool_output_paths, tool_calls_shown, turn_id, parent_turn_id, "
+        "fork_parent_scopes)"
     ),
     "ToolValue": "(*, content, images, audios, videos, files)",
     "Toolkit": "(*, name, tools, instructions)",
@@ -667,7 +668,7 @@ _ELSEWHERE_SIGNATURES = {
 }
 
 # The plugin API version these pins describe, and their digest.
-_PINNED_VERSION = ((1, 33), "08f4429016d50edf41a21ae9e7a02680dd8c257f0a943963e856fd1d5c051499")
+_PINNED_VERSION = ((1, 34), "034bc7f03269dad758b759964a39abe584ba8ec4e8bee4f3a4966b5c7aaaa969")
 
 
 def _is_enum(obj: object) -> bool:

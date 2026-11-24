@@ -332,10 +332,17 @@ class LockedTurns:
         exclude_event_id: str | None = None,
     ) -> ResponseRequest:
         """Refresh model-facing thread history once this turn owns the lifecycle lock."""
+        has_cross_room_prefix = any(
+            message.room_id not in (None, request.room_id) for message in request.thread_history
+        )
         try:
-            refreshed_history = await read_fresh_thread_history(self.deps.resolver, request.response_envelope.target)
+            refreshed_history = await read_fresh_thread_history(
+                self.deps.resolver,
+                request.response_envelope.target,
+                requester_id=request.response_envelope.requester_id,
+            )
         except Exception as exc:
-            if request.requires_model_history_refresh:
+            if request.requires_model_history_refresh or has_cross_room_prefix:
                 raise
             self.deps.logger.warning(
                 "Failed to refresh thread history after lock; continuing with existing history",

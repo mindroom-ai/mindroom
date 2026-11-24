@@ -1225,6 +1225,7 @@ async def test_edit_context_is_read_in_the_recorded_thread(tmp_path: Path, recor
         harness.room,
         event,
         thread_id=recorded_thread_id,
+        requester_id=USER_ID,
     )
     harness.resolver.fetch_thread_history.assert_not_awaited()
     assert harness.generate_response.await_args.args[0].thread_history == recorded_context.thread_history
