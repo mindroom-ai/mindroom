@@ -1094,10 +1094,15 @@ class KubernetesWorkerBackend:
         entry = self._cached_ready_worker(spec.worker_key, spec=spec, launch=launch, now=now)
         if entry is None:
             return None
-        # Only user workers and workers whose plan mounted nothing can gain a workspace while running.
+        # User workers and unmounted workers can gain a workspace while running, and mounted sandbox workers
+        # must re-verify mount_dir existence and inode on cache hits.
         state_scope_worker_key = resolve_state_scope_worker_key(spec.worker_key, spec.state_scope_worker_key)
-        may_gain_workspace = not entry.workspace_mounts or resolved_worker_key_scope(state_scope_worker_key) == "user"
-        if may_gain_workspace and entry.workspace_mounts != self._plan_workspace_mounts(
+        recheck_workspace_mounts = (
+            not entry.workspace_mounts
+            or resolved_worker_key_scope(state_scope_worker_key) == "user"
+            or (spec.sandbox is not None and spec.sandbox.mount_dir is not None)
+        )
+        if recheck_workspace_mounts and entry.workspace_mounts != self._plan_workspace_mounts(
             spec,
             launch,
             create_shared=False,

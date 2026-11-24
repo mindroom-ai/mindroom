@@ -8968,3 +8968,56 @@ def test_kubernetes_sandbox_omits_extra_containers_and_extra_volumes(tmp_path: P
         "worker-tmp",
         "sidecar-secret",
     ]
+
+
+def test_kubernetes_sandbox_mounted_ready_cache_rechecks_rotated_mount_dir(tmp_path: Path) -> None:
+    """Rotating or symlinking mount_dir invalidates the ready-worker cache instead of reusing a stale mount."""
+    storage_root = tmp_path / "storage"
+    workspace = storage_root / "agents" / "general" / "workspace"
+    build_dir = workspace / "build"
+    build_dir.mkdir(parents=True)
+    original_ino = os.lstat(build_dir).st_ino
+
+    runtime_paths = resolve_primary_runtime_paths(config_path=Path("config.yaml"), storage_path=storage_root)
+    backend, apps_api, _core_api = _backend(runtime_paths=runtime_paths)
+    user_agent_key = "v1:tenant-123:user_agent:@alice:example.org:general"
+    sandbox_key = named_worker_key(user_agent_key, "e" * 32)
+    spec = WorkerSpec(
+        sandbox_key,
+        private_agent_names=frozenset(),
+        state_scope_worker_key=user_agent_key,
+        sandbox=WorkerSandboxConfig(mount_dir="build"),
+        mirror_grantable_credentials=False,
+    )
+
+    backend.ensure_worker(spec, now=10.0)
+    assert len(apps_api.created_bodies) == 1
+    first_template_hash = apps_api.created_bodies[-1]["metadata"]["annotations"][ANNOTATION_TEMPLATE_HASH]
+    assert (
+        _load_startup_manifest(backend, worker_key=sandbox_key)[STARTUP_MANIFEST_SANDBOX_MOUNT]["ino"] == original_ino
+    )
+
+    # Unchanged mount_dir still hits the ready-worker cache without re-applying the Deployment.
+    backend.ensure_worker(spec, now=12.0)
+    assert len(apps_api.created_bodies) == 1
+    assert apps_api.deleted_names == []
+
+    # Rotating build -> build-old and creating a new build changes the inode, invalidating the cache.
+    rotated_dir = workspace / "build-old"
+    build_dir.rename(rotated_dir)
+    build_dir.mkdir()
+    new_ino = os.lstat(build_dir).st_ino
+    assert new_ino != original_ino
+
+    backend.ensure_worker(spec, now=14.0)
+    assert len(apps_api.created_bodies) == 2
+    assert len(apps_api.deleted_names) == 1
+    second_template_hash = apps_api.created_bodies[-1]["metadata"]["annotations"][ANNOTATION_TEMPLATE_HASH]
+    assert second_template_hash != first_template_hash
+    assert _load_startup_manifest(backend, worker_key=sandbox_key)[STARTUP_MANIFEST_SANDBOX_MOUNT]["ino"] == new_ino
+
+    # Replacing mount_dir with a symlink fails closed instead of reusing the cached ready worker.
+    build_dir.rmdir()
+    build_dir.symlink_to(rotated_dir)
+    with pytest.raises(WorkerBackendError, match="symlink"):
+        backend.ensure_worker(spec, now=16.0)

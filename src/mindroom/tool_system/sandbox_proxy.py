@@ -890,12 +890,11 @@ def _reject_sandbox_output_path(
 ) -> None:
     if not has_output_path or sandbox is None:
         return
-    if sandbox.mount_dir is None:
-        msg = "mindroom_output_path is not supported in an empty-scratch sandbox without mount_dir."
-        raise NamedWorkerError(msg)
-    if sandbox.mount_read_only:
-        msg = "mindroom_output_path cannot write into a read-only sandbox mount."
-        raise NamedWorkerError(msg)
+    msg = (
+        "mindroom_output_path is not supported in a sandboxed named worker; "
+        "write to a file inside mount_dir or capture stdout directly."
+    )
+    raise NamedWorkerError(msg)
 
 
 def _sandbox_agent_workspace_output_path(saved_path: str, mount_dir: str) -> str:
@@ -903,8 +902,6 @@ def _sandbox_agent_workspace_output_path(saved_path: str, mount_dir: str) -> str
     normalized = saved_path.removeprefix("./")
     if not normalized or Path(normalized).is_absolute():
         return saved_path
-    if normalized == mount_dir or normalized.startswith(f"{mount_dir}/"):
-        return normalized
     return f"{mount_dir}/{normalized}"
 
 

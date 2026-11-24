@@ -1226,11 +1226,10 @@ def _prepare_execute_request(call: _ExecuteCall) -> _PreparedSandboxRequestConte
         else None
     )
     output_path = normalize_output_path_argument(request.kwargs.get(OUTPUT_PATH_ARGUMENT))
-    if request.sandbox and output_path is not None and tool_output_workspace_root is None:
+    if request.sandbox and output_path is not None:
         msg = (
-            "mindroom_output_path is not supported in an empty-scratch sandbox without mount_dir."
-            if request.base_dir is None
-            else "mindroom_output_path cannot write into a read-only sandbox mount."
+            "mindroom_output_path is not supported in a sandboxed named worker; "
+            "write to a file inside mount_dir or capture stdout directly."
         )
         raise sandbox_worker_prep.WorkerRequestPreparationError(msg)
     kwargs = dict(request.kwargs)

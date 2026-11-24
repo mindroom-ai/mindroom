@@ -6,7 +6,7 @@ import fnmatch
 from collections.abc import Mapping  # noqa: TC003 - public annotations support typing.get_type_hints().
 from types import MappingProxyType
 from typing import cast
-from urllib.parse import urlsplit
+from urllib.parse import urlparse
 
 __all__ = [
     "AWS_ENV_BY_KEY",
@@ -617,18 +617,30 @@ _SANDBOX_SAFE_EXTRA_ENV_NAMES = frozenset(
 )
 
 
+_ALLOWED_PROXY_URL_SCHEMES = frozenset({"http", "https", "socks5", "socks5h"})
+
+
 def is_credential_free_proxy_url(value: str) -> bool:
-    """Return whether ``value`` parses as a proxy URL without embedded credentials."""
+    """Return whether ``value`` parses as a credential-free proxy URL with an allowed scheme."""
     stripped = value.strip()
     if not stripped or any(ch.isspace() for ch in stripped):
         return False
     target = stripped if "://" in stripped else f"http://{stripped}"
     try:
-        parsed = urlsplit(target)
+        parsed = urlparse(target)
         _ = parsed.port
     except ValueError:
         return False
-    return bool(parsed.hostname) and parsed.username is None and parsed.password is None
+    return (
+        parsed.scheme.lower() in _ALLOWED_PROXY_URL_SCHEMES
+        and bool(parsed.hostname)
+        and parsed.username is None
+        and parsed.password is None
+        and parsed.path in {"", "/"}
+        and not parsed.params
+        and not parsed.query
+        and not parsed.fragment
+    )
 
 
 def sandbox_worker_extra_env(env: Mapping[str, str]) -> dict[str, str]:

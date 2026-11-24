@@ -80,15 +80,15 @@ When a named worker's admitted `sandbox` is not `None`:
   - When admitted `sandbox` is not `None`:
     - If `sandbox.mount_dir is None`: `route.base_dir = None` (worker runs in its own ephemeral `<state_subpath>/workspace`).
     - If `sandbox.mount_dir` is set: `route.base_dir` is `<workspace_rel>/<mount_dir>`.
-    - If explicit `mindroom_output_path` was supplied on either empty scratch (`mount_dir is None`) or `mount_read_only=True`: raise `NamedWorkerError`.
-    - For writable `mount_dir`, rewrite runner `saved_to_file` receipt paths to `<mount_dir>/<path>` so paths stay agent-workspace-relative.
+    - If explicit `mindroom_output_path` was supplied on any sandboxed named worker (empty scratch, read-only `mount_dir`, or writable `mount_dir`): raise `NamedWorkerError`.
+    - For writable `mount_dir`, rewrite runner auto-saved `saved_to_file` receipt paths to `<mount_dir>/<path>` so paths stay agent-workspace-relative.
     - Set `request.sandbox = True`.
 - In `src/mindroom/api/sandbox_runner.py` & `src/mindroom/api/sandbox_env_assembly.py`:
   - `_route_workspace`: when `isinstance(route, ExecuteRequest) and route.sandbox` and `worker is not None` and `route.base_dir is None`, return `worker.base_dir` (`paths.workspace.resolve()`) instead of calling `resolve_agent_runtime(..., create=True)`. When `workspace.is_dir()` is already true, do not call `mkdir`.
   - `_prepare_execute_request`: when `request.sandbox` is `True`:
     - Force `execution_env = {}` (never fall back to `sandbox_exec.request_execution_env` / `build_execution_tool_env`), empty `call_environment`, empty `call_path_prepend`, `credential_overrides = {}`.
     - Call `build_request_execution_env(..., sandbox=True)` which skips `.mindroom/worker-env.sh`, points `HOME`, `XDG_CONFIG_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME` to `prepared.paths.root` (writable worker state root so RO mounts work and mounted dirs aren't polluted), and keeps `MINDROOM_AGENT_WORKSPACE = str(request_workspace)`.
-    - Set `tool_output_workspace_root = None` when `request.base_dir is None` (empty scratch) or `route.workspace` is not writable (`not os.access(route.workspace, os.W_OK)`), so large output never auto-saves to an unreachable ephemeral worker path or crashes on a read-only mount.
+    - Refuse any explicit `mindroom_output_path` in sandbox mode, while setting `tool_output_workspace_root = None` when `request.base_dir is None` (empty scratch) or `route.workspace` is not writable (`not os.access(route.workspace, os.W_OK)`), so auto-save works on writable `mount_dir` and never saves to an unreachable ephemeral worker path or crashes on a read-only mount.
     - Pass `sandbox=True` on `PreparedSandboxRunnerExecuteRequest` so `_resolve_entrypoint` sets `allowed_shared_services=frozenset()`.
   - Streamed execution (`stream_io=True`, `_shell_launch`) shares `_prepare_execute_request`, so `mindroom-agent workers run --sandbox` gets identical isolation.
 
@@ -97,6 +97,6 @@ When a named worker's admitted `sandbox` is not `None`:
 - Unit & integration tests in `tests/test_named_workers.py`, `tests/test_kubernetes_worker_backend.py`, `tests/test_agent_cli_main.py`, `tests/test_sandbox_runner.py` (or dedicated sandbox runner test cases), and `tests/test_worker_protocol_schema.py`:
   - Validation errors, `mount_dir` implying `sandbox=True`, `mount_read_only` rules, first-call locking & follow-up reuse without repeating flags, refusal on conflicting sandbox options.
   - Kubernetes pod template mounts (empty scratch = 0 workspace/shared/knowledge mounts; `mount_dir` = single subpath mount RW or RO; missing dir / symlink refused; `mindroom.ai/worker-sandbox: "true"` label; `.shared_credentials` mirrors nothing; non-sandboxed worker template hash unchanged).
-  - Primary request stripping (no `MINDROOM_AGENT_CLI_TOKEN`, no Agent Keys broker env, no `execution_env`/passthrough/temp secrets, no leases, even on follow-up calls omitting flags; `mindroom_output_path` refused on `mount_read_only`).
+  - Primary request stripping (no `MINDROOM_AGENT_CLI_TOKEN`, no Agent Keys broker env, no `execution_env`/passthrough/temp secrets, no leases, even on follow-up calls omitting flags; explicit `mindroom_output_path` refused on all sandboxed named workers).
   - Runner execution (`sandbox=True` empty scratch uses ephemeral worker workspace without touching agent workspace; `.mindroom/worker-env.sh` is not sourced; `HOME` points to writable worker root while `cwd` & `MINDROOM_AGENT_WORKSPACE` point to mounted dir; RO mount handles large output without crashing; `stream_io=True` via `workers run --sandbox --mount-dir --mount-read-only`).
 - `ruff check`, `ruff format --check`, `uv run --with tach tach check --dependencies --interfaces`, and pytest with default addopts.

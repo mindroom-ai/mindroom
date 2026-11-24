@@ -16,6 +16,7 @@ from mindroom.api import sandbox_exec
 from mindroom.api import sandbox_runner as sandbox_runner_module
 from mindroom.api.sandbox_runner_app import app as sandbox_runner_app
 from mindroom.constants import resolve_primary_runtime_paths, write_startup_manifest
+from mindroom.tool_system.sandbox_proxy import _sandbox_agent_workspace_output_path
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     named_worker_key,
@@ -44,19 +45,19 @@ _IDENTITY = serialize_tool_execution_identity(
 )
 
 
-@pytest.fixture
-def sandbox_runner_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[tuple[TestClient, Path]]:
-    """A runner configured with a `code` agent and a secret in process_env to prove sandbox strips it."""
-    storage_root = tmp_path / "storage"
-    storage_root.mkdir()
+def _write_runner_config(tmp_path: Path, *, auto_save_threshold_bytes: int | None = None) -> Path:
+    defaults_block = (
+        f"defaults:\n  tool_output_auto_save_threshold_bytes: {auto_save_threshold_bytes}\n"
+        if auto_save_threshold_bytes is not None
+        else ""
+    )
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         "models:\n"
         "  default:\n"
         "    provider: openai\n"
         "    id: gpt-6-astra\n"
-        "defaults:\n"
-        "  tool_output_auto_save_threshold_bytes: 1024\n"
+        f"{defaults_block}"
         "agents:\n"
         "  code:\n"
         "    display_name: Code\n"
@@ -68,21 +69,95 @@ def sandbox_runner_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Itera
         "  model: default\n",
         encoding="utf-8",
     )
-    test_env = {
+    return config_path
+
+
+def _base_runner_env(
+    config_path: Path,
+    storage_path: Path,
+    extra: dict[str, str] | None = None,
+) -> dict[str, str]:
+    return {
         "PATH": os.environ.get("PATH", ""),
         "MINDROOM_CONFIG_PATH": str(config_path),
-        "MINDROOM_STORAGE_PATH": str(storage_root),
+        "MINDROOM_STORAGE_PATH": str(storage_path),
         "MINDROOM_SANDBOX_PROXY_TOKEN": _TOKEN,
         "MINDROOM_SANDBOX_RUNNER_MODE": "true",
         "MINDROOM_SANDBOX_RUNNER_USE_SUBPROCESS": "false",
-        "RUNNER_SECRET": "must-never-leak",
-        "MINDROOM_AGENT_CLI_TOKEN": "cli-must-never-leak",
+        **(extra or {}),
     }
-    monkeypatch.delenv("MINDROOM_WORKER_COMPUTER_ENABLED", raising=False)
-    monkeypatch.delenv("MINDROOM_SANDBOX_DEDICATED_WORKER_KEY", raising=False)
-    monkeypatch.delenv("MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT", raising=False)
-    monkeypatch.delenv("MINDROOM_SANDBOX_SHARED_STORAGE_ROOT", raising=False)
-    monkeypatch.delenv("MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH", raising=False)
+
+
+def _clear_dedicated_runner_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    for var in (
+        "MINDROOM_WORKER_COMPUTER_ENABLED",
+        "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY",
+        "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT",
+        "MINDROOM_SANDBOX_SHARED_STORAGE_ROOT",
+        "MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH",
+    ):
+        monkeypatch.delenv(var, raising=False)
+
+
+def _setup_manifest_runner(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    worker_suffix: str,
+    mount_subdir: str,
+    dedicated: bool = False,
+    pin_mount: bool = False,
+) -> tuple[Path, str, int]:
+    storage_root = tmp_path / "storage"
+    mounted_dir = storage_root / "agents" / "code" / "workspace" / mount_subdir
+    mounted_dir.mkdir(parents=True)
+    expected_ino = os.lstat(mounted_dir).st_ino
+    config_path = _write_runner_config(tmp_path)
+    worker_key = named_worker_key(_NORMAL_KEY, worker_suffix)
+    worker_root = worker_root_path(storage_root, worker_key)
+    worker_root.mkdir(parents=True)
+    storage_path = worker_root if dedicated else storage_root
+    extra_env = (
+        {
+            "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY": worker_key,
+            "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT": str(worker_root),
+            "MINDROOM_SANDBOX_SHARED_STORAGE_ROOT": str(storage_root),
+        }
+        if dedicated
+        else {}
+    )
+    startup_env = _base_runner_env(config_path, storage_path, extra_env)
+    runtime_paths = resolve_primary_runtime_paths(
+        config_path=config_path,
+        storage_path=storage_path,
+        process_env=startup_env,
+    )
+    manifest_path = write_startup_manifest(
+        worker_root,
+        runtime_paths,
+        sandbox_mount={"path": str(mounted_dir), "ino": expected_ino} if pin_mount else None,
+    )
+    _clear_dedicated_runner_env(monkeypatch)
+    monkeypatch.setenv("MINDROOM_SANDBOX_PROXY_TOKEN", _TOKEN)
+    monkeypatch.setenv("MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH", str(manifest_path))
+    return mounted_dir, worker_key, expected_ino
+
+
+@pytest.fixture
+def sandbox_runner_env(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Iterator[tuple[TestClient, Path]]:
+    """A runner configured with a `code` agent and a secret in process_env to prove sandbox strips it."""
+    storage_root = tmp_path / "storage"
+    storage_root.mkdir()
+    config_path = _write_runner_config(tmp_path, auto_save_threshold_bytes=1024)
+    test_env = _base_runner_env(
+        config_path,
+        storage_root,
+        {
+            "RUNNER_SECRET": "must-never-leak",
+            "MINDROOM_AGENT_CLI_TOKEN": "cli-must-never-leak",
+        },
+    )
+    _clear_dedicated_runner_env(monkeypatch)
     for key, value in test_env.items():
         monkeypatch.setenv(key, value)
 
@@ -185,7 +260,7 @@ def test_empty_scratch_sandbox_uses_worker_workspace_without_resolve_agent_runti
         stream_io=stream_io,
     )
     assert refused_frames[-1]["ok"] is False
-    assert "empty-scratch sandbox" in refused_frames[-1]["error"]
+    assert "mindroom_output_path is not supported in a sandboxed named worker" in refused_frames[-1]["error"]
 
 
 @pytest.mark.parametrize("stream_io", [False, True], ids=["execute", "stream_io"])
@@ -283,7 +358,7 @@ def test_readonly_mount_dir_keeps_home_writable_skips_hook_and_autosave(
             stream_io=stream_io,
         )
         assert refused_frames[-1]["ok"] is False
-        assert "read-only sandbox mount" in refused_frames[-1]["error"]
+        assert "mindroom_output_path is not supported in a sandboxed named worker" in refused_frames[-1]["error"]
     finally:
         mounted_dir.chmod(0o755)
 
@@ -391,72 +466,19 @@ def test_stream_io_sandbox_mount_dir_readonly_end_to_end(
     assert _streamed_stdout(frames) == f"{resolved_mounted_dir}|stream-data|unset"
 
 
-def _setup_pinned_sandbox_manifest(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> tuple[Path, str, int]:
-    storage_root = tmp_path / "storage"
-    mounted_dir = storage_root / "agents" / "code" / "workspace" / "scratch" / "pinned"
-    mounted_dir.mkdir(parents=True)
-    (mounted_dir / "ok.txt").write_text("pinned-ok", encoding="utf-8")
-    expected_ino = os.lstat(mounted_dir).st_ino
-
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text(
-        "models:\n"
-        "  default:\n"
-        "    provider: openai\n"
-        "    id: gpt-6-astra\n"
-        "agents:\n"
-        "  code:\n"
-        "    display_name: Code\n"
-        "    tools: [shell]\n"
-        "    worker_tools: [shell]\n"
-        "    worker_scope: user_agent\n"
-        "    named_workers: 4\n"
-        "router:\n"
-        "  model: default\n",
-        encoding="utf-8",
-    )
-    worker_key = named_worker_key(_NORMAL_KEY, "5" * 32)
-    worker_root = worker_root_path(storage_root, worker_key)
-    worker_root.mkdir(parents=True)
-    startup_env = {
-        "PATH": os.environ.get("PATH", ""),
-        "MINDROOM_CONFIG_PATH": str(config_path),
-        "MINDROOM_STORAGE_PATH": str(storage_root),
-        "MINDROOM_SANDBOX_PROXY_TOKEN": _TOKEN,
-        "MINDROOM_SANDBOX_RUNNER_MODE": "true",
-        "MINDROOM_SANDBOX_RUNNER_USE_SUBPROCESS": "false",
-    }
-    runtime_paths = resolve_primary_runtime_paths(
-        config_path=config_path,
-        storage_path=storage_root,
-        process_env=startup_env,
-    )
-    manifest_path = write_startup_manifest(
-        worker_root,
-        runtime_paths,
-        sandbox_mount={"path": str(mounted_dir), "ino": expected_ino},
-    )
-    for var in (
-        "MINDROOM_WORKER_COMPUTER_ENABLED",
-        "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY",
-        "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT",
-        "MINDROOM_SANDBOX_SHARED_STORAGE_ROOT",
-    ):
-        monkeypatch.delenv(var, raising=False)
-    monkeypatch.setenv("MINDROOM_SANDBOX_PROXY_TOKEN", _TOKEN)
-    monkeypatch.setenv("MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH", str(manifest_path))
-    return mounted_dir, worker_key, expected_ino
-
-
 def test_sandbox_startup_manifest_mount_inode_pinning(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     """Startup manifest sandbox_mount inode pin succeeds on match and fails closed on swap or symlink."""
-    mounted_dir, worker_key, expected_ino = _setup_pinned_sandbox_manifest(monkeypatch, tmp_path)
+    mounted_dir, worker_key, expected_ino = _setup_manifest_runner(
+        monkeypatch,
+        tmp_path,
+        worker_suffix="5" * 32,
+        mount_subdir="scratch/pinned",
+        pin_mount=True,
+    )
+    (mounted_dir / "ok.txt").write_text("pinned-ok", encoding="utf-8")
     try:
         sandbox_runner_app.state.sandbox_runner_context = None
         with TestClient(sandbox_runner_app) as client:
@@ -526,28 +548,47 @@ def test_sandbox_startup_manifest_mount_inode_pinning(
         sandbox_runner_app.state.sandbox_runner_context = None
 
 
-def test_writable_mount_dir_autosaves_into_mounted_directory(
+@pytest.mark.parametrize("mount_dir", ["scratch/rw_job", "mindroom_tool_outputs"])
+def test_writable_mount_dir_autosaves_and_refuses_explicit_output_path(
     sandbox_runner_env: tuple[TestClient, Path],
+    mount_dir: str,
 ) -> None:
-    """Writable mount_dir auto-saves large output under the mounted directory with a mount-relative receipt path."""
+    """Writable mount_dir auto-saves under the mount, translates unambiguously, and refuses explicit output_path."""
     client, storage_root = sandbox_runner_env
     worker_key = named_worker_key(_NORMAL_KEY, "7" * 32)
-    mounted_dir = storage_root / "agents" / "code" / "workspace" / "scratch" / "rw_job"
+    agent_workspace = storage_root / "agents" / "code" / "workspace"
+    mounted_dir = agent_workspace / mount_dir
     mounted_dir.mkdir(parents=True)
+    base_dir = f"agents/code/workspace/{mount_dir}"
 
     frames = _post_execute(
         client,
         worker_key=worker_key,
-        base_dir="agents/code/workspace/scratch/rw_job",
+        base_dir=base_dir,
         args=["printf 'y%.0s' {1..2000}"],
-        kwargs={"worker": "rw", "mount_dir": "scratch/rw_job"},
+        kwargs={"worker": "rw", "mount_dir": mount_dir},
         sandbox=True,
     )
     assert frames[-1]["ok"] is True
     saved = frames[-1]["result"]["mindroom_tool_output"]
     assert saved["status"] == "saved_to_file"
     assert saved["path"].startswith("mindroom_tool_outputs/")
-    assert (mounted_dir / saved["path"]).read_text(encoding="utf-8") == "y" * 2000
+    translated = _sandbox_agent_workspace_output_path(saved["path"], mount_dir)
+    assert translated == f"{mount_dir}/{saved['path']}"
+    assert (agent_workspace / translated).read_text(encoding="utf-8") == "y" * 2000
+
+    for stream_io in (False, True):
+        refused = _post_execute(
+            client,
+            worker_key=worker_key,
+            base_dir=base_dir,
+            args=["echo hi"],
+            kwargs={"worker": "rw", "mount_dir": mount_dir, "mindroom_output_path": "out.txt"},
+            sandbox=True,
+            stream_io=stream_io,
+        )
+        assert refused[-1]["ok"] is False
+        assert "mindroom_output_path is not supported in a sandboxed named worker" in refused[-1]["error"]
 
 
 def test_dedicated_worker_refuses_sandbox_mount_dir_without_startup_pin(
@@ -555,49 +596,13 @@ def test_dedicated_worker_refuses_sandbox_mount_dir_without_startup_pin(
     tmp_path: Path,
 ) -> None:
     """Dedicated workers fail closed when a sandbox mount_dir request arrives without a pinned sandbox_mount."""
-    storage_root = tmp_path / "storage"
-    mounted_dir = storage_root / "agents" / "code" / "workspace" / "scratch" / "unpinned"
-    mounted_dir.mkdir(parents=True)
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text(
-        "models:\n"
-        "  default:\n"
-        "    provider: openai\n"
-        "    id: gpt-6-astra\n"
-        "agents:\n"
-        "  code:\n"
-        "    display_name: Code\n"
-        "    tools: [shell]\n"
-        "    worker_tools: [shell]\n"
-        "    worker_scope: user_agent\n"
-        "    named_workers: 4\n"
-        "router:\n"
-        "  model: default\n",
-        encoding="utf-8",
+    _mounted_dir, worker_key, _expected_ino = _setup_manifest_runner(
+        monkeypatch,
+        tmp_path,
+        worker_suffix="6" * 32,
+        mount_subdir="scratch/unpinned",
+        dedicated=True,
     )
-    worker_key = named_worker_key(_NORMAL_KEY, "6" * 32)
-    worker_root = worker_root_path(storage_root, worker_key)
-    worker_root.mkdir(parents=True)
-    startup_env = {
-        "PATH": os.environ.get("PATH", ""),
-        "MINDROOM_CONFIG_PATH": str(config_path),
-        "MINDROOM_STORAGE_PATH": str(worker_root),
-        "MINDROOM_SANDBOX_PROXY_TOKEN": _TOKEN,
-        "MINDROOM_SANDBOX_RUNNER_MODE": "true",
-        "MINDROOM_SANDBOX_RUNNER_USE_SUBPROCESS": "false",
-        "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY": worker_key,
-        "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT": str(worker_root),
-        "MINDROOM_SANDBOX_SHARED_STORAGE_ROOT": str(storage_root),
-    }
-    runtime_paths = resolve_primary_runtime_paths(
-        config_path=config_path,
-        storage_path=worker_root,
-        process_env=startup_env,
-    )
-    manifest_path = write_startup_manifest(worker_root, runtime_paths)
-    monkeypatch.delenv("MINDROOM_WORKER_COMPUTER_ENABLED", raising=False)
-    monkeypatch.setenv("MINDROOM_SANDBOX_PROXY_TOKEN", _TOKEN)
-    monkeypatch.setenv("MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH", str(manifest_path))
     try:
         sandbox_runner_app.state.sandbox_runner_context = None
         with TestClient(sandbox_runner_app) as client:

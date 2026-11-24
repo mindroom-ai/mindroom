@@ -1780,14 +1780,16 @@ async def test_sandboxed_shell_proxy_strips_all_trust_surfaces_including_followu
             specs_before = len(backend.specs)
             with pytest.raises(NamedWorkerError, match="does not exist"):
                 await call_shell("ls", worker="sbx-missing", mount_dir="no-such-dir")
-            with pytest.raises(NamedWorkerError, match="cannot write into a read-only sandbox mount"):
-                await call_shell(
-                    "ls",
-                    worker="sbx-ro-out",
-                    mount_dir="scratch/job1",
-                    mount_read_only=True,
-                    mindroom_output_path="out.txt",
-                )
+            for bad_worker, bad_kwargs in [
+                ("sbx-rw-out", {"mount_dir": "scratch/job1"}),
+                ("sbx-ro-out", {"mount_dir": "scratch/job1", "mount_read_only": True}),
+                ("sbx-empty-out", {"sandbox": True}),
+            ]:
+                with pytest.raises(
+                    NamedWorkerError,
+                    match="mindroom_output_path is not supported in a sandboxed named worker",
+                ):
+                    await call_shell("ls", worker=bad_worker, mindroom_output_path="out.txt", **bad_kwargs)
             assert len(backend.specs) == specs_before
 
             # Call 1: RO mount_dir sandbox.
@@ -1795,15 +1797,19 @@ async def test_sandboxed_shell_proxy_strips_all_trust_surfaces_including_followu
             # Call 2: follow-up omitting all sandbox flags must still strip everything and resolve locked base_dir.
             await call_shell("pwd", worker="sbx-dir")
             # Call 3: follow-up omitting mount_read_only still refuses mindroom_output_path.
-            with pytest.raises(NamedWorkerError, match="cannot write into a read-only sandbox mount"):
+            with pytest.raises(
+                NamedWorkerError,
+                match="mindroom_output_path is not supported in a sandboxed named worker",
+            ):
                 await call_shell("ls", worker="sbx-dir", mindroom_output_path="out.txt")
 
-            # Empty-scratch sandbox refuses mindroom_output_path before admission and on flagless follow-ups.
-            with pytest.raises(NamedWorkerError, match="empty-scratch sandbox"):
-                await call_shell("pwd", worker="sbx-empty-out", sandbox=True, mindroom_output_path="out.txt")
+            # Empty-scratch sandbox also refuses mindroom_output_path on flagless follow-ups.
             await call_shell("pwd", worker="sbx-empty", sandbox=True)
             await call_shell("pwd", worker="sbx-empty")
-            with pytest.raises(NamedWorkerError, match="empty-scratch sandbox"):
+            with pytest.raises(
+                NamedWorkerError,
+                match="mindroom_output_path is not supported in a sandboxed named worker",
+            ):
                 await call_shell("pwd", worker="sbx-empty", mindroom_output_path="out.txt")
 
     # Agent Keys broker was never invoked for any sandboxed call (still 1 from plain call).
@@ -1908,9 +1914,20 @@ async def test_sandboxed_writable_mount_dir_rewrites_saved_output_receipt_paths(
     backend: _FakeBackend,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Saved-output receipts from writable mount_dir sandboxes translate to agent-workspace-relative paths."""
+    """Auto-saved receipts from writable mount_dir sandboxes always prefix mount_dir, and explicit output_path is refused."""
     storage_root = tmp_path / "storage"
-    (storage_root / "agents" / "code" / "workspace" / "scratch" / "job1").mkdir(parents=True)
+    agent_workspace = storage_root / "agents" / "code" / "workspace"
+    scratch_mount = agent_workspace / "scratch" / "job1"
+    nested_outputs_mount = agent_workspace / "mindroom_tool_outputs"
+    for mount_dir_path, rel_path, content in [
+        (scratch_mount, "mindroom_tool_outputs/2026-11-23/auto.txt", "scratch auto output"),
+        (scratch_mount, "mindroom_tool_outputs/2026-11-23/followup.txt", "scratch followup output"),
+        (nested_outputs_mount, "mindroom_tool_outputs/2026-11-23/nested.txt", "nested mount output"),
+    ]:
+        saved_file = mount_dir_path / rel_path
+        saved_file.parent.mkdir(parents=True, exist_ok=True)
+        saved_file.write_text(content, encoding="utf-8")
+
     runtime_paths = resolve_primary_runtime_paths(
         config_path=tmp_path / "config.yaml",
         storage_path=storage_root,
@@ -1938,7 +1955,7 @@ async def test_sandboxed_writable_mount_dir_rewrites_saved_output_receipt_paths(
                 "result": {
                     "mindroom_tool_output": {
                         "status": "saved_to_file",
-                        "path": "reports/out.txt",
+                        "path": "mindroom_tool_outputs/2026-11-23/followup.txt",
                         "bytes": 128,
                         "format": "text",
                     },
@@ -1949,7 +1966,7 @@ async def test_sandboxed_writable_mount_dir_rewrites_saved_output_receipt_paths(
                 "result": {
                     "mindroom_tool_output": {
                         "status": "saved_to_file",
-                        "path": "scratch/job1/already-prefixed.txt",
+                        "path": "mindroom_tool_outputs/2026-11-23/nested.txt",
                         "bytes": 64,
                         "format": "text",
                     },
@@ -1972,9 +1989,16 @@ async def test_sandboxed_writable_mount_dir_rewrites_saved_output_receipt_paths(
     with idle_worker_cleanup_owner(), tool_runtime_context(_tool_context(runtime_paths)):
         async with execution_resources(response=True):
             auto_saved = await call_shell("cat big.log", worker="sbx-rw", mount_dir="scratch/job1")
-            # Follow-up omitting mount_dir still translates saved receipt paths using the admitted sandbox.
-            explicit_saved = await call_shell("echo done", worker="sbx-rw", mindroom_output_path="reports/out.txt")
-            prefixed_saved = await call_shell("echo pre", worker="sbx-rw")
+            # Explicit mindroom_output_path is refused even on a writable mount_dir follow-up.
+            with pytest.raises(
+                NamedWorkerError,
+                match="mindroom_output_path is not supported in a sandboxed named worker",
+            ):
+                await call_shell("echo done", worker="sbx-rw", mindroom_output_path="reports/out.txt")
+            # Follow-up omitting mount_dir still translates auto-saved receipt paths using the admitted sandbox.
+            followup_saved = await call_shell("cat big2.log", worker="sbx-rw")
+            # Even when mount_dir itself is "mindroom_tool_outputs", the mount-relative path is always prefixed.
+            nested_saved = await call_shell("cat big3.log", worker="sbx-nested", mount_dir="mindroom_tool_outputs")
 
     assert auto_saved == {
         "mindroom_tool_output": {
@@ -1985,19 +2009,28 @@ async def test_sandboxed_writable_mount_dir_rewrites_saved_output_receipt_paths(
             "preview": "[worker: sbx-rw, started]\nhello preview",
         },
     }
-    assert explicit_saved == {
+    assert followup_saved == {
         "mindroom_tool_output": {
             "status": "saved_to_file",
-            "path": "scratch/job1/reports/out.txt",
+            "path": "scratch/job1/mindroom_tool_outputs/2026-11-23/followup.txt",
             "bytes": 128,
             "format": "text",
         },
     }
-    assert prefixed_saved == {
+    assert nested_saved == {
         "mindroom_tool_output": {
             "status": "saved_to_file",
-            "path": "scratch/job1/already-prefixed.txt",
+            "path": "mindroom_tool_outputs/mindroom_tool_outputs/2026-11-23/nested.txt",
             "bytes": 64,
             "format": "text",
         },
     }
+    assert (agent_workspace / auto_saved["mindroom_tool_output"]["path"]).read_text(
+        encoding="utf-8",
+    ) == "scratch auto output"
+    assert (agent_workspace / followup_saved["mindroom_tool_output"]["path"]).read_text(
+        encoding="utf-8",
+    ) == "scratch followup output"
+    assert (agent_workspace / nested_saved["mindroom_tool_output"]["path"]).read_text(
+        encoding="utf-8",
+    ) == "nested mount output"
