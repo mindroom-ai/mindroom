@@ -1799,7 +1799,7 @@ def create_agent(
         roster = (
             [
                 *agent_tools.toolkit_names(agent_tools.candidates()),
-                *(name for name in tool_assembly.local_tool_names if name == "workflow_peers"),
+                *(("workflow_peers",) if "workflow_peers" in tool_assembly.local_tool_names else ()),
             ]
             if persona is None and tool_names is None
             else [*tool_assembly.local_tool_names, *tool_assembly.worker_routed_tool_names]

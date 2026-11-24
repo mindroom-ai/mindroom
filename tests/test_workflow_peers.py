@@ -153,7 +153,7 @@ async def test_message_to_a_name_nobody_has_yet_is_held_and_delivered_when_it_st
 
     await stack.submit("/0:p1@0", "agent", {"prompt": "fe", "name": "frontend"}, meta={"name": "frontend"})
     frontend = _ref(stack, "/0:p1@0")
-    messages = peers.read(stack.store, stack.run_id, op_id="op-2", reader=frontend, names=("frontend", "*"))
+    messages = peers.read_call(stack.store, stack.run_id, op_id="op-2", reader=frontend, names=("frontend", "*"))
     assert [m["text"] for m in messages] == ["contract v1"]
     assert messages[0]["from"] == "backend"
     assert "sent_at" in messages[0]
@@ -186,9 +186,9 @@ async def test_a_retried_tool_call_sends_once_and_reads_the_same_messages(stack:
 
     read_op1 = peer_op_id(b.key, b.generation, "mrun-2", "call-2", "read_peer_messages", {"wait_seconds": 0})
     read_op2 = peer_op_id(b.key, b.generation, "mrun-2", "call-3", "read_peer_messages", {"wait_seconds": 0})
-    first_read = peers.read(stack.store, stack.run_id, op_id=read_op1, reader=b, names=("b", "*"))
-    assert peers.read(stack.store, stack.run_id, op_id=read_op1, reader=b, names=("b", "*")) == first_read
-    assert peers.read(stack.store, stack.run_id, op_id=read_op2, reader=b, names=("b", "*")) == []
+    first_read = peers.read_call(stack.store, stack.run_id, op_id=read_op1, reader=b, names=("b", "*"))
+    assert peers.read_call(stack.store, stack.run_id, op_id=read_op1, reader=b, names=("b", "*")) == first_read
+    assert peers.read_call(stack.store, stack.run_id, op_id=read_op2, reader=b, names=("b", "*")) == []
     assert [m["text"] for m in first_read] == ["hello"]
 
     hold.set()
@@ -387,19 +387,19 @@ async def test_two_agents_sharing_a_name_each_get_a_copy_and_star_reaches_all_un
         "held": False,
     }
     assert [
-        m["text"] for m in peers.read(stack.store, stack.run_id, op_id="rd1", reader=r1, names=("reviewer", "*"))
+        m["text"] for m in peers.read_call(stack.store, stack.run_id, op_id="rd1", reader=r1, names=("reviewer", "*"))
     ] == [
         "check diff",
         "all hands",
     ]
     assert [
-        m["text"] for m in peers.read(stack.store, stack.run_id, op_id="rd2", reader=r2, names=("reviewer", "*"))
+        m["text"] for m in peers.read_call(stack.store, stack.run_id, op_id="rd2", reader=r2, names=("reviewer", "*"))
     ] == [
         "check diff",
         "all hands",
     ]
     # Sender does not receive its own broadcast.
-    assert peers.read(stack.store, stack.run_id, op_id="rd3", reader=lead, names=("lead", "*")) == []
+    assert peers.read_call(stack.store, stack.run_id, op_id="rd3", reader=lead, names=("lead", "*")) == []
 
     hold.set()
     for key, name in (("/0:p0@0", "reviewer"), ("/0:p1@0", "reviewer"), ("/0:p2@0", "lead")):
@@ -717,7 +717,7 @@ async def test_prune_removes_peer_tables(stack: WorkflowStack) -> None:
     sender = NodeRef(key="@0", generation=1, name="a")
     reader = NodeRef(key="@1", generation=1, name="b")
     peers.send(stack.store, stack.run_id, op_id="p1", sender=sender, to="b", text="hi")
-    peers.read(stack.store, stack.run_id, op_id="p2", reader=reader, names=("b", "*"))
+    peers.read_call(stack.store, stack.run_id, op_id="p2", reader=reader, names=("b", "*"))
     peers.set_state(stack.store, stack.run_id, op_id="p3", key="k", value=1, updated_by="a")
 
     old_time = (datetime.now(UTC) - timedelta(days=40)).isoformat()

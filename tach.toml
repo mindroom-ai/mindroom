@@ -2642,7 +2642,6 @@ expose = [
 path = "mindroom.workflow_runs.peers"
 depends_on = [
     "mindroom.workflow_runs.models",
-    "mindroom.workflow_runs.replay",
     "mindroom.workflow_runs.store",
 ]
 
@@ -2656,16 +2655,16 @@ expose = [
     "PeerUnreachableError",
     "all_messages",
     "all_state",
+    "format_session_message",
     "get_state",
-    "get_state_entry",
     "has_unread",
     "list_peers",
     "message_edges",
     "peer_op_id",
-    "read",
     "read_call",
-    "record_deadlock",
+    "script_op",
     "send",
+    "session_turn_message",
     "set_state",
     "withdraw_unread",
 ]

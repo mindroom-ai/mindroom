@@ -85,8 +85,6 @@ _SAME_LOOP_VARIABLE = (
     "Use foreach(prompts, lambda p: agent(p))."
 )
 _BAD_LIMIT = "max_concurrent must be a whole number of at least 1."
-_MAX_PEER_BYTES = 1024 * 1024
-_TOO_LARGE = "Too large ({size:,} bytes, limit 1 MiB). Write it to a workspace file and send the path."
 
 
 class WorkflowError(RuntimeError):
@@ -152,31 +150,21 @@ class _Local(threading.local):
     loading: bool = False
 
 
-class _Runnable:
-    """Tracks lanes that can still run Python (unstarted or between calls) with a monotonic change counter."""
-
-    def __init__(self) -> None:
-        self._lock = threading.Lock()
-        self._seq = 0
-        self._count = 0
-
-    def reset(self, count: int) -> None:
-        with self._lock:
-            self._seq += 1
-            self._count = max(0, count)
-
-    def change(self, delta: int) -> None:
-        with self._lock:
-            self._seq += 1
-            self._count = max(0, self._count + delta)
-
-    def header(self) -> str:
-        with self._lock:
-            return f"{self._seq}:{self._count}"
-
-
 _local = _Local()
-_runnable = _Runnable()
+_runnable_lock = threading.Lock()
+_runnable_seq, _runnable_count = 0, 0
+
+
+def _runnable_change(delta: int, *, reset: bool = False) -> None:
+    global _runnable_seq, _runnable_count
+    with _runnable_lock:
+        _runnable_seq += 1
+        _runnable_count = max(0, delta if reset else _runnable_count + delta)
+
+
+def _runnable_header() -> str:
+    with _runnable_lock:
+        return f"{_runnable_seq}:{_runnable_count}"
 
 
 def _current_lane() -> _Lane:
@@ -215,7 +203,7 @@ class _Gateway:
             headers = {
                 "Authorization": f"Bearer {self._token}",
                 "Content-Type": "application/json",
-                "X-Workflow-Runnable": _runnable.header(),
+                "X-Workflow-Runnable": _runnable_header(),
                 **(extra_headers or {}),
             }
             request = urllib.request.Request(  # noqa: S310 - the launcher sets the gateway URL.
@@ -315,7 +303,7 @@ def _call(
     meta = {"cached": cached, "phase": lane.phase, "label": label, "name": name, "timeout": timeout}
     gateway = _gateway()
     node_key = _next_key() if key is None else key
-    _runnable.change(-1)
+    _runnable_change(-1)
     try:
         receipt = gateway.submit(node_key, kind, args, {k: value for k, value in meta.items() if value is not None})
         node_id = str(receipt["id"])
@@ -330,16 +318,12 @@ def _call(
                 receipt = gateway.poll(node_id, state=str(receipt["state"]))
         if receipt["state"] == "completed":
             return gateway.result(node_id) if receipt.get("result_ref") else receipt.get("result")
-        error_type = {
-            "tool": ToolError,
-            "ask": WorkflowError,
-            "send": WorkflowError,
-            "inbox": WorkflowError,
-            "state": WorkflowError,
-        }.get(kind, AgentError)
+        error_type = (
+            AgentError if kind in {"agent", "turn", "session"} else ToolError if kind == "tool" else WorkflowError
+        )
         raise _failure(receipt, error_type)
     finally:
-        _runnable.change(1)
+        _runnable_change(1)
 
 
 def _failure(receipt: dict[str, object], error_type: type[WorkflowError]) -> WorkflowError:
@@ -542,7 +526,7 @@ def _fan_out(
     lanes = _Lanes(threading.Semaphore(active), [None] * len(calls))
     threads: list[threading.Thread] = []
     started = 0
-    _runnable.change(len(calls) - 1)
+    _runnable_change(len(calls) - 1)
     try:
         for position, call in enumerate(calls):
             # Waits for a lane to end, or to wait for a person/peer, so 1,000 items are never 1,000 threads at work.
@@ -557,7 +541,7 @@ def _fan_out(
         for thread in threads:
             thread.join()
     finally:
-        _runnable.change(1 - (len(calls) - started))
+        _runnable_change(1 - (len(calls) - started))
     if lanes.stopped:
         raise lanes.stopped[0]
     if lanes.errors:
@@ -589,7 +573,7 @@ class _Lanes:
                 report: dict[str, object] = {"type": type(error).__name__, "message": str(error)[:_ERROR_BYTES]}
                 _gateway().submit(_next_key(), "error", report, {"phase": lane.phase} if lane.phase else {})
         finally:
-            _runnable.change(-1)
+            _runnable_change(-1)
             self.places.release()
 
 
@@ -665,11 +649,7 @@ def random() -> float:
 def send(to: str, text: str) -> dict[str, object]:
     """Message an agent of this run by name; "*" reaches every agent that has not finished."""
     _current_lane()
-    body = str(text)
-    raw = body.encode("utf-8")
-    if len(raw) > _MAX_PEER_BYTES:
-        raise WorkflowError(_TOO_LARGE.format(size=len(raw)))
-    return cast("dict[str, object]", _call("send", {"to": str(to), "text": body}))
+    return cast("dict[str, object]", _call("send", {"to": str(to), "text": str(text)}))
 
 
 def inbox(wait_seconds: float = 0) -> list[dict[str, object]]:
@@ -696,9 +676,7 @@ class state:  # noqa: N801 - public SDK namespace matching the spec (`state.get`
     def set(key: str, value: object) -> None:
         """Store *value* under *key* in the run's shared state; last write wins."""
         _current_lane()
-        raw = json.dumps(value, allow_nan=False, separators=(",", ":")).encode("utf-8")
-        if len(raw) > _MAX_PEER_BYTES:
-            raise WorkflowError(_TOO_LARGE.format(size=len(raw)))
+        json.dumps(value, allow_nan=False)
         _call("state", {"op": "set", "key": str(key), "value": value})
 
 
@@ -764,11 +742,11 @@ def run_workflow(source_path: str) -> None:
             raise WorkflowError(_NO_MAIN)  # noqa: TRY301 - reported like any failure of the script.
         args = gateway.run_info()["args"]
         _local.lane = _Lane("")
-        _runnable.reset(1)
+        _runnable_change(1, reset=True)
         try:
             result = main(args)
         finally:
-            _runnable.change(-1)
+            _runnable_change(-1)
             _local.lane = None
         gateway.finish(result=result)
     except Exception:

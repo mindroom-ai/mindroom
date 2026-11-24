@@ -200,34 +200,24 @@ async def node_result(node_id: str, authenticated: _Attempt) -> Response:
 
 
 @router.post("/log")
-async def append_log(
-    request: Request,
-    authenticated: _Attempt,
-    x_workflow_runnable: Annotated[str | None, Header()] = None,
-) -> Response:
+async def append_log(request: Request, authenticated: _Attempt) -> Response:
     """Add one progress line to the run."""
     engine, attempt = authenticated
     body = await _read(request, _LogBody, _MAX_REQUEST_BYTES)
     if isinstance(body, Response):
         return body
     with _refusals():
-        await engine.record_runnable(attempt, x_workflow_runnable)
         await engine.append_log(attempt, body.text)
     return JSONResponse({})
 
 
 @router.post("/finish")
-async def finish(
-    request: Request,
-    authenticated: _Attempt,
-    x_workflow_runnable: Annotated[str | None, Header()] = None,
-) -> Response:
+async def finish(request: Request, authenticated: _Attempt) -> Response:
     """Store what the script's `main` returned or raised."""
     engine, attempt = authenticated
     body = await _read(request, _FinishBody, _MAX_REPORT_BYTES)
     if isinstance(body, Response):
         return body
     with _refusals():
-        await engine.record_runnable(attempt, x_workflow_runnable)
         await engine.finish(attempt, result=body.result, error=body.error)
     return JSONResponse({})
