@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING
 
 from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowed_for_responder
 from mindroom.background_tasks import SupervisedLoop, run_coroutine_until_complete
-from mindroom.constants import ORIGINAL_SENDER_KEY
+from mindroom.constants import ORIGINAL_SENDER_KEY, TODO_POKE_CONTENT_KEY
 from mindroom.custom_tools.todo_poke import (
     TodoPokeDeliveryUnavailableError,
     TodoPokeDeps,
@@ -29,7 +29,8 @@ from mindroom.requester_identity import is_human_requester_id
 from mindroom.scheduling.tasks import get_pending_schedule_thread_ids_for_room
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Mapping
+    from typing import Any
 
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
     from mindroom.bot import AgentBot
@@ -187,6 +188,7 @@ class TodoPokeRuntimeCoordinator:
         body: str,
         thread_id: str | None,
         requester_id: str | None,
+        todo_poke_metadata: Mapping[str, Any] | None = None,
     ) -> str | None:
         """Send one assigned-agent todo poke that enters normal dispatch as its human requester or internally."""
         config = self.config_provider()
@@ -196,12 +198,16 @@ class TodoPokeRuntimeCoordinator:
 
         # A human original sender makes the assignee apply its access policy and tool authorization to that human.
         original_sender = requester_id if requester_id is not None else mindroom_user_id(config, self.runtime_paths)
-        extra_content = {ORIGINAL_SENDER_KEY: original_sender} if original_sender is not None else None
+        extra_content: dict[str, Any] = {}
+        if original_sender is not None:
+            extra_content[ORIGINAL_SENDER_KEY] = original_sender
+        if todo_poke_metadata is not None:
+            extra_content[TODO_POKE_CONTENT_KEY] = dict(todo_poke_metadata)
         return await agent_bot.hook_context.send_message(
             room_id,
             body,
             thread_id,
             "todo_poke",
-            extra_content,
+            extra_content or None,
             trigger_dispatch=True,
         )
