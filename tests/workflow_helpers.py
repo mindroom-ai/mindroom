@@ -65,6 +65,7 @@ from mindroom.tool_system.agno_toolkits import Toolkit
 from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_construction
 from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import serialize_tool_execution_identity
+from mindroom.workflow_runs import nodes as nodes_module
 from mindroom.workflow_runs.agent_nodes import AgentRuntime
 from mindroom.workflow_runs.engine import WorkflowEngine
 from mindroom.workflow_runs.limits import WorkflowLimits
@@ -893,7 +894,7 @@ class WorkflowStack:
         meta: dict[str, object] | None = None,
     ) -> NodeReceipt:
         """Submit one node as the attempt's script would."""
-        return await self.engine.calls.submit_node(self.attempt, NodeRequest(key, kind, args, meta or {}))
+        return await nodes_module.submit_node(self.engine, self.attempt, NodeRequest(key, kind, args, meta or {}))
 
     async def result(
         self,
@@ -905,7 +906,12 @@ class WorkflowStack:
         """Submit one node, wait until it settles, and return its result or raise `NodeFailed`."""
         receipt = await self.submit(key, kind, args, meta)
         while receipt.state not in _SETTLED_STATES:
-            receipt = await self.engine.calls.node_receipt(self.attempt, receipt.id, wait=SETTLE_TIMEOUT_SECONDS)
+            receipt = await nodes_module.node_receipt(
+                self.engine,
+                self.attempt,
+                receipt.id,
+                wait=SETTLE_TIMEOUT_SECONDS,
+            )
         if receipt.state != "completed":
             raise NodeFailed(receipt)
         return receipt.result
@@ -1029,7 +1035,7 @@ class WorkflowStack:
 
     async def finish_attempt(self, result: object = None, error: str | None = None) -> None:
         """Let the attempt's script report and exit, as `main` returning or raising does."""
-        await self.engine.calls.finish(self.attempt, result=result, error=error)
+        await nodes_module.finish(self.engine, self.attempt, result=result, error=error)
         await self.end_attempt(ScriptRunState.EXITED if error is None else ScriptRunState.FAILED)
 
     async def collect(self, job: BackgroundJob) -> object:
@@ -1045,10 +1051,11 @@ class WorkflowStack:
         """
         if kill:
             # A dead process starts nothing more, whatever its stopping tasks would make room for.
-            self.engine.live.closed = True
+            self.engine.closed = True
             tasks = [
                 *self.broker._tasks.values(),
-                *(task for owned in self.engine.live.tasks.values() for task in owned),
+                *self.engine._admissions,
+                *(task for st in self.engine._runs.values() for task in st.tasks),
             ]
             for task in tasks:
                 task.cancel()
@@ -1077,8 +1084,12 @@ class WorkflowStack:
         saved = self.tmp_path / "killed"
         for path in durable:
             _copy_saved(path, saved / path.name)
-        self.engine.live.closed = True
-        tasks = [*self.broker._tasks.values(), *(task for owned in self.engine.live.tasks.values() for task in owned)]
+        self.engine.closed = True
+        tasks = [
+            *self.broker._tasks.values(),
+            *self.engine._admissions,
+            *(task for st in self.engine._runs.values() for task in st.tasks),
+        ]
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
