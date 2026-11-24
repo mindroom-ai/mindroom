@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom.authorization import is_sender_allowed_for_entity_replies_in_room
 from mindroom.credentials.manager import get_runtime_credentials_manager
+from mindroom.desktop.credentials import has_ready_self_service_desktop
 from mindroom.mcp.toolkit import require_mcp_server_manager
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.tool_system.agent_tools import resolve_agent_tools, turn_keeps_room_tools
@@ -143,10 +144,10 @@ async def required_approval_tool_names(
         if (
             not owned
             and name == "desktop"
-            and config.defaults.desktop_pairing == "self_service"
+            and "desktop" not in agent_tools.facts.disabled
             and turn_keeps_room_tools(execution_identity)
             and agent_tools.tools.available("desktop")
-            and bool(execution_identity.requester_id)
+            and has_ready_self_service_desktop(config, runtime_paths, agent_name, execution_identity.requester_id)
         ):
             continue
         if not owned:

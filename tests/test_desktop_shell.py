@@ -1019,11 +1019,14 @@ async def test_per_controller_grant_and_revoke_isolate_leases_pending_and_handle
         await task_b2
     assert shell.handles() == []
 
-    # Global grant(controller_key=None) and revoke(None) preserve legacy behavior.
+    # Unscoped grant(controller_key=None) never leaks into named controllers; revoke(None) revokes all.
     shell.grant(60)
-    assert shell.controller_status("ctrl-a")["auto_approve_remaining_seconds"] > 0
-    assert shell.controller_status("ctrl-b")["auto_approve_remaining_seconds"] > 0
+    assert shell.controller_status("ctrl-a")["auto_approve_remaining_seconds"] == 0
+    assert shell.controller_status("ctrl-b")["auto_approve_remaining_seconds"] == 0
+    shell.grant(60, controller_key="ctrl-a")
+    shell.grant(60, controller_key="ctrl-b")
     shell.revoke()
     assert shell.controller_status("ctrl-a")["auto_approve_remaining_seconds"] == 0
     assert shell.controller_status("ctrl-b")["auto_approve_remaining_seconds"] == 0
+    assert shell.status()["auto_approve_remaining_seconds"] == 0
     await shell.close()

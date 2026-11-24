@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING, Any
 from mindroom.config.knowledge_graph import KNOWLEDGE_GRAPH_EDIT_FUNCTIONS
 from mindroom.config.models import EffectiveToolConfig
 from mindroom.config.resolution import edits_knowledge_graph
+from mindroom.desktop.credentials import has_ready_self_service_desktop
 from mindroom.tool_system.agent_tools import resolve_agent_tools, turn_keeps_room_tools
 from mindroom.tool_system.construction import get_toolkit_construction, tool_config_signature
 from mindroom.tool_system.filters import tool_name_allowed
@@ -15,6 +16,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from mindroom.config.main import Config
+    from mindroom.constants import RuntimePaths
     from mindroom.tool_system.agno_toolkits import AnyToolkit
     from mindroom.tool_system.registry import ToolRegistry
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -55,6 +57,7 @@ def locally_allowed(
     origin: dict[str, Any],
     depth: int,
     authority: dict[str, Any],
+    runtime_paths: RuntimePaths | None = None,
 ) -> bool:
     """Check current authored ownership and filters without remote availability probes.
 
@@ -69,7 +72,8 @@ def locally_allowed(
     construction = authority.get("construction")
     if not isinstance(construction, dict):
         return False
-    candidates = resolve_agent_tools(config, owner.agent_name, tools).candidates(
+    agent_tools = resolve_agent_tools(config, owner.agent_name, tools)
+    candidates = agent_tools.candidates(
         depth=depth,
         room_tools=turn_keeps_room_tools(owner),
         portable_search=True,
@@ -86,10 +90,15 @@ def locally_allowed(
         entry is None
         and toolkit_name == "desktop"
         and construction.get("name") == "desktop"
+        and "desktop" not in agent_tools.facts.disabled
         and config.defaults.desktop_pairing == "self_service"
         and turn_keeps_room_tools(owner)
         and tools.available("desktop")
         and bool(owner.requester_id)
+        and (
+            runtime_paths is None
+            or has_ready_self_service_desktop(config, runtime_paths, owner.agent_name, owner.requester_id)
+        )
     ):
         entry = EffectiveToolConfig(name="desktop", tool_config_overrides={}, authored_name="desktop")
     if entry is None:

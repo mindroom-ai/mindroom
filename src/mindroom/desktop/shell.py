@@ -209,9 +209,7 @@ class DesktopShell:
         self._environment = dict(environment)
         self._clock = clock
         self._monotonic_clock = monotonic_clock
-        self._lease_until = 0.0
-        self._controller_leases: dict[str, float] = {}
-        self._global_excluded: set[str] = set()
+        self._leases: dict[str, float] = {}
         self._pending: DesktopShellRequest | None = None
         # True from the moment a request needs a decision, including while it is held back behind agent input.
         self._awaiting_decision = False
@@ -267,8 +265,7 @@ class DesktopShell:
         return self._monotonic_clock() + remaining
 
     def _effective_lease(self, controller_key: str) -> float:
-        global_lease = 0.0 if controller_key in self._global_excluded else self._lease_until
-        return max(global_lease, self._controller_leases.get(controller_key, 0.0))
+        return self._leases.get(controller_key, 0.0)
 
     def _lease_summary(self, lease_until: float) -> tuple[int, bool]:
         until_revoked = lease_until == math.inf
@@ -299,7 +296,7 @@ class DesktopShell:
         effective_lease = (
             self._effective_lease(controller_key)
             if controller_key is not None
-            else max((self._lease_until, *self._controller_leases.values()), default=0.0)
+            else max(self._leases.values(), default=0.0)
         )
         remaining, until_revoked = self._lease_summary(effective_lease)
         if caller is None:
@@ -386,14 +383,7 @@ class DesktopShell:
             raise DesktopShellError(message)
         if approved and (auto_approve_until_revoked or auto_approve_seconds):
             lease_until = math.inf if auto_approve_until_revoked else self._monotonic_clock() + auto_approve_seconds
-            if pending.controller_key:
-                self._controller_leases[pending.controller_key] = lease_until
-                if self._lease_until > 0.0:
-                    self._global_excluded.add(pending.controller_key)
-            else:
-                self._lease_until = lease_until
-                self._controller_leases.clear()
-                self._global_excluded.clear()
+            self._leases[pending.controller_key] = lease_until
         decision.set_result("approved" if approved else "denied")
         # The reply to this decision already shows the request as settled, so no approval surface keeps it live.
         self._pending = None
@@ -405,7 +395,7 @@ class DesktopShell:
         until_revoked: bool = False,
         controller_key: str | None = None,
     ) -> None:
-        """Auto-approve callers globally or for one controller for a bounded duration or until revoked."""
+        """Auto-approve one controller (or the unscoped default key) for a bounded duration or until revoked."""
         if self._closed:
             message = "Local shell is closed."
             raise DesktopShellError(message)
@@ -422,16 +412,12 @@ class DesktopShell:
             message = "Grant 60 to 3600 seconds or until revoked."
             raise DesktopShellError(message)
         if controller_key is None:
-            self._lease_until = lease_until
-            self._controller_leases.clear()
-            self._global_excluded.clear()
+            self._leases[""] = lease_until
             return
         if not isinstance(controller_key, str) or not controller_key.strip():
             message = "Shell controller key must be non-empty text."
             raise DesktopShellError(message)
-        self._controller_leases[controller_key] = lease_until
-        if self._lease_until > 0.0:
-            self._global_excluded.add(controller_key)
+        self._leases[controller_key] = lease_until
 
     @contextmanager
     def agent_input(self) -> Iterator[None]:
@@ -697,9 +683,7 @@ class DesktopShell:
         and handles are affected; other controllers' leases and running handles remain untouched.
         """
         if controller_key is None:
-            self._lease_until = 0.0
-            self._controller_leases.clear()
-            self._global_excluded.clear()
+            self._leases.clear()
             self._cancel_event.set()
             if self._decision is not None and not self._decision.done():
                 self._decision.set_result("cancelled")
@@ -711,9 +695,7 @@ class DesktopShell:
         if not isinstance(controller_key, str) or not controller_key.strip():
             message = "Shell controller key must be non-empty text."
             raise DesktopShellError(message)
-        self._controller_leases.pop(controller_key, None)
-        if self._lease_until > 0.0:
-            self._global_excluded.add(controller_key)
+        self._leases.pop(controller_key, None)
         if self._busy and self._active_controller_key == controller_key:
             self._cancel_event.set()
             if self._decision is not None and not self._decision.done():

@@ -164,21 +164,29 @@ class DesktopBridgePolicy:
         if not self.allow_control and self.control_lease_expires_at_ms is not None:
             msg = "Observe-only desktop bridge cannot carry a control lease expiry."
             raise ValueError(msg)
-        resolved = (primary,) if len(self.controllers) <= 1 else self.controllers
+        if self.controllers and self.controllers[0] != primary:
+            msg = "Desktop bridge primary controller fields must match controllers[0]."
+            raise ValueError(msg)
         seen_devices: set[tuple[str, str]] = set()
-        for entry in resolved:
+        for entry in self.effective_controllers:
             device_key = (entry.controller.user_id, entry.controller.device_id)
             if device_key in seen_devices:
                 msg = "Desktop bridge controllers must not contain duplicate devices."
                 raise ValueError(msg)
             seen_devices.add(device_key)
-        object.__setattr__(self, "controllers", resolved)
+
+    @property
+    def effective_controllers(self) -> tuple[DesktopControllerPolicy, ...]:
+        """Return all configured controllers, defaulting to the top-level primary controller."""
+        return self.controllers or (
+            DesktopControllerPolicy(self.controller, self.allowed_requester_ids, self.allowed_agent_names),
+        )
 
     def caller_allowed(self, command: DesktopCommand, controller_key: str | None = None) -> bool:
         """Return whether local static policy admits the human and agent provenance for one controller."""
         if controller_key is None:
             return command.requester_id in self.allowed_requester_ids and command.agent_name in self.allowed_agent_names
-        for entry in self.controllers:
+        for entry in self.effective_controllers:
             if controller_journal_key(entry.controller) == controller_key:
                 return entry.caller_allowed(command)
         return False
@@ -244,22 +252,26 @@ class DesktopBridge:
         if self.policy.shell_enabled != (self.shell is not None):
             msg = "Desktop shell policy and local shell provider must be enabled together."
             raise ValueError(msg)
-        self._controllers = {controller_journal_key(entry.controller): entry for entry in self.policy.controllers}
+        self._controllers = {
+            controller_journal_key(entry.controller): entry for entry in self.policy.effective_controllers
+        }
         self._observations = DesktopObservations(clock=self.monotonic_clock)
         self._journal = DesktopCommandJournal.load(
             self.journal_path,
-            controller_key=controller_journal_key(self.policy.controller),
+            controller_key=self._primary_controller_key(),
             legacy_path=self.legacy_journal_path,
         )
-        if self.policy.control_lease_expires_at_ms is None:
-            return
-        remaining_seconds = max(0.0, self.policy.control_lease_expires_at_ms / 1000 - self.clock())
-        grant = _ControlGrant(
-            deadline=self.monotonic_clock() + remaining_seconds,
-            expires_at_ms=self.policy.control_lease_expires_at_ms,
-            computer=False,
-        )
-        self._control_grants = dict.fromkeys(self._controllers, grant)
+        if self.policy.control_lease_expires_at_ms is not None:
+            remaining_seconds = max(0.0, self.policy.control_lease_expires_at_ms / 1000 - self.clock())
+            grant = _ControlGrant(
+                deadline=self.monotonic_clock() + remaining_seconds,
+                expires_at_ms=self.policy.control_lease_expires_at_ms,
+                computer=False,
+            )
+            self._control_grants = dict.fromkeys(self._controllers, grant)
+        elif self.policy.allow_control:
+            expired = _ControlGrant(deadline=-math.inf, expires_at_ms=None, computer=False)
+            self._control_grants = dict.fromkeys(self._controllers, expired)
 
     def _match_controller(self, event: AuthenticatedToDeviceEvent) -> str | None:
         for controller_key, entry in self._controllers.items():
@@ -515,13 +527,10 @@ class DesktopBridge:
         until_revoked: bool = False,
         controller_key: str | None = None,
     ) -> dict[str, object]:
-        """Auto-approve shell requests for one controller or all currently configured controllers."""
+        """Auto-approve shell requests for one controller (or the primary controller when omitted)."""
         shell = self._running_shell()
-        targets = (
-            (self._require_controller(controller_key),) if controller_key is not None else tuple(self._controllers)
-        )
-        for target in targets:
-            shell.grant(duration_seconds, until_revoked=until_revoked, controller_key=target)
+        target = self._primary_controller_key() if controller_key is None else self._require_controller(controller_key)
+        shell.grant(duration_seconds, until_revoked=until_revoked, controller_key=target)
         return self.local_status()
 
     def revoke_local_shell(self, controller_key: str | None = None) -> dict[str, object]:
@@ -549,6 +558,9 @@ class DesktopBridge:
             msg = "The desktop bridge is stopping."
             raise ValueError(msg)
         return shell
+
+    def _primary_controller_key(self) -> str:
+        return controller_journal_key(self.policy.controller)
 
     def _require_controller(self, controller_key: str) -> str:
         if controller_key not in self._controllers:
@@ -578,16 +590,12 @@ class DesktopBridge:
         if self.provider is None:
             msg = "Desktop GUI is unavailable."
             raise ValueError(msg)
-        targets = (
-            (self._require_controller(controller_key),) if controller_key is not None else tuple(self._controllers)
-        )
-        grant = _ControlGrant(
+        target = self._primary_controller_key() if controller_key is None else self._require_controller(controller_key)
+        self._control_grants[target] = _ControlGrant(
             deadline=math.inf if duration_seconds is None else self.monotonic_clock() + duration_seconds,
             expires_at_ms=None if duration_seconds is None else round((self.clock() + duration_seconds) * 1000),
             computer=computer,
         )
-        for target in targets:
-            self._control_grants[target] = grant
         self._sync_policy_control()
         return self.local_status()
 
@@ -598,7 +606,7 @@ class DesktopBridge:
         computer: bool = False,
         controller_key: str | None = None,
     ) -> dict[str, object]:
-        """Grant live GUI control for one controller or all currently configured controllers."""
+        """Grant live GUI control for one controller (or the primary controller when omitted)."""
         return self.grant_local_control(duration_seconds, computer=computer, controller_key=controller_key)
 
     def revoke_local_control(self, controller_key: str | None = None) -> dict[str, object]:
@@ -630,7 +638,7 @@ class DesktopBridge:
             allowed_agent_names=controllers[0].allowed_agent_names,
             controllers=controllers,
         )
-        new_map = {controller_journal_key(entry.controller): entry for entry in next_policy.controllers}
+        new_map = {controller_journal_key(entry.controller): entry for entry in next_policy.effective_controllers}
         removed_keys = [key for key in self._controllers if key not in new_map]
         self._controllers = new_map
         self.policy = next_policy
@@ -642,7 +650,11 @@ class DesktopBridge:
         return self.local_status()
 
     def _sync_policy_control(self) -> None:
-        grants = [grant for key, grant in self._control_grants.items() if key in self._controllers]
+        grants = [
+            grant
+            for key, grant in self._control_grants.items()
+            if key in self._controllers and self._grant_active(grant)
+        ]
         if not grants:
             self.policy = replace(self.policy, allow_control=False, control_lease_expires_at_ms=None)
             return
@@ -904,11 +916,9 @@ class DesktopBridge:
         return error
 
     def _control_policy_error(self, controller_key: str | None = None) -> str | None:
-        key = controller_journal_key(self.policy.controller) if controller_key is None else controller_key
+        key = self._primary_controller_key() if controller_key is None else controller_key
         grant = self._control_grants.get(key)
         if grant is None:
-            if self.policy.allow_control and not self._control_grants:
-                return "Local desktop control lease has expired."
             return "Desktop control is disabled; this bridge is observe-only."
         if not self._grant_active(grant):
             return "Local desktop control lease has expired."
@@ -1116,13 +1126,15 @@ class DesktopBridge:
         ``gui_mode`` describes only application control; folders and shell access are reported separately.
         """
         control_available = self._control_available(controller_key)
+        gui_available = self.provider is not None
         status: dict[str, object] = {
             "gui_mode": "control" if control_available else "observe_only",
             "control_available": control_available,
             "control_scope": "computer" if self._computer_scope(controller_key) else "saved_apps",
             "allowed_app_count": len(self.policy.allowed_app_ids),
             "browser_enabled": self.policy.browser_enabled,
-            "gui_available": self.provider is not None,
+            "gui_available": gui_available,
+            "gui_permissions_ready": gui_available and not missing_macos_desktop_permissions(),
             "observation_modes": ["tree", "screenshot", "both"],
             "durable_commands": True,
         }

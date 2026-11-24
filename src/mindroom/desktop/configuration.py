@@ -84,10 +84,17 @@ def desktop_configuration_state(credentials: dict[str, Any] | None) -> DesktopCo
     )
 
 
-def desktop_pairing_error(config: Config, agent_name: str) -> str | None:
-    """Return why an agent cannot own requester-scoped Desktop pairing, or None when eligible."""
+def desktop_disconnect_error(config: Config, agent_name: str) -> str | None:
+    """Return why an agent cannot own requester-scoped Desktop disconnect, or None when eligible."""
     if agent_name not in config.agents:
         return "Run this command while talking directly to a configured agent."
+    return None
+
+
+def desktop_pairing_error(config: Config, agent_name: str) -> str | None:
+    """Return why an agent cannot own requester-scoped Desktop pairing, or None when eligible."""
+    if (error := desktop_disconnect_error(config, agent_name)) is not None:
+        return error
     policy = config.defaults.desktop_pairing
     if policy == "disabled":
         return "Desktop pairing is disabled by configuration."
@@ -101,5 +108,6 @@ __all__ = [
     "DesktopConfigurationState",
     "DesktopConfigurationStatus",
     "desktop_configuration_state",
+    "desktop_disconnect_error",
     "desktop_pairing_error",
 ]

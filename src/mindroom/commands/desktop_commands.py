@@ -13,6 +13,7 @@ from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.desktop.configuration import (
     DesktopConfigurationStatus,
     desktop_configuration_state,
+    desktop_disconnect_error,
     desktop_pairing_error,
 )
 from mindroom.desktop.credentials import (
@@ -119,13 +120,18 @@ def desktop_room_agent(
     answering = [name for name in names if name in config.agents or name in config.teams]
     parsed = _parse_desktop_args(args_text)
     target_agent = parsed.target_agent if parsed is not None else None
+    eligibility_check = (
+        desktop_disconnect_error
+        if parsed is not None and parsed.operation == "disconnect"
+        else chat_pairing_desktop_error
+    )
     if target_agent is not None:
         if target_agent not in answering:
             return None
-        return target_agent if chat_pairing_desktop_error(config, target_agent) is None else None
+        return target_agent if eligibility_check(config, target_agent) is None else None
     if len(answering) != 1:
         return None
-    return answering[0] if chat_pairing_desktop_error(config, answering[0]) is None else None
+    return answering[0] if eligibility_check(config, answering[0]) is None else None
 
 
 def _validate_desktop_scope(scope: DesktopCommandScope) -> None:
@@ -143,7 +149,7 @@ def _load_desktop_credentials(scope: DesktopCommandScope) -> dict[str, object] |
     )
 
 
-def _setup_response(scope: DesktopCommandScope) -> str:
+def _setup_response(scope: DesktopCommandScope, *, explicit_agent: bool = False) -> str:
     _validate_desktop_scope(scope)
     controller = scope.controller_identity(scope.agent_name)
     pairing = create_desktop_pairing(
@@ -187,8 +193,13 @@ def _setup_response(scope: DesktopCommandScope) -> str:
         f"```json\n{json.dumps(descriptor.to_content(), indent=2)}\n```\n\n"
         "For terminal setup, run this command on your computer. It logs in if needed, claims the pairing, and saves setup for both the terminal and app:\n\n"
         f"```bash\n{setup_command}\n```\n\n"
-        "Then return here and run the exact `!desktop confirm ...` command it prints.\n\n"
-        "Current Desktop target remains unchanged until confirmation."
+        + (
+            f"Then return here and run `/desktop confirm {scope.agent_name} <code> <verification>` "
+            "using the code and verification it prints.\n\n"
+            if explicit_agent
+            else "Then return here and run the exact `!desktop confirm ...` command it prints.\n\n"
+        )
+        + "Current Desktop target remains unchanged until confirmation."
     )
 
 
@@ -268,7 +279,9 @@ def _disconnect_response(
             f"/desktop disconnect {scope.agent_name} confirm" if explicit_agent else "/desktop disconnect confirm"
         )
         return f"This removes your Desktop target for agent `{scope.agent_name}`. Run `{confirm_cmd}` to continue."
-    _validate_desktop_scope(scope)
+    eligibility_error = desktop_disconnect_error(scope.config, scope.agent_name)
+    if eligibility_error is not None:
+        raise DesktopPairingError(eligibility_error)
     delete_desktop_credentials(
         get_runtime_credentials_manager(scope.runtime_paths),
         requester_id=scope.requester_id,
@@ -292,7 +305,7 @@ def handle_desktop_command(args_text: str, *, scope: DesktopCommandScope) -> str
         )
     try:
         if parsed.operation in {"setup", "rotate"}:
-            response = _setup_response(scope)
+            response = _setup_response(scope, explicit_agent=parsed.target_agent is not None)
         elif parsed.operation == "status":
             response = _status_response(scope)
         elif parsed.operation == "confirm":

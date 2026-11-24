@@ -318,8 +318,8 @@ async def test_denied_callers_get_no_file_bytes_or_shell_process(
     """Caller policy rejects file and shell work before either local provider runs."""
     files = DesktopFilesystem((selected_root,))
     shell = _local_shell()
-    shell.grant(60)
     bridge = _local_bridge(filesystem=files, shell=shell)
+    bridge.grant_local_shell(60)
     caller = {"requester_id": requester_id, "agent_name": agent_name}
     await _handle(
         bridge,
@@ -444,9 +444,9 @@ async def test_stop_settles_shell_work_promptly_without_replay(
     started = tmp_path / "started"
     expected_runs = "started" if phase == "running" else None
     shell = _local_shell()
-    if phase == "running":
-        shell.grant(60)
     bridge = _local_bridge(shell=shell, journal_path=journal)
+    if phase == "running":
+        bridge.grant_local_shell(60)
     command = _command("run_shell", parameters={"command": "printf started >> started; sleep 30", "cwd": str(tmp_path)})
     await bridge.on_to_device_event(_event(command))
     execution = asyncio.create_task(_execute(bridge))
@@ -718,8 +718,8 @@ async def test_interrupted_shell_command_reports_unknown_outcome_after_restart(
     """A shell command started before a crash is reported as uncertain and never rerun."""
     journal = tmp_path / "commands.sqlite3"
     shell = _local_shell()
-    shell.grant(60)
     bridge = _local_bridge(shell=shell, journal_path=journal)
+    bridge.grant_local_shell(60)
     command = _command("run_shell", parameters={"command": PRIVATE_COMMAND, "cwd": str(tmp_path)})
     monkeypatch.setattr(bridge, "_execute_safely", AsyncMock(side_effect=asyncio.CancelledError))
     with pytest.raises(asyncio.CancelledError):
@@ -727,8 +727,8 @@ async def test_interrupted_shell_command_reports_unknown_outcome_after_restart(
     bridge.close()
 
     restarted_shell = _local_shell()
-    restarted_shell.grant(60)
     restarted = _local_bridge(shell=restarted_shell, journal_path=journal)
+    restarted.grant_local_shell(60)
     await _handle(restarted, _event(command))
     response = _response(transport)
     assert response.result["action_outcome"] == "unknown"
@@ -784,8 +784,8 @@ async def test_request_status_recovers_the_reply_of_a_consumed_handle_check(
 ) -> None:
     """A finished check hands its handle over once, and request_status still returns that recorded reply."""
     shell = _local_shell()
-    shell.grant(60)
     bridge = _local_bridge(shell=shell)
+    bridge.grant_local_shell(60)
     await _handle(bridge, _event(_run_shell("while [ ! -f release ]; do sleep 0.05; done; printf done", tmp_path)))
     handle = _response(transport).result["handle"]
     assert isinstance(handle, str)
@@ -815,8 +815,8 @@ async def test_request_status_recovers_the_reply_of_a_consumed_handle_check(
 async def test_other_callers_cannot_kill_a_handle(transport: AsyncMock, tmp_path: Path) -> None:
     """Another allowed requester gets exactly the error reply of a handle that never existed."""
     shell = _local_shell()
-    shell.grant(60)
     bridge = _local_bridge(shell=shell)
+    bridge.grant_local_shell(60)
     await _handle(bridge, _event(_run_shell("sleep 30", tmp_path)))
     handle = _response(transport).result["handle"]
     assert isinstance(handle, str)
@@ -831,8 +831,8 @@ async def test_other_callers_cannot_kill_a_handle(transport: AsyncMock, tmp_path
 async def test_local_handle_kill_reaches_the_agent_as_killed(transport: AsyncMock, tmp_path: Path) -> None:
     """After the person at the computer kills a handle, the agent's next check reports killed, not unknown."""
     shell = _local_shell()
-    shell.grant(60)
     bridge = _local_bridge(shell=shell)
+    bridge.grant_local_shell(60)
     await _handle(bridge, _event(_run_shell("printf before; sleep 30", tmp_path)))
     handle = _response(transport).result["handle"]
     assert isinstance(handle, str)
@@ -848,8 +848,8 @@ async def test_local_handle_kill_reaches_the_agent_as_killed(transport: AsyncMoc
 async def test_revoke_and_bridge_stop_kill_running_handles(transport: AsyncMock, tmp_path: Path, stop: str) -> None:
     """Handles outlive their inline wait but never local revocation or bridge stop."""
     shell = _local_shell()
-    shell.grant(60)
     bridge = _local_bridge(shell=shell)
+    bridge.grant_local_shell(60)
     pid_file = tmp_path / "leader.pid"
     try:
         # The leader outlives any wait below, so only a real kill makes it disappear.
@@ -920,8 +920,8 @@ async def test_undeliverable_run_shell_reply_stays_recoverable_until_revoke_and_
     )
     (tmp_path / "log").write_bytes(b"".join(f"line {number:05}\n".encode() for number in range(9_000)))
     shell = _local_shell()
-    shell.grant(60)
     bridge = _local_bridge(shell=shell)
+    bridge.grant_local_shell(60)
     await _handle(bridge, _event(_run_shell("cat log", tmp_path)))
     first = _response(transport)
     handle = first.result["handle"]
@@ -952,8 +952,8 @@ async def test_bridge_stop_during_a_stalled_output_upload_returns_within_the_bou
     """Stop drains the in-flight reply, and a stalled upload bounds that drain instead of hanging it."""
     started, released = _stall_output_uploads(monkeypatch)
     shell = _local_shell()
-    shell.grant(60)
     bridge = _local_bridge(shell=shell)
+    bridge.grant_local_shell(60)
     worker = asyncio.create_task(bridge.run())
     command = f"{shlex.quote(sys.executable)} -c {shlex.quote(_LARGE_OUTPUT)}"
     await bridge.on_to_device_event(_event(_run_shell(command, tmp_path)))
@@ -1018,7 +1018,6 @@ async def test_worst_case_escaped_output_is_inline_only_while_the_encrypted_repl
         assert peer.olm is not None
         controller = PinnedMatrixDevice(controller_user, "DESKTOP", peer.olm.account.identity_keys["ed25519"])
         shell = _local_shell()
-        shell.grant(60)
         bridge = DesktopBridge(
             client=client,
             provider=None,
@@ -1026,6 +1025,7 @@ async def test_worst_case_escaped_output_is_inline_only_while_the_encrypted_repl
             shell=shell,
             clock=lambda: NOW_SECONDS,
         )
+        bridge.grant_local_shell(60)
         inline_id, attached_id = "i" * _MAX_PROTOCOL_IDENTIFIER_LENGTH, "a" * _MAX_PROTOCOL_IDENTIFIER_LENGTH
         probe = replace(
             _run_shell("true", tmp_path, request_id=inline_id, expires_at_ms=120_000),
@@ -1447,6 +1447,7 @@ async def test_list_apps_and_status_expose_only_coarse_local_authority(transport
         "allowed_app_count": 1,
         "browser_enabled": False,
         "gui_available": True,
+        "gui_permissions_ready": True,
         "file_roots": [],
         "file_roots_truncated": False,
         "shell": {
@@ -1467,8 +1468,8 @@ async def test_list_apps_and_status_expose_only_coarse_local_authority(transport
 async def test_status_names_gui_mode_so_shell_access_never_reads_as_read_only(transport: AsyncMock) -> None:
     """Observe-only describes only app control; live shell auto-approval is reported beside it."""
     shell = _local_shell()
-    shell.grant(60)
     bridge = _local_bridge(shell=shell)
+    bridge.grant_local_shell(60)
     await _handle(bridge, _event(_command("status")))
     for status in (_response(transport).result["bridge"], bridge.local_status()):
         assert "mode" not in status
@@ -2845,3 +2846,103 @@ async def test_responses_route_back_to_issuing_controller(
     finally:
         await bridge.stop()
         bridge.close()
+
+
+@pytest.mark.asyncio
+async def test_omitted_controller_key_grants_only_primary_while_revoke_clears_all(
+    transport: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """grant_control()/grant_local_shell() without controller_key grant ONLY primary; revoke() clears both."""
+    monkeypatch.setattr("mindroom.desktop.bridge.authenticated_sender_matches", _match_pinned)
+    shell = _local_shell()
+    bridge, ctrl_a, ctrl_b, _, _ = _two_controller_bridge(provider=FakeProvider(), shell=shell)
+    key_a, key_b = controller_journal_key(ctrl_a), controller_journal_key(ctrl_b)
+    try:
+        bridge.grant_control(computer=True)
+        bridge.grant_local_shell(until_revoked=True)
+        local = bridge.local_status()
+        assert local["controllers"][key_a]["control_available"] is True
+        assert local["controllers"][key_a]["control_scope"] == "computer"
+        assert local["controllers"][key_a]["shell"]["auto_approve_until_revoked"] is True
+        assert local["controllers"][key_b]["control_available"] is False
+        assert local["controllers"][key_b]["shell"]["auto_approve_until_revoked"] is False
+
+        # Controller B is still rejected for control actions.
+        await bridge.on_to_device_event(
+            _controller_event(
+                ctrl_b,
+                _command(
+                    "launch_app",
+                    request_id="b-denied",
+                    sequence=1,
+                    requester_id=BOB,
+                    agent_name="agent_b",
+                    parameters={"app": APP_ID},
+                ),
+            ),
+        )
+        await _execute(bridge)
+        await bridge.deliver_pending()
+        assert not _response(transport).ok
+        assert "observe-only" in (_response(transport).error or "")
+
+        # Grant B explicitly, then revoking without controller_key clears BOTH A and B.
+        bridge.grant_control(60, controller_key=key_b)
+        bridge.grant_local_shell(60, controller_key=key_b)
+        bridge.revoke_control()
+        bridge.revoke_local_shell()
+        revoked = bridge.local_status()
+        assert revoked["controllers"][key_a]["control_available"] is False
+        assert revoked["controllers"][key_b]["control_available"] is False
+        assert revoked["controllers"][key_a]["shell"]["auto_approve_until_revoked"] is False
+        assert revoked["controllers"][key_b]["shell"]["auto_approve_remaining_seconds"] == 0
+    finally:
+        await bridge.stop()
+        bridge.close()
+
+
+def test_bridge_policy_rejects_mismatched_single_element_controllers_tuple() -> None:
+    """DesktopBridgePolicy never silently ignores a 1-element controllers tuple that disagrees with top-level fields."""
+    other = PinnedMatrixDevice("@other:example.org", "OTHER", "other-key")
+    with pytest.raises(ValueError, match=r"controllers\[0\]"):
+        DesktopBridgePolicy(
+            controller=CONTROLLER,
+            allowed_requester_ids=frozenset({ALICE}),
+            allowed_agent_names=frozenset({"computer"}),
+            allowed_app_ids=frozenset({APP_ID}),
+            controllers=(DesktopControllerPolicy(other, frozenset({BOB}), frozenset({"agent_b"})),),
+        )
+
+
+@pytest.mark.asyncio
+async def test_agent_status_exposes_gui_permissions_ready(
+    transport: AsyncMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Agent-facing bridge.status() exposes gui_permissions_ready so agents detect missing macOS permissions."""
+    monkeypatch.setattr("mindroom.desktop.bridge.missing_macos_desktop_permissions", lambda: ("Accessibility",))
+    gui_bridge = DesktopBridge(
+        client=object(),
+        provider=FakeProvider(),
+        policy=_policy(),
+        clock=lambda: NOW_SECONDS,
+    )
+    await _handle(gui_bridge, _event(_command("status", request_id="s1", sequence=1)))
+    missing_status = _response(transport).result["bridge"]
+    assert missing_status["gui_available"] is True
+    assert missing_status["gui_permissions_ready"] is False
+
+    monkeypatch.setattr("mindroom.desktop.bridge.missing_macos_desktop_permissions", lambda: ())
+    await _handle(gui_bridge, _event(_command("status", request_id="s2", sequence=2)))
+    ready_status = _response(transport).result["bridge"]
+    assert ready_status["gui_available"] is True
+    assert ready_status["gui_permissions_ready"] is True
+
+    no_gui_bridge = _local_bridge(shell=_local_shell())
+    await _handle(no_gui_bridge, _event(_command("status", request_id="s3", sequence=1)))
+    no_gui_status = _response(transport).result["bridge"]
+    assert no_gui_status["gui_available"] is False
+    assert no_gui_status["gui_permissions_ready"] is False
+    await no_gui_bridge.stop()
+    no_gui_bridge.close()

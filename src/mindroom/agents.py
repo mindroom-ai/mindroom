@@ -35,8 +35,7 @@ from mindroom.delegation.personas import (
     require_built_persona_tools,
 )
 from mindroom.delegation.state import is_delegation_function
-from mindroom.desktop.configuration import DesktopConfigurationStatus, desktop_configuration_state
-from mindroom.desktop.credentials import load_desktop_credentials
+from mindroom.desktop.credentials import has_ready_self_service_desktop
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.error_handling import MinimalModeUnavailableError, minimal_mode_failure_message
 from mindroom.failure_text import failure_text
@@ -982,29 +981,6 @@ def _agent_create_timing(label: str, **event_data: object) -> AbstractContextMan
     return timed_block(f"system_prompt_assembly.agent_create.{label}", scope=None, **event_data)
 
 
-def _has_ready_self_service_desktop(
-    config: Config,
-    runtime_paths: constants.RuntimePaths,
-    agent_name: str,
-    execution_identity: ToolExecutionIdentity | None,
-) -> bool:
-    """Return whether self-service desktop pairing is READY for this requester and agent."""
-    if (
-        config.defaults.desktop_pairing != "self_service"
-        or agent_name not in config.agents
-        or execution_identity is None
-        or not execution_identity.requester_id
-        or not turn_keeps_room_tools(execution_identity)
-    ):
-        return False
-    credentials = load_desktop_credentials(
-        get_runtime_credentials_manager(runtime_paths),
-        requester_id=execution_identity.requester_id,
-        agent_name=agent_name,
-    )
-    return desktop_configuration_state(credentials).status is DesktopConfigurationStatus.READY
-
-
 def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools share one construction path
     agent_tools: AgentTools,
     runtime_paths: constants.RuntimePaths,
@@ -1078,8 +1054,11 @@ def _assemble_agent_toolkits(  # noqa: C901, PLR0915 - eager and deferred tools 
         and "desktop" not in resolved_tool_configs
         and "desktop" not in deferred_configs
         and "desktop" not in disabled_tool_names
+        and "desktop" not in agent_tools.facts.disabled
         and agent_tools.tools.available("desktop")
-        and _has_ready_self_service_desktop(config, runtime_paths, agent_name, execution_identity)
+        and execution_identity is not None
+        and turn_keeps_room_tools(execution_identity)
+        and has_ready_self_service_desktop(config, runtime_paths, agent_name, execution_identity.requester_id)
     ):
         resolved_tool_configs["desktop"] = EffectiveToolConfig(
             name="desktop",

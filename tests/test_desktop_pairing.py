@@ -1201,6 +1201,7 @@ async def test_slash_desktop_setup_named_agent_in_multi_agent_room_and_rejects_o
 
     setup_reply = await run_cmd("setup dev")
     assert "Desktop pairing started" in setup_reply
+    assert "/desktop confirm dev <code> <verification>" in setup_reply
     token_match = re.search(r"--code ([A-Za-z0-9_-]+)", setup_reply)
     assert token_match is not None
     token = token_match.group(1)
@@ -1357,3 +1358,314 @@ async def test_setup_request_reports_ineligible_when_policy_disabled_or_explicit
     comp_offer = DesktopSetupOffer.from_content(sent.pop()[2])
     assert comp_offer.eligible is True
     assert comp_offer.code is not None
+
+
+@pytest.mark.asyncio
+async def test_confirm_accepts_named_and_unnamed_forms_in_single_agent_room(tmp_path: Path) -> None:
+    """In a 1-agent room, both `/desktop confirm <code> <ver>` and `/desktop confirm <agent> <code> <ver>` succeed."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = _desktop_config(runtime_paths)
+    persist_entity_accounts(config, runtime_paths, usernames={"computer": "mindroom_computer"})
+    room = nio.MatrixRoom(room_id="!dm:localhost", own_user_id="@mindroom_computer:localhost")
+    for user_id in ("@alice:localhost", "@mindroom_computer:localhost"):
+        room.add_member(user_id, None, None)
+    client = SimpleNamespace(
+        user_id="@mindroom_computer:localhost",
+        joined_members=AsyncMock(
+            return_value=nio.JoinedMembersResponse(
+                members=[
+                    nio.RoomMember("@alice:localhost", None, None),
+                    nio.RoomMember("@mindroom_computer:localhost", None, None),
+                ],
+                room_id=room.room_id,
+            ),
+        ),
+    )
+    assert await ensure_room_membership_synced(client, room, sender_id="@alice:localhost")
+
+    for use_named in (False, True):
+        pairing = create_desktop_pairing(runtime_paths, requester_id="@alice:localhost", agent_name="computer")
+        claim_desktop_pairing(
+            runtime_paths,
+            token=pairing.token,
+            agent_name="computer",
+            device_user_id="@alice:localhost",
+            device_id="DEV1",
+            device_ed25519="dev1-key",
+        )
+        ver = desktop_pairing_verification(pairing.token, "dev1-key")
+        args_text = f"confirm computer {pairing.token} {ver}" if use_named else f"confirm {pairing.token} {ver}"
+        assert desktop_room_agent(config, runtime_paths, room, "@alice:localhost", args_text=args_text) == "computer"
+        reply = handle_desktop_command(
+            args_text,
+            scope=DesktopCommandScope(
+                config=config,
+                runtime_paths=runtime_paths,
+                agent_name="computer",
+                requester_id="@alice:localhost",
+                controller_identity=lambda _name: SimpleNamespace(
+                    user_id="@mindroom_computer:localhost",
+                    device_id="CLOUD",
+                    ed25519="cloud-key",
+                ),
+            ),
+        )
+        assert "Desktop paired" in reply
+
+
+@pytest.mark.asyncio
+async def test_disconnect_succeeds_under_disabled_desktop_pairing_via_chat_and_olm(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Existing pairings can still be disconnected via chat and Olm even when desktop_pairing == 'disabled'."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    base_config = _desktop_config(runtime_paths)
+    disabled_config = base_config.model_copy(
+        update={"defaults": base_config.defaults.model_copy(update={"desktop_pairing": "disabled"})},
+    )
+    persist_entity_accounts(
+        disabled_config,
+        runtime_paths,
+        usernames={"computer": "mindroom_computer", "notes": "mindroom_notes"},
+    )
+    creds_manager = get_runtime_credentials_manager(runtime_paths)
+    saved_creds = {"device_user_id": "@alice:example.org", "device_id": "HELPER1", "device_ed25519": "helper1-key"}
+
+    # 1. Chat /desktop disconnect in both 1-agent and multi-agent rooms succeeds under disabled policy.
+    room = nio.MatrixRoom(room_id="!shared:localhost", own_user_id="@mindroom_computer:localhost")
+    for user_id in ("@alice:example.org", "@mindroom_computer:localhost", "@mindroom_notes:localhost"):
+        room.add_member(user_id, None, None)
+    client = SimpleNamespace(
+        user_id="@mindroom_computer:localhost",
+        joined_members=AsyncMock(
+            return_value=nio.JoinedMembersResponse(
+                members=[
+                    nio.RoomMember(u, None, None)
+                    for u in ("@alice:example.org", "@mindroom_computer:localhost", "@mindroom_notes:localhost")
+                ],
+                room_id=room.room_id,
+            ),
+        ),
+    )
+    assert await ensure_room_membership_synced(client, room, sender_id="@alice:example.org")
+
+    save_desktop_credentials(creds_manager, saved_creds, requester_id="@alice:example.org", agent_name="computer")
+    assert (
+        desktop_room_agent(disabled_config, runtime_paths, room, "@alice:example.org", args_text="setup computer")
+        is None
+    )
+    assert (
+        desktop_room_agent(
+            disabled_config,
+            runtime_paths,
+            room,
+            "@alice:example.org",
+            args_text="disconnect computer confirm",
+        )
+        == "computer"
+    )
+    chat_reply = handle_desktop_command(
+        "disconnect computer confirm",
+        scope=DesktopCommandScope(
+            config=disabled_config,
+            runtime_paths=runtime_paths,
+            agent_name="computer",
+            requester_id="@alice:example.org",
+            controller_identity=lambda _name: SimpleNamespace(
+                user_id="@mindroom_computer:localhost",
+                device_id="CLOUD",
+                ed25519="cloud-key",
+            ),
+        ),
+    )
+    assert "Desktop disconnected" in chat_reply
+    assert load_desktop_credentials(creds_manager, requester_id="@alice:example.org", agent_name="computer") is None
+
+    # Room ownership check still rejects rooms with another human even for disconnect.
+    room_with_bob = nio.MatrixRoom(room_id="!twohumans:localhost", own_user_id="@mindroom_computer:localhost")
+    for user_id in ("@alice:example.org", "@bob:example.org", "@mindroom_computer:localhost"):
+        room_with_bob.add_member(user_id, None, None)
+    client.joined_members.return_value = nio.JoinedMembersResponse(
+        members=[
+            nio.RoomMember(u, None, None)
+            for u in ("@alice:example.org", "@bob:example.org", "@mindroom_computer:localhost")
+        ],
+        room_id=room_with_bob.room_id,
+    )
+    assert await ensure_room_membership_synced(client, room_with_bob, sender_id="@alice:example.org")
+    assert (
+        desktop_room_agent(
+            disabled_config,
+            runtime_paths,
+            room_with_bob,
+            "@alice:example.org",
+            args_text="disconnect confirm",
+        )
+        is None
+    )
+
+    # 2. Olm disconnect_request.v1 succeeds under disabled policy while setup_request.v1 stays rejected.
+    save_desktop_credentials(creds_manager, saved_creds, requester_id="@alice:example.org", agent_name="computer")
+    devices = {"@alice:example.org": {"CHAT1": _olm_device("chat1-key")}}
+    receiver, sent = _olm_receiver(
+        runtime_paths,
+        monkeypatch,
+        devices=devices,
+        agent_name="computer",
+        config=disabled_config,
+    )
+    await receiver.on_event(
+        _olm_event(
+            sender="@alice:example.org",
+            device_id="CHAT1",
+            ed25519="chat1-key",
+            event_type=DESKTOP_DISCONNECT_REQUEST_EVENT_TYPE,
+            content=DesktopDisconnectRequest(nonce="disc-disabled-01234", agent_name="computer").to_content(),
+        ),
+    )
+    _, event_type, content = sent.pop()
+    assert event_type == DESKTOP_DISCONNECT_CONFIRMED_EVENT_TYPE
+    assert DesktopDisconnectConfirmed.from_content(content) == DesktopDisconnectConfirmed(
+        nonce="disc-disabled-01234",
+        agent_name="computer",
+        ok=True,
+    )
+    assert load_desktop_credentials(creds_manager, requester_id="@alice:example.org", agent_name="computer") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_olm_pairing_receiver_rejects_unauthorized_senders_on_all_events(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unauthorized senders are dropped silently on setup, claim, confirm, and disconnect without leaking metadata."""
+    runtime_paths = replace(
+        test_runtime_paths(tmp_path),
+        process_env={
+            "MATRIX_HOMESERVER": "http://localhost:8008",
+            "MINDROOM_DESKTOP_MATRIX_HOMESERVER": "https://secret.example.org",
+            "MINDROOM_DESKTOP_CLOUDFLARE_ACCESS": "true",
+        },
+    )
+    config = Config.validate_with_runtime(
+        {
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
+            "defaults": {"tools": []},
+            "agents": {
+                "computer": {
+                    "display_name": "Computer",
+                    "role": "Operate apps",
+                    "tools": ["desktop"],
+                    "access": {"users": ["@alice:example.org"]},
+                },
+            },
+        },
+        runtime_paths,
+    )
+    devices = {
+        "@alice:example.org": {"CHAT_A": _olm_device("chat-a-key"), "HELP_A": _olm_device("help-a-key")},
+        "@mallory:example.org": {"CHAT_M": _olm_device("chat-m-key"), "HELP_M": _olm_device("help-m-key")},
+    }
+    receiver, sent = _olm_receiver(runtime_paths, monkeypatch, devices=devices, agent_name="computer", config=config)
+
+    # Pre-create a claimed pairing and saved credentials for mallory to prove none can be mutated or confirmed.
+    pending = create_desktop_pairing(
+        runtime_paths,
+        requester_id="@mallory:example.org",
+        agent_name="computer",
+        initiator_device_id="CHAT_M",
+        initiator_ed25519="chat-m-key",
+    )
+    creds_manager = get_runtime_credentials_manager(runtime_paths)
+    existing_creds = {"device_user_id": "@mallory:example.org", "device_id": "OLD", "device_ed25519": "old-key"}
+    save_desktop_credentials(creds_manager, existing_creds, requester_id="@mallory:example.org", agent_name="computer")
+
+    # 1. setup_request.v1 from unauthorized sender -> silently dropped, no homeserver/cloudflare_access leaked.
+    await receiver.on_event(
+        _olm_event(
+            sender="@mallory:example.org",
+            device_id="CHAT_M",
+            ed25519="chat-m-key",
+            event_type=DESKTOP_SETUP_REQUEST_EVENT_TYPE,
+            content=DesktopSetupRequest(nonce="unauth-setup-01234", agent_name="computer").to_content(),
+        ),
+    )
+    assert sent == []
+
+    # 2. pairing_claim.v1 from unauthorized sender -> silently dropped, pairing remains unclaimed.
+    await receiver.on_event(
+        _olm_event(
+            sender="@mallory:example.org",
+            device_id="HELP_M",
+            ed25519="help-m-key",
+            event_type=DESKTOP_PAIRING_CLAIM_EVENT_TYPE,
+            content=DesktopPairingClaim(pending.token).to_content(),
+        ),
+    )
+    assert sent == []
+
+    # Claim in DB directly so confirm would otherwise succeed if authorization weren't checked.
+    claim_desktop_pairing(
+        runtime_paths,
+        token=pending.token,
+        agent_name="computer",
+        device_user_id="@mallory:example.org",
+        device_id="HELP_M",
+        device_ed25519="help-m-key",
+    )
+    ver = desktop_pairing_verification(pending.token, "help-m-key")
+
+    # 3. pairing_confirm.v1 from unauthorized sender -> silently dropped, credentials untouched.
+    await receiver.on_event(
+        _olm_event(
+            sender="@mallory:example.org",
+            device_id="CHAT_M",
+            ed25519="chat-m-key",
+            event_type=DESKTOP_PAIRING_CONFIRM_EVENT_TYPE,
+            content=DesktopPairingConfirm(
+                nonce="unauth-confirm-012",
+                token=pending.token,
+                verification=ver,
+                device_id="HELP_M",
+                device_ed25519="help-m-key",
+            ).to_content(),
+        ),
+    )
+    assert sent == []
+    assert (
+        load_desktop_credentials(creds_manager, requester_id="@mallory:example.org", agent_name="computer")
+        == existing_creds
+    )
+
+    # 4. disconnect_request.v1 from unauthorized sender -> silently dropped, credentials untouched.
+    await receiver.on_event(
+        _olm_event(
+            sender="@mallory:example.org",
+            device_id="CHAT_M",
+            ed25519="chat-m-key",
+            event_type=DESKTOP_DISCONNECT_REQUEST_EVENT_TYPE,
+            content=DesktopDisconnectRequest(nonce="unauth-disc-012345", agent_name="computer").to_content(),
+        ),
+    )
+    assert sent == []
+    assert (
+        load_desktop_credentials(creds_manager, requester_id="@mallory:example.org", agent_name="computer")
+        == existing_creds
+    )
+
+    # Authorized sender (@alice:example.org) still succeeds end-to-end!
+    await receiver.on_event(
+        _olm_event(
+            sender="@alice:example.org",
+            device_id="CHAT_A",
+            ed25519="chat-a-key",
+            event_type=DESKTOP_SETUP_REQUEST_EVENT_TYPE,
+            content=DesktopSetupRequest(nonce="auth-setup-0123456", agent_name="computer").to_content(),
+        ),
+    )
+    assert len(sent) == 1
+    offer = DesktopSetupOffer.from_content(sent.pop()[2])
+    assert offer.eligible is True
+    assert offer.homeserver == "https://secret.example.org"

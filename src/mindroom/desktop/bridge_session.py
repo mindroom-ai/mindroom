@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING
 from nio import AuthenticatedToDeviceEvent
 
 from mindroom.desktop.bridge import DesktopBridge, DesktopBridgePolicy, DesktopControllerPolicy
-from mindroom.desktop.command_journal import desktop_journal_path
+from mindroom.desktop.command_journal import controller_journal_key, desktop_journal_path
 from mindroom.desktop.filesystem import DesktopFilesystem
 from mindroom.desktop.native_config import require_supported_local_access
 from mindroom.desktop.playwright_mcp import PlaywrightMCPBrowserProvider
@@ -163,7 +163,11 @@ async def start_desktop_bridge_session(
             control_lease_expires_at_ms=lease_expires_at_ms,
         )
         if shell_auto_approve_seconds is not None:
-            bridge.grant_local_shell(shell_auto_approve_seconds)
+            for entry in config.controllers:
+                bridge.grant_local_shell(
+                    shell_auto_approve_seconds,
+                    controller_key=controller_journal_key(entry.controller),
+                )
         client.add_to_device_callback(bridge.on_to_device_event, AuthenticatedToDeviceEvent)
         resources.callback(client.to_device_callbacks.remove, client.to_device_callbacks[-1])
         for entry in config.controllers[1:]:

@@ -9,11 +9,14 @@ from typing import TYPE_CHECKING
 
 from nio import AuthenticatedToDeviceEvent
 
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
+from mindroom.authorization import is_sender_allowed_for_responder
 from mindroom.constants import runtime_matrix_homeserver
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.desktop.configuration import (
     DesktopConfigurationStatus,
     desktop_configuration_state,
+    desktop_disconnect_error,
     desktop_pairing_error,
 )
 from mindroom.desktop.credentials import delete_desktop_credentials, save_desktop_credentials
@@ -52,6 +55,7 @@ from mindroom.matrix.olm_to_device import (
     authenticated_sender_is_current,
     send_encrypted_to_device,
 )
+from mindroom.requester_identity import is_human_requester_id
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -84,14 +88,42 @@ class DesktopPairingReceiver:
     config: Config | None = None
     config_getter: Callable[[], Config] | None = None
     eligibility_error: Callable[[], str | None] | None = None
+    membership_index: AgentReplyMembershipIndex | None = None
+
+    def _current_config(self) -> Config | None:
+        return self.config_getter() if self.config_getter is not None else self.config
+
+    def _is_sender_authorized(self, sender_id: str) -> bool:
+        config = self._current_config()
+        if config is None:
+            return True
+        if self.agent_name not in config.agents:
+            return False
+        if not is_human_requester_id(sender_id, config, self.runtime_paths):
+            return False
+        membership_index = self.membership_index if self.membership_index is not None else AgentReplyMembershipIndex()
+        return is_sender_allowed_for_responder(
+            sender_id,
+            self.agent_name,
+            None,
+            config,
+            self.runtime_paths,
+            membership_index,
+        )
 
     def _check_eligibility(self) -> str | None:
         if self.eligibility_error is not None:
             return self.eligibility_error()
-        config = self.config_getter() if self.config_getter is not None else self.config
+        config = self._current_config()
         if config is None:
             return None
         return desktop_pairing_error(config, self.agent_name)
+
+    def _check_disconnect_eligibility(self) -> str | None:
+        config = self._current_config()
+        if config is None:
+            return None
+        return desktop_disconnect_error(config, self.agent_name)
 
     async def _send_reply(
         self,
@@ -159,6 +191,14 @@ class DesktopPairingReceiver:
                 agent=self.agent_name,
                 event_type=event.type,
                 reason="untrusted_device",
+            )
+            return
+        if not self._is_sender_authorized(event.sender):
+            logger.warning(
+                "desktop_pairing_event_rejected",
+                agent=self.agent_name,
+                event_type=event.type,
+                reason="unauthorized_sender",
             )
             return
         identity = event.authenticated_sender
@@ -345,7 +385,7 @@ class DesktopPairingReceiver:
                 error=f"Desktop disconnect request targets agent '{request.agent_name}', not '{self.agent_name}'.",
             )
             return
-        if (error := self._check_eligibility()) is not None:
+        if (error := self._check_disconnect_eligibility()) is not None:
             await self._reply_disconnect_confirmed(target, request.nonce, ok=False, error=error)
             return
         try:
@@ -374,6 +414,7 @@ def register_desktop_pairing_receiver(
         Callable[..., Awaitable[None]],
     ],
     config_getter: Callable[[], Config] | None = None,
+    membership_index: AgentReplyMembershipIndex | None = None,
 ) -> None:
     """Register a pairing receiver for any concrete agent and check policy dynamically."""
     if agent_name not in config.agents:
@@ -384,6 +425,7 @@ def register_desktop_pairing_receiver(
         runtime_paths=runtime_paths,
         config=config,
         config_getter=config_getter,
+        membership_index=membership_index,
     )
     client.add_to_device_callback(
         callback_wrapper(receiver.on_event),  # ty: ignore[invalid-argument-type]  # nio types reject async wrappers

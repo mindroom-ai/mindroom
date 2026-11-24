@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace as dc_replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
@@ -11,6 +12,7 @@ import pytest
 
 import mindroom.tools  # noqa: F401
 from mindroom.agents import create_agent
+from mindroom.approval.tool_owners import required_approval_tool_names
 from mindroom.config.main import Config, ConfigRuntimeValidationError
 from mindroom.constants import DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES
 from mindroom.credentials.manager import CredentialsManager, get_runtime_credentials_manager
@@ -18,10 +20,12 @@ from mindroom.custom_tools.desktop import DesktopTools
 from mindroom.delegation.state import SubagentPersona
 from mindroom.desktop.client import DesktopRequestError
 from mindroom.desktop.configuration import DesktopConfigurationStatus, desktop_configuration_state
-from mindroom.desktop.credentials import save_desktop_credentials
+from mindroom.desktop.credentials import delete_desktop_credentials, save_desktop_credentials
 from mindroom.desktop.media import DesktopMediaError
 from mindroom.desktop.protocol import MAX_SHELL_OUTPUT_BYTES, DesktopResponse, EncryptedDesktopMedia
+from mindroom.event_journal import ApprovalCall
 from mindroom.tool_jobs.authorization import locally_allowed
+from mindroom.tool_system import agent_tools as agent_tools_module
 from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.registry import builtin_tool_registry
@@ -1334,4 +1338,162 @@ def test_explicit_only_and_disabled_policies_block_dynamic_injection(tmp_path: P
         origin={},
         depth=0,
         authority=dict(full.tool_jobs.tools["desktop"].authority),
+    )
+
+
+@pytest.mark.asyncio
+async def test_tool_owners_and_locally_allowed_enforce_self_service_ready_credentials_and_disabled_tools(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """required_approval_tool_names and locally_allowed enforce self_service policy, ready credentials, and disabled tools."""
+    config, runtime_paths, paired, alice_id = _build_assistant(
+        tmp_path,
+        requester_id="@alice:example.org",
+        pair=True,
+    )
+    assert paired.tool_jobs is not None
+    tools = config_plugins(config, runtime_paths).tools
+    authority = dict(paired.tool_jobs.tools["desktop"].authority)
+    calls = (ApprovalCall("call-1", "desktop", "assistant", 100, toolkit_name="desktop"),)
+
+    # Paired requester in a room under self_service is permitted by both approval recovery and tool-job authorization.
+    assert await required_approval_tool_names(
+        "assistant",
+        calls,
+        config=config,
+        runtime_paths=runtime_paths,
+        tools=tools,
+        execution_identity=alice_id,
+        delegation_depth=0,
+    ) == ("desktop",)
+    assert locally_allowed(
+        config,
+        alice_id,
+        tools=tools,
+        tool_name="desktop",
+        toolkit_name="desktop",
+        origin={},
+        depth=0,
+        authority=authority,
+        runtime_paths=runtime_paths,
+    )
+
+    # Roomless execution identity is refused by both.
+    roomless_id = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="assistant",
+        requester_id="@alice:example.org",
+        room_id=None,
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="session",
+    )
+    with pytest.raises(RuntimeError, match="no longer permitted"):
+        await required_approval_tool_names(
+            "assistant",
+            calls,
+            config=config,
+            runtime_paths=runtime_paths,
+            tools=tools,
+            execution_identity=roomless_id,
+            delegation_depth=0,
+        )
+    assert not locally_allowed(
+        config,
+        roomless_id,
+        tools=tools,
+        tool_name="desktop",
+        toolkit_name="desktop",
+        origin={},
+        depth=0,
+        authority=authority,
+        runtime_paths=runtime_paths,
+    )
+
+    # Disabling desktop_pairing (explicit_only or disabled) refuses both even while credentials exist.
+    for policy in ("explicit_only", "disabled"):
+        policy_cfg = config.model_copy(
+            update={"defaults": config.defaults.model_copy(update={"desktop_pairing": policy})},
+        )
+        with pytest.raises(RuntimeError, match="no longer permitted"):
+            await required_approval_tool_names(
+                "assistant",
+                calls,
+                config=policy_cfg,
+                runtime_paths=runtime_paths,
+                tools=tools,
+                execution_identity=alice_id,
+                delegation_depth=0,
+            )
+        assert not locally_allowed(
+            policy_cfg,
+            alice_id,
+            tools=tools,
+            tool_name="desktop",
+            toolkit_name="desktop",
+            origin={},
+            depth=0,
+            authority=authority,
+            runtime_paths=runtime_paths,
+        )
+
+    # If desktop appears in agent_tools.facts.disabled, both reject it.
+    real_resolve = agent_tools_module.resolve_agent_tools
+
+    def resolve_with_desktop_disabled(cfg: Config, name: str, registry: object) -> object:
+        resolved = real_resolve(cfg, name, registry)  # type: ignore[arg-type]
+        return dc_replace(resolved, facts=dc_replace(resolved.facts, disabled=resolved.facts.disabled | {"desktop"}))
+
+    with monkeypatch.context() as mp:
+        mp.setattr("mindroom.approval.tool_owners.resolve_agent_tools", resolve_with_desktop_disabled)
+        mp.setattr("mindroom.tool_jobs.authorization.resolve_agent_tools", resolve_with_desktop_disabled)
+        with pytest.raises(RuntimeError, match="no longer permitted"):
+            await required_approval_tool_names(
+                "assistant",
+                calls,
+                config=config,
+                runtime_paths=runtime_paths,
+                tools=tools,
+                execution_identity=alice_id,
+                delegation_depth=0,
+            )
+        assert not locally_allowed(
+            config,
+            alice_id,
+            tools=tools,
+            tool_name="desktop",
+            toolkit_name="desktop",
+            origin={},
+            depth=0,
+            authority=authority,
+            runtime_paths=runtime_paths,
+        )
+
+    # Once the requester disconnects (credentials deleted), both refuse immediately.
+    delete_desktop_credentials(
+        get_runtime_credentials_manager(runtime_paths),
+        requester_id="@alice:example.org",
+        agent_name="assistant",
+    )
+    with pytest.raises(RuntimeError, match="no longer permitted"):
+        await required_approval_tool_names(
+            "assistant",
+            calls,
+            config=config,
+            runtime_paths=runtime_paths,
+            tools=tools,
+            execution_identity=alice_id,
+            delegation_depth=0,
+        )
+    assert not locally_allowed(
+        config,
+        alice_id,
+        tools=tools,
+        tool_name="desktop",
+        toolkit_name="desktop",
+        origin={},
+        depth=0,
+        authority=authority,
+        runtime_paths=runtime_paths,
     )

@@ -52,9 +52,14 @@ from mindroom.desktop.native_host import (
 from mindroom.desktop.native_protocol import NativeProtocolError, NativeRequest, parse_native_request
 from mindroom.desktop.protocol import (
     DESKTOP_COMMAND_EVENT_TYPE,
+    DESKTOP_PAIRING_ACCEPTED_EVENT_TYPE,
+    DESKTOP_PAIRING_CLAIM_EVENT_TYPE,
     DesktopCommand,
+    DesktopPairingAccepted,
+    DesktopPairingClaim,
     DesktopResponse,
     EncryptedDesktopMedia,
+    desktop_pairing_verification,
 )
 from mindroom.desktop.session import DesktopMatrixSession, load_desktop_session, save_desktop_session
 from mindroom.desktop.shell import DesktopShell, DesktopShellError
@@ -186,6 +191,14 @@ class FakeRuntime:
     def update_controllers(self, config: NativeDesktopConfig) -> dict[str, object]:
         _ = config
         return self.status()
+
+    async def pair_controller(self, _controller: PinnedMatrixDevice, *, code: str) -> dict[str, str]:
+        verification = desktop_pairing_verification(code, "fake-ed25519")
+        return {
+            "verification": verification,
+            "device_id": "FAKE_LOCAL",
+            "device_ed25519": "fake-ed25519",
+        }
 
     async def connect_browser(self) -> None:
         pass
@@ -2609,12 +2622,20 @@ async def test_grant_control_and_shell_accept_optional_controller_key(
             st["shell"]["controllers"][key_2]["auto_approve_remaining_seconds"] > 0,
         ) == (False, True)
 
+        # Omitting controller_key on grant scopes ONLY to primary controller (key_1), never leaking to key_2.
+        await host.handle(_request("revoke_control"))
+        await host.handle(_request("revoke_shell"))
         await host.handle(_request("grant_control", until_revoked=True, scope="computer"))
         await host.handle(_request("grant_shell", until_revoked=True))
         st = host.status()
-        assert all(entry["control_scope"] == "computer" for entry in st["authority"]["controllers"].values())
-        assert all(entry["auto_approve_until_revoked"] is True for entry in st["shell"]["controllers"].values())
+        assert st["authority"]["controllers"][key_1]["control_scope"] == "computer"
+        assert st["authority"]["controllers"][key_2]["control_available"] is False
+        assert st["shell"]["controllers"][key_1]["auto_approve_until_revoked"] is True
+        assert st["shell"]["controllers"][key_2]["auto_approve_until_revoked"] is False
 
+        # Grant key_2 explicitly too, then revoke without controller_key must revoke BOTH (fail-closed).
+        await host.handle(_request("grant_control", duration_seconds=60, controller_key=key_2))
+        await host.handle(_request("grant_shell", duration_seconds=60, controller_key=key_2))
         await host.handle(_request("revoke_control"))
         await host.handle(_request("revoke_shell"))
         st = host.status()
@@ -2622,3 +2643,223 @@ async def test_grant_control_and_shell_accept_optional_controller_key(
         assert all(entry["auto_approve_until_revoked"] is False for entry in st["shell"]["controllers"].values())
     finally:
         await host.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_pair_targets_selected_controller_when_stopped(
+    offline_runtime_session: _OfflineMatrix,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Stopped pair(controller_key=...) targets that exact controller, defaults to primary, and returns device identity."""
+    ctrl_1 = PinnedMatrixDevice("@controller:example.org", "DEVICE", "key")
+    ctrl_2 = PinnedMatrixDevice("@controller2:example.org", "DEVICE2", "key2")
+    key_2 = controller_journal_key(ctrl_2)
+
+    host = _offline_host(tmp_path, offline_runtime_session)
+    await host.handle(_request("configure", expected_revision=0, config=_config_payload()))
+    await host.handle(_upsert_request(1, ctrl_2, requester_ids=["@bob:example.org"], agent_names=["helper"]))
+
+    with pytest.raises(NativeProtocolError) as unknown:
+        await host.handle(_request("pair", code="bad-code", controller_key='["@missing:example.org", "D", "k"]'))
+    assert unknown.value.code == "invalid_request"
+
+    stopped_targets: list[PinnedMatrixDevice] = []
+    fake_owner = SimpleNamespace(client=object(), close=AsyncMock())
+
+    async def fake_open_client(*_args: object, **_kwargs: object) -> object:
+        return fake_owner
+
+    async def fake_claim(_owner: object, controller: PinnedMatrixDevice, *, code: str) -> str:
+        stopped_targets.append(controller)
+        return desktop_pairing_verification(code, "stopped-ed25519")
+
+    monkeypatch.setattr("mindroom.desktop.session.open_desktop_client", fake_open_client)
+    monkeypatch.setattr("mindroom.desktop.session.client_ed25519_fingerprint", lambda _client: "stopped-ed25519")
+    monkeypatch.setattr("mindroom.desktop.pairing_client.send_desktop_pairing_claim", fake_claim)
+
+    stopped_b = await host.handle(_request("pair", code="code-b", controller_key=key_2))
+    expected_ver_b = desktop_pairing_verification("code-b", "stopped-ed25519")
+    assert stopped_targets == [ctrl_2]
+    assert stopped_b["verification"] == expected_ver_b
+    assert stopped_b["confirmation_command"] == f"!desktop confirm code-b {expected_ver_b}"
+    assert stopped_b["agent_confirmation_command"] == f"!desktop confirm helper code-b {expected_ver_b}"
+    assert stopped_b["device_id"] == "LOCAL"
+    assert stopped_b["device_ed25519"] == "stopped-ed25519"
+
+    stopped_a = await host.handle(_request("pair", code="code-a"))
+    assert stopped_targets == [ctrl_2, ctrl_1]
+    assert stopped_a["device_id"] == "LOCAL"
+    assert stopped_a["device_ed25519"] == "stopped-ed25519"
+
+
+@pytest.mark.asyncio
+async def test_pair_targets_selected_controller_while_running_preserving_handles(
+    offline_runtime_session: _OfflineMatrix,
+    bridge_transport: AsyncMock,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Running pair(controller_key=B) uses the live bridge client without stopping it or dropping A's handles."""
+    _enable_primary_screen_offline(monkeypatch)
+    ctrl_1 = PinnedMatrixDevice("@controller:example.org", "DEVICE", "key")
+    ctrl_2 = PinnedMatrixDevice("@controller2:example.org", "DEVICE2", "key2")
+    key_1 = controller_journal_key(ctrl_1)
+    key_2 = controller_journal_key(ctrl_2)
+
+    host = _offline_host(tmp_path, offline_runtime_session)
+    payload = _config_payload() | {
+        "allowed_app_ids": ["primary-screen"],
+        "files": {"roots": []},
+        "shell": {"enabled": True},
+    }
+    await host.handle(_request("configure", expected_revision=0, config=payload))
+    await host.handle(_request("start"))
+    try:
+        bridge = offline_runtime_session.bridge()
+        await host.handle(_request("grant_shell", until_revoked=True, controller_key=key_1))
+        await bridge.on_to_device_event(
+            _shell_event("sleep 30", tmp_path, request_id="live-keep", sequence=1, timeout_seconds=1),
+        )
+        await bridge.execute_pending(shell_starts=True)
+        await bridge.deliver_pending()
+        handle_1 = str(DesktopResponse.from_content(bridge_transport.await_args.kwargs["content"]).result["handle"])
+
+        await host.handle(_upsert_request(1, ctrl_2, requester_ids=["@carol:example.org"], agent_names=["coder"]))
+        live_claims: list[tuple[PinnedMatrixDevice, str]] = []
+        live_fingerprint = "live-helper-ed25519"
+
+        async def resolve_live(_client: object, _controller: PinnedMatrixDevice) -> None:
+            return None
+
+        async def send_live_claim(
+            _client: object,
+            controller: PinnedMatrixDevice,
+            *,
+            event_type: str,
+            content: dict[str, object],
+        ) -> None:
+            assert event_type == DESKTOP_PAIRING_CLAIM_EVENT_TYPE
+            claim = DesktopPairingClaim.from_content(content)
+            live_claims.append((controller, claim.token))
+            verification = desktop_pairing_verification(claim.token, live_fingerprint)
+            ack = AuthenticatedToDeviceEvent(
+                source={"content": DesktopPairingAccepted(verification).to_content()},
+                sender=controller.user_id,
+                type=DESKTOP_PAIRING_ACCEPTED_EVENT_TYPE,
+                authenticated_sender=AuthenticatedDevice(
+                    controller.user_id,
+                    controller.device_id,
+                    "curve",
+                    controller.ed25519,
+                ),
+            )
+            for callback in list(offline_runtime_session.owner.client.to_device_callbacks):
+                await callback.func(ack)
+
+        monkeypatch.setattr("mindroom.desktop.pairing_client.client_ed25519_fingerprint", lambda _c: live_fingerprint)
+        monkeypatch.setattr("mindroom.desktop.session.client_ed25519_fingerprint", lambda _c: live_fingerprint)
+        monkeypatch.setattr("mindroom.desktop.pairing_client.resolve_pinned_device", resolve_live)
+        monkeypatch.setattr("mindroom.desktop.pairing_client.send_encrypted_to_device", send_live_claim)
+        monkeypatch.setattr(
+            "mindroom.desktop.pairing_client.authenticated_sender_matches",
+            lambda _client, event, pinned: (
+                event.sender == pinned.user_id
+                and event.authenticated_sender.device_id == pinned.device_id
+                and event.authenticated_sender.ed25519 == pinned.ed25519
+            ),
+        )
+
+        live_result = await host.handle(_request("pair", code="code-b-live", controller_key=key_2))
+        expected_ver = desktop_pairing_verification("code-b-live", live_fingerprint)
+        assert live_claims == [(ctrl_2, "code-b-live")]
+        assert live_result["verification"] == expected_ver
+        assert live_result["confirmation_command"] == f"!desktop confirm code-b-live {expected_ver}"
+        assert live_result["agent_confirmation_command"] == f"!desktop confirm coder code-b-live {expected_ver}"
+        assert live_result["device_id"] == "LOCAL"
+        assert live_result["device_ed25519"] == live_fingerprint
+        assert live_result["status"]["bridge"]["state"] == "observe_only"
+        assert len(offline_runtime_session.owner.client.to_device_callbacks) == 1
+        assert [h["handle"] for h in host.status()["shell"]["handles"]] == [handle_1]
+    finally:
+        await host.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_config_mutations_refuse_already_running_when_other_host_holds_lock(tmp_path: Path) -> None:
+    """Stopped config-mutating actions fail with already_running and never touch native_config.json while host.lock is held."""
+    ctrl_2 = PinnedMatrixDevice("@controller2:example.org", "DEVICE2", "key2")
+    ctrl_3 = PinnedMatrixDevice("@controller3:example.org", "DEVICE3", "key3")
+    key_2 = controller_journal_key(ctrl_2)
+
+    owner_host = _host(tmp_path, FakeRuntime())
+    await owner_host.handle(_request("configure", expected_revision=0, config=_config_payload()))
+    await owner_host.handle(_upsert_request(1, ctrl_2))
+    await owner_host.handle(_request("start"))
+    try:
+        config_file = native_config_path(tmp_path)
+        before = config_file.read_bytes()
+        other_host = _host(tmp_path, FakeRuntime())
+        mutating_requests = [
+            _request("configure", expected_revision=2, config=_config_payload() | {"revision": 2}),
+            _request("set_allowed_apps", expected_revision=2, allowed_app_ids=["com.example.Other"]),
+            _local_access_request(2, [], enabled=True),
+            _request(
+                "set_browser_config",
+                expected_revision=2,
+                browser={"enabled": False, "executable_path": None, "user_data_dir": None},
+            ),
+            _request(
+                "finish_setup",
+                expected_revision=2,
+                expected_session={"homeserver": "https://example.org", "user_id": "@me:example.org", "device_id": "D"},
+            ),
+            _upsert_request(2, ctrl_3),
+            _request("remove_controller", expected_revision=2, controller_key=key_2),
+        ]
+        for req in mutating_requests:
+            with pytest.raises(NativeProtocolError) as refused:
+                await other_host.handle(req)
+            assert refused.value.code == "already_running", f"{req.action} returned {refused.value.code}"
+            assert config_file.read_bytes() == before
+    finally:
+        await owner_host.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_legacy_v1_configure_preserves_unrelated_secondary_controllers_and_handles_empty_previous(
+    tmp_path: Path,
+) -> None:
+    """Legacy v1 configure works when previous.controllers is empty and preserves unrelated secondary controllers."""
+    ctrl_1 = PinnedMatrixDevice("@controller:example.org", "DEVICE", "key")
+    ctrl_2 = PinnedMatrixDevice("@controller2:example.org", "DEVICE2", "key2")
+    ctrl_3 = PinnedMatrixDevice("@controller3:example.org", "DEVICE3", "key3")
+    key_1 = controller_journal_key(ctrl_1)
+    key_2 = controller_journal_key(ctrl_2)
+    key_3 = controller_journal_key(ctrl_3)
+
+    host = _host(tmp_path, FakeRuntime())
+    # Start with a saved v2 config having zero controllers.
+    await host.handle(_upsert_request(0, ctrl_1))
+    await host.handle(_request("remove_controller", expected_revision=1, controller_key=key_1))
+    assert host.status()["config"]["controllers"] == []
+
+    # Legacy v1 configure on empty previous.controllers succeeds cleanly.
+    await host.handle(_request("configure", expected_revision=2, config=_config_payload() | {"revision": 2}))
+    # Add secondary controller B.
+    await host.handle(_upsert_request(3, ctrl_2))
+    assert [c["controller_key"] for c in host.status()["config"]["controllers"]] == [key_1, key_2]
+
+    # Legacy v1 configure updating primary A preserves secondary B!
+    v1_update_a = _config_payload() | {"revision": 4, "allowed_app_ids": ["com.example.Updated"]}
+    updated = (await host.handle(_request("configure", expected_revision=4, config=v1_update_a)))["status"]
+    assert [c["controller_key"] for c in updated["config"]["controllers"]] == [key_1, key_2]
+    assert updated["config"]["allowed_app_ids"] == ["com.example.Updated"]
+
+    # Legacy v1 configure with a brand-new controller C appends cleanly without wiping A or B.
+    v1_add_c = _config_payload() | {
+        "revision": 5,
+        "controller": {"user_id": ctrl_3.user_id, "device_id": ctrl_3.device_id, "ed25519": ctrl_3.ed25519},
+    }
+    added = (await host.handle(_request("configure", expected_revision=5, config=v1_add_c)))["status"]
+    assert [c["controller_key"] for c in added["config"]["controllers"]] == [key_1, key_2, key_3]
