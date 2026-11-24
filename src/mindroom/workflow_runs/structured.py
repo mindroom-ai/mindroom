@@ -18,6 +18,8 @@ from mindroom.json_utils import has_only_finite_numbers
 if TYPE_CHECKING:
     from collections.abc import Iterator
 
+    from referencing import Resource
+
 # How many turns an agent gets to answer with a value that matches: its first, and four corrections.
 SCHEMA_TURNS = 5
 _INSTRUCTION = "End your answer with one fenced json block that matches this JSON Schema:"
@@ -25,8 +27,6 @@ _FENCED = re.compile(r"^[ \t]*```json[ \t]*\r?\n(.*?)\r?\n[ \t]*```[ \t]*\r?$", 
 # What a schema may reach beside itself: nothing, so no reference is ever fetched.
 _NOTHING_ELSE: Registry = Registry()
 _REFERENCES = ("$ref", "$dynamicRef")
-# The keywords whose content is a value to compare with, where a `$ref` is a key like any other.
-_VALUES = frozenset({"const", "enum", "default", "examples"})
 _INVALID = "schema is not valid JSON Schema: {reason}."
 
 
@@ -39,13 +39,12 @@ def _at(path: object, message: str) -> str:
     return f"{where}: {message}" if where else message
 
 
-def _references(schema: object) -> Iterator[str]:
-    """Yield each reference *schema* makes, wherever a subschema may stand."""
-    if isinstance(schema, dict):
-        yield from (schema[name] for name in _REFERENCES if isinstance(schema.get(name), str))
-        schema = [part for name, part in schema.items() if name not in _VALUES]
-    for part in schema if isinstance(schema, list) else ():
-        yield from _references(part)
+def _references(resource: Resource[object]) -> Iterator[str]:
+    """Yield each reference in *resource* and its Draft 2020-12 subresources."""
+    if isinstance(resource.contents, dict):
+        yield from (resource.contents[name] for name in _REFERENCES if isinstance(resource.contents.get(name), str))
+    for subresource in resource.subresources():
+        yield from _references(subresource)
 
 
 def check_schema(schema: object) -> None:
@@ -59,8 +58,9 @@ def check_schema(schema: object) -> None:
     except InvalidSchemaError as exc:
         reason = _at(exc.absolute_path or ("schema",), exc.message)
         raise SchemaError(_INVALID.format(reason=reason)) from exc
-    resolver = _NOTHING_ELSE.with_resource("", DRAFT202012.create_resource(schema)).resolver()
-    for reference in _references(schema):
+    resource = DRAFT202012.create_resource(schema)
+    resolver = _NOTHING_ELSE.with_resource("", resource).resolver()
+    for reference in _references(resource):
         try:
             inside = reference.startswith("#") and resolver.lookup(reference)
         except (Unresolvable, LookupError, ValueError, TypeError):
