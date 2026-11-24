@@ -171,6 +171,10 @@ def read_call(
                 "ON CONFLICT(run_id, reader_key, reader_generation) DO UPDATE SET seq = excluded.seq"
             )
             conn.execute(q, (run_id, reader.key, reader.generation, int(matched[-1]["seq"])))
+            conn.executemany(
+                "UPDATE workflow_messages SET was_read = 1 WHERE run_id = ? AND seq = ?",
+                [(run_id, int(r["seq"])) for r in matched],
+            )
         msgs = [{"from": r["sender_name"], "text": r["text"], "sent_at": r["created_at"]} for r in matched]
         return {"messages": msgs, **({"note": empty_note} if not msgs and empty_note else {})}
 
@@ -278,23 +282,10 @@ def session_turn_message(
 
 def withdraw_unread(store: WorkflowRunStore, run_id: str, sender_key: str, old_generation: int) -> int:
     """Mark unread messages from `(sender_key, old_generation)` withdrawn; return count withdrawn."""
-    sql = """
-        UPDATE workflow_messages SET withdrawn = 1
-        WHERE run_id = ? AND sender_key = ? AND sender_generation = ? AND withdrawn = 0
-          AND NOT EXISTS (
-            SELECT 1 FROM workflow_cursors c
-            LEFT JOIN workflow_nodes rn ON rn.run_id = c.run_id AND rn.key = c.reader_key
-            LEFT JOIN workflow_nodes sn ON sn.run_id = workflow_messages.run_id AND sn.key = workflow_messages.sender_key
-            WHERE c.run_id = workflow_messages.run_id AND c.seq >= workflow_messages.seq
-              AND COALESCE(rn.session_key, c.reader_key) != COALESCE(sn.session_key, workflow_messages.sender_key)
-              AND (
-                (workflow_messages.recipient_name = 'script' AND c.reader_key = 'script')
-                OR (workflow_messages.recipient_name = '*' AND c.reader_key != 'script'
-                    AND (workflow_messages.recipient_keys_json IS NULL OR EXISTS (
-                      SELECT 1 FROM json_each(workflow_messages.recipient_keys_json)
-                      WHERE value = COALESCE(rn.session_key, c.reader_key))))
-                OR rn.name = workflow_messages.recipient_name))
-    """
+    sql = (
+        "UPDATE workflow_messages SET withdrawn = 1 "
+        "WHERE run_id = ? AND sender_key = ? AND sender_generation = ? AND withdrawn = 0 AND was_read = 0"
+    )
     with store.write_transaction(run_id) as conn:
         return int(conn.execute(sql, (run_id, sender_key, old_generation)).rowcount)
 

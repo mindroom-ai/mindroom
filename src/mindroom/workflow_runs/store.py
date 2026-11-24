@@ -869,6 +869,7 @@ _SCHEMA_STATEMENTS = (
         recipient_keys_json TEXT,
         text TEXT NOT NULL,
         withdrawn INTEGER NOT NULL,
+        was_read INTEGER NOT NULL DEFAULT 0,
         created_at TEXT NOT NULL,
         PRIMARY KEY (run_id, seq)
     )
