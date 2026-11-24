@@ -15,6 +15,7 @@ This page lists every command and fully covers `/help`, `/hi`, and `/config`; th
 | `/cancel_schedule <id>` | Cancel a scheduled task | [Scheduling](https://docs.mindroom.chat/scheduling/#cancel_schedule) |
 | `/jobs` | List the background jobs running in this thread, or in the whole room when sent outside any thread | [Background jobs](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs) |
 | `/cancel_job <id\|all>` | Cancel a background job by the short ID `/jobs` shows, or all of them in this thread, or in the whole room when sent outside any thread | [Background jobs](https://docs.mindroom.chat/tools/agent-orchestration/#background-jobs) |
+| `/answer [id] <answer>` | Answer a question a workflow run asked you in this thread, with an option's number or text; the ID is needed only when several questions are open | [Questions](https://docs.mindroom.chat/tools/workflows/#questions) |
 | `/desktop [setup\|status\|confirm\|rotate\|disconnect]` | Manage your Desktop target for one agent | [Desktop](https://docs.mindroom.chat/tools/desktop/#desktop) |
 | `/mode <agent> minimal\|standard\|show\|reset` | Switch one agent between standard tools and a Bash-only interface | [Minimal Agent Mode](https://docs.mindroom.chat/tools/agent-cli/#mode) |
 | `/compact [agent_or_team]` | Compact context now, after any in-progress reply (bare `/compact` applies to every agent or configured team you may address that has a conversation here) | [History](https://docs.mindroom.chat/configuration/history/#manual-compaction) |

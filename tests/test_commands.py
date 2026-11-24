@@ -18,6 +18,7 @@ from mindroom.authorization import (
 from mindroom.commands.handler import generate_welcome_message_for_room, handle_command
 from mindroom.commands.parsing import (
     _COMMAND_DOCS,
+    COMMAND_TYPES_WITH_SIDE_EFFECTS,
     Command,
     CommandType,
     command_parser,
@@ -247,6 +248,21 @@ def test_background_job_commands() -> None:
     assert command.args == {"job_id": None}
 
 
+def test_answer_command_is_parsed_and_listed_in_help() -> None:
+    """`!answer` takes a question's ID and an answer, or the answer alone, in one or several lines."""
+    command = _parse("!answer q3fa91c 2")
+    assert command is not None
+    assert (command.type, command.args) == (CommandType.ANSWER, {"text": "q3fa91c 2"})
+    command = _parse("/answer after lunch,\nor tomorrow")
+    assert command is not None
+    assert (command.type, command.args) == (CommandType.ANSWER, {"text": "after lunch,\nor tomorrow"})
+    assert _parse("!answer") is not None
+    assert _parse("!answer").type is CommandType.UNKNOWN
+    assert _COMMAND_DOCS[CommandType.ANSWER] == ("/answer [id] <answer>", "Answer a question a workflow run asked you")
+    assert "/answer [id] <answer>" in get_command_help()
+    assert CommandType.ANSWER in COMMAND_TYPES_WITH_SIDE_EFFECTS
+
+
 def test_cancel_schedule_command() -> None:
     """Test cancel schedule command parsing."""
     # Basic cancel
@@ -302,6 +318,7 @@ def test_cancel_schedule_command() -> None:
         "!e2ee",
         "!jobs",
         "!cancel_job all",
+        "!answer q3fa91c Yes",
         "!help schedule",
         "!list_schedules",
         "🎤 !cancel_schedule abc123",

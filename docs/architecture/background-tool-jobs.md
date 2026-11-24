@@ -25,8 +25,8 @@ What the feature does and how to configure it is on [Agent Orchestration](../too
   A reply awaiting replay holds those jobs until it settles.
   If the reply ends without collecting those jobs, they can get a follow-up; a reply paused for approval does not hold them.
   Work that follow-ups start can chain at most 20 follow-ups without a human message, so follow-ups cannot keep each other going.
-  A follow-up gives way to its requester's messages already waiting in its conversation, because the reply to one reports the jobs in its start note; answering first kept that message waiting and made the follow-up stop for a message older than itself.
-  A cancellation gets no follow-up, since the person who cancelled already knows and no cancel, a Stop included, may make the agent speak; a silent schedule's jobs get none, so the schedule stays silent.
+  A non-silent follow-up gives way to its requester's messages already waiting in its conversation, because the reply to one reports the jobs in its start note; answering first kept that message waiting and made the follow-up stop for a message older than itself.
+  A cancellation gets no follow-up, since the person who cancelled already knows and no cancel, a Stop included, may make the agent speak; a silent schedule's jobs get a silent follow-up (with no visible held notice if it hits the follow-up cap), so a one-shot silent schedule's results are reported (unless the cap holds them) while routine results stay silent.
   The next reply still collects a cancellation like any ended job, so the agent learns that a call its reply showed as started never completed.
 - A gated call that can become a job asks for its approval as the job's first phase, so a pending approval never holds the conversation.
   Its cards belong to the job alone, so no reply pauses for them and no stale card can resume newer work.

@@ -1,7 +1,9 @@
 """Send a request without inline media its route cannot take, and retry without what the provider rejects.
 
 Media a route never accepts (``Capabilities.omitted_media``) and media a route rejected earlier in this
-process are replaced up front by a note telling the model the attachment was not inspected. When the
+process are replaced up front by a note telling the model the attachment was not inspected. On routes that
+accept audio, inline audio on any message followed by an assistant message is also replaced up front by a
+byte-stable note so later requests of a turn do not resend audio the model already heard. When the
 provider then rejects the request before the attempt committed (no visible output and no hosted tool that acts),
 the request is sent again without the rejected media. Item-specific rejections (``ProviderError.rejected_media``)
 remove only those items where possible; otherwise an error naming media kinds removes only those kinds present.
@@ -43,11 +45,15 @@ if TYPE_CHECKING:
 
     type _Media = Image | Audio | Video | File
 
-__all__ = ["FALLBACK_MARKER", "media_fallback_projection", "media_fallback_stream"]
+__all__ = ["ANSWERED_AUDIO_MARKER", "FALLBACK_MARKER", "media_fallback_projection", "media_fallback_stream"]
 
 logger = get_logger(__name__)
 
 FALLBACK_MARKER = "[Inline media unavailable for this model]"
+ANSWERED_AUDIO_MARKER = "[Earlier inline audio omitted]"
+_ANSWERED_AUDIO_PROMPT = (
+    "Already sent in an earlier request; call get_attachment(attachment_id, view=True) to hear it again if needed."
+)
 _UNSUPPORTED_VIEW_MESSAGE = (
     "The active model rejected the viewed image input; the retained attachment is still available."
 )
@@ -103,12 +109,52 @@ def _label(kind: MediaKind, item: _Media) -> str:
     return f"{label} ({item.id})" if item.id.startswith(_ATTACHMENT_ID_PREFIX) else label
 
 
-def _note(named: Sequence[tuple[MediaKind, _Media]], fallback_prompt: str) -> str:
-    """Return the fallback note, which names the ``named`` items when there are any."""
+def _note(
+    named: Sequence[tuple[MediaKind, _Media]],
+    prompt: str,
+    *,
+    marker: str = FALLBACK_MARKER,
+) -> str:
+    """Return a media-omission note, which names the ``named`` items when there are any."""
     if not named:
-        return f"{FALLBACK_MARKER}\n{fallback_prompt}"
+        return f"{marker}\n{prompt}"
     labels = ", ".join(_label(kind, item) for kind, item in named)
-    return f"{FALLBACK_MARKER}\nNot sent: {labels}.\n{fallback_prompt}"
+    return f"{marker}\nNot sent: {labels}.\n{prompt}"
+
+
+def _without_answered_audio(messages: Sequence[Message]) -> list[Message]:
+    """Return copies dropping inline audio from messages followed by an assistant message, leaving a stable note."""
+    last_assistant = max((index for index, message in enumerate(messages) if message.role == "assistant"), default=-1)
+    if last_assistant <= 0 or not any(message.audio for message in messages[:last_assistant]):
+        return list(messages)
+    return [
+        replace(
+            message,
+            audio=None,
+            content=_with_note(
+                message.content,
+                _note(
+                    [("audio", clip) for clip in message.audio],
+                    _ANSWERED_AUDIO_PROMPT,
+                    marker=ANSWERED_AUDIO_MARKER,
+                ),
+            ),
+        )
+        if index < last_assistant and message.audio
+        else message
+        for index, message in enumerate(messages)
+    ]
+
+
+def _prepared_messages(
+    inner: ModelProvider,
+    messages: Sequence[Message],
+) -> tuple[Sequence[Message], frozenset[MediaKind], frozenset[MediaKind]]:
+    """Return ``(base, present, known)`` after dropping answered audio on audio-capable routes."""
+    unsupported = _unsupported_kinds(inner)
+    base = messages if "audio" in unsupported else _without_answered_audio(messages)
+    present = _media_kinds(base)
+    return base, present, unsupported & present
 
 
 def _kept[T: (Image, Audio, Video, File)](
@@ -242,9 +288,9 @@ def _unsupported_kinds(inner: ModelProvider) -> frozenset[MediaKind]:
 
 
 def _first_attempt(inner: ModelProvider, request: ModelRequest, *, fallback_prompt: str) -> ModelRequest:
-    """Return the first attempt the media fallback sends ``inner``: unsupported media replaced by the fallback note."""
-    known = _unsupported_kinds(inner) & _media_kinds(request.messages)
-    return replace(request, messages=_without_media(request.messages, known, frozenset(), fallback_prompt))
+    """Return the first attempt the media fallback sends ``inner``: answered audio and unsupported media replaced."""
+    base, _present, known = _prepared_messages(inner, request.messages)
+    return replace(request, messages=_without_media(base, known, frozenset(), fallback_prompt))
 
 
 def _first_attempt_inputs(inner: ModelProvider, *, fallback_prompt: str) -> object:
@@ -268,10 +314,9 @@ async def media_fallback_stream(
 ) -> AsyncIterator[StreamEvent]:
     """Stream ``request`` with unsupported media replaced, retrying without what a rejection names, then media-free."""
     identity = inner.identity
-    present = _media_kinds(request.messages)
-    known = _unsupported_kinds(inner) & present
+    base, present, known = _prepared_messages(inner, request.messages)
     remaining = present - known
-    first = _first_attempt(inner, request, fallback_prompt=fallback_prompt)
+    first = replace(request, messages=_without_media(base, known, frozenset(), fallback_prompt))
     sent = {item.id: kind for message in first.messages for kind, item in media_items(message)}
     failure: ProviderError | None = None
     sent_broad = False
@@ -295,7 +340,7 @@ async def media_fallback_stream(
             if (selective := _selective_removal(named, sent, known)) is not None:
                 removed, ids = selective
                 log("Retrying model request without the inline media its failure names", rejected_media=len(ids))
-                messages = _without_media(request.messages, removed, ids, fallback_prompt)
+                messages = _without_media(base, removed, ids, fallback_prompt)
                 removed_kinds = remaining - _media_kinds(messages)
                 return Retry(replace(request, messages=messages))
             kinds = _named_media_kinds(error) & remaining if isinstance(error, InvalidRequest) else frozenset()
@@ -308,18 +353,18 @@ async def media_fallback_stream(
                 return Retry(
                     replace(
                         request,
-                        messages=_without_media(request.messages, known | kinds, frozenset(), fallback_prompt),
+                        messages=_without_media(base, known | kinds, frozenset(), fallback_prompt),
                     ),
                 )
         sent_broad = True
         removed_kinds = remaining
         log("Retrying model request without inline media")
-        return Retry(replace(request, messages=_without_media(request.messages, present, frozenset(), fallback_prompt)))
+        return Retry(replace(request, messages=_without_media(base, present, frozenset(), fallback_prompt)))
 
     events = attempts(inner, first, without_rejected_media)
     async with closing_async_stream(events):
         async for event in events:
             yield event
     # Successful removal of a whole named kind can teach the route; partial item removal cannot.
-    if failure is not None and (unsupported := _names_capability_gap(failure, removed_kinds)):
-        _LEARNED_UNSUPPORTED.setdefault(_route(inner), set()).update(unsupported)
+    if failure is not None and (learned := _names_capability_gap(failure, removed_kinds)):
+        _LEARNED_UNSUPPORTED.setdefault(_route(inner), set()).update(learned)

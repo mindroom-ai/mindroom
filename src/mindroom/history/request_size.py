@@ -81,17 +81,24 @@ class RequestSizer:
 
         The replay's boundary bounds the search (``native_replay``): the latest native checkpoint for the request's
         route replaced the transcript before it, which every earlier answer's size, and the checkpoint's own, still
-        describe; and an answer before a later encrypted-replay reset sized a request that still sent the checkpoint.
+        describe; an answer before a later encrypted-replay reset sized a request that still sent the checkpoint; and
+        an answer whose request sent inline audio that later requests omit does not anchor them.
         """
         prefixes = request_prefixes(self.model, request)
         route = request.native_compaction.route if request.native_compaction is not None else None
         scope = self.model.capabilities.replay_reset_scope
         replay = native_replay(request.messages, route, reset_scope=scope, stripped=request.strip_encrypted_replay)
         identity = self.model.identity
+        sends_audio = "audio" not in self.model.capabilities.omitted_media
         for index in range(len(request.messages) - 1, replay.boundary, -1):
             message = request.messages[index]
             recorded = (message.provider_data or {}).get(REQUEST_IDENTITY_KEY)
-            if message.role != "assistant" or recorded is None or recorded != prefixes[index]:
+            if (
+                message.role != "assistant"
+                or recorded is None
+                or recorded != prefixes[index]
+                or (sends_audio and _carried_answered_audio(request.messages, index))
+            ):
                 continue
             context = message_context_tokens(
                 message,
@@ -102,6 +109,16 @@ class RequestSizer:
             if context is not None:
                 return index, context.tokens
         return None
+
+
+def _carried_answered_audio(messages: Sequence[Message], answer_index: int) -> bool:
+    """Return whether ``messages[:answer_index]`` sent inline audio that a request containing ``answer_index`` drops."""
+    for message in reversed(messages[:answer_index]):
+        if message.role == "assistant":
+            return False
+        if message.audio:
+            return True
+    return False
 
 
 def request_sizer(model: ModelProvider, config: Config, model_name: str) -> RequestSizer:

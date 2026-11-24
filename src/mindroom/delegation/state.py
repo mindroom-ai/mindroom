@@ -27,6 +27,11 @@ DELEGATION_STATE_KEY = "mindroom_delegation"
 # The functions of the ``delegate`` toolkit, each of which runs one child turn.
 RUN_SUBAGENT = "run_subagent"
 CONTINUE_SUBAGENT = "continue_subagent"
+# Where the job of a workflow run's agent keeps the runs that restarts cut short before its current one, in its adapter.
+SPENT_RUNS_KEY = "spent_runs"
+# Under this key the job of a workflow run's agent keeps which toolkit owns each call its paused turn asks about, so
+# the start that resumes the turn after a restart can ask again before it builds the agent.
+APPROVAL_TOOLKITS_KEY = "approval_toolkits"
 # What a child turn that a restart cut short is settled with, as failed.
 RESTART_INTERRUPTION_REASON = (
     "Subagent turn was interrupted by a restart. MindRoom may continue it automatically; if it doesn't, you may be "
@@ -174,6 +179,15 @@ class DelegationChild:
     cost_usd: float | None = None
     # What the subagent turns whose results the turn received cost so far, across its pauses, None for none of known cost.
     subagents_cost_usd: float | None = None
+    # LEGACY_COMPAT: Delegation child snapshots stored before a child kept that a subagent's cost was unknown.
+    # Legacy format: A child snapshot in a subagent session file, a run's `mindroom_delegation` metadata, or a
+    # background job's adapter that lacks `subagents_cost_unknown`.
+    # Last legacy release: v2026.11.444; the next, still unreleased, release writes it.
+    # Handling: The default reads such a child as having received no turn of unknown cost, as those releases did.
+    # It stays on the model for the reason above.
+    # Coverage: tests/test_legacy_delegation_snapshots.py::test_every_reader_reads_a_rewritten_snapshot_as_the_release_before_the_rewrite_did.
+    # Whether the turn received a subagent turn whose cost nobody knows, which makes the sum above a lower bound.
+    subagents_cost_unknown: bool = False
     # LEGACY_COMPAT: Delegation child snapshots stored before a child kept when its running tool calls started.
     # Legacy format: A child snapshot in a subagent session file, a run's `mindroom_delegation` metadata, or a
     # background job's adapter that lacks `tool_started_at`.
@@ -195,6 +209,19 @@ class DelegationChild:
     # Coverage: tests/test_legacy_delegation_snapshots.py::test_every_reader_reads_a_rewritten_snapshot_as_the_release_before_the_rewrite_did.
     # What people watching the run see it as, from the call that started it; follow-ups keep it.
     title: str = ""
+    # LEGACY_COMPAT: Delegation child snapshots stored before a workflow run could run agents.
+    # Legacy format: A child snapshot in a subagent session file, a run's `mindroom_delegation` metadata, or a
+    # background job's adapter that lacks `workflow_run_id`, `workflow_node_key` and `workflow_generation`.
+    # Last legacy release: v2026.11.444; the next, still unreleased, release writes all three.
+    # Handling: The defaults read such a child as a subagent of no run, which it was. They stay on the model for the
+    # reason above.
+    # Coverage: tests/test_workflow_targets.py::test_old_child_snapshot_reads_without_the_new_fields,
+    # tests/test_legacy_delegation_snapshots.py::test_every_reader_reads_a_rewritten_snapshot_as_the_release_before_the_rewrite_did.
+    # The workflow run whose script runs this turn, with the node of that call and its generation; None for a
+    # subagent no run runs. Such a child is granted by its caller's `workflow` toolkit (`delegation_grant`).
+    workflow_run_id: str | None = None
+    workflow_node_key: str | None = None
+    workflow_generation: int | None = None
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> DelegationChild:

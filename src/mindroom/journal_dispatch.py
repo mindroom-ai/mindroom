@@ -120,6 +120,8 @@ class JournalCallbacks:
     on_runtime_source: Callable[[JournalEvent], Awaitable[None]]
     on_job_cancel: _JobCancelCallback
     on_rtc: _RtcCallback | None = None
+    # What a person's client sends to act on a workflow run; without it such an event is settled unread.
+    on_workflow_event: Callable[[nio.MatrixRoom, nio.UnknownEvent], Awaitable[object]] | None = None
     # Awaited with the room of every event whose callback may use what it reads, before that callback runs.
     before_room_event: Callable[[str], Awaitable[object]] | None = None
     # Whether the owner of a runtime source takes it only once its runtime accepts work again.
@@ -631,6 +633,14 @@ async def _run_rtc_event(
     return True
 
 
+async def _run_workflow_event(dispatcher: JournalDispatcher, room: nio.MatrixRoom, event: nio.UnknownEvent) -> bool:
+    """Hand a person's workflow event to the bot's workflows, whose work is finished when the callback returns."""
+    callback = dispatcher.callbacks.on_workflow_event
+    if callback is not None:
+        await callback(room, event)
+    return True
+
+
 _BINDINGS: dict[EventKind, _Binding] = {
     EventKind.MESSAGE: _Binding(TEXTUAL_MESSAGE_EVENT_TYPE, _turn_backed(lambda c: c.on_message)),
     EventKind.MEDIA: _Binding(MATRIX_MEDIA_EVENT_TYPES, _turn_backed(lambda c: c.on_media)),
@@ -642,6 +652,8 @@ _BINDINGS: dict[EventKind, _Binding] = {
     EventKind.REACTION: _Binding(nio.ReactionEvent, _turn_backed(lambda c: c.on_reaction)),
     EventKind.APPROVAL: _Binding(nio.UnknownEvent, _completing(lambda c: c.on_approval)),
     EventKind.JOB_CANCEL: _Binding(nio.UnknownEvent, _completing(lambda c: c.on_job_cancel)),
+    EventKind.WORKFLOW_CONTROL: _Binding(nio.UnknownEvent, _run_workflow_event),
+    EventKind.WORKFLOW_ANSWER: _Binding(nio.UnknownEvent, _run_workflow_event),
     EventKind.ROOM_LIFECYCLE: _Binding(nio.RoomMemberEvent, _completing(lambda c: c.on_room_lifecycle)),
     EventKind.RTC: _Binding(nio.UnknownEvent, _run_rtc_event),
     EventKind.REDACTION: _Binding(nio.RedactionEvent, _completing(lambda c: c.on_redaction)),

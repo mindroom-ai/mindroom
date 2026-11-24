@@ -7,7 +7,12 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, cast
 
 from mindroom.requester_identity import is_managed_entity_id
-from mindroom.tool_jobs.runtime import TERMINAL_STATUSES, describe_job, get_background_runtime
+from mindroom.tool_jobs.runtime import (
+    TERMINAL_STATUSES,
+    describe_job,
+    get_background_runtime,
+    is_workflow_node_job,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -111,12 +116,16 @@ async def cancel_stopped_reply_jobs(runtime_paths: RuntimePaths, reply_id: str) 
 
 
 def conversation_jobs(runtime: ToolJobRuntime, *, room_id: str, thread_id: str | None) -> list[BackgroundJob]:
-    """Return the live jobs of every entity in one thread, or in the whole room for ``None``, oldest first."""
+    """Return the live jobs of every entity in one thread, or in the whole room for ``None``, oldest first.
+
+    The jobs of a workflow run's calls are left out: the run is the job a person lists and cancels.
+    """
     return sorted(
         (
             job
             for job in runtime.retained_jobs()
             if job.status not in TERMINAL_STATUSES
+            and not is_workflow_node_job(job)
             and job.owner.room_id == room_id
             and thread_id in {None, job.owner.resolved_thread_id}
         ),

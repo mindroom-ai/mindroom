@@ -15,6 +15,8 @@ SOURCE_DIGEST_ENV = "MINDROOM_SCRIPT_SOURCE_DIGEST"
 SNAPSHOT_ROOT_ENV = "MINDROOM_SCRIPT_SNAPSHOT_ROOT"
 TOKEN_PATH_ENV = "MINDROOM_SCRIPT_TOKEN_PATH"  # noqa: S105 - this names a path, not a token.
 WORKSPACE_ROOT_ENV = "MINDROOM_SCRIPT_WORKSPACE_ROOT"
+# What the shim does with the validated source: `script` runs it as `__main__`, `workflow` hands it to the workflow SDK.
+ENTRY_ENV = "MINDROOM_SCRIPT_ENTRY"
 MAX_SOURCE_BYTES = 128 * 1024
 MAX_TOKEN_BYTES = 4096
 SOURCE_FILE_NAME = "source.py"

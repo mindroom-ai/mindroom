@@ -172,6 +172,7 @@ from mindroom.tools.webex import webex_tools
 from mindroom.tools.website import website_tools
 from mindroom.tools.whatsapp import whatsapp_tools
 from mindroom.tools.wikipedia import wikipedia_tools
+from mindroom.tools.workflow import workflow_tools
 from mindroom.tools.x import x_tools
 from mindroom.tools.yfinance import yfinance_tools
 from mindroom.tools.youtube import youtube_tools

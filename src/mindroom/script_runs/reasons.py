@@ -6,6 +6,7 @@ RUNTIME_SHUTDOWN = "MindRoom runtime shut down."
 RUNTIME_RESTARTED = "MindRoom runtime restarted."
 OWNER_AGENT_REMOVED = "Owning agent was removed by configuration reload."
 SCRIPT_TOOL_REMOVED = "Background script tool was removed by configuration reload."
+WORKFLOW_TOOL_REMOVED = "Workflow tool was removed by configuration reload."
 OWNER_AUTHORIZATION_REVOKED = "Script owner no longer has room-and-agent reply authorization."
 PLUGIN_TOOLS_CHANGED = "Plugin tools changed during configuration reload."
 SUPERVISOR_UNAVAILABLE = "Background script supervisor handle is unavailable."
@@ -22,6 +23,7 @@ INTERRUPTION_REASONS = frozenset(
         RUNTIME_RESTARTED,
         OWNER_AGENT_REMOVED,
         SCRIPT_TOOL_REMOVED,
+        WORKFLOW_TOOL_REMOVED,
         OWNER_AUTHORIZATION_REVOKED,
         PLUGIN_TOOLS_CHANGED,
         SUPERVISOR_UNAVAILABLE,
@@ -45,4 +47,5 @@ __all__ = [
     "SCRIPT_TOOL_REMOVED",
     "SUPERVISOR_UNAVAILABLE",
     "WORKER_CONFIGURATION_CHANGED",
+    "WORKFLOW_TOOL_REMOVED",
 ]

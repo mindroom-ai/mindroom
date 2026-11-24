@@ -867,11 +867,13 @@ async def dispatch_external_tool_hooks(
     error: BaseException | None = None,
     blocked: bool = False,
     duration_ms: float = 0,
+    registered_toolkit: str | None = None,
 ) -> str | None:
     """Dispatch one phase of a durable external tool, called by ``execution_identity``, through the ordinary hook policy.
 
     The phase selects its hooks as a call does; a phase without a Matrix conversation, such as one a restart recovers,
-    runs the published plugins' hooks for ``config``.
+    runs the published plugins' hooks for ``config``. A before phase that names its ``registered_toolkit`` also asks
+    the environment hooks, which may decline a call as the before-call hooks may; what they set is not used.
     """
     resolved = _resolve_tool_context(
         execution_identity,
@@ -882,13 +884,22 @@ async def dispatch_external_tool_hooks(
     )
     hook_registry = resolved.hooks.registry
     if before:
-        if not hook_registry.has_hooks(EVENT_TOOL_BEFORE_CALL):
-            return None
-        return await _run_before_hooks(
-            resolved_context=resolved,
-            arguments=deepcopy(arguments),
-            tool_name=tool_name,
-        )
+        declined = None
+        if hook_registry.has_hooks(EVENT_TOOL_BEFORE_CALL):
+            declined = await _run_before_hooks(
+                resolved_context=resolved,
+                arguments=deepcopy(arguments),
+                tool_name=tool_name,
+            )
+        if declined is None and registered_toolkit is not None and hook_registry.has_hooks(EVENT_TOOL_ENVIRONMENT):
+            _, declined = await _collect_environment(
+                resolved_context=resolved,
+                arguments=deepcopy(arguments),
+                tool_name=tool_name,
+                registered_toolkit=registered_toolkit,
+                timing=_ToolBridgeTiming(started_at=time.perf_counter()),
+            )
+        return declined
     if hook_registry.has_hooks(EVENT_TOOL_AFTER_CALL):
         await _emit_after_call(
             resolved_context=resolved,

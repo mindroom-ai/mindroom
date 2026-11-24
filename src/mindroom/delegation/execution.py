@@ -28,6 +28,7 @@ from mindroom.delegation.lifecycle import (
     live_delegation_config,
     note_child_run_id,
     observe_child_event,
+    original_prompt,
     prepare_child_turn,
     reserve_child_turn,
     running_child_id,
@@ -77,6 +78,7 @@ from mindroom.tool_system.output_files import (
     ToolOutputFilePolicy,
     ToolOutputFileRequest,
     finalize_tool_output_file,
+    normalize_output_path_argument,
     prepare_tool_output_file,
 )
 from mindroom.tool_system.runtime_context import (
@@ -87,7 +89,6 @@ from mindroom.tool_system.runtime_context import (
 from mindroom.tool_system.tool_function import POLICY_CONFIRMATION_APPROVAL_TYPE
 from mindroom.turn_continuation import continuation_decision_from_tools, stopped_calls
 from mindroom.turn_model import ModelScope, resolve_turn_model
-from mindroom.workspaces import resolve_agent_workspace_from_state_path
 
 logger = get_logger(__name__)
 
@@ -337,6 +338,7 @@ async def _execute_child(
         tools=context.plugins.tools,
         execution_identity=identity,
         delegation_depth=child.depth,
+        runtime_toolkits=("workflow_peers",) if child.workflow_run_id and child.workflow_node_key else (),
     )
     await settle_child_response(
         child,
@@ -409,7 +411,7 @@ async def _execute_child(
     if response.status == RunStatus.completed:
         decision = continuation_decision_from_tools(
             stopped_calls(response.tools or ()),
-            original_prompt=child.task,
+            original_prompt=original_prompt(child),
             continuation_count=0,
         )
         if decision.continuation is not None:
@@ -586,13 +588,7 @@ def _prepare_delegation_output(
     It neither scaffolds nor reconciles the caller's workspace.
     """
     storage = resolve_agent_storage(identity.agent_name, config, runtime_paths, execution_identity=identity)
-    workspace = resolve_agent_workspace_from_state_path(
-        identity.agent_name,
-        config,
-        runtime_paths=runtime_paths,
-        state_storage_path=storage.state_root,
-        use_state_storage_path=storage.execution.policy.private_workspace_enabled,
-    )
+    workspace = storage.workspace(config, runtime_paths)
     policy = ToolOutputFilePolicy.from_runtime(
         workspace.root,
         runtime_paths,
@@ -647,9 +643,14 @@ async def _run_job_child(
     refresh_scheduler: KnowledgeRefreshScheduler | None,
     runtime: ToolJobRuntime,
     prompt: str | None,
-    receipts: Mapping[str, float] | None,
+    paused: _ChildOutcome | None = None,
+    receipts: Mapping[str, float] | None = None,
 ) -> tuple[DelegationTerminalStatus, str]:
-    """Start, run, and settle a child inside its job, which asks for its approvals; return its status and text."""
+    """Start, run, and settle a child inside its job, which asks for its approvals; return its status and text.
+
+    With ``paused``, the turn of a workflow run's agent that waited for approvals when a restart came, nothing
+    starts: the job asks about that turn's calls again, on the cards they have, and resumes it.
+    """
 
     def failed_unsettled(primary_error: str, stage: str, error: Exception) -> tuple[DelegationTerminalStatus, str]:
         logger.warning(
@@ -676,19 +677,25 @@ async def _run_job_child(
     async with subagent_liveness(child, runtime_paths):
         primary_error: str | None = None
         try:
-            await start_child_turn(
-                child,
-                parent_run_id=parent_run_id,
-                parent_delegation_id=running_child_id(),
+            if paused is None:
+                await start_child_turn(
+                    child,
+                    parent_run_id=parent_run_id,
+                    parent_delegation_id=running_child_id(),
+                    config=config,
+                    runtime_paths=runtime_paths,
+                    caller_execution_identity=owner,
+                )
+                # From here on, recovery after a crash settles the child's audit record from the job's saved child.
+                await runtime.save_adapter(job_id, child=child_snapshot(child))
+            outcome = paused or await run(
                 config=config,
-                runtime_paths=runtime_paths,
-                caller_execution_identity=owner,
+                approval_calls=None,
+                fresh=True,
+                prompt=prompt,
+                receipts=receipts,
             )
-            # From here on, recovery after a crash settles the child's audit record from the job's saved child.
-            await runtime.save_adapter(job_id, child=child_snapshot(child))
-            outcome = await run(config=config, approval_calls=None, fresh=True, prompt=prompt, receipts=receipts)
             while outcome.response.status == RunStatus.paused:
-                # The job, not a parent reply, asks for the child's approvals and resumes it with the decided calls.
                 calls = await request_child_approvals(
                     child,
                     outcome.response,
@@ -748,6 +755,7 @@ def delegation_call_job(
     runtime_paths: RuntimePaths,
     refresh_scheduler: KnowledgeRefreshScheduler | None,
     prompt: str | None = None,
+    paused: tuple[RunRecord, Sequence[Sequence[str]]] | None = None,
     receipts: Mapping[str, float] | None = None,
 ) -> JobSpec | str:
     """Return the job a prepared subagent call runs as, known as its child, or why the call cannot run.
@@ -755,14 +763,24 @@ def delegation_call_job(
     The job runs the child with the call's plugin hooks around it. The child's status decides the job's: the output
     policy shapes only the text, so a saved or redirected failure still fails the job and the call. ``prompt`` is
     what the child's first response is sent in place of its task, which stays its label; no other child receives it,
-    nor ``receipts``, what its turn starts from having received (``child_run_context``).
+    nor ``receipts``, what its turn starts from having received (``child_run_context``). ``paused`` is the paused run
+    of ``child``'s turn and the owners its job saved (`APPROVAL_TOOLKITS_KEY`): the job then resumes that turn
+    instead of starting one.
     """
-    output_request = _prepare_delegation_output(
-        owner,
-        config,
-        runtime_paths,
-        arguments.get(OUTPUT_PATH_ARGUMENT),
-        tool_name=tool_name,
+    resumed = None
+    if paused is not None:
+        resumed = _ChildOutcome(paused[0], {(agent, tool): toolkit for agent, tool, toolkit in paused[1]})
+    output_path = normalize_output_path_argument(arguments.get(OUTPUT_PATH_ARGUMENT))
+    output_request = (
+        None
+        if child.workflow_run_id is not None and output_path is None
+        else _prepare_delegation_output(
+            owner,
+            config,
+            runtime_paths,
+            output_path,
+            tool_name=tool_name,
+        )
     )
     if isinstance(output_request, str):
         return output_request
@@ -790,6 +808,7 @@ def delegation_call_job(
                 refresh_scheduler=refresh_scheduler,
                 runtime=runtime,
                 prompt=prompt,
+                paused=resumed,
                 receipts=receipts,
             )
         except BaseException as error:
@@ -801,7 +820,22 @@ def delegation_call_job(
                 error=error,
             )
             raise
-        result = _finalize_delegation_output(text, output_request)
+        if child.workflow_run_id is None:
+            result = _finalize_delegation_output(text, output_request)
+        elif (
+            status == "completed"
+            and output_request is not None
+            and (record := await read_child_run(child, config, runtime_paths)) is not None
+        ):
+            formatted = finalize_tool_output_file(output_request, record.handover_content or "")
+            receipt = formatted.get("mindroom_tool_output") if isinstance(formatted, dict) else None
+            if isinstance(receipt, dict) and receipt.get("status") == "error":
+                status = "failed"
+                result = str(receipt.get("error") or json.dumps(formatted))
+            else:
+                result = formatted if isinstance(formatted, str) else json.dumps(formatted)
+        else:
+            result = text
         await after_delegation(hook_state, config=config, runtime_paths=runtime_paths, result=result)
         return delegation_outcome(status, result)
 

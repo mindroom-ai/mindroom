@@ -48,6 +48,7 @@ from mindroom.session_storage.schema import (
     usage_upsert_sql,
 )
 from mindroom.session_storage.types import ConversationSession, session_state_snapshot
+from mindroom.sqlite_utils import begun
 from mindroom.usage.storage import helper_usage_snapshot, run_usage_snapshot
 
 if TYPE_CHECKING:
@@ -107,22 +108,6 @@ def connect_by_name(path: Path, *, timeout: float = BUSY_TIMEOUT_SECONDS) -> sql
         msg = f"Refusing to open {path}: SQLite opened {opened} instead"
         raise ValueError(msg)
     return connection
-
-
-@contextmanager
-def begun(connection: sqlite3.Connection, *, write: bool) -> Iterator[None]:
-    """Run the block as one transaction on ``connection``, committing when it exits normally.
-
-    A write takes the write lock first. A block that fails or is interrupted rolls back at once rather than
-    leaving that to a close: a cursor still alive keeps the connection, and with it the write lock, open past its close.
-    """
-    connection.execute("BEGIN IMMEDIATE" if write else "BEGIN")
-    try:
-        yield
-    except BaseException:
-        connection.rollback()
-        raise
-    connection.commit()
 
 
 @dataclass(frozen=True, slots=True)

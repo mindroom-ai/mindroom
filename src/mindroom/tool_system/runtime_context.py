@@ -301,15 +301,26 @@ class ToolRuntimeContext:
         record, when they do not exist yet.
         """
         # why-lazy: runtime resolution loads the config and credential modules, which slim tool authoring must not.
-        from mindroom.runtime_resolution import resolve_agent_runtime  # noqa: PLC0415
+        if create:
+            from mindroom.runtime_resolution import resolve_agent_runtime  # noqa: PLC0415
 
-        return resolve_agent_runtime(
+            return resolve_agent_runtime(
+                self.agent_name,
+                self.config,
+                self.runtime_paths,
+                execution_identity=self.execution_identity,
+                create=True,
+            ).workspace.root
+
+        from mindroom.runtime_resolution import resolve_agent_storage  # noqa: PLC0415
+
+        storage = resolve_agent_storage(
             self.agent_name,
             self.config,
             self.runtime_paths,
             execution_identity=self.execution_identity,
-            create=create,
-        ).workspace.root
+        )
+        return storage.workspace(self.config, self.runtime_paths).root
 
 
 @dataclass(frozen=True, slots=True)
