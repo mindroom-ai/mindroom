@@ -3294,9 +3294,6 @@ depends_on = [
 [[modules]]
 path = "mindroom.delivery_gateway"
 depends_on = [
-    "mindroom.tool_jobs.conversation",
-    "mindroom.tool_jobs.follow_ups",
-    "mindroom.tool_jobs.runtime",
     "mindroom.ai_run_metadata",
     "mindroom.cancellation",
     "mindroom.failure_text",
@@ -10004,7 +10001,6 @@ visibility = [
     "mindroom.delegation.continuation",
     "mindroom.delegation.recovery",
     "mindroom.orchestration.tool_job_runtime",
-    "mindroom.delivery_gateway",
     "mindroom.response_runner",
     "mindroom.tool_jobs.consumption",
     "mindroom.tool_jobs.execution",
@@ -10493,7 +10489,6 @@ depends_on = [
 ]
 visibility = [
     "mindroom.bot",
-    "mindroom.delivery_gateway",
     "mindroom.orchestration.tool_job_runtime",
     "mindroom.response_runner",
 ]
@@ -10510,7 +10505,6 @@ depends_on = [
 
 visibility = [
     "mindroom.custom_tools.job",
-    "mindroom.delivery_gateway",
     "mindroom.orchestration.tool_job_runtime",
     "mindroom.response_runner",
     "mindroom.tool_jobs.execution",

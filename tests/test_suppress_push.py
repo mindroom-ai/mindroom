@@ -17,6 +17,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import SKIP_MENTIONS_KEY, STREAM_STATUS_KEY, SUPPRESS_PUSH_KEY
 from mindroom.custom_tools.matrix_message import MatrixMessageTools
+from mindroom.delivery_gateway import DeliveryGateway, DeliveryGatewayDeps, ResponseIdentity
 from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND
 from mindroom.event_journal import EventClass, EventKind, InboundEvent
 from mindroom.matrix.client_delivery import build_edit_event_content
@@ -31,8 +32,10 @@ from mindroom.tool_jobs.conversation import ConversationKey
 from mindroom.tool_jobs.follow_ups import (
     _FOLLOW_UP_LIMIT,
     _follow_up_event_id,
+    follow_up_envelope,
     follow_up_event,
     has_working_jobs_for_conversation,
+    has_working_jobs_for_reply,
     next_follow_up_id,
 )
 from mindroom.tool_jobs.instances import pin_background_tool_jobs
@@ -395,6 +398,124 @@ async def test_has_working_jobs_for_conversation_states(tmp_path: Path) -> None:
 
         await _start_awaiting_approval(runtime, "approval_job", owner)
         assert not await has_working_jobs_for_conversation(runtime, key)
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_has_working_jobs_for_reply(tmp_path: Path) -> None:
+    """Reply-level helper handles missing runtime, silent isolation, current follow-ups, and settled checks."""
+    runtime = await tool_job_runtime(tmp_path)
+    owner = job_owner()
+    key = _conversation_key(owner)
+    target = MessageTarget.resolve(key.room_id, key.thread_id, "$msg-1")
+    visible_envelope = replace(
+        _envelope(target, source_event_id="$msg-1"),
+        origin=message_origin(sender_id=key.requester_id, requester_id=key.requester_id),
+    )
+    silent_envelope = replace(
+        visible_envelope,
+        origin=replace(visible_envelope.origin, source_kind=SILENT_SCHEDULE_SOURCE_KIND),
+    )
+    try:
+        assert not await has_working_jobs_for_reply(
+            None,
+            agent_name=key.recipient,
+            target=target,
+            envelope=visible_envelope,
+        )
+
+        await _start_ended(
+            runtime,
+            "silent_ended",
+            BackgroundOutcome("completed", "done"),
+            owner,
+            source_kind=SILENT_SCHEDULE_SOURCE_KIND,
+        )
+        assert not await has_working_jobs_for_reply(
+            runtime,
+            agent_name=key.recipient,
+            target=target,
+            envelope=visible_envelope,
+        )
+        assert await has_working_jobs_for_reply(
+            runtime,
+            agent_name=key.recipient,
+            target=target,
+            envelope=silent_envelope,
+        )
+
+        await _start_ended(runtime, "visible_ended", BackgroundOutcome("completed", "done"), owner)
+        follow_up_id = next_follow_up_id(key, await runtime.ended_jobs(key))
+        follow_up_env = follow_up_envelope(
+            key,
+            follow_up_id=follow_up_id,
+            sender_id="@mindroom_general:example.com",
+            prompt="follow up",
+        )
+        assert not await has_working_jobs_for_reply(
+            runtime,
+            agent_name=key.recipient,
+            target=target,
+            envelope=follow_up_env,
+        )
+
+        async def settled(event_id: str) -> bool:
+            return event_id == follow_up_id
+
+        assert not await has_working_jobs_for_reply(
+            runtime,
+            agent_name=key.recipient,
+            target=target,
+            envelope=visible_envelope,
+            is_follow_up_settled=settled,
+        )
+    finally:
+        await runtime.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_delivery_gateway_default_suppress_final_push_is_noop(tmp_path: Path) -> None:
+    """DeliveryGateway leaves push unsuppressed when should_suppress_final_push is omitted (None)."""
+    bot = _bot(tmp_path)
+    key = _runner_key(bot)
+    owner = _runner_owner(key)
+    runtime = await _runner_runtime(bot, tmp_path)
+    try:
+        await _start_forever(runtime, "bg_running", owner)
+        target = _target(thread_id=key.thread_id, reply_to_event_id="$msg-1")
+        envelope = replace(
+            _envelope(target, source_event_id="$msg-1"),
+            origin=message_origin(sender_id=key.requester_id, requester_id=key.requester_id),
+        )
+        identity = ResponseIdentity(
+            response_kind="agent",
+            response_envelope=envelope,
+            correlation_id="$msg-1",
+            turn_id="$msg-1",
+            sources=ResponseSources(("$msg-1",), ("$msg-1",)),
+        )
+        base = bot._delivery_gateway.deps
+        default_deps = DeliveryGatewayDeps(
+            runtime=base.runtime,
+            runtime_paths=base.runtime_paths,
+            agent_name=base.agent_name,
+            logger=base.logger,
+            resolver=base.resolver,
+            response_hooks=base.response_hooks,
+            outbox=base.outbox,
+            turn_handoff=base.turn_handoff,
+        )
+        assert default_deps.should_suppress_final_push is None
+        gateway = DeliveryGateway(default_deps)
+        extra_content: dict[str, Any] = {}
+        await gateway._maybe_suppress_final_push(
+            extra_content,
+            target=target,
+            identity=identity,
+            has_interactive_prompt=False,
+        )
+        assert SUPPRESS_PUSH_KEY not in extra_content
     finally:
         await runtime.shutdown()
 

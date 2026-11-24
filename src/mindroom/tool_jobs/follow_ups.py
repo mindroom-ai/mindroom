@@ -157,6 +157,33 @@ async def has_working_jobs_for_conversation(
     return not (is_follow_up_settled is not None and await is_follow_up_settled(follow_up_id))
 
 
+async def has_working_jobs_for_reply(
+    runtime: ToolJobRuntime | None,
+    *,
+    agent_name: str,
+    target: MessageTarget,
+    envelope: MessageEnvelope,
+    is_follow_up_settled: Callable[[str], Awaitable[bool]] | None = None,
+) -> bool:
+    """Return whether a reply's conversation stays in Working due to active or pending follow-up jobs."""
+    if runtime is None:
+        return False
+    key = ConversationKey(
+        recipient=agent_name,
+        room_id=target.room_id,
+        thread_id=target.resolved_thread_id,
+        requester_id=envelope.requester_id,
+        silent=envelope.source_kind == SILENT_SCHEDULE_SOURCE_KIND,
+    )
+    current_follow_up_id = envelope.source_event_id if envelope.origin.intent is TurnIntent.JOB_FOLLOW_UP else None
+    return await has_working_jobs_for_conversation(
+        runtime,
+        key,
+        current_follow_up_id=current_follow_up_id,
+        is_follow_up_settled=is_follow_up_settled,
+    )
+
+
 def held_jobs(jobs: Sequence[BackgroundJob]) -> tuple[BackgroundJob, ...]:
     """Return the ended jobs the limit holds for a human message, which `follow_up_jobs` leaves out."""
     return tuple(

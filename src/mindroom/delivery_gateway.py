@@ -132,11 +132,7 @@ from mindroom.streaming import (
     send_streaming_response,
     stream_progress_edits,
 )
-from mindroom.tool_jobs.conversation import ConversationKey
-from mindroom.tool_jobs.follow_ups import has_working_jobs_for_conversation
-from mindroom.tool_jobs.runtime import get_background_runtime
 from mindroom.tool_system.events import tool_markers_in_text
-from mindroom.turn_origin import TurnIntent
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
@@ -565,8 +561,8 @@ class DeliveryGatewayDeps:
     reply_effects: Callable[[tuple[PostCommitEffect, ...]], Awaitable[None]] | None = None
     # Wakes claims that waited for a reply's earlier writes.
     reply_row_resolved: Callable[[str], None] | None = None
-    # Whether a follow-up event ID already settled in this bot's journal.
-    is_follow_up_settled: Callable[[str], Awaitable[bool]] | None = None
+    # Whether a finalized reply should suppress push notifications.
+    should_suppress_final_push: Callable[[MessageTarget, ResponseIdentity], Awaitable[bool]] | None = None
 
 
 _MATRIX_DELIVERY_FAILURE_REASONS: dict[MatrixDeliveryFailureKind, str] = {
@@ -2115,24 +2111,9 @@ class DeliveryGateway:
         identity: ResponseIdentity,
     ) -> bool:
         """Return whether a finalized reply should suppress push while background work stays active."""
-        runtime = get_background_runtime(self.deps.runtime_paths)
-        if runtime is None:
+        if self.deps.should_suppress_final_push is None:
             return False
-        envelope = identity.response_envelope
-        key = ConversationKey(
-            recipient=self.deps.agent_name,
-            room_id=target.room_id,
-            thread_id=target.resolved_thread_id,
-            requester_id=envelope.requester_id,
-            silent=envelope.source_kind == SILENT_SCHEDULE_SOURCE_KIND,
-        )
-        current_follow_up_id = envelope.source_event_id if envelope.origin.intent is TurnIntent.JOB_FOLLOW_UP else None
-        return await has_working_jobs_for_conversation(
-            runtime,
-            key,
-            current_follow_up_id=current_follow_up_id,
-            is_follow_up_settled=self.deps.is_follow_up_settled,
-        )
+        return await self.deps.should_suppress_final_push(target, identity)
 
     async def _deliver_stream(
         self,

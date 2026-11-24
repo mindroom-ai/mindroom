@@ -128,7 +128,7 @@ from .steward_duties import (
 )
 from .thread_tags import THREAD_TAGS_EVENT_TYPE
 from .tool_jobs.client_cancel import cancel_room_jobs, cancel_stopped_reply_jobs, handle_job_cancel_event
-from .tool_jobs.follow_ups import follow_up_event
+from .tool_jobs.follow_ups import follow_up_event, has_working_jobs_for_reply
 from .tool_jobs.runtime import get_background_runtime
 from .turn_policy import TurnPolicy, TurnPolicyDeps
 from .turn_store import TurnStore, TurnStoreDeps
@@ -159,6 +159,7 @@ if TYPE_CHECKING:
     from mindroom.runtime_protocols import OrchestratorRuntime
     from mindroom.tool_jobs.conversation import ConversationKey
 
+    from .delivery_gateway import ResponseIdentity
     from .dispatch_callback_outcome import TurnDispatchOutcome
 
 
@@ -581,6 +582,19 @@ class AgentBot:
             approval_ended=self._settle_reply_debt_later,
             reply_stopped=partial(cancel_stopped_reply_jobs, self.runtime_paths),
         )
+
+        async def should_suppress_final_push(
+            target: MessageTarget,
+            identity: ResponseIdentity,
+        ) -> bool:
+            return await has_working_jobs_for_reply(
+                get_background_runtime(self.runtime_paths),
+                agent_name=self.agent_name,
+                target=target,
+                envelope=identity.response_envelope,
+                is_follow_up_settled=principal.is_settled,
+            )
+
         self._delivery_gateway = DeliveryGateway(
             DeliveryGatewayDeps(
                 runtime=self._runtime_view,
@@ -606,7 +620,7 @@ class AgentBot:
                 sending_device_id=lambda: self._sending_device_id,
                 reply_effects=self._reply_runtime.run_effects,
                 reply_row_resolved=self._reply_row_resolved,
-                is_follow_up_settled=principal.is_settled,
+                should_suppress_final_push=should_suppress_final_push,
             ),
         )
         self._post_response_effects_support = PostResponseEffectsSupport(
