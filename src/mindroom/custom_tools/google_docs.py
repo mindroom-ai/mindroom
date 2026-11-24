@@ -62,19 +62,23 @@ def _formatting_range(operation: dict[str, object], tab_id: str) -> dict[str, ob
 
 def _formatting_fields(operation: dict[str, object]) -> str:
     fields = operation["fields"]
-    if (
-        not isinstance(fields, list)
-        or not fields
-        or any(not isinstance(field, str) or not field.strip() or field == "*" for field in fields)
-    ):
+    if not isinstance(fields, list):
+        msg = "style fields must be a list"
+        raise TypeError(msg)
+    fields = cast("list[object]", fields)
+    if not fields or any(not isinstance(field, str) or not field.strip() or field == "*" for field in fields):
         msg = "style fields must be a non-empty list of explicit field names"
         raise ValueError(msg)
-    return ",".join(fields)
+    return ",".join(cast("list[str]", fields))
 
 
 def _formatting_style(operation: dict[str, object]) -> dict[str, object]:
     style = operation["style"]
-    if not isinstance(style, dict) or not style or any(not isinstance(key, str) for key in style):
+    if not isinstance(style, dict):
+        msg = "style must be an object"
+        raise TypeError(msg)
+    style = cast("dict[str, object]", style)
+    if not style or any(not isinstance(key, str) for key in style):
         msg = "style must be a non-empty object with string field names"
         raise ValueError(msg)
     return dict(style)
@@ -90,6 +94,7 @@ def _formatting_request(operation: object, tab_id: str) -> dict[str, object]:
     if not isinstance(operation, dict):
         msg = "operation must be an object"
         raise TypeError(msg)
+    operation = cast("dict[str, object]", operation)
     operation_type = operation.get("type")
     if operation_type not in _FORMAT_OPERATION_TYPES:
         msg = "operation type is not supported"
