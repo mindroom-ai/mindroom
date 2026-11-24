@@ -46,6 +46,7 @@ from mindroom.workflow_runs.agent_nodes import (
     AgentRuntime,
     await_child,
     delegated_request,
+    follow_up_fits_ceiling,
     launch_child,
     schema_failure,
 )
@@ -906,7 +907,7 @@ class WorkflowEngine:
         elif shown in ("agent", "turn"):
             follow_up = None
             if shown == "turn" and session is not None:
-                follow_up, prompt = await self._prepare_turn(session, all_turns, earlier, str(asked["message"]))
+                follow_up, prompt = await self._prepare_turn(run, session, all_turns, earlier, str(asked["message"]))
                 node = replace(node, request={**asked, "prompt": prompt})
             dispatch = partial(self._dispatch_agent, run, timeout=_timeout(meta), follow_up=follow_up)
             start = partial(self._enter, run, node, dispatch)
@@ -1303,6 +1304,7 @@ class WorkflowEngine:
 
     async def _prepare_turn(
         self,
+        run: WorkflowRun,
         session: WorkflowNode,
         all_turns: list[WorkflowNode],
         earlier: list[WorkflowNode],
@@ -1324,6 +1326,12 @@ class WorkflowEngine:
                 for other in all_turns
             )
         )
+        if can_continue and prev_sub is not None and run.persona:
+            context = self.authorize(run)
+            if context is None:
+                raise ScriptRuntimeUnavailableError(_OWNER_NOT_READY)
+            if not isinstance(context, str) and not await follow_up_fits_ceiling(context, run, prev_sub):
+                can_continue = False
         if can_continue:
             return prev_sub, message
         if not completed:

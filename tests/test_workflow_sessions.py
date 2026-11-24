@@ -6,6 +6,7 @@ Level: pure SDK against `FakeWorkflowGateway` plus engine harness (`WorkflowStac
 from __future__ import annotations
 
 import asyncio
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
 import pytest
@@ -13,6 +14,7 @@ import pytest_asyncio
 
 import mindroom.workflow as workflow_sdk
 from mindroom.delegation.background import delegation_child
+from mindroom.delegation.state import SubagentPersona
 from mindroom.workflow_runs import agent_nodes
 from mindroom.workflow_runs import engine as engine_module
 from mindroom.workflow_runs.agent_nodes import turn_job_id
@@ -374,3 +376,38 @@ async def test_session_ask_supports_schema_correction_on_later_turns(stack: Work
             stack.store.get_node(stack.run_id, "@1").links["subagent_id"]  # type: ignore[union-attr]
         )
     )
+
+
+@pytest.mark.asyncio
+async def test_narrowed_resume_starts_a_capped_fresh_child_with_transcript(stack: WorkflowStack) -> None:
+    """A resume with a narrower tool ceiling starts a capped fresh child with the transcript instead of continuing the wider child."""
+    stack.child_script(answer("a1"))
+    await stack.result("@0", "session", {"name": "dev"}, meta={"name": "dev"})
+    assert await stack.result("@1", "turn", _turn_args("@0", 1, "Step one"), meta={"name": "dev"}) == "a1"
+    child1 = delegation_child(stack.node_job("@1"))
+    assert child1.persona is None
+    await stack.finish_attempt("v1")
+
+    narrow = SubagentPersona("inline", "narrow", "Only text.", tools=("counter.text",))
+    stack.context = replace(stack.context, persona=narrow)
+    await stack.resume(stack.run_id, source="def main(args): return 2")
+    model2 = stack.child_script(answer("a2"), answer("a3"))
+    await stack.result("@0", "session", {"name": "dev"}, meta={"name": "dev"})
+    r1 = await stack.submit("@1", "turn", _turn_args("@0", 1, "Step one"), meta={"name": "dev"})
+    assert (r1.cached, r1.result) == (True, "a1")
+
+    assert await stack.result("@2", "turn", _turn_args("@0", 2, "Step two"), meta={"name": "dev"}) == "a2"
+    assert await stack.result("@3", "turn", _turn_args("@0", 3, "Step three"), meta={"name": "dev"}) == "a3"
+
+    child2 = delegation_child(stack.node_job("@2"))
+    child3 = delegation_child(stack.node_job("@3"))
+    assert child2.subagent_id != child1.subagent_id
+    assert child2.persona is not None
+    assert child2.persona.tools == ("counter.text",)
+    assert child3.subagent_id == child2.subagent_id
+    prompt2 = _user_texts(model2.requests[0])[0]
+    assert prompt2.startswith("Earlier conversation:")
+    assert "Step one" in prompt2
+    assert "a1" in prompt2
+    assert prompt2.endswith("\n\nStep two")
+    assert _user_texts(model2.requests[1]) == [prompt2, "Step three"]
