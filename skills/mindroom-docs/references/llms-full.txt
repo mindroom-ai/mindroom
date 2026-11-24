@@ -743,7 +743,8 @@ On iPhone, iPad, and Apple silicon Macs, use the native client described in the 
 
 ## Navigation and Layout
 
-The left rail switches between **Home**, **Direct Messages**, **Activity**, **Threads**, **Canvases**, your Matrix **Spaces**, **Explore Community**, and **Create Space**, with your account menu (and **Settings**) pinned at the bottom.
+By default, the left rail shows **Home**, **Direct Messages**, **Activity**, your Matrix **Spaces**, and your account menu (and **Settings**) pinned at the bottom.
+Optional rail buttons for **Threads**, **Canvases** (once at least one canvas exists), **Explore Community**, and **Create Space** are off by default, can be enabled in **Settings** > **Sidebar**, and stay reachable from Home's `⋮` menu while hidden.
 The **Threads** view lists threads across rooms under **Mine**, **Following**, and **All**, grouped in order by **Needs you** (pending approvals and questions), **Unread** (including mentions), **Agents working**, **Recent**, **Later** (snoozed or scheduled threads), and **Automations** (under **All**).
 The **Activity** bell shows mentions, replies, and items waiting on you.
 Press `Cmd+\` (`Ctrl+\` on Linux and Windows) to show or hide the room list sidebar.
@@ -776,9 +777,9 @@ Pasting text large enough to exceed Matrix's event size budget automatically con
 Select **Record voice message** to record, pause, resume, or discard a voice message; see [Voice Messages](https://docs.mindroom.chat/voice/) for transcription setup.
 
 Use a message's reply action to quote-reply in context, or press `Up` in an empty composer to edit your last message.
-Inside a thread an agent answers in, the composer's **Choose model** picker sets a per-thread model override or resets to **Room default**; the `!model` command in [Chat Commands](https://docs.mindroom.chat/chat-commands/) does the same from any client.
+Inside a thread an agent answers in, the composer's **Choose model** picker sets a per-thread model override, and choosing its inherited default row (**Agent default**, **Room model**, or **Default**) clears the override; the `!model` command in [Chat Commands](https://docs.mindroom.chat/chat-commands/) does the same from any client.
 On desktop, press `Enter` to send and `Shift+Enter` for a new line, or enable **ENTER for Newline** in **Settings** > **Chats** to send with `Cmd+Enter` (`Ctrl+Enter`).
-On iPadOS with a hardware keyboard, `Enter` inserts a new line and `Cmd+Enter` sends regardless of **ENTER for Newline**.
+On phones and tablets with a hardware keyboard, `Enter` inserts a new line and `Cmd+Enter` (iPhone/iPad) or `Ctrl+Enter` (Android) sends regardless of **ENTER for Newline**.
 
 ## Working with Conversations and Replies
 
@@ -795,7 +796,7 @@ On iPadOS with a hardware keyboard, `Enter` inserts a new line and `Cmd+Enter` s
 Press `Cmd+/` (`Ctrl+/` on Linux and Windows) to open the **Keyboard shortcuts** dialog when no other dialog or focused Computer view is intercepting keys.
 On Apple devices, `Cmd` is `⌘` and `Option` is `⌥`.
 
-| Action | macOS / iPadOS | Linux / Windows |
+| Action | Apple (macOS / iOS / iPadOS) | Linux / Windows / Android |
 | --- | --- | --- |
 | Search and commands (command palette) | `Cmd+K` | `Ctrl+K` |
 | Search messages (palette Messages tab) | `Cmd+Shift+F` | `Ctrl+Shift+F` |
@@ -810,8 +811,8 @@ On Apple devices, `Cmd` is `⌘` and `Option` is `⌥`.
 | Enter / leave thread | `Option+Right` / `Option+Left` | `Alt+Right` / `Alt+Left` |
 | Resolve or reopen thread | `Cmd+Shift+Enter` | `Ctrl+Shift+Enter` |
 | Mark as read and go to composer | `Esc` | `Esc` |
-| Send / new line (macOS, Linux, Windows) | `Enter` / `Shift+Enter` | `Enter` / `Shift+Enter` |
-| Send / new line (iPadOS hardware keyboard) | `Cmd+Enter` / `Enter` | — |
+| Send / new line (desktop) | `Enter` / `Shift+Enter` | `Enter` / `Shift+Enter` |
+| Send / new line (phone / tablet hardware keyboard) | `Cmd+Enter` / `Enter` | `Ctrl+Enter` / `Enter` |
 | Edit your last message (empty composer) | `Up` | `Up` |
 | Bold / italic / underline | `Cmd+B` / `Cmd+I` / `Cmd+U` | `Ctrl+B` / `Ctrl+I` / `Ctrl+U` |
 | Strikethrough / inline code / spoiler | `Cmd+Shift+X` / `Cmd+E` / `Cmd+Shift+H` | `Ctrl+Shift+X` / `Ctrl+E` / `Ctrl+Shift+H` |
