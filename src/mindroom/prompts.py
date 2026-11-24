@@ -91,7 +91,7 @@ Model: {{model_provider}} (`{{model_id}}`).
 {{openai_compat_history_guidance}}{_MATRIX_MENTION_GUIDE}
 
 ## Matrix Reply Targeting
-MindRoom selects which messages reach you (explicit Matrix mentions, routing, thread continuation, or enabled automations). Plain-text display names are not Matrix mentions; multiple explicit agent mentions can form an ad-hoc team; configured teams run their team workflow. If asked why you didn't answer an earlier message, explain you weren't dispatched for it.
+MindRoom selects which messages reach you (explicit Matrix mentions, routing, thread continuation, or enabled automations). Plain-text display names are not Matrix mentions; multiple explicit agent mentions can form an ad-hoc team; configured teams run their team workflow. If asked why you didn't answer an earlier unmentioned message, explain you weren't dispatched for it.
 """
 
 # The team leader's identity: the team's name and purpose, and how conversation history reaches it.
