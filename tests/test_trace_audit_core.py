@@ -199,6 +199,7 @@ def _db_run(
     *,
     status: str = "COMPLETED",
     error: str | None = None,
+    content: str = "Completed task.",
     parent_run_id: str | None = None,
     metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
@@ -210,6 +211,7 @@ def _db_run(
         "updated_at": ts + 100,
         "status": status,
         "error": error,
+        "content": content,
         "parent_run_id": parent_run_id,
         "metadata": metadata,
     }
@@ -390,6 +392,105 @@ def test_evidence_card_selects_triggering_human_prompt_over_preceding_context() 
     assert "user_ask: Run the test suite" in card.rendered
     assert "Lunch is at noon" not in card.rendered
     assert any(s.label == "user_ask" and s.text == "Run the test suite" for s in card.snippets)
+
+
+def test_multiline_curl_password_redacted_before_whitespace_collapse() -> None:
+    """Multiline tool errors and snippets redact line-anchored credentials before flattening whitespace."""
+    raw_error = "Exit code 1\nStderr:\ncurl -u name:ExampleOnlyPassword https://example.test"
+    tool_0 = _tool("run_shell_command", ord_idx=0, args={"command": "curl ..."}, result=raw_error)
+    tool_1 = _tool("run_shell_command", ord_idx=1, args={"command": "curl ..."}, result=raw_error)
+
+    outcome = classify_tool_execution(tool_0)
+    assert outcome.is_failure
+    assert "ExampleOnlyPassword" not in outcome.error_excerpt
+    assert "curl -u name:***redacted***" in outcome.error_excerpt
+
+    run = _run(
+        "r_multiline_secret",
+        status="ERROR",
+        error=raw_error,
+        content=raw_error,
+        tools=(tool_0, tool_1),
+        messages=(RunMessageRecord(ord=0, role="user", content=raw_error),),
+    )
+    sess = _session((run,))
+    card = build_evidence_card(detect_session_incidents(sess, now=NOW)[0], sess)
+
+    assert "ExampleOnlyPassword" not in card.rendered
+    assert all("ExampleOnlyPassword" not in e.truncated_error for e in card.failure_sequence)
+    assert all("ExampleOnlyPassword" not in s.text for s in card.snippets)
+
+
+def test_source_prefers_final_assistant_message_over_long_record_content(tmp_path: Path) -> None:
+    """AuditedRun.content prefers the last non-history assistant message so EvidenceCard sees the final reply."""
+    db_path = tmp_path / "assistant.db"
+    sid = "!roomA:example.com:$final_reply"
+    opening_progress = "Investigating failing tests and inspecting command output. " * 7
+    assert len(opening_progress) > 300
+    final_reply = "Verified fix: switched to --no-cov and confirmed pytest passes."
+    combined_record_content = f"{opening_progress}\n\n{final_reply}"
+
+    _seed_v8_db(
+        db_path,
+        "assistant",
+        sessions=[{"session_id": sid}],
+        runs=[
+            _db_run("r_final", sid, seq=1, content=combined_record_content),
+            _db_run("r_fallback", sid, seq=2, ts=NOW - 3500, content="Fallback record reply."),
+        ],
+        tools=[
+            ("r_final", 0, _fail_row("1")),
+            ("r_final", 1, _fail_row("2")),
+        ],
+        messages=[
+            ("r_final", 0, {"role": "assistant", "content": "Old history reply", "from_history": True}),
+            ("r_final", 1, {"role": "user", "content": "Fix the test failures"}),
+            ("r_final", 2, {"role": "assistant", "content": opening_progress}),
+            ("r_final", 3, {"role": "assistant", "content": final_reply}),
+            ("r_fallback", 0, {"role": "assistant", "content": "History only", "from_history": True}),
+        ],
+    )
+
+    sessions = load_audited_sessions(db_path, "assistant")
+    assert len(sessions) == 1
+    run_final, run_fallback = sessions[0].runs
+    assert run_final.content == final_reply
+    assert run_fallback.content == "Fallback record reply."
+
+    card = build_evidence_card(detect_session_incidents(sessions[0], now=NOW)[0], sessions[0])
+    assert any(s.label == "assistant_reply" and final_reply in s.text for s in card.snippets)
+    assert f"assistant_reply: {final_reply}" in card.rendered
+
+
+def test_source_marks_compaction_summary_message_synthetic(tmp_path: Path) -> None:
+    """Compaction summary messages with provider_data marker are synthetic and skipped by triggering_human_text."""
+    db_path = tmp_path / "assistant.db"
+    sid = "!roomA:example.com:$compacted"
+    _seed_v8_db(
+        db_path,
+        "assistant",
+        sessions=[{"session_id": sid}],
+        runs=[_db_run("r_comp", sid, seq=1)],
+        messages=[
+            ("r_comp", 0, {"role": "user", "content": "Run the integration suite"}),
+            (
+                "r_comp",
+                1,
+                {
+                    "role": "user",
+                    "content": "The earlier part of this conversation was compacted into this summary",
+                    "provider_data": {"mindroom_compaction_summary": "run"},
+                },
+            ),
+        ],
+    )
+
+    sessions = load_audited_sessions(db_path, "assistant")
+    msgs = sessions[0].runs[0].messages
+    assert len(msgs) == 2
+    assert msgs[0].is_synthetic is False
+    assert msgs[1].is_synthetic is True
+    assert triggering_human_text(msgs) == "Run the integration suite"
 
 
 def test_source_read_only_exclusions_and_symlink_refusal(tmp_path: Path) -> None:

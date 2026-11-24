@@ -156,6 +156,14 @@ class TraceAuditAutomation(_ScheduledAutomation):
             "defaults to the agent's first configured room (or personal room for private instances)"
         ),
     )
+    model: str | None = Field(
+        default=None,
+        description=(
+            "Model for trace_audit Stage 2 reviews, a key of models; "
+            "defaults to cheap_model, then skill_learning.model, then the agent's own model"
+        ),
+        json_schema_extra=dashboard_hint(reference="model"),
+    )
     min_idle_seconds: int = Field(default=600, ge=0, le=86_400, description="Idle seconds before a session is audited")
     max_audits_per_run: int = Field(default=12, ge=1, le=100, description="Max evidence cards audited per pass")
     min_cluster_sessions: int = Field(default=2, ge=1, le=50, description="Distinct sessions needed to promote")

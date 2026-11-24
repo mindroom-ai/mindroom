@@ -11,6 +11,7 @@ from typing import Any
 from mindroom.history.run_checkpoint import INTERRUPTED_CALL_RESULT
 from mindroom.hooks.enrichment import is_transient_context, strip_enrichment_blocks
 from mindroom.prompt_message_tags import parse_msg_tags
+from mindroom.redaction import redact_sensitive_text
 from mindroom.trace_audit.models import (
     AuditedSession,
     Incident,
@@ -28,6 +29,7 @@ _IDENT_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 _SENT_BY_YOU_RE = re.compile(r"""<msg\b[^>]*\bsent_by_you=(["'])true\1[^>]*><!\[CDATA\[.*?\]\]></msg>""", re.DOTALL)
 
 _MAX_JSON_ERROR_CHARS = 65_536
+_REDACT_EXCERPT_SCAN_CHARS = 4_096
 _WINDOW_SECONDS = 86_400.0
 _TERMINAL_STATUSES = frozenset({"COMPLETED", "ERROR", "CANCELLED"})
 SHELL_TOOLS = frozenset({"run_shell_command", "bash", "shell"})
@@ -173,6 +175,12 @@ def classify_tool_execution(tool: ToolExecutionRecord) -> ToolOutcome:
     else:
         kind, is_failure, text, exit_code = _classify_output(tool, result)
     canonical = json.dumps(tool.tool_args, ensure_ascii=False, sort_keys=True, separators=(",", ":"), default=str)
+    raw_error = (text or result).strip() if is_failure else ""
+    error_excerpt = (
+        " ".join(redact_sensitive_text(raw_error, max_length=_REDACT_EXCERPT_SCAN_CHARS).split())[:300]
+        if raw_error
+        else ""
+    )
     return ToolOutcome(
         tool_ord=tool.ord,
         tool_name=tool.tool_name,
@@ -180,7 +188,7 @@ def classify_tool_execution(tool: ToolExecutionRecord) -> ToolOutcome:
         kind=kind,
         diagnostic_family=_diagnostic_family(kind, text or result, exit_code=exit_code),
         is_failure=is_failure,
-        error_excerpt=" ".join((text or result).strip().split())[:300] if is_failure else "",
+        error_excerpt=error_excerpt,
         args_digest=hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16],
     )
 

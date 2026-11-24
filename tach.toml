@@ -2927,6 +2927,7 @@ visibility = [
     "mindroom.history.replay",
     "mindroom.history.request_messages",
     "mindroom.participation_hook",
+    "mindroom.trace_audit.source",
 ]
 
 [[modules]]
@@ -11055,6 +11056,7 @@ path = "mindroom.trace_audit.source"
 depends_on = [
     "mindroom.automations.steps",
     "mindroom.constants",
+    "mindroom.history.summary_message",
     "mindroom.llm",
     "mindroom.session_storage.schema",
     "mindroom.trace_audit.models",

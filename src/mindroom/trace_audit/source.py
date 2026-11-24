@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 
 from mindroom.automations.steps import is_automation_hook_source
 from mindroom.constants import HOOK_SOURCE_RUN_METADATA_KEY
+from mindroom.history.summary_message import is_compaction_summary
 from mindroom.llm.messages import Message, is_media_follow_up, is_queued_notice_message
 from mindroom.llm.runs import FailingTool, ToolExecution
 from mindroom.session_ids import session_in_room
@@ -23,7 +24,6 @@ if TYPE_CHECKING:
 
 _WORKFLOW_MARKER = ":dynamic_workflow:"
 _OWN_THREAD_KEY = "mindroom_own_thread_message"
-_COMPACTION_KEY = "mindroom_compaction_summary"
 _CHUNK_SIZE = 500
 
 
@@ -133,7 +133,7 @@ def _load_tools_and_messages(
             is_queued_notice_message(msg)
             or is_media_follow_up(msg)
             or pdata.get(_OWN_THREAD_KEY) is True
-            or pdata.get(_COMPACTION_KEY) is True
+            or is_compaction_summary(msg)
         )
         messages_by_run[run_id].append(
             RunMessageRecord(
@@ -171,17 +171,10 @@ def _build_run(
 ) -> AuditedRun:
     rid, sid, status, seq, created, updated, meta, record = row
     raw_content = record.get("content")
-    content = (
-        raw_content
-        if isinstance(raw_content, str) and raw_content.strip()
-        else next(
-            (
-                m.content
-                for m in reversed(messages)
-                if m.role == "assistant" and not m.from_history and m.content.strip()
-            ),
-            "",
-        )
+    fallback_content = raw_content if isinstance(raw_content, str) and raw_content.strip() else ""
+    content = next(
+        (m.content for m in reversed(messages) if m.role == "assistant" and not m.from_history and m.content.strip()),
+        fallback_content,
     )
     raw_error = record.get("error")
     return AuditedRun(

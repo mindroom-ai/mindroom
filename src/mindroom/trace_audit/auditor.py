@@ -50,6 +50,7 @@ MAX_FAILURE_ERROR_CHARS = 240
 MAX_SNIPPETS = 4
 MAX_SNIPPET_CHARS = 280
 _MAX_LOADED_SKILLS = 12
+_REDACT_SCAN_CHARS = 4_096
 
 _AUDIT_SYSTEM_PROMPT = (
     "You are a passive trace auditor evaluating a bounded, redacted evidence card from one settled agent session.\n"
@@ -65,8 +66,11 @@ _AUDIT_SYSTEM_PROMPT = (
 
 
 def _redact_clip(text: str, limit: int) -> str:
-    collapsed = " ".join(text.split())
-    return redact_sensitive_text(collapsed, max_length=limit)[:limit] if collapsed else ""
+    stripped = text.strip()
+    if not stripped:
+        return ""
+    redacted = redact_sensitive_text(stripped, max_length=max(limit, _REDACT_SCAN_CHARS))
+    return " ".join(redacted.split())[:limit]
 
 
 def _loaded_skills(session: AuditedSession, up_to_seq: int) -> tuple[str, ...]:
@@ -152,7 +156,7 @@ def build_evidence_card(incident: Incident, session: AuditedSession) -> Evidence
         lines.append("Snippets:")
         lines.extend(f"  {s.label}: {s.text}" for s in snippets)
 
-    rendered = redact_sensitive_text("\n".join(lines), max_length=MAX_CARD_CHARS)[:MAX_CARD_CHARS]
+    rendered = redact_sensitive_text("\n".join(lines), max_length=MAX_CARD_CHARS)
     return EvidenceCard(
         session_id=incident.session_id,
         run_id=incident.run_id,

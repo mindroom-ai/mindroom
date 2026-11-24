@@ -6037,7 +6037,7 @@
             }
           ],
           "default": null,
-          "description": "Model for the prompt's runs, a key of models; defaults to the agent's own model",
+          "description": "Model for trace_audit Stage 2 reviews, a key of models; defaults to cheap_model, then skill_learning.model, then the agent's own model",
           "title": "Model",
           "x-mindroom": {
             "reference": "model"
