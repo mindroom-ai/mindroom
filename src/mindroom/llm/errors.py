@@ -119,8 +119,27 @@ class ModelSafeguardRefusal(ProviderError):  # noqa: N818
     ``usage`` is the refused response's usage, for a caller that reads only the finished turn, such as ``complete``.
     """
 
-    def __init__(self, *, provider: str, usage: MessageMetrics) -> None:
-        super().__init__(MODEL_SAFEGUARD_REFUSAL_MESSAGE, provider=provider, code=SAFEGUARD_REFUSAL)
+    def __init__(
+        self,
+        *,
+        provider: str,
+        usage: MessageMetrics,
+        message: str | None = None,
+        provider_code: str | None = None,
+    ) -> None:
+        if message is None:
+            message = (
+                f"The model's safeguards blocked the response ({provider_code}). "
+                "Choose a different model or revise the prompt, then try again."
+                if provider_code
+                else MODEL_SAFEGUARD_REFUSAL_MESSAGE
+            )
+        super().__init__(
+            message,
+            provider=provider,
+            code=SAFEGUARD_REFUSAL,
+            provider_code=provider_code,
+        )
         self.usage = usage
 
 

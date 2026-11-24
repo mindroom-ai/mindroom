@@ -80,6 +80,7 @@ def finished_turn(
     provider_data: dict[str, Any] | None = None,
     usage: MessageMetrics | None,
     stop_reason: StopReason | None,
+    raw_stop_reason: str | None = None,
 ) -> list[StreamEvent]:
     """Return the events that end one finished turn, its assistant message stamped with its provenance and timings."""
     message = Message(
@@ -92,15 +93,20 @@ def finished_turn(
     if usage is not None:
         message.metrics = usage
     stamp_finished_turn(message, identity, timer)
-    return turn_end(message, stop_reason)
+    return turn_end(message, stop_reason, raw_stop_reason=raw_stop_reason)
 
 
-def turn_end(message: Message, stop_reason: StopReason | None) -> list[StreamEvent]:
+def turn_end(
+    message: Message,
+    stop_reason: StopReason | None,
+    *,
+    raw_stop_reason: str | None = None,
+) -> list[StreamEvent]:
     """Return a finished turn's last events: its final usage report, when the provider reported usage, then completion.
 
     The final report carries the message's metrics, timings included.
     """
-    completed = TurnCompleted(message=message, stop_reason=stop_reason)
+    completed = TurnCompleted(message=message, stop_reason=stop_reason, raw_stop_reason=raw_stop_reason)
     return [UsageReported(message.metrics), completed] if message.metrics.reported else [completed]
 
 

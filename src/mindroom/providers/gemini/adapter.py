@@ -160,6 +160,7 @@ class GeminiProvider:
         """Return the events that end a reply Gemini ended, or raise its malformed call."""
         if (malformed := malformed_tool_call_error(reply, provider=self.identity.provider)) is not None:
             raise malformed
+        resolved_stop = stop_reason(reply)
         return finished_turn(
             self.identity,
             timer,
@@ -168,7 +169,12 @@ class GeminiProvider:
             tool_calls=reply.tool_calls,
             provider_data=reply_provider_data(reply),
             usage=reply.usage,
-            stop_reason=stop_reason(reply),
+            stop_reason=resolved_stop,
+            raw_stop_reason=(
+                reply.finish_reason
+                if resolved_stop in {"content_filter", "incomplete", "output_limit", "refusal"}
+                else None
+            ),
         )
 
     def _request_config(
