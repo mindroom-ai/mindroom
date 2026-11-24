@@ -1557,9 +1557,10 @@ async def test_stale_while_revalidate_returns_cached_7d_and_refreshes_in_backgro
         )
         assert (s_fresh.accounts[0].tokens_7d, scan_calls[0]) == (4200, 2)
 
-        # Once the snapshot cache TTL elapses, the next snapshot picks up the refreshed 7d totals.
+        # Once the snapshot cache TTL elapses (even across UTC midnight), cached daily_breakdown serves refreshed totals.
         clock[0] += provider_limits.CACHE_TTL_SECONDS
-        s3 = await get_provider_usage_snapshot(config=config, runtime_paths=paths, now=FIXED_NOW)
+        next_utc_day = datetime(2026, 11, 24, 0, 5, 0, tzinfo=UTC)
+        s3 = await get_provider_usage_snapshot(config=config, runtime_paths=paths, now=next_utc_day)
         assert (s3.partial, _acct(s3, "anthropic:default").tokens_7d, scan_calls[0]) == (False, 4200, 2)
         assert _acct(s3, "anthropic:default").cost_usd_7d == pytest.approx(0.0084)
     finally:
@@ -1632,8 +1633,8 @@ async def test_failed_usage_scan_logs_warning_and_degrades_gracefully(
         ] == [("warning", "OSError")]
         assert "secret-db-path" not in json.dumps(stale_logs)
         assert loop_errors == []
-        retained_report, _ = next(iter(provider_limits._USAGE_REPORT_CACHE.values()))
-        assert retained_report.daily_breakdown[0].totals.total_tokens == 1500
+        retained_daily, _ = next(iter(provider_limits._USAGE_REPORT_CACHE.values()))
+        assert retained_daily[0].totals.total_tokens == 1500
     finally:
         release_fail.set()
         loop.set_exception_handler(prev_handler)

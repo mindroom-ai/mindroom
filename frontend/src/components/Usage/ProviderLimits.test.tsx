@@ -1,5 +1,6 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
+  act,
   cleanup,
   render,
   screen,
@@ -254,5 +255,112 @@ describe("ProviderLimits", () => {
     await waitFor(() => expect(vi.mocked(fetch)).toHaveBeenCalledTimes(4));
     expect(await screen.findByText("80% left")).toBeInTheDocument();
     expect(screen.queryByText("62% left")).not.toBeInTheDocument();
+  });
+
+  it("hides misleading zero 7d totals on partial snapshots and auto-refetches until complete", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(new Date("2026-11-23T20:00:00Z"));
+    const baseAccount = contractFixture
+      .accounts[0] as ProviderUsageSnapshot["accounts"][number];
+    const partialSnapshot: ProviderUsageSnapshot = {
+      version: 1,
+      checked_at: "2026-11-23T20:00:00Z",
+      partial: true,
+      accounts: [
+        {
+          ...baseAccount,
+          tokens_7d: 0,
+          cost_usd_7d: null,
+          cost_estimated: false,
+        },
+      ],
+      daily_7d: [],
+      unattributed_tokens_7d: 0,
+      unattributed_cost_usd_7d: null,
+    };
+    const completeSnapshot: ProviderUsageSnapshot = {
+      ...partialSnapshot,
+      partial: false,
+      accounts: [
+        {
+          ...baseAccount,
+          tokens_7d: 125_000,
+          cost_usd_7d: 4.5,
+          cost_estimated: true,
+        },
+      ],
+    };
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(respond(partialSnapshot))
+      .mockResolvedValueOnce(respond(completeSnapshot));
+
+    renderProviderLimits();
+
+    expect(await screen.findByText("62% left")).toBeInTheDocument();
+    expect(screen.getByRole("status")).toHaveTextContent(
+      /7-day token totals are still loading or unavailable/i,
+    );
+    expect(screen.getByText("Loading 7-day usage…")).toBeInTheDocument();
+    expect(screen.queryByText("0 tokens")).not.toBeInTheDocument();
+    expect(screen.queryByText("Last 7 days")).not.toBeInTheDocument();
+    expect(vi.mocked(fetch)).toHaveBeenCalledTimes(1);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_100);
+    });
+
+    expect(await screen.findByText("125,000 tokens")).toBeInTheDocument();
+    expect(screen.getByText("~$4.50 · 7d")).toBeInTheDocument();
+    expect(screen.queryByRole("status")).not.toBeInTheDocument();
+    expect(screen.queryByText("Loading 7-day usage…")).not.toBeInTheDocument();
+    expect(vi.mocked(fetch)).toHaveBeenCalledTimes(2);
+
+    // Polling stops once partial becomes false.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(15_000);
+    });
+    expect(vi.mocked(fetch)).toHaveBeenCalledTimes(2);
+  });
+
+  it("caps automatic retries when partial snapshots persist", async () => {
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    vi.setSystemTime(new Date("2026-11-23T20:00:00Z"));
+    const baseAccount = contractFixture
+      .accounts[0] as ProviderUsageSnapshot["accounts"][number];
+    const partialSnapshot: ProviderUsageSnapshot = {
+      version: 1,
+      checked_at: "2026-11-23T20:00:00Z",
+      partial: true,
+      accounts: [
+        {
+          ...baseAccount,
+          tokens_7d: 0,
+          cost_usd_7d: null,
+          cost_estimated: false,
+        },
+      ],
+      daily_7d: [],
+      unattributed_tokens_7d: 0,
+      unattributed_cost_usd_7d: null,
+    };
+    vi.mocked(fetch).mockImplementation(() =>
+      Promise.resolve(respond(partialSnapshot)),
+    );
+
+    renderProviderLimits();
+    expect(await screen.findByText("Loading 7-day usage…")).toBeInTheDocument();
+
+    // Advance well past 6 retries (6 * 5s = 30s) and verify polling halts at 1 initial + 6 retries.
+    for (let i = 0; i < 8; i += 1) {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(5_100);
+      });
+    }
+
+    expect(vi.mocked(fetch)).toHaveBeenCalledTimes(7);
+    expect(
+      await screen.findByText("7-day usage unavailable"),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("0 tokens")).not.toBeInTheDocument();
   });
 });
