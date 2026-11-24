@@ -17,7 +17,7 @@ from mindroom.llm.provider import ToolCallReady
 from mindroom.llm.request_context import with_request_headers
 from mindroom.logging_config import get_logger
 from mindroom.model_defaults import OPENAI_BASE_URL_DEFAULT
-from mindroom.providers.assistant_turn import TurnTimer, finished_turn
+from mindroom.providers.assistant_turn import ABNORMAL_STOP_REASONS, TurnTimer, finished_turn
 from mindroom.providers.extra_kwargs import sdk_request_body, settings_params
 from mindroom.providers.openai.adapter_common import SDKClients, request_settings, with_large_fields_untyped
 from mindroom.providers.openai.chat_wire import (
@@ -218,9 +218,7 @@ class ChatAdapter:
             usage=parts.usage,
             stop_reason=stop_reason,
             raw_stop_reason=(
-                parts.native_finish_reason or parts.finish_reason
-                if stop_reason in {"content_filter", "incomplete", "output_limit", "refusal"}
-                else None
+                parts.native_finish_reason or parts.finish_reason if stop_reason in ABNORMAL_STOP_REASONS else None
             ),
         ):
             yield event
@@ -229,11 +227,7 @@ class ChatAdapter:
         """Log abnormal finishes, raise provider turn errors, and return the normalized stop reason."""
         stop_reason = chat_stop_reason(parts.finish_reason, parts.native_finish_reason)
         turn_error = chat_turn_error(parts, provider=self.identity.provider)
-        if (
-            turn_error is not None
-            or parts.finish_reason == "error"
-            or stop_reason in {"content_filter", "incomplete", "refusal", "output_limit"}
-        ):
+        if turn_error is not None or parts.finish_reason == "error" or stop_reason in ABNORMAL_STOP_REASONS:
             logger.warning(
                 "chat_abnormal_finish",
                 provider=self.identity.provider,

@@ -20,7 +20,17 @@ if TYPE_CHECKING:
     from mindroom.llm.provider import ModelIdentity, StopReason, StreamEvent
     from mindroom.llm.usage import MessageMetrics
 
-__all__ = ["ThinkTagSplitter", "TurnTimer", "finished_turn", "stamp_finished_turn", "stamp_model", "turn_end"]
+__all__ = [
+    "ABNORMAL_STOP_REASONS",
+    "ThinkTagSplitter",
+    "TurnTimer",
+    "finished_turn",
+    "stamp_finished_turn",
+    "stamp_model",
+    "turn_end",
+]
+
+ABNORMAL_STOP_REASONS: frozenset[StopReason] = frozenset({"content_filter", "incomplete", "output_limit", "refusal"})
 
 _THINK_OPEN = "<think>"
 _THINK_CLOSE = "</think>"

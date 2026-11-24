@@ -109,6 +109,21 @@ def incomplete_stream_error(*, provider: str) -> ProviderUnavailable:
     return ProviderUnavailable(msg, provider=provider)
 
 
+def incomplete_turn_error(
+    *,
+    provider: str,
+    raw_stop_reason: str | None = None,
+    phase: str = "producing output",
+) -> ProviderUnavailable:
+    """Return the error of a turn that ended ``incomplete`` before finishing ``phase``; ``provider`` names the route.
+
+    It is retryable like a dropped connection, since the next attempt may complete normally.
+    """
+    detail = f" ({raw_stop_reason})" if raw_stop_reason else ""
+    msg = f"Model stopped with incomplete response{detail} before {phase}"
+    return ProviderUnavailable(msg, provider=provider, provider_code=raw_stop_reason)
+
+
 class ModelOutputLimitError(RuntimeError):
     """A run's model responses kept stopping at the output limit before their tool calls were complete."""
 
@@ -161,4 +176,5 @@ __all__ = [
     "ProviderUnavailable",
     "RateLimited",
     "incomplete_stream_error",
+    "incomplete_turn_error",
 ]

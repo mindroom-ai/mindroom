@@ -34,8 +34,8 @@ from mindroom.llm.errors import (
     ModelOutputLimitError,
     ModelSafeguardRefusal,
     ProviderError,
-    ProviderUnavailable,
     incomplete_stream_error,
+    incomplete_turn_error,
 )
 from mindroom.llm.events import ToolCompleted, ToolProgress, ToolStarted
 from mindroom.llm.messages import (
@@ -591,10 +591,10 @@ def _abnormal_turn_error(turn: TurnCompleted, *, provider: str) -> Exception | N
             provider_code=turn.raw_stop_reason,
         )
     if stop == "incomplete":
-        return ProviderUnavailable(
-            f"Model stopped with incomplete response{detail} before {phase}",
+        return incomplete_turn_error(
             provider=provider,
-            provider_code=turn.raw_stop_reason,
+            raw_stop_reason=turn.raw_stop_reason,
+            phase=phase,
         )
     if stop == "output_limit" and not has_calls:
         while_reasoning = " while reasoning" if has_reasoning else ""

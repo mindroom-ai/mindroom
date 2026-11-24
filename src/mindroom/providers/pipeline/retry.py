@@ -21,7 +21,7 @@ from dataclasses import dataclass
 from functools import partial
 from typing import TYPE_CHECKING
 
-from mindroom.llm.errors import ProviderError, ProviderUnavailable
+from mindroom.llm.errors import ProviderError, ProviderUnavailable, incomplete_turn_error
 from mindroom.llm.provider import TurnCompleted
 from mindroom.logging_config import get_logger
 from mindroom.providers.pipeline.wrapped import Retry, WrappedProvider, attempts
@@ -149,12 +149,9 @@ async def _fail_empty_incomplete(inner: ModelProvider, request: ModelRequest) ->
                 and not event.message.tool_calls
                 and not event.message.get_content_string().strip()
             ):
-                detail = f" ({event.raw_stop_reason})" if event.raw_stop_reason else ""
-                msg = f"Model stopped with incomplete response{detail} before producing output"
-                raise ProviderUnavailable(
-                    msg,
+                raise incomplete_turn_error(
                     provider=inner.identity.provider,
-                    provider_code=event.raw_stop_reason,
+                    raw_stop_reason=event.raw_stop_reason,
                 )
             yield event
 

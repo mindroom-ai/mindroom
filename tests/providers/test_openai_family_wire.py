@@ -553,6 +553,40 @@ async def test_chat_unknown_finish_reason_without_native_reason_falls_back_to_fi
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("event_type", "status", "incomplete_details", "expected_stop", "expected_raw"),
+    [
+        ("response.completed", "completed", None, "end", None),
+        ("response.incomplete", "incomplete", {"reason": "max_output_tokens"}, "output_limit", "max_output_tokens"),
+        ("response.incomplete", "incomplete", {"reason": "content_filter"}, "content_filter", "content_filter"),
+        ("response.incomplete", "incomplete", None, "incomplete", "incomplete"),
+    ],
+    ids=["completed", "max-output-tokens", "content-filter", "incomplete-without-details"],
+)
+async def test_responses_stop_populates_raw_stop_reason_only_when_abnormal(
+    tmp_path: Path,
+    event_type: str,
+    status: str,
+    incomplete_details: dict[str, Any] | None,
+    expected_stop: str,
+    expected_raw: str | None,
+) -> None:
+    """Abnormal Responses stops carry ``incomplete_details.reason`` (falling back to status); normal stops omit it."""
+    ended = {
+        "type": event_type,
+        "sequence_number": 9,
+        "response": _response(status, incomplete_details=incomplete_details),
+    }
+    built = _Built(tmp_path, _OPENAI_RESPONSES, _responses_reply(*_text_events("Partial"), ended))
+
+    events = [event async for event in built.adapter.stream(ModelRequest(messages=[_user()]))]
+
+    completed = events[-1]
+    assert isinstance(completed, TurnCompleted)
+    assert (completed.stop_reason, completed.raw_stop_reason) == (expected_stop, expected_raw)
+
+
+@pytest.mark.asyncio
 async def test_a_chat_content_filter_stop_is_a_safeguard_refusal(tmp_path: Path) -> None:
     """OpenRouter reports Claude's refusal as ``content_filter``; the reply must say so, not read as empty."""
     built = _Built(tmp_path, _OPENAI_CHAT, _chat_reply(_chunk({"content": ""}, finish_reason="content_filter")))
