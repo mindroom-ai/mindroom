@@ -23,6 +23,7 @@ logger = get_logger(__name__)
 _GOOGLE_DOCS_URL_ID_PATTERN = re.compile(
     r"^https?://docs\.google\.com/document/(?:u/\d+/)?d/([A-Za-z0-9_-]+)(?:[/?#]|$)",
 )
+_FORMAT_FIELD_PATH_PATTERN = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)*$")
 _FORMAT_OPERATION_TYPES = frozenset(
     {
         "paragraph_style",
@@ -66,10 +67,17 @@ def _formatting_fields(operation: dict[str, object]) -> str:
         msg = "style fields must be a list"
         raise TypeError(msg)
     fields = cast("list[object]", fields)
-    if not fields or any(not isinstance(field, str) or not field.strip() or field == "*" for field in fields):
-        msg = "style fields must be a non-empty list of explicit field names"
+    if not fields:
+        msg = "style fields must not be empty"
         raise ValueError(msg)
-    return ",".join(cast("list[str]", fields))
+    if not all(isinstance(field, str) for field in fields):
+        msg = "style fields must contain strings"
+        raise TypeError(msg)
+    field_paths = [cast("str", field).strip() for field in fields]
+    if any(not _FORMAT_FIELD_PATH_PATTERN.fullmatch(field_path) for field_path in field_paths):
+        msg = "style fields must be explicit dotted paths"
+        raise ValueError(msg)
+    return ",".join(field_paths)
 
 
 def _formatting_style(operation: dict[str, object]) -> dict[str, object]:
@@ -454,7 +462,7 @@ class GoogleDocsTools(GoogleApiToolkit):
         Supported operations are paragraph_style, text_style, native_list,
         remove_native_list, and hyperlink. Each operation names a body-index
         range with start_index and end_index. Style operations include a style
-        object and explicit fields list, native_list includes bullet_preset,
+        object and explicit dotted field paths, native_list includes bullet_preset,
         and hyperlink includes url.
 
         Args:
