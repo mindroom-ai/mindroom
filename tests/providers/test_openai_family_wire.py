@@ -1090,7 +1090,7 @@ async def test_openrouter_chat_sends_video_parts_with_mime_resolution_and_canoni
     link = Message(role="user", content="Link", videos=[Video(url="https://example.com/clip.mp4")])
     await _adapter_turn(built, ModelRequest(messages=[link]))
     assert built.body(1)["messages"][0]["content"] == [
-        {"type": "text", "text": "Link", "cache_control": {"type": "ephemeral"}},
+        {"type": "text", "text": "Link"},
         {"type": "video_url", "video_url": {"url": "https://example.com/clip.mp4"}},
     ]
 
@@ -3698,14 +3698,6 @@ def _calls(*call_ids: str) -> list[dict[str, Any]]:
     return [{**_CALL, "id": call_id} for call_id in call_ids]
 
 
-def _gemini_tool_json(content: Any) -> Any:  # noqa: ANN401
-    """Decode the wrapped JSON payload inside a Gemini text-part tool result."""
-    assert isinstance(content, list)
-    assert len(content) == 1
-    assert content[0]["type"] == "text"
-    return json.loads(content[0]["text"])
-
-
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     "model_id",
@@ -3734,9 +3726,9 @@ async def test_openrouter_gemini_wraps_tool_results_as_json_objects(tmp_path: Pa
     await _turn(built, ModelRequest(messages=[_user(), assistant, ok_result, err_result, empty_err]))
 
     sent = built.body()["messages"]
-    assert _gemini_tool_json(sent[2]["content"]) == {"result": text}
-    assert _gemini_tool_json(sent[3]["content"]) == {"error": "Failed with {code: 500}"}
-    assert _gemini_tool_json(sent[4]["content"]) == {"error": "The tool call failed without an error message."}
+    assert json.loads(sent[2]["content"]) == {"result": text}
+    assert json.loads(sent[3]["content"]) == {"error": "Failed with {code: 500}"}
+    assert json.loads(sent[4]["content"]) == {"error": "The tool call failed without an error message."}
     # Wrapping happens only on the wire; stored messages stay plain text for cross-provider replay.
     assert ok_result.content == text
 
@@ -3788,7 +3780,7 @@ async def test_openrouter_gemini_tool_wrapping_follows_authored_model_override(
     if expect_wrapped:
         assert json.loads(sent_content) == {"result": text}
     else:
-        assert sent_content[0]["text"] == text
+        assert sent_content == text
 
 
 @pytest.mark.asyncio
@@ -3829,11 +3821,7 @@ async def test_openrouter_gemini_null_or_empty_extra_body_model_is_the_effective
 
     body = built.body()
     assert body["model"] == extra_body_model
-    sent_texts = [
-        message["content"][0]["text"] if model_id == "google/gemini-4-neon" else message["content"]
-        for message in body["messages"][2:]
-    ]
-    assert sent_texts == [quoted_text, compact_json]
+    assert [message["content"] for message in body["messages"][2:]] == [quoted_text, compact_json]
     parts = RequestParts(built.adapter.token_counter)
     built.adapter._parts(replace(request, messages=()), 0, parts)
     assert "openrouter_gemini_tool_results" not in parts.flags
@@ -3841,12 +3829,9 @@ async def test_openrouter_gemini_null_or_empty_extra_body_model_is_the_effective
     logged_text = log_file.read_text(encoding="utf-8")
     assert "synthetic-quoted-value" not in logged_text
     logged_messages = json.loads(logged_text.splitlines()[0])["body"]["messages"]
-    logged_texts = [
-        message["content"][0]["text"] if model_id == "google/gemini-4-neon" else message["content"]
-        for message in logged_messages[2:]
-    ]
     # Redacted as plain text, and a result that only looks like a wrapped one is neither decoded nor re-encoded.
-    assert logged_texts == ['password="***redacted***" followed by public text', compact_json]
+    assert logged_messages[2]["content"] == 'password="***redacted***" followed by public text'
+    assert logged_messages[3]["content"] == compact_json
 
 
 @pytest.mark.asyncio
@@ -3911,7 +3896,7 @@ async def test_openrouter_gemini_wraps_multimodal_and_multipart_tool_results(tmp
     assert sent[2]["content"][0]["type"] == "text"
     assert json.loads(sent[2]["content"][0]["text"]) == {"result": "Caption {}"}
     assert sent[2]["content"][1]["type"] == "image_url"
-    assert _gemini_tool_json(sent[3]["content"]) == {"result": ["Part 1", "Part 2 {a: 1}"]}
+    assert json.loads(sent[3]["content"]) == {"result": ["Part 1", "Part 2 {a: 1}"]}
     assert sent[4]["content"][0]["type"] == "text"
     assert json.loads(sent[4]["content"][0]["text"]) == {"result": "Before {}"}
     assert sent[4]["content"][1] == image_part
@@ -4030,9 +4015,9 @@ async def test_openrouter_gemini_request_log_redacts_secrets_inside_wrapped_tool
     await complete(provider, ModelRequest(messages=[_user(), assistant, json_tool, multipart_tool, quoted_tool]))
 
     wire_messages = built.body()["messages"]
-    assert _gemini_tool_json(wire_messages[2]["content"]) == {"result": json_payload}
+    assert json.loads(wire_messages[2]["content"]) == {"result": json_payload}
     assert json.loads(wire_messages[3]["content"][0]["text"]) == {"result": kv_payload}
-    assert _gemini_tool_json(wire_messages[4]["content"]) == {"result": quoted_payload}
+    assert json.loads(wire_messages[4]["content"]) == {"result": quoted_payload}
 
     log_files = list(log_dir.glob("llm-requests-*.jsonl"))
     assert len(log_files) == 1
@@ -4042,13 +4027,13 @@ async def test_openrouter_gemini_request_log_redacts_secrets_inside_wrapped_tool
     assert "synthetic-quoted-value" not in logged_text
     request_record = json.loads(logged_text.splitlines()[0])
     logged_messages = request_record["body"]["messages"]
-    assert _gemini_tool_json(logged_messages[2]["content"]) == {
+    assert json.loads(logged_messages[2]["content"]) == {
         "result": '{"password": "***redacted***", "public": "ok"}',
     }
     assert json.loads(logged_messages[3]["content"][0]["text"]) == {
         "result": "password=***redacted***\nnext=ok",
     }
-    assert _gemini_tool_json(logged_messages[4]["content"]) == {
+    assert json.loads(logged_messages[4]["content"]) == {
         "result": 'password="***redacted***" followed by public text',
     }
 
@@ -4080,13 +4065,13 @@ async def test_openrouter_gemini_request_log_redacts_each_text_part_of_a_multipa
 
     await complete(provider, ModelRequest(messages=[_user(), assistant, *results]))
 
-    sent = [_gemini_tool_json(sent_message["content"]) for sent_message in built.body()["messages"][2:]]
+    sent = [json.loads(sent_message["content"]) for sent_message in built.body()["messages"][2:]]
     assert sent == [{"result": [message, secret]} for secret in secrets]
     (log_file,) = log_dir.glob("llm-requests-*.jsonl")
     logged_text = log_file.read_text(encoding="utf-8")
     assert "synthetic-canary" not in logged_text
     logged_messages = json.loads(logged_text.splitlines()[0])["body"]["messages"][2:]
-    logged = [_gemini_tool_json(logged_message["content"]) for logged_message in logged_messages]
+    logged = [json.loads(logged_message["content"]) for logged_message in logged_messages]
     # Each part reads as it does redacted alone, the message included.
     assert logged == [{"result": [redact_sensitive_data(message), hidden]} for hidden in redacted]
 
