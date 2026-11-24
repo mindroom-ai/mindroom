@@ -76,10 +76,10 @@ export function RoomAdmins() {
         aria-controls="room-admins-content"
         aria-label={`Room Admins, ${adminCountLabel}`}
         onClick={() => setIsExpanded((expanded) => !expanded)}
-        className="flex min-h-12 w-full items-center justify-between gap-3 rounded-lg px-4 py-3 text-left transition-colors hover:bg-foreground/[0.035] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
+        className="flex min-h-12 w-full items-center justify-between gap-3 rounded-lg px-4 py-3 text-left transition-colors hover:bg-secondary focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring"
       >
         <span className="flex items-center gap-2">
-          <ShieldCheck className="h-5 w-5 text-primary" />
+          <ShieldCheck className="h-5 w-5" />
           <span className="text-base font-semibold">Room Admins</span>
         </span>
         <span className="flex items-center gap-2 text-sm text-muted-foreground">

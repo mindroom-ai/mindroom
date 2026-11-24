@@ -1,0 +1,12 @@
+{"objects":{
+"062cfe85361a":{"content":"question r0","created_at":1750000000,"from_history":true,"id":"r0.u","role":"user","stop_after_tool_call":false},
+"0c2bac2bc105":{"content":"question dup","created_at":1750000000,"from_history":false,"id":"dup.u","role":"user","stop_after_tool_call":false},
+"2557e8968600":{"content":"answer dup","created_at":1750000000,"from_history":false,"id":"dup.u","role":"assistant","stop_after_tool_call":false},
+"5b44281e0868":{"content":"probe","created_at":0,"from_history":false,"id":"probe","role":"user","stop_after_tool_call":false},
+"6a09cb4a35be":{"content":"answer dup","created_at":1750000000,"from_history":true,"id":"dup.u","role":"assistant","stop_after_tool_call":false},
+"6cc920af3e40":{"content":"question dup","created_at":1750000000,"from_history":true,"id":"dup.u","role":"user","stop_after_tool_call":false},
+"81e41ee00c37":{"agent_id":"code","content":"answer r0","created_at":1750000000,"messages":[{"$":"b10c39260ea3"}],"metadata":{"matrix_event_id":"$r0","matrix_seen_event_ids":["$r0"]},"run_id":"r0","session_id":"session","status":"COMPLETED"},
+"986ec5f63429":{"agent_id":"code","content":"answer dup","created_at":1750000000,"messages":[{"$":"0c2bac2bc105"},{"$":"2557e8968600"}],"metadata":{"matrix_event_id":"$dup","matrix_seen_event_ids":["$dup"]},"run_id":"dup","session_id":"session","status":"COMPLETED"},
+"b10c39260ea3":{"content":"question r0","created_at":1750000000,"from_history":false,"id":"r0.u","role":"user","stop_after_tool_call":false}
+},
+"recording":{"sessions":{"session":{"observed":{"folded_tool_call_ids":{},"force_queued":false,"ledger":[],"list_runs":[{"$":"986ec5f63429"},{"$":"81e41ee00c37"}],"loaded_runs":[{"$":"81e41ee00c37"},{"$":"986ec5f63429"}],"redaction_candidates":["$dup","$r0"],"request":[{"$":"062cfe85361a"},{"$":"6cc920af3e40"},{"$":"6a09cb4a35be"},{"$":"5b44281e0868"}],"resume_requests":{},"row":{"created_at":1750000000,"session_data":{"session_state":{}},"updated_at":1750000000,"user_id":null},"seen_event_ids":["$dup","$r0"],"session":{"created_at":1750000000,"kind":"agent","metadata":null,"owner_id":"code","session_state":{},"summary":null},"session_runs":[]},"run_ids":["dup","r0"],"scope":"agent:code"}},"storage_name":"code"}}

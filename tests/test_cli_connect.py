@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import io
+import re
 import stat
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
@@ -55,6 +56,7 @@ _CONNECTED = {
         "last_seen_at": "2026-09-26T12:01:00Z",
     },
 }
+_OWNER_PLACEHOLDER_CONFIG = f"administrators:\n  - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n"
 
 
 def test_run_device_pairing_polls_until_connected() -> None:
@@ -338,7 +340,7 @@ def test_owner_user_id_outside_the_matrix_grammar_never_reaches_config(tmp_path:
     assert result.rejected_owner_user_id == owner_user_id
 
     config_path = tmp_path / "config.yaml"
-    original = f"authorization:\n  global_users:\n    - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n"
+    original = _OWNER_PLACEHOLDER_CONFIG
     config_path.write_text(original, encoding="utf-8")
     assert (
         cli_connect.replace_owner_placeholders_in_config(config_path=config_path, owner_user_id=owner_user_id) is False
@@ -478,14 +480,7 @@ def test_persist_local_provisioning_env_writes_owner_when_available(tmp_path: Pa
 def test_replace_owner_placeholders_in_config_accepts_server_port(tmp_path: Path) -> None:
     """Placeholder replacement should quote MXIDs so '@' doesn't break YAML."""
     config_path = tmp_path / "config.yaml"
-    config_path.write_text(
-        "authorization:\n"
-        "  global_users:\n"
-        f"    - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n"
-        "  agent_reply_permissions:\n"
-        '    "*":\n'
-        "      - __PLACEHOLDER__\n",
-    )
+    config_path.write_text(_OWNER_PLACEHOLDER_CONFIG)
 
     replaced = cli_connect.replace_owner_placeholders_in_config(
         config_path=config_path,
@@ -495,23 +490,21 @@ def test_replace_owner_placeholders_in_config_accepts_server_port(tmp_path: Path
     assert replaced is True
     updated = config_path.read_text()
     assert OWNER_MATRIX_USER_ID_PLACEHOLDER not in updated
-    assert "__PLACEHOLDER__" not in updated
     # Value must be YAML-quoted so the leading '@' doesn't break parsing
     assert '"@alice:mindroom.chat:8448"' in updated
 
     # Verify the result is valid YAML
     parsed = yaml.safe_load(updated)
-    assert parsed["authorization"]["global_users"] == ["@alice:mindroom.chat:8448"]
-    assert parsed["authorization"]["agent_reply_permissions"]["*"] == ["@alice:mindroom.chat:8448"]
+    assert parsed["administrators"] == ["@alice:mindroom.chat:8448"]
 
 
 def test_replace_owner_placeholders_reaches_included_files(tmp_path: Path) -> None:
     """Placeholders living in !include files are replaced too."""
     config_path = tmp_path / "config.yaml"
-    config_path.write_text("authorization: !include auth.yaml\n", encoding="utf-8")
-    auth_path = tmp_path / "auth.yaml"
-    auth_path.write_text(
-        f"global_users:\n  - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n",
+    config_path.write_text("room_defaults: !include room_defaults.yaml\n", encoding="utf-8")
+    include_path = tmp_path / "room_defaults.yaml"
+    include_path.write_text(
+        f"admins:\n  - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n",
         encoding="utf-8",
     )
 
@@ -521,10 +514,10 @@ def test_replace_owner_placeholders_reaches_included_files(tmp_path: Path) -> No
     )
 
     assert replaced is True
-    assert config_path.read_text(encoding="utf-8") == "authorization: !include auth.yaml\n"
-    updated = auth_path.read_text(encoding="utf-8")
+    assert config_path.read_text(encoding="utf-8") == "room_defaults: !include room_defaults.yaml\n"
+    updated = include_path.read_text(encoding="utf-8")
     assert OWNER_MATRIX_USER_ID_PLACEHOLDER not in updated
-    assert yaml.safe_load(updated)["global_users"] == ["@alice:mindroom.chat"]
+    assert yaml.safe_load(updated)["admins"] == ["@alice:mindroom.chat"]
 
 
 def test_run_device_pairing_renews_after_404_from_poll() -> None:
@@ -786,55 +779,157 @@ def test_run_device_pairing_uses_empty_namespace_when_non_string(namespace: obje
     assert result.namespace_invalid is False
 
 
-def test_pair_local_install_shows_qr_only_when_terminal(tmp_path: Path) -> None:
-    """QR code appears only when console.is_terminal is True."""
+class _TerminalBuffer(io.StringIO):
+    """Captured output that reports itself as a terminal, as a person's shell would."""
+
+    def isatty(self) -> bool:
+        return True
+
+
+def _pairing_output(tmp_path: Path, console: Console, responses: list[httpx.Response] | None = None) -> str:
+    """Pair through a fake service, by default approving on the first poll, and return what `console` printed."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text("models: {}\nagents: {}\nrouter:\n  model: default\n")
     runtime_paths = resolve_primary_runtime_paths(config_path=config_path, process_env={})
-
-    # Terminal: QR shown
-    terminal_out = io.StringIO()
-    terminal_console = Console(file=terminal_out, force_terminal=True)
     post = _fake_transport(
-        [httpx.Response(200, json=_START), httpx.Response(200, json=_CONNECTED)],
+        responses or [httpx.Response(200, json=_START), httpx.Response(200, json=_CONNECTED)],
         [],
     )
-
     cli_connect.pair_local_install(
         runtime_paths,
-        console=terminal_console,
+        console=console,
         provisioning_url="https://provisioning.example",
         persist_env=False,
         post_request=post,
         sleep=lambda _seconds: None,
     )
+    assert isinstance(console.file, io.StringIO)
+    # Drop the spinner's cursor and erase codes, which a terminal applies in place.
+    return re.sub(r"\x1b\[[0-9;?]*[A-Za-z]|\r", "", console.file.getvalue())
 
-    terminal_output = terminal_out.getvalue()
-    assert "or enter code ABCD-EFGH" in terminal_output
-    assert "Approve only if the page shows code ABCD-EFGH" in terminal_output
-    assert "█" in terminal_output or "▀" in terminal_output  # QR present
 
-    # Non-terminal: QR hidden
-    non_terminal_out = io.StringIO()
-    non_terminal_console = Console(file=non_terminal_out, force_terminal=False)
-    post = _fake_transport(
-        [httpx.Response(200, json=_START), httpx.Response(200, json=_CONNECTED)],
-        [],
+@pytest.fixture
+def terminal_console(monkeypatch: pytest.MonkeyPatch) -> Callable[[int], Console]:
+    """Return a console that writes to a capturable terminal of the given width."""
+    # The suite's dumb terminal would turn off the live terminal view.
+    monkeypatch.setenv("TERM", "xterm-256color")
+    return lambda width: Console(file=_TerminalBuffer(), color_system=None, width=width)
+
+
+@pytest.mark.parametrize("width", [80, 120])
+def test_pair_local_install_in_a_terminal_shows_the_link_alone_and_the_qr_beside_the_code(
+    tmp_path: Path,
+    terminal_console: Callable[[int], Console],
+    width: int,
+) -> None:
+    """A terminal gets a clickable unwrapped link, then the QR code next to the pair code to check."""
+    output = _pairing_output(tmp_path, terminal_console(width))
+    lines = output.splitlines()
+
+    assert "  https://chat.example/connect?code=ABCD-EFGH" in lines
+    assert any("█" in line and "Pair code  ABCD-EFGH" in line for line in lines)
+    assert any("█" in line and line.rstrip().endswith("code ABCD-EFGH.") for line in lines)
+    assert "Waiting for approval · the code expires at " in output
+
+
+def test_pair_local_install_in_a_narrow_terminal_stacks_the_code_below_the_qr(
+    tmp_path: Path,
+    terminal_console: Callable[[int], Console],
+) -> None:
+    """Without room beside the QR code, the pair code and its check follow below it."""
+    lines = _pairing_output(tmp_path, terminal_console(60)).splitlines()
+
+    qr_rows = [index for index, line in enumerate(lines) if "█" in line]
+    details_row = next(index for index, line in enumerate(lines) if "Pair code  ABCD-EFGH" in line)
+    assert qr_rows
+    assert details_row > qr_rows[-1]
+    assert "code ABCD-EFGH." in lines
+
+
+def test_pair_local_install_in_a_terminal_shows_each_renewed_code(
+    tmp_path: Path,
+    terminal_console: Callable[[int], Console],
+) -> None:
+    """An expired code is followed by its replacement, each with its own link and check."""
+    output = _pairing_output(
+        tmp_path,
+        terminal_console(60),
+        [
+            httpx.Response(200, json=_START),
+            httpx.Response(200, json={"status": "expired"}),
+            httpx.Response(
+                200,
+                json={**_START, "pair_code": "WXYZ-2345", "approve_url": "https://chat.example/connect?code=WXYZ-2345"},
+            ),
+            httpx.Response(200, json=_CONNECTED),
+        ],
     )
 
-    cli_connect.pair_local_install(
-        runtime_paths,
-        console=non_terminal_console,
-        provisioning_url="https://provisioning.example",
-        persist_env=False,
-        post_request=post,
-        sleep=lambda _seconds: None,
+    first = output.index("code ABCD-EFGH.")
+    second = output.index("code WXYZ-2345.")
+    assert first < output.index("  https://chat.example/connect?code=WXYZ-2345") < second
+    assert output.count("Or enter the code in MindRoom Chat") == 2
+
+
+def test_terminal_qr_code_has_fixed_colors_without_a_strip_below(monkeypatch: pytest.MonkeyPatch) -> None:
+    """White-on-black modules scan in light themes too, and the last half-block row keeps the terminal background."""
+    monkeypatch.delenv("NO_COLOR", raising=False)
+    console = Console(file=io.StringIO(), color_system="truecolor", width=120)
+    session = cli_connect.DevicePairSession(
+        pair_code="ABCD-EFGH",
+        device_secret="device-secret",  # noqa: S106
+        approve_url="https://chat.example/connect?code=ABCD-EFGH",
+        poll_interval_seconds=3,
+        expires_at=datetime(2099, 9, 26, 12, 10, tzinfo=UTC),
     )
 
-    non_terminal_output = non_terminal_out.getvalue()
-    assert "or enter code ABCD-EFGH" in non_terminal_output
-    assert "█" not in non_terminal_output
-    assert "▀" not in non_terminal_output
+    console.print(cli_connect._terminal_pairing_request(session, width=120))
+
+    assert isinstance(console.file, io.StringIO)
+    qr_lines = [line for line in console.file.getvalue().splitlines() if "█" in line or "▀" in line]
+    black_background = "\x1b[38;2;255;255;255;48;2;0;0;0m"
+    assert all(black_background in line for line in qr_lines[:-1])
+    assert black_background not in qr_lines[-1]
+    assert "\x1b[38;2;255;255;255m▀" in qr_lines[-1]
+
+
+def test_pair_local_install_in_a_dumb_terminal_prints_plain_lines_with_qr(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A dumb terminal, such as an Emacs shell buffer, cannot draw the spinner but still shows the QR code."""
+    monkeypatch.setenv("TERM", "dumb")
+    output = _pairing_output(tmp_path, Console(file=_TerminalBuffer()))
+
+    assert "  https://chat.example/connect?code=ABCD-EFGH\n" in output
+    assert "Waiting for approval (Ctrl+C to cancel)…" in output
+    assert "▀" in output
+    assert "Connect to MindRoom Chat" not in output
+
+
+@pytest.mark.parametrize("force_terminal", [False, True])
+def test_pair_local_install_without_a_terminal_prints_plain_lines_without_qr(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    force_terminal: bool,
+) -> None:
+    """Logs and the macOS app, which reads the link from its own line, get plain lines and no QR code.
+
+    `FORCE_COLOR` makes Rich treat a pipe as a terminal, which must not bring the spinner into logs.
+    """
+    monkeypatch.setenv("TERM", "xterm-256color")
+    output = _pairing_output(tmp_path, Console(file=io.StringIO(), force_terminal=force_terminal, color_system=None))
+
+    assert (
+        "\nConnect this machine to MindRoom:\n"
+        "  https://chat.example/connect?code=ABCD-EFGH\n"
+        "  or enter code ABCD-EFGH in MindRoom Chat → Settings → Local MindRoom\n"
+        "  Approve only if the page shows code ABCD-EFGH\n"
+        "Waiting for approval (Ctrl+C to cancel)…\n"
+    ) in output
+    assert "█" not in output
+    assert "▀" not in output
+    assert "Connect to MindRoom Chat" not in output
 
 
 def test_run_device_pairing_raises_on_expired_when_no_renew() -> None:
@@ -996,7 +1091,7 @@ def test_pair_local_install_prints_credentials_when_env_write_is_refused(
 def test_pair_local_install_warns_when_owner_placeholders_cannot_be_updated(tmp_path: Path) -> None:
     """Saved credentials are kept and a read-only config only produces a warning."""
     config_path = tmp_path / "config.yaml"
-    config_path.write_text(f"authorization:\n  global_users:\n    - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n")
+    config_path.write_text(_OWNER_PLACEHOLDER_CONFIG)
     config_path.chmod(0o400)
     runtime_paths = resolve_primary_runtime_paths(config_path=config_path, process_env={})
     out = io.StringIO()
@@ -1046,7 +1141,7 @@ def test_pair_local_install_notes_a_repaired_owner_missing_from_administrators(t
 @pytest.mark.parametrize(
     "config_text",
     [
-        f"administrators:\n  - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n",
+        _OWNER_PLACEHOLDER_CONFIG,
         'administrators: ["@bob:mindroom.chat", "@alice:mindroom.chat"]\n',
     ],
     ids=["first-pairing", "already-administrator"],
@@ -1098,15 +1193,15 @@ def test_pair_local_install_does_not_note_for_a_malformed_config(tmp_path: Path,
     assert config_path.read_text() == config_text
 
 
-def _approval_install(tmp_path: Path) -> tuple[RuntimePaths, Path]:
+def _approval_install(tmp_path: Path) -> RuntimePaths:
     config_path = tmp_path / "config.yaml"
-    config_path.write_text(f"authorization:\n  global_users:\n    - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n")
-    return resolve_primary_runtime_paths(config_path=config_path, process_env={}), config_path
+    config_path.write_text(_OWNER_PLACEHOLDER_CONFIG)
+    return resolve_primary_runtime_paths(config_path=config_path, process_env={})
 
 
 def test_pair_local_install_discards_credentials_when_the_approver_is_not_this_user(tmp_path: Path) -> None:
     """Declining the approving account saves nothing and explains that the connection is unusable."""
-    runtime_paths, config_path = _approval_install(tmp_path)
+    runtime_paths = _approval_install(tmp_path)
     out = io.StringIO()
     post = _fake_transport([httpx.Response(200, json=_START), httpx.Response(200, json=_CONNECTED)], [])
 
@@ -1126,7 +1221,7 @@ def test_pair_local_install_discards_credentials_when_the_approver_is_not_this_u
     assert "Approved by @alice:mindroom.chat." in out.getvalue()
     assert "secret-123" not in out.getvalue()
     assert not (tmp_path / ".env").exists()
-    assert OWNER_MATRIX_USER_ID_PLACEHOLDER in config_path.read_text()
+    assert OWNER_MATRIX_USER_ID_PLACEHOLDER in runtime_paths.config_path.read_text()
 
 
 @pytest.mark.parametrize(
@@ -1139,7 +1234,7 @@ def test_pair_local_install_still_asks_about_an_approver_it_cannot_save(
     shown: str,
 ) -> None:
     """A named approver outside the Matrix grammar is shown and confirmed like any other, never treated as unnamed."""
-    runtime_paths, config_path = _approval_install(tmp_path)
+    runtime_paths = _approval_install(tmp_path)
     out = io.StringIO()
     connected = {**_CONNECTED, "owner_user_id": owner_user_id}
     asked: list[bool] = []
@@ -1175,12 +1270,12 @@ def test_pair_local_install_still_asks_about_an_approver_it_cannot_save(
     env_content = (tmp_path / ".env").read_text()
     assert "MINDROOM_LOCAL_CLIENT_SECRET=secret-123" in env_content
     assert OWNER_MATRIX_USER_ID_ENV not in env_content
-    assert OWNER_MATRIX_USER_ID_PLACEHOLDER in config_path.read_text()
+    assert OWNER_MATRIX_USER_ID_PLACEHOLDER in runtime_paths.config_path.read_text()
 
 
 def test_pair_local_install_asks_about_the_approver_before_saving(tmp_path: Path) -> None:
     """The approving account is confirmed before any credential or config change is written."""
-    runtime_paths, config_path = _approval_install(tmp_path)
+    runtime_paths = _approval_install(tmp_path)
     out = io.StringIO()
     post = _fake_transport([httpx.Response(200, json=_START), httpx.Response(200, json=_CONNECTED)], [])
     env_existed_when_asked: list[bool] = []
@@ -1202,12 +1297,12 @@ def test_pair_local_install_asks_about_the_approver_before_saving(tmp_path: Path
     assert env_existed_when_asked == [False]
     assert "Approved by @alice:mindroom.chat." in out.getvalue()
     assert "MINDROOM_LOCAL_CLIENT_SECRET=secret-123" in (tmp_path / ".env").read_text()
-    assert "@alice:mindroom.chat" in config_path.read_text()
+    assert "@alice:mindroom.chat" in runtime_paths.config_path.read_text()
 
 
 def test_pair_local_install_names_the_approver_without_a_terminal(tmp_path: Path) -> None:
     """Services and the macOS app cannot answer a prompt, so the approving account is shown with how to revoke it."""
-    runtime_paths, _config_path = _approval_install(tmp_path)
+    runtime_paths = _approval_install(tmp_path)
     out = io.StringIO()
     post = _fake_transport([httpx.Response(200, json=_START), httpx.Response(200, json=_CONNECTED)], [])
 
@@ -1345,14 +1440,16 @@ def test_run_device_pairing_times_out_at_expiry_while_the_service_is_unreachable
     ("env", "refused_homeserver"),
     [
         ({"MATRIX_HOMESERVER": "https://matrix.example.org"}, "https://matrix.example.org"),
-        ({}, "http://localhost:8008"),
+        ({}, None),
+        ({"MATRIX_HOMESERVER": "http://localhost:8008"}, "http://localhost:8008"),
         ({"MATRIX_HOMESERVER": "https://matrix.example.org", "MINDROOM_PROVISIONING_URL": "https://p.example"}, None),
         ({"MATRIX_HOMESERVER": "https://mindroom.chat"}, None),
-        ({"MATRIX_HOMESERVER": "https://matrix.mindroom.chat/"}, None),
+        ({"MATRIX_HOMESERVER": "https://matrix.mindroom.chat/"}, "https://matrix.mindroom.chat/"),
+        ({"MATRIX_HOMESERVER": "https://mindroom.chat:443"}, "https://mindroom.chat:443"),
     ],
 )
 def test_self_hosted_pairing_error(tmp_path: Path, env: dict[str, str], refused_homeserver: str | None) -> None:
-    """Pairing is refused for any effective non-hosted homeserver, including the localhost default, without a provisioning URL."""
+    """Pairing accepts the hosted default and refuses explicit self-hosted homeservers without provisioning."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text("agents: {}\n")
     runtime_paths = resolve_primary_runtime_paths(config_path=config_path, process_env=env)
@@ -1411,3 +1508,61 @@ def test_pair_local_install_does_not_ask_about_an_unidentified_approver(tmp_path
     assert "Approved by an account the provisioning service did not identify." in output
     assert "If this is not your account, revoke this connection in MindRoom Chat → Settings → Local MindRoom." in output
     assert "MINDROOM_LOCAL_CLIENT_SECRET=secret-123" in (tmp_path / ".env").read_text()
+
+
+def test_pair_local_install_prints_paths_accounts_and_warnings_whole_on_one_line(narrow_markup_dir: Path) -> None:
+    """Retry warnings, links, exports, saved paths, and owner notes keep emoji codes as written, whole on one line."""
+    text = str(narrow_markup_dir)
+    runtime_paths = _approval_install(narrow_markup_dir)
+    config_path = runtime_paths.config_path
+    rejected_owner = "alice:fire:-an-account-name-long-enough-to-pass-eighty-columns"
+    # A server name that is also an emoji code, such as `office`, is part of a valid Matrix user ID.
+    lan_owner = "@alice:office:8448"
+
+    # After a port, Rich would read `:rocket:` in a URL as an emoji code.
+    provisioning_url = f"https://provisioning.example:8443/:rocket:/{'a-long-path-segment-' * 3}"
+    approve_url = f"https://chat.example:8443/connect?code=ABCD-EFGH&from=:rocket:{'-a-long-query-value' * 3}"
+
+    def pair(owner_user_id: str, *first: httpx.Response, persist_env: bool = True) -> list[str]:
+        out = io.StringIO()
+        responses = [
+            *first,
+            httpx.Response(200, json=_START | {"approve_url": approve_url}),
+            httpx.Response(200, json=_CONNECTED | {"owner_user_id": owner_user_id}),
+        ]
+        cli_connect.pair_local_install(
+            runtime_paths,
+            console=Console(file=out, width=80),
+            provisioning_url=provisioning_url,
+            persist_env=persist_env,
+            post_request=_fake_transport(responses, []),
+            sleep=lambda _seconds: None,
+        )
+        return out.getvalue().splitlines()
+
+    first = pair("@alice:mindroom.chat", httpx.Response(503, json={"detail": f"Unavailable at {text}"}))
+    repaired = pair("@bob:mindroom.chat")
+    rejected = pair(rejected_owner)
+    printed = pair(lan_owner, persist_env=False)
+    config_path.write_text(_OWNER_PLACEHOLDER_CONFIG)
+    config_path.chmod(0o400)
+    read_only = pair(lan_owner)
+
+    assert f"Warning: Pairing failed (503): Unavailable at {text} (retrying in 3s)" in first
+    assert f"  Saved credentials to: {narrow_markup_dir / '.env'}" in first
+    assert f"  Updated owner placeholder(s) in: {config_path}" in first
+    assert (
+        f"  Note: @bob:mindroom.chat is not listed in administrators in {config_path}. "
+        "If this account should manage MindRoom, add it to administrators, "
+        "room_defaults.invite_users, and room_defaults.admins."
+    ) in repaired
+    assert f"Approved by '{rejected_owner}', which is not a valid Matrix user ID." in rejected
+    assert f"  {approve_url}" in first
+    assert f"  export MINDROOM_PROVISIONING_URL={provisioning_url}" in printed
+    assert "  export MINDROOM_LOCAL_CLIENT_SECRET=secret-123" in printed
+    assert f"  export MINDROOM_OWNER_USER_ID={lan_owner}" in printed
+    assert f"Owner user ID from pairing: {lan_owner} (not persisted in --no-persist-env mode)." in printed
+    assert any(
+        line.startswith(f"Warning: Could not update owner placeholder(s) in {config_path}: ") for line in read_only
+    )
+    assert f"  Replace them with {lan_owner} manually." in read_only

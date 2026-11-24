@@ -1,4 +1,4 @@
-"""Small read-only adapter for retained Agno SQLite sessions."""
+"""Small read-only adapter for retained conversation SQLite sessions."""
 
 from __future__ import annotations
 
@@ -7,14 +7,13 @@ import math
 import re
 import sqlite3
 import sys
-from contextlib import contextmanager
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from types import MappingProxyType
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, Literal, TypeGuard, cast
 
 from mindroom.constants import RuntimePaths, resolve_session_state_root
-from mindroom.legacy_session_storage import decode_persisted_session_json
+from mindroom.llm.usage import TOKEN_FIELDS
 from mindroom.private_storage.legacy_private_storage_aliases import is_verified_private_instance_alias
 from mindroom.private_storage.private_instance_identity import (
     PrivateInstanceIdentityError,
@@ -22,25 +21,31 @@ from mindroom.private_storage.private_instance_identity import (
 )
 from mindroom.requester_identity import equivalent_requester_ids
 from mindroom.runtime_resolution import resolve_agent_storage
-from mindroom.tool_system.worker_routing import build_tool_execution_identity, worker_dir_name
+from mindroom.session_storage.schema import LEDGER_TOTALS_VERSION, TableNames, table_names
+from mindroom.session_storage.usage_reader import (
+    read_only_snapshot,
+    recorded_meta,
+    stored_sessions,
+    stored_usage,
+    unreadable_layout,
+)
+from mindroom.tool_system.worker_routing import build_requester_execution_identity, worker_dir_name
+from mindroom.usage.legacy_usage_storage import current_provider_name
 from mindroom.usage.storage import (
     SYSTEM_USAGE_ENTITY,
-    SYSTEM_USAGE_RELATIVE_PATH,
-    SYSTEM_USAGE_SESSION_TABLE,
-    TOKEN_FIELDS,
+    SYSTEM_USAGE_STORAGE_NAME,
     USAGE_KINDS,
-    quote_identifier,
 )
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping
 
     from mindroom.config.main import Config
+    from mindroom.session_storage.usage_reader import RecordedMeta, StoredSession
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
     from mindroom.usage.storage import UsageKind
 
 __all__ = [
-    "TOKEN_FIELDS",
     "UsageModelMetrics",
     "UsageRequestMetrics",
     "UsageRunNode",
@@ -54,30 +59,29 @@ __all__ = [
 ]
 
 type _UsageStorageScope = Literal["shared_agent", "private_agent", "team", "system"]
-type _UsageReadMode = Literal["runs", "both"]
 type _MetricValue = int | float | str | None
 
 _MAX_STRING_LENGTH = 512
 _IDENTIFIER = re.compile(r"[A-Za-z0-9_]+\Z")
 _WORKER_DIRECTORY = re.compile(r"[A-Za-z0-9._@+-]+-[0-9a-f]{16}\Z")
-_REQUIRED_COLUMNS = frozenset(
-    {"session_id", "session_type", "agent_id", "team_id", "user_id", "session_data"},
-)
-_USAGE_REQUIRED_COLUMNS = frozenset({"id", "session_id", "run_id", "usage_data"})
 
 
 @dataclass(frozen=True, slots=True)
 class UsageStorageSource:
-    """One fixed-layout Agno session database."""
+    """One fixed-layout conversation database."""
 
     path: Path
     path_label: str
     scope: _UsageStorageScope
-    expected_session_table: str
     source_agent_id: str | None
     allowed_agent_ids: frozenset[str]
     requester_isolated: bool
     owner_id: str | None = None
+
+    @property
+    def names(self) -> TableNames:
+        """The names of the database ``path`` holds."""
+        return TableNames.of_database(self.path)
 
 
 @dataclass(frozen=True, slots=True)
@@ -127,19 +131,18 @@ class UsageRunNode:
 
 @dataclass(frozen=True, slots=True)
 class UsageSessionRow:
-    """Usage runs from one retained Agno session."""
+    """The usage ledger rows of one retained session, whose sum is its totals."""
 
     source: UsageStorageSource
     entity_id: str
     entity_kind: Literal["agent", "team"]
     row_key: str
     runs: tuple[UsageRunNode, ...]
-    session_metrics: Mapping[str, _MetricValue] = field(default_factory=lambda: MappingProxyType({}))
-    # Empty means no detailed attribution was stored; None means it was unusable.
-    session_model_metrics: tuple[UsageModelMetrics, ...] | None = ()
     requester_id: str | None = None
     runs_available: bool = True
-    session_metrics_available: bool = True
+    # False when the rows may not sum to the totals: a whole-history read of a database whose conversion to the layout
+    # version that keeps pre-ledger usage as a row (``LEDGER_TOTALS_VERSION``) has not run yet.
+    totals_available: bool = True
 
 
 @dataclass(frozen=True, slots=True)
@@ -150,22 +153,6 @@ class UsageStorageDiagnostic:
     status: Literal["absent", "busy", "corrupt", "unsupported_schema", "partial"]
     detail: str
     scope: _UsageStorageScope | None = None
-
-
-@contextmanager
-def _open_read_only_database(source: UsageStorageSource) -> Iterator[sqlite3.Connection]:
-    connection = sqlite3.connect(
-        f"{source.path.resolve().as_uri()}?mode=ro&cache=private",
-        uri=True,
-        timeout=1.0,
-    )
-    try:
-        connection.execute("PRAGMA query_only = ON")
-        connection.execute("BEGIN")
-        connection.row_factory = sqlite3.Row
-        yield connection
-    finally:
-        connection.close()
 
 
 def discover_self_usage_sources(
@@ -183,30 +170,27 @@ def discover_self_usage_sources(
         runtime_paths,
         execution_identity=execution_identity,
     )
-    database = resolved.session_state_root / "sessions" / f"{agent_name}.db"
+    names = TableNames(agent_name)
+    database = names.database_path(resolved.session_state_root)
     if resolved.execution.is_private:
         worker_key = resolved.execution.worker_key
         if worker_key is None:
-            return (_diagnostic("self", "partial", "source discovery unavailable"),)
-        relative = (
-            Path("private_instances") / worker_dir_name(worker_key) / agent_name / "sessions" / f"{agent_name}.db"
-        )
+            return (_discovery_unavailable("self"),)
+        relative = names.database_path(Path("private_instances") / worker_dir_name(worker_key) / agent_name)
         scope: _UsageStorageScope = "private_agent"
     else:
-        relative = Path("agents") / agent_name / "sessions" / f"{agent_name}.db"
+        relative = names.database_path(Path("agents") / agent_name)
         scope = "shared_agent"
     candidate = _safe_candidate(session_root, relative)
     if candidate is None or candidate != database.expanduser().resolve():
-        return (_diagnostic("self", "partial", "source discovery unavailable"),)
+        return (_discovery_unavailable("self"),)
     return (
         _source(
             path=candidate,
             root=session_root,
             scope=scope,
-            table=f"{agent_name}_sessions",
             agent_name=agent_name,
             config=config,
-            requester_isolated=resolved.execution.is_private,
             owner_id=execution_identity.requester_id if resolved.execution.is_private else None,
         ),
     )
@@ -225,15 +209,10 @@ def discover_private_usage_sources(
         if agent_config.private is None:
             continue
         for user_id in sorted(requester_ids):
-            identity = build_tool_execution_identity(
-                channel="matrix",
+            identity = build_requester_execution_identity(
                 agent_name=agent_name,
                 runtime_paths=runtime_paths,
                 requester_id=user_id,
-                room_id=None,
-                thread_id=None,
-                resolved_thread_id=None,
-                session_id=None,
             )
             try:
                 agent_sources = discover_self_usage_sources(
@@ -243,7 +222,7 @@ def discover_private_usage_sources(
                     execution_identity=identity,
                 )
             except (OSError, ValueError):
-                agent_sources = (_diagnostic("self", "partial", "source discovery unavailable"),)
+                agent_sources = (_discovery_unavailable("self"),)
             for source in agent_sources:
                 if isinstance(source, UsageStorageDiagnostic):
                     diagnostic = replace(
@@ -267,17 +246,18 @@ def discover_admin_usage_sources(
     sources = _shared_agent_sources(root, config)
     sources.extend(_private_agent_sources(root, config, runtime_paths.storage_root))
     sources.extend(_team_sources(root, config))
-    system_path = _safe_candidate(root, Path(SYSTEM_USAGE_RELATIVE_PATH))
+    system_path = _safe_candidate(
+        root,
+        TableNames(SYSTEM_USAGE_STORAGE_NAME).database_path(Path(SYSTEM_USAGE_STORAGE_NAME)),
+    )
     if system_path is not None and system_path.is_file():
         sources.append(
             _source(
                 path=system_path,
                 root=root,
                 scope="system",
-                table=SYSTEM_USAGE_SESSION_TABLE,
                 agent_name=None,
                 config=config,
-                requester_isolated=False,
             ),
         )
     return tuple(sorted(sources, key=lambda item: item.path_label))
@@ -295,22 +275,18 @@ def _shared_agent_sources(
     for agent_name, agent_config in config.agents.items():
         if agent_config.private is not None:
             continue
-        relative = Path("agents") / agent_name / "sessions" / f"{agent_name}.db"
+        relative = TableNames(agent_name).database_path(Path("agents") / agent_name)
         candidate = _safe_candidate(root, relative)
         if candidate is None:
-            sources.append(
-                _diagnostic(relative.as_posix(), "partial", "source discovery unavailable", scope="shared_agent"),
-            )
+            sources.append(_discovery_unavailable(relative.as_posix(), "shared_agent"))
             continue
         sources.append(
             _source(
                 path=candidate,
                 root=root,
                 scope="shared_agent",
-                table=f"{agent_name}_sessions",
                 agent_name=agent_name,
                 config=config,
-                requester_isolated=False,
             ),
         )
     return sources
@@ -321,11 +297,9 @@ def _private_agent_sources(
     config: Config,
     state_root: Path,
 ) -> list[UsageStorageSource | UsageStorageDiagnostic]:
-    private_root = root / "private_instances"
-    directory_entries = _directory_entries(private_root)
-    if isinstance(directory_entries, UsageStorageDiagnostic):
-        return [replace(directory_entries, scope="private_agent")]
-    entries = directory_entries
+    entries = _directory_entries(root / "private_instances")
+    if isinstance(entries, UsageStorageDiagnostic):
+        return [replace(entries, scope="private_agent")]
     private_agents = tuple(name for name, agent in config.agents.items() if agent.private is not None)
     sources: list[UsageStorageSource | UsageStorageDiagnostic] = []
     for worker_directory in entries:
@@ -334,14 +308,7 @@ def _private_agent_sources(
         if worker_directory.is_symlink() and is_verified_private_instance_alias(state_root, worker_directory):
             continue  # Its canonical directory is scanned separately.
         if worker_directory.is_symlink() or not worker_directory.is_dir():
-            sources.append(
-                _diagnostic(
-                    worker_directory.relative_to(root).as_posix(),
-                    "partial",
-                    "source discovery unavailable",
-                    scope="private_agent",
-                ),
-            )
+            sources.append(_discovery_unavailable(worker_directory.relative_to(root).as_posix(), "private_agent"))
             continue
         # Ownership lives with runtime state, even when sessions use a separate root.
         try:
@@ -352,12 +319,12 @@ def _private_agent_sources(
         except (PrivateInstanceIdentityError, OSError):
             owner = None
         for agent_name in private_agents:
-            relative = Path("private_instances") / worker_directory.name / agent_name / "sessions" / f"{agent_name}.db"
+            relative = TableNames(agent_name).database_path(
+                Path("private_instances") / worker_directory.name / agent_name,
+            )
             candidate = _safe_candidate(root, relative)
             if candidate is None:
-                sources.append(
-                    _diagnostic(relative.as_posix(), "partial", "source discovery unavailable", scope="private_agent"),
-                )
+                sources.append(_discovery_unavailable(relative.as_posix(), "private_agent"))
                 continue
             if not candidate.is_file():
                 continue
@@ -366,10 +333,8 @@ def _private_agent_sources(
                     path=candidate,
                     root=root,
                     scope="private_agent",
-                    table=f"{agent_name}_sessions",
                     agent_name=agent_name,
                     config=config,
-                    requester_isolated=True,
                     owner_id=owner.requester_id if owner is not None else None,
                 ),
             )
@@ -380,19 +345,18 @@ def _team_sources(
     root: Path,
     config: Config,
 ) -> list[UsageStorageSource | UsageStorageDiagnostic]:
-    directory_entries = _directory_entries(root / "teams")
-    if isinstance(directory_entries, UsageStorageDiagnostic):
-        return [directory_entries]
-    entries = directory_entries
+    entries = _directory_entries(root / "teams")
+    if isinstance(entries, UsageStorageDiagnostic):
+        return [entries]
     sources: list[UsageStorageSource | UsageStorageDiagnostic] = []
     for directory in entries:
         storage_name = directory.name
         if _IDENTIFIER.fullmatch(storage_name) is None:
             continue
-        relative = Path("teams") / storage_name / "sessions" / f"{storage_name}.db"
+        relative = TableNames(storage_name).database_path(Path("teams") / storage_name)
         candidate = _safe_candidate(root, relative)
         if candidate is None:
-            sources.append(_diagnostic(relative.as_posix(), "partial", "source discovery unavailable", scope="team"))
+            sources.append(_discovery_unavailable(relative.as_posix(), "team"))
             continue
         if not directory.is_dir() or not candidate.is_file():
             continue
@@ -401,10 +365,8 @@ def _team_sources(
                 path=candidate,
                 root=root,
                 scope="team",
-                table=f"{storage_name}_sessions",
                 agent_name=None,
                 config=config,
-                requester_isolated=False,
             ),
         )
     return sources
@@ -416,13 +378,13 @@ def _directory_entries(path: Path) -> tuple[Path, ...] | UsageStorageDiagnostic:
     except FileNotFoundError:
         return ()
     except OSError:
-        return _diagnostic("admin discovery", "partial", "source discovery unavailable")
+        return _discovery_unavailable("admin discovery")
     if path.is_symlink() or not path.is_dir():
-        return _diagnostic("admin discovery", "partial", "source discovery unavailable")
+        return _discovery_unavailable("admin discovery")
     try:
         entries = tuple(path.iterdir())
     except OSError:
-        return _diagnostic("admin discovery", "partial", "source discovery unavailable")
+        return _discovery_unavailable("admin discovery")
     return tuple(sorted(entries, key=lambda entry: entry.name))
 
 
@@ -447,20 +409,17 @@ def _source(
     path: Path,
     root: Path,
     scope: _UsageStorageScope,
-    table: str,
     agent_name: str | None,
     config: Config,
-    requester_isolated: bool,
     owner_id: str | None = None,
 ) -> UsageStorageSource:
     return UsageStorageSource(
         path=path,
         path_label=path.relative_to(root).as_posix(),
         scope=scope,
-        expected_session_table=table,
         source_agent_id=agent_name,
         allowed_agent_ids=frozenset(config.agents),
-        requester_isolated=requester_isolated,
+        requester_isolated=scope == "private_agent",
         owner_id=owner_id,
     )
 
@@ -468,30 +427,51 @@ def _source(
 def iter_usage_storage_rows(
     source: UsageStorageSource,
     *,
-    mode: _UsageReadMode = "runs",
+    since: float | None = None,
 ) -> Iterator[UsageSessionRow | UsageStorageDiagnostic]:
-    """Read independent usage snapshots and optional cumulative session counters without writes."""
-    if mode not in {"runs", "both"}:
-        raise ValueError(mode)
+    """Read each session's usage snapshots without writes.
+
+    ``since`` reads only snapshots last updated at or after that epoch time, which leaves out the undated usage a
+    session had before the ledger.
+
+    The whole database is read in one snapshot that is closed before the first row is yielded, so the caller's work
+    between rows never holds the database's read lock, which writers wait for. All of the database's rows are
+    therefore held in memory at once.
+    """
+    yield from list(_read_usage_storage(source, since=since))
+
+
+def _read_usage_storage(
+    source: UsageStorageSource,
+    *,
+    since: float | None,
+) -> Iterator[UsageSessionRow | UsageStorageDiagnostic]:
+    """Yield the database's rows, and a diagnostic for what it could not read, while its snapshot is open."""
     if not source.path.is_file():
         yield _source_diagnostic(source, "absent", "database absent")
         return
     try:
-        with _open_read_only_database(source) as connection:
-            diagnostic = _validate_schema(connection, source)
-            if diagnostic is not None:
-                yield diagnostic
-                return
-            table = quote_identifier(source.expected_session_table)
-            usage_table = f"{source.expected_session_table}_usage"
-            has_usage = _table_exists(connection, usage_table)
-            query = (
-                "SELECT session_id, session_type, agent_id, team_id, user_id, session_data "  # noqa: S608
-                f"FROM {table}"
+        with read_only_snapshot(source.path) as connection:
+            problem = (
+                "session table unavailable"
+                if _IDENTIFIER.fullmatch(source.names.sessions) is None
+                else unreadable_layout(connection, source.names)
             )
-            for row in connection.execute(query):
+            if problem is not None:
+                yield _source_diagnostic(source, "unsupported_schema", problem)
+                return
+            has_usage = source.names.usage in table_names(connection)
+            meta: RecordedMeta | None = None
+            # A dated read visits the sessions with a usage snapshot in range, or every one when there is no ledger.
+            rows = stored_sessions(connection, source.names, since=since if has_usage else None)
+            for row in rows:
+                # Read once a row needs it, so a database without sessions reads alike in every layout.
+                meta = meta or recorded_meta(connection, source.names)
+                if meta is None:
+                    yield _source_diagnostic(source, "unsupported_schema", "session owner unavailable")
+                    return
                 try:
-                    yield _extract_row(source, row, connection, mode=mode, has_usage=has_usage)
+                    yield _extract_row(source, row, meta, connection, has_usage=has_usage, since=since)
                 except (RecursionError, TypeError, ValueError):
                     yield _source_diagnostic(source, "partial", "malformed retained session")
     except sqlite3.Error as error:
@@ -500,108 +480,79 @@ def iter_usage_storage_rows(
         yield _source_diagnostic(source, "partial", "database unavailable")
 
 
-def _validate_schema(connection: sqlite3.Connection, source: UsageStorageSource) -> UsageStorageDiagnostic | None:
-    table = source.expected_session_table
-    if _IDENTIFIER.fullmatch(table) is None or not _table_exists(connection, table):
-        return _source_diagnostic(source, "unsupported_schema", "session table unavailable")
-    if not _REQUIRED_COLUMNS.issubset(_table_columns(connection, table)):
-        return _source_diagnostic(source, "unsupported_schema", "session schema unsupported")
-    usage_table = f"{table}_usage"
-    if _table_exists(connection, usage_table) and not _USAGE_REQUIRED_COLUMNS.issubset(
-        _table_columns(connection, usage_table),
-    ):
-        return _source_diagnostic(source, "unsupported_schema", "usage schema unsupported")
-    return None
-
-
-def _table_exists(connection: sqlite3.Connection, table: str) -> bool:
-    return (
-        connection.execute(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
-            (table,),
-        ).fetchone()
-        is not None
-    )
-
-
-def _table_columns(connection: sqlite3.Connection, table: str) -> set[str]:
-    return {row[1] for row in connection.execute(f"PRAGMA table_info({quote_identifier(table)})")}
-
-
 def _extract_row(
     source: UsageStorageSource,
-    row: sqlite3.Row,
+    row: StoredSession,
+    meta: RecordedMeta,
     connection: sqlite3.Connection,
     *,
-    mode: _UsageReadMode,
     has_usage: bool,
+    since: float | None,
 ) -> UsageSessionRow:
-    entity_kind = row["session_type"]
+    entity_kind, entity_id, version = meta
     if entity_kind not in {"agent", "team"}:
         raise ValueError
-    entity_id = row["agent_id"] if entity_kind == "agent" else row["team_id"]
     if source.scope == "system" and (entity_kind != "agent" or entity_id != SYSTEM_USAGE_ENTITY):
         raise ValueError
-    row_key = row["session_id"]
-    row_requester = _optional_string(row["user_id"])
+    row_key = row.session_id
+    row_requester = _optional_string(row.user_id)
     if not isinstance(entity_id, str) or not entity_id or not isinstance(row_key, str) or not row_key:
         raise ValueError
-    runs: list[UsageRunNode] = []
-    runs_available = has_usage
-    if has_usage:
-        query = (
-            f"SELECT usage_data FROM {quote_identifier(source.expected_session_table + '_usage')} "  # noqa: S608
-            "WHERE session_id = ? ORDER BY id"
+    runs, runs_available = (
+        _read_runs(
+            connection,
+            source,
+            row_key,
+            row_requester=row_requester,
+            include_team_members=source.scope == "team" and entity_kind == "team",
+            since=since,
         )
-        for (payload,) in connection.execute(query, (row_key,)):
-            try:
-                run = _extract_run(
-                    json.loads(payload),
-                    row_requester=row_requester,
-                    include_team_members=source.scope == "team" and entity_kind == "team",
-                )
-                if run is not None:
-                    runs.append(run)
-            except (RecursionError, TypeError, ValueError):
-                runs_available = False
-    session_metrics: Mapping[str, _MetricValue] = MappingProxyType({})
-    session_model_metrics: tuple[UsageModelMetrics, ...] | None = ()
-    session_metrics_available = mode == "both"
-    if session_metrics_available:
-        try:
-            session_metrics, session_model_metrics = _decode_session_usage(row["session_data"])
-        except (RecursionError, TypeError, ValueError):
-            session_model_metrics = None
-            session_metrics_available = False
+        if has_usage
+        else ([], False)
+    )
     return UsageSessionRow(
         source=source,
         entity_id=_bounded_string(entity_id),
         entity_kind=cast("Literal['agent', 'team']", entity_kind),
         row_key=_bounded_string(row_key),
         runs=tuple(runs),
-        session_metrics=session_metrics,
-        session_model_metrics=session_model_metrics,
         requester_id=row_requester,
         runs_available=runs_available,
-        session_metrics_available=session_metrics_available,
+        totals_available=since is not None or (isinstance(version, int) and version >= LEDGER_TOTALS_VERSION),
     )
 
 
-def _decode_session_usage(
-    raw_value: object,
-) -> tuple[Mapping[str, _MetricValue], tuple[UsageModelMetrics, ...] | None]:
-    decoded = decode_persisted_session_json(raw_value)
-    if decoded is None:
-        return MappingProxyType({}), ()
-    if not isinstance(decoded, dict):
+def _read_runs(
+    connection: sqlite3.Connection,
+    source: UsageStorageSource,
+    session_id: str,
+    *,
+    row_requester: str | None,
+    include_team_members: bool,
+    since: float | None,
+) -> tuple[list[UsageRunNode], bool]:
+    """Read one session's usage snapshots, reporting whether every snapshot was usable."""
+    runs: list[UsageRunNode] = []
+    runs_available = True
+    for payload in stored_usage(connection, source.names, session_id, since=since):
+        try:
+            run = _extract_run(
+                _decoded_snapshot(payload),
+                row_requester=row_requester,
+                include_team_members=include_team_members,
+            )
+            if run is not None:
+                runs.append(run)
+        except (RecursionError, TypeError, ValueError):
+            runs_available = False
+    return runs, runs_available
+
+
+def _decoded_snapshot(payload: object) -> object:
+    """Decode one stored usage snapshot; a value that is not text raises as text that is not JSON does."""
+    if not isinstance(payload, (str, bytes)):
         raise TypeError
-    raw_metrics = cast("dict[str, object]", decoded).get("session_metrics")
-    if raw_metrics is None:
-        return MappingProxyType({}), ()
-    if not isinstance(raw_metrics, dict):
-        raise TypeError
-    session_metrics = cast("dict[str, object]", raw_metrics)
-    return _select_metrics(session_metrics), _extract_model_metrics(session_metrics.get("details"))
+    return json.loads(payload)
 
 
 def _extract_run(
@@ -635,12 +586,6 @@ def _extract_run(
     run_metrics = cast("dict[str, object]", metrics)
     selected_metrics = _select_metrics(run_metrics)
     created_at = run.get("created_at")
-    if (
-        isinstance(created_at, bool)
-        or not isinstance(created_at, (int, float))
-        or (isinstance(created_at, float) and not math.isfinite(created_at))
-    ):
-        created_at = None
     voice_seconds = run.get("voice_seconds") if kind == "live_voice" else None
     voice_finalized = run.get("voice_finalized", False)
     if kind == "live_voice" and (
@@ -661,10 +606,10 @@ def _extract_run(
         ),
         run_id=_optional_string(run.get("run_id")),
         parent_run_id=parent_run_id,
-        model_provider=_optional_string(run.get("model_provider")),
+        model_provider=_stored_provider(run.get("model_provider")),
         model=_optional_string(run.get("model")),
         metrics=selected_metrics,
-        created_at=created_at,
+        created_at=created_at if _is_timestamp(created_at) else None,
         model_metrics=_extract_model_metrics(run_metrics.get("details")),
         requests=_extract_request_metrics(run.get("requests")),
         kind=cast("UsageKind", kind),
@@ -685,12 +630,7 @@ def _extract_request_metrics(requests: object) -> tuple[UsageRequestMetrics, ...
             request = cast("dict[str, object]", raw_request)
             created_at = request.get("created_at")
             metrics = request.get("metrics")
-            if (
-                isinstance(created_at, bool)
-                or not isinstance(created_at, (int, float))
-                or (isinstance(created_at, float) and not math.isfinite(created_at))
-                or not isinstance(metrics, dict)
-            ):
+            if not _is_timestamp(created_at) or not isinstance(metrics, dict):
                 return None
             if any(key in request and not _optional_string(request[key]) for key in ("model_provider", "model")):
                 return None
@@ -698,7 +638,7 @@ def _extract_request_metrics(requests: object) -> tuple[UsageRequestMetrics, ...
                 UsageRequestMetrics(
                     created_at,
                     _select_metrics(cast("dict[str, object]", metrics)),
-                    model_provider=_optional_string(request.get("model_provider")),
+                    model_provider=_stored_provider(request.get("model_provider")),
                     model=_optional_string(request.get("model")),
                 ),
             )
@@ -708,7 +648,7 @@ def _extract_request_metrics(requests: object) -> tuple[UsageRequestMetrics, ...
 
 
 def _extract_model_metrics(details: object) -> tuple[UsageModelMetrics, ...] | None:
-    """Read Agno's per-role model lists without discarding usable run totals."""
+    """Read the per-role model lists of stored metrics details without discarding usable run totals."""
     if details is None:
         return ()
     if not isinstance(details, dict):
@@ -724,7 +664,7 @@ def _extract_model_metrics(details: object) -> tuple[UsageModelMetrics, ...] | N
                 model_metrics = cast("dict[str, object]", entry)
                 models.append(
                     UsageModelMetrics(
-                        model_provider=_optional_string(model_metrics.get("provider")),
+                        model_provider=_stored_provider(model_metrics.get("provider")),
                         model=_optional_string(model_metrics.get("id")),
                         metrics=_select_metrics(model_metrics),
                     ),
@@ -747,8 +687,19 @@ def _select_metrics(metrics: Mapping[str, object]) -> Mapping[str, _MetricValue]
     return MappingProxyType(selected_metrics)
 
 
+def _is_timestamp(value: object) -> TypeGuard[int | float]:
+    if isinstance(value, float):
+        return math.isfinite(value)
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
 def _optional_string(value: object) -> str | None:
     return _bounded_string(value) if isinstance(value, str) and value else None
+
+
+def _stored_provider(value: object) -> str | None:
+    provider = _optional_string(value)
+    return current_provider_name(provider) if provider is not None else None
 
 
 def _bounded_string(value: str) -> str:
@@ -757,14 +708,8 @@ def _bounded_string(value: str) -> str:
     return value
 
 
-def _diagnostic(
-    path_label: str,
-    status: Literal["partial"],
-    detail: str,
-    *,
-    scope: _UsageStorageScope | None = None,
-) -> UsageStorageDiagnostic:
-    return UsageStorageDiagnostic(path_label=path_label, status=status, detail=detail, scope=scope)
+def _discovery_unavailable(path_label: str, scope: _UsageStorageScope | None = None) -> UsageStorageDiagnostic:
+    return UsageStorageDiagnostic(path_label, "partial", "source discovery unavailable", scope)
 
 
 def _source_diagnostic(

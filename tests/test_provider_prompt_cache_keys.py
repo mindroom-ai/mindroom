@@ -12,12 +12,21 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import resolve_runtime_paths
-from mindroom.providers.model_loading import get_model_instance
+from mindroom.llm.messages import Message
+from mindroom.llm.provider import ModelRequest
+from mindroom.providers.openai.chat import ChatAdapter
+from mindroom.providers.openai.responses import ResponsesAdapter
+from mindroom.providers.registry import build_model_provider
+from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.identity_helpers import persist_entity_accounts
+from tests.providers.bare_adapter import bare_adapter
+from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from mindroom.llm.provider import ModelProvider
 
 
 @pytest.fixture
@@ -34,6 +43,14 @@ def identity() -> ToolExecutionIdentity:
         tenant_id="tenant-a",
         account_id="account-a",
     )
+
+
+def _sent(provider: ModelProvider) -> dict[str, Any]:
+    """Return the body fields and headers one request of ``provider`` sends, as SDK keywords or in ``extra_body``."""
+    adapter = bare_adapter(provider)
+    assert isinstance(adapter, ChatAdapter | ResponsesAdapter)
+    kwargs = adapter._request_kwargs(ModelRequest(messages=(Message(role="user", content="Write an introduction."),)))
+    return {**kwargs, **kwargs.get("extra_body", {}), "extra_headers": kwargs.get("extra_headers", {})}
 
 
 def _request(
@@ -57,7 +74,7 @@ def _request(
         storage_path=root / "data",
         process_env={},
     )
-    return get_model_instance(config, runtime_paths, execution_identity=identity).get_request_params()
+    return _sent(build_model_provider(config, runtime_paths, execution_identity=identity))
 
 
 @pytest.mark.parametrize("provider", ["codex", "openai_codex", "kimi", "kimi_code"])
@@ -156,12 +173,9 @@ def test_materialized_agents_keep_distinct_cache_identity(
     identity: ToolExecutionIdentity,
     provider: str,
 ) -> None:
-    """Members created under one team execution retain their own model identity."""
+    """Members created under one team execution retain their own model identity, as the team builds each one."""
     config = Config(
-        agents={
-            name: AgentConfig(display_name=name, include_default_tools=False, learning=False)
-            for name in ("writer", "editor")
-        },
+        agents={name: AgentConfig(display_name=name, include_default_tools=False) for name in ("writer", "editor")},
         models={"default": ModelConfig(provider=provider, id="k3" if provider == "kimi" else "gpt-6-astra")},
     )
     runtime_paths = resolve_runtime_paths(
@@ -172,7 +186,17 @@ def test_materialized_agents_keep_distinct_cache_identity(
     team_identity = replace(identity, agent_name="team")
     persist_entity_accounts(config, runtime_paths)
     requests = [
-        create_agent(name, config, runtime_paths, execution_identity=team_identity).model.get_request_params()
+        _sent(
+            create_agent(
+                name,
+                config,
+                runtime_paths,
+                execution_identity=replace(team_identity, agent_name=name),
+                knowledge=None,
+                model=turn_model(config, runtime_paths, name),
+                plugins=config_plugins(config, runtime_paths),
+            ).spec.model,
+        )
         for name in config.agents
     ]
 

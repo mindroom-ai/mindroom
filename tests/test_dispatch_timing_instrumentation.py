@@ -9,23 +9,28 @@ from unittest.mock import AsyncMock, Mock, patch
 
 import nio
 import pytest
-from agno.models.response import ToolExecution
-from agno.run.agent import ToolCallCompletedEvent, ToolCallStartedEvent
 
 from mindroom import ai as ai_module
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.hooks import (
     EVENT_TOOL_AFTER_CALL,
     EVENT_TOOL_BEFORE_CALL,
+    EVENT_TOOL_ENVIRONMENT,
     HookRegistry,
     ToolAfterCallContext,
     ToolBeforeCallContext,
+    ToolEnvironmentContext,
     hook,
 )
+from mindroom.llm.events import ToolCompleted, ToolStarted
+from mindroom.llm.runs import ToolExecution
 from mindroom.matrix.client_delivery import send_message_result
 from mindroom.streaming import _queue_delivery_request
 from mindroom.tool_system import tool_hooks as tool_hooks_module
-from mindroom.tool_system.tool_hooks import build_tool_hook_bridge
+from mindroom.tool_system.runtime_context import detached_tool_scope
+from mindroom.tool_system.tool_function import ToolOutcome
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+from tests.agent_tool_helpers import tool_policy
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -50,20 +55,21 @@ async def test_stream_processing_marks_tool_call_started() -> None:
             tool_args={"cmd": "date +%s.%N"},
             tool_call_id="call-1",
         )
-        yield ToolCallStartedEvent(tool=tool)
-        yield ToolCallStartedEvent(
-            tool=ToolExecution(
+        yield ToolStarted(call=tool.call)
+        yield ToolStarted(
+            call=ToolExecution(
                 tool_name="run_shell_command",
                 tool_args={"cmd": "date +%s.%N"},
-            ),
+                tool_call_id="call-2",
+            ).call,
         )
-        yield ToolCallCompletedEvent(
-            tool=ToolExecution(
+        yield ToolCompleted(
+            call=ToolExecution(
                 tool_name="run_shell_command",
                 tool_args={"cmd": "date +%s.%N"},
                 tool_call_id="call-1",
                 result="ok",
-            ),
+            ).call,
         )
 
     with patch(
@@ -76,6 +82,7 @@ async def test_stream_processing_marks_tool_call_started() -> None:
                 stream(),
                 state=ai_module._StreamingAttemptState(),
                 show_tool_calls=True,
+                show_reasoning=False,
                 agent_name="code",
             )
         ]
@@ -85,7 +92,7 @@ async def test_stream_processing_marks_tool_call_started() -> None:
         (
             "Dispatch tool-call timing",
             {
-                "phase": "agno_tool_call_started",
+                "phase": "tool_call_started",
                 "agent_name": "code",
                 "tool_name": "run_shell_command",
                 "tool_call_id": "call-1",
@@ -95,17 +102,17 @@ async def test_stream_processing_marks_tool_call_started() -> None:
         (
             "Dispatch tool-call timing",
             {
-                "phase": "agno_tool_call_started",
+                "phase": "tool_call_started",
                 "agent_name": "code",
                 "tool_name": "run_shell_command",
-                "tool_call_id": None,
+                "tool_call_id": "call-2",
                 "show_tool_calls": True,
             },
         ),
         (
             "Dispatch tool-call timing",
             {
-                "phase": "agno_tool_call_completed",
+                "phase": "tool_call_completed",
                 "agent_name": "code",
                 "tool_name": "run_shell_command",
                 "tool_call_id": "call-1",
@@ -158,6 +165,7 @@ async def test_send_message_result_marks_prepare_and_send_phases() -> None:
     """Matrix sends should mark large-message prep and room-send boundaries."""
     timing_events: list[tuple[str, dict[str, object]]] = []
     client = AsyncMock(spec=nio.AsyncClient)
+    client.user_id = "@mindroom_test:localhost"
     room = Mock()
     room.encrypted = False
     client.rooms = {"!room:localhost": room}
@@ -231,14 +239,17 @@ async def test_tool_hook_bridge_marks_hook_and_tool_entry() -> None:
             ),
         ],
     )
-    bridge = build_tool_hook_bridge(registry, agent_name="code")
+    bridge = tool_policy(registry)
 
     async def echo(text: str) -> str:
         return text.upper()
 
-    with patch(
-        "mindroom.tool_system.tool_hooks.emit_timing_event",
-        side_effect=lambda *args, **kwargs: _record_timing_event(timing_events, *args, **kwargs),
+    with (
+        detached_tool_scope(ToolExecutionIdentity("matrix", "code", None, None, None, None, None)),
+        patch(
+            "mindroom.tool_system.tool_hooks.emit_timing_event",
+            side_effect=lambda *args, **kwargs: _record_timing_event(timing_events, *args, **kwargs),
+        ),
     ):
         result = await bridge("echo", echo, {"text": "hello"})
 
@@ -267,6 +278,84 @@ async def test_tool_hook_bridge_marks_hook_and_tool_entry() -> None:
     assert isinstance(bridge_finish["total_bridge_ms"], float)
     assert isinstance(bridge_finish["before_hooks_ms"], float)
     assert isinstance(bridge_finish["tool_body_ms"], float)
+    assert timing_events[0][1]["has_environment_hooks"] is False
+    assert bridge_finish["environment_hooks_ms"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("answer", "outcome"),
+    [
+        (ValueError("boom"), "error"),
+        (ToolOutcome(content="❌ Scheduled call `task-1` failed: boom", is_error=True), "error"),
+        (ToolOutcome(content="✅ Scheduled call `task-1` ran."), "success"),
+    ],
+    ids=["raised", "failed_outcome", "outcome"],
+)
+async def test_tool_hook_bridge_finishes_a_call_as_an_error_when_it_failed(
+    answer: ValueError | ToolOutcome,
+    outcome: str,
+) -> None:
+    """A call that raised and one that answered with a failed outcome finish their timing as an ``error``."""
+    timing_events: list[tuple[str, dict[str, object]]] = []
+
+    async def run(**_kwargs: object) -> ToolOutcome:
+        if isinstance(answer, ValueError):
+            raise answer
+        return answer
+
+    bridge = tool_policy(HookRegistry.empty())
+    with patch(
+        "mindroom.tool_system.tool_hooks.emit_timing_event",
+        side_effect=lambda *args, **kwargs: _record_timing_event(timing_events, *args, **kwargs),
+    ):
+        if isinstance(answer, ValueError):
+            with pytest.raises(ValueError, match="boom"):
+                await bridge("run_scheduled_call", run, {})
+        else:
+            assert await bridge("run_scheduled_call", run, {}) is answer
+
+    [bridge_finish] = [
+        event_data for _event_name, event_data in timing_events if event_data["phase"] == "bridge_finish"
+    ]
+    assert bridge_finish["outcome"] == outcome
+
+
+@pytest.mark.asyncio
+async def test_tool_hook_bridge_times_the_environment_hooks() -> None:
+    """A call with environment hooks reports them at entry and their duration at finish, apart from the tool body."""
+    timing_events: list[tuple[str, dict[str, object]]] = []
+
+    @hook(EVENT_TOOL_ENVIRONMENT)
+    async def environment(ctx: ToolEnvironmentContext) -> None:
+        ctx.set_env("PLUGIN_VALUE", "set")
+
+    registry = HookRegistry.from_plugins(
+        [
+            SimpleNamespace(
+                name="tool-environment",
+                discovered_hooks=(environment,),
+                discovered_automations=(),
+                entry_config=PluginEntryConfig(path="./plugins/tool-environment", settings={}),
+                plugin_order=0,
+            ),
+        ],
+    )
+
+    async def echo(text: str) -> str:
+        return text
+
+    with patch(
+        "mindroom.tool_system.tool_hooks.emit_timing_event",
+        side_effect=lambda *args, **kwargs: _record_timing_event(timing_events, *args, **kwargs),
+    ):
+        await tool_policy(registry)("echo", echo, {"text": "hello"})
+
+    phases = {event_data["phase"]: event_data for _event_name, event_data in timing_events}
+    assert phases["bridge_entry"]["has_environment_hooks"] is True
+    environment_hooks_ms = phases["bridge_finish"]["environment_hooks_ms"]
+    assert isinstance(environment_hooks_ms, float)
+    assert environment_hooks_ms >= 0
 
 
 @pytest.mark.asyncio
@@ -294,7 +383,7 @@ async def test_tool_hook_bridge_times_blocked_after_hooks_separately(monkeypatch
             ),
         ],
     )
-    bridge = build_tool_hook_bridge(registry, agent_name="code")
+    bridge = tool_policy(registry)
     next_func = AsyncMock(return_value="should not run")
     perf_counter = Mock(
         side_effect=[
@@ -318,7 +407,9 @@ async def test_tool_hook_bridge_times_blocked_after_hooks_separately(monkeypatch
         result = await bridge("read_file", next_func, {"path": "secret.txt"})
 
     assert next_func.await_count == 0
-    assert after_seen == [(True, result, 5.0)]
+    assert isinstance(result, ToolOutcome)
+    assert result.is_error
+    assert after_seen == [(True, result.content, 5.0)]
     bridge_finish = next(
         event_data
         for event_name, event_data in timing_events

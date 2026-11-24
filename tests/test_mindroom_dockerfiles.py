@@ -3,7 +3,13 @@
 from __future__ import annotations
 
 import re
+import subprocess
+import sys
 from pathlib import Path
+
+import pytest
+
+from mindroom.api import sandbox_runner_app
 
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _MINDROOM_DOCKERFILES = (
@@ -52,6 +58,16 @@ def test_mindroom_runtime_images_run_under_tini() -> None:
         assert 'CMD ["/app/.venv/bin/mindroom", "run"]' in text
 
 
+def test_mindroom_runtime_images_link_sqlite_that_ignores_planted_journal_pointers() -> None:
+    """Debian's SQLite deletes a file a planted journal names, so both images link and check a newer one."""
+    for dockerfile in _MINDROOM_DOCKERFILES:
+        stages, final = dockerfile.read_text(encoding="utf-8").split(" AS final", maxsplit=1)
+
+        assert "RUN sh /tmp/build-sqlite.sh" in stages
+        assert "COPY --from=sqlite /sqlite/ /" in final
+        assert "sqlite3.sqlite_version_info >= (3, 53, 3)" in final
+
+
 def test_mindroom_runtime_images_opt_into_dashboard_asset_build() -> None:
     """The runtime image should ship dashboard assets without runtime Bun."""
     for dockerfile in _MINDROOM_DOCKERFILES:
@@ -75,7 +91,29 @@ def test_full_mindroom_runtime_image_bundles_browser_runtime_packages() -> None:
     text = (_REPO_ROOT / "local/instances/deploy/Dockerfile.mindroom").read_text(encoding="utf-8")
     packages = _apt_install_packages(text.split(" AS final", maxsplit=1)[1])
 
-    assert {"chromium", "ffmpeg", "fonts-liberation", "nodejs"} <= packages
+    assert {
+        "chromium",
+        "ffmpeg",
+        "fonts-dejavu-core",
+        "fonts-liberation",
+        "fonts-noto-cjk",
+        "fonts-noto-color-emoji",
+        "nodejs",
+    } <= packages
+
+
+def test_full_mindroom_runtime_image_bundles_tailnet_ssh_packages() -> None:
+    """A worker serves tailnet SSH with the image's sshd and SFTP server, and file sync with its rsync."""
+    text = (_REPO_ROOT / "local/instances/deploy/Dockerfile.mindroom").read_text(encoding="utf-8")
+    packages = _apt_install_packages(text.split(" AS final", maxsplit=1)[1])
+
+    assert {"openssh-server", "rsync"} <= packages
+    install = next(
+        line
+        for line in text.replace("\\\n", " ").splitlines()
+        if line.startswith("RUN apt-get ") and "openssh-server" in line
+    )
+    assert re.search(r"openssh-server .*&& rm -f /etc/ssh/ssh_host_\*", install)
 
 
 def test_mindroom_runtime_images_keep_git_ssh_support_when_disabling_recommends() -> None:
@@ -116,6 +154,65 @@ def test_sandbox_runner_script_writes_startup_manifest_expected_by_app() -> None
     assert 'export MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH="${startup_manifest_path}"' in text
     assert 'export MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH="$(' not in text
     assert "MINDROOM_RUNTIME_PATHS_JSON" not in text
+
+
+def test_sandbox_runner_script_serves_through_the_runner_entrypoint() -> None:
+    """The sidecar starts uvicorn through the runner's entrypoint, and no workspace module can shadow MindRoom's."""
+    text = _SANDBOX_RUNNER_SCRIPT.read_text(encoding="utf-8")
+
+    assert "exec /app/.venv/bin/python -P -s -m mindroom.api.sandbox_runner_app\n" in text
+    assert "/app/.venv/bin/python -P -s - <<'PY'\n" in text
+    assert "-m uvicorn" not in text
+
+
+def test_sandbox_runner_logs_uvicorn_info_to_stdout_and_warnings_to_stderr() -> None:
+    """Log collectors read stderr as errors, so only uvicorn's warnings and errors go there; request lines omit queries."""
+    probe = """
+import logging.config
+
+from mindroom.api.sandbox_runner_app import _uvicorn_log_config
+
+logging.config.dictConfig(_uvicorn_log_config())
+logging.getLogger("uvicorn.error").info("Uvicorn running on http://0.0.0.0:8766")
+logging.getLogger("uvicorn.error").warning("Invalid HTTP request received.")
+logging.getLogger("uvicorn.error").error("Exception in ASGI application")
+logging.getLogger("uvicorn.access").info('%s - "%s %s HTTP/%s" %d', "10.0.0.1:5000", "GET", "/healthz?token=http-token", "1.1", 200)
+logging.getLogger("uvicorn.error").info('%s - "WebSocket %s" [accepted]', "10.0.0.1:5001", "/stream?token=ws-token")
+"""
+    result = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, check=True, timeout=120)
+
+    assert result.stdout.splitlines() == [
+        "INFO:     Uvicorn running on http://0.0.0.0:8766",
+        'INFO:     10.0.0.1:5000 - "GET /healthz HTTP/1.1" 200 OK',
+        'INFO:     10.0.0.1:5001 - "WebSocket /stream" [accepted]',
+    ]
+    assert result.stderr.splitlines() == [
+        "WARNING:  Invalid HTTP request received.",
+        "ERROR:    Exception in ASGI application",
+    ]
+
+
+@pytest.mark.parametrize(("port_env", "port"), [(None, 8766), ("", 8766), ("9123", 9123)])
+def test_sandbox_runner_serves_every_interface_on_the_configured_port(
+    monkeypatch: pytest.MonkeyPatch,
+    port_env: str | None,
+    port: int,
+) -> None:
+    """The runner listens on every interface, at its configured port or 8766 when that is unset or empty."""
+    if port_env is None:
+        monkeypatch.delenv("MINDROOM_SANDBOX_RUNNER_PORT", raising=False)
+    else:
+        monkeypatch.setenv("MINDROOM_SANDBOX_RUNNER_PORT", port_env)
+    calls: list[tuple[object, dict[str, object]]] = []
+    monkeypatch.setattr(sandbox_runner_app.uvicorn, "run", lambda app, **kwargs: calls.append((app, kwargs)))
+
+    sandbox_runner_app._main()
+
+    [(app, kwargs)] = calls
+    assert app is sandbox_runner_app.app
+    assert kwargs["host"] == "0.0.0.0"  # noqa: S104
+    assert kwargs["port"] == port
+    assert kwargs["log_config"] == sandbox_runner_app._uvicorn_log_config()
 
 
 def test_platform_backend_kubectl_matches_target_architecture() -> None:

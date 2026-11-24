@@ -16,19 +16,30 @@ from typing import TYPE_CHECKING, Any
 
 import structlog
 
+from mindroom.config.main import Config
 from mindroom.config.plugin import PluginEntryConfig
+from mindroom.constants import resolve_runtime_paths
 from mindroom.hooks import (
     EVENT_TOOL_AFTER_CALL,
     EVENT_TOOL_BEFORE_CALL,
+    HookBindings,
     HookRegistry,
     ToolAfterCallContext,
     ToolBeforeCallContext,
     hook,
 )
-from mindroom.tool_system.tool_hooks import build_tool_hook_bridge
+from mindroom.tool_system.invocation import ToolCallContext, run_tool_call
+from mindroom.tool_system.tool_function import ToolFunction
+from mindroom.tool_system.tool_hooks import build_tool_hook_middleware
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
+
+# The hook policy's runtime paths; the benchmark logs no requests and its hooks read no state, so nothing is written.
+_UNWRITTEN_RUNTIME_PATHS = resolve_runtime_paths(
+    config_path=Path(tempfile.gettempdir()) / "mindroom-tool-call-benchmark" / "config.yaml",
+    process_env={},
+)
 
 
 async def _noop_async(value: int) -> int:
@@ -61,6 +72,7 @@ def _registry_with_hooks() -> HookRegistry:
             SimpleNamespace(
                 name="tool-call-benchmark",
                 discovered_hooks=(_benchmark_before_hook, _benchmark_after_hook),
+                discovered_automations=(),
                 entry_config=PluginEntryConfig(path="./scripts/testing/benchmark_tool_call_overhead.py", settings={}),
                 plugin_order=0,
             ),
@@ -97,14 +109,16 @@ async def _run_case(
     iterations: int,
     warmup: int,
 ) -> dict[str, object]:
-    bridge = build_tool_hook_bridge(hook_registry, agent_name="benchmark")
+    middleware = (build_tool_hook_middleware(HookBindings(registry=hook_registry), Config(), _UNWRITTEN_RUNTIME_PATHS),)
+    function = ToolFunction(name="noop", description=None, parameters={}, entrypoint=func)
+    context = ToolCallContext(run_id="benchmark", session_id="benchmark", user_id=None)
     for _ in range(warmup):
-        await bridge("noop", func, {"value": 1})
+        await run_tool_call(function, {"value": 1}, context, middleware=middleware)
 
     samples: list[float] = []
     for _ in range(iterations):
         started_at = time.perf_counter()
-        await bridge("noop", func, {"value": 1})
+        await run_tool_call(function, {"value": 1}, context, middleware=middleware)
         samples.append((time.perf_counter() - started_at) * 1000)
     return {"case": label, **summarize_samples(samples)}
 
@@ -167,7 +181,8 @@ async def _run_shell_benchmark(iterations: int, warmup: int) -> list[dict[str, o
             storage_path=root / "storage",
             process_env={},
         )
-        toolkit = shell_tools()(runtime_paths=runtime)
+        # This benchmark measures the shell in this process, which needs `defaults.allow_shell_without_worker`.
+        toolkit = shell_tools()(runtime_paths=runtime, allow_without_worker=True)
         for label, command in (("shell_argv", ["printf", "benchmark-ok"]), ("shell_string", "printf benchmark-ok")):
             samples: list[float] = []
             for index in range(warmup + iterations):
@@ -185,6 +200,7 @@ async def _run_shell_benchmark(iterations: int, warmup: int) -> list[dict[str, o
 
 def _run_docker_shell_benchmark(image: str, iterations: int, warmup: int) -> list[dict[str, object]]:
     """Measure a disposable Docker worker with empty credentials and isolated storage."""
+    from mindroom.config.main import load_config  # noqa: PLC0415
     from mindroom.constants import resolve_runtime_paths  # noqa: PLC0415
     from mindroom.tool_system.worker_proxy_client import (  # noqa: PLC0415
         WorkerProxyClientConfig,
@@ -192,6 +208,11 @@ def _run_docker_shell_benchmark(image: str, iterations: int, warmup: int) -> lis
     )
     from mindroom.workers.backends.docker import DockerWorkerBackend  # noqa: PLC0415
     from mindroom.workers.models import WorkerSpec  # noqa: PLC0415
+    from mindroom.workers.protocol import WORKER_PROTOCOL_VERSION, ExecuteRequest  # noqa: PLC0415
+    from mindroom.workers.runtime import (  # noqa: PLC0415
+        build_worker_launch_config,
+        serialized_dedicated_worker_validation_snapshot,
+    )
 
     with tempfile.TemporaryDirectory(prefix="mindroom-docker-benchmark-") as tmp:
         root = Path(tmp)
@@ -205,18 +226,32 @@ def _run_docker_shell_benchmark(image: str, iterations: int, warmup: int) -> lis
                 "MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE": "forkserver",
             },
         )
+        config = load_config(runtime)
+        launch = build_worker_launch_config(
+            config,
+            tool_validation_snapshot=serialized_dedicated_worker_validation_snapshot(runtime, runtime_config=config),
+        )
         manager = DockerWorkerBackend.from_runtime(
             runtime,
             auth_token=secrets.token_urlsafe(32),
-            worker_grantable_credentials=frozenset(),
+            current_launch=lambda: launch,
         )
-        spec = WorkerSpec("v1:default:unscoped:benchmark", mirrored_credential_services=frozenset())
+        spec = WorkerSpec("v1:default:unscoped:benchmark", mirror_grantable_credentials=False)
         proxy = WorkerProxyClientConfig(
             proxy_url=None,
             proxy_token=None,
             proxy_timeout_seconds=120,
             credential_lease_ttl_seconds=60,
             credential_policy={},
+            lease_tool_credentials=False,
+        )
+        request = ExecuteRequest(
+            protocol=WORKER_PROTOCOL_VERSION,
+            worker_key=spec.worker_key,
+            routing_agent_name="benchmark",
+            tool_name="shell",
+            function_name="run_shell_command",
+            kwargs={"args": ["printf", "benchmark-ok"]},
         )
         samples: dict[str, list[float]] = {"docker_ensure": [], "docker_execute": [], "docker_total": []}
         try:
@@ -229,16 +264,8 @@ def _run_docker_shell_benchmark(image: str, iterations: int, warmup: int) -> lis
                 ready = time.perf_counter()
                 result = execute_worker_proxy_request(
                     config=proxy,
-                    payload={
-                        "tool_name": "shell",
-                        "function_name": "run_shell_command",
-                        "kwargs": {"args": ["printf", "benchmark-ok"]},
-                        "worker_key": spec.worker_key,
-                        "routing_agent_name": "benchmark",
-                    },
+                    request=request,
                     credentials_manager=None,
-                    tool_name="shell",
-                    function_name="run_shell_command",
                     worker_target=None,
                     worker_handle=handle,
                     worker_manager=manager,
@@ -268,6 +295,8 @@ def _run_sandbox_dispatch_case(mode: str, iterations: int, warmup: int) -> dict[
     from mindroom.api import sandbox_runner  # noqa: PLC0415
     from mindroom.constants import resolve_primary_runtime_paths  # noqa: PLC0415
     from mindroom.model_defaults import CONFIG_INIT_MODEL_PRESETS  # noqa: PLC0415
+    from mindroom.tool_system.plugins import refresh_plugins  # noqa: PLC0415
+    from mindroom.workers.protocol import WORKER_PROTOCOL_VERSION, ExecuteRequest, WorkerFailure  # noqa: PLC0415
 
     default_model = CONFIG_INIT_MODEL_PRESETS["openai"]
     with tempfile.TemporaryDirectory(prefix="mindroom-dispatch-benchmark-") as tmp:
@@ -285,18 +314,27 @@ def _run_sandbox_dispatch_case(mode: str, iterations: int, warmup: int) -> dict[
             process_env={"MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE": mode},
         )
         config = sandbox_runner._runtime_config_or_empty(runtime_paths)
+        request = ExecuteRequest(
+            protocol=WORKER_PROTOCOL_VERSION,
+            tool_name="calculator",
+            function_name="add",
+            args=[1, 2],
+        )
+        route = sandbox_runner._prepare_route_with_config(
+            request,
+            runtime_paths=runtime_paths,
+            config=config,
+            runner_token=None,
+        )
+        if isinstance(route, WorkerFailure):
+            msg = f"sandbox dispatch route failed: {route.error}"
+            raise RuntimeError(msg)  # noqa: TRY004
+        # The registry the runner itself validates and builds the call from.
+        tools = refresh_plugins(route.config, route.runtime_paths).tools
+        call = sandbox_runner._ExecuteCall(request=request, route=route, tools=tools)
 
         def _call() -> None:
-            response = sandbox_runner._execute_request_subprocess_sync(
-                sandbox_runner.SandboxRunnerExecuteRequest(
-                    tool_name="calculator",
-                    function_name="add",
-                    args=[1, 2],
-                    kwargs={},
-                ),
-                runtime_paths,
-                config,
-            )
+            response = sandbox_runner._execute_request_subprocess_sync(call)
             if not response.ok:
                 msg = f"sandbox dispatch failed: {response.error}"
                 raise RuntimeError(msg)

@@ -62,7 +62,6 @@ An ambiguous query returns a list of candidate page titles instead of a summary,
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `auto_suggest` | `boolean` | `true` | Let Wikipedia suggest or correct the title before lookup; set `false` for exact-title lookup. |
-| `knowledge` | `text` | unset | Has no effect in YAML configuration; leave unset. |
 | `all` | `boolean` | `false` | Has no effect for this toolkit. |
 
 ```yaml

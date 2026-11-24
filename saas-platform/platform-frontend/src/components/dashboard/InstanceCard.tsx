@@ -4,7 +4,7 @@ import { useState } from 'react'
 import type { Instance } from '@/hooks/useInstance'
 import type { Subscription } from '@/hooks/useSubscription'
 import { provisionInstance } from '@/lib/api'
-import { buildCinnyLoginUrl } from '@/lib/cinny'
+import { buildChatLoginUrl } from '@/lib/chat'
 import { Card, CardHeader } from '@/components/ui/Card'
 import { logger } from '@/lib/logger'
 import { planAction, planState } from '@/lib/plan-state'
@@ -109,7 +109,7 @@ export function InstanceCard({
       <Card>
         <CardHeader>MindRoom Instance</CardHeader>
         <div className="flex justify-center py-8">
-          <Loader2 className="w-8 h-8 animate-spin text-orange-500" aria-label="Loading subscription" />
+          <Loader2 className="w-8 h-8 animate-spin text-brand-600 dark:text-brand-400" aria-label="Loading subscription" />
         </div>
       </Card>
     )
@@ -136,7 +136,7 @@ export function InstanceCard({
               <button
                 onClick={handleProvision}
                 disabled={isProvisioning}
-                className="px-6 py-3 bg-gradient-to-r from-orange-500 to-orange-600 text-white rounded-xl font-semibold hover:shadow-lg hover:scale-105 transition-all disabled:bg-gray-400 disabled:cursor-not-allowed"
+                className="px-6 py-3 bg-gradient-to-r from-brand-600 to-brand-700 text-white rounded-xl font-semibold hover:shadow-lg hover:scale-105 transition-all disabled:bg-gray-400 disabled:cursor-not-allowed"
               >
                 {isProvisioning ? (
                   <>
@@ -155,7 +155,7 @@ export function InstanceCard({
               )}
               <Link
                 href={nextStep.href}
-                className="inline-flex items-center justify-center px-6 py-3 bg-gradient-to-r from-orange-500 to-orange-600 text-white rounded-xl font-semibold hover:shadow-lg hover:scale-105 transition-all"
+                className="inline-flex items-center justify-center px-6 py-3 bg-gradient-to-r from-brand-600 to-brand-700 text-white rounded-xl font-semibold hover:shadow-lg hover:scale-105 transition-all"
               >
                 {nextStep.label}
               </Link>
@@ -219,7 +219,7 @@ export function InstanceCard({
   const frontendHost = getHostname(instance.frontend_url)
   const backendHost = getHostname(instance.backend_url)
   const chatInterfaceUrl = instance.matrix_server_url
-    ? buildCinnyLoginUrl(instance.matrix_server_url)
+    ? buildChatLoginUrl(instance.matrix_server_url)
     : null
   const lastSynced = instance.kubernetes_synced_at
     ? formatRelativeTime(instance.kubernetes_synced_at)
@@ -390,7 +390,7 @@ export function InstanceCard({
               href={instance.frontend_url}
               target="_blank"
               rel="noopener noreferrer"
-              className="w-full inline-flex items-center justify-center gap-2 px-6 py-3 bg-gradient-to-r from-orange-500 to-orange-600 text-white rounded-xl font-semibold hover:shadow-lg hover:scale-105 transition-all"
+              className="w-full inline-flex items-center justify-center gap-2 px-6 py-3 bg-gradient-to-r from-brand-600 to-brand-700 text-white rounded-xl font-semibold hover:shadow-lg hover:scale-105 transition-all"
             >
               <ExternalLink className="w-4 h-4" />
               Open MindRoom

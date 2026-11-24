@@ -1,0 +1,2026 @@
+"""The provider-neutral pipeline stages: retries, the idle limit, media fallback, tool search, and logging."""
+# ruff: noqa: D103
+
+from __future__ import annotations
+
+import asyncio
+import io
+import json
+import threading
+from dataclasses import dataclass, field, replace
+from functools import partial
+from typing import TYPE_CHECKING, cast
+
+import pytest
+from structlog.testing import capture_logs
+
+from mindroom.agent_loop.model_loop import EMPTY_REQUEST
+from mindroom.agent_loop.run import run_agent
+from mindroom.agent_loop.spec import AgentSpec, RunContext, UnstoredSession
+from mindroom.config.models import DebugConfig
+from mindroom.llm.errors import (
+    MALFORMED_TOOL_CALL,
+    MODEL_SAFEGUARD_REFUSAL_MESSAGE,
+    QUOTA_EXHAUSTED,
+    SAFEGUARD_REFUSAL,
+    ContextWindowExceeded,
+    InvalidRequest,
+    ModelSafeguardRefusal,
+    ProviderError,
+    ProviderUnavailable,
+    RateLimited,
+)
+from mindroom.llm.media import Audio, File, Image, Video
+from mindroom.llm.messages import AGGREGATE_USAGE_KEY, REWRITTEN_ATTEMPT_KEY, Message
+from mindroom.llm.provider import (
+    Capabilities,
+    DeferredTools,
+    ModelIdentity,
+    ModelRequest,
+    ReportedUsage,
+    StopReason,
+    StreamProgress,
+    TextDelta,
+    ToolCallReady,
+    ToolSpec,
+    TurnCompleted,
+    UsageReported,
+    complete,
+    hosted_tool_started,
+)
+from mindroom.llm.request_context import bind_llm_request_log_context
+from mindroom.llm.runs import RunRecord, RunStatus
+from mindroom.llm.tool_search import portable_tool_search_stream
+from mindroom.llm.usage import MessageMetrics, TokenCounts
+from mindroom.media_delivery import VIEWED_IMAGE_ID_PREFIX
+from mindroom.providers.errors import classify_provider_error
+from mindroom.providers.pipeline import request_log as request_log_stage
+from mindroom.providers.pipeline import retry as retry_stage
+from mindroom.providers.pipeline.guidance_retry import MALFORMED_FUNCTION_CALL_GUIDANCE, guidance_retry_stream
+from mindroom.providers.pipeline.media import (
+    FALLBACK_MARKER,
+    media_fallback_projection,
+    media_fallback_stream,
+)
+from mindroom.providers.pipeline.refusal import refusal_stream
+from mindroom.providers.pipeline.request_log import RequestLog, logged_stream
+from mindroom.providers.pipeline.retry import retrying_stream
+from mindroom.providers.pipeline.wrapped import Retry, WrappedProvider, attempts
+from tests.fakes.request_sizing import PlainRequestSizing
+from tests.fakes.scripted_model import Await, scripted_body
+from tests.fakes.token_counter import fake_token_counter
+from tests.providers.bare_adapter import drain, drain_into
+from tests.providers.golden_support import pipeline_provider
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
+    from pathlib import Path
+
+    from mindroom.llm.provider import StreamEvent, TokenCounter
+
+_PROMPT = "Use the attached image."
+_FALLBACK_PROMPT = "Media was not inspected."
+
+type _Step = StreamEvent | Exception | float | Await
+
+
+_IDENTITY = ModelIdentity(id="scripted", provider="Scripted")
+_CAPABILITIES = Capabilities()
+
+
+@dataclass
+class _ScriptedProvider(PlainRequestSizing):
+    """Answer each request with the next scripted attempt; an exception step raises, a float or ``Await`` step waits.
+
+    Unless ``sends`` is off, each attempt first reports its ``scripted_body`` as sent, so a failing step fails a
+    request that was sent.
+    """
+
+    attempts: list[list[_Step]]
+    identity: ModelIdentity = _IDENTITY
+    capabilities: Capabilities = _CAPABILITIES
+    native_history_route: None = None
+    token_counter: TokenCounter = field(default_factory=fake_token_counter)
+    model_params: dict[str, object] = field(default_factory=dict)
+    requests: list[ModelRequest] = field(default_factory=list)
+    closed: int = 0
+    sends: bool = True
+
+    async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
+        self.requests.append(request)
+        steps = self.attempts[len(self.requests) - 1]
+        if self.sends:
+            await request.on_send(scripted_body(self.identity, request))
+        try:
+            for step in steps:
+                if isinstance(step, Exception):
+                    raise step
+                if isinstance(step, float):
+                    await asyncio.sleep(step)
+                    continue
+                if isinstance(step, Await):
+                    await step.run()
+                    continue
+                yield cast("StreamEvent", step)
+        finally:
+            self.closed += 1
+
+
+def _turn(text: str = "done", usage: MessageMetrics | None = None) -> TurnCompleted:
+    message = Message(role="assistant", content=text, provider_data={"mindroom_model": {"id": "scripted"}})
+    if usage is not None:
+        message.metrics = usage
+    return TurnCompleted(message=message, stop_reason="end")
+
+
+def _transient(message: str = "overloaded") -> ProviderUnavailable:
+    return ProviderUnavailable(message, provider="Scripted", status_code=503)
+
+
+def _malformed() -> ProviderError:
+    message = "Generation ended with finish reason: MALFORMED_FUNCTION_CALL"
+    return ProviderError(message, provider="Scripted", code=MALFORMED_TOOL_CALL)
+
+
+@pytest.fixture(autouse=True)
+def _no_retry_delay(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(retry_stage, "_retry_delay_seconds", lambda _attempt: 0.0)
+
+
+def _user(text: str = "hi", **media: object) -> Message:
+    return Message(role="user", content=text, **media)
+
+
+# --- Stream retry ---------------------------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_transient_failure_before_output_is_retried_and_its_usage_carried() -> None:
+    """A failed attempt's reported usage is added to the finished turn, which is marked as aggregated."""
+    failed_usage = MessageMetrics(tokens=TokenCounts(input_tokens=40, output_tokens=0, total_tokens=40))
+    final_usage = MessageMetrics(tokens=TokenCounts(input_tokens=42, output_tokens=12, total_tokens=54))
+    inner = _ScriptedProvider(
+        [
+            [UsageReported(failed_usage), _transient()],
+            [TextDelta("done"), UsageReported(final_usage), _turn(usage=final_usage)],
+        ],
+    )
+    provider = WrappedProvider(inner, partial(retrying_stream, idle_timeout_seconds=None))
+
+    events = await drain(provider, ModelRequest(messages=[_user()]))
+
+    assert len(inner.requests) == 2
+    assert inner.closed == 2
+    reported = [event.usage for event in events if isinstance(event, UsageReported)]
+    assert reported == [failed_usage, final_usage]
+    finished = events[-1]
+    assert isinstance(finished, TurnCompleted)
+    assert finished.message.metrics.to_dict() == {"input_tokens": 82, "output_tokens": 12, "total_tokens": 94}
+    assert finished.message.provider_data == {"mindroom_model": {"id": "scripted"}, "mindroom_aggregate_usage": True}
+
+
+@pytest.mark.asyncio
+async def test_a_retried_turn_keeps_the_answering_attempt_s_context() -> None:
+    """Counters sum across attempts, but the context the model saw is the answering attempt's, not the failed one's."""
+
+    def usage(input_tokens: int) -> MessageMetrics:
+        return MessageMetrics(
+            tokens=TokenCounts(input_tokens=input_tokens, total_tokens=input_tokens),
+            context=TokenCounts(input_tokens=input_tokens),
+        )
+
+    inner = _ScriptedProvider([[UsageReported(usage(40)), _transient()], [TextDelta("done"), _turn(usage=usage(90))]])
+    provider = WrappedProvider(inner, partial(retrying_stream, idle_timeout_seconds=None))
+
+    finished = (await drain(provider, ModelRequest(messages=[_user()])))[-1]
+
+    assert isinstance(finished, TurnCompleted)
+    assert finished.message.metrics.context == TokenCounts(input_tokens=90)
+    assert finished.message.metrics.tokens.input_tokens == 130
+
+
+@pytest.mark.asyncio
+async def test_a_reissue_keeps_a_stripped_requests_budget_after_a_failure_that_carries_none() -> None:
+    """A stage above the retry stage can fail a stripped request itself, such as a download that fails."""
+    budget = object()
+    base = ModelRequest(messages=[_user()])
+    inner = _ScriptedProvider([[InvalidRequest("cannot download", provider="Scripted")], [_turn()]])
+    stripped = replace(base, strip_encrypted_replay=True, retry_budget=budget)
+
+    events = [event async for event in attempts(inner, stripped, lambda _error: Retry(base))]
+
+    assert isinstance(events[-1], TurnCompleted)
+    assert [(sent.strip_encrypted_replay, sent.retry_budget) for sent in inner.requests] == [(True, budget)] * 2
+
+
+@pytest.mark.asyncio
+async def test_a_transient_failure_is_reissued_after_its_backoff(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(retry_stage, "_retry_delay_seconds", lambda _attempt: 0.2)
+    inner = _ScriptedProvider([[_transient()], [_turn()]])
+    provider = WrappedProvider(inner, partial(retrying_stream, idle_timeout_seconds=None))
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+
+    await drain(provider, ModelRequest(messages=[_user()]))
+
+    assert (len(inner.requests), loop.time() - started >= 0.2) == (2, True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("hint", "delay"), [(0.25, 0.25), (61.0, 0.0), (None, 0.0)])
+async def test_a_retry_after_hint_of_at_most_a_minute_replaces_the_backoff(hint: float | None, delay: float) -> None:
+    """The provider's ``Retry-After`` decides the wait, as the SDK did when it retried; a longer hint is no hint."""
+    throttled = RateLimited("slow down", provider="Scripted", status_code=429, retry_after_seconds=hint)
+    inner = _ScriptedProvider([[throttled], [_turn()]])
+    provider = WrappedProvider(inner, partial(retrying_stream, idle_timeout_seconds=None))
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+
+    with capture_logs() as logs:
+        await drain(provider, ModelRequest(messages=[_user()]))
+
+    assert [entry["delay_seconds"] for entry in logs if entry["event"] == "provider_request_retried"] == [delay]
+    assert (len(inner.requests), loop.time() - started >= delay) == (2, True)
+
+
+@pytest.mark.asyncio
+async def test_failure_after_visible_output_is_not_retried() -> None:
+    inner = _ScriptedProvider([[TextDelta("partial"), _transient()], [_turn()]])
+    provider = WrappedProvider(inner, partial(retrying_stream, idle_timeout_seconds=None))
+
+    with pytest.raises(ProviderUnavailable):
+        await drain(provider, ModelRequest(messages=[_user()]))
+
+    assert len(inner.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_tool_call_counts_as_visible_output() -> None:
+    inner = _ScriptedProvider([[ToolCallReady({"id": "call_1"}), _transient()], [_turn()]])
+    provider = WrappedProvider(inner, partial(retrying_stream, idle_timeout_seconds=None))
+
+    with pytest.raises(ProviderUnavailable):
+        await drain(provider, ModelRequest(messages=[_user()]))
+
+    assert len(inner.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_progress_events_are_not_visible_output() -> None:
+    inner = _ScriptedProvider([[StreamProgress(), _transient()], [_turn()]])
+    provider = WrappedProvider(inner, partial(retrying_stream, idle_timeout_seconds=None))
+
+    events = await drain(provider, ModelRequest(messages=[_user()]))
+
+    assert (len(inner.requests), events[0]) == (2, StreamProgress())
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure",
+    [_transient(), 1.0],
+    ids=["provider-error", "stall"],
+)
+async def test_a_failure_after_a_hosted_tool_committed_the_attempt_is_final(failure: Exception | float) -> None:
+    """A retry could run the hosted tool again, so the stage reissues nothing, for its own stall too."""
+    inner = _ScriptedProvider([[StreamProgress(commits=True), failure, _turn()], [_turn()]])
+    provider = WrappedProvider(inner, partial(retrying_stream, idle_timeout_seconds=0.05))
+
+    with pytest.raises(ProviderUnavailable):
+        await drain(provider, ModelRequest(messages=[_user()]))
+
+    assert len(inner.requests) == 1
+
+
+@pytest.mark.parametrize(
+    ("name", "commits"),
+    [
+        ("tool_search_tool_regex", False),
+        ("tool_search_tool_bm25", False),
+        ("tool_search_tool_result", False),
+        ("tool_search_call", False),
+        ("tool_search_output", False),
+        ("compaction", False),
+        ("web_search", True),
+        ("web_fetch", True),
+        ("code_execution", True),
+        ("web_search_call", True),
+        ("file_search_call", True),
+        ("code_interpreter_call", True),
+        ("image_generation_call", True),
+        ("google_search", True),
+    ],
+)
+def test_only_a_hosted_tool_that_reads_keeps_the_attempt_retryable(name: str, *, commits: bool) -> None:
+    """Tool search and compaction repeat no work; every other hosted tool acts or costs, on every route."""
+    assert hosted_tool_started(name) == StreamProgress(commits=commits)
+
+
+@pytest.mark.asyncio
+async def test_non_retryable_failure_propagates_at_once() -> None:
+    inner = _ScriptedProvider([[InvalidRequest("bad body", provider="Scripted", status_code=400)], [_turn()]])
+    provider = WrappedProvider(inner, partial(retrying_stream, idle_timeout_seconds=None))
+
+    with pytest.raises(InvalidRequest):
+        await drain(provider, ModelRequest(messages=[_user()]))
+
+    assert len(inner.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_transient_retries_are_bounded() -> None:
+    inner = _ScriptedProvider([[_transient()] for _ in range(6)])
+    provider = WrappedProvider(inner, partial(retrying_stream, idle_timeout_seconds=None))
+
+    with pytest.raises(ProviderUnavailable):
+        await drain(provider, ModelRequest(messages=[_user()]))
+
+    assert len(inner.requests) == 5
+
+
+@pytest.mark.asyncio
+async def test_silent_stream_is_retried_once_then_fails_as_stalled() -> None:
+    inner = _ScriptedProvider([[1.0, _turn()], [1.0, _turn()], [_turn()]])
+    provider = WrappedProvider(inner, partial(retrying_stream, idle_timeout_seconds=0.01))
+
+    with pytest.raises(ProviderUnavailable, match="stalled") as info:
+        await drain(provider, ModelRequest(messages=[_user()]))
+
+    assert (info.value.status_code, info.value.code, len(inner.requests)) == (504, "stream_stalled", 2)
+
+
+@pytest.mark.asyncio
+async def test_a_timeout_the_provider_raises_is_not_reported_as_a_stall() -> None:
+    """An SDK's own timeout inside the idle limit propagates as raised instead of becoming a retried stall."""
+    inner = _ScriptedProvider([[TimeoutError("read timed out")], [_turn()]])
+    provider = WrappedProvider(inner, partial(retrying_stream, idle_timeout_seconds=60.0))
+
+    with pytest.raises(TimeoutError, match="read timed out"):
+        await drain(provider, ModelRequest(messages=[_user()]))
+
+    assert len(inner.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_a_failed_attempt_without_tokens_leaves_the_finished_turn_unmarked() -> None:
+    """The finished turn's token counts stay one request's own, so they still describe its context."""
+    final_usage = MessageMetrics(tokens=TokenCounts(input_tokens=42, output_tokens=12, total_tokens=54), duration=2.0)
+    inner = _ScriptedProvider(
+        [
+            [UsageReported(MessageMetrics(duration=1.5)), _transient()],
+            [UsageReported(final_usage), _turn(usage=final_usage)],
+        ],
+    )
+    provider = WrappedProvider(inner, partial(retrying_stream, idle_timeout_seconds=None))
+
+    events = await drain(provider, ModelRequest(messages=[_user()]))
+
+    finished = events[-1]
+    assert isinstance(finished, TurnCompleted)
+    assert finished.message.metrics.to_dict() == {
+        "input_tokens": 42,
+        "output_tokens": 12,
+        "total_tokens": 54,
+        "duration": 3.5,
+    }
+    assert finished.message.provider_data == {"mindroom_model": {"id": "scripted"}}
+    assert [event.sums_attempts for event in events if isinstance(event, UsageReported)] == [False, False]
+
+
+@pytest.mark.asyncio
+async def test_a_request_whose_every_attempt_failed_after_billing_input_reports_usage_that_sums_attempts() -> None:
+    """From the second attempt on, every report is marked, a failed attempt's partial one forwarded as final too.
+
+    A consumer that keeps the usage of a request cut off this way therefore reads it as no single request's.
+    """
+    started = MessageMetrics(tokens=TokenCounts(input_tokens=700, total_tokens=700))
+    inner = _ScriptedProvider([[UsageReported(started, final=False), _transient()] for _ in range(5)])
+    provider = WrappedProvider(inner, partial(retrying_stream, idle_timeout_seconds=None))
+    events: list[StreamEvent] = []
+
+    with pytest.raises(ProviderUnavailable):
+        await drain_into(events, provider, ModelRequest(messages=[_user()]))
+
+    reports = [event for event in events if isinstance(event, UsageReported)]
+    marks = [(event.final, event.sums_attempts) for event in reports]
+    assert marks == [(False, False), (True, False), *[(False, True), (True, True)] * 3, (False, True)]
+    received = ReportedUsage()
+    for event in reports:
+        received.observe(event)
+    assert received.received is not None
+    assert (received.received.tokens.input_tokens, received.sums_attempts) == (3500, True)
+
+
+@pytest.mark.asyncio
+async def test_usage_that_sums_attempts_stays_marked_when_an_outer_stage_forwards_it_again() -> None:
+    """A media retry forwards the failed attempt's partial report again unmarked, as its own first attempt's usage.
+
+    The request's reports already sum the transient retry's two attempts by then, so a consumer keeps the mark it read.
+    """
+    started = MessageMetrics(tokens=TokenCounts(input_tokens=700, total_tokens=700))
+    image_rejection = InvalidRequest(
+        "This model does not support image input",
+        provider="Scripted",
+        status_code=400,
+    )
+    rejection = InvalidRequest("The request was rejected", provider="Scripted", status_code=400)
+    inner = _ScriptedProvider(
+        [
+            [UsageReported(started, final=False), _transient()],
+            [UsageReported(started, final=False), image_rejection],
+            [rejection],
+        ],
+    )
+    events: list[StreamEvent] = []
+
+    with pytest.raises(InvalidRequest, match="rejected"):
+        await drain_into(events, pipeline_provider(inner), ModelRequest(messages=[_user(_PROMPT, images=[_image()])]))
+
+    assert len(inner.requests) == 3
+    received = ReportedUsage()
+    for event in events:
+        received.observe(event)
+    assert received.received is not None
+    assert (received.received.tokens.input_tokens, received.sums_attempts) == (1400, True)
+
+
+# --- Media fallback -------------------------------------------------------------------------------------------
+
+
+def _image(image_id: str = "image-1") -> Image:
+    return Image(id=image_id, content=b"\x89PNG\r\n\x1a\n0000", mime_type="image/png")
+
+
+@pytest.mark.asyncio
+async def test_media_the_route_omits_is_replaced_by_the_fallback_note() -> None:
+    inner = _ScriptedProvider([[_turn()]], capabilities=Capabilities(omitted_media=frozenset({"audio"})))
+    provider = WrappedProvider(inner, partial(media_fallback_stream, fallback_prompt=_FALLBACK_PROMPT))
+    audio = Audio(content=b"RIFF", mime_type="audio/wav")
+
+    await drain(provider, ModelRequest(messages=[_user(_PROMPT, audio=[audio], images=[_image()])]))
+
+    sent = inner.requests[0].messages[0]
+    assert sent.audio is None
+    assert sent.images == [_image()]
+    assert sent.content == f"{_PROMPT}\n\n{FALLBACK_MARKER}\n{_FALLBACK_PROMPT}"
+
+
+@pytest.mark.asyncio
+async def test_rejected_media_is_removed_for_one_retry_and_remembered_for_the_route() -> None:
+    rejection = InvalidRequest("This model does not support image input", provider="Scripted", status_code=400)
+    inner = _ScriptedProvider(
+        [[UsageReported(MessageMetrics(tokens=TokenCounts(input_tokens=5))), rejection], [_turn()], [_turn()]],
+    )
+    provider = WrappedProvider(inner, partial(media_fallback_stream, fallback_prompt=_FALLBACK_PROMPT))
+    request = ModelRequest(messages=[_user(_PROMPT, images=[_image()])])
+
+    events = await drain(provider, request)
+
+    retried = inner.requests[1].messages[0]
+    assert (retried.images, retried.content) == (None, f"{_PROMPT}\n\n{FALLBACK_MARKER}\n{_FALLBACK_PROMPT}")
+    finished = events[-1]
+    assert isinstance(finished, TurnCompleted)
+    assert finished.message.metrics.tokens.input_tokens == 5
+    assert finished.message.provider_data["mindroom_aggregate_usage"] is True
+    # The capability gap is learned, so the next request leaves the image out up front.
+    await drain(provider, request)
+    assert len(inner.requests) == 3
+    assert inner.requests[2].messages[0].images is None
+
+
+@pytest.mark.asyncio
+async def test_a_media_free_retry_that_is_rejected_too_ends_the_request() -> None:
+    rejection = InvalidRequest("This model does not support image input", provider="Scripted", status_code=400)
+    inner = _ScriptedProvider([[rejection], [rejection], [_turn()]])
+    provider = WrappedProvider(inner, partial(media_fallback_stream, fallback_prompt=_FALLBACK_PROMPT))
+
+    with pytest.raises(InvalidRequest):
+        await drain(provider, ModelRequest(messages=[_user(_PROMPT, images=[_image()])]))
+
+    assert len(inner.requests) == 2
+
+
+@pytest.mark.asyncio
+async def test_input_specific_rejection_retries_without_learning() -> None:
+    """The retry's usage describes a request without the image, so its answer is marked as another request's."""
+    rejection = InvalidRequest("Image exceeds 5 MB maximum", provider="Scripted", status_code=400)
+    inner = _ScriptedProvider([[rejection], [_turn()], [_turn()]])
+    provider = WrappedProvider(inner, partial(media_fallback_stream, fallback_prompt=_FALLBACK_PROMPT))
+    request = ModelRequest(messages=[_user(_PROMPT, images=[_image()])])
+
+    retried = (await drain(provider, request))[-1]
+    sent_as_asked = (await drain(provider, request))[-1]
+
+    assert inner.requests[1].messages[0].images is None
+    assert inner.requests[2].messages[0].images == [_image()]
+    assert isinstance(retried, TurnCompleted)
+    assert isinstance(sent_as_asked, TurnCompleted)
+    assert (retried.message.provider_data or {}).get(REWRITTEN_ATTEMPT_KEY) is True
+    assert REWRITTEN_ATTEMPT_KEY not in (sent_as_asked.message.provider_data or {})
+
+
+@pytest.mark.asyncio
+async def test_a_plain_retry_resends_the_request_and_marks_nothing() -> None:
+    inner = _ScriptedProvider([[_transient()], [_turn()]])
+    provider = WrappedProvider(inner, partial(retrying_stream, idle_timeout_seconds=None))
+
+    finished = (await drain(provider, ModelRequest(messages=[_user()])))[-1]
+
+    assert isinstance(finished, TurnCompleted)
+    assert REWRITTEN_ATTEMPT_KEY not in (finished.message.provider_data or {})
+
+
+@pytest.mark.asyncio
+async def test_a_learned_media_limit_changes_the_size_and_identity_of_a_request() -> None:
+    """Once the route learned its model rejects images, a request sizes the note it sends instead, under a new key."""
+    rejection = InvalidRequest("This model does not support image input", provider="Scripted", status_code=400)
+    inner = _ScriptedProvider([[rejection], [_turn()]], identity=replace(_IDENTITY, endpoint="http://learning/v1"))
+    provider = WrappedProvider(
+        inner,
+        partial(media_fallback_stream, fallback_prompt=_FALLBACK_PROMPT),
+        media_fallback_projection(_FALLBACK_PROMPT),
+    )
+    request = ModelRequest(messages=[_user(_PROMPT, images=[_image()])])
+    size, key = provider.request_tokens(request), provider.context_key(request)
+
+    await drain(provider, request)
+
+    assert provider.context_key(request) != key
+    assert provider.request_tokens(request) < size
+    assert provider.request_tokens(request) == inner.request_tokens(
+        ModelRequest(messages=[_user(f"{_PROMPT}\n\n{FALLBACK_MARKER}\n{_FALLBACK_PROMPT}")]),
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_payload_rejection_retries_without_learning() -> None:
+    """A 413 proves nothing about the model, even when its text names a capability gap."""
+    rejection = classify_provider_error(
+        "This model does not support image input",
+        provider="Scripted",
+        status_code=413,
+    )
+    inner = _ScriptedProvider([[rejection], [_turn()], [_turn()]])
+    provider = WrappedProvider(inner, partial(media_fallback_stream, fallback_prompt=_FALLBACK_PROMPT))
+    request = ModelRequest(messages=[_user(_PROMPT, images=[_image()])])
+
+    await drain(provider, request)
+    await drain(provider, request)
+
+    assert inner.requests[1].messages[0].images is None
+    assert inner.requests[2].messages[0].images == [_image()]
+
+
+@pytest.mark.asyncio
+async def test_audio_rejection_preserves_viewed_image_and_learns_only_audio() -> None:
+    rejection = InvalidRequest("No endpoints found that support input audio", provider="Scripted", status_code=404)
+    inner = _ScriptedProvider([[rejection], [_turn()], [_turn()]])
+    viewed = _image(f"{VIEWED_IMAGE_ID_PREFIX}att-1")
+    receipt = json.dumps({"view_status": "ready", "attachment_id": "att-1"})
+    request = ModelRequest(
+        messages=[
+            _user("Earlier voice message", audio=[_CLIP]),
+            Message(role="tool", tool_call_id="call_1", content=receipt),
+            _user("Viewed image follows.", images=[viewed]),
+        ],
+    )
+
+    await drain(_fallback_stage(inner), request)
+    await drain(_fallback_stage(inner), request)
+
+    assert len(inner.requests) == 3
+    for attempt in inner.requests[1:]:
+        assert attempt.messages[0].audio is None
+        assert FALLBACK_MARKER in attempt.messages[0].content
+        assert attempt.messages[1].content == receipt
+        assert attempt.messages[2].images == [viewed]
+        assert attempt.messages[2].content == "Viewed image follows."
+    assert request.messages[0].audio == [_CLIP]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "removed"),
+    [
+        ("This model does not support audio input", "audio"),
+        ("Audio inputs are not supported", "audio"),
+        ("This model doesn't support images", "image"),
+        ("This model does not support vision", "image"),
+        ("No endpoints found that support input video", "video"),
+        ("File input is not supported", "file"),
+        ("This model does not support pdf input", "file"),
+        ("Document inputs are not supported", "file"),
+        ("This model does not support audio input; images are supported", "audio"),
+    ],
+)
+async def test_named_media_kind_aliases_retry_and_learn_only_that_kind(error: str, removed: str) -> None:
+    inner = _ScriptedProvider([[_rejection(message=error)], [_turn()], [_turn()]])
+    video = Video(content=b"video", mime_type="video/mp4")
+    request = ModelRequest(messages=[_user(images=[_image()], audio=[_CLIP], files=[_REPORT], videos=[video])])
+    expected = {
+        "image": None if removed == "image" else [_image()],
+        "audio": None if removed == "audio" else [_CLIP],
+        "file": None if removed == "file" else [_REPORT],
+        "video": None if removed == "video" else [video],
+    }
+
+    await drain(_fallback_stage(inner), request)
+    await drain(_fallback_stage(inner), request)
+
+    assert len(inner.requests) == 3
+    for attempt in inner.requests[1:]:
+        message = attempt.messages[0]
+        assert {
+            "image": message.images,
+            "audio": message.audio,
+            "file": message.files,
+            "video": message.videos,
+        } == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "rejects_files"),
+    [
+        ("Audio and video inputs are not supported", False),
+        ("Audio or video inputs are not supported", False),
+        ("Audio, video and file inputs are not supported", True),
+        ("Audio, video, and files are not supported; images are supported", True),
+        ("No endpoints found that support input audio and video", False),
+        ("No endpoints found that support input audio, video and file", True),
+        ("This model does not support audio or video inputs; images are supported", False),
+        ("Images are supported, but audio and video inputs are not supported", False),
+    ],
+)
+async def test_coordinated_media_rejection_preserves_images_and_learns_all_rejected_kinds(
+    error: str,
+    rejects_files: bool,
+) -> None:
+    """A coordinated unsupported clause removes and teaches every named kind, not unrelated supported kinds."""
+    inner = _ScriptedProvider([[_rejection(message=error)], [_turn()], [_turn()]])
+    video = Video(content=b"video", mime_type="video/mp4")
+    request = ModelRequest(messages=[_user(_PROMPT, images=[_image()], audio=[_CLIP], videos=[video], files=[_REPORT])])
+
+    await drain(_fallback_stage(inner), request)
+    await drain(_fallback_stage(inner), request)
+
+    assert len(inner.requests) == 3
+    for attempt in inner.requests[1:]:
+        message = attempt.messages[0]
+        assert message.images == [_image()]
+        assert message.audio is None
+        assert message.videos is None
+        assert message.files == (None if rejects_files else [_REPORT])
+        assert message.content == f"{_PROMPT}\n\n{FALLBACK_MARKER}\n{_FALLBACK_PROMPT}"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error",
+    [
+        "This model does not support audio and images are supported",
+        "This model does not support audio, images are supported",
+    ],
+)
+async def test_affirmative_clause_after_unsupported_kind_keeps_its_kind(error: str) -> None:
+    """A kind that starts its own "are supported" clause is not part of the unsupported list."""
+    inner = _ScriptedProvider([[_rejection(message=error)], [_turn()], [_turn()]])
+    request = ModelRequest(messages=[_user(_PROMPT, images=[_image()], audio=[_CLIP])])
+
+    await drain(_fallback_stage(inner), request)
+    await drain(_fallback_stage(inner), request)
+
+    assert len(inner.requests) == 3
+    for attempt in inner.requests[1:]:
+        assert attempt.messages[0].images == [_image()]
+        assert attempt.messages[0].audio is None
+
+
+@pytest.mark.asyncio
+async def test_kind_retry_failure_uses_backstop_without_learning_unrelated_images() -> None:
+    inner = _ScriptedProvider(
+        [
+            [_rejection(message="No endpoints found that support input audio")],
+            [_rejection(message="Invalid request")],
+            [_turn()],
+            [_turn()],
+        ],
+    )
+    request = ModelRequest(messages=[_user(images=[_image()], audio=[_CLIP])])
+
+    await drain(_fallback_stage(inner), request)
+    await drain(_fallback_stage(inner), request)
+
+    assert [(r.messages[0].images, r.messages[0].audio) for r in inner.requests] == [
+        ([_image()], [_CLIP]),
+        ([_image()], None),
+        (None, None),
+        ([_image()], None),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", ["Invalid request", "This is not a multimodal model"])
+async def test_unnamed_media_errors_strip_all_without_learning(error: str) -> None:
+    inner = _ScriptedProvider([[_rejection(message=error)], [_turn()], [_turn()]])
+    request = ModelRequest(messages=[_user(images=[_image()], audio=[_CLIP])])
+
+    await drain(_fallback_stage(inner), request)
+    await drain(_fallback_stage(inner), request)
+
+    assert (inner.requests[1].messages[0].images, inner.requests[1].messages[0].audio) == (None, None)
+    assert (inner.requests[2].messages[0].images, inner.requests[2].messages[0].audio) == ([_image()], [_CLIP])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "rejection",
+    [
+        InvalidRequest("This model does not support audio input", provider="Scripted", status_code=413),
+        ContextWindowExceeded("This model does not support audio input", provider="Scripted"),
+        InvalidRequest("Audio exceeds size limit; does not support audio input", provider="Scripted"),
+        InvalidRequest("Unsupported MIME type; does not support audio input", provider="Scripted"),
+        InvalidRequest("Invalid audio; model does not support images", provider="Scripted"),
+        InvalidRequest("This is not a multimodal model", provider="Scripted"),
+        InvalidRequest("This is only supported by certain models", provider="Scripted"),
+    ],
+)
+async def test_media_learning_requires_a_named_capability_gap_not_an_input_error(rejection: ProviderError) -> None:
+    inner = _ScriptedProvider([[rejection], [_turn()], [_turn()]])
+    request = ModelRequest(messages=[_user(audio=[_CLIP])])
+
+    await drain(_fallback_stage(inner), request)
+    await drain(_fallback_stage(inner), request)
+
+    assert inner.requests[1].messages[0].audio is None
+    assert inner.requests[2].messages[0].audio == [_CLIP]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "removed"),
+    [("Unsupported file", "file"), ("Unsupported image type", "image")],
+)
+async def test_unsupported_payload_retries_only_named_kind_without_learning(error: str, removed: str) -> None:
+    inner = _ScriptedProvider([[_rejection(message=error)], [_turn()], [_turn()]])
+    request = ModelRequest(messages=[_user(images=[_image()], audio=[_CLIP], files=[_REPORT])])
+
+    await drain(_fallback_stage(inner), request)
+    await drain(_fallback_stage(inner), request)
+
+    assert len(inner.requests) == 3
+    retry = inner.requests[1].messages[0]
+    assert retry.images == (None if removed == "image" else [_image()])
+    assert retry.files == (None if removed == "file" else [_REPORT])
+    assert retry.audio == [_CLIP]
+    subsequent = inner.requests[2].messages[0]
+    assert subsequent.images == [_image()]
+    assert subsequent.files == [_REPORT]
+    assert subsequent.audio == [_CLIP]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("end", ["failed", "visible", "closed", "cancelled"])
+async def test_unsuccessful_kind_retry_does_not_teach_capabilities(end: str) -> None:
+    rejection = _rejection(message="This model does not support audio input")
+    waiting = asyncio.Event()
+
+    async def wait_for_cancellation() -> None:
+        waiting.set()
+        await asyncio.Event().wait()
+
+    steps: list[_Step] = [TextDelta("partial")] if end != "failed" else []
+    if end == "cancelled":
+        steps = [Await(wait_for_cancellation)]
+    elif end != "closed":
+        steps.append(_transient())
+    inner = _ScriptedProvider([[rejection], steps, [_turn()]])
+    request = ModelRequest(messages=[_user(images=[_image()], audio=[_CLIP])])
+    provider = _fallback_stage(inner)
+
+    if end == "cancelled":
+        task = asyncio.create_task(drain(provider, request))
+        await waiting.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    elif end == "closed":
+        stream = provider.stream(request)
+        assert isinstance(await anext(stream), TextDelta)
+        await stream.aclose()
+    else:
+        with pytest.raises(ProviderError):
+            await drain(provider, request)
+    await drain(provider, request)
+
+    assert inner.requests[-1].messages[0].images == [_image()]
+    assert inner.requests[-1].messages[0].audio == [_CLIP]
+
+
+@pytest.mark.asyncio
+async def test_a_learned_media_limit_stays_with_its_endpoint() -> None:
+    """The same model id behind another endpoint keeps sending the media one endpoint rejected."""
+    rejection = InvalidRequest("This model does not support image input", provider="Scripted", status_code=400)
+    first = _ScriptedProvider([[rejection], [_turn()]], identity=replace(_IDENTITY, endpoint="http://one/v1"))
+    other = _ScriptedProvider([[_turn()]], identity=replace(_IDENTITY, endpoint="http://two/v1"))
+    request = ModelRequest(messages=[_user(_PROMPT, images=[_image()])])
+
+    await drain(WrappedProvider(first, partial(media_fallback_stream, fallback_prompt=_FALLBACK_PROMPT)), request)
+    await drain(WrappedProvider(other, partial(media_fallback_stream, fallback_prompt=_FALLBACK_PROMPT)), request)
+
+    assert other.requests[0].messages[0].images == [_image()]
+
+
+@pytest.mark.asyncio
+async def test_a_rejection_after_a_hosted_tool_committed_the_attempt_is_not_resent_without_media() -> None:
+    rejection = InvalidRequest("This model does not support image input", provider="Scripted", status_code=400)
+    inner = _ScriptedProvider([[StreamProgress(commits=True), rejection], [_turn()]])
+    provider = WrappedProvider(inner, partial(media_fallback_stream, fallback_prompt=_FALLBACK_PROMPT))
+
+    with pytest.raises(InvalidRequest):
+        await drain(provider, ModelRequest(messages=[_user(_PROMPT, images=[_image()])]))
+
+    assert len(inner.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_retryable_failures_and_visible_output_are_not_media_retries() -> None:
+    transient = _ScriptedProvider([[_transient()]])
+    visible = _ScriptedProvider(
+        [[TextDelta("partial"), InvalidRequest("This model does not support image input", provider="x")]],
+    )
+    request = ModelRequest(messages=[_user(_PROMPT, images=[_image()])])
+
+    for inner in (transient, visible):
+        with pytest.raises(ProviderError):
+            await drain(WrappedProvider(inner, partial(media_fallback_stream, fallback_prompt="x")), request)
+        assert len(inner.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_removed_viewed_image_marks_its_receipt_unsupported() -> None:
+    receipt = json.dumps({"view_status": "ready", "attachment_id": "att-1"})
+    messages = [
+        Message(
+            role="assistant",
+            tool_calls=[
+                {"id": "call_1", "type": "function", "function": {"name": "get_attachment", "arguments": "{}"}},
+            ],
+        ),
+        Message(role="tool", tool_call_id="call_1", content=receipt),
+        _user("Viewed image follows.", images=[_image(f"{VIEWED_IMAGE_ID_PREFIX}att-1")]),
+    ]
+    inner = _ScriptedProvider([[_turn()]], capabilities=Capabilities(omitted_media=frozenset({"image"})))
+
+    await drain(
+        WrappedProvider(inner, partial(media_fallback_stream, fallback_prompt="x")),
+        ModelRequest(messages=messages),
+    )
+
+    tool_result = json.loads(inner.requests[0].messages[1].content)
+    assert tool_result["view_status"] == "unsupported"
+    assert messages[1].content == receipt
+
+
+# --- Media the rejection names --------------------------------------------------------------------------------
+
+_REPORT = File(id="att_report", content=b"%PDF-1.4", filename="report.pdf", mime_type="application/pdf")
+_CLIP = Audio(id="att_clip", content=b"RIFF", mime_type="audio/wav")
+
+
+def _rejection(*rejected: str, message: str = "Unsupported media") -> InvalidRequest:
+    return InvalidRequest(message, provider="Scripted", status_code=400, rejected_media=frozenset(rejected))
+
+
+def _media_request() -> ModelRequest:
+    """A prompt with two images, a file, and a clip, after a turn without media."""
+    return ModelRequest(
+        messages=[
+            _user("Earlier"),
+            _user(_PROMPT, images=[_image("att_photo"), _image("att_scan")], files=[_REPORT], audio=[_CLIP]),
+        ],
+    )
+
+
+def _sent(messages: list[Message]) -> list[tuple[object, ...]]:
+    """What a request's messages send: each one's role, content, and media."""
+    return [(item.role, item.content, item.images, item.audio, item.videos, item.files) for item in messages]
+
+
+# What the media-free retry sends for ``_media_request``, as the stage sent it before rejections named media.
+_MEDIA_FREE = [
+    ("user", "Earlier", None, None, None, None),
+    ("user", f"{_PROMPT}\n\n{FALLBACK_MARKER}\n{_FALLBACK_PROMPT}", None, None, None, None),
+]
+
+
+def _fallback_stage(inner: _ScriptedProvider) -> WrappedProvider:
+    return WrappedProvider(inner, partial(media_fallback_stream, fallback_prompt=_FALLBACK_PROMPT))
+
+
+@pytest.mark.asyncio
+async def test_a_rejection_that_names_some_media_retries_without_only_those_and_names_them() -> None:
+    inner = _ScriptedProvider([[_rejection("att_photo", "att_report")], [_turn()]])
+
+    await drain(_fallback_stage(inner), _media_request())
+
+    earlier, retried = inner.requests[1].messages
+    assert _sent([earlier]) == _MEDIA_FREE[:1]
+    assert (retried.images, retried.files, retried.audio) == ([_image("att_scan")], None, [_CLIP])
+    named = "Not sent: image (att_photo), report.pdf (att_report)."
+    assert retried.content == f"{_PROMPT}\n\n{FALLBACK_MARKER}\n{named}\n{_FALLBACK_PROMPT}"
+    assert len(inner.requests) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "rejected",
+    [(), ("att_photo", "att_scan", "att_report", "att_clip"), ("att_unsent",)],
+    ids=["names-none", "names-all", "names-only-unsent-media"],
+)
+async def test_a_rejection_that_names_no_part_of_the_media_retries_without_any_of_it(rejected: tuple[str, ...]) -> None:
+    """The retry is the media-free request the stage always sent, byte for byte, note included."""
+    inner = _ScriptedProvider([[_rejection(*rejected)], [_turn()]])
+
+    await drain(_fallback_stage(inner), _media_request())
+
+    assert _sent(inner.requests[1].messages) == _MEDIA_FREE
+    assert len(inner.requests) == 2
+
+
+@pytest.mark.asyncio
+async def test_explicitly_rejected_items_take_precedence_over_a_named_kind() -> None:
+    rejection = _rejection(
+        "att_photo",
+        "att_scan",
+        "att_report",
+        "att_clip",
+        message="This model does not support image input",
+    )
+    inner = _ScriptedProvider([[rejection], [_turn()]])
+
+    await drain(_fallback_stage(inner), _media_request())
+
+    assert _sent(inner.requests[1].messages) == _MEDIA_FREE
+
+
+@pytest.mark.asyncio
+async def test_a_request_too_large_for_the_window_retries_without_any_media_whatever_it_names() -> None:
+    """Only a rejected request body names its parts; a request that does not fit shrinks as a whole."""
+    too_large = ContextWindowExceeded(
+        "Request too large",
+        provider="Scripted",
+        status_code=413,
+        rejected_media=frozenset({"att_photo"}),
+    )
+    inner = _ScriptedProvider([[too_large], [_turn()]])
+
+    await drain(_fallback_stage(inner), _media_request())
+
+    assert _sent(inner.requests[1].messages) == _MEDIA_FREE
+
+
+@pytest.mark.asyncio
+async def test_a_named_retry_that_is_rejected_too_is_sent_once_more_without_any_media() -> None:
+    """A wrong or partial naming costs one request: the media-free request still answers."""
+    inner = _ScriptedProvider([[_rejection("att_photo")], [_rejection("att_scan")], [_turn("answered")]])
+
+    events = await drain(_fallback_stage(inner), _media_request())
+
+    assert inner.requests[1].messages[1].images == [_image("att_scan")]
+    assert _sent(inner.requests[2].messages) == _MEDIA_FREE
+    finished = events[-1]
+    assert isinstance(finished, TurnCompleted)
+    assert finished.message.content == "answered"
+
+
+@pytest.mark.asyncio
+async def test_a_third_rejection_ends_the_request() -> None:
+    inner = _ScriptedProvider([[_rejection("att_photo")], [_rejection()], [_rejection()], [_turn()]])
+
+    with pytest.raises(InvalidRequest):
+        await drain(_fallback_stage(inner), _media_request())
+
+    assert len(inner.requests) == 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure",
+    [
+        _transient(),
+        ProviderError("You exceeded your current quota", provider="Scripted", code=QUOTA_EXHAUSTED),
+    ],
+    ids=["retryable", "quota"],
+)
+async def test_a_named_retry_ends_at_a_failure_the_media_cannot_have_caused(failure: ProviderError) -> None:
+    inner = _ScriptedProvider([[_rejection("att_photo")], [failure], [_turn()]])
+
+    with pytest.raises(ProviderError) as raised:
+        await drain(_fallback_stage(inner), _media_request())
+
+    assert raised.value is failure
+    assert len(inner.requests) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_named_retry_that_answers_teaches_the_route_nothing() -> None:
+    """Removing one image while another succeeds cannot establish an image capability gap."""
+    gap = "This model does not support image input"
+    inner = _ScriptedProvider([[_rejection("att_photo", message=gap)], [_turn()], [_turn()]])
+    request = ModelRequest(messages=[_user(_PROMPT, images=[_image("att_photo"), _image("att_scan")])])
+
+    await drain(_fallback_stage(inner), request)
+    await drain(_fallback_stage(inner), request)
+
+    assert inner.requests[1].messages[0].images == [_image("att_scan")]
+    assert inner.requests[2].messages[0].images == [_image("att_photo"), _image("att_scan")]
+
+
+@pytest.mark.asyncio
+async def test_a_capability_gap_is_learned_once_the_media_free_backstop_answers() -> None:
+    gap = "This model does not support image input"
+    inner = _ScriptedProvider([[_rejection("att_photo", message=gap)], [_rejection(message=gap)], [_turn()], [_turn()]])
+    request = ModelRequest(messages=[_user(_PROMPT, images=[_image("att_photo"), _image("att_scan")])])
+
+    await drain(_fallback_stage(inner), request)
+    await drain(_fallback_stage(inner), request)
+
+    assert [len(attempt.messages[0].images or ()) for attempt in inner.requests] == [2, 1, 0, 0]
+    assert len(inner.requests) == 4
+
+
+@pytest.mark.asyncio
+async def test_openrouters_missing_audio_endpoint_is_learned() -> None:
+    """OpenRouter names the gap as no endpoint supporting input audio, so the next request leaves the audio out."""
+    gap = InvalidRequest("No endpoints found that support input audio", provider="Scripted", status_code=404)
+    inner = _ScriptedProvider([[gap], [_turn()], [_turn()]])
+    request = ModelRequest(messages=[_user(_PROMPT, audio=[_CLIP])])
+
+    await drain(_fallback_stage(inner), request)
+    await drain(_fallback_stage(inner), request)
+
+    assert [attempt.messages[0].audio for attempt in inner.requests] == [[_CLIP], None, None]
+
+
+@pytest.mark.asyncio
+async def test_a_named_retry_leaves_the_media_the_route_omits_out_and_names_it_too() -> None:
+    """Media the route never takes stays out of the named retry, and the one note names it beside the rejected item."""
+    inner = _ScriptedProvider(
+        [[_rejection("att_photo")], [_turn()]],
+        capabilities=Capabilities(omitted_media=frozenset({"audio"})),
+    )
+
+    await drain(_fallback_stage(inner), _media_request())
+
+    sent = inner.requests[0].messages[1]
+    assert (sent.audio, sent.content) == (None, f"{_PROMPT}\n\n{FALLBACK_MARKER}\n{_FALLBACK_PROMPT}")
+    retried = inner.requests[1].messages[1]
+    assert (retried.audio, retried.images, retried.files) == (None, [_image("att_scan")], [_REPORT])
+    named = "Not sent: image (att_photo), audio (att_clip)."
+    assert retried.content == f"{_PROMPT}\n\n{FALLBACK_MARKER}\n{named}\n{_FALLBACK_PROMPT}"
+
+
+@pytest.mark.asyncio
+async def test_a_named_viewed_image_removes_every_image_and_marks_the_receipts() -> None:
+    """A viewed image's receipt cannot be told apart from the others', so naming one leaves every image out."""
+    receipt = json.dumps({"view_status": "ready", "attachment_id": "att-1"})
+    viewed = _image(f"{VIEWED_IMAGE_ID_PREFIX}1")
+    messages = [
+        Message(
+            role="assistant",
+            tool_calls=[
+                {"id": "call_1", "type": "function", "function": {"name": "get_attachment", "arguments": "{}"}},
+            ],
+        ),
+        Message(role="tool", tool_call_id="call_1", content=receipt),
+        _user("Viewed image follows.", images=[viewed, _image("att_photo")], files=[_REPORT]),
+    ]
+    inner = _ScriptedProvider([[_rejection(viewed.id)], [_turn()]])
+
+    await drain(_fallback_stage(inner), ModelRequest(messages=messages))
+
+    retried = inner.requests[1].messages
+    assert json.loads(retried[1].content)["view_status"] == "unsupported"
+    assert (retried[2].images, retried[2].files) == (None, [_REPORT])
+    named = "Not sent: image, image (att_photo)."
+    assert retried[2].content == f"Viewed image follows.\n\n{FALLBACK_MARKER}\n{named}\n{_FALLBACK_PROMPT}"
+
+
+@pytest.mark.asyncio
+async def test_the_note_names_each_removed_item_by_its_file_name_or_kind() -> None:
+    """Only stored attachments' ids, which ``get_attachment`` takes, appear beside the label."""
+    unnamed = File(id="tool-file", content=b"data")
+    clip = Audio(id="generated-clip", content=b"RIFF", mime_type="audio/wav")
+    message = _user(_PROMPT, images=[_image("att_photo")], files=[_REPORT, unnamed], audio=[clip, _CLIP])
+    inner = _ScriptedProvider([[_rejection("tool-file", "generated-clip", "att_report")], [_turn()]])
+
+    await drain(_fallback_stage(inner), ModelRequest(messages=[message]))
+
+    retried = inner.requests[1].messages[0]
+    named = "Not sent: audio, report.pdf (att_report), file."
+    assert retried.content == f"{_PROMPT}\n\n{FALLBACK_MARKER}\n{named}\n{_FALLBACK_PROMPT}"
+    assert (retried.images, retried.files, retried.audio) == ([_image("att_photo")], None, [_CLIP])
+
+
+# --- Portable tool search -------------------------------------------------------------------------------------
+
+
+def _tool(name: str) -> ToolSpec:
+    return ToolSpec(
+        name=name,
+        description=name,
+        parameters={"type": "object"},
+        strict=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_portable_tool_search_hides_deferred_tools_behind_call_tool() -> None:
+    stored_call = {
+        "id": "call_1",
+        "type": "function",
+        "function": {"name": "lookup_order", "arguments": '{"order_id": "A-1"}'},
+    }
+    messages = [
+        Message(role="assistant", tool_calls=[stored_call]),
+        Message(role="tool", tool_call_id="call_1", tool_name="lookup_order", content="shipped"),
+    ]
+    inner = _ScriptedProvider([[_turn()]])
+    request = ModelRequest(
+        messages=messages,
+        tools=[_tool("call_tool"), _tool("lookup_order"), _tool("tool_search")],
+        deferred_tools=DeferredTools(names=frozenset({"lookup_order"}), portable=True),
+    )
+
+    await drain(WrappedProvider(inner, portable_tool_search_stream), request)
+
+    sent = inner.requests[0]
+    assert [tool.name for tool in sent.tools] == ["call_tool", "tool_search"]
+    assert sent.deferred_tools == DeferredTools()
+    assert sent.messages[0].tool_calls == [
+        {
+            "id": "call_1",
+            "type": "function",
+            "function": {
+                "name": "call_tool",
+                "arguments": '{"name": "lookup_order", "arguments": {"order_id": "A-1"}}',
+            },
+        },
+    ]
+    assert sent.messages[1].tool_name == "call_tool"
+    assert messages[0].tool_calls == [stored_call]
+
+
+@pytest.mark.asyncio
+async def test_native_tool_search_routes_receive_the_deferred_names() -> None:
+    inner = _ScriptedProvider([[_turn()]], capabilities=Capabilities(native_tool_search=True))
+    request = ModelRequest(
+        messages=[_user()],
+        tools=[_tool("lookup_order")],
+        deferred_tools=DeferredTools(names=frozenset({"lookup_order"})),
+    )
+
+    await drain(WrappedProvider(inner, portable_tool_search_stream), request)
+
+    assert inner.requests[0] is request
+
+
+def _stored_call(call_id: str, name: str, arguments: str) -> dict[str, object]:
+    return {"id": call_id, "type": "function", "function": {"name": name, "arguments": arguments}}
+
+
+@pytest.mark.asyncio
+async def test_portable_tool_search_projects_stored_calls_byte_stably() -> None:
+    """Repeated requests wrap the same deferred call identically and leave eager and unknown calls untouched."""
+    eager = _stored_call("call_2", "shell", "{}")
+    legacy = _stored_call("call_3", "load_tool", '{"tool_name": "crm"}')
+    assistant = Message(role="assistant", tool_calls=[_stored_call("call_1", "lookup_order", '{"note": "é"}'), eager])
+    untouched = Message(role="assistant", tool_calls=[legacy])
+    inner = _ScriptedProvider([[_turn()], [_turn()]])
+    request = ModelRequest(
+        messages=[assistant, untouched],
+        deferred_tools=DeferredTools(names=frozenset({"lookup_order"}), portable=True),
+    )
+
+    await drain(WrappedProvider(inner, portable_tool_search_stream), request)
+    await drain(WrappedProvider(inner, portable_tool_search_stream), request)
+
+    first, second = (sent.messages for sent in inner.requests)
+    assert first[0].tool_calls == second[0].tool_calls
+    assert first[0].tool_calls[0]["function"]["arguments"] == '{"name": "lookup_order", "arguments": {"note": "é"}}'
+    assert first[0].tool_calls[1] is eager
+    assert first[1] is untouched
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stored", "arguments"),
+    [
+        ("{'order_id': 'A-1'}", {"order_id": "A-1"}),
+        ("[]", {}),
+        ("", {}),
+        ('"A-1"', {}),
+        ('{{"id": 1}}', {}),
+    ],
+    ids=["python-literal", "empty-list", "empty", "not-an-object", "unparseable"],
+)
+async def test_portable_tool_search_wraps_stored_arguments_as_an_object(stored: str, arguments: dict[str, str]) -> None:
+    """Stored arguments Agno accepted keep their values; malformed ones wrap as empty instead of breaking the thread."""
+    assistant = Message(role="assistant", tool_calls=[_stored_call("call_1", "lookup_order", stored)])
+    inner = _ScriptedProvider([[_turn()]])
+    request = ModelRequest(
+        messages=[assistant],
+        deferred_tools=DeferredTools(names=frozenset({"lookup_order"}), portable=True),
+    )
+
+    await drain(WrappedProvider(inner, portable_tool_search_stream), request)
+
+    wrapped = inner.requests[0].messages[0].tool_calls[0]["function"]["arguments"]
+    assert json.loads(wrapped) == {"name": "lookup_order", "arguments": arguments}
+
+
+# --- Safeguard refusal ----------------------------------------------------------------------------------------
+
+
+def _refusal(usage: MessageMetrics, stop_reason: StopReason = "refusal") -> TurnCompleted:
+    return TurnCompleted(message=Message(role="assistant", metrics=usage), stop_reason=stop_reason)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stop_reason", ["refusal", "content_filter"])
+async def test_a_refused_turn_raises_the_typed_refusal_after_its_usage(stop_reason: StopReason) -> None:
+    """A safety filter's stop is a refusal too: OpenRouter reports Claude's refusals as ``content_filter``."""
+    usage = MessageMetrics(tokens=TokenCounts(input_tokens=40, output_tokens=9, total_tokens=49))
+    inner = _ScriptedProvider([[UsageReported(usage), _refusal(usage, stop_reason)]])
+    events = WrappedProvider(inner, refusal_stream).stream(ModelRequest(messages=[_user()]))
+
+    assert await anext(events) == UsageReported(usage)
+    with pytest.raises(ModelSafeguardRefusal) as raised:
+        await anext(events)
+
+    refusal = raised.value
+    assert (str(refusal), refusal.code, refusal.provider, refusal.retryable) == (
+        MODEL_SAFEGUARD_REFUSAL_MESSAGE,
+        SAFEGUARD_REFUSAL,
+        "Scripted",
+        False,
+    )
+    assert inner.closed == 1
+
+
+@pytest.mark.asyncio
+async def test_a_refusal_is_neither_retried_nor_resent_without_media() -> None:
+    """A transient failure before still retries; the refused attempt ends the request with its media intact."""
+    usage = MessageMetrics(tokens=TokenCounts(input_tokens=40, output_tokens=9, total_tokens=49))
+    inner = _ScriptedProvider([[_transient()], [UsageReported(usage), _refusal(usage)]])
+    provider = pipeline_provider(inner)
+
+    with pytest.raises(ModelSafeguardRefusal):
+        await complete(provider, ModelRequest(messages=[_user(_PROMPT, images=[_image()])]))
+
+    assert len(inner.requests) == 2
+    assert all(request.messages[0].images for request in inner.requests)
+
+
+# --- An account out of credit ---------------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_an_account_out_of_credit_is_neither_retried_nor_resent_without_media() -> None:
+    """Only a change to the account's billing lets the request through, and its media did not cause the failure."""
+    quota = classify_provider_error(
+        "You exceeded your current quota, please check your plan and billing details.",
+        provider="Scripted",
+        status_code=429,
+        code="insufficient_quota",
+    )
+    inner = _ScriptedProvider([[quota], [_turn()]])
+
+    with pytest.raises(ProviderError) as raised:
+        await complete(pipeline_provider(inner), ModelRequest(messages=[_user(_PROMPT, images=[_image()])]))
+
+    assert raised.value.code == QUOTA_EXHAUSTED
+    assert len(inner.requests) == 1
+
+
+# --- Malformed tool-call guidance -----------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_a_malformed_tool_call_is_retried_with_guidance_on_the_retried_request_only() -> None:
+    """The guidance is appended to the resent request, never to the caller's conversation; usage carries over."""
+    failed = MessageMetrics(tokens=TokenCounts(input_tokens=30, total_tokens=30))
+    final = MessageMetrics(tokens=TokenCounts(input_tokens=42, output_tokens=12, total_tokens=54))
+    inner = _ScriptedProvider(
+        [[UsageReported(failed), _malformed()], [TextDelta("done"), UsageReported(final), _turn(usage=final)]],
+    )
+    message = _user()
+    conversation = [message]
+    request = ModelRequest(messages=conversation)
+
+    events = await drain(WrappedProvider(inner, guidance_retry_stream), request)
+
+    first, retried = inner.requests
+    *resent, guidance = retried.messages
+    assert first is request
+    assert resent == [message]
+    assert (guidance.role, guidance.content) == ("user", MALFORMED_FUNCTION_CALL_GUIDANCE)
+    assert conversation == [message]
+    finished = events[-1]
+    assert isinstance(finished, TurnCompleted)
+    assert finished.message.metrics.to_dict() == {"input_tokens": 72, "output_tokens": 12, "total_tokens": 84}
+    assert (finished.message.provider_data or {})[AGGREGATE_USAGE_KEY] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "attempt",
+    [[TextDelta("partial"), _malformed()], [InvalidRequest("bad", provider="Scripted", status_code=400)]],
+    ids=["malformed-after-output", "other-error"],
+)
+async def test_only_a_malformed_tool_call_before_output_gets_guidance(attempt: list[_Step]) -> None:
+    inner = _ScriptedProvider([attempt, [_turn()]])
+
+    with pytest.raises(ProviderError):
+        await drain(WrappedProvider(inner, guidance_retry_stream), ModelRequest(messages=[_user()]))
+
+    assert len(inner.requests) == 1
+
+
+# --- Request logging ------------------------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_request_log_records_the_request_and_its_usage(tmp_path: Path) -> None:
+    usage = MessageMetrics(tokens=TokenCounts(input_tokens=42, output_tokens=12, total_tokens=54, cache_read_tokens=30))
+    inner = _ScriptedProvider([[UsageReported(usage), _turn(usage=usage)]], model_params={"temperature": 0.2})
+    log = RequestLog(
+        model_name="default",
+        configured_provider="openai",
+        debug=DebugConfig(log_llm_requests=True, llm_request_log_dir=str(tmp_path)),
+        storage_root=tmp_path / "unused",
+    )
+    request = ModelRequest(messages=[Message(role="system", content="Be brief."), _user()], tools=[_tool("search")])
+
+    await drain(WrappedProvider(inner, partial(logged_stream, log=log)), request)
+
+    (log_file,) = tmp_path.glob("llm-requests-*.jsonl")
+    request_record, response_record = (json.loads(line) for line in log_file.read_text().splitlines())
+    assert request_record["body"] == scripted_body(_IDENTITY, request)
+    assert request_record["model_params"] == {"temperature": 0.2}
+    assert response_record["request_log_id"] == request_record["request_log_id"]
+    assert response_record["usage"] == {
+        "input_tokens": 42,
+        "output_tokens": 12,
+        "cache_read_tokens": 30,
+        "cache_write_tokens": 0,
+    }
+
+
+@pytest.mark.asyncio
+async def test_the_request_record_is_written_before_the_request_is_sent(tmp_path: Path) -> None:
+    """The adapter sends only once its record is on disk, so a request that hangs or crashes is still logged."""
+    seen_before_reply: list[dict[str, object]] = []
+
+    async def read_log() -> None:
+        seen_before_reply.extend(_log_records(tmp_path))
+
+    inner = _ScriptedProvider([[Await(read_log), _turn()]])
+
+    await drain(WrappedProvider(inner, partial(logged_stream, log=_request_log(tmp_path))), _request())
+
+    assert seen_before_reply == _log_records(tmp_path)
+    assert [record["body"] for record in seen_before_reply] == [scripted_body(_IDENTITY, _request())]
+
+
+@pytest.mark.asyncio
+async def test_a_request_that_is_never_sent_logs_only_its_usage_line(tmp_path: Path) -> None:
+    """An attempt that fails before its adapter sends a body, such as one with an unreadable file, writes no record."""
+    unsent = _ScriptedProvider([[InvalidRequest("unreadable file", provider="Scripted")]], sends=False)
+
+    with capture_logs() as logs, pytest.raises(InvalidRequest, match="unreadable file"):
+        await drain(WrappedProvider(unsent, partial(logged_stream, log=_request_log(tmp_path))), _request())
+
+    assert not list(tmp_path.glob("llm-requests-*.jsonl"))
+    assert [entry["usage_available"] for entry in logs if entry["event"] == "LLM usage"] == [False]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("deferred", "expected"),
+    [(frozenset({"lookup_order", "archive_order"}), ["archive_order", "lookup_order"]), (frozenset(), [])],
+    ids=["deferred", "none"],
+)
+async def test_request_log_names_the_deferred_tools(
+    tmp_path: Path,
+    deferred: frozenset[str],
+    expected: list[str],
+) -> None:
+    """The record lists the deferred tool names, sorted, beside the body the route sent."""
+    inner = _ScriptedProvider([[_turn()]])
+    request = ModelRequest(
+        messages=[_user()],
+        tools=[_tool("search"), _tool("lookup_order"), _tool("archive_order")],
+        deferred_tools=DeferredTools(names=deferred),
+    )
+
+    await drain(WrappedProvider(inner, partial(logged_stream, log=_request_log(tmp_path))), request)
+
+    [record] = _log_records(tmp_path)
+    assert record["deferred_tool_names"] == expected
+
+
+@pytest.mark.asyncio
+async def test_request_log_builds_the_record_off_the_event_loop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Serializing a long conversation must not stall the loop, so the record is built in the thread that writes it."""
+    inner = _ScriptedProvider([[_turn()]])
+    build_threads: list[int] = []
+    write_record = request_log_stage._write_request_record
+
+    def record_build_thread(*args: object, **kwargs: object) -> None:
+        build_threads.append(threading.get_ident())
+        write_record(*args, **kwargs)
+
+    monkeypatch.setattr(request_log_stage, "_write_request_record", record_build_thread)
+    request = ModelRequest(messages=[_user("hi")], tools=[_tool("search")])
+
+    await drain(WrappedProvider(inner, partial(logged_stream, log=_request_log(tmp_path))), request)
+
+    [record] = _log_records(tmp_path)
+    assert record["body"] == scripted_body(_IDENTITY, request)
+    assert len(build_threads) == 1
+    assert build_threads[0] != threading.get_ident()
+
+
+def _request_log(tmp_path: Path, *, enabled: bool = True, provider: str = "openai") -> RequestLog:
+    return RequestLog(
+        model_name="default",
+        configured_provider=provider,
+        debug=DebugConfig(log_llm_requests=enabled, llm_request_log_dir=str(tmp_path) if enabled else None),
+        storage_root=tmp_path / "default",
+    )
+
+
+def _log_records(tmp_path: Path) -> list[dict[str, object]]:
+    (log_file,) = tmp_path.glob("llm-requests-*.jsonl")
+    return [json.loads(line) for line in log_file.read_text().splitlines()]
+
+
+@pytest.mark.asyncio
+async def test_request_log_masks_credentials_before_writing(tmp_path: Path) -> None:
+    inner = _ScriptedProvider([[_turn()]])
+    leaked = "call failed with Authorization: Bearer auth-secret and api_key=api-secret"
+    request = ModelRequest(messages=[_user(leaked)])
+
+    with bind_llm_request_log_context(callback_url="https://example.test/cb?code=code-secret&keep=1"):
+        await drain(WrappedProvider(inner, partial(logged_stream, log=_request_log(tmp_path))), request)
+
+    [record] = _log_records(tmp_path)
+    assert record["body"]["messages"][0]["content"] == (
+        "call failed with Authorization: Bearer ***redacted*** and api_key=***redacted***"
+    )
+    assert record["callback_url"] == "https://example.test/cb?code=***redacted***&keep=1"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("context", "agent"),
+    [({}, None), ({"agent_id": "code", "session_id": "session-1"}, "code")],
+    ids=["no-agent", "agent"],
+)
+async def test_request_log_names_the_model_config_and_takes_the_agent_from_the_context(
+    tmp_path: Path,
+    context: dict[str, str],
+    agent: str | None,
+) -> None:
+    """Both records name the model config as ``model_name``; only a context that binds an agent gives ``agent_id``."""
+    usage = MessageMetrics(tokens=TokenCounts(input_tokens=3, output_tokens=1))
+    inner = _ScriptedProvider([[UsageReported(usage), _turn(usage=usage)]])
+
+    with bind_llm_request_log_context(**context):
+        await drain(WrappedProvider(inner, partial(logged_stream, log=_request_log(tmp_path))), _request())
+
+    records = _log_records(tmp_path)
+    assert [(record.get("record"), record.get("model_name"), record.get("agent_id")) for record in records] == [
+        (None, "default", agent),
+        ("response", "default", agent),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("provider", "context_tokens", "uncached", "ratio"),
+    [("OpenAI", 1_000, 200, 0.8), ("Anthropic", 1_900, 1_100, 0.421053)],
+    ids=["cache-inside-input", "cache-beside-input"],
+)
+async def test_usage_telemetry_is_logged_without_the_request_log(
+    tmp_path: Path,
+    provider: str,
+    context_tokens: int,
+    uncached: int,
+    ratio: float,
+) -> None:
+    """Every request reports its usage; Anthropic counts cached tokens beside the input, not inside it."""
+    usage = MessageMetrics(
+        tokens=TokenCounts(
+            input_tokens=1_000,
+            output_tokens=50,
+            reasoning_tokens=20,
+            cache_read_tokens=800,
+            cache_write_tokens=100,
+        ),
+    )
+    identity = replace(_IDENTITY, provider=provider)
+    inner = _ScriptedProvider([[UsageReported(usage), _turn(usage=usage)]], identity=identity)
+    log = _request_log(tmp_path, enabled=False, provider=provider.lower())
+
+    with capture_logs() as logs, bind_llm_request_log_context(correlation_id="corr-1", full_prompt="private"):
+        await drain(WrappedProvider(inner, partial(logged_stream, log=log)), ModelRequest(messages=[_user()]))
+
+    assert list(tmp_path.iterdir()) == []
+    assert [entry for entry in logs if entry["event"] == "LLM usage"] == [
+        {
+            "event": "LLM usage",
+            "log_level": "info",
+            "model_name": "default",
+            "model_id": "scripted",
+            "provider": provider,
+            "usage_available": True,
+            "stop_reason": "end",
+            "correlation_id": "corr-1",
+            "input_tokens": 1_000,
+            "context_input_tokens": context_tokens,
+            "output_tokens": 50,
+            "reasoning_tokens": 20,
+            "cache_read_tokens": 800,
+            "cache_write_tokens": 100,
+            "uncached_input_tokens": uncached,
+            "cache_read_ratio": ratio,
+        },
+    ]
+
+
+@pytest.mark.asyncio
+async def test_usage_telemetry_logs_a_compacted_claude_request_s_final_iteration_context(tmp_path: Path) -> None:
+    """After a native compaction the context fields read the final iteration, while the billed counters sum them all."""
+    usage = MessageMetrics(
+        tokens=TokenCounts(input_tokens=30_000, output_tokens=900, cache_read_tokens=5_000),
+        context=TokenCounts(input_tokens=1_200, cache_read_tokens=300, cache_write_tokens=100),
+    )
+    identity = replace(_IDENTITY, provider="Anthropic")
+    inner = _ScriptedProvider([[UsageReported(usage), _turn(usage=usage)]], identity=identity)
+    log = _request_log(tmp_path, enabled=False, provider="anthropic")
+
+    with capture_logs() as logs:
+        await drain(WrappedProvider(inner, partial(logged_stream, log=log)), ModelRequest(messages=[_user()]))
+
+    [usage_log] = [entry for entry in logs if entry["event"] == "LLM usage"]
+    fields = ("input_tokens", "cache_read_tokens", "context_input_tokens", "uncached_input_tokens", "cache_read_ratio")
+    assert {field: usage_log[field] for field in fields} == {
+        "input_tokens": 30_000,
+        "cache_read_tokens": 5_000,
+        "context_input_tokens": 1_600,
+        "uncached_input_tokens": 1_300,
+        "cache_read_ratio": 0.1875,
+    }
+
+
+@pytest.mark.asyncio
+async def test_usage_telemetry_logs_no_context_for_a_request_that_reported_no_input(tmp_path: Path) -> None:
+    """A request whose usage counted no input logs its billed counters and no context size."""
+    usage = MessageMetrics(tokens=TokenCounts(output_tokens=7))
+    inner = _ScriptedProvider([[UsageReported(usage), _turn(usage=usage)]])
+    log = _request_log(tmp_path, enabled=False)
+
+    with capture_logs() as logs:
+        await drain(WrappedProvider(inner, partial(logged_stream, log=log)), _request())
+
+    [usage_log] = [entry for entry in logs if entry["event"] == "LLM usage"]
+    fields = ("output_tokens", "context_input_tokens", "uncached_input_tokens", "cache_read_ratio")
+    assert {field: usage_log[field] for field in fields} == {
+        "output_tokens": 7,
+        "context_input_tokens": None,
+        "uncached_input_tokens": None,
+        "cache_read_ratio": 0.0,
+    }
+
+
+@pytest.mark.asyncio
+async def test_usage_telemetry_bounds_over_reported_cache_reads_to_the_context(tmp_path: Path) -> None:
+    """An OpenAI-compatible server can report more cached tokens than prompt tokens; the log splits as the meter does."""
+    usage = MessageMetrics(tokens=TokenCounts(input_tokens=100, output_tokens=5, cache_read_tokens=150))
+    inner = _ScriptedProvider([[UsageReported(usage), _turn(usage=usage)]])
+    log = _request_log(tmp_path, enabled=False)
+
+    with capture_logs() as logs:
+        await drain(WrappedProvider(inner, partial(logged_stream, log=log)), _request())
+
+    [usage_log] = [entry for entry in logs if entry["event"] == "LLM usage"]
+    fields = ("cache_read_tokens", "context_input_tokens", "uncached_input_tokens", "cache_read_ratio")
+    assert {field: usage_log[field] for field in fields} == {
+        "cache_read_tokens": 150,
+        "context_input_tokens": 100,
+        "uncached_input_tokens": 0,
+        "cache_read_ratio": 1.0,
+    }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("zero_report", [False, True], ids=["no-report", "all-zero-report"])
+async def test_a_request_without_usage_is_reported_and_writes_no_response_record(
+    tmp_path: Path,
+    zero_report: bool,
+) -> None:
+    """A report whose counters are all zero, as some OpenAI-compatible servers send, is no usage either."""
+    served = Message(role="assistant", content="ok", provider_data={"model_extra": {"provider": "OpenInference"}})
+    reports = [UsageReported(MessageMetrics(duration=0.2), final=False)] if zero_report else []
+    inner = _ScriptedProvider([[*reports, TurnCompleted(message=served, stop_reason="end")]])
+
+    with capture_logs() as logs:
+        await drain(
+            WrappedProvider(inner, partial(logged_stream, log=_request_log(tmp_path))),
+            ModelRequest(messages=[_user()]),
+        )
+
+    [usage_log] = [entry for entry in logs if entry["event"] == "LLM usage"]
+    assert (usage_log["usage_available"], usage_log["served_provider"]) == (False, "OpenInference")
+    assert "input_tokens" not in usage_log
+    assert [record.get("record") for record in _log_records(tmp_path)] == [None]
+
+
+@pytest.mark.asyncio
+async def test_a_failing_request_log_neither_fails_the_request_nor_hides_its_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unwritable(_path: Path, _payload: dict[str, object]) -> None:
+        message = "disk full"
+        raise OSError(message)
+
+    monkeypatch.setattr(request_log_stage, "_write_line", unwritable)
+    usage = MessageMetrics(tokens=TokenCounts(input_tokens=3, output_tokens=1))
+    answered = _ScriptedProvider([[UsageReported(usage), _turn(usage=usage)]])
+    failed = _ScriptedProvider([[InvalidRequest("bad request", provider="Scripted", status_code=400)]])
+
+    with capture_logs() as logs:
+        events = await drain(WrappedProvider(answered, partial(logged_stream, log=_request_log(tmp_path))), _request())
+        with pytest.raises(InvalidRequest, match="bad request"):
+            await drain(WrappedProvider(failed, partial(logged_stream, log=_request_log(tmp_path))), _request())
+
+    assert isinstance(events[-1], TurnCompleted)
+    assert [entry["usage_available"] for entry in logs if entry["event"] == "LLM usage"] == [True, False]
+    assert [
+        (entry.get("model_name"), entry.get("agent_name"))
+        for entry in logs
+        if entry["event"] == "Failed to persist LLM request log"
+    ] == [("default", None)] * 2
+    # A response record joins only a logged request, so none is attempted after its request record failed.
+    assert not [entry for entry in logs if entry["event"] == "Failed to emit LLM response telemetry"]
+
+
+@pytest.mark.asyncio
+async def test_a_response_record_that_cannot_be_written_is_reported_and_the_answer_still_arrives(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A disk that fills between the request and response records costs only the response record."""
+    write_line = request_log_stage._write_line
+    written: list[dict[str, object]] = []
+
+    def fills_after_one_line(path: Path, payload: dict[str, object]) -> None:
+        if written:
+            message = "No space left on device"
+            raise OSError(message)
+        written.append(payload)
+        write_line(path, payload)
+
+    monkeypatch.setattr(request_log_stage, "_write_line", fills_after_one_line)
+    usage = MessageMetrics(tokens=TokenCounts(input_tokens=3, output_tokens=1))
+    inner = _ScriptedProvider([[UsageReported(usage), _turn(usage=usage)]])
+
+    with capture_logs() as logs:
+        events = await drain(WrappedProvider(inner, partial(logged_stream, log=_request_log(tmp_path))), _request())
+
+    assert isinstance(events[-1], TurnCompleted)
+    assert [record.get("record") for record in _log_records(tmp_path)] == [None]
+    assert [entry["event"] for entry in logs if entry["log_level"] in {"info", "error"}] == [
+        "LLM usage",
+        "Failed to emit LLM response telemetry",
+    ]
+    [failure] = [entry for entry in logs if entry["event"] == "Failed to emit LLM response telemetry"]
+    assert (failure.get("model_name"), failure.get("agent_name")) == ("default", None)
+
+
+def test_concurrent_large_records_each_land_on_their_own_line(tmp_path: Path) -> None:
+    """Records larger than one buffered write, written by concurrent model calls, never share a line."""
+    path = tmp_path / "llm-requests.jsonl"
+    writers = 8
+    records_per_writer = 10
+    padding = "x" * (2 * max(io.DEFAULT_BUFFER_SIZE, tmp_path.stat().st_blksize))
+    start = threading.Barrier(writers)
+
+    def write(writer: int) -> None:
+        start.wait()
+        for index in range(records_per_writer):
+            request_log_stage._write_line(path, {"writer": writer, "index": index, "padding": padding})
+
+    threads = [threading.Thread(target=write, args=(writer,)) for writer in range(writers)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join()
+
+    records = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+    assert sorted((record["writer"], record["index"]) for record in records) == [
+        (writer, index) for writer in range(writers) for index in range(records_per_writer)
+    ]
+
+
+@pytest.mark.asyncio
+async def test_usage_seen_before_a_stream_is_abandoned_is_still_recorded(tmp_path: Path) -> None:
+    usage = MessageMetrics(tokens=TokenCounts(input_tokens=3, cache_read_tokens=42))
+    inner = _ScriptedProvider([[UsageReported(usage), TextDelta("ok"), TextDelta("never read"), _turn()]])
+    stream = WrappedProvider(inner, partial(logged_stream, log=_request_log(tmp_path))).stream(_request())
+
+    assert isinstance(await anext(stream), UsageReported)
+    await stream.aclose()
+
+    request_record, response_record = _log_records(tmp_path)
+    assert response_record["request_log_id"] == request_record["request_log_id"]
+    assert response_record["usage"]["cache_read_tokens"] == 42
+
+
+@pytest.mark.asyncio
+async def test_a_partial_usage_report_of_an_abandoned_stream_is_recorded(tmp_path: Path) -> None:
+    """A request cut off after only a partial report logs that usage, as every other consumer settles it."""
+    usage = MessageMetrics(tokens=TokenCounts(input_tokens=3, output_tokens=1, cache_read_tokens=42))
+    inner = _ScriptedProvider([[UsageReported(usage, final=False), TextDelta("ok"), TextDelta("never read"), _turn()]])
+    stream = WrappedProvider(inner, partial(logged_stream, log=_request_log(tmp_path))).stream(_request())
+
+    with capture_logs() as logs:
+        assert isinstance(await anext(stream), UsageReported)
+        await stream.aclose()
+
+    [usage_log] = [entry for entry in logs if entry["event"] == "LLM usage"]
+    assert (usage_log["usage_available"], usage_log["cache_read_tokens"]) == (True, 42)
+    _, response_record = _log_records(tmp_path)
+    assert response_record["usage"]["cache_read_tokens"] == 42
+
+
+@pytest.mark.asyncio
+async def test_a_failed_attempt_logs_the_partial_usage_it_reported(tmp_path: Path) -> None:
+    """An attempt that fails after only a partial report, as a Claude stream can, logs that usage."""
+    usage = MessageMetrics(tokens=TokenCounts(input_tokens=3, cache_read_tokens=42))
+    inner = _ScriptedProvider([[UsageReported(usage, final=False), _transient()]])
+
+    with capture_logs() as logs, pytest.raises(ProviderUnavailable):
+        await drain(WrappedProvider(inner, partial(logged_stream, log=_request_log(tmp_path))), _request())
+
+    [usage_log] = [entry for entry in logs if entry["event"] == "LLM usage"]
+    assert (usage_log["usage_available"], usage_log["cache_read_tokens"]) == (True, 42)
+    _, response_record = _log_records(tmp_path)
+    assert response_record["usage"]["cache_read_tokens"] == 42
+
+
+def _request() -> ModelRequest:
+    return ModelRequest(messages=[_user()])
+
+
+# --- Composition ----------------------------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_composed_pipeline_drains_with_complete() -> None:
+    inner = _ScriptedProvider([[_transient()], [TextDelta("done"), _turn()]])
+    provider = pipeline_provider(inner)
+
+    turn = await complete(provider, ModelRequest(messages=[_user()]))
+
+    assert (turn.content, turn.stop_reason, len(inner.requests)) == ("done", "end", 2)
+    assert provider.identity == inner.identity
+
+
+@pytest.mark.asyncio
+async def test_a_guidance_retry_after_a_media_fallback_does_not_resend_the_rejected_media() -> None:
+    rejection = InvalidRequest("Unsupported mime type: image/png", provider="Scripted", status_code=400)
+    inner = _ScriptedProvider([[rejection], [_malformed()], [TextDelta("done"), _turn()]])
+
+    turn = await complete(pipeline_provider(inner), ModelRequest(messages=[_user(_PROMPT, images=[_image()])]))
+
+    assert (turn.content, len(inner.requests)) == ("done", 3)
+    assert [request.messages[0].images for request in inner.requests] == [[_image()], None, None]
+    assert inner.requests[2].messages[-1].content == MALFORMED_FUNCTION_CALL_GUIDANCE
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "rejection",
+    [
+        InvalidRequest("This model does not support image input", provider="Scripted", status_code=400),
+        _malformed(),
+    ],
+    ids=["media-retry", "guidance-retry"],
+)
+async def test_reported_usage_always_sums_to_the_finished_turn(rejection: ProviderError) -> None:
+    """Usage of transient retries inside a media or guidance retry is counted once, in reports and final metrics."""
+    inner = _ScriptedProvider(
+        [
+            [UsageReported(MessageMetrics(tokens=TokenCounts(input_tokens=5))), _transient()],
+            [UsageReported(MessageMetrics(tokens=TokenCounts(input_tokens=7))), rejection],
+            [
+                UsageReported(MessageMetrics(tokens=TokenCounts(input_tokens=10))),
+                _turn(usage=MessageMetrics(tokens=TokenCounts(input_tokens=10))),
+            ],
+        ],
+    )
+    provider = pipeline_provider(inner)
+
+    events = await drain(provider, ModelRequest(messages=[_user(_PROMPT, images=[_image()])]))
+
+    reported = sum(event.usage.tokens.input_tokens for event in events if isinstance(event, UsageReported))
+    finished = events[-1]
+    assert isinstance(finished, TurnCompleted)
+    assert reported == finished.message.metrics.tokens.input_tokens == 22
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "failure",
+    [
+        _transient(),
+        InvalidRequest("This model does not support image input", provider="Scripted", status_code=400),
+        _malformed(),
+    ],
+    ids=["stream-retry", "media-retry", "guidance-retry"],
+)
+async def test_a_failed_attempts_partial_usage_is_counted_once_in_the_retried_turn(failure: ProviderError) -> None:
+    """Usage an attempt reported only partially before it failed is settled as final once, then carried over.
+
+    Claude reports a request's input and cache usage when its message starts and its full usage when it stops, so an
+    attempt that fails in between was billed for what its partial report says.
+    """
+    started = MessageMetrics(
+        tokens=TokenCounts(
+            input_tokens=12,
+            output_tokens=1,
+            total_tokens=13,
+            cache_read_tokens=900,
+            cache_write_tokens=40,
+        ),
+    )
+    restarted = MessageMetrics(
+        tokens=TokenCounts(input_tokens=12, output_tokens=1, total_tokens=13, cache_read_tokens=940),
+    )
+    final = MessageMetrics(
+        tokens=TokenCounts(input_tokens=12, output_tokens=30, total_tokens=42, cache_read_tokens=940),
+    )
+    inner = _ScriptedProvider(
+        [
+            [UsageReported(started, final=False), StreamProgress(), failure],
+            [UsageReported(restarted, final=False), TextDelta("done"), UsageReported(final), _turn(usage=final)],
+        ],
+    )
+    provider = pipeline_provider(inner)
+
+    events = await drain(provider, ModelRequest(messages=[_user(_PROMPT, images=[_image()])]))
+
+    reports = [(event.usage, event.final, event.sums_attempts) for event in events if isinstance(event, UsageReported)]
+    # The retry's reports are marked, since with them the request's reports add up both attempts.
+    assert reports == [(started, False, False), (started, True, False), (restarted, False, True), (final, True, True)]
+    finished = events[-1]
+    assert isinstance(finished, TurnCompleted)
+    assert finished.message.metrics.to_dict() == {
+        "input_tokens": 24,
+        "output_tokens": 31,
+        "total_tokens": 55,
+        "cache_read_tokens": 1840,
+        "cache_write_tokens": 40,
+    }
+    assert finished.message.provider_data[AGGREGATE_USAGE_KEY] is True
+
+
+@pytest.mark.asyncio
+async def test_a_run_whose_retried_request_fails_again_stores_each_attempts_partial_usage_once() -> None:
+    """The run's error record counts the settled partial usage of the failed attempt beside the retry's own."""
+    saved: list[RunRecord] = []
+
+    async def persist(record: RunRecord) -> None:
+        saved.append(record)
+
+    rejection = InvalidRequest("The request was rejected", provider="Scripted", status_code=400)
+    inner = _ScriptedProvider(
+        [
+            [
+                UsageReported(
+                    MessageMetrics(tokens=TokenCounts(input_tokens=5, total_tokens=5, cache_read_tokens=40)),
+                    final=False,
+                ),
+                _transient(),
+            ],
+            [
+                UsageReported(
+                    MessageMetrics(tokens=TokenCounts(input_tokens=6, total_tokens=6, cache_read_tokens=40)),
+                    final=False,
+                ),
+                rejection,
+            ],
+        ],
+    )
+    spec = AgentSpec(
+        id="code",
+        name="Code",
+        model=WrappedProvider(inner, partial(retrying_stream, idle_timeout_seconds=None)),
+        system_messages=(),
+        toolkits=(),
+    )
+
+    with pytest.raises(InvalidRequest, match="rejected"):
+        async for _ in run_agent(
+            spec,
+            [_user()],
+            ctx=RunContext(run_id="run", session=UnstoredSession("session")),
+            persist=persist,
+            request_template=EMPTY_REQUEST,
+        ):
+            pass
+
+    [record] = saved
+    assert record.status is RunStatus.error
+    assert record.messages[-1].metrics.to_dict() == {"input_tokens": 11, "total_tokens": 11, "cache_read_tokens": 80}
+    # The kept usage sums both attempts, so it reads as no single request's.
+    assert (record.messages[-1].provider_data or {})[AGGREGATE_USAGE_KEY] is True
+    assert (record.metrics.tokens.input_tokens, record.metrics.tokens.cache_read_tokens) == (11, 80)
+
+
+@pytest.mark.asyncio
+async def test_a_run_cancelled_during_the_retried_request_keeps_the_failed_attempts_partial_usage() -> None:
+    """The cancelled run settles the failed attempt's partial input and cache tokens beside the retry's own report."""
+    streaming = asyncio.Event()
+    saved: list[RunRecord] = []
+
+    async def persist(record: RunRecord) -> None:
+        saved.append(record)
+
+    async def wait_to_be_cancelled() -> None:
+        streaming.set()
+        await asyncio.get_running_loop().create_future()
+
+    started = MessageMetrics(
+        tokens=TokenCounts(input_tokens=12, total_tokens=12, cache_read_tokens=900, cache_write_tokens=40),
+    )
+    restarted = MessageMetrics(
+        tokens=TokenCounts(input_tokens=12, output_tokens=1, total_tokens=13, cache_read_tokens=940),
+    )
+    inner = _ScriptedProvider(
+        [
+            [UsageReported(started, final=False), _transient()],
+            [UsageReported(restarted, final=False), Await(wait_to_be_cancelled)],
+        ],
+    )
+    spec = AgentSpec(
+        id="code",
+        name="Code",
+        model=WrappedProvider(inner, partial(retrying_stream, idle_timeout_seconds=None)),
+        system_messages=(),
+        toolkits=(),
+    )
+
+    async def consume() -> None:
+        async for _ in run_agent(
+            spec,
+            [_user()],
+            ctx=RunContext(run_id="run", session=UnstoredSession("session")),
+            persist=persist,
+            request_template=EMPTY_REQUEST,
+        ):
+            pass
+
+    task = asyncio.create_task(consume())
+    await asyncio.wait_for(streaming.wait(), timeout=5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    [record] = saved
+    assert record.status is RunStatus.cancelled
+    assert record.messages[-1].metrics.to_dict() == {
+        "input_tokens": 24,
+        "output_tokens": 1,
+        "total_tokens": 25,
+        "cache_read_tokens": 1840,
+        "cache_write_tokens": 40,
+    }
+    assert (record.messages[-1].provider_data or {})[AGGREGATE_USAGE_KEY] is True
+    assert (
+        record.metrics.tokens.input_tokens,
+        record.metrics.tokens.cache_read_tokens,
+        record.metrics.tokens.cache_write_tokens,
+    ) == (
+        24,
+        1840,
+        40,
+    )

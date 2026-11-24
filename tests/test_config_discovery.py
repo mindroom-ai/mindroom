@@ -1,4 +1,4 @@
-"""Tests for config file discovery: find_config() and config_search_locations()."""
+"""Tests for config file discovery: find_config_path() and config_search_locations()."""
 
 from __future__ import annotations
 
@@ -17,6 +17,7 @@ from mindroom.config.main import Config, load_config
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix_identifiers import managed_space_alias_localpart
 from tests.conftest import TEST_PASSWORD, load_config_yaml
+from tests.matrix_state_helpers import save_matrix_state
 
 _RUNTIME_GLOBAL_NAMES = {
     "MATRIX_HOMESERVER",
@@ -40,39 +41,33 @@ _RUNTIME_ENV_ALLOWLIST = {
     "src/mindroom/workers/backends/local.py",
 }
 _EXECUTION_IDENTITY_ENV_ALLOWLIST = {
-    "src/mindroom/api/dashboard_credential_scope.py",
-    "src/mindroom/api/main.py",
-    "src/mindroom/api/openai_compat.py",
-    "src/mindroom/bot.py",
-    "src/mindroom/commands/handler.py",
+    # The platform login check compares the signed-in user with the instance's account.
+    "src/mindroom/api/auth.py",
     "src/mindroom/tool_system/worker_routing.py",
 }
-_AMBIENT_EXECUTION_IDENTITY_ALLOWLIST = {
-    # Canonical prepared dispatch installs its explicitly retained runtime identity.
-    "src/mindroom/tool_system/agent_tool_calls.py",
-    "src/mindroom/api/openai_compat.py",
+# The detached identity var: its module, the scopes that bind it, and the worker's runner, which has no conversation.
+_DETACHED_EXECUTION_IDENTITY_ALLOWLIST = {
     "src/mindroom/api/sandbox_runner.py",
-    "src/mindroom/bot.py",
-    "src/mindroom/commands/handler.py",
-    "src/mindroom/response_runner.py",
+    "src/mindroom/tool_system/runtime_context.py",
     "src/mindroom/tool_system/worker_routing.py",
 }
-_AGENT_STORAGE_HELPERS = {
-    "create_session_storage",
-    "get_agent_session",
-    "get_team_session",
+# Runners without a Matrix conversation: the OpenAI-compatible API, headless runs, the MCP gateway, and their delegated children.
+_DETACHED_TOOL_SCOPE_ALLOWLIST = {
+    "src/mindroom/ai.py",
+    "src/mindroom/api/openai_compat.py",
+    "src/mindroom/headless.py",
+    "src/mindroom/mcp_gateway/tools.py",
+    "src/mindroom/tool_system/runtime_context.py",
 }
+_AGENT_STORAGE_HELPERS = {"create_session_storage"}
 _EXPLICIT_RUNTIME_SCOPE_KEYWORDS = {
-    "_build_tool_instance": "worker_target",
     "build_agent_toolkit": "execution_identity",
     "build_worker_target_from_runtime_env": "execution_identity",
     "create_agent": "execution_identity",
     "create_session_storage": "execution_identity",
     "get_tool_by_name": "worker_target",
     "load_scoped_credentials": "worker_target",
-    "_resolve_worker_credentials_manager": "worker_target",
     "resolve_knowledge_binding": "execution_identity",
-    "resolve_worker_execution_scope": "execution_identity",
     "resolve_worker_target": "execution_identity",
     "resolve_agent_execution": "execution_identity",
     "resolve_agent_runtime": "execution_identity",
@@ -80,17 +75,14 @@ _EXPLICIT_RUNTIME_SCOPE_KEYWORDS = {
 }
 _EXPLICIT_RUNTIME_SCOPE_NO_DEFAULTS = {
     ("src/mindroom/agents.py", "build_agent_toolkit", "execution_identity"),
-    ("src/mindroom/agent_storage.py", "create_session_storage", "execution_identity"),
+    ("src/mindroom/session_storage/agent_storage.py", "create_session_storage", "execution_identity"),
     ("src/mindroom/agents.py", "create_agent", "execution_identity"),
     ("src/mindroom/credentials/manager.py", "load_scoped_credentials", "worker_target"),
-    ("src/mindroom/credentials/manager.py", "_resolve_worker_credentials_manager", "worker_target"),
     ("src/mindroom/credentials/manager.py", "save_scoped_credentials", "worker_target"),
-    ("src/mindroom/tool_system/metadata.py", "_build_tool_instance", "worker_target"),
     ("src/mindroom/runtime_resolution.py", "resolve_agent_execution", "execution_identity"),
     ("src/mindroom/runtime_resolution.py", "resolve_agent_runtime", "execution_identity"),
     ("src/mindroom/runtime_resolution.py", "resolve_knowledge_binding", "execution_identity"),
     ("src/mindroom/tool_system/worker_routing.py", "build_worker_target_from_runtime_env", "execution_identity"),
-    ("src/mindroom/tool_system/worker_routing.py", "resolve_worker_execution_scope", "execution_identity"),
     ("src/mindroom/tool_system/worker_routing.py", "resolve_worker_target", "execution_identity"),
     ("src/mindroom/tool_system/metadata.py", "get_tool_by_name", "worker_target"),
 }
@@ -243,10 +235,13 @@ def _collect_execution_identity_keyword_violations() -> list[str]:
             # and passes execution_identity explicitly to the routing helper.
             # Keep exact expressions: a new free helper call still needs review.
             bound_target_calls = {
-                ("src/mindroom/approval/execution.py", "runtime_context.resolve_worker_target"),
+                ("src/mindroom/approval/execution.py", "tool_context.resolve_worker_target"),
                 ("src/mindroom/approval/tool_owners.py", "context.resolve_worker_target"),
                 ("src/mindroom/agent_cli/response_owner.py", "runtime.resolve_worker_target"),
                 ("src/mindroom/custom_tools/dynamic_workflow.py", "context.resolve_worker_target"),
+                ("src/mindroom/custom_tools/workflow.py", "context.resolve_worker_target"),
+                ("src/mindroom/plugin_testing.py", "context.resolve_worker_target"),
+                ("src/mindroom/tools/approved_egress.py", "context.resolve_worker_target"),
             }
             if (relative_path, ast.unparse(node.func)) in bound_target_calls:
                 continue
@@ -285,31 +280,16 @@ def _collect_execution_identity_default_violations() -> list[str]:
     return sorted(set(violations))
 
 
-def _collect_ambient_execution_identity_read_violations() -> list[str]:
+def _collect_call_violations(names: set[str], allowlist: set[str], what: str) -> list[str]:
     violations: list[str] = []
     for relative_path, tree, _constant_aliases in _runtime_source_contexts():
-        if relative_path in _AMBIENT_EXECUTION_IDENTITY_ALLOWLIST:
+        if relative_path in allowlist:
             continue
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Call):
-                continue
-            if _call_name(node) != "get_tool_execution_identity":
-                continue
-            violations.append(f"{relative_path}:{node.lineno} reads ambient execution identity")
-    return sorted(set(violations))
-
-
-def _collect_ambient_execution_identity_write_violations() -> list[str]:
-    violations: list[str] = []
-    for relative_path, tree, _constant_aliases in _runtime_source_contexts():
-        if relative_path in _AMBIENT_EXECUTION_IDENTITY_ALLOWLIST:
-            continue
-        for node in ast.walk(tree):
-            if not isinstance(node, ast.Call):
-                continue
-            if _call_name(node) != "tool_execution_identity":
-                continue
-            violations.append(f"{relative_path}:{node.lineno} binds ambient execution identity")
+        violations.extend(
+            f"{relative_path}:{node.lineno} {what}"
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Call) and _call_name(node) in names
+        )
     return sorted(set(violations))
 
 
@@ -351,31 +331,20 @@ def _collect_agent_storage_helper_facade_import_violations() -> list[str]:
     return sorted(set(violations))
 
 
-def _patch_config_globals(
-    monkeypatch: pytest.MonkeyPatch,
-    *,
-    env: str | None = None,
-    search_paths: list[Path] | None = None,
-) -> None:
-    """Patch module-level config globals used by find_config / config_search_locations."""
-    if env is None:
-        monkeypatch.delenv("MINDROOM_CONFIG_PATH", raising=False)
-    else:
-        monkeypatch.setenv("MINDROOM_CONFIG_PATH", env)
-    if search_paths is not None:
-        monkeypatch.setattr(constants_mod, "_CONFIG_SEARCH_PATHS", search_paths)
+def _patch_search_paths(monkeypatch: pytest.MonkeyPatch, search_paths: list[Path]) -> None:
+    monkeypatch.setattr(constants_mod, "_CONFIG_SEARCH_PATHS", search_paths)
 
 
-class TestFindConfig:
-    """Tests for find_config()."""
+class TestFindConfigPath:
+    """Tests for find_config_path()."""
 
     def test_returns_home_config_when_nothing_exists(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Falls back to ~/.mindroom/config.yaml when no file exists."""
         cwd_config = tmp_path / "config.yaml"
         home_config = tmp_path / ".mindroom" / "config.yaml"
-        _patch_config_globals(monkeypatch, search_paths=[cwd_config, home_config])
+        _patch_search_paths(monkeypatch, [cwd_config, home_config])
 
-        result = constants_mod._find_config(process_env=constants_mod.exported_process_env())
+        result = constants_mod.find_config_path(process_env={})
         assert result == home_config
 
     def test_returns_home_config_when_cwd_missing(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -384,9 +353,9 @@ class TestFindConfig:
         home_config = tmp_path / ".mindroom" / "config.yaml"
         home_config.parent.mkdir(parents=True)
         home_config.write_text("agents: {}")
-        _patch_config_globals(monkeypatch, search_paths=[cwd_config, home_config])
+        _patch_search_paths(monkeypatch, [cwd_config, home_config])
 
-        result = constants_mod._find_config(process_env=constants_mod.exported_process_env())
+        result = constants_mod.find_config_path(process_env={})
         assert result == home_config
 
     def test_prefers_cwd_over_home(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -396,9 +365,9 @@ class TestFindConfig:
         home_config = tmp_path / ".mindroom" / "config.yaml"
         home_config.parent.mkdir(parents=True)
         home_config.write_text("agents: {}")
-        _patch_config_globals(monkeypatch, search_paths=[cwd_config, home_config])
+        _patch_search_paths(monkeypatch, [cwd_config, home_config])
 
-        result = constants_mod._find_config(process_env=constants_mod.exported_process_env())
+        result = constants_mod.find_config_path(process_env={})
         assert result == cwd_config
 
     def test_env_var_overrides_filesystem_search(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -406,23 +375,15 @@ class TestFindConfig:
         cwd_config = tmp_path / "config.yaml"
         cwd_config.write_text("agents: {}")
         env_config = tmp_path / "custom" / "config.yaml"
-        _patch_config_globals(
-            monkeypatch,
-            env=str(env_config),
-            search_paths=[cwd_config],
-        )
+        _patch_search_paths(monkeypatch, [cwd_config])
 
-        result = constants_mod._find_config(process_env=constants_mod.exported_process_env())
+        result = constants_mod.find_config_path(process_env={"MINDROOM_CONFIG_PATH": str(env_config)})
         assert result == env_config
 
-    def test_env_var_expands_tilde(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_env_var_expands_tilde(self) -> None:
         """MINDROOM_CONFIG_PATH with ~ is expanded."""
-        from pathlib import Path  # noqa: PLC0415
-
-        _patch_config_globals(monkeypatch, env="~/my_config.yaml")
-
-        result = constants_mod._find_config(process_env=constants_mod.exported_process_env())
-        assert result == Path("~/my_config.yaml").expanduser()
+        result = constants_mod.find_config_path(process_env={"MINDROOM_CONFIG_PATH": "~/my_config.yaml"})
+        assert result == Path("~/my_config.yaml").expanduser().resolve()
         assert "~" not in str(result)
 
 
@@ -433,9 +394,9 @@ class TestConfigSearchLocations:
         """Without env var, returns the default search paths."""
         cwd_config = tmp_path / "config.yaml"
         home_config = tmp_path / ".mindroom" / "config.yaml"
-        _patch_config_globals(monkeypatch, search_paths=[cwd_config, home_config])
+        _patch_search_paths(monkeypatch, [cwd_config, home_config])
 
-        result = constants_mod.config_search_locations(constants_mod.exported_process_env())
+        result = constants_mod.config_search_locations({})
         assert len(result) == 2
         assert result[0] == cwd_config.resolve()
         assert result[1] == home_config.resolve()
@@ -444,25 +405,17 @@ class TestConfigSearchLocations:
         """Env var path appears first in the list."""
         env_config = tmp_path / "custom" / "config.yaml"
         cwd_config = tmp_path / "config.yaml"
-        _patch_config_globals(
-            monkeypatch,
-            env=str(env_config),
-            search_paths=[cwd_config],
-        )
+        _patch_search_paths(monkeypatch, [cwd_config])
 
-        result = constants_mod.config_search_locations(constants_mod.exported_process_env())
+        result = constants_mod.config_search_locations({"MINDROOM_CONFIG_PATH": str(env_config)})
         assert result[0] == env_config.resolve()
 
     def test_deduplicates_when_env_matches_default(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """No duplicates when env var points to one of the default paths."""
         cwd_config = tmp_path / "config.yaml"
-        _patch_config_globals(
-            monkeypatch,
-            env=str(cwd_config),
-            search_paths=[cwd_config],
-        )
+        _patch_search_paths(monkeypatch, [cwd_config])
 
-        result = constants_mod.config_search_locations(constants_mod.exported_process_env())
+        result = constants_mod.config_search_locations({"MINDROOM_CONFIG_PATH": str(cwd_config)})
         resolved_paths = [str(p) for p in result]
         assert len(resolved_paths) == len(set(resolved_paths))
 
@@ -692,6 +645,34 @@ class TestResolveConfigRelativePath:
         assert constants_mod.runtime_matrix_server_name(runtime_paths=runtime_paths) == "server.example"
         assert config.get_domain(runtime_paths) == "server.example"
 
+    @pytest.mark.parametrize(
+        ("process_env", "env_homeserver", "expected"),
+        [
+            ({}, None, "https://mindroom.chat"),
+            ({"MATRIX_HOMESERVER": ""}, None, "https://mindroom.chat"),
+            ({"MATRIX_HOMESERVER": " https://mindroom.chat/ "}, None, "https://mindroom.chat"),
+            ({}, "http://localhost:8008", "http://localhost:8008"),
+            ({"MATRIX_HOMESERVER": "https://matrix.example.org"}, None, "https://matrix.example.org"),
+            ({"MATRIX_HOMESERVER": "http://localhost:8008"}, "https://mindroom.chat", "http://localhost:8008"),
+        ],
+    )
+    def test_matrix_homeserver_defaults_to_hosted_without_overriding_explicit_settings(
+        self,
+        tmp_path: Path,
+        process_env: dict[str, str],
+        env_homeserver: str | None,
+        expected: str,
+    ) -> None:
+        """A missing or empty URL uses hosted Matrix; configured URLs retain their precedence."""
+        if env_homeserver is not None:
+            (tmp_path / ".env").write_text(f"MATRIX_HOMESERVER={env_homeserver}\n", encoding="utf-8")
+        runtime_paths = constants_mod.resolve_runtime_paths(
+            config_path=tmp_path / "config.yaml",
+            process_env=process_env,
+        )
+
+        assert constants_mod.runtime_matrix_homeserver(runtime_paths) == expected
+
     def test_config_domain_uses_sibling_env_matrix_homeserver(
         self,
         tmp_path: Path,
@@ -722,7 +703,7 @@ class TestResolveConfigRelativePath:
         runtime_paths = constants_mod.resolve_runtime_paths(config_path=config_path.resolve())
         state = MatrixState.load(runtime_paths=runtime_paths)
         state.add_account("agent_router", "mindroom_router", TEST_PASSWORD, domain="localhost")
-        state.save(runtime_paths=runtime_paths)
+        save_matrix_state(state, runtime_paths)
         config_path.write_text(
             (
                 "models:\n"
@@ -748,7 +729,7 @@ class TestResolveConfigRelativePath:
         runtime_paths = constants_mod.resolve_runtime_paths(config_path=config_path.resolve())
         state = MatrixState.load(runtime_paths=runtime_paths)
         state.add_account("agent_general", "actual_general", TEST_PASSWORD, domain="localhost")
-        state.save(runtime_paths=runtime_paths)
+        save_matrix_state(state, runtime_paths)
         config_path.write_text(
             (
                 "models:\n"
@@ -821,7 +802,7 @@ class TestResolveConfigRelativePath:
         assert not hasattr(config, "runtime_paths")
         assert resolved_runtime_paths.storage_root == (tmp_path / "mindroom_data").resolve()
 
-    def test_find_config_and_primary_runtime_ignore_resolved_runtime_paths(self, tmp_path: Path) -> None:
+    def test_find_config_path_and_primary_runtime_ignore_resolved_runtime_paths(self, tmp_path: Path) -> None:
         """Pure config discovery should ignore unrelated resolved runtime objects."""
         config_path = tmp_path / "cfg" / "config.yaml"
         storage_path = tmp_path / "custom-storage"
@@ -836,7 +817,8 @@ class TestResolveConfigRelativePath:
             storage_path=storage_path,
         )
 
-        assert constants_mod._find_config(process_env=constants_mod.exported_process_env()) == Path("config.yaml")
+        found = constants_mod.find_config_path(process_env=constants_mod.exported_process_env())
+        assert found == Path("config.yaml").resolve()
         assert constants_mod.resolve_primary_runtime_paths().config_path == Path("config.yaml").resolve()
         assert runtime_paths.config_path == config_path.resolve()
         assert runtime_paths.storage_root == storage_path.resolve()
@@ -1079,7 +1061,7 @@ class TestRuntimeContextConsumers:
             config_path=first_config,
             storage_path=first_storage,
         )
-        MatrixState().save(runtime_paths=first_runtime_paths)
+        save_matrix_state(MatrixState(), first_runtime_paths)
         assert constants_mod.tracking_dir(first_runtime_paths) == first_storage / "tracking"
         assert constants_mod.matrix_state_file(runtime_paths=first_runtime_paths) == first_storage / "matrix_state.yaml"
 
@@ -1087,7 +1069,7 @@ class TestRuntimeContextConsumers:
             config_path=second_config,
             storage_path=second_storage,
         )
-        MatrixState().save(runtime_paths=second_runtime_paths)
+        save_matrix_state(MatrixState(), second_runtime_paths)
         assert constants_mod.tracking_dir(second_runtime_paths) == second_storage / "tracking"
         assert (
             constants_mod.matrix_state_file(runtime_paths=second_runtime_paths) == second_storage / "matrix_state.yaml"
@@ -1117,14 +1099,22 @@ class TestRuntimeGuardrails:
         violations = _collect_execution_identity_default_violations()
         assert not violations, "\n".join(violations)
 
-    def test_production_code_does_not_read_ambient_execution_identity(self) -> None:
-        """Prevent production logic from reaching back into the execution ContextVar."""
-        violations = _collect_ambient_execution_identity_read_violations()
+    def test_only_the_identity_scopes_and_the_worker_touch_the_detached_identity(self) -> None:
+        """Production code reads a call's identity through ``current_execution_identity()``, never the var itself."""
+        violations = _collect_call_violations(
+            {"detached_execution_identity", "bind_detached_execution_identity"},
+            _DETACHED_EXECUTION_IDENTITY_ALLOWLIST,
+            "touches the detached execution identity",
+        )
         assert not violations, "\n".join(violations)
 
-    def test_production_code_only_binds_ambient_execution_identity_at_boundaries(self) -> None:
-        """Prevent business logic from rebinding execution ContextVar state."""
-        violations = _collect_ambient_execution_identity_write_violations()
+    def test_only_runners_without_a_conversation_bind_a_detached_identity(self) -> None:
+        """A conversation's identity comes from its context; only a runner without one binds a detached scope."""
+        violations = _collect_call_violations(
+            {"detached_tool_scope"},
+            _DETACHED_TOOL_SCOPE_ALLOWLIST,
+            "binds a detached tool scope",
+        )
         assert not violations, "\n".join(violations)
 
     def test_tenant_account_env_reads_stay_at_ingress(self) -> None:
@@ -1142,7 +1132,7 @@ class TestRuntimeGuardrails:
         interfaces = _tach_public_interfaces()
 
         agents_exports = interfaces.get("mindroom.agents", set())
-        agent_storage_exports = interfaces.get("mindroom.agent_storage", set())
+        agent_storage_exports = interfaces.get("mindroom.session_storage.agent_storage", set())
 
         assert not (_AGENT_STORAGE_HELPERS & agents_exports)
         assert agent_storage_exports >= _AGENT_STORAGE_HELPERS

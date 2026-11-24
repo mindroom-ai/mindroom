@@ -6,6 +6,7 @@ from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
 import httpx
+import ollama
 import pytest
 from openai import AuthenticationError
 
@@ -14,19 +15,23 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.memory import MemoryTools
+from mindroom.embeddings.errors import EmbedderRequestError, openai_embedder_error
+from mindroom.embeddings.ollama_embedder import OllamaEmbedder
 from mindroom.memory import MemorySearchOutcome, search_agent_memories
-from mindroom.tool_system.metadata import TOOL_METADATA
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_workspace_root_path
 from tests.conftest import bind_runtime_paths, runtime_paths_for
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from pathlib import Path
 
 
-def _auth_error_with_secret(secret: str) -> AuthenticationError:
+def _auth_error_with_secret(secret: str) -> EmbedderRequestError:
+    """Return what the embedder raises for a rejected key, classified at its boundary from the SDK error."""
     request = httpx.Request("POST", "http://embeddings.local/v1/embeddings")
     response = httpx.Response(401, request=request, json={"error": {"message": f"rejected {secret}"}})
-    return AuthenticationError(f"rejected {secret}", response=response, body=None)
+    return openai_embedder_error(AuthenticationError(f"rejected {secret}", response=response, body=None))
 
 
 class TestMemoryTools:
@@ -59,16 +64,26 @@ class TestMemoryTools:
         )
 
     @pytest.fixture
-    def tools(self, storage_path: Path, config: Config) -> MemoryTools:
+    def tools(self, config: Config) -> MemoryTools:
         """Create a MemoryTools instance for testing."""
         return MemoryTools(
             agent_name="test_agent",
-            storage_path=storage_path,
             config=config,
             runtime_paths=runtime_paths_for(config),
         )
 
+    @pytest.fixture
+    def similar_lookup(self) -> Iterator[AsyncMock]:
+        """Keep add_memory's similar-memory lookup off the real default mem0 backend."""
+        with patch(
+            "mindroom.custom_tools.memory.search_agent_memories",
+            new_callable=AsyncMock,
+            return_value=MemorySearchOutcome(results=[]),
+        ) as mock_search:
+            yield mock_search
+
     @pytest.mark.asyncio
+    @pytest.mark.usefixtures("similar_lookup")
     async def test_add_memory(self, tools: MemoryTools) -> None:
         """Test that add_memory stores content via add_agent_memory."""
         with patch("mindroom.custom_tools.memory.add_agent_memory", new_callable=AsyncMock) as mock_add:
@@ -77,7 +92,6 @@ class TestMemoryTools:
             mock_add.assert_called_once_with(
                 "The user prefers dark mode",
                 "test_agent",
-                tools._storage_path,
                 tools._config,
                 tools._runtime_paths,
                 metadata={"source": "explicit_tool"},
@@ -87,7 +101,11 @@ class TestMemoryTools:
             assert "dark mode" in result
 
     @pytest.mark.asyncio
-    async def test_add_memory_uses_stored_execution_identity(self, storage_path: Path, config: Config) -> None:
+    async def test_add_memory_uses_stored_execution_identity(
+        self,
+        config: Config,
+        similar_lookup: AsyncMock,
+    ) -> None:
         """MemoryTools should forward the constructor-bound execution identity without ambient context."""
         execution_identity = ToolExecutionIdentity(
             channel="matrix",
@@ -100,7 +118,6 @@ class TestMemoryTools:
         )
         tools = MemoryTools(
             agent_name="test_agent",
-            storage_path=storage_path,
             config=config,
             runtime_paths=runtime_paths_for(config),
             execution_identity=execution_identity,
@@ -110,8 +127,10 @@ class TestMemoryTools:
             await tools.add_memory("Remember this")
 
         assert mock_add.await_args.kwargs["execution_identity"] == execution_identity
+        assert similar_lookup.await_args.kwargs["execution_identity"] == execution_identity
 
     @pytest.mark.asyncio
+    @pytest.mark.usefixtures("similar_lookup")
     async def test_add_memory_error(self, tools: MemoryTools) -> None:
         """Test that add_memory handles errors gracefully."""
         with patch(
@@ -125,6 +144,7 @@ class TestMemoryTools:
             assert "DB down" in result
 
     @pytest.mark.asyncio
+    @pytest.mark.usefixtures("similar_lookup")
     async def test_add_memory_redacts_provider_error(self, tools: MemoryTools) -> None:
         """A rejected embedder key never reaches Matrix-visible tool output."""
         secret = "sk-secret-add"  # noqa: S105
@@ -146,12 +166,10 @@ class TestMemoryTools:
     ) -> None:
         """Explicit memory writes should land in the same canonical files prompt reads use."""
         config.memory.backend = "file"
-        config.memory.file.path = str(storage_path / "shared-memory")
         config.agents["general"].memory_backend = "file"
 
         tools = MemoryTools(
             agent_name="general",
-            storage_path=storage_path,
             config=config,
             runtime_paths=runtime_paths_for(config),
         )
@@ -161,7 +179,6 @@ class TestMemoryTools:
             await search_agent_memories(
                 "Tool memory",
                 "general",
-                storage_path,
                 config,
                 runtime_paths_for(config),
                 limit=5,
@@ -170,8 +187,66 @@ class TestMemoryTools:
 
         assert result == "Memorized: Tool memory stays canonical"
         assert any(memory.get("memory") == "Tool memory stays canonical" for memory in memories)
-        assert not (storage_path / "shared-memory" / "agent_general" / "MEMORY.md").exists()
         assert (agent_workspace_root_path(storage_path, "general") / "MEMORY.md").exists()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("search_mode", ["keyword", "semantic"])
+    async def test_add_memory_lists_similar_existing_memories(
+        self,
+        config: Config,
+        search_mode: str,
+    ) -> None:
+        """A new memory should point at related existing entries so corrections update them instead of piling up.
+
+        A healthy semantic index returns read-only locators, so the lookup must still find the editable entry.
+        The agent rewrites a listed entry whole with update_memory, so the reply shows each one in full, and it never
+        asks to delete an entry the reply does not show.
+        """
+        config.memory.backend = "file"
+        config.memory.search.mode = search_mode
+        config.agents["general"].memory_backend = "file"
+        tools = MemoryTools(
+            agent_name="general",
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+        )
+        existing_text = (
+            "The weekly standup is on Mondays at 09:30 in room 4B, hosted by the platform team; agenda items go in the "
+            "shared doc by Friday, the demo slot is the last ten minutes, and remote attendees join the video room"
+        )
+        semantic_hit = {"id": "semantic:memory/notes.md:0", "memory": existing_text}
+
+        with patch(
+            "mindroom.memory._file_backend.search_semantic_file_memories",
+            new_callable=AsyncMock,
+            return_value=[semantic_hit],
+        ):
+            await tools.add_memory(existing_text)
+            existing = (await tools.list_memories()).splitlines()[1]
+            existing_id = existing.split("[id=", 1)[1].split("]", 1)[0]
+
+            result = await tools.add_memory("The weekly standup moved to Tuesdays")
+
+        assert result.startswith("Memorized: The weekly standup moved to Tuesdays\n")
+        assert f"[id={existing_id}] {existing_text}" in result
+        assert result.count("moved to Tuesdays") == 1
+        assert "update_memory" in result
+        assert "delete_memory" not in result
+
+    @pytest.mark.asyncio
+    async def test_add_memory_reply_stays_plain_when_the_similar_lookup_fails(self, tools: MemoryTools) -> None:
+        """A failed similar-memory lookup never fails the add."""
+        with (
+            patch("mindroom.custom_tools.memory.add_agent_memory", new_callable=AsyncMock),
+            patch(
+                "mindroom.custom_tools.memory.search_agent_memories",
+                new_callable=AsyncMock,
+                side_effect=RuntimeError("index down"),
+            ),
+        ):
+            result = await tools.add_memory("The user prefers dark mode")
+
+        assert result == "Memorized: The user prefers dark mode"
 
     @pytest.mark.asyncio
     async def test_search_memories(self, tools: MemoryTools) -> None:
@@ -191,7 +266,6 @@ class TestMemoryTools:
             mock_search.assert_called_once_with(
                 "preferences",
                 "test_agent",
-                tools._storage_path,
                 tools._config,
                 tools._runtime_paths,
                 limit=3,
@@ -364,7 +438,6 @@ class TestMemoryTools:
     @pytest.mark.asyncio
     async def test_credential_advice_names_the_configured_service(
         self,
-        storage_path: Path,
         config: Config,
     ) -> None:
         """Auth guidance should identify the strict credential binding that can recover the embedder."""
@@ -386,7 +459,6 @@ class TestMemoryTools:
         )
         tools = MemoryTools(
             agent_name="test_agent",
-            storage_path=storage_path,
             config=config,
             runtime_paths=runtime_paths,
         )
@@ -402,6 +474,86 @@ class TestMemoryTools:
         assert "memory.embedder.config.api_key" in result
         assert "'embedding-production' credential service" in result
         assert "EMBEDDER_API_KEY" not in result
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("status_code", [401, 403])
+    async def test_credential_advice_for_an_ollama_rejection_names_the_key_ollama_sends(
+        self,
+        config: Config,
+        status_code: int,
+    ) -> None:
+        """An Ollama embedder sends only OLLAMA_API_KEY, so its advice names no setting that embedder ignores."""
+        runtime_paths = runtime_paths_for(config)
+        config = Config.model_validate(
+            {
+                **config.model_dump(),
+                "memory": {
+                    **config.memory.model_dump(),
+                    "embedder": {"provider": "ollama", "config": {"model": "nomic-embed-text"}},
+                },
+            },
+        )
+        transport = httpx.MockTransport(lambda _request: httpx.Response(status_code, json={"error": "unauthorized"}))
+        embedder = OllamaEmbedder(
+            model="nomic-embed-text",
+            host="http://ollama.local:11434",
+            client=ollama.Client(host="http://ollama.local:11434", transport=transport),
+        )
+        with pytest.raises(EmbedderRequestError) as rejection:
+            embedder.embed(["anything"], purpose="query")
+        tools = MemoryTools(
+            agent_name="test_agent",
+            config=config,
+            runtime_paths=runtime_paths,
+        )
+        outcome = MemorySearchOutcome(results=[], degraded_reason=str(rejection.value))
+
+        with patch(
+            "mindroom.custom_tools.memory.search_agent_memories",
+            new_callable=AsyncMock,
+            return_value=outcome,
+        ):
+            result = await tools.search_memories("anything")
+
+        assert result.splitlines() == [
+            f"Semantic memory search unavailable: {rejection.value}.",
+            "Repair the embedder credential: the Ollama embedder sends only OLLAMA_API_KEY, "
+            "so set it in the environment of the MindRoom process and restart MindRoom.",
+        ]
+
+    @pytest.mark.asyncio
+    async def test_credential_advice_for_a_vertex_ai_rejection_names_google_cloud_credentials(
+        self,
+        config: Config,
+    ) -> None:
+        """A Vertex AI embedder authenticates with Google Cloud credentials, so its advice names no API key."""
+        runtime_paths = runtime_paths_for(config)
+        config = Config.model_validate(
+            {
+                **config.model_dump(),
+                "memory": {
+                    **config.memory.model_dump(),
+                    "backend": "file",
+                    "embedder": {"provider": "vertex_ai", "config": {"model": "gemini-embedding-2"}},
+                },
+            },
+        )
+        tools = MemoryTools(agent_name="test_agent", config=config, runtime_paths=runtime_paths)
+        outcome = MemorySearchOutcome(results=[], degraded_reason="embedder permission denied (HTTP 403)")
+
+        with patch(
+            "mindroom.custom_tools.memory.search_agent_memories",
+            new_callable=AsyncMock,
+            return_value=outcome,
+        ):
+            result = await tools.search_memories("anything")
+
+        assert result.splitlines() == [
+            "Semantic memory search unavailable: embedder permission denied (HTTP 403).",
+            "Repair the embedder credential: the Vertex AI embedder authenticates with GOOGLE_APPLICATION_CREDENTIALS "
+            "or Application Default Credentials, which need permission to call Vertex AI in its project, and then "
+            "restart MindRoom.",
+        ]
 
     @pytest.mark.asyncio
     async def test_search_memories_error(self, tools: MemoryTools) -> None:
@@ -436,7 +588,7 @@ class TestMemoryTools:
 
     def test_toolkit_has_six_tools(self, tools: MemoryTools) -> None:
         """Test that the toolkit exposes all memory tools."""
-        func_names = [f.name for f in tools.async_functions.values()]
+        func_names = list(tools.functions)
         assert "add_memory" in func_names
         assert "search_memories" in func_names
         assert "list_memories" in func_names
@@ -462,7 +614,6 @@ class TestMemoryTools:
 
             mock_list.assert_called_once_with(
                 "test_agent",
-                tools._storage_path,
                 tools._config,
                 tools._runtime_paths,
                 limit=10,
@@ -516,7 +667,6 @@ class TestMemoryTools:
             mock_get.assert_called_once_with(
                 "abc-123",
                 "test_agent",
-                tools._storage_path,
                 tools._config,
                 tools._runtime_paths,
                 execution_identity=None,
@@ -562,7 +712,6 @@ class TestMemoryTools:
                 "abc-123",
                 "Updated content",
                 "test_agent",
-                tools._storage_path,
                 tools._config,
                 tools._runtime_paths,
                 execution_identity=None,
@@ -596,7 +745,6 @@ class TestMemoryTools:
             mock_delete.assert_called_once_with(
                 "abc-123",
                 "test_agent",
-                tools._storage_path,
                 tools._config,
                 tools._runtime_paths,
                 execution_identity=None,
@@ -623,8 +771,8 @@ class TestMemoryToolRegistration:
 
     def test_memory_in_tool_metadata(self) -> None:
         """Test that memory tool appears in the metadata registry."""
-        assert "memory" in TOOL_METADATA
-        meta = TOOL_METADATA["memory"]
+        assert "memory" in builtin_tool_registry()
+        meta = builtin_tool_registry().entries["memory"]
         assert meta.display_name == "Agent Memory"
         assert meta.status.value == "available"
         assert meta.setup_type.value == "none"

@@ -2,10 +2,11 @@
 
 import asyncio
 import threading
+from copy import deepcopy
 from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, Mock, call
+from unittest.mock import ANY, AsyncMock, Mock, call, patch
 
 import nio
 import pytest
@@ -14,12 +15,22 @@ from structlog.testing import capture_logs
 from mindroom import personal_room_lifecycle
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.config.main import Config
+from mindroom.config.reload_status import ConfigReloadStatus
 from mindroom.matrix.personal_room_store import PersonalRoomRecord, personal_room_record_path, write_personal_room
-from mindroom.matrix.personal_rooms import PersonalRoomRosterMismatchError, PersonalRoomService
+from mindroom.matrix.personal_rooms import (
+    PersonalRoomRosterMismatchError,
+    PersonalRoomService,
+    PersonalRoomValidationError,
+)
 from mindroom.matrix.room_member_joins import RoomMemberJoin
 from mindroom.matrix.state import MatrixState
+from mindroom.personal_agents import _append_personal_agent_roster_entry
 from mindroom.personal_room_lifecycle import PersonalRoomLifecycle, PersonalRoomTarget
-from tests.conftest import test_runtime_paths
+from tests.access_schema_support import joined_members_response
+from tests.conftest import SETTLE_TIMEOUT_SECONDS, test_runtime_paths
+from tests.matrix_state_helpers import save_matrix_state
+from tests.test_personal_agents_config import BASE as PERSONAL_AGENTS_BASE
+from tests.test_personal_agents_config import _entry as personal_agent_entry
 
 
 @dataclass
@@ -30,7 +41,6 @@ class Coordination:
     owner: Mock
     local: Mock
     lookup: Mock
-    requester: Mock
 
 
 @pytest.fixture
@@ -46,17 +56,10 @@ def coordination(tmp_path: Path) -> Coordination:
     paths = test_runtime_paths(tmp_path)
     state = MatrixState.load(paths)
     state.add_room("lobby", "!lobby:localhost", "#lobby:localhost", "Lobby")
-    state.save(paths)
+    save_matrix_state(state, paths)
     client = SimpleNamespace(
         user_id="@mindroom_router:localhost",
-        joined_members=AsyncMock(
-            return_value=nio.JoinedMembersResponse.from_dict(
-                {
-                    "joined": {"@alice:localhost": {"display_name": "Alice", "avatar_url": None}},
-                },
-                "!lobby:localhost",
-            ),
-        ),
+        joined_members=AsyncMock(return_value=joined_members_response("!lobby:localhost", "@alice:localhost")),
         room_resolve_alias=AsyncMock(
             return_value=nio.RoomResolveAliasResponse(
                 "#personal_pending:localhost",
@@ -69,9 +72,89 @@ def coordination(tmp_path: Path) -> Coordination:
     owner = Mock(spec=PersonalRoomService)
     local = Mock(spec=PersonalRoomService)
     lookup = Mock(return_value=PersonalRoomTarget(owner, first_sync_complete=True))
-    requester = Mock(side_effect=lambda event: event.sender)
-    lifecycle = PersonalRoomLifecycle("router", runtime, paths, local, lookup, requester)
-    return Coordination(lifecycle, owner, local, lookup, requester)
+    lifecycle = PersonalRoomLifecycle(
+        "router",
+        runtime,
+        paths,
+        local,
+        lookup,
+        Mock(),
+        Mock(),
+        lambda _room_id: True,
+        lambda _room_id, _device_id: runtime.client,
+        lambda: runtime.client,
+    )
+    return Coordination(lifecycle, owner, local, lookup)
+
+
+@dataclass
+class TemplateCoordination:
+    """A coordinator whose personal_rooms.agent names a template, so each user gets their own agent."""
+
+    lifecycle: PersonalRoomLifecycle
+    target: Mock
+    lookup: Mock
+    provision: AsyncMock
+    config_reload: Mock
+
+    def provisioned(self) -> list[tuple[str, str, str, str]]:
+        """Return each provisioning request as (template, owner, joining account, source room)."""
+        return [
+            (
+                awaited.kwargs["template"],
+                awaited.kwargs["user_id"],
+                awaited.kwargs["source_user_id"],
+                awaited.kwargs["source_room_id"],
+            )
+            for awaited in self.provision.await_args_list
+        ]
+
+
+@pytest.fixture
+def template_coordination(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> TemplateCoordination:
+    """Wire a real coordinator to stub personal-agent registration and alice's own agent, once it exists."""
+    paths = test_runtime_paths(tmp_path)
+    state = MatrixState.load(paths)
+    state.add_room("lobby", "!lobby:localhost", "#lobby:localhost", "Lobby")
+    save_matrix_state(state, paths)
+    client = SimpleNamespace(
+        user_id="@mindroom_router:localhost",
+        joined_members=AsyncMock(return_value=joined_members_response("!lobby:localhost", "@alice:localhost")),
+        get_displayname=AsyncMock(return_value=nio.ProfileGetDisplayNameResponse("Alice")),
+    )
+    runtime = SimpleNamespace(config=Config.validate_with_runtime(deepcopy(PERSONAL_AGENTS_BASE), paths), client=client)
+    target = Mock(spec=PersonalRoomService)
+    lookup = Mock(
+        side_effect=lambda name: PersonalRoomTarget(target, first_sync_complete=True) if name == "mind_alice" else None,
+    )
+    provision = AsyncMock(return_value=("mind_alice", True))
+    monkeypatch.setattr(personal_room_lifecycle, "provision_personal_agent", provision)
+    lifecycle = PersonalRoomLifecycle(
+        "router",
+        runtime,
+        paths,
+        Mock(spec=PersonalRoomService),
+        lookup,
+        config_reload := Mock(status=ConfigReloadStatus(status="applied")),
+        Mock(),
+        lambda _room_id: True,
+        lambda _room_id, _device_id: runtime.client,
+        lambda: runtime.client,
+    )
+    return TemplateCoordination(lifecycle, target, lookup, provision, config_reload)
+
+
+def set_lobby_members(lifecycle: PersonalRoomLifecycle, *user_ids: str) -> None:
+    """Replace who the router sees in the lobby."""
+    lifecycle.runtime.client.joined_members.return_value = joined_members_response("!lobby:localhost", *user_ids)
+
+
+def add_alices_agent(lifecycle: PersonalRoomLifecycle, source_room_id: str = "!lobby:localhost") -> None:
+    """Record alice's own agent in the roster and reload the config that contains it."""
+    paths = lifecycle.runtime_paths
+    _append_personal_agent_roster_entry(paths, personal_agent_entry("@alice:localhost", source_room_id=source_room_id))
+    lifecycle.runtime.config = Config.validate_with_runtime(deepcopy(PERSONAL_AGENTS_BASE), paths)
+    lifecycle.config_changed()
 
 
 @dataclass
@@ -93,14 +176,22 @@ def clock(monkeypatch: pytest.MonkeyPatch) -> Clock:
     return clock
 
 
-def record_intent(lifecycle: PersonalRoomLifecycle, user: str) -> None:
-    """Retain one requester's onboarding intent from the lobby."""
+def record_intent(
+    lifecycle: PersonalRoomLifecycle,
+    user: str,
+    *,
+    agent: str = "helper",
+    source_room_id: str = "!lobby:localhost",
+    room_id: str | None = None,
+) -> None:
+    """Retain one requester's onboarding intent and any already recorded room."""
     write_personal_room(
-        personal_room_record_path(lifecycle.runtime_paths, "helper", f"@{user}:localhost"),
+        personal_room_record_path(lifecycle.runtime_paths, agent, f"@{user}:localhost"),
         PersonalRoomRecord(
             user_id=f"@{user}:localhost",
             alias=f"#personal_{user}:localhost",
-            source_room_id="!lobby:localhost",
+            source_room_id=source_room_id,
+            room_id=room_id,
         ),
     )
 
@@ -136,26 +227,58 @@ def lobby_rejoin() -> nio.RoomMemberEvent:
 LOBBY = nio.MatrixRoom("!lobby:localhost", "@mindroom_router:localhost")
 
 
+def _ensured(user_id: str, room_id: str, client: object, *, reinvite: bool = False) -> object:
+    """The service call one onboarding makes, whoever posts and joins for it."""
+    return call(user_id, room_id, client, reinvite_departed_owner=reinvite, poster=ANY, admin=ANY)
+
+
+_ALICE_JOIN = RoomMemberJoin(LOBBY.room_id, "$join", "@alice:localhost", "@alice:localhost", None, None, "join", None)
+
+
 @pytest.mark.asyncio
 async def test_commands_require_exact_self_request_in_onboarding_room(coordination: Coordination) -> None:
     """Only a trusted self-command can reach the selected owner's service."""
     lifecycle = coordination.lifecycle
     room = nio.MatrixRoom("!lobby:localhost", "@mindroom_router:localhost")
-    assert not await lifecycle.handle_command(room, command("!personal @bob:localhost"))
-    assert not await lifecycle.handle_command(nio.MatrixRoom("!other:localhost", room.own_user_id), command())
-    assert await lifecycle.handle_command(room, command("  !personal  "))
-    coordination.lookup.assert_called_with("helper")
-    coordination.owner.ensure.assert_awaited_once_with(
+    assert not await lifecycle.handle_command(room, command("!personal @bob:localhost"), "@alice:localhost")
+    assert not await lifecycle.handle_command(
+        nio.MatrixRoom("!other:localhost", room.own_user_id),
+        command(),
         "@alice:localhost",
-        room.room_id,
-        lifecycle.runtime.client,
-        reinvite_departed_owner=False,
     )
+    assert await lifecycle.handle_command(room, command("  !personal  "), "@alice:localhost")
+    coordination.lookup.assert_called_with("helper")
+    assert coordination.owner.ensure.await_args_list == [
+        _ensured("@alice:localhost", room.room_id, lifecycle.runtime.client),
+    ]
     coordination.owner.ensure.reset_mock()
-    coordination.requester.side_effect = None
-    coordination.requester.return_value = "@bob:localhost"
-    assert await lifecycle.handle_command(room, command())
+    # The event's trusted requester is someone else, as when an entity relays alice's words for bob.
+    assert await lifecycle.handle_command(room, command(), "@bob:localhost")
     coordination.owner.ensure.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_an_ordinary_message_resolves_no_onboarding_room(
+    coordination: Coordination,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only a configured command reads the onboarding rooms; every other message is refused without that read."""
+    resolve = Mock(wraps=personal_room_lifecycle.resolve_room_aliases)
+    monkeypatch.setattr(personal_room_lifecycle, "resolve_room_aliases", resolve)
+
+    assert not await coordination.lifecycle.handle_command(LOBBY, command("hello there"), "@alice:localhost")
+    resolve.assert_not_called()
+    assert await coordination.lifecycle.handle_command(LOBBY, command(), "@alice:localhost")
+    assert resolve.called
+
+
+@pytest.mark.asyncio
+async def test_slash_form_runs_configured_bang_command(coordination: Coordination) -> None:
+    """``/personal`` runs the configured ``!personal`` command; ``//personal`` stays conversation."""
+    lifecycle = coordination.lifecycle
+    assert not await lifecycle.handle_command(LOBBY, command("//personal"), "@alice:localhost")
+    assert await lifecycle.handle_command(LOBBY, command(" /personal "), "@alice:localhost")
+    coordination.owner.ensure.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -181,14 +304,266 @@ async def test_missing_target_keeps_live_trigger_retryable(coordination: Coordin
 
 
 @pytest.mark.asyncio
-async def test_non_router_never_routes_onboarding(coordination: Coordination) -> None:
-    """Only the router selects and invokes the target service."""
+async def test_onboarding_join_observed_by_room_steward(coordination: Coordination) -> None:
+    """Any entity that stewards the onboarding room observes its joins, and stewarding another room observes none."""
     lifecycle = coordination.lifecycle
     lifecycle.agent_name = "helper"
-    lifecycle.runtime.config.personal_rooms.backfill = True
-    assert not lifecycle.observes_onboarding_joins
-    assert not await lifecycle.handle_command(nio.MatrixRoom("!lobby:localhost", "@helper:localhost"), command())
+    lifecycle.is_steward = lambda room_id: room_id == "!other:localhost"
+    assert not lifecycle._stewarded_onboarding_rooms()
+    # Every bot in a configured onboarding room enters its joins into their claim, whoever stewards it.
+    assert lifecycle.onboards_from("!lobby:localhost")
+    assert not lifecycle.onboards_from("!other:localhost")
+    lifecycle.is_steward = lambda room_id: room_id == "!lobby:localhost"
+    assert lifecycle._stewarded_onboarding_rooms()
+    join = RoomMemberJoin("!lobby:localhost", "$join", "@alice:localhost", "@alice:localhost", None, None, "join", None)
+    await lifecycle.baseline_join(join)
+    coordination.owner.ensure.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_agent_steward_onboards_through_the_rooms_poster_and_the_owner_account(
+    coordination: Coordination,
+) -> None:
+    """A steward lends only its view of the onboarding room: the room's poster confirms and the owner account joins."""
+    lifecycle = coordination.lifecycle
+    lifecycle.agent_name = "helper"
+    poster, owner_client = Mock(), Mock()
+    lifecycle.poster_client = Mock(return_value=poster)
+    lifecycle.owner_client = Mock(return_value=owner_client)
     await lifecycle._onboard("@alice:localhost", "!lobby:localhost")
+    ensure = coordination.owner.ensure.await_args
+    assert ensure.args == ("@alice:localhost", "!lobby:localhost", lifecycle.runtime.client)
+    assert ensure.kwargs["admin"] is owner_client
+    assert ensure.kwargs["poster"](("@mindroom_code:localhost", "DEVICE")) is poster
+    lifecycle.poster_client.assert_called_once_with("!lobby:localhost", ("@mindroom_code:localhost", "DEVICE"))
+
+
+@pytest.mark.asyncio
+async def test_reconciliation_leaves_an_onboarding_room_to_its_own_steward(coordination: Coordination) -> None:
+    """A pass neither reads nor settles another bot's onboarding room, except for a trigger this bot took there."""
+    lifecycle = coordination.lifecycle
+    config = lifecycle.runtime.config
+    config.rooms["other"] = config.rooms["lobby"].model_copy()
+    config.personal_rooms.onboarding_rooms = ["lobby", "other"]
+    config.personal_rooms.backfill = True
+    state = MatrixState.load(lifecycle.runtime_paths)
+    state.add_room("other", "!other:localhost", "#other:localhost", "Other")
+    save_matrix_state(state, lifecycle.runtime_paths)
+    lifecycle.is_steward = lambda room_id: room_id == "!lobby:localhost"
+    record_intent(lifecycle, "bob", source_room_id="!other:localhost")
+    lifecycle._retry_candidates[("@carol:localhost", "!other:localhost")] = False
+
+    await lifecycle._reconcile()
+
+    assert call("!other:localhost") not in lifecycle.runtime.client.joined_members.await_args_list
+    assert lifecycle._completed_candidates == {
+        ("@alice:localhost", "!lobby:localhost"),
+        ("@carol:localhost", "!other:localhost"),
+    }
+    assert coordination.owner.ensure.await_count == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("regained", ["during the pass", "after the pass"])
+async def test_a_lobby_lost_before_a_pass_read_it_is_backfilled_once_it_is_stewarded_again(
+    coordination: Coordination,
+    regained: str,
+) -> None:
+    """A pass settles only the lobbies it read: one it lost before reading it is still owed its backfill.
+
+    The bot stewards both lobbies when the pass begins and loses one while it reads its records.
+    Whenever it gets that lobby back, the next pass reads it and onboards who is already there.
+    """
+    lifecycle = coordination.lifecycle
+    config = lifecycle.runtime.config
+    config.rooms["other"] = config.rooms["lobby"].model_copy()
+    config.personal_rooms.onboarding_rooms = ["other", "lobby"]
+    config.personal_rooms.backfill = True
+    state = MatrixState.load(lifecycle.runtime_paths)
+    state.add_room("other", "!other:localhost", "#other:localhost", "Other")
+    save_matrix_state(state, lifecycle.runtime_paths)
+    stewarded = {"!lobby:localhost", "!other:localhost"}
+    lifecycle.is_steward = stewarded.__contains__
+    recorded_intent = lifecycle._recorded_intent
+
+    def lose_the_other_lobby(settings: object) -> tuple[set[tuple[str, str]], bool]:
+        stewarded.discard("!other:localhost")
+        return recorded_intent(settings)
+
+    async def members(room_id: str) -> nio.JoinedMembersResponse:
+        if regained == "during the pass":
+            stewarded.add("!other:localhost")
+        user_id = "@alice:localhost" if room_id == "!lobby:localhost" else "@bob:localhost"
+        return joined_members_response(room_id, user_id)
+
+    lifecycle.runtime.client.joined_members = AsyncMock(side_effect=members)
+    with patch.object(lifecycle, "_recorded_intent", lose_the_other_lobby):
+        await lifecycle._reconcile()
+    assert lifecycle.runtime.client.joined_members.await_args_list == [call("!lobby:localhost")]
+    stewarded.add("!other:localhost")
+
+    await lifecycle._reconcile()
+
+    assert call("!other:localhost") in lifecycle.runtime.client.joined_members.await_args_list
+    onboarded = [attempt.args[0] for attempt in coordination.owner.ensure.await_args_list]
+    assert onboarded == ["@alice:localhost", "@bob:localhost"]
+    assert lifecycle._settled()
+
+
+@pytest.mark.asyncio
+async def test_a_settled_lobby_seen_lost_is_read_again_once_it_is_stewarded_again(coordination: Coordination) -> None:
+    """Who joins a settled lobby while another bot stewards it is this bot's to onboard when it takes the lobby back."""
+    lifecycle = coordination.lifecycle
+    lifecycle.runtime.config.personal_rooms.backfill = True
+    set_lobby_members(lifecycle, "@alice:localhost")
+    await lifecycle._reconcile()
+    assert lifecycle._settled()
+    lifecycle.is_steward = lambda _room_id: False
+    lifecycle.schedule_reconciliation()
+    set_lobby_members(lifecycle, "@alice:localhost", "@bob:localhost")
+    lifecycle.is_steward = lambda _room_id: True
+
+    await lifecycle._reconcile()
+
+    onboarded = [attempt.args[0] for attempt in coordination.owner.ensure.await_args_list]
+    assert onboarded == ["@alice:localhost", "@bob:localhost"]
+    assert lifecycle._settled()
+
+
+@pytest.mark.asyncio
+async def test_a_lobby_seen_lost_while_a_pass_onboards_is_read_again(coordination: Coordination) -> None:
+    """A sync frame that sees the lobby lost during a pass keeps that pass from settling it, even once it is back."""
+    lifecycle = coordination.lifecycle
+    lifecycle.runtime.config.personal_rooms.backfill = True
+    set_lobby_members(lifecycle, "@alice:localhost")
+    ensure = coordination.owner.ensure.side_effect
+
+    async def lose_the_lobby_while_onboarding(*args: object, **kwargs: object) -> object:
+        if coordination.owner.ensure.await_count == 1:
+            lifecycle.is_steward = lambda _room_id: False
+            lifecycle.schedule_reconciliation()
+            set_lobby_members(lifecycle, "@alice:localhost", "@bob:localhost")
+            lifecycle.is_steward = lambda _room_id: True
+        return await ensure(*args, **kwargs) if ensure is not None else coordination.owner.ensure.return_value
+
+    coordination.owner.ensure.side_effect = lose_the_lobby_while_onboarding
+    await lifecycle._reconcile()
+    await lifecycle._reconcile()
+
+    onboarded = [attempt.args[0] for attempt in coordination.owner.ensure.await_args_list]
+    assert "@bob:localhost" in onboarded
+
+
+@pytest.mark.asyncio
+async def test_claimed_baseline_join_onboards_and_retries_without_stewardship(coordination: Coordination) -> None:
+    """The bot that holds a join's claim onboards it after losing the room, and its own pass retries a failure."""
+    lifecycle = coordination.lifecycle
+    lifecycle.is_steward = lambda _room_id: False
+    coordination.owner.ensure.side_effect = [RuntimeError("Personal-room invite failed"), None]
+
+    await lifecycle.baseline_join(_ALICE_JOIN)
+    coordination.owner.ensure.assert_awaited_once()
+    await lifecycle._reconcile()
+
+    assert coordination.owner.ensure.await_count == 2
+    assert not lifecycle._retry_candidates
+
+
+@pytest.mark.asyncio
+async def test_retry_pass_without_stewardship_leaves_the_lobbys_backfill_owed(coordination: Coordination) -> None:
+    """A pass that only settled this bot's own retry scanned no lobby, so taking the lobby over still backfills it."""
+    lifecycle = coordination.lifecycle
+    lifecycle.runtime.config.personal_rooms.backfill = True
+    lifecycle.is_steward = lambda _room_id: False
+    coordination.owner.ensure.side_effect = [RuntimeError("Personal-room invite failed"), None, None]
+    await lifecycle.baseline_join(_ALICE_JOIN)
+    await lifecycle._reconcile()
+    lifecycle.runtime.client.joined_members.assert_not_awaited()
+    set_lobby_members(lifecycle, "@alice:localhost", "@bob:localhost")
+    lifecycle.is_steward = lambda _room_id: True
+
+    await lifecycle._reconcile()
+
+    lifecycle.runtime.client.joined_members.assert_awaited_once_with("!lobby:localhost")
+    onboarded = [attempt.args[0] for attempt in coordination.owner.ensure.await_args_list]
+    assert onboarded == ["@alice:localhost", "@alice:localhost", "@bob:localhost"]
+    assert lifecycle._reconciled
+
+
+@pytest.mark.asyncio
+async def test_taking_over_another_onboarding_room_backfills_it(coordination: Coordination) -> None:
+    """A bot that settled its own lobby and then becomes the steward of a second onboarding room backfills that one too."""
+    lifecycle = coordination.lifecycle
+    settings = lifecycle.runtime.config.personal_rooms
+    settings.backfill = True
+    settings.onboarding_rooms = ["lobby", "!second:localhost"]
+    members = {"!lobby:localhost": "@alice:localhost", "!second:localhost": "@bob:localhost"}
+    lifecycle.runtime.client.joined_members.side_effect = lambda room_id: joined_members_response(
+        room_id,
+        members[room_id],
+    )
+    stewarded = {"!lobby:localhost"}
+    lifecycle.is_steward = lambda room_id: room_id in stewarded
+    await lifecycle._reconcile()
+    assert lifecycle._reconciled
+    stewarded.add("!second:localhost")
+
+    lifecycle.schedule_reconciliation()
+    assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=lifecycle.runtime)
+
+    onboarded = [attempt.args[:2] for attempt in coordination.owner.ensure.await_args_list]
+    assert onboarded == [("@alice:localhost", "!lobby:localhost"), ("@bob:localhost", "!second:localhost")]
+    assert lifecycle._reconciled
+
+
+@pytest.mark.asyncio
+async def test_disabling_personal_rooms_drops_a_queued_retry(coordination: Coordination) -> None:
+    """A reload that turns the feature off ends a failed trigger's retry, so the next sync frame schedules nothing."""
+    lifecycle = coordination.lifecycle
+    coordination.owner.ensure.side_effect = RuntimeError("Personal-room invite failed")
+    assert await lifecycle.handle_command(LOBBY, command(), "@alice:localhost")
+    assert lifecycle._retry_candidates
+    lifecycle.runtime.config.personal_rooms = None
+    lifecycle.config_changed()
+
+    lifecycle.schedule_reconciliation()
+
+    assert lifecycle._reconciliation_task is None
+    assert not lifecycle._retry_candidates
+
+
+@pytest.mark.asyncio
+async def test_every_bot_consumes_the_lobby_command_and_its_steward_alone_onboards(coordination: Coordination) -> None:
+    """Each bot in the lobby takes the configured command as handled, and only the lobby's steward runs it, once."""
+    lifecycle = coordination.lifecycle
+    consumed = []
+    # The same command reaches a bot that does not steward the lobby, then the steward.
+    for is_steward in (False, True):
+        lifecycle.is_steward = lambda _room_id, is_steward=is_steward: is_steward
+        consumed.append(await lifecycle.handle_command(LOBBY, command(), "@alice:localhost"))
+        assert coordination.owner.ensure.await_count == int(is_steward)
+    assert consumed == [True, True]
+    # Other text, and the command outside the lobby, stay every bot's to answer.
+    lifecycle.is_steward = lambda _room_id: False
+    assert not await lifecycle.handle_command(LOBBY, command("!help"), "@alice:localhost")
+    other_room = nio.MatrixRoom("!other:localhost", LOBBY.own_user_id)
+    assert not await lifecycle.handle_command(other_room, command(), "@alice:localhost")
+
+
+@pytest.mark.asyncio
+async def test_non_steward_never_routes_onboarding(coordination: Coordination) -> None:
+    """A bot that stewards no onboarding room and took no trigger selects and invokes no target service."""
+    lifecycle = coordination.lifecycle
+    lifecycle.is_steward = lambda _room_id: False
+    lifecycle.runtime.config.personal_rooms.backfill = True
+    assert not lifecycle._stewarded_onboarding_rooms()
+    # It still takes the lobby's command as handled, so it never answers it as an unknown command.
+    assert await lifecycle.handle_command(
+        nio.MatrixRoom("!lobby:localhost", "@helper:localhost"),
+        command(),
+        "@alice:localhost",
+    )
+    await lifecycle.member_event(LOBBY, lobby_rejoin())
     await lifecycle._reconcile()
     coordination.lookup.assert_not_called()
     coordination.owner.ensure.assert_not_awaited()
@@ -216,15 +591,51 @@ async def test_live_membership_leaves_unknown_baseline_to_durable_gate(
     coordination.local.owner_membership_event.assert_awaited_once_with(room.room_id, "@alice:localhost", "join")
     assert coordination.owner.ensure.await_count == (previous == "leave")
     if previous == "leave":
-        coordination.owner.ensure.assert_awaited_once_with(
-            "@alice:localhost",
-            room.room_id,
-            coordination.lifecycle.runtime.client,
-            reinvite_departed_owner=True,
-        )
+        assert coordination.owner.ensure.await_args_list == [
+            _ensured("@alice:localhost", room.room_id, coordination.lifecycle.runtime.client, reinvite=True),
+        ]
     join = RoomMemberJoin(room.room_id, "$join", "@alice:localhost", "@alice:localhost", None, None, "join", previous)
     await coordination.lifecycle.baseline_join(join)
     assert coordination.owner.ensure.await_count == (previous != "join")
+
+
+@pytest.mark.asyncio
+async def test_unfixable_personal_room_settles_its_owners_membership_event(coordination: Coordination) -> None:
+    """A raising member callback holds the room's event lane, so the agent would answer nothing there until a repair."""
+    lifecycle = coordination.lifecycle
+    lifecycle.agent_name = "helper"
+    room = nio.MatrixRoom("!personal:localhost", "@mindroom_helper:localhost")
+    # A profile change is a join after a join, which the owner's client sends to every room it is in.
+    profile_change = nio.RoomMemberEvent.from_dict(
+        {
+            "type": "m.room.member",
+            "event_id": "$profile",
+            "sender": "@alice:localhost",
+            "state_key": "@alice:localhost",
+            "origin_server_ts": 1,
+            "content": {"membership": "join", "displayname": "Alice A."},
+            "unsigned": {"prev_content": {"membership": "join", "displayname": "Alice"}},
+        },
+    )
+    coordination.local.owner_membership_event.side_effect = PersonalRoomRosterMismatchError(
+        room.room_id,
+        {"@mindroom_other:localhost"},
+    )
+    with capture_logs() as logs:
+        await lifecycle.member_event(room, profile_change)
+    assert [(entry["event"], entry["log_level"]) for entry in logs] == [
+        ("Personal-room validation failed for an owner membership event", "warning"),
+    ]
+    coordination.local.guest_membership_event.assert_awaited_once_with(room, "@alice:localhost", "join")
+    # A failure a retry can pass still raises, so the journal keeps the event and retries it.
+    coordination.local.owner_membership_event.side_effect = RuntimeError("Personal-room ownership state unavailable")
+    with pytest.raises(RuntimeError, match="state unavailable"):
+        await lifecycle.member_event(room, profile_change)
+    # Every check no retry passes settles, not only the roster mismatch.
+    coordination.local.owner_membership_event.side_effect = PersonalRoomValidationError(
+        "Personal-room directory must remain private",
+    )
+    await lifecycle.member_event(room, profile_change)
 
 
 @pytest.mark.asyncio
@@ -370,10 +781,9 @@ async def test_live_triggers_ignore_reconciliation_backoff(coordination: Coordin
     lifecycle.runtime.config.personal_rooms.backfill = True
     coordination.owner.ensure.side_effect = [RuntimeError("membership mismatch"), None, None, None]
     await lifecycle._reconcile()
-    assert await lifecycle.handle_command(LOBBY, command())
+    assert await lifecycle.handle_command(LOBBY, command(), "@alice:localhost")
     await lifecycle.member_event(LOBBY, lobby_rejoin())
-    join = RoomMemberJoin(LOBBY.room_id, "$join", "@alice:localhost", "@alice:localhost", None, None, "join", None)
-    await lifecycle.baseline_join(join)
+    await lifecycle.baseline_join(_ALICE_JOIN)
     assert coordination.owner.ensure.await_count == 4
     clock.now += 1
     await lifecycle._reconcile()
@@ -394,7 +804,7 @@ async def test_failed_live_trigger_is_retried_by_reconciliation_with_its_reinvit
     await lifecycle.member_event(LOBBY, lobby_rejoin())
     await lifecycle._reconcile()
 
-    retry = call("@alice:localhost", LOBBY.room_id, lifecycle.runtime.client, reinvite_departed_owner=True)
+    retry = _ensured("@alice:localhost", LOBBY.room_id, lifecycle.runtime.client, reinvite=True)
     assert coordination.owner.ensure.await_args_list[-2:] == [retry, retry]
     assert lifecycle._reconciled
 
@@ -404,17 +814,12 @@ async def test_failed_live_trigger_without_recorded_intent_is_retried(coordinati
     """A command that fails before its owner records any intent is still retried by the next pass."""
     lifecycle = coordination.lifecycle
     coordination.owner.ensure.side_effect = [RuntimeError("Personal-room onboarding membership unavailable"), None]
-    assert await lifecycle.handle_command(LOBBY, command())
+    assert await lifecycle.handle_command(LOBBY, command(), "@alice:localhost")
 
     await lifecycle._reconcile()
 
     assert coordination.owner.ensure.await_count == 2
-    coordination.owner.ensure.assert_awaited_with(
-        "@alice:localhost",
-        LOBBY.room_id,
-        lifecycle.runtime.client,
-        reinvite_departed_owner=False,
-    )
+    assert coordination.owner.ensure.await_args == _ensured("@alice:localhost", LOBBY.room_id, lifecycle.runtime.client)
     assert lifecycle._reconciled
 
 
@@ -428,7 +833,7 @@ async def test_live_trigger_failing_during_a_pass_keeps_reconciliation_pending(c
     async def ensure(user_id: str, *_args: object, **_kwargs: object) -> None:
         attempts.append(user_id)
         if len(attempts) == 1:
-            assert await lifecycle.handle_command(LOBBY, command())
+            assert await lifecycle.handle_command(LOBBY, command(), "@alice:localhost")
         elif len(attempts) == 2:
             msg = "Personal-room invite failed"
             raise RuntimeError(msg)
@@ -460,7 +865,7 @@ async def test_successful_live_trigger_retires_only_the_retry_it_covers(
     if second_trigger == "rejoin":
         await lifecycle.member_event(LOBBY, lobby_rejoin())
     else:
-        assert await lifecycle.handle_command(LOBBY, command())
+        assert await lifecycle.handle_command(LOBBY, command(), "@alice:localhost")
 
     await lifecycle._reconcile()
 
@@ -469,6 +874,8 @@ async def test_successful_live_trigger_retires_only_the_retry_it_covers(
         LOBBY.room_id,
         lifecycle.runtime.client,
         reinvite_departed_owner=retried_reinvite,
+        poster=ANY,
+        admin=lifecycle.runtime.client,
     )
     assert lifecycle._reconciled
 
@@ -482,7 +889,7 @@ async def test_rejoin_failing_during_its_owners_reconciliation_keeps_the_reinvit
     record_intent(lifecycle, "alice")
     reinvites = []
 
-    async def ensure(*_args: object, reinvite_departed_owner: bool) -> None:
+    async def ensure(*_args: object, reinvite_departed_owner: bool, **_actors: object) -> None:
         reinvites.append(reinvite_departed_owner)
         if len(reinvites) == 1:
             await lifecycle.member_event(LOBBY, lobby_rejoin())
@@ -504,35 +911,264 @@ async def test_live_trigger_preserves_cancellation(coordination: Coordination) -
     """Shutdown cancellation still stops an onboarding-room trigger instead of settling it."""
     coordination.owner.ensure.side_effect = asyncio.CancelledError
     with pytest.raises(asyncio.CancelledError):
-        await coordination.lifecycle.handle_command(LOBBY, command())
+        await coordination.lifecycle.handle_command(LOBBY, command(), "@alice:localhost")
+
+
+_FAILED = "Personal-room reconciliation failed"
+_RECOVERED = "Personal-room reconciliation recovered"
+
+
+def reconciliation_logs(logs: list[dict]) -> list[tuple[str, str, bool, int]]:
+    """Return each reconciliation failure and recovery as (event, level, traceback, attempt count)."""
+    return [
+        (
+            entry["event"],
+            entry["log_level"],
+            entry.get("exc_info", False),
+            entry.get("attempt", entry.get("failed_attempts")),
+        )
+        for entry in logs
+        if entry["event"] in {_FAILED, _RECOVERED}
+    ]
 
 
 @pytest.mark.asyncio
-async def test_repeated_error_logs_its_traceback_once(coordination: Coordination, clock: Clock) -> None:
-    """Only the first of the same error in a row carries a traceback; retries report their attempt and next delay."""
+@pytest.mark.usefixtures("clock")
+async def test_a_failure_that_heals_logs_a_warning_and_its_recovery(coordination: Coordination) -> None:
+    """A first failure a retry heals is a warning with its traceback, and the success says how many attempts failed.
+
+    The reload between them, which each new user's provisioning requests, keeps the count; a candidate that never
+    failed logs no recovery.
+    """
+    lifecycle = coordination.lifecycle
+    for user in ("alice", "bob"):
+        record_intent(lifecycle, user)
+    healed = False
+
+    async def ensure(user_id: str, *_args: object, **_kwargs: object) -> None:
+        if user_id == "@alice:localhost" and not healed:
+            msg = "Personal-room initial join failed"
+            raise RuntimeError(msg)
+
+    coordination.owner.ensure.side_effect = ensure
+    with capture_logs() as logs:
+        await lifecycle._reconcile()
+        healed = True
+        lifecycle.config_changed()
+        await lifecycle._reconcile()
+    assert lifecycle._reconciled
+    assert not [entry for entry in logs if entry["log_level"] in {"error", "critical"}]
+    assert reconciliation_logs(logs) == [(_FAILED, "warning", True, 1), (_RECOVERED, "info", False, 1)]
+    failure, recovery = (entry for entry in logs if entry["event"] in {_FAILED, _RECOVERED})
+    assert (failure["user_id"], failure["error_type"], failure["error"], failure["retry_in_seconds"]) == (
+        "@alice:localhost",
+        "RuntimeError",
+        "Personal-room initial join failed",
+        30.0,
+    )
+    assert recovery == {
+        "event": _RECOVERED,
+        "log_level": "info",
+        "user_id": "@alice:localhost",
+        "room_id": "!lobby:localhost",
+        "failed_attempts": 1,
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_failing_candidate_logs_one_error_at_its_third_failure_in_a_row(
+    coordination: Coordination,
+    clock: Clock,
+) -> None:
+    """Only the third failure in a row is an error; the traceback comes with the first, and later ones warn again."""
     lifecycle = coordination.lifecycle
     lifecycle.runtime.config.personal_rooms.backfill = True
     coordination.owner.ensure.side_effect = RuntimeError("temporarily unavailable")
     with capture_logs() as logs:
         await lifecycle._reconcile()
-        clock.now += 30
-        await lifecycle._reconcile()
-        clock.now += 60
-        await lifecycle._reconcile()
-    failures = [entry for entry in logs if entry["event"] == "Personal-room reconciliation failed"]
+        for delay in (30, 60, 120, 240):
+            clock.now += delay
+            await lifecycle._reconcile()
+    failures = [entry for entry in logs if entry["event"] == _FAILED]
     assert [
         (entry["log_level"], entry.get("exc_info", False), entry["attempt"], entry["retry_in_seconds"])
         for entry in failures
-    ] == [("error", True, 1, 30.0), ("warning", False, 2, 60.0), ("warning", False, 3, 120.0)]
-    assert [(entry["error_type"], entry["error"]) for entry in failures[1:]] == [
+    ] == [
+        ("warning", True, 1, 30.0),
+        ("warning", False, 2, 60.0),
+        ("error", False, 3, 120.0),
+        ("warning", False, 4, 240.0),
+        ("warning", False, 5, 480.0),
+    ]
+    assert {(entry["error_type"], entry["error"]) for entry in failures} == {
         ("RuntimeError", "temporarily unavailable"),
-    ] * 2
+    }
     assert {(entry["user_id"], entry["room_id"]) for entry in failures} == {("@alice:localhost", "!lobby:localhost")}
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("clock")
+async def test_reloads_do_not_restart_the_count_toward_an_error(coordination: Coordination) -> None:
+    """A reload retries at once and restarts the delays, but a candidate that keeps failing still reaches an error."""
+    lifecycle = coordination.lifecycle
+    lifecycle.runtime.config.personal_rooms.backfill = True
+    coordination.owner.ensure.side_effect = RuntimeError("temporarily unavailable")
+    with capture_logs() as logs:
+        await lifecycle._reconcile()
+        for _ in range(2):
+            lifecycle.config_changed()
+            await lifecycle._reconcile()
+    assert [
+        (entry["log_level"], entry["attempt"], entry["retry_in_seconds"]) for entry in logs if entry["event"] == _FAILED
+    ] == [("warning", 1, 30.0), ("warning", 2, 30.0), ("error", 3, 30.0)]
+
+
+@pytest.mark.asyncio
+async def test_a_live_success_ends_the_failure_count(coordination: Coordination, clock: Clock) -> None:
+    """A lobby command that succeeds logs the recovery, so the same failure coming back counts toward a new error."""
+    lifecycle = coordination.lifecycle
+    lifecycle.runtime.config.personal_rooms.backfill = True
+    failure = RuntimeError("temporarily unavailable")
+    coordination.owner.ensure.side_effect = [failure] * 3 + [None] + [failure] * 3
+    with capture_logs() as logs:
+        await lifecycle._reconcile()
+        for delay in (30, 60):
+            clock.now += delay
+            await lifecycle._reconcile()
+        assert await lifecycle.handle_command(LOBBY, command(), "@alice:localhost")
+        for delay in (120, 240, 480):
+            clock.now += delay
+            await lifecycle._reconcile()
+    assert reconciliation_logs(logs) == [
+        (_FAILED, "warning", True, 1),
+        (_FAILED, "warning", False, 2),
+        (_FAILED, "error", False, 3),
+        (_RECOVERED, "info", False, 3),
+        (_FAILED, "warning", True, 1),
+        (_FAILED, "warning", False, 2),
+        (_FAILED, "error", False, 3),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_new_error_after_the_third_failure_is_one_new_error(coordination: Coordination, clock: Clock) -> None:
+    """A different failure in a candidate already past the threshold is a new problem: one error with its traceback."""
+    lifecycle = coordination.lifecycle
+    lifecycle.runtime.config.personal_rooms.backfill = True
+    coordination.owner.ensure.side_effect = [RuntimeError("unavailable")] * 3 + [KeyError("content")] * 3 + [None]
+    with capture_logs() as logs:
+        await lifecycle._reconcile()
+        for delay in (30, 60, 120, 240, 480, 960):
+            clock.now += delay
+            await lifecycle._reconcile()
+    assert reconciliation_logs(logs) == [
+        (_FAILED, "warning", True, 1),
+        (_FAILED, "warning", False, 2),
+        (_FAILED, "error", False, 3),
+        (_FAILED, "error", True, 4),
+        (_FAILED, "warning", False, 5),
+        (_FAILED, "warning", False, 6),
+        (_RECOVERED, "info", False, 6),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_failure_behind_roster_mismatches_still_reaches_an_error(
+    coordination: Coordination,
+    clock: Clock,
+) -> None:
+    """Roster mismatches never log an error, so the first other failure at or past the threshold does, once."""
+    lifecycle = coordination.lifecycle
+    lifecycle.runtime.config.personal_rooms.backfill = True
+    unavailable = RuntimeError("Personal-room ownership state unavailable")
+    mismatch = PersonalRoomRosterMismatchError("!personal:localhost", {"@eve:localhost"})
+    coordination.owner.ensure.side_effect = [unavailable, mismatch, mismatch, unavailable, unavailable]
+    with capture_logs() as logs:
+        await lifecycle._reconcile()
+        for delay in (30, 60, 120, 240):
+            clock.now += delay
+            await lifecycle._reconcile()
+    assert reconciliation_logs(logs) == [
+        (_FAILED, "warning", True, 1),
+        (_FAILED, "error", False, 4),
+        (_FAILED, "warning", False, 5),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_failure_seen_before_another_reached_the_threshold_still_logs_its_error(
+    coordination: Coordination,
+    clock: Clock,
+) -> None:
+    """The error at the third failure names one kind; another kind that keeps failing after it logs its own error."""
+    lifecycle = coordination.lifecycle
+    lifecycle.runtime.config.personal_rooms.backfill = True
+    unavailable, missing = RuntimeError("unavailable"), KeyError("content")
+    coordination.owner.ensure.side_effect = [unavailable, missing, missing, unavailable, unavailable]
+    with capture_logs() as logs:
+        await lifecycle._reconcile()
+        for delay in (30, 60, 120, 240):
+            clock.now += delay
+            await lifecycle._reconcile()
+    assert reconciliation_logs(logs) == [
+        (_FAILED, "warning", True, 1),
+        (_FAILED, "warning", True, 2),
+        (_FAILED, "error", False, 3),
+        (_FAILED, "error", False, 4),
+        (_FAILED, "warning", False, 5),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_lobby_command_that_leaves_a_reinvite_pending_does_not_end_the_failure_count(
+    coordination: Coordination,
+    clock: Clock,
+) -> None:
+    """A command without re-invite authority does not do the failing re-invite, so it is no recovery."""
+    lifecycle = coordination.lifecycle
+    record_intent(lifecycle, "alice")
+    await lifecycle._reconcile()
+    invite_failed = RuntimeError("Personal-room invite failed")
+    coordination.owner.ensure.side_effect = [invite_failed, invite_failed, None, invite_failed]
+    with capture_logs() as logs:
+        await lifecycle.member_event(LOBBY, lobby_rejoin())
+        await lifecycle._reconcile()
+        assert await lifecycle.handle_command(LOBBY, command(), "@alice:localhost")
+        clock.now += 30
+        await lifecycle._reconcile()
+    assert reconciliation_logs(logs) == [(_FAILED, "warning", True, 1), (_FAILED, "warning", False, 2)]
+    assert lifecycle._retry_candidates == {("@alice:localhost", "!lobby:localhost"): True}
+
+
+@pytest.mark.asyncio
+async def test_errors_that_alternate_after_the_third_failure_log_one_error_each(
+    coordination: Coordination,
+    clock: Clock,
+) -> None:
+    """Two kinds of failure taking turns are two problems, so each logs one error, not one per attempt."""
+    lifecycle = coordination.lifecycle
+    lifecycle.runtime.config.personal_rooms.backfill = True
+    unavailable, missing = RuntimeError("unavailable"), KeyError("content")
+    coordination.owner.ensure.side_effect = [unavailable] * 3 + [missing, unavailable, missing, unavailable]
+    with capture_logs() as logs:
+        await lifecycle._reconcile()
+        for delay in (30, 60, 120, 240, 480, 960):
+            clock.now += delay
+            await lifecycle._reconcile()
+    assert reconciliation_logs(logs) == [
+        (_FAILED, "warning", True, 1),
+        (_FAILED, "warning", False, 2),
+        (_FAILED, "error", False, 3),
+        (_FAILED, "error", True, 4),
+        (_FAILED, "warning", False, 5),
+        (_FAILED, "warning", False, 6),
+        (_FAILED, "warning", False, 7),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_a_different_error_logs_a_new_traceback(coordination: Coordination, clock: Clock) -> None:
-    """A new kind of failure behind a waiting roster mismatch is a new problem, so it gets its own traceback."""
+    """A new kind of failure behind a waiting roster mismatch gets its own traceback, and the third failure is an error."""
     lifecycle = coordination.lifecycle
     lifecycle.runtime.config.personal_rooms.backfill = True
     coordination.owner.ensure.side_effect = [
@@ -552,8 +1188,8 @@ async def test_a_different_error_logs_a_new_traceback(coordination: Coordination
         if entry["log_level"] in {"warning", "error"}
     ] == [
         ("Personal-room imported roster has unattested members", "warning", False),
-        ("Personal-room reconciliation failed", "error", True),
-        ("Personal-room reconciliation failed", "warning", False),
+        (_FAILED, "warning", True),
+        (_FAILED, "error", False),
     ]
     assert logs[-1]["error_type"] == "KeyError"
 
@@ -579,34 +1215,248 @@ async def test_failure_during_reload_leaves_no_stale_delay(coordination: Coordin
 
 
 @pytest.mark.asyncio
-async def test_imported_roster_mismatch_is_a_warning_without_traceback(
+async def test_imported_roster_mismatch_warns_once_until_its_members_change(
     coordination: Coordination,
     clock: Clock,
 ) -> None:
-    """A room waiting for someone to remove unattested members is reported on each retry, never as a crash."""
+    """A room waiting for someone to remove unattested members is warned about once, never as a crash or an error.
+
+    Retries that find the same members, including after a reload, log at debug; other members warn again.
+    The attempt count runs on across the reload until the room is fixed.
+    """
     lifecycle = coordination.lifecycle
     lifecycle.runtime.config.personal_rooms.backfill = True
-    coordination.owner.ensure.side_effect = PersonalRoomRosterMismatchError(
-        "!personal:localhost",
-        {"@eve:localhost", "@bob:localhost"},
-    )
+    both = PersonalRoomRosterMismatchError("!personal:localhost", {"@eve:localhost", "@bob:localhost"})
+    eve = PersonalRoomRosterMismatchError("!personal:localhost", {"@eve:localhost"})
+    coordination.owner.ensure.side_effect = [both, both, both, eve, None, eve]
     with capture_logs() as logs:
         await lifecycle._reconcile()
         clock.now += 30
         await lifecycle._reconcile()
-    assert [entry for entry in logs if entry["log_level"] in {"warning", "error"}] == [
-        {
-            "event": "Personal-room imported roster has unattested members",
-            "log_level": "warning",
-            "user_id": "@alice:localhost",
-            "room_id": "!lobby:localhost",
-            "personal_room_id": "!personal:localhost",
-            "unexpected_user_ids": ("@bob:localhost", "@eve:localhost"),
-            "attempt": attempt,
-            "retry_in_seconds": delay,
-        }
-        for attempt, delay in ((1, 30.0), (2, 60.0))
+        # Each user's provisioning from a template requests a reload, so a reload alone does not warn again.
+        lifecycle.config_changed()
+        await lifecycle._reconcile()
+        clock.now += 30
+        await lifecycle._reconcile()
+        clock.now += 60
+        await lifecycle._reconcile()
+        assert lifecycle._reconciled
+        # A mismatch that returns after the room was fixed is a new problem.
+        lifecycle.config_changed()
+        await lifecycle._reconcile()
+    roster = [entry for entry in logs if entry["event"] == "Personal-room imported roster has unattested members"]
+    assert [(entry["log_level"], entry["unexpected_user_ids"], entry["attempt"]) for entry in roster] == [
+        ("warning", ("@bob:localhost", "@eve:localhost"), 1),
+        ("debug", ("@bob:localhost", "@eve:localhost"), 2),
+        ("debug", ("@bob:localhost", "@eve:localhost"), 3),
+        ("warning", ("@eve:localhost",), 4),
+        ("warning", ("@eve:localhost",), 1),
     ]
+    assert roster[0] == {
+        "event": "Personal-room imported roster has unattested members",
+        "log_level": "warning",
+        "user_id": "@alice:localhost",
+        "room_id": "!lobby:localhost",
+        "personal_room_id": "!personal:localhost",
+        "unexpected_user_ids": ("@bob:localhost", "@eve:localhost"),
+        "attempt": 1,
+        "retry_in_seconds": 30.0,
+    }
+    assert not [entry for entry in logs if entry["log_level"] == "error"]
+
+
+@pytest.mark.asyncio
+async def test_membership_change_retries_a_blocked_personal_room_at_once(
+    coordination: Coordination,
+    clock: Clock,
+) -> None:
+    """Someone leaving an adopted room may fix its roster, so its owner is retried without waiting out any delay."""
+    lifecycle = coordination.lifecycle
+    lifecycle.runtime.config.personal_rooms.backfill = True
+    coordination.owner.ensure.side_effect = [
+        PersonalRoomRosterMismatchError("!personal:localhost", {"@eve:localhost"}),
+        None,
+    ]
+    lifecycle.schedule_reconciliation()
+    assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=lifecycle.runtime)
+    lifecycle.membership_changed("!elsewhere:localhost", "$elsewhere")
+    lifecycle.schedule_reconciliation()
+    assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=lifecycle.runtime)
+    assert coordination.owner.ensure.await_count == 1
+
+    lifecycle.membership_changed("!personal:localhost", "$left")
+    assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=lifecycle.runtime)
+
+    assert coordination.owner.ensure.await_count == 2
+    assert clock.now == 1000.0
+    assert lifecycle._reconciled
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("clock")
+@pytest.mark.parametrize(("racing_attempt_fails", "attempts_expected"), [(True, 3), (False, 2)])
+async def test_membership_change_during_an_attempt_retries_after_it(
+    coordination: Coordination,
+    racing_attempt_fails: bool,
+    attempts_expected: int,
+) -> None:
+    """A failed attempt may have read the room before a change it raced, so that change earns one more attempt.
+
+    A successful attempt already validated the room after its own owner invite, which also comes back as a change.
+    """
+    lifecycle = coordination.lifecycle
+    lifecycle.runtime.config.personal_rooms.backfill = True
+    mismatch = PersonalRoomRosterMismatchError("!personal:localhost", {"@eve:localhost"})
+    attempts = 0
+
+    async def ensure(*_args: object, **_kwargs: object) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 2:
+            lifecycle.membership_changed("!personal:localhost", "$second")
+        if attempts == 1 or (attempts == 2 and racing_attempt_fails):
+            raise mismatch
+
+    coordination.owner.ensure.side_effect = ensure
+    await lifecycle._reconcile()
+    lifecycle.membership_changed("!personal:localhost", "$first")
+    assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=lifecycle.runtime)
+
+    assert attempts == attempts_expected
+    assert lifecycle._reconciled
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("changed_room", "attempts_expected"), [("!personal:localhost", 2), ("!other:localhost", 1)])
+async def test_membership_change_during_the_first_failing_attempt_retries_after_it(
+    coordination: Coordination,
+    clock: Clock,
+    changed_room: str,
+    attempts_expected: int,
+) -> None:
+    """The router cannot know a requester's personal room before its first failure, so a change it raced counts."""
+    lifecycle = coordination.lifecycle
+    lifecycle.runtime.config.personal_rooms.backfill = True
+    mismatch = PersonalRoomRosterMismatchError("!personal:localhost", {"@eve:localhost"})
+    attempts = 0
+
+    async def ensure(*_args: object, **_kwargs: object) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            # The person leaves after this attempt read the room's members.
+            lifecycle.membership_changed(changed_room, "$left")
+            raise mismatch
+
+    coordination.owner.ensure.side_effect = ensure
+    lifecycle.schedule_reconciliation()
+    assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=lifecycle.runtime)
+
+    assert attempts == attempts_expected
+    assert clock.now == 1000.0
+    assert lifecycle._reconciled == (attempts_expected == 2)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("clock")
+async def test_one_change_reported_by_every_bot_in_the_room_retries_once(coordination: Coordination) -> None:
+    """Every bot in a room reports the same event, so repeats before, during, or after its retry add nothing.
+
+    A different event still retries.
+    """
+    lifecycle = coordination.lifecycle
+    lifecycle.runtime.config.personal_rooms.backfill = True
+    mismatch = PersonalRoomRosterMismatchError("!personal:localhost", {"@eve:localhost"})
+    attempts = 0
+
+    async def ensure(*_args: object, **_kwargs: object) -> None:
+        nonlocal attempts
+        attempts += 1
+        if attempts == 2:
+            lifecycle.membership_changed("!personal:localhost", "$left")
+        raise mismatch
+
+    coordination.owner.ensure.side_effect = ensure
+    await lifecycle._reconcile()
+    for _ in range(2):
+        lifecycle.membership_changed("!personal:localhost", "$left")
+    assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=lifecycle.runtime)
+    lifecycle.membership_changed("!personal:localhost", "$left")
+    assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=lifecycle.runtime)
+
+    assert attempts == 2
+    # Each pass reads the lobby's members once for backfill.
+    assert lifecycle.runtime.client.joined_members.await_count == 2
+
+    lifecycle.membership_changed("!personal:localhost", "$joined")
+    assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=lifecycle.runtime)
+
+    assert attempts == 3
+
+
+@pytest.mark.asyncio
+async def test_a_requester_whose_intent_is_gone_is_forgotten(coordination: Coordination) -> None:
+    """A clean pass that no longer finds a requester drops what it reported, its failure count, and its immediate retry."""
+    lifecycle = coordination.lifecycle
+    record_intent(lifecycle, "alice")
+    coordination.owner.ensure.side_effect = PersonalRoomRosterMismatchError("!personal:localhost", {"@eve:localhost"})
+    await lifecycle._reconcile()
+    assert lifecycle._failure_streaks
+    personal_room_record_path(lifecycle.runtime_paths, "helper", "@alice:localhost").unlink()
+
+    lifecycle.membership_changed("!personal:localhost", "$left")
+    assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=lifecycle.runtime)
+
+    assert coordination.owner.ensure.await_count == 1
+    assert lifecycle._reconciled
+    assert not lifecycle._roster_mismatches
+    assert not lifecycle._membership_changed
+    assert not lifecycle._failure_streaks
+
+
+@pytest.mark.asyncio
+async def test_a_live_success_lets_a_returning_mismatch_warn_again(coordination: Coordination) -> None:
+    """A lobby trigger that onboards the requester shows the room was fixed, so the same members later are news."""
+    lifecycle = coordination.lifecycle
+    lifecycle.runtime.config.personal_rooms.backfill = True
+    mismatch = PersonalRoomRosterMismatchError("!personal:localhost", {"@eve:localhost"})
+    coordination.owner.ensure.side_effect = [mismatch, None, mismatch]
+    with capture_logs() as logs:
+        await lifecycle._reconcile()
+        assert await lifecycle.handle_command(LOBBY, command(), "@alice:localhost")
+        lifecycle.config_changed()
+        await lifecycle._reconcile()
+    assert [
+        entry["log_level"] for entry in logs if entry["event"] == "Personal-room imported roster has unattested members"
+    ] == ["warning", "warning"]
+
+
+@pytest.mark.asyncio
+async def test_member_events_report_membership_changes_but_not_profile_updates(coordination: Coordination) -> None:
+    """The router retries a blocked room only when someone joins, leaves, or is invited, not on every profile edit."""
+    lifecycle = coordination.lifecycle
+    lifecycle.agent_name = "helper"
+    report = Mock()
+    lifecycle.report_membership_change = report
+    room = nio.MatrixRoom("!personal:localhost", "@mindroom_helper:localhost")
+
+    def member(membership: str, previous: str) -> nio.RoomMemberEvent:
+        return nio.RoomMemberEvent.from_dict(
+            {
+                "type": "m.room.member",
+                "event_id": f"${membership}",
+                "sender": "@eve:localhost",
+                "state_key": "@eve:localhost",
+                "origin_server_ts": 1,
+                "content": {"membership": membership},
+                "unsigned": {"prev_content": {"membership": previous}},
+            },
+        )
+
+    await lifecycle.member_event(room, member("join", "join"))
+    report.assert_not_called()
+    await lifecycle.member_event(room, member("leave", "join"))
+    report.assert_called_once_with("!personal:localhost", "$leave")
 
 
 @pytest.mark.asyncio
@@ -637,7 +1487,7 @@ async def test_scheduled_reconciliation_is_single_flight_and_cancellable(coordin
         assert attempts == [1]
         coordination.owner.ensure.side_effect = None
         lifecycle.schedule_reconciliation()
-        assert await wait_for_background_tasks(timeout=2, owner=lifecycle.runtime)
+        assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=lifecycle.runtime)
         assert coordination.owner.ensure.await_count == 2
     finally:
         await lifecycle.cancel_reconciliation(timeout_seconds=2)
@@ -655,19 +1505,19 @@ async def test_scheduled_failure_has_cooldown_but_reload_can_retry(
     monkeypatch.setattr("mindroom.personal_room_lifecycle.monotonic", lambda: now)
     coordination.owner.ensure.side_effect = RuntimeError("membership mismatch")
     lifecycle.schedule_reconciliation()
-    assert await wait_for_background_tasks(timeout=2, owner=lifecycle.runtime)
+    assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=lifecycle.runtime)
     now += 1
     for _ in range(10):
         lifecycle.schedule_reconciliation()
-    assert await wait_for_background_tasks(timeout=2, owner=lifecycle.runtime)
+    assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=lifecycle.runtime)
     assert coordination.owner.ensure.await_count == 1
     now += 3600
     lifecycle.schedule_reconciliation()
-    assert await wait_for_background_tasks(timeout=2, owner=lifecycle.runtime)
+    assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=lifecycle.runtime)
     assert coordination.owner.ensure.await_count == 2
     lifecycle.config_changed()
     lifecycle.schedule_reconciliation()
-    assert await wait_for_background_tasks(timeout=2, owner=lifecycle.runtime)
+    assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=lifecycle.runtime)
     assert coordination.owner.ensure.await_count == 3
 
 
@@ -682,11 +1532,11 @@ async def test_target_first_sync_does_not_impose_retry_cooldown(
     monkeypatch.setattr("mindroom.personal_room_lifecycle.monotonic", lambda: 1000.0)
     coordination.lookup.return_value = PersonalRoomTarget(coordination.owner, first_sync_complete=False)
     lifecycle.schedule_reconciliation()
-    assert await wait_for_background_tasks(timeout=2, owner=lifecycle.runtime)
+    assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=lifecycle.runtime)
     coordination.owner.ensure.assert_not_awaited()
     coordination.lookup.return_value = PersonalRoomTarget(coordination.owner, first_sync_complete=True)
     lifecycle.schedule_reconciliation()
-    assert await wait_for_background_tasks(timeout=2, owner=lifecycle.runtime)
+    assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=lifecycle.runtime)
     coordination.owner.ensure.assert_awaited_once()
 
 
@@ -697,14 +1547,7 @@ async def test_slow_record_storage_does_not_block_event_loop(
 ) -> None:
     """The event loop progresses while durable room records are being read."""
     lifecycle = coordination.lifecycle
-    write_personal_room(
-        personal_room_record_path(lifecycle.runtime_paths, "helper", "@alice:localhost"),
-        PersonalRoomRecord(
-            user_id="@alice:localhost",
-            alias="#personal_alice:localhost",
-            source_room_id="!lobby:localhost",
-        ),
-    )
+    record_intent(lifecycle, "alice")
     read = personal_room_lifecycle.read_personal_room
     entered = threading.Event()
     release = threading.Event()
@@ -723,7 +1566,7 @@ async def test_slow_record_storage_does_not_block_event_loop(
         assert not timed_out.is_set()
     finally:
         release.set()
-        assert await wait_for_background_tasks(timeout=2, owner=lifecycle.runtime)
+        assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=lifecycle.runtime)
 
 
 @pytest.mark.asyncio
@@ -744,9 +1587,9 @@ async def test_reload_during_provisioning_does_not_cache_stale_success(coordinat
         await asyncio.wait_for(entered.wait(), timeout=2)
         lifecycle.config_changed()
         release.set()
-        assert await wait_for_background_tasks(timeout=2, owner=lifecycle.runtime)
+        assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=lifecycle.runtime)
         lifecycle.schedule_reconciliation()
-        assert await wait_for_background_tasks(timeout=2, owner=lifecycle.runtime)
+        assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=lifecycle.runtime)
         assert coordination.owner.ensure.await_count == 2
     finally:
         await lifecycle.cancel_reconciliation(timeout_seconds=2)
@@ -757,22 +1600,11 @@ async def test_backfill_failure_does_not_block_recorded_user(coordination: Coord
     """A lobby membership outage leaves backfill retryable while recorded intent progresses."""
     lifecycle = coordination.lifecycle
     lifecycle.runtime.config.personal_rooms.backfill = True
-    path = personal_room_record_path(lifecycle.runtime_paths, "helper", "@alice:localhost")
-    write_personal_room(
-        path,
-        PersonalRoomRecord(
-            user_id="@alice:localhost",
-            alias="#personal_alice:localhost",
-            source_room_id="!lobby:localhost",
-        ),
-    )
+    record_intent(lifecycle, "alice")
     lifecycle.runtime.client.joined_members.return_value = nio.JoinedMembersError("unavailable", "M_UNKNOWN")
     await lifecycle._reconcile()
     coordination.owner.ensure.assert_awaited_once()
-    lifecycle.runtime.client.joined_members.return_value = nio.JoinedMembersResponse.from_dict(
-        {"joined": {"@alice:localhost": {"display_name": "Alice", "avatar_url": None}}},
-        "!lobby:localhost",
-    )
+    set_lobby_members(lifecycle, "@alice:localhost")
     await lifecycle._reconcile()
     assert coordination.owner.ensure.await_count == 1
 
@@ -784,22 +1616,14 @@ async def test_corrupt_record_does_not_block_other_record(coordination: Coordina
     alice_path = personal_room_record_path(lifecycle.runtime_paths, "helper", "@alice:localhost")
     alice_path.parent.mkdir(parents=True, exist_ok=True)
     alice_path.write_text("not json")
-    write_personal_room(
-        personal_room_record_path(lifecycle.runtime_paths, "helper", "@bob:localhost"),
-        PersonalRoomRecord(
-            user_id="@bob:localhost",
-            alias="#personal_bob:localhost",
-            source_room_id="!lobby:localhost",
-        ),
-    )
+    record_intent(lifecycle, "bob")
     await lifecycle._reconcile()
     await lifecycle._reconcile()
     assert coordination.owner.ensure.await_count == 1
-    coordination.owner.ensure.assert_awaited_with(
+    assert coordination.owner.ensure.await_args == _ensured(
         "@bob:localhost",
         "!lobby:localhost",
         lifecycle.runtime.client,
-        reinvite_departed_owner=False,
     )
 
 
@@ -817,7 +1641,7 @@ async def test_reload_during_backfill_keeps_new_onboarding_room_pending(
     original.rooms["new"] = original.rooms["lobby"].model_copy()
     state = MatrixState.load(lifecycle.runtime_paths)
     state.add_room("new", "!new:localhost", "#new:localhost", "New")
-    state.save(lifecycle.runtime_paths)
+    save_matrix_state(state, lifecycle.runtime_paths)
     started = asyncio.Event()
     release = asyncio.Event()
     membership_reads = []
@@ -827,10 +1651,7 @@ async def test_reload_during_backfill_keeps_new_onboarding_room_pending(
         if room_id == "!lobby:localhost":
             started.set()
             await release.wait()
-        return nio.JoinedMembersResponse.from_dict(
-            {"joined": {"@alice:localhost": {"display_name": "Alice", "avatar_url": None}}},
-            room_id,
-        )
+        return joined_members_response(room_id, "@alice:localhost")
 
     monkeypatch.setattr(lifecycle.runtime.client, "joined_members", joined_members)
     async with asyncio.timeout(2):
@@ -845,12 +1666,9 @@ async def test_reload_during_backfill_keeps_new_onboarding_room_pending(
     coordination.owner.ensure.assert_not_awaited()
     await lifecycle._reconcile()
     assert membership_reads == ["!lobby:localhost", "!new:localhost"]
-    coordination.owner.ensure.assert_awaited_once_with(
-        "@alice:localhost",
-        "!new:localhost",
-        lifecycle.runtime.client,
-        reinvite_departed_owner=False,
-    )
+    assert coordination.owner.ensure.await_args_list == [
+        _ensured("@alice:localhost", "!new:localhost", lifecycle.runtime.client),
+    ]
 
 
 @pytest.mark.asyncio
@@ -860,18 +1678,387 @@ async def test_disabled_provisioning_retains_only_recorded_ids_for_rejoin(coordi
     lifecycle.agent_name = "helper"
     lifecycle.runtime.config.personal_rooms = None
     for user, room_id in [("alice", "!owned:localhost"), ("bob", None)]:
-        user_id = f"@{user}:localhost"
-        write_personal_room(
-            personal_room_record_path(lifecycle.runtime_paths, "helper", user_id),
-            PersonalRoomRecord(
-                user_id=user_id,
-                alias=f"#personal_{user}:localhost",
-                source_room_id="!lobby:localhost",
-                room_id=room_id,
-            ),
-        )
+        record_intent(lifecycle, user, room_id=room_id)
     assert lifecycle.retained_room_ids() == {"!owned:localhost"}
     assert await lifecycle.cleanup_exclusions() == {"!owned:localhost", "!pending:localhost"}
     await lifecycle._onboard("@alice:localhost", "!lobby:localhost")
     await lifecycle._reconcile()
     coordination.owner.ensure.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("trigger", ["first_join", "rejoin"])
+async def test_template_join_provisions_and_settles_without_holding_the_lane(
+    template_coordination: TemplateCoordination,
+    trigger: str,
+) -> None:
+    """A lobby join creates the user's own agent and settles, so the lobby keeps answering while it starts."""
+    lifecycle = template_coordination.lifecycle
+    with capture_logs() as logs:
+        if trigger == "first_join":
+            await lifecycle.baseline_join(_ALICE_JOIN)
+        else:
+            await lifecycle.member_event(LOBBY, lobby_rejoin())
+    assert template_coordination.provisioned() == [("mind", "@alice:localhost", "@alice:localhost", "!lobby:localhost")]
+    assert call("mind") not in template_coordination.lookup.call_args_list
+    assert lifecycle._retry_candidates == {("@alice:localhost", "!lobby:localhost"): trigger == "rejoin"}
+    assert [(entry["event"], entry["log_level"]) for entry in logs] == [("Personal agent is starting", "info")]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("lobby", "retried"),
+    [
+        (joined_members_response("!lobby:localhost"), {}),
+        (nio.JoinedMembersError("unavailable"), {("@alice:localhost", "!lobby:localhost"): False}),
+    ],
+    ids=["left", "unavailable"],
+)
+async def test_template_join_gets_no_agent_unless_its_sender_is_still_in_the_lobby(
+    template_coordination: TemplateCoordination,
+    lobby: object,
+    retried: dict[tuple[str, str], bool],
+) -> None:
+    """A join seen after its sender left the lobby settles without an agent; an unknown lobby retries it."""
+    lifecycle = template_coordination.lifecycle
+    lifecycle.runtime.client.joined_members.return_value = lobby
+    await lifecycle.baseline_join(_ALICE_JOIN)
+    template_coordination.provision.assert_not_awaited()
+    template_coordination.config_reload.request_reload.assert_not_called()
+    assert lifecycle._retry_candidates == retried
+
+
+@pytest.mark.asyncio
+async def test_template_provisioning_failure_backs_off_like_any_failure(
+    template_coordination: TemplateCoordination,
+    clock: Clock,
+) -> None:
+    """A registration failure fails only that user's onboarding, which retries after the usual delays."""
+    lifecycle = template_coordination.lifecycle
+    template_coordination.provision.side_effect = RuntimeError("Failed to register personal agent account")
+    with capture_logs() as logs:
+        await lifecycle.member_event(LOBBY, lobby_rejoin())
+    assert [entry["event"] for entry in logs] == ["Personal-room onboarding trigger failed"]
+    await lifecycle._reconcile()
+    assert lifecycle._failure_streaks[("@alice:localhost", "!lobby:localhost")].failures == 1
+    clock.now += 29
+    await lifecycle._reconcile()
+    assert template_coordination.provision.await_count == 2
+    clock.now += 1
+    await lifecycle._reconcile()
+    assert template_coordination.provision.await_count == 3
+
+
+@pytest.mark.asyncio
+async def test_template_reconciliation_ensures_on_the_users_own_agent(
+    template_coordination: TemplateCoordination,
+) -> None:
+    """Once the user's agent is in the config and connected, reconciliation onboards them through it."""
+    lifecycle = template_coordination.lifecycle
+    add_alices_agent(lifecycle)
+    await lifecycle._reconcile()
+    template_coordination.lookup.assert_any_call("mind_alice")
+    assert template_coordination.target.ensure.await_args_list == [
+        _ensured("@alice:localhost", "!lobby:localhost", lifecycle.runtime.client),
+    ]
+    template_coordination.provision.assert_not_awaited()
+    assert lifecycle._reconciled
+
+
+@pytest.mark.asyncio
+async def test_template_reconciliation_retries_intent_recorded_by_each_users_agent(
+    template_coordination: TemplateCoordination,
+) -> None:
+    """A personal room recorded by the user's own agent is retried from its source room, not only the roster's."""
+    lifecycle = template_coordination.lifecycle
+    add_alices_agent(lifecycle, source_room_id="!retired:localhost")
+    record_intent(lifecycle, "alice", agent="mind_alice")
+    await lifecycle._reconcile()
+    assert template_coordination.target.ensure.await_args_list == [
+        _ensured("@alice:localhost", "!lobby:localhost", lifecycle.runtime.client),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("connected", [False, True])
+async def test_template_pending_target_does_not_back_off(
+    template_coordination: TemplateCoordination,
+    connected: bool,
+) -> None:
+    """A user's agent that is not connected or not synced yet is retried later, without a delay or a warning."""
+    lifecycle = template_coordination.lifecycle
+    add_alices_agent(lifecycle)
+    template_coordination.lookup.side_effect = None
+    template_coordination.lookup.return_value = (
+        PersonalRoomTarget(template_coordination.target, first_sync_complete=False) if connected else None
+    )
+    with capture_logs() as logs:
+        await lifecycle._reconcile()
+    template_coordination.target.ensure.assert_not_awaited()
+    assert lifecycle._candidate_backoff == {}
+    assert lifecycle._reconciled is False
+    assert not [entry for entry in logs if entry["log_level"] in {"warning", "error"}]
+
+
+@pytest.mark.asyncio
+async def test_target_ready_allows_immediate_reconciliation(template_coordination: TemplateCoordination) -> None:
+    """A user's agent finishing its first sync onboards its owner at once instead of after the retry delay."""
+    lifecycle = template_coordination.lifecycle
+    add_alices_agent(lifecycle)
+    lifecycle._reconciled, lifecycle._reconciled_rooms = True, frozenset({"!lobby:localhost"})
+    lifecycle._next_reconciliation_at = float("inf")
+    lifecycle.schedule_reconciliation()
+    assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=lifecycle.runtime)
+    template_coordination.target.ensure.assert_not_awaited()
+    lifecycle.target_ready()
+    assert lifecycle._next_reconciliation_at == 0.0
+    assert lifecycle._reconciled is False
+    assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=lifecycle.runtime)
+    template_coordination.target.ensure.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("recorded_in", ["matrix_state", "roster"])
+async def test_template_join_by_an_unpublished_mindroom_account_settles_without_provisioning(
+    template_coordination: TemplateCoordination,
+    recorded_in: str,
+) -> None:
+    """An agent's account that joins the lobby before a reload makes it known never gets an agent of its own."""
+    lifecycle = template_coordination.lifecycle
+    paths = lifecycle.runtime_paths
+    if recorded_in == "matrix_state":
+        state = MatrixState.load(paths)
+        state.add_account("agent_mind_bob", "mindroom_mind_bob", None, domain="localhost")
+        save_matrix_state(state, paths)
+    else:
+        _append_personal_agent_roster_entry(paths, personal_agent_entry("@bob:localhost"))
+    bot_id = "@mindroom_mind_bob:localhost"
+    join = RoomMemberJoin(LOBBY.room_id, "$join", bot_id, bot_id, None, None, "join", None)
+    with capture_logs() as logs:
+        await lifecycle.baseline_join(join)
+    template_coordination.provision.assert_not_awaited()
+    assert lifecycle._retry_candidates == {}
+    assert not [entry for entry in logs if entry["log_level"] in {"warning", "error"}]
+
+
+@pytest.mark.asyncio
+async def test_template_bridge_alias_onboards_onto_its_persons_agent(
+    template_coordination: TemplateCoordination,
+) -> None:
+    """A bridge alias gets its person's agent, which then serves the alias account's own personal room."""
+    lifecycle = template_coordination.lifecycle
+    paths = lifecycle.runtime_paths
+    data = deepcopy(PERSONAL_AGENTS_BASE)
+    data["authorization"] = {"aliases": {"@alice:localhost": ["@bridge_alice:localhost"]}}
+    lifecycle.runtime.config = Config.validate_with_runtime(data, paths)
+    alias = "@bridge_alice:localhost"
+    set_lobby_members(lifecycle, alias)
+    await lifecycle.baseline_join(RoomMemberJoin(LOBBY.room_id, "$join", alias, alias, None, None, "join", None))
+    assert template_coordination.provisioned() == [("mind", "@alice:localhost", alias, "!lobby:localhost")]
+
+    _append_personal_agent_roster_entry(
+        paths,
+        personal_agent_entry("@alice:localhost", source_room_id="!lobby:localhost"),
+    )
+    lifecycle.runtime.config = Config.validate_with_runtime(data, paths)
+    lifecycle.config_changed()
+    await lifecycle._reconcile()
+    assert (
+        _ensured(alias, "!lobby:localhost", lifecycle.runtime.client)
+        in template_coordination.target.ensure.await_args_list
+    )
+
+
+@pytest.mark.asyncio
+async def test_template_alias_onboarding_survives_a_restart(template_coordination: TemplateCoordination) -> None:
+    """After a restart, reconciliation retries the alias whose join onboarded the owner, not the owner's own ID."""
+    lifecycle = template_coordination.lifecycle
+    paths = lifecycle.runtime_paths
+    alias = "@bridge_alice:localhost"
+    data = deepcopy(PERSONAL_AGENTS_BASE)
+    data["authorization"] = {"aliases": {"@alice:localhost": [alias]}}
+    _append_personal_agent_roster_entry(
+        paths,
+        personal_agent_entry("@alice:localhost", source_room_id="!lobby:localhost", source_user_id=alias),
+    )
+    lifecycle.runtime.config = Config.validate_with_runtime(data, paths)
+    lifecycle.config_changed()
+    await lifecycle._reconcile()
+    assert template_coordination.target.ensure.await_args_list == [
+        _ensured(alias, "!lobby:localhost", lifecycle.runtime.client),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_one_users_provisioning_failure_does_not_stop_another_in_the_same_pass(
+    template_coordination: TemplateCoordination,
+) -> None:
+    """A registration failure for one user still lets the next candidate in that pass onboard."""
+    lifecycle = template_coordination.lifecycle
+    add_alices_agent(lifecycle)
+    set_lobby_members(lifecycle, "@aaron:localhost", "@alice:localhost")
+    # Sorted before alice, so her candidate runs after the failure.
+    lifecycle._queue_retry(("@aaron:localhost", "!lobby:localhost"), reinvite_departed_owner=False)
+    template_coordination.provision.side_effect = RuntimeError("Failed to register personal agent account")
+    await lifecycle._reconcile()
+    assert template_coordination.provisioned() == [("mind", "@aaron:localhost", "@aaron:localhost", "!lobby:localhost")]
+    assert template_coordination.target.ensure.await_args_list == [
+        _ensured("@alice:localhost", "!lobby:localhost", lifecycle.runtime.client),
+    ]
+    assert lifecycle._failure_streaks[("@aaron:localhost", "!lobby:localhost")].failures == 1
+
+
+@pytest.mark.asyncio
+async def test_target_ready_during_a_pass_starts_the_next_pass_at_once(
+    template_coordination: TemplateCoordination,
+    clock: Clock,
+) -> None:
+    """A user's agent that finishes its first sync while a pass runs is onboarded right after that pass."""
+    lifecycle = template_coordination.lifecycle
+    add_alices_agent(lifecycle)
+    target = template_coordination.target
+    synced = False
+
+    def lookup(name: str) -> PersonalRoomTarget | None:
+        nonlocal synced
+        if name != "mind_alice":
+            return None
+        if synced:
+            return PersonalRoomTarget(target, first_sync_complete=True)
+        # The pass sees the agent unsynced, and its first sync completes before the pass ends.
+        synced = True
+        lifecycle.target_ready()
+        return PersonalRoomTarget(target, first_sync_complete=False)
+
+    template_coordination.lookup.side_effect = lookup
+    lifecycle.schedule_reconciliation()
+    assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=lifecycle.runtime)
+    assert clock.now == 1000.0
+    target.ensure.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("profile", "display_name"),
+    [
+        (nio.ProfileGetDisplayNameResponse("Alice A."), "Alice A."),
+        (nio.ProfileGetDisplayNameError("missing", "M_NOT_FOUND"), None),
+    ],
+)
+async def test_a_joining_users_agent_is_provisioned_under_their_display_name_and_reloaded(
+    template_coordination: TemplateCoordination,
+    profile: object,
+    display_name: str | None,
+) -> None:
+    """A lobby join with a template target creates that user's agent under their display name, then reloads."""
+    lifecycle = template_coordination.lifecycle
+    lifecycle.runtime.client.get_displayname = AsyncMock(return_value=profile)
+
+    await lifecycle.baseline_join(_ALICE_JOIN)
+
+    lifecycle.runtime.client.get_displayname.assert_awaited_once_with("@alice:localhost")
+    template_coordination.provision.assert_awaited_once_with(
+        lifecycle.runtime.config,
+        lifecycle.runtime_paths,
+        template="mind",
+        user_id="@alice:localhost",
+        user_display_name=display_name,
+        source_user_id="@alice:localhost",
+        source_room_id="!lobby:localhost",
+    )
+    template_coordination.config_reload.request_reload.assert_called_once_with()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("changed", "status", "reloads"),
+    [(True, "pending", True), (False, "pending", False), (False, "applied", True), (False, "failed", True)],
+)
+async def test_reprovisioning_never_supersedes_a_queued_reload(
+    template_coordination: TemplateCoordination,
+    changed: bool,
+    status: str,
+    reloads: bool,
+) -> None:
+    """An agent whose roster entry already existed asks for a reload only when none is queued, so retries cannot restart its wait."""
+    template_coordination.provision.return_value = ("mind_alice", changed)
+    template_coordination.config_reload.status = ConfigReloadStatus(status=status)
+
+    await template_coordination.lifecycle.baseline_join(_ALICE_JOIN)
+
+    assert template_coordination.config_reload.request_reload.called is reloads
+
+
+@pytest.mark.asyncio
+async def test_one_users_agent_is_provisioned_one_call_at_a_time(template_coordination: TemplateCoordination) -> None:
+    """A second call for a user being provisioned returns at once instead of registering again; other users proceed."""
+    lifecycle = template_coordination.lifecycle
+    release = asyncio.Event()
+    users: list[str] = []
+
+    async def provision(*_args: object, user_id: str, **_kwargs: object) -> tuple[str, bool]:
+        users.append(user_id)
+        await release.wait()
+        return "mind_x", True
+
+    template_coordination.provision.side_effect = provision
+    first = asyncio.create_task(
+        lifecycle._provision_personal_agent(
+            "mind",
+            user_id="@alice:localhost",
+            source_user_id="@alice:localhost",
+            source_room_id="!lobby:localhost",
+        ),
+    )
+    await asyncio.sleep(0)
+    await asyncio.wait_for(
+        lifecycle._provision_personal_agent(
+            "mind",
+            user_id="@alice:localhost",
+            source_user_id="@bridge_alice:localhost",
+            source_room_id="!other:localhost",
+        ),
+        timeout=1,
+    )
+    other = asyncio.create_task(
+        lifecycle._provision_personal_agent(
+            "mind",
+            user_id="@bob:localhost",
+            source_user_id="@bob:localhost",
+            source_room_id="!lobby:localhost",
+        ),
+    )
+    await asyncio.sleep(0)
+    release.set()
+    await asyncio.gather(first, other)
+
+    assert users == ["@alice:localhost", "@bob:localhost"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("interruption", [RuntimeError("registration failed"), asyncio.CancelledError()])
+async def test_an_interrupted_provisioning_lets_the_next_request_for_that_user_run(
+    template_coordination: TemplateCoordination,
+    interruption: BaseException,
+) -> None:
+    """A provisioning call that fails or is cancelled requests no reload and no longer blocks that user's next request."""
+    lifecycle = template_coordination.lifecycle
+    template_coordination.provision.side_effect = [interruption, ("mind_alice", True)]
+
+    with pytest.raises(type(interruption)):
+        await lifecycle._provision_personal_agent(
+            "mind",
+            user_id="@alice:localhost",
+            source_user_id="@alice:localhost",
+            source_room_id="!lobby:localhost",
+        )
+    template_coordination.config_reload.request_reload.assert_not_called()
+    await lifecycle._provision_personal_agent(
+        "mind",
+        user_id="@alice:localhost",
+        source_user_id="@alice:localhost",
+        source_room_id="!lobby:localhost",
+    )
+
+    assert template_coordination.provision.await_count == 2
+    template_coordination.config_reload.request_reload.assert_called_once_with()

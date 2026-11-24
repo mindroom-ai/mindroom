@@ -10,7 +10,7 @@ Start with one K3s server node and keep tenant storage on Hetzner Cloud Volumes.
 This keeps the current bill low while making later worker nodes possible.
 Use `hcloud-volumes` for provisioned instance PVCs and avoid `local-path` for tenant data that must survive node replacement.
 The platform frontend and backend are stateless and can use HPA once metrics-server is installed.
-Tenant MindRoom and Synapse releases stay single-replica stateful workloads; scale capacity by placing more tenants across more nodes.
+Tenant MindRoom and Tuwunel releases stay single-replica stateful workloads; scale capacity by placing more tenants across more nodes.
 
 Production platform values should make the storage class explicit:
 
@@ -100,7 +100,7 @@ The instance chart mounts provider keys as files under `/etc/secrets/` and sets 
 
 Provisioned instances keep their credentials in the Secret `mindroom-api-keys-{instance_id}`, which the platform backend writes outside Helm, so tenant API keys and OIDC client secrets never enter Helm release values or history.
 Tenant workloads are untrusted, so the instance Secret holds only instance-scoped credentials and never the platform's Supabase service-role key.
-The one exception is the platform-wide Matrix OIDC client secret, which only Synapse mounts; the MindRoom container mounts just the provider key and registration secret files it reads.
+The one exception is the platform-wide Matrix OIDC client secret, which only Tuwunel mounts; the MindRoom container mounts just the provider key and registration secret files it reads.
 The sandbox proxy token is random per instance.
 Upgrading from releases that copied platform credentials into instance Secrets requires rotating the Supabase service-role key and any platform provider keys copied by `cluster/scripts/update-api-keys.sh`, then re-provisioning every instance with `POST /system/provision` and its `instance_id`.
 Standalone chart installs that set the retired `supabaseServiceKey` value keep that key in the chart-created Secret until it is deleted manually.
@@ -111,7 +111,7 @@ Each instance gets three hosts:
 
 - `{customer}.{baseDomain}` - MindRoom dashboard and API
 - `{customer}.api.{baseDomain}` - Direct API access
-- `{customer}.matrix.{baseDomain}` - Matrix/Synapse server
+- `{customer}.matrix.{baseDomain}` - Matrix homeserver (Tuwunel)
 
 ## Platform Deployment
 
@@ -157,9 +157,9 @@ Without `TRUSTED_PROXY_CIDRS`, as in the Docker Compose setup, every caller is k
 
 ### Matrix SSO
 
-With `matrixOidc.enabled: "true"` (default `"false"`), instance owners sign into their instance's Synapse server with their platform login.
+With `matrixOidc.enabled: "true"` (default `"false"`), instance owners sign into their instance's Matrix server with their platform login.
 Enabling it requires `matrixOidc.clientSecret`, a random shared secret, and `matrixOidc.privateKey`, a PEM-encoded RSA private key such as one from `openssl genrsa 2048`; an external Secret holds them as `matrix_oidc_client_secret` and `matrix_oidc_private_key`.
-`matrixOidc.issuer` defaults to `https://api.{domain}/matrix-oidc`, `matrixOidc.clientId` to `mindroom-synapse`, and `matrixOidc.keyId` to `mindroom-platform`.
+`matrixOidc.issuer` defaults to `https://api.{domain}/matrix-oidc`, `matrixOidc.clientId` to `mindroom-matrix`, and `matrixOidc.keyId` to `mindroom-platform`.
 Existing instances pick up the setting when they are re-provisioned, for example with `deploy-release.sh`.
 
 ## Local Development with Kind
@@ -195,7 +195,7 @@ All endpoints require bearer token (`PROVISIONER_API_KEY`).
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/system/provision` | POST | Create or re-provision an instance |
+| `/system/provision` | POST | Create or re-provision an instance; `"keep_stopped": true` redeploys an existing instance without starting it |
 | `/system/instances/{id}/start` | POST | Start a stopped instance |
 | `/system/instances/{id}/stop` | POST | Stop a running instance |
 | `/system/instances/{id}/restart` | POST | Restart an instance |
@@ -228,6 +228,16 @@ If an existing instance still has plaintext credential files, enabling credentia
 Clear or replace stale plaintext credential files before enabling the flag.
 If an already-encrypted instance has lost its instance Secret, pass `"enable_credentials_encryption": true` during reprovisioning so Helm receives the stable derived key again.
 
+### Instance Status Sync
+
+`/system/sync-instances`, the admin dashboard's "Refresh All", and the customer dashboard record the status Kubernetes shows: `running` once every desired pod is ready, `stopped` when scaled to zero, and `provisioning` otherwise.
+A crash-looping instance therefore shows `provisioning`, and the admin dashboard still offers Stop and Restart for it.
+A Stop pressed while a provision is still deploying the instance can be undone by that deploy; stop it again once the provision finishes.
+An instance without a deployment becomes `error`, except a `provisioning` or `deprovisioned` one, which keeps its status.
+When kubectl cannot reach the cluster, the sync leaves each instance unchanged; `/system/sync-instances` and "Refresh All" count it under `errors`.
+A `provisioning` instance whose deployment never appears belongs to a provision that stopped before Helm ran, such as one interrupted by a backend restart or a failed step before the deployment; the platform backend logs show which, and that no provision of it is still running.
+To retry it, set its `status` to `error` in Supabase and provision it again from the admin dashboard; do not uninstall it, because uninstalling deletes its volumes.
+
 ## Subscription Lifecycle
 
 Hosted instances follow their subscription.
@@ -243,11 +253,22 @@ Admins see the last run, instances pending teardown, and stuck states on the adm
 
 A failed step is stored in `instances.lifecycle_error` and retried on the next run.
 For Stripe-billed subscriptions the lifecycle rechecks the subscription with Stripe, so a lost or out-of-order webhook converges by the next night; if Stripe cannot be reached, nothing is stopped except the instances of an account pending deletion.
-When a price cannot be mapped to a tier, the lifecycle logs a warning and still refreshes status and trial end so inactive subscriptions are held.
+When a price cannot be mapped to a tier and billing cycle, the lifecycle logs a warning and still refreshes status and trial end so inactive subscriptions are held.
 Changing a plan's `included_ai_budget_usd` redeploys every running instance of that tier, one after another, on its next reconcile.
 Operator reprovisioning (`/system/provision`, admin provision) redeploys a held instance but keeps it stopped with its key disabled.
 If an instance's OpenRouter key was deleted in OpenRouter or is missing from its instance Secret, re-provisioning replaces it.
 Each subscription has at most one instance, so a concurrent second provision request for it gets `409`.
+
+### Changing a Plan Price
+
+Plan prices are the `price_monthly` and `price_yearly` amounts, in US cents, in `saas-platform/pricing-config.yaml`.
+Keep each `price_yearly` at twelve monthly payments less `discounts.annual_percentage`, because the upgrade page advertises that percentage as the yearly saving of every plan.
+To change a price, edit the amount and run `cluster/scripts/sync-stripe-prices.py` with a test-mode `STRIPE_SECRET_KEY` exported in your shell, which overrides the key in `saas-platform/.env`; it finds or creates a test-mode price for each amount and writes its ID to `stripe_price_id_monthly` or `stripe_price_id_yearly`.
+The script refuses a live key, so create the live price by hand on the MindRoom product with the new amount, the test-mode price's billing interval, and `tier` and `billing_cycle` metadata (for example `byok` and `monthly`; `billing_cycle` is `monthly` or `yearly`), then set its ID in `stripe_price_id_monthly_live` or `stripe_price_id_yearly_live`.
+Existing subscribers keep the price they bought, which maps to their plan only through its `tier` and `billing_cycle` metadata once its ID leaves the YAML, so before deploying, add that metadata to the old live price if it lacks it or its `billing_cycle` is not `monthly` or `yearly`.
+Subscribers upgrade in a Stripe customer portal configuration per plan, which checkout finds by its `mindroom_upgrade_prices` metadata (the plan's price IDs) or creates on first use, so new prices get a new configuration; the Dashboard cannot manage these, so deactivate the old one through the API (`stripe.billing_portal.Configuration.modify(<id>, active=False)`).
+The public landing page lists the monthly prices separately in `saas-platform/platform-frontend/src/app/page.tsx`, so update them there too.
+Checkout, the upgrade page, and the landing page use the new prices once a release with these changes is deployed (see [Release Deployment](#release-deployment)).
 
 ### Account Deletion
 
@@ -269,7 +290,7 @@ Run it from a repository checkout that has the tag (`git fetch --tags`), with `k
 ```bash
 cluster/scripts/deploy-release.sh v2026.9.351 --dry-run              # Show the plan and render the Helm upgrade
 cluster/scripts/deploy-release.sh v2026.9.351                        # Platform plus running instances
-cluster/scripts/deploy-release.sh v2026.9.351 --instances all        # Running plus lifecycle-held instances
+cluster/scripts/deploy-release.sh v2026.9.351 --instances all        # Running, lifecycle-held, and manually stopped instances
 cluster/scripts/deploy-release.sh v2026.9.351 --instances 1,7        # Only these instances
 cluster/scripts/deploy-release.sh v2026.9.351 --instances none       # Platform only
 ```
@@ -278,20 +299,26 @@ The script performs these steps:
 
 1. Pre-pull the three release images on the node with `sudo k3s crictl pull`, locally or over ssh when `NODE_SSH` is set.
 2. Save the current platform Helm values to `BACKUP_DIR` (default `~/saas-deploy`), then `helm upgrade --wait` the `platform` release with the chart from the same tag, setting `imageTag`, `backendImageTag`, `frontendImageTag`, and `provisioner.instanceMindroomImage`.
-3. Check `https://api.{domain}/health`, then re-provision each selected instance through `POST /system/provision` with its `subscription_id`, `account_id`, and `instance_id` from the `instances` table and the `tier` of its subscription, and wait for the `synapse-{id}` and `mindroom-{id}` rollouts.
+3. Check `https://api.{domain}/health`, then re-provision each selected instance through `POST /system/provision` with its `subscription_id`, `account_id`, and `instance_id` from the `instances` table and the `tier` of its subscription, and wait for the `tuwunel-{id}` and `mindroom-{id}` rollouts of the instances that run.
 4. Check `https://{id}.{baseDomain}/api/health` for every re-provisioned running instance, where `baseDomain` is `provisioner.instanceBaseDomain` or, when that is empty, `domain`.
 
 It reads the domain, environment, Supabase URL, and platform Secret name from the release's computed Helm values, and reads `provisioner_api_key` and `supabase_service_key` from that Secret in the chart's `mindroom-{environment}` namespace; secrets are never printed.
 `--dry-run` still performs these reads and the platform health check, but changes nothing and hides the rendered Helm output because it can contain secrets.
 `NAMESPACE` (default `mindroom-production`) and `RELEASE` (default `platform`) select the Helm release to upgrade.
 Re-provisioning rewrites the tenant Secret and applies the new MindRoom image, while the live tenant config on the instance PVC is left untouched.
-Tenant Synapse runs `matrixdotorg/synapse:latest` with pull policy `Always` unless the platform chart sets `provisioner.instanceSynapseImage` and `provisioner.instanceSynapseImagePullPolicy`.
-Set them there to pin or upgrade Synapse; the script keeps them across releases, and each instance switches when it is re-provisioned.
+Tenant homeservers run MindRoom's Tuwunel fork, `ghcr.io/mindroom-ai/mindroom-tuwunel:latest` with pull policy `Always`, unless the platform chart sets `provisioner.instanceTuwunelImage` and `provisioner.instanceTuwunelImagePullPolicy`.
+Set them there to pin or upgrade Tuwunel; the script keeps them across releases, and each instance switches when it is re-provisioned.
+An instance that still runs Synapse gets an empty Tuwunel server on its first re-provision.
+That deletes the instance's Matrix accounts, rooms, messages, uploaded files, and scheduled tasks, so owners sign in to Matrix again and the agents recreate their accounts and rooms; the MindRoom config, memories, workspaces, and saved credentials on the instance PVC are kept.
+Signed [external triggers](../external-triggers.md) name their room by ID, so they stop delivering and must be created again.
+Paired MindRoom Desktop computers stop, because the agents get new Matrix devices, and each must be set up again from a new storage path, as for changing the cloud controller under [Desktop operations](../tools/desktop.md#operations).
+Deploy the first release with Tuwunel using `--instances all`, so held and manually stopped instances switch too, and re-provision any instance left in another status, such as `error`, with `--instances <id>`.
+The switch cannot be rolled back: deploying an earlier release replaces each Tuwunel server with an empty Synapse server that the instances cannot start against, and switching forward again needs `.homeserver-tuwunel` deleted from each instance's MindRoom volume first.
 `/system/provision` is rate limited to five requests per minute, so the script waits between instances.
 An instance held by the subscription lifecycle (`lifecycle_stopped_at` set) is redeployed and then scaled back to zero with its key disabled, as described in [Subscription Lifecycle](#subscription-lifecycle).
-The script never re-provisions an instance that a customer or admin stopped manually (`stopped` without `lifecycle_stopped_at`), because re-provisioning would start it, and it refuses such ids when they are requested explicitly.
-Starting a stopped instance through the portal or `/system/instances/{id}/start` only scales its existing deployments back up, so it keeps running the old MindRoom image until it is re-provisioned; run the script with `--instances <id>` after it has been started.
-Deprovisioned instances are never re-provisioned either, because that would recreate them empty.
+An instance that a customer or admin stopped manually (`stopped` without `lifecycle_stopped_at`) is redeployed only with `--instances all` or its id, and then scaled back to zero so it stays stopped; the default `running` selection leaves it alone.
+Starting a stopped instance through the portal or `/system/instances/{id}/start` only scales its existing deployments back up, so it runs the release it was last redeployed with.
+Deprovisioned instances are never re-provisioned, because that would recreate them empty, and the script refuses their ids.
 A failed instance does not stop the run; the script reports every failure at the end and exits non-zero.
 When the node's memory requests are nearly full, rollout pods can stay `Pending`; stop idle instances or resize the node first.
 
@@ -343,13 +370,13 @@ Each customer instance gets:
 
 - Separate Kubernetes deployment in `mindroom-instances` namespace
 - Isolated PersistentVolumeClaim for data
-- Own Matrix/Synapse server (SQLite)
+- Own Matrix server, MindRoom's Tuwunel fork, which binds OpenID tokens so MindRoom Chat can open the instance's [Connections](../connections-portal.md) without settings
 - Independent ConfigMap configuration
 - Dedicated ingress routes
 
 Tenants share the namespace, so their isolation comes from these controls:
 
-- Tool code runs in the instance pod's sandbox-runner sidecar, no instance pod holds a Kubernetes API token, and the instance chart refuses dedicated Kubernetes workers.
+- Tool code runs in the instance pod's sandbox-runner sidecar, every instance pod runs under the container runtime's default seccomp profile, no instance pod holds a Kubernetes API token, and the instance chart refuses dedicated Kubernetes workers.
 - The namespace enforces the Pod Security `baseline` profile, which rejects privileged containers, host namespaces, `hostPath` volumes, and capabilities beyond the default set; Terraform creates it with that label, and the provisioner reapplies the label before every deployment.
 - Each instance's NetworkPolicy admits service traffic only from the ingress controller and the same instance, and allows HTTP and HTTPS egress only to public addresses and the ingress controller, so metadata services, private networks including private node addresses, and other pods are unreachable on those ports.
   The chart finds the controller by namespace through `ingressControllerNamespace` (default `ingress-nginx`).
@@ -358,7 +385,7 @@ Tenants share the namespace, so their isolation comes from these controls:
   The matching ephemeral-storage requests stay at 64 MiB, because every tenant's requests count against the node's allocatable ephemeral storage and large ones would leave new tenant pods unschedulable.
 
 Platform services run in `mindroom-{environment}` namespace.
-The hosted SaaS chart currently runs Synapse per tenant, with server names such as `{customer}.mindroom.chat`.
+The hosted SaaS chart runs a Tuwunel server per tenant, with server names such as `{customer}.mindroom.chat`.
 The public `mindroom.chat` Matrix server is the separate Tuwunel server on `hetzner-matrix`.
 Do not reuse `mindroom.chat` as the default SaaS tenant homeserver until the product has an explicit shared-homeserver mode with tenant isolation, provisioning, room ownership, SSO, and deprovisioning semantics.
 The runtime-only chart is the better starting point for a future bring-your-own-homeserver or shared-homeserver mode.

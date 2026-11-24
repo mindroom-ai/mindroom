@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     config_fields=[
         ConfigField(
             name="api_key",
+            env=("TAVILY_API_KEY",),
             label="API Key",
             type="password",
             required=False,
@@ -31,6 +32,7 @@ if TYPE_CHECKING:
         ),
         ConfigField(
             name="api_base_url",
+            env=("TAVILY_API_BASE_URL",),
             label="API Base URL",
             type="url",
             required=False,
@@ -209,7 +211,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["tavily-python"],
-    docs_url="https://docs.agno.com/tools/toolkits/search/tavily",
+    docs_url="https://docs.mindroom.chat/tools/web-search/#tavily",
     function_names=("extract_url_content", "web_search_using_tavily", "web_search_with_tavily"),
 )
 def tavily_tools() -> type[TavilyTools]:

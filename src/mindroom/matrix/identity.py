@@ -12,6 +12,7 @@ from mindroom.matrix.state import matrix_state_for_runtime
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
+    from mindroom.matrix.state import MatrixAccount
 
 _CURRENT_USER_LOCALPART_PATTERN = re.compile(r"^[a-z0-9._=/+-]+$")
 _SERVER_DNS_LABEL_PATTERN = re.compile(r"^[A-Za-z0-9-]{1,63}$")
@@ -21,6 +22,7 @@ __all__ = [
     "MatrixID",
     "managed_account_key",
     "managed_account_user_id",
+    "matrix_account_user_id",
     "matrix_user_id_from_email",
     "parse_current_matrix_user_id",
     "parse_historical_matrix_user_id",
@@ -249,4 +251,13 @@ def managed_account_user_id(account_key: str, domain: str, runtime_paths: Runtim
     account = matrix_state_for_runtime(runtime_paths).get_account(account_key)
     if account is None:
         return None
+    return matrix_account_user_id(account, domain)
+
+
+def matrix_account_user_id(account: MatrixAccount, domain: str) -> str:
+    """Return a persisted account's full Matrix user ID, using ``domain`` when the account saved none.
+
+    Loops over many entities read Matrix state once and call this per account,
+    instead of calling ``managed_account_user_id`` per entity.
+    """
     return MatrixID.from_username(account.username, account.domain or domain).full_id

@@ -2,41 +2,19 @@
 
 from __future__ import annotations
 
-import mimetypes
 import os
 import stat
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urlsplit
 
-import httpx
-from agno.media import Audio, File, Image, Video
-from agno.tools.function import ToolResult
-from httpx._utils import get_environment_proxies
-
-from mindroom.server_fetch_url import ServerFetchHTTPTransport, ServerFetchUrlError, validate_server_fetch_url
+from mindroom.llm.media import Audio, File, Image, Video, canonical_mime_type, named_by_resource, url_file_name
+from mindroom.public_fetch import PublicFetchError, fetch_public_url_sync
 from mindroom.tool_system import media_transport
+from mindroom.tool_system.agno_toolkits import read_tool_value
 from mindroom.tool_system.worker_proxy_client import to_json_compatible
 
 type _Media = Image | Audio | Video | File
-
-_AUDIO_FORMAT_BY_MIME_TYPE = {
-    "audio/mpeg": "mp3",
-    "audio/mp3": "mp3",
-    "audio/wav": "wav",
-    "audio/wave": "wav",
-    "audio/x-wav": "wav",
-}
-
-
-class _WorkerMediaProxyTransport(httpx.HTTPTransport):
-    """Validate media destinations before forwarding through configured egress."""
-
-    def handle_request(self, request: httpx.Request) -> httpx.Response:
-        """Check every origin and redirect before sending it to the worker proxy."""
-        # The configured proxy owns its final connection and hostname grant policy.
-        validate_server_fetch_url(str(request.url))
-        return super().handle_request(request)
 
 
 def _read_file(path: str | Path, limit: int) -> bytes:
@@ -52,83 +30,15 @@ def _read_file(path: str | Path, limit: int) -> bytes:
         os.close(descriptor)
 
 
-def _read_url(url: str, limit: int) -> tuple[bytes, str | None]:
-    # HTTPX disables environment proxy discovery with an explicit transport.
-    # Reuse its routing map so scheme selection and NO_PROXY keep their semantics.
-    mounts = {
-        pattern: None if proxy is None else _WorkerMediaProxyTransport(proxy=proxy)
-        for pattern, proxy in get_environment_proxies().items()
-    }
-    with httpx.Client(
-        transport=ServerFetchHTTPTransport(),
-        mounts=mounts,
-        trust_env=False,
-        headers={"Accept-Encoding": "identity"},
-        follow_redirects=False,
-        max_redirects=5,
-        timeout=30,
-    ) as client:
-        request = client.build_request("GET", url)
-        for _ in range(client.max_redirects + 1):
-            response = client.send(request, stream=True)
-            try:
-                if response.next_request is not None:
-                    # HTTPX automatic redirects read the whole intermediate body.
-                    request = response.next_request
-                    continue
-                response.raise_for_status()
-                encoding = response.headers.get("content-encoding", "")
-                if any(value.strip().lower() not in {"", "identity"} for value in encoding.split(",")):
-                    msg = "Worker media requires identity content encoding."
-                    raise ValueError(msg)
-                content = bytearray()
-                for chunk in response.iter_raw(chunk_size=64 * 1024):
-                    if len(content) + len(chunk) > limit:
-                        msg = "Worker media exceeds the byte limit."
-                        raise ValueError(msg)
-                    content.extend(chunk)
-                mime = response.headers.get("content-type", "").split(";", 1)[0].strip().lower()
-                return bytes(content), mime or None
-            finally:
-                response.close()
-        msg = "Exceeded maximum allowed redirects."
-        raise httpx.TooManyRedirects(msg, request=request)
-
-
 def _resource_name(media: _Media) -> str:
     if media.filepath is not None:
         return Path(media.filepath).name
-    return Path(unquote(urlsplit(media.url or "").path)).name
-
-
-def _inline_metadata(media: _Media, declared_mime: str | None) -> dict[str, Any]:
-    """Retain provider-relevant resource identity before dropping its location."""
-    name = _resource_name(media)
-    if isinstance(media, File):
-        filename = media.filename or media.name or name or None
-        candidates = (declared_mime, mimetypes.guess_type(filename or "")[0], mimetypes.guess_type(name)[0])
-        mime = media.mime_type or next((value for value in candidates if value in File.valid_mime_types()), None)
-        return {"filename": filename, "mime_type": mime}
-    updates: dict[str, Any] = {}
-    if media.mime_type is None and media.format is None:
-        family = media_transport.MEDIA_MIME_FAMILIES[type(media)]
-        inferred_mime = mimetypes.guess_type(name)[0] if isinstance(media, Image) else None
-        candidates = (declared_mime, inferred_mime)
-        updates["mime_type"] = next((value for value in candidates if value and value.startswith(family)), None)
-    if isinstance(media, (Audio, Video)) and media.format is None and name:
-        updates["format"] = Path(name).suffix.removeprefix(".").lower() or None
-    if isinstance(media, Audio) and media.format is None:
-        suffix_mime = mimetypes.guess_type(name)[0] or ""
-        if updates.get("format") not in {"mp3", "wav", "ogg", "webm"} and not suffix_mime.startswith("audio/"):
-            mime = media.mime_type or updates.get("mime_type")
-            if audio_format := _AUDIO_FORMAT_BY_MIME_TYPE.get(mime or ""):
-                updates["format"] = audio_format
-    return updates
+    return url_file_name(media.url or "")
 
 
 def _materialize_media(media: _Media, limit: int) -> tuple[_Media, int]:
-    if limit <= 0 or media.media_reference is not None or (isinstance(media, File) and media.external is not None):
-        msg = "Unsupported worker media resource or exhausted byte limit."
+    if limit <= 0:
+        msg = "Worker media exhausted the byte limit."
         raise ValueError(msg)
     declared_mime = None
     try:
@@ -137,45 +47,47 @@ def _materialize_media(media: _Media, limit: int) -> tuple[_Media, int]:
         elif media.filepath is not None:
             content = _read_file(media.filepath, limit)
         elif media.url is not None:
-            content, declared_mime = _read_url(media.url, limit)
+            # Proxy-only workers reach the internet through their egress proxy, which owns its hostname grants.
+            fetched = fetch_public_url_sync(media.url, max_bytes=limit, use_env_proxy=True)
+            content, declared_mime = fetched.content, canonical_mime_type(fetched.content_type)
         else:
             msg = "Worker media has no content source."
             raise ValueError(msg)
-    except (OSError, httpx.HTTPError, ServerFetchUrlError):
+    except OSError:
         msg = "Unable to read worker media resource."
         raise ValueError(msg) from None
-    if isinstance(media, File) and isinstance(content, str):
+    except PublicFetchError as error:
+        msg = f"Unable to read worker media resource: {error}"
+        raise ValueError(msg) from None
+    if isinstance(content, str):
         content = content.encode("utf-8")
-    if not isinstance(content, bytes) or not content or len(content) > limit:
+    if not content or len(content) > limit:
         msg = "Worker media must contain bytes within the byte limit."
         raise ValueError(msg)
-    updates = {"content": content, "url": None, "filepath": None, **_inline_metadata(media, declared_mime)}
-    return media.model_copy(update=updates), len(content)
+    # The resource's name and declared type keep identifying the media once its location is gone.
+    named = named_by_resource(media, _resource_name(media), declared_mime)
+    return replace(named, content=content, url=None, filepath=None), len(content)
 
 
 def serialize_worker_tool_result(result: object) -> object:
     """Resolve bounded media in the worker; ordinary results keep their JSON form."""
-    if not isinstance(result, ToolResult):
+    value = read_tool_value(result)
+    if value is None:
         result = to_json_compatible(result)
         if media_transport.is_media_result_envelope(result):
             return media_transport.encode_media_result(result)
         return result
-    sources = {
-        "images": result.images or [],
-        "audios": result.audios or [],
-        "videos": result.videos or [],
-        "files": result.files or [],
-    }
-    if sum(map(len, sources.values())) > media_transport.MAX_MEDIA_COUNT:
+    if sum(1 for _ in value.media()) > media_transport.MAX_MEDIA_COUNT:
         msg = "Worker media exceeds the item limit."
         raise ValueError(msg)
     total = 0
-    prepared: dict[str, Any] = {}
-    for field, items in sources.items():
-        prepared[field] = []
+    prepared: dict[str, list[Any]] = {"images": [], "audios": [], "videos": [], "files": []}
+    for field, items in zip(prepared, (value.images, value.audios, value.videos, value.files), strict=True):
         for media in items:
             limit = min(media_transport.MAX_MEDIA_BYTES, media_transport.MAX_TOTAL_MEDIA_BYTES - total)
             item, size = _materialize_media(media, limit)
             total += size
             prepared[field].append(item)
-    return media_transport.encode_media_result(result.model_copy(update=prepared))
+    return media_transport.encode_media_result(
+        replace(value, **{field: tuple(items) for field, items in prepared.items()}),
+    )

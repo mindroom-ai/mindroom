@@ -3,17 +3,16 @@
 import asyncio
 import json
 import threading
-from collections.abc import Iterator
+from collections.abc import AsyncIterator, Iterator
 from contextlib import nullcontext
 from dataclasses import replace
 from pathlib import Path
-from typing import Literal, Never
+from typing import Literal, Never, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import aiohttp
 import httpx
 import pytest
-import yaml
 from fastapi import FastAPI, Request, WebSocket
 from fastapi.testclient import TestClient
 from nio.exceptions import LocalProtocolError, RemoteTransportError
@@ -24,11 +23,13 @@ from structlog.testing import capture_logs
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.api import computers, config_lifecycle
 from mindroom.api import main as api_main
+from mindroom.api import workers as workers_api
+from mindroom.api.app_state import ensure_app_state
 from mindroom.api.computers import router
-from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.orchestration.computer_runtime import ComputerRuntimeCoordinator
-from mindroom.worker_computer.auth import computer_origins
+from mindroom.origins import allowed_client_origins
+from mindroom.runtime_env_policy import COMPUTER_ALLOWED_ORIGINS_ENV
 from mindroom.worker_computer.protocol import BrowserSession, ComputerStatus
 from mindroom.worker_computer.sessions import ComputerError, ComputerSessionStore
 from mindroom.workers.backend import WorkerBackend
@@ -41,7 +42,7 @@ type Gateway = tuple[TestClient, ComputerPeer, FastAPI]
 def test_public_control_requires_session_bearer_and_returns_no_store() -> None:
     """Public control requires session bearer and returns no store."""
     app = FastAPI()
-    config_lifecycle.ensure_app_state(app)
+    ensure_app_state(app)
     app.include_router(router)
     with TestClient(app) as client:
         response = client.post("/api/computers/sessions/missing/control", json={"action": "take"})
@@ -59,7 +60,7 @@ def gateway(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Gateway
         yield client, peer, app
 
 
-def create(client: TestClient) -> httpx.Response:
+def create(client: TestClient, headers: dict[str, str] | None = None) -> httpx.Response:
     """Create."""
     return client.post(
         "/api/computers/sessions",
@@ -73,6 +74,7 @@ def create(client: TestClient) -> httpx.Response:
             "room_id": "!room:example.org",
             "agent_user_id": "@agent:example.org",
         },
+        headers=headers,
     )
 
 
@@ -190,24 +192,23 @@ def test_active_stream_authorization_transport_failure_revokes_control(
 
 
 @pytest.mark.parametrize("protocol_format", ["split", "combined", "combined_whitespace"])
-@pytest.mark.parametrize("duplicate_ticket", [False, True])
-def test_stream_ticket_from_asgi_subprotocols(
-    gateway: Gateway,
-    protocol_format: str,
-    *,
-    duplicate_ticket: bool,
-) -> None:
-    """Accept SansIO header values while rejecting duplicate and replayed tickets."""
-    client, _peer, app = gateway
+@pytest.mark.parametrize("offer", ["valid", "duplicate", "missing_binary", "missing_ticket"])
+def test_stream_ticket_scope_representations(gateway: Gateway, protocol_format: str, offer: str) -> None:
+    """Raw header lines and normalized ASGI tokens enforce the same ticket contract, including replay rejection."""
+    client, _, app = gateway
     session = create(client).json()
     path = "/api/computers/sessions/" + session["session_id"]
     headers = {"Authorization": "Bearer " + session["session_token"]}
     ticket = client.post(path + "/stream-ticket", headers=headers).json()["ticket"]
     protocols = ["binary", "mindroom-ticket." + ticket]
-    if duplicate_ticket:
-        protocols.append("mindroom-ticket." + ticket)
+    if offer == "duplicate":
+        protocols.append(protocols[-1])
+    elif offer == "missing_binary":
+        protocols.pop(0)
+    elif offer == "missing_ticket":
+        protocols.pop()
     if protocol_format == "combined":
-        protocols = [", ".join(protocols)]
+        protocols = [", \t".join(protocols)]
     elif protocol_format == "combined_whitespace":
         protocols = [" " + " ,\t ".join(protocols) + " "]
     # TestClient splits the header itself, masking Uvicorn SansIO's raw scope.
@@ -221,16 +222,15 @@ def test_stream_ticket_from_asgi_subprotocols(
         receive=AsyncMock(),
         send=AsyncMock(),
     )
-    if duplicate_ticket:
+    if offer == "valid":
+        assert computers._stream_session(websocket, session["session_id"]).session_id == session["session_id"]
+        with pytest.raises(ComputerError) as replayed:
+            computers._stream_session(websocket, session["session_id"])
+        assert replayed.value.status_code == 401
+    else:
         with pytest.raises(ComputerError, match="A computer stream ticket is required") as denied:
             computers._stream_session(websocket, session["session_id"])
         assert denied.value.status_code == 401
-        return
-    accepted = computers._stream_session(websocket, session["session_id"])
-    assert accepted.session_id == session["session_id"]
-    with pytest.raises(ComputerError) as replayed:
-        computers._stream_session(websocket, session["session_id"])
-    assert replayed.value.status_code == 401
 
 
 @pytest.mark.parametrize("combined_protocols", [False, True])
@@ -282,6 +282,21 @@ def test_stream_watch_take_release_reconnect_and_stop(gateway: Gateway, *, combi
             ws.receive_bytes()
     assert client.get(path, headers=headers).status_code == 401
     assert create(client).json()["state"] == "ready"
+
+
+@pytest.mark.asyncio
+async def test_worker_text_ends_the_desktop_stream() -> None:
+    """The desktop stream is all RFB, so text from the worker ends it before anything after it reaches the viewer."""
+    websocket = AsyncMock()
+
+    async def worker() -> AsyncIterator[aiohttp.WSMessage]:
+        yield aiohttp.WSMessage(aiohttp.WSMsgType.BINARY, b"screen", None)
+        yield aiohttp.WSMessage(aiohttp.WSMsgType.TEXT, "status", None)
+        yield aiohttp.WSMessage(aiohttp.WSMsgType.BINARY, b"frame", None)
+
+    await computers._downstream(websocket, cast("aiohttp.ClientWebSocketResponse", worker()))
+    websocket.send_bytes.assert_awaited_once_with(b"screen")
+    websocket.send_text.assert_not_called()
 
 
 @pytest.mark.parametrize("failure", ["origin", "missing", "expired", "generation", "config"])
@@ -386,6 +401,61 @@ def test_openid_subject_server_and_verifier_failures(
     assert "openid-secret" not in caplog.text
 
 
+def _set_public_url(app: FastAPI, public_url: str) -> None:
+    state = config_lifecycle.require_api_state(app)
+    paths = state.snapshot.runtime_paths
+    state.snapshot = replace(
+        state.snapshot,
+        runtime_paths=replace(paths, process_env={**paths.process_env, "MINDROOM_PUBLIC_URL": public_url}),
+    )
+
+
+def test_session_creation_binds_openid_to_the_configured_public_url(gateway: Gateway) -> None:
+    """A binding homeserver gets the normalized MINDROOM_PUBLIC_URL origin, and a token for another origin is refused."""
+    client, peer, app = gateway
+    _set_public_url(app, "https://Mindroom.Example.org:443/some/path")
+    peer.expected_audience = "https://elsewhere.example.org"
+    response = create(client)
+    assert response.status_code == 401
+    assert "openid-secret" not in response.text
+    peer.expected_audience = "https://mindroom.example.org"
+    assert create(client).status_code == 200
+    assert peer.userinfo_audiences == ["https://mindroom.example.org"] * 2
+
+
+def test_session_creation_never_takes_the_audience_from_the_host_header(gateway: Gateway) -> None:
+    """A replaying backend controls `Host`, so a binding homeserver still sees the configured origin."""
+    client, peer, app = gateway
+    _set_public_url(app, "https://mindroom.example.org")
+    peer.expected_audience = "https://mindroom.example.org"
+    assert create(client, headers={"Host": "evil.example.org"}).status_code == 200
+    assert peer.userinfo_audiences == ["https://mindroom.example.org"]
+
+
+@pytest.mark.parametrize(("public_url", "audience"), [(None, "http://localhost:8765"), ("mindroom.example.org", None)])
+def test_session_creation_audience_without_a_usable_public_url(
+    gateway: Gateway,
+    public_url: str | None,
+    audience: str | None,
+) -> None:
+    """Unset, the audience is the local default; unusable, none is sent; a homeserver that binds no tokens verifies both."""
+    client, peer, app = gateway
+    if public_url is not None:
+        _set_public_url(app, public_url)
+    assert create(client).status_code == 200
+    assert peer.userinfo_audiences == [audience]
+
+
+def test_session_refused_at_another_address_names_the_public_url_setting(gateway: Gateway) -> None:
+    """Chat binds the token to the address it opened, so a refusal there tells the operator to set MINDROOM_PUBLIC_URL."""
+    client, peer, _ = gateway
+    peer.expected_audience = "http://10.42.0.6:8765"
+    response = create(client, headers={"Host": "10.42.0.6:8765"})
+    assert response.status_code == 401
+    assert "set MINDROOM_PUBLIC_URL to it." in response.text
+    assert "if MindRoom is opened at http://10.42.0.6:8765," in response.text
+
+
 def test_changed_config_conflicts_with_existing_session(gateway: Gateway) -> None:
     """An existing bearer cannot survive an API configuration generation change."""
     client, _, app = gateway
@@ -473,36 +543,6 @@ def test_missing_stream_ticket_denies_upgrade_with_401(gateway: Gateway) -> None
     assert error.value.headers["cache-control"] == "no-store"
 
 
-def test_prebound_computer_authorizer_survives_initial_api_config_load(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Initial API startup must retain the orchestrator's already-bound authorization."""
-    config = Config()
-    config_path = tmp_path / "config.yaml"
-    config_path.write_text(yaml.safe_dump(config.model_dump(mode="json")))
-    paths = resolve_runtime_paths(
-        config_path=config_path,
-        storage_path=tmp_path / "storage",
-        process_env={"MINDROOM_WORKER_COMPUTER_ENABLED": "1"},
-    )
-    app = FastAPI(lifespan=api_main._lifespan)
-    app.include_router(router)
-    api_main.initialize_api_app(app, paths)
-    state = config_lifecycle.app_state(app)
-    state.computer_runtime = computers.ComputerRuntime(
-        AsyncMock(side_effect=ComputerError(403, "Policy denied.")),
-        0,
-        config,
-    )
-    monkeypatch.setattr(computers, "verify_openid", AsyncMock(return_value="@alice:example.org"))
-    with TestClient(app) as client:
-        loaded = config_lifecycle.require_api_state(app).snapshot.runtime_config
-        assert loaded is not None
-        assert config.model_dump() == loaded.model_dump()
-        assert create(client).status_code == 403
-
-
 def test_worker_maintenance_touches_computer_stream_before_cleanup(
     gateway: Gateway,
     monkeypatch: pytest.MonkeyPatch,
@@ -522,7 +562,7 @@ def test_worker_maintenance_touches_computer_stream_before_cleanup(
         lambda *_args, **_kwargs: nullcontext(manager),
     )
     monkeypatch.setattr(
-        api_main,
+        workers_api,
         "maintain_workers",
         lambda _manager: actions.append("maintain") or WorkerMaintenanceResult((), ()),
     )
@@ -532,11 +572,10 @@ def test_worker_maintenance_touches_computer_stream_before_cleanup(
         headers={"Origin": "https://chat.example.org"},
     ) as websocket:
         assert websocket.receive_bytes() == b"screen"
-        config, paths = config_lifecycle.read_app_committed_runtime_config(app)
         api_main._cleanup_workers_once(
-            paths,
-            runtime_config=config,
-            computer_worker_keys=computers.active_computer_worker_keys(app),
+            config_lifecycle.require_api_state(app).snapshot.runtime_paths,
+            touch_live_workers=lambda _manager: None,
+            held_worker_keys=computers.active_computer_worker_keys(app),
         )
         assert actions == ["touch:worker", "maintain"]
 
@@ -550,7 +589,7 @@ def test_orchestrator_unbind_revokes_active_stream(gateway: Gateway, monkeypatch
     headers = {"Authorization": "Bearer " + session["session_token"]}
     ticket = client.post(path + "/stream-ticket", headers=headers).json()["ticket"]
     paths = config_lifecycle.require_api_state(app).snapshot.runtime_paths
-    coordinator = ComputerRuntimeCoordinator(paths, AgentReplyMembershipIndex())
+    coordinator = ComputerRuntimeCoordinator(paths, AgentReplyMembershipIndex(), AsyncMock())
     with client.websocket_connect(
         path + "/stream",
         subprotocols=["binary", "mindroom-ticket." + ticket],
@@ -559,6 +598,11 @@ def test_orchestrator_unbind_revokes_active_stream(gateway: Gateway, monkeypatch
         assert websocket.receive_bytes() == b"screen"
         assert client.portal is not None
         client.portal.call(coordinator.unbind)
+        # The sessions close at once, not only once the stream's maintenance notices the runtime is gone.
+        sessions = config_lifecycle.app_state(app).computer_sessions
+        assert sessions is not None
+        with pytest.raises(ComputerError):
+            sessions.get(session["session_id"])
         with pytest.raises(WebSocketDisconnect):
             websocket.receive_bytes()
     assert client.get(path, headers=headers).status_code == 401
@@ -576,7 +620,7 @@ async def test_stream_maintenance_bounds_complete_checks_with_virtual_time(
     monkeypatch.setattr(loop, "time", lambda: now)
     app = FastAPI()
     store = ComputerSessionStore(clock=lambda: now)
-    config_lifecycle.ensure_app_state(app).computer_sessions = store
+    ensure_app_state(app).computer_sessions = store
     session = store.create(authorized_target())
     stream_closed = asyncio.Event()
     session.stream = stream_closed
@@ -655,27 +699,32 @@ def test_invalid_computer_origin_fails_closed(origin: str, tmp_path: Path) -> No
         storage_path=tmp_path,
         process_env={"MINDROOM_COMPUTER_ALLOWED_ORIGINS": json.dumps([origin])},
     )
-    assert computer_origins(paths) == ()
+    assert allowed_client_origins(paths, COMPUTER_ALLOWED_ORIGINS_ENV) == ()
 
 
 @pytest.mark.parametrize(
-    "origin",
+    ("configured", "expected"),
     [
-        "https://chat.example.org",
-        "http://localhost:4173",
-        "http://127.0.0.2:4173",
-        "http://[::1]:4173",
-        "capacitor://localhost",
+        ("https://chat.example.org", "https://chat.example.org"),
+        ("http://localhost:4173", "http://localhost:4173"),
+        ("http://127.0.0.2:4173", "http://127.0.0.2:4173"),
+        ("http://[::1]:4173", "http://[::1]:4173"),
+        ("capacitor://localhost", "capacitor://localhost"),
+        ("https://Chat.Example.org", "https://chat.example.org"),
+        ("HTTPS://chat.example.org:443", "https://chat.example.org"),
+        ("https://chat.example.org/", "https://chat.example.org"),
+        ("https://Chat.Example.org:443/", "https://chat.example.org"),
+        ("http://LOCALHOST:80/", "http://localhost"),
     ],
 )
-def test_secure_and_loopback_computer_origins_preserve_exact_value(origin: str, tmp_path: Path) -> None:
-    """Accepted origins retain exact matching, including the explicit port."""
+def test_secure_and_loopback_computer_origins_are_normalized(configured: str, expected: str, tmp_path: Path) -> None:
+    """Accepted origins are returned in the normalized form a browser sends."""
     paths = resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
         storage_path=tmp_path,
-        process_env={"MINDROOM_COMPUTER_ALLOWED_ORIGINS": json.dumps([origin])},
+        process_env={"MINDROOM_COMPUTER_ALLOWED_ORIGINS": json.dumps([configured])},
     )
-    assert computer_origins(paths) == (origin,)
+    assert allowed_client_origins(paths, COMPUTER_ALLOWED_ORIGINS_ENV) == (expected,)
 
 
 def test_native_origin_mixed_allowlist(tmp_path: Path) -> None:
@@ -686,9 +735,9 @@ def test_native_origin_mixed_allowlist(tmp_path: Path) -> None:
         storage_path=tmp_path,
         process_env={"MINDROOM_COMPUTER_ALLOWED_ORIGINS": json.dumps(origins)},
     )
-    assert computer_origins(paths) == tuple(origins)
+    assert allowed_client_origins(paths, COMPUTER_ALLOWED_ORIGINS_ENV) == tuple(origins)
     invalid = replace(paths, process_env={"MINDROOM_COMPUTER_ALLOWED_ORIGINS": json.dumps([*origins, "null"])})
-    assert computer_origins(invalid) == ()
+    assert allowed_client_origins(invalid, COMPUTER_ALLOWED_ORIGINS_ENV) == ()
 
 
 @pytest.mark.parametrize("allowed", [False, True])
@@ -828,14 +877,17 @@ async def test_background_maintenance_snapshots_computers_on_owning_loop(
             return WorkerMaintenanceResult((), ())
 
         monkeypatch.setattr(store, "active_worker_keys", collect)
-        monkeypatch.setattr(api_main, "_worker_cleanup_interval_seconds", lambda _paths: 0.001)
+        monkeypatch.setattr(api_main, "worker_cleanup_interval_seconds", lambda _paths: 0.001)
         monkeypatch.setattr(
             api_main,
             "lease_configured_primary_worker_manager",
             lambda *_args, **_kwargs: nullcontext(manager),
         )
-        monkeypatch.setattr(api_main, "maintain_workers", maintain)
-        await asyncio.wait_for(api_main._worker_cleanup_loop(stop, app), timeout=1)
+        monkeypatch.setattr(workers_api, "maintain_workers", maintain)
+        await asyncio.wait_for(
+            api_main._worker_cleanup_loop(stop, app, touch_live_workers=lambda _manager: None),
+            timeout=1,
+        )
     assert collected == [owner]
     assert actions == ["touch:worker", "maintain"]
 
@@ -1098,39 +1150,3 @@ def test_abandoned_session_creation_does_not_hold_a_viewer_slot(
         assert create(client).status_code == 409
     disconnected = False
     assert create(client).status_code == 200
-
-
-@pytest.mark.parametrize("combined", [False, True])
-@pytest.mark.parametrize("offer", ["valid", "duplicate", "missing_binary", "missing_ticket"])
-def test_stream_ticket_scope_representations(gateway: Gateway, offer: str, *, combined: bool) -> None:
-    """Raw header lines and normalized ASGI tokens enforce the same ticket contract."""
-    client, _, app = gateway
-    session = create(client).json()
-    path = "/api/computers/sessions/" + session["session_id"]
-    headers = {"Authorization": "Bearer " + session["session_token"]}
-    ticket = client.post(path + "/stream-ticket", headers=headers).json()["ticket"]
-    protocols = ["binary", "mindroom-ticket." + ticket]
-    if offer == "duplicate":
-        protocols.append(protocols[-1])
-    elif offer == "missing_binary":
-        protocols.pop(0)
-    elif offer == "missing_ticket":
-        protocols.pop()
-    websocket = WebSocket(
-        {
-            "type": "websocket",
-            "app": app,
-            "headers": [(b"origin", b"https://chat.example.org")],
-            "subprotocols": [", \t".join(protocols)] if combined else protocols,
-        },
-        receive=AsyncMock(),
-        send=AsyncMock(),
-    )
-    if offer == "valid":
-        assert computers._stream_session(websocket, session["session_id"]).session_id == session["session_id"]
-        with pytest.raises(ComputerError):
-            computers._stream_session(websocket, session["session_id"])
-    else:
-        with pytest.raises(ComputerError) as error:
-            computers._stream_session(websocket, session["session_id"])
-        assert error.value.status_code == 401

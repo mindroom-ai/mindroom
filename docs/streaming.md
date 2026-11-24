@@ -7,9 +7,9 @@ icon: lucide/radio
 MindRoom streams agent responses to Matrix by progressively editing a single message, so users see text appear as the model generates it.
 This page covers when streaming is used, how to tune or disable it, how streamed messages show tool calls, completion, cancellation, and errors, and how oversized responses are delivered.
 
-<video controls playsinline preload="metadata" aria-label="Three colleagues and one agent in a shared thread, each answer streaming live" style="width: 100%" poster="https://github.com/user-attachments/assets/fa232e8f-a26b-425f-b667-433fb12da6ec" data-poster-light="https://github.com/user-attachments/assets/fa232e8f-a26b-425f-b667-433fb12da6ec" data-poster-dark="https://github.com/user-attachments/assets/54a96fc9-91dc-48a7-985c-7d4e41ad9be8">
-  <source src="https://github.com/user-attachments/assets/571db927-105b-4907-9c83-ed4f9ef1fc4a" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/c913ed8a-4afb-43be-8d90-cdd2aa4158a9" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="Three colleagues and one agent in a shared thread, each answer streaming live" style="width: 100%" poster="https://github.com/user-attachments/assets/dc935612-af9a-4556-a502-5c1ffaf3810a" data-poster-light="https://github.com/user-attachments/assets/dc935612-af9a-4556-a502-5c1ffaf3810a" data-poster-dark="https://github.com/user-attachments/assets/d3312f2a-0315-4109-83d6-3470bb2a4247">
+  <source src="https://github.com/user-attachments/assets/0545ae90-c825-496d-81ad-45d3cc069822" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/71036d2f-4ccd-4cdd-99c2-518b915f2ba0" type="video/mp4">
 </video>
 
 <a id="streaming-responses_1"></a>
@@ -22,6 +22,23 @@ This page covers when streaming is used, how to tune or disable it, how streamed
 
 When a response is not streamed, the placeholder is replaced with the complete response in a single edit.
 Agents also show a typing indicator while they work on a response.
+
+## Live Updates
+
+When the homeserver relays live updates, as MindRoom's Tuwunel fork (`mindroom-tuwunel`) does for mindroom.chat, hosted MindRoom, and `mindroom-stack`, MindRoom Chat shows a streamed reply about ten times a second, including its tool calls, worker progress, and [reasoning](#reasoning), without editing the message each time.
+While a tool such as `shell` runs, MindRoom Chat also shows the last lines of its output under the call, with credentials masked as in tool results; the message keeps only the tool's result, and team replies do not show it.
+The message itself is then edited only every `update_interval` seconds (5 by default) and once at the end, so Element, bridges, and other clients show the reply in steps of about five seconds and end with the same final message.
+A reply that grows too large for a live update, as a very long reply with many tool calls can, switches to the progressive edits below for the rest of the reply.
+Live updates are encrypted like the reply in an encrypted room.
+They reach only accounts on the agents' homeserver; people on other homeservers see the message edits.
+MindRoom Chat opened while a reply is streaming shows the last edit until the next live update, at most five seconds later.
+A reply that is stopped or ends with an error keeps the text of its last edit, so up to `update_interval` seconds of text MindRoom Chat showed live can disappear above the note.
+A homeserver relays them when its `/_matrix/client/versions` lists `io.mindroom.ephemeral_opt_in`, which the fork does unless its `mindroom_ephemeral_events_enabled` option is off; with any other homeserver every client sees the progressive edits below.
+MindRoom Chat's Sub-agents panel uses the same mechanism: it shows each running [subagent](tools/agent-orchestration.md#running-subagents) and Dynamic Workflow participant with its text and tool calls as they happen, then how it ended.
+Tool call details appear there only when the reply that started the subagent shows its tool calls.
+It needs a homeserver that relays live updates, and is empty when they are off or the conversation is not in a Matrix room.
+The graph of a [workflow run](tools/workflows.md#the-run-in-the-room) is sent the same way, as `io.mindroom.workflow` frames from the run's agent, within the same budget as that agent's sub-agent frames in the room.
+Set `defaults.streaming.live_frames: false` to turn live updates off, so every client sees the progressive edits below, the Sub-agents panel shows nothing for subagents that start afterwards, and a workflow run shows its card only.
 
 ## Configuration
 
@@ -36,6 +53,7 @@ defaults:
     min_update_interval: 0.5
     interval_ramp_seconds: 15.0
     max_idle: 2.0
+    live_frames: true
 ```
 
 | Field | Type | Default | Description |
@@ -45,8 +63,10 @@ defaults:
 | `streaming.min_update_interval` | float, > 0 | `0.5` | Seconds between edits at the start of a response. |
 | `streaming.interval_ramp_seconds` | float, >= 0 | `15.0` | Seconds over which the interval ramps from `min_update_interval` to `update_interval`. Set `0` to use `update_interval` from the start. |
 | `streaming.max_idle` | float, > 0 | `2.0` | When no new text has arrived for this many seconds, the buffered text is shown with the next streaming update. |
+| `streaming.live_frames` | bool | `true` | Send [live updates](#live-updates) when the homeserver relays them, and edit the message only every `update_interval`. |
 
 Edits also come sooner than the interval once enough new text has accumulated, and a tool-call marker appears as soon as the tool starts.
+While live updates run, edits come only every `update_interval`, and the other timing settings have no effect.
 Raise `update_interval` to reduce load on the homeserver, or lower it for smoother updates.
 
 ## Presence-Based Streaming
@@ -54,7 +74,7 @@ Raise `update_interval` to reduce load on the homeserver, or lower it for smooth
 Even when streaming is enabled, MindRoom streams a response only when the user who sent the message is `online` or `unavailable`; for an `offline` requester, the placeholder is replaced with the complete response.
 Everyone in the room sees the same edits.
 If the presence check fails, for example because the homeserver has presence disabled, MindRoom does not stream.
-A reply that continues after a restart always streams, even when streaming is off or the requester is offline, so the part it already showed stays in the message.
+A reply that continues after a restart keeps the part it already showed; the rest streams even when streaming is off or the requester is offline, except in a [silent schedule's](scheduling.md#silent-delivery) run.
 When no requester can be identified, MindRoom streams.
 
 ## Presence
@@ -71,26 +91,50 @@ Each streamed message carries its progress in the Matrix event content field `io
 | `pending` | Initial message of the response |
 | `streaming` | Response is still being generated |
 | `approval_pending` | Response is paused until someone approves or denies a tool call (see [Tool Approval](tool-approval.md)) |
-| `completed` | Response finished successfully |
+| `completed` | Response finished, including one that ends by reporting an error, such as a provider failure, whether or not part of the answer came first |
 | `cancelled` | User stopped the response |
-| `error` | Response failed or was otherwise interrupted |
+| `error` | MindRoom could not finish or deliver the response, for example because of a restart or a failed delivery; a response cut short ends with a note that says why (see [Cancellation and Errors](#cancellation-and-errors)) |
 
 To confirm a response finished, inspect the latest `io.mindroom.stream_status` in a client or event view that shows event content.
 MindRoom never appends an ellipsis to generated text, and clients may draw their own progress indicators, so a trailing ellipsis is not a progress signal.
 
 ## Tool Calls During Streaming
 
-When an agent calls tools, MindRoom shows inline markers in the message text:
+When an agent calls tools, MindRoom builds each reply with a marker line per call:
 
 ```
 🔧 `web_search` [1] ⏳       ← tool call started
 🔧 `web_search` [1]          ← tool call completed
 ```
 
-The number in brackets counts tool calls within the message, and `io.mindroom.tool_trace.events[N-1]` in the event content holds the tool name, argument preview, and result preview for call `[N]`.
+The number in brackets counts tool calls within the message, and `io.mindroom.tool_trace.events[N-1]` in the event content holds the tool name, argument preview, result preview, and `tool_call_id` for call `[N]`.
+Live frames carry the marker lines, but messages and edits go to Matrix without them (`io.mindroom.tool_trace` version 3), so clients without tool support show only the text.
+Each call's trace entry says where its line was instead: `body_line` counts the lines of the sent `body` before it, and `at` counts the top-level HTML blocks of the sent `formatted_body` before it.
+The conversion is the last step of every send, on the whole event: an edit's fallback text is converted as its replacement is, after `* `.
+MindRoom Chat puts the lines back there and gets the version 2 message byte for byte, and so does MindRoom wherever it reads an agent's message from Matrix, so history, summaries, judges and tools read a reply as before.
+Both put the lines back for exactly the accounts whose sends MindRoom converts: those whose username starts with `mindroom_`, on any homeserver (another server's MindRoom, an agent that has left the config, and the internal user), and for no other, whatever trace a message carries.
+The lines go back as the text they were and nothing more: MindRoom reads the trace of a message the same from any sender, as it did before, and the username gives an account no trust.
+The `matrix_api` tool's `get_event` is the exception: it returns the event as Matrix holds it, so a version 3 reply's calls are in `io.mindroom.tool_trace.events` and not in its `body`.
+Search runs on the homeserver, over the text Matrix holds: a word of a reply's prose finds it, and a found reply is shown with its lines back, but a tool's name no longer finds a reply that named the tool only in a marker line, unless the reply is tool calls alone.
+A reply or an edit made of tool calls alone keeps its markers, as version 2: without them it would have no text, and a reader that puts no lines back (another client, an earlier MindRoom) would take it for no message.
+A progress edit of a reply that is still streaming is the exception: it shows `Thinking...` as its text, with `placeholder_body: true` in its version 3 trace, and MindRoom Chat and MindRoom put the lines back in place of that text.
+A message also keeps its markers, as version 2, whenever MindRoom is not sure of that: a marker line that is not also its own top-level paragraph in the HTML (inside a paragraph, a list item or raw HTML, or a fenced example of one), a trace with a malformed entry, a warm-up frame, the attached content of a message too large for one event (its preview has neither the marker lines nor the trace), and every message of an account whose username does not start with `mindroom_` (an agent with its own `matrix_username` is one), which MindRoom Chat does not take for an agent.
+A completed call that did not succeed (it errored, was refused or denied, or was cancelled or interrupted) also carries `is_error: true`, and its result preview says why; the key is omitted on a call that succeeded and on a started one, in live frames and the final event alike.
+A secret request card (`io.mindroom.secret_request`) that a reply's tool call posted names that reply's event (`response_event_id`) and the call (`tool_call_id`), so a client can draw the card at the call's line; a call made through the CLI from a Bash call has its own line, which the card names.
 Tools that start in quick succession appear together in one edit.
 Markers and tool-trace metadata are shown by default; to hide them, set `show_tool_calls: false` on one agent or under `defaults` for every agent that leaves it unset (see [Agent Configuration](configuration/agents.md#defaults)).
 With tool calls hidden, the agent still shows typing activity, and a tool that needs an isolated worker may show generic progress such as `Preparing isolated worker... 17s elapsed.` without naming the tool.
+
+## Reasoning
+
+When a model reasons before or between parts of its answer, as with Anthropic extended thinking, OpenAI reasoning summaries, Gemini thinking, or `<think>` blocks, a streamed reply shows that reasoning to everyone in the room.
+MindRoom Chat keeps reasoning collapsed by default behind a toggle above the answer (expandable in place while streaming and once finished, labeled "Thought for N s" after the reply finishes, where N is how long the model reasoned).
+The final message keeps it in `io.mindroom.reasoning`; it is never part of the answer text or the agent's history.
+The final message also keeps where each reasoning segment began (`segments`: UTF-16 `start` in `text`, `after_tool`, `duration_ms`), so clients can show it between the tool calls; segment durations add up to the total unless long reasoning was cut, which drops the later segments.
+Live frames carry the same list without durations.
+Set `show_reasoning: false` on an agent, or under `defaults`, to keep reasoning out of the room.
+Reasoning can describe tool calls that `show_tool_calls: false` hides, so set `show_reasoning: false` as well to keep them out of the room.
+Long reasoning is shortened on the final message so the reply stays one ordinary message; replies that are not streamed, team replies, and replies split into several messages (`large_message_strategy: split`) keep no reasoning, and a reply that paused for a tool approval shows its reasoning only until the pause and keeps none on its final message.
 
 ## Cancellation and Errors
 
@@ -102,8 +146,12 @@ The partial text stays in the message, followed by a note explaining how it ende
 |------|-------|
 | `**[Response cancelled by user]**` | The user stopped the response. |
 | `**[Response interrupted by service restart]**` | MindRoom restarted while the response was being generated; the reply continues below the note once MindRoom is back, or ends there if nothing is left to continue. |
+| `**[Response interrupted: agent restarted to apply a config change]**` | A `config.yaml` edit restarted this agent (for example, its tools changed) while the response was being generated; MindRoom itself kept running, and the reply continues below the note once the agent is back, or ends there if nothing is left to continue. |
 | `**[Response interrupted]**` | The response was interrupted for another reason. |
-| `**[Response interrupted by an error: <error description>]**` | Generation failed; the description says why. |
+| `**[Response interrupted by an error: <error description>]**` | MindRoom could not finish the reply; the description says why. |
+| `Done.` | The agent finished without writing an answer of its own, for example after tool calls hidden by `show_tool_calls: false` or after a tool posted its answer; those tool calls still ran. |
+| `Response delivery failed. Please retry.` | Matrix refused the answer or could not take it, so the note replaces what the reply showed; send the message again for a new answer. |
+| `Tool approval could not be started. Please try again.` | The agent paused for a tool approval, but MindRoom could not start the approval or show it in the room, so the tool did not run; send the message again. |
 
 A crash, an orderly shutdown, or an agent restarted by a configuration or MCP change, including during an approved tool call, keeps the partial reply and its tool calls, and the agent continues it in the same message once MindRoom is back.
 The agent is told which tool calls already finished, and which were still running, so it avoids repeating side effects, including calls hidden by `show_tool_calls: false` and calls made while streaming is off.
@@ -118,6 +166,9 @@ A Matrix event holds at most about 64 KB, so `defaults.large_message_strategy` c
 | `sidecar` (default) | A preview with as much text as fits, plus the full message content attached as `message-content.json` (`message-content.json.enc`, encrypted, in encrypted rooms). |
 | `split` | Several complete rich-text messages: the first replaces the streaming placeholder and the rest follow it in the same thread or room. |
 
-The `sidecar` strategy applies to messages over about 55 KB and edits over about 27 KB, and the preview omits inline tool-trace metadata.
-With `split`, each segment renders as standalone Markdown, text is cut at paragraph or line boundaries and never inside a fenced code block, and the segments together reproduce the full response exactly.
+The `sidecar` strategy applies to messages over about 55 KB and edits over about 27 KB, and the preview omits inline tool-trace metadata and the tool marker lines, which the attached content keeps.
+A reply of tool calls alone keeps its marker lines in its preview, as it does in an event that fits, and the preview of a progress edit of one shows `Thinking...`.
+When the attachment cannot be uploaded, the text sent in the preview's place is cut to fit and has no marker lines either, except for a reply or a progress edit of tool calls alone, which keeps them because nothing else that is sent names its calls.
+With `split`, each segment renders as standalone Markdown, text is cut at paragraph or line boundaries and never inside a fenced code block, and the segments together reproduce the full response text exactly.
+Each segment carries the tool calls it shows, numbered from 1; a segment with many tool calls may show them without their input and output previews, or, when even their names do not fit, without them.
 Even with `split`, non-text payloads, metadata that alone exceeds the size budget, and a single code block larger than one event use the sidecar.

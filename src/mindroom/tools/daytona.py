@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
 from mindroom.tool_system.registration import register_tool_with_metadata
@@ -18,7 +18,7 @@ if TYPE_CHECKING:
     requires_primary_runtime=True,
     display_name="Daytona",
     description="Execute code in secure, remote sandbox environments",
-    category=ToolCategory.DEVELOPMENT,  # others/ maps to DEVELOPMENT
+    category=ToolCategory.DEVELOPMENT,
     status=ToolStatus.REQUIRES_CONFIG,  # Requires API key
     setup_type=SetupType.API_KEY,  # Uses API key authentication
     icon="FaTerminal",  # Terminal icon for code execution
@@ -27,6 +27,7 @@ if TYPE_CHECKING:
         # Authentication parameters
         ConfigField(
             name="api_key",
+            env=("DAYTONA_API_KEY",),
             label="API Key",
             type="password",
             required=False,
@@ -35,6 +36,7 @@ if TYPE_CHECKING:
         ),
         ConfigField(
             name="api_url",
+            env=("DAYTONA_API_URL",),
             label="API URL",
             type="url",
             required=False,
@@ -147,7 +149,7 @@ if TYPE_CHECKING:
             type="boolean",
             required=False,
             default=True,
-            description="Whether to reuse the same sandbox within the current agent session",
+            description="Whether to reuse the same sandbox across calls within one reply",
         ),
         ConfigField(
             name="sandbox_public",
@@ -165,17 +167,9 @@ if TYPE_CHECKING:
             placeholder="Custom guidelines for the toolkit",
             description="Custom instructions for the toolkit",
         ),
-        ConfigField(
-            name="add_instructions",
-            label="Add Instructions",
-            type="boolean",
-            required=False,
-            default=False,
-            description="Whether to add instructions to the agent",
-        ),
     ],
     dependencies=["daytona"],
-    docs_url="https://docs.agno.com/tools/toolkits/others/daytona",
+    docs_url="https://docs.mindroom.chat/tools/automation-and-platforms/#daytona",
     function_names=(
         "change_directory",
         "create_file",
@@ -213,8 +207,7 @@ def daytona_tools() -> type[DaytonaTools]:
             verify_ssl: bool | None = True,
             persistent: bool = True,
             instructions: str | None = None,
-            add_instructions: bool = False,
-            **kwargs: object,
+            **kwargs: Any,  # noqa: ANN401 - mirrors Agno Toolkit passthrough kwargs.
         ) -> None:
             normalized_language = sandbox_language.strip() if isinstance(sandbox_language, str) else sandbox_language
             if isinstance(normalized_language, str):
@@ -237,7 +230,7 @@ def daytona_tools() -> type[DaytonaTools]:
                 timeout=timeout,
                 auto_create_sandbox=auto_create_sandbox,
                 # AGNO_COMPAT: Daytona disables TLS verification process-wide for any falsy verify_ssl.
-                # Reason: Agno 3.0.9 treats None like False and then patches daytona_api_client.Configuration.__init__
+                # Reason: Agno 3.2.1 treats None like False and then patches daytona_api_client.Configuration.__init__
                 # for the whole process until it restarts, so one such toolkit disables checks for every Daytona client.
                 # Upstream issue: Tracking gap; no matching issue has been verified for either behavior.
                 # Upstream PR: No matching fix identified.
@@ -247,7 +240,6 @@ def daytona_tools() -> type[DaytonaTools]:
                 verify_ssl=verify_ssl is not False,
                 persistent=persistent,
                 instructions=instructions,
-                add_instructions=add_instructions,
                 **kwargs,
             )
 

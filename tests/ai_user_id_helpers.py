@@ -2,61 +2,55 @@
 
 from __future__ import annotations
 
-from contextlib import asynccontextmanager, contextmanager
-from copy import deepcopy
+from contextlib import asynccontextmanager
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, TypeVar, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import nio
-from agno.db.base import SessionType
-from agno.models.message import Message
-from agno.run.agent import RunOutput
-from agno.run.team import TeamRunOutput
 
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
-from mindroom.ai import (
-    _PreparedAgentRun,
-)
 from mindroom.bot import AgentBot
+from mindroom.bot_runtime_view import RunPhase
+from mindroom.budgets.monitor import BudgetMonitor
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
-from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import (
+    ROUTER_AGENT_NAME,
     RuntimePaths,
     resolve_runtime_paths,
 )
-from mindroom.delivery_gateway import DeliveryGateway, DeliveryGatewayDeps, ResponseHookService
-from mindroom.entity_resolution import entity_identity_registry
-from mindroom.event_journal import EventJournalStore, PrincipalStore
+from mindroom.delivery_gateway import DeliveryGateway, DeliveryGatewayDeps, SendTextRequest
+from mindroom.event_journal import EventJournalStore
+from mindroom.event_journal.approval_store import ApprovalStore
+from mindroom.event_journal.identity import journal_principal_id
 from mindroom.final_delivery import StreamTransportOutcome
-from mindroom.history.session_context import ScopeSessionContext
-from mindroom.history.team_scope import ad_hoc_team_scope_id
-from mindroom.history.types import HistoryScope, PreparedHistoryState
+from mindroom.history.session_context import resolve_bound_team_scope
+from mindroom.history.types import HistoryScope
 from mindroom.hooks import (
     HookContextSupport,
     HookRegistry,
 )
+from mindroom.hooks.ingress import IngressHookRunner
 from mindroom.hooks.registry import HookRegistryState
 from mindroom.knowledge.utils import KnowledgeAvailabilityDetail, _KnowledgeResolution
+from mindroom.logging_config import get_logger
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.message_target import MessageTarget
 from mindroom.post_response_effects import PostResponseEffectsDeps, PostResponseEffectsSupport
 from mindroom.reply_scope import ReplyRuntime
+from mindroom.reply_turn.locked_turn import ReplyTurnDeps
+from mindroom.reply_turn.request import ResponseRequest
+from mindroom.response_admission import ResponseAdmissionGate
+from mindroom.response_lifecycle import ResponseHookService
 from mindroom.response_payload_preparation import ResponsePayloadPreparer
-from mindroom.response_runner import (
-    ResponseRequest,
-    ResponseRunner,
-    ResponseRunnerDeps,
-)
 from mindroom.response_sources import ResponseSources
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeSupport,
 )
 from tests.access_schema_support import with_current_room_member_access
-from tests.conftest import bind_runtime_paths as _bind_runtime_paths
 from tests.conftest import (
     ignore_final_delivery_handoff,
     make_conversation_reader_mock,
@@ -64,29 +58,21 @@ from tests.conftest import (
     make_relation_lookup,
     request_envelope,
 )
-from tests.identity_helpers import persist_entity_accounts
+from tests.reply_span_helpers import no_reply_jobs
+from tests.reply_turn_helpers import runner_for
+from tests.runtime_fakes import ready_runtime
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Generator, Iterable
+    from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
     from pathlib import Path
 
-    from agno.knowledge.knowledge import Knowledge
-    from agno.session.agent import AgentSession
-    from agno.session.team import TeamSession
-
-    from mindroom.matrix.identity import MatrixID
+    from mindroom.knowledge.search import AgentKnowledge
     from mindroom.media_inputs import MediaInputs
     from mindroom.reply_scope import SpanSlot
+    from mindroom.response_runner import ResponseRunner
 
 
 T = TypeVar("T")
-
-
-def bind_runtime_paths(config: Config, runtime_paths: RuntimePaths) -> Config:
-    """Bind test runtime paths and persist managed account identities."""
-    bound = _bind_runtime_paths(config, runtime_paths)
-    persist_entity_accounts(bound, runtime_paths)
-    return bound
 
 
 def _set_gateway_method(gateway: DeliveryGateway, name: str, value: T) -> T:
@@ -101,11 +87,6 @@ def _runtime_paths(tmp_path: Path, *, config_path: Path | None = None) -> Runtim
     )
 
 
-def _entity_alias_for_test(config: Config, runtime_paths: RuntimePaths, matrix_id: MatrixID) -> str:
-    registry = entity_identity_registry(config, runtime_paths)
-    return registry.current_entity_name_for_user_id(matrix_id.full_id) or matrix_id.username
-
-
 def _config() -> Config:
     return with_current_room_member_access(
         Config(
@@ -116,17 +97,9 @@ def _config() -> Config:
 
 
 def _config_with_matrix_message() -> Config:
-    return with_current_room_member_access(
-        Config(
-            agents={
-                "general": AgentConfig(
-                    display_name="General",
-                    tools=["matrix_message"],
-                ),
-            },
-            models={"default": ModelConfig(provider="openai", id="test-model")},
-        ),
-    )
+    config = _config()
+    config.agents["general"].tools = ["matrix_message"]
+    return config
 
 
 def _config_with_team() -> Config:
@@ -147,43 +120,9 @@ def _config_with_team() -> Config:
 
 
 def _config_with_team_matrix_message() -> Config:
-    return with_current_room_member_access(
-        Config(
-            agents={
-                "general": AgentConfig(
-                    display_name="General",
-                    tools=["matrix_message"],
-                ),
-            },
-            teams={
-                "ultimate": TeamConfig(
-                    display_name="Ultimate",
-                    role="Coordinate the team",
-                    agents=["general"],
-                    mode="coordinate",
-                ),
-            },
-            models={"default": ModelConfig(provider="openai", id="test-model")},
-        ),
-    )
-
-
-def _prepared_prompt_result(
-    agent: object,
-    *,
-    prompt: str = "test prompt",
-    prepared_context_tokens: int | None = None,
-    runtime_model_name: str = "default",
-) -> _PreparedAgentRun:
-    return _PreparedAgentRun(
-        agent=agent,
-        messages=(Message(role="user", content=prompt),),
-        unseen_event_ids=[],
-        prepared_history=PreparedHistoryState(
-            prepared_context_tokens=prepared_context_tokens,
-        ),
-        runtime_model_name=runtime_model_name,
-    )
+    config = _config_with_team()
+    config.agents["general"].tools = ["matrix_message"]
+    return config
 
 
 def _metadata_config(provider: str, model_id: str) -> Config:
@@ -193,108 +132,13 @@ def _metadata_config(provider: str, model_id: str) -> Config:
     )
 
 
-class _SessionStorage:
-    def __init__(self, session: AgentSession | TeamSession | None = None) -> None:
-        self._session = deepcopy(session)
+def _mark_requester_online(client: AsyncMock, user_id: str) -> None:
+    """Make the homeserver report the requester as online.
 
-    @property
-    def session(self) -> AgentSession | TeamSession | None:
-        return deepcopy(self._session)
-
-    @session.setter
-    def session(self, session: AgentSession | TeamSession | None) -> None:
-        self._session = deepcopy(session)
-
-    def open(self) -> _SessionStorageView:
-        return _SessionStorageView(self)
-
-
-class _SessionStorageView:
-    def __init__(self, store: _SessionStorage) -> None:
-        self._store = store
-
-    def get_session(self, session_id: str, _session_type: object) -> AgentSession | TeamSession | None:
-        session = self._store.session
-        if session is None or session.session_id != session_id:
-            return None
-        return session
-
-    def upsert_session(self, session: AgentSession | TeamSession) -> None:
-        self._store.session = session
-
-    def upsert_run(
-        self,
-        run: object,
-        session_id: str,
-        user_id: str | None = None,
-        run_index: int | None = None,
-    ) -> None:
-        """Store the run as its own row: replace by run_id or append, like agno's runs table."""
-        del user_id, run_index
-        stored = self._store.session
-        if stored is None or stored.session_id != session_id:
-            return
-        assert isinstance(run, RunOutput | TeamRunOutput)
-        runs = [existing for existing in stored.runs or [] if existing.run_id != run.run_id]
-        stored.runs = [*runs, run]
-        self._store.session = stored
-
-    def delete_runs(self, run_ids: list[str]) -> None:
-        stored = self._store.session
-        if stored is None:
-            return
-        stored.runs = [run for run in stored.runs or [] if run.run_id not in run_ids]
-        self._store.session = stored
-
-    def close(self) -> None:
-        return None
-
-
-def _plugin(name: str, callbacks: list[object]) -> SimpleNamespace:
-    return SimpleNamespace(
-        name=name,
-        discovered_hooks=tuple(callbacks),
-        discovered_automations=(),
-        entry_config=PluginEntryConfig(path=f"./plugins/{name}"),
-        plugin_order=0,
-    )
-
-
-@contextmanager
-def _open_agent_scope_context(
-    storage: _SessionStorage,
-    *,
-    scope_id: str = "general",
-) -> Generator[ScopeSessionContext, None, None]:
-    yield ScopeSessionContext(
-        scope=HistoryScope(kind="agent", scope_id=scope_id),
-        storage=storage.open(),
-        session=storage.session,
-    )
-
-
-@contextmanager
-def _open_team_scope_context(
-    storage: _SessionStorage,
-    *,
-    scope_id: str = "ultimate",
-) -> Generator[ScopeSessionContext, None, None]:
-    yield ScopeSessionContext(
-        scope=HistoryScope(kind="team", scope_id=scope_id),
-        storage=storage.open(),
-        session=storage.session,
-    )
-
-
-def _mark_requester_online(client: AsyncMock, user_id: str, room_id: str = "!test:localhost") -> None:
-    """Make the requester show as online in the client's synced room cache.
-
-    ``should_use_streaming`` reads presence from ``client.rooms`` first, so this
-    drives the streaming decision through its real input instead of a patch.
+    ``should_use_streaming`` asks the homeserver for presence, so this drives
+    the streaming decision through its real input instead of a patch.
     """
-    room = nio.MatrixRoom(room_id, "@mindroom_general:localhost")
-    room.users[user_id] = nio.MatrixUser(user_id, presence="online")
-    client.rooms = {room_id: room}
+    client.get_presence.return_value = nio.PresenceGetResponse(user_id, "online", None, True, None)
 
 
 def _make_bot(
@@ -321,23 +165,17 @@ def _knowledge_access_support(
     unavailable: dict[str, KnowledgeAvailabilityDetail] | None = None,
 ) -> SimpleNamespace:
     return SimpleNamespace(
-        for_agent=MagicMock(return_value=knowledge),
-        resolve_for_agent=MagicMock(
-            return_value=_KnowledgeResolution(
-                knowledge=cast("Knowledge | None", knowledge),
-                unavailable=unavailable or {},
-            ),
-        ),
         resolve_for_agent_async=AsyncMock(
             return_value=_KnowledgeResolution(
-                knowledge=cast("Knowledge | None", knowledge),
+                knowledge=cast("AgentKnowledge | None", knowledge),
                 unavailable=unavailable or {},
             ),
         ),
     )
 
 
-def _team_orchestrator(config: Config, runtime_paths: RuntimePaths) -> SimpleNamespace:
+def team_orchestrator(config: Config, runtime_paths: RuntimePaths) -> SimpleNamespace:
+    """Return a stand-in orchestrator with what a team reply reads from one: config, paths, hooks, and budgets."""
     matrix_admin = object()
     knowledge_refresh_scheduler = SimpleNamespace(
         schedule_refresh=lambda _base_id: None,
@@ -347,9 +185,15 @@ def _team_orchestrator(config: Config, runtime_paths: RuntimePaths) -> SimpleNam
         config=config,
         runtime_paths=runtime_paths,
         knowledge_refresh_scheduler=knowledge_refresh_scheduler,
-        hook_matrix_admin=lambda: matrix_admin,
-        hook_room_state_querier=lambda: None,
-        hook_room_state_putter=lambda: None,
+        # An owner account whose admin the team's hooks receive, in rooms with no other bot to send or hold state.
+        agent_bots={
+            ROUTER_AGENT_NAME: SimpleNamespace(hook_context=SimpleNamespace(matrix_admin=lambda: matrix_admin)),
+        },
+        room_poster=lambda _room_id: None,
+        room_steward=lambda _room_id: None,
+        budgets=BudgetMonitor(runtime_paths=runtime_paths, config_provider=lambda: config),
+        running_entity_names=lambda: frozenset({*config.agents, *config.teams}),
+        response_admission_gate=ResponseAdmissionGate(),
     )
 
 
@@ -373,26 +217,19 @@ def _build_response_runner(
     config: Config,
     runtime_paths: RuntimePaths,
     storage_path: Path,
-    requester_id: str,  # noqa: ARG001
     hook_registry: HookRegistry | None = None,
     history_storage: object | None = None,
     team_history_storage: object | None = None,
     message_target: MessageTarget | None = None,
     orchestrator: object | None = None,
-    knowledge_access_support: SimpleNamespace | None = None,
-    enable_streaming: bool = True,
 ) -> ResponseRunner:
     """Build a real response runner for one bot-shaped test double."""
 
     def _open_test_storage(storage: object | None) -> object:
-        if isinstance(storage, _SessionStorage):
-            return storage.open()
         return storage if storage is not None else MagicMock()
 
     bot.matrix_id = MagicMock(full_id="@mindroom_general:localhost", domain="localhost")
-    bot.enable_streaming = enable_streaming
-    bot.show_tool_calls = False
-    bot.orchestrator = orchestrator
+    bot.orchestrator = orchestrator if orchestrator is not None else ready_runtime(config, runtime_paths)
     bot._conversation_resolver = MagicMock()
     bot._conversation_resolver.build_message_target = MagicMock(
         return_value=message_target or MessageTarget.resolve("!test:localhost", None, "$user_msg", room_mode=True),
@@ -421,57 +258,41 @@ def _build_response_runner(
     )
 
     def _team_history_scope_for_test(
-        team_agents: Iterable[MatrixID],
+        member_names: Sequence[str],
         *,
         requester_user_id: str | None = None,
     ) -> HistoryScope:
-        if bot.agent_name in config.teams:
-            return HistoryScope(kind="team", scope_id=bot.agent_name)
-        member_names = [_entity_alias_for_test(config, runtime_paths, mid) for mid in team_agents]
-        scope_id = (
-            ad_hoc_team_scope_id(
-                member_names,
-                config.agents,
-                requester_user_id=requester_user_id,
-                missing_requester_message="Private ad hoc team history scope requires requester_user_id",
-            )
-            or "team_"
-        )
-        return HistoryScope(
-            kind="team",
-            scope_id=scope_id,
+        return resolve_bound_team_scope(
+            member_names=member_names,
+            config=config,
+            team_name=bot.agent_name,
+            requester_user_id=requester_user_id,
         )
 
     bot._conversation_state_writer.team_history_scope = MagicMock(side_effect=_team_history_scope_for_test)
-    bot._conversation_state_writer.session_type_for_scope = MagicMock(
-        side_effect=lambda scope: SessionType.TEAM if scope.kind == "team" else SessionType.AGENT,
-    )
-    bot._edit_message = AsyncMock(return_value=True)
     agent_reply_memberships = AgentReplyMembershipIndex()
-    bot.agent_reply_memberships = agent_reply_memberships
     runtime = SimpleNamespace(
         client=bot.client,
         config=config,
         agent_reply_memberships=agent_reply_memberships,
-        enable_streaming=bot.enable_streaming,
         orchestrator=bot.orchestrator,
-        response_admission_gate=bot.admission_gate,
+        response_admission_gate=bot.orchestrator.response_admission_gate,
         runtime_started_at=0.0,
+        phase=RunPhase.ACCEPTING,
     )
     hook_context = HookContextSupport(
         runtime=runtime,
-        logger=bot.logger,
         runtime_paths=runtime_paths,
         agent_name=bot.agent_name,
         hook_registry_state=HookRegistryState(hook_registry or HookRegistry.empty()),
-        hook_send_message=AsyncMock(),
+        conversation_reader=bot.conversation_reader,
+        logger=get_logger("tests.hooks"),
     )
     response_hook_service = ResponseHookService(hook_context=hook_context)
-    response_hook_service.emit_cancelled_response = AsyncMock(wraps=response_hook_service.emit_cancelled_response)
-    response_hook_service.emit_after_response = AsyncMock(wraps=response_hook_service.emit_after_response)
+    response_hook_service._emit_cancelled_response = AsyncMock(wraps=response_hook_service._emit_cancelled_response)
     # One principal's records, as a bot's gateway and reply runtime share them.
     principal = EventJournalStore.open_sqlite(storage_path / "reply_records.db").principal(
-        f"{bot.agent_name}@{bot.matrix_id.full_id}",
+        journal_principal_id(bot.agent_name, bot.matrix_id.full_id),
     )
     delivery_gateway = DeliveryGateway(
         DeliveryGatewayDeps(
@@ -479,7 +300,6 @@ def _build_response_runner(
             runtime_paths=runtime_paths,
             agent_name=bot.agent_name,
             logger=bot.logger,
-            redact_message_event=AsyncMock(return_value=True),
             resolver=bot._conversation_resolver,
             response_hooks=response_hook_service,
             outbox=principal,
@@ -492,7 +312,6 @@ def _build_response_runner(
         AsyncMock(
             return_value=StreamTransportOutcome(
                 last_physical_stream_event_id="$msg_id",
-                terminal_status="completed",
                 rendered_body="Hello!",
                 visible_body_state="visible_body",
             ),
@@ -506,16 +325,15 @@ def _build_response_runner(
     bot.client.rooms.setdefault("!test:localhost", nio.MatrixRoom("!test:localhost", "@mindroom_general:localhost"))
     record_send_text = delivery_gateway.send_text
 
-    async def send_text(request: object) -> str | None:
-        if getattr(request, "reply_write", None) is not None:
-            return await record_send_text(request)  # type: ignore[arg-type]
+    async def send_text(request: SendTextRequest) -> str | None:
+        if request.reply_write is not None:
+            return await record_send_text(request)
         return "$thinking"
 
     _set_gateway_method(delivery_gateway, "send_text", AsyncMock(side_effect=send_text))
     membership = make_membership_stub()
     tool_runtime = ToolRuntimeSupport(
         runtime=runtime,
-        logger=bot.logger,
         runtime_paths=runtime_paths,
         storage_path=storage_path,
         agent_name=bot.agent_name,
@@ -533,16 +351,15 @@ def _build_response_runner(
         membership=membership,
         agent_name=bot.agent_name,
     )
-    bot._knowledge_access_support = knowledge_access_support or _knowledge_access_support()
-    approval_store = MagicMock(spec=PrincipalStore)
+    bot._knowledge_access_support = _knowledge_access_support()
+    approval_store = MagicMock(spec=ApprovalStore)
     approval_store.approval_continuation_for_source = AsyncMock(return_value=None)
 
-    return ResponseRunner(
-        ResponseRunnerDeps(
+    return runner_for(
+        ReplyTurnDeps(
             runtime=runtime,
             logger=bot.logger,
             runtime_paths=runtime_paths,
-            storage_path=storage_path,
             agent_name=bot.agent_name,
             matrix_full_id=bot.matrix_id.full_id,
             resolver=bot._conversation_resolver,
@@ -553,12 +370,13 @@ def _build_response_runner(
             state_writer=bot._conversation_state_writer,
             request_preparer=ResponsePayloadPreparer(
                 normalizer=MagicMock(),
-                ingress_hook_runner=MagicMock(),
+                ingress_hook_runner=IngressHookRunner(hook_context=hook_context),
                 agent_name=bot.agent_name,
                 logger=bot.logger,
             ),
             approval_store=approval_store,
             retry_approval_sources=lambda _room_id, _source_event_ids: None,
+            settle_ignored_sources=AsyncMock(),
             approval_runtime_generation="test-runtime",
             redacted_history_events=AsyncMock(return_value={}),
             replies=_StartedReplyRuntime(
@@ -566,21 +384,11 @@ def _build_response_runner(
                 entity_name=bot.agent_name,
                 generation="test-runtime",
                 retry_sources=lambda _room_id, _event_ids: None,
-                complete_turn=AsyncMock(),
-                hold_conversation=lambda _continuation: None,
                 approval_ended=lambda _ended: None,
+                reply_stopped=no_reply_jobs,
             ),
         ),
     )
-
-
-@asynccontextmanager
-async def _claimed_reply_span(runner: ResponseRunner, request: ResponseRequest) -> AsyncIterator[ResponseRequest]:
-    """Claim the reply span the locked generation claims for ``request``, for calls made below that claim."""
-    async with runner.deps.replies.span_scope():
-        claimed = await runner._claim_reply_span(request, history_scope=runner.deps.state_writer.history_scope())
-        assert claimed is not None
-        yield claimed
 
 
 def _response_request(
@@ -632,7 +440,7 @@ class _InertPostResponseEffects(PostResponseEffectsSupport):
         membership_turn_id: str,
         queue_memory_persistence: Callable[[], None] | None = None,
         queue_skill_review: Callable[[str], Awaitable[None]] | None = None,
-        notify_response_finished: Callable[[], None] | None = None,
+        notify_response_finished: Callable[[float | None], None] | None = None,
         persist_response_event_id: Callable[[str, str], Awaitable[None]] | None = None,
     ) -> PostResponseEffectsDeps:
         del room_id, membership_turn_id, queue_memory_persistence, queue_skill_review, notify_response_finished
@@ -643,7 +451,7 @@ class _InertPostResponseEffects(PostResponseEffectsSupport):
 def _install_inert_post_response_effects(coordinator: ResponseRunner) -> None:
     """Swap the post-response collaborator for the inert variant at the deps seam."""
     support = coordinator.deps.post_response_effects
-    coordinator.deps = replace(
+    coordinator.locked.deps = replace(
         coordinator.deps,
         post_response_effects=_InertPostResponseEffects(
             runtime=support.runtime,

@@ -5,10 +5,13 @@ import asyncio
 import html
 import importlib
 import json
+import re
 import secrets
+import threading
 import time
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Protocol, cast
+from urllib.error import HTTPError
 from urllib.parse import quote, unquote, urlencode, urlsplit
 
 import jwt
@@ -18,22 +21,48 @@ from jwt import PyJWKClient, PyJWTError
 from pydantic import BaseModel
 
 from mindroom.api import config_lifecycle
-from mindroom.api.config_lifecycle import ApiSnapshot
-from mindroom.api.config_lifecycle import request_snapshot as request_api_snapshot
-from mindroom.api.config_lifecycle import store_request_snapshot as store_request_api_snapshot
+from mindroom.api.auth_user import (
+    STANDALONE_USER_ID,
+    AuthSource,
+    AuthUser,
+    SignedMatrixUser,
+    bind_request_auth_user,
+)
+from mindroom.api.connections_session_cookie import connections_session_cookie, read_connections_session
 from mindroom.api.open_access import open_access_rejection
-from mindroom.authorization import is_platform_administrator
+from mindroom.logging_config import get_logger
 from mindroom.matrix.identity import (
     matrix_user_id_from_email,
     try_parse_historical_matrix_user_id,
     validate_email_to_matrix_mapping,
 )
-from mindroom.tool_system.dependencies import auto_install_enabled, auto_install_optional_extra_for_import_retry
+from mindroom.origins import (
+    connections_chat_origin,
+    dashboard_origin,
+    deployment_origin,
+    normalized_origin,
+    published_reports_require_sign_in,
+)
+from mindroom.requester_identity import is_platform_administrator
+from mindroom.tool_system.dependencies import (
+    auto_install_enabled,
+    auto_install_optional_extra_for_import_retry,
+    optional_dependency_environment,
+)
 
 if TYPE_CHECKING:
-    from mindroom.constants import RuntimePaths
+    from collections.abc import Callable
 
+    from mindroom.api.connections_session_cookie import ConnectionsSession
+    from mindroom.constants import EnvValueSource, RuntimePaths
+
+logger = get_logger(__name__)
 router = APIRouter(tags=["auth"])
+
+
+def _api_key_matches(supplied: str, api_key: str) -> bool:
+    """Compare UTF-8 bytes, since `compare_digest` raises on non-ASCII strings and `encode` on lone surrogates."""
+    return secrets.compare_digest(supplied.encode(errors="surrogatepass"), api_key.encode(errors="surrogatepass"))
 
 
 def require_operator_key(request: Request, authorization: str | None) -> None:
@@ -43,7 +72,7 @@ def require_operator_key(request: Request, authorization: str | None) -> None:
     if not configured_key:
         raise HTTPException(status_code=503, detail="This operational check requires MINDROOM_API_KEY")
     token = _extract_bearer_token(authorization)
-    if token is None or not secrets.compare_digest(token.encode(), configured_key.encode()):
+    if token is None or not _api_key_matches(token, configured_key):
         raise HTTPException(status_code=401, detail="Missing or invalid credentials")
 
 
@@ -55,17 +84,25 @@ _PLATFORM_SSO_TICKET_TYPE = "mindroom_platform_sso_ticket"
 _PLATFORM_SSO_CLOCK_SKEW_SECONDS = 10
 # Ticket IDs already exchanged by this runtime, mapped to their expiry.
 _used_platform_sso_ticket_ids: dict[str, int] = {}
-_STANDALONE_AUTH_COOKIE_NAME = "mindroom_api_key"
+# Host-only by prefix over HTTPS, so other hosts under the domain can neither set nor override it.
+_HTTPS_STANDALONE_AUTH_COOKIE_NAME = "__Host-mindroom_api_key"
+# Browsers keep a `__Host-` cookie only when it is Secure, which they refuse to store over plain HTTP.
+_PLAIN_HTTP_STANDALONE_AUTH_COOKIE_NAME = "mindroom_api_key"
+# Set only by server code; ASGI scope keys cannot come from the client.
+_CONNECTIONS_SESSION_FLOW_SCOPE_KEY = "mindroom.connections_session_flow"
+# Each Connections page names the account it shows, so a stale tab cannot act as the browser's new account.
+_CONNECTIONS_USER_HEADER = "X-MindRoom-Connections-User"
+CONNECTIONS_SIGN_IN_REQUIRED = "Connections sign-in required"
 _TRUSTED_UPSTREAM_JWKS_CACHE_SECONDS = 60
 _TRUSTED_UPSTREAM_JWKS_TIMEOUT_SECONDS = 5
-_TRUSTED_UPSTREAM_JWT_MAX_BYTES = 16 * 1024
+_JWT_MAX_BYTES = 16 * 1024
+_SUPABASE_TOKEN_SHAPE = re.compile(r"[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+")
+# Each Supabase token check is a blocking network call in a worker thread; cap how many run at once.
+_supabase_token_checks = asyncio.Semaphore(4)
 _REDIRECT_TARGET_DECODE_PASSES = 5
-_STANDALONE_PUBLIC_PATHS = frozenset(
-    {
-        "/api/homeassistant/callback",
-        "/api/integrations/spotify/callback",
-    },
-)
+_AUTH_STATE_SCOPE_KEY = "mindroom.api_auth_state"
+# One build at a time, so concurrent first requests share one Supabase client and JWKS cache.
+_auth_state_build_lock = threading.Lock()
 
 
 class _AuthSessionRequest(BaseModel):
@@ -92,39 +129,19 @@ class _SupabaseClientProtocol(Protocol):
 
 
 @dataclass(frozen=True)
-class _TrustedUpstreamJwtSettings:
-    """Signed assertion settings for trusted-upstream auth."""
+class _TrustedUpstreamAuthSettings:
+    """Settings for the signed assertion in which a deployment-owned gateway names the browser user."""
 
-    require_jwt: bool = False
-    header: str | None = None
+    enabled: bool = False
+    jwt_header: str | None = None
     jwks_url: str | None = None
     audience: str | None = None
     issuer: str | None = None
     email_claim: str = "email"
     user_id_claim: str | None = None
     matrix_user_id_claim: str | None = None
-
-
-@dataclass(frozen=True)
-class _TrustedUpstreamJwtIdentity:
-    """Identity claims verified from the upstream JWT."""
-
-    email: str
-    user_id: str | None = None
-    matrix_user_id: str | None = None
-
-
-@dataclass(frozen=True)
-class _TrustedUpstreamAuthSettings:
-    """Trusted reverse-proxy/browser identity settings for hosted deployments."""
-
-    enabled: bool = False
-    user_id_header: str | None = None
-    email_header: str | None = None
-    matrix_user_id_header: str | None = None
     email_to_matrix_user_id_template: str | None = None
     email_domain: str | None = None
-    jwt: _TrustedUpstreamJwtSettings = field(default_factory=_TrustedUpstreamJwtSettings)
 
 
 @dataclass(frozen=True)
@@ -135,7 +152,9 @@ class _ApiAuthSettings:
     supabase_anon_key: str | None
     account_id: str | None
     mindroom_api_key: str | None
+    mindroom_api_key_source: EnvValueSource | None = None
     public_url: str | None = None
+    dashboard_origin: str | None = None
     platform_sso_url: str | None = None
     platform_sso_secret: str | None = None
     trusted_upstream: _TrustedUpstreamAuthSettings = field(default_factory=_TrustedUpstreamAuthSettings)
@@ -151,17 +170,47 @@ class ApiAuthState:
     trusted_upstream_jwt_client: PyJWKClient | None = None
 
 
-def _build_auth_settings(runtime_paths: RuntimePaths, *, account_id: str | None = None) -> _ApiAuthSettings:
+def _build_auth_settings(runtime_paths: RuntimePaths) -> _ApiAuthSettings:
     """Read dashboard auth settings from one explicit runtime context."""
+    # LEGACY_COMPAT: Retired MINDROOM_BASE_URL public origin.
+    # Legacy format: `MINDROOM_BASE_URL` named MindRoom's public origin for OAuth links and callbacks when
+    #   `MINDROOM_PUBLIC_URL` was unset, and its host answered requests without a credential.
+    # Last legacy release: v2026.11.7; replacement: v2026.11.8 reads only `MINDROOM_PUBLIC_URL`.
+    # Handling: refuse to start while it is set and name `MINDROOM_PUBLIC_URL`, so a deployment that still sets it
+    #   never silently moves its OAuth callbacks to localhost.
+    # Coverage: tests/api/test_api.py::test_retired_base_url_fails_startup.
+    if runtime_paths.env_value("MINDROOM_BASE_URL"):
+        msg = (
+            "MINDROOM_BASE_URL was removed; set MINDROOM_PUBLIC_URL to MindRoom's public origin "
+            "and remove MINDROOM_BASE_URL"
+        )
+        raise ValueError(msg)
+    # Refuse to start with an access value for published reports that MindRoom does not know.
+    published_reports_require_sign_in(runtime_paths)
+    trusted_upstream = _build_trusted_upstream_auth_settings(runtime_paths)
+    dashboard = dashboard_origin(runtime_paths)
+    # Only a gateway's signed identity reaches both hosts; dashboard sign-ins and Connections sessions stay on one.
+    if dashboard is not None and not trusted_upstream.enabled:
+        msg = "MINDROOM_DASHBOARD_URL requires trusted upstream auth (MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED)"
+        raise ValueError(msg)
+    public = normalized_origin(runtime_paths.env_value("MINDROOM_PUBLIC_URL"))
+    if dashboard is not None and (public is None or urlsplit(public).netloc == urlsplit(dashboard).netloc):
+        msg = "MINDROOM_DASHBOARD_URL must name another host or port than MINDROOM_PUBLIC_URL, which must be set"
+        raise ValueError(msg)
+    resolved_api_key = runtime_paths.plain_env_value_with_source(("MINDROOM_API_KEY",))
+    mindroom_api_key = None if resolved_api_key is None else resolved_api_key[0]
+    mindroom_api_key_source = None if resolved_api_key is None else resolved_api_key[2]
     return _ApiAuthSettings(
         supabase_url=runtime_paths.env_value("SUPABASE_URL"),
         supabase_anon_key=runtime_paths.env_value("SUPABASE_ANON_KEY"),
-        account_id=account_id,
-        mindroom_api_key=runtime_paths.env_value("MINDROOM_API_KEY"),
+        account_id=runtime_paths.env_value("ACCOUNT_ID"),
+        mindroom_api_key=mindroom_api_key,
+        mindroom_api_key_source=mindroom_api_key_source,
         public_url=runtime_paths.env_value("MINDROOM_PUBLIC_URL"),
+        dashboard_origin=dashboard,
         platform_sso_url=_env_text(runtime_paths, "MINDROOM_PLATFORM_SSO_URL"),
         platform_sso_secret=_env_text(runtime_paths, "MINDROOM_PLATFORM_SSO_SECRET"),
-        trusted_upstream=_build_trusted_upstream_auth_settings(runtime_paths),
+        trusted_upstream=trusted_upstream,
     )
 
 
@@ -184,69 +233,69 @@ def dashboard_requires_credential(runtime_paths: RuntimePaths) -> bool:
 
 def _env_text(runtime_paths: RuntimePaths, name: str) -> str | None:
     value = runtime_paths.env_value(name)
-    if value is None:
-        return None
-    stripped = value.strip()
-    return stripped or None
+    return None if value is None else value.strip()
 
 
 def _build_trusted_upstream_auth_settings(runtime_paths: RuntimePaths) -> _TrustedUpstreamAuthSettings:
     """Read trusted-upstream auth settings from one runtime context."""
     return _TrustedUpstreamAuthSettings(
         enabled=runtime_paths.env_flag("MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED"),
-        user_id_header=_env_text(runtime_paths, "MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER"),
-        email_header=_env_text(runtime_paths, "MINDROOM_TRUSTED_UPSTREAM_EMAIL_HEADER"),
-        matrix_user_id_header=_env_text(runtime_paths, "MINDROOM_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER"),
+        jwt_header=_env_text(runtime_paths, "MINDROOM_TRUSTED_UPSTREAM_JWT_HEADER"),
+        jwks_url=_env_text(runtime_paths, "MINDROOM_TRUSTED_UPSTREAM_JWKS_URL"),
+        audience=_env_text(runtime_paths, "MINDROOM_TRUSTED_UPSTREAM_JWT_AUDIENCE"),
+        issuer=_env_text(runtime_paths, "MINDROOM_TRUSTED_UPSTREAM_JWT_ISSUER"),
+        email_claim=_env_text(runtime_paths, "MINDROOM_TRUSTED_UPSTREAM_JWT_EMAIL_CLAIM") or "email",
+        user_id_claim=_env_text(runtime_paths, "MINDROOM_TRUSTED_UPSTREAM_JWT_USER_ID_CLAIM"),
+        matrix_user_id_claim=_env_text(runtime_paths, "MINDROOM_TRUSTED_UPSTREAM_JWT_MATRIX_USER_ID_CLAIM"),
         email_to_matrix_user_id_template=_env_text(
             runtime_paths,
             "MINDROOM_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE",
         ),
         email_domain=_env_text(runtime_paths, "MINDROOM_TRUSTED_UPSTREAM_EMAIL_DOMAIN"),
-        jwt=_TrustedUpstreamJwtSettings(
-            require_jwt=runtime_paths.env_flag("MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT"),
-            header=_env_text(runtime_paths, "MINDROOM_TRUSTED_UPSTREAM_JWT_HEADER"),
-            jwks_url=_env_text(runtime_paths, "MINDROOM_TRUSTED_UPSTREAM_JWKS_URL"),
-            audience=_env_text(runtime_paths, "MINDROOM_TRUSTED_UPSTREAM_JWT_AUDIENCE"),
-            issuer=_env_text(runtime_paths, "MINDROOM_TRUSTED_UPSTREAM_JWT_ISSUER"),
-            email_claim=_env_text(runtime_paths, "MINDROOM_TRUSTED_UPSTREAM_JWT_EMAIL_CLAIM") or "email",
-            user_id_claim=_env_text(runtime_paths, "MINDROOM_TRUSTED_UPSTREAM_JWT_USER_ID_CLAIM"),
-            matrix_user_id_claim=_env_text(runtime_paths, "MINDROOM_TRUSTED_UPSTREAM_JWT_MATRIX_USER_ID_CLAIM"),
-        ),
     )
 
 
 def _build_trusted_upstream_jwt_client(settings: _TrustedUpstreamAuthSettings) -> PyJWKClient | None:
-    """Return a short-lived JWKS cache for strict trusted-upstream auth."""
-    jwt_settings = settings.jwt
-    if not settings.enabled or not jwt_settings.require_jwt or jwt_settings.jwks_url is None:
+    """Return a short-lived JWKS cache for trusted-upstream auth."""
+    if not settings.enabled or settings.jwks_url is None:
         return None
     return PyJWKClient(
-        jwt_settings.jwks_url,
+        settings.jwks_url,
         cache_keys=False,
         cache_jwk_set=True,
         lifespan=_TRUSTED_UPSTREAM_JWKS_CACHE_SECONDS,
         timeout=_TRUSTED_UPSTREAM_JWKS_TIMEOUT_SECONDS,
+        # PyJWT 2.14 waits 30 seconds after a fetch before refetching for an unknown `kid`; rotated keys work at once.
+        cooldown_duration=0,
     )
 
 
-def _app_auth_state(api_app: FastAPI) -> ApiAuthState:
-    """Return the committed auth state for one API app instance."""
+def _app_auth_state(api_app: FastAPI, runtime_paths: RuntimePaths) -> ApiAuthState:
+    """Return the app's auth state for `runtime_paths`, rebuilt when the app last built it for another runtime."""
     app_state = config_lifecycle.app_state(api_app)
-    api_state = config_lifecycle.require_api_state(api_app)
-    with api_state.config_lock:
-        snapshot = api_state.snapshot
-        state = cast("ApiAuthState | None", snapshot.auth_state)
-        if state is not None and state.runtime_paths == snapshot.runtime_paths:
-            return state
-        settings = _build_auth_settings(snapshot.runtime_paths, account_id=app_state.api_auth_account_id)
-        state = ApiAuthState(
-            runtime_paths=snapshot.runtime_paths,
-            settings=settings,
-            supabase_auth=_init_supabase_auth(snapshot.runtime_paths, settings),
-            trusted_upstream_jwt_client=_build_trusted_upstream_jwt_client(settings.trusted_upstream),
-        )
-        api_state.snapshot = replace(snapshot, auth_state=state)
+    with _auth_state_build_lock:
+        state = app_state.api_auth_state
+        if state is None or state.runtime_paths != runtime_paths:
+            settings = _build_auth_settings(runtime_paths)
+            state = ApiAuthState(
+                runtime_paths=runtime_paths,
+                settings=settings,
+                supabase_auth=_init_supabase_auth(runtime_paths, settings),
+                trusted_upstream_jwt_client=_build_trusted_upstream_jwt_client(settings.trusted_upstream),
+            )
+            app_state.api_auth_state = state
         return state
+
+
+def _request_auth_state(request: Request) -> ApiAuthState:
+    """Return the auth state of the request's pinned runtime, resolved once so it never changes mid-request."""
+    resolved = request.scope.get(_AUTH_STATE_SCOPE_KEY)
+    if isinstance(resolved, ApiAuthState):
+        return resolved
+    snapshot = config_lifecycle.bind_current_request_snapshot(request)
+    state = _app_auth_state(request.app, snapshot.runtime_paths)
+    request.scope[_AUTH_STATE_SCOPE_KEY] = state
+    return state
 
 
 def _init_supabase_auth(
@@ -259,7 +308,8 @@ def _init_supabase_auth(
         return None
 
     try:
-        create_client = importlib.import_module("supabase").create_client
+        with optional_dependency_environment():
+            create_client = importlib.import_module("supabase").create_client
     except ModuleNotFoundError:
         disabled_hint = ""
         if not auto_install_enabled(runtime_paths):
@@ -270,7 +320,8 @@ def _init_supabase_auth(
                 f"{disabled_hint} Install it with: pip install 'mindroom[supabase]'"
             )
             raise ImportError(msg) from None
-        create_client = importlib.import_module("supabase").create_client
+        with optional_dependency_environment():
+            create_client = importlib.import_module("supabase").create_client
 
     return cast("_SupabaseClientProtocol", create_client(*credentials))
 
@@ -283,38 +334,11 @@ def _extract_bearer_token(authorization: str | None) -> str | None:
     return token or None
 
 
-def _is_standalone_public_path(path: str) -> bool:
-    """Return whether one unauthenticated standalone callback path may enter its handler."""
-    return path in _STANDALONE_PUBLIC_PATHS
-
-
-def _get_configured_header(request: Request, header_name: str | None) -> str | None:
-    """Return a stripped configured header value when present."""
-    if header_name is None:
-        return None
-    value = request.headers.get(header_name)
-    if value is None:
-        return None
-    stripped = value.strip()
-    return stripped or None
-
-
-def _validated_trusted_upstream_email_to_matrix_template(
-    settings: _TrustedUpstreamAuthSettings,
-    *,
-    require_email_header: bool,
-) -> str | None:
+def _validated_trusted_upstream_email_to_matrix_template(settings: _TrustedUpstreamAuthSettings) -> str | None:
     """Return the configured email-to-Matrix template after validating it."""
     template = settings.email_to_matrix_user_id_template
     if template is None:
         return None
-    if require_email_header and settings.email_header is None:
-        raise HTTPException(
-            status_code=500,
-            detail=(
-                "Trusted upstream email-to-Matrix template is set but MINDROOM_TRUSTED_UPSTREAM_EMAIL_HEADER is not set"
-            ),
-        )
     try:
         validate_email_to_matrix_mapping(template, settings.email_domain)
     except ValueError as exc:
@@ -327,30 +351,11 @@ def _validated_trusted_upstream_email_to_matrix_template(
     return template
 
 
-def _derive_trusted_upstream_matrix_user_id(
-    settings: _TrustedUpstreamAuthSettings,
-    email: str | None,
-    template: str | None,
-) -> str | None:
-    """Derive a Matrix user ID from a trusted email identity when configured."""
-    if template is None:
-        return None
-    if email is None:
-        raise HTTPException(
-            status_code=401,
-            detail=f"Missing trusted upstream email header: {settings.email_header}",
-        )
-    try:
-        return matrix_user_id_from_email(email, template, settings.email_domain)
-    except ValueError as exc:
-        raise HTTPException(status_code=401, detail="Invalid trusted upstream email identity") from exc
-
-
 def _trusted_upstream_required_jwt_setting(value: str | None, env_name: str) -> str:
     if value is None:
         raise HTTPException(
             status_code=500,
-            detail=f"Trusted upstream strict JWT auth is enabled but {env_name} is not set",
+            detail=f"Trusted upstream auth is enabled but {env_name} is not set",
         )
     return value
 
@@ -367,10 +372,11 @@ async def _verified_trusted_upstream_jwt_claims(
     algorithms: tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
     """Verify one configured upstream JWT and return its claims."""
-    token = _get_configured_header(request, header)
-    if token is None:
+    token = (request.headers.get(header) or "").strip()
+    if not token:
         raise HTTPException(status_code=401, detail=f"Missing trusted upstream JWT header: {header}")
-    if len(token.encode("utf-8")) > _TRUSTED_UPSTREAM_JWT_MAX_BYTES:
+    if len(token.encode("utf-8")) > _JWT_MAX_BYTES:
+        logger.warning("Trusted upstream JWT rejected", detail=invalid_detail, error="too_large")
         raise HTTPException(status_code=401, detail=invalid_detail)
 
     try:
@@ -390,47 +396,49 @@ async def _verified_trusted_upstream_jwt_claims(
             options={"require": list(required_claims)},
         )
     except PyJWTError as exc:
+        if isinstance(exc, jwt.PyJWKClientConnectionError):
+            # PyJWT refuses JWKS redirects, so a URL that redirects never yields keys.
+            redirected = isinstance(exc.__cause__, HTTPError) and 300 <= exc.__cause__.code < 400
+            # Name the setting, not its value: the URL may carry a credential in its query string.
+            logger.warning(
+                "Trusted upstream JWKS fetch failed",
+                setting="MINDROOM_TRUSTED_UPSTREAM_JWKS_URL",
+                reason="redirect refused; configure the direct JWKS URL" if redirected else "unreachable",
+            )
+        # PyJWT messages can quote unverified header text such as `kid`, so log only the class and a missing claim.
+        logger.warning(
+            "Trusted upstream JWT rejected",
+            detail=invalid_detail,
+            error=type(exc).__name__,
+            claim=exc.claim if isinstance(exc, jwt.MissingRequiredClaimError) else None,
+        )
         raise HTTPException(status_code=401, detail=invalid_detail) from exc
     return claims
 
 
-async def _verified_trusted_upstream_jwt_identity(
+async def _trusted_upstream_auth_user(
     request: Request,
     settings: _TrustedUpstreamAuthSettings,
     jwt_client: PyJWKClient | None,
-) -> _TrustedUpstreamJwtIdentity | None:
-    """Return verified upstream identity claims when strict mode is enabled."""
-    jwt_settings = settings.jwt
-    if not jwt_settings.require_jwt:
+) -> AuthUser | None:
+    """Return the browser user the gateway's signed assertion names, when trusted upstream auth is on."""
+    if not settings.enabled:
         return None
-
-    header = _trusted_upstream_required_jwt_setting(
-        jwt_settings.header,
-        "MINDROOM_TRUSTED_UPSTREAM_JWT_HEADER",
-    )
-    audience = _trusted_upstream_required_jwt_setting(
-        jwt_settings.audience,
-        "MINDROOM_TRUSTED_UPSTREAM_JWT_AUDIENCE",
-    )
-    issuer = _trusted_upstream_required_jwt_setting(
-        jwt_settings.issuer,
-        "MINDROOM_TRUSTED_UPSTREAM_JWT_ISSUER",
-    )
-    _trusted_upstream_required_jwt_setting(
-        jwt_settings.jwks_url,
-        "MINDROOM_TRUSTED_UPSTREAM_JWKS_URL",
-    )
+    header = _trusted_upstream_required_jwt_setting(settings.jwt_header, "MINDROOM_TRUSTED_UPSTREAM_JWT_HEADER")
+    audience = _trusted_upstream_required_jwt_setting(settings.audience, "MINDROOM_TRUSTED_UPSTREAM_JWT_AUDIENCE")
+    issuer = _trusted_upstream_required_jwt_setting(settings.issuer, "MINDROOM_TRUSTED_UPSTREAM_JWT_ISSUER")
+    _trusted_upstream_required_jwt_setting(settings.jwks_url, "MINDROOM_TRUSTED_UPSTREAM_JWKS_URL")
     if jwt_client is None:
         raise HTTPException(
             status_code=500,
-            detail="Trusted upstream strict JWT auth is enabled but JWKS validation is not configured",
+            detail="Trusted upstream auth is enabled but JWKS validation is not configured",
         )
 
-    required_claims = ["exp", "iss", "aud", jwt_settings.email_claim]
-    if jwt_settings.user_id_claim is not None:
-        required_claims.append(jwt_settings.user_id_claim)
-    if jwt_settings.matrix_user_id_claim is not None:
-        required_claims.append(jwt_settings.matrix_user_id_claim)
+    required_claims = ["exp", "iss", "aud", settings.email_claim]
+    if settings.user_id_claim is not None:
+        required_claims.append(settings.user_id_claim)
+    if settings.matrix_user_id_claim is not None:
+        required_claims.append(settings.matrix_user_id_claim)
     claims = await _verified_trusted_upstream_jwt_claims(
         request,
         jwt_client,
@@ -441,18 +449,26 @@ async def _verified_trusted_upstream_jwt_identity(
         invalid_detail="Invalid trusted upstream JWT",
     )
 
-    email = _trusted_upstream_jwt_string_claim(claims, jwt_settings.email_claim)
+    email = _trusted_upstream_jwt_string_claim(claims, settings.email_claim)
     user_id = (
-        _trusted_upstream_jwt_string_claim(claims, jwt_settings.user_id_claim)
-        if jwt_settings.user_id_claim is not None
+        _trusted_upstream_jwt_string_claim(claims, settings.user_id_claim)
+        if settings.user_id_claim is not None
         else None
     )
-    matrix_user_id = (
-        _trusted_upstream_jwt_string_claim(claims, jwt_settings.matrix_user_id_claim)
-        if jwt_settings.matrix_user_id_claim is not None
+    matrix_user_id_claim = (
+        _trusted_upstream_jwt_string_claim(claims, settings.matrix_user_id_claim)
+        if settings.matrix_user_id_claim is not None
         else None
     )
-    return _TrustedUpstreamJwtIdentity(email=email, user_id=user_id, matrix_user_id=matrix_user_id)
+    matrix_user_id = _trusted_upstream_matrix_user_id(settings, email, matrix_user_id_claim)
+    if matrix_user_id is None:
+        return AuthUser(user_id=user_id or email, email=email, source=AuthSource.TRUSTED_UPSTREAM)
+    return SignedMatrixUser(
+        user_id=user_id or email,
+        email=email,
+        source=AuthSource.TRUSTED_UPSTREAM,
+        matrix_user_id=matrix_user_id,
+    )
 
 
 def _trusted_upstream_jwt_string_claim(claims: dict[str, Any], claim_name: str) -> str:
@@ -462,114 +478,24 @@ def _trusted_upstream_jwt_string_claim(claims: dict[str, Any], claim_name: str) 
     return claim.strip()
 
 
-def _verified_trusted_upstream_identity(
-    user_id: str,
-    email: str | None,
-    jwt_identity: _TrustedUpstreamJwtIdentity | None,
-) -> tuple[str, str | None]:
-    """Return trusted identity headers after checking strict JWT consistency."""
-    if jwt_identity is None:
-        return user_id, email
-
-    verified_user_id = jwt_identity.user_id or jwt_identity.email
-    if user_id != verified_user_id:
-        raise HTTPException(status_code=401, detail="Trusted upstream identity does not match JWT claim")
-    if email is not None and email != jwt_identity.email:
-        raise HTTPException(status_code=401, detail="Trusted upstream identity does not match JWT claim")
-    if email is None:
-        email = jwt_identity.email
-    return user_id, email
-
-
-def _verified_trusted_upstream_matrix_user_id(
+def _trusted_upstream_matrix_user_id(
     settings: _TrustedUpstreamAuthSettings,
-    matrix_user_id: str | None,
-    email: str | None,
-    jwt_identity: _TrustedUpstreamJwtIdentity | None,
+    email: str,
+    matrix_user_id_claim: str | None,
 ) -> str | None:
-    """Return a Matrix identity only when it is trusted for the active auth mode."""
-    parsed_matrix_user_id = try_parse_historical_matrix_user_id(matrix_user_id)
-    if matrix_user_id is not None and parsed_matrix_user_id is None:
-        raise HTTPException(status_code=401, detail="Invalid trusted upstream Matrix user id")
-
-    if jwt_identity is None:
-        if parsed_matrix_user_id is not None:
-            return parsed_matrix_user_id
-        email_to_matrix_template = _validated_trusted_upstream_email_to_matrix_template(
-            settings,
-            require_email_header=True,
-        )
-        return _derive_trusted_upstream_matrix_user_id(settings, email, email_to_matrix_template)
-
-    if jwt_identity.matrix_user_id is not None:
-        verified_matrix_user_id = try_parse_historical_matrix_user_id(jwt_identity.matrix_user_id)
-        if verified_matrix_user_id is None:
+    """Return the signed Matrix claim, else the Matrix user the email template names, else None."""
+    if settings.matrix_user_id_claim is not None:
+        matrix_user_id = try_parse_historical_matrix_user_id(matrix_user_id_claim)
+        if matrix_user_id is None:
             raise HTTPException(status_code=401, detail="Invalid trusted upstream Matrix user id")
-        if parsed_matrix_user_id is not None and parsed_matrix_user_id != verified_matrix_user_id:
-            raise HTTPException(
-                status_code=401,
-                detail="Trusted upstream Matrix identity does not match JWT claim",
-            )
-        return verified_matrix_user_id
-
-    email_to_matrix_template = _validated_trusted_upstream_email_to_matrix_template(
-        settings,
-        require_email_header=False,
-    )
-    derived_matrix_user_id = _derive_trusted_upstream_matrix_user_id(settings, email, email_to_matrix_template)
-    if derived_matrix_user_id is not None:
-        if parsed_matrix_user_id is not None and parsed_matrix_user_id != derived_matrix_user_id:
-            raise HTTPException(
-                status_code=401,
-                detail="Trusted upstream Matrix identity does not match verified email",
-            )
-        return derived_matrix_user_id
-
-    if parsed_matrix_user_id is not None:
-        raise HTTPException(status_code=401, detail="Trusted upstream Matrix identity is not signed")
-    return None
-
-
-async def _trusted_upstream_auth_user(
-    request: Request,
-    settings: _TrustedUpstreamAuthSettings,
-    jwt_client: PyJWKClient | None = None,
-) -> dict[str, Any] | None:
-    """Return the trusted-upstream auth user for this request when configured."""
-    if not settings.enabled:
+        return matrix_user_id
+    template = _validated_trusted_upstream_email_to_matrix_template(settings)
+    if template is None:
         return None
-    if settings.user_id_header is None:
-        raise HTTPException(
-            status_code=500,
-            detail="Trusted upstream auth is enabled but MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER is not set",
-        )
-
-    user_id = _get_configured_header(request, settings.user_id_header)
-    if user_id is None:
-        raise HTTPException(
-            status_code=401,
-            detail=f"Missing trusted upstream identity header: {settings.user_id_header}",
-        )
-
-    jwt_identity = await _verified_trusted_upstream_jwt_identity(request, settings, jwt_client)
-    email = _get_configured_header(request, settings.email_header)
-    user_id, email = _verified_trusted_upstream_identity(user_id, email, jwt_identity)
-    matrix_user_id = _get_configured_header(request, settings.matrix_user_id_header)
-    parsed_matrix_user_id = _verified_trusted_upstream_matrix_user_id(
-        settings,
-        matrix_user_id,
-        email,
-        jwt_identity,
-    )
-
-    auth_user = {
-        "user_id": user_id,
-        "email": email,
-        "auth_source": "trusted_upstream",
-    }
-    if parsed_matrix_user_id is not None:
-        auth_user["matrix_user_id"] = parsed_matrix_user_id
-    return auth_user
+    try:
+        return matrix_user_id_from_email(email, template, settings.email_domain)
+    except ValueError as exc:
+        raise HTTPException(status_code=401, detail="Invalid trusted upstream email identity") from exc
 
 
 def _supabase_auth_error_class() -> type[Exception]:
@@ -577,13 +503,17 @@ def _supabase_auth_error_class() -> type[Exception]:
     return cast("type[Exception]", importlib.import_module("supabase_auth.errors").AuthError)
 
 
-def _validate_supabase_token(token: str, auth_state: ApiAuthState) -> _SupabaseUserProtocol | None:
+async def _validate_supabase_token(token: str, auth_state: ApiAuthState) -> _SupabaseUserProtocol | None:
     """Validate a Supabase access token and return the authenticated user."""
     if auth_state.supabase_auth is None:
         return None
+    # Supabase access tokens are JWTs, so any other bearer value is rejected without a network call.
+    if len(token) > _JWT_MAX_BYTES or _SUPABASE_TOKEN_SHAPE.fullmatch(token) is None:
+        return None
 
     try:
-        response = auth_state.supabase_auth.auth.get_user(token)
+        async with _supabase_token_checks:
+            response = await asyncio.to_thread(auth_state.supabase_auth.auth.get_user, token)
     except _supabase_auth_error_class():
         return None
 
@@ -591,11 +521,6 @@ def _validate_supabase_token(token: str, auth_state: ApiAuthState) -> _SupabaseU
         return None
 
     return response.user
-
-
-def _dashboard_origin(request: Request, settings: _ApiAuthSettings) -> str | None:
-    """Return this dashboard's public origin, which platform logins and browser mutations must name."""
-    return public_origin(settings.public_url or str(request.base_url))
 
 
 def _verified_platform_sso_claims(
@@ -607,7 +532,7 @@ def _verified_platform_sso_claims(
     required_claims: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     """Verify a platform login ticket or session signed with this instance's own SSO key."""
-    audience = _dashboard_origin(request, settings)
+    audience = deployment_origin(settings.public_url, str(request.base_url))
     if settings.platform_sso_secret is None or audience is None:
         raise HTTPException(status_code=401, detail="Missing or invalid credentials")
     try:
@@ -633,7 +558,7 @@ def _verified_platform_sso_claims(
     return claims
 
 
-def _platform_user_identity(
+async def _platform_user_identity(
     request: Request,
     authorization: str | None,
     auth_state: ApiAuthState,
@@ -641,7 +566,7 @@ def _platform_user_identity(
     """Return the user from a Supabase bearer token or this instance's platform session cookie."""
     bearer_token = _extract_bearer_token(authorization)
     if bearer_token is not None:
-        user = _validate_supabase_token(bearer_token, auth_state)
+        user = await _validate_supabase_token(bearer_token, auth_state)
         if user is None:
             raise HTTPException(status_code=401, detail="Invalid token")
         return user.id, user.email
@@ -669,65 +594,19 @@ def _consume_platform_sso_ticket(ticket_id: object, expires_at: int) -> None:
     _used_platform_sso_ticket_ids[ticket_id] = expires_at
 
 
-def _bind_authenticated_request_snapshot(request: Request) -> ApiSnapshot:
-    """Bind one coherent auth/runtime/config snapshot to the request."""
-    existing = request_api_snapshot(request)
-    bound_auth_state = cast("ApiAuthState | None", existing.auth_state) if existing is not None else None
-    if (
-        existing is not None
-        and bound_auth_state is not None
-        and bound_auth_state.runtime_paths == existing.runtime_paths
-    ):
-        return existing
-
-    app_state = config_lifecycle.app_state(request.app)
-    api_state = config_lifecycle.require_api_state(request.app)
-    with api_state.config_lock:
-        current = api_state.snapshot
-        auth_state = cast("ApiAuthState | None", current.auth_state)
-        if auth_state is None or auth_state.runtime_paths != current.runtime_paths:
-            settings = _build_auth_settings(current.runtime_paths, account_id=app_state.api_auth_account_id)
-            auth_state = ApiAuthState(
-                runtime_paths=current.runtime_paths,
-                settings=settings,
-                supabase_auth=_init_supabase_auth(current.runtime_paths, settings),
-                trusted_upstream_jwt_client=_build_trusted_upstream_jwt_client(settings.trusted_upstream),
-            )
-            current = replace(current, auth_state=auth_state)
-            api_state.snapshot = current
-        return store_request_api_snapshot(request, current)
-
-
-def _request_auth_state(request: Request) -> ApiAuthState:
-    """Return the request-bound auth state when available."""
-    snapshot = request_api_snapshot(request)
-    if snapshot is None:
-        return _app_auth_state(request.app)
-    auth_state = cast("ApiAuthState | None", snapshot.auth_state)
-    if auth_state is None or auth_state.runtime_paths != snapshot.runtime_paths:
-        return cast("ApiAuthState", _bind_authenticated_request_snapshot(request).auth_state)
-    return auth_state
-
-
 async def request_has_frontend_access(request: Request) -> bool:
     """Return whether the current request may load the dashboard UI."""
-    authorization = request.headers.get("authorization")
-    snapshot = _bind_authenticated_request_snapshot(request)
-    auth_state = cast("ApiAuthState", snapshot.auth_state)
-    if _env_text(snapshot.runtime_paths, "MINDROOM_CONNECTIONS_AGENT") and _is_connections_path(
-        request.scope["path"],
-    ):
-        await require_connections_user(request)
+    if _is_connections_path(request.scope["path"]):
+        # The portal page is a static shell that signs itself in; its APIs authenticate every request.
         return True
     try:
-        auth_user = await authenticate_user(request, authorization, allow_public_paths=False)
+        auth_user = await authenticate_user(request, request.headers.get("authorization"))
     except HTTPException as exc:
         # Only a missing or invalid credential falls through to the login page.
         if exc.status_code not in {401, 403}:
             raise
         return False
-    if auth_state.settings.trusted_upstream.enabled:
-        _require_connections_route_authorized(request, auth_user, snapshot)
+    _require_connections_route_authorized(request, auth_user)
     return True
 
 
@@ -761,27 +640,61 @@ def _is_offsite_candidate(candidate: str) -> bool:
     return candidate.replace("\\", "/").startswith("//")
 
 
-def _request_path_with_query(request: Request) -> str:
+def request_path_with_query(request: Request) -> str:
+    """Return this request's path with its query string, for a redirect back to it."""
     path = request.url.path
     query = request.url.query
     return f"{path}?{query}" if query else path
 
 
-def public_origin(public_url: str | None) -> str | None:
-    """Extract a configured URL's origin for browser redirects, CORS, and mutation checks."""
-    if not public_url:
-        return None
-    parsed = urlsplit(public_url.strip())
-    if not parsed.scheme or not parsed.netloc:
-        return None
-    return f"{parsed.scheme}://{parsed.netloc}"
+_DASHBOARD_CORS_ALLOWED_ORIGINS_ENV = "MINDROOM_DASHBOARD_CORS_ALLOWED_ORIGINS"
+_DASHBOARD_CORS_ALLOW_ALL_ORIGINS_ENV = "MINDROOM_DASHBOARD_CORS_ALLOW_ALL_ORIGINS"
+_DEFAULT_DASHBOARD_CORS_ALLOWED_ORIGINS = (
+    "http://localhost:3003",
+    "http://localhost:5173",
+    "http://127.0.0.1:3003",
+    "http://127.0.0.1:5173",
+)
+
+
+def _hosted_browser_origins(runtime_paths: RuntimePaths) -> list[str]:
+    """Return hosted browser origins allowed to make credentialed API calls."""
+    return list(
+        dict.fromkeys(
+            origin
+            for origin in (
+                normalized_origin(runtime_paths.env_value("MINDROOM_PUBLIC_URL")),
+                normalized_origin(runtime_paths.env_value("MINDROOM_PLATFORM_LOGIN_URL")),
+            )
+            if origin is not None
+        ),
+    )
+
+
+def dashboard_cors_origins(runtime_paths: RuntimePaths) -> tuple[str, ...]:
+    """Return the browser origins the dashboard API serves cross-origin; `("*",)` when every origin is allowed.
+
+    `MINDROOM_DASHBOARD_CORS_ALLOW_ALL_ORIGINS` allows every origin. Otherwise
+    `MINDROOM_DASHBOARD_CORS_ALLOWED_ORIGINS` lists them; unset, a hosted instance allows its own origins and any
+    other instance the local development servers.
+    """
+    if runtime_paths.env_flag(_DASHBOARD_CORS_ALLOW_ALL_ORIGINS_ENV):
+        return ("*",)
+    configured_origins = runtime_paths.env_value(_DASHBOARD_CORS_ALLOWED_ORIGINS_ENV)
+    if configured_origins is None:
+        hosted_origins = tuple(_hosted_browser_origins(runtime_paths))
+        if hosted_origins:
+            return hosted_origins
+        return _DEFAULT_DASHBOARD_CORS_ALLOWED_ORIGINS
+    origins = tuple(origin for origin in (part.strip() for part in configured_origins.split(",")) if origin)
+    return origins or _DEFAULT_DASHBOARD_CORS_ALLOWED_ORIGINS
 
 
 def _platform_redirect_target(request: Request, auth_settings: _ApiAuthSettings, next_path: str | None) -> str:
-    origin = public_origin(auth_settings.public_url)
+    origin = normalized_origin(auth_settings.public_url)
     if origin is None:
         return str(request.url)
-    path = sanitize_next_path(next_path or _request_path_with_query(request))
+    path = sanitize_next_path(next_path or request_path_with_query(request))
     return f"{origin}{path}"
 
 
@@ -798,14 +711,31 @@ def login_redirect_for_request(request: Request, *, next_path: str | None = None
         redirect_to = quote(_platform_redirect_target(request, auth_settings, next_path), safe="")
         return RedirectResponse(f"{auth_settings.platform_sso_url}?redirect_to={redirect_to}")
     if auth_settings.mindroom_api_key:
-        login_target = sanitize_next_path(next_path or _request_path_with_query(request))
+        login_target = sanitize_next_path(next_path or request_path_with_query(request))
         return RedirectResponse(f"/login?{urlencode({'next': login_target})}")
     return None
+
+
+def _standalone_login_key_hint(
+    runtime_paths: RuntimePaths,
+    api_key_source: EnvValueSource | None,
+) -> str:
+    """Return the login page hint paragraph for where `MINDROOM_API_KEY` is configured."""
+    if api_key_source == "process_env":
+        return "<p>Check <code>MINDROOM_API_KEY</code> in the environment configured for your MindRoom service.</p>"
+    if api_key_source == "env_file":
+        env_path = html.escape(str(runtime_paths.env_path))
+        return f"<p>Find it in <code>{env_path}</code> as <code>MINDROOM_API_KEY=...</code>.</p>"
+    return (
+        "<p>Check <code>MINDROOM_API_KEY</code> in the environment configured for your MindRoom service "
+        "or in the <code>.env</code> file beside <code>config.yaml</code>.</p>"
+    )
 
 
 def _render_standalone_login_page(
     next_path: str,
     runtime_paths: RuntimePaths,
+    api_key_source: EnvValueSource | None = None,
 ) -> str:
     """Return the standalone dashboard login page."""
     next_path_js = (
@@ -816,7 +746,7 @@ def _render_standalone_login_page(
         .replace("\u2028", "\\u2028")
         .replace("\u2029", "\\u2029")
     )
-    env_path = html.escape(str(runtime_paths.env_path))
+    key_hint = _standalone_login_key_hint(runtime_paths, api_key_source)
     return f"""<!doctype html>
 <html lang="en">
 <head>
@@ -885,7 +815,7 @@ def _render_standalone_login_page(
   <form id="login-form">
     <h1>MindRoom Dashboard</h1>
     <p>Enter the dashboard API key to continue.</p>
-    <p>Find it in <code>{env_path}</code> as <code>MINDROOM_API_KEY=...</code>.</p>
+    {key_hint}
     <input id="api-key" name="api-key" type="password" autocomplete="current-password" autofocus>
     <button type="submit">Continue</button>
     <div id="error" role="alert"></div>
@@ -922,93 +852,282 @@ def _is_connections_path(path: str) -> bool:
     return any(path == prefix or path.startswith(f"{prefix}/") for prefix in ("/connections", "/api/connections"))
 
 
-def _require_connections_route_authorized(
-    request: Request,
-    auth_user: dict[str, Any],
-    snapshot: ApiSnapshot,
-) -> None:
-    """Keep trusted personal users outside administrator routes when the portal is enabled."""
+def _is_oauth_popup_path(path: str, actions: frozenset[str]) -> bool:
+    """Recognize exactly `/api/oauth/{provider}/{action}` for one of `actions`."""
+    parts = path.split("/")
+    return len(parts) == 5 and parts[1:3] == ["api", "oauth"] and bool(parts[3]) and parts[4] in actions
+
+
+def allow_connections_session_for_oauth_flow(request: Request) -> None:
+    """Let this OAuth route authenticate with the Connections session.
+
+    Callers grant it on a callback whose flow a session started, and on a connect or reset link whose token names
+    the one requester the session must then be.
+    """
+    request.scope[_CONNECTIONS_SESSION_FLOW_SCOPE_KEY] = True
+
+
+def _connections_session_path_honored(request: Request) -> bool:
+    """Honor sessions on portal paths, OAuth success pages, and published reports; on other OAuth routes only when granted."""
+    path = request.scope["path"]
+    if _is_oauth_popup_path(path, frozenset({"authorize", "callback", "reset"})):
+        return request.scope.get(_CONNECTIONS_SESSION_FLOW_SCOPE_KEY) is True
+    # Only GET: the dashboard shell answers HEAD on every path.
+    published_report = request.method == "GET" and path.startswith("/reports/public/pub_")
+    return _is_connections_path(path) or _is_oauth_popup_path(path, frozenset({"success"})) or published_report
+
+
+def _read_request_connections_session(request: Request) -> ConnectionsSession | None:
+    """Return the valid Connections session this request's cookie carries, on any path; callers decide where it counts."""
+    settings = _request_auth_state(request).settings
+    token = request.cookies.get(
+        connections_session_cookie(deployment_origin(settings.public_url, str(request.base_url))),
+    )
+    return read_connections_session(token, now=time.time()) if token else None
+
+
+def non_administrator_chat_redirect(request: Request) -> RedirectResponse | None:
+    """Send someone signed in to Connections who is no administrator back to the MindRoom Chat that signed them in.
+
+    The dashboard is for administrators, so its login is a dead end for them, as when they trim `/connections` off the
+    portal's address. An administrator whose sign-in the dashboard does not accept keeps the login, and so does the
+    owner, who may hold the API key without being listed in `administrators`.
+    """
+    session = _read_request_connections_session(request)
+    if session is None:
+        return None
+    snapshot = config_lifecycle.bind_current_request_snapshot(request)
+    chat_origin = connections_chat_origin(snapshot.runtime_paths, session.chat_origin)
+    owner = snapshot.runtime_paths.env_value("MINDROOM_OWNER_USER_ID")
+    if chat_origin is None or session.matrix_user_id == owner or is_administrator(session.matrix_user_id, snapshot):
+        return None
+    return RedirectResponse(f"{chat_origin}/")
+
+
+def _connections_session_auth_user(request: Request) -> SignedMatrixUser | None:
+    """Return the Connections session identity.
+
+    It is honored on portal paths, on OAuth routes whose handler granted it (`allow_connections_session_for_oauth_flow`),
+    and on dashboard routes for an administrator whose sign-in the homeserver bound to this deployment, outside hosted
+    platform mode and never on OAuth callbacks without that grant.
+    """
+    auth_state = _request_auth_state(request)
+    session = _read_request_connections_session(request)
+    if session is None:
+        return None
+    if not _connections_session_path_honored(request) and not (
+        session.dashboard
+        and not _is_oauth_popup_path(request.scope["path"], frozenset({"callback"}))
+        and auth_state.supabase_auth is None
+        and is_administrator(session.matrix_user_id, config_lifecycle.bind_current_request_snapshot(request))
+    ):
+        return None
+    matrix_user_id = session.matrix_user_id
+    return SignedMatrixUser(
+        user_id=matrix_user_id,
+        email=None,
+        source=AuthSource.MATRIX_OPENID,
+        matrix_user_id=matrix_user_id,
+    )
+
+
+def is_administrator(matrix_user_id: str | None, snapshot: config_lifecycle.ApiSnapshot) -> bool:
+    """Return whether a signed Matrix user is a platform administrator in the snapshot's config."""
+    return (
+        matrix_user_id is not None
+        and snapshot.runtime_config is not None
+        and is_platform_administrator(matrix_user_id, snapshot.runtime_config, snapshot.runtime_paths)
+    )
+
+
+def _require_connections_route_authorized(request: Request, auth_user: AuthUser) -> None:
+    """Keep trusted personal users outside administrator routes while `MINDROOM_CONNECTIONS_AGENT` is set."""
+    if not _request_auth_state(request).settings.trusted_upstream.enabled:
+        return
+    snapshot = config_lifecycle.bind_current_request_snapshot(request)
     if not _env_text(snapshot.runtime_paths, "MINDROOM_CONNECTIONS_AGENT"):
         return
     path = request.scope["path"]
-    if _is_connections_path(path):
-        return
-    parts = path.split("/")
-    if len(parts) == 5 and parts[1:3] == ["api", "oauth"] and parts[3] and parts[4] in {"callback", "success", "reset"}:
+    if _is_oauth_popup_path(path, frozenset({"callback", "success", "reset"})):
         # These handlers independently validate their state or reset capability.
         return
-    matrix_user_id = auth_user.get("matrix_user_id")
-    if (
-        isinstance(matrix_user_id, str)
-        and snapshot.runtime_config is not None
-        and is_platform_administrator(matrix_user_id, snapshot.runtime_config, snapshot.runtime_paths)
-    ):
+    if is_administrator(auth_user.matrix_user_id, snapshot):
         return
+    if _is_browser_page_request(request):
+        # A user who opens a dashboard page lands on their own page, which says why, instead of a JSON refusal.
+        raise HTTPException(
+            status_code=303,
+            detail="Administrator access required",
+            headers={"Location": "/connections?notice=admin-only"},
+        )
     raise HTTPException(status_code=403, detail="Administrator access required")
 
 
-async def require_connections_user(request: Request) -> dict[str, Any]:
-    """Authenticate a Connections user through a signed upstream Matrix identity."""
-    return await _require_signed_matrix_user(request, label="Connections")
+def _is_browser_page_request(request: Request) -> bool:
+    """Recognize a browser loading a page: a GET that accepts HTML, outside the API."""
+    path = request.scope["path"]
+    return (
+        request.method == "GET"
+        and "text/html" in request.headers.get("accept", "").lower()
+        and path != "/api"
+        and not path.startswith("/api/")
+    )
 
 
-async def require_personal_user(request: Request) -> dict[str, Any]:
+async def require_connections_user(request: Request) -> SignedMatrixUser:
+    """Authenticate a Connections user through a portal session or a signed upstream Matrix identity."""
+    auth_user = _connections_session_auth_user(request)
+    if auth_user is not None:
+        bind_request_auth_user(request, auth_user)
+    else:
+        if not _request_auth_state(request).settings.trusted_upstream.enabled:
+            # Without a signed upstream identity, only a portal session can authenticate, so ask the page to sign in.
+            raise HTTPException(status_code=401, detail=CONNECTIONS_SIGN_IN_REQUIRED)
+        auth_user = await _require_signed_matrix_user(request, label="Connections")
+    page_user = request.headers.get(_CONNECTIONS_USER_HEADER)
+    if page_user is not None and page_user != auth_user.matrix_user_id:
+        # Sessions and upstream identities are browser-wide, so a page showing another account must reload.
+        raise HTTPException(status_code=401, detail="This page shows another account. Reload this page.")
+    return auth_user
+
+
+def trusted_upstream_email_to_matrix_user_id(request: Request) -> Callable[[str], str | None] | None:
+    """Return how the email-to-Matrix template turns an email into its Matrix user, or None when the email does not decide it."""
+    settings = _request_auth_state(request).settings.trusted_upstream
+    # In `_trusted_upstream_matrix_user_id`, a signed Matrix claim wins over the email template, which then names no one.
+    if settings.enabled and settings.matrix_user_id_claim is not None:
+        return None
+    template = _validated_trusted_upstream_email_to_matrix_template(settings)
+    if template is None:
+        return None
+
+    def matrix_user_id(email: str) -> str | None:
+        try:
+            return matrix_user_id_from_email(email, template, settings.email_domain)
+        except ValueError:
+            return None
+
+    return matrix_user_id
+
+
+async def require_personal_user(request: Request) -> SignedMatrixUser:
     """Authenticate personal read APIs without granting administrator access."""
     return await _require_signed_matrix_user(request, label="Personal APIs")
 
 
 async def require_usage_service(request: Request) -> None:
     """Authenticate the dedicated usage-export service without creating a user identity."""
-    auth_state = cast("ApiAuthState", _bind_authenticated_request_snapshot(request).auth_state)
+    await _require_service_jwt(
+        request,
+        audience_env="MINDROOM_USAGE_SERVICE_JWT_AUDIENCE",
+        client_id_env="MINDROOM_USAGE_SERVICE_CLIENT_ID",
+        unconfigured_detail="Usage export service authentication is not configured",
+        invalid_detail="Invalid usage service JWT",
+    )
+
+
+async def require_budget_service(request: Request) -> None:
+    """Authenticate the dedicated budget service without creating a user identity."""
+    await _require_service_jwt(
+        request,
+        audience_env="MINDROOM_BUDGET_SERVICE_JWT_AUDIENCE",
+        client_id_env="MINDROOM_BUDGET_SERVICE_CLIENT_ID",
+        unconfigured_detail="Budget service authentication is not configured",
+        invalid_detail="Invalid budget service JWT",
+    )
+
+
+async def _require_service_jwt(
+    request: Request,
+    *,
+    audience_env: str,
+    client_id_env: str,
+    unconfigured_detail: str,
+    invalid_detail: str,
+) -> None:
+    """Require a trusted-upstream service assertion for one dedicated audience and client ID."""
+    auth_state = _request_auth_state(request)
     settings = auth_state.settings.trusted_upstream
-    jwt_settings = settings.jwt
-    audience = _env_text(auth_state.runtime_paths, "MINDROOM_USAGE_SERVICE_JWT_AUDIENCE")
-    client_id = _env_text(auth_state.runtime_paths, "MINDROOM_USAGE_SERVICE_CLIENT_ID")
+    audience = _env_text(auth_state.runtime_paths, audience_env)
+    client_id = _env_text(auth_state.runtime_paths, client_id_env)
     if (
         not settings.enabled
-        or settings.user_id_header is None
-        or not jwt_settings.require_jwt
-        or jwt_settings.header is None
-        or jwt_settings.jwks_url is None
-        or jwt_settings.audience is None
-        or jwt_settings.issuer is None
+        or settings.jwt_header is None
+        or settings.jwks_url is None
+        or settings.audience is None
+        or settings.issuer is None
         or audience is None
         or client_id is None
         or auth_state.trusted_upstream_jwt_client is None
     ):
-        raise HTTPException(status_code=503, detail="Usage export service authentication is not configured")
+        raise HTTPException(status_code=503, detail=unconfigured_detail)
 
     claims = await _verified_trusted_upstream_jwt_claims(
         request,
         auth_state.trusted_upstream_jwt_client,
-        header=jwt_settings.header,
+        header=settings.jwt_header,
         audience=audience,
-        issuer=jwt_settings.issuer,
+        issuer=settings.issuer,
         algorithms=("RS256",),
-        required_claims=("exp", "iat", "iss", "aud", "type", "common_name", "sub"),
-        invalid_detail="Invalid usage service JWT",
+        required_claims=("exp", "iat", "iss", "aud", "type", "common_name"),
+        invalid_detail=invalid_detail,
     )
 
-    if (
-        claims.get("type") != "app"
-        or claims.get("sub") != ""
-        or not isinstance(claims.get("common_name"), str)
-        or claims["common_name"] != client_id
-    ):
-        raise HTTPException(status_code=401, detail="Invalid usage service JWT")
+    # Cloudflare sends `sub: ""` for service tokens but has also sent none at all; a person's `sub` is never empty.
+    if claims.get("type") != "app":
+        failed_check = "type"
+    elif claims.get("sub", "") != "":
+        failed_check = "sub"
+    elif not isinstance(claims.get("common_name"), str) or claims["common_name"] != client_id:
+        failed_check = "common_name"
+    else:
+        return
+    logger.warning("Service JWT rejected", detail=invalid_detail, failed_check=failed_check)
+    raise HTTPException(status_code=401, detail=invalid_detail)
 
 
-async def _require_signed_matrix_user(request: Request, *, label: str) -> dict[str, Any]:
-    auth_state = cast("ApiAuthState", _bind_authenticated_request_snapshot(request).auth_state)
+async def _require_signed_matrix_user(request: Request, *, label: str) -> SignedMatrixUser:
+    auth_state = _request_auth_state(request)
     settings = auth_state.settings.trusted_upstream
-    if not settings.enabled or not settings.jwt.require_jwt:
+    if not settings.enabled:
         raise HTTPException(status_code=403, detail=f"{label} require trusted signed authentication")
     auth_user = await _trusted_upstream_auth_user(request, settings, auth_state.trusted_upstream_jwt_client)
-    matrix_user_id = auth_user.get("matrix_user_id") if auth_user is not None else None
-    if not isinstance(matrix_user_id, str) or try_parse_historical_matrix_user_id(matrix_user_id) is None:
+    if not isinstance(auth_user, SignedMatrixUser):
         raise HTTPException(status_code=403, detail=f"{label} require a verified Matrix identity")
-    request.scope["auth_user"] = auth_user
-    return cast("dict[str, Any]", auth_user)
+    return bind_request_auth_user(request, auth_user)
+
+
+def _reached_dashboard_host(request: Request, settings: _ApiAuthSettings) -> bool:
+    """Return whether this request reached the dashboard's own host, which startup keeps apart from the public one."""
+    # Behind a TLS-terminating proxy the request's scheme may differ from the browser's, but its Host header,
+    # port included, does not.
+    dashboard = settings.dashboard_origin
+    return dashboard is not None and request.url.netloc.lower() == urlsplit(dashboard).netloc
+
+
+def browser_origin(request: Request) -> str | None:
+    """Return the origin the browser opened MindRoom at: the dashboard's own host, else the deployment origin."""
+    settings = _request_auth_state(request).settings
+    if _reached_dashboard_host(request, settings):
+        return settings.dashboard_origin
+    return deployment_origin(settings.public_url, str(request.base_url))
+
+
+def dashboard_host_public_origin(request: Request) -> str | None:
+    """Return the public origin when this request reached the dashboard's own host from `MINDROOM_DASHBOARD_URL`."""
+    settings = _request_auth_state(request).settings
+    return normalized_origin(settings.public_url) if _reached_dashboard_host(request, settings) else None
+
+
+def dashboard_link(request: Request) -> str:
+    """Return where administrators open the dashboard: `MINDROOM_DASHBOARD_URL` when set, else this origin's `/`."""
+    return f"{_request_auth_state(request).settings.dashboard_origin or ''}/"
+
+
+def oauth_callback_hostname(request: Request) -> str | None:
+    """Return the host an OAuth flow started here returns to: the public one when started on the dashboard's host."""
+    public = dashboard_host_public_origin(request)
+    return urlsplit(public).hostname if public is not None else request.url.hostname
 
 
 def require_same_origin(
@@ -1023,103 +1142,94 @@ def require_same_origin(
         raise HTTPException(403, detail, headers=headers)
 
 
-def _require_browser_mutation_origin(
-    request: Request,
-    settings: _ApiAuthSettings,
-    validated_authorization: str | None = None,
-) -> None:
+def _require_browser_mutation_origin(request: Request, validated_authorization: str | None = None) -> None:
     if (
         request.method in {"GET", "HEAD", "OPTIONS", "TRACE"}
         or _extract_bearer_token(validated_authorization) is not None
     ):
         return
-    origin = _dashboard_origin(request, settings)
+    origin = browser_origin(request)
     if origin is None:
         raise HTTPException(403, "Browser changes require a valid public origin")
     require_same_origin(request, origin)
 
 
-async def authenticate_user(
-    request: Request,
-    authorization: str | None = Header(None),
-    *,
-    allow_public_paths: bool = True,
-) -> dict[str, Any]:
+async def authenticate_user(request: Request, authorization: str | None = Header(None)) -> AuthUser:
     """Authenticate the request, enforcing account ownership and browser mutation origin."""
-    snapshot = _bind_authenticated_request_snapshot(request)
-    auth_state = cast("ApiAuthState", snapshot.auth_state)
-    mindroom_api_key = auth_state.settings.mindroom_api_key
+    auth_state = _request_auth_state(request)
+    session_user = _connections_session_auth_user(request)
+    if session_user is not None:
+        _require_browser_mutation_origin(request)
+        return bind_request_auth_user(request, session_user)
+
     trusted_auth_user = await _trusted_upstream_auth_user(
         request,
         auth_state.settings.trusted_upstream,
         auth_state.trusted_upstream_jwt_client,
     )
     if trusted_auth_user is not None:
-        _require_browser_mutation_origin(request, auth_state.settings)
-        request.scope["auth_user"] = trusted_auth_user
-        return trusted_auth_user
+        _require_browser_mutation_origin(request)
+        return bind_request_auth_user(request, trusted_auth_user)
 
     if auth_state.supabase_auth is None:
-        if allow_public_paths and _is_standalone_public_path(request.scope["path"]):
-            auth_user = {"user_id": "standalone", "email": None}
-            request.scope["auth_user"] = auth_user
-            return auth_user
-
+        mindroom_api_key = auth_state.settings.mindroom_api_key
         if mindroom_api_key:
-            token = _extract_bearer_token(authorization) or request.cookies.get(_STANDALONE_AUTH_COOKIE_NAME) or None
+            token = (
+                _extract_bearer_token(authorization) or request.cookies.get(_standalone_auth_cookie(request)) or None
+            )
             if token is None:
                 raise HTTPException(status_code=401, detail="Missing or invalid credentials")
-            if not secrets.compare_digest(token, mindroom_api_key):
+            if not _api_key_matches(token, mindroom_api_key):
                 raise HTTPException(status_code=401, detail="Invalid API key")
-            _require_browser_mutation_origin(request, auth_state.settings, authorization)
+            _require_browser_mutation_origin(request, authorization)
         else:
             # Without a credential, only where the request comes from authorizes it.
-            rejection = open_access_rejection(request.headers, request.method, snapshot.runtime_paths)
+            rejection = open_access_rejection(request.headers, request.method, auth_state.runtime_paths)
             if rejection is not None:
                 raise HTTPException(rejection.status_code, rejection.detail)
-        auth_user = {"user_id": "standalone", "email": None}
-        request.scope["auth_user"] = auth_user
-        return auth_user
+        return bind_request_auth_user(
+            request,
+            AuthUser(user_id=STANDALONE_USER_ID, email=None, source=AuthSource.STANDALONE),
+        )
 
-    user_id, email = _platform_user_identity(request, authorization, auth_state)
+    user_id, email = await _platform_user_identity(request, authorization, auth_state)
     if auth_state.settings.account_id and user_id != auth_state.settings.account_id:
         raise HTTPException(status_code=403, detail="Forbidden")
 
-    _require_browser_mutation_origin(request, auth_state.settings, authorization)
-    auth_user = {"user_id": user_id, "email": email}
-    request.scope["auth_user"] = auth_user
-    return auth_user
+    _require_browser_mutation_origin(request, authorization)
+    return bind_request_auth_user(request, AuthUser(user_id=user_id, email=email, source=AuthSource.PLATFORM))
 
 
-async def verify_user(
-    request: Request,
-    authorization: str | None = Header(None),
-    *,
-    allow_public_paths: bool = True,
-) -> dict[str, Any]:
+async def verify_user(request: Request, authorization: str | None = Header(None)) -> AuthUser:
     """Authenticate a dashboard request and enforce its route access policy."""
-    auth_user = await authenticate_user(request, authorization, allow_public_paths=allow_public_paths)
-    snapshot = _bind_authenticated_request_snapshot(request)
-    if cast("ApiAuthState", snapshot.auth_state).settings.trusted_upstream.enabled:
-        _require_connections_route_authorized(request, auth_user, snapshot)
+    auth_user = await authenticate_user(request, authorization)
+    _require_connections_route_authorized(request, auth_user)
     return auth_user
+
+
+def _standalone_auth_cookie(request: Request) -> str:
+    """Name the dashboard sign-in cookie for the origin the browser opened."""
+    origin = browser_origin(request)
+    plain_http = origin is not None and origin.startswith("http://")
+    return _PLAIN_HTTP_STANDALONE_AUTH_COOKIE_NAME if plain_http else _HTTPS_STANDALONE_AUTH_COOKIE_NAME
 
 
 @router.post("/api/auth/session", include_in_schema=False)
 async def create_auth_session(request: Request, payload: _AuthSessionRequest, response: Response) -> dict[str, bool]:
     """Set a same-origin cookie for standalone dashboard auth."""
-    mindroom_api_key = _app_auth_state(request.app).settings.mindroom_api_key
+    mindroom_api_key = _request_auth_state(request).settings.mindroom_api_key
     if not mindroom_api_key:
         raise HTTPException(status_code=404, detail="Dashboard auth is not enabled")
 
-    if not payload.api_key or not secrets.compare_digest(payload.api_key, mindroom_api_key):
+    if not _api_key_matches(payload.api_key, mindroom_api_key):
         raise HTTPException(status_code=401, detail="Invalid API key")
 
+    cookie = _standalone_auth_cookie(request)
     response.set_cookie(
-        key=_STANDALONE_AUTH_COOKIE_NAME,
+        key=cookie,
         value=payload.api_key,
         path="/",
-        secure=request.url.scheme == "https",
+        secure=cookie == _HTTPS_STANDALONE_AUTH_COOKIE_NAME,
         httponly=True,
         samesite="lax",
     )
@@ -1128,15 +1238,16 @@ async def create_auth_session(request: Request, payload: _AuthSessionRequest, re
 
 @router.delete("/api/auth/session", include_in_schema=False)
 async def clear_auth_session(response: Response) -> dict[str, bool]:
-    """Clear the standalone dashboard auth cookie."""
-    response.delete_cookie(key=_STANDALONE_AUTH_COOKIE_NAME, path="/")
+    """Clear the standalone dashboard auth cookie under both of its names."""
+    response.delete_cookie(key=_HTTPS_STANDALONE_AUTH_COOKIE_NAME, path="/", secure=True)
+    response.delete_cookie(key=_PLAIN_HTTP_STANDALONE_AUTH_COOKIE_NAME, path="/")
     return {"success": True}
 
 
 @router.get("/api/auth/platform-sso", include_in_schema=False)
 async def complete_platform_sso(request: Request, ticket: str, next: str = "/") -> RedirectResponse:  # noqa: A002
     """Exchange a single-use platform login ticket for a host-only dashboard session."""
-    auth_state = cast("ApiAuthState", _bind_authenticated_request_snapshot(request).auth_state)
+    auth_state = _request_auth_state(request)
     settings = auth_state.settings
     if auth_state.supabase_auth is None or settings.trusted_upstream.enabled or settings.platform_sso_secret is None:
         raise HTTPException(status_code=404, detail="Platform login is not enabled")
@@ -1181,11 +1292,18 @@ async def complete_platform_sso(request: Request, ticket: str, next: str = "/") 
 @router.get("/login", include_in_schema=False)
 async def standalone_login(request: Request, next: str = "/") -> Response:  # noqa: A002
     """Render the standalone dashboard login form when API-key auth is enabled."""
-    if not cast("ApiAuthState", _bind_authenticated_request_snapshot(request).auth_state).settings.mindroom_api_key:
+    auth_state = _request_auth_state(request)
+    if not auth_state.settings.mindroom_api_key:
         raise HTTPException(status_code=404, detail="Not found")
 
     next_path = sanitize_next_path(next)
     if await request_has_frontend_access(request):
         return RedirectResponse(next_path)
 
-    return HTMLResponse(_render_standalone_login_page(next_path, config_lifecycle.api_runtime_paths(request)))
+    return HTMLResponse(
+        _render_standalone_login_page(
+            next_path,
+            auth_state.runtime_paths,
+            api_key_source=auth_state.settings.mindroom_api_key_source,
+        ),
+    )

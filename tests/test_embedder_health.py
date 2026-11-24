@@ -17,6 +17,7 @@ from mindroom.constants import resolve_primary_runtime_paths
 from mindroom.embeddings import embedder_health
 from mindroom.embeddings import errors as embedding_errors
 from mindroom.embeddings.embedder_health import (
+    EmbedderHealthRecorder,
     capture_embedder_health_recorder,
     check_embedder_health,
     embedder_in_use,
@@ -28,7 +29,9 @@ from mindroom.embeddings.errors import (
     describe_embedder_error,
     is_embedder_auth_failure_detail,
 )
-from mindroom.embeddings.openai_embedder import MindRoomOpenAIEmbedder
+from mindroom.embeddings.factory import create_configured_embedder
+from mindroom.embeddings.openai_embedder import OpenAIEmbedder
+from tests.conftest import SETTLE_TIMEOUT_SECONDS
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -80,41 +83,59 @@ def _config(
 
 
 class _HealthyEmbedder:
-    def get_embedding(self, _text: str) -> list[float]:
-        return [0.1, 0.2]
+    def embed(self, _texts: list[str], *, purpose: str) -> list[list[float]]:
+        assert purpose == "query"
+        return [[0.1, 0.2]]
 
 
 class _AuthFailingEmbedder:
-    def get_embedding(self, _text: str) -> list[float]:
-        raise _status_error(401)
+    def embed(self, _texts: list[str], *, purpose: str) -> list[list[float]]:
+        del purpose
+        raise embedding_errors.openai_embedder_error(_status_error(401))
 
 
 class _EmptyVectorEmbedder:
-    def get_embedding(self, _text: str) -> list[float]:
-        return []
+    def embed(self, _texts: list[str], *, purpose: str) -> list[list[float]]:
+        del purpose
+        return [[]]
 
 
 def test_authentication_error_maps_to_fixed_401_detail() -> None:
     """401 maps to the fixed auth-failed detail."""
     exc = _status_error(401)
-    assert is_embedder_auth_failure_detail(describe_embedder_error(exc))
-    assert describe_embedder_error(exc) == EMBEDDER_AUTH_FAILED_DETAIL
-    assert describe_embedder_error(exc) == "embedder authentication failed (HTTP 401)"
+    assert is_embedder_auth_failure_detail(describe_embedder_error(embedding_errors.openai_embedder_error(exc)))
+    assert describe_embedder_error(embedding_errors.openai_embedder_error(exc)) == EMBEDDER_AUTH_FAILED_DETAIL
+    assert (
+        describe_embedder_error(embedding_errors.openai_embedder_error(exc))
+        == "embedder authentication failed (HTTP 401)"
+    )
+
+
+def test_a_key_rejected_with_another_client_status_reads_as_a_credential_rejection() -> None:
+    """Some OpenAI-compatible endpoints reject a key with HTTP 400, which still needs credential advice, not a retry."""
+    error = embedding_errors.openai_embedder_error(
+        _status_error(400, message="API key not valid. Please pass a valid API key."),
+    )
+
+    assert (str(error), error.retryable) == ("embedder authentication failed (HTTP 400)", False)
+    assert is_embedder_auth_failure_detail(str(error))
+    assert embedding_errors.extract_classified_embedder_detail(f"Last error: {error}") == str(error)
+    assert SECRET not in str(error)
 
 
 def test_permission_denied_maps_to_distinct_403_detail() -> None:
     """403 stays distinct from 401 so operators repair the right thing."""
     exc = _status_error(403)
-    assert is_embedder_auth_failure_detail(describe_embedder_error(exc))
-    assert describe_embedder_error(exc) == EMBEDDER_PERMISSION_DENIED_DETAIL
-    assert describe_embedder_error(exc) != EMBEDDER_AUTH_FAILED_DETAIL
+    assert is_embedder_auth_failure_detail(describe_embedder_error(embedding_errors.openai_embedder_error(exc)))
+    assert describe_embedder_error(embedding_errors.openai_embedder_error(exc)) == EMBEDDER_PERMISSION_DENIED_DETAIL
+    assert describe_embedder_error(embedding_errors.openai_embedder_error(exc)) != EMBEDDER_AUTH_FAILED_DETAIL
 
 
 def test_other_http_status_uses_fixed_message_without_body() -> None:
     """Non-auth HTTP failures use a fixed message without the response body."""
     exc = _status_error(500, message=f"internal error at http://user:{SECRET}@embeddings.local/v1")
-    assert not is_embedder_auth_failure_detail(describe_embedder_error(exc))
-    detail = describe_embedder_error(exc)
+    assert not is_embedder_auth_failure_detail(describe_embedder_error(embedding_errors.openai_embedder_error(exc)))
+    detail = describe_embedder_error(embedding_errors.openai_embedder_error(exc))
     assert detail == "embedder request failed (HTTP 500)"
     assert SECRET not in detail
 
@@ -123,7 +144,9 @@ def test_transport_error_uses_fixed_message_without_host() -> None:
     """Transport failures never leak the configured host."""
     request = httpx.Request("POST", "http://embeddings.internal.example/v1/embeddings")
     exc = APIConnectionError(request=request)
-    detail = describe_embedder_error(exc)
+    # The SDK raises its connection error from the transport failure.
+    exc.__cause__ = httpx.ConnectError("connection refused", request=request)
+    detail = describe_embedder_error(embedding_errors.openai_embedder_error(exc))
     assert detail == "embedder endpoint unreachable"
     assert "embeddings.internal.example" not in detail
 
@@ -138,7 +161,7 @@ def test_generic_exception_maps_to_type_only_detail() -> None:
 
 def test_embedder_request_error_detail_passes_through() -> None:
     """Already-classified errors keep their exact detail."""
-    exc = embedding_errors.EmbedderRequestError("embedder authentication failed (HTTP 401)")
+    exc = embedding_errors.EmbedderRequestError("embedder authentication failed (HTTP 401)", kind="credentials")
     assert describe_embedder_error(exc) == "embedder authentication failed (HTTP 401)"
 
 
@@ -247,7 +270,7 @@ def test_probe_returns_none_on_non_empty_vector(tmp_path: Path, monkeypatch: pyt
     """A successful embedding round-trip reports healthy."""
     monkeypatch.setattr(
         "mindroom.embeddings.factory.create_configured_embedder",
-        lambda *_args: _HealthyEmbedder(),
+        lambda *_args, **_kwargs: _HealthyEmbedder(),
     )
     assert probe_embedder(_config(), _runtime_paths(tmp_path)) is None
 
@@ -256,7 +279,7 @@ def test_probe_reports_auth_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     """A 401 during the probe surfaces the canonical auth detail."""
     monkeypatch.setattr(
         "mindroom.embeddings.factory.create_configured_embedder",
-        lambda *_args: _AuthFailingEmbedder(),
+        lambda *_args, **_kwargs: _AuthFailingEmbedder(),
     )
     assert probe_embedder(_config(), _runtime_paths(tmp_path)) == EMBEDDER_AUTH_FAILED_DETAIL
 
@@ -265,9 +288,45 @@ def test_probe_rejects_empty_vector(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     """An empty vector is a failure, never a silent success."""
     monkeypatch.setattr(
         "mindroom.embeddings.factory.create_configured_embedder",
-        lambda *_args: _EmptyVectorEmbedder(),
+        lambda *_args, **_kwargs: _EmptyVectorEmbedder(),
     )
     assert probe_embedder(_config(), _runtime_paths(tmp_path)) == "embedder returned an empty vector"
+
+
+def test_probe_builds_its_embedder_with_the_callers_health_recorder(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A probe builds its embedder with the health recorder its caller passes, and with none when it passes none."""
+    recorders: list[EmbedderHealthRecorder | None] = []
+
+    def create(*_args: object, health_recorder: EmbedderHealthRecorder | None) -> _HealthyEmbedder:
+        recorders.append(health_recorder)
+        return _HealthyEmbedder()
+
+    monkeypatch.setattr("mindroom.embeddings.factory.create_configured_embedder", create)
+    retired = EmbedderHealthRecorder(generation=-1)
+
+    assert probe_embedder(_config(), _runtime_paths(tmp_path), retired) is None
+    assert probe_embedder(_config(), _runtime_paths(tmp_path)) is None
+    assert recorders == [retired, None]
+
+
+def test_factory_gives_the_openai_embedder_its_health_recorder(tmp_path: Path) -> None:
+    """The recorder a caller passes reaches the embedder, and none passed means the current generation's."""
+    config = _config(
+        memory={"embedder": {"provider": "openai", "config": {"model": "text-embedding-3-small", "api_key": SECRET}}},
+    )
+    runtime_paths = _runtime_paths(tmp_path)
+    retired = EmbedderHealthRecorder(generation=-1)
+
+    passed = create_configured_embedder(config, runtime_paths, health_recorder=retired)
+    default = create_configured_embedder(config, runtime_paths)
+
+    assert isinstance(passed, OpenAIEmbedder)
+    assert isinstance(default, OpenAIEmbedder)
+    assert passed.health_recorder is retired
+    assert default.health_recorder == capture_embedder_health_recorder()
 
 
 def test_probe_bounds_openai_client_timeout(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -277,14 +336,19 @@ def test_probe_bounds_openai_client_timeout(tmp_path: Path, monkeypatch: pytest.
         data=[SimpleNamespace(embedding=[0.1, 0.2])],
         usage=None,
     )
-    embedder = MindRoomOpenAIEmbedder(id="text-embedding-3-small", api_key="sk-x", openai_client=client)
+    embedder = OpenAIEmbedder(
+        model="text-embedding-3-small",
+        api_key="sk-x",
+        client=client,
+        health_recorder=capture_embedder_health_recorder(),
+    )
     monkeypatch.setattr(
         "mindroom.embeddings.factory.create_configured_embedder",
-        lambda *_args: embedder,
+        lambda *_args, **_kwargs: embedder,
     )
 
     assert probe_embedder(_config(), _runtime_paths(tmp_path)) is None
-    assert embedder.client_params == {"timeout": 10.0, "max_retries": 0}
+    assert (embedder.timeout, embedder.max_retries) == (10.0, 0)
 
 
 @pytest.mark.asyncio
@@ -347,7 +411,7 @@ async def test_reload_with_embedder_change_resets_health_and_reprobes(
     new = _config(memory={"backend": "mem0", "embedder": {"config": {"model": "other-model"}}})
 
     handle_embedder_config_reload(current, new, _runtime_paths(tmp_path))
-    await wait_for_background_tasks(timeout=5)
+    await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS)
 
     assert get_embedder_failure() is None
     assert probes == ["config_reload"]
@@ -394,7 +458,7 @@ async def test_reload_enabling_embedder_use_probes_without_embedder_change(
         _config(memory={"backend": "mem0"}),
         _runtime_paths(tmp_path),
     )
-    await wait_for_background_tasks(timeout=5)
+    await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS)
 
     assert probes == ["config_reload"]
 

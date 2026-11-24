@@ -7,96 +7,44 @@ step runs exactly once while the lifecycle lock is held.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, cast
+from dataclasses import replace
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
-import nio
 import pytest
 
-from mindroom.config.agent import AgentConfig
-from mindroom.config.main import Config
-from mindroom.config.models import ModelConfig
+from mindroom.ai import _compose_current_turn_prompt
+from mindroom.constants import UNREADABLE_EDIT_NOTICE, UNREADABLE_SIDECAR_NOTICE
 from mindroom.conversation_resolver import MessageContext
-from mindroom.final_delivery import FinalDeliveryOutcome
-from mindroom.hooks import MessageEnvelope
+from mindroom.final_delivery import Completed, FinalDeliveryOutcome
+from mindroom.hooks import EVENT_MESSAGE_ENRICH, HookRegistry, MessageEnrichContext, hook
 from mindroom.inbound_turn_normalizer import DispatchPayload
+from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.thread_history_result import ThreadHistoryResult
-from mindroom.matrix.users import AgentMatrixUser
-from mindroom.message_target import MessageTarget
-from mindroom.response_payload_preparation import DispatchPayloadInputs, ResponsePayloadPreparation
-from mindroom.response_runner import ResponseRequest, _ResponseGenerationOutcome
-from mindroom.response_sources import ResponseSources
-from mindroom.turn_policy import PreparedDispatch
-from tests.access_schema_support import with_current_room_member_access
-from tests.bot_helpers import make_test_agent_bot
-from tests.conftest import (
-    TEST_PASSWORD,
-    bind_runtime_paths,
-    install_runtime_journal_support,
-    message_origin,
-    runtime_paths_for,
-    test_runtime_paths,
-    unwrap_extracted_collaborator,
-    wrap_extracted_collaborators,
+from mindroom.reply_turn.enrichment import prepare_memory_and_model_context
+from mindroom.reply_turn.locked_turn import LockedTurns
+from mindroom.reply_turn.request import ResponseRequest
+from mindroom.response_payload_preparation import (
+    _STEER_CONTINUATION_LINE,
+    DispatchPayloadInputs,
+    ResponsePayloadPreparation,
+    _steered_follow_up_prompt,
 )
+from mindroom.response_sources import Owned, ResponseSources
+from mindroom.turn_policy import PreparedDispatch
+from tests.bot_helpers import _hook_plugin
+from tests.conftest import (
+    unwrap_extracted_collaborator,
+)
+from tests.response_runner_helpers import _envelope, _target, attempt_in_place
+from tests.test_queued_message_notify import _bot
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Sequence
+    from collections.abc import Sequence
     from pathlib import Path
 
-    from mindroom.bot import AgentBot
     from mindroom.dispatch_handoff import MediaDispatchEvent
-    from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
-
-
-def _config(tmp_path: Path) -> Config:
-    return bind_runtime_paths(
-        with_current_room_member_access(
-            Config(
-                agents={"general": AgentConfig(display_name="General", rooms=["!room:localhost"])},
-                teams={},
-                models={"default": ModelConfig(provider="openai", id="test-model")},
-            ),
-        ),
-        test_runtime_paths(tmp_path),
-    )
-
-
-def _bot(tmp_path: Path) -> AgentBot:
-    config = _config(tmp_path)
-    agent_user = AgentMatrixUser(
-        agent_name="general",
-        password=TEST_PASSWORD,
-        display_name="General",
-        user_id="@mindroom_general:localhost",
-    )
-    bot = make_test_agent_bot(agent_user, tmp_path, config, runtime_paths_for(config), rooms=["!room:localhost"])
-    bot.client = AsyncMock(spec=nio.AsyncClient)
-    bot.client.rooms = {}
-    install_runtime_journal_support(bot)
-    wrap_extracted_collaborators(bot)
-    return bot
-
-
-def _target(thread_id: str | None = None) -> MessageTarget:
-    return MessageTarget.resolve(
-        room_id="!room:localhost",
-        thread_id=thread_id,
-        reply_to_event_id="$event",
-        room_mode=thread_id is None,
-    )
-
-
-def _envelope(target: MessageTarget) -> MessageEnvelope:
-    return MessageEnvelope(
-        source_event_id="$event",
-        target=target,
-        body="hello",
-        attachment_ids=(),
-        mentioned_agents=(),
-        agent_name="general",
-        origin=message_origin(sender_id="@user:localhost", requester_id="@user:localhost", source_kind="message"),
-    )
+    from mindroom.message_target import MessageTarget
 
 
 def _preparation(
@@ -106,6 +54,7 @@ def _preparation(
     action_kind: str = "individual",
     message_attachment_ids: tuple[str, ...] = (),
     media_events: tuple[MediaDispatchEvent, ...] = (),
+    routed_revision: object = None,
 ) -> ResponsePayloadPreparation:
     return ResponsePayloadPreparation(
         dispatch=PreparedDispatch(
@@ -132,6 +81,7 @@ def _preparation(
         target_member_names=None,
         dispatch_started_at=1.0,
         context_ready_monotonic=2.0,
+        routed_revision=routed_revision,
     )
 
 
@@ -140,6 +90,7 @@ def _request(
     preparation: ResponsePayloadPreparation,
     *,
     thread_history: Sequence[ResolvedVisibleMessage],
+    prompt_source_event_ids: tuple[str, ...] = (),
 ) -> ResponseRequest:
     return ResponseRequest(
         sources=ResponseSources(
@@ -147,6 +98,7 @@ def _request(
             logical_source_event_ids=("$event",),
         ),
         thread_history=thread_history,
+        prompt_source_event_ids=prompt_source_event_ids,
         prompt=preparation.prompt,
         user_id="@user:localhost",
         response_envelope=_envelope(target),
@@ -186,6 +138,130 @@ async def test_prepare_builds_request_from_inputs_and_refreshed_history(tmp_path
     build_request = seen[0]
     assert build_request.thread_history is refreshed_history
     assert build_request.prompt == "raw prompt"
+
+
+def _held(
+    event_id: str,
+    body: str,
+    *,
+    revision: str | None = None,
+    edited_at: int = 2_000,
+    msgtype: str = "m.text",
+) -> ResolvedVisibleMessage:
+    """Return one message as this responder's thread holds it, at ``revision`` when its own sender edited it."""
+    content = {"msgtype": msgtype, "body": body}
+    message = ResolvedVisibleMessage.from_message_data(
+        {"sender": "@user:localhost", "body": body, "timestamp": 1, "event_id": event_id, "content": content},
+        thread_id="$thread",
+        latest_event_id=revision or event_id,
+    )
+    message.edited_timestamp = None if revision is None else edited_at
+    return message
+
+
+@pytest.mark.parametrize(
+    ("held", "routed", "answered"),
+    [
+        # The sender corrected the message while the steward selected: the route was written from the old text.
+        pytest.param([_held("$first", "the corrected text", revision="$edit")], ("$first",), "the corrected text"),
+        # No edit of its sender's: the route's prompt stands. A replacement someone else sent reads the same, as the
+        # thread holds the message as its sender wrote it (``test_a_replacement_from_another_sender_is_not_an_edit``).
+        pytest.param([_held("$first", "the first text")], ("$first",), "raw prompt"),
+        # A batch's prompt is its steward's, whatever its messages became since.
+        pytest.param(
+            [_held("$first", "the corrected text", revision="$edit"), _held("$second", "more")],
+            ("$first", "$second"),
+            "raw prompt",
+        ),
+        # An edit whose file, or whose own later edit, could not be read leaves the route's whole prompt standing:
+        # its text ends in the notice its read appended.
+        pytest.param(
+            [_held("$first", f"the preview\n\n{UNREADABLE_SIDECAR_NOTICE}", revision="$edit")],
+            ("$first",),
+            "raw prompt",
+        ),
+        pytest.param(
+            [_held("$first", f"an older edit\n\n{UNREADABLE_EDIT_NOTICE}", revision="$edit")],
+            ("$first",),
+            "raw prompt",
+        ),
+        # A voice message's transcript is not replaced by the filename of an audio edit.
+        pytest.param([_held("$first", "clip.ogg", revision="$edit", msgtype="m.audio")], ("$first",), "raw prompt"),
+        # Another message's edit is not the routed one's.
+        pytest.param([_held("$other", "an edited neighbour", revision="$edit")], ("$first",), "raw prompt"),
+        # An unrouted turn's prompt is its own.
+        pytest.param([_held("$event", "the corrected text", revision="$edit")], (), "raw prompt"),
+    ],
+    ids=[
+        "edited",
+        "unedited-or-replaced-by-another",
+        "batch",
+        "edit-file-unread",
+        "later-edit-unread",
+        "edit-not-text",
+        "neighbour-edited",
+        "unrouted",
+    ],
+)
+@pytest.mark.asyncio
+async def test_a_lone_routed_message_is_answered_as_its_sender_last_edited_it(
+    tmp_path: Path,
+    held: list[ResolvedVisibleMessage],
+    routed: tuple[str, ...],
+    answered: str,
+) -> None:
+    """A route names one message its sender edited since: the responder answers the text its own thread holds."""
+    bot = _bot(tmp_path)
+    target = _target(thread_id="$thread")
+    build = AsyncMock(return_value=DispatchPayload(prompt="built"))
+
+    with patch.object(bot._inbound_turn_normalizer, "build_dispatch_payload_with_attachments", new=build):
+        await bot._request_payload_preparer.prepare(
+            _request(target, _preparation(target), thread_history=held, prompt_source_event_ids=routed),
+        )
+
+    assert build.await_args.args[0].prompt == answered
+
+
+@pytest.mark.parametrize(
+    ("held_revision", "selected", "answered"),
+    [
+        # The steward read a later edit than this thread holds: its route's text is the newest known.
+        pytest.param((2_000, "$edit1"), [3_000, "$edit2"], "raw prompt", id="older-than-the-stewards"),
+        pytest.param((3_000, "$edit2"), [3_000, "$edit2"], "raw prompt", id="the-stewards-own"),
+        pytest.param((4_000, "$edit3"), [3_000, "$edit2"], "the thread's text", id="newer-than-the-stewards"),
+        # Revisions are ordered as the projection orders them, by time and then by event ID.
+        pytest.param((3_000, "$edit3"), [3_000, "$edit2"], "the thread's text", id="same-time-later-id"),
+        pytest.param((3_000, "$edit1"), [3_000, "$edit2"], "raw prompt", id="same-time-earlier-id"),
+        # A person can write the key into a message of their own: what is no revision names none.
+        pytest.param((2_000, "$edit1"), ["soon", 3], "the thread's text", id="malformed"),
+        pytest.param((2_000, "$edit1"), "$edit9", "the thread's text", id="not-a-list"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_a_lone_routed_message_is_answered_as_edited_only_past_the_edit_its_steward_read(
+    tmp_path: Path,
+    held_revision: tuple[int, str],
+    selected: object,
+    answered: str,
+) -> None:
+    """The route says which edit its text is: only a strictly newer one in the responder's thread stands in for it."""
+    bot = _bot(tmp_path)
+    target = _target(thread_id="$thread")
+    build = AsyncMock(return_value=DispatchPayload(prompt="built"))
+    held = [_held("$first", "the thread's text", revision=held_revision[1], edited_at=held_revision[0])]
+
+    with patch.object(bot._inbound_turn_normalizer, "build_dispatch_payload_with_attachments", new=build):
+        await bot._request_payload_preparer.prepare(
+            _request(
+                target,
+                _preparation(target, routed_revision=selected),
+                thread_history=held,
+                prompt_source_event_ids=("$first",),
+            ),
+        )
+
+    assert build.await_args.args[0].prompt == answered
 
 
 @pytest.mark.asyncio
@@ -316,25 +392,16 @@ async def test_generate_response_invokes_preparer_exactly_once_under_lock(tmp_pa
 
     async def spy_prepare(request: ResponseRequest) -> ResponseRequest:
         prepare_calls.append(request)
-        lock_held_at_prepare.append(coordinator.has_active_response_for_target(target))
+        lock_held_at_prepare.append(coordinator.lifecycle_coordinator.has_active_response_for_target(target))
         return await real_prepare(request)
 
-    async def fake_run_cancellable_response(**kwargs: object) -> str:
-        response_function = cast("Callable[[object | None], Awaitable[object]]", kwargs["response_function"])
-        await response_function(None)
-        return "$response"
-
-    async def fake_process_and_respond(_request: ResponseRequest, **_kwargs: object) -> _ResponseGenerationOutcome:
-        return _ResponseGenerationOutcome(
-            delivery=FinalDeliveryOutcome(
-                terminal_status="completed",
-                event_id="$response",
-                is_visible_response=True,
-                final_visible_body="ok",
-                delivery_kind="sent",
-            ),
-            run_succeeded=True,
-        )
+    delivered = FinalDeliveryOutcome(
+        ending=Completed(),
+        event_id="$response",
+        is_visible_response=True,
+        final_visible_body="ok",
+        delivery_kind="sent",
+    )
 
     with (
         patch.object(bot._request_payload_preparer, "prepare", new=AsyncMock(side_effect=spy_prepare)),
@@ -343,18 +410,70 @@ async def test_generate_response_invokes_preparer_exactly_once_under_lock(tmp_pa
             "build_dispatch_payload_with_attachments",
             new=AsyncMock(return_value=DispatchPayload(prompt="built")),
         ),
-        patch.object(
-            coordinator,
-            "_run_cancellable_response",
-            new=AsyncMock(side_effect=fake_run_cancellable_response),
-        ),
-        patch.object(coordinator, "_process_and_respond", new=AsyncMock(side_effect=fake_process_and_respond)),
+        patch.object(LockedTurns, "_run_cancellable_response", new=attempt_in_place()),
+        patch.object(coordinator, "_deliver_turn", new=AsyncMock(return_value=delivered)),
         patch("mindroom.response_runner.should_use_streaming", AsyncMock(return_value=False)),
     ):
         result = await coordinator.generate_response(
             _request(target, _preparation(target), thread_history=[]),
         )
 
-    assert result == "$response"
+    # The delivered answer's reply holds the source.
+    assert result == Owned()
     assert len(prepare_calls) == 1
     assert lock_held_at_prepare == [True]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("model_prompt", [None, "raw prompt\n\nThe attachment is a photo."], ids=["text", "attachment"])
+@pytest.mark.parametrize("stopped_reply", [True, False], ids=["marked", "unmarked"])
+async def test_carry_on_line_follows_only_marked_model_prompt_after_enrichment(
+    tmp_path: Path,
+    model_prompt: str | None,
+    *,
+    stopped_reply: bool,
+) -> None:
+    """A message that cut a reply short tells the model once, after its enrichment, only in the model's copy.
+
+    The person's raw prompt, the envelope body, and the memory input stay as the person wrote them; an unmarked
+    message (Queue, a Steer sent while nothing ran, an Auto message without a verdict) carries no line.
+    """
+    bot = _bot(tmp_path)
+
+    @hook(EVENT_MESSAGE_ENRICH)
+    async def add_note(ctx: MessageEnrichContext) -> None:
+        ctx.add_metadata("note", "Enriched note.")
+
+    bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins([_hook_plugin("note", [add_note])])
+    target = _target()
+    preparation = _preparation(target)
+    preparation = replace(preparation, dispatch=replace(preparation.dispatch, stopped_reply=stopped_reply))
+    request = _request(target, preparation, thread_history=ThreadHistoryResult([], is_full_history=True))
+    with patch.object(
+        bot._inbound_turn_normalizer,
+        "build_dispatch_payload_with_attachments",
+        new=AsyncMock(return_value=DispatchPayload(prompt="raw prompt", model_prompt=model_prompt)),
+    ):
+        result = await bot._request_payload_preparer.prepare(request)
+
+    assert result.model_prompt is not None
+    assert result.prompt == preparation.prompt == "raw prompt"
+    assert result.response_envelope.body == preparation.dispatch.envelope.body
+    assert "Enriched note." in result.model_prompt
+    assert ("The attachment is a photo." in result.model_prompt) is (model_prompt is not None)
+    assert result.model_prompt.count(_STEER_CONTINUATION_LINE) == (1 if stopped_reply else 0)
+    memory_prompt, _history, model_prompt_text, _model_history = prepare_memory_and_model_context(
+        result.prompt,
+        [],
+        config=bot.config,
+        runtime_paths=bot.runtime_paths,
+        timezone="UTC",
+        model_prompt=result.model_prompt,
+    )
+    assert memory_prompt == "raw prompt"
+    # The model reads the person's message once, then the line after its enrichment.
+    current = _compose_current_turn_prompt(raw_prompt=memory_prompt, model_prompt=model_prompt_text)
+    assert current.count("raw prompt") == 1
+    assert current.startswith("raw prompt\n\n")
+    assert current.endswith(_STEER_CONTINUATION_LINE) is stopped_reply
+    assert _steered_follow_up_prompt("Do X") == f"Do X\n\n{_STEER_CONTINUATION_LINE}"

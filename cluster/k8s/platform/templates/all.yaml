@@ -28,28 +28,20 @@ metadata:
 {{ end }}
 {{ $trustedUpstreamAuthEnabledValue := lower (toString ($trustedUpstreamAuth.enabled | default false)) }}
 {{ $trustedUpstreamAuthEnabled := has $trustedUpstreamAuthEnabledValue (list "1" "true" "yes" "on") }}
-{{ $trustedUpstreamRequireJwtValue := lower (toString ($trustedUpstreamAuth.requireJwt | default false)) }}
-{{ $trustedUpstreamRequireJwt := has $trustedUpstreamRequireJwtValue (list "1" "true" "yes" "on") }}
-{{ if and $trustedUpstreamAuthEnabled ($trustedUpstreamAuth.emailToMatrixUserIdTemplate | default "") (not ($trustedUpstreamAuth.emailHeader | default "")) }}
-{{ fail "provisioner.trustedUpstreamAuth.emailHeader is required when provisioner.trustedUpstreamAuth.emailToMatrixUserIdTemplate is set" }}
-{{ end }}
 {{ if and $trustedUpstreamAuthEnabled ($trustedUpstreamAuth.emailToMatrixUserIdTemplate | default "") (not ($trustedUpstreamAuth.emailDomain | default "")) }}
 {{ fail "provisioner.trustedUpstreamAuth.emailDomain is required when provisioner.trustedUpstreamAuth.emailToMatrixUserIdTemplate is set" }}
 {{ end }}
-{{ if and $trustedUpstreamAuthEnabled (not ($trustedUpstreamAuth.userIdHeader | default "")) }}
-{{ fail "provisioner.trustedUpstreamAuth.userIdHeader is required when provisioner.trustedUpstreamAuth.enabled=true" }}
+{{ if and $trustedUpstreamAuthEnabled (not ($trustedUpstreamAuth.jwtHeader | default "")) }}
+{{ fail "provisioner.trustedUpstreamAuth.jwtHeader is required when provisioner.trustedUpstreamAuth.enabled=true" }}
 {{ end }}
-{{ if and $trustedUpstreamAuthEnabled $trustedUpstreamRequireJwt (not ($trustedUpstreamAuth.jwtHeader | default "")) }}
-{{ fail "provisioner.trustedUpstreamAuth.jwtHeader is required when provisioner.trustedUpstreamAuth.requireJwt=true" }}
+{{ if and $trustedUpstreamAuthEnabled (not ($trustedUpstreamAuth.jwksUrl | default "")) }}
+{{ fail "provisioner.trustedUpstreamAuth.jwksUrl is required when provisioner.trustedUpstreamAuth.enabled=true" }}
 {{ end }}
-{{ if and $trustedUpstreamAuthEnabled $trustedUpstreamRequireJwt (not ($trustedUpstreamAuth.jwksUrl | default "")) }}
-{{ fail "provisioner.trustedUpstreamAuth.jwksUrl is required when provisioner.trustedUpstreamAuth.requireJwt=true" }}
+{{ if and $trustedUpstreamAuthEnabled (not ($trustedUpstreamAuth.jwtAudience | default "")) }}
+{{ fail "provisioner.trustedUpstreamAuth.jwtAudience is required when provisioner.trustedUpstreamAuth.enabled=true" }}
 {{ end }}
-{{ if and $trustedUpstreamAuthEnabled $trustedUpstreamRequireJwt (not ($trustedUpstreamAuth.jwtAudience | default "")) }}
-{{ fail "provisioner.trustedUpstreamAuth.jwtAudience is required when provisioner.trustedUpstreamAuth.requireJwt=true" }}
-{{ end }}
-{{ if and $trustedUpstreamAuthEnabled $trustedUpstreamRequireJwt (not ($trustedUpstreamAuth.jwtIssuer | default "")) }}
-{{ fail "provisioner.trustedUpstreamAuth.jwtIssuer is required when provisioner.trustedUpstreamAuth.requireJwt=true" }}
+{{ if and $trustedUpstreamAuthEnabled (not ($trustedUpstreamAuth.jwtIssuer | default "")) }}
+{{ fail "provisioner.trustedUpstreamAuth.jwtIssuer is required when provisioner.trustedUpstreamAuth.enabled=true" }}
 {{ end }}
 {{ $matrixOidcEnabledValue := lower (toString ($matrixOidc.enabled | default false)) }}
 {{ $matrixOidcEnabled := has $matrixOidcEnabledValue (list "1" "true" "yes" "on") }}
@@ -74,15 +66,11 @@ data:
   INSTANCE_MINDROOM_IMAGE: {{ .Values.provisioner.instanceMindroomImage | default "" | quote }}
   INSTANCE_MINDROOM_IMAGE_PULL_POLICY: {{ .Values.provisioner.instanceMindroomImagePullPolicy | default "" | quote }}
   INSTANCE_IMAGE_PULL_SECRET_NAMES: {{ (.Values.provisioner.instanceImagePullSecretNames | default (list) | join ",") | quote }}
-  INSTANCE_SYNAPSE_IMAGE: {{ .Values.provisioner.instanceSynapseImage | default "" | quote }}
-  INSTANCE_SYNAPSE_IMAGE_PULL_POLICY: {{ .Values.provisioner.instanceSynapseImagePullPolicy | default "" | quote }}
+  INSTANCE_TUWUNEL_IMAGE: {{ .Values.provisioner.instanceTuwunelImage | default "" | quote }}
+  INSTANCE_TUWUNEL_IMAGE_PULL_POLICY: {{ .Values.provisioner.instanceTuwunelImagePullPolicy | default "" | quote }}
   INSTANCE_TRUSTED_UPSTREAM_AUTH_ENABLED: {{ $trustedUpstreamAuth.enabled | default "false" | quote }}
-  INSTANCE_TRUSTED_UPSTREAM_USER_ID_HEADER: {{ $trustedUpstreamAuth.userIdHeader | default "" | quote }}
-  INSTANCE_TRUSTED_UPSTREAM_EMAIL_HEADER: {{ $trustedUpstreamAuth.emailHeader | default "" | quote }}
-  INSTANCE_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER: {{ $trustedUpstreamAuth.matrixUserIdHeader | default "" | quote }}
   INSTANCE_TRUSTED_UPSTREAM_EMAIL_DOMAIN: {{ $trustedUpstreamAuth.emailDomain | default "" | quote }}
   INSTANCE_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE: {{ $trustedUpstreamAuth.emailToMatrixUserIdTemplate | default "" | quote }}
-  INSTANCE_TRUSTED_UPSTREAM_REQUIRE_JWT: {{ $trustedUpstreamAuth.requireJwt | default "false" | quote }}
   INSTANCE_TRUSTED_UPSTREAM_JWT_HEADER: {{ $trustedUpstreamAuth.jwtHeader | default "" | quote }}
   INSTANCE_TRUSTED_UPSTREAM_JWKS_URL: {{ $trustedUpstreamAuth.jwksUrl | default "" | quote }}
   INSTANCE_TRUSTED_UPSTREAM_JWT_AUDIENCE: {{ $trustedUpstreamAuth.jwtAudience | default "" | quote }}
@@ -92,11 +80,11 @@ data:
   INSTANCE_TRUSTED_UPSTREAM_JWT_MATRIX_USER_ID_CLAIM: {{ $trustedUpstreamAuth.jwtMatrixUserIdClaim | default "" | quote }}
   MATRIX_OIDC_ENABLED: {{ $matrixOidc.enabled | default "false" | quote }}
   MATRIX_OIDC_ISSUER: {{ $matrixOidcIssuer | quote }}
-  MATRIX_OIDC_CLIENT_ID: {{ $matrixOidc.clientId | default "mindroom-synapse" | quote }}
+  MATRIX_OIDC_CLIENT_ID: {{ $matrixOidc.clientId | default "mindroom-matrix" | quote }}
   MATRIX_OIDC_KEY_ID: {{ $matrixOidc.keyId | default "mindroom-platform" | quote }}
   INSTANCE_MATRIX_OIDC_ENABLED: {{ $matrixOidc.enabled | default "false" | quote }}
   INSTANCE_MATRIX_OIDC_ISSUER: {{ $matrixOidcIssuer | quote }}
-  INSTANCE_MATRIX_OIDC_CLIENT_ID: {{ $matrixOidc.clientId | default "mindroom-synapse" | quote }}
+  INSTANCE_MATRIX_OIDC_CLIENT_ID: {{ $matrixOidc.clientId | default "mindroom-matrix" | quote }}
   DO_NOT_TRACK: "1"
   NEXT_TELEMETRY_DISABLED: "1"
   TURBO_TELEMETRY_DISABLED: "1"

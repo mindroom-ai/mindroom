@@ -1,61 +1,54 @@
-"""Runtime tool catalog resolution, validation, and instance construction."""
+"""Tool construction from a `ToolRegistry`, authored override validation, and tool metadata export."""
 
 from __future__ import annotations
 
-import ast
-import functools
 import math
 import os
-import sys
-import threading
-import weakref
-from dataclasses import asdict, dataclass
+import re
+from dataclasses import asdict, dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
 
-import mindroom.tool_system.plugin_imports as plugin_module
+from mindroom.config.legacy_fields import retired_file_setting, retired_tool_override
+from mindroom.config.tool_aliases import TOOL_ALIASES, canonical_tool_name
 from mindroom.constants import DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES
 from mindroom.credentials.manager import get_runtime_credentials_manager, load_scoped_credentials
 from mindroom.file_access import agent_file_access
 from mindroom.logging_config import get_logger
+from mindroom.shared_directories.paths import shared_directory_roots
+from mindroom.shared_directories.tool_roots import SharedDirectoryRoot
+from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_construction
 from mindroom.tool_system.declarations import (
     ConfigField,
     ToolAuthoredOverrideValidator,
-    ToolCategory,
     ToolFileAccess,
     ToolManagedInitArg,
     ToolMetadata,
     ToolValidationInfo,
 )
-from mindroom.tool_system.dependencies import auto_install_optional_extra_for_import_retry, ensure_tool_deps
-from mindroom.tool_system.legacy_tool_overrides import retired_tool_override
-from mindroom.tool_system.registry_state import (
-    BUILTIN_TOOL_METADATA,
-    BUILTIN_TOOL_REGISTRY,
-    TOOL_METADATA,
-    TOOL_REGISTRY,
-    ToolMetadataValidationError,
-    resolved_tool_state,
-    scoped_plugin_registration_owner,
-    scoped_plugin_registration_store,
+from mindroom.tool_system.dependencies import (
+    auto_install_optional_extra_for_import_retry,
+    ensure_tool_deps,
+    optional_dependency_environment,
 )
-from mindroom.tool_system.sandbox_proxy import maybe_wrap_toolkit_for_sandbox_proxy, primary_owns_tool_settings
+from mindroom.tool_system.filters import tool_name_allowed
+from mindroom.tool_system.registry import ToolMetadataValidationError, ToolRegistry
+from mindroom.tool_system.sandbox_proxy import primary_owns_tool_settings, tool_placement, worker_stand_ins
 from mindroom.tool_system.worker_routing import (
     ResolvedWorkerTarget,
     supports_tool_name_for_worker_scope,
     unsupported_shared_only_integration_message,
 )
+from mindroom.workers.named import named_workers_refusal
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
-    from types import ModuleType
-
-    from agno.tools import Toolkit
+    from collections.abc import Callable, Collection, Iterable, Mapping
 
     from mindroom.config.main import Config
     from mindroom.config.models import FileAccess
     from mindroom.constants import RuntimePaths
     from mindroom.credentials.manager import CredentialsManager
+    from mindroom.tool_system.agno_toolkits import AnyToolkit
 
 logger = get_logger(__name__)
 
@@ -72,7 +65,7 @@ _MEDIA_MODEL_DEFAULT_FIELDS = {
 }
 
 _SAFE_TOOL_INIT_OVERRIDE_FIELDS = frozenset({"base_dir", "shell_path_prepend"})
-_TEXT_CONFIG_FIELD_TYPES = frozenset({"password", "select", "string[]", "text", "url"})
+_TEXT_CONFIG_FIELD_TYPES = frozenset({"select", "string[]", "text", "url"})
 _TOOLKIT_FILTER_CONFIG_FIELDS = (
     ConfigField(
         name="include_tools",
@@ -90,8 +83,6 @@ _TOOLKIT_FILTER_CONFIG_FIELDS = (
     ),
 )
 _AUTHORED_OVERRIDE_INHERIT = "__MINDROOM_INHERIT__"
-_VALIDATION_PLUGIN_MODULE_SUFFIX = "__validation__"
-_OMIT_TOOL_CONFIG_ARG = object()
 
 
 class ToolInitOverrideError(ValueError):
@@ -100,11 +91,6 @@ class ToolInitOverrideError(ValueError):
 
 class ToolConfigOverrideError(ValueError):
     """Raised when authored tool config overrides are invalid."""
-
-
-def _is_authored_override_inherit(value: object) -> bool:
-    """Return whether an authored override value clears an inherited higher-level override."""
-    return value == _AUTHORED_OVERRIDE_INHERIT
 
 
 def apply_authored_overrides(
@@ -117,7 +103,7 @@ def apply_authored_overrides(
         return resolved
 
     for field_name, value in overrides.items():
-        if _is_authored_override_inherit(value):
+        if value == _AUTHORED_OVERRIDE_INHERIT:
             resolved.pop(field_name, None)
         else:
             resolved[field_name] = value
@@ -161,22 +147,13 @@ def _override_path(
     return f"{tool_name}.{field_name}"
 
 
-def _agent_override_field(
-    tool_name: str,
-    field_name: str,
-    *,
-    tool_metadata: Mapping[str, ToolMetadata | ToolValidationInfo] | None = None,
-) -> ConfigField | None:
+def _agent_override_field(metadata: ToolMetadata | ToolValidationInfo, field_name: str) -> ConfigField | None:
     """Return one tool's agent override field metadata when it exists."""
-    metadata_by_name = TOOL_METADATA if tool_metadata is None else tool_metadata
-    metadata = metadata_by_name.get(tool_name)
-    if metadata is None or not metadata.agent_override_fields:
-        return None
-    return next((candidate for candidate in metadata.agent_override_fields if candidate.name == field_name), None)
+    return next((candidate for candidate in metadata.agent_override_fields or () if candidate.name == field_name), None)
 
 
 def _tool_config_fields(metadata: ToolMetadata | ToolValidationInfo) -> tuple[ConfigField, ...]:
-    """Return declared fields plus universal Agno Toolkit filters."""
+    """Return declared fields plus the universal toolkit function filters."""
     fields = tuple(metadata.config_fields or ())
     if not metadata.supports_toolkit_filters:
         return fields
@@ -198,32 +175,35 @@ def _authored_tool_config_fields(
 
 
 def _validate_text_authored_override_value(
-    tool_name: str,
     field: ConfigField,
     value: object,
     *,
     full_path: str,
-    tool_metadata: Mapping[str, ToolMetadata | ToolValidationInfo] | None = None,
+    metadata: ToolMetadata | ToolValidationInfo,
 ) -> object:
     """Validate one authored override for a text-like config field."""
-    if field.type == "string[]":
-        try:
-            return _normalize_string_array_override(value, preserve_empty_list=True)
-        except TypeError as exc:
-            msg = f"{full_path}: {exc}."
-            raise ToolConfigOverrideError(msg) from exc
-
-    agent_override_field = _agent_override_field(tool_name, field.name, tool_metadata=tool_metadata)
-    if agent_override_field is not None and agent_override_field.type == "string[]":
-        try:
+    agent_override_field = _agent_override_field(metadata, field.name)
+    try:
+        if field.type == "string[]":
+            values = _normalize_string_array_override(value, preserve_empty_list=True)
+            pattern = (field.validation or {}).get("pattern")
+            if pattern:
+                if values is None and isinstance(value, str):
+                    # A blank string must not read as unset, which leaves a limit such as a space list off.
+                    msg = f"{full_path}: expected a list of {field.label} entries; use [] for none."
+                    raise ToolConfigOverrideError(msg)
+                invalid = next((item for item in values or () if not re.fullmatch(pattern, item)), None)
+                if invalid is not None:
+                    example = f"; for example {field.placeholder}" if field.placeholder else ""
+                    msg = f"{full_path}: {invalid!r} is not a valid {field.label} entry{example}."
+                    raise ToolConfigOverrideError(msg)
+            return values
+        if agent_override_field is not None and agent_override_field.type == "string[]":
             normalized = _normalize_string_array_override(value)
-        except TypeError as exc:
-            msg = f"{full_path}: {exc}."
-            raise ToolConfigOverrideError(msg) from exc
-        if normalized is None:
-            return None
-        return ", ".join(normalized)
-
+            return None if normalized is None else ", ".join(normalized)
+    except TypeError as exc:
+        msg = f"{full_path}: {exc}."
+        raise ToolConfigOverrideError(msg) from exc
     if not isinstance(value, str):
         msg = f"{full_path}: expected a string or null."
         raise ToolConfigOverrideError(msg)
@@ -231,30 +211,22 @@ def _validate_text_authored_override_value(
 
 
 def _validate_authored_override_value(
-    tool_name: str,
     field: ConfigField,
     value: object,
     *,
     full_path: str,
-    tool_metadata: Mapping[str, ToolMetadata | ToolValidationInfo] | None = None,
+    metadata: ToolMetadata | ToolValidationInfo,
 ) -> object:
     """Validate one authored override value against its declared config field type."""
-    if _is_authored_override_inherit(value):
+    if value is None or value == _AUTHORED_OVERRIDE_INHERIT:
         return value
-
-    if value is None:
-        if field.required:
-            msg = f"{full_path}: null is not allowed for required fields."
-            raise ToolConfigOverrideError(msg)
-        return None
 
     if field.type in _TEXT_CONFIG_FIELD_TYPES:
         return _validate_text_authored_override_value(
-            tool_name,
             field,
             value,
             full_path=full_path,
-            tool_metadata=tool_metadata,
+            metadata=metadata,
         )
 
     if field.type == "boolean":
@@ -302,24 +274,23 @@ def _validate_authored_file_access(
     raise ToolConfigOverrideError(msg)
 
 
-def _validate_authored_overrides(
+def validate_authored_tool_entry_overrides(
     tool_name: str,
     overrides: dict[str, object] | None,
     *,
     config_path_prefix: str | None = None,
-    tool_metadata: Mapping[str, ToolMetadata | ToolValidationInfo] | None = None,
+    tool_metadata: Mapping[str, ToolMetadata | ToolValidationInfo],
 ) -> dict[str, object]:
-    """Validate authored YAML overrides against one tool's declared config fields."""
+    """Validate authored YAML overrides against one tool's declared config fields and its validation mode."""
     if not overrides:
         return {}
 
-    metadata_by_name = TOOL_METADATA if tool_metadata is None else tool_metadata
-    metadata = metadata_by_name.get(tool_name)
+    metadata = tool_metadata.get(tool_name)
     if metadata is None:
         msg = f"Unknown tool '{tool_name}'."
         raise ToolConfigOverrideError(msg)
 
-    retired = retired_tool_override(overrides)
+    retired = retired_tool_override(tool_name, overrides)
     if retired is not None:
         field_name, guidance = retired
         path = _override_path(tool_name, field_name, config_path_prefix=config_path_prefix)
@@ -341,28 +312,37 @@ def _validate_authored_overrides(
     unexpected_fields = sorted(set(overrides) - set(fields_by_name))
     if unexpected_fields:
         unexpected = ", ".join(unexpected_fields)
-        allowed = ", ".join(sorted(fields_by_name)) or "none"
+        allowed = ", ".join(sorted(name for name, field in fields_by_name.items() if field.authored_override)) or "none"
         path = _override_path(tool_name, unexpected_fields[0], config_path_prefix=config_path_prefix)
-        msg = f"{path}: unknown authored override field(s): {unexpected}. Allowed fields: {allowed}."
+        msg = f"{path}: unknown authored override field(s): {unexpected}; remove or correct them. Allowed fields: {allowed}."
         raise ToolConfigOverrideError(msg)
 
     validated: dict[str, object] = {}
     for field_name, value in overrides.items():
         field = fields_by_name[field_name]
         full_path = _override_path(tool_name, field_name, config_path_prefix=config_path_prefix)
-        if field.type == "password":
-            msg = f"{full_path}: authored overrides are not allowed for password fields."
-            raise ToolConfigOverrideError(msg)
         if not field.authored_override:
-            msg = f"{full_path}: authored overrides are not allowed for this field."
+            reason = (
+                "authored overrides are not allowed for password fields; save the secret on the dashboard's Tools page."
+                if field.type == "password"
+                else "authored overrides are not allowed for this field."
+            )
+            msg = f"{full_path}: {reason}"
             raise ToolConfigOverrideError(msg)
-        validated[field_name] = _validate_authored_override_value(
-            tool_name,
+        validated_value = _validate_authored_override_value(
             field,
             value,
             full_path=full_path,
-            tool_metadata=tool_metadata,
+            metadata=metadata,
         )
+        if field.required and validated_value in (None, []):
+            msg = f"{full_path}: this field is required and cannot be empty."
+            raise ToolConfigOverrideError(msg)
+        validated[field_name] = validated_value
+    try:
+        _run_authored_override_validator(tool_name, validated, validator=metadata.authored_override_validator)
+    except ValueError as exc:
+        raise ToolConfigOverrideError(str(exc)) from exc
     return validated
 
 
@@ -373,62 +353,27 @@ def _run_authored_override_validator(
     validator: ToolAuthoredOverrideValidator,
 ) -> None:
     """Run one tool-specific authored-override validator against normalized overrides."""
-    if not overrides or validator == ToolAuthoredOverrideValidator.DEFAULT:
-        return
-    if validator == ToolAuthoredOverrideValidator.MCP:
+    if overrides and validator == ToolAuthoredOverrideValidator.MCP:
+        # Deferred: the MCP registry imports this module through the tool catalog.
         from mindroom.mcp.registry import validate_mcp_agent_overrides  # noqa: PLC0415
 
         validate_mcp_agent_overrides(tool_name, overrides)
-        return
-    msg = f"Unsupported authored override validator '{validator}'."
-    raise ValueError(msg)
-
-
-def validate_authored_tool_entry_overrides(
-    tool_name: str,
-    overrides: dict[str, object] | None,
-    *,
-    config_path_prefix: str | None = None,
-    tool_metadata: Mapping[str, ToolMetadata | ToolValidationInfo] | None = None,
-) -> dict[str, object]:
-    """Validate authored overrides, including any tool-specific validation mode."""
-    validated_overrides = _validate_authored_overrides(
-        tool_name,
-        overrides,
-        config_path_prefix=config_path_prefix,
-        tool_metadata=tool_metadata,
-    )
-    metadata_by_name = TOOL_METADATA if tool_metadata is None else tool_metadata
-    metadata = metadata_by_name.get(tool_name)
-    if metadata is None:
-        return validated_overrides
-    try:
-        _run_authored_override_validator(
-            tool_name,
-            validated_overrides,
-            validator=metadata.authored_override_validator,
-        )
-    except ValueError as exc:
-        raise ToolConfigOverrideError(str(exc)) from exc
-    return validated_overrides
 
 
 def sanitize_tool_init_overrides(
     tool_name: str,
     tool_init_overrides: dict[str, object] | None,
     *,
-    tool_metadata: Mapping[str, ToolMetadata] | None = None,
+    tool_metadata: Mapping[str, ToolMetadata],
 ) -> dict[str, object] | None:
     """Validate and retain only the explicitly safe runtime tool init overrides."""
     if not tool_init_overrides:
         return None
 
-    metadata_by_name = TOOL_METADATA if tool_metadata is None else tool_metadata
-    metadata = metadata_by_name.get(tool_name)
-    if metadata is None:
+    if tool_name not in tool_metadata:
         msg = f"Unknown tool '{tool_name}'."
         raise ToolInitOverrideError(msg)
-    allowed_fields = safe_tool_init_override_fields(tool_name, tool_metadata=metadata_by_name)
+    allowed_fields = safe_tool_init_override_fields(tool_name, tool_metadata=tool_metadata)
     unexpected_fields = sorted(set(tool_init_overrides) - allowed_fields)
     if unexpected_fields:
         allowed = ", ".join(sorted(allowed_fields)) or "none"
@@ -445,11 +390,10 @@ def sanitize_tool_init_overrides(
 def safe_tool_init_override_fields(
     tool_name: str,
     *,
-    tool_metadata: Mapping[str, ToolMetadata] | None = None,
+    tool_metadata: Mapping[str, ToolMetadata],
 ) -> frozenset[str]:
     """Return the config fields a tool exposes as safe runtime init overrides."""
-    metadata_by_name = TOOL_METADATA if tool_metadata is None else tool_metadata
-    metadata = metadata_by_name.get(tool_name)
+    metadata = tool_metadata.get(tool_name)
     if metadata is None:
         return frozenset()
     return frozenset(
@@ -478,19 +422,16 @@ def coerce_optional_finite_number(value: object) -> int | float | None:
     raise TypeError
 
 
-def _coerce_number_tool_config_value(tool_name: str, field_name: str, value: object) -> int | float | object:
-    """Normalize a persisted dashboard number field before passing it to a tool constructor."""
+def _coerce_number_tool_config_value(tool_name: str, field_name: str, value: object) -> int | float | None:
+    """Normalize a persisted dashboard number field before passing it to a tool constructor; None omits it."""
     try:
-        coerced = coerce_optional_finite_number(value)
+        return coerce_optional_finite_number(value)
     except OverflowError as exc:
         msg = f"Stored config value for '{tool_name}.{field_name}' must be a finite number."
         raise ToolConfigOverrideError(msg) from exc
     except (TypeError, ValueError) as exc:
         msg = f"Stored config value for '{tool_name}.{field_name}' must be a number."
         raise ToolConfigOverrideError(msg) from exc
-    if coerced is None:
-        return _OMIT_TOOL_CONFIG_ARG
-    return coerced
 
 
 def _coerce_boolean_tool_config_value(tool_name: str, field_name: str, value: object) -> bool | None:
@@ -509,26 +450,6 @@ def _coerce_boolean_tool_config_value(tool_name: str, field_name: str, value: ob
     raise ToolConfigOverrideError(msg)
 
 
-def _coerce_runtime_tool_config_value(tool_name: str, field: ConfigField, value: object) -> object:
-    if field.type == "number":
-        return _coerce_number_tool_config_value(tool_name, field.name, value)
-    if field.type == "boolean":
-        return _coerce_boolean_tool_config_value(tool_name, field.name, value)
-    return value
-
-
-def _set_tool_config_init_kwarg(
-    init_kwargs: dict[str, object],
-    *,
-    tool_name: str,
-    field: ConfigField,
-    value: object,
-) -> None:
-    coerced_value = _coerce_runtime_tool_config_value(tool_name, field, value)
-    if coerced_value is not _OMIT_TOOL_CONFIG_ARG:
-        init_kwargs[field.name] = coerced_value
-
-
 def _apply_tool_config_init_values(
     init_kwargs: dict[str, object],
     *,
@@ -543,20 +464,42 @@ def _apply_tool_config_init_values(
         if field.name not in values:
             continue
         value = values[field.name]
-        if skip_inherited and _is_authored_override_inherit(value):
+        if skip_inherited and value == _AUTHORED_OVERRIDE_INHERIT:
             continue
-        _set_tool_config_init_kwarg(
-            init_kwargs,
-            tool_name=tool_name,
-            field=field,
-            value=value,
-        )
+        if field.type == "number":
+            value = _coerce_number_tool_config_value(tool_name, field.name, value)
+            if value is None:
+                continue
+        elif field.type == "boolean":
+            value = _coerce_boolean_tool_config_value(tool_name, field.name, value)
+        init_kwargs[field.name] = value
+
+
+def _tool_env_values(
+    fields: tuple[ConfigField, ...],
+    init_kwargs: dict[str, object],
+    runtime_paths: RuntimePaths,
+) -> dict[str, object]:
+    """Return the first usable declared variable of each unset field, read as ``RuntimePaths.first_env_value`` reads it.
+
+    The lowest settings layer, read in the process that builds the toolkit: a worker has its own environment and
+    never the primary's `.env`.
+    """
+    values: dict[str, object] = {}
+    for field in fields:
+        current = init_kwargs.get(field.name)
+        if current is not None and (not isinstance(current, str) or current.strip()):
+            continue
+        if (found := runtime_paths.first_env_value(field.env)) is not None:
+            values[field.name] = found[0]
+    return values
 
 
 def _build_tool_config_init_kwargs(
     tool_name: str,
     metadata: ToolMetadata,
     *,
+    runtime_paths: RuntimePaths,
     credentials: dict[str, object],
     tool_config_overrides: dict[str, object] | None,
     tool_init_overrides: dict[str, object] | None,
@@ -578,6 +521,12 @@ def _build_tool_config_init_kwargs(
     )
     _apply_tool_config_init_values(init_kwargs, tool_name=tool_name, fields=fields, values=tool_init_overrides)
     _apply_tool_config_init_values(init_kwargs, tool_name=tool_name, fields=fields, values=runtime_overrides)
+    _apply_tool_config_init_values(
+        init_kwargs,
+        tool_name=tool_name,
+        fields=fields,
+        values=_tool_env_values(fields, init_kwargs, runtime_paths),
+    )
     if "base_dir" in init_kwargs and isinstance(init_kwargs["base_dir"], str):
         init_kwargs["base_dir"] = Path(init_kwargs["base_dir"])
     return init_kwargs
@@ -589,86 +538,91 @@ def _pop_implicit_toolkit_filters(
 ) -> tuple[list[str] | None, list[str] | None]:
     """Remove universal filters that the concrete constructor did not declare."""
     declared_names = {field.name for field in metadata.config_fields or ()}
-    include_tools = (
+    include_tools, exclude_tools = (
         None
-        if "include_tools" in declared_names
-        else _normalize_string_array_override(
-            init_kwargs.pop("include_tools", None),
-            preserve_empty_list=True,
-        )
-    )
-    exclude_tools = (
-        None
-        if "exclude_tools" in declared_names
-        else _normalize_string_array_override(
-            init_kwargs.pop("exclude_tools", None),
-            preserve_empty_list=True,
-        )
+        if name in declared_names
+        else _normalize_string_array_override(init_kwargs.pop(name, None), preserve_empty_list=True)
+        for name in ("include_tools", "exclude_tools")
     )
     return include_tools, exclude_tools
 
 
-def _apply_implicit_toolkit_filters(
-    toolkit: Toolkit,
+def _offered_function_names(
+    available: Collection[str],
     *,
     include_tools: list[str] | None,
     exclude_tools: list[str] | None,
     declared_functions: frozenset[str] = frozenset(),
-) -> None:
-    """Apply Agno-equivalent filters after constructing a Toolkit subclass.
+) -> frozenset[str] | None:
+    """Return the functions the universal filters keep of ``available``, the ones a toolkit offers; None keeps all.
 
     Excluding a declared function that an option left disabled (such as chat_ui's show_canvas) is a
     no-op, so the exclusion cannot drop the whole toolkit.
     """
     if include_tools is None and exclude_tools is None:
-        return
-
-    available_tools = {*toolkit.functions, *toolkit.async_functions}
-    missing_includes = sorted(set(include_tools or ()) - available_tools)
+        return None
+    missing_includes = sorted(set(include_tools or ()) - set(available))
     if missing_includes:
         msg = f"Included tool(s) not present in the toolkit: {', '.join(missing_includes)}"
         raise ValueError(msg)
-    missing_excludes = sorted(set(exclude_tools or ()) - available_tools - declared_functions)
+    missing_excludes = sorted(set(exclude_tools or ()) - set(available) - declared_functions)
     if missing_excludes:
         msg = f"Excluded tool(s) not present in the toolkit: {', '.join(missing_excludes)}"
         raise ValueError(msg)
-
-    toolkit.include_tools = include_tools
-    toolkit.exclude_tools = exclude_tools
-    included_names = set(include_tools) if include_tools is not None else None
-    excluded_names = set(exclude_tools or ())
-    for registered_functions in (toolkit.functions, toolkit.async_functions):
-        for function_name in tuple(registered_functions):
-            if (included_names is not None and function_name not in included_names) or function_name in excluded_names:
-                del registered_functions[function_name]
+    included = set(include_tools) if include_tools is not None else None
+    excluded = set(exclude_tools or ())
+    return frozenset(name for name in available if tool_name_allowed(name, include=included, exclude=excluded))
 
 
 def _build_managed_tool_init_kwargs(
     metadata: ToolMetadata,
     *,
     runtime_paths: RuntimePaths,
+    tools: ToolRegistry,
     credentials_manager: CredentialsManager | None,
     worker_target: ResolvedWorkerTarget | None,
     runtime_config: Config | None,
     tool_output_workspace_root: Path | None,
-    worker_tools_override: list[str] | None,
+    saved_output_dir: Path | None,
+    workspace_in_worker: bool | None,
     agent_state_root: Path | None,
+    in_sandbox_request: bool,
 ) -> dict[str, object]:
-    """Build declared MindRoom-managed constructor kwargs for one tool."""
+    """Build declared MindRoom-managed constructor kwargs for one tool.
+
+    Path tools working in a workdir can read ``saved_output_dir``, the saved outputs whose receipts name files there.
+    """
     execution_identity = worker_target.execution_identity if worker_target is not None else None
+    agent_name = worker_target.routing_agent_name if worker_target is not None else None
+    saved_outputs = (
+        (SharedDirectoryRoot(path=saved_output_dir, writable=False, label="the saved tool outputs directory"),)
+        if saved_output_dir
+        else ()
+    )
+
+    def path_tool_roots() -> tuple[SharedDirectoryRoot, ...]:
+        # Shared directories change during a response, so path tools resolve them on each call.
+        return (*shared_directory_roots(runtime_config, runtime_paths, agent_name), *saved_outputs)
+
     managed_values: dict[ToolManagedInitArg, Callable[[], object]] = {
         ToolManagedInitArg.RUNTIME_PATHS: lambda: runtime_paths,
         ToolManagedInitArg.CREDENTIALS_MANAGER: lambda: credentials_manager,
         ToolManagedInitArg.WORKER_TARGET: lambda: worker_target,
         ToolManagedInitArg.RUNTIME_CONFIG: lambda: runtime_config,
         ToolManagedInitArg.TOOL_OUTPUT_WORKSPACE_ROOT: lambda: tool_output_workspace_root,
-        ToolManagedInitArg.WORKER_TOOLS_OVERRIDE: lambda: worker_tools_override,
+        ToolManagedInitArg.WORKSPACE_IN_WORKER: lambda: (
+            _sandbox_settings_route_workspace_tools(runtime_paths, tools)
+            if workspace_in_worker is None
+            else workspace_in_worker
+        ),
         ToolManagedInitArg.CURRENT_ROOM_ID: lambda: (
             execution_identity.room_id if execution_identity is not None else None
         ),
-        ToolManagedInitArg.AGENT_NAME: lambda: worker_target.routing_agent_name if worker_target is not None else None,
+        ToolManagedInitArg.AGENT_NAME: lambda: agent_name,
         ToolManagedInitArg.FILE_ACCESS: lambda: _managed_file_access(runtime_config, worker_target),
         ToolManagedInitArg.AGENT_STATE_ROOT: lambda: agent_state_root,
+        ToolManagedInitArg.SHARED_DIRECTORY_ROOTS: lambda: path_tool_roots,
+        ToolManagedInitArg.IN_SANDBOX_REQUEST: lambda: in_sandbox_request,
     }
     return {init_arg.value: managed_values[init_arg]() for init_arg in metadata.managed_init_args}
 
@@ -692,123 +646,172 @@ def _resolve_tool_credentials_manager(
     return None
 
 
-def _build_tool_instance(
+def _constructing_agent_runs_in_worker(
+    tool_name: str,
+    runtime_paths: RuntimePaths,
+    tools: ToolRegistry,
+    runtime_config: Config | None,
+    worker_target: ResolvedWorkerTarget | None,
+) -> bool:
+    """Place a toolkit a tool builds for its agent, such as a plugin's sub-toolkit.
+
+    It runs in a worker when the sandbox settings route it there, or when the agent's own toolkit of that name would:
+    an agent's explicit ``worker_tools`` can move it into a worker, never out of one, since the agent may not have
+    that toolkit itself.
+    """
+    # Imported here: agent tool resolution validates tool settings through this module.
+    from mindroom.tool_system.agent_tools import resolve_agent_tools  # noqa: PLC0415
+
+    placement = tool_placement(runtime_paths, tools)
+    if placement.runs_in_worker(tool_name, None):
+        return True
+    agent_name = worker_target.routing_agent_name if worker_target is not None else None
+    return (
+        runtime_config is not None
+        and agent_name in runtime_config.agents
+        and resolve_agent_tools(runtime_config, agent_name, tools).runs_in_worker(tool_name, placement)
+    )
+
+
+def _sandbox_settings_route_workspace_tools(runtime_paths: RuntimePaths, tools: ToolRegistry) -> bool:
+    """Return whether the sandbox settings route any tool that works on workspace paths to a worker."""
+    placement = tool_placement(runtime_paths, tools)
+    return any(
+        placement.runs_in_worker(name, None)
+        for name, metadata in tools.entries.items()
+        if metadata.consumes_workspace_paths
+    )
+
+
+@dataclass(frozen=True)
+class _ToolSettings:
+    """The settings one tool is built with for one agent, and the validated overrides they apply."""
+
+    # Each config field's constructor argument: stored settings, then authored, init, and runtime overrides, then the
+    # environment for a field still unset.
+    values: dict[str, object]
+    tool_config_overrides: dict[str, object]
+    tool_init_overrides: dict[str, object] | None
+    # The credentials manager the stored settings came from, which the toolkit and its worker calls also use.
+    credentials_manager: CredentialsManager | None
+
+
+def offered_functions(
+    metadata: ToolMetadata,
+    settings: Mapping[str, object],
+    *,
+    validate_filters: bool = False,
+) -> tuple[frozenset[str] | None, bool]:
+    """Return the toolkit's functions its settings leave on, and whether one it names as writing is among them.
+
+    A function stays on by Agno's ``all`` or ``enable_<function>``, then the filters. The functions are None when the
+    toolkit declares no function names, as a plugin or MCP server may, and no allowlist names them. A toolkit that
+    names no writing functions writes when it runs code. Request filter validation only when the declared functions
+    and enable flags predict what the constructor registers, as they do for shell.
+    """
+    values = {config_field.name: config_field.default for config_field in metadata.config_fields or ()} | dict(settings)
+    include, exclude = (
+        _normalize_string_array_override(values.get(name), preserve_empty_list=True)
+        for name in ("include_tools", "exclude_tools")
+    )
+
+    def offered(names: Iterable[str], *, validate: bool = False) -> frozenset[str]:
+        enabled = frozenset(name for name in names if values.get("all") or values.get(f"enable_{name}", True))
+        if validate:
+            filtered = _offered_function_names(
+                enabled,
+                include_tools=include,
+                exclude_tools=exclude,
+                declared_functions=frozenset(metadata.function_names or ()),
+            )
+            return enabled if filtered is None else filtered
+        return frozenset(name for name in enabled if tool_name_allowed(name, include=include, exclude=exclude))
+
+    available = metadata.function_names or include
+    functions = None if available is None else offered(available, validate=validate_filters)
+    if not metadata.workspace_writers:
+        return functions, metadata.executes_code
+    return functions, bool(offered(metadata.workspace_writers))
+
+
+def resolve_tool_settings(
     tool_name: str,
     runtime_paths: RuntimePaths,
     *,
-    disable_sandbox_proxy: bool = False,
-    credential_overrides: dict[str, object] | None = None,
+    tools: ToolRegistry,
+    worker_target: ResolvedWorkerTarget | None,
     credentials_manager: CredentialsManager | None = None,
-    runtime_config: Config | None = None,
+    allowed_shared_services: frozenset[str] | None = None,
+    credential_overrides: dict[str, object] | None = None,
     tool_config_overrides: dict[str, object] | None = None,
     tool_init_overrides: dict[str, object] | None = None,
-    worker_tools_override: list[str] | None = None,
     runtime_overrides: dict[str, object] | None = None,
-    shared_storage_root_path: Path | None = None,
-    allowed_shared_services: frozenset[str] | None = None,
-    tool_output_workspace_root: Path | None = None,
-    agent_state_root: Path | None = None,
-    tool_output_auto_save_threshold_bytes: int,
-    worker_target: ResolvedWorkerTarget | None,
-) -> Toolkit:
-    """Instantiate a tool from the registry, applying credentials and sandbox proxy."""
-    worker_scope = worker_target.worker_scope if worker_target is not None else None
-    routing_agent_name = worker_target.routing_agent_name if worker_target is not None else None
-    if not supports_tool_name_for_worker_scope(tool_name, worker_scope):
-        msg = unsupported_shared_only_integration_message(
-            tool_name,
-            worker_scope,
-            agent_name=routing_agent_name,
-            subject="Tool",
-        )
-        raise ToolMetadataValidationError(msg)
+) -> _ToolSettings:
+    """Resolve the settings ``tool_name`` in ``tools`` is built with for the agent ``worker_target`` names.
 
-    # Imported on first tool construction so importing the registry stays free
-    # of the agno runtime import chain (#1436).
-    from mindroom.tool_system.output_files import (  # noqa: PLC0415
-        ToolOutputFilePolicy,
-        wrap_toolkit_for_output_files,
+    Stored settings come from the agent's scoped store over the shared layer ``allowed_shared_services`` grants, never
+    from a store worker code can write when this primary owns the tool's settings. Raises ``ToolConfigOverrideError``
+    or ``ToolInitOverrideError`` for an override the tool does not accept.
+    """
+    metadata = tools.entries[tool_name]
+    validated_tool_config_overrides = validate_authored_tool_entry_overrides(
+        tool_name,
+        tool_config_overrides,
+        tool_metadata=tools.entries,
     )
+    resolved_credentials_manager = _resolve_tool_credentials_manager(metadata, runtime_paths, credentials_manager)
 
-    metadata = TOOL_METADATA[tool_name]
-    tool_class = TOOL_REGISTRY[tool_name]()
-    resolved_credentials_manager = _resolve_tool_credentials_manager(
-        metadata,
-        runtime_paths,
-        credentials_manager,
-    )
-    credentials = (
-        load_scoped_credentials(
-            tool_name,
+    def stored(service: str) -> dict[str, Any] | None:
+        if resolved_credentials_manager is None:
+            return None
+        return load_scoped_credentials(
+            service,
             credentials_manager=resolved_credentials_manager,
             worker_target=worker_target,
             allowed_shared_services=allowed_shared_services,
-            primary_built_tool=primary_owns_tool_settings(tool_name, runtime_paths=runtime_paths),
+            primary_built_tool=primary_owns_tool_settings(tool_name, tools, runtime_paths=runtime_paths),
         )
-        if resolved_credentials_manager is not None
-        else {}
-    ) or {}
-    if credential_overrides:
-        credentials = {**credentials, **credential_overrides}
-    validated_tool_config_overrides = validate_authored_tool_entry_overrides(tool_name, tool_config_overrides)
-    safe_tool_init_overrides = sanitize_tool_init_overrides(tool_name, tool_init_overrides)
-    init_kwargs = _build_tool_config_init_kwargs(
+
+    stored_credentials = stored(tool_name)
+    # LEGACY_COMPAT: Dashboard settings stored for the file and coding tools.
+    # Legacy format: a stored settings document under service file or coding, saved from the Tools dashboard, holding
+    #   Agno FileTools switches or an include_tools or exclude_tools filter.
+    # Last legacy release: v2026.11.447; replacement: unreleased; the filesystem toolkit reads service filesystem.
+    # Handling: Refuse to resolve the toolkit's settings while such a document holds any setting, so the toolkit is
+    #   not built and grants no workspace write until the operator deletes it; the dashboard reads and deletes it
+    #   in the store read here.
+    # Coverage:
+    #   tests/api/test_plugin_room_agents.py::test_settings_stored_under_an_old_name_stop_the_toolkit_and_its_workspace_grant;
+    #   tests/test_credentials.py::test_dashboard_deletes_old_name_settings_from_the_store_the_toolkit_build_reads.
+    for alias, name in TOOL_ALIASES.items():
+        if name == tool_name and any(not key.startswith("_") for key in stored(alias) or ()):
+            msg = (
+                f"{tool_name}: settings stored under '{alias}' no longer apply; "
+                f"delete them, and save any you still want under '{tool_name}'."
+            )
+            raise ToolConfigOverrideError(msg)
+    if tool_name == "filesystem" and (retired := retired_file_setting(stored_credentials or {})) is not None:
+        msg = f"{tool_name}: stored setting {retired[0]} was removed; {retired[1]}."
+        raise ToolConfigOverrideError(msg)
+    credentials = {**(stored_credentials or {}), **(credential_overrides or {})}
+    safe_tool_init_overrides = sanitize_tool_init_overrides(
         tool_name,
-        metadata,
-        credentials=credentials,
-        tool_config_overrides=validated_tool_config_overrides,
-        tool_init_overrides=safe_tool_init_overrides,
-        runtime_overrides=runtime_overrides,
+        tool_init_overrides,
+        tool_metadata=tools.entries,
     )
-    extra_env_passthrough = init_kwargs.get("extra_env_passthrough")
-    proxy_tool_init_overrides = dict(safe_tool_init_overrides or {})
-    shell_path_prepend = init_kwargs.get("shell_path_prepend")
-    if tool_name == "shell" and isinstance(shell_path_prepend, str):
-        proxy_tool_init_overrides["shell_path_prepend"] = shell_path_prepend
-    init_kwargs.update(
-        _build_managed_tool_init_kwargs(
+    return _ToolSettings(
+        values=_build_tool_config_init_kwargs(
+            tool_name,
             metadata,
             runtime_paths=runtime_paths,
-            credentials_manager=resolved_credentials_manager,
-            worker_target=worker_target,
-            runtime_config=runtime_config,
-            tool_output_workspace_root=tool_output_workspace_root,
-            worker_tools_override=worker_tools_override,
-            agent_state_root=agent_state_root,
+            credentials=credentials,
+            tool_config_overrides=validated_tool_config_overrides,
+            tool_init_overrides=safe_tool_init_overrides,
+            runtime_overrides=runtime_overrides,
         ),
-    )
-    include_tools, exclude_tools = _pop_implicit_toolkit_filters(metadata, init_kwargs)
-
-    toolkit = cast("Any", tool_class)(**init_kwargs)
-    _apply_implicit_toolkit_filters(
-        toolkit,
-        include_tools=include_tools,
-        exclude_tools=exclude_tools,
-        declared_functions=frozenset(metadata.function_names or ()),
-    )
-    output_file_policy = (
-        ToolOutputFilePolicy.from_runtime(
-            tool_output_workspace_root,
-            runtime_paths,
-            auto_save_threshold_bytes=tool_output_auto_save_threshold_bytes,
-        )
-        if tool_output_workspace_root is not None
-        else None
-    )
-    wrap_toolkit_for_output_files(toolkit, output_file_policy)
-    if disable_sandbox_proxy:
-        return toolkit
-    return maybe_wrap_toolkit_for_sandbox_proxy(
-        tool_name,
-        toolkit,
-        runtime_paths=runtime_paths,
-        credentials_manager=resolved_credentials_manager,
-        tool_init_overrides=proxy_tool_init_overrides or None,
         tool_config_overrides=validated_tool_config_overrides,
-        extra_env_passthrough=extra_env_passthrough if isinstance(extra_env_passthrough, str) else None,
-        worker_tools_override=worker_tools_override,
-        shared_storage_root_path=shared_storage_root_path,
-        worker_target=worker_target,
+        tool_init_overrides=safe_tool_init_overrides,
+        credentials_manager=resolved_credentials_manager,
     )
 
 
@@ -816,60 +819,196 @@ def get_tool_by_name(
     tool_name: str,
     runtime_paths: RuntimePaths,
     *,
-    disable_sandbox_proxy: bool = False,
+    tools: ToolRegistry,
+    runs_in_worker: bool | None = None,
     credential_overrides: dict[str, object] | None = None,
     credentials_manager: CredentialsManager | None = None,
     runtime_config: Config | None = None,
     tool_config_overrides: dict[str, object] | None = None,
     tool_init_overrides: dict[str, object] | None = None,
-    worker_tools_override: list[str] | None = None,
     runtime_overrides: dict[str, object] | None = None,
-    shared_storage_root_path: Path | None = None,
     allowed_shared_services: frozenset[str] | None = None,
     tool_output_workspace_root: Path | None = None,
     agent_state_root: Path | None = None,
     tool_output_auto_save_threshold_bytes: int = DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES,
+    workspace_in_worker: bool | None = None,
+    in_sandbox_request: bool = False,
     worker_target: ResolvedWorkerTarget | None,
-) -> Toolkit:
-    """Get a tool instance by its registered name.
+) -> AnyToolkit:
+    """Get a tool instance by its name in ``tools``, the registry of the config the caller acts for.
 
+    The factory, metadata, placement, and credential ownership come from ``tools``; ``runtime_config`` supplies
+    configuration only.
+    ``runs_in_worker`` says whether the toolkit's calls go to a worker; None routes them there when the sandbox
+    settings would, or when the worker tools of the agent ``worker_target`` names would.
     ``agent_state_root`` is the constructing agent's resolved state root in the primary runtime;
     worker runtimes leave it unset because their own storage root is the state they own.
+    ``workspace_in_worker`` says whether the agent's workspace-path tools run in a worker, where attachments are saved;
+    None follows the sandbox settings for those tools.
+    ``in_sandbox_request`` is set only by the sandbox runner building a toolkit for the request it executes.
     """
-    if tool_name not in TOOL_REGISTRY:
-        available = ", ".join(sorted(TOOL_REGISTRY.keys()))
-        msg = f"Unknown tool: {tool_name}. Available tools: {available}"
-        raise ToolMetadataValidationError(msg)
-
-    build = functools.partial(
-        _build_tool_instance,
-        tool_name,
-        runtime_paths,
-        disable_sandbox_proxy=disable_sandbox_proxy,
-        credential_overrides=credential_overrides,
-        credentials_manager=credentials_manager,
-        runtime_config=runtime_config,
-        tool_config_overrides=tool_config_overrides,
-        tool_init_overrides=tool_init_overrides,
-        worker_tools_override=worker_tools_override,
-        runtime_overrides=runtime_overrides,
-        shared_storage_root_path=shared_storage_root_path,
-        allowed_shared_services=allowed_shared_services,
-        tool_output_workspace_root=tool_output_workspace_root,
-        agent_state_root=agent_state_root,
-        tool_output_auto_save_threshold_bytes=tool_output_auto_save_threshold_bytes,
-        worker_target=worker_target,
+    tool_name = canonical_tool_name(tool_name)
+    factory = tools.factory(tool_name)
+    metadata = tools.entries[tool_name]
+    routed = (
+        _constructing_agent_runs_in_worker(tool_name, runtime_paths, tools, runtime_config, worker_target)
+        if runs_in_worker is None
+        else runs_in_worker
     )
 
+    def build() -> AnyToolkit:
+        worker_scope = worker_target.worker_scope if worker_target is not None else None
+        routing_agent_name = worker_target.routing_agent_name if worker_target is not None else None
+        if not supports_tool_name_for_worker_scope(tool_name, worker_scope):
+            msg = unsupported_shared_only_integration_message(
+                tool_name,
+                worker_scope,
+                agent_name=routing_agent_name,
+                subject="Tool",
+            )
+            raise ToolMetadataValidationError(msg)
+
+        # Imported on first tool construction so importing this module stays free
+        # of the agno runtime import chain (#1436).
+        from mindroom.tool_system.agno_toolkits import (  # noqa: PLC0415
+            configure_toolkit_functions,
+            toolkit_function_names,
+        )
+        from mindroom.tool_system.output_files import ToolOutputFilePolicy, current_tool_workdir  # noqa: PLC0415
+
+        output_file_policy = (
+            ToolOutputFilePolicy.from_runtime(
+                tool_output_workspace_root,
+                runtime_paths,
+                auto_save_threshold_bytes=tool_output_auto_save_threshold_bytes,
+                tools_use_workdir=current_tool_workdir() is not None,
+            )
+            if tool_output_workspace_root is not None
+            else None
+        )
+        settings = resolve_tool_settings(
+            tool_name,
+            runtime_paths,
+            tools=tools,
+            worker_target=worker_target,
+            credentials_manager=credentials_manager,
+            allowed_shared_services=allowed_shared_services,
+            credential_overrides=credential_overrides,
+            tool_config_overrides=tool_config_overrides,
+            tool_init_overrides=tool_init_overrides,
+            runtime_overrides=runtime_overrides,
+        )
+        construction = ToolConstruction.from_factory(
+            tool_name,
+            factory,
+            tool_config_overrides=settings.tool_config_overrides,
+        )
+        tool_class = load_toolkit_class(tool_name, factory)
+        init_kwargs = dict(settings.values)
+        extra_env_passthrough = init_kwargs.get("extra_env_passthrough")
+        proxy_tool_init_overrides = dict(settings.tool_init_overrides or {})
+        if tool_name == "shell":
+            shell_path_prepend = init_kwargs.get("shell_path_prepend")
+            if isinstance(shell_path_prepend, str):
+                proxy_tool_init_overrides["shell_path_prepend"] = shell_path_prepend
+            init_kwargs["allow_without_worker"] = (
+                runtime_config is not None and runtime_config.defaults.allow_shell_without_worker
+            )
+            init_kwargs["named_workers"] = (
+                routed and named_workers_refusal(routing_agent_name, runtime_config, runtime_paths) is None
+            )
+        init_kwargs.update(
+            _build_managed_tool_init_kwargs(
+                metadata,
+                runtime_paths=runtime_paths,
+                tools=tools,
+                credentials_manager=settings.credentials_manager,
+                worker_target=worker_target,
+                runtime_config=runtime_config,
+                tool_output_workspace_root=tool_output_workspace_root,
+                saved_output_dir=(
+                    output_file_policy.saved_output_dir
+                    if output_file_policy is not None and output_file_policy.tools_use_workdir
+                    else None
+                ),
+                workspace_in_worker=workspace_in_worker,
+                agent_state_root=agent_state_root,
+                in_sandbox_request=in_sandbox_request,
+            ),
+        )
+        include_tools, exclude_tools = _pop_implicit_toolkit_filters(metadata, init_kwargs)
+        with optional_dependency_environment():
+            toolkit = cast("Any", tool_class)(**init_kwargs)
+        available = toolkit_function_names(toolkit)
+        declared = frozenset(metadata.function_names or ())
+        unknown_aliases = sorted(set(metadata.approval_aliases) - set(available) - declared)
+        if unknown_aliases:
+            msg = f"Tool '{tool_name}' declares approval aliases for functions it does not have: {', '.join(unknown_aliases)}"
+            raise ToolMetadataValidationError(msg)
+        offered = _offered_function_names(
+            available,
+            include_tools=include_tools,
+            exclude_tools=exclude_tools,
+            declared_functions=declared,
+        )
+        configure_toolkit_functions(
+            toolkit,
+            offered=offered,
+            output_files=output_file_policy,
+            to_worker=worker_stand_ins(
+                tool_name,
+                toolkit,
+                runtime_paths=runtime_paths,
+                credentials_manager=settings.credentials_manager,
+                tool_init_overrides=proxy_tool_init_overrides or None,
+                tool_config_overrides=settings.tool_config_overrides,
+                extra_env_passthrough=extra_env_passthrough if isinstance(extra_env_passthrough, str) else None,
+                worker_target=worker_target,
+                runtime_config=runtime_config,
+                tools=tools,
+            )
+            if routed
+            else None,
+        )
+        authored = bool(init_kwargs.get("instructions"))
+        return bind_toolkit_construction(toolkit, replace(construction, authored_instructions=authored))
+
+    return _build_with_tool_dependencies(tool_name, metadata, runtime_paths, build)
+
+
+def load_toolkit_class[T: type](tool_name: str, factory: Callable[[], T]) -> T:
+    """Return the toolkit class ``factory`` registers as ``tool_name``, refusing one MindRoom does not run."""
+    with optional_dependency_environment():
+        tool_class = factory()
+    # By module and class name, so building or checking a tool never imports Agno's MCP module and the MCP SDK.
+    if any((base.__module__, base.__name__) == ("agno.tools.mcp.mcp", "MCPTools") for base in tool_class.__mro__):
+        msg = (
+            f"Tool '{tool_name}' subclasses Agno MCPTools, which MindRoom does not run; "
+            "configure its MCP server under mcp_servers: in config.yaml instead"
+        )
+        raise ToolMetadataValidationError(msg)
+    return tool_class
+
+
+def _build_with_tool_dependencies(
+    tool_name: str,
+    metadata: ToolMetadata,
+    runtime_paths: RuntimePaths,
+    build: Callable[[], AnyToolkit],
+) -> AnyToolkit:
+    """Run ``build`` once the tool's declared dependencies are present.
+
+    When ``build`` raises ImportError and the tool's optional extra installs, ``build`` runs once more.
+    """
+    extra = metadata.dependency_extra or tool_name
     # Pre-check dependencies using find_spec (no side effects) before importing
-    metadata = TOOL_METADATA.get(tool_name)
-    deps = metadata.dependencies if metadata and metadata.dependencies else []
+    deps = metadata.dependencies or []
     if deps:
         missing = ", ".join(deps)
         try:
             installed = ensure_tool_deps(
                 deps,
-                tool_name,
+                extra,
                 runtime_paths,
                 missing_message=f"Missing dependencies for tool '{tool_name}': {missing}",
             )
@@ -883,7 +1022,7 @@ def get_tool_by_name(
     try:
         return build()
     except ImportError as first_error:
-        if not auto_install_optional_extra_for_import_retry(tool_name, runtime_paths):
+        if not auto_install_optional_extra_for_import_retry(extra, runtime_paths):
             logger.warning("tool_import_failed", tool_name=tool_name, error=str(first_error))
             logger.warning("tool_dependency_install_required", tool_name=tool_name)
             raise
@@ -894,452 +1033,6 @@ def get_tool_by_name(
         except ImportError as second_error:
             logger.warning("tool_auto_install_failed", tool_name=tool_name, error=str(second_error))
             raise second_error from first_error
-
-
-@dataclass(frozen=True)
-class _ResolvedToolState:
-    """Runtime-visible tool state plus validation-only skipped-plugin metadata."""
-
-    tool_registry: dict[str, Callable[[], type[Toolkit]]]
-    tool_metadata: dict[str, ToolMetadata]
-    unavailable_tool_metadata: dict[str, ToolMetadata]
-    unresolved_plugin_tool_sources: frozenset[str] = frozenset()
-
-
-@dataclass(frozen=True, slots=True)
-class _ModuleOrigin:
-    """One live module's resolved file and most recent plugin containment check."""
-
-    module_file: str
-    resolved_file: Path | None
-    root: Path
-    within_root: bool
-
-
-# Validation scans all loaded modules twice. A fixed-size LRU below that working
-# set evicts every path before the next scan reaches it. Weak keys retain one
-# entry per live module and release transient plugin modules after unloading.
-_MODULE_ORIGIN_CACHE: weakref.WeakKeyDictionary[ModuleType, _ModuleOrigin] = weakref.WeakKeyDictionary()
-
-
-@functools.lru_cache(maxsize=8192)
-def _module_directory_within_root(directory: Path, root: Path) -> bool:
-    """Share containment checks across modules in the same resolved directory."""
-    return directory.is_relative_to(root)
-
-
-def _module_origin_within_root(module: ModuleType, root: Path) -> bool:
-    """Return whether one loaded module originates from within one plugin root."""
-    module_file = getattr(module, "__file__", None)
-    if not isinstance(module_file, str):
-        return False
-    cached = _MODULE_ORIGIN_CACHE.get(module)
-    if cached is not None and cached.module_file == module_file:
-        if cached.root == root:
-            return cached.within_root
-        resolved = cached.resolved_file
-    else:
-        try:
-            resolved = Path(module_file).resolve()
-        except OSError:
-            resolved = None
-    within_root = resolved is not None and (resolved == root or _module_directory_within_root(resolved.parent, root))
-    _MODULE_ORIGIN_CACHE[module] = _ModuleOrigin(module_file, resolved, root, within_root)
-    return within_root
-
-
-def _execute_validation_plugin_module(
-    plugin_name: str,
-    plugin_root: Path,
-    module_path: Path,
-    registrations_by_module: dict[str, dict[str, ToolMetadata]],
-) -> str:
-    """Execute one plugin module into a temporary validation import context."""
-    runtime_module_name = plugin_module._module_name(plugin_name, plugin_root, module_path)
-    validation_module_name = f"{runtime_module_name}{_VALIDATION_PLUGIN_MODULE_SUFFIX}{id(registrations_by_module)}"
-    loaded_modules = sys.modules.copy()
-    previous_module = loaded_modules.get(validation_module_name)
-    prepared_module = plugin_module._prepare_module(plugin_name, plugin_root, module_path, validation_module_name)
-    if prepared_module is None:
-        msg = f"Failed to load plugin validation module: {module_path}"
-        raise ToolMetadataValidationError(msg)
-    module, loader, previous_packages = prepared_module
-
-    previous_modules_within_root = {
-        module_name: loaded_module
-        for module_name, loaded_module in loaded_modules.items()
-        if _module_origin_within_root(loaded_module, plugin_root)
-    }
-    try:
-        with (
-            scoped_plugin_registration_store(registrations_by_module),
-            scoped_plugin_registration_owner(validation_module_name),
-        ):
-            loader.exec_module(module)
-    except BaseException as exc:
-        if not isinstance(exc, (Exception, SystemExit)):
-            raise
-        msg = f"Plugin validation module execution failed for {module_path}: {exc}"
-        raise ToolMetadataValidationError(msg) from exc
-    finally:
-        for loaded_module_name, loaded_module in sys.modules.copy().items():
-            if loaded_module_name not in previous_modules_within_root and _module_origin_within_root(
-                loaded_module,
-                plugin_root,
-            ):
-                sys.modules.pop(loaded_module_name, None)
-        for loaded_module_name, loaded_module in previous_modules_within_root.items():
-            sys.modules[loaded_module_name] = loaded_module
-        plugin_module._restore_plugin_package_chain(previous_packages)
-        if previous_module is None:
-            sys.modules.pop(validation_module_name, None)
-        else:
-            sys.modules[validation_module_name] = previous_module
-
-    return validation_module_name
-
-
-_RESOLVED_TOOL_STATE_LOCK = threading.RLock()
-_RESOLVED_TOOL_STATE_CACHE: dict[tuple[int, bool], tuple[RuntimePaths, _ResolvedToolState]] = {}
-
-
-def clear_resolved_tool_state_cache() -> None:
-    """Drop cached per-config resolved tool state after live plugin registry changes."""
-    with _RESOLVED_TOOL_STATE_LOCK:
-        _RESOLVED_TOOL_STATE_CACHE.clear()
-
-
-def _evict_resolved_tool_state(cache_key: tuple[int, bool]) -> None:
-    with _RESOLVED_TOOL_STATE_LOCK:
-        _RESOLVED_TOOL_STATE_CACHE.pop(cache_key, None)
-
-
-def _resolved_tool_state_for_runtime(
-    runtime_paths: RuntimePaths,
-    config: Config,
-    *,
-    tolerate_plugin_load_errors: bool = False,
-) -> _ResolvedToolState:
-    """Return registry and metadata visible for one runtime config without mutating global state.
-
-    The state is computed once per config object and reused by every consumer
-    (authored-entry validation, the tools API, self-config tools, worker
-    snapshots): resolving it executes plugin modules and walks the filesystem,
-    so recomputing per consumer stalls the event loop (#1260). The lock also
-    serializes plugin validation, which temporarily rewires ``sys.modules``.
-    """
-    cache_key = (id(config), tolerate_plugin_load_errors)
-    with _RESOLVED_TOOL_STATE_LOCK:
-        cached = _RESOLVED_TOOL_STATE_CACHE.get(cache_key)
-        if cached is not None and cached[0] == runtime_paths:
-            return cached[1]
-        resolved_state = _compute_resolved_tool_state_for_runtime(
-            runtime_paths,
-            config,
-            tolerate_plugin_load_errors=tolerate_plugin_load_errors,
-        )
-        if cache_key not in _RESOLVED_TOOL_STATE_CACHE:
-            weakref.finalize(config, _evict_resolved_tool_state, cache_key)
-        _RESOLVED_TOOL_STATE_CACHE[cache_key] = (runtime_paths, resolved_state)
-        return resolved_state
-
-
-def _compute_resolved_tool_state_for_runtime(
-    runtime_paths: RuntimePaths,
-    config: Config,
-    *,
-    tolerate_plugin_load_errors: bool = False,
-) -> _ResolvedToolState:
-    """Resolve registry and metadata for one runtime config by executing its plugins."""
-    import mindroom.tools  # noqa: F401, PLC0415
-    from mindroom.mcp.registry import resolved_mcp_tool_state  # noqa: PLC0415
-
-    plugin_entries = config.plugins
-    if not plugin_entries:
-        builtin_registry = BUILTIN_TOOL_REGISTRY.copy()
-        builtin_metadata = BUILTIN_TOOL_METADATA.copy()
-        mcp_registry, mcp_metadata = resolved_mcp_tool_state(config)
-        _merge_mcp_tool_state(
-            builtin_registry,
-            builtin_metadata,
-            mcp_registry,
-            mcp_metadata,
-        )
-        return _ResolvedToolState(builtin_registry, builtin_metadata, {})
-
-    plugin_bases, skipped_plugin_sources = plugin_module._collect_plugin_bases(
-        plugin_entries,
-        runtime_paths,
-        skip_broken_plugins=tolerate_plugin_load_errors,
-    )
-
-    plugin_module._reject_duplicate_plugin_manifest_names(plugin_bases)
-
-    validation_registrations: dict[str, dict[str, ToolMetadata]] = {}
-    unavailable_tool_metadata: dict[str, ToolMetadata] = {}
-    unresolved_plugin_tool_sources = set(skipped_plugin_sources)
-    active_plugins: list[tuple[str, str]] = []
-    for plugin_base, plugin_entry, _ in plugin_bases:
-        candidate_registrations: dict[str, dict[str, ToolMetadata]] = {}
-        candidate_active_plugins: list[tuple[str, str]] = []
-        tool_namespace_complete = plugin_base.tools_module_path is None
-        try:
-            if plugin_base.tools_module_path is None:
-                if plugin_base.hooks_module_path is not None:
-                    _execute_validation_plugin_module(
-                        plugin_base.name,
-                        plugin_base.root,
-                        plugin_base.hooks_module_path,
-                        candidate_registrations,
-                    )
-            else:
-                tools_module_name = _execute_validation_plugin_module(
-                    plugin_base.name,
-                    plugin_base.root,
-                    plugin_base.tools_module_path,
-                    candidate_registrations,
-                )
-                candidate_active_plugins.append((plugin_base.name, tools_module_name))
-                tool_namespace_complete = True
-                if (
-                    plugin_base.hooks_module_path is not None
-                    and plugin_base.hooks_module_path != plugin_base.tools_module_path
-                ):
-                    _execute_validation_plugin_module(
-                        plugin_base.name,
-                        plugin_base.root,
-                        plugin_base.hooks_module_path,
-                        candidate_registrations,
-                    )
-        except Exception as exc:
-            if not tolerate_plugin_load_errors:
-                raise
-            plugin_module._log_skipped_plugin_entry(plugin_entry.path, plugin_base.root, exc)
-            if not tool_namespace_complete:
-                unresolved_plugin_tool_sources.add(plugin_base.name)
-            unavailable_tool_metadata.update(
-                _unavailable_tool_metadata_from_failed_plugin(plugin_base, candidate_registrations),
-            )
-            continue
-
-        validation_registrations.update(candidate_registrations)
-        active_plugins.extend(candidate_active_plugins)
-
-    desired_registry, desired_metadata = resolved_tool_state(active_plugins, validation_registrations)
-    mcp_registry, mcp_metadata = resolved_mcp_tool_state(config)
-    _merge_mcp_tool_state(
-        desired_registry,
-        desired_metadata,
-        mcp_registry,
-        mcp_metadata,
-    )
-    unavailable_tool_metadata = _unavailable_tool_metadata_without_resolved_tools(
-        unavailable_tool_metadata,
-        desired_registry,
-        desired_metadata,
-    )
-    return _ResolvedToolState(
-        desired_registry,
-        desired_metadata,
-        unavailable_tool_metadata,
-        frozenset(unresolved_plugin_tool_sources),
-    )
-
-
-def _unavailable_tool_metadata_without_resolved_tools(
-    unavailable_tool_metadata: Mapping[str, ToolMetadata],
-    tool_registry: Mapping[str, Callable[[], type[Toolkit]]],
-    tool_metadata: Mapping[str, ToolMetadata],
-) -> dict[str, ToolMetadata]:
-    """Drop skipped-plugin declarations that collide with available runtime tools."""
-    resolved_tool_names = {*tool_registry, *tool_metadata}
-    return {
-        tool_name: metadata
-        for tool_name, metadata in unavailable_tool_metadata.items()
-        if tool_name not in resolved_tool_names
-    }
-
-
-def _merge_mcp_tool_state(
-    registry: dict[str, Callable[[], type[Toolkit]]],
-    metadata: dict[str, ToolMetadata],
-    mcp_registry: dict[str, Callable[[], type[Toolkit]]],
-    mcp_metadata: dict[str, ToolMetadata],
-) -> None:
-    """Merge MCP tool state into one resolved runtime registry after collision checks."""
-    collisions = sorted({*mcp_registry, *mcp_metadata} & {*registry, *metadata})
-    if collisions:
-        msg = f"MCP tool '{collisions[0]}' conflicts with an existing registered tool"
-        raise ToolMetadataValidationError(msg)
-    registry.update(mcp_registry)
-    metadata.update(mcp_metadata)
-
-
-def resolved_tool_metadata_for_runtime(
-    runtime_paths: RuntimePaths,
-    config: Config,
-    *,
-    tolerate_plugin_load_errors: bool = False,
-) -> dict[str, ToolMetadata]:
-    """Return tool metadata visible for one runtime config without mutating global state."""
-    resolved_state = _resolved_tool_state_for_runtime(
-        runtime_paths,
-        config,
-        tolerate_plugin_load_errors=tolerate_plugin_load_errors,
-    )
-    return resolved_state.tool_metadata
-
-
-def _tool_validation_snapshot_from_state(
-    tool_registry: Mapping[str, Callable[[], type[Toolkit]]],
-    tool_metadata: Mapping[str, ToolMetadata],
-    *,
-    unavailable_plugin_tool_names: frozenset[str] = frozenset(),
-) -> dict[str, ToolValidationInfo]:
-    """Project runtime tool state into a validation-only snapshot."""
-    return {
-        tool_name: ToolValidationInfo(
-            name=tool_name,
-            config_fields=tuple(metadata.config_fields or ()),
-            agent_override_fields=tuple(metadata.agent_override_fields or ()),
-            authored_override_validator=metadata.authored_override_validator,
-            file_access=metadata.file_access,
-            supports_toolkit_filters=metadata.supports_toolkit_filters,
-            requires_room_context=metadata.requires_room_context,
-            requires_primary_runtime=metadata.requires_primary_runtime,
-            runtime_loadable=tool_name in tool_registry,
-            unavailable_due_to_plugin_load_error=tool_name in unavailable_plugin_tool_names,
-        )
-        for tool_name, metadata in tool_metadata.items()
-    }
-
-
-def _declared_tool_metadata_from_broken_plugin_source(module_path: Path) -> dict[str, ToolMetadata]:
-    """Return literal tool declarations from a plugin module that failed before registration."""
-    try:
-        module_tree = ast.parse(module_path.read_text(encoding="utf-8"), filename=str(module_path))
-    except (OSError, SyntaxError, UnicodeError):
-        return {}
-
-    module_constants = _module_level_string_constants(module_tree)
-    metadata_by_name: dict[str, ToolMetadata] = {}
-    for node in ast.walk(module_tree):
-        if not isinstance(node, ast.Call):
-            continue
-        if not _is_register_tool_with_metadata_call(node.func):
-            continue
-        tool_name = _literal_string_keyword(node, "name", module_constants)
-        if tool_name is None:
-            continue
-        metadata_by_name[tool_name] = ToolMetadata(
-            name=tool_name,
-            display_name=_literal_string_keyword(node, "display_name", module_constants) or tool_name,
-            description=_literal_string_keyword(node, "description", module_constants) or "Unavailable plugin tool",
-            category=ToolCategory.INTEGRATIONS,
-            # Placeholder for a plugin module that failed to load; the tool is never constructed.
-            file_access=ToolFileAccess.NONE,
-        )
-    return metadata_by_name
-
-
-def _module_level_string_constants(module_tree: ast.Module) -> dict[str, str]:
-    """Map module-level names assigned one string literal, for name=SOME_CONSTANT registrations."""
-    constants: dict[str, str] = {}
-    for node in module_tree.body:
-        if isinstance(node, ast.Assign):
-            targets = node.targets
-            value = node.value
-        elif isinstance(node, ast.AnnAssign) and node.value is not None:
-            targets = [node.target]
-            value = node.value
-        else:
-            continue
-        if not (isinstance(value, ast.Constant) and isinstance(value.value, str)):
-            continue
-        for target in targets:
-            if isinstance(target, ast.Name):
-                constants[target.id] = value.value
-    return constants
-
-
-def _is_register_tool_with_metadata_call(node: ast.expr) -> bool:
-    if isinstance(node, ast.Name):
-        return node.id == "register_tool_with_metadata"
-    if isinstance(node, ast.Attribute):
-        return node.attr == "register_tool_with_metadata"
-    return False
-
-
-def _literal_string_keyword(
-    node: ast.Call,
-    keyword_name: str,
-    module_constants: Mapping[str, str],
-) -> str | None:
-    for keyword in node.keywords:
-        if keyword.arg != keyword_name:
-            continue
-        if isinstance(keyword.value, ast.Constant) and isinstance(keyword.value.value, str):
-            return keyword.value.value
-        if isinstance(keyword.value, ast.Name):
-            return module_constants.get(keyword.value.id)
-    return None
-
-
-def _unavailable_tool_metadata_from_failed_plugin(
-    plugin_base: plugin_module._PluginBase,
-    candidate_registrations: Mapping[str, dict[str, ToolMetadata]],
-) -> dict[str, ToolMetadata]:
-    """Return tools known to belong to one plugin that failed in tolerant startup mode."""
-    metadata_by_name: dict[str, ToolMetadata] = {}
-    for module_path in (plugin_base.tools_module_path, plugin_base.hooks_module_path):
-        if module_path is not None:
-            metadata_by_name.update(_declared_tool_metadata_from_broken_plugin_source(module_path))
-    metadata_by_name.update(
-        {
-            tool_name: metadata
-            for registrations in candidate_registrations.values()
-            for tool_name, metadata in registrations.items()
-        },
-    )
-    return metadata_by_name
-
-
-def resolved_tool_validation_snapshot_for_runtime(
-    runtime_paths: RuntimePaths,
-    config: Config,
-    *,
-    tolerate_plugin_load_errors: bool = False,
-) -> dict[str, ToolValidationInfo]:
-    """Return validation-only tool state visible for one runtime config."""
-    resolved_state = _resolved_tool_state_for_runtime(
-        runtime_paths,
-        config,
-        tolerate_plugin_load_errors=tolerate_plugin_load_errors,
-    )
-    validation_metadata = {
-        **resolved_state.tool_metadata,
-        **resolved_state.unavailable_tool_metadata,
-    }
-    return _tool_validation_snapshot_from_state(
-        resolved_state.tool_registry,
-        validation_metadata,
-        unavailable_plugin_tool_names=frozenset(resolved_state.unavailable_tool_metadata),
-    )
-
-
-def unresolved_plugin_tool_sources_for_runtime(
-    runtime_paths: RuntimePaths,
-    config: Config,
-    *,
-    tolerate_plugin_load_errors: bool = False,
-) -> frozenset[str]:
-    """Return plugin names or specs whose tool namespaces could not be resolved."""
-    resolved_state = _resolved_tool_state_for_runtime(
-        runtime_paths,
-        config,
-        tolerate_plugin_load_errors=tolerate_plugin_load_errors,
-    )
-    return resolved_state.unresolved_plugin_tool_sources
 
 
 def serialize_tool_validation_snapshot(
@@ -1400,14 +1093,13 @@ def deserialize_tool_validation_snapshot(payload: object) -> dict[str, ToolValid
         raise TypeError(msg)
 
     snapshot: dict[str, ToolValidationInfo] = {}
-    for raw_tool_name, raw_info in payload.items():
-        if not isinstance(raw_tool_name, str):
+    for tool_name, raw_info in payload.items():
+        if not isinstance(tool_name, str):
             msg = "Tool validation snapshot must be a JSON object keyed by tool name."
             raise TypeError(msg)
         if not isinstance(raw_info, dict):
-            msg = f"Tool validation snapshot entry for '{raw_tool_name}' must be an object."
+            msg = f"Tool validation snapshot entry for '{tool_name}' must be an object."
             raise TypeError(msg)
-        tool_name = raw_tool_name
         raw_info_mapping = cast("dict[str, object]", raw_info)
         raw_validator = raw_info_mapping.get(
             "authored_override_validator",
@@ -1427,36 +1119,21 @@ def deserialize_tool_validation_snapshot(payload: object) -> dict[str, ToolValid
         except ValueError as exc:
             msg = f"Tool validation snapshot entry for '{tool_name}' has unsupported file_access '{raw_file_access}'."
             raise TypeError(msg) from exc
-        raw_runtime_loadable = _deserialize_tool_validation_bool(
-            raw_info_mapping,
-            tool_name=tool_name,
-            field_name="runtime_loadable",
-            default=True,
-        )
-        raw_unavailable_due_to_plugin_load_error = _deserialize_tool_validation_bool(
-            raw_info_mapping,
-            tool_name=tool_name,
-            field_name="unavailable_due_to_plugin_load_error",
-            default=False,
-        )
-        raw_requires_room_context = _deserialize_tool_validation_bool(
-            raw_info_mapping,
-            tool_name=tool_name,
-            field_name="requires_room_context",
-            default=False,
-        )
-        raw_requires_primary_runtime = _deserialize_tool_validation_bool(
-            raw_info_mapping,
-            tool_name=tool_name,
-            field_name="requires_primary_runtime",
-            default=False,
-        )
-        raw_supports_toolkit_filters = _deserialize_tool_validation_bool(
-            raw_info_mapping,
-            tool_name=tool_name,
-            field_name="supports_toolkit_filters",
-            default=False,
-        )
+        flags = {
+            field_name: _deserialize_tool_validation_bool(
+                raw_info_mapping,
+                tool_name=tool_name,
+                field_name=field_name,
+                default=default,
+            )
+            for field_name, default in (
+                ("runtime_loadable", True),
+                ("unavailable_due_to_plugin_load_error", False),
+                ("requires_room_context", False),
+                ("requires_primary_runtime", False),
+                ("supports_toolkit_filters", False),
+            )
+        }
         snapshot[tool_name] = ToolValidationInfo(
             name=tool_name,
             config_fields=_deserialize_tool_validation_fields(
@@ -1469,22 +1146,18 @@ def deserialize_tool_validation_snapshot(payload: object) -> dict[str, ToolValid
             ),
             authored_override_validator=authored_override_validator,
             file_access=file_access,
-            supports_toolkit_filters=raw_supports_toolkit_filters,
-            requires_room_context=raw_requires_room_context,
-            requires_primary_runtime=raw_requires_primary_runtime,
-            runtime_loadable=raw_runtime_loadable,
-            unavailable_due_to_plugin_load_error=raw_unavailable_due_to_plugin_load_error,
+            **flags,
         )
     return snapshot
 
 
-def export_tools_metadata(tool_metadata: dict[str, ToolMetadata] | None = None) -> list[dict[str, Any]]:
+def export_tools_metadata(tool_metadata: Mapping[str, ToolMetadata]) -> list[dict[str, Any]]:
     """Export tool metadata as JSON-serializable dictionaries."""
     tools: list[dict[str, Any]] = []
-    metadata_by_name = TOOL_METADATA if tool_metadata is None else tool_metadata
 
-    for metadata in metadata_by_name.values():
-        tool_dict = asdict(metadata)
+    for metadata in tool_metadata.values():
+        # asdict copies every value deeply, which code such as a judge bound to a lock cannot survive.
+        tool_dict = asdict(replace(metadata, factory=None, approval_aliases={}))
         tool_dict["category"] = metadata.category.value
         tool_dict["status"] = metadata.status.value
         tool_dict["setup_type"] = metadata.setup_type.value
@@ -1496,11 +1169,17 @@ def export_tools_metadata(tool_metadata: dict[str, ToolMetadata] | None = None) 
             tool_dict.pop("oauth_fallback_fields", None)
         if not metadata.requires_primary_runtime:
             tool_dict.pop("requires_primary_runtime", None)
+        tool_dict.pop("approval_aliases", None)
         tool_dict.pop("authored_override_validator", None)
         tool_dict.pop("managed_init_args", None)
         tool_dict.pop("worker_inert_agent_functions", None)
+        tool_dict.pop("workspace_writers", None)
         tool_dict.pop("supports_toolkit_filters", None)
         tool_dict.pop("factory", None)
+        tool_dict.pop("mcp_server_id", None)
+        tool_dict.pop("dependency_extra", None)
+        if aliases := sorted(alias for alias, name in TOOL_ALIASES.items() if name == metadata.name):
+            tool_dict["aliases"] = aliases
         tools.append(tool_dict)
 
     tools.sort(key=lambda tool: (tool["category"], tool["name"]))
@@ -1532,86 +1211,3 @@ def _normalize_string_array_override(
     if normalized or preserve_empty_list:
         return normalized
     return None
-
-
-def _normalize_agent_override_field_value(field: ConfigField, value: object) -> object | None:
-    """Normalize one authored agent override value according to its declared schema."""
-    if field.type == "string[]":
-        return _normalize_string_array_override(value)
-    if field.type == "boolean":
-        if value is None or isinstance(value, bool):
-            return value
-        msg = "expected a boolean or null"
-        raise ValueError(msg)
-    if field.type == "number":
-        if value is None or (isinstance(value, (int, float)) and not isinstance(value, bool)):
-            return value
-        msg = "expected a number or null"
-        raise ValueError(msg)
-    if field.type in {"password", "select", "text", "url"}:
-        if value is None:
-            return None
-        if isinstance(value, str):
-            stripped = value.strip()
-            return stripped or None
-        msg = "expected a string or null"
-        raise ValueError(msg)
-    return value
-
-
-def normalize_authored_tool_overrides(tool_name: str, overrides: dict[str, object] | None) -> dict[str, object]:
-    """Validate and normalize one tool's authored per-agent overrides."""
-    if not overrides:
-        return {}
-
-    metadata = TOOL_METADATA.get(tool_name)
-    if metadata is None:
-        msg = f"Unknown tool '{tool_name}' cannot declare per-agent overrides."
-        raise ValueError(msg)
-
-    field_map = {field.name: field for field in metadata.agent_override_fields or []}
-    if not field_map:
-        msg = f"Tool '{tool_name}' does not support per-agent overrides."
-        raise ValueError(msg)
-
-    unexpected_fields = sorted(set(overrides) - set(field_map))
-    if unexpected_fields:
-        allowed = ", ".join(sorted(field_map)) or "none"
-        unexpected = ", ".join(unexpected_fields)
-        msg = f"Unsupported per-agent override(s) for '{tool_name}': {unexpected}. Allowed overrides: {allowed}."
-        raise ValueError(msg)
-
-    normalized: dict[str, object] = {}
-    for field_name, raw_value in overrides.items():
-        field = field_map[field_name]
-        try:
-            normalized_value = _normalize_agent_override_field_value(field, raw_value)
-        except (TypeError, ValueError) as exc:
-            msg = f"Invalid per-agent override for '{tool_name}.{field_name}': {exc}"
-            raise ValueError(msg) from exc
-        if normalized_value is not None:
-            normalized[field_name] = normalized_value
-    _run_authored_override_validator(
-        tool_name,
-        normalized,
-        validator=metadata.authored_override_validator,
-    )
-    return normalized
-
-
-def authored_tool_overrides_to_runtime(tool_name: str, overrides: dict[str, object] | None) -> dict[str, object] | None:
-    """Convert normalized authored per-agent overrides into runtime kwargs."""
-    normalized = normalize_authored_tool_overrides(tool_name, overrides)
-    if not normalized:
-        return None
-
-    metadata = TOOL_METADATA[tool_name]
-    field_map = {field.name: field for field in metadata.agent_override_fields or []}
-    runtime_overrides: dict[str, object] = {}
-    for field_name, value in normalized.items():
-        field = field_map[field_name]
-        if field.type == "string[]":
-            runtime_overrides[field_name] = ", ".join(cast("list[str]", value))
-        else:
-            runtime_overrides[field_name] = value
-    return runtime_overrides or None

@@ -1,0 +1,419 @@
+"""History compacted before the archive existed becomes summary rows once, when its database converts on open."""
+
+from __future__ import annotations
+
+import json
+import sqlite3
+import threading
+from concurrent.futures import ThreadPoolExecutor
+from contextlib import closing
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING
+
+import pytest
+
+from mindroom.constants import MINDROOM_HISTORY_METADATA_KEY
+from mindroom.history.types import HistoryScope, ScopeSummary
+from mindroom.llm.runs import RunRecord
+from mindroom.session_storage import legacy_compaction_state, summary_rows
+from mindroom.session_storage.agent_storage import (
+    create_agent_state_storage,
+    create_state_storage,
+    prepare_conversation_database,
+)
+from mindroom.session_storage.legacy_compaction_state import _legacy_tombstones
+from mindroom.session_storage.legacy_scope_metadata import (
+    LEGACY_COMPACTION_METADATA_KEY,
+    LEGACY_MATRIX_HISTORY_METADATA_KEY,
+)
+from mindroom.session_storage.schema import TableNames, table_names
+from mindroom.session_storage.store import ConversationStore
+from mindroom.session_storage.types import ConversationSession
+from tests.conftest import create_agno_2_sessions_db
+from tests.history_helpers import StoredSummaryRow, stored_run_ids, summary_rows_of
+from tests.session_storage.agno_layout import recorded_owner, write_agno_database
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+_SCOPE = HistoryScope(kind="agent", scope_id="code")
+_EPOCH = datetime.fromtimestamp(0, UTC)
+_NAMES = TableNames("code")
+
+
+def _open(tmp_path: Path) -> ConversationStore:
+    db = create_state_storage("code", tmp_path, recorded_owner(_NAMES.database_path(tmp_path)))
+    assert isinstance(db, ConversationStore)
+    return db
+
+
+def _seed_as_older_release(tmp_path: Path, session: ConversationSession, storage_name: str = "code") -> Path:
+    """Write ``session`` as a release before the archive stored it: a replayed summary lived in the row's ``summary``."""
+    return write_agno_database(TableNames(storage_name).database_path(tmp_path), session)
+
+
+def _migrated(tmp_path: Path, session: ConversationSession) -> ConversationStore:
+    """Write ``session`` the way an older release left it, then open it so the conversion runs."""
+    _seed_as_older_release(tmp_path, session)
+    return _open(tmp_path)
+
+
+def _compaction_metadata(scope_key: str, raw_state: dict[str, object]) -> dict[str, object]:
+    return {LEGACY_COMPACTION_METADATA_KEY: {"version": 2, "states": {scope_key: raw_state}}}
+
+
+def _seen_metadata(scope_key: str, event_ids: list[str]) -> dict[str, object]:
+    return {LEGACY_MATRIX_HISTORY_METADATA_KEY: {"version": 1, "states": {scope_key: {"seen_event_ids": event_ids}}}}
+
+
+def test_legacy_tombstones_recognize_only_the_destructive_compactor() -> None:
+    """Only states carrying a retired compactor key are legacy."""
+    assert _legacy_tombstones({"force_compact_before_next_run": True}) is None
+    assert _legacy_tombstones({"last_compacted_at": "2026-09-01T00:00:00Z"}) == ()
+    assert _legacy_tombstones({"compacted_run_ids": ["a", "", 3, "b", "a"]}) == ("a", "b")
+
+
+def test_opening_storage_adopts_legacy_summary_tombstones_and_seen_ids_once(tmp_path: Path) -> None:
+    """The summary keeps replaying, its seen ids move into a legacy summary row, tombstoned copies go, and so do the retired keys."""
+    storage = _migrated(
+        tmp_path,
+        ConversationSession(
+            kind="agent",
+            session_id="session",
+            owner_id="code",
+            runs=[RunRecord(run_id="gone", agent_id="code"), RunRecord(run_id="kept", agent_id="code")],
+            summary=ScopeSummary(text="legacy summary", updated_at=_EPOCH),
+            metadata={
+                **_compaction_metadata(
+                    _SCOPE.key,
+                    {
+                        "compacted_run_ids": ["gone"],
+                        "last_compacted_at": "2026-09-01T00:00:00Z",
+                        "last_summary_model": "old-model",
+                        "last_compacted_run_count": 1,
+                        "force_compact_before_next_run": True,
+                    },
+                ),
+                **_seen_metadata(_SCOPE.key, ["$legacy"]),
+            },
+        ),
+    )
+    storage = _open(tmp_path)
+    stored = storage.load_session("session")
+    assert stored is not None
+    assert stored.metadata == {MINDROOM_HISTORY_METADATA_KEY: {"force_compact_before_next_run": True}}
+    assert stored.summary is not None
+    assert stored.summary.text == "legacy summary"
+    assert summary_rows_of(storage, _SCOPE.key, "session") == [
+        StoredSummaryRow(summary="legacy summary", legacy=True),
+    ]
+    assert summary_rows.legacy_event_ids(storage, session_id="session", scope_key=_SCOPE.key) == {"$legacy"}
+    assert stored_run_ids(storage, "session") == ["kept"]
+    assert [run.run_id for run in stored.runs or []] == ["kept"]
+
+
+def test_a_member_row_whose_id_is_not_text_below_a_tombstoned_run_does_not_stop_the_conversion(tmp_path: Path) -> None:
+    """Worker code can write a tombstoned copy's member row with an id that is not text; the copy goes, the row stays out."""
+    database = _seed_as_older_release(
+        tmp_path,
+        ConversationSession(
+            kind="agent",
+            session_id="session",
+            owner_id="code",
+            runs=[
+                RunRecord(run_id="gone", agent_id="code"),
+                RunRecord(run_id="member", agent_id="code", parent_run_id="gone"),
+                RunRecord(run_id="kept", agent_id="code"),
+            ],
+            summary=ScopeSummary(text="legacy summary", updated_at=_EPOCH),
+            metadata=_compaction_metadata(_SCOPE.key, {"compacted_run_ids": ["gone"]}),
+        ),
+    )
+    with closing(sqlite3.connect(database)) as connection, connection:
+        connection.execute("UPDATE code_sessions_runs SET run_id = ? WHERE run_id = 'member'", (b"\x09",))
+
+    storage = _open(tmp_path)
+
+    assert stored_run_ids(storage, "session") == ["kept"]
+
+
+def test_opening_storage_adopts_a_summary_without_compaction_state_under_the_row_scope(tmp_path: Path) -> None:
+    """A replayed summary with no retired keys belongs to the scope that owns the session row."""
+    team_scope = HistoryScope(kind="team", scope_id="squad")
+    storage = _migrated(
+        tmp_path,
+        ConversationSession(
+            kind="team",
+            session_id="session",
+            owner_id="squad",
+            summary=ScopeSummary(text="team summary", updated_at=_EPOCH),
+        ),
+    )
+    assert summary_rows_of(storage, team_scope.key, "session") == [
+        StoredSummaryRow(summary="team summary", legacy=True),
+    ]
+    stored = storage.load_session("session")
+    assert stored is not None
+    assert stored.summary is not None
+    assert stored.summary.text == "team summary"
+
+
+def test_opening_storage_leaves_uncompacted_scopes_and_their_seen_ids_alone(tmp_path: Path) -> None:
+    """Seen ids a team recorded without compaction stay in session metadata."""
+    metadata = _seen_metadata(_SCOPE.key, ["$consumed"])
+    storage = _migrated(
+        tmp_path,
+        ConversationSession(
+            kind="agent",
+            session_id="session",
+            owner_id="code",
+            runs=[RunRecord(run_id="kept", agent_id="code")],
+            metadata=metadata,
+        ),
+    )
+    assert summary_rows_of(storage, _SCOPE.key, "session") == []
+    stored = storage.load_session("session")
+    assert stored is not None
+    assert stored.metadata == {MINDROOM_HISTORY_METADATA_KEY: {"seen_event_ids": ["$consumed"]}}
+
+
+@pytest.mark.parametrize("column", ["metadata", "summary"])
+@pytest.mark.parametrize("stored", ["not json", "[" * 100_000 + "]" * 100_000], ids=["not-json", "too-deep"])
+def test_opening_storage_ignores_malformed_legacy_metadata(tmp_path: Path, column: str, stored: str) -> None:
+    """Metadata or a replayed summary no decoder reads is left as it is instead of failing the database open."""
+    _seed_as_older_release(tmp_path, ConversationSession(kind="agent", session_id="session", owner_id="code"))
+    with closing(sqlite3.connect(tmp_path / "sessions" / "code.db")) as connection, connection:
+        connection.execute(f"UPDATE code_sessions SET {column} = ? WHERE session_id = 'session'", (stored,))  # noqa: S608
+
+    storage = _open(tmp_path)
+    assert summary_rows_of(storage, _SCOPE.key, "session") == []
+    if column == "metadata":
+        with closing(sqlite3.connect(tmp_path / "sessions" / "code.db")) as connection:
+            assert connection.execute("SELECT metadata FROM code_sessions").fetchone() == (stored,)
+
+
+def test_opening_storage_keeps_seen_ids_of_a_scope_without_a_summary(tmp_path: Path) -> None:
+    """Tombstones alone carry no replayed summary, so no row is written and the scope's seen ids stay in metadata."""
+    seen = _seen_metadata(_SCOPE.key, ["$consumed"])
+    storage = _migrated(
+        tmp_path,
+        ConversationSession(
+            kind="agent",
+            session_id="session",
+            owner_id="code",
+            metadata={**_compaction_metadata(_SCOPE.key, {"compacted_run_ids": ["gone"]}), **seen},
+        ),
+    )
+    assert summary_rows_of(storage, _SCOPE.key, "session") == []
+    assert summary_rows.legacy_event_ids(storage, session_id="session", scope_key=_SCOPE.key) is None
+    stored = storage.load_session("session")
+    assert stored is not None
+    assert stored.metadata == {MINDROOM_HISTORY_METADATA_KEY: {"seen_event_ids": ["$consumed"]}}
+
+
+def test_opening_storage_reads_double_encoded_legacy_metadata(tmp_path: Path) -> None:
+    """Metadata an older Agno stored as a JSON string of JSON is adopted like plain JSON."""
+    _seed_as_older_release(
+        tmp_path,
+        ConversationSession(
+            kind="agent",
+            session_id="session",
+            owner_id="code",
+            summary=ScopeSummary(text="legacy summary", updated_at=_EPOCH),
+        ),
+    )
+    metadata = {
+        **_compaction_metadata(_SCOPE.key, {"compacted_run_ids": ["gone"]}),
+        **_seen_metadata(_SCOPE.key, ["$legacy"]),
+    }
+    connection = sqlite3.connect(tmp_path / "sessions" / "code.db")
+    try:
+        connection.execute(
+            "UPDATE code_sessions SET metadata = ? WHERE session_id = 'session'",
+            (json.dumps(json.dumps(metadata)),),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    storage = _open(tmp_path)
+    assert summary_rows_of(storage, _SCOPE.key, "session") == [
+        StoredSummaryRow(summary="legacy summary", legacy=True),
+    ]
+    assert summary_rows.legacy_event_ids(storage, session_id="session", scope_key=_SCOPE.key) == {"$legacy"}
+    stored = storage.load_session("session")
+    assert stored is not None
+    assert stored.metadata == {}
+
+
+def test_opening_storage_adopts_a_team_row_with_tombstones(tmp_path: Path) -> None:
+    """A team scope's tombstones and summary are adopted under the team scope."""
+    team_scope = HistoryScope(kind="team", scope_id="squad")
+    storage = _migrated(
+        tmp_path,
+        ConversationSession(
+            kind="team",
+            session_id="session",
+            owner_id="squad",
+            summary=ScopeSummary(text="team summary", updated_at=_EPOCH),
+            metadata=_compaction_metadata(team_scope.key, {"compacted_run_ids": ["gone"]}),
+        ),
+    )
+    assert summary_rows_of(storage, team_scope.key, "session") == [
+        StoredSummaryRow(summary="team summary", legacy=True),
+    ]
+    stored = storage.load_session("session")
+    assert stored is not None
+    assert stored.metadata == {}
+
+
+def test_opening_storage_turns_pre_archive_blob_runs_into_rows_without_tombstoned_ones(tmp_path: Path) -> None:
+    """Agno 2 blob runs stay in the conversation, except the copy of a run the destructive compactor deleted."""
+    _seed_as_older_release(
+        tmp_path,
+        ConversationSession(
+            kind="agent",
+            session_id="session",
+            owner_id="code",
+            summary=ScopeSummary(text="legacy summary", updated_at=_EPOCH),
+            metadata=_compaction_metadata(_SCOPE.key, {"compacted_run_ids": ["gone"]}),
+        ),
+    )
+    blob = [{"run_id": run_id, "agent_id": "code", "session_id": "session"} for run_id in ("gone", "kept")]
+    with closing(sqlite3.connect(tmp_path / "sessions" / "code.db")) as connection, connection:
+        connection.execute("ALTER TABLE code_sessions ADD COLUMN runs JSON")
+        connection.execute("UPDATE code_sessions SET runs = ?", (json.dumps(json.dumps(blob)),))
+
+    storage = _open(tmp_path)
+    stored = storage.load_session("session")
+    assert stored is not None
+    assert stored_run_ids(storage, "session") == ["kept"]
+    assert [run.run_id for run in stored.runs or []] == ["kept"]
+    assert stored.summary is not None
+    assert stored.summary.text == "legacy summary"
+
+
+def test_opening_storage_numbers_rows_an_old_writer_stored_without_an_index(tmp_path: Path) -> None:
+    """Rows without an index keep the first places a read gave them, and every row gets its place in the log."""
+    _seed_as_older_release(
+        tmp_path,
+        ConversationSession(
+            kind="agent",
+            session_id="session",
+            owner_id="code",
+            runs=[RunRecord(run_id=run_id, agent_id="code") for run_id in ("r0", "r1", "r2")],
+        ),
+    )
+    with closing(sqlite3.connect(tmp_path / "sessions" / "code.db")) as connection, connection:
+        connection.execute("UPDATE code_sessions_runs SET run_index = NULL WHERE run_id = 'r2'")
+
+    storage = _open(tmp_path)
+
+    assert stored_run_ids(storage, "session") == ["r2", "r0", "r1"]
+
+
+def test_an_agent_named_agno_migrates_the_agno_runs_table(tmp_path: Path) -> None:
+    """Agno names the runs table beside ``agno_sessions`` ``agno_runs``; the conversion reads it and then drops it."""
+    scope = HistoryScope(kind="agent", scope_id="agno")
+    db_file = _seed_as_older_release(
+        tmp_path,
+        ConversationSession(
+            kind="agent",
+            session_id="session",
+            owner_id="agno",
+            runs=[RunRecord(run_id=run_id, agent_id="agno") for run_id in ("gone", "r1", "r2")],
+            summary=ScopeSummary(text="legacy summary", updated_at=_EPOCH),
+            metadata=_compaction_metadata(scope.key, {"compacted_run_ids": ["gone"]}),
+        ),
+        "agno",
+    )
+    with closing(sqlite3.connect(db_file)) as connection, connection:
+        connection.execute("UPDATE agno_runs SET run_index = NULL WHERE run_id = 'r2'")
+
+    storage = create_agent_state_storage("agno", tmp_path)
+    assert stored_run_ids(storage, "session") == ["r2", "r1"]
+    assert summary_rows_of(storage, scope.key, "session") == [
+        StoredSummaryRow(summary="legacy summary", legacy=True),
+    ]
+    with closing(sqlite3.connect(db_file)) as connection:
+        runs_tables = {name for name in table_names(connection) if name.endswith("runs")}
+    assert runs_tables == {"agno_sessions_log_runs"}
+
+
+def _agno_2_database_with_summary(tmp_path: Path) -> Path:
+    """Write the Agno 2.6.12 fixture with a replayed ``session.summary``, as a destructive compactor left it."""
+    db_file = create_agno_2_sessions_db(_NAMES.database_path(tmp_path))
+    with closing(sqlite3.connect(db_file)) as connection, connection:
+        connection.execute("UPDATE code_sessions SET summary = ?", (json.dumps({"summary": "legacy summary"}),))
+    return db_file
+
+
+def _migrated_log(db_file: Path) -> tuple[list[tuple[str, int]], list[tuple[str, str, int, int]]]:
+    """Return the run positions and the summary rows of the converted fixture's session."""
+    with closing(sqlite3.connect(db_file)) as connection:
+        runs = connection.execute("SELECT run_id, seq FROM code_sessions_log_runs ORDER BY seq").fetchall()
+        rows = connection.execute(
+            "SELECT scope_key, summary, legacy, through FROM code_sessions_log_summaries ORDER BY id",
+        ).fetchall()
+    return runs, rows
+
+
+def _dump(db_file: Path) -> list[str]:
+    with closing(sqlite3.connect(db_file)) as connection:
+        return list(connection.iterdump())
+
+
+_MIGRATED_LOG = ([("run-1", 1), ("run-2", 2), ("run-3", 3)], [(_SCOPE.key, "legacy summary", 1, 0)])
+
+
+def test_an_agno_2_database_migrates_before_the_owned_store_opens_it(tmp_path: Path) -> None:
+    """The conversion needs no Agno storage, and the store then loads the runs after the adopted summary."""
+    db_file = _agno_2_database_with_summary(tmp_path)
+
+    prepare_conversation_database(db_file, _NAMES, recorded_owner(db_file))
+
+    assert _migrated_log(db_file) == _MIGRATED_LOG
+    session = ConversationStore(db_file).load_session("session-1")
+    assert session is not None
+    assert [run.run_id for run in session.runs] == ["run-1", "run-2", "run-3"]
+    assert session.summary is not None
+    assert session.summary.text == "legacy summary"
+
+
+def test_an_interrupted_migration_changes_nothing_and_runs_again(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failure after the blob moved and the summary row was written leaves the database as it was."""
+    db_file = _agno_2_database_with_summary(tmp_path)
+    before = _dump(db_file)
+
+    def interrupt(*_args: object, **_kwargs: object) -> set[str]:
+        message = "interrupted adoption"
+        raise RuntimeError(message)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(legacy_compaction_state, "delete_run_subtrees_in_transaction", interrupt)
+        with pytest.raises(RuntimeError, match="interrupted adoption"):
+            prepare_conversation_database(db_file, _NAMES, recorded_owner(db_file))
+
+    assert _dump(db_file) == before
+    prepare_conversation_database(db_file, _NAMES, recorded_owner(db_file))
+    assert _migrated_log(db_file) == _MIGRATED_LOG
+
+
+def test_owners_migrating_at_once_adopt_the_summary_once(tmp_path: Path) -> None:
+    """Startups racing on one database convert it once: one legacy summary row and one row per run."""
+    db_file = _agno_2_database_with_summary(tmp_path)
+    # Read the owner before the race: a conversion that commits first drops the columns it is read from.
+    owner = recorded_owner(db_file)
+    start = threading.Barrier(4)
+
+    def migrate(_index: int) -> None:
+        start.wait()
+        prepare_conversation_database(db_file, _NAMES, owner)
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        list(pool.map(migrate, range(4)))
+
+    assert _migrated_log(db_file) == _MIGRATED_LOG

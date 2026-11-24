@@ -9,12 +9,11 @@ import nio
 
 from mindroom.agent_descriptions import describe_agent
 from mindroom.authorization import responder_candidate_entities_with_membership_refresh
+from mindroom.contacts.turns import contact_counterparty_agent
 from mindroom.entity_resolution import entity_identity_registry
-from mindroom.responder_availability import (
-    filter_materializable_responders,
-    live_responder_entity_names,
-    materializable_agent_names_for_orchestrator,
-)
+from mindroom.responder_availability import filter_materializable_responders
+from mindroom.teams.formation import resolve_live_shared_agent_names
+from mindroom.tool_system.plugins import config_plugins
 
 if TYPE_CHECKING:
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
@@ -31,40 +30,59 @@ class _MatrixRoomAgent:
 
 
 async def available_room_agents(context: ToolRuntimeContext, room_id: str) -> list[_MatrixRoomAgent]:
-    """Apply current ingress authorization, room scope, and runtime availability."""
+    """Apply current ingress authorization, room scope, and runtime availability.
+
+    In the agent's own active contact room, the contact's other agent is a candidate whatever its access says, and
+    another deployment's agent there is one by its Matrix ID.
+    """
     context = replace(context, config=context.current_config, config_provider=None)
     target_room = context.room if room_id == context.room_id else None
-    target_room = target_room or context.client.rooms.get(room_id)
+    room = target_room or context.client.rooms.get(room_id) or nio.MatrixRoom(room_id, own_user_id="")
     if room_id == context.room_id:
-        candidates = await context.responder_candidates_for_current_room(
-            target_room or nio.MatrixRoom(room_id, own_user_id=""),
-            context.requester_id,
-        )
+        candidates = await context.responder_candidates_for_current_room(room, context.requester_id)
     else:
         candidates = await responder_candidate_entities_with_membership_refresh(
             context.client,
-            target_room or nio.MatrixRoom(room_id, own_user_id=""),
+            room,
             context.requester_id,
             context.config,
             context.runtime_paths,
             context.require_agent_reply_memberships(),
         )
-    candidates = filter_materializable_responders(
-        candidates,
+    registry = entity_identity_registry(context.config, context.runtime_paths)
+    counterparty = contact_counterparty_agent(
         context.config,
         context.runtime_paths,
-        materializable_agent_names=materializable_agent_names_for_orchestrator(context.orchestrator, context.config),
-        live_entity_names=live_responder_entity_names(context.orchestrator, context.config),
+        room_id=room_id,
+        agent_name=context.agent_name,
     )
-    registry = entity_identity_registry(context.config, context.runtime_paths)
+    if counterparty is not None and counterparty.kind == "agent":
+        candidates = [*candidates, registry.current_id(counterparty.id)]
+    if context.orchestrator is not None:
+        candidates = filter_materializable_responders(
+            candidates,
+            context.config,
+            context.runtime_paths,
+            materializable_agent_names=resolve_live_shared_agent_names(context.orchestrator, config=context.config),
+            live_entity_names=context.orchestrator.running_entity_names(),
+        )
     agents: dict[str, _MatrixRoomAgent] = {}
+    tools = config_plugins(context.config, context.runtime_paths).tools
     for candidate in candidates:
         name = registry.current_entity_name_for_user_id(candidate.full_id, include_router=False)
         if name in context.config.agents or name in context.config.teams:
             agents[name] = _MatrixRoomAgent(
                 name=name,
                 matrix_user_id=candidate.full_id,
-                description=describe_agent(name, context.config),
+                description=describe_agent(name, context.config, tools),
                 thread_mode=context.config.get_entity_thread_mode(name, context.runtime_paths, room_id=room_id),
             )
+    if counterparty is not None and counterparty.kind == "remote_agent":
+        # Another deployment's agent is named by its Matrix ID; its thread mode is its own deployment's to choose.
+        agents[counterparty.id] = _MatrixRoomAgent(
+            name=counterparty.id,
+            matrix_user_id=counterparty.id,
+            description="An agent of another MindRoom deployment.",
+            thread_mode="thread",
+        )
     return [agents[name] for name in sorted(agents)]

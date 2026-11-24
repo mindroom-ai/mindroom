@@ -97,7 +97,7 @@ if TYPE_CHECKING:
     ],
     managed_init_args=(ToolManagedInitArg.TOOL_OUTPUT_WORKSPACE_ROOT, ToolManagedInitArg.FILE_ACCESS),
     dependencies=["groq"],
-    docs_url="https://docs.agno.com/tools/toolkits/models/groq",
+    docs_url="https://docs.mindroom.chat/tools/ai-and-generation/#groq",
     function_names=("generate_speech", "transcribe_audio", "translate_audio"),
 )
 def groq_tools() -> type[MindRoomGroqTools]:

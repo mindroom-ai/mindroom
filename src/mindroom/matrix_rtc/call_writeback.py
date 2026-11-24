@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from html import escape
 from typing import TYPE_CHECKING
 
-from mindroom.constants import SKIP_MENTIONS_KEY
+from mindroom.constants import CALL_TRANSCRIPT_CONTENT_KEY, SKIP_MENTIONS_KEY
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import send_message_result
 from mindroom.matrix.message_builder import build_message_content
@@ -22,35 +22,53 @@ logger = get_logger(__name__)
 _MIN_WRITEBACK_SECONDS = 10
 
 
+def _call_time(seconds: int) -> str:
+    """Format whole seconds from the call start as ``[m:ss]``."""
+    return f"[{seconds // 60}:{seconds % 60:02}]"
+
+
 @dataclass(frozen=True)
 class _CallWriteback:
-    """Plain and HTML bodies of one transcript message."""
+    """Plain and HTML bodies of one transcript message, and its turns by sender ID for clients."""
 
     body: str
     formatted_body: str
+    transcript: dict[str, object]
 
 
 def format_call_writeback(
     *,
-    turns: Sequence[tuple[str, str]],
+    turns: Sequence[tuple[str, str, int]],
     duration_seconds: float,
+    caller_id: str,
     caller_label: str,
+    agent_id: str,
     agent_label: str,
 ) -> _CallWriteback | None:
     """Render the transcript message, or ``None`` for calls not worth posting.
 
     Labels and spoken text are folded onto one line and HTML-escaped, so neither can start a speaker line or add markup.
     """
-    if duration_seconds < _MIN_WRITEBACK_SECONDS or not any(role == "user" for role, _ in turns):
+    if duration_seconds < _MIN_WRITEBACK_SECONDS or not any(role == "user" for role, _, _ in turns):
         return None
     minutes = max(1, round(duration_seconds / 60))
     heading = f"📞 Voice call · {minutes} min"
-    labels = {"user": caller_label, "assistant": agent_label}
-    lines = [(" ".join(labels.get(role, role).split()), " ".join(text.split())) for role, text in turns]
-    body = "\n\n".join([heading, "Transcript", *(f"{label}: {text}" for label, text in lines)])
-    transcript = "".join(f"<p><strong>{escape(label)}</strong>: {escape(text)}</p>" for label, text in lines)
+    speakers = {
+        "user": (caller_id, " ".join(caller_label.split())),
+        "assistant": (agent_id, " ".join(agent_label.split())),
+    }
+    lines = [(*speakers[role], " ".join(text.split()), at) for role, text, at in turns if role in speakers]
+    body = "\n\n".join([heading, "Transcript", *(f"{_call_time(at)} {label}: {text}" for _, label, text, at in lines)])
+    transcript = "".join(
+        f"<p>{_call_time(at)} <strong>{escape(label)}</strong>: {escape(text)}</p>" for _, label, text, at in lines
+    )
     formatted_body = f"<p>{heading}</p><details><summary>Transcript</summary>{transcript}</details>"
-    return _CallWriteback(body=body, formatted_body=formatted_body)
+    turns_by_sender = [{"sender": sender, "text": text, "offset_seconds": at} for sender, _, text, at in lines]
+    return _CallWriteback(
+        body=body,
+        formatted_body=formatted_body,
+        transcript={"duration_seconds": round(duration_seconds), "turns": turns_by_sender},
+    )
 
 
 async def post_call_writeback(*, context: ToolRuntimeContext, origin: CallOrigin, writeback: _CallWriteback) -> None:
@@ -64,7 +82,7 @@ async def post_call_writeback(*, context: ToolRuntimeContext, origin: CallOrigin
         formatted_body=writeback.formatted_body,
         thread_event_id=origin.thread_id,
         latest_thread_event_id=latest_thread_event_id,
-        extra_content={SKIP_MENTIONS_KEY: True},
+        extra_content={SKIP_MENTIONS_KEY: True, CALL_TRANSCRIPT_CONTENT_KEY: writeback.transcript},
     )
     delivered = await send_message_result(
         context.client,

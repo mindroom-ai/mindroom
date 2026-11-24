@@ -18,7 +18,9 @@ helm upgrade --install mindroom-client ./cluster/k8s/client \
 
 The default values render a Deployment, Service, a client `config.json` ConfigMap, and an nginx ConfigMap.
 The Deployment carries checksum annotations for both chart-managed ConfigMaps, so config changes roll pods on upgrade.
-For production, pin `image.tag` or `image.digest` instead of the default `latest`.
+The default `image.tag` is a [MindRoom Chat release](https://github.com/mindroom-ai/mindroom-chat/releases) (`vYYYY.M.N`); set `image.tag` or `image.digest` to run another one.
+The pinned tag moves only when someone bumps it in `values.yaml`; new client releases do not update it.
+With a tag that moves, such as `latest`, also set `image.pullPolicy: Always`, because the default `IfNotPresent` keeps the image a node already has.
 
 ## Homeserver Configuration
 
@@ -97,6 +99,53 @@ nginx then serves that well-known path even without MatrixRTC; route it from the
 Without administrators the item is called **Download bug report** and saves the report as a file.
 See [Bug Reports](../../../docs/bug-reports.md) for what a report contains and where it goes.
 
+## Server Custom Emoji
+
+The client can offer the custom emoji of one shared room to everyone on the homeserver.
+When the MindRoom runtime runs against the homeserver, set `server_emoji.enabled: true` in its config, and it creates the room `#emoji:<server name>`; see [Custom Emoji](../../../docs/custom-emoji.md#let-mindroom-create-the-room).
+Otherwise, create that room once with an operator's access token, from the root of this repository:
+
+```bash
+MATRIX_ACCESS_TOKEN=... uv run python -m scripts.utilities.create_server_emoji_room \
+  --homeserver https://matrix.example.com --name "Example"
+```
+
+The script prints the room ID and the `io.mindroom.emoji` key that names the room's alias.
+Give that alias, or the room ID, to the chart to publish it in `/.well-known/matrix/client`:
+
+```yaml
+matrix:
+  homeserverUrl: https://matrix.example.com
+
+serverEmoji:
+  room: "#emoji:example.com"
+```
+
+Quote the value.
+Unquoted, `#` starts a YAML comment and `!` a YAML tag, so the chart would publish nothing and raise no error.
+
+nginx then serves that well-known path even without MatrixRTC; route it from the Matrix server-name origin to this Service as described above.
+Without a room, custom emoji stay personal to each user.
+The chart rejects a room that is not an alias or a room ID, an alias whose server is not a host name or IP literal with an optional port, or a value that contains whitespace, quotes, backslashes, `$`, `<`, `>` or `&`.
+See [Custom Emoji](../../../docs/custom-emoji.md) for who may add emoji and how the client uses the room.
+
+## Operator Notices
+
+The web client shows banners from `basePath/notices.json`, which nginx serves without caching; the [MindRoom Chat README](https://github.com/mindroom-ai/mindroom-chat#notices) documents the file format.
+Store the list under the `notices.json` key of a ConfigMap and name it in `notices.existingConfigMap`:
+
+```bash
+kubectl -n mindroom create configmap mindroom-client-notices --from-file=notices.json
+```
+
+```yaml
+notices:
+  existingConfigMap: mindroom-client-notices
+```
+
+Edits to the ConfigMap reach running pods within one to two minutes without a restart, and open tabs pick them up within another minute.
+Without `notices.existingConfigMap` the client serves the image's empty list, and while the named ConfigMap does not exist it shows no notices.
+
 ## Base Path
 
 Set `basePath` to serve the client under a URL prefix instead of the origin root:
@@ -105,10 +154,11 @@ Set `basePath` to serve the client under a URL prefix instead of the origin root
 basePath: /mindroom
 ```
 
+MindRoom Chat releases do not work under a sub-path yet: their asset URLs and `config.json` request start at `/`, so keep `basePath` at `/` with them.
 The chart-managed nginx config serves the app shell, `config.json`, and the service worker under the base path, redirects `/` and the bare base path to `basePath/`, and resolves hashed build assets referenced from any route depth.
 It also serves `version.json` under the base path without caching so the client can detect and load a newly published build.
-The bundled Element Call under `public/element-call/` resolves to its own `assets/` directory.
-Files under `assets/` and `public/` are cached as immutable, except Element Call's stable files such as its `index.html`, which revalidate on every use.
+Files under `assets/` are cached as immutable because their names change with their content.
+Files under `public/`, such as `public/locales/<lang>.json`, keep their names across releases, so they revalidate on every use; the hashed `public/element-call/assets/` that older images bundle stays immutable.
 Missing files there get no immutable caching header.
 The client always loads `/runtime-config.js` from the origin root, so route the full origin host to this Service even when `basePath` is not `/`.
 The chart serves `/runtime-config.js` directly from nginx because the image entrypoint would otherwise write it into the app directory, which the unprivileged read-only container forbids.
@@ -165,7 +215,9 @@ The chart serves the image's native `authentication-recovery.js` asset and a fix
 Changing `probeUrl` changes only the client bootstrap target; it does not create another nginx location.
 The selected client image must contain `/usr/share/nginx/html/authentication-recovery.js`.
 
-If an external gateway applies authentication, expose only the exact `/runtime-config.js` and `/authentication-recovery.js` asset routes without authentication so cached application shells can load the configuration and recovery code.
+If an external gateway applies authentication, exempt the exact `/runtime-config.js` and `/authentication-recovery.js` asset routes from it so cached application shells can load the configuration and recovery code.
+You may also exempt the service worker scripts at `basePath/sw.js` and, with `rootServiceWorkerCleanup`, `/sw.js`, so installed service workers can still update after the gateway session expires.
+Gateway rules that exempt a path usually exempt every path below it too, so the chart answers 404 below each of these files.
 Keep `/authentication-recovery-probe`, the configured navigation target, client routes, and API routes protected.
 Enabling this option does not change gateway authentication policies.
 
@@ -187,10 +239,25 @@ nginx:
     }
 ```
 
-The chart rejects `nginx.serverSnippet` when the nginx config is not chart-managed, because an external ConfigMap cannot receive the snippet.
+Set `nginx.httpSnippet` for directives that nginx accepts only outside a server block, such as `log_format`.
+The chart renders it above the server block, at nginx's http level, and evaluates it as a Helm template too.
+This example writes one JSON access log line per request:
 
-The app shell responses send `Content-Security-Policy: frame-ancestors 'self'` and `X-Frame-Options: SAMEORIGIN`, so only the client's own origin can frame the signed-in client.
+```yaml
+nginx:
+  httpSnippet: |
+    log_format json_access escape=json '{"time":"$time_iso8601","method":"$request_method","uri":"$request_uri","status":$status,"user_agent":"$http_user_agent"}';
+  serverSnippet: |
+    access_log /dev/stdout json_access;
+```
+
+The chart rejects `nginx.serverSnippet` and `nginx.httpSnippet` when the nginx config is not chart-managed, because an external ConfigMap cannot receive the snippet.
+
+Every response of the chart-managed nginx sends `Content-Security-Policy: frame-ancestors 'self'` and `X-Frame-Options: SAMEORIGIN`, so only the client's own origin can frame the client and its files, as the client does for its PDF viewer and client plugin pages.
+The device pairing page at `basePath/connect`, in any letter case, sends `frame-ancestors 'none'` and `X-Frame-Options: DENY` instead, so no origin can frame it.
 nginx ignores server-level `add_header` directives in any location that sets its own headers, as the app shell, configuration, and asset locations do, so response headers added through `nginx.serverSnippet` do not reach those responses.
+For the same reason, a location added through `nginx.serverSnippet` that sets its own `add_header` must repeat both framing headers.
+Response headers added through `nginx.httpSnippet` reach no response, because the server block sets its own framing headers.
 
 ## Custom nginx Config
 
@@ -209,7 +276,10 @@ When `rootServiceWorkerCleanup.enabled` is true, the same ConfigMap must also pr
 ## Notes
 
 - The chart does not create ingress, TLS, or a Matrix homeserver.
+- The chart runs nginx without the image's start scripts and replaces its nginx config, so an image must be based on the official nginx image and serve its build from `/usr/share/nginx/html`, where the chart mounts `config.json`.
 - The container runs as the unprivileged nginx user with a read-only root filesystem, so `nginx.port` must stay at 1024 or higher unless you grant extra privileges through `securityContext` or lower `net.ipv4.ip_unprivileged_port_start`.
+- The chart-managed nginx ConfigMap also replaces the image's main `nginx.conf`: nginx logs only warnings and errors, and the config sets the `user` directive, which only a root master can apply, only when `podSecurityContext` and `securityContext` may run nginx as root.
+  With `nginx.existingConfigMap`, nginx keeps the image's main config.
 - Set `nginx.ipv6: false` on nodes without an IPv6 stack, where binding `[::]` makes nginx fail at startup.
 - Use `nodeSelector`, `affinity`, `tolerations`, and `topologySpreadConstraints` for cluster-specific scheduling policy.
 - Set `selectorLabels` when adopting an existing Deployment with an immutable selector.

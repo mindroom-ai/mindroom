@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from mindroom.attachment_ids import normalize_attachment_id
+from mindroom.attachments.ids import normalize_attachment_id
 from mindroom.matrix.encrypted_file import encrypted_file_content_from_values
 
 

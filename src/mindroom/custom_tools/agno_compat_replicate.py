@@ -19,7 +19,7 @@ logger = get_logger(__name__)
 
 
 # AGNO_COMPAT: ReplicateTools checks its key but calls an unrelated default SDK client.
-# Reason: Agno 3.0.9 calls module-level replicate.run, so its resolved api_key
+# Reason: Agno 3.2.1 calls module-level replicate.run, so its resolved api_key
 # never reaches SDK authentication. Keep media parsing while binding each call.
 # Upstream issue: Tracking gap; no issue has been verified for this key handoff.
 # Upstream PR: No fix or client-injection proposal has been verified.

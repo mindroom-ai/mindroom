@@ -7,6 +7,7 @@ import os
 import shutil
 import socket
 import ssl
+import struct
 import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -117,8 +118,8 @@ def test_primary_egress_follows_curl_proxy_precedence(
     """Scheme proxies win over all_proxy, which applies only to schemes without one."""
     egress = browser_egress({}, env, egress_control=False)
     assert (egress.http, egress.https, egress.by_hostname) == (expected_http, expected_https, False)
-    assert egress._upstream_for(80) == expected_http
-    assert egress._upstream_for(443) == egress._upstream_for(8443) == expected_https
+    assert egress.upstream_for(80) == expected_http
+    assert egress.upstream_for(443) == egress.upstream_for(8443) == expected_https
 
 
 @pytest.mark.parametrize(
@@ -172,8 +173,8 @@ def test_runner_egress_fails_closed_on_unsupported_or_ambiguous_proxies(
 def test_no_proxy_matches_names_by_suffix_and_addresses_by_range(host: str, address: str, expected: bool) -> None:
     """NO_PROXY decides only whether an already validated destination skips the upstream proxy."""
     egress = BrowserEgress(no_proxy=(".corp.example", "printer", "10.0.0.0/8", "192.168.1.5", "[fd00::5]"))
-    assert egress._bypasses(host, ipaddress.ip_address(address)) is expected
-    assert BrowserEgress(no_proxy=("*",))._bypasses(host, ipaddress.ip_address(address)) is True
+    assert egress.bypasses(host, ipaddress.ip_address(address)) is expected
+    assert BrowserEgress(no_proxy=("*",)).bypasses(host, ipaddress.ip_address(address)) is True
 
 
 class _RecordingUpstream:
@@ -515,6 +516,47 @@ async def test_relay_tunnels_through_an_https_egress_proxy_and_survives_client_h
         upstream_server.close()
         await upstream_server.wait_closed()
     assert requests == [b"CONNECT 8.8.8.8:443 HTTP/1.1"]
+
+
+@pytest.mark.parametrize("reset", [True, False], ids=["reset", "close"])
+def test_relay_ends_cleanly_when_the_browser_closes_while_the_destination_sends_under_uvloop(reset: bool) -> None:
+    """Sandbox runners serve on uvloop, which reports a write to a connection the browser closed as RuntimeError."""
+    uvloop = pytest.importorskip("uvloop")
+
+    async def send_after_browser_closes(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        try:
+            await reader.read()
+            while True:
+                writer.write(b"x" * 1024)
+                await writer.drain()
+                # Let the relay return to reading between chunks, as it does between a server's writes.
+                await asyncio.sleep(0)
+        except (OSError, RuntimeError):
+            writer.transport.abort()
+
+    async def scenario() -> None:
+        server = await asyncio.start_server(send_after_browser_closes, "127.0.0.1", 0)
+        proxy = BrowserDestinationProxy(allow_loopback=True)
+        await proxy.start()
+        try:
+            _reader, writer, status = await socks5_connect(
+                proxy.endpoint,
+                "127.0.0.1",
+                server.sockets[0].getsockname()[1],
+            )
+            assert status == 0
+            (connection,) = proxy._connections
+            if reset:
+                writer.get_extra_info("socket").setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack("ii", 1, 0))
+            writer.close()
+            await asyncio.wait_for(connection, 5)
+        finally:
+            await proxy.close()
+            server.close()
+            await server.wait_closed()
+
+    with asyncio.Runner(loop_factory=uvloop.new_event_loop) as runner:
+        runner.run(scenario())
 
 
 @pytest.mark.asyncio
@@ -994,7 +1036,7 @@ async def test_address_that_drops_connections_falls_back_to_the_next_validated_a
 @pytest.mark.asyncio
 async def test_runner_proxy_tunnel_keeps_the_whole_setup_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
     """A runner's egress proxy gets the name once and picks the address itself, so its slow tunnel is not cut short."""
-    original_tunnel = browser_proxy._open_upstream_tunnel
+    original_tunnel = browser_proxy.open_upstream_tunnel
 
     def validate(_host: str, **_kwargs: bool | int) -> list[ipaddress.IPv4Address]:
         return [ipaddress.IPv4Address("8.8.8.8"), ipaddress.IPv4Address("8.8.4.4")]
@@ -1009,7 +1051,7 @@ async def test_runner_proxy_tunnel_keeps_the_whole_setup_deadline(monkeypatch: p
         return await original_tunnel(upstream, target, port, tls)
 
     monkeypatch.setattr(browser_proxy, "validated_connect_addresses", validate)
-    monkeypatch.setattr(browser_proxy, "_open_upstream_tunnel", slow_tunnel)
+    monkeypatch.setattr(browser_proxy, "open_upstream_tunnel", slow_tunnel)
     monkeypatch.setattr(browser_proxy, "_ATTEMPT_DEADLINE", 0.05)
     recorder = _RecordingUpstream()
     async with recorder as upstream_proxy:

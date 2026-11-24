@@ -3,53 +3,69 @@
 from __future__ import annotations
 
 import json
-from contextlib import contextmanager
 from dataclasses import replace
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 
 import pytest
-from agno.agent import Agent
-from agno.models.response import ModelResponse, ToolExecution
-from agno.run.agent import RunOutput
-from agno.run.base import RunStatus
 
-from mindroom.agent_storage import create_session_storage
-from mindroom.agents import apply_tool_approval_capability
-from mindroom.ai import run_delegated_child_response
+from mindroom import ai as ai_module
 from mindroom.config.agent import AgentConfig
-from mindroom.config.main import Config
-from mindroom.config.models import DefaultsConfig, ModelConfig
+from mindroom.config.knowledge import KnowledgeBaseConfig
+from mindroom.config.models import ModelConfig
 from mindroom.custom_tools.delegate import DelegateTools
-from mindroom.delegation.execution import _resolve_delegation_target, drive_delegations
+from mindroom.delegation import execution as delegation_execution
 from mindroom.delegation.lifecycle import MAX_DELEGATION_DEPTH, prepare_child_turn
+from mindroom.delegation.personas import follow_up_refusal, inline_persona
 from mindroom.delegation.sessions import reserve_subagent_turn, update_subagent_turn
 from mindroom.delegation.state import DelegationState, SubagentPersona
+from mindroom.delegation.targets import DelegationTarget, resolve_delegation_target
+from mindroom.llm.runs import RunStatus, ToolExecution
+from mindroom.response_turn import CompletedApprovalRun, PausedAttempt
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import tool_runtime_context
+from tests.agent_tool_helpers import toolkit_offers
+from tests.delegation_helpers import (
+    ScriptedAgents,
+    _delegate_runtime_context,
+    _runtime_paths,
+    _saved_approval_calls,
+    approval_executor,
+    authored_prompts,
+    native_delegation_config,
+    offered_tools,
+    respond,
+    resume,
+    stored_run,
+)
+from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 from tests.identity_helpers import entity_ids
-from tests.test_delegate_tools import _delegate_runtime_context, _runtime_paths
 from tests.test_delegation_direct_audit import _identity
-from tests.test_delegation_envelopes import _InstructionRecordingModel
-from tests.test_delegation_execution import DelegationModel, _call, _saved_approval_calls
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Iterator
+    from collections.abc import Awaitable, Callable
     from pathlib import Path
 
-    from agno.db.base import BaseDb
-
+    from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
+    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 _CRITIC = """---
 description: Finds the biggest risk.
-tools: [file]
+tools: [filesystem]
 model: haiku
 ---
 You are a hostile critic.
 """
 
 
-def _config(*, tools: tuple[str | dict[str, object], ...] = ("file",), approval: bool = False) -> Config:
-    return Config(
+def _config(
+    *,
+    tools: tuple[str | dict[str, object], ...] = ("filesystem",),
+    approval: bool = False,
+    knowledge_bases: tuple[str, ...] = (),
+) -> Config:
+    return native_delegation_config(
         agents={
             "leader": AgentConfig(
                 display_name="Leader",
@@ -57,16 +73,16 @@ def _config(*, tools: tuple[str | dict[str, object], ...] = ("file",), approval:
                 tools=list(tools),
                 delegate_to=["leader", "child"],
                 memory_backend="file",
+                knowledge_bases=list(knowledge_bases),
             ),
             "child": AgentConfig(display_name="Child"),
         },
-        defaults=DefaultsConfig(tools=[], learning=False),
-        memory={"backend": "none"},
+        knowledge_bases={base_id: KnowledgeBaseConfig(path=f"./{base_id}") for base_id in knowledge_bases},
         tool_approval={"rules": [{"match": "add", "action": "require_approval"}] if approval else []},
         models={
-            "default": ModelConfig(provider="test", id="default-model"),
-            "haiku": ModelConfig(provider="test", id="haiku-model"),
-            "sonnet": ModelConfig(provider="test", id="sonnet-model"),
+            "default": ModelConfig(provider="openai", id="default-model"),
+            "haiku": ModelConfig(provider="openai", id="haiku-model"),
+            "sonnet": ModelConfig(provider="openai", id="sonnet-model"),
         },
     )
 
@@ -82,23 +98,9 @@ def _write_profile(tmp_path: Path, name: str, content: str) -> Path:
     return path
 
 
-@contextmanager
-def _native_parent(
-    config: Config,
-    paths: RuntimePaths,
-    workspace: Path,
-    responses: list[ModelResponse],
-) -> Iterator[tuple[Agent, BaseDb]]:
-    """A native-path leader whose delegate tool may run itself, scripted with ``responses``."""
-    identity = _identity()
-    toolkit = DelegateTools("leader", ["leader"], paths, config, execution_identity=identity, workspace_root=workspace)
-    apply_tool_approval_capability(toolkit, config, supports_native_tool_approval=True, registered_tool_name="delegate")
-    storage = create_session_storage("leader", config, paths, identity)
-    try:
-        model = DelegationModel(id="test-parent", responses=responses)
-        yield Agent(name="leader", db=storage, tools=[toolkit], model=model), storage
-    finally:
-        storage.close()
+def _last_tool_results(model: ScriptedModel) -> list[str]:
+    """Return the tool results the model's last request carried."""
+    return [str(message.content) for message in model.requests[-1].messages if message.role == "tool"]
 
 
 class _Harness:
@@ -108,28 +110,22 @@ class _Harness:
         self.paths: RuntimePaths = _runtime_paths(tmp_path)
         self.config = config
         entity_ids(config, self.paths)
-        self.model = _InstructionRecordingModel(
-            id="test",
-            responses=[ModelResponse(content=f"Reply {index}.") for index in range(replies)],
-        )
-        self.models_loaded: list[str] = []
-
-        def load_model(*args: object) -> _InstructionRecordingModel:
-            self.models_loaded.append(str(args[2]))
-            return self.model
-
-        monkeypatch.setattr("mindroom.agents._load_agent_model_instance", load_model)
+        self.model = ScriptedModel([answer(f"Reply {index}.") for index in range(replies)])
+        self.agents = ScriptedAgents({"leader": self.model, "child": self.model})
+        self.agents.install(monkeypatch)
         self.identity = _identity()
         self.toolkit = self.tools(["leader", "child"])
 
-    def tools(self, delegate_to: list[str]) -> DelegateTools:
+    def tools(self, delegate_to: list[str], delegation_depth: int = 0) -> DelegateTools:
+        config = self.config.model_copy(deep=True)
+        config.agents["leader"].delegate_to = delegate_to
         return DelegateTools(
             "leader",
-            delegate_to,
             self.paths,
-            self.config,
+            config,
             execution_identity=self.identity,
             workspace_root=_workspace(self.paths.storage_root),
+            delegation_depth=delegation_depth,
         )
 
     async def run(self, call: Awaitable[str], config: Config | None = None) -> str:
@@ -148,18 +144,20 @@ async def test_inline_persona_starts_self_child(tmp_path: Path, monkeypatch: pyt
     harness = _Harness(tmp_path, monkeypatch, _config())
 
     result = await harness.run(
-        harness.toolkit.run_subagent(task="Review the plan", system_prompt="Inline {x} prompt", tools=["file"]),
+        harness.toolkit.run_subagent(task="Review the plan", system_prompt="Inline {x} prompt", tools=["filesystem"]),
     )
 
     assert "Reply 0." in result
-    assert harness.model.authored_prompts == ["Inline {x} prompt"]
+    assert authored_prompts(harness.model) == ["Inline {x} prompt"]
     child = harness.session_child()
     assert child["child_agent_name"] == "leader"
     assert child["persona"] == {
         "source_kind": "inline",
         "source_name": "",
         "system_prompt": "Inline {x} prompt",
-        "tools": ["file"],
+        "tools": ["filesystem"],
+        "skills": [],
+        "knowledge": [],
     }
 
 
@@ -172,8 +170,8 @@ async def test_profile_persona_uses_profile_prompt_and_model(tmp_path: Path, mon
     await harness.run(harness.toolkit.run_subagent(task="Find the risk", profile="critic"))
     await harness.run(harness.toolkit.run_subagent(task="Find another risk", profile="critic", model="sonnet"))
 
-    assert harness.model.authored_prompts == ["You are a hostile critic.", "You are a hostile critic."]
-    assert harness.models_loaded == ["haiku", "sonnet"]
+    assert authored_prompts(harness.model) == ["You are a hostile critic.", "You are a hostile critic."]
+    assert harness.agents.built_models == ["haiku", "sonnet"]
 
 
 @pytest.mark.asyncio
@@ -183,16 +181,19 @@ async def test_profile_persona_uses_profile_prompt_and_model(tmp_path: Path, mon
         ({"profile": "absent"}, "Cannot delegate: subagent profile 'absent' was not found in subagents/."),
         (
             {"agent_name": "child", "system_prompt": "P"},
-            "Cannot author a subagent for 'child': system_prompt, tools, and profile apply only to yourself.",
+            "Cannot author a subagent for 'child': system_prompt, tools, skills, knowledge, and profile apply only to yourself.",
         ),
         (
             {"profile": "critic", "system_prompt": "P"},
-            "Cannot delegate: pass either profile or system_prompt and tools",
+            "Cannot delegate: pass either profile or system_prompt, tools, skills, and knowledge",
         ),
-        ({"profile": "critic", "tools": ["file"]}, "Cannot delegate: pass either profile or system_prompt and tools"),
+        (
+            {"profile": "critic", "tools": ["filesystem"]},
+            "Cannot delegate: pass either profile or system_prompt, tools, skills, and knowledge",
+        ),
         (
             {"system_prompt": "P", "tools": ["shell"]},
-            "Cannot delegate: unknown tool 'shell'. Your tools: delegate, file",
+            "Cannot delegate: unknown tool 'shell'. Your tools: delegate, filesystem",
         ),
     ],
 )
@@ -208,7 +209,7 @@ async def test_invalid_authoring_is_refused_before_a_child_runs(
     result = await harness.run(harness.toolkit.run_subagent(task="Do it", **arguments))
 
     assert result.startswith(refusal)
-    assert harness.model.authored_prompts == []
+    assert authored_prompts(harness.model) == []
 
 
 def test_persona_parameters_hidden_without_self_delegation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -218,12 +219,12 @@ def test_persona_parameters_hidden_without_self_delegation(tmp_path: Path, monke
     self_allowed = harness.tools(["leader", "child"])
 
     def properties(toolkit: DelegateTools) -> set[str]:
-        return set(toolkit.async_functions["run_subagent"].parameters["properties"])
+        return set(toolkit_offers(toolkit, "run_subagent").parameters["properties"])
 
-    assert {"system_prompt", "tools", "profile"}.isdisjoint(properties(other_only))
-    assert {"system_prompt", "tools", "profile"} <= properties(self_allowed)
-    assert "system_prompt" not in other_only.async_functions["run_subagent"].description
-    assert "system_prompt" in self_allowed.async_functions["run_subagent"].description
+    assert {"system_prompt", "tools", "skills", "knowledge", "profile"}.isdisjoint(properties(other_only))
+    assert {"system_prompt", "tools", "skills", "knowledge", "profile"} <= properties(self_allowed)
+    assert "system_prompt" not in toolkit_offers(other_only, "run_subagent").description
+    assert "system_prompt" in toolkit_offers(self_allowed, "run_subagent").description
 
 
 def test_run_subagent_description_lists_profiles(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -232,11 +233,11 @@ def test_run_subagent_description_lists_profiles(tmp_path: Path, monkeypatch: py
     _write_profile(tmp_path, "broken", "---\ndescription: D\n---\n\n")
     harness = _Harness(tmp_path, monkeypatch, _config())
 
-    description = harness.tools(["leader"]).async_functions["run_subagent"].description or ""
+    description = toolkit_offers(harness.tools(["leader"]), "run_subagent").description or ""
 
     assert "critic: Finds the biggest risk." in description
     assert "broken (invalid: " in description
-    assert "critic" not in (harness.tools(["child"]).async_functions["run_subagent"].description or "")
+    assert "critic" not in (toolkit_offers(harness.tools(["child"]), "run_subagent").description or "")
 
 
 @pytest.mark.asyncio
@@ -250,15 +251,19 @@ async def test_follow_up_keeps_snapshot_after_profile_edit(tmp_path: Path, monke
 
     await harness.run(harness.toolkit.continue_subagent(subagent_id=subagent_id, message="And another?"))
 
-    assert harness.model.authored_prompts == ["You are a hostile critic.", "You are a hostile critic."]
+    assert authored_prompts(harness.model) == ["You are a hostile critic.", "You are a hostile critic."]
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("tools", "reduced", "refusal"),
     [
-        (["file"], (), "Subagent tool 'file' is no longer available to you; start a new subagent."),
-        (["file.save_file"], ({"file": {"include_tools": ["read_file"]}},), "'file.save_file' is not available to you"),
+        (["filesystem"], (), "Subagent tool 'filesystem' is no longer available to you; start a new subagent."),
+        (
+            ["filesystem.write_file"],
+            ({"filesystem": {"include_tools": ["read_file"]}},),
+            "'filesystem.write_file' is not available to you",
+        ),
     ],
 )
 async def test_follow_up_after_caller_lost_a_tool_is_refused(
@@ -279,7 +284,56 @@ async def test_follow_up_after_caller_lost_a_tool_is_refused(
     )
 
     assert refusal in result
-    assert harness.model.authored_prompts == ["P"]
+    assert authored_prompts(harness.model) == ["P"]
+
+
+def test_a_stored_selector_under_an_old_toolkit_name_is_refused_on_follow_up() -> None:
+    """A subagent saved with file or coding is not read as filesystem: its follow-up asks for a new subagent."""
+    config, registry = _config(tools=("filesystem", "shell")), builtin_tool_registry()
+    snapshot = {"source_kind": "inline", "source_name": "", "system_prompt": "P", "skills": None, "knowledge": None}
+
+    for stored, missing in ((["coding"], "coding"), (["shell", "file.read_file"], "file.read_file")):
+        persona = SubagentPersona.from_dict({**snapshot, "tools": stored})
+        refusal = follow_up_refusal(persona, "leader", config, registry, delegation_depth=0)
+        assert refusal == f"Subagent tool '{missing}' is no longer available to you; start a new subagent."
+
+
+@pytest.mark.asyncio
+async def test_a_new_subagent_takes_filesystem_by_an_old_name_and_a_saved_profile_does_not(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """run_subagent's own tools may say coding or file; a profile saved with them is read as written and refused."""
+    _write_profile(tmp_path, "reader", _CRITIC.replace("[filesystem]", "[coding]"))
+    harness = _Harness(tmp_path, monkeypatch, _config())
+
+    refused = await harness.run(harness.toolkit.run_subagent(task="Read", profile="reader"))
+    tools = ["coding", "file.read_file"]
+    await harness.run(harness.toolkit.run_subagent(task="Read", system_prompt="P", tools=tools))
+
+    assert "unknown tool 'coding'" in refused
+    assert harness.session_child()["persona"]["tools"] == ["filesystem", "filesystem.read_file"]
+
+
+@pytest.mark.asyncio
+async def test_a_direct_follow_up_is_refused_for_its_lost_tool_before_its_revoked_grant(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A follow-up that fails both checks names the subagent's lost tool on every channel, as the native driver does."""
+    harness = _Harness(tmp_path, monkeypatch, _config())
+    await harness.run(harness.toolkit.run_subagent(task="Work", system_prompt="P", tools=["filesystem"]))
+    subagent_id = str(harness.session_child()["subagent_id"])
+    reloaded = _config(tools=())
+    reloaded.agents["leader"].delegate_to = ["child"]
+
+    result = await harness.run(
+        harness.toolkit.continue_subagent(subagent_id=subagent_id, message="Again"),
+        config=reloaded,
+    )
+
+    assert result == "Subagent tool 'filesystem' is no longer available to you; start a new subagent."
+    assert authored_prompts(harness.model) == ["P"]
 
 
 @pytest.mark.asyncio
@@ -288,14 +342,14 @@ async def test_persona_naming_a_function_its_caller_lacks_never_runs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A function the caller's configuration removes is refused instead of starting a child without it."""
-    harness = _Harness(tmp_path, monkeypatch, _config(tools=({"file": {"include_tools": ["read_file"]}},)))
+    harness = _Harness(tmp_path, monkeypatch, _config(tools=({"filesystem": {"include_tools": ["read_file"]}},)))
 
     result = await harness.run(
-        harness.toolkit.run_subagent(task="Save it", system_prompt="P", tools=["file.save_file"]),
+        harness.toolkit.run_subagent(task="Save it", system_prompt="P", tools=["filesystem.write_file"]),
     )
 
-    assert "'file.save_file' is not available to you" in result
-    assert harness.model.authored_prompts == []
+    assert "'filesystem.write_file' is not available to you" in result
+    assert authored_prompts(harness.model) == []
 
 
 @pytest.mark.asyncio
@@ -304,9 +358,13 @@ async def test_native_team_member_authors_persona_for_itself(tmp_path: Path) -> 
     config = _config()
     paths = _runtime_paths(tmp_path)
     member_identity = replace(_identity(), agent_name="child")
-    tool = ToolExecution(tool_name="run_subagent", tool_args={"task": "Check", "system_prompt": "Member prompt"})
+    tool = ToolExecution(
+        tool_call_id="call-run_subagent",
+        tool_name="run_subagent",
+        tool_args={"task": "Check", "system_prompt": "Member prompt"},
+    )
 
-    target = await _resolve_delegation_target(
+    target = await resolve_delegation_target(
         tool,
         None,
         caller_identity=member_identity,
@@ -314,8 +372,9 @@ async def test_native_team_member_authors_persona_for_itself(tmp_path: Path) -> 
         runtime_paths=paths,
         depth=0,
     )
-    refused = await _resolve_delegation_target(
+    refused = await resolve_delegation_target(
         ToolExecution(
+            tool_call_id="call-run_subagent",
             tool_name="run_subagent",
             tool_args={"task": "Check", "agent_name": "leader", "system_prompt": "Member prompt"},
         ),
@@ -329,7 +388,10 @@ async def test_native_team_member_authors_persona_for_itself(tmp_path: Path) -> 
     assert not isinstance(target, str)
     assert target.agent_name == "child"
     assert target.persona == SubagentPersona(source_kind="inline", source_name="", system_prompt="Member prompt")
-    assert refused == "Cannot author a subagent for 'leader': system_prompt, tools, and profile apply only to yourself."
+    assert (
+        refused
+        == "Cannot author a subagent for 'leader': system_prompt, tools, skills, knowledge, and profile apply only to yourself."
+    )
 
 
 @pytest.mark.asyncio
@@ -337,96 +399,98 @@ async def test_native_resume_uses_frozen_persona_after_profile_delete(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A profile child paused for approval resumes with its frozen persona after the file is deleted."""
+    """A profile child paused for approval resumes with its frozen persona and knowledge after the file is deleted."""
     profile = _write_profile(
         tmp_path,
         "adder",
-        "---\ndescription: Adds numbers.\ntools: [calculator]\n---\nYou add numbers.\n",
+        "---\ndescription: Adds numbers.\ntools: [calculator]\nknowledge: [docs]\n---\nYou add numbers.\n",
     )
-    config = _config(tools=("calculator", "file"), approval=True)
+    config = _config(tools=("calculator", "filesystem"), approval=True, knowledge_bases=("docs", "faq"))
     paths = _runtime_paths(tmp_path)
     entity_ids(config, paths)
-    model = _InstructionRecordingModel(
-        id="test",
-        responses=[
-            ModelResponse(tool_calls=[_call("add", "approved-add", a=1, b=2)]),
-            ModelResponse(content="Sum is 3."),
+    identity = _identity()
+    model = ScriptedModel([calls(tool_call("add", "approved-add", a=1, b=2)), answer("Sum is 3.")])
+    parent = ScriptedModel(
+        [
+            calls(tool_call("run_subagent", "delegate", task="Add 1 and 2", profile="adder")),
+            answer("Parent finished."),
         ],
     )
-    monkeypatch.setattr("mindroom.agents._load_agent_model_instance", lambda *_args: model)
-    identity = _identity()
-    options = {
-        "run_child": run_delegated_child_response,
-        "agent_name": "leader",
-        "config": config,
-        "runtime_paths": paths,
-        "execution_identity": identity,
-    }
-    parent_responses = [
-        ModelResponse(tool_calls=[_call("run_subagent", "delegate", task="Add 1 and 2", profile="adder")]),
-        ModelResponse(content="Parent finished."),
-    ]
-    with (
-        _native_parent(config, paths, _workspace(tmp_path), parent_responses) as (parent, storage),
-        tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=identity)),
-    ):
-        response = await parent.arun("Delegate", session_id=identity.session_id, user_id=identity.requester_id)
-        paused = await drive_delegations(parent, response, **options)
-        assert paused.status == RunStatus.paused
-        state = DelegationState.from_metadata(paused.metadata)
-        profile.unlink()
-        persisted = storage.get_run(paused.run_id)
-        assert isinstance(persisted, RunOutput)
-        decisions = {str(tool["tool_call_id"]): True for tool in state.pending_tools}
-        completed = await drive_delegations(
-            parent,
-            persisted,
-            decisions=decisions,
-            denial_reasons=dict.fromkeys(decisions),
-            approval_calls=_saved_approval_calls(state),
-            **options,
-        )
+    ScriptedAgents({"leader": model}, by_session={identity.session_id: parent}).install(monkeypatch)
+    resumed_knowledge: list[object] = []
+    # The child's resume resolves its knowledge through the delegation driver's import.
+    resolve = delegation_execution.resolve_agent_knowledge_access_async
 
-    assert completed.status == RunStatus.completed
-    assert model.authored_prompts == ["You add numbers.", "You add numbers."]
-    assert len(model.offered) == 2
-    assert all("add" in offered and "read_file" not in offered for offered in model.offered)
+    async def recording_resolve(*args: object, **kwargs: object) -> object:
+        # The resumed parent resolves its own knowledge too; only the child's resolution is the persona's.
+        execution_identity = cast("ToolExecutionIdentity", kwargs["execution_identity"])
+        if execution_identity.session_id != identity.session_id:
+            resumed_knowledge.append(kwargs.get("only"))
+        return await resolve(*args, **kwargs)
+
+    monkeypatch.setattr(delegation_execution, "resolve_agent_knowledge_access_async", recording_resolve)
+    options = {"config": config, "runtime_paths": paths, "identity": identity}
+
+    paused = await respond("leader", "Delegate", **options, run_id="parent-run")
+    assert isinstance(paused, PausedAttempt)
+    state = DelegationState.from_metadata(stored_run("leader", "parent-run", **options).metadata)
+    profile.unlink()
+    approvals = _saved_approval_calls(state)
+    result = await resume(
+        approval_executor(config, paths),
+        paused,
+        approvals,
+        agent_name="leader",
+        **options,
+        decisions={call.tool_call_id: True for call in approvals},
+    )
+
+    assert isinstance(result, CompletedApprovalRun)
+    completed = stored_run("leader", "parent-run", **options)
+    assert completed.status is RunStatus.completed
+    assert authored_prompts(model) == ["You add numbers.", "You add numbers."]
+    assert resumed_knowledge == [("docs",)]
+    offered = offered_tools(model)
+    assert len(offered) == 2
+    assert all("add" in names and "read_file" not in names for names in offered)
     assert DelegationState.from_metadata(completed.metadata).children[0].persona == SubagentPersona(
         source_kind="profile",
         source_name="adder",
         system_prompt="You add numbers.",
         tools=("calculator",),
+        skills=(),
+        knowledge=("docs",),
     )
 
 
 @pytest.mark.asyncio
 async def test_nested_persona_stays_within_parent_tools(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """An authored subagent with delegate can author copies only within its own tools."""
-    harness = _Harness(tmp_path, monkeypatch, _config(tools=("file", "calculator")))
-    harness.model.responses = [
-        ModelResponse(tool_calls=[_call("run_subagent", "n1", task="Add.", system_prompt="Q", tools=["calculator"])]),
-        ModelResponse(tool_calls=[_call("run_subagent", "n2", task="Plain copy.")]),
-        ModelResponse(tool_calls=[_call("run_subagent", "n3", task="Read.", system_prompt="Q")]),
-        ModelResponse(content="Grandchild answer."),
-        ModelResponse(content="Child answer."),
+    harness = _Harness(tmp_path, monkeypatch, _config(tools=("filesystem", "calculator")))
+    harness.model.turns = [
+        calls(tool_call("run_subagent", "n1", task="Add.", system_prompt="Q", tools=["calculator"])),
+        calls(tool_call("run_subagent", "n2", task="Plain copy.")),
+        calls(tool_call("run_subagent", "n3", task="Read.", system_prompt="Q")),
+        answer("Grandchild answer."),
+        answer("Child answer."),
     ]
 
     result = await harness.run(
-        harness.toolkit.run_subagent(task="Coordinate.", system_prompt="P", tools=["delegate", "file"]),
+        harness.toolkit.run_subagent(task="Coordinate.", system_prompt="P", tools=["delegate", "filesystem"]),
     )
 
     assert "Child answer." in result
-    assert harness.model.authored_prompts == ["P", "P", "P", "Q", "P"]
+    assert authored_prompts(harness.model) == ["P", "P", "P", "Q", "P"]
     records = [
         json.loads(path.read_text())["child"]
         for path in (harness.paths.storage_root / "subagent_sessions").glob("*.json")
     ]
     grandchild = next(record for record in records if record["persona"]["system_prompt"] == "Q")
-    assert grandchild["persona"]["tools"] == ["delegate", "file"]
+    assert grandchild["persona"]["tools"] == ["delegate", "filesystem"]
     assert len(records) == 2
-    tool_results = [str(message.content) for message in harness.model.seen_messages if message.role == "tool"]
+    tool_results = _last_tool_results(harness.model)
     assert any(
-        "Cannot delegate: unknown tool 'calculator'. Your tools: delegate, file." in text for text in tool_results
+        "Cannot delegate: unknown tool 'calculator'. Your tools: delegate, filesystem." in text for text in tool_results
     )
     assert any("pass system_prompt or profile so the copy stays within your tools" in text for text in tool_results)
 
@@ -437,51 +501,52 @@ async def test_copy_at_max_depth_inherits_tools_without_delegate(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A copy started at the maximum depth inherits its parent's tools except delegate, which it cannot have."""
-    harness = _Harness(tmp_path, monkeypatch, _config(tools=("file", "calculator")))
-    harness.toolkit = DelegateTools(
-        "leader",
-        ["leader", "child"],
-        harness.paths,
-        harness.config,
-        execution_identity=harness.identity,
-        workspace_root=_workspace(harness.paths.storage_root),
-        delegation_depth=MAX_DELEGATION_DEPTH - 2,
-    )
-    harness.model.responses = [
-        ModelResponse(tool_calls=[_call("run_subagent", "n1", task="Read.", system_prompt="Q")]),
-        ModelResponse(content="Grandchild answer."),
-        ModelResponse(content="Child answer."),
+    harness = _Harness(tmp_path, monkeypatch, _config(tools=("filesystem", "calculator")))
+    harness.toolkit = harness.tools(["leader", "child"], delegation_depth=MAX_DELEGATION_DEPTH - 2)
+    harness.model.turns = [
+        calls(tool_call("run_subagent", "n1", task="Read.", system_prompt="Q")),
+        answer("Grandchild answer."),
+        answer("Child answer."),
     ]
 
     result = await harness.run(
-        harness.toolkit.run_subagent(task="Coordinate.", system_prompt="P", tools=["delegate", "file"]),
+        harness.toolkit.run_subagent(task="Coordinate.", system_prompt="P", tools=["delegate", "filesystem"]),
     )
 
     assert "Child answer." in result
-    assert harness.model.authored_prompts == ["P", "Q", "P"]
+    assert authored_prompts(harness.model) == ["P", "Q", "P"]
     records = [
         json.loads(path.read_text())["child"]
         for path in (harness.paths.storage_root / "subagent_sessions").glob("*.json")
     ]
     grandchild = next(record for record in records if record["persona"]["system_prompt"] == "Q")
-    assert grandchild["persona"]["tools"] == ["file"]
+    assert grandchild["persona"]["tools"] == ["filesystem"]
 
 
 @pytest.mark.asyncio
 async def test_native_copy_at_max_depth_inherits_tools_without_delegate(tmp_path: Path) -> None:
     """On the native path a copy started at the maximum depth inherits its parent's tools except delegate."""
-    config = _config(tools=("file", "calculator"))
+    config = _config(tools=("filesystem", "calculator"))
     paths = _runtime_paths(tmp_path)
     entity_ids(config, paths)
     identity = _identity()
     context = replace(
         _delegate_runtime_context(config, paths, execution_identity=identity),
-        persona_tools=("delegate", "file"),
+        persona=SubagentPersona(
+            source_kind="inline",
+            source_name="",
+            system_prompt="P",
+            tools=("delegate", "filesystem"),
+        ),
     )
 
     with tool_runtime_context(context):
-        target = await _resolve_delegation_target(
-            ToolExecution(tool_name="run_subagent", tool_args={"task": "Read.", "system_prompt": "Q"}),
+        target = await resolve_delegation_target(
+            ToolExecution(
+                tool_call_id="call-run_subagent",
+                tool_name="run_subagent",
+                tool_args={"task": "Read.", "system_prompt": "Q"},
+            ),
             None,
             caller_identity=identity,
             config=config,
@@ -491,23 +556,35 @@ async def test_native_copy_at_max_depth_inherits_tools_without_delegate(tmp_path
 
     assert not isinstance(target, str), target
     assert target.persona is not None
-    assert target.persona.tools == ("file",)
+    assert target.persona.tools == ("filesystem",)
 
 
 @pytest.mark.asyncio
-async def test_native_authoring_after_the_caller_is_removed_is_refused(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("arguments", "refusal"),
+    [
+        ({"tools": ["filesystem"]}, "Cannot delegate: unknown tool 'filesystem'. Your tools: none."),
+        ({"knowledge": ["docs"]}, "Cannot delegate: unknown knowledge base 'docs'. Your knowledge bases: none."),
+    ],
+)
+async def test_native_authoring_after_the_caller_is_removed_is_refused(
+    tmp_path: Path,
+    arguments: dict[str, object],
+    refusal: str,
+) -> None:
     """A reload that removes the caller mid-response refuses its authored subagent instead of failing the response."""
-    config = _config(tools=("file",))
+    config = _config(tools=("filesystem",))
     paths = _runtime_paths(tmp_path)
     entity_ids(config, paths)
     identity = _identity()
     without_caller = config.model_copy(update={"agents": {"child": config.agents["child"]}})
 
     with tool_runtime_context(_delegate_runtime_context(without_caller, paths, execution_identity=identity)):
-        result = await _resolve_delegation_target(
+        result = await resolve_delegation_target(
             ToolExecution(
+                tool_call_id="call-run_subagent",
                 tool_name="run_subagent",
-                tool_args={"task": "Read.", "system_prompt": "Q", "tools": ["file"]},
+                tool_args={"task": "Read.", "system_prompt": "Q", **arguments},
             ),
             None,
             caller_identity=identity,
@@ -516,7 +593,7 @@ async def test_native_authoring_after_the_caller_is_removed_is_refused(tmp_path:
             depth=0,
         )
 
-    assert result == "Cannot delegate: unknown tool 'file'. Your tools: none."
+    assert result == refusal
 
 
 @pytest.mark.asyncio
@@ -534,18 +611,23 @@ async def test_native_follow_up_checks_the_current_config(tmp_path: Path) -> Non
         config=with_file,
         runtime_paths=paths,
         depth=0,
-        persona=SubagentPersona(source_kind="inline", source_name="", system_prompt="P", tools=("file",)),
+        budget_monitor=None,
+        persona=SubagentPersona(source_kind="inline", source_name="", system_prompt="P", tools=("filesystem",)),
+        model=None,
+        agent_mode="standard",
+        previous=None,
     )
     await reserve_subagent_turn(child, owner=identity, runtime_paths=paths)
     child.status = "completed"
     await update_subagent_turn(child, paths)
     follow_up = ToolExecution(
+        tool_call_id="call-continue_subagent",
         tool_name="continue_subagent",
         tool_args={"subagent_id": child.subagent_id, "message": "Again"},
     )
 
     with tool_runtime_context(_delegate_runtime_context(without_file, paths, execution_identity=identity)):
-        result = await _resolve_delegation_target(
+        result = await resolve_delegation_target(
             follow_up,
             None,
             caller_identity=identity,
@@ -554,7 +636,7 @@ async def test_native_follow_up_checks_the_current_config(tmp_path: Path) -> Non
             depth=0,
         )
 
-    assert result == "Subagent tool 'file' is no longer available to you; start a new subagent."
+    assert result == "Subagent tool 'filesystem' is no longer available to you; start a new subagent."
 
 
 @pytest.mark.asyncio
@@ -563,57 +645,47 @@ async def test_native_nested_persona_stays_within_running_child_tools(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """On the native path an authored child's tools cap the copies it authors, and it cannot start a plain copy."""
-    config = _config(tools=("file", "calculator"))
+    config = _config(tools=("filesystem", "calculator"))
     paths = _runtime_paths(tmp_path)
     entity_ids(config, paths)
-    model = _InstructionRecordingModel(
-        id="test",
-        responses=[
-            ModelResponse(
-                tool_calls=[_call("run_subagent", "n1", task="Add.", system_prompt="Q", tools=["calculator"])],
-            ),
-            ModelResponse(tool_calls=[_call("run_subagent", "n2", task="Plain copy.")]),
-            ModelResponse(tool_calls=[_call("run_subagent", "n3", task="Read.", system_prompt="Q")]),
-            ModelResponse(content="Grandchild answer."),
-            ModelResponse(content="Child finished."),
+    identity = _identity()
+    model = ScriptedModel(
+        [
+            calls(tool_call("run_subagent", "n1", task="Add.", system_prompt="Q", tools=["calculator"])),
+            calls(tool_call("run_subagent", "n2", task="Plain copy.")),
+            calls(tool_call("run_subagent", "n3", task="Read.", system_prompt="Q")),
+            answer("Grandchild answer."),
+            answer("Child finished."),
         ],
     )
-    monkeypatch.setattr("mindroom.agents._load_agent_model_instance", lambda *_args: model)
-    identity = _identity()
-    parent_responses = [
-        ModelResponse(
-            tool_calls=[
-                _call("run_subagent", "delegate", task="Coordinate.", system_prompt="P", tools=["delegate", "file"]),
-            ],
-        ),
-        ModelResponse(content="Parent finished."),
-    ]
-    with (
-        _native_parent(config, paths, _workspace(tmp_path), parent_responses) as (parent, _storage),
-        tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=identity)),
-    ):
-        response = await parent.arun("Delegate", session_id=identity.session_id, user_id=identity.requester_id)
-        completed = await drive_delegations(
-            parent,
-            response,
-            run_child=run_delegated_child_response,
-            agent_name="leader",
-            config=config,
-            runtime_paths=paths,
-            execution_identity=identity,
-        )
+    authored = {"system_prompt": "P", "tools": ["delegate", "filesystem"]}
+    parent = ScriptedModel(
+        [calls(tool_call("run_subagent", "delegate", task="Coordinate.", **authored)), answer("Parent finished.")],
+    )
+    ScriptedAgents({"leader": model}, by_session={identity.session_id: parent}).install(monkeypatch)
+    options = {"config": config, "runtime_paths": paths, "identity": identity}
 
-    assert completed.status == RunStatus.completed
-    assert model.authored_prompts == ["P", "P", "P", "Q", "P"]
+    reply = await respond("leader", "Delegate", **options, run_id="parent-run")
+
+    assert isinstance(reply, str)
+    assert stored_run("leader", "parent-run", **options).status is RunStatus.completed
+    assert authored_prompts(model) == ["P", "P", "P", "Q", "P"]
     records = [
         json.loads(path.read_text())["child"] for path in (paths.storage_root / "subagent_sessions").glob("*.json")
     ]
     assert len(records) == 2
     grandchild = next(record for record in records if record["persona"]["system_prompt"] == "Q")
-    assert grandchild["persona"]["tools"] == ["delegate", "file"]
-    tool_results = [str(message.content) for message in model.seen_messages if message.role == "tool"]
+    assert grandchild["persona"]["tools"] == ["delegate", "filesystem"]
+    # The audit record of the child the grandchild ran inside names it as the parent delegation.
+    audits = {
+        run["persona"]["system_prompt"]: run
+        for run in (json.loads(path.read_text()) for path in paths.storage_root.rglob("run.json"))
+    }
+    assert audits["P"]["parent_delegation_id"] is None
+    assert audits["Q"]["parent_delegation_id"] == audits["P"]["delegation_id"]
+    tool_results = _last_tool_results(model)
     assert any(
-        "Cannot delegate: unknown tool 'calculator'. Your tools: delegate, file." in text for text in tool_results
+        "Cannot delegate: unknown tool 'calculator'. Your tools: delegate, filesystem." in text for text in tool_results
     )
     assert any("stays within your tools" in text for text in tool_results)
 
@@ -624,12 +696,12 @@ async def test_fresh_direct_persona_checks_the_current_config(tmp_path: Path, mo
     harness = _Harness(tmp_path, monkeypatch, _config())
 
     result = await harness.run(
-        harness.toolkit.run_subagent(task="Read.", system_prompt="P", tools=["file"]),
+        harness.toolkit.run_subagent(task="Read.", system_prompt="P", tools=["filesystem"]),
         config=_config(tools=()),
     )
 
-    assert result.startswith("Cannot delegate: unknown tool 'file'. Your tools: ")
-    assert harness.model.authored_prompts == []
+    assert result.startswith("Cannot delegate: unknown tool 'filesystem'. Your tools: ")
+    assert authored_prompts(harness.model) == []
 
 
 @pytest.mark.asyncio
@@ -641,9 +713,132 @@ async def test_plain_delegation_never_lists_caller_tools(tmp_path: Path, monkeyp
         msg = "caller tools must not be listed for a plain delegation"
         raise AssertionError(msg)
 
-    monkeypatch.setattr("mindroom.custom_tools.delegate.caller_toolkit_names", unavailable)
-    monkeypatch.setattr("mindroom.delegation.execution.caller_toolkit_names", unavailable)
+    monkeypatch.setattr("mindroom.delegation.targets.caller_toolkit_names", unavailable)
 
     result = await harness.run(harness.toolkit.run_subagent(task="Summarize.", agent_name="child"))
 
     assert "Reply 0." in result
+
+
+def _write_skill(tmp_path: Path, name: str) -> None:
+    skill = _workspace(tmp_path) / "skills" / name
+    skill.mkdir(parents=True, exist_ok=True)
+    (skill / "SKILL.md").write_text(f"---\nname: {name}\ndescription: The {name} skill\n---\n\n{name} body\n")
+
+
+@pytest.mark.asyncio
+async def test_authored_skills_are_checked_against_the_callers_skills(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A named skill must be one of the caller's own, and the child records the skills it was given."""
+    _write_skill(tmp_path, "research")
+    harness = _Harness(tmp_path, monkeypatch, _config())
+
+    refused = await harness.run(harness.toolkit.run_subagent(task="Read.", system_prompt="P", skills=["absent"]))
+    await harness.run(harness.toolkit.run_subagent(task="Read.", system_prompt="P", skills=["research"]))
+
+    assert refused == "Cannot delegate: unknown skill 'absent'. Your skills: research."
+    assert harness.session_child()["persona"]["skills"] == ["research"]
+
+
+def _knowledge_config() -> Config:
+    """Give the leader the semantic bases docs and faq and the files-mode base notes; wiki belongs to no agent."""
+    config = _config(knowledge_bases=("docs", "faq"))
+    config.knowledge_bases["wiki"] = KnowledgeBaseConfig(path="./wiki")
+    config.knowledge_bases["notes"] = KnowledgeBaseConfig(path="./notes", mode="files")
+    config.agents["leader"].knowledge_bases.append("notes")
+    return config
+
+
+def _native_resolver(
+    tmp_path: Path,
+    config: Config,
+) -> tuple[ToolRuntimeContext, Callable[..., Awaitable[DelegationTarget | str]]]:
+    """Return the caller's tool context and a resolver for its native run_subagent calls with system_prompt Q."""
+    paths = _runtime_paths(tmp_path)
+    entity_ids(config, paths)
+    identity = _identity()
+
+    async def resolve(context: ToolRuntimeContext, **arguments: object) -> DelegationTarget | str:
+        with tool_runtime_context(context):
+            return await resolve_delegation_target(
+                ToolExecution(
+                    tool_call_id="call-run_subagent",
+                    tool_name="run_subagent",
+                    tool_args={"task": "Read.", "system_prompt": "Q", **arguments},
+                ),
+                None,
+                caller_identity=identity,
+                config=config,
+                runtime_paths=paths,
+                depth=0,
+            )
+
+    return _delegate_runtime_context(config, paths, execution_identity=identity), resolve
+
+
+@pytest.mark.asyncio
+async def test_native_authoring_checks_and_inherits_skills(tmp_path: Path) -> None:
+    """The native path checks named skills against the caller's own, and a copy without skills inherits its parent's."""
+    _write_skill(tmp_path, "research")
+    _write_skill(tmp_path, "writing")
+    base, resolve = _native_resolver(tmp_path, _config())
+
+    refused = await resolve(base, skills=["absent"])
+    inherited = await resolve(replace(base, persona=inline_persona("P", None, ["writing"], None)))
+
+    assert refused == "Cannot delegate: unknown skill 'absent'. Your skills: research, writing."
+    assert not isinstance(inherited, str)
+    assert inherited.persona is not None
+    assert inherited.persona.skills == ("writing",)
+
+
+@pytest.mark.asyncio
+async def test_native_authoring_checks_names_and_inherits_knowledge(tmp_path: Path) -> None:
+    """The native path checks named knowledge bases against the caller's own and keeps them, and a copy inherits its parent's."""
+    base, resolve = _native_resolver(tmp_path, _knowledge_config())
+
+    refused = await resolve(base, knowledge=["wiki"])
+    refused_files = await resolve(base, knowledge=["notes"])
+    named = await resolve(base, knowledge=["faq"])
+    inherited = await resolve(replace(base, persona=inline_persona("P", None, None, ["docs"])))
+
+    assert refused == "Cannot delegate: unknown knowledge base 'wiki'. Your knowledge bases: docs, faq."
+    assert refused_files == "Cannot delegate: unknown knowledge base 'notes'. Your knowledge bases: docs, faq."
+    assert not isinstance(named, str)
+    assert named.persona is not None
+    assert named.persona.knowledge == ("faq",)
+    assert not isinstance(inherited, str)
+    assert inherited.persona is not None
+    assert inherited.persona.knowledge == ("docs",)
+
+
+@pytest.mark.asyncio
+async def test_authored_knowledge_narrows_the_childs_knowledge_bases(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A named knowledge base must be one of the caller's, and the child resolves only the bases it keeps."""
+    harness = _Harness(tmp_path, monkeypatch, _knowledge_config())
+    requested: list[tuple[str, ...] | None] = []
+    resolve = ai_module.resolve_agent_knowledge_access_async
+
+    async def recording_resolve(*args: object, **kwargs: object) -> object:
+        requested.append(cast("tuple[str, ...] | None", kwargs.get("only")))
+        return await resolve(*args, **kwargs)
+
+    monkeypatch.setattr(ai_module, "resolve_agent_knowledge_access_async", recording_resolve)
+
+    refused = await harness.run(harness.toolkit.run_subagent(task="Read.", system_prompt="P", knowledge=["wiki"]))
+    refused_files = await harness.run(
+        harness.toolkit.run_subagent(task="Read.", system_prompt="P", knowledge=["notes"]),
+    )
+    await harness.run(
+        harness.toolkit.run_subagent(task="Read.", system_prompt="P", tools=["filesystem"], knowledge=["faq"]),
+    )
+
+    assert refused == "Cannot delegate: unknown knowledge base 'wiki'. Your knowledge bases: docs, faq."
+    assert refused_files == "Cannot delegate: unknown knowledge base 'notes'. Your knowledge bases: docs, faq."
+    assert requested == [("faq",)]
+    assert harness.session_child()["persona"]["knowledge"] == ["faq"]

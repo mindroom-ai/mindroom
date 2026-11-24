@@ -15,6 +15,13 @@ CONCRETE_ORCHESTRATOR_IMPORT_ALLOWLIST = {
 RUNTIME_PROTOCOLS_MODULE = Path("src/mindroom/runtime_protocols.py")
 CONFIG_MAIN_MODULE = Path("src/mindroom/config/main.py")
 CONFIG_MODELS_MODULE = Path("src/mindroom/config/models.py")
+CONFIG_SLACK_MODULE = Path("src/mindroom/config/slack.py")
+# The only `mindroom.matrix.identity` names each config module may import: identity helpers config validation uses.
+CONFIG_IDENTITY_IMPORT_ALLOWLIST = {
+    CONFIG_MAIN_MODULE: {"managed_account_key"},
+    CONFIG_MODELS_MODULE: {"valid_matrix_server_name"},
+    CONFIG_SLACK_MODULE: {"validate_email_to_matrix_mapping"},
+}
 APPROVAL_CONFIG_MODULE = Path("src/mindroom/config/approval.py")
 MATRIX_MESSAGE_TOOL_MODULE = Path("src/mindroom/custom_tools/matrix_message.py")
 RESPONSE_RUNNER_MODULE = Path("src/mindroom/response_runner.py")
@@ -38,9 +45,9 @@ MATRIX_IDENTIFIER_HELPERS = frozenset(
         "agent_username_localpart",
         "extract_server_name_from_homeserver",
         "managed_room_alias_localpart",
+        "managed_room_key_for_alias",
         "managed_space_alias_localpart",
         "mindroom_namespace",
-        "room_alias_identifier_candidates",
     },
 )
 
@@ -50,17 +57,15 @@ def _is_matrix_runtime_module(module: str) -> bool:
 
 
 def test_config_modules_do_not_import_matrix_runtime_modules() -> None:
-    """Config models avoid Matrix runtime imports outside the server-name validation seam."""
+    """Config models avoid Matrix runtime imports outside the identity validation seam."""
     forbidden: list[str] = []
     for source_path in CONFIG_MODULES:
         tree = ast.parse(source_path.read_text(encoding="utf-8"))
         for node in ast.walk(tree):
             if isinstance(node, ast.ImportFrom) and node.module and _is_matrix_runtime_module(node.module):
-                if (
-                    source_path == CONFIG_MODELS_MODULE
-                    and node.module == "mindroom.matrix.identity"
-                    and {alias.name for alias in node.names} == {"valid_matrix_server_name"}
-                ):
+                if node.module == "mindroom.matrix.identity" and {
+                    alias.name for alias in node.names
+                } == CONFIG_IDENTITY_IMPORT_ALLOWLIST.get(source_path):
                     continue
                 forbidden.append(f"{source_path}:{node.lineno}: from {node.module}")
             if isinstance(node, ast.Import):
@@ -230,7 +235,11 @@ def test_response_runner_delegates_lifecycle_coordination() -> None:
     """ResponseRunner should delegate lock and queued-turn state to response_lifecycle."""
     tree = ast.parse(RESPONSE_RUNNER_MODULE.read_text(encoding="utf-8"))
     forbidden_names = {
+        "_Conversation",
         "_QueuedMessageState",
+        "_conversation_for",
+        "_conversation_for_key",
+        "_conversations",
         "_get_or_create_queued_signal",
         "_response_lifecycle_lock",
         "_response_lifecycle_locks",
@@ -248,15 +257,8 @@ def test_response_runner_delegates_lifecycle_coordination() -> None:
 
 
 def test_response_lifecycle_does_not_reach_into_response_runner_internals() -> None:
-    """Response lifecycle owns its dependencies instead of calling runner-private helpers."""
+    """Response lifecycle owns its dependencies instead of importing the response runner."""
     tree = ast.parse(RESPONSE_LIFECYCLE_MODULE.read_text(encoding="utf-8"))
-    forbidden_private_helpers = {
-        "_emit_pipeline_timing_summary",
-        "_emit_session_started_safely",
-        "_log_post_response_effects_failure",
-        "_response_outcome",
-        "_should_watch_session_started",
-    }
     found: list[str] = []
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
@@ -265,12 +267,8 @@ def test_response_lifecycle_does_not_reach_into_response_runner_internals() -> N
             ) or node.module == "mindroom.response_runner"
             if imported_from_response_runner:
                 found.append(f"{RESPONSE_LIFECYCLE_MODULE}:{node.lineno}: from response_runner")
-        if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef) and node.name in forbidden_private_helpers:
-            found.append(f"{RESPONSE_LIFECYCLE_MODULE}:{node.lineno}: {node.name}")
-        if isinstance(node, ast.Name) and node.id in {"ResponseRequest", "ResponseRunner", *forbidden_private_helpers}:
+        if isinstance(node, ast.Name) and node.id in {"ResponseRequest", "ResponseRunner"}:
             found.append(f"{RESPONSE_LIFECYCLE_MODULE}:{node.lineno}: {node.id}")
-        if isinstance(node, ast.Attribute) and node.attr in forbidden_private_helpers:
-            found.append(f"{RESPONSE_LIFECYCLE_MODULE}:{node.lineno}: {node.attr}")
 
     assert found == []
 

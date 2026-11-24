@@ -10,14 +10,16 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
 
     private let runner: MindRoomCommandRunner
     private let desktop: DesktopControlStore
+    private let chatApp: ChatAppStore
     private let menu = NSMenu()
     private var statusItem: NSStatusItem?
     private var statusRefreshTimer: Timer?
     private var subscriptions = Set<AnyCancellable>()
 
-    init(runner: MindRoomCommandRunner = .shared, desktop: DesktopControlStore = .shared) {
+    init(runner: MindRoomCommandRunner = .shared, desktop: DesktopControlStore = .shared, chatApp: ChatAppStore = .shared) {
         self.runner = runner
         self.desktop = desktop
+        self.chatApp = chatApp
         super.init()
         menu.delegate = self
         menu.autoenablesItems = false
@@ -31,7 +33,7 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
         item.button?.imagePosition = .imageOnly
         item.button?.setAccessibilityLabel("MindRoom")
         statusItem = item
-        runner.objectWillChange.merge(with: desktop.objectWillChange)
+        runner.objectWillChange.merge(with: desktop.objectWillChange, chatApp.objectWillChange)
             // Defer until the published value is assigned, including while menus/panels are open.
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in self?.refresh() }
@@ -68,6 +70,14 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
         menu.addItem(.sectionHeader(title: "MindRoom"))
         menu.addItem(actionItem("Open MindRoom…", symbol: "macwindow", action: #selector(openWindow)))
         menu.addItem(actionItem("Open Chat", symbol: "bubble.left.and.bubble.right", action: #selector(openChat)))
+        chatApp.refresh()
+        let chatAppItem = actionItem(
+            chatApp.installedURL != nil ? "Open MindRoom Chat"
+                : chatApp.progress != nil ? "Installing MindRoom Chat…" : "Install MindRoom Chat…",
+            symbol: chatApp.installedURL != nil ? "arrow.up.forward.app" : "arrow.down.app", action: #selector(openChatApp)
+        )
+        chatAppItem.isEnabled = chatApp.progress == nil
+        menu.addItem(chatAppItem)
         let dashboardItem = actionItem("Open Dashboard", symbol: "square.grid.2x2", action: #selector(openDashboard))
         dashboardItem.isEnabled = runner.serviceStatus.state.canOpenDashboard
         menu.addItem(dashboardItem)
@@ -137,6 +147,11 @@ final class StatusMenuController: NSObject, NSMenuDelegate {
     @objc private func reviewCommand() { showShellApproval() }
     @objc private func openSettings() { showWindow(.settings) }
     @objc private func openChat() { runner.run(.openHostedChat) }
+    @objc private func openChatApp() {
+        chatApp.openOrInstall()
+        // Overview shows an install's progress and why a copy was not opened: neither is silent.
+        if chatApp.installedURL == nil || chatApp.error != nil { showWindow(.overview) }
+    }
     @objc private func openDashboard() { runner.run(.openDashboard) }
     @objc private func refreshStatus() { runner.refreshStatus() }
     @objc private func revokeComputerControl() { desktop.revokeControl() }

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import Editor from "@monaco-editor/react";
 import {
   ArrowLeft,
@@ -15,9 +15,10 @@ import { EditorPanelEmptyState } from "@/components/shared";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { useToast } from "@/components/ui/use-toast";
+import { toast } from "@/components/ui/toaster";
 import { useTheme } from "@/contexts/ThemeContext";
 import { useSwipeBack } from "@/hooks/useSwipeBack";
+import { useUnsavedDraft } from "@/hooks/useUnsavedDraft";
 import {
   createSkill,
   deleteSkill,
@@ -34,10 +35,6 @@ interface SkillListItem extends ListItem {
 }
 
 export function Skills() {
-  const { toast } = useToast();
-  const toastRef = useRef(toast);
-  toastRef.current = toast;
-
   const { resolvedTheme } = useTheme();
   const [skills, setSkills] = useState<SkillSummary[]>([]);
   const [selectedName, setSelectedName] = useState<string | null>(null);
@@ -45,15 +42,23 @@ export function Skills() {
   const [originalContent, setOriginalContent] = useState("");
   const [loadingList, setLoadingList] = useState(true);
   const [loadingDetail, setLoadingDetail] = useState(false);
+  // Why the selected skill failed to load; its editor stays hidden, so nothing can save over it.
+  const [loadError, setLoadError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
   const selectedSkill = selectedName
     ? (skills.find((s) => s.name === selectedName) ?? null)
     : null;
   const isDirty = draftContent !== originalContent;
+  const confirmDiscard = useUnsavedDraft(isDirty);
+
+  // Selecting another skill, or none, replaces the draft.
+  const handleSelect = (name: string | null) => {
+    if (name !== selectedName && confirmDiscard()) setSelectedName(name);
+  };
 
   useSwipeBack({
-    onSwipeBack: () => setSelectedName(null),
+    onSwipeBack: () => handleSelect(null),
     enabled: !!selectedSkill && window.innerWidth < 1024,
   });
 
@@ -66,7 +71,7 @@ export function Skills() {
         current && data.some((s) => s.name === current) ? current : null,
       );
     } catch (error) {
-      toastRef.current({
+      toast({
         title: "Failed to load skills",
         description: error instanceof Error ? error.message : "Unknown error",
         variant: "destructive",
@@ -83,11 +88,11 @@ export function Skills() {
   useEffect(() => {
     let isActive = true;
 
-    if (!selectedName) {
-      setDraftContent("");
-      setOriginalContent("");
-      return;
-    }
+    // The previous skill's draft goes at once, so it never shows or saves under another skill.
+    setDraftContent("");
+    setOriginalContent("");
+    setLoadError(null);
+    if (!selectedName) return;
 
     setLoadingDetail(true);
     getSkill(selectedName)
@@ -98,9 +103,12 @@ export function Skills() {
       })
       .catch((error) => {
         if (!isActive) return;
-        toastRef.current({
+        const message =
+          error instanceof Error ? error.message : "Unknown error";
+        setLoadError(message);
+        toast({
           title: "Failed to load skill",
-          description: error instanceof Error ? error.message : "Unknown error",
+          description: message,
           variant: "destructive",
         });
       })
@@ -112,13 +120,6 @@ export function Skills() {
       isActive = false;
     };
   }, [selectedName]);
-
-  const handleSelect = (name: string) => {
-    if (isDirty && selectedName !== name) {
-      if (!window.confirm("Discard unsaved changes?")) return;
-    }
-    setSelectedName(name);
-  };
 
   const handleSave = async () => {
     if (!selectedSkill) return;
@@ -154,6 +155,7 @@ export function Skills() {
       });
       return false;
     }
+    if (!confirmDiscard()) return false;
     try {
       await createSkill(trimmed, trimmed);
       toast({
@@ -279,7 +281,8 @@ export function Skills() {
                   <Button
                     variant="ghost"
                     size="sm"
-                    onClick={() => setSelectedName(null)}
+                    onClick={() => handleSelect(null)}
+                    aria-label="Back to skills"
                     className="lg:hidden -ml-2 mt-1"
                   >
                     <ArrowLeft className="h-4 w-4" />
@@ -324,6 +327,10 @@ export function Skills() {
               {loadingDetail ? (
                 <div className="h-full flex items-center justify-center text-sm text-muted-foreground">
                   Loading skill contents...
+                </div>
+              ) : loadError !== null ? (
+                <div className="h-full flex items-center justify-center text-sm text-destructive">
+                  Could not load {selectedSkill.name}: {loadError}
                 </div>
               ) : (
                 <Editor

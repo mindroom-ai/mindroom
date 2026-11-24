@@ -14,6 +14,7 @@ from mindroom.event_journal import EventJournalStore
 from mindroom.matrix import _owned_session, users
 from mindroom.matrix.client_session import MindRoomAsyncClient
 from mindroom.matrix.state import MatrixState
+from tests.matrix_state_helpers import save_matrix_state
 from tests.test_matrix_agent_manager import _runtime_paths
 
 if TYPE_CHECKING:
@@ -39,7 +40,7 @@ async def test_account_http_operations_preserve_an_owned_device(
         device_id=credentials.device_id,
         access_token=credentials.access_token,
     )
-    state.save(runtime_paths)
+    save_matrix_state(state, runtime_paths)
     journal = EventJournalStore.open_sqlite(tmp_path / "journal.db")
     principal = journal.principal(credentials.user_id)
     opened = await _owned_session.open_owned_matrix_session(
@@ -115,7 +116,7 @@ async def test_account_http_uses_persisted_account_domain(tmp_path: Path) -> Non
         domain="matrix.example",
         access_token="saved-token",  # noqa: S106
     )
-    state.save(paths)
+    save_matrix_state(state, paths)
     client = users.create_agent_http_client("router", paths)
     try:
         assert client.user_id == "@actual_router:matrix.example"

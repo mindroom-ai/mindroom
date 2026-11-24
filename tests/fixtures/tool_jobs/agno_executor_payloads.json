@@ -1,0 +1,224 @@
+{
+ "control": {
+  "value": {
+   "type": "dict",
+   "value": {
+    "control": {
+     "type": "dict",
+     "value": {
+      "agent_message": "stopping",
+      "message": "stop requested",
+      "messages": {
+       "type": "list",
+       "value": [
+        {
+         "type": "Message",
+         "value": {
+          "type": "dict",
+          "value": {
+           "add_to_agent_memory": true,
+           "audio": null,
+           "audio_output": null,
+           "checkpoint_created_at": null,
+           "checkpoint_status": null,
+           "citations": null,
+           "compressed_content": null,
+           "content": "why",
+           "created_at": 1,
+           "file_output": null,
+           "files": null,
+           "from_history": false,
+           "id": "message-1",
+           "image_output": null,
+           "images": null,
+           "metrics": {
+            "type": "dict",
+            "value": {
+             "audio_input_tokens": 0,
+             "audio_output_tokens": 0,
+             "audio_total_tokens": 0,
+             "cache_read_tokens": 0,
+             "cache_write_tokens": 0,
+             "cost": null,
+             "duration": null,
+             "input_tokens": 0,
+             "output_tokens": 0,
+             "provider_metrics": null,
+             "reasoning_tokens": 0,
+             "time_to_first_token": null,
+             "timer": null,
+             "total_tokens": 0
+            }
+           },
+           "name": null,
+           "provider_data": null,
+           "reasoning_content": null,
+           "redacted_reasoning_content": null,
+           "references": null,
+           "role": "user",
+           "stop_after_tool_call": false,
+           "temporary": false,
+           "tool_args": null,
+           "tool_call_error": null,
+           "tool_call_id": null,
+           "tool_calls": null,
+           "tool_name": null,
+           "video_output": null,
+           "videos": null
+          }
+         }
+        }
+       ]
+      },
+      "stop_execution": true,
+      "user_message": null
+     }
+    },
+    "elapsed": 0.1,
+    "error": "stop requested",
+    "replay": {
+     "type": "tuple",
+     "value": []
+    },
+    "state_delta": {
+     "type": "dict",
+     "value": {}
+    },
+    "value": null
+   }
+  },
+  "version": 1
+ },
+ "streamed": {
+  "value": {
+   "type": "dict",
+   "value": {
+    "control": null,
+    "elapsed": 0.25,
+    "error": null,
+    "replay": {
+     "type": "tuple",
+     "value": [
+      {
+       "type": "tuple",
+       "value": [
+        9,
+        {
+         "type": "dict",
+         "value": {
+          "event": {
+           "type": "dict",
+           "value": {
+            "agent_id": "",
+            "agent_name": "",
+            "content_type": "str",
+            "created_at": 1,
+            "event": "RunContent",
+            "nested_depth": 0,
+            "run_id": "tool-run",
+            "workflow_agent": false
+           }
+          },
+          "type": "agno.run.agent.RunContentEvent"
+         }
+        }
+       ]
+      },
+      {
+       "type": "tuple",
+       "value": [
+        0,
+        {
+         "type": "dict",
+         "value": {
+          "event": {
+           "type": "dict",
+           "value": {
+            "created_at": 2,
+            "event": "CustomEvent",
+            "nested_depth": 0,
+            "run_id": "tool-run",
+            "team_id": "",
+            "team_name": ""
+           }
+          },
+          "text": "team notice",
+          "type": "agno.run.team.CustomEvent"
+         }
+        }
+       ]
+      },
+      {
+       "type": "tuple",
+       "value": [
+        4,
+        null
+       ]
+      }
+     ]
+    },
+    "state_delta": {
+     "type": "dict",
+     "value": {
+      "counter": {
+       "type": "dict",
+       "value": {
+        "before": 1,
+        "before_present": true,
+        "present": true,
+        "value": 2
+       }
+      }
+     }
+    },
+    "value": {
+     "type": "ToolResult",
+     "value": {
+      "type": "dict",
+      "value": {
+       "audios": null,
+       "content": "streamed tail",
+       "files": null,
+       "images": {
+        "type": "list",
+        "value": [
+         {
+          "type": "Image",
+          "value": {
+           "type": "dict",
+           "value": {
+            "alt_text": null,
+            "content": {
+             "type": "bytes",
+             "value": "AP8="
+            },
+            "detail": null,
+            "filepath": null,
+            "format": null,
+            "id": "image-1",
+            "media_reference": null,
+            "metadata": null,
+            "mime_type": null,
+            "original_prompt": null,
+            "revised_prompt": null,
+            "url": null
+           }
+          }
+         }
+        ]
+       },
+       "metadata": {
+        "type": "dict",
+        "value": {
+         "artifact": "one"
+        }
+       },
+       "videos": null
+      }
+     }
+    }
+   }
+  },
+  "version": 1
+ }
+}

@@ -9,12 +9,11 @@ from pathlib import Path  # noqa: TC003 - tool config sync evaluates constructor
 from threading import Lock
 from typing import TYPE_CHECKING, ClassVar, Literal
 
-from agno.tools import Toolkit
-from pydantic import BaseModel, ConfigDict, TypeAdapter
-
+from mindroom.contacts.parties import personal_room_of
+from mindroom.contacts.turns import contact_room
 from mindroom.custom_tools import matrix_conversation_operations
 from mindroom.custom_tools.attachment_helpers import (
-    normalize_str_list,
+    explicit_thread_root,
     resolve_context_thread_id,
     resolve_requested_room_id,
     room_access_allowed,
@@ -25,32 +24,58 @@ from mindroom.custom_tools.matrix_message_idempotency import (
     MatrixMessageIdempotencyError,
     claim_matrix_message_send,
 )
-from mindroom.custom_tools.tool_payloads import custom_tool_payload
-from mindroom.matrix.message_extras import parse_message_extra_sections
+from mindroom.custom_tools.tool_payloads import custom_tool_payload, tool_context_or_error
+from mindroom.matrix.message_extras import MatrixMessageExtra, parse_message_extra_sections
 from mindroom.requester_identity import is_human_requester_id
-from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
+from mindroom.tool_system.authoring import Toolkit
 
 if TYPE_CHECKING:
     from mindroom.config.models import FileAccess
     from mindroom.custom_tools.matrix_message_idempotency import MatrixMessageSendClaim
-    from mindroom.matrix.message_extras import MessageExtraSection
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 
-class MatrixMessageExtra(BaseModel):
-    """Model-facing fields for one optional collapsible section."""
+_CONTACT_ROOM_KEY_ERROR = "Error: idempotency_key cannot be used in a contact room"
+_CONTACT_TURN_ERROR = (
+    "Error: in a contact conversation you can only write to this room, or send a message without recipient or "
+    "idempotency_key to your owner's personal room, in its timeline or a new thread"
+)
 
-    model_config = ConfigDict(strict=True, extra="forbid")
 
-    title: str
-    content: str
-    content_type: Literal["text/plain", "text/markdown", "text/html"] = "text/markdown"
-    collapsed: bool = True
+def _contact_target_error(
+    context: ToolRuntimeContext,
+    room_id: str,
+    *,
+    action: str,
+    recipient: str | None,
+    thread_id: str | None,
+    idempotency_key: str | None,
+) -> str | None:
+    """Return why this turn may not act in ``room_id`` this way, or None when it may.
+
+    A keyed retry into a room that is or was a contact room would deliver a message prepared under outdated rules.
+    A turn in such a room is a contact turn, even after a removal mid-turn, and beyond its room it may only report to
+    its owner's personal room: a recipient, one of the owner's threads, or a key shared with the owner's keyed sends
+    would act with the owner's authority.
+    """
+    config = context.current_config
+    paths = context.runtime_paths
+    if idempotency_key is not None and contact_room(config, paths, room_id, context.agent_name) is not None:
+        return _CONTACT_ROOM_KEY_ERROR
+    contact = contact_room(config, paths, context.room_id, context.agent_name)
+    if contact is None or room_id == context.room_id:
+        return None
+    record, side = contact
+    report = action == "send" and recipient is None and idempotency_key is None and thread_id in {None, "room"}
+    if report and personal_room_of(config, paths, record.party(side).local_owner) == (context.agent_name, room_id):
+        return None
+    return _CONTACT_TURN_ERROR
 
 
 def _optional_string(value: str | None, name: str) -> str | None:
     if value is None:
         return None
-    if not isinstance(value, str) or not value.strip():
+    if not value.strip():
         msg = f"{name} must be a non-empty string when provided."
         raise ValueError(msg)
     return value.strip()
@@ -66,7 +91,6 @@ class MatrixMessageTools(Toolkit):
     _MAX_ATTACHMENTS_PER_CALL: ClassVar[int] = 5
     _DEFAULT_READ_LIMIT: ClassVar[int] = 20
     _MAX_READ_LIMIT: ClassVar[int] = 50
-    _VALID_ACTIONS: ClassVar[frozenset[str]] = frozenset({"send", "read", "edit", "react"})
 
     def __init__(
         self,
@@ -125,7 +149,7 @@ class MatrixMessageTools(Toolkit):
             action: send, read, edit, or react.
             message: Text to send/edit, or reaction emoji.
             recipient: Agent/team name to request a response from; send only.
-            room_id: Room ID or configured room name; current room by default.
+            room_id: Room ID, alias, or configured room name; current room by default.
             thread_id: Thread root ID; current conversation by default, "room" for room timeline.
             new_thread: Start a separate thread; send only, cannot combine with thread_id.
             event_id: Message event ID to edit or react to.
@@ -137,64 +161,59 @@ class MatrixMessageTools(Toolkit):
                 Completed receipts last eight days; pending sends never expire.
 
         """
-        context = get_tool_runtime_context()
-        if context is None:
-            return self._payload("error", message="Matrix messaging tool context is unavailable in this runtime path.")
+        if isinstance(context := tool_context_or_error(self._payload, "Matrix messaging"), str):
+            return context
         if idempotency_key is None:
             context = replace(context, config=context.current_config, config_provider=None)
-        if not isinstance(action, str) or action.strip().lower() not in self._VALID_ACTIONS:
-            return self._payload("error", message="Unsupported action. Use send, read, edit, or react.")
-        normalized_action = action.strip().lower()
         try:
             recipient = _optional_string(recipient, "recipient")
             thread_id = _optional_string(thread_id, "thread_id")
             event_id = _optional_string(event_id, "event_id")
         except ValueError as exc:
-            return self._payload("error", action=normalized_action, message=str(exc))
-        if not isinstance(new_thread, bool):
-            return self._payload("error", message="new_thread must be a boolean.")
-        if message is not None and not isinstance(message, str):
-            return self._payload("error", message="message must be a string.")
-        if limit is not None and (not isinstance(limit, int) or isinstance(limit, bool)):
-            return self._payload("error", message="limit must be an integer.")
-        if attachments is not None and not isinstance(attachments, list):
-            return self._payload("error", message="attachments must be a list of attachment IDs or file paths.")
-        references, attachment_error = normalize_str_list(attachments, field_name="attachments")
-        if attachment_error is not None:
-            return self._payload("error", message=attachment_error)
+            return self._payload("error", action=action, message=str(exc))
+        references = [reference.strip() for reference in attachments or [] if reference.strip()]
         if len(references) > self._MAX_ATTACHMENTS_PER_CALL:
             return self._payload("error", message="attachments cannot exceed 5 per call.")
-        if normalized_action != "send" and (recipient is not None or new_thread or references):
+        if action != "send" and (recipient is not None or new_thread or references):
             return self._payload("error", message="recipient, new_thread, and attachments are only supported for send.")
         if idempotency_key is not None:
-            if not isinstance(idempotency_key, str) or not idempotency_key.strip() or len(idempotency_key) > 256:
+            if not idempotency_key.strip() or len(idempotency_key) > 256:
                 return self._payload("error", message="idempotency_key must be nonblank and at most 256 characters.")
-            if normalized_action != "send" or attachments:
+            if action != "send" or references:
                 return self._payload(
                     "error",
                     message="idempotency_key is only supported for text sends without attachments.",
                 )
         if new_thread and thread_id is not None:
             return self._payload("error", message="Use either new_thread=True or thread_id, not both.")
-        if event_id is not None and normalized_action not in {"edit", "react"}:
+        if event_id is not None and action not in {"edit", "react"}:
             return self._payload("error", message="event_id is only supported for edit and react.")
         parsed_extras = None
         if message_extras:
-            if normalized_action not in {"send", "edit"}:
+            if action not in {"send", "edit"}:
                 return self._payload("error", message="message_extras is only supported for send and edit.")
             try:
-                sections = TypeAdapter(list[MatrixMessageExtra]).validate_python(message_extras)
-                parsed_extras = parse_message_extra_sections([section.model_dump() for section in sections])
-            except (TypeError, ValueError) as exc:
+                parsed_extras = parse_message_extra_sections(message_extras)
+            except ValueError as exc:
                 return self._payload("error", message=str(exc))
-        resolved_room_id, room_error = resolve_requested_room_id(context, room_id)
+        resolved_room_id, room_error = await resolve_requested_room_id(context, room_id)
         if room_error is not None or resolved_room_id is None:
             return self._payload("error", message=room_error)
-        if not await room_access_allowed(context, resolved_room_id):
+        target_error = _contact_target_error(
+            context,
+            resolved_room_id,
+            action=action,
+            recipient=recipient,
+            thread_id=thread_id,
+            idempotency_key=idempotency_key,
+        )
+        if target_error is not None:
+            return self._payload("error", room_id=resolved_room_id, message=target_error)
+        if not await room_access_allowed(context, resolved_room_id, contact_room_ok=True):
             return self._payload("error", room_id=resolved_room_id, message="Not authorized to access the target room.")
         dispatch = partial(
             self._dispatch_action,
-            action=normalized_action,
+            action=action,
             message=message,
             recipient=recipient,
             room_id=resolved_room_id,
@@ -225,7 +244,7 @@ class MatrixMessageTools(Toolkit):
         new_thread: bool,
         event_id: str | None,
         attachments: list[str],
-        message_extras: list[MessageExtraSection] | None,
+        message_extras: list[MatrixMessageExtra] | None,
         limit: int | None,
         send_claim: MatrixMessageSendClaim | None = None,
     ) -> str:
@@ -237,9 +256,10 @@ class MatrixMessageTools(Toolkit):
         if (rate_error := self._check_rate_limit(context, room_id, weight=1 + len(attachments))) is not None:
             return self._payload("error", room_id=room_id, message=rate_error)
         recipient_user_id = None
+        # A team member posts from the team's account, so its message follows the team's thread mode.
         room_mode = (
             context.config.get_entity_thread_mode(
-                context.agent_name,
+                context.recipient,
                 context.runtime_paths,
                 room_id=room_id,
             )
@@ -255,11 +275,7 @@ class MatrixMessageTools(Toolkit):
                     message=f"Recipient '{recipient}' is not available in this room. Available recipients: {names}.",
                 )
             recipient_user_id = selected.matrix_user_id
-            if (
-                send_claim is not None
-                and send_claim.intent is not None
-                and recipient_user_id != send_claim.intent.recipient_user_id
-            ):
+            if stored_intent is not None and recipient_user_id != stored_intent.recipient_user_id:
                 return self._payload("error", message="The original Matrix recipient is no longer available.")
             if recipient_user_id == context.client.user_id and not is_human_requester_id(
                 context.requester_id,
@@ -278,6 +294,9 @@ class MatrixMessageTools(Toolkit):
                         message=f"Recipient '{recipient}' uses room conversations. Omit new_thread/thread_id or use thread_id=\"room\".",
                     )
                 thread_id = "room"
+        # A replayed keyed send delivers its stored target, so only a new request resolves its thread.
+        if stored_intent is None and thread_id is not None and thread_id != "room":
+            thread_id = await explicit_thread_root(context, room_id=room_id, thread_id=thread_id)
         effective_thread_id = resolve_context_thread_id(
             context,
             room_id=room_id,

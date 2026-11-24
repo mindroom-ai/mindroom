@@ -1,0 +1,1046 @@
+"""Behavior every provider family must share: tool definitions, the composed pipeline, stream activity, finality.
+
+Each family's bare adapter is built from a real model config over an httpx mock transport (the synthetic model
+needs none) and wrapped in the production pipeline (``wrap_provider``: portable tool search, media fallback, the
+malformed-call guidance retry, retry with the idle limit, the safeguard refusal, request logging), so what these tests
+prove is what the registry runs. The OpenAI family's idle-limit and server-tool cases live in
+``test_openai_family_wire.py``; the Claude tool tri-state in its behavior tests.
+"""
+
+from __future__ import annotations
+
+import base64
+import json
+from dataclasses import replace
+from typing import TYPE_CHECKING, Any
+
+import httpx
+import pytest
+from structlog.testing import capture_logs
+
+from mindroom.config.models import ModelConfig
+from mindroom.history.request_messages import TurnMessages, build_request, scope_history_messages
+from mindroom.history.types import HistoryScope
+from mindroom.llm.errors import MALFORMED_TOOL_CALL, ProviderError, ProviderUnavailable
+from mindroom.llm.media import Audio, File, Image, Video
+from mindroom.llm.messages import Message
+from mindroom.llm.provider import DeferredTools, ModelRequest, ToolSpec, TurnCompleted, UsageReported, complete
+from mindroom.media_inputs import MediaInputs
+from mindroom.prompts import INLINE_MEDIA_FALLBACK_PROMPT
+from mindroom.providers.gemini import wire as gemini_wire
+from mindroom.providers.pipeline import retry as retry_stage
+from mindroom.providers.pipeline.guidance_retry import MALFORMED_FUNCTION_CALL_GUIDANCE
+from mindroom.providers.pipeline.media import FALLBACK_MARKER
+from mindroom.providers.pipeline.wrapped import WrappedProvider
+from mindroom.providers.synthetic_adapter import SHELL_TOOL
+from mindroom.providers.synthetic_adapter import build_provider as build_synthetic_provider
+from mindroom.session_storage.schema import TableNames
+from tests.providers.family_support import (
+    CLAUDE_DEPRECATION_FILTER,
+    FAMILIES,
+    Family,
+    chat_chunk,
+    claude_events,
+    gemini_chunk,
+    ollama_chunk,
+    prompt_text,
+    sends,
+)
+from tests.providers.gemini_ollama_support import runtime_paths_for
+from tests.providers.golden_support import (
+    Wire,
+    hide_provider_environment,
+    ndjson_response,
+    pipeline_provider,
+    responses_events,
+    sse_response,
+)
+from tests.session_storage.agno_layout import converted_store
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Callable
+    from pathlib import Path
+
+    from mindroom.llm.provider import ModelProvider, StreamEvent
+
+pytestmark = pytest.mark.filterwarnings(CLAUDE_DEPRECATION_FILTER)
+
+_SCHEMA = {"type": "object", "properties": {"city": {"type": "string"}}}
+_IDLE_LIMIT_SECONDS = 0.5
+# Each pause stays far below the idle limit while the whole stream outlasts it.
+_EVENT_PAUSE_SECONDS = 0.04
+_SILENT_EVENTS = 25
+_OVERLOADED = "The model is overloaded"
+_PNG = bytes.fromhex(
+    "89504e470d0a1a0a0000000d4948445200000001000000010806000000"
+    "1f15c4890000000d49444154789c636001000000050001a5f645400000000049454e44ae426082",
+)
+_PNG_BASE64 = base64.b64encode(_PNG).decode("ascii")
+
+
+@pytest.fixture(autouse=True)
+def _isolated(monkeypatch: pytest.MonkeyPatch) -> None:
+    hide_provider_environment(monkeypatch)
+    monkeypatch.setattr(retry_stage, "_retry_delay_seconds", lambda _attempt: 0.0)
+
+
+def _tool(name: str) -> ToolSpec:
+    return ToolSpec(
+        name=name,
+        description=f"{name}.",
+        parameters=_SCHEMA,
+        strict=None,
+    )
+
+
+# --- Tool definitions -------------------------------------------------------------------------------------------
+
+
+_TRI_STATE_TOOLS = [
+    ToolSpec(
+        name="unset",
+        description=None,
+        parameters=_SCHEMA,
+        strict=None,
+    ),
+    ToolSpec(
+        name="gated",
+        description="Gated.",
+        parameters=_SCHEMA,
+        strict=True,
+    ),
+    ToolSpec(
+        name="plain",
+        description="Plain.",
+        parameters=_SCHEMA,
+        strict=False,
+    ),
+]
+_STRICT = {"gated": {"strict": True}, "plain": {"strict": False}}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("family", ["openai_chat", "openai_responses", "cerebras", "gemini", "ollama"])
+async def test_each_wire_leaves_unset_tool_fields_out_of_its_definitions(family: str, tmp_path: Path) -> None:
+    """An unset field is left out; each wire keeps the fields its API takes.
+
+    The Chat and Responses wires carry ``strict`` when set, Cerebras's included; Ollama and Gemini send only name,
+    description, and parameters, Gemini's as JSON Schema.
+    """
+    spec = FAMILIES[family]
+    wire = Wire(spec.reply())
+    provider = pipeline_provider(spec.adapter(tmp_path, wire))
+
+    await complete(provider, ModelRequest(messages=[Message(role="user", content="Hi")], tools=_TRI_STATE_TOOLS))
+
+    sent = spec.wire_tools(wire.body())
+    assert list(sent) == ["gated", "plain", "unset"]
+    if family == "gemini":
+        assert sent["unset"] == {"name": "unset", "parameters_json_schema": _SCHEMA}
+        assert sent["gated"] == {"name": "gated", "description": "Gated.", "parameters_json_schema": _SCHEMA}
+        return
+    kind = {"type": "function"} if family == "openai_responses" else {}
+    assert sent["unset"] == {"name": "unset", "parameters": _SCHEMA, **kind}
+    expected_flags: dict[str, dict[str, Any]] = (
+        _STRICT if family in {"openai_chat", "openai_responses", "cerebras"} else {"gated": {}, "plain": {}}
+    )
+    for name in ("gated", "plain"):
+        assert sent[name] == {
+            "name": name,
+            "description": f"{name.title()}.",
+            "parameters": _SCHEMA,
+            **expected_flags[name],
+            **kind,
+        }
+
+
+# --- Stored tool calls ------------------------------------------------------------------------------------------
+
+# A thread that switched models replays tool calls other providers stored: a Chat call the output limit cut off
+# mid-arguments, a Gemini call stored with empty arguments, a call stored without arguments by releases through
+# v2026.9.43, and an id-only placeholder streamed Chat history kept through v2026.7.172, each with its result.
+_STORED_CALLS = [
+    {"id": "call_cut", "type": "function", "function": {"name": "get_weather", "arguments": '{"city": "Par'}},
+    {"id": "call_empty", "type": "function", "function": {"name": "get_weather", "arguments": ""}},
+    {"id": "call_bare", "type": "function", "function": {"name": "get_weather"}},
+    {"id": "call_placeholder"},
+]
+_STORED_RUN = {
+    "run_id": "run-1",
+    "agent_id": "code",
+    "status": "COMPLETED",
+    "messages": [
+        {"role": "user", "content": "Weather?"},
+        {"role": "assistant", "tool_calls": _STORED_CALLS},
+        *(
+            {"role": "tool", "tool_call_id": call["id"], "tool_name": "get_weather", "content": "sunny"}
+            for call in _STORED_CALLS
+        ),
+    ],
+}
+
+
+def _stored_tool_turn(tmp_path: Path) -> list[Message]:
+    """The request a new prompt sends after the stored run, converted from its row and assembled as a reply does."""
+    run = converted_store(TableNames("code").database_path(tmp_path), _STORED_RUN).get_run("run-1")
+    assert run is not None
+    history = scope_history_messages(
+        [run],
+        scope=HistoryScope(kind="agent", scope_id="code"),
+        num_history_runs=None,
+        num_history_messages=None,
+        max_tool_calls_from_history=None,
+    )
+    prompt = Message(role="user", content="And tomorrow?")
+    return build_request(summary=None, history=history, turn=TurnMessages(prompt=prompt), media=MediaInputs())
+
+
+def _replayed_tool_turn(family: str, body: dict[str, Any]) -> tuple[list[object], int]:
+    """Return the arguments of every tool call the request replays, in order, and how many results it replays."""
+    if family == "anthropic":
+        blocks = [block for message in body["messages"] for block in message["content"] if isinstance(block, dict)]
+        calls = [block["input"] for block in blocks if block["type"] == "tool_use"]
+        return calls, sum(block["type"] == "tool_result" for block in blocks)
+    if family.startswith("gemini"):
+        parts = [part for content in body["contents"] for part in content["parts"]]
+        calls = [part["functionCall"].get("args") for part in parts if "functionCall" in part]
+        return calls, sum("functionResponse" in part for part in parts)
+    if family == "openai_responses":
+        calls = [item["arguments"] for item in body["input"] if item.get("type") == "function_call"]
+        return calls, sum(item.get("type") == "function_call_output" for item in body["input"])
+    messages = body["messages"]
+    calls = [call["function"]["arguments"] for message in messages for call in message.get("tool_calls") or ()]
+    return calls, sum(message["role"] == "tool" for message in messages)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("family", sorted(FAMILIES))
+async def test_every_family_replays_the_tool_calls_any_provider_stored(family: str, tmp_path: Path) -> None:
+    """Every stored call shape replays on every route: the placeholder and its result are dropped everywhere.
+
+    Routes that send arguments as text replay the stored text, with ``{}`` for a call stored without any; routes
+    that send an object replay ``{}`` for arguments that are not one.
+    """
+    spec = FAMILIES[family]
+    wire = Wire(spec.reply())
+
+    await complete(
+        pipeline_provider(spec.adapter(tmp_path, wire)),
+        ModelRequest(messages=_stored_tool_turn(tmp_path / "store"), tools=[_tool("get_weather")]),
+    )
+
+    body = wire.body()
+    assert "call_placeholder" not in json.dumps(body)
+    as_text = family in {"openai_chat", "openai_responses", "cerebras", "groq"}
+    assert _replayed_tool_turn(family, body) == (['{"city": "Par', "", "{}"] if as_text else [{}, {}, {}], 3)
+
+
+# --- Tool results -----------------------------------------------------------------------------------------------
+
+
+def _answered_tool_turn() -> list[Message]:
+    """A tool loop's next request: calls that succeeded, failed, and were stored without content or error text."""
+    results = {
+        "ok": ("sunny", False),
+        "failed": ("No city", True),
+        "empty": (None, None),
+        "failed_none": (None, True),
+        "failed_blank": ("", True),
+    }
+    return [
+        Message(role="user", content="Weather?"),
+        Message(
+            role="assistant",
+            tool_calls=[
+                {"id": f"call_{outcome}", "type": "function", "function": {"name": "get_weather", "arguments": "{}"}}
+                for outcome in results
+            ],
+        ),
+        *(
+            Message(
+                role="tool",
+                tool_call_id=f"call_{outcome}",
+                tool_name="get_weather",
+                content=content,
+                tool_call_error=failed,
+            )
+            for outcome, (content, failed) in results.items()
+        ),
+    ]
+
+
+_NO_ERROR_TEXT = "The tool call failed without an error message."
+_GEMINI_RESULTS = [
+    {"id": "call_ok", "name": "get_weather", "response": {"result": "sunny"}},
+    {"id": "call_failed", "name": "get_weather", "response": {"error": "No city"}},
+    {"id": "call_empty", "name": "get_weather", "response": {"result": ""}},
+    {"id": "call_failed_none", "name": "get_weather", "response": {"error": _NO_ERROR_TEXT}},
+    {"id": "call_failed_blank", "name": "get_weather", "response": {"error": _NO_ERROR_TEXT}},
+]
+# Chat Completions has no failure or name field.
+_CHAT_RESULTS = [
+    {"role": "tool", "tool_call_id": "call_ok", "content": "sunny"},
+    {"role": "tool", "tool_call_id": "call_failed", "content": "No city"},
+    {"role": "tool", "tool_call_id": "call_empty", "content": ""},
+    {"role": "tool", "tool_call_id": "call_failed_none", "content": _NO_ERROR_TEXT},
+    {"role": "tool", "tool_call_id": "call_failed_blank", "content": _NO_ERROR_TEXT},
+]
+_ENCODED_RESULTS: dict[str, list[dict[str, Any]]] = {
+    "anthropic": [
+        {"type": "tool_result", "tool_use_id": "call_ok", "content": "sunny"},
+        {"type": "tool_result", "tool_use_id": "call_failed", "content": "No city", "is_error": True},
+        {"type": "tool_result", "tool_use_id": "call_empty", "content": ""},
+        # The API rejects a failed result with empty content.
+        {"type": "tool_result", "tool_use_id": "call_failed_none", "content": _NO_ERROR_TEXT, "is_error": True},
+        {"type": "tool_result", "tool_use_id": "call_failed_blank", "content": _NO_ERROR_TEXT, "is_error": True},
+    ],
+    "gemini": _GEMINI_RESULTS,
+    "gemini_vertexai": _GEMINI_RESULTS,
+    # Ollama has no failure field or call ids: a result names the tool that answered, and the SDK drops empty content.
+    "ollama": [
+        {"role": "tool", "content": "sunny", "tool_name": "get_weather"},
+        {"role": "tool", "content": "No city", "tool_name": "get_weather"},
+        {"role": "tool", "tool_name": "get_weather"},
+        {"role": "tool", "content": _NO_ERROR_TEXT, "tool_name": "get_weather"},
+        {"role": "tool", "content": _NO_ERROR_TEXT, "tool_name": "get_weather"},
+    ],
+    # Responses has no failure field, and replays the Chat call ids under its own.
+    "openai_responses": [
+        {"type": "function_call_output", "call_id": "call_00000000", "output": "sunny"},
+        {"type": "function_call_output", "call_id": "call_00000001", "output": "No city"},
+        {"type": "function_call_output", "call_id": "call_00000002", "output": ""},
+        {"type": "function_call_output", "call_id": "call_00000003", "output": _NO_ERROR_TEXT},
+        {"type": "function_call_output", "call_id": "call_00000004", "output": _NO_ERROR_TEXT},
+    ],
+    "openai_chat": _CHAT_RESULTS,
+    "cerebras": _CHAT_RESULTS,
+    "groq": _CHAT_RESULTS,
+}
+
+
+def _encoded_results(family: str, body: dict[str, Any]) -> list[dict[str, Any]]:
+    """Return every tool result the request sends, as the wire encodes it."""
+    if family == "anthropic":
+        blocks = [block for message in body["messages"] for block in message["content"] if isinstance(block, dict)]
+        # The prompt-cache marker the request adds to the newest result is not part of the result.
+        return [
+            {key: value for key, value in block.items() if key != "cache_control"}
+            for block in blocks
+            if block["type"] == "tool_result"
+        ]
+    if family.startswith("gemini"):
+        parts = [part for content in body["contents"] for part in content["parts"]]
+        return [part["functionResponse"] for part in parts if "functionResponse" in part]
+    if family == "openai_responses":
+        return [item for item in body["input"] if item.get("type") == "function_call_output"]
+    return [message for message in body["messages"] if message["role"] == "tool"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("family", sorted(FAMILIES))
+async def test_every_family_encodes_a_tool_result_with_its_call_name_content_and_failure(
+    family: str,
+    tmp_path: Path,
+) -> None:
+    """A failed call reads as a failure wherever the API has a field for it, and no result goes unanswered.
+
+    Claude marks it ``is_error`` and Gemini sends it as the response's ``error``; Ollama names the tool that
+    answered. A result stored without content still answers its call with empty content, which the Ollama SDK leaves
+    out of the request, and a failed one says that it failed.
+    """
+    spec = FAMILIES[family]
+    wire = Wire(spec.reply())
+
+    await complete(
+        pipeline_provider(spec.adapter(tmp_path, wire)),
+        ModelRequest(messages=_answered_tool_turn(), tools=[_tool("get_weather")]),
+    )
+
+    assert _encoded_results(family, wire.body()) == _ENCODED_RESULTS[family]
+
+
+# --- The composed pipeline --------------------------------------------------------------------------------------
+
+
+def _error_reply(family: str) -> httpx.Response:
+    gemini = {"error": {"code": 503, "message": _OVERLOADED, "status": "UNAVAILABLE"}}
+    bodies = {
+        "anthropic": {"type": "error", "error": {"type": "api_error", "message": _OVERLOADED}},
+        "gemini": gemini,
+        "gemini_vertexai": gemini,
+        "ollama": {"error": _OVERLOADED},
+    }
+    return httpx.Response(503, json=bodies.get(family, {"error": {"message": _OVERLOADED}}))
+
+
+def _media_message(spec: Family, root: Path) -> Message:
+    """A prompt with media the route omits up front, or an image the adapter cannot read where it omits none."""
+    if spec.omitted_media == "audio":
+        return Message(role="user", content="Look", audio=[Audio(content=b"RIFF", mime_type="audio/wav")])
+    if spec.omitted_media == "video":
+        return Message(role="user", content="Look", videos=[Video(content=b"\x00\x00", mime_type="video/mp4")])
+    return Message(role="user", content="Look", images=[Image(filepath=str(root / "missing.png"))])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("family", sorted(FAMILIES))
+async def test_composed_pipeline_recovers_logs_and_projects_for_every_family(family: str, tmp_path: Path) -> None:
+    """One request through every stage: media noted, deferred tools hidden, a 503 retried, the usage logged.
+
+    Media the route omits is replaced by the fallback note up front; media the adapter cannot send (an unreadable
+    image on Gemini and on Vertex AI) is removed with the same note after its rejection. The deferred tool leaves
+    the tool list and the request is reissued after the transient failure, with the request log recording every
+    attempt that reached the wire.
+    """
+    spec = FAMILIES[family]
+    wire = Wire(_error_reply(family), spec.reply())
+    log_dir = tmp_path / "logs"
+    provider = pipeline_provider(spec.adapter(tmp_path, wire), log_dir=log_dir)
+    request = ModelRequest(
+        messages=[Message(role="system", content="Be brief."), _media_message(spec, tmp_path)],
+        tools=[_tool("call_tool"), _tool("lookup_order"), _tool("tool_search")],
+        deferred_tools=DeferredTools(names=frozenset({"lookup_order"}), portable=True),
+    )
+
+    turn = await complete(provider, request)
+
+    assert (turn.content, turn.stop_reason, len(wire.requests)) == ("ok", "end", 2)
+    body = wire.body()
+    assert sorted(spec.wire_tools(body)) == ["call_tool", "tool_search"]
+    assert spec.user_text(body) == f"Look\n\n{FALLBACK_MARKER}\n{INLINE_MEDIA_FALLBACK_PROMPT}"
+    serialized = json.dumps(body)
+    assert "inlineData" not in serialized
+    assert "input_audio" not in serialized
+    assert "images" not in body
+    (log_file,) = log_dir.glob("llm-requests-*.jsonl")
+    records = [json.loads(line) for line in log_file.read_text().splitlines()]
+    requests = [record for record in records if record.get("record") != "response"]
+    (response,) = [record for record in records if record.get("record") == "response"]
+    # Gemini's attempt with the unreadable image never reaches the wire, so it logs no record.
+    assert len(requests) == 2
+    assert FALLBACK_MARKER in json.dumps(requests[-1]["body"])
+    assert "lookup_order" not in json.dumps(requests[-1]["body"])
+    assert response["usage"] == {
+        "input_tokens": 40,
+        "output_tokens": 9,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+    }
+    assert turn.usage.tokens.input_tokens == 40
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("family", sorted(FAMILIES))
+async def test_the_request_record_holds_the_body_each_family_sent(family: str, tmp_path: Path) -> None:
+    """The record, written before the request goes out, holds the body the route handed its SDK, media as base64.
+
+    For this request every SDK but google-genai sends that body as it is, the Claude SDK with its ``stream`` flag;
+    google-genai builds its REST body from the arguments, which keep its own field names, without ``http_options``.
+    """
+    spec = FAMILIES[family]
+    log_dir = tmp_path / "logs"
+    logged_before_sending: list[bool] = []
+
+    def reply(_request: httpx.Request) -> httpx.Response:
+        logged_before_sending.append(any(log_dir.glob("llm-requests-*.jsonl")))
+        return spec.reply()
+
+    wire = Wire(reply)
+    provider = pipeline_provider(spec.adapter(tmp_path, wire), log_dir=log_dir)
+    image = Image(content=_PNG, mime_type="image/png")
+    request = ModelRequest(
+        messages=[Message(role="system", content="Be brief."), Message(role="user", content="Look", images=[image])],
+        tools=[_tool("lookup_order")],
+    )
+
+    await complete(provider, request)
+
+    (log_file,) = log_dir.glob("llm-requests-*.jsonl")
+    record, _response = (json.loads(line) for line in log_file.read_text().splitlines())
+    logged, sent = record["body"], wire.body()
+    assert logged_before_sending == [True]
+    if not family.startswith("gemini"):
+        assert logged == {key: value for key, value in sent.items() if (key, family) != ("stream", "anthropic")}
+        return
+    image_part = {"inline_data": {"mime_type": "image/png", "data": _PNG_BASE64}}
+    assert logged["contents"] == [{"role": "user", "parts": [{"text": "Look"}, image_part]}]
+    assert logged["config"]["system_instruction"] == "Be brief."
+    assert [tool["name"] for tool in logged["config"]["tools"][0]["function_declarations"]] == ["lookup_order"]
+    assert "http_options" not in logged["config"]
+    assert _PNG_BASE64 in json.dumps(sent["contents"])
+
+
+@pytest.mark.asyncio
+async def test_a_gemini_decision_request_logs_its_validated_config_in_the_same_field_names(tmp_path: Path) -> None:
+    """A request that allows no tool use sends the SDK a validated config, which the record holds as plain JSON."""
+    spec = FAMILIES["gemini"]
+    wire = Wire(spec.reply())
+    log_dir = tmp_path / "logs"
+    provider = pipeline_provider(spec.adapter(tmp_path, wire), log_dir=log_dir)
+    request = ModelRequest(
+        messages=[Message(role="user", content="Hi")],
+        tools=[_tool("lookup_order")],
+        tool_choice="none",
+    )
+
+    await complete(provider, request)
+
+    (log_file,) = log_dir.glob("llm-requests-*.jsonl")
+    config = json.loads(log_file.read_text().splitlines()[0])["body"]["config"]
+    assert config["tool_config"] == {"function_calling_config": {"mode": "NONE"}}
+    assert config["response_mime_type"] == "application/json"
+    assert "http_options" not in config
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("family", ["anthropic", "openai_chat", "openai_responses"])
+async def test_the_request_record_leaves_out_the_request_options(family: str, tmp_path: Path) -> None:
+    """Headers, query parameters, the timeout, and Claude's betas are request options, so the body leaves them out.
+
+    An authored ``extra_body`` is part of the body the SDK sends, so the body holds it merged; the key never appears.
+    The record's ``model_params`` still list the authored settings, as before.
+    """
+    options: dict[str, Any] = {
+        "extra_headers": {"X-Trace": "header-value"},
+        "extra_query": {"trace": "query-value"},
+        "timeout": 30,
+        "extra_body": {"metadata": {"user_id": "u1"}},
+    }
+    if family == "anthropic":
+        options["betas"] = ["beta-value"]
+    spec = FAMILIES[family]
+    spec = replace(spec, config={**spec.config, "extra_kwargs": {"request_params": options}})
+    wire = Wire(spec.reply())
+    log_dir = tmp_path / "logs"
+    provider = pipeline_provider(spec.adapter(tmp_path, wire), log_dir=log_dir)
+
+    await complete(provider, ModelRequest(messages=[Message(role="user", content="Hi")]))
+
+    [sent] = wire.requests
+    assert (sent.headers["x-trace"], sent.url.params["trace"]) == ("header-value", "query-value")
+    (log_file,) = log_dir.glob("llm-requests-*.jsonl")
+    logged = log_file.read_text()
+    body = json.loads(logged.splitlines()[0])["body"]
+    assert body["metadata"] == {"user_id": "u1"}
+    assert not {"extra_headers", "extra_query", "extra_body", "timeout", "betas"} & set(body)
+    assert not [value for value in ("header-value", "query-value", "beta-value") if value in json.dumps(body)]
+    assert spec.config["api_key"] not in logged
+
+
+def _unreadable_media(kind: str, root: Path) -> dict[str, Any]:
+    path = str(root / f"gone-{kind}")
+    media = {"image": Image(filepath=path), "file": File(filepath=path), "audio": Audio(filepath=path, format="wav")}
+    return {{"image": "images", "file": "files", "audio": "audio"}[kind]: [media[kind]]}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["image", "file", "audio"])
+@pytest.mark.parametrize("family", sorted(FAMILIES))
+async def test_every_family_notes_an_attachment_file_it_cannot_read(family: str, kind: str, tmp_path: Path) -> None:
+    """An attachment whose file is gone reaches the model as the media fallback's note on every route.
+
+    A route that takes the kind fails to read the file and is retried without media; one that omits the kind
+    replaces it up front. Either way the model reads the same note and the provider gets one request.
+    """
+    spec = FAMILIES[family]
+    wire = Wire(spec.reply())
+    provider = pipeline_provider(spec.adapter(tmp_path, wire))
+    message = Message(role="user", content="Look", **_unreadable_media(kind, tmp_path))
+
+    turn = await complete(provider, ModelRequest(messages=[message]))
+
+    assert (turn.content, len(wire.requests)) == ("ok", 1)
+    assert spec.user_text(wire.body()) == f"Look\n\n{FALLBACK_MARKER}\n{INLINE_MEDIA_FALLBACK_PROMPT}"
+
+
+_KEPT_PROMPT = "Plan my packing."
+# A readable attachment of each kind, and the bytes that show a request sent it.
+_READABLE = {
+    "image": ("images", Image(id="att_kept", content=b"PNG photo", mime_type="image/png"), b"PNG photo"),
+    "file": ("files", File(id="att_kept", content=b"%PDF-1.4 report", filename="kept.pdf"), b"%PDF-1.4 report"),
+    "audio": ("audio", Audio(id="att_kept", content=b"RIFF clip", format="wav"), b"RIFF clip"),
+}
+
+
+def _named_note(label: str) -> str:
+    return f"{_KEPT_PROMPT}\n\n{FALLBACK_MARKER}\nNot sent: {label}.\n{INLINE_MEDIA_FALLBACK_PROMPT}"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["image", "file", "audio"])
+@pytest.mark.parametrize("family", sorted(FAMILIES))
+async def test_every_family_sends_the_rest_of_the_media_beside_an_attachment_it_cannot_read(
+    family: str,
+    kind: str,
+    tmp_path: Path,
+) -> None:
+    """The unreadable attachment's own failure names it, so the provider gets one request with the readable one.
+
+    A route that omits the kind replaces both up front with the plain note.
+    """
+    spec = FAMILIES[family]
+    wire = Wire(spec.reply())
+    adapter = spec.adapter(tmp_path, wire)
+    field, readable, data = _READABLE[kind]
+    [unreadable] = _unreadable_media(kind, tmp_path)[field]
+    message = Message(role="user", content=_KEPT_PROMPT, **{field: [replace(unreadable, id="att_gone"), readable]})
+
+    turn = await complete(pipeline_provider(adapter), ModelRequest(messages=[message]))
+
+    assert (turn.content, len(wire.requests)) == ("ok", 1)
+    if kind in adapter.capabilities.omitted_media:
+        assert prompt_text(wire.body()) == f"{_KEPT_PROMPT}\n\n{FALLBACK_MARKER}\n{INLINE_MEDIA_FALLBACK_PROMPT}"
+        return
+    assert prompt_text(wire.body()) == _named_note(f"{kind} (att_gone)")
+    assert sends(wire.body(), data)
+
+
+@pytest.mark.asyncio
+async def test_vertex_ai_sends_the_rest_of_the_media_beside_a_file_too_large_to_inline(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Vertex AI has no Files API, so the large file is left out by name and the small image still goes inline."""
+    monkeypatch.setattr(gemini_wire, "_INLINE_MEDIA_LIMIT_BYTES", 12)
+    large = tmp_path / "large.pdf"
+    large.write_bytes(b"%PDF-1.4 " + bytes(32))
+    _field, image, _data = _READABLE["image"]
+    message = Message(
+        role="user",
+        content=_KEPT_PROMPT,
+        images=[image],
+        files=[File(id="att_large", filepath=str(large), filename="large.pdf", mime_type="application/pdf")],
+    )
+    spec = FAMILIES["gemini_vertexai"]
+    wire = Wire(spec.reply())
+
+    await complete(pipeline_provider(spec.adapter(tmp_path, wire)), ModelRequest(messages=[message]))
+
+    assert len(wire.requests) == 1
+    assert prompt_text(wire.body()) == _named_note("large.pdf (att_large)")
+    assert sends(wire.body(), b"PNG photo")
+
+
+# Keys that only a media part of some wire carries.
+_MEDIA_PART_MARKERS = (
+    '"type": "image',
+    '"type": "input_image"',
+    '"type": "input_file"',
+    '"type": "input_audio"',
+    '"type": "video_url"',
+    '"type": "input_video"',
+    '"type": "file"',
+    '"type": "document"',
+    '"inlineData"',
+    '"fileData"',
+    '"images"',
+)
+
+
+def _empty_media(kind: str, root: Path) -> dict[str, Any]:
+    path = root / f"empty-{kind}"
+    path.write_bytes(b"")
+    media = {
+        "image": Image(filepath=str(path), mime_type="image/png"),
+        "file": File(filepath=str(path), mime_type="application/pdf", filename="empty.pdf"),
+        "audio": Audio(filepath=str(path), format="wav"),
+    }
+    return {{"image": "images", "file": "files", "audio": "audio"}[kind]: [media[kind]]}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("kind", ["image", "file", "audio"])
+@pytest.mark.parametrize("family", sorted(FAMILIES))
+async def test_every_family_leaves_out_an_empty_attachment_file_with_one_warning(
+    family: str,
+    kind: str,
+    tmp_path: Path,
+) -> None:
+    """An empty attachment file adds no part on any route, and a route that reads it logs one warning.
+
+    A route that omits the kind replaces it up front with the media fallback's note and never reads it.
+    """
+    spec = FAMILIES[family]
+    wire = Wire(spec.reply())
+    adapter = spec.adapter(tmp_path, wire)
+    message = Message(role="user", content="Look", **_empty_media(kind, tmp_path))
+
+    with capture_logs() as logs:
+        turn = await complete(pipeline_provider(adapter), ModelRequest(messages=[message]))
+
+    assert (turn.content, len(wire.requests)) == ("ok", 1)
+    sent = json.dumps(wire.body())
+    assert not [marker for marker in _MEDIA_PART_MARKERS if marker in sent]
+    omitted = kind in adapter.capabilities.omitted_media
+    assert (FALLBACK_MARKER in sent) is omitted
+    warnings = [log["event"] for log in logs if log["log_level"] == "warning"]
+    assert warnings == ([] if omitted else ["media_file_empty"])
+
+
+# The media kind of each part type a wire's user content holds.
+_PART_KINDS = {
+    "text": "text",
+    "input_text": "text",
+    "image": "image",
+    "image_url": "image",
+    "input_image": "image",
+    "input_audio": "audio",
+    "video_url": "video",
+    "input_video": "video",
+    "document": "file",
+    "file": "file",
+    "input_file": "file",
+}
+
+
+def _user_part_kinds(body: dict[str, Any]) -> list[str]:
+    """Return the media kind of each part of the request's last user content, in order."""
+    if "contents" in body:
+        # The SDK spells the inline type ``mimeType`` on the Gemini API and ``mime_type`` on Vertex AI.
+        inline = [part.get("inlineData", {}) for part in body["contents"][-1]["parts"]]
+        kinds = [(data.get("mimeType") or data.get("mime_type") or "text").split("/")[0] for data in inline]
+        return [kind.replace("application", "file") for kind in kinds]
+    message = body["messages"][-1] if "messages" in body else body["input"][-1]
+    return [_PART_KINDS[part["type"]] for part in message["content"]]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("family", ["anthropic", "gemini", "gemini_vertexai", "openai_chat", "openai_responses"])
+async def test_every_family_sends_the_text_first_then_images_audio_video_and_files(family: str, tmp_path: Path) -> None:
+    """One order on every wire: the text, then each kind of media the route takes, each in the order it came."""
+    spec = FAMILIES[family]
+    wire = Wire(spec.reply())
+    adapter = spec.adapter(tmp_path, wire)
+    omitted = adapter.capabilities.omitted_media
+    png = b"\x89PNG\r\n\x1a\n" + bytes(8)
+    message = Message(
+        role="user",
+        content="Compare",
+        images=[Image(content=png, mime_type="image/png"), Image(content=png, mime_type="image/png")],
+        audio=None if "audio" in omitted else [Audio(content=b"RIFF", format="wav", mime_type="audio/wav")],
+        videos=None if "video" in omitted else [Video(content=b"mp4", mime_type="video/mp4")],
+        files=[File(content=b"%PDF-1", filename="first.pdf"), File(content=b"%PDF-2", filename="second.pdf")],
+    )
+
+    await complete(pipeline_provider(adapter), ModelRequest(messages=[message]))
+
+    expected = ["text", "image", "image"]
+    expected += [] if "audio" in omitted else ["audio"]
+    expected += [] if "video" in omitted else ["video"]
+    assert _user_part_kinds(wire.body()) == [*expected, "file", "file"]
+
+
+@pytest.mark.asyncio
+async def test_composed_pipeline_serves_the_synthetic_family(tmp_path: Path) -> None:
+    """The synthetic model has no wire, but every stage still applies to it as the registry composes it.
+
+    The deferred tool leaves the tool list, and the shell call and the continuation after its result pass through
+    the media, retry, and logging stages. The model sends no request body and reports no usage, so the request log
+    writes no record for it.
+    """
+    settings = {"min_response_chars": 200, "max_response_chars": 200, "chars_per_second": 0, "tool_call_probability": 1}
+    adapter = build_synthetic_provider(
+        ModelConfig(provider="synthetic", id="lorem-ipsum", extra_kwargs=settings),
+        runtime_paths_for(tmp_path),
+    )
+    received: list[ModelRequest] = []
+
+    async def receiving(inner: ModelProvider, request: ModelRequest) -> AsyncIterator[StreamEvent]:
+        received.append(request)
+        async for event in inner.stream(request):
+            yield event
+
+    log_dir = tmp_path / "logs"
+    provider = pipeline_provider(
+        WrappedProvider(adapter, receiving),
+        log_dir=log_dir,
+        idle_timeout_seconds=_IDLE_LIMIT_SECONDS,
+    )
+    request = ModelRequest(
+        messages=[Message(role="user", content="Hi")],
+        tools=[_tool("call_tool"), _tool("lookup_order"), _tool(SHELL_TOOL), _tool("tool_search")],
+        deferred_tools=DeferredTools(names=frozenset({"lookup_order"}), portable=True),
+    )
+
+    calling = await complete(provider, request)
+    (call,) = calling.tool_calls
+    result = Message(role="tool", content="hi", tool_call_id=call["id"], tool_name=SHELL_TOOL)
+    answer = await complete(provider, replace(request, messages=[*request.messages, calling.message, result]))
+
+    assert (calling.stop_reason, call["function"]["name"], answer.stop_reason) == ("tool_use", SHELL_TOOL, "end")
+    assert len(calling.content + answer.content) == 200
+    assert [[tool.name for tool in sent.tools] for sent in received] == [["call_tool", SHELL_TOOL, "tool_search"]] * 2
+    assert received[1].messages[-1].tool_call_id == call["id"]
+    assert not log_dir.exists()
+
+
+# --- Timings ------------------------------------------------------------------------------------------------------
+
+
+_REPLIES_WITHOUT_OUTPUT: dict[str, Callable[[], httpx.Response]] = {
+    "openai_chat": lambda: sse_response(
+        [
+            {
+                "id": "c",
+                "object": "chat.completion.chunk",
+                "created": 1,
+                "model": "m",
+                "choices": [],
+                "usage": {"prompt_tokens": 40, "completion_tokens": 0, "total_tokens": 40},
+            },
+            "[DONE]",
+        ],
+    ),
+    "gemini": lambda: sse_response([gemini_chunk(finish=True)]),
+    "ollama": lambda: ndjson_response([ollama_chunk(done=True)]),
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("family", _REPLIES_WITHOUT_OUTPUT)
+async def test_a_reply_without_output_records_no_time_to_first_token(family: str, tmp_path: Path) -> None:
+    """Only text, reasoning, or a tool call is output; a chunk that carries only usage starts no first-token time."""
+    spec = FAMILIES[family]
+    wire = Wire(_REPLIES_WITHOUT_OUTPUT[family]())
+
+    turn = await complete(
+        pipeline_provider(spec.adapter(tmp_path, wire)),
+        ModelRequest(messages=[Message(role="user", content="Hi")]),
+    )
+
+    assert turn.content == ""
+    assert turn.usage.time_to_first_token is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("family", sorted(FAMILIES))
+async def test_every_family_ends_a_turn_with_its_final_usage_timed_from_its_first_output(
+    family: str,
+    tmp_path: Path,
+) -> None:
+    """A finished turn's last events are its final usage report and the turn, which carries that usage.
+
+    Its time to first token runs from the request to the reply's text, within the request's duration.
+    """
+    spec = FAMILIES[family]
+    provider = pipeline_provider(spec.adapter(tmp_path, Wire(spec.reply())))
+
+    events = [event async for event in provider.stream(ModelRequest(messages=[Message(role="user", content="Hi")]))]
+
+    *_, usage, completed = events
+    assert isinstance(usage, UsageReported)
+    assert isinstance(completed, TurnCompleted)
+    metrics = completed.message.metrics
+    assert (completed.message.content, completed.stop_reason, usage.final, usage.usage) == ("ok", "end", True, metrics)
+    assert metrics.time_to_first_token is not None
+    assert 0 <= metrics.time_to_first_token <= metrics.duration
+
+
+_WEATHER_ARGUMENTS = '{"city": "Paris"}'
+
+
+def _chat_weather_call() -> httpx.Response:
+    """A Chat stream that opens the call, streams its arguments as a second piece, then finishes."""
+    opened = {"index": 0, "id": "call_1", "type": "function", "function": {"name": "get_weather", "arguments": ""}}
+    arguments = {"index": 0, "function": {"arguments": _WEATHER_ARGUMENTS}}
+    return sse_response(
+        [
+            chat_chunk({"tool_calls": [opened]}),
+            chat_chunk({"tool_calls": [arguments]}),
+            chat_chunk({}, finish_reason="tool_calls"),
+            "[DONE]",
+        ],
+    )
+
+
+def _ollama_weather_call() -> httpx.Response:
+    calling = ollama_chunk()
+    calling["message"]["tool_calls"] = [{"function": {"name": "get_weather", "arguments": {"city": "Paris"}}}]
+    return ndjson_response([calling, ollama_chunk(done=True)])
+
+
+# One reply per adapter whose only output is one ``get_weather`` call, its arguments streamed where the wire streams them.
+_REPLIES_THAT_ONLY_CALL_A_TOOL: dict[str, Callable[[], httpx.Response]] = {
+    "anthropic": lambda: sse_response(
+        claude_events(
+            [{"type": "tool_use", "id": "toolu_1", "name": "get_weather", "input": {}}],
+            deltas=[{"type": "input_json_delta", "partial_json": _WEATHER_ARGUMENTS}],
+            stop_reason="tool_use",
+        ),
+        named=True,
+    ),
+    "gemini": lambda: sse_response(
+        [gemini_chunk({"functionCall": {"name": "get_weather", "args": {"city": "Paris"}}}, finish=True)],
+    ),
+    "ollama": _ollama_weather_call,
+    "openai_chat": _chat_weather_call,
+    "openai_responses": lambda: sse_response(
+        responses_events(
+            {
+                "id": "resp_1",
+                "object": "response",
+                "created_at": 1,
+                "model": "gpt-6-astra",
+                "status": "completed",
+                "output": [
+                    {
+                        "id": "fc_1",
+                        "type": "function_call",
+                        "call_id": "call_1",
+                        "name": "get_weather",
+                        "arguments": _WEATHER_ARGUMENTS,
+                        "status": "completed",
+                    },
+                ],
+            },
+        ),
+        named=True,
+    ),
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("family", _REPLIES_THAT_ONLY_CALL_A_TOOL)
+async def test_a_reply_that_only_calls_a_tool_is_timed_from_that_call(family: str, tmp_path: Path) -> None:
+    """A complete tool call is output, so a reply without text still records its time to first token."""
+    spec = FAMILIES[family]
+    wire = Wire(_REPLIES_THAT_ONLY_CALL_A_TOOL[family]())
+
+    turn = await complete(
+        pipeline_provider(spec.adapter(tmp_path, wire)),
+        ModelRequest(messages=[Message(role="user", content="Weather in Paris?")], tools=[_tool("get_weather")]),
+    )
+
+    assert [(call["function"]["name"], json.loads(call["function"]["arguments"])) for call in turn.tool_calls] == [
+        ("get_weather", {"city": "Paris"}),
+    ]
+    assert turn.content == ""
+    assert turn.usage.time_to_first_token is not None
+    assert 0 <= turn.usage.time_to_first_token <= turn.usage.duration
+
+
+# --- Stream activity and server tools ----------------------------------------------------------------------------
+
+
+def _claude_argument_stream(*, pause_seconds: float) -> httpx.Response:
+    arguments = json.dumps({"city": "P" * 50})
+    step = -(-len(arguments) // _SILENT_EVENTS)
+    pieces = [arguments[index : index + step] for index in range(0, len(arguments), step)]
+    block = {"type": "tool_use", "id": "toolu_1", "name": "get_weather", "input": {}}
+    deltas = [{"type": "input_json_delta", "partial_json": piece} for piece in pieces]
+    return sse_response(
+        claude_events([block], deltas=deltas, stop_reason="tool_use"),
+        named=True,
+        pause_seconds=pause_seconds,
+    )
+
+
+def _gemini_code_execution_stream(*, pause_seconds: float = 0.0, drop: bool = False) -> httpx.Response:
+    running = gemini_chunk({"executableCode": {"language": "PYTHON", "code": "print(1)"}})
+    chunks: list[dict[str, Any] | str] = [running] * (_SILENT_EVENTS if not drop else 1)
+    if not drop:
+        chunks.append(gemini_chunk({"text": "ok"}, finish=True))
+    return sse_response(chunks, pause_seconds=pause_seconds, drop=drop)
+
+
+def _ollama_silent_stream(*, pause_seconds: float = 0.0, drop: bool = False) -> httpx.Response:
+    chunks = [ollama_chunk("")] * (_SILENT_EVENTS if not drop else 1)
+    if not drop:
+        chunks.extend([ollama_chunk("ok"), ollama_chunk(done=True)])
+    return ndjson_response(chunks, pause_seconds=pause_seconds, drop=drop)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("family", "reply", "stop_reason"),
+    [
+        ("anthropic", lambda: _claude_argument_stream(pause_seconds=_EVENT_PAUSE_SECONDS), "tool_use"),
+        ("gemini", lambda: _gemini_code_execution_stream(pause_seconds=_EVENT_PAUSE_SECONDS), "end"),
+        ("ollama", lambda: _ollama_silent_stream(pause_seconds=_EVENT_PAUSE_SECONDS), "end"),
+    ],
+    ids=["anthropic-tool-arguments", "gemini-code-execution", "ollama-empty-chunks"],
+)
+async def test_provider_events_without_output_keep_a_stream_inside_the_idle_limit(
+    family: str,
+    reply: Callable[[], httpx.Response],
+    stop_reason: str,
+    tmp_path: Path,
+) -> None:
+    """The idle limit measures the gap between provider events, including those that carry no output."""
+    spec = FAMILIES[family]
+    wire = Wire(spec.reply(), reply())
+    provider = pipeline_provider(spec.adapter(tmp_path, wire), idle_timeout_seconds=_IDLE_LIMIT_SECONDS)
+    request = ModelRequest(messages=[Message(role="user", content="Hi")], tools=[_tool("get_weather")])
+    # The first request builds and caches the SDK client, which must not count against the paced stream's limit.
+    await complete(provider, request)
+
+    turn = await complete(provider, request)
+
+    assert (turn.stop_reason, len(wire.requests)) == (stop_reason, 2)
+    if family == "anthropic":
+        assert turn.tool_calls[0]["function"]["arguments"] == json.dumps({"city": "P" * 50})
+
+
+def _claude_server_tool_then_drop() -> httpx.Response:
+    events = claude_events([])[:1]
+    block = {"type": "server_tool_use", "id": "srvtoolu_1", "name": "web_search", "input": {"query": "paris"}}
+    events.append({"type": "content_block_start", "index": 0, "content_block": block})
+    return sse_response(events, named=True, drop=True)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("family", "reply"),
+    [("anthropic", _claude_server_tool_then_drop), ("gemini", lambda: _gemini_code_execution_stream(drop=True))],
+    ids=["anthropic-web-search", "gemini-code-execution"],
+)
+async def test_failure_after_a_server_tool_started_is_final(
+    family: str,
+    reply: Callable[[], httpx.Response],
+    tmp_path: Path,
+) -> None:
+    """Once a hosted tool ran, a retry would run it again, so the dropped connection ends the request for good."""
+    spec = FAMILIES[family]
+    wire = Wire(lambda _request: reply())
+    provider = pipeline_provider(spec.adapter(tmp_path, wire))
+    request = ModelRequest(messages=[Message(role="user", content="Hi")])
+
+    with pytest.raises(ProviderUnavailable) as raised:
+        await complete(provider, request)
+
+    assert (raised.value.code, len(wire.requests)) == ("connection_error", 1)
+
+
+@pytest.mark.asyncio
+async def test_a_malformed_function_call_does_not_strip_the_request_media(tmp_path: Path) -> None:
+    """Gemini's MALFORMED_FUNCTION_CALL is the model's failure, not the media's: only the guidance retry follows."""
+    spec = FAMILIES["gemini"]
+    malformed = {"candidates": [{"content": {"role": "model", "parts": []}, "finishReason": "MALFORMED_FUNCTION_CALL"}]}
+    wire = Wire(lambda _request: sse_response([malformed]))
+    provider = pipeline_provider(spec.adapter(tmp_path, wire))
+    image = Image(content=b"\x89PNG\r\n\x1a\n0000", mime_type="image/png")
+    request = ModelRequest(
+        messages=[Message(role="user", content="Look", images=[image])],
+        tools=[_tool("get_weather")],
+    )
+
+    with pytest.raises(ProviderError) as raised:
+        await complete(provider, request)
+
+    assert (raised.value.code, raised.value.retryable, len(wire.requests)) == (MALFORMED_TOOL_CALL, False, 2)
+    assert all("inlineData" in json.dumps(wire.body(index)) for index in range(2))
+    texts = [part["text"] for content in wire.body()["contents"] for part in content["parts"] if "text" in part]
+    assert texts[-1] == MALFORMED_FUNCTION_CALL_GUIDANCE
+
+
+@pytest.mark.asyncio
+async def test_a_dropped_connection_without_server_tools_is_still_retried(tmp_path: Path) -> None:
+    """Ollama has no hosted tools, so a stream that drops before output keeps the transient retry budget."""
+    spec = FAMILIES["ollama"]
+    wire = Wire(lambda _request: _ollama_silent_stream(drop=True))
+    provider = pipeline_provider(spec.adapter(tmp_path, wire))
+
+    with pytest.raises(ProviderUnavailable):
+        await complete(provider, ModelRequest(messages=[Message(role="user", content="Hi")]))
+
+    assert len(wire.requests) == 5

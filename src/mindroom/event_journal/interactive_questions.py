@@ -12,7 +12,7 @@ from mindroom.interactive_models import (
     interactive_prompt_from_content,
 )
 
-from .identity import decode_thread_id
+from .identity import decode_thread_id, journal_principal_id
 from .membership_state import claim_membership_epoch
 from .models import EventClass, EventKind, SemanticConsumer
 from .schema import PENDING_STATE
@@ -160,7 +160,7 @@ def record_projected_prompt(
 ) -> None:
     """Record one authorized prompt revision."""
     prompt = interactive_prompt_from_content(content)
-    if prompt is None or principal_id != f"{prompt.creator_agent}@{sender}":
+    if prompt is None or principal_id != journal_principal_id(prompt.creator_agent, sender):
         return
     prompt_membership_epoch = _prompt_membership_epoch(
         transaction,

@@ -26,7 +26,6 @@ import asyncio
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
-from functools import partial
 from typing import TYPE_CHECKING, Any, Literal
 
 import anyio
@@ -39,9 +38,9 @@ from backend.entitlements import (
     is_subscription_service_active,
     parse_timestamp,
 )
-from backend.k8s import check_deployment_exists, run_kubectl, tenant_stop_deployment_refs
+from backend.k8s import INSTANCES_NAMESPACE, check_deployment_exists, run_kubectl, tenant_stop_deployment_refs
 from backend.openrouter import OpenRouterKeyNotFoundError
-from backend.services.instances_data import get_instance, update_instance
+from backend.services.instances_data import get_instance, list_instances, update_instance
 from backend.services.legacy_instance_lifecycle import (
     adopt_legacy_soft_deleted_instance,
     legacy_soft_deleted_deployment_exists,
@@ -51,10 +50,10 @@ from backend.services.provisioner_service import (
     InstanceClaimLostError,
     account_pending_deletion,
     account_row_pending_deletion,
+    allowed_openrouter_limit_usd,
     openrouter_key_exceeds_plan,
     openrouter_key_matches_plan,
     provision_instance,
-    revoke_instance_openrouter_key,
     set_instance_openrouter_key_disabled,
     set_instance_openrouter_key_limit,
     start_instance,
@@ -75,9 +74,7 @@ LIFECYCLE_INSTANCE_COLUMNS = (
     "openrouter_key_limit_reset,lifecycle_stopped_at,teardown_after,lifecycle_error,lifecycle_error_at"
 )
 _CLEARED_LIFECYCLE_ERROR = {"lifecycle_error": None, "lifecycle_error_at": None}
-_PAGE_SIZE = 1000
 _STRIPE_REFRESH_ATTEMPTS = 3
-_INSTANCES_NAMESPACE = "mindroom-instances"
 # Stripe subscriptions in these states have no paid period to finish, so a recorded account deletion cancels them;
 # otherwise a customer could still pay an open first invoice or resume a paused trial during the grace period.
 _UNBILLED_STRIPE_STATUSES = frozenset({"incomplete", "paused"})
@@ -210,7 +207,7 @@ async def end_account_billing_at_period_end(account_id: str) -> list[ScheduledBi
     recorded. A no-op without a Stripe customer or without Stripe.
     """
     if customer_id := _stripe_customer_id(ensure_supabase(), account_id):
-        return await anyio.to_thread.run_sync(partial(_end_customer_billing_at_period_end, customer_id))
+        return await anyio.to_thread.run_sync(_end_customer_billing_at_period_end, customer_id)
     return []
 
 
@@ -220,13 +217,13 @@ async def cancel_unpaid_subscriptions(account_id: str) -> None:
     A Stripe error propagates; the nightly cleanup repeats this for every account inside its grace period.
     """
     if customer_id := _stripe_customer_id(ensure_supabase(), account_id):
-        await anyio.to_thread.run_sync(partial(_cancel_customer_subscriptions, customer_id, _UNBILLED_STRIPE_STATUSES))
+        await anyio.to_thread.run_sync(_cancel_customer_subscriptions, customer_id, _UNBILLED_STRIPE_STATUSES)
 
 
 async def resume_account_billing(account_id: str) -> None:
     """Undo `end_account_billing_at_period_end` after an account deletion is cancelled; a Stripe error propagates."""
     if customer_id := _stripe_customer_id(ensure_supabase(), account_id):
-        await anyio.to_thread.run_sync(partial(_resume_customer_billing, customer_id))
+        await anyio.to_thread.run_sync(_resume_customer_billing, customer_id)
 
 
 def restart_teardown_grace(account_id: str) -> None:
@@ -290,7 +287,7 @@ async def reconcile_all_subscriptions(*, now: datetime | None = None) -> Lifecyc
     """Reconcile every subscription that owns an instance."""
     summary = LifecycleSummary()
     subscription_ids = dict.fromkeys(
-        row["subscription_id"] for row in _instance_rows(ensure_supabase(), "subscription_id")
+        row["subscription_id"] for row in list_instances(ensure_supabase(), "subscription_id")
     )
     for subscription_id in subscription_ids:
         try:
@@ -322,7 +319,7 @@ def _stripe_customer_id(sb: Client, account_id: str) -> str | None:
 async def _cancel_stripe_subscriptions(sb: Client, account_id: str) -> None:
     """Cancel every Stripe subscription of the account's customer that still bills; a no-op without Stripe."""
     if customer_id := _stripe_customer_id(sb, account_id):
-        await anyio.to_thread.run_sync(partial(_cancel_customer_subscriptions, customer_id))
+        await anyio.to_thread.run_sync(_cancel_customer_subscriptions, customer_id)
 
 
 def _customer_subscriptions(customer_id: str) -> list[Any]:
@@ -416,16 +413,17 @@ async def _refresh_status_from_stripe(sb: Client, subscription_id: str) -> dict[
                 "status": subscription_status(sb, remote["status"], stripe_subscription_id),
                 "trial_ends_at": maybe_timestamp_to_iso(remote.get("trial_end")),
             }
-        unchanged = all(
-            parse_timestamp(subscription.get(key)) == parse_timestamp(value)
-            if key in {"trial_ends_at", "current_period_start", "current_period_end"}
-            else subscription.get(key) == value
+        changed = {
+            key: value
             for key, value in fields.items()
-        )
+            if (
+                parse_timestamp(subscription.get(key)) != parse_timestamp(value)
+                if key in {"trial_ends_at", "current_period_start", "current_period_end"}
+                else subscription.get(key) != value
+            )
+        }
         query = sb.table("subscriptions")
-        query = (
-            query.select("*") if unchanged else query.update({**fields, "updated_at": datetime.now(UTC).isoformat()})
-        )
+        query = query.update({**fields, "updated_at": datetime.now(UTC).isoformat()}) if changed else query.select("*")
         current = (
             query.eq("id", subscription_id)
             .eq("stripe_subscription_id", stripe_subscription_id)
@@ -435,12 +433,11 @@ async def _refresh_status_from_stripe(sb: Client, subscription_id: str) -> dict[
             .data
         )
         if current:
-            if not unchanged:
+            if changed:
                 logger.warning(
-                    "Subscription %s was stored as %s but Stripe reports %s; corrected it",
+                    "Corrected subscription %s from Stripe: %s",
                     subscription_id,
-                    subscription.get("status"),
-                    fields["status"],
+                    ", ".join(f"{key} {subscription.get(key)!r} -> {value!r}" for key, value in changed.items()),
                 )
             return current[0]
         logger.info("Subscription %s changed while Stripe was queried; refreshing again", subscription_id)
@@ -454,7 +451,7 @@ def lifecycle_overview(*, now: datetime | None = None) -> tuple[list[dict[str, A
     Each row carries the instance lifecycle columns, `account_email`, `subscription_status`, and `problem`.
     """
     now = now or datetime.now(UTC)
-    rows = _instance_rows(
+    rows = list_instances(
         ensure_supabase(),
         f"{LIFECYCLE_INSTANCE_COLUMNS},subscription:subscriptions(*),account:accounts(email,deleted_at)",
     )
@@ -506,24 +503,6 @@ def _lifecycle_problem(
     return None
 
 
-def _instance_rows(sb: Client, columns: str) -> list[dict[str, Any]]:
-    """Return every instance row, paged past PostgREST's row limit."""
-    rows: list[dict[str, Any]] = []
-    while True:
-        page = (
-            sb.table("instances")
-            .select(columns)
-            .order("instance_id")
-            .range(len(rows), len(rows) + _PAGE_SIZE - 1)
-            .execute()
-            .data
-            or []
-        )
-        if not page:
-            return rows
-        rows.extend(page)
-
-
 async def _resume(
     sb: Client, instance: dict[str, Any], subscription: dict[str, Any], now: datetime, summary: LifecycleSummary
 ) -> None:
@@ -531,7 +510,7 @@ async def _resume(
     instance_id = instance["instance_id"]
     torn_down = instance.get("status") == "deprovisioned"
     # Apply the tier's resources and key limit before re-enabling a held instance.
-    plan_mismatch = not _deployed_plan_matches(instance, subscription["tier"])
+    plan_mismatch = not _deployed_plan_matches(instance, subscription)
     # After any failed resume or provision, only a full reprovision republishes the key and deployment.
     failed_before = bool(instance.get("lifecycle_error")) or instance.get("status") == "error"
     if torn_down or plan_mismatch or failed_before or not await check_deployment_exists(str(instance_id)):
@@ -572,25 +551,31 @@ async def _hold_for_pending_deletion(
     return True
 
 
-def _deployed_plan_matches(instance: dict[str, Any], tier: str) -> bool:
+def _deployed_plan_matches(instance: dict[str, Any], subscription: dict[str, Any]) -> bool:
     """Return whether an instance was last deployed for the tier, with exactly the platform-paid key it includes."""
-    return instance.get("tier") == tier and openrouter_key_matches_plan(instance, tier)
+    tier = subscription["tier"]
+    limit = allowed_openrouter_limit_usd(tier, subscription)
+    return instance.get("tier") == tier and openrouter_key_matches_plan(instance, limit)
 
 
-def _plan_alignment(instance: dict[str, Any], tier: str) -> Literal["redeploy", "limit"] | None:
+def _plan_alignment(instance: dict[str, Any], subscription: dict[str, Any]) -> Literal["redeploy", "limit"] | None:
     """Return how an instance the lifecycle does not hold must change to run only what its tier pays for."""
+    tier = subscription["tier"]
     status = instance.get("status")
     if status == "error" and instance.get("lifecycle_error"):
         # A redeploy by this function failed, and provisioning marked the instance errored; retry it.
         return "redeploy"
-    if _deployed_plan_matches(instance, tier):
+    if _deployed_plan_matches(instance, subscription):
         return None
+    if instance.get("tier") == tier and instance.get("openrouter_key_hash"):
+        # Deployed for the tier, so only the key limit differs, as it does around a trial conversion.
+        return "limit"
     if status == "running":
         # Provisioning applies the tier's resources and updates the key limit.
         return "redeploy"
     # Any other instance is not redeployed, which would start a customer-stopped one or race a provision; it only
     # gets a lower key limit when required, and the rest follows once it runs again.
-    return "limit" if openrouter_key_exceeds_plan(instance, tier) else None
+    return "limit" if openrouter_key_exceeds_plan(instance, allowed_openrouter_limit_usd(tier, subscription)) else None
 
 
 def _needs_change(instance: dict[str, Any], subscription: dict[str, Any], *, entitled: bool) -> bool:
@@ -598,21 +583,31 @@ def _needs_change(instance: dict[str, Any], subscription: dict[str, Any], *, ent
         return instance.get("status") != "deprovisioned"
     if instance.get("lifecycle_stopped_at"):
         return True
-    return _plan_alignment(instance, subscription["tier"]) is not None
+    return _plan_alignment(instance, subscription) is not None
 
 
 async def _align_plan(sb: Client, instance: dict[str, Any], subscription: dict[str, Any]) -> None:
     """Keep an entitled instance the lifecycle does not hold on what its subscription tier pays for."""
     instance_id = instance["instance_id"]
-    alignment = _plan_alignment(instance, subscription["tier"])
+    alignment = _plan_alignment(instance, subscription)
     if alignment == "redeploy":
         logger.info("Redeploying instance %s for the %s tier of its subscription", instance_id, subscription["tier"])
         await _reprovision(sb, instance, subscription, resume_lifecycle_hold=False)
     elif alignment == "limit":
         try:
-            await set_instance_openrouter_key_limit(sb, instance, subscription["tier"])
+            limit = allowed_openrouter_limit_usd(subscription["tier"], subscription)
+            await set_instance_openrouter_key_limit(sb, instance, limit)
         except OpenRouterKeyNotFoundError:
-            await revoke_instance_openrouter_key(sb, instance_id)
+            # The key is gone on OpenRouter; forget it unless another run recorded a replacement meanwhile, and give a
+            # running instance a new key now. A stopped one gets its key when it starts again.
+            update_instance(
+                sb,
+                instance_id,
+                CLEARED_OPENROUTER_KEY_METADATA,
+                expected_openrouter_key_hash=instance["openrouter_key_hash"],
+            )
+            if instance.get("status") == "running":
+                await _reprovision(sb, instance, subscription, resume_lifecycle_hold=False)
     # The instance now carries only what its tier pays for, so an earlier failed step is resolved.
     if instance.get("lifecycle_error"):
         update_instance(sb, instance_id, _CLEARED_LIFECYCLE_ERROR)
@@ -650,9 +645,12 @@ async def _hold(
     summary: LifecycleSummary,
 ) -> None:
     """Keep an instance of an unentitled subscription stopped, and tear it down once its grace period ends."""
-    if instance.get("status") == "deprovisioned":
-        return
     instance_id = instance["instance_id"]
+    if instance.get("status") == "deprovisioned":
+        # A torn-down instance has nothing left to hold; a failed legacy lookup is repeated by the next nightly run.
+        if instance.get("lifecycle_error"):
+            update_instance(sb, instance_id, _CLEARED_LIFECYCLE_ERROR)
+        return
     if instance.get("lifecycle_stopped_at") is None:
         hold = {
             "lifecycle_stopped_at": now.isoformat(),
@@ -699,7 +697,7 @@ async def _teardown(
 async def _scale_down(instance_id: Any) -> None:
     """Scale every tenant deployment to zero; a deployment that does not exist is already stopped."""
     for deployment_ref in tenant_stop_deployment_refs(instance_id):
-        code, out, err = await run_kubectl(["scale", deployment_ref, "--replicas=0"], namespace=_INSTANCES_NAMESPACE)
+        code, out, err = await run_kubectl(["scale", deployment_ref, "--replicas=0"], namespace=INSTANCES_NAMESPACE)
         message = (err or out).strip()
         if code != 0 and "notfound" not in message.lower().replace(" ", ""):
             msg = f"kubectl scale failed for {deployment_ref}: {message}"

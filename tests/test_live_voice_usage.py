@@ -2,17 +2,20 @@
 
 from __future__ import annotations
 
+import json
 import math
 from typing import TYPE_CHECKING
 
 import pytest
 
-from mindroom.agent_storage import save_independent_usage
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
+from mindroom.llm.usage import HelperUsage, RunMetrics, TokenCounts, VoiceDuration
 from mindroom.matrix_rtc.call_tools import record_call_token_usage, record_call_voice_usage
 from mindroom.matrix_rtc.voice_agent import LiveVoiceUsage, RealtimeCallUsage, _RealtimeResponseUsage
+from mindroom.session_storage.agent_storage import create_session_storage
+from mindroom.session_storage.schema import quote_identifier, usage_upsert_sql
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from mindroom.usage.stats import collect_admin_usage, collect_private_usage
 from tests.conftest import test_runtime_paths
@@ -21,9 +24,8 @@ from tests.test_request_usage import request_usage  # noqa: F401
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from agno.db.sqlite import SqliteDb
-
     from mindroom.constants import RuntimePaths
+    from mindroom.session_storage.store import ConversationStore
 
 
 @pytest.mark.asyncio
@@ -67,7 +69,10 @@ async def test_voice_usage_keeps_caller_ownership(tmp_path: Path, private: bool)
 
 @pytest.mark.asyncio
 async def test_realtime_call_tokens_count_once_for_the_caller(tmp_path: Path) -> None:
-    """Realtime speech models bill tokens per response; each save replaces the call's responses so far."""
+    """Realtime speech models bill tokens per response; each save replaces the call's responses so far.
+
+    Each stored response names the model that answered it.
+    """
     paths = test_runtime_paths(tmp_path)
     config = Config(agents={"helper": AgentConfig(display_name="Helper")})
     identity = ToolExecutionIdentity(
@@ -81,19 +86,23 @@ async def test_realtime_call_tokens_count_once_for_the_caller(tmp_path: Path) ->
     )
     first = _RealtimeResponseUsage(
         created_at=1_700_000_010,
-        input_tokens=900,
-        output_tokens=300,
-        cache_read_tokens=400,
-        audio_input_tokens=800,
-        audio_output_tokens=250,
+        tokens=TokenCounts(
+            input_tokens=900,
+            output_tokens=300,
+            cache_read_tokens=400,
+            audio_input_tokens=800,
+            audio_output_tokens=250,
+        ),
     )
     second = _RealtimeResponseUsage(
         created_at=1_700_000_040,
-        input_tokens=1100,
-        output_tokens=400,
-        cache_read_tokens=800,
-        audio_input_tokens=1000,
-        audio_output_tokens=350,
+        tokens=TokenCounts(
+            input_tokens=1100,
+            output_tokens=400,
+            cache_read_tokens=800,
+            audio_input_tokens=1000,
+            audio_output_tokens=350,
+        ),
     )
     for responses in ((first,), (first, second)):
         usage = RealtimeCallUsage(
@@ -116,26 +125,69 @@ async def test_realtime_call_tokens_count_once_for_the_caller(tmp_path: Path) ->
     ]
     assert report.request_coverage is not None
     assert report.request_coverage.unavailable_sources == 0
+    storage = create_session_storage("helper", config, paths, identity)
+    with storage.transaction(write=False) as connection:
+        [(raw,)] = connection.execute(
+            f"SELECT usage_data FROM {quote_identifier(storage.names.usage)} WHERE run_id = ?",  # noqa: S608
+            ("realtime_voice:call-1",),
+        ).fetchall()
+    assert [(request["model"], request["model_provider"]) for request in json.loads(raw)["requests"]] == [
+        ("gpt-realtime-2.1", "OpenAI"),
+        ("gpt-realtime-2.1", "OpenAI"),
+    ]
+    # The call's first usage created the caller's conversation, dated when the call started.
+    conversation = storage.load_session("call")
+    assert conversation is not None
+    assert conversation.created_at == 1_700_000_000
+
+
+@pytest.mark.asyncio
+async def test_a_realtime_call_without_responses_stores_its_model_with_zero_usage(tmp_path: Path) -> None:
+    """A call saved before any response keeps the stored usage shape Agno wrote: its model's entry, all counts zero."""
+    paths = test_runtime_paths(tmp_path)
+    config = Config(agents={"helper": AgentConfig(display_name="Helper")})
+    identity = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="helper",
+        requester_id="@alice:example.org",
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="call",
+    )
+    usage = RealtimeCallUsage(usage_id="call-1", model="gpt-realtime-2.1", created_at=1_700_000_000, responses=())
+
+    await record_call_token_usage(usage, config=config, runtime_paths=paths, execution_identity=identity)
+
+    storage = create_session_storage("helper", config, paths, identity)
+    with storage.transaction(write=False) as connection:
+        [(raw,)] = connection.execute(
+            f"SELECT usage_data FROM {quote_identifier(storage.names.usage)} WHERE run_id = ?",  # noqa: S608
+            ("realtime_voice:call-1",),
+        ).fetchall()
+    snapshot = json.loads(raw)
+    assert snapshot["run_id"] == "realtime_voice:call-1"
+    assert snapshot["metrics"] == {"details": {"model": [{"id": "gpt-realtime-2.1", "provider": "OpenAI"}]}}
 
 
 def test_voice_duration_without_caller_keeps_usage_but_reports_incomplete_coverage(
-    request_usage: tuple[Config, RuntimePaths, SqliteDb],  # noqa: F811
+    request_usage: tuple[Config, RuntimePaths, ConversationStore],  # noqa: F811
 ) -> None:
     """Known voice duration must survive missing attribution without claiming complete coverage."""
     config, paths, storage = request_usage
-    save_independent_usage(
-        storage,
+    storage.save_independent_usage(
         session_id="session",
         usage_id="live_voice:unattributed",
         kind="live_voice",
         requester_id=None,
-        run={
-            "model_provider": "OpenAI",
-            "model": "gpt-live-1",
-            "created_at": 1_700_000_000,
-            "voice_seconds": 12.5,
-            "voice_finalized": True,
-        },
+        usage=HelperUsage(
+            run_id="unattributed",
+            model="gpt-live-1",
+            provider="OpenAI",
+            metrics=RunMetrics(),
+            voice=VoiceDuration(seconds=12.5, finalized=True),
+            created_at=1_700_000_000,
+        ),
     )
     report = collect_admin_usage(config=config, runtime_paths=paths).to_dict()
     assert [(row["user_id"], row["duration_seconds"]) for row in report["voice_breakdown"]] == [(None, 12.5)]
@@ -145,25 +197,30 @@ def test_voice_duration_without_caller_keeps_usage_but_reports_incomplete_covera
 
 @pytest.mark.parametrize("seconds", [-1, True, "12", math.nan, math.inf, None, pytest.param(10**400, id="overflow")])
 def test_invalid_voice_duration_is_excluded_without_discarding_delegate_tokens(
-    request_usage: tuple[Config, RuntimePaths, SqliteDb],  # noqa: F811
+    request_usage: tuple[Config, RuntimePaths, ConversationStore],  # noqa: F811
     seconds: object,
 ) -> None:
     """Malformed voice records cannot become billable seconds or erase sound token counters."""
     config, paths, storage = request_usage
-    save_independent_usage(
-        storage,
-        session_id="session",
-        usage_id="live_voice:invalid",
-        kind="live_voice",
-        requester_id="@alice:example.test",
-        run={
-            "model_provider": "OpenAI",
-            "model": "gpt-live-1",
-            "created_at": 1_700_000_000,
-            "voice_seconds": seconds,
-            "voice_finalized": False,
-        },
-    )
+    # Stored as written, since no writer stores such a duration.
+    stored = {
+        "run_id": "live_voice:invalid",
+        "parent_run_id": None,
+        "team_id": None,
+        "user_id": "@alice:example.test",
+        "model_provider": "OpenAI",
+        "model": "gpt-live-1",
+        "created_at": 1_700_000_000,
+        "voice_seconds": seconds,
+        "voice_finalized": False,
+        "metrics": {},
+        "kind": "live_voice",
+    }
+    with storage.transaction(write=True) as connection:
+        connection.execute(
+            usage_upsert_sql(storage.names),
+            ("session", "live_voice:invalid", json.dumps(stored)),
+        )
     report = collect_admin_usage(config=config, runtime_paths=paths).to_dict()
     assert report["voice_breakdown"] == []
     assert report["voice_coverage"]["unavailable_sources"] == 1

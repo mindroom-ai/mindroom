@@ -21,6 +21,7 @@ if TYPE_CHECKING:
     name="attachments",
     display_name="Attachments",
     description="Find files attached to a conversation and make workspace files available as attachments",
+    docs_url="https://docs.mindroom.chat/attachments/#the-attachments-tool",
     category=ToolCategory.PRODUCTIVITY,
     file_access=ToolFileAccess.AGENT,
     status=ToolStatus.AVAILABLE,
@@ -34,11 +35,12 @@ if TYPE_CHECKING:
     managed_init_args=(
         ToolManagedInitArg.RUNTIME_PATHS,
         ToolManagedInitArg.WORKER_TARGET,
+        ToolManagedInitArg.RUNTIME_CONFIG,
         ToolManagedInitArg.TOOL_OUTPUT_WORKSPACE_ROOT,
-        ToolManagedInitArg.WORKER_TOOLS_OVERRIDE,
+        ToolManagedInitArg.WORKSPACE_IN_WORKER,
         ToolManagedInitArg.FILE_ACCESS,
     ),
-    function_names=("get_attachment", "list_attachments", "register_attachment", "view_file"),
+    function_names=("get_attachment", "inline_image", "list_attachments", "register_attachment", "view_file"),
 )
 def attachments_tools() -> type[AttachmentTools]:
     """Return attachments tools."""

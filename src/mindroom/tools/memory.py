@@ -1,9 +1,9 @@
 """Memory tool metadata registration.
 
-Registers the ``memory`` tool in the metadata registry for UI display.
+Registers the ``memory`` tool in the metadata registry.
 The actual toolkit (``mindroom.custom_tools.memory.MemoryTools``) requires
-agent context and is instantiated directly in ``create_agent()``, so it
-is NOT added to ``TOOL_REGISTRY`` (no generic factory).
+agent context and is built in ``build_agent_toolkit()``, so it
+has no generic factory.
 """
 
 from mindroom.tool_system.declarations import (
@@ -21,6 +21,7 @@ register_builtin_tool_metadata(
         file_access=ToolFileAccess.NONE,
         display_name="Agent Memory",
         description="Save, find, and update information the agent remembers",
+        docs_url="https://docs.mindroom.chat/memory/#memory",
         category=ToolCategory.PRODUCTIVITY,
         status=ToolStatus.AVAILABLE,
         setup_type=SetupType.NONE,

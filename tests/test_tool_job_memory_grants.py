@@ -1,0 +1,141 @@
+"""Accepted memory work obeys the current effective memory setting."""
+
+from __future__ import annotations
+
+import asyncio
+from dataclasses import replace
+from functools import partial
+from typing import TYPE_CHECKING
+
+import pytest
+
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
+from mindroom.agents import build_agent_toolkit
+from mindroom.config.access import ResponderAccessConfig
+from mindroom.config.agent import AgentConfig
+from mindroom.config.main import Config
+from mindroom.config.models import BackgroundToolJobsConfig, DefaultsConfig
+from mindroom.memory import list_all_agent_memories
+from mindroom.orchestration.tool_job_runtime import ToolJobRuntimeCoordinator
+from mindroom.tool_jobs.authorization import authority_snapshot
+from mindroom.tool_jobs.provenance import function_provenance
+from mindroom.tool_jobs.resources import execution_resources
+from mindroom.tool_jobs.runtime import BackgroundOutcome
+from mindroom.tool_system.agent_tools import resolve_agent_tools
+from mindroom.tool_system.registry import builtin_tool_registry
+from mindroom.tool_system.runtime_context import tool_runtime_context
+from mindroom.tool_system.sandbox_proxy import tool_placement
+from tests.delegation_helpers import _delegate_runtime_context, _runtime_paths
+from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
+from tests.identity_helpers import entity_ids
+from tests.tool_job_helpers import job_actor, run_job_turn, tool_job_journal, toolkit_job_tools
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
+
+pytestmark = pytest.mark.usefixtures("enforce_turn_authorization")
+
+
+@pytest.fixture
+def memory_context(tmp_path: Path) -> ToolRuntimeContext:
+    """Configure a real file-memory store and an explicitly authorized requester."""
+    config = Config(
+        agents={
+            "leader": AgentConfig(
+                display_name="Leader",
+                tools=["memory"],
+                access=ResponderAccessConfig(users=["@alice:example.org"], current_room_members=False),
+            ),
+        },
+        defaults=DefaultsConfig(tools=[]),
+        memory={"backend": "file"},
+        background_tool_jobs=BackgroundToolJobsConfig(enabled=True),
+    )
+    paths = _runtime_paths(tmp_path)
+    entity_ids(config, paths)
+    return _delegate_runtime_context(config, paths)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("agent_setting", [False, True])
+@pytest.mark.parametrize("revoked", [False, True])
+async def test_memory_disabled_after_acceptance_cannot_write_retained_store(
+    memory_context: ToolRuntimeContext,
+    agent_setting: bool,
+    revoked: bool,
+) -> None:
+    """A real memory call uses current grants even though its toolkit retains old config."""
+    config, paths = memory_context.config, memory_context.runtime_paths
+    if agent_setting:
+        config.agents["leader"].memory_backend = "file"
+    current = config
+    owner = memory_context.execution_identity
+    coordinator = ToolJobRuntimeCoordinator(
+        paths,
+        lambda: current,
+        lambda _: None,
+        AgentReplyMembershipIndex(),
+        partial(tool_job_journal, paths.storage_root),
+    )
+    toolkit = build_agent_toolkit(
+        "memory",
+        agent_tools=resolve_agent_tools(config, "leader", builtin_tool_registry()),
+        placement=tool_placement(paths, builtin_tool_registry()),
+        runtime_paths=paths,
+        execution_identity=owner,
+    )
+    assert toolkit is not None
+    tools = toolkit_job_tools(toolkit, authored_name="memory", snapshot=authority_snapshot(config, "leader"))
+    tool = tools["add_memory"]
+    model = ScriptedModel(
+        [calls(tool_call("add_memory", "write-memory", content="accepted memory marker")), answer("done")],
+    )
+    actor = job_actor(*tools.values())
+    started, release, finished = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    async def operation() -> BackgroundOutcome:
+        try:
+            started.set()
+            await release.wait()
+            record = await run_job_turn(actor, model, "Store the marker", session_id=owner.session_id or "session")
+            return BackgroundOutcome("completed", str(record.content))
+        finally:
+            finished.set()
+
+    try:
+        await coordinator.sync()
+        async with execution_resources():
+            with tool_runtime_context(replace(memory_context, config_provider=lambda: current)):
+                _, claim = await coordinator.runtime.start(
+                    "accepted-memory",
+                    tool_name="add_memory",
+                    depth=0,
+                    toolkit_name="memory",
+                    adapter={"origin": function_provenance(tool), "authority": dict(tool.authority)},
+                    owner=owner,
+                    operation=operation,
+                )
+                await asyncio.wait_for(started.wait(), 30)
+                current = config.model_copy(deep=True)
+                if revoked:
+                    if agent_setting:
+                        current.agents["leader"].memory_backend = "none"
+                    else:
+                        current.memory.backend = "none"
+                release.set()
+                await asyncio.wait_for(finished.wait(), 30)
+                current = config
+                waited = await coordinator.runtime.wait("accepted-memory", owner=owner, depth=0, claim=claim)
+                await coordinator.runtime.release_wait("accepted-memory", waited.claim)
+                memories = await list_all_agent_memories(
+                    "leader",
+                    config,
+                    paths,
+                    execution_identity=owner,
+                )
+                assert any("accepted memory marker" in memory["memory"] for memory in memories) is not revoked
+    finally:
+        release.set()
+        await coordinator.stop()

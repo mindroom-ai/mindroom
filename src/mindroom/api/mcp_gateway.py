@@ -6,9 +6,9 @@ import asyncio
 import ipaddress
 import json
 import sqlite3
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any
-from urllib.parse import parse_qsl, urlencode, urlsplit
+from urllib.parse import parse_qsl, urlencode
 
 from fastapi import HTTPException
 from mcp.server.auth.handlers.authorize import AuthorizationHandler
@@ -34,20 +34,22 @@ from mindroom.api.mcp_clients import client_routes
 from mindroom.api.mcp_identity import resolve_gateway_browser_owner
 from mindroom.api.mcp_scim import scim_routes
 from mindroom.api.mcp_selection import selection_routes
+from mindroom.config.tool_aliases import canonical_tool_name
 from mindroom.logging_config import get_logger
 from mindroom.mcp.manager import MCPServerManager
 from mindroom.mcp_gateway.accounts import GatewayAccounts
 from mindroom.mcp_gateway.admission import OnboardingRateLimiter
-from mindroom.mcp_gateway.consent import render_consent_page
+from mindroom.mcp_gateway.consent import render_consent_error_page, render_consent_page
 from mindroom.mcp_gateway.execution import run_gateway_sync
 from mindroom.mcp_gateway.external_auth import ExternalAuth, ExternalAuthSettings
-from mindroom.mcp_gateway.oauth import GatewayOAuthProvider
+from mindroom.mcp_gateway.oauth import GatewayOAuthProvider, gateway_public_origin
 from mindroom.mcp_gateway.selection import GatewaySelections
 from mindroom.mcp_gateway.server import GatewayServer, read_gateway_body, replay_gateway_body
 from mindroom.mcp_gateway.store import GatewayOAuthCapacityError
 from mindroom.mcp_gateway.toolkits import drain_gateway_tool_cleanup
 from mindroom.mcp_gateway.tools import get_tool, invoke_tool, search_agents, search_tools
 from mindroom.mcp_gateway.types import GatewayError, GatewayErrorCode, GatewayPrincipal
+from mindroom.origins import parse_browser_origin
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Callable
@@ -63,6 +65,19 @@ if TYPE_CHECKING:
 
 logger = get_logger(__name__)
 _MACHINE_HEADERS = {**CONNECTIONS_HEADERS, "Access-Control-Allow-Origin": "*"}
+_CONSENT_PAGE_HEADERS = {
+    **CONNECTIONS_HEADERS,
+    # Native browser form POSTs send Origin:null under no-referrer.
+    # Keep an origin for CSRF checks without exposing the consent URL.
+    "Referrer-Policy": "strict-origin",
+    "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'",
+    "X-Frame-Options": "DENY",
+    "X-Content-Type-Options": "nosniff",
+}
+_CONSENT_SIGN_IN_MESSAGE = (
+    "Sign in to Connections in this browser first, for example by opening Connections from MindRoom Chat, "
+    "then reload this page."
+)
 
 
 async def _check_search_access(
@@ -77,12 +92,7 @@ async def _check_search_access(
 
 
 def _enabled(paths: RuntimePaths) -> bool:
-    return (
-        paths.env_flag("MINDROOM_MCP_GATEWAY_ENABLED", default=False)
-        and paths.env_flag("MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED", default=False)
-        and paths.env_flag("MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT", default=False)
-        and bool((paths.env_value("MINDROOM_CONNECTIONS_AGENT") or "").strip())
-    )
+    return paths.env_flag("MINDROOM_MCP_GATEWAY_ENABLED", default=False)
 
 
 def _browser_origins(paths: RuntimePaths) -> tuple[str, ...]:
@@ -95,27 +105,11 @@ def _browser_origins(paths: RuntimePaths) -> tuple[str, ...]:
         value = raw.strip()
         if not value:
             continue
-        parsed = urlsplit(value)
-        loopback = parsed.hostname == "localhost"
-        if parsed.hostname and not loopback:
-            with suppress(ValueError):
-                loopback = ipaddress.ip_address(parsed.hostname).is_loopback
-        if (
-            not parsed.hostname
-            or parsed.username
-            or parsed.password
-            or parsed.path not in {"", "/"}
-            or parsed.query
-            or parsed.fragment
-            or "#" in value
-            or "?" in value
-            or (parsed.scheme != "https" and not (parsed.scheme == "http" and loopback))
-            or "*" in parsed.netloc
-        ):
-            msg = "MCP browser origins must be explicit HTTPS or loopback HTTP origins"
-            raise ValueError(msg)
-        _ = parsed.port
-        origins.append(f"{parsed.scheme}://{parsed.netloc}")
+        try:
+            origins.append(parse_browser_origin(value))
+        except ValueError:
+            msg = "MCP browser origins must be explicit HTTPS origins, or HTTP origins on local addresses"
+            raise ValueError(msg) from None
     return tuple(dict.fromkeys(origins))
 
 
@@ -159,7 +153,7 @@ class GatewayRuntime:
         self.scim_token = self.provider.scim_token or ""
         self.accounts = GatewayAccounts(self.provider.store)
         self.selections = GatewaySelections(self.provider.store)
-        self.manager = MCPServerManager(paths, validate_agent_function_names=False)
+        self.manager = MCPServerManager(paths)
         self._config_lock = asyncio.Lock()
         self.server = GatewayServer(
             authenticate=self.authenticate,
@@ -212,7 +206,7 @@ class GatewayRuntime:
                 snapshot,
                 identity.matrix_user_id,
                 account_id=account_id,
-                membership_index=app_state(request.app).agent_reply_memberships,
+                membership_index=app_state(request.app).runtime.agent_reply_memberships,
             )
         except HTTPException as exc:
             raise HTTPException(401, "External principal is no longer authorized", headers=headers) from exc
@@ -254,7 +248,7 @@ class GatewayRuntime:
                 snapshot,
                 token.authenticated_user_id,
                 account_id=token.account_id,
-                membership_index=app_state(request.app).agent_reply_memberships,
+                membership_index=app_state(request.app).runtime.agent_reply_memberships,
             )
         except HTTPException as exc:
             raise HTTPException(401, "Gateway grant is no longer authorized", headers=headers) from exc
@@ -315,7 +309,7 @@ class GatewayRuntime:
                         current,
                         user.owner.authenticated_user_id,
                         account_id=user.owner.account_id,
-                        membership_index=app_state(request.app).agent_reply_memberships,
+                        membership_index=app_state(request.app).runtime.agent_reply_memberships,
                     )
                     if agent_name not in current_user.gateway_agent_names:
                         raise GatewayError(GatewayErrorCode.UNAUTHORIZED)
@@ -330,6 +324,8 @@ class GatewayRuntime:
         saved = await self.selections.get(user.owner, defaults)
         selected = {agent: tools for agent, tools in saved.items() if agent in user.gateway_agent_names}
         require_current_access = self._access_guard(request, user, require_authority)
+        if isinstance(toolkit := arguments.get("toolkit"), str):
+            arguments = {**arguments, "toolkit": canonical_tool_name(toolkit)}
 
         agent = arguments.get("agent")
         # Report membership checks, never arbitrary client-supplied agent names.
@@ -428,13 +424,14 @@ def _runtime(request: Request, *, paths: RuntimePaths | None = None) -> GatewayR
         paths = require_api_state(request.app).snapshot.runtime_paths
     try:
         external_settings = ExternalAuthSettings.from_paths(paths)
+        public_origin = gateway_public_origin(paths.env_value("MINDROOM_PUBLIC_URL") or "")
     except ValueError as exc:
         raise HTTPException(404, "MCP gateway is disabled", headers=CONNECTIONS_HEADERS) from exc
     if (
         runtime is None
         or runtime.external_settings != external_settings
         or not _enabled(paths)
-        or (paths.env_value("MINDROOM_PUBLIC_URL") or "").rstrip("/") != runtime.origin
+        or public_origin != runtime.origin
         or (paths.env_value("MINDROOM_MCP_SCIM_TOKEN") or "") != runtime.scim_token
     ):
         raise HTTPException(404, "MCP gateway is disabled", headers=CONNECTIONS_HEADERS)
@@ -572,6 +569,19 @@ async def _metadata(request: Request) -> Response:
 
 
 async def _consent(request: Request) -> Response:
+    try:
+        return await _consent_page(request)
+    except HTTPException as exc:
+        # People open this page in a browser, so a refusal is a page that says what to do, not raw JSON.
+        message = _CONSENT_SIGN_IN_MESSAGE if exc.status_code == 401 else str(exc.detail)
+        return HTMLResponse(
+            render_consent_error_page(message),
+            status_code=exc.status_code,
+            headers={**(exc.headers or {}), **_CONSENT_PAGE_HEADERS},
+        )
+
+
+async def _consent_page(request: Request) -> Response:
     runtime = _local_runtime(request)
     user = await require_connections_user(request)
     owner = await resolve_gateway_browser_owner(request, user, runtime.provider)
@@ -579,7 +589,7 @@ async def _consent(request: Request) -> Response:
         rebind_current_request_snapshot(request),
         owner.authenticated_user_id,
         account_id=owner.account_id,
-        membership_index=app_state(request.app).agent_reply_memberships,
+        membership_index=app_state(request.app).runtime.agent_reply_memberships,
     )
     if not context.agent_names:
         raise HTTPException(403, "Agent access is required", headers=CONNECTIONS_HEADERS)
@@ -598,7 +608,7 @@ async def _consent(request: Request) -> Response:
             redirect = await runtime.provider.finish_consent(
                 fields["state"],
                 requester_id=context.owner.requester_id,
-                authenticated_user_id=user["matrix_user_id"],
+                authenticated_user_id=user.matrix_user_id,
                 account_id=context.owner.account_id,
                 csrf_token=fields["csrf_token"],
                 allow=fields["decision"] == "allow",
@@ -610,7 +620,7 @@ async def _consent(request: Request) -> Response:
         consent = await runtime.provider.begin_consent(
             state,
             requester_id=context.owner.requester_id,
-            authenticated_user_id=user["matrix_user_id"],
+            authenticated_user_id=user.matrix_user_id,
             account_id=context.owner.account_id,
         )
         defaults = (context.personal_agent_name,) if context.personal_agent_name is not None else ()
@@ -638,15 +648,7 @@ async def _consent(request: Request) -> Response:
             state=state,
             csrf_token=consent.csrf_token,
         ),
-        headers={
-            **CONNECTIONS_HEADERS,
-            # Native browser form POSTs send Origin:null under no-referrer.
-            # Keep an origin for CSRF checks without exposing the consent URL.
-            "Referrer-Policy": "strict-origin",
-            "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; frame-ancestors 'none'; base-uri 'none'",
-            "X-Frame-Options": "DENY",
-            "X-Content-Type-Options": "nosniff",
-        },
+        headers=_CONSENT_PAGE_HEADERS,
     )
 
 

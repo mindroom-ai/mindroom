@@ -1,8 +1,9 @@
-"""What an automation's check receives, and the two step types it returns to the runner."""
+"""What an automation's check receives, the two step types it returns to the runner, and the always-loaded workspace files the built-ins maintain."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
+from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
@@ -12,20 +13,35 @@ if TYPE_CHECKING:
     from mindroom.config.automations import Automation
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+
+
+def workspace_context_files(config: Config, agent_name: str) -> list[str]:
+    """Return the always-loaded context files in the workspace an automation maintains, as workspace-relative paths.
+
+    A private agent's are its ``private.context_files``; its agent-level ``context_files`` load from the shared agent
+    workspace that every requester reads, which no requester's run maintains.
+    """
+    agent = config.get_agent(agent_name)
+    paths = (agent.private.context_files or []) if agent.private is not None else agent.context_files
+    return [PurePosixPath(path).as_posix() for path in paths]
 
 
 @dataclass(frozen=True)
 class AutomationContext:
-    """Everything an automation's check gets when its cron fires for one agent.
+    """Everything an automation's check gets when its cron fires for one agent, or one requester's private instance.
 
     ``config`` is the config at fire time; later steps receive the current one.
     ``entry`` is the agent's entry for this automation, ``options`` its ``options`` (empty for a built-in), and
     ``settings`` the plugin's own ``settings`` (empty for a built-in).
     ``options`` and ``settings`` are read-only.
-    ``workspace`` is the agent's workspace root, which may not exist yet, or None for an agent without file memory,
-    which has no workspace, and
-    ``state_dir`` is the agent's automation state directory in primary storage, outside the workspace, which the automation
-    creates when it first writes there.
+    ``requester_id`` is the requester whose private instance of a private agent this run maintains, and
+    ``execution_identity`` the identity that resolves that instance for memory and knowledge helpers; both are None for a
+    shared agent.
+    ``workspace`` is the workspace root, which may not exist yet: the agent's own for a shared agent and the requester's
+    private root for a private agent, and
+    ``state_dir`` is the automation state directory of the agent or private instance in primary storage, outside the
+    workspace, which the automation creates when it first writes there.
     """
 
     agent_name: str
@@ -34,7 +50,9 @@ class AutomationContext:
     entry: Automation
     options: Mapping[str, Any]
     settings: Mapping[str, Any]
-    workspace: Path | None
+    requester_id: str | None
+    execution_identity: ToolExecutionIdentity | None
+    workspace: Path
     state_dir: Path
 
 
@@ -46,11 +64,19 @@ class Ask:
     When the run's response is final, or after the fallback timeout, the runner calls ``then`` off the event loop
     with the current config, the thread the text was posted in, and whether the timeout fired.
     Without ``then``, the chain ends once the run does.
+    ``summary`` is pinned as the title of the thread a ``new_thread`` prompt starts, so no generated summary replaces it.
     """
 
     text: str
     new_thread: bool
     then: Callable[[Config, str, bool], Ask | Done] | None = None
+    summary: str | None = None
+
+    def __post_init__(self) -> None:
+        """Let only the prompt that starts a thread title it, so two steps never race to title the same thread."""
+        if self.summary is not None and not self.new_thread:
+            msg = "Ask.summary titles the thread the prompt starts, so it needs new_thread=True"
+            raise ValueError(msg)
 
 
 @dataclass(frozen=True)

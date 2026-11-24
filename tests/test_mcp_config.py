@@ -35,6 +35,19 @@ def test_mcp_server_config_rejects_invalid_transport_mix() -> None:
     with pytest.raises(ValueError, match="streamable-http MCP servers do not allow command"):
         MCPServerConfig(transport="streamable-http", url="http://localhost:8000/mcp", command="npx")
 
+    with pytest.raises(ValueError, match="stdio MCP servers do not allow allow_private_network"):
+        MCPServerConfig(transport="stdio", command="npx", allow_private_network=True)
+
+
+def test_mcp_server_config_keeps_private_networks_closed_by_default() -> None:
+    """Remote servers reach private networks only when they opt in."""
+    assert not MCPServerConfig(transport="sse", url="https://mcp.example/sse").allow_private_network
+    assert MCPServerConfig(
+        transport="sse",
+        url="http://internal:8000/sse",
+        allow_private_network=True,
+    ).allow_private_network
+
 
 def test_mcp_server_config_rejects_overlapping_filters() -> None:
     """Reject overlapping include and exclude tool filters."""
@@ -60,24 +73,32 @@ def test_mcp_server_config_normalizes_tool_filters() -> None:
     assert config.exclude_tools == ["pong"]
 
 
-def test_mcp_server_config_normalizes_description() -> None:
-    """Trim the server description and collapse blank values to None."""
-    auth = {
-        "type": "oauth",
-        "discovery": "manual",
-        "authorization_url": "https://auth.example.test/authorize",
-        "token_url": "https://auth.example.test/token",
-    }
+@pytest.mark.parametrize(("raw", "expected"), [("  Demo  ", "Demo"), ("   ", None)])
+def test_mcp_server_config_normalizes_display_metadata(raw: str, expected: str | None) -> None:
+    """Trim server and OAuth display metadata and collapse blank values to None."""
     config = MCPServerConfig(
         transport="streamable-http",
         url="https://mcp.example.test/mcp",
-        description="  Demo workspace tools.  ",
-        auth=auth,
+        display_name=raw,
+        summary=raw,
+        icon=raw,
+        description=raw,
+        auth={
+            "type": "oauth",
+            "display_name": raw,
+            "discovery": "manual",
+            "authorization_url": "https://auth.example.test/authorize",
+            "token_url": "https://auth.example.test/token",
+        },
     )
-    assert config.description == "Demo workspace tools."
+    assert config.auth is not None
+    values = (config.display_name, config.summary, config.icon, config.description, config.auth.display_name)
+    assert values == (expected,) * 5
 
-    blank = MCPServerConfig(transport="stdio", command="npx", description="   ")
-    assert blank.description is None
+
+def test_mcp_server_config_accepts_blank_description_without_auth() -> None:
+    """A blank description counts as unset, so it does not require OAuth auth."""
+    assert MCPServerConfig(transport="stdio", command="npx", description="   ").description is None
 
 
 def test_mcp_server_config_rejects_description_without_auth() -> None:
@@ -146,6 +167,7 @@ def test_config_accepts_top_level_mcp_servers(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths(tmp_path)
     config = Config.validate_with_runtime(
         {
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
             "mcp_servers": {
                 "chrome_devtools": {
                     "transport": "stdio",
@@ -165,7 +187,7 @@ def test_config_accepts_top_level_mcp_servers(tmp_path: Path) -> None:
         runtime_paths,
     )
     assert "chrome_devtools" in config.mcp_servers
-    assert "mcp_chrome_devtools" in config.resolve_entity("code").available_tools
+    assert "mcp_chrome_devtools" in config.resolve_agent("code").tools.tool_names
 
 
 def test_config_allows_non_oauth_mcp_tools_on_private_per_user_agents(tmp_path: Path) -> None:
@@ -173,6 +195,7 @@ def test_config_allows_non_oauth_mcp_tools_on_private_per_user_agents(tmp_path: 
     runtime_paths = _runtime_paths(tmp_path)
     config = Config.validate_with_runtime(
         {
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
             "mcp_servers": {
                 "demo": {
                     "transport": "stdio",
@@ -191,8 +214,8 @@ def test_config_allows_non_oauth_mcp_tools_on_private_per_user_agents(tmp_path: 
         runtime_paths,
     )
 
-    assert config.resolve_entity("code").execution_scope == "user_agent"
-    assert "mcp_demo" in config.resolve_entity("code").available_tools
+    assert config.resolve_agent("code").policy.effective_execution_scope == "user_agent"
+    assert "mcp_demo" in config.resolve_agent("code").tools.tool_names
 
 
 def test_config_allows_non_oauth_mcp_tools_on_user_scoped_agents(tmp_path: Path) -> None:
@@ -200,6 +223,7 @@ def test_config_allows_non_oauth_mcp_tools_on_user_scoped_agents(tmp_path: Path)
     runtime_paths = _runtime_paths(tmp_path)
     config = Config.validate_with_runtime(
         {
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
             "mcp_servers": {
                 "demo": {
                     "transport": "stdio",
@@ -218,7 +242,7 @@ def test_config_allows_non_oauth_mcp_tools_on_user_scoped_agents(tmp_path: Path)
         runtime_paths,
     )
 
-    assert "mcp_demo" in config.resolve_entity("code").available_tools
+    assert "mcp_demo" in config.resolve_agent("code").tools.tool_names
 
 
 def test_config_allows_oauth_mcp_tools_on_user_scoped_agents(tmp_path: Path) -> None:
@@ -226,6 +250,7 @@ def test_config_allows_oauth_mcp_tools_on_user_scoped_agents(tmp_path: Path) -> 
     runtime_paths = _runtime_paths(tmp_path)
     config = Config.validate_with_runtime(
         {
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
             "mcp_servers": {
                 "demo": {
                     "transport": "streamable-http",
@@ -250,13 +275,14 @@ def test_config_allows_oauth_mcp_tools_on_user_scoped_agents(tmp_path: Path) -> 
         runtime_paths,
     )
 
-    assert "mcp_demo" in config.resolve_entity("code").available_tools
+    assert "mcp_demo" in config.resolve_agent("code").tools.tool_names
 
 
 def test_config_tracks_initial_deferred_mcp_dependencies_for_agents_and_teams(tmp_path: Path) -> None:
     """Treat initial deferred MCP tools as dependencies for restart planning."""
     config = Config.validate_with_runtime(
         {
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
             "mcp_servers": {
                 "demo": {
                     "transport": "stdio",
@@ -292,6 +318,7 @@ def test_config_does_not_treat_deferred_only_mcp_tools_as_hard_dependencies(tmp_
     """Deferred-only tools should stay optional for restart and startup dependency tracking."""
     config = Config.validate_with_runtime(
         {
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
             "mcp_servers": {
                 "demo": {
                     "transport": "stdio",
@@ -326,6 +353,7 @@ def test_config_rejects_invalid_mcp_assignment_overrides(tmp_path: Path) -> None
     with pytest.raises(ConfigRuntimeValidationError, match="include_tools and exclude_tools overlap"):
         Config.validate_with_runtime(
             {
+                "models": {"default": {"provider": "openai", "id": "test-model"}},
                 "mcp_servers": {
                     "demo": {
                         "transport": "stdio",
@@ -353,6 +381,7 @@ def test_config_rejects_invalid_mcp_assignment_overrides(tmp_path: Path) -> None
     with pytest.raises(ConfigRuntimeValidationError, match="greater than 0"):
         Config.validate_with_runtime(
             {
+                "models": {"default": {"provider": "openai", "id": "test-model"}},
                 "mcp_servers": {
                     "demo": {
                         "transport": "stdio",

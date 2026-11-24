@@ -1,20 +1,20 @@
-"""Generate contextual topics for Matrix rooms using AI."""
+"""Choose topics for managed Matrix rooms, from config or generated with AI."""
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
 import nio
-from agno.agent import Agent
 from pydantic import BaseModel, Field
 
-from mindroom.ai_runtime import cached_agent_run
+from mindroom.agent_loop.helper import complete_prompt
 from mindroom.entity_resolution import configured_routable_entity_names_for_room
 from mindroom.helper_usage import record_system_usage
 from mindroom.logging_config import get_logger
 from mindroom.matrix import state as matrix_state
 from mindroom.matrix.room_reconciliation import RoomStateSnapshot, read_state_event
-from mindroom.providers import model_loading
+from mindroom.matrix.state_failures import StateFailure, state_failure
+from mindroom.providers import registry as provider_registry
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
@@ -37,11 +37,15 @@ def _configured_entity_display_names_for_room(
     """Return configured agent and team display names for one room key or ID."""
     room_id = matrix_state.get_room_id(room_key, runtime_paths) or room_key
     return [
-        (config.agents[entity_name].display_name or entity_name)
-        if entity_name in config.agents
-        else (config.teams[entity_name].display_name or entity_name)
+        config.entity_display_name(entity_name) or entity_name
         for entity_name in configured_routable_entity_names_for_room(config, room_id, runtime_paths)
     ]
+
+
+def configured_room_topic(room_key: str, config: Config) -> str | None:
+    """Return the room's configured description to use as its topic, or None when it has none."""
+    room_config = config.rooms.get(room_key)
+    return (room_config.description.strip() or None) if room_config is not None else None
 
 
 async def generate_room_topic_ai(
@@ -50,18 +54,7 @@ async def generate_room_topic_ai(
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> str | None:
-    """Generate a contextual topic for a room using AI based on its purpose and configured entities.
-
-    Args:
-        room_key: The room key/alias (e.g., 'dev', 'analysis', 'lobby')
-        room_name: Display name for the room
-        config: Configuration with agent settings
-        runtime_paths: Explicit runtime context for model selection and session scoping
-
-    Returns:
-        A contextual topic string for the room
-
-    """
+    """Generate a contextual topic for a room from its key, name, and configured agents and teams, or None on failure."""
     configured_entity_list = ", ".join(
         _configured_entity_display_names_for_room(room_key, config, runtime_paths),
     )
@@ -99,27 +92,18 @@ Examples:
 
 Generate the topic:"""
 
-    model = model_loading.get_model_instance(config, runtime_paths, "default")
-
-    agent = Agent(
-        name="TopicGenerator",
-        role="Generate contextual room topics",
-        model=model,
-        output_schema=_RoomTopic,
-        telemetry=False,
-    )
-
-    session_id = f"topic_{room_key}"
+    provider = provider_registry.build_model_provider(config, runtime_paths, "default")
     try:
-        response = await cached_agent_run(
-            agent=agent,
-            run_input=prompt,
-            session_id=session_id,
+        response = await complete_prompt(
+            provider,
+            prompt,
+            instructions=["Generate contextual room topics"],
+            schema=_RoomTopic,
         )
     except Exception:
-        logger.exception("room_topic_generation_failed", room_key=room_key, session_id=session_id)
+        logger.exception("room_topic_generation_failed", room_key=room_key)
         return None
-    await record_system_usage(response, runtime_paths=runtime_paths, kind="room_topic")
+    await record_system_usage(response.usage, runtime_paths=runtime_paths, kind="room_topic")
     content = response.content
     if not isinstance(content, _RoomTopic):
         logger.warning(
@@ -141,20 +125,10 @@ async def ensure_room_has_topic(
     *,
     snapshot: RoomStateSnapshot | None = None,
 ) -> bool:
-    """Ensure a room has a topic set, generating one if needed.
+    """Ensure a room has a topic, using the configured description or generating one if needed.
 
-    Args:
-        client: Matrix client
-        room_id: The room ID
-        room_key: The room key/alias
-        room_name: Display name for the room
-        config: Configuration with agent settings
-        runtime_paths: Explicit runtime context for topic generation
-        snapshot: Complete pass-local room state, if already read by reconciliation
-
-    Returns:
-        True if topic was set or already exists, False on error
-
+    ``snapshot`` is the complete pass-local room state when reconciliation already read it. Returns True when the
+    topic was set or already exists, and False on error.
     """
     response = await read_state_event(client, room_id, "m.room.topic", snapshot=snapshot)
     if isinstance(response, nio.RoomGetStateEventResponse) and response.content.get("topic"):
@@ -166,21 +140,22 @@ async def ensure_room_has_topic(
         )
         return True
 
-    # Generate and set topic
-    logger.info("generate_room_topic", room_id=room_id, room_key=room_key, room_name=room_name)
-    topic = await generate_room_topic_ai(room_key, room_name, config, runtime_paths)
+    topic = configured_room_topic(room_key, config)
     if topic is None:
-        logger.warning("generate_room_topic_failed", room_id=room_id, room_key=room_key)
-        return False
+        logger.info("generate_room_topic", room_id=room_id, room_key=room_key, room_name=room_name)
+        topic = await generate_room_topic_ai(room_key, room_name, config, runtime_paths)
+        if topic is None:
+            logger.warning("generate_room_topic_failed", room_id=room_id, room_key=room_key)
+            return False
 
-    # Generation can take seconds; a human topic added meanwhile must win.
-    response = await read_state_event(client, room_id, "m.room.topic")
-    if isinstance(response, nio.RoomGetStateEventResponse):
-        if response.content.get("topic"):
-            return True
-    elif response.status_code != "M_NOT_FOUND":
-        logger.warning("room_topic_recheck_failed", room_id=room_id, error=str(response))
-        return False
+        # Generation can take seconds; a human topic added meanwhile must win.
+        response = await read_state_event(client, room_id, "m.room.topic")
+        if isinstance(response, nio.RoomGetStateEventResponse):
+            if response.content.get("topic"):
+                return True
+        elif state_failure(response) is not StateFailure.MISSING:
+            logger.warning("room_topic_recheck_failed", room_id=room_id, error=str(response))
+            return False
 
     # Set the topic
     response = await client.room_put_state(

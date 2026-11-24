@@ -3,28 +3,83 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import cached_property
 from typing import TYPE_CHECKING
 
 from fastapi import HTTPException
+from pydantic import BaseModel, ConfigDict
 
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
+from mindroom.api.auth import require_same_origin
 from mindroom.authorization import is_sender_allowed_for_agent_credential_management, is_sender_allowed_for_responder
+from mindroom.config.resolution import agent_policy
 from mindroom.matrix.identity import try_parse_historical_matrix_user_id
 from mindroom.mcp_gateway.types import GatewayOwner
+from mindroom.origins import deployment_origin, is_local_origin
 from mindroom.requester_identity import resolve_human_requester_alias
-from mindroom.tool_system.worker_routing import build_agent_toolkit_worker_target, build_tool_execution_identity
+from mindroom.runtime_resolution import resolve_agent_execution
+from mindroom.tool_system.plugins import ConfigPlugins, config_plugins
+from mindroom.tool_system.worker_routing import build_tool_execution_identity
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable
+
+    from fastapi import Request
+
     from mindroom.api.config_lifecycle import ApiSnapshot
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity
 
 CONNECTIONS_HEADERS = {"Cache-Control": "private, no-store", "Referrer-Policy": "no-referrer"}
+
+
+class EmptyMutation(BaseModel):
+    """The body of a portal change that takes no fields, so a misspelled field is refused rather than ignored."""
+
+    model_config = ConfigDict(extra="forbid")
+
+
 SHARED_CREDENTIALS_GATEWAY_MESSAGE = (
     "This shared agent runs tools with credentials shared by all its users and is not available through MCP. "
     "Use it in MindRoom chat."
 )
+
+
+def require_connections_public_origin(request: Request, runtime_paths: RuntimePaths) -> str:
+    """Return this deployment's origin, refusing one that is plain HTTP outside local addresses."""
+    expected = deployment_origin(runtime_paths.env_value("MINDROOM_PUBLIC_URL"), str(request.base_url))
+    if expected is None or not (expected.startswith("https://") or is_local_origin(expected)):
+        raise HTTPException(
+            403,
+            "Connections require an HTTPS public origin, or HTTP on a local address",
+            headers=CONNECTIONS_HEADERS,
+        )
+    return expected
+
+
+def require_connections_same_origin(
+    request: Request,
+    runtime_paths: RuntimePaths,
+    *,
+    detail: str = "Connection changes require a same-origin request",
+) -> None:
+    """Reject mutations from another origin (shared helper for connections and egress routes)."""
+    expected = require_connections_public_origin(request, runtime_paths)
+    require_same_origin(
+        request,
+        expected,
+        detail=detail,
+        headers=CONNECTIONS_HEADERS,
+    )
+
+
+async def masked_oauth_call[T](call: Awaitable[T], detail: str) -> T:
+    """Await a portal route's OAuth call; a refusal keeps its status but says only `detail`, with the portal headers."""
+    try:
+        return await call
+    except HTTPException as exc:
+        raise HTTPException(exc.status_code, detail, headers=CONNECTIONS_HEADERS) from exc
 
 
 @dataclass(frozen=True)
@@ -37,6 +92,11 @@ class AgentToolContext:
     runtime_paths: RuntimePaths
     execution_identity: ToolExecutionIdentity
     worker_target: ResolvedWorkerTarget
+
+    @cached_property
+    def plugins(self) -> ConfigPlugins:
+        """The plugin view this request captures on first use, so its tools and tool hooks share one generation."""
+        return config_plugins(self.config, self.runtime_paths)
 
 
 @dataclass(frozen=True)
@@ -53,10 +113,9 @@ class ConnectionUserContext:
 
     @property
     def visible_agent_names(self) -> tuple[str, ...]:
-        """Show agents the user can execute or whose credentials they can manage."""
+        """Show agents the user can execute or whose credentials they can manage, in config declaration order."""
         eligible = set(self.agent_names) | set(self.credential_agent_names)
-        personal = (self.personal_agent_name,) if self.personal_agent_name is not None else ()
-        return personal + tuple(name for name in self.config.agents if name in eligible and name not in personal)
+        return tuple(name for name in self.config.agents if name in eligible)
 
 
 def resolve_connection_user(
@@ -69,14 +128,11 @@ def resolve_connection_user(
     """Resolve current agent eligibility without constructing execution targets."""
     paths = snapshot.runtime_paths
     agent_name = (paths.env_value("MINDROOM_CONNECTIONS_AGENT") or "").strip()
-    if not agent_name:
-        raise HTTPException(404, "Connections are not enabled", headers=CONNECTIONS_HEADERS)
     config = snapshot.runtime_config
     if config is None:
         raise HTTPException(503, "Connections are unavailable", headers=CONNECTIONS_HEADERS)
-    agent = config.agents.get(agent_name)
-    if agent is None or agent.private is None or agent.private.per not in {"user", "user_agent"}:
-        raise HTTPException(403, "Connections require a configured private agent", headers=CONNECTIONS_HEADERS)
+    if agent_name and (agent_name not in config.agents or config.agents[agent_name].private is None):
+        raise HTTPException(403, "MINDROOM_CONNECTIONS_AGENT must name a private agent", headers=CONNECTIONS_HEADERS)
     if try_parse_historical_matrix_user_id(authenticated_user_id) is None:
         raise HTTPException(
             403,
@@ -85,28 +141,25 @@ def resolve_connection_user(
         )
     requester_id = resolve_human_requester_alias(authenticated_user_id, config, paths)
     memberships = membership_index if membership_index is not None else AgentReplyMembershipIndex()
-    candidates = (agent_name, *(name for name, candidate in config.agents.items() if candidate.private is None))
     usable = tuple(
         name
-        for name in candidates
+        for name in config.agents
         if is_sender_allowed_for_responder(requester_id, name, None, config, paths, memberships)
     )
     personal_agent_name = agent_name if agent_name in usable else None
+    # Users manage their own connections on every agent they may use; shared ones need explicit authority.
     managed = tuple(
         name
-        for name in candidates
-        if name == personal_agent_name
-        or (
-            config.agents[name].private is None
-            and is_sender_allowed_for_agent_credential_management(requester_id, name, config, paths)
-        )
+        for name, agent in config.agents.items()
+        if agent.private is None
+        and is_sender_allowed_for_agent_credential_management(requester_id, name, config, paths)
     )
     # With a shared or unset worker scope, every requester runs tools with the same credentials and worker.
     # The gateway runs tools without the agent's instructions, so those agents need an explicit opt-in.
     gateway = tuple(
         name
         for name in usable
-        if config.resolve_entity(name).execution_scope in {"user", "user_agent"}
+        if agent_policy(config, name).effective_execution_scope in {"user", "user_agent"}
         or config.agents[name].mcp_gateway_shared_credentials
     )
     return ConnectionUserContext(
@@ -120,6 +173,41 @@ def resolve_connection_user(
     )
 
 
+def _connection_agent_identity_and_target(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    requester_id: str,
+    agent_name: str,
+) -> tuple[ToolExecutionIdentity, ResolvedWorkerTarget]:
+    """Build the execution identity and worker target for one agent and requester."""
+    identity = build_tool_execution_identity(
+        channel="mcp",
+        agent_name=agent_name,
+        runtime_paths=runtime_paths,
+        requester_id=requester_id,
+        room_id=None,
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
+    )
+    return identity, resolve_agent_execution(
+        agent_name,
+        config,
+        runtime_paths,
+        execution_identity=identity,
+    ).worker_target
+
+
+def build_connection_agent_target(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    requester_id: str,
+    agent_name: str,
+) -> ResolvedWorkerTarget:
+    """Build an agent worker target for authorized connection and credential operations."""
+    return _connection_agent_identity_and_target(config, runtime_paths, requester_id, agent_name)[1]
+
+
 def resolve_connection_agent(
     user: ConnectionUserContext,
     agent_name: str,
@@ -127,22 +215,11 @@ def resolve_connection_agent(
     """Build one eligible agent target using its actual privacy and execution scope."""
     if agent_name not in user.agent_names:
         raise HTTPException(404, "Agent is not available", headers=CONNECTIONS_HEADERS)
-    identity = build_tool_execution_identity(
-        channel="mcp",
-        agent_name=agent_name,
-        runtime_paths=user.runtime_paths,
-        requester_id=user.owner.requester_id,
-        room_id=None,
-        thread_id=None,
-        resolved_thread_id=None,
-        session_id=None,
-    )
-    target = build_agent_toolkit_worker_target(
-        user.config.resolve_entity(agent_name).execution_scope,
+    identity, target = _connection_agent_identity_and_target(
+        user.config,
+        user.runtime_paths,
+        user.owner.requester_id,
         agent_name,
-        is_private=user.config.agents[agent_name].private is not None,
-        execution_identity=identity,
-        runtime_paths=user.runtime_paths,
     )
     return AgentToolContext(
         agent_name,

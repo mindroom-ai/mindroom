@@ -36,10 +36,6 @@ jobs:
   smoke:
     runs-on: ubuntu-latest
     timeout-minutes: 90
-    env:
-      # Pull Synapse from mirror.gcr.io; anonymous Docker Hub pulls fail on shared runners.
-      SYNAPSE_IMAGE: mirror.gcr.io/matrixdotorg/synapse:latest
-      INSTANCE_SYNAPSE_IMAGE: mirror.gcr.io/matrixdotorg/synapse:latest
 
     steps:
       - name: Checkout mindroom
@@ -127,6 +123,9 @@ jobs:
 
       - name: Smoke platform images
         run: python -m scripts.smoke_platform_images
+
+      - name: Smoke Shell-reach SSH and Service patches in kind
+        run: uv run --no-project --with pyyaml python -m cluster.k8s.kind.smoke_tailnet_ssh_worker
 
       - name: Install platform chart
         run: bash cluster/k8s/kind/install_platform.sh

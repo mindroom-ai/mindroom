@@ -1,0 +1,224 @@
+{
+ "scenario": {
+  "actions": [
+   {
+    "events": [
+     "$m6",
+     "$m7"
+    ],
+    "op": "admit",
+    "room": "a"
+   },
+   {
+    "op": "pending",
+    "room": "a",
+    "sources": [
+     "$m7"
+    ]
+   },
+   {
+    "history": [
+     [
+      "$m6",
+      null,
+      0
+     ]
+    ],
+    "op": "prepare",
+    "room": "a",
+    "sources": [
+     "$m7"
+    ]
+   },
+   {
+    "days": 31,
+    "op": "cleanup",
+    "unsettled": [
+     "$m7"
+    ]
+   },
+   {
+    "history": [
+     [
+      "$m6",
+      null,
+      0
+     ]
+    ],
+    "op": "prepare",
+    "room": "a",
+    "sources": [
+     "$m7"
+    ]
+   },
+   {
+    "op": "reopen"
+   }
+  ],
+  "ids": [
+   "$m6",
+   "$m7",
+   "$x1",
+   "$x2"
+  ],
+  "input": "room_less_tombstone"
+ },
+ "steps": [
+  {
+   "action": null,
+   "changes": {
+    "is_handled": {
+     "$m6": true
+    },
+    "redacted_event_ids": {
+     "a": [
+      "$m6",
+      "$x1"
+     ],
+     "b": [
+      "$m6"
+     ]
+    },
+    "redacted_history_events": {
+     "a": {
+      "$x1": null
+     },
+     "b": {
+      "$m6": null
+     }
+    },
+    "turn_record": {
+     "$m6": {
+      "anchor": "$m6",
+      "completed": false,
+      "redacted": [
+       "$m6"
+      ],
+      "sources": [
+       "$m6"
+      ]
+     }
+    }
+   },
+   "outcome": null
+  },
+  {
+   "action": {
+    "events": [
+     "$m6",
+     "$m7"
+    ],
+    "op": "admit",
+    "room": "a"
+   },
+   "changes": {},
+   "outcome": "ok"
+  },
+  {
+   "action": {
+    "op": "pending",
+    "room": "a",
+    "sources": [
+     "$m7"
+    ]
+   },
+   "changes": {
+    "pending_intent": {
+     "$m7": true
+    },
+    "turn_record": {
+     "$m7": {
+      "anchor": "$m7",
+      "completed": false,
+      "history_scope": "agent:agent",
+      "prompts": {
+       "$m7": "$m7 original"
+      },
+      "requester": "@alice:example.org",
+      "response_owner": "agent",
+      "sources": [
+       "$m7"
+      ],
+      "target": {
+       "reply_to_event_id": null,
+       "resolved_thread_id": "$thread-a",
+       "room_id": "!a:example.org",
+       "session_id": "!a:example.org:$thread-a",
+       "source_thread_id": "$thread-a"
+      }
+     }
+    }
+   },
+   "outcome": "ok"
+  },
+  {
+   "action": {
+    "history": [
+     [
+      "$m6",
+      null,
+      0
+     ]
+    ],
+    "op": "prepare",
+    "room": "a",
+    "sources": [
+     "$m7"
+    ]
+   },
+   "changes": {},
+   "outcome": {
+    "error": "RevisionSnapshotChangedError",
+    "message": "Conversation revision changed before locked response preparation"
+   }
+  },
+  {
+   "action": {
+    "days": 31,
+    "op": "cleanup",
+    "unsettled": [
+     "$m7"
+    ]
+   },
+   "changes": {
+    "is_handled": {
+     "$m6": null
+    },
+    "redacted_event_ids": {
+     "a": [
+      "$x1"
+     ]
+    },
+    "turn_record": {
+     "$m6": null
+    }
+   },
+   "outcome": "ok"
+  },
+  {
+   "action": {
+    "history": [
+     [
+      "$m6",
+      null,
+      0
+     ]
+    ],
+    "op": "prepare",
+    "room": "a",
+    "sources": [
+     "$m7"
+    ]
+   },
+   "changes": {},
+   "outcome": "proceed"
+  },
+  {
+   "action": {
+    "op": "reopen"
+   },
+   "changes": {},
+   "outcome": "ok"
+  }
+ ]
+}

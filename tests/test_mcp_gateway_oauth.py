@@ -491,7 +491,7 @@ async def test_access_grant_survives_process_restart(
     process.start()
     child.close()
     try:
-        await asyncio.to_thread(process.join, 15)
+        await asyncio.to_thread(process.join)
         assert process.exitcode == 0
         assert parent.poll()
         assert parent.recv() == "@alice:example.org"

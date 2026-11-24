@@ -38,7 +38,7 @@ if TYPE_CHECKING:
             type="text",
             required=False,
             default=OPENAI_TTS,
-            description="Plain OpenAI model IDs use OpenAI; provider-prefixed IDs (e.g. hexgrad/kokoro-82m) route through OpenRouter.",
+            description="gpt-realtime IDs use the OpenAI Realtime API, other plain IDs use OpenAI, and provider-prefixed IDs (e.g. hexgrad/kokoro-82m) route through OpenRouter.",
         ),
         ConfigField(
             name="base_url",
@@ -46,7 +46,7 @@ if TYPE_CHECKING:
             type="url",
             required=False,
             default=None,
-            description="OpenAI-compatible speech endpoint (e.g. a local Kokoro server); leave empty to use OpenAI or OpenRouter based on the model ID.",
+            description="OpenAI-compatible speech endpoint (e.g. a local Kokoro server, with the model set to one it serves); leave empty to use OpenAI or OpenRouter based on the model ID.",
         ),
         ConfigField(
             name="voice",
@@ -61,11 +61,11 @@ if TYPE_CHECKING:
             type="text",
             required=False,
             default="opus",
-            description="Audio format the TTS endpoint returns: aac, flac, mp3, opus, or wav. Non-opus formats require ffmpeg and ffprobe. OpenRouter voice models always use mp3.",
+            description="Audio format the TTS endpoint returns: aac, flac, mp3, opus, or wav. Non-opus formats require ffmpeg and ffprobe. OpenRouter voice models always use mp3, and gpt-realtime models ignore this and require ffmpeg and ffprobe.",
         ),
     ],
     dependencies=["openai"],
-    docs_url="https://github.com/mindroom-ai/mindroom",
+    docs_url="https://docs.mindroom.chat/tools/matrix-and-attachments/#matrix_voice_message",
     function_names=("matrix_voice_message",),
 )
 def matrix_voice_message_tools() -> type[MatrixVoiceMessageTools]:

@@ -13,7 +13,7 @@ from mindroom.oauth.discovery import (
 from mindroom.oauth.providers import OAuthProvider
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Iterable
+    from collections.abc import AsyncIterator, Iterable, Mapping
 
     from mindroom.mcp.config import MCPOAuthConfig, MCPServerConfig
     from mindroom.oauth.credential_lifecycle import OAuthCredentialContext
@@ -42,7 +42,7 @@ def _mcp_oauth_service_prefix(provider_id: str) -> str:
 
 
 def _mcp_oauth_provider_is_configured(
-    mcp_servers: dict[str, MCPServerConfig],
+    mcp_servers: Mapping[str, MCPServerConfig],
     provider_id: str,
 ) -> bool:
     """Return whether the request-pinned config generated one OAuth provider."""
@@ -56,7 +56,7 @@ def _mcp_oauth_provider_is_configured(
 
 @asynccontextmanager
 async def retire_mcp_oauth_scope_session(
-    mcp_servers: dict[str, MCPServerConfig],
+    mcp_servers: Mapping[str, MCPServerConfig],
     provider_id: str,
     *,
     credential_context: OAuthCredentialContext,
@@ -151,7 +151,7 @@ def mcp_oauth_provider(server_id: str, server_config: MCPServerConfig) -> OAuthP
     )
 
 
-def mcp_oauth_providers_for_config(mcp_servers: dict[str, MCPServerConfig]) -> Iterable[OAuthProvider]:
+def mcp_oauth_providers_for_config(mcp_servers: Mapping[str, MCPServerConfig]) -> Iterable[OAuthProvider]:
     """Yield generated OAuth providers for OAuth-backed MCP servers."""
     for server_id, server_config in mcp_servers.items():
         if server_config.enabled and server_config.auth is not None:

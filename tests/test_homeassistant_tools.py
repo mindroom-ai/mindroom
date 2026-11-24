@@ -17,6 +17,7 @@ from mindroom.custom_tools.homeassistant import HomeAssistantTools
 from mindroom.homeassistant_url_validation import homeassistant_url_error_detail
 from mindroom.server_fetch_url import ServerFetchUrlError
 from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.worker_routing import resolve_worker_target
 from tests.conftest import TEST_PASSWORD
 
@@ -56,7 +57,7 @@ class TestHomeAssistantTools:
         ha_tools = HomeAssistantTools(credentials_manager=mock_credentials_manager)
 
         assert ha_tools.name == "homeassistant"
-        assert len(ha_tools.tools) == 11
+        assert len(ha_tools.functions) == 11
 
         expected_methods = [
             "get_entity_state",
@@ -71,7 +72,7 @@ class TestHomeAssistantTools:
             "trigger_automation",
             "call_service",
         ]
-        method_names = [tool.__name__ for tool in ha_tools.tools]
+        method_names = [tool.__name__ for tool in ha_tools.functions.values()]
         for expected in expected_methods:
             assert expected in method_names
 
@@ -92,6 +93,7 @@ class TestHomeAssistantTools:
                 tenant_id=runtime_paths.env_value("CUSTOMER_ID"),
                 account_id=runtime_paths.env_value("ACCOUNT_ID"),
             ),
+            tools=builtin_tool_registry(),
         )
 
         assert isinstance(tool, HomeAssistantTools)
@@ -127,6 +129,7 @@ class TestHomeAssistantTools:
                 tenant_id=runtime_paths.env_value("CUSTOMER_ID"),
                 account_id=runtime_paths.env_value("ACCOUNT_ID"),
             ),
+            tools=builtin_tool_registry(),
         )
 
         assert isinstance(tool, HomeAssistantTools)
@@ -155,6 +158,7 @@ class TestHomeAssistantTools:
                     tenant_id=runtime_paths.env_value("CUSTOMER_ID"),
                     account_id=runtime_paths.env_value("ACCOUNT_ID"),
                 ),
+                tools=builtin_tool_registry(),
             )
 
     def test_load_config_with_stored_credentials(

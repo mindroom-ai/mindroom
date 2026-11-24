@@ -12,33 +12,34 @@ from mindroom.authorization import (
     ReplyMembershipPendingError,
     _ReplyAuthorizationDecision,
     _responder_reply_authorization,
-    is_platform_administrator,
     is_sender_allowed_for_agent_credential_management,
     is_sender_allowed_for_agent_reply_in_room,
     is_sender_allowed_for_entity_replies_in_room,
     is_sender_allowed_for_responder,
 )
 from mindroom.config.access import ResponderAccessConfig
-from tests.access_schema_support import membership_config, membership_index, unresolved_membership_index
-from tests.conftest import runtime_paths_for
+from mindroom.config.main import Config
+from mindroom.requester_identity import is_platform_administrator
+from tests.access_schema_support import (
+    OBSERVER_USER_ID,
+    membership_config,
+    membership_index,
+    unresolved_membership_index,
+)
+from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 from tests.identity_helpers import entity_ids
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from mindroom.config.main import Config
-
 
 def _allowed(
     sender_id: str,
-    config: object,
+    config: Config,
     memberships: AgentReplyMembershipIndex,
     *,
     room_id: str = "!current:example.com",
 ) -> bool:
-    from mindroom.config.main import Config  # noqa: PLC0415
-
-    assert isinstance(config, Config)
     return is_sender_allowed_for_responder(
         sender_id,
         "talent",
@@ -156,12 +157,56 @@ def test_unresolved_grant_room_fails_closed(tmp_path: Path) -> None:
     )
 
 
-def test_internal_identity_bypasses_responder_policy(tmp_path: Path) -> None:
-    """Current runtime-owned identities must remain trusted participants."""
-    config = membership_config(tmp_path, access={"users": []})
-    sender_id = entity_ids(config, runtime_paths_for(config))["talent"].full_id
+@pytest.mark.asyncio
+async def test_other_agent_account_needs_access_while_own_account_is_admitted(tmp_path: Path) -> None:
+    """Another MindRoom account passes a responder's access like any requester, and its own account always does."""
+    config = bind_runtime_paths(
+        Config.model_validate(
+            {
+                "agents": {
+                    "talent": {"display_name": "Talent", "rooms": ["talent"]},
+                    "scout": {"display_name": "Scout"},
+                },
+            },
+        ),
+        test_runtime_paths(tmp_path),
+    )
+    ids = entity_ids(config, runtime_paths_for(config))
+    scout_id = ids["scout"].full_id
+    router_id = ids["router"].full_id
+    memberships = await membership_index(config, {"talent": {scout_id}})
 
-    assert _allowed(sender_id, config, AgentReplyMembershipIndex())
+    # The default access admits an agent account joined to one of the responder's rooms.
+    assert _allowed(scout_id, config, memberships)
+    assert not _allowed(router_id, config, memberships)
+
+    config.agents["talent"].access = ResponderAccessConfig(members_of_rooms=[])
+    assert _allowed(ids["talent"].full_id, config, memberships)
+    assert not _allowed(scout_id, config, memberships)
+
+    config.agents["talent"].access = ResponderAccessConfig(members_of_rooms=[], users=[scout_id])
+    assert _allowed(scout_id, config, memberships)
+    assert not _allowed(router_id, config, memberships)
+
+
+def test_responder_without_a_prepared_account_still_applies_its_grants(tmp_path: Path) -> None:
+    """A responder whose Matrix account is not prepared yet must apply its grants instead of failing."""
+    config = membership_config(tmp_path)
+    config.agents["late"] = config.agents["talent"].model_copy(
+        update={"access": ResponderAccessConfig(users=["@owner:example.com"])},
+    )
+    memberships = AgentReplyMembershipIndex()
+    runtime_paths = runtime_paths_for(config)
+
+    assert is_sender_allowed_for_responder("@owner:example.com", "late", None, config, runtime_paths, memberships)
+    assert not is_sender_allowed_for_responder(
+        "@outsider:example.com",
+        "late",
+        None,
+        config,
+        runtime_paths,
+        memberships,
+    )
 
 
 def test_credential_authority_is_separate_from_conversation_access(tmp_path: Path) -> None:
@@ -224,7 +269,13 @@ async def test_relevant_membership_certainty_and_alternative_grants(tmp_path: Pa
     config.authorization.aliases = {"@owner:example.com": ["@bridge:example.com"]}
     paths = runtime_paths_for(config)
     index = await membership_index(config, {"grant": {"@member:example.com"}, "other": set()})
-    index.mark_room_unready(config, paths, "!other:example.com", reason="refresh_failed")
+    index.mark_room_unready(
+        config,
+        paths,
+        "!other:example.com",
+        observer_user_id=OBSERVER_USER_ID,
+        reason="refresh_failed",
+    )
     for sender in (
         "@member:example.com",
         "@admin:example.com",
@@ -255,7 +306,13 @@ async def test_relevant_membership_certainty_and_alternative_grants(tmp_path: Pa
     config.agents["talent"].access = ResponderAccessConfig(members_of_rooms=["grant"])
     config.router.access = ResponderAccessConfig(members_of_rooms=["other"])
     index = await membership_index(config, {"grant": set(), "other": set()})
-    index.mark_room_unready(config, paths, "!other:example.com", reason="refresh_failed")
+    index.mark_room_unready(
+        config,
+        paths,
+        "!other:example.com",
+        observer_user_id=OBSERVER_USER_ID,
+        reason="refresh_failed",
+    )
     assert (
         _responder_reply_authorization(
             "@outsider:example.com",
@@ -288,7 +345,13 @@ async def test_current_room_absence_differs_from_unknown_joined_rooms(tmp_path: 
     )
     paths = runtime_paths_for(config)
     index = await membership_index(config, {"other": set()})
-    index.mark_room_unready(config, paths, "!other:example.com", reason="refresh_failed")
+    index.mark_room_unready(
+        config,
+        paths,
+        "!other:example.com",
+        observer_user_id=OBSERVER_USER_ID,
+        reason="refresh_failed",
+    )
     assert (
         _responder_reply_authorization(
             "@outsider:example.com",
@@ -389,7 +452,7 @@ async def test_newcomer_seen_joining_waits_for_the_router_to_apply_the_join(
             observed_room=_room_seen_by_the_agent(),
         )
 
-    index.apply_member_event(config, paths, "!talent:example.com", _join_event(_NEWCOMER), control_user_id="@r:x")
+    index.apply_member_event(config, "!talent:example.com", _join_event(_NEWCOMER), control_user_id=OBSERVER_USER_ID)
 
     assert _newcomer_decision(config, index) is _ReplyAuthorizationDecision.ALLOWED
 
@@ -431,7 +494,7 @@ async def test_waiting_for_a_join_is_bounded_and_a_later_join_waits_afresh(tmp_p
     assert _newcomer_decision(config, index) is _ReplyAuthorizationDecision.DENIED
     now[0] += 30.0
     other = "@other:example.com"
-    assert index.awaits_router_join(  # an unrelated wait starting now cannot hand the expired one a fresh grace
+    assert index.awaits_observer_join(  # an unrelated wait starting now cannot hand the expired one a fresh grace
         other,
         "!talent:example.com",
         frozenset({other}),

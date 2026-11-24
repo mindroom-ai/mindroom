@@ -2,17 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from mindroom.agent_policy import (
-    ResolvedAgentPolicy,
-    build_agent_policy_seeds,
-    resolve_agent_policy_from_data,
-    resolve_private_knowledge_base_agent,
-)
+from mindroom.config.resolution import agent_knowledge_base_ids, agent_policy
 from mindroom.constants import (
     RuntimePaths,
     config_relative_path,
@@ -21,10 +17,11 @@ from mindroom.constants import (
     resolve_session_state_root,
 )
 from mindroom.private_storage.private_instance_identity_store import ensure_private_instance_identity
+from mindroom.requester_identity import is_access_checked_requester_id
 from mindroom.tool_system.worker_routing import (
+    build_agent_toolkit_worker_target,
     private_instance_scope_root_path,
     resolve_agent_state_storage_path,
-    resolve_worker_execution_scope,
     resolve_worker_key,
     shared_storage_root,
     written_by_other_workers,
@@ -39,19 +36,36 @@ from mindroom.workspaces import (
 )
 
 if TYPE_CHECKING:
+    from mindroom.agent_policy import ResolvedAgentPolicy
     from mindroom.config.main import Config
-    from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope
+    from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity, WorkerScope
 
 
 @dataclass(frozen=True)
 class ResolvedAgentExecution:
-    """Resolved execution scope for one `(agent_name, execution_identity)` materialization."""
+    """Resolved execution scope for one `(agent_name, execution_identity)` materialization.
+
+    ``worker_target`` is the agent's own worker target, which its toolkits and every operation on its behalf use.
+    """
 
     agent_name: str
     policy: ResolvedAgentPolicy
-    execution_scope: WorkerScope | None
-    execution_identity: ToolExecutionIdentity | None
-    worker_key: str | None
+    worker_target: ResolvedWorkerTarget
+
+    @property
+    def execution_scope(self) -> WorkerScope | None:
+        """Return the agent's effective execution scope."""
+        return self.policy.effective_execution_scope
+
+    @property
+    def execution_identity(self) -> ToolExecutionIdentity | None:
+        """Return the execution identity the worker target resolved."""
+        return self.worker_target.execution_identity
+
+    @property
+    def worker_key(self) -> str | None:
+        """Return the worker key of the agent's worker target."""
+        return self.worker_target.worker_key
 
     @property
     def is_private(self) -> bool:
@@ -66,9 +80,7 @@ class ResolvedAgentRuntime:
     execution: ResolvedAgentExecution
     state_root: Path
     session_state_root: Path
-    workspace: ResolvedAgentWorkspace | None
-    tool_base_dir: Path | None
-    file_memory_root: Path | None
+    workspace: ResolvedAgentWorkspace
 
 
 @dataclass(frozen=True)
@@ -78,6 +90,23 @@ class ResolvedAgentStorage:
     execution: ResolvedAgentExecution
     state_root: Path
     session_state_root: Path
+
+    def workspace(
+        self,
+        config: Config,
+        runtime_paths: RuntimePaths,
+        *,
+        create: bool = False,
+    ) -> ResolvedAgentWorkspace:
+        """Resolve this storage scope's workspace without reconciling knowledge links."""
+        return resolve_agent_workspace_from_state_path(
+            self.execution.agent_name,
+            config,
+            runtime_paths=runtime_paths,
+            state_storage_path=self.state_root,
+            use_state_storage_path=self.execution.policy.private_workspace_enabled,
+            create=create,
+        )
 
 
 @dataclass(frozen=True)
@@ -156,15 +185,11 @@ def _resolved_private_state_root(
 def resolve_agent_execution(
     agent_name: str,
     config: Config,
+    runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None,
 ) -> ResolvedAgentExecution:
     """Resolve one agent's execution scope for the current runtime context."""
-    policy = resolve_agent_policy_from_data(
-        agent_name,
-        config.get_agent(agent_name),
-        default_worker_scope=config.defaults.worker_scope,
-        private_knowledge_base_id_prefix=config.PRIVATE_KNOWLEDGE_BASE_ID_PREFIX,
-    )
+    policy = agent_policy(config, agent_name)
     execution_scope = policy.effective_execution_scope
     if policy.is_private:
         if execution_identity is None:
@@ -173,20 +198,46 @@ def resolve_agent_execution(
         if not execution_identity.requester_id or not execution_identity.requester_id.strip():
             msg = f"Private agent '{agent_name}' requires a requester identity to resolve requester-local state"
             raise ValueError(msg)
-    resolved_worker_execution = resolve_worker_execution_scope(
+        # MindRoom's own accounts act for no one, so they never own a private instance.
+        if not is_access_checked_requester_id(execution_identity.requester_id, config, runtime_paths):
+            msg = f"Private agent '{agent_name}' requires a human or bot-account requester to resolve requester-local state"
+            raise ValueError(msg)
+    worker_target = build_agent_toolkit_worker_target(
         execution_scope,
-        agent_name=agent_name,
+        agent_name,
+        is_private=policy.is_private,
         execution_identity=execution_identity,
+        runtime_paths=runtime_paths,
     )
-    if policy.is_private and resolved_worker_execution.worker_key is None:
+    if policy.is_private and worker_target.worker_key is None:
         msg = f"Private agent '{agent_name}' could not resolve a worker key for execution scope '{execution_scope}'"
         raise ValueError(msg)
-    return ResolvedAgentExecution(
-        agent_name=agent_name,
-        policy=policy,
-        execution_scope=execution_scope,
-        execution_identity=resolved_worker_execution.execution_identity,
-        worker_key=resolved_worker_execution.worker_key,
+    return ResolvedAgentExecution(agent_name=agent_name, policy=policy, worker_target=worker_target)
+
+
+def record_private_instance_owner(
+    agent_name: str,
+    resolved_execution: ResolvedAgentExecution,
+    runtime_paths: RuntimePaths,
+) -> None:
+    """Record who owns a private instance before the primary stores its first data there.
+
+    A scope that already holds data when its record is first written stays undiscoverable, so every primary path
+    that creates private state calls this first.
+    """
+    # The identity record sits in the private scope above the workspace, which
+    # dedicated workers never mount; only the primary creates or locks it.
+    if not resolved_execution.policy.private_workspace_enabled or runs_in_dedicated_worker(runtime_paths):
+        return
+    execution_identity = resolved_execution.execution_identity
+    worker_key = resolved_execution.worker_key
+    if execution_identity is None or worker_key is None or execution_identity.requester_id is None:
+        msg = f"Private agent '{agent_name}' has unresolved private execution state"
+        raise ValueError(msg)
+    ensure_private_instance_identity(
+        runtime_paths.storage_root,
+        worker_key=worker_key,
+        requester_id=execution_identity.requester_id,
     )
 
 
@@ -207,30 +258,11 @@ def resolve_agent_runtime(
     )
     resolved_execution = resolved_storage.execution
     state_root = resolved_storage.state_root
+    if create:
+        record_private_instance_owner(agent_name, resolved_execution, runtime_paths)
 
-    # The identity record sits in the private scope above the workspace, which
-    # dedicated workers never mount; only the primary creates or locks it.
-    if create and resolved_execution.policy.private_workspace_enabled and not runs_in_dedicated_worker(runtime_paths):
-        execution_identity = resolved_execution.execution_identity
-        worker_key = resolved_execution.worker_key
-        if execution_identity is None or worker_key is None or execution_identity.requester_id is None:
-            msg = f"Private agent '{agent_name}' has unresolved private execution state"
-            raise ValueError(msg)
-        ensure_private_instance_identity(
-            runtime_paths.storage_root,
-            worker_key=worker_key,
-            requester_id=execution_identity.requester_id,
-        )
-
-    workspace = resolve_agent_workspace_from_state_path(
-        agent_name,
-        config,
-        runtime_paths=runtime_paths,
-        state_storage_path=state_root,
-        use_state_storage_path=resolved_execution.policy.private_workspace_enabled,
-        create=create,
-    )
-    if workspace is not None and (create or workspace.root.exists()):
+    workspace = resolved_storage.workspace(config, runtime_paths, create=create)
+    if create or workspace.root.exists():
         workspace_knowledge_root = resolve_workspace_relative_path(
             workspace.root,
             "knowledge",
@@ -244,7 +276,7 @@ def resolve_agent_runtime(
             ).is_relative_to(workspace_knowledge_root)
         }
         knowledge_paths: dict[str, Path] = {}
-        for base_id in config.resolve_entity(agent_name).knowledge_base_ids:
+        for base_id in agent_knowledge_base_ids(config, agent_name):
             base_config = config.get_knowledge_base_config(base_id)
             if config.get_private_knowledge_base_agent(base_id) is None:
                 knowledge_paths[base_id] = resolve_config_relative_path(base_config.path, runtime_paths).resolve()
@@ -259,15 +291,11 @@ def resolve_agent_runtime(
             knowledge_paths=knowledge_paths,
             protected_paths=protected_knowledge_paths,
         )
-    tool_base_dir = workspace.root if workspace is not None else None
-    file_memory_root = workspace.file_memory_path if workspace is not None else None
     return ResolvedAgentRuntime(
         execution=resolved_execution,
         state_root=state_root,
         session_state_root=resolved_storage.session_state_root,
         workspace=workspace,
-        tool_base_dir=tool_base_dir,
-        file_memory_root=file_memory_root,
     )
 
 
@@ -281,6 +309,7 @@ def resolve_agent_storage(
     resolved_execution = resolve_agent_execution(
         agent_name,
         config,
+        runtime_paths,
         execution_identity=execution_identity,
     )
     if resolved_execution.policy.private_workspace_enabled:
@@ -316,6 +345,17 @@ def shared_knowledge_path(raw_path: str, runtime_paths: RuntimePaths) -> Path:
     return resolve_config_relative_path(raw_path, runtime_paths).resolve()
 
 
+def _private_knowledge_index_root(runtime_paths: RuntimePaths, state_root: Path) -> Path:
+    """Return the primary-only directory one requester's private knowledge indexes live under.
+
+    Not the agent's state root, which its static runner can write: indexes sit beside the other bases' in
+    ``knowledge_db``, as knowledge Git directories sit outside worker storage. The canonical state root names the
+    requester's namespace there, so no requester's index can share a directory with another's.
+    """
+    namespace = hashlib.sha256(str(state_root).encode("utf-8")).hexdigest()[:32]
+    return runtime_paths.storage_root.expanduser().resolve() / "knowledge_db" / "private" / namespace
+
+
 def resolve_knowledge_binding(
     base_id: str,
     config: Config,
@@ -331,21 +371,15 @@ def resolve_knowledge_binding(
         file_watch_enabled=base_config.watch,
         has_git_sync=base_config.git is not None,
     )
-    effective_agent_name = resolve_private_knowledge_base_agent(
-        base_id,
-        build_agent_policy_seeds(
-            config.agents,
-            default_worker_scope=config.defaults.worker_scope,
-        ),
-        private_knowledge_base_id_prefix=config.PRIVATE_KNOWLEDGE_BASE_ID_PREFIX,
-    )
+    effective_agent_name = config.get_private_knowledge_base_agent(base_id)
     if effective_agent_name is None:
         knowledge_path = shared_knowledge_path(base_config.path, runtime_paths)
         return ResolvedKnowledgeBinding(
             base_id=base_id,
             storage_root=runtime_paths.storage_root.expanduser().resolve(),
             knowledge_path=knowledge_path,
-            # Shared Git bases poll through STALE scheduling after their interval, not READY access scheduling.
+            # Polled shared bases (Git, or local with poll_interval_seconds) refresh through STALE scheduling
+            # after their interval; Git bases never use READY access scheduling.
             incremental_sync_on_access=base_config.watch and base_config.git is None and not start_watchers,
         )
 
@@ -356,13 +390,9 @@ def resolve_knowledge_binding(
         execution_identity=execution_identity,
         create=create,
     )
-    if agent_runtime.workspace is None:
-        msg = f"Knowledge base '{base_id}' requires agent '{effective_agent_name}' to define a private root"
-        raise ValueError(msg)
-
     return ResolvedKnowledgeBinding(
         base_id=base_id,
-        storage_root=agent_runtime.state_root,
+        storage_root=_private_knowledge_index_root(runtime_paths, agent_runtime.state_root),
         knowledge_path=resolve_workspace_relative_path(
             agent_runtime.workspace.root,
             base_config.path,
@@ -379,6 +409,7 @@ __all__ = [
     "ResolvedAgentRuntime",
     "ResolvedAgentStorage",
     "ResolvedKnowledgeBinding",
+    "record_private_instance_owner",
     "resolve_agent_execution",
     "resolve_agent_runtime",
     "resolve_agent_storage",

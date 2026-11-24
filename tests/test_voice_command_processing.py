@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 from dataclasses import replace
 from typing import TYPE_CHECKING
@@ -10,17 +9,16 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
-from agno.media import Audio
 
-from mindroom.attachments import _attachment_id_for_event, load_attachment
-from mindroom.background_tasks import wait_for_background_tasks
-from mindroom.config.access import ResponderAccessConfig
+from mindroom.attachments.storage import _attachment_id_for_event, load_attachment
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.config.models import RouterConfig
 from mindroom.constants import (
     ATTACHMENT_IDS_KEY,
     ORIGINAL_SENDER_KEY,
+    ROUTE_EVENT_TYPE,
+    ROUTE_PROMPT_STRUCTURED_KEY,
+    ROUTE_VOICE_TRANSCRIPTS_KEY,
     ROUTER_AGENT_NAME,
     SKIP_MENTIONS_KEY,
     SOURCE_KIND_KEY,
@@ -28,29 +26,27 @@ from mindroom.constants import (
     VOICE_RAW_AUDIO_FALLBACK_KEY,
     VOICE_TRANSCRIPT_KEY,
 )
-from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
-from mindroom.dispatch_handoff import PreparedIngress
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND, VOICE_SOURCE_KIND
-from mindroom.handled_turns import TurnRecord
 from mindroom.history.types import HistoryScope
-from mindroom.inbound_turn_normalizer import _VoiceNormalizationResult
+from mindroom.llm.media import Audio
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.message_target import MessageTarget
+from mindroom.routing_judgment import ResponderSelection
+from mindroom.turn_policy import DispatchPlan
+from mindroom.turn_record import TurnRecord
 from mindroom.voice.handler import prepare_voice_message
-from mindroom.voice.visible_voice_echo import VisibleVoiceEchoRequest
 from tests.access_schema_support import with_current_room_member_access
 from tests.authorization_helpers import isolated_membership_index
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     bind_runtime_paths,
     drain_coalescing,
-    install_edit_message_mock,
     install_generate_response_mock,
     install_runtime_journal_support,
     install_send_response_mock,
     orchestrator_runtime_paths,
-    replace_turn_controller_deps,
+    replace_turn_deps,
     runtime_paths_for,
     serve_media_from_download,
     unwrap_extracted_collaborator,
@@ -61,19 +57,17 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.bot import AgentBot
-    from mindroom.delivery_gateway import EditTextRequest
 
 
 def _attach_runtime_paths(config: Config, tmp_path: Path) -> Config:
     return bind_runtime_paths(config, orchestrator_runtime_paths(tmp_path, config_path=tmp_path / "config.yaml"))
 
 
-def _agent_bot(*, agent_user: object, storage_path: Path, config: Config, rooms: list[str]) -> AgentBot:
+def _agent_bot(*, agent_user: object, config: Config, rooms: list[str]) -> AgentBot:
     """Construct an agent bot with the explicit runtime bound to the test config."""
     bot = install_runtime_journal_support(
         make_test_agent_bot(
             agent_user=agent_user,
-            storage_path=storage_path,
             config=config,
             runtime_paths=runtime_paths_for(config),
             rooms=rooms,
@@ -134,99 +128,47 @@ def _install_voice_thread_dispatch_mocks(
     bot: AgentBot,
 ) -> None:
     """Provide minimal explicit-thread cache reads for normalized voice dispatch."""
-    bot._turn_controller.deps.resolver.dispatch_thread_snapshot = AsyncMock(
+    bot._turn_ingress.deps.resolver._dispatch_thread_snapshot = AsyncMock(
         return_value=thread_history_result([], is_full_history=False),
     )
 
 
-def _make_visible_router_echo_scenario(
-    tmp_path: Path,
-    *,
-    agents: dict | None = None,
-    router_access: ResponderAccessConfig | None = None,
-    voice_enabled: bool = True,
-    send_response_return: str | None = "$voice_echo",
-    send_response_side_effect: list[str] | None = None,
-) -> tuple[AgentBot, nio.MatrixRoom, nio.RoomMessageAudio]:
-    """Build a router bot + room + voice event for visible echo tests."""
+@pytest.mark.asyncio
+async def test_router_voice_text_for_a_user_is_conversation_not_a_command(tmp_path) -> None:  # noqa: ANN001
+    """Voice-kind text the router sent for a user runs as that user's conversation, never as a command."""
     agent_user = MagicMock()
     agent_user.user_id = "@mindroom_router:localhost"
     agent_user.agent_name = ROUTER_AGENT_NAME
     agent_user.matrix_id = MatrixID.parse("@mindroom_router:localhost")
 
-    configured_agents = agents or {"home": {"display_name": "HomeAssistant", "rooms": ["!test:example.com"]}}
-    config = with_current_room_member_access(
-        Config(
-            agents=configured_agents,
-            router=RouterConfig(access=router_access),
-            voice={"enabled": voice_enabled, "visible_router_echo": True},
-        ),
-    )
-    if router_access is not None:
-        config.router.access = router_access
-    config = _attach_runtime_paths(config, tmp_path)
-
     bot = _agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
-        config=config,
-        rooms=["!test:example.com"],
-    )
-    bot.logger = MagicMock()
-    replace_turn_controller_deps(bot, logger=bot.logger)
-    bot.client = AsyncMock()
-    bot.client.rooms = {}
-    _install_voice_thread_dispatch_mocks(bot)
-    send_response = AsyncMock()
-    if send_response_side_effect is not None:
-        send_response.side_effect = send_response_side_effect
-    else:
-        send_response.return_value = send_response_return
-    install_send_response_mock(bot, send_response)
-    install_edit_message_mock(bot, AsyncMock(return_value=True))
-
-    room_user_ids = [
-        "@mindroom_router:localhost",
-        *[f"@mindroom_{name}:localhost" for name in configured_agents],
-        "@alice:example.com",
-    ]
-    room = _make_room(*room_user_ids)
-    event = _make_voice_event(sender="@alice:example.com")
-    return bot, room, event
-
-
-@pytest.mark.asyncio
-async def test_router_processes_own_voice_transcriptions(tmp_path) -> None:  # noqa: ANN001
-    """Router should still handle voice-derived commands it sent on behalf of users."""
-    agent_user = MagicMock()
-    agent_user.user_id = "@mindroom_router:example.com"
-    agent_user.agent_name = ROUTER_AGENT_NAME
-    agent_user.matrix_id = MatrixID.parse("@mindroom_router:example.com")
-
-    bot = _agent_bot(
-        agent_user=agent_user,
-        storage_path=tmp_path,
         config=_attach_runtime_paths(with_current_room_member_access(Config(authorization={})), tmp_path),
-        rooms=["!test:example.com"],
+        rooms=["!test:localhost"],
     )
     turn_store = unwrap_extracted_collaborator(bot._turn_store)
-    turn_store.is_handled = MagicMock(return_value=False)
+    turn_store.is_handled = AsyncMock(return_value=False)
     bot.logger = MagicMock()
-    replace_turn_controller_deps(bot, logger=bot.logger)
+    replace_turn_deps(bot, logger=bot.logger)
 
-    room = _make_room("@mindroom_router:example.com", "@alice:example.com")
-    event = MagicMock(spec=nio.RoomMessageText)
-    event.sender = "@mindroom_router:example.com"
-    event.body = "🎤 !schedule daily"
-    event.event_id = "test_event"
-    event.server_timestamp = 1234567890
-    event.source = {
-        "content": {
-            "body": "🎤 !schedule daily",
-            ORIGINAL_SENDER_KEY: "@alice:example.com",
-            SOURCE_KIND_KEY: VOICE_SOURCE_KIND,
+    room = _make_room("@mindroom_router:localhost", "@alice:localhost")
+    event = nio.RoomMessageText.from_dict(
+        {
+            "event_id": "$router-voice-text",
+            "sender": "@mindroom_router:localhost",
+            "origin_server_ts": 1234567890,
+            "type": "m.room.message",
+            "content": {
+                "msgtype": "m.text",
+                "body": "🎤 !schedule daily",
+                ORIGINAL_SENDER_KEY: "@alice:localhost",
+                SOURCE_KIND_KEY: VOICE_SOURCE_KIND,
+            },
         },
-    }
+    )
+    facts = bot._ingress_validator.classify(event, room_id=room.room_id)
+    assert facts.source_kind == VOICE_SOURCE_KIND
+    assert facts.lane_requester_id == "@alice:localhost"
 
     with (
         patch.object(
@@ -234,15 +176,13 @@ async def test_router_processes_own_voice_transcriptions(tmp_path) -> None:  # n
             "execute_if_owned",
             new=AsyncMock(return_value=True),
         ) as mock_handle,
-        patch("mindroom.text_ingress_dispatch.is_dm_room", return_value=False),
+        patch.object(bot._turn_policy, "plan_turn", new=AsyncMock(return_value=DispatchPlan(kind="ignore"))),
     ):
         bot.client = MagicMock()
         await bot._on_message(room, event)
         await drain_coalescing(bot)
 
-    mock_handle.assert_called_once()
-    command = mock_handle.await_args.kwargs["command"]
-    assert command.type.value == "schedule"
+    mock_handle.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -255,14 +195,13 @@ async def test_router_ignores_non_voice_self_messages(tmp_path) -> None:  # noqa
 
     bot = _agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=_attach_runtime_paths(with_current_room_member_access(Config(authorization={})), tmp_path),
         rooms=["!test:example.com"],
     )
     turn_store = unwrap_extracted_collaborator(bot._turn_store)
-    turn_store.is_handled = MagicMock(return_value=False)
+    turn_store.is_handled = AsyncMock(return_value=False)
     bot.logger = MagicMock()
-    replace_turn_controller_deps(bot, logger=bot.logger)
+    replace_turn_deps(bot, logger=bot.logger)
 
     room = _make_room("@mindroom_router:example.com", "@bob:example.com")
     event = MagicMock(spec=nio.RoomMessageText)
@@ -278,7 +217,6 @@ async def test_router_ignores_non_voice_self_messages(tmp_path) -> None:  # noqa
             "execute_if_owned",
             new=AsyncMock(return_value=True),
         ) as mock_handle,
-        patch("mindroom.text_ingress_dispatch.is_dm_room", return_value=False),
     ):
         bot.client = MagicMock()
         await bot._on_message(room, event)
@@ -287,31 +225,30 @@ async def test_router_ignores_non_voice_self_messages(tmp_path) -> None:  # noqa
 
 
 @pytest.mark.asyncio
-async def test_router_processes_own_sidecar_commands_using_original_sender(tmp_path) -> None:  # noqa: ANN001
-    """Self-sent sidecar previews should still use ORIGINAL_SENDER for dispatch prechecks."""
+async def test_a_sidecar_relay_the_router_sent_stays_conversation(tmp_path) -> None:  # noqa: ANN001
+    """A long relay the router sent as a sidecar keeps its relay kind, so its command-shaped text is not a command."""
     agent_user = MagicMock()
-    agent_user.user_id = "@mindroom_router:example.com"
+    agent_user.user_id = "@mindroom_router:localhost"
     agent_user.agent_name = ROUTER_AGENT_NAME
-    agent_user.matrix_id = MatrixID.parse("@mindroom_router:example.com")
+    agent_user.matrix_id = MatrixID.parse("@mindroom_router:localhost")
 
     bot = _agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=_attach_runtime_paths(
             with_current_room_member_access(
                 Config(
-                    agents={"home": AgentConfig(display_name="Home", rooms=["!test:example.com"])},
+                    agents={"home": AgentConfig(display_name="Home", rooms=["!test:localhost"])},
                     authorization={},
                 ),
             ),
             tmp_path,
         ),
-        rooms=["!test:example.com"],
+        rooms=["!test:localhost"],
     )
     turn_store = unwrap_extracted_collaborator(bot._turn_store)
-    turn_store.is_handled = MagicMock(return_value=False)
+    turn_store.is_handled = AsyncMock(return_value=False)
     bot.logger = MagicMock()
-    replace_turn_controller_deps(bot, logger=bot.logger)
+    replace_turn_deps(bot, logger=bot.logger)
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.rooms = {}
     bot.client.download = AsyncMock(
@@ -329,11 +266,11 @@ async def test_router_processes_own_sidecar_commands_using_original_sender(tmp_p
     send_response = AsyncMock(return_value="$reply")
     install_send_response_mock(bot, send_response)
 
-    room = _make_room("@mindroom_router:example.com", "@mindroom_home:localhost", "@alice:example.com")
+    room = _make_room("@mindroom_router:localhost", "@mindroom_home:localhost", "@alice:localhost")
     event = nio.Event.parse_event(
         {
             "event_id": "$sidecar-relay",
-            "sender": "@mindroom_router:example.com",
+            "sender": "@mindroom_router:localhost",
             "origin_server_ts": 1234567890,
             "type": "m.room.message",
             "content": {
@@ -345,26 +282,21 @@ async def test_router_processes_own_sidecar_commands_using_original_sender(tmp_p
                     "encoding": "matrix_event_content_json",
                 },
                 "url": "mxc://server/sidecar-relay",
-                ORIGINAL_SENDER_KEY: "@alice:example.com",
-                SOURCE_KIND_KEY: VOICE_SOURCE_KIND,
+                ORIGINAL_SENDER_KEY: "@alice:localhost",
+                SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
             },
         },
     )
 
-    with (
-        patch(
-            "mindroom.commands.handler.schedule_task",
-            new_callable=AsyncMock,
-            return_value=("task123", "scheduled"),
-        ) as mock_schedule,
-    ):
+    with patch("mindroom.commands.handler.schedule_task", new_callable=AsyncMock) as mock_schedule:
         assert isinstance(event, nio.RoomMessageFile)
         await bot._on_media_message(room, event)
         await bot._coalescing_gate.drain_all()
 
-    assert mock_schedule.await_args.kwargs["scheduled_by"] == "@alice:example.com"
+    mock_schedule.assert_not_awaited()
 
 
+@pytest.mark.usefixtures("commands_aimed_at_bot_under_test")
 @pytest.mark.asyncio
 async def test_router_parses_sidecar_schedule_command_from_canonical_body(tmp_path) -> None:  # noqa: ANN001
     """Router should schedule from the hydrated sidecar body and mentions."""
@@ -375,7 +307,6 @@ async def test_router_parses_sidecar_schedule_command_from_canonical_body(tmp_pa
 
     bot = _agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=_attach_runtime_paths(
             with_current_room_member_access(
                 Config(
@@ -388,9 +319,9 @@ async def test_router_parses_sidecar_schedule_command_from_canonical_body(tmp_pa
         rooms=["!test:example.com"],
     )
     turn_store = unwrap_extracted_collaborator(bot._turn_store)
-    turn_store.is_handled = MagicMock(return_value=False)
+    turn_store.is_handled = AsyncMock(return_value=False)
     bot.logger = MagicMock()
-    replace_turn_controller_deps(bot, logger=bot.logger)
+    replace_turn_deps(bot, logger=bot.logger)
     bot.client = AsyncMock(spec=nio.AsyncClient)
     serve_media_from_download(bot.client)
     bot.client.rooms = {}
@@ -433,7 +364,7 @@ async def test_router_parses_sidecar_schedule_command_from_canonical_body(tmp_pa
         patch(
             "mindroom.commands.handler.schedule_task",
             new_callable=AsyncMock,
-            return_value=("task123", "scheduled"),
+            return_value="scheduled",
         ) as mock_schedule,
     ):
         assert isinstance(event, nio.RoomMessageFile)
@@ -447,6 +378,7 @@ async def test_router_parses_sidecar_schedule_command_from_canonical_body(tmp_pa
     assert [agent.full_id for agent in mentioned_agents] == ["@mindroom_home:localhost"]
 
 
+@pytest.mark.usefixtures("commands_aimed_at_bot_under_test")
 @pytest.mark.asyncio
 async def test_router_treats_sidecar_skill_command_as_unknown_command(tmp_path) -> None:  # noqa: ANN001
     """Router should not special-case removed skill commands after sidecar hydration."""
@@ -457,7 +389,6 @@ async def test_router_treats_sidecar_skill_command_as_unknown_command(tmp_path) 
 
     bot = _agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=_attach_runtime_paths(
             with_current_room_member_access(
                 Config(
@@ -473,9 +404,9 @@ async def test_router_treats_sidecar_skill_command_as_unknown_command(tmp_path) 
         rooms=["!test:example.com"],
     )
     turn_store = unwrap_extracted_collaborator(bot._turn_store)
-    turn_store.is_handled = MagicMock(return_value=False)
+    turn_store.is_handled = AsyncMock(return_value=False)
     bot.logger = MagicMock()
-    replace_turn_controller_deps(bot, logger=bot.logger)
+    replace_turn_deps(bot, logger=bot.logger)
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.rooms = {}
     bot.client.download = AsyncMock(
@@ -522,7 +453,9 @@ async def test_router_treats_sidecar_skill_command_as_unknown_command(tmp_path) 
     await bot._on_media_message(room, event)
     await bot._coalescing_gate.drain_all()
     send_response.assert_awaited_once()
-    assert send_response.await_args.kwargs["response_text"] == ("❌ Unknown command. Try !help for available commands.")
+    assert send_response.await_args.kwargs["response_text"] == (
+        "❌ Unknown command. Try `/help` (or `!help`) for available commands."
+    )
 
 
 @pytest.mark.asyncio
@@ -535,15 +468,14 @@ async def test_router_skips_unauthorized_sidecar_commands_before_hydration(tmp_p
 
     bot = _agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=_attach_runtime_paths(with_current_room_member_access(Config(authorization={})), tmp_path),
         rooms=["!test:example.com"],
     )
     turn_store = unwrap_extracted_collaborator(bot._turn_store)
-    turn_store.is_handled = MagicMock(return_value=False)
+    turn_store.is_handled = AsyncMock(return_value=False)
     turn_store.record_turn = AsyncMock(wraps=turn_store.record_turn)
     bot.logger = MagicMock()
-    replace_turn_controller_deps(bot, logger=bot.logger)
+    replace_turn_deps(bot, logger=bot.logger)
     bot.client = AsyncMock(spec=nio.AsyncClient)
     bot.client.rooms = {}
     bot.client.user_id = bot.matrix_id.full_id
@@ -571,6 +503,7 @@ async def test_router_skips_unauthorized_sidecar_commands_before_hydration(tmp_p
 
     with (
         patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=False),
+        patch("mindroom.turn_policy.TurnPolicy.routes_for_sender_in_room", return_value=False),
         patch("mindroom.commands.handler.schedule_task", new_callable=AsyncMock) as mock_schedule,
     ):
         assert isinstance(event, nio.RoomMessageFile)
@@ -578,9 +511,7 @@ async def test_router_skips_unauthorized_sidecar_commands_before_hydration(tmp_p
 
     bot.client.download.assert_not_awaited()
     mock_schedule.assert_not_awaited()
-    turn_store.record_turn.assert_called_once_with(
-        TurnRecord.create([event.event_id]),
-    )
+    turn_store.record_turn.assert_called_once_with(TurnRecord.create([event.event_id]), room_id=room.room_id)
 
 
 @pytest.mark.asyncio
@@ -741,15 +672,14 @@ async def test_router_ignores_audio_events_from_internal_agents(tmp_path) -> Non
 
     bot = _agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         rooms=["!test:example.com"],
     )
     turn_store = unwrap_extracted_collaborator(bot._turn_store)
-    turn_store.is_handled = MagicMock(return_value=False)
+    turn_store.is_handled = AsyncMock(return_value=False)
     turn_store.record_turn = AsyncMock(wraps=turn_store.record_turn)
     bot.logger = MagicMock()
-    replace_turn_controller_deps(bot, logger=bot.logger)
+    replace_turn_deps(bot, logger=bot.logger)
     bot.client = MagicMock()
     send_response = AsyncMock()
     install_send_response_mock(bot, send_response)
@@ -789,7 +719,6 @@ async def test_agent_handles_audio_without_router_when_voice_disabled(tmp_path) 
 
     bot = _agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=_attach_runtime_paths(
             with_current_room_member_access(
                 Config(
@@ -802,11 +731,11 @@ async def test_agent_handles_audio_without_router_when_voice_disabled(tmp_path) 
         rooms=["!test:example.com"],
     )
     turn_store = unwrap_extracted_collaborator(bot._turn_store)
-    turn_store.is_handled = MagicMock(return_value=False)
+    turn_store.is_handled = AsyncMock(return_value=False)
     turn_store.record_pending_turn = AsyncMock(wraps=turn_store.record_pending_turn)
     turn_store.record_turn = AsyncMock(wraps=turn_store.record_turn)
     bot.logger = MagicMock()
-    replace_turn_controller_deps(bot, logger=bot.logger)
+    replace_turn_deps(bot, logger=bot.logger)
     bot.client = AsyncMock()
     bot.client.rooms = {}
     bot.client.user_id = "@mindroom_home:localhost"
@@ -821,7 +750,6 @@ async def test_agent_handles_audio_without_router_when_voice_disabled(tmp_path) 
         patch("mindroom.voice.handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
         patch("mindroom.voice.handler._handle_voice_message", new_callable=AsyncMock) as mock_voice,
         patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
-        patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
     ):
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         mock_voice.return_value = None
@@ -855,7 +783,7 @@ async def test_agent_handles_audio_without_router_when_voice_disabled(tmp_path) 
     assert turn_store.record_pending_turn.call_args.args[0] == expected_record
     # The reply's records record the turn answered; nothing else writes it terminal.
     turn_store.record_turn.assert_not_called()
-    persisted_record = turn_store.get_turn_record("$voice_event")
+    persisted_record = await turn_store.get_turn_record("$voice_event")
     assert persisted_record is not None
     assert persisted_record.completed is True
 
@@ -870,12 +798,13 @@ async def test_agent_handles_audio_with_router_present_in_single_agent_room(tmp_
 
     bot = _agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=_attach_runtime_paths(
             with_current_room_member_access(
                 Config(
                     agents={"home": {"display_name": "HomeAssistant", "rooms": ["!test:example.com"]}},
                     authorization={},
+                    # The live router's visible echo would hold the turn; this covers routing alone.
+                    voice={"visible_router_echo": False},
                 ),
             ),
             tmp_path,
@@ -883,9 +812,9 @@ async def test_agent_handles_audio_with_router_present_in_single_agent_room(tmp_
         rooms=["!test:example.com"],
     )
     turn_store = unwrap_extracted_collaborator(bot._turn_store)
-    turn_store.is_handled = MagicMock(return_value=False)
+    turn_store.is_handled = AsyncMock(return_value=False)
     bot.logger = MagicMock()
-    replace_turn_controller_deps(bot, logger=bot.logger)
+    replace_turn_deps(bot, logger=bot.logger)
     bot.client = AsyncMock()
     bot.client.rooms = {}
     bot.client.user_id = "@mindroom_home:localhost"
@@ -900,7 +829,6 @@ async def test_agent_handles_audio_with_router_present_in_single_agent_room(tmp_
         patch("mindroom.voice.handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
         patch("mindroom.voice.handler._handle_voice_message", new_callable=AsyncMock) as mock_voice,
         patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
-        patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
     ):
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         mock_voice.return_value = None
@@ -935,14 +863,13 @@ async def test_router_and_agent_share_audio_normalization_when_router_is_present
         agent_user.matrix_id = MatrixID.parse(f"@mindroom_{agent_name}:localhost")
         bot = _agent_bot(
             agent_user=agent_user,
-            storage_path=tmp_path,
             config=config,
             rooms=["!test:example.com"],
         )
         turn_store = unwrap_extracted_collaborator(bot._turn_store)
-        turn_store.is_handled = MagicMock(return_value=False)
+        turn_store.is_handled = AsyncMock(return_value=False)
         bot.logger = MagicMock()
-        replace_turn_controller_deps(bot, logger=bot.logger)
+        replace_turn_deps(bot, logger=bot.logger)
         bot.client = AsyncMock()
         bot.client.rooms = {}
         bot.client.user_id = agent_user.user_id
@@ -962,7 +889,6 @@ async def test_router_and_agent_share_audio_normalization_when_router_is_present
         patch("mindroom.voice.handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
         patch("mindroom.voice.handler._handle_voice_message", new_callable=AsyncMock) as mock_voice,
         patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
-        patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
     ):
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         mock_voice.return_value = f"{VOICE_PREFIX}turn on the lights"
@@ -974,782 +900,6 @@ async def test_router_and_agent_share_audio_normalization_when_router_is_present
     assert mock_voice.await_count == 1
     send_response_mocks[0].assert_not_called()
     assert generate_response_mocks[1].await_count == 1
-
-
-@pytest.mark.asyncio
-async def test_router_posts_visible_voice_echo_when_enabled(tmp_path) -> None:  # noqa: ANN001
-    """Router can optionally post the normalized voice text for user visibility."""
-    bot, room, event = _make_visible_router_echo_scenario(tmp_path)
-
-    with (
-        patch("mindroom.voice.handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
-        patch("mindroom.voice.handler._handle_voice_message", new_callable=AsyncMock) as mock_voice,
-        patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
-    ):
-        mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
-        mock_voice.return_value = f"{VOICE_PREFIX}@home turn on the lights"
-        await bot._on_media_message(room, event)
-        await drain_coalescing(bot)
-
-    bot._delivery_gateway.send_text.assert_called_once()
-    placeholder_request = bot._delivery_gateway.send_text.call_args.args[0]
-    assert placeholder_request.target.reply_to_event_id == "$voice_event"
-    assert placeholder_request.response_text == "Router agent is transcribing…"
-    assert placeholder_request.target.resolved_thread_id == "$voice_event"
-    assert placeholder_request.skip_mentions is True
-
-    bot._delivery_gateway.edit_text.assert_awaited_once()
-    edit_request = bot._delivery_gateway.edit_text.await_args.args[0]
-    assert edit_request.event_id == "$voice_echo"
-    assert edit_request.new_text == f"{VOICE_PREFIX}@home turn on the lights"
-    assert edit_request.extra_content is not None
-    assert edit_request.extra_content[ORIGINAL_SENDER_KEY] == "@alice:example.com"
-    assert edit_request.extra_content[SOURCE_KIND_KEY] == TRUSTED_INTERNAL_RELAY_SOURCE_KIND
-    assert edit_request.extra_content[ATTACHMENT_IDS_KEY] == [_attachment_id_for_event("$voice_event")]
-    assert VOICE_RAW_AUDIO_FALLBACK_KEY not in edit_request.extra_content
-
-
-@pytest.mark.asyncio
-async def test_router_voice_echo_skips_transcription_placeholder_when_voice_is_disabled(tmp_path) -> None:  # noqa: ANN001
-    """Disabled STT should post only truthful attached-voice fallback text."""
-    bot, room, event = _make_visible_router_echo_scenario(tmp_path, voice_enabled=False)
-
-    with (
-        patch("mindroom.voice.handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
-        patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
-    ):
-        mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
-        await bot._on_media_message(room, event)
-        await drain_coalescing(bot)
-
-    bot._delivery_gateway.send_text.assert_awaited_once()
-    request = bot._delivery_gateway.send_text.await_args.args[0]
-    assert request.response_text == f"{VOICE_PREFIX}[Attached voice message]"
-    assert request.extra_content is not None
-    assert request.extra_content[VOICE_RAW_AUDIO_FALLBACK_KEY] is True
-    bot._delivery_gateway.edit_text.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_router_posts_transcription_placeholder_before_voice_is_ready(tmp_path) -> None:  # noqa: ANN001
-    """Router should show immediate progress, then replace it with the normalized voice text."""
-    bot, room, event = _make_visible_router_echo_scenario(tmp_path)
-    allow_placeholder_send = asyncio.Event()
-    placeholder_send_finished = asyncio.Event()
-    placeholder_send_started = asyncio.Event()
-    transcription_started = asyncio.Event()
-    release_transcription = asyncio.Event()
-
-    async def transcribe_voice(*_args: object, **_kwargs: object) -> str:
-        transcription_started.set()
-        await release_transcription.wait()
-        return f"{VOICE_PREFIX}@home turn on the lights"
-
-    async def send_visible_echo(_request: object) -> str:
-        placeholder_send_started.set()
-        await allow_placeholder_send.wait()
-        placeholder_send_finished.set()
-        return "$voice_echo"
-
-    with (
-        patch("mindroom.voice.handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
-        patch("mindroom.voice.handler._handle_voice_message", side_effect=transcribe_voice),
-        patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
-    ):
-        mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
-        bot._delivery_gateway.send_text.side_effect = send_visible_echo
-        await bot._turn_controller.handle_media_event(room, event)
-        try:
-            await asyncio.wait_for(placeholder_send_started.wait(), timeout=1)
-            await asyncio.wait_for(transcription_started.wait(), timeout=1)
-            assert not placeholder_send_finished.is_set()
-            allow_placeholder_send.set()
-            await asyncio.wait_for(placeholder_send_finished.wait(), timeout=1)
-            placeholder_request = bot._delivery_gateway.send_text.await_args.args[0]
-            assert placeholder_request.response_text == "Router agent is transcribing…"
-            bot._delivery_gateway.edit_text.assert_not_awaited()
-        finally:
-            allow_placeholder_send.set()
-            release_transcription.set()
-            await drain_coalescing(bot)
-
-    bot._delivery_gateway.send_text.assert_awaited_once()
-    bot._delivery_gateway.edit_text.assert_awaited_once()
-    edit_request = bot._delivery_gateway.edit_text.await_args.args[0]
-    assert edit_request.event_id == "$voice_echo"
-    assert edit_request.new_text == f"{VOICE_PREFIX}@home turn on the lights"
-    assert edit_request.extra_content is not None
-    assert edit_request.extra_content[ORIGINAL_SENDER_KEY] == "@alice:example.com"
-    assert edit_request.extra_content[SOURCE_KIND_KEY] == TRUSTED_INTERNAL_RELAY_SOURCE_KIND
-    assert edit_request.extra_content[ATTACHMENT_IDS_KEY] == [_attachment_id_for_event("$voice_event")]
-
-
-@pytest.mark.asyncio
-async def test_concurrent_voice_redelivery_shares_visible_echo_lifecycle(tmp_path) -> None:  # noqa: ANN001
-    """Concurrent delivery of one audio event should send and finish one visible echo."""
-    bot, room, event = _make_visible_router_echo_scenario(tmp_path)
-    allow_normalization = asyncio.Event()
-    allow_placeholder_send = asyncio.Event()
-    normalization_started = asyncio.Event()
-    placeholder_send_started = asyncio.Event()
-    normalization_count = 0
-    normalized_event = PreparedIngress(
-        sender=event.sender,
-        event_id=event.event_id,
-        body=f"{VOICE_PREFIX}@home turn on the lights",
-        source={
-            "content": {
-                "body": f"{VOICE_PREFIX}@home turn on the lights",
-                ORIGINAL_SENDER_KEY: event.sender,
-                SOURCE_KIND_KEY: VOICE_SOURCE_KIND,
-                VOICE_TRANSCRIPT_KEY: True,
-            },
-        },
-        server_timestamp=event.server_timestamp,
-        source_kind_override=VOICE_SOURCE_KIND,
-    )
-
-    async def normalize_voice(*_args: object, **_kwargs: object) -> _VoiceNormalizationResult:
-        nonlocal normalization_count
-        normalization_count += 1
-        normalization_started.set()
-        await allow_normalization.wait()
-        return _VoiceNormalizationResult(event=normalized_event)
-
-    async def send_placeholder(_request: object) -> str:
-        placeholder_send_started.set()
-        await allow_placeholder_send.wait()
-        return "$voice_echo"
-
-    with (
-        patch.object(
-            bot._turn_controller.deps.normalizer,
-            "prepare_voice_event",
-            new=AsyncMock(side_effect=normalize_voice),
-        ),
-        patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
-    ):
-        bot._delivery_gateway.send_text.side_effect = send_placeholder
-        await bot._turn_controller.handle_media_event(room, event)
-        redelivery = asyncio.create_task(bot._turn_controller.handle_media_event(room, event))
-        try:
-            await asyncio.wait_for(normalization_started.wait(), timeout=1)
-            await asyncio.wait_for(placeholder_send_started.wait(), timeout=1)
-            await asyncio.sleep(0)
-            assert normalization_count == 1
-            assert bot._delivery_gateway.send_text.await_count == 1
-        finally:
-            allow_normalization.set()
-            allow_placeholder_send.set()
-        assert await asyncio.wait_for(redelivery, timeout=1) is TurnDispatchOutcome.DEFERRED
-        await drain_coalescing(bot)
-
-    bot._delivery_gateway.send_text.assert_awaited_once()
-    bot._delivery_gateway.edit_text.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_voice_echo_finishes_after_config_is_disabled_mid_transcription(tmp_path) -> None:  # noqa: ANN001
-    """A started placeholder lifecycle should finish despite a live config toggle."""
-    bot, room, event = _make_visible_router_echo_scenario(tmp_path)
-    placeholder_sent = asyncio.Event()
-    release_transcription = asyncio.Event()
-    transcription_started = asyncio.Event()
-
-    async def transcribe_voice(*_args: object, **_kwargs: object) -> str:
-        transcription_started.set()
-        await release_transcription.wait()
-        return f"{VOICE_PREFIX}@home turn on the lights"
-
-    async def send_placeholder(_request: object) -> str:
-        placeholder_sent.set()
-        return "$voice_echo"
-
-    with (
-        patch("mindroom.voice.handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
-        patch("mindroom.voice.handler._handle_voice_message", side_effect=transcribe_voice),
-        patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
-    ):
-        mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
-        bot._delivery_gateway.send_text.side_effect = send_placeholder
-        await bot._turn_controller.handle_media_event(room, event)
-        await asyncio.wait_for(placeholder_sent.wait(), timeout=1)
-        await asyncio.wait_for(transcription_started.wait(), timeout=1)
-        bot.config.voice.visible_router_echo = False
-        release_transcription.set()
-        await drain_coalescing(bot)
-
-    bot._delivery_gateway.send_text.assert_awaited_once()
-    bot._delivery_gateway.edit_text.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_voice_echo_edit_failure_retries_existing_placeholder(tmp_path) -> None:  # noqa: ANN001
-    """A failed replacement should retry the same placeholder on redelivery."""
-    bot, room, event = _make_visible_router_echo_scenario(tmp_path)
-    bot._delivery_gateway.edit_text.side_effect = None
-    bot._delivery_gateway.edit_text.return_value = False
-
-    with (
-        patch("mindroom.voice.handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
-        patch("mindroom.voice.handler._handle_voice_message", new_callable=AsyncMock) as mock_voice,
-        patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
-    ):
-        mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
-        mock_voice.return_value = f"{VOICE_PREFIX}@home turn on the lights"
-        await bot._turn_controller.handle_media_event(room, event)
-        await drain_coalescing(bot)
-        assert not bot._turn_store.is_handled(event.event_id)
-
-        bot._delivery_gateway.edit_text.return_value = True
-        await bot._turn_controller.handle_media_event(room, event)
-        await drain_coalescing(bot)
-
-    bot._delivery_gateway.send_text.assert_awaited_once()
-    assert bot._delivery_gateway.edit_text.await_count == 2
-    assert bot._turn_store.is_handled(event.event_id)
-    assert bot._turn_store.visible_echo_for_source(event.event_id) == "$voice_echo"
-
-
-@pytest.mark.asyncio
-async def test_finalized_voice_transcript_is_not_replaced_by_late_fallback(tmp_path) -> None:  # noqa: ANN001
-    """A late fallback must not downgrade a successfully delivered transcript."""
-    bot, room, event = _make_visible_router_echo_scenario(tmp_path)
-    voice_target = bot._turn_controller.deps.resolver.build_message_target(
-        room_id=room.room_id,
-        thread_id=event.event_id,
-        reply_to_event_id=event.event_id,
-        event_source=event.source,
-    )
-    await bot._turn_store.record_visible_echo(event.event_id, "$voice_echo")
-    await bot._turn_store.record_finalized_visible_echo(
-        event.event_id,
-        "$voice_echo",
-        is_fallback=False,
-    )
-    handle = bot._visible_voice_echo.start(
-        VisibleVoiceEchoRequest(
-            source_event_id=event.event_id,
-            target=voice_target,
-            requester_user_id=event.sender,
-            raw_source=event.source,
-        ),
-    )
-
-    await bot._visible_voice_echo.finish(
-        handle,
-        PreparedIngress(
-            sender=event.sender,
-            event_id=event.event_id,
-            body=f"{VOICE_PREFIX}[Attached voice message]",
-            source={
-                "content": {
-                    "body": f"{VOICE_PREFIX}[Attached voice message]",
-                    ORIGINAL_SENDER_KEY: event.sender,
-                    SOURCE_KIND_KEY: VOICE_SOURCE_KIND,
-                    VOICE_RAW_AUDIO_FALLBACK_KEY: True,
-                },
-            },
-            server_timestamp=event.server_timestamp,
-            source_kind_override=VOICE_SOURCE_KIND,
-        ),
-    )
-
-    bot._delivery_gateway.edit_text.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_cancelled_voice_finish_does_not_replace_finalized_transcript(tmp_path) -> None:  # noqa: ANN001
-    """Cancellation cleanup must not downgrade a successfully delivered transcript."""
-    bot, room, event = _make_visible_router_echo_scenario(tmp_path)
-    voice_target = bot._turn_controller.deps.resolver.build_message_target(
-        room_id=room.room_id,
-        thread_id=event.event_id,
-        reply_to_event_id=event.event_id,
-        event_source=event.source,
-    )
-    await bot._turn_store.record_visible_echo(event.event_id, "$voice_echo")
-    await bot._turn_store.record_finalized_visible_echo(
-        event.event_id,
-        "$voice_echo",
-        is_fallback=False,
-    )
-    handle = bot._visible_voice_echo.start(
-        VisibleVoiceEchoRequest(
-            source_event_id=event.event_id,
-            target=voice_target,
-            requester_user_id=event.sender,
-            raw_source=event.source,
-        ),
-    )
-    fallback_event = PreparedIngress(
-        sender=event.sender,
-        event_id=event.event_id,
-        body=f"{VOICE_PREFIX}[Attached voice message]",
-        source={
-            "content": {
-                "body": f"{VOICE_PREFIX}[Attached voice message]",
-                ORIGINAL_SENDER_KEY: event.sender,
-                SOURCE_KIND_KEY: VOICE_SOURCE_KIND,
-                VOICE_RAW_AUDIO_FALLBACK_KEY: True,
-            },
-        },
-        server_timestamp=event.server_timestamp,
-        source_kind_override=VOICE_SOURCE_KIND,
-    )
-
-    bot._visible_voice_echo.finish_after_cancellation(handle, fallback_event)
-
-    assert await wait_for_background_tasks(timeout=5, owner=bot._runtime_view) is True
-    bot._delivery_gateway.edit_text.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_transcript_wins_when_fallback_edit_is_in_flight(tmp_path) -> None:  # noqa: ANN001
-    """A transcript arriving during fallback delivery should become final visible text."""
-    bot, room, event = _make_visible_router_echo_scenario(tmp_path)
-    voice_target = bot._turn_controller.deps.resolver.build_message_target(
-        room_id=room.room_id,
-        thread_id=event.event_id,
-        reply_to_event_id=event.event_id,
-        event_source=event.source,
-    )
-    handle = bot._visible_voice_echo.start(
-        VisibleVoiceEchoRequest(
-            source_event_id=event.event_id,
-            target=voice_target,
-            requester_user_id=event.sender,
-            raw_source=event.source,
-        ),
-    )
-    assert handle is not None
-    assert handle.placeholder_task is not None
-    assert await handle.placeholder_task == "$voice_echo"
-
-    edit_started = asyncio.Event()
-    release_fallback_edit = asyncio.Event()
-    edited_texts: list[str] = []
-
-    async def edit_text(request: EditTextRequest) -> bool:
-        new_text = request.new_text
-        edited_texts.append(new_text)
-        if len(edited_texts) == 1:
-            edit_started.set()
-            await release_fallback_edit.wait()
-        return True
-
-    bot._delivery_gateway.edit_text.side_effect = edit_text
-    fallback_event = PreparedIngress(
-        sender=event.sender,
-        event_id=event.event_id,
-        body=f"{VOICE_PREFIX}[Attached voice message]",
-        source={
-            "content": {
-                "body": f"{VOICE_PREFIX}[Attached voice message]",
-                VOICE_RAW_AUDIO_FALLBACK_KEY: True,
-            },
-        },
-    )
-    transcript_event = PreparedIngress(
-        sender=event.sender,
-        event_id=event.event_id,
-        body=f"{VOICE_PREFIX}summarize this audio",
-        source={
-            "content": {
-                "body": f"{VOICE_PREFIX}summarize this audio",
-                VOICE_TRANSCRIPT_KEY: True,
-            },
-        },
-    )
-
-    fallback_task = asyncio.create_task(bot._visible_voice_echo.finish(handle, fallback_event))
-    await asyncio.wait_for(edit_started.wait(), timeout=1)
-    transcript_task = asyncio.create_task(bot._visible_voice_echo.finish(handle, transcript_event))
-    release_fallback_edit.set()
-    await asyncio.gather(fallback_task, transcript_task)
-
-    assert edited_texts == [
-        f"{VOICE_PREFIX}[Attached voice message]",
-        f"{VOICE_PREFIX}summarize this audio",
-    ]
-    finalized = bot._turn_store.finalized_visible_echo(event.event_id)
-    assert finalized is not None
-    assert finalized.is_fallback is False
-
-
-@pytest.mark.asyncio
-async def test_voice_preparation_failure_replaces_placeholder_with_fallback(tmp_path) -> None:  # noqa: ANN001
-    """A preparation failure after placeholder delivery should leave terminal fallback text."""
-    bot, room, event = _make_visible_router_echo_scenario(tmp_path)
-
-    with (
-        patch.object(
-            bot._turn_controller.deps.normalizer,
-            "prepare_voice_event",
-            side_effect=RuntimeError("transcription failed"),
-        ),
-        patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
-    ):
-        await bot._turn_controller.handle_media_event(room, event)
-        await drain_coalescing(bot)
-
-    bot._delivery_gateway.send_text.assert_awaited_once()
-    bot._delivery_gateway.edit_text.assert_awaited_once()
-    edit_request = bot._delivery_gateway.edit_text.await_args.args[0]
-    assert edit_request.event_id == "$voice_echo"
-    assert edit_request.new_text == f"{VOICE_PREFIX}[Attached voice message]"
-    assert edit_request.extra_content is not None
-    assert edit_request.extra_content[VOICE_RAW_AUDIO_FALLBACK_KEY] is True
-
-
-@pytest.mark.asyncio
-async def test_voice_readiness_cancellation_schedules_terminal_placeholder_fallback(tmp_path) -> None:  # noqa: ANN001
-    """Cancelling readiness should schedule terminal fallback replacement before escaping."""
-    bot, room, event = _make_visible_router_echo_scenario(tmp_path)
-    normalization_started = asyncio.Event()
-    placeholder_sent = asyncio.Event()
-
-    async def wait_for_cancellation(*_args: object, **_kwargs: object) -> None:
-        normalization_started.set()
-        await asyncio.Event().wait()
-
-    async def send_placeholder(_request: object) -> str:
-        placeholder_sent.set()
-        return "$voice_echo"
-
-    bot._delivery_gateway.send_text.side_effect = send_placeholder
-    with (
-        patch.object(
-            bot._turn_controller.deps.normalizer,
-            "prepare_voice_event",
-            side_effect=wait_for_cancellation,
-        ),
-        patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
-    ):
-        await bot._turn_controller.handle_media_event(room, event)
-        await asyncio.wait_for(normalization_started.wait(), timeout=1)
-        await asyncio.wait_for(placeholder_sent.wait(), timeout=1)
-        drain_result = await bot._coalescing_gate.drain_all(ready_timeout_seconds=0.0)
-
-    assert drain_result.cancelled_unready_count == 1
-    assert await wait_for_background_tasks(timeout=5, owner=bot._runtime_view) is True
-    bot._delivery_gateway.edit_text.assert_awaited_once()
-    edit_request = bot._delivery_gateway.edit_text.await_args.args[0]
-    assert edit_request.event_id == "$voice_echo"
-    assert edit_request.new_text == f"{VOICE_PREFIX}[Attached voice message]"
-    assert edit_request.extra_content is not None
-    assert edit_request.extra_content[VOICE_RAW_AUDIO_FALLBACK_KEY] is True
-
-
-@pytest.mark.asyncio
-async def test_voice_placeholder_is_owned_by_runtime_shutdown(tmp_path) -> None:  # noqa: ANN001
-    """Runtime shutdown should find and cancel a blocked voice-placeholder send."""
-    bot, room, event = _make_visible_router_echo_scenario(tmp_path)
-    placeholder_send_started = asyncio.Event()
-    placeholder_send_stopped = asyncio.Event()
-    release_placeholder_send = asyncio.Event()
-    release_transcription = asyncio.Event()
-
-    async def transcribe_voice(*_args: object, **_kwargs: object) -> str:
-        await release_transcription.wait()
-        return f"{VOICE_PREFIX}@home turn on the lights"
-
-    async def send_placeholder(_request: object) -> str:
-        placeholder_send_started.set()
-        try:
-            await release_placeholder_send.wait()
-        finally:
-            placeholder_send_stopped.set()
-        return "$voice_echo"
-
-    with (
-        patch("mindroom.voice.handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
-        patch("mindroom.voice.handler._handle_voice_message", side_effect=transcribe_voice),
-        patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
-    ):
-        mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
-        bot._delivery_gateway.send_text.side_effect = send_placeholder
-        await bot._turn_controller.handle_media_event(room, event)
-        await asyncio.wait_for(placeholder_send_started.wait(), timeout=1)
-        try:
-            completed = await wait_for_background_tasks(timeout=0.0, owner=bot._runtime_view)
-            assert completed is False
-            await asyncio.wait_for(placeholder_send_stopped.wait(), timeout=1)
-        finally:
-            release_placeholder_send.set()
-            release_transcription.set()
-            await drain_coalescing(bot)
-
-
-@pytest.mark.asyncio
-async def test_voice_placeholder_finish_is_owned_by_runtime_shutdown(tmp_path) -> None:  # noqa: ANN001
-    """Runtime shutdown should find and cancel a blocked placeholder replacement."""
-    bot, room, event = _make_visible_router_echo_scenario(tmp_path)
-    edit_started = asyncio.Event()
-    edit_stopped = asyncio.Event()
-    release_edit = asyncio.Event()
-
-    async def edit_placeholder(_request: object) -> bool:
-        edit_started.set()
-        try:
-            await release_edit.wait()
-        finally:
-            edit_stopped.set()
-        return True
-
-    with (
-        patch("mindroom.voice.handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
-        patch("mindroom.voice.handler._handle_voice_message", new_callable=AsyncMock) as mock_voice,
-        patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
-    ):
-        mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
-        mock_voice.return_value = f"{VOICE_PREFIX}@home turn on the lights"
-        bot._delivery_gateway.edit_text.side_effect = edit_placeholder
-        await bot._turn_controller.handle_media_event(room, event)
-        await asyncio.wait_for(edit_started.wait(), timeout=1)
-        try:
-            completed = await wait_for_background_tasks(timeout=0.0, owner=bot._runtime_view)
-            assert completed is False
-            await asyncio.wait_for(edit_stopped.wait(), timeout=1)
-        finally:
-            release_edit.set()
-            await drain_coalescing(bot)
-
-
-@pytest.mark.asyncio
-async def test_router_visible_voice_echo_is_deduplicated_on_redelivery(tmp_path) -> None:  # noqa: ANN001
-    """Visible router echoes should be sent once even if the same audio event is redelivered."""
-    bot, room, event = _make_visible_router_echo_scenario(tmp_path)
-
-    with (
-        patch("mindroom.voice.handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
-        patch("mindroom.voice.handler._handle_voice_message", new_callable=AsyncMock) as mock_voice,
-        patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
-    ):
-        mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
-        mock_voice.return_value = f"{VOICE_PREFIX}@home turn on the lights"
-        await bot._on_media_message(room, event)
-        await bot._on_media_message(room, event)
-        await drain_coalescing(bot)
-
-    bot._delivery_gateway.send_text.assert_called_once()
-    bot._delivery_gateway.edit_text.assert_awaited_once()
-    assert mock_download_audio.await_count == 1
-    assert mock_voice.await_count == 1
-    assert bot._turn_store.is_handled(event.event_id)
-    turn_record = bot._turn_store.get_turn_record(event.event_id)
-    assert turn_record is not None
-    assert turn_record.response_event_id == "$voice_echo"
-
-
-@pytest.mark.asyncio
-@pytest.mark.usefixtures("enforce_turn_authorization")
-async def test_router_visible_voice_echo_respects_reply_permissions(tmp_path) -> None:  # noqa: ANN001
-    """Router should not post visible echoes when it cannot reply to the sender."""
-    bot, room, event = _make_visible_router_echo_scenario(
-        tmp_path,
-        router_access=ResponderAccessConfig(current_room_members=False, users=["@bob:example.com"]),
-    )
-
-    with (
-        patch("mindroom.voice.handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
-        patch("mindroom.voice.handler._handle_voice_message", new_callable=AsyncMock) as mock_voice,
-    ):
-        await bot._on_media_message(room, event)
-
-    bot._delivery_gateway.send_text.assert_not_called()
-    mock_download_audio.assert_not_awaited()
-    mock_voice.assert_not_awaited()
-    assert bot._turn_store.is_handled(event.event_id)
-    turn_record = bot._turn_store.get_turn_record(event.event_id)
-    assert turn_record is not None
-    assert turn_record.response_event_id is None
-
-
-@pytest.mark.asyncio
-async def test_router_visible_voice_echo_keeps_multi_agent_handoff(tmp_path) -> None:  # noqa: ANN001
-    """Visible router echoes should not replace the normal multi-agent handoff."""
-    bot, room, event = _make_visible_router_echo_scenario(
-        tmp_path,
-        agents={
-            "home": {"display_name": "HomeAssistant", "rooms": ["!test:example.com"]},
-            "research": {"display_name": "ResearchAgent", "rooms": ["!test:example.com"]},
-        },
-        send_response_side_effect=["$voice_echo", "$route"],
-    )
-
-    with (
-        patch("mindroom.voice.handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
-        patch("mindroom.voice.handler._handle_voice_message", new_callable=AsyncMock) as mock_voice,
-        patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
-        patch("mindroom.router_relay.suggest_responder_for_message", new_callable=AsyncMock, return_value="home"),
-    ):
-        mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
-        mock_voice.return_value = f"{VOICE_PREFIX}summarize this audio"
-        await bot._on_media_message(room, event)
-        await drain_coalescing(bot)
-
-    assert bot._delivery_gateway.send_text.await_count == 2
-    echo_request = bot._delivery_gateway.send_text.call_args_list[0].args[0]
-    handoff_request = bot._delivery_gateway.send_text.call_args_list[1].args[0]
-    assert echo_request.target.reply_to_event_id == "$voice_event"
-    assert echo_request.response_text == "Router agent is transcribing…"
-    assert echo_request.skip_mentions is True
-    bot._delivery_gateway.edit_text.assert_awaited_once()
-    edit_request = bot._delivery_gateway.edit_text.await_args.args[0]
-    assert edit_request.event_id == "$voice_echo"
-    assert edit_request.new_text == f"{VOICE_PREFIX}summarize this audio"
-    assert edit_request.extra_content is not None
-    assert edit_request.extra_content[ORIGINAL_SENDER_KEY] == "@alice:example.com"
-    assert edit_request.extra_content[SOURCE_KIND_KEY] == TRUSTED_INTERNAL_RELAY_SOURCE_KIND
-    assert edit_request.extra_content[ATTACHMENT_IDS_KEY] == [_attachment_id_for_event("$voice_event")]
-    assert VOICE_RAW_AUDIO_FALLBACK_KEY not in edit_request.extra_content
-    assert handoff_request.target.reply_to_event_id == "$voice_event"
-    assert handoff_request.response_text == "@home could you help with this?"
-    assert handoff_request.extra_content == {
-        ORIGINAL_SENDER_KEY: "@alice:example.com",
-        SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
-        ATTACHMENT_IDS_KEY: [_attachment_id_for_event("$voice_event")],
-        VOICE_TRANSCRIPT_KEY: True,
-    }
-    finalized_echo = bot._turn_store.finalized_visible_echo(event.event_id)
-    assert finalized_echo is not None
-    assert finalized_echo.event_id == "$voice_echo"
-    assert finalized_echo.is_fallback is False
-
-
-@pytest.mark.asyncio
-async def test_router_visible_voice_echo_marks_raw_audio_fallback(tmp_path) -> None:  # noqa: ANN001
-    """Visible router voice echoes should preserve the raw-audio fallback marker."""
-    bot, room, event = _make_visible_router_echo_scenario(tmp_path)
-
-    with (
-        patch("mindroom.voice.handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
-        patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
-    ):
-        mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
-        await bot._on_media_message(room, event)
-        await drain_coalescing(bot)
-
-    bot._delivery_gateway.send_text.assert_called_once()
-    placeholder_request = bot._delivery_gateway.send_text.call_args.args[0]
-    assert placeholder_request.response_text == "Router agent is transcribing…"
-
-    bot._delivery_gateway.edit_text.assert_awaited_once()
-    edit_request = bot._delivery_gateway.edit_text.await_args.args[0]
-    assert edit_request.new_text == f"{VOICE_PREFIX}[Attached voice message]"
-    assert edit_request.extra_content is not None
-    assert edit_request.extra_content[ORIGINAL_SENDER_KEY] == "@alice:example.com"
-    assert edit_request.extra_content[SOURCE_KIND_KEY] == TRUSTED_INTERNAL_RELAY_SOURCE_KIND
-    assert edit_request.extra_content[ATTACHMENT_IDS_KEY] == [_attachment_id_for_event("$voice_event")]
-    assert edit_request.extra_content[VOICE_RAW_AUDIO_FALLBACK_KEY] is True
-
-
-@pytest.mark.asyncio
-async def test_router_visible_voice_echo_is_not_duplicated_when_handoff_retries(tmp_path) -> None:  # noqa: ANN001
-    """A failed handoff retry should reuse the prior visible echo instead of reposting it."""
-    bot, room, event = _make_visible_router_echo_scenario(
-        tmp_path,
-        agents={
-            "home": {"display_name": "HomeAssistant", "rooms": ["!test:example.com"]},
-            "research": {"display_name": "ResearchAgent", "rooms": ["!test:example.com"]},
-        },
-        send_response_side_effect=["$voice_echo", None, "$route"],
-    )
-
-    with (
-        patch("mindroom.voice.handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
-        patch("mindroom.voice.handler._handle_voice_message", new_callable=AsyncMock) as mock_voice,
-        patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
-        patch("mindroom.router_relay.suggest_responder_for_message", new_callable=AsyncMock, return_value="home"),
-        patch(
-            "mindroom.visible_response_reconciliation.find_response_event_ids_via_room_messages",
-            new_callable=AsyncMock,
-            return_value=frozenset(),
-        ),
-    ):
-        mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
-        mock_voice.return_value = f"{VOICE_PREFIX}summarize this audio"
-        await bot._on_media_message(room, event)
-        await drain_coalescing(bot)
-
-        assert not bot._turn_store.is_handled(event.event_id)
-        assert bot._turn_store.visible_echo_for_source(event.event_id) == "$voice_echo"
-
-        await bot._on_media_message(room, event)
-        await drain_coalescing(bot)
-
-    response_texts = [call.args[0].response_text for call in bot._delivery_gateway.send_text.call_args_list]
-    assert response_texts == [
-        "Router agent is transcribing…",
-        "@home could you help with this?",
-        "@home could you help with this?",
-    ]
-    bot._delivery_gateway.edit_text.assert_awaited_once()
-    assert bot._turn_store.is_handled(event.event_id)
-    assert bot._turn_store.visible_echo_for_source(event.event_id) == "$voice_echo"
-
-
-@pytest.mark.asyncio
-@pytest.mark.ledger_loads_from_disk
-async def test_router_visible_voice_echo_is_not_duplicated_when_handoff_retries_after_restart(
-    tmp_path: Path,
-) -> None:
-    """A fresh bot should reuse the persisted visible echo after a failed handoff retry."""
-    agents = {
-        "home": {"display_name": "HomeAssistant", "rooms": ["!test:example.com"]},
-        "research": {"display_name": "ResearchAgent", "rooms": ["!test:example.com"]},
-    }
-    bot, room, event = _make_visible_router_echo_scenario(
-        tmp_path,
-        agents=agents,
-        send_response_side_effect=["$voice_echo", None],
-    )
-    await bot._turn_store.warm()
-
-    with (
-        patch("mindroom.voice.handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
-        patch("mindroom.voice.handler._handle_voice_message", new_callable=AsyncMock) as mock_voice,
-        patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
-        patch("mindroom.router_relay.suggest_responder_for_message", new_callable=AsyncMock, return_value="home"),
-    ):
-        mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
-        mock_voice.return_value = f"{VOICE_PREFIX}summarize this audio"
-        await bot._on_media_message(room, event)
-        await drain_coalescing(bot)
-
-    assert not bot._turn_store.is_handled(event.event_id)
-    assert bot._turn_store.visible_echo_for_source(event.event_id) == "$voice_echo"
-
-    restarted_bot, restarted_room, restarted_event = _make_visible_router_echo_scenario(
-        tmp_path,
-        agents=agents,
-        send_response_return="$route",
-    )
-    # The replacement opens its own database handle, so the echo it must reuse
-    # only reaches it by reading the rows the first run wrote.
-    await restarted_bot._turn_store.warm()
-
-    with (
-        patch("mindroom.voice.handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
-        patch("mindroom.voice.handler._handle_voice_message", new_callable=AsyncMock) as mock_voice,
-        patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
-        patch("mindroom.router_relay.suggest_responder_for_message", new_callable=AsyncMock, return_value="home"),
-        patch(
-            "mindroom.visible_response_reconciliation.find_response_event_ids_via_room_messages",
-            new_callable=AsyncMock,
-            return_value=frozenset(),
-        ),
-    ):
-        mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
-        mock_voice.return_value = f"{VOICE_PREFIX}summarize this audio"
-        await restarted_bot._on_media_message(restarted_room, restarted_event)
-        await drain_coalescing(restarted_bot)
-
-    response_texts = [call.args[0].response_text for call in restarted_bot._delivery_gateway.send_text.call_args_list]
-    assert response_texts == ["@home could you help with this?"]
-    assert restarted_bot._turn_store.is_handled(event.event_id)
-    assert restarted_bot._turn_store.visible_echo_for_source(event.event_id) == "$voice_echo"
 
 
 @pytest.mark.asyncio
@@ -1776,15 +926,14 @@ async def test_router_routes_transcribed_audio_when_multiple_agents_are_present(
 
     bot = _agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         rooms=["!test:example.com"],
     )
     turn_store = unwrap_extracted_collaborator(bot._turn_store)
-    turn_store.is_handled = MagicMock(return_value=False)
-    turn_store.record_turn = AsyncMock(wraps=turn_store.record_turn)
+    turn_store.is_handled = AsyncMock(return_value=False)
+    turn_store.record_responded_turn = AsyncMock(wraps=turn_store.record_responded_turn)
     bot.logger = MagicMock()
-    replace_turn_controller_deps(bot, logger=bot.logger)
+    replace_turn_deps(bot, logger=bot.logger)
     bot.client = AsyncMock()
     send_response = AsyncMock(return_value="$response")
     install_send_response_mock(bot, send_response)
@@ -1802,30 +951,40 @@ async def test_router_routes_transcribed_audio_when_multiple_agents_are_present(
         patch("mindroom.voice.handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
         patch("mindroom.voice.handler._handle_voice_message", new_callable=AsyncMock) as mock_voice,
         patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
-        patch("mindroom.router_relay.suggest_responder_for_message", new_callable=AsyncMock, return_value="home"),
+        patch(
+            "mindroom.router.relay.suggest_responder_for_message",
+            new_callable=AsyncMock,
+            return_value=ResponderSelection("home"),
+        ),
     ):
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
         mock_voice.return_value = f"{VOICE_PREFIX}summarize this audio"
         await bot._on_media_message(room, event)
         await drain_coalescing(bot)
 
-    bot._delivery_gateway.send_text.assert_called_once()
-    request = bot._delivery_gateway.send_text.call_args.args[0]
-    assert request.target.reply_to_event_id == "$voice_event"
-    assert request.target.resolved_thread_id == "$voice_event"
-    assert request.target.resolved_thread_id == "$voice_event"
-    assert request.response_text == "@home could you help with this?"
-    assert request.extra_content == {
+    bot._delivery_gateway.send_text.assert_not_called()
+    route = dict(bot._delivery_gateway.send_route.await_args.args[1])
+    assert route.pop(ROUTE_EVENT_TYPE) == {
+        "entity": "@mindroom_home:localhost",
+        "event_ids": ["$voice_event"],
+        "thread_id": "$voice_event",
+    }
+    assert route == {
+        # The steward's prompt: what it transcribed, in place of the audio file's name.
+        "body": f"{VOICE_PREFIX}summarize this audio",
+        ROUTE_PROMPT_STRUCTURED_KEY: False,
         ORIGINAL_SENDER_KEY: "@alice:example.com",
         SOURCE_KIND_KEY: TRUSTED_INTERNAL_RELAY_SOURCE_KIND,
         ATTACHMENT_IDS_KEY: [_attachment_id_for_event("$voice_event")],
         VOICE_TRANSCRIPT_KEY: True,
+        # The responder posts the transcript before its answer, so the route carries it.
+        ROUTE_VOICE_TRANSCRIPTS_KEY: {"$voice_event": f"{VOICE_PREFIX}summarize this audio"},
     }
-    turn_store.record_turn.assert_called_once()
-    record = turn_store.get_turn_record("$voice_event")
+    turn_store.record_responded_turn.assert_called_once()
+    record = await turn_store.get_turn_record("$voice_event")
     assert record is not None
     assert record.completed is True
-    assert record.response_event_id == "$response"
+    assert record.response_event_id == "$route"
     assert record.response_owner == ROUTER_AGENT_NAME
     assert record.requester_id == "@alice:example.com"
     assert record.history_scope is None
@@ -1837,102 +996,48 @@ async def test_router_routes_transcribed_audio_when_multiple_agents_are_present(
 
 
 @pytest.mark.asyncio
-async def test_transcribed_mentions_target_the_mentioned_agent_when_router_absent(tmp_path) -> None:  # noqa: ANN001
-    """A transcript mention should make the mentioned agent respond directly."""
-    config = _attach_runtime_paths(
-        with_current_room_member_access(
-            Config(
-                agents={
-                    "home": {"display_name": "HomeAssistant", "rooms": ["!test:example.com"]},
-                    "research": {"display_name": "ResearchAgent", "rooms": ["!test:example.com"]},
-                },
-                authorization={},
-                voice={"enabled": True},
-            ),
-        ),
-        tmp_path,
-    )
-
-    room = _make_room("@mindroom_home:localhost", "@mindroom_research:localhost", "@alice:example.com")
-    event = _make_voice_event(sender="@alice:example.com")
-
-    bots: list[AgentBot] = []
-    generate_response_mocks: list[AsyncMock] = []
-    for agent_name in ("home", "research"):
-        agent_user = MagicMock()
-        agent_user.user_id = f"@mindroom_{agent_name}:localhost"
-        agent_user.agent_name = agent_name
-        agent_user.matrix_id = MatrixID.parse(f"@mindroom_{agent_name}:localhost")
-        bot = _agent_bot(
-            agent_user=agent_user,
-            storage_path=tmp_path,
-            config=config,
-            rooms=["!test:example.com"],
-        )
-        turn_store = unwrap_extracted_collaborator(bot._turn_store)
-        turn_store.is_handled = MagicMock(return_value=False)
-        bot.logger = MagicMock()
-        replace_turn_controller_deps(bot, logger=bot.logger)
-        bot.client = AsyncMock()
-        bot.client.rooms = {}
-        bot.client.user_id = f"@mindroom_{agent_name}:localhost"
-        generate_response = AsyncMock(return_value=f"${agent_name}_response")
-        install_generate_response_mock(bot, generate_response)
-        _install_voice_thread_dispatch_mocks(bot)
-        bots.append(bot)
-        generate_response_mocks.append(generate_response)
-
-    with (
-        patch("mindroom.voice.handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
-        patch("mindroom.voice.handler._handle_voice_message", new_callable=AsyncMock) as mock_voice,
-        patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
-        patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
-    ):
-        mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
-        mock_voice.return_value = f"{VOICE_PREFIX}@research summarize this audio"
-        for bot in bots:
-            await bot._on_media_message(room, event)
-        await drain_coalescing(*bots)
-
-    assert mock_download_audio.await_count == 1
-    assert mock_voice.await_count == 1
-    assert generate_response_mocks[0].await_count == 0
-    assert generate_response_mocks[1].await_count == 1
-    call_kwargs = generate_response_mocks[1].call_args.kwargs
-    assert call_kwargs["response_envelope"].target.reply_to_event_id == "$voice_event"
-    assert call_kwargs["prompt"].startswith(f"{VOICE_PREFIX}@research summarize this audio")
-    assert call_kwargs["attachment_ids"] == [_attachment_id_for_event("$voice_event")]
-
-
-@pytest.mark.asyncio
-async def test_caption_mentions_still_target_agent_when_stt_drops_the_mention(tmp_path) -> None:  # noqa: ANN001
-    """Inherited audio-caption mentions should still target the agent when STT omits them."""
-    config = _attach_runtime_paths(
-        with_current_room_member_access(
-            Config(
-                agents={
-                    "home": {"display_name": "HomeAssistant", "rooms": ["!test:example.com"]},
-                    "research": {"display_name": "ResearchAgent", "rooms": ["!test:example.com"]},
-                },
-                authorization={},
-                voice={"enabled": True},
-            ),
-        ),
-        tmp_path,
-    )
-
-    room = _make_room("@mindroom_home:localhost", "@mindroom_research:localhost", "@alice:example.com")
-    event = _make_voice_event(
-        sender="@alice:example.com",
-        body="For @research voice note",
-        source={
-            "content": {
+@pytest.mark.parametrize(
+    ("event_kwargs", "transcript"),
+    [
+        pytest.param({}, "@research summarize this audio", id="transcript-mention"),
+        pytest.param(
+            {
                 "body": "For @research voice note",
-                "filename": "voice.ogg",
-                "m.mentions": {"user_ids": ["@mindroom_research:localhost"]},
+                "source": {
+                    "content": {
+                        "body": "For @research voice note",
+                        "filename": "voice.ogg",
+                        "m.mentions": {"user_ids": ["@mindroom_research:localhost"]},
+                    },
+                },
             },
-        },
+            "summarize this audio",
+            id="caption-mention",
+        ),
+    ],
+)
+async def test_voice_mentions_target_the_mentioned_agent_when_router_absent(
+    tmp_path: Path,
+    event_kwargs: dict,
+    transcript: str,
+) -> None:
+    """A mention in the transcript or caption directly targets the named agent."""
+    config = _attach_runtime_paths(
+        with_current_room_member_access(
+            Config(
+                agents={
+                    "home": {"display_name": "HomeAssistant", "rooms": ["!test:example.com"]},
+                    "research": {"display_name": "ResearchAgent", "rooms": ["!test:example.com"]},
+                },
+                authorization={},
+                voice={"enabled": True, "visible_router_echo": False},
+            ),
+        ),
+        tmp_path,
     )
+
+    room = _make_room("@mindroom_home:localhost", "@mindroom_research:localhost", "@alice:example.com")
+    event = _make_voice_event(sender="@alice:example.com", **event_kwargs)
 
     bots: list[AgentBot] = []
     generate_response_mocks: list[AsyncMock] = []
@@ -1943,14 +1048,13 @@ async def test_caption_mentions_still_target_agent_when_stt_drops_the_mention(tm
         agent_user.matrix_id = MatrixID.parse(f"@mindroom_{agent_name}:localhost")
         bot = _agent_bot(
             agent_user=agent_user,
-            storage_path=tmp_path,
             config=config,
             rooms=["!test:example.com"],
         )
         turn_store = unwrap_extracted_collaborator(bot._turn_store)
-        turn_store.is_handled = MagicMock(return_value=False)
+        turn_store.is_handled = AsyncMock(return_value=False)
         bot.logger = MagicMock()
-        replace_turn_controller_deps(bot, logger=bot.logger)
+        replace_turn_deps(bot, logger=bot.logger)
         bot.client = AsyncMock()
         bot.client.rooms = {}
         bot.client.user_id = f"@mindroom_{agent_name}:localhost"
@@ -1964,10 +1068,9 @@ async def test_caption_mentions_still_target_agent_when_stt_drops_the_mention(tm
         patch("mindroom.voice.handler._download_audio", new_callable=AsyncMock) as mock_download_audio,
         patch("mindroom.voice.handler._handle_voice_message", new_callable=AsyncMock) as mock_voice,
         patch("mindroom.turn_policy.TurnPolicy.can_reply_to_sender_in_room", return_value=True),
-        patch("mindroom.text_ingress_dispatch.is_dm_room", new_callable=AsyncMock, return_value=False),
     ):
         mock_download_audio.return_value = Audio(content=b"voice-bytes", mime_type="audio/ogg")
-        mock_voice.return_value = f"{VOICE_PREFIX}summarize this audio"
+        mock_voice.return_value = f"{VOICE_PREFIX}{transcript}"
         for bot in bots:
             await bot._on_media_message(room, event)
         await drain_coalescing(*bots)
@@ -1978,5 +1081,5 @@ async def test_caption_mentions_still_target_agent_when_stt_drops_the_mention(tm
     assert generate_response_mocks[1].await_count == 1
     call_kwargs = generate_response_mocks[1].call_args.kwargs
     assert call_kwargs["response_envelope"].target.reply_to_event_id == "$voice_event"
-    assert call_kwargs["prompt"].startswith(f"{VOICE_PREFIX}summarize this audio")
+    assert call_kwargs["prompt"].startswith(f"{VOICE_PREFIX}{transcript}")
     assert call_kwargs["attachment_ids"] == [_attachment_id_for_event("$voice_event")]

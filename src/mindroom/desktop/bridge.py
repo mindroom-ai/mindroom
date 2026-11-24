@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import math
 import sys
 import threading
 import time
@@ -13,10 +14,12 @@ from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, cast
 
 from mindroom.desktop.accessibility import (
+    PRIMARY_SCREEN_APP_ID,
     AccessibilityActionOutcomeUnknownError,
     AccessibilityError,
+    app_targetable,
 )
-from mindroom.desktop.command_journal import DesktopCommandJournal
+from mindroom.desktop.command_journal import DesktopCommandJournal, controller_journal_key
 from mindroom.desktop.command_parameters import (
     reject_unexpected_parameters,
     required_object_parameter,
@@ -49,7 +52,11 @@ from mindroom.desktop.protocol import (
     desktop_observation_mode,
     event_content,
 )
-from mindroom.desktop.provider import DesktopEmergencyStopError, DesktopProvider, DesktopProviderError
+from mindroom.desktop.provider import (
+    DesktopProvider,
+    DesktopProviderError,
+    missing_macos_desktop_permissions,
+)
 from mindroom.desktop.reply_fitting import leftmost_fitting, response_metrics, success_response
 from mindroom.desktop.shell import DesktopShell, DesktopShellError
 from mindroom.desktop.shell_actions import caller_shell_status, execute_shell, shell_status
@@ -86,7 +93,7 @@ async def _run_macos_application_events() -> None:
         msg = "The macOS desktop bridge must run on the main thread."
         raise RuntimeError(msg)
 
-    from CoreFoundation import (  # noqa: PLC0415  # ty: ignore[unresolved-import]
+    from CoreFoundation import (  # noqa: PLC0415  # ty: ignore[import-not-found]
         CFRunLoopRunInMode,
         kCFRunLoopDefaultMode,
     )
@@ -106,6 +113,34 @@ class _DesktopBridgeStoppedError(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
+class DesktopControllerPolicy:
+    """Pinned controller identity and its allowed human/agent callers."""
+
+    controller: PinnedMatrixDevice
+    allowed_requester_ids: frozenset[str]
+    allowed_agent_names: frozenset[str]
+
+    def __post_init__(self) -> None:
+        """Require explicit non-empty requester and agent allowlists."""
+        if not self.allowed_requester_ids:
+            msg = "Desktop bridge requires at least one allowed requester Matrix ID."
+            raise ValueError(msg)
+        if not self.allowed_agent_names:
+            msg = "Desktop bridge requires at least one allowed agent name."
+            raise ValueError(msg)
+        if any(not value.strip() for value in self.allowed_requester_ids):
+            msg = "Desktop bridge requester IDs must not be empty."
+            raise ValueError(msg)
+        if any(not value.strip() for value in self.allowed_agent_names):
+            msg = "Desktop bridge agent names must not be empty."
+            raise ValueError(msg)
+
+    def caller_allowed(self, command: DesktopCommand) -> bool:
+        """Return whether this controller's allowlist admits the human and agent provenance."""
+        return command.requester_id in self.allowed_requester_ids and command.agent_name in self.allowed_agent_names
+
+
+@dataclass(frozen=True, slots=True)
 class DesktopBridgePolicy:
     """Local authority for one running desktop bridge process."""
 
@@ -118,37 +153,50 @@ class DesktopBridgePolicy:
     browser_enabled: bool = False
     allowed_file_roots: tuple[Path, ...] = ()
     shell_enabled: bool = False
+    controllers: tuple[DesktopControllerPolicy, ...] = ()
 
     def __post_init__(self) -> None:
-        """Require explicit caller and agent allowlists plus at least one local capability."""
-        if not self.allowed_requester_ids:
-            msg = "Desktop bridge requires at least one allowed requester Matrix ID."
-            raise ValueError(msg)
-        if not self.allowed_agent_names:
-            msg = "Desktop bridge requires at least one allowed agent name."
-            raise ValueError(msg)
-        if not (self.allowed_app_ids or self.allowed_file_roots or self.shell_enabled or self.browser_enabled):
-            msg = "Desktop bridge requires at least one local capability."
-            raise ValueError(msg)
-        if any(not value.strip() for value in self.allowed_requester_ids):
-            msg = "Desktop bridge requester IDs must not be empty."
-            raise ValueError(msg)
-        if any(not value.strip() for value in self.allowed_agent_names):
-            msg = "Desktop bridge agent names must not be empty."
-            raise ValueError(msg)
+        """Require explicit caller and agent allowlists, unique controllers, and a lease expiry only with control."""
+        primary = DesktopControllerPolicy(self.controller, self.allowed_requester_ids, self.allowed_agent_names)
         if any(not value.strip() for value in self.allowed_app_ids):
             msg = "Desktop bridge application IDs must not be empty."
-            raise ValueError(msg)
-        if self.allow_control and self.control_lease_expires_at_ms is None:
-            msg = "Control-enabled desktop bridge requires a lease expiry."
             raise ValueError(msg)
         if not self.allow_control and self.control_lease_expires_at_ms is not None:
             msg = "Observe-only desktop bridge cannot carry a control lease expiry."
             raise ValueError(msg)
+        if self.controllers and self.controllers[0] != primary:
+            msg = "Desktop bridge primary controller fields must match controllers[0]."
+            raise ValueError(msg)
+        seen_devices: set[tuple[str, str]] = set()
+        for entry in self.effective_controllers:
+            device_key = (entry.controller.user_id, entry.controller.device_id)
+            if device_key in seen_devices:
+                msg = "Desktop bridge controllers must not contain duplicate devices."
+                raise ValueError(msg)
+            seen_devices.add(device_key)
 
-    def caller_allowed(self, command: DesktopCommand) -> bool:
-        """Return whether local static policy admits the human and agent provenance."""
-        return command.requester_id in self.allowed_requester_ids and command.agent_name in self.allowed_agent_names
+    @property
+    def effective_controllers(self) -> tuple[DesktopControllerPolicy, ...]:
+        """Return all configured controllers, defaulting to the top-level primary controller."""
+        return self.controllers or (
+            DesktopControllerPolicy(self.controller, self.allowed_requester_ids, self.allowed_agent_names),
+        )
+
+    def caller_allowed(self, command: DesktopCommand, controller_key: str | None = None) -> bool:
+        """Return whether local static policy admits the human and agent provenance for one controller."""
+        if controller_key is None:
+            return command.requester_id in self.allowed_requester_ids and command.agent_name in self.allowed_agent_names
+        for entry in self.effective_controllers:
+            if controller_journal_key(entry.controller) == controller_key:
+                return entry.caller_allowed(command)
+        return False
+
+
+@dataclass(frozen=True, slots=True)
+class _ControlGrant:
+    deadline: float
+    expires_at_ms: int | None
+    computer: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -176,7 +224,8 @@ class DesktopBridge:
     legacy_journal_path: Path | None = None
     _journal: DesktopCommandJournal = field(init=False)
     _observations: DesktopObservations = field(init=False)
-    _in_flight: set[str] = field(default_factory=set, init=False)
+    _controllers: dict[str, DesktopControllerPolicy] = field(default_factory=dict, init=False)
+    _in_flight: set[tuple[str, str]] = field(default_factory=set, init=False)
     _execution_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     _shell_start_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
     _delivery_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False)
@@ -187,8 +236,7 @@ class DesktopBridge:
     _stopped: asyncio.Event = field(default_factory=asyncio.Event, init=False)
     _accepting: bool = field(default=True, init=False)
     _active_action: str | None = field(default=None, init=False)
-    _control_revoked: bool = field(default=False, init=False)
-    _control_lease_deadline: float | None = field(default=None, init=False)
+    _control_grants: dict[str, _ControlGrant] = field(default_factory=dict, init=False)
 
     def __post_init__(self) -> None:
         """Pair each enabled capability with its provider and convert the lease label to a local deadline."""
@@ -204,22 +252,32 @@ class DesktopBridge:
         if self.policy.shell_enabled != (self.shell is not None):
             msg = "Desktop shell policy and local shell provider must be enabled together."
             raise ValueError(msg)
+        self._controllers = {
+            controller_journal_key(entry.controller): entry for entry in self.policy.effective_controllers
+        }
         self._observations = DesktopObservations(clock=self.monotonic_clock)
         self._journal = DesktopCommandJournal.load(
             self.journal_path,
-            controller_key=json.dumps(
-                [
-                    self.policy.controller.user_id,
-                    self.policy.controller.device_id,
-                    self.policy.controller.ed25519,
-                ],
-            ),
+            controller_key=self._primary_controller_key(),
             legacy_path=self.legacy_journal_path,
         )
-        if self.policy.control_lease_expires_at_ms is None:
-            return
-        remaining_seconds = max(0.0, self.policy.control_lease_expires_at_ms / 1000 - self.clock())
-        self._control_lease_deadline = self.monotonic_clock() + remaining_seconds
+        if self.policy.control_lease_expires_at_ms is not None:
+            remaining_seconds = max(0.0, self.policy.control_lease_expires_at_ms / 1000 - self.clock())
+            grant = _ControlGrant(
+                deadline=self.monotonic_clock() + remaining_seconds,
+                expires_at_ms=self.policy.control_lease_expires_at_ms,
+                computer=False,
+            )
+            self._control_grants = dict.fromkeys(self._controllers, grant)
+        elif self.policy.allow_control:
+            expired = _ControlGrant(deadline=-math.inf, expires_at_ms=None, computer=False)
+            self._control_grants = dict.fromkeys(self._controllers, expired)
+
+    def _match_controller(self, event: AuthenticatedToDeviceEvent) -> str | None:
+        for controller_key, entry in self._controllers.items():
+            if authenticated_sender_matches(self.client, event, entry.controller):
+                return controller_key
+        return None
 
     async def on_to_device_event(self, event: AuthenticatedToDeviceEvent) -> None:
         """Persist authenticated admission before the durable sync consumer acknowledges."""
@@ -227,7 +285,8 @@ class DesktopBridge:
             raise _DesktopBridgeStoppedError
         if event.type != DESKTOP_COMMAND_EVENT_TYPE:
             return
-        if not authenticated_sender_matches(self.client, event, self.policy.controller):
+        controller_key = self._match_controller(event)
+        if controller_key is None:
             logger.warning("desktop_command_sender_rejected", sender=event.sender)
             return
         try:
@@ -236,44 +295,45 @@ class DesktopBridge:
             logger.warning("desktop_command_malformed", reason=str(exc))
             return
         fingerprint = _command_fingerprint(command)
-        if self._replay_cached(command, fingerprint):
+        if self._replay_cached(command, fingerprint, controller_key):
             return
-        error = self._policy_error(command) or self._journal.sequence_error(command)
+        error = self._policy_error(command, controller_key) or self._journal.sequence_error(command, controller_key)
         if error is not None:
-            self._queue_response(self._error_response(command, error))
+            self._queue_response(self._error_response(command, error), controller_key)
             return
         if command.action == "request_status":
-            self._queue_response(self._request_status_response(command))
+            self._queue_response(self._request_status_response(command, controller_key), controller_key)
             return
-        self._journal.admit(command, fingerprint)
+        self._journal.admit(command, fingerprint, controller_key)
         (self._shell_work_available if command.action == "run_shell" else self._work_available).set()
 
-    def _replay_cached(self, command: DesktopCommand, fingerprint: str) -> bool:
-        cached = self._journal.get(command.request_id)
+    def _replay_cached(self, command: DesktopCommand, fingerprint: str, controller_key: str) -> bool:
+        cached = self._journal.get(command.request_id, controller_key)
         if cached is None:
             return False
         if cached.command_fingerprint != fingerprint:
             self._queue_response(
                 self._error_response(command, "Desktop request ID was reused with different command content."),
+                controller_key,
             )
         elif cached.response is not None:
-            self._queue_response(cached.response)
-        elif cached.state == "started" and command.request_id not in self._in_flight:
-            self._journal.remember_response(command, fingerprint, self._interrupted_response(command))
+            self._queue_response(cached.response, controller_key)
+        elif cached.state == "started" and (controller_key, command.request_id) not in self._in_flight:
+            self._journal.remember_response(command, fingerprint, self._interrupted_response(command), controller_key)
             self._response_available.set()
         return True
 
-    def _request_status_response(self, command: DesktopCommand) -> DesktopResponse:
+    def _request_status_response(self, command: DesktopCommand, controller_key: str) -> DesktopResponse:
         try:
-            return success_response(command, result=self._request_status(command))
+            return success_response(command, result=self._request_status(command, controller_key))
         except DesktopProtocolError as exc:
             return self._error_response(command, str(exc))
 
-    def _request_status(self, command: DesktopCommand) -> dict[str, object]:
+    def _request_status(self, command: DesktopCommand, controller_key: str) -> dict[str, object]:
         """Read a caller's retained receipt without waiting for the action executor."""
         reject_unexpected_parameters(command.parameters, allowed=frozenset({"request_id"}))
         request_id = required_str_parameter(command.parameters, "request_id")
-        entry = self._journal.get(request_id)
+        entry = self._journal.get(request_id, controller_key)
         result: dict[str, object] = {"request_id": request_id, "state": "not_found"}
         if (
             entry is None
@@ -284,7 +344,7 @@ class DesktopBridge:
         ):
             return result
         if entry.state == "started":
-            result["state"] = "running" if request_id in self._in_flight else "unknown"
+            result["state"] = "running" if (controller_key, request_id) in self._in_flight else "unknown"
         else:
             result["state"] = entry.state
         if entry.response is not None:
@@ -293,19 +353,20 @@ class DesktopBridge:
                 result["state"] = "unknown"
         return result
 
-    def _queue_response(self, response: DesktopResponse) -> None:
-        self._journal.queue_response(response)
+    def _queue_response(self, response: DesktopResponse, controller_key: str) -> None:
+        self._journal.queue_response(response, controller_key)
         self._response_available.set()
 
     def recover_interrupted(self) -> None:
         """Record uncertain outcomes for started work without an active executor."""
-        for entry in self._journal.started():
+        for entry in self._journal.started(all_controllers=True):
             command = entry.command
-            if command is not None and command.request_id not in self._in_flight:
+            if command is not None and (entry.controller_key, command.request_id) not in self._in_flight:
                 self._journal.remember_response(
                     command,
                     entry.command_fingerprint,
                     self._interrupted_response(command),
+                    entry.controller_key,
                 )
                 self._response_available.set()
 
@@ -319,19 +380,21 @@ class DesktopBridge:
         if lock.locked():
             return
         async with lock:
-            for entry in self._journal.queued():
+            for entry in self._journal.queued(all_controllers=True):
                 if not self._accepting:
                     break
                 command = entry.command
                 assert command is not None
                 if (command.action == "run_shell") != shell_starts:
                     continue
-                self._in_flight.add(command.request_id)
+                controller_key = entry.controller_key
+                in_flight_key = (controller_key, command.request_id)
+                self._in_flight.add(in_flight_key)
                 if not shell_starts:
                     self._active_action = command.action
                 started_at = self.monotonic_clock()
                 try:
-                    response = await self._process(command, entry.command_fingerprint)
+                    response = await self._process(command, entry.command_fingerprint, controller_key)
                     response = replace(
                         response,
                         result={
@@ -343,7 +406,7 @@ class DesktopBridge:
                             ),
                         },
                     )
-                    self._journal.remember_response(command, entry.command_fingerprint, response)
+                    self._journal.remember_response(command, entry.command_fingerprint, response, controller_key)
                     self._response_available.set()
                     logger.info(
                         "desktop_command_completed",
@@ -352,7 +415,7 @@ class DesktopBridge:
                         ok=response.ok,
                     )
                 finally:
-                    self._in_flight.discard(command.request_id)
+                    self._in_flight.discard(in_flight_key)
                     if not shell_starts:
                         self._active_action = None
 
@@ -360,9 +423,16 @@ class DesktopBridge:
         """Retry exact recorded results without running desktop work again."""
         progressed = False
         async with self._delivery_lock:
-            for delivery_id, response in self._journal.pending_responses():
-                if not await self._send_response(response):
-                    break
+            failed_controllers: set[str] = set()
+            for delivery_id, controller_key, response in self._journal.pending_responses_with_controller():
+                if controller_key in failed_controllers:
+                    continue
+                entry = self._controllers.get(controller_key)
+                if entry is None:
+                    continue
+                if not await self._send_response(response, entry.controller):
+                    failed_controllers.add(controller_key)
+                    continue
                 self._journal.mark_delivered(delivery_id)
                 self._capacity_available.set()
                 progressed = True
@@ -407,7 +477,10 @@ class DesktopBridge:
             await self._response_available.wait()
             self._response_available.clear()
             await self.deliver_pending()
-            if self._journal.pending_responses():
+            if any(
+                controller_key in self._controllers
+                for _, controller_key, _ in self._journal.pending_responses_with_controller()
+            ):
                 await asyncio.sleep(1)
                 self._response_available.set()
 
@@ -417,17 +490,17 @@ class DesktopBridge:
         ``file_roots`` is reported in full here: the native NDJSON channel the Mac app reads over
         has no to-device size limit, unlike the remote ``status`` action reply.
         """
-        remaining = 0.0
-        if self._control_available() and self._control_lease_deadline is not None:
-            remaining = max(0.0, self._control_lease_deadline - self.monotonic_clock())
+        status = self._bridge_status()
+        remaining, expires_at_ms = self._top_level_lease_summary()
         return {
-            **self._bridge_status(),
+            **status,
             "file_roots": self.filesystem.list_folders()["folders"] if self.filesystem is not None else [],
-            "gui_mode": "stopped" if not self._accepting else ("control" if remaining else "observe_only"),
-            "lease_expires_at_ms": self.policy.control_lease_expires_at_ms,
+            "gui_mode": status["gui_mode"] if self._accepting else "stopped",
+            "lease_expires_at_ms": expires_at_ms,
             "lease_remaining_seconds": remaining,
             "active_action": self._active_action,
             "shell": shell_status(self.shell),
+            "controllers": {key: self._controller_local_status(key) for key in self._controllers},
         }
 
     def decide_local_shell(
@@ -452,14 +525,20 @@ class DesktopBridge:
         duration_seconds: int | None = None,
         *,
         until_revoked: bool = False,
+        controller_key: str | None = None,
     ) -> dict[str, object]:
-        """Auto-approve shell requests from every locally allowed caller until the lease ends or is revoked."""
-        self._running_shell().grant(duration_seconds, until_revoked=until_revoked)
+        """Auto-approve shell requests for one controller (or the primary controller when omitted)."""
+        shell = self._running_shell()
+        target = self._primary_controller_key() if controller_key is None else self._require_controller(controller_key)
+        shell.grant(duration_seconds, until_revoked=until_revoked, controller_key=target)
         return self.local_status()
 
-    def revoke_local_shell(self) -> dict[str, object]:
-        """End auto-approval, reject pending approval, and kill handles now; an active command stops promptly."""
-        self._enabled_shell().revoke()
+    def revoke_local_shell(self, controller_key: str | None = None) -> dict[str, object]:
+        """End auto-approval, reject pending approval, and kill handles for one controller or all controllers."""
+        shell = self._enabled_shell()
+        if controller_key is not None:
+            self._require_controller(controller_key)
+        shell.revoke(controller_key=controller_key)
         return self.local_status()
 
     def kill_local_shell_handle(self, handle: str) -> dict[str, object]:
@@ -480,43 +559,91 @@ class DesktopBridge:
             raise ValueError(msg)
         return shell
 
-    def grant_local_control(self, duration_seconds: int) -> dict[str, object]:
-        """Grant control only through the local helper's private management channel."""
-        if type(duration_seconds) is not int or not 60 <= duration_seconds <= 3600:
-            msg = "Local control duration must be between 60 and 3600 seconds."
+    def _primary_controller_key(self) -> str:
+        return controller_journal_key(self.policy.controller)
+
+    def _require_controller(self, controller_key: str) -> str:
+        if controller_key not in self._controllers:
+            msg = "Unknown desktop controller."
             raise ValueError(msg)
-        if not self._accepting or self._control_revoked:
-            msg = "Restart or reset the stopped bridge before granting control."
+        return controller_key
+
+    def grant_local_control(
+        self,
+        duration_seconds: int | None = None,
+        *,
+        computer: bool = False,
+        controller_key: str | None = None,
+    ) -> dict[str, object]:
+        """Grant control only through the local helper's private management channel; it is never saved.
+
+        A duration grants a bounded lease over the saved apps.
+        ``computer`` instead grants every app but MindRoom's own and the primary screen until revoked or stopped.
+        """
+        timed = computer is False and type(duration_seconds) is int and 60 <= duration_seconds <= 3600
+        if not timed and not (computer is True and duration_seconds is None):
+            msg = "Local control must last 60 to 3600 seconds over the saved apps, or cover the computer until revoked."
+            raise ValueError(msg)
+        if not self._accepting:
+            msg = "Restart the stopped bridge before granting control."
             raise ValueError(msg)
         if self.provider is None:
             msg = "Desktop GUI is unavailable."
             raise ValueError(msg)
-        self.provider.check_emergency_stop()
-        self.policy = replace(
-            self.policy,
-            allow_control=True,
-            control_lease_expires_at_ms=round((self.clock() + duration_seconds) * 1000),
+        target = self._primary_controller_key() if controller_key is None else self._require_controller(controller_key)
+        self._control_grants[target] = _ControlGrant(
+            deadline=math.inf if duration_seconds is None else self.monotonic_clock() + duration_seconds,
+            expires_at_ms=None if duration_seconds is None else round((self.clock() + duration_seconds) * 1000),
+            computer=computer,
         )
-        self._control_lease_deadline = self.monotonic_clock() + duration_seconds
         return self.local_status()
 
-    def revoke_local_control(self) -> dict[str, object]:
-        """Revoke new input immediately without repeating or interrupting active actions."""
-        self.policy = replace(self.policy, allow_control=False, control_lease_expires_at_ms=None)
-        self._control_lease_deadline = None
+    def grant_control(
+        self,
+        duration_seconds: int | None = None,
+        *,
+        computer: bool = False,
+        controller_key: str | None = None,
+    ) -> dict[str, object]:
+        """Grant live GUI control for one controller (or the primary controller when omitted)."""
+        return self.grant_local_control(duration_seconds, computer=computer, controller_key=controller_key)
+
+    def revoke_local_control(self, controller_key: str | None = None) -> dict[str, object]:
+        """Revoke new input and its computer scope immediately without interrupting active actions."""
+        if controller_key is None:
+            self._control_grants.clear()
+        else:
+            self._require_controller(controller_key)
+            self._control_grants.pop(controller_key, None)
         return self.local_status()
 
-    def reset_local_emergency_stop(self) -> dict[str, object]:
-        """Clear a local emergency latch only while idle and away from the fail-safe."""
-        if self._in_flight:
-            msg = "Wait for the active desktop action before resetting emergency stop."
+    def revoke_control(self, controller_key: str | None = None) -> dict[str, object]:
+        """Revoke live GUI control for one controller or all configured controllers."""
+        return self.revoke_local_control(controller_key=controller_key)
+
+    def update_controllers(self, controllers: tuple[DesktopControllerPolicy, ...]) -> dict[str, object]:
+        """Hot-reload configured controllers without dropping the Matrix session or surviving handles."""
+        if not self._accepting:
+            msg = "The desktop bridge is stopping."
             raise ValueError(msg)
-        if self.provider is None:
-            msg = "Desktop GUI is unavailable."
+        if not controllers:
+            msg = "Desktop bridge requires at least one controller."
             raise ValueError(msg)
-        self.provider.check_emergency_stop()
-        self.revoke_local_control()
-        self._control_revoked = False
+        next_policy = replace(
+            self.policy,
+            controller=controllers[0].controller,
+            allowed_requester_ids=controllers[0].allowed_requester_ids,
+            allowed_agent_names=controllers[0].allowed_agent_names,
+            controllers=controllers,
+        )
+        new_map = {controller_journal_key(entry.controller): entry for entry in next_policy.effective_controllers}
+        removed_keys = [key for key in self._controllers if key not in new_map]
+        self._controllers = new_map
+        self.policy = next_policy
+        for removed_key in removed_keys:
+            self._control_grants.pop(removed_key, None)
+            if self.shell is not None:
+                self.shell.revoke(controller_key=removed_key)
         return self.local_status()
 
     async def stop(self) -> None:
@@ -546,15 +673,22 @@ class DesktopBridge:
         if self.filesystem is not None:
             self.filesystem.close()
 
-    async def _process(self, command: DesktopCommand, command_fingerprint: str) -> DesktopResponse:
-        policy_error = self._policy_error(command)
+    async def _process(
+        self,
+        command: DesktopCommand,
+        command_fingerprint: str,
+        controller_key: str | None = None,
+    ) -> DesktopResponse:
+        key = controller_journal_key(self.policy.controller) if controller_key is None else controller_key
+        controller_key = key
+        policy_error = self._policy_error(command, controller_key)
         if policy_error is not None:
             return self._error_response(command, policy_error)
         try:
-            await resolve_pinned_device(self.client, self.policy.controller)
+            await resolve_pinned_device(self.client, self._controllers[controller_key].controller)
         except OlmToDeviceError as exc:
             return self._error_response(command, str(exc))
-        policy_error = self._policy_error(command)
+        policy_error = self._policy_error(command, controller_key)
         if policy_error is not None:
             return self._error_response(command, policy_error)
         if command.action in DESKTOP_FILE_ACTIONS | DESKTOP_SHELL_ACTIONS and "observation" in command.parameters:
@@ -564,25 +698,26 @@ class DesktopBridge:
             resolved = self._observations.resolve(command) if "state_id" in command.parameters else command
         except DesktopProtocolError as exc:
             return self._error_response(command, str(exc))
-        self._journal.remember_started(command, command_fingerprint)
+        self._journal.remember_started(command, command_fingerprint, controller_key)
         execution_command = replace(
             resolved,
             parameters={key: value for key, value in resolved.parameters.items() if key != "observation"},
         )
-        execution = await self._execute_safely(execution_command)
-        return await self._execution_response(command, execution, mode)
+        execution = await self._execute_safely(execution_command, controller_key, mode=mode)
+        return await self._execution_response(command, execution, mode, controller_key)
 
     async def _execution_response(
         self,
         command: DesktopCommand,
         execution: _Execution | DesktopResponse,
         mode: DesktopObservationMode,
+        controller_key: str,
     ) -> DesktopResponse:
         """Collect the requested fresh observation after an action."""
         if isinstance(execution, DesktopResponse):
             return execution
         if execution.follow_up_app is not None:
-            execution = await self._attach_follow_up_state(command, execution)
+            execution = await self._attach_follow_up_state(command, execution, controller_key)
             if isinstance(execution, DesktopResponse):
                 return execution
         if command.action in DESKTOP_APP_ACTIONS:
@@ -597,7 +732,12 @@ class DesktopBridge:
             return await self._browser_image_response(command, execution)
         if execution.capture_app is None or execution.capture_state_id is None:
             return success_response(command, result=execution.result)
-        return await self._capture_response(
+        return self._observation_refused(
+            command,
+            execution,
+            execution.capture_app,
+            controller_key,
+        ) or await self._capture_response(
             command,
             result=execution.result,
             app_id=execution.capture_app,
@@ -624,12 +764,15 @@ class DesktopBridge:
             return self._capture_error_response(command, result=execution.result, error="Browser image upload failed.")
         return success_response(command, result=execution.result, screenshot=screenshot)
 
-    async def _execute_safely(self, command: DesktopCommand) -> _Execution | DesktopResponse:
+    async def _execute_safely(
+        self,
+        command: DesktopCommand,
+        controller_key: str,
+        *,
+        mode: DesktopObservationMode,
+    ) -> _Execution | DesktopResponse:
         try:
-            return await self._execute(command)
-        except DesktopEmergencyStopError as exc:
-            self._control_revoked = True
-            return self._error_response(command, str(exc))
+            return await self._execute(command, controller_key, mode=mode)
         except (AccessibilityActionOutcomeUnknownError, PlaywrightActionOutcomeUnknownError) as exc:
             return self._unknown_control_response(command, reason=str(exc))
         except (
@@ -640,7 +783,7 @@ class DesktopBridge:
             DesktopFilesystemError,
             DesktopShellError,
         ) as exc:
-            return self._error_response(command, str(exc))
+            return self._error_response(command, self._with_shell_hint(str(exc)))
         except Exception:
             logger.exception(
                 "desktop_command_execution_failed",
@@ -655,10 +798,14 @@ class DesktopBridge:
         self,
         command: DesktopCommand,
         execution: _Execution,
+        controller_key: str,
     ) -> _Execution | DesktopResponse:
         app_id = execution.follow_up_app
         if app_id is None:
             return execution
+        refused = self._observation_refused(command, execution, app_id, controller_key)
+        if refused is not None:
+            return refused
         try:
             state = await asyncio.to_thread(self._required_gui_provider().get_app_state, app_id)
             self._observations.remember(state, command)
@@ -704,7 +851,7 @@ class DesktopBridge:
                 timeout_seconds=MEDIA_UPLOAD_TIMEOUT_SECONDS,
             )
         except (AccessibilityError, DesktopProviderError, DesktopMediaError) as exc:
-            return self._capture_error_response(command, result=result, error=str(exc))
+            return self._capture_error_response(command, result=result, error=self._with_shell_hint(str(exc)))
         except Exception:
             logger.exception("desktop_follow_up_screenshot_failed", action=command.action)
             return self._capture_error_response(command, result=result, error="Local screenshot operation failed.")
@@ -725,35 +872,37 @@ class DesktopBridge:
             screenshot=screenshot,
         )
 
-    def _policy_error(self, command: DesktopCommand) -> str | None:
+    def _policy_error(self, command: DesktopCommand, controller_key: str) -> str | None:
         now_ms = round(self.clock() * 1000)
         app_id = command.parameters.get("app")
+        controller_entry = self._controllers.get(controller_key)
         if command.issued_at_ms > now_ms + _MAX_FUTURE_SKEW_MS:
             error = "Desktop command was issued too far in the future."
         elif command.expires_at_ms <= now_ms:
             error = "Desktop command expired before local execution."
-        elif not self.policy.caller_allowed(command):
+        elif controller_entry is None or not controller_entry.caller_allowed(command):
             error = "Desktop command requester or agent is not allowed by local policy."
         elif command.action in DESKTOP_FILE_ACTIONS | DESKTOP_SHELL_ACTIONS:
             error = self._local_capability_error(command.action)
         elif command.action in DESKTOP_BROWSER_ACTIONS:
-            error = self._browser_policy_error(command)
-        elif command.action in DESKTOP_APP_ACTIONS and (
-            not isinstance(app_id, str) or app_id not in self.policy.allowed_app_ids
+            error = self._browser_policy_error(command, controller_key)
+        elif command.action in DESKTOP_APP_ACTIONS and not (
+            isinstance(app_id, str)
+            and app_targetable(app_id, self.policy.allowed_app_ids, all_apps=self._computer_scope(controller_key))
         ):
             error = "Desktop command must target an application in the local allowlist."
         elif command.action in DESKTOP_CONTROL_ACTIONS:
-            error = self._control_policy_error()
+            error = self._control_policy_error(controller_key)
         else:
             error = None
         return error
 
-    def _control_policy_error(self) -> str | None:
-        if not self.policy.allow_control:
+    def _control_policy_error(self, controller_key: str | None = None) -> str | None:
+        key = self._primary_controller_key() if controller_key is None else controller_key
+        grant = self._control_grants.get(key)
+        if grant is None:
             return "Desktop control is disabled; this bridge is observe-only."
-        if self._control_revoked:
-            return "Desktop emergency stop is latched; restart the bridge locally before granting control again."
-        if not self._control_available():
+        if not self._grant_active(grant):
             return "Local desktop control lease has expired."
         return None
 
@@ -764,7 +913,7 @@ class DesktopBridge:
             return "Local shell access is disabled."
         return None
 
-    def _browser_policy_error(self, command: DesktopCommand) -> str | None:  # noqa: PLR0911
+    def _browser_policy_error(self, command: DesktopCommand, controller_key: str) -> str | None:
         if not self.policy.browser_enabled or self.browser_provider is None:
             return "Playwright browser extension support is disabled on this desktop bridge."
         try:
@@ -777,33 +926,70 @@ class DesktopBridge:
             return "Desktop browser command used the wrong observe/control classification."
         if not requires_control:
             return None
-        if not self.policy.allow_control:
-            return "Desktop control is disabled; this bridge is observe-only."
-        if self._control_revoked:
-            return "Desktop emergency stop is latched; restart the bridge locally before granting control again."
-        if not self._control_available():
-            return "Local desktop control lease has expired."
-        return None
+        return self._control_policy_error(controller_key)
 
-    async def _execute(self, command: DesktopCommand) -> _Execution:
+    async def _execute(
+        self,
+        command: DesktopCommand,
+        controller_key: str,
+        *,
+        mode: DesktopObservationMode,
+    ) -> _Execution:
         if command.action in DESKTOP_FILE_ACTIONS:
             return _Execution(await execute_file(self.filesystem, command))
         if command.action in DESKTOP_SHELL_ACTIONS:
-            return _Execution(await execute_shell(self.client, self.shell, command))
-        return await self._execute_desktop(command)
+            return _Execution(await execute_shell(self.client, self.shell, command, controller_key=controller_key))
+        self._live_scope(controller_key)
+        return await self._execute_desktop(command, controller_key, mode=mode)
 
-    async def _execute_desktop(self, command: DesktopCommand) -> _Execution:
+    def _gui_permission_error(self, command: DesktopCommand, *, mode: DesktopObservationMode) -> str | None:
+        missing = missing_macos_desktop_permissions()
+        if not missing:
+            return None
+        app_id = command.parameters.get("app")
+        required: list[str] = []
+        if command.action == "screenshot":
+            required = [name for name in ("Screen Recording",) if name in missing]
+        elif command.action == "get_app_state":
+            needed = (
+                ("Accessibility", "Screen Recording")
+                if app_id == PRIMARY_SCREEN_APP_ID and mode == "tree"
+                else (("Screen Recording",) if app_id == PRIMARY_SCREEN_APP_ID else ("Accessibility",))
+            )
+            required = [name for name in needed if name in missing]
+        elif command.action in DESKTOP_CONTROL_ACTIONS and command.action != "launch_app":
+            required = [name for name in ("Accessibility",) if name in missing]
+        if not required:
+            return None
+        names = " and ".join(required)
+        suffix = " Shell commands remain available." if self.policy.shell_enabled else ""
+        return f"macOS {names} permission is not granted yet.{suffix}"
+
+    def _with_shell_hint(self, error: str) -> str:
+        if (
+            self.policy.shell_enabled
+            and ("Accessibility" in error or "Screen Recording" in error)
+            and "shell commands remain available" not in error.lower()
+        ):
+            return f"{error} Shell commands remain available."
+        return error
+
+    async def _execute_desktop(
+        self,
+        command: DesktopCommand,
+        controller_key: str,
+        *,
+        mode: DesktopObservationMode,
+    ) -> _Execution:
         parameters = command.parameters
         if command.action in DESKTOP_BROWSER_ACTIONS:
             browser_action, browser_parameters = _browser_command_parameters(parameters)
             if self.browser_provider is None:
                 msg = "Playwright browser extension support is disabled on this desktop bridge."
                 raise DesktopProtocolError(msg)
-            if command.action == "browser_control":
-                if self.provider is None:
-                    msg = "Desktop GUI is unavailable for browser control."
-                    raise DesktopProtocolError(msg)
-                await asyncio.to_thread(self.provider.check_emergency_stop)
+            if command.action == "browser_control" and self.provider is None:
+                msg = "Desktop GUI is unavailable for browser control."
+                raise DesktopProtocolError(msg)
             browser_result = await self.browser_provider.execute(browser_action, browser_parameters)
             return _Execution(browser_result.payload, browser_image=browser_result.image)
         if command.action == "status":
@@ -816,15 +1002,22 @@ class DesktopBridge:
                 self._fit_status(
                     command,
                     status,
-                    caller_shell_status(self.shell, command),
+                    caller_shell_status(self.shell, command, controller_key=controller_key),
                     cast("list[dict[str, str]]", folders),
+                    controller_key=controller_key,
                 ),
             )
         if command.action == "list_apps":
             reject_unexpected_parameters(parameters, allowed=frozenset())
             apps = await asyncio.to_thread(self.provider.list_apps) if self.provider is not None else []
-            return _Execution({"apps": [app.to_result() for app in apps]})
-        provider = self._required_gui_provider()
+            # Computer scope lists every running Dock app, so the reply keeps the prefix that fits, primary screen first.
+            listed = sorted((app.to_result() for app in apps), key=lambda app: app["id"] != PRIMARY_SCREEN_APP_ID)
+
+            def reply(dropped: int) -> dict[str, object]:
+                return {"apps": listed[: len(listed) - dropped], "apps_truncated": dropped > 0}
+
+            return _Execution(reply(leftmost_fitting(command, 0, len(listed), reply)))
+        provider = self._gui_provider_for_action(command, mode=mode)
         if command.action == "launch_app":
             reject_unexpected_parameters(parameters, allowed=frozenset({"app"}))
             app_id = required_str_parameter(parameters, "app")
@@ -866,12 +1059,26 @@ class DesktopBridge:
             raise DesktopProtocolError(msg)
         return provider
 
+    def _gui_provider_for_action(
+        self,
+        command: DesktopCommand,
+        *,
+        mode: DesktopObservationMode,
+    ) -> DesktopProvider:
+        provider = self._required_gui_provider()
+        permission_error = self._gui_permission_error(command, mode=mode)
+        if permission_error is not None:
+            raise DesktopProviderError(permission_error)
+        return provider
+
     def _fit_status(
         self,
         command: DesktopCommand,
         provider_status: dict[str, object],
         caller_shell: dict[str, object],
         folders: list[dict[str, str]],
+        *,
+        controller_key: str,
     ) -> dict[str, object]:
         """Keep the fitting prefix of ``folders`` in the remote reply's ``bridge.file_roots``.
 
@@ -885,7 +1092,7 @@ class DesktopBridge:
             return {
                 **provider_status,
                 "bridge": {
-                    **self._bridge_status(),
+                    **self._bridge_status(controller_key),
                     "file_roots": folders[:count],
                     "file_roots_truncated": count < total,
                     "shell": caller_shell,
@@ -895,36 +1102,114 @@ class DesktopBridge:
         dropped = leftmost_fitting(command, 0, total, reply)
         return reply(dropped)
 
-    def _bridge_status(self) -> dict[str, object]:
+    def _bridge_status(self, controller_key: str | None = None) -> dict[str, object]:
         """Build the shared status fields; callers attach ``file_roots`` themselves (trimmed or not).
 
         ``gui_mode`` describes only application control; folders and shell access are reported separately.
         """
-        control_available = self._control_available()
+        control_available = self._control_available(controller_key)
+        gui_available = self.provider is not None
         status: dict[str, object] = {
             "gui_mode": "control" if control_available else "observe_only",
             "control_available": control_available,
-            "emergency_stop_latched": self._control_revoked,
+            "control_scope": "computer" if self._computer_scope(controller_key) else "saved_apps",
             "allowed_app_count": len(self.policy.allowed_app_ids),
             "browser_enabled": self.policy.browser_enabled,
-            "gui_available": self.provider is not None,
+            "gui_available": gui_available,
+            "gui_permissions_ready": gui_available and not missing_macos_desktop_permissions(),
             "observation_modes": ["tree", "screenshot", "both"],
             "durable_commands": True,
         }
-        if self.policy.control_lease_expires_at_ms is not None:
-            status["control_lease_expires_at_ms"] = self.policy.control_lease_expires_at_ms
+        if controller_key is not None:
+            grant = self._control_grants.get(controller_key)
+            expires_at_ms = grant.expires_at_ms if grant is not None else None
+        else:
+            _, expires_at_ms = self._top_level_lease_summary()
+        if expires_at_ms is not None:
+            status["control_lease_expires_at_ms"] = expires_at_ms
         return status
 
-    def _control_available(self) -> bool:
-        lease_expires_at_ms = self.policy.control_lease_expires_at_ms
-        return (
-            self.policy.allow_control
-            and not self._control_revoked
-            and lease_expires_at_ms is not None
-            and self.clock() * 1000 < lease_expires_at_ms
-            and self._control_lease_deadline is not None
-            and self.monotonic_clock() < self._control_lease_deadline
+    def _controller_local_status(self, controller_key: str) -> dict[str, object]:
+        grant = self._control_grants.get(controller_key)
+        available = grant is not None and self._grant_active(grant)
+        computer = available and grant.computer
+        remaining = 0.0
+        if available and grant is not None and grant.deadline != math.inf:
+            remaining = max(0.0, grant.deadline - self.monotonic_clock())
+        shell_entry = (
+            self.shell.controller_status(controller_key)
+            if self.shell is not None
+            else {"auto_approve_remaining_seconds": 0, "auto_approve_until_revoked": False}
         )
+        return {
+            "gui_mode": ("control" if available else "observe_only") if self._accepting else "stopped",
+            "control_available": available,
+            "control_scope": "computer" if computer else "saved_apps",
+            "lease_expires_at_ms": grant.expires_at_ms if grant is not None else None,
+            "lease_remaining_seconds": remaining,
+            "shell": shell_entry,
+        }
+
+    def _top_level_lease_summary(self) -> tuple[float, int | None]:
+        active = [
+            grant
+            for key, grant in self._control_grants.items()
+            if key in self._controllers and self._grant_active(grant)
+        ]
+        if not active:
+            expired_ms = [
+                grant.expires_at_ms
+                for key, grant in self._control_grants.items()
+                if key in self._controllers and grant.expires_at_ms is not None
+            ]
+            return 0.0, max(expired_ms) if expired_ms else None
+        if any(grant.deadline == math.inf for grant in active):
+            return 0.0, None
+        longest = max(active, key=lambda grant: grant.deadline)
+        return max(0.0, longest.deadline - self.monotonic_clock()), longest.expires_at_ms
+
+    def _grant_active(self, grant: _ControlGrant) -> bool:
+        return (
+            grant.expires_at_ms is None or self.clock() * 1000 < grant.expires_at_ms
+        ) and self.monotonic_clock() < grant.deadline
+
+    def _control_available(self, controller_key: str | None = None) -> bool:
+        """Report live control; only a local grant sets the deadline of control that has no expiry."""
+        if controller_key is not None:
+            grant = self._control_grants.get(controller_key)
+            return grant is not None and self._grant_active(grant)
+        return any(self._grant_active(grant) for key, grant in self._control_grants.items() if key in self._controllers)
+
+    def _computer_scope(self, controller_key: str | None = None) -> bool:
+        """Report whether live control reaches every app; expiry, Revoke, and stop all return to the saved apps."""
+        if controller_key is not None:
+            grant = self._control_grants.get(controller_key)
+            return grant is not None and grant.computer and self._grant_active(grant)
+        return any(
+            grant.computer and self._grant_active(grant)
+            for key, grant in self._control_grants.items()
+            if key in self._controllers
+        )
+
+    def _live_scope(self, controller_key: str) -> bool:
+        """Give the provider, which checks every target itself, the scope live control has right now."""
+        all_apps = self._computer_scope(controller_key)
+        if self.provider is not None:
+            self.provider.set_all_apps(all_apps)
+        return all_apps
+
+    def _observation_refused(
+        self,
+        command: DesktopCommand,
+        execution: _Execution,
+        app_id: str,
+        controller_key: str,
+    ) -> DesktopResponse | None:
+        """Return the receipt alone when the app left the live scope before a new observation of it began."""
+        if app_targetable(app_id, self.policy.allowed_app_ids, all_apps=self._live_scope(controller_key)):
+            return None
+        warning = "Access to this application ended before a new observation; none was taken."
+        return success_response(command, result={**execution.result, "warning": warning})
 
     def _capture_error_response(
         self,
@@ -1002,11 +1287,11 @@ class DesktopBridge:
             "Desktop observation was interrupted before its outcome was recorded; retry with a new request.",
         )
 
-    async def _send_response(self, response: DesktopResponse) -> bool:
+    async def _send_response(self, response: DesktopResponse, controller: PinnedMatrixDevice) -> bool:
         try:
             await send_encrypted_to_device(
                 self.client,
-                self.policy.controller,
+                controller,
                 event_type=DESKTOP_RESPONSE_EVENT_TYPE,
                 content=response.to_content(),
             )
@@ -1047,4 +1332,4 @@ def _browser_command_parameters(parameters: dict[str, object]) -> tuple[str, dic
     )
 
 
-__all__ = ["DesktopBridge", "DesktopBridgePolicy"]
+__all__ = ["DesktopBridge", "DesktopBridgePolicy", "DesktopControllerPolicy"]

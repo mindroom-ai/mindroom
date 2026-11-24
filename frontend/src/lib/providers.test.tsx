@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 
-import { getProviderInfo, getProviderList } from "./providers";
+import acceptedProviders from "@/test/fixtures/modelProviders.json";
+
+import { getProviderInfo, getProviderList, PROVIDERS } from "./providers";
 
 describe("providers", () => {
   it("lists Vertex Claude provider in dropdown options", () => {
@@ -14,5 +16,13 @@ describe("providers", () => {
 
     expect(vertexProvider.name).toBe("Vertex AI Claude");
     expect(vertexProvider.requiresApiKey).toBe(false);
+  });
+
+  it("knows only providers that config load accepts", () => {
+    const rejected = Object.keys(PROVIDERS).filter(
+      (providerId) => !acceptedProviders.includes(providerId),
+    );
+
+    expect(rejected).toEqual([]);
   });
 });

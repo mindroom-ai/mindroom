@@ -59,6 +59,23 @@ async def test_late_approval_cannot_reopen_failed_turn() -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("approve", [True, False])
+async def test_wait_for_approval_returns_the_settled_decision(*, approve: bool) -> None:
+    """Visible progress waits for the decision and starts only when it approves a reply."""
+    gate = ParticipationGate()
+    waiter = asyncio.create_task(gate.wait_for_approval())
+    await asyncio.sleep(0)
+    assert not waiter.done()
+
+    if approve:
+        gate.approve_existing_response()
+    else:
+        gate.decline("preparation_failed")
+
+    assert await waiter is approve
+
+
+@pytest.mark.asyncio
 async def test_settled_approval_cannot_be_overwritten() -> None:
     """Late errors must not revoke a turn that already owns visible output."""
 
@@ -87,3 +104,23 @@ async def test_deliberate_decline_is_distinct_from_failure() -> None:
     assert not await gate.check(decide)
     assert gate.is_silent
     assert gate.is_declined
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("action", "ran"), [("respond", True), ("stay_silent", False)])
+async def test_only_an_approval_runs_its_callback_before_the_turn_may_become_visible(action: str, ran: bool) -> None:
+    """What must precede a reply runs once the turn decides to answer, before anything waiting on it wakes."""
+    decided_at_callback: list[bool] = []
+    gate = ParticipationGate()
+
+    async def on_approved() -> None:
+        decided_at_callback.append(gate.decided.is_set())
+
+    gate.on_approved = on_approved
+
+    async def decide() -> ParticipationDecision:
+        return ParticipationDecision(action=action, reason="Decided.")
+
+    assert await gate.check(decide) is ran
+    assert await gate.check(decide) is ran
+    assert decided_at_callback == ([False] if ran else [])

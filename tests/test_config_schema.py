@@ -8,6 +8,7 @@ import typing
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
+import pytest
 from pydantic import BaseModel
 
 from mindroom.config.main import Config, dashboard_config_schema
@@ -20,8 +21,8 @@ if TYPE_CHECKING:
 
 # The dashboard's configSchema.ts understands exactly this hint vocabulary.
 HINT_KEY = "x-mindroom"
-_HINT_FIELDS = {"reference", "key_reference", "secret", "multiline"}
-_REFERENCE_KINDS = {"model", "agent", "room", "tool"}
+_HINT_FIELDS = {"reference", "key_reference", "key_placeholder", "secret", "multiline"}
+_REFERENCE_KINDS = {"model", "agent", "personal_room_agent", "room", "tool"}
 
 
 def _nested_models(annotation: object) -> list[type[BaseModel]]:
@@ -44,6 +45,10 @@ def _walk_fields() -> Iterator[tuple[type[BaseModel], str, FieldInfo]]:
         for name, field in model.model_fields.items():
             yield model, name, field
             pending.extend(_nested_models(field.annotation))
+
+
+def _field_reference(field: FieldInfo) -> object:
+    return cast("dict[str, dict[str, object]]", field.json_schema_extra or {}).get(HINT_KEY, {}).get("reference")
 
 
 def _collect_hints(node: object) -> Iterator[dict[str, object]]:
@@ -107,21 +112,56 @@ def test_dashboard_hint_omits_unset_fields() -> None:
     }
     assert dashboard_hint(secret=True) == {HINT_KEY: {"secret": True}}
     assert dashboard_hint(multiline=True) == {HINT_KEY: {"multiline": True}}
+    assert dashboard_hint(key_placeholder="mind") == {HINT_KEY: {"key_placeholder": "mind"}}
 
 
 def test_reference_fields_are_annotated() -> None:
     """Fields naming configured entities render as pickers in the dashboard."""
     schema = Config.model_json_schema()
     defs = schema["$defs"]
-    assert defs["RouterConfig"]["properties"]["model"][HINT_KEY] == {"reference": "model"}
-    assert defs["LLMJudgmentConfig"]["properties"]["model"][HINT_KEY] == {"reference": "model"}
-    assert defs["PersonalRoomsConfig"]["properties"]["agent"][HINT_KEY] == {"reference": "agent"}
+    assert defs["PersonalRoomsConfig"]["properties"]["agent"][HINT_KEY] == {"reference": "personal_room_agent"}
     assert defs["PersonalRoomsConfig"]["properties"]["onboarding_rooms"][HINT_KEY] == {"reference": "room"}
-    assert defs["DefaultsConfig"]["properties"]["tools"][HINT_KEY] == {"reference": "tool"}
+    # calls.agents keys name an agent or a personal_agents template, the same choices as personal_rooms.agent.
+    assert defs["CallsConfig"]["properties"]["agents"][HINT_KEY] == {"key_reference": "personal_room_agent"}
     assert schema["properties"]["room_thread_summary_models"][HINT_KEY] == {
         "reference": "model",
         "key_reference": "room",
     }
+
+
+# Fields named like a model that hold a provider's own model ID, not the name of a configured model.
+_PROVIDER_MODEL_ID_FIELDS = {
+    "EmbedderConfig.model",
+    "KnowledgeRerankerConfig.model",
+    "LiveCallProfile.model",
+    "RealtimeCallProfile.model",
+    "SpeechServiceConfig.model",
+    "VoiceSTTConfig.model",
+}
+
+
+def test_every_field_that_names_a_configured_model_offers_the_model_picker() -> None:
+    """A model-named field is a configured-model reference, which the dashboard shows as a picker, or a provider model ID."""
+    unhinted = {
+        f"{model.__name__}.{name}"
+        for model, name, field in _walk_fields()
+        if name.endswith(("model", "models")) and name != "models" and _field_reference(field) != "model"
+    }
+    assert unhinted == _PROVIDER_MODEL_ID_FIELDS
+
+
+# Tool lists that name an MCP server's own tools, not registered MindRoom tools.
+_MCP_SERVER_TOOL_FIELDS = {"MCPServerConfig.include_tools", "MCPServerConfig.exclude_tools"}
+
+
+def test_every_field_that_lists_tools_offers_the_tool_picker() -> None:
+    """A tools list names registered tools, which the dashboard edits with the tool picker, or an MCP server's own tools."""
+    unhinted = {
+        f"{model.__name__}.{name}"
+        for model, name, field in _walk_fields()
+        if name.endswith(("tools", "toolkits")) and field.annotation is not bool and _field_reference(field) != "tool"
+    }
+    assert unhinted == _MCP_SERVER_TOOL_FIELDS
 
 
 def test_secret_fields_are_annotated() -> None:
@@ -166,6 +206,19 @@ def test_dashboard_schema_reports_default_factory_values() -> None:
     assert "default" not in schema["$defs"]["VoiceSTTConfig"]["properties"]["credentials_service"]
 
 
+def test_every_authored_config_section_rejects_unknown_keys() -> None:
+    """A misspelled key fails config load in every section instead of loading and doing nothing."""
+    schema = dashboard_config_schema()
+    open_sections = sorted(
+        name
+        for name, definition in schema["$defs"].items()
+        if "properties" in definition and definition.get("additionalProperties") is not False
+    )
+
+    assert schema["additionalProperties"] is False
+    assert open_sections == []
+
+
 def test_dashboard_schema_snapshot_is_current() -> None:
     """Frontend tests render the checked-in snapshot, so it must match the models."""
     snapshot_path = (
@@ -173,6 +226,12 @@ def test_dashboard_schema_snapshot_is_current() -> None:
     )
     snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
     assert snapshot == dashboard_config_schema(), "Run .venv/bin/python .github/scripts/generate_config_schema.py"
+
+
+def test_voice_transcript_schema_title() -> None:
+    """The visible_router_echo field keeps its wire key while exposing the Voice Transcript label."""
+    voice_properties = dashboard_config_schema()["$defs"]["VoiceConfig"]["properties"]
+    assert voice_properties["visible_router_echo"]["title"] == "Voice Transcript"
 
 
 def test_the_automation_union_is_chosen_by_name_with_plugin_automations_as_the_fallback() -> None:
@@ -183,5 +242,20 @@ def test_the_automation_union_is_chosen_by_name_with_plugin_automations_as_the_f
 
     assert union["discriminator"] == {"propertyName": "name"}
     names = [defs[branch["$ref"].removeprefix("#/$defs/")]["properties"]["name"] for branch in union["oneOf"]]
-    assert [name.get("const") for name in names] == ["prompt_curation", "dreaming", None]
-    assert names[2]["not"] == {"enum": ["prompt_curation", "dreaming"]}
+    assert [name.get("const") for name in names] == ["prompt_curation", "dreaming", "exploration", None]
+    assert names[3]["not"] == {"enum": ["prompt_curation", "dreaming", "exploration"]}
+
+
+@pytest.mark.parametrize(
+    ("sections", "needed"),
+    [
+        ({"agents": {"general": {"display_name": "General", "model": "default", "rooms": ["lobby"]}}}, True),
+        ({"matrix_space": {"enabled": True}}, False),
+        ({"server_emoji": {"enabled": True}}, True),
+        ({}, False),
+    ],
+)
+def test_needs_owner_account(sections: dict[str, object], needed: bool) -> None:
+    """The owner account is needed for a configured room or the emoji room; an enabled Space with no room needs none."""
+    base = {"models": {"default": {"provider": "openai", "id": "test-model"}}, "matrix_space": {"enabled": False}}
+    assert Config.model_validate({**base, **sections}).needs_owner_account() is needed

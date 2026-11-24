@@ -4,12 +4,13 @@ from __future__ import annotations
 
 # ruff: noqa: D103
 from dataclasses import replace
-from typing import TYPE_CHECKING, Literal
-from unittest.mock import AsyncMock, MagicMock
+from functools import partial
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, Any, Literal, cast
+from unittest.mock import AsyncMock, MagicMock, Mock, call
 
 import nio
 import pytest
-from agno.tools.toolkit import Toolkit
 
 from mindroom import agents
 from mindroom.agent_cli import minimal_mode_preflight
@@ -18,13 +19,17 @@ from mindroom.agent_modes import clear_agent_mode, resolve_agent_mode, set_agent
 from mindroom.commands import mode_commands
 from mindroom.commands.handler import handle_command
 from mindroom.commands.parsing import CommandType, _CommandParser
+from mindroom.commands.thread_mode_commands import handle_thread_mode_command
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.constants import primary_records_dir
 from mindroom.credentials.manager import get_runtime_credentials_manager, save_scoped_credentials
 from mindroom.message_target import MessageTarget
+from mindroom.room_settings import THREAD_MODE, on_thread_mode_change, resolve_room_setting
 from mindroom.runtime_resolution import resolve_agent_storage
 from mindroom.runtime_state import clear_api_server_address, set_api_server_address
-from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context
+from mindroom.steward_duties import room_state_response_as_steward
+from mindroom.tool_system.plugins import config_plugins
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.sandbox_proxy import primary_owns_tool_settings
 from mindroom.tool_system.worker_routing import build_agent_toolkit_worker_target
 from tests.authorization_helpers import make_test_command_handler_context
@@ -32,15 +37,20 @@ from tests.conftest import make_conversation_reader_mock, unwrap_extracted_colla
 from tests.identity_helpers import persist_entity_accounts
 from tests.response_runner_helpers import _bot, _plain_request
 from tests.test_agent_cli_authority import _runtime_context as _authority_runtime_context
+from tests.test_steward_room_state import ROOM_ID as THREAD_MODE_ROOM_ID
+from tests.test_steward_room_state import room_state as room_state  # noqa: PLC0414
+from tests.turn_model_helpers import turn_model
 
 pytestmark = pytest.mark.usefixtures("enforce_turn_authorization")
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Coroutine, Iterator
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
+    from mindroom.runtime_protocols import OrchestratorRuntime
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
+    from tests.test_steward_room_state import RoomState
 
 
 # Agents' shells run in Docker workers, which call MindRoom back over the network.
@@ -95,9 +105,9 @@ async def test_mode_command_matches_response_runner_session(
     config.administrators = ["@user:localhost"]
     target = MessageTarget.resolve("!room:localhost", "$thread", "$next", room_mode=thread_mode == "room")
     request = _plain_request(target)
-    runtime = await runner.prepare_response_runtime(request)
-    root = resolve_agent_storage("general", config, paths, runtime.tool_dispatch.execution_identity).state_root
-    set_agent_mode(paths, root, "general", target.session_id, "minimal", request.user_id)
+    runtime = await runner.prepare_response_runtime(request, show_tool_calls=True)
+    root = resolve_agent_storage("general", config, paths, runtime.tool_context.execution_identity).state_root
+    set_agent_mode(paths, root, "general", target.session_id, "minimal")
     result = mode_commands.handle_mode_command(
         f"general {action}",
         config=config,
@@ -111,8 +121,9 @@ async def test_mode_command_matches_response_runner_session(
         runtime=runtime,
         run_id="run",
         active_event_ids={"$next"},
+        knowledge=None,
         transient_enrichment_items=(),
-        system_enrichment_items=(),
+        compaction_lifecycle=None,
     )
     expected = "minimal" if action == "show" else "standard"
     assert turn.agent_mode == expected
@@ -131,9 +142,9 @@ async def test_private_agent_mode_is_isolated_per_requester(tmp_path: Path) -> N
     config.administrators = ["@user:localhost", "@other:localhost"]
     target = MessageTarget.resolve("!room:localhost", "$thread", "$next")
     request = _plain_request(target)
-    runtime = await runner.prepare_response_runtime(request)
-    root = resolve_agent_storage("general", config, paths, runtime.tool_dispatch.execution_identity).state_root
-    set_agent_mode(paths, root, "general", target.session_id, "minimal", request.user_id)
+    runtime = await runner.prepare_response_runtime(request, show_tool_calls=True)
+    root = resolve_agent_storage("general", config, paths, runtime.tool_context.execution_identity).state_root
+    set_agent_mode(paths, root, "general", target.session_id, "minimal")
 
     def show(requester_id: str) -> str:
         return mode_commands.handle_mode_command(
@@ -174,9 +185,9 @@ async def test_mode_handler_preserves_canonical_or_explicit_source_thread(tmp_pa
         "helper",
         runtime.config,
         runtime.runtime_paths,
-        build_execution_identity_from_runtime_context(runtime),
+        runtime.execution_identity,
     ).state_root
-    set_agent_mode(runtime.runtime_paths, root, "helper", runtime.session_id, "minimal", runtime.requester_id)
+    set_agent_mode(runtime.runtime_paths, root, "helper", runtime.session_id, "minimal")
     room = nio.MatrixRoom(runtime.room_id, "@router:example.test")
     event = nio.RoomMessageText.from_dict(
         {
@@ -238,11 +249,6 @@ def test_mode_parser_preserves_target_and_action() -> None:
             "the MindRoom API; the dashboard then asks for this key.",
         ),
         (
-            {"MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "true"},
-            "Set `MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT=true`, because worker shells could forge "
-            "trusted-upstream headers.",
-        ),
-        (
             {"OPENAI_COMPAT_ALLOW_UNAUTHENTICATED": "true"},
             "Unset `OPENAI_COMPAT_ALLOW_UNAUTHENTICATED`, because worker shells could run agents through "
             "the unauthenticated OpenAI-compatible API.",
@@ -266,9 +272,9 @@ def test_selection_refuses_unsafe_worker_shell_deployment_before_saving(
         "helper",
         context.config,
         paths,
-        build_execution_identity_from_runtime_context(context),
+        context.execution_identity,
     )
-    set_agent_mode(paths, storage.state_root, "helper", context.session_id, "standard", context.requester_id)
+    set_agent_mode(paths, storage.state_root, "helper", context.session_id, "standard")
     saved = _mode_file(paths, storage.state_root).read_bytes()
     result = mode_commands.handle_mode_command(
         "helper minimal",
@@ -302,9 +308,9 @@ def test_mode_command_refusal_and_recovery_controls(tmp_path: Path) -> None:
         "helper",
         context.config,
         context.runtime_paths,
-        build_execution_identity_from_runtime_context(context),
+        context.execution_identity,
     ).state_root
-    set_agent_mode(context.runtime_paths, root, "helper", context.session_id, "minimal", context.requester_id)
+    set_agent_mode(context.runtime_paths, root, "helper", context.session_id, "minimal")
     assert "minimal" in mode_commands.handle_mode_command("helper show", **kwargs)
     assert "shell" in mode_commands.handle_mode_command("helper minimal", **kwargs)
     assert resolve_agent_mode(context.runtime_paths, root, "helper", context.session_id) == "minimal"
@@ -326,8 +332,7 @@ def test_mode_command_refusal_and_recovery_controls(tmp_path: Path) -> None:
     "restriction",
     [
         {"enable_run_shell_command": False},
-        {"include_tools": ["run_shell_command"]},
-        {"exclude_tools": ["kill_shell_command"]},
+        {"exclude_tools": ["run_shell_command"]},
     ],
 )
 @pytest.mark.parametrize("worker_tools", [None, []])
@@ -343,7 +348,7 @@ def test_selection_checks_effective_shell_permissions(
     context.config.administrators = [context.requester_id]
     restored = {
         "enable_run_shell_command": True,
-        "include_tools": ["run_shell_command", "check_shell_command", "kill_shell_command"],
+        "include_tools": ["run_shell_command"],
         "exclude_tools": [],
     }
     context.config.agents["helper"] = AgentConfig(
@@ -360,7 +365,7 @@ def test_selection_checks_effective_shell_permissions(
         context.runtime_paths,
         process_env=_CLI_DEPLOYMENT_ENV,
     )
-    identity = build_execution_identity_from_runtime_context(context)
+    identity = context.execution_identity
     storage = resolve_agent_storage("helper", context.config, paths, identity)
     target = build_agent_toolkit_worker_target(
         storage.execution.execution_scope,
@@ -370,7 +375,7 @@ def test_selection_checks_effective_shell_permissions(
         runtime_paths=paths,
     )
     # Save scoped settings where the dashboard would.
-    primary_built = primary_owns_tool_settings("shell", runtime_paths=paths)
+    primary_built = primary_owns_tool_settings("shell", builtin_tool_registry(), runtime_paths=paths)
     save_scoped_credentials(
         "shell",
         restriction,
@@ -386,7 +391,7 @@ def test_selection_checks_effective_shell_permissions(
             worker_target=target,
             primary_built_tool=primary_built,
         )
-    set_agent_mode(paths, storage.state_root, "helper", context.session_id, "standard", context.requester_id)
+    set_agent_mode(paths, storage.state_root, "helper", context.session_id, "standard")
     prior_choice = _mode_file(paths, storage.state_root).read_bytes()
     result = mode_commands.handle_mode_command(
         "helper minimal",
@@ -403,19 +408,18 @@ def test_selection_checks_effective_shell_permissions(
         context.config,
         paths,
         identity,
-        session_id=context.session_id,
-        persist_runtime_state=False,
+        knowledge=None,
+        model=turn_model(context.config, paths, "helper"),
+        plugins=config_plugins(context.config, paths),
     )
-    assert isinstance(canonical.tools, list)
     shell_functions = {
-        name
-        for tool in canonical.tools
-        if isinstance(tool, Toolkit) and tool.name == "shell_tools"
-        for name in tool.get_async_functions()
+        function.name
+        for toolkit in canonical.spec.toolkits
+        if toolkit.name == "shell_tools"
+        for function in toolkit.functions
     }
-    required = {"run_shell_command", "check_shell_command", "kill_shell_command"}
-    assert required.issubset(shell_functions) is permitted
-    assert ("uses `minimal`" if permitted else "run, check, and kill") in result
+    assert ("run_shell_command" in shell_functions) is permitted
+    assert ("uses `minimal`" if permitted else "Allow the `run_shell_command` shell function") in result
     assert resolve_agent_mode(paths, storage.state_root, "helper", context.session_id) == (
         "minimal" if permitted else "standard"
     )
@@ -423,7 +427,7 @@ def test_selection_checks_effective_shell_permissions(
         assert _mode_file(paths, storage.state_root).read_bytes() == prior_choice
 
 
-@pytest.mark.parametrize("failure", ["registry_import", "tool_import", "tool_config"])
+@pytest.mark.parametrize("failure", ["tool_import", "tool_config"])
 def test_selection_preserves_choice_on_shell_preparation_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -437,7 +441,7 @@ def test_selection_preserves_choice_on_shell_preparation_failure(
         "helper",
         context.config,
         context.runtime_paths,
-        build_execution_identity_from_runtime_context(context),
+        context.execution_identity,
     )
     set_agent_mode(
         context.runtime_paths,
@@ -445,7 +449,6 @@ def test_selection_preserves_choice_on_shell_preparation_failure(
         "helper",
         context.session_id,
         "standard",
-        context.requester_id,
     )
     saved = _mode_file(context.runtime_paths, storage.state_root).read_bytes()
 
@@ -454,11 +457,7 @@ def test_selection_preserves_choice_on_shell_preparation_failure(
         message = "fake-secret-value-in-private-config"
         raise error(message)
 
-    monkeypatch.setattr(
-        minimal_mode_preflight,
-        "ensure_tool_registry_loaded" if failure == "registry_import" else "get_tool_by_name",
-        unavailable,
-    )
+    monkeypatch.setattr(minimal_mode_preflight, "get_tool_by_name", unavailable)
     result = mode_commands.handle_mode_command(
         "helper minimal",
         config=context.config,
@@ -492,7 +491,7 @@ def test_selection_lists_every_missing_deployment_setting_at_once(tmp_path: Path
         "helper",
         context.config,
         paths,
-        build_execution_identity_from_runtime_context(context),
+        context.execution_identity,
     ).state_root
 
     result = mode_commands.handle_mode_command(
@@ -526,7 +525,7 @@ def test_local_shell_agent_selects_minimal_mode_without_setup(tmp_path: Path, ap
         "helper",
         context.config,
         context.runtime_paths,
-        build_execution_identity_from_runtime_context(context),
+        context.execution_identity,
     ).state_root
 
     result = mode_commands.handle_mode_command(
@@ -545,6 +544,38 @@ def test_local_shell_agent_selects_minimal_mode_without_setup(tmp_path: Path, ap
     assert resolve_agent_mode(context.runtime_paths, root, "helper", context.session_id) == (
         "minimal" if api_running else "standard"
     )
+
+
+def test_a_shell_a_preset_brings_in_selects_minimal_mode(tmp_path: Path) -> None:
+    """The shell `openclaw_compat` brings in is the agent's shell, for `!mode` and for minimal subagents alike."""
+    context = _runtime_context(tmp_path)
+    context.config.administrators = [context.requester_id]
+    context.config.agents["helper"] = AgentConfig(
+        display_name="Helper",
+        tools=["openclaw_compat"],
+        memory_backend="file",
+    )
+    identity = context.execution_identity
+    root = resolve_agent_storage("helper", context.config, context.runtime_paths, identity).state_root
+
+    result = mode_commands.handle_mode_command(
+        "helper minimal",
+        config=context.config,
+        runtime_paths=context.runtime_paths,
+        target=context.target,
+        requester_id=context.requester_id,
+        membership_index=context.agent_reply_memberships,
+    )
+
+    assert "uses `minimal`" in result, result
+    assert resolve_agent_mode(context.runtime_paths, root, "helper", context.session_id) == "minimal"
+    candidates = minimal_mode_preflight.minimal_subagent_candidates(
+        context.config,
+        context.runtime_paths,
+        ["helper"],
+        identity,
+    )
+    assert candidates == ["helper"]
 
 
 def test_docker_worker_callback_url_is_derived_from_the_running_api(tmp_path: Path) -> None:
@@ -568,3 +599,104 @@ def test_docker_worker_callback_url_is_derived_from_the_running_api(tmp_path: Pa
     shell_env = agent_cli_shell_env(context.config, paths, "helper", "grant")
     assert shell_env.api_url == "http://host.docker.internal:8765"
     assert shell_env.bin_dir is None
+
+
+def _thread_mode_command_through(
+    state: RoomState,
+    steward_client: AsyncMock | None,
+) -> tuple[AsyncMock, Coroutine[Any, Any, str]]:
+    """Return a power-0 agent's client and its `!thread_mode room`, written through the given steward's client."""
+    config, paths, _ids, _events, client = state
+    answering = AsyncMock(spec=nio.AsyncClient)
+    answering.user_id = "@mindroom_agent1:localhost"
+    answering.rooms = client.rooms
+    for read in ("room_get_state_event", "room_get_state", "joined_members"):
+        setattr(answering, read, getattr(client, read))
+    steward = None if steward_client is None else SimpleNamespace(client=steward_client)
+    runtime = cast("OrchestratorRuntime", SimpleNamespace(room_steward=lambda _room_id: steward))
+    return answering, handle_thread_mode_command(
+        "room",
+        client=answering,
+        config=config,
+        runtime_paths=paths,
+        room_id=THREAD_MODE_ROOM_ID,
+        requester_user_id="@admin:localhost",
+        sender_user_id="@admin:localhost",
+        put_state=partial(room_state_response_as_steward, runtime.room_steward),
+    )
+
+
+@pytest.mark.asyncio
+async def test_thread_mode_written_by_steward(room_state: RoomState) -> None:
+    """A power-0 agent answers `!thread_mode`, and the room's powered steward writes the state clients read."""
+    answering, command = _thread_mode_command_through(room_state, room_state[4])
+
+    assert (await command).startswith("✅ This room now uses `room` thread mode")
+    assert room_state[3]["io.mindroom.room_settings", "thread_mode"] == {"value": "room"}
+    assert room_state[3]["io.mindroom.thread_mode", ""] == {"mode": "room"}
+    answering.room_put_state.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("steward", ["power_0", "none"])
+async def test_thread_mode_without_power_says_moderator_rights(room_state: RoomState, steward: str) -> None:
+    """Where no MindRoom account may write the room's state, the answering agent asks for moderator rights."""
+    refusing = AsyncMock(spec=nio.AsyncClient)
+    refusing.room_put_state.return_value = nio.RoomPutStateError("forbidden", "M_FORBIDDEN")
+    _answering, command = _thread_mode_command_through(room_state, refusing if steward == "power_0" else None)
+
+    assert await command == "I need moderator rights in this room to change the thread mode."
+    # Nothing changed: agents keep the mode the room's clients show.
+    assert resolve_room_setting(THREAD_MODE, room_state[1], THREAD_MODE_ROOM_ID) is None
+    assert ("io.mindroom.thread_mode", "") not in room_state[3]
+
+
+@pytest.mark.asyncio
+async def test_thread_mode_failure_that_is_no_refusal_asks_to_retry(room_state: RoomState) -> None:
+    """A setting write that fails for another reason than power changes nothing and asks for no moderator rights."""
+    failing = AsyncMock(spec=nio.AsyncClient)
+    failing.room_put_state.return_value = nio.RoomPutStateError("server error", "M_UNKNOWN")
+    _answering, command = _thread_mode_command_through(room_state, failing)
+
+    assert await command == "❌ The room did not take the change. Run the command again to retry."
+    assert resolve_room_setting(THREAD_MODE, room_state[1], THREAD_MODE_ROOM_ID) is None
+    assert ("io.mindroom.thread_mode", "") not in room_state[3]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status_code", "advice"),
+    [
+        ("M_UNKNOWN", "Run the command again to retry."),
+        ("M_FORBIDDEN", "I need moderator rights in this room to show clients this room's thread mode."),
+    ],
+)
+async def test_a_thread_mode_the_room_took_stays_set_when_it_cannot_be_published(
+    room_state: RoomState,
+    status_code: str,
+    advice: str,
+) -> None:
+    """The room's setting is what agents follow, so a failed publication of the mode clients show undoes nothing.
+
+    A publication that failed for now is left to the room's steward to retry; one the room refuses is not.
+    """
+    retry = Mock()
+    on_thread_mode_change(room_state[1], retry)
+    steward = AsyncMock(spec=nio.AsyncClient)
+    write = room_state[4].room_put_state.side_effect
+
+    async def settings_only(room_id: str, event_type: str, content: dict[str, Any], state_key: str = "") -> object:
+        if event_type == "io.mindroom.thread_mode":
+            return nio.RoomPutStateError("refused", status_code)
+        return await write(room_id, event_type, content, state_key)
+
+    steward.room_put_state.side_effect = settings_only
+    _answering, command = _thread_mode_command_through(room_state, steward)
+
+    reply = await command
+
+    assert reply.startswith("⚠️ This room now uses `room` thread mode")
+    assert reply.endswith(advice)
+    assert resolve_room_setting(THREAD_MODE, room_state[1], THREAD_MODE_ROOM_ID) == "room"
+    assert ("io.mindroom.thread_mode", "") not in room_state[3]
+    assert retry.call_args_list == ([call(THREAD_MODE_ROOM_ID)] if status_code == "M_UNKNOWN" else [])

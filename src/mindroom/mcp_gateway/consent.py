@@ -5,6 +5,9 @@ from __future__ import annotations
 from html import escape
 from urllib.parse import urlsplit
 
+_HEAD = """<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Connect to MindRoom</title>
+<style>body{font:16px system-ui;background:#f7f8fa;color:#17212b;margin:0;padding:8vh 24px}main{max-width:560px;margin:auto;padding:32px;background:white;border-radius:16px;box-shadow:0 4px 24px #0001}button{font:inherit;padding:10px 20px;margin:12px 12px 0 0;cursor:pointer}p{line-height:1.6}small{overflow-wrap:anywhere}</style></head>"""
+
 
 def render_consent_page(
     *,
@@ -18,10 +21,15 @@ def render_consent_page(
     agents = ", ".join(escape(name) for name in agent_names) or "None selected"
     callback = urlsplit(redirect_uri)
     callback_origin = f"{callback.scheme}://{callback.netloc}"
-    return f"""<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Connect to MindRoom</title>
-<style>body{{font:16px system-ui;background:#f7f8fa;color:#17212b;margin:0;padding:8vh 24px}}main{{max-width:560px;margin:auto;padding:32px;background:white;border-radius:16px;box-shadow:0 4px 24px #0001}}button{{font:inherit;padding:10px 20px;margin:12px 12px 0 0;cursor:pointer}}p{{line-height:1.6}}small{{overflow-wrap:anywhere}}</style></head>
+    return f"""{_HEAD}
 <body><main><h1>Connect to MindRoom</h1><p><strong>{escape(client_name)}</strong> wants to use your chosen agents in Connections.</p><p>Currently selected: <strong>{agents}</strong>.</p>
 <p>This client can discover and run compatible tools from your selected agents, using their configured connections. Some tools can create or change data. Changes to your selection in Connections apply to every connected MCP client, including this one.</p>
 <p><small>Client callback: {escape(callback_origin)}</small></p><form method="post" action="/connections/mcp/authorize">
 <input type="hidden" name="state" value="{escape(state, quote=True)}"><input type="hidden" name="csrf_token" value="{escape(csrf_token, quote=True)}">
 <button name="decision" value="allow" type="submit">Allow access</button><button name="decision" value="deny" type="submit">Cancel</button></form></main></body></html>"""
+
+
+def render_consent_error_page(message: str) -> str:
+    """Render why consent cannot continue, as escaped HTML for the person's browser."""
+    return f"""{_HEAD}
+<body><main><h1>Connect to MindRoom</h1><p>{escape(message)}</p></main></body></html>"""

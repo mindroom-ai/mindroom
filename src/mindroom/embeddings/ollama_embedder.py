@@ -1,0 +1,81 @@
+"""Embedder for a local or remote Ollama server.
+
+Imported only when the ollama provider is configured, so the ollama SDK stays out of every other import.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+
+from ollama import AsyncClient, Client
+
+from mindroom.embeddings.errors import EMBEDDER_EMPTY_VECTOR_DETAIL, EmbedderRequestError, embedder_request_error
+from mindroom.providers.ollama.errors import provider_error
+from mindroom.providers.ollama.settings import ollama_client_options
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from ollama import EmbedResponse
+
+    from mindroom.embeddings.base import EmbeddingPurpose
+
+_PROVIDER = "ollama"
+
+
+def _vector(response: EmbedResponse) -> list[float]:
+    """Return the single vector of a one-text response, whatever width the model produces."""
+    if not response.embeddings or not response.embeddings[0]:
+        raise EmbedderRequestError(EMBEDDER_EMPTY_VECTOR_DETAIL)
+    return [float(value) for value in response.embeddings[0]]
+
+
+@dataclass
+class OllamaEmbedder:
+    """Embed one text per ``/api/embed`` request; Ollama models embed queries and documents alike."""
+
+    model: str
+    host: str
+    api_key: str | None = field(default=None, repr=False)
+    client: Client | None = field(default=None, repr=False)
+    async_client: AsyncClient | None = field(default=None, repr=False)
+
+    @property
+    def sends_batches(self) -> bool:
+        """Return false: each request carries one text."""
+        return False
+
+    def _sync_client(self) -> Client:
+        if self.client is None:
+            self.client = Client(**ollama_client_options(self.host, self.api_key))
+        return self.client
+
+    def _async_client(self) -> AsyncClient:
+        if self.async_client is None:
+            self.async_client = AsyncClient(**ollama_client_options(self.host, self.api_key))
+        return self.async_client
+
+    def embed(self, texts: Sequence[str], *, purpose: EmbeddingPurpose) -> list[list[float]]:
+        """Return one vector per text; raise a classified error on failure."""
+        del purpose
+        vectors: list[list[float]] = []
+        for text in texts:
+            try:
+                response = self._sync_client().embed(model=self.model, input=text)
+            except Exception as exc:
+                raise embedder_request_error(exc, provider_error(exc, provider=_PROVIDER)) from exc
+            vectors.append(_vector(response))
+        return vectors
+
+    async def aembed(self, texts: Sequence[str], *, purpose: EmbeddingPurpose) -> list[list[float]]:
+        """Return one vector per text asynchronously; raise a classified error on failure."""
+        del purpose
+        vectors: list[list[float]] = []
+        for text in texts:
+            try:
+                response = await self._async_client().embed(model=self.model, input=text)
+            except Exception as exc:
+                raise embedder_request_error(exc, provider_error(exc, provider=_PROVIDER)) from exc
+            vectors.append(_vector(response))
+        return vectors

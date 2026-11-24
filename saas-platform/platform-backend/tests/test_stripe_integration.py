@@ -208,25 +208,3 @@ class TestPricingEndpoints:
         # Check that Stripe IDs are included
         assert data["plans"]["byok"]["stripe_price_id_monthly"] is not None
         assert data["plans"]["pro"]["stripe_price_id_yearly"] is not None
-
-    def test_stripe_price_endpoint(self, client: TestClient) -> None:
-        """Test the Stripe price retrieval endpoint."""
-        response = client.get("/pricing/stripe-price/byok/monthly")
-
-        assert response.status_code == 200
-        data = response.json()
-
-        assert "price_id" in data
-        assert data["price_id"] == get_stripe_price_id("byok", "monthly")
-        assert data["plan"] == "byok"
-        assert data["billing_cycle"] == "monthly"
-
-    def test_stripe_price_endpoint_invalid(self, client: TestClient) -> None:
-        """Test Stripe price endpoint with invalid parameters."""
-        # Invalid plan
-        response = client.get("/pricing/stripe-price/invalid/monthly")
-        assert response.status_code == 404
-
-        # Invalid billing cycle
-        response = client.get("/pricing/stripe-price/byok/weekly")
-        assert response.status_code == 400

@@ -9,8 +9,9 @@ from __future__ import annotations
 import json
 from typing import Any
 
-from agno.tools import Toolkit
 from scholarly import MaxTriesExceededException, scholarly
+
+from mindroom.tool_system.authoring import Toolkit
 
 _RATE_LIMIT_MESSAGE = "Google Scholar is currently blocking automated requests. Try again later."
 
@@ -42,14 +43,10 @@ def _search_publications(query: str, limit: int) -> list[dict[str, Any]]:
 class GoogleScholarTools(Toolkit):
     """Tools for searching academic publications on Google Scholar."""
 
-    def __init__(
-        self,
-        max_results: int = 5,
-        **kwargs: Any,  # noqa: ANN401 - mirrors Agno Toolkit passthrough kwargs.
-    ) -> None:
+    def __init__(self, max_results: int = 5) -> None:
         """Initialize Google Scholar tools."""
         self.max_results = max_results
-        super().__init__(name="google_scholar_tools", tools=[self.search_google_scholar], **kwargs)
+        super().__init__(name="google_scholar_tools", tools=[self.search_google_scholar])
 
     def search_google_scholar(self, query: str, max_results: int | None = None) -> str:
         """Search Google Scholar for academic publications.

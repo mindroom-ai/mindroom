@@ -15,11 +15,13 @@ import nio
 import pytest
 
 from mindroom import agents
-from mindroom.api import config_lifecycle, mcp_selection
+from mindroom.api import config_lifecycle
 from mindroom.api.connection_agents import SHARED_CREDENTIALS_GATEWAY_MESSAGE
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig
-from tests.access_schema_support import membership_index
+from mindroom.config.plugin import PluginEntryConfig
+from mindroom.config.tool_aliases import TOOL_ALIASES
+from tests.access_schema_support import OBSERVER_USER_ID, membership_index
 from tests.api.test_mcp_clients import _connect
 from tests.api.test_mcp_gateway_api import (
     MCP_HEADERS,
@@ -31,9 +33,11 @@ from tests.api.test_mcp_gateway_api import (
     signed_headers,  # noqa: F401
 )
 from tests.conftest import bind_runtime_paths
+from tests.runtime_fakes import bind_test_embedded_runtime
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from pathlib import Path
 
     from fastapi.testclient import TestClient
 
@@ -64,7 +68,7 @@ def test_room_membership_grants_require_room_independent_access(
         ),
     )
     memberships = asyncio.run(membership_index(config, {"project": {"@alice:example.org"}}))
-    config_lifecycle.app_state(gateway_client.app).agent_reply_memberships = memberships
+    bind_test_embedded_runtime(gateway_client.app, agent_reply_memberships=memberships)
     alice = signed_headers("alice")
     token = _connect(gateway_client, alice)["access_token"]
     response = gateway_client.post(SELECTION, headers={**alice, "Origin": ORIGIN}, json={"agents": {"shared": None}})
@@ -85,7 +89,13 @@ def test_room_membership_grants_require_room_independent_access(
     )
     assert not result["isError"]
     assert json.loads(result["structuredContent"]["result"])["result"] == 3
-    memberships.mark_room_unready(config, snapshot.runtime_paths, "!project:example.com", reason="membership_unknown")
+    memberships.mark_room_unready(
+        config,
+        snapshot.runtime_paths,
+        "!project:example.com",
+        observer_user_id=OBSERVER_USER_ID,
+        reason="membership_unknown",
+    )
     assert gateway_client.get(SELECTION, headers=alice).json()["agents"] == {}
     assert _call(gateway_client, token, "search_tools", {})["structuredContent"] == {"results": []}
     assert _call(
@@ -113,14 +123,14 @@ def test_membership_revocation_during_preparation_stops_tool_body(
     snapshot.runtime_config = config
     config.agents["personal"].access = ResponderAccessConfig(members_of_rooms=["project"])
     memberships = asyncio.run(membership_index(config, {"project": {"@alice:example.org"}}))
-    config_lifecycle.app_state(gateway_client.app).agent_reply_memberships = memberships
+    bind_test_embedded_runtime(gateway_client.app, agent_reply_memberships=memberships)
     token = _connect(gateway_client, signed_headers("alice"))["access_token"]
     paused, release = threading.Event(), threading.Event()
     events: list[str] = []
     monkeypatch.setattr(
         agents,
         "build_agent_toolkit",
-        _native_dispatch_builder("hook", async_body, paused, release, events),
+        _native_dispatch_builder(monkeypatch, "hook", async_body, paused, release, events),
     )
     with ThreadPoolExecutor(max_workers=1) as executor:
         pending = executor.submit(
@@ -150,10 +160,9 @@ def test_membership_revocation_during_preparation_stops_tool_body(
             assert isinstance(event, nio.RoomMemberEvent)
             memberships.apply_member_event(
                 config,
-                snapshot.runtime_paths,
                 "!project:example.com",
                 event,
-                control_user_id="@router:example.org",
+                control_user_id=OBSERVER_USER_ID,
             )
         finally:
             release.set()
@@ -201,22 +210,54 @@ def test_removed_tools_cannot_block_access_withdrawal(
     assert response.json()["agents"] == {}
 
 
-def test_withdrawal_does_not_require_plugin_metadata(
+def test_withdrawal_works_while_a_configured_plugin_does_not_load(
+    gateway_client: TestClient,
+    signed_headers: Callable[[str], dict[str, str]],
+    tmp_path: Path,
+) -> None:
+    """A broken plugin cannot prevent withdrawing all tool access."""
+    plugin_root = tmp_path / "broken-plugin"
+    plugin_root.mkdir()
+    (plugin_root / "mindroom.plugin.json").write_text(
+        json.dumps({"name": "broken-plugin", "tools_module": "tools.py", "skills": []}),
+        encoding="utf-8",
+    )
+    (plugin_root / "tools.py").write_text("raise RuntimeError('broken plugin')\n", encoding="utf-8")
+    config = config_lifecycle.require_api_state(gateway_client.app).snapshot.runtime_config
+    config.plugins = [PluginEntryConfig(path=str(plugin_root))]
+    alice = signed_headers("alice")
+    assert gateway_client.get(SELECTION, headers=alice).status_code == 200
+
+    response = gateway_client.post(SELECTION, headers={**alice, "Origin": ORIGIN}, json={"agents": {}})
+
+    assert response.status_code == 200, response.text
+    assert response.json()["agents"] == {}
+
+
+def test_a_new_selection_takes_a_toolkits_other_name_and_a_saved_one_stays_as_saved(
     gateway_client: TestClient,
     signed_headers: Callable[[str], dict[str, str]],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A broken plugin cannot prevent withdrawing all tool access."""
-    alice = signed_headers("alice")
-    assert gateway_client.get(SELECTION, headers=alice).status_code == 200
+    """A newly chosen file or coding selects filesystem; a name saved before it became an alias is never revived."""
+    config = config_lifecycle.require_api_state(gateway_client.app).snapshot.runtime_config
+    headers = {**signed_headers("alice"), "Origin": ORIGIN}
 
-    def unavailable(*_args: object, **_kwargs: object) -> None:
-        pytest.fail("Withdrawing access must not load plugins")
+    def select(*tools: str) -> object:
+        response = gateway_client.post(SELECTION, headers=headers, json={"agents": {"personal": list(tools)}})
+        assert response.status_code == 200, response.text
+        return response.json()["agents"]
 
-    monkeypatch.setattr(mcp_selection, "resolved_tool_metadata_for_runtime", unavailable)
-    response = gateway_client.post(SELECTION, headers={**alice, "Origin": ORIGIN}, json={"agents": {}})
-    assert response.status_code == 200, response.text
-    assert response.json()["agents"] == {}
+    config.agents["personal"].tools = ["calculator", "filesystem"]
+    assert select("coding", "calculator") == {"personal": ["filesystem", "calculator"]}
+
+    config.agents["personal"].tools = ["calculator", "duckduckgo"]
+    assert select("duckduckgo") == {"personal": ["duckduckgo"]}
+    config.agents["personal"].tools = ["calculator"]
+    monkeypatch.setitem(TOOL_ALIASES, "duckduckgo", "calculator")
+    assert gateway_client.get(SELECTION, headers=headers).json()["agents"] == {}
+    assert select("duckduckgo") == {}
+    assert select("duckduckgo") == {"personal": ["calculator"]}
 
 
 def test_tool_selection_filters_discovery_and_blocks_unselected_dispatch(
@@ -428,7 +469,7 @@ def test_removing_the_opt_in_during_preparation_stops_the_tool_body(
     assert gateway_client.post(SELECTION, headers={**alice, "Origin": ORIGIN}, json=choices).status_code == 200
     paused, release = threading.Event(), threading.Event()
     events: list[str] = []
-    build = _native_dispatch_builder("hook", False, paused, release, events, agent="shared")
+    build = _native_dispatch_builder(monkeypatch, "hook", False, paused, release, events, agent="shared")
     monkeypatch.setattr(agents, "build_agent_toolkit", build)
     with ThreadPoolExecutor(max_workers=1) as executor:
         pending = executor.submit(
@@ -473,6 +514,7 @@ def test_per_user_scoped_shared_agent_needs_no_gateway_opt_in(
         {"agents": "personal"},
         {"agents": {"personal": ["unknown"]}},
         {"agents": {"personal": ["matrix_message"]}},
+        {"agents": {"personal": ["claude_agent"]}},
         {"agents": {"personal": "calculator"}},
         {"agents": {"personal": [False]}},
         {"agents": {1: None}},
@@ -486,6 +528,8 @@ def test_selection_rejects_invalid_or_unauthorized_names(
     body: object,
 ) -> None:
     """Browser input can narrow current authority but cannot invent agent access or owner IDs."""
+    config = config_lifecycle.require_api_state(gateway_client.app).snapshot.runtime_config
+    config.agents["personal"].tools = ["calculator", "matrix_message", "claude_agent"]
     assert (
         gateway_client.post(
             SELECTION,
@@ -601,7 +645,7 @@ def test_deselection_during_preparation_stops_provider_body(
     monkeypatch.setattr(
         agents,
         "build_agent_toolkit",
-        _native_dispatch_builder(phase, async_body, paused, release, events),
+        _native_dispatch_builder(monkeypatch, phase, async_body, paused, release, events),
     )
     with ThreadPoolExecutor(max_workers=1) as executor:
         pending = executor.submit(

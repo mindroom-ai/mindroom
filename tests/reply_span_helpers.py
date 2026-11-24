@@ -6,42 +6,45 @@ import time
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock
 from uuid import uuid4
 
 from mindroom import reply_lifecycle as rl
 from mindroom.event_journal import ApprovalContinuation, DeliveryStage, EventClass, EventKind, InboundEvent, replies
 from mindroom.event_journal.replies import PreparedReplyRow, ReplyRowRequest
+from mindroom.final_delivery import Failed
 from mindroom.reply_presentation import AGENT_PLACEHOLDER, Presentation, Segment, encode_presentation
 from mindroom.reply_scope import ReplyRuntime, SpanHandle, initial_write
 from mindroom.response_sources import ResponseSources
 from tests.approval_continuation_helpers import approval_continuation, claim_continuation, continuation_claim
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable
+    from collections.abc import AsyncIterator
     from contextlib import AbstractAsyncContextManager
 
     from mindroom.delivery_gateway import DeliveryGateway, FinalDeliveryRequest
     from mindroom.event_journal import PrincipalStore
     from mindroom.final_delivery import FinalDeliveryOutcome
-    from mindroom.response_runner import ResponseRequest, ResponseRunner
-    from mindroom.turn_record import TurnRecord
+    from mindroom.message_target import MessageTarget
+    from mindroom.reply_turn.request import ResponseRequest
+    from mindroom.response_runner import ResponseRunner
+
+
+async def no_reply_jobs(_reply_id: str) -> None:
+    """End no jobs on a reply's Stop, for a bot instance whose replies start none."""
 
 
 def _runtime(
     principal: PrincipalStore,
     *,
     entity_name: str = "agent",
-    complete_turn: Callable[[TurnRecord], Awaitable[object]] | None = None,
 ) -> ReplyRuntime:
     return ReplyRuntime(
         store=principal,
         entity_name=entity_name,
         generation="gen-test",
         retry_sources=lambda _room_id, _sources: None,
-        complete_turn=complete_turn or AsyncMock(),
-        hold_conversation=lambda _continuation: None,
         approval_ended=lambda _ended: None,
+        reply_stopped=no_reply_jobs,
     )
 
 
@@ -114,25 +117,22 @@ async def reply_span(
     if runtime is None:
         runtime = _runtime(principal, entity_name=entity_name)
     await runtime.take_ownership()
+    sources = ResponseSources(
+        pending_event_ids=(source_event_id,),
+        logical_source_event_ids=logical_source_event_ids or (source_event_id,),
+    )
     if regenerated_event_id is not None and await principal.replies.for_event(regenerated_event_id) is None:
         await seed_finished_reply(
             principal,
             regenerated_event_id,
-            sources=ResponseSources(
-                pending_event_ids=(source_event_id,),
-                logical_source_event_ids=logical_source_event_ids or (source_event_id,),
-            ),
+            sources=sources,
             room_id=room_id,
             thread_id=thread_id,
             entity_name=entity_name,
         )
     async with runtime.span_scope() as slot:
         handle = await runtime.claim(
-            delivery_id=source_event_id,
-            sources=ResponseSources(
-                pending_event_ids=(source_event_id,),
-                logical_source_event_ids=logical_source_event_ids or (source_event_id,),
-            ),
+            sources=sources,
             room_id=room_id,
             thread_id=thread_id,
             placeholder=placeholder,
@@ -175,16 +175,16 @@ async def final_in_span(
     request: FinalDeliveryRequest,
     *,
     regenerates: bool = False,
-    complete_turn: Callable[[TurnRecord], Awaitable[object]] | None = None,
+    end_failed_span: bool = False,
 ) -> FinalDeliveryOutcome:
     """Deliver one final answer from inside the reply span its request names, as a locked response turn does.
 
     A regeneration regenerates the answer the request names; any other
     request with an existing event shows that event as its placeholder.
-    ``complete_turn`` sees each turn the reply records answered, as the bot's
-    gateway runs its reply runtime's effects.
+    With ``end_failed_span``, a failure that leaves its span running ends it
+    as the locked turn's exit does, and the noted outcome is returned.
     """
-    runtime = _runtime(principal, complete_turn=complete_turn)
+    runtime = _runtime(principal)
     gateway = replace(gateway, deps=replace(gateway.deps, reply_effects=runtime.run_effects))
     sources = request.identity.sources
     regenerated = request.existing_event_id if regenerates else None
@@ -197,16 +197,41 @@ async def final_in_span(
         placeholder_event_id=None if regenerated is not None else request.existing_event_id,
         regenerated_event_id=regenerated,
         runtime=runtime,
-    ):
-        return await gateway.deliver_final(request)
+    ) as handle:
+        outcome = await gateway.deliver_final(request)
+        return await end_span_as_locked_turn(gateway, handle, request.target, outcome) if end_failed_span else outcome
+
+
+async def end_span_as_locked_turn(
+    gateway: DeliveryGateway,
+    handle: SpanHandle,
+    target: MessageTarget,
+    outcome: FinalDeliveryOutcome,
+) -> FinalDeliveryOutcome:
+    """End a span a failed outcome left running, as the locked turn's exit does; return the noted outcome."""
+    if handle.exited or not isinstance(outcome.ending, Failed):
+        return outcome
+    noted = await gateway.end_interrupted_span(
+        handle,
+        target,
+        ending=outcome.ending,
+        delivery_started=True,
+        contact_turn=False,
+    )
+    return outcome if noted is None else noted
 
 
 async def final_in_resume_span(
     gateway: DeliveryGateway,
     principal: PrincipalStore,
     request: FinalDeliveryRequest,
+    *,
+    end_failed_span: bool = False,
 ) -> FinalDeliveryOutcome:
-    """Deliver one final answer as an approved run's resume, below the pause its request's event shows."""
+    """Deliver one final answer as an approved run's resume, below the pause its request's event shows.
+
+    With ``end_failed_span``, a failure that leaves the resume running ends it as the locked turn's exit does.
+    """
     runtime = _runtime(principal)
     gateway = replace(gateway, deps=replace(gateway.deps, reply_effects=runtime.run_effects))
     source = request.identity.response_envelope.source_event_id
@@ -244,7 +269,8 @@ async def final_in_resume_span(
         assert claimed is not None
         assert handle is not None
         slot.handle = handle
-        return await gateway.deliver_final(request)
+        outcome = await gateway.deliver_final(request)
+        return await end_span_as_locked_turn(gateway, handle, request.target, outcome) if end_failed_span else outcome
 
 
 def response_span(
@@ -338,7 +364,7 @@ async def pause_shown_reply(
         show_tool_calls=continuation.show_tool_calls,
     )
     stage = rl.WriteStage.EDIT if text else None
-    enqueued = await principal.pause_for_approval(
+    enqueued = await principal.approvals.pause_for_approval(
         continuation,
         ReplyRowRequest(
             reply_id=span.reply_id,
@@ -367,7 +393,7 @@ async def pause_shown_reply(
             event_id=f"{continuation.response_event_id}:paused",
             delivered_projections=(),
         )
-    return await principal.approval_continuation(continuation.approval_id)
+    return await principal.approvals.approval_continuation(continuation.approval_id)
 
 
 async def paused_for_approval(
@@ -379,7 +405,7 @@ async def paused_for_approval(
     """Pause a reply for ``continuation`` the way a response does, and return the continuation the pause created.
 
     ``None`` means the pause could not take the sources, as
-    ``PrincipalStore.pause_for_approval`` reports it. A claimed continuation
+    ``ApprovalStore.pause_for_approval`` reports it. A claimed continuation
     is paused ready and then claimed by its ``runtime_generation``'s resume.
     ``text`` is the partial answer the paused reply keeps.
     """

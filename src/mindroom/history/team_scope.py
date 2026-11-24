@@ -11,18 +11,7 @@ if TYPE_CHECKING:
     from mindroom.config.agent import AgentConfig
 
 
-def _requester_scoped_team_scope_id(scope_id: str, requester_user_id: str) -> str:
-    """Return a requester-partitioned variant of one team history scope id."""
-    requester_digest = hashlib.sha256(requester_user_id.encode("utf-8")).hexdigest()[:12]
-    return f"{scope_id}_requester_{requester_digest}"
-
-
-def _ad_hoc_team_member_names(member_names: Iterable[str | None]) -> tuple[str, ...]:
-    """Return stable team-scope member names from candidate agent names."""
-    return tuple(sorted(name for name in member_names if name))
-
-
-def ad_hoc_team_has_private_member(
+def _ad_hoc_team_has_private_member(
     member_names: Iterable[str],
     agent_configs: Mapping[str, AgentConfig],
 ) -> bool:
@@ -37,17 +26,17 @@ def ad_hoc_team_scope_id(
     member_names: Iterable[str | None],
     agent_configs: Mapping[str, AgentConfig],
     *,
-    requester_user_id: str | None = None,
-    missing_requester_message: str = "Private ad hoc team history scope requires requester identity",
+    requester_user_id: str | None,
 ) -> str | None:
-    """Return the stable history scope id for one exact ad hoc team."""
-    stable_member_names = _ad_hoc_team_member_names(member_names)
+    """Return the stable history scope id for one exact ad hoc team, partitioned by requester when a member is private."""
+    stable_member_names = tuple(sorted(name for name in member_names if name))
     if not stable_member_names:
         return None
 
     scope_id = f"team_{'+'.join(stable_member_names)}"
-    if not ad_hoc_team_has_private_member(stable_member_names, agent_configs):
+    if not _ad_hoc_team_has_private_member(stable_member_names, agent_configs):
         return scope_id
     if not requester_user_id:
-        raise ValueError(missing_requester_message)
-    return _requester_scoped_team_scope_id(scope_id, requester_user_id)
+        msg = "Private ad hoc team history scope requires requester identity"
+        raise ValueError(msg)
+    return f"{scope_id}_requester_{hashlib.sha256(requester_user_id.encode('utf-8')).hexdigest()[:12]}"

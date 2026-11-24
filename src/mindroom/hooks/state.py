@@ -77,17 +77,23 @@ def build_hook_room_state_putter(
 
 
 def chain_hook_room_state_queriers(
-    primary: HookRoomStateQuerier | None,
-    fallback: HookRoomStateQuerier | None,
-) -> HookRoomStateQuerier | None:
-    """Return a room-state querier that falls back on Matrix error responses."""
-    if primary is None:
-        return fallback
-    if fallback is None:
-        return primary
+    client: nio.AsyncClient,
+    fallback: HookRoomStateQuerier,
+) -> HookRoomStateQuerier:
+    """Query *client* first; fall back unless *client* is joined and got ``M_NOT_FOUND``."""
 
     async def _query(room_id: str, event_type: str, state_key: str | None) -> dict[str, Any] | None:
-        result = await primary(room_id, event_type, state_key)
+        import nio  # noqa: PLC0415
+
+        if state_key is not None:
+            resp = await client.room_get_state_event(room_id, event_type, state_key)
+            if not isinstance(resp, nio.RoomGetStateEventError):
+                return resp.content
+            if resp.status_code == "M_NOT_FOUND" and room_id in client.rooms:
+                return None
+            return await fallback(room_id, event_type, state_key)
+
+        result = await _query_hook_room_state(client, room_id, event_type, None)
         if result is not None:
             return result
         return await fallback(room_id, event_type, state_key)
@@ -97,13 +103,11 @@ def chain_hook_room_state_queriers(
 
 def chain_hook_room_state_putters(
     primary: HookRoomStatePutter | None,
-    fallback: HookRoomStatePutter | None,
-) -> HookRoomStatePutter | None:
+    fallback: HookRoomStatePutter,
+) -> HookRoomStatePutter:
     """Return a room-state putter that falls back on Matrix error responses."""
     if primary is None:
         return fallback
-    if fallback is None:
-        return primary
 
     async def _put(room_id: str, event_type: str, state_key: str, content: dict[str, Any]) -> bool:
         if await primary(room_id, event_type, state_key, content):

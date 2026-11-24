@@ -34,6 +34,8 @@ from backend.routes import (
     webhooks,
 )
 from fastapi import FastAPI, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from slowapi import _rate_limit_exceeded_handler
@@ -186,6 +188,19 @@ async def _logged_rate_limit_exceeded(request: Request, exc: RateLimitExceeded) 
 
 
 app.add_exception_handler(RateLimitExceeded, _logged_rate_limit_exceeded)
+
+
+async def _validation_error_response(_request: Request, exc: RequestValidationError) -> StarletteResponse:
+    """Return FastAPI's 422 body with each error's ``input`` left out.
+
+    The default body repeats each rejected value, which echoes request bodies back
+    and cannot be rendered when the value is a non-finite number such as ``NaN``.
+    """
+    errors = [{key: value for key, value in error.items() if key != "input"} for error in exc.errors()]
+    return JSONResponse(status_code=422, content={"detail": jsonable_encoder(errors)})
+
+
+app.add_exception_handler(RequestValidationError, _validation_error_response)
 
 
 def _service_allowed_hosts(*, environment: str) -> list[str]:

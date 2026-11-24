@@ -24,26 +24,18 @@ from mindroom.reply_lifecycle import (
     Transition,
 )
 
-from . import approval_continuations, journal, outbox, reply_messages, reply_spans, turn_records
+from . import approval_continuations, journal, outbox, reply_messages, reply_spans, turn_rows
+from .identity import agent_of_principal
 from .membership_state import claim_membership_epoch
-from .projection import is_tombstoned
+from .principal_rows import PrincipalRows
 
 logger = get_logger(__name__)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
-    from mindroom.turn_record import TurnRecord
-
-    from .backend import Backend, Transaction
+    from .backend import Transaction
     from .models import MatrixDelivery
-
-
-@dataclass(frozen=True, slots=True)
-class TurnCompleted:
-    """After commit: the turn ledger learns a turn a reply's settlement recorded answered."""
-
-    record: TurnRecord
 
 
 @dataclass(frozen=True, slots=True)
@@ -57,16 +49,22 @@ class WakeApproval:
 class ApprovalEnded:
     """After commit: the approval that held this reply ended.
 
-    The claims that waited for it retry, the reply's debt is due, and its
-    conversation stops waiting for it.
+    The claims that waited for it retry and the reply's debt is due; the
+    conversation it held learns of its end from the approval signals.
     """
 
-    approval_id: str
+    reply_id: str
+
+
+@dataclass(frozen=True, slots=True)
+class ReplyStopped:
+    """After commit: a Stop reached this reply, so the jobs its calls started stop waiting for approval."""
+
     reply_id: str
 
 
 # Effects the caller runs after the transaction commits.
-type PostCommitEffect = CancelSpan | WakeApproval | ApprovalEnded | TurnCompleted
+type PostCommitEffect = CancelSpan | WakeApproval | ApprovalEnded | ReplyStopped
 
 
 type Decide = Callable[[Reply, Span], Transition]
@@ -138,25 +136,16 @@ def _run(
             span = _span_for(transaction, principal_id, transition, span_id)
             reply = transition.reply
             assert reply is not None, "a settlement belongs to a reply's transition"
+            journal.settle_many(transaction, principal_id, span.sources.pending_event_ids)
             # Nothing answers a turn whose every message the user deleted, whichever rule settles it.
-            if not answered or all(
-                is_tombstoned(transaction, principal_id, reply.room_id, source)
-                for source in span.sources.logical_source_event_ids
+            logical = span.sources.logical_source_event_ids
+            if answered and not set(logical).issubset(
+                turn_rows.deleted_events(transaction, reply.entity_name, reply.room_id, logical),
             ):
-                journal.settle_many(transaction, principal_id, span.sources.pending_event_ids)
-                return
-            completed = turn_records.settle_turn(
-                transaction,
-                principal_id,
-                reply.entity_name,
-                pending=span.sources.pending_event_ids,
-                logical=span.sources.logical_source_event_ids,
-            )
-            if completed is not None:
-                # The ledger's write ordering and cache learn it after the commit.
-                post_commit.append(TurnCompleted(completed))
-        case FenceApproval(approval_id=approval_id, disposition=disposition):
-            approval_continuations.fence(transaction, principal_id, approval_id=approval_id, reason=disposition)
+                turn_rows.complete_turn_of(transaction, reply.entity_name, logical)
+        case FenceApproval(approval_id=approval_id, kind=kind, detail=detail):
+            failure = approval_continuations.ApprovalFailure(kind, detail)
+            approval_continuations.fence(transaction, principal_id, approval_id=approval_id, failure=failure)
             post_commit.append(WakeApproval(approval_id))
         case CancelSpan():
             post_commit.append(effect)
@@ -165,7 +154,7 @@ def _run(
             raise NotImplementedError(msg)
 
 
-def retired(transaction: Transaction, principal_id: str, span: Span, *, author_generation: str | None = None) -> bool:
+def retired(transaction: Transaction, principal_id: str, span: Span, *, author_generation: str | None) -> bool:
     """Return whether a write on a running span comes from a bot instance that no longer owns the principal's replies.
 
     Such a span writes nothing more: the instance that took over replays its
@@ -184,6 +173,16 @@ def retired(transaction: Transaction, principal_id: str, span: Span, *, author_g
     return span.kind is not rl.SpanKind.APPROVAL_RESUME and span.bot_generation != active
 
 
+def lock_reply_and_span(transaction: Transaction, principal_id: str, reply_id: str, span_id: str) -> tuple[Reply, Span]:
+    """Lock one reply and read the named span, raising when either does not exist."""
+    reply = reply_messages.lock(transaction, principal_id, reply_id)
+    span = reply_spans.load(transaction, principal_id, span_id)
+    if reply is None or span is None:
+        msg = f"Reply {reply_id} or span {span_id} does not exist"
+        raise RuntimeError(msg)
+    return reply, span
+
+
 def decide_on_span(
     transaction: Transaction,
     principal_id: str,
@@ -197,11 +196,7 @@ def decide_on_span(
 
     ``author_generation`` names the bot instance of the span's own task, when it writes.
     """
-    reply = reply_messages.lock(transaction, principal_id, reply_id)
-    span = reply_spans.load(transaction, principal_id, span_id)
-    if reply is None or span is None:
-        msg = f"Reply {reply_id} or span {span_id} does not exist"
-        raise RuntimeError(msg)
+    reply, span = lock_reply_and_span(transaction, principal_id, reply_id, span_id)
     if retired(transaction, principal_id, span, author_generation=author_generation):
         return AppliedTransition(transition=rl.Transition(outcome=rl.Outcome.STALE, reply=reply), post_commit=())
     return with_ended_span(apply(transaction, principal_id, decide(reply, span)), span)
@@ -245,22 +240,30 @@ def end_replies_of_deleted_source(
 ) -> None:
     """End the replies whose current work lost every logical source to this deletion, settling their sources.
 
-    An answer already written is kept; a reply an approval holds ends too, and
-    its approval is fenced for its settlement. The bot cancels the spans it
-    runs, wakes those approvals, and redacts what the replies showed after the
-    deletion commits, and the turn ledger loads the turns this answered.
+    A source is deleted when it was redacted, or when the human message a
+    router relayed and it answers for was: the redacted event is resolved to
+    the sources it deletes before the replies naming them are looked up. An
+    answer already written is kept; a reply an approval holds ends too, and its
+    approval is fenced for its settlement. The bot cancels the spans it runs,
+    wakes those approvals, and redacts what the replies showed after the
+    deletion commits.
     """
-    for reply_id in reply_messages.naming_logical_source(transaction, principal_id, event_id):
+    agent_name = agent_of_principal(principal_id)
+    deleted = (event_id, *turn_rows.sources_deleted_by(transaction, agent_name, room_id, event_id))
+    reply_ids = dict.fromkeys(
+        reply_id
+        for source_event_id in deleted
+        for reply_id in reply_messages.naming_logical_source(transaction, principal_id, source_event_id)
+    )
+    for reply_id in reply_ids:
         reply = reply_messages.lock(transaction, principal_id, reply_id)
         if reply is None or reply.terminal or reply.room_id != room_id:
             continue
         span = reply_spans.load(transaction, principal_id, reply.current_span_id or reply.last_span_id)
-        if span is None or event_id not in span.sources.logical_source_event_ids:
+        logical = () if span is None else span.sources.logical_source_event_ids
+        if span is None or set(deleted).isdisjoint(logical):
             continue
-        if not all(
-            is_tombstoned(transaction, principal_id, room_id, source)
-            for source in span.sources.logical_source_event_ids
-        ):
+        if not set(logical).issubset(turn_rows.deleted_events(transaction, agent_name, room_id, logical)):
             continue
         transition = rl.sources_deleted(reply, span, now_ns=time.time_ns())
         if transition.applied:
@@ -288,9 +291,6 @@ def approval_finished(
     reply = lock_paused_reply(transaction, principal_id, continuation)
     assert reply is not None, "a continuation's paused reply exists while the continuation does"
     assert continuation.span_id is not None
-    disposition: rl.FailureDisposition | None = None
-    if continuation.state == "failing":
-        disposition = "cancelled_by_user" if continuation.failure_reason == "cancelled_by_user" else "failed"
     return apply(
         transaction,
         principal_id,
@@ -299,7 +299,7 @@ def approval_finished(
             reply_spans.load(transaction, principal_id, reply.last_span_id),
             approval_id=continuation.approval_id,
             paused_span_id=continuation.span_id,
-            disposition=disposition,
+            failure_kind=None if continuation.failure is None else continuation.failure.kind,
             answers_turn=owner_available,
             now_ns=time.time_ns(),
         ),
@@ -377,8 +377,8 @@ def claim(
         active_generation=active_generation,
     )
     if reply is None or request.driving_edit_id is not None:
-        # A new reply, or a regeneration of one, writes in the membership its delivery was admitted in.
-        admitted = journal.admitted_membership_owner(transaction, principal_id, request.delivery_id)
+        # A new reply, or a regeneration of one, writes in the membership the message driving it was admitted in.
+        admitted = journal.admitted_membership_owner(transaction, principal_id, request.sources.pending_event_ids[0])
         if admitted is not None:
             request = replace(request, membership_epoch=admitted[1])
     return apply(transaction, principal_id, rl.claim(request, context))
@@ -419,8 +419,23 @@ def _record_stop(
         return True
     if found.room_id != room_id:
         return False
-    reply = reply_messages.lock(transaction, principal_id, found.reply_id)
-    assert reply is not None
+    stopped = _stop_reply(transaction, principal_id, found.reply_id, receipt_order=receipt_order, now_ns=now_ns)
+    assert stopped is not None
+    return stopped
+
+
+def _stop_reply(
+    transaction: Transaction,
+    principal_id: str,
+    reply_id: str,
+    *,
+    receipt_order: int,
+    now_ns: int,
+) -> AppliedTransition | None:
+    """Record a Stop on one reply, before or after Matrix acknowledged its event; ``None`` when no record of it remains."""
+    reply = reply_messages.lock(transaction, principal_id, reply_id)
+    if reply is None:
+        return None
     span = reply_spans.load(transaction, principal_id, reply.current_span_id or reply.last_span_id)
     return _apply_stop(transaction, principal_id, reply, span, receipt_order=receipt_order, now_ns=now_ns)
 
@@ -434,10 +449,13 @@ def _apply_stop(
     receipt_order: int,
     now_ns: int,
 ) -> AppliedTransition:
-    """Apply a Stop to a reply, cancelling its span when this bot instance runs it."""
+    """Apply a Stop to a reply, cancelling its span when this bot instance runs it and its jobs that await approval."""
     span_live = _runs_here(transaction, principal_id, reply, span)
     facts = rl.StopFacts(receipt_order=receipt_order, span_live=span_live)
-    return apply(transaction, principal_id, rl.stop(reply, span, facts, now_ns=now_ns))
+    applied = apply(transaction, principal_id, rl.stop(reply, span, facts, now_ns=now_ns))
+    if not applied.transition.applied:
+        return applied
+    return replace(applied, post_commit=(ReplyStopped(reply.reply_id), *applied.post_commit))
 
 
 def _runs_here(transaction: Transaction, principal_id: str, reply: Reply, span: Span | None) -> bool:
@@ -472,9 +490,16 @@ def _supersede_replay(
             reply,
             last,
             durable_write_debt=has_unresolved_rows(transaction, principal_id, reply.reply_id),
+            # The superseded sources are pending until this settles them.
+            sources_pending=_sources_pending(transaction, principal_id, last, besides=source_event_ids),
             now_ns=now_ns,
         ),
     )
+
+
+def _sources_pending(transaction: Transaction, principal_id: str, span: Span, *, besides: tuple[str, ...] = ()) -> bool:
+    """Return whether any of the span's sources, other than ``besides``, still waits in the journal for its replay."""
+    return bool(journal.pending_among(transaction, principal_id, span.sources.pending_event_ids).difference(besides))
 
 
 def drop_replays(
@@ -493,13 +518,15 @@ def drop_replays(
         assert reply is not None
         last = reply_spans.load(transaction, principal_id, reply.last_span_id)
         assert last is not None
-        sources_pending = any(
-            journal.is_pending(transaction, principal_id, source) for source in last.sources.pending_event_ids
-        )
         applied = apply(
             transaction,
             principal_id,
-            rl.replay_dropped(reply, last, sources_pending=sources_pending, now_ns=now_ns),
+            rl.replay_dropped(
+                reply,
+                last,
+                sources_pending=_sources_pending(transaction, principal_id, last),
+                now_ns=now_ns,
+            ),
         )
         if applied.transition.applied:
             ended.append(reply_id)
@@ -507,7 +534,8 @@ def drop_replays(
 
 
 def end_entity_replies(transaction: Transaction, ends: Callable[[str], bool], *, now_ns: int) -> int:
-    """End the open replies of entities with no bot any more, without writing to Matrix."""
+    """End the open replies and settle the runtime sources of entities with no bot any more; nothing goes to Matrix."""
+    journal.settle_runtime_sources_of(transaction, ends)
     ended = 0
     for principal_id, found in reply_messages.open_replies(transaction):
         if not ends(found.entity_name):
@@ -541,14 +569,22 @@ def _owner_lost(
         assert last is not None
         facts = rl.OwnerLostFacts(
             active_generation=active_generation,
-            sources_pending=any(
-                journal.is_pending(transaction, principal_id, event_id) for event_id in last.sources.pending_event_ids
-            ),
+            sources_pending=_sources_pending(transaction, principal_id, last),
         )
         transition = rl.owner_lost(reply, last, facts, now_ns=now_ns)
         if transition.applied:
             applied.append(apply(transaction, principal_id, transition))
     return tuple(applied)
+
+
+def _continued_sources(transaction: Transaction, principal_id: str) -> frozenset[str]:
+    """Return the sources still pending in the journal of the replies that have not ended, which replay continues."""
+    continued: set[str] = set()
+    for found in reply_messages.in_states(transaction, principal_id, (rl.ReplyState.ACTIVE, rl.ReplyState.PAUSED)):
+        last = reply_spans.load(transaction, principal_id, found.last_span_id)
+        assert last is not None
+        continued.update(journal.pending_among(transaction, principal_id, last.sources.pending_event_ids))
+    return frozenset(continued)
 
 
 # ---------------------------------------------------------------------------
@@ -708,103 +744,171 @@ def fail_row(
     return applied
 
 
+def _start_tool_call(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    span_id: str,
+    call_id: str,
+    entry_json: str,
+    now_ns: int,
+) -> bool:
+    """Record a tool call before it runs only while its span may still start one; return whether it may run."""
+    span = reply_spans.load(transaction, principal_id, span_id)
+    reply = None if span is None else reply_messages.lock(transaction, principal_id, span.reply_id)
+    if span is None or reply is None or not rl.admits_tool_start(reply, span):
+        return False
+    reply_spans.record_tool_call(
+        transaction,
+        principal_id,
+        span_id=span_id,
+        call_id=call_id,
+        entry_json=entry_json,
+        now_ns=now_ns,
+    )
+    return True
+
+
+def _write_ahead(
+    transaction: Transaction,
+    principal_id: str,
+    *,
+    reply_id: str,
+    span_id: str,
+    shown: str,
+    previous: rl.ProgressConfirmation | None,
+    active_generation: str,
+    now_ns: int,
+    shown_live: bool,
+) -> AppliedTransition:
+    """Record a span's next direct progress edit against the reply's unresolved durable writes."""
+    return decide_on_span(
+        transaction,
+        principal_id,
+        reply_id=reply_id,
+        span_id=span_id,
+        author_generation=active_generation,
+        decide=lambda reply, span: rl.write_ahead(
+            reply,
+            span,
+            shown=shown,
+            previous=previous,
+            active_generation=active_generation,
+            durable_write_debt=has_unresolved_rows(transaction, principal_id, reply_id),
+            now_ns=now_ns,
+            shown_live=shown_live,
+        ),
+    )
+
+
+def _update(
+    transaction: Transaction,
+    principal_id: str,
+    reply_id: str,
+    decide: Callable[[Reply], Transition],
+) -> AppliedTransition | None:
+    """Apply one reply-only rule to the locked reply."""
+    reply = reply_messages.lock(transaction, principal_id, reply_id)
+    return None if reply is None else apply(transaction, principal_id, decide(reply))
+
+
+def _record_stop_button(
+    transaction: Transaction,
+    principal_id: str,
+    reply_id: str,
+    event_id: str,
+    *,
+    now_ns: int,
+) -> AppliedTransition | None:
+    """Record the Stop button sent for a reply, in the membership the reply was written in."""
+    reply = reply_messages.lock(transaction, principal_id, reply_id)
+    if reply is None:
+        return None
+    membership_current = claim_membership_epoch(
+        transaction,
+        principal_id,
+        room_id=reply.room_id,
+        expected_membership_epoch=reply.membership_epoch,
+    )
+    return apply(
+        transaction,
+        principal_id,
+        rl.record_stop_button(reply, event_id=event_id, membership_current=membership_current, now_ns=now_ns),
+    )
+
+
+def _accepts_stop(transaction: Transaction, principal_id: str, event_id: str, room_id: str) -> bool:
+    """Return whether a Stop on this event reaches a reply: a running one bound to it, or a create in its room."""
+    found = reply_messages.for_event(transaction, principal_id, event_id)
+    if found is not None:
+        return found.room_id == room_id and not found.terminal
+    return reply_messages.has_unresolved_create(transaction, principal_id, room_id)
+
+
 # ---------------------------------------------------------------------------
 # Store view
 
 
-@dataclass(frozen=True, slots=True)
-class ReplyStore:
+class ReplyStore(PrincipalRows):
     """One principal's reply records."""
 
-    _backend: Backend
-    _principal_id: str
+    __slots__ = ()
 
     async def load(self, reply_id: str) -> Reply | None:
         """Return one reply."""
-        return await self._backend.read(
-            lambda transaction: reply_messages.load(transaction, self._principal_id, reply_id),
-        )
+        return await self._read(reply_messages.load, reply_id)
 
     async def for_event(self, event_id: str) -> Reply | None:
         """Return the reply bound to one Matrix event."""
-        return await self._backend.read(
-            lambda transaction: reply_messages.for_event(transaction, self._principal_id, event_id),
-        )
+        return await self._read(reply_messages.for_event, event_id)
 
     async def for_sources(self, event_ids: tuple[str, ...]) -> Reply | None:
         """Return the newest reply answering any of these sources."""
-        return await self._backend.read(
-            lambda transaction: reply_messages.for_sources(transaction, self._principal_id, event_ids),
-        )
+        return await self._read(reply_messages.for_sources, event_ids)
 
     async def span(self, span_id: str) -> Span | None:
         """Return one span."""
-        return await self._backend.read(
-            lambda transaction: reply_spans.load(transaction, self._principal_id, span_id),
-        )
+        return await self._read(reply_spans.load, span_id)
 
     async def spans(self, reply_id: str) -> tuple[Span, ...]:
         """Return every span of one reply, oldest first."""
-        return await self._backend.read(
-            lambda transaction: reply_spans.for_reply(transaction, self._principal_id, reply_id),
-        )
+        return await self._read(reply_spans.for_reply, reply_id)
 
     async def start_tool_call(self, *, span_id: str, call_id: str, entry_json: str, now_ns: int) -> bool:
         """Record a tool call before the tool runs, when its span may still start one; return whether it may run."""
-
-        def start(transaction: Transaction) -> bool:
-            span = reply_spans.load(transaction, self._principal_id, span_id)
-            reply = None if span is None else reply_messages.lock(transaction, self._principal_id, span.reply_id)
-            if span is None or reply is None or not rl.admits_tool_start(reply, span):
-                return False
-            reply_spans.record_tool_call(
-                transaction,
-                self._principal_id,
-                span_id=span_id,
-                call_id=call_id,
-                entry_json=entry_json,
-                now_ns=now_ns,
-            )
-            return True
-
-        return await self._backend.write(start)
+        return await self._write(
+            _start_tool_call,
+            span_id=span_id,
+            call_id=call_id,
+            entry_json=entry_json,
+            now_ns=now_ns,
+        )
 
     async def record_tool_call(self, *, span_id: str, call_id: str, entry_json: str, now_ns: int) -> None:
         """Record what a started tool call returned, replacing its start."""
-        await self._backend.write(
-            lambda transaction: reply_spans.record_tool_call(
-                transaction,
-                self._principal_id,
-                span_id=span_id,
-                call_id=call_id,
-                entry_json=entry_json,
-                now_ns=now_ns,
-            ),
+        await self._write(
+            reply_spans.record_tool_call,
+            span_id=span_id,
+            call_id=call_id,
+            entry_json=entry_json,
+            now_ns=now_ns,
         )
 
     async def tool_calls(self, span_ids: tuple[str, ...]) -> tuple[str, ...]:
         """Return the recorded tool calls of these spans, in the order they started."""
-        return await self._backend.read(
-            lambda transaction: reply_spans.tool_calls(transaction, self._principal_id, span_ids),
-        )
+        return await self._read(reply_spans.tool_calls, span_ids)
 
     async def write_generation(self, generation: str) -> None:
         """Make one bot instance the owner of this principal's replies."""
-        await self._backend.write(
-            lambda transaction: reply_messages.write_generation(transaction, self._principal_id, generation=generation),
-        )
+        await self._write(reply_messages.write_generation, generation=generation)
 
     async def active_generation(self) -> str | None:
         """Return the bot instance that owns this principal's replies now."""
-        return await self._backend.read(
-            lambda transaction: reply_messages.active_generation(transaction, self._principal_id),
-        )
+        return await self._read(reply_messages.active_generation)
 
     async def claim(self, request: rl.ClaimRequest, *, existing_event_id: str | None = None) -> AppliedTransition:
         """Find and claim the reply one span continues; see ``claim``."""
-        return await self._backend.write(
-            lambda transaction: claim(transaction, self._principal_id, request, existing_event_id=existing_event_id),
-        )
+        return await self._write(claim, request, existing_event_id=existing_event_id)
 
     async def decide(
         self,
@@ -815,15 +919,12 @@ class ReplyStore:
         author_generation: str | None = None,
     ) -> AppliedTransition:
         """Apply one rule to a locked reply and its span, in a transaction of its own."""
-        return await self._backend.write(
-            lambda transaction: decide_on_span(
-                transaction,
-                self._principal_id,
-                reply_id=reply_id,
-                span_id=span_id,
-                decide=decide,
-                author_generation=author_generation,
-            ),
+        return await self._write(
+            decide_on_span,
+            reply_id=reply_id,
+            span_id=span_id,
+            decide=decide,
+            author_generation=author_generation,
         )
 
     async def write_ahead(
@@ -835,73 +936,39 @@ class ReplyStore:
         previous: rl.ProgressConfirmation | None,
         active_generation: str,
         now_ns: int,
+        shown_live: bool = False,
     ) -> AppliedTransition:
         """Record a span's next direct progress edit, deferring it while earlier durable writes are unresolved."""
-        return await self._backend.write(
-            lambda transaction: decide_on_span(
-                transaction,
-                self._principal_id,
-                reply_id=reply_id,
-                span_id=span_id,
-                author_generation=active_generation,
-                decide=lambda reply, span: rl.write_ahead(
-                    reply,
-                    span,
-                    shown=shown,
-                    previous=previous,
-                    active_generation=active_generation,
-                    durable_write_debt=has_unresolved_rows(transaction, self._principal_id, reply_id),
-                    now_ns=now_ns,
-                ),
-            ),
+        return await self._write(
+            _write_ahead,
+            reply_id=reply_id,
+            span_id=span_id,
+            shown=shown,
+            previous=previous,
+            active_generation=active_generation,
+            now_ns=now_ns,
+            shown_live=shown_live,
         )
 
     async def update(self, reply_id: str, decide: Callable[[Reply], Transition]) -> AppliedTransition | None:
         """Apply one reply-only rule to the locked reply, in a transaction of its own."""
-
-        def write(transaction: Transaction) -> AppliedTransition | None:
-            reply = reply_messages.lock(transaction, self._principal_id, reply_id)
-            return None if reply is None else apply(transaction, self._principal_id, decide(reply))
-
-        return await self._backend.write(write)
+        return await self._write(_update, reply_id, decide)
 
     async def record_stop_button(self, reply_id: str, event_id: str, *, now_ns: int) -> AppliedTransition | None:
         """Record the Stop button sent for a reply, in the membership the reply was written in."""
-
-        def write(transaction: Transaction) -> AppliedTransition | None:
-            reply = reply_messages.lock(transaction, self._principal_id, reply_id)
-            if reply is None:
-                return None
-            membership_current = claim_membership_epoch(
-                transaction,
-                self._principal_id,
-                room_id=reply.room_id,
-                expected_membership_epoch=reply.membership_epoch,
-            )
-            return apply(
-                transaction,
-                self._principal_id,
-                rl.record_stop_button(reply, event_id=event_id, membership_current=membership_current, now_ns=now_ns),
-            )
-
-        return await self._backend.write(write)
+        return await self._write(_record_stop_button, reply_id, event_id, now_ns=now_ns)
 
     async def owner_lost(self, active_generation: str, *, now_ns: int) -> tuple[AppliedTransition, ...]:
         """End what an older bot instance left running on these replies; see ``_owner_lost``."""
-        return await self._backend.write(
-            lambda transaction: _owner_lost(
-                transaction,
-                self._principal_id,
-                active_generation=active_generation,
-                now_ns=now_ns,
-            ),
-        )
+        return await self._write(_owner_lost, active_generation=active_generation, now_ns=now_ns)
+
+    async def continued_sources(self) -> frozenset[str]:
+        """Return the pending sources of the replies that have not ended; see ``_continued_sources``."""
+        return await self._read(_continued_sources)
 
     async def supersede_replay(self, source_event_ids: tuple[str, ...], *, now_ns: int) -> AppliedTransition | None:
         """Settle a superseded replay's sources with the reply they left; see ``_supersede_replay``."""
-        return await self._backend.write(
-            lambda transaction: _supersede_replay(transaction, self._principal_id, source_event_ids, now_ns=now_ns),
-        )
+        return await self._write(_supersede_replay, source_event_ids, now_ns=now_ns)
 
     async def record_stop(
         self,
@@ -913,80 +980,64 @@ class ReplyStore:
         now_ns: int,
     ) -> AppliedTransition | bool:
         """Record a Stop on the reply bound to one event in its room; see ``_record_stop``."""
-        return await self._backend.write(
-            lambda transaction: _record_stop(
-                transaction,
-                self._principal_id,
-                event_id=event_id,
-                room_id=room_id,
-                receipt_order=receipt_order,
-                may_wait=may_wait,
-                now_ns=now_ns,
-            ),
+        return await self._write(
+            _record_stop,
+            event_id=event_id,
+            room_id=room_id,
+            receipt_order=receipt_order,
+            may_wait=may_wait,
+            now_ns=now_ns,
         )
+
+    async def stop(self, reply_id: str, *, receipt_order: int, now_ns: int) -> AppliedTransition | None:
+        """Record a Stop on one reply; see ``_stop_reply``."""
+        return await self._write(_stop_reply, reply_id, receipt_order=receipt_order, now_ns=now_ns)
 
     async def accepts_stop(self, event_id: str, room_id: str) -> bool:
         """Return whether a Stop on this event reaches a reply: a running one bound to it, or a create in its room."""
+        return await self._read(_accepts_stop, event_id, room_id)
 
-        def read(transaction: Transaction) -> bool:
-            found = reply_messages.for_event(transaction, self._principal_id, event_id)
-            if found is not None:
-                return found.room_id == room_id and not found.terminal
-            return reply_messages.has_unresolved_create(transaction, self._principal_id, room_id)
-
-        return await self._backend.read(read)
+    async def open_event_id(self, room_id: str, thread_id: str | None) -> str | None:
+        """Return the event of the newest unfinished reply in one conversation, which a Stop on it reaches."""
+        return await self._read(reply_messages.open_event_id, room_id, thread_id)
 
     async def event_ids_of_spans(self, room_id: str, span_ids: frozenset[str]) -> frozenset[str]:
         """Return the events of a room's replies whose current span is one of these."""
         if not span_ids:
             return frozenset()
-        return await self._backend.read(
-            lambda transaction: reply_messages.event_ids_of_spans(
-                transaction,
-                self._principal_id,
-                room_id,
-                tuple(sorted(span_ids)),
-            ),
-        )
+        return await self._read(reply_messages.event_ids_of_spans, room_id, tuple(sorted(span_ids)))
 
-    async def forget_finished(self, *, before_ns: int, limit: int) -> int:
-        """Delete up to ``limit`` finished replies that owe nothing and are older than ``before_ns``."""
-        return await self._backend.write(
-            lambda transaction: reply_messages.forget_finished(
-                transaction,
-                self._principal_id,
-                before_ns=before_ns,
-                limit=limit,
-            ),
-        )
+    async def forget_finished(self, *, before_ns: int) -> int:
+        """Delete the finished replies that owe nothing and are older than ``before_ns``; return how many.
+
+        Finding them reads every finished reply the principal has, so that runs
+        on a reader rather than holding the single writer, and every other
+        journal write, for the whole scan. Each reply then goes in its own write
+        that re-checks it, so a reply written since the scan stays. One at a
+        time because deleting a reply reads back all its spans and tool calls:
+        batched, those costs add up into one long hold of the writer.
+        """
+        candidates = await self._read(reply_messages.forgettable_replies, before_ns=before_ns)
+        forgotten = 0
+        for reply_id in candidates:
+            forgotten += await self._write(reply_messages.forget_reply, before_ns=before_ns, reply_id=reply_id)
+        await self._write(reply_messages.forget_pending_stops, before_ns=before_ns)
+        return forgotten
 
     async def take_deletion_endings(self) -> tuple[reply_messages.DeletionEnding, ...]:
         """Remove and return the replies source deletions ended, with the spans they cancelled."""
-        return await self._backend.write(
-            lambda transaction: reply_messages.take_deletion_endings(transaction, self._principal_id),
-        )
+        return await self._write(reply_messages.take_deletion_endings)
 
     async def spans_in_room(self, room_id: str, span_ids: frozenset[str]) -> frozenset[str]:
         """Return which of these spans belong to the room's replies."""
         if not span_ids:
             return frozenset()
-        return await self._backend.read(
-            lambda transaction: reply_messages.spans_in_room(
-                transaction,
-                self._principal_id,
-                room_id,
-                tuple(sorted(span_ids)),
-            ),
-        )
+        return await self._read(reply_messages.spans_in_room, room_id, tuple(sorted(span_ids)))
 
     async def with_pending_work(self) -> tuple[Reply, ...]:
         """Return replies owing a redaction or a note not yet enqueued."""
-        return await self._backend.read(
-            lambda transaction: reply_messages.with_pending_work(transaction, self._principal_id),
-        )
+        return await self._read(reply_messages.with_pending_work)
 
     async def has_unresolved_rows(self, reply_id: str) -> bool:
         """Return whether any durable write of the reply has an unknown Matrix outcome."""
-        return await self._backend.read(
-            lambda transaction: has_unresolved_rows(transaction, self._principal_id, reply_id),
-        )
+        return await self._read(has_unresolved_rows, reply_id)

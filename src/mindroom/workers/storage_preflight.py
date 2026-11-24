@@ -6,13 +6,12 @@ import math
 import time
 from typing import TYPE_CHECKING
 
-from mindroom.runtime_env_policy import KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY, SANDBOX_RUNTIME_ENV_BY_KEY
+from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
 from mindroom.workers.backend import WorkerBackendError
+from mindroom.workers.backend_kinds import WorkerBackendKind, worker_backend_kind
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
-
-_WORKER_BACKEND_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["worker_backend"]
 
 
 def _remaining_seconds(deadline: float) -> float:
@@ -33,38 +32,32 @@ def check_workers_absent_for_storage_upgrade(
         msg = "Managed-worker preflight timeout must be a positive finite number."
         raise WorkerBackendError(msg)
     deadline = time.monotonic() + timeout_seconds
-    backend_name = (runtime_paths.env_value(_WORKER_BACKEND_ENV) or "").strip().lower()
 
-    if backend_name == "docker":
-        from mindroom.workers.backends.docker import (  # noqa: PLC0415
-            check_docker_workers_absent_for_storage_upgrade,
-        )
-
-        check_docker_workers_absent_for_storage_upgrade(
-            runtime_paths,
-            timeout_seconds=_remaining_seconds(deadline),
-        )
-        return
-    if backend_name in {"k8s", "kubernetes"}:
-        from mindroom.workers.backends.kubernetes import (  # noqa: PLC0415
-            check_kubernetes_workers_absent_for_storage_upgrade,
-        )
-
-        check_kubernetes_workers_absent_for_storage_upgrade(
-            runtime_paths,
-            timeout_seconds=_remaining_seconds(deadline),
-        )
-        return
-    if backend_name in {"", "static", "static_runner", "shared_runner", "static_sandbox_runner"}:
-        proxy_url = (runtime_paths.env_value(SANDBOX_RUNTIME_ENV_BY_KEY["proxy_url"]) or "").strip()
-        if proxy_url:
-            msg = (
-                "Private-storage upgrade cannot verify absence of the configured external runner. "
-                "Stop it through the deployment lifecycle, temporarily unset MINDROOM_SANDBOX_PROXY_URL "
-                "for migration startup, then restart the primary."
+    match worker_backend_kind(runtime_paths):
+        case WorkerBackendKind.DOCKER:
+            from mindroom.workers.backends.docker import (  # noqa: PLC0415
+                check_docker_workers_absent_for_storage_upgrade,
             )
-            raise WorkerBackendError(msg)
-        return
 
-    msg = f"Unsupported worker backend: {runtime_paths.env_value(_WORKER_BACKEND_ENV)}"
-    raise WorkerBackendError(msg)
+            check_docker_workers_absent_for_storage_upgrade(
+                runtime_paths,
+                timeout_seconds=_remaining_seconds(deadline),
+            )
+        case WorkerBackendKind.KUBERNETES:
+            from mindroom.workers.backends.kubernetes import (  # noqa: PLC0415
+                check_kubernetes_workers_absent_for_storage_upgrade,
+            )
+
+            check_kubernetes_workers_absent_for_storage_upgrade(
+                runtime_paths,
+                timeout_seconds=_remaining_seconds(deadline),
+            )
+        case WorkerBackendKind.STATIC_RUNNER:
+            proxy_url = (runtime_paths.env_value(SANDBOX_RUNTIME_ENV_BY_KEY["proxy_url"]) or "").strip()
+            if proxy_url:
+                msg = (
+                    "Private-storage upgrade cannot verify absence of the configured external runner. "
+                    "Stop it through the deployment lifecycle, temporarily unset MINDROOM_SANDBOX_PROXY_URL "
+                    "for migration startup, then restart the primary."
+                )
+                raise WorkerBackendError(msg)

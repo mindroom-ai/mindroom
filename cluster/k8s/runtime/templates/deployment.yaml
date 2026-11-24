@@ -48,6 +48,7 @@ spec:
       {{- end }}
     spec:
       serviceAccountName: {{ include "mindroom-runtime.serviceAccountName" . }}
+      enableServiceLinks: false
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets:
         {{- toYaml . | nindent 8 }}
@@ -157,6 +158,7 @@ spec:
             - {{ printf "%s/sandbox-runner" $storageRoot | quote }}
             - {{ printf "%s/agents" $storageRoot | quote }}
             - {{ printf "%s/private_instances" $storageRoot | quote }}
+            - {{ printf "%s/shared_directories" $storageRoot | quote }}
           {{- with .Values.securityContext }}
           securityContext:
             {{- toYaml . | nindent 12 }}
@@ -194,6 +196,16 @@ spec:
             {{- if .Values.scriptGateway.enabled }}
             - name: script-gateway
               containerPort: {{ .Values.scriptGateway.port }}
+              protocol: TCP
+            {{- end }}
+            {{- if .Values.egressBroker.enabled }}
+            - name: egress-broker
+              containerPort: {{ .Values.egressBroker.port }}
+              protocol: TCP
+            {{- end }}
+            {{- if .Values.tailnetSsh.enabled }}
+            - name: tailnet-ssh
+              containerPort: {{ .Values.tailnetSsh.port }}
               protocol: TCP
             {{- end }}
           env:
@@ -274,6 +286,9 @@ spec:
             {{- if eq .Values.workers.backend "static_runner" }}
             - name: MINDROOM_SANDBOX_PROXY_URL
               value: {{ printf "http://localhost:%v" .Values.workers.staticRunner.port | quote }}
+            # The static runner sidecar mounts the agents' storage, so people in a room may type in agents' terminals.
+            - name: MINDROOM_STATIC_RUNNER_AGENT_STORAGE
+              value: "true"
             {{- else if eq .Values.workers.backend "kubernetes" }}
             - name: MINDROOM_WORKER_COMPUTER_ENABLED
               value: {{ .Values.workers.computerEnabled | quote }}
@@ -321,6 +336,10 @@ spec:
             {{- end }}
             - name: MINDROOM_KUBERNETES_WORKER_LABELS_JSON
               value: {{ toJson .Values.workers.kubernetes.extraLabels | quote }}
+            {{- if .Values.tailnetSsh.enabled }}
+            - name: MINDROOM_KUBERNETES_WORKER_TAILNET_SSH_RELEASE_ID
+              value: {{ include "mindroom-runtime.tailnetSshReleaseId" . | quote }}
+            {{- end }}
             - name: MINDROOM_KUBERNETES_WORKER_ANNOTATIONS_JSON
               value: {{ toJson .Values.workers.kubernetes.extraAnnotations | quote }}
             - name: MINDROOM_KUBERNETES_WORKER_EXTRA_VOLUMES_JSON
@@ -348,6 +367,26 @@ spec:
             - name: MINDROOM_SCRIPT_GATEWAY_ISOLATED
               value: "true"
             {{- end }}
+            {{- if .Values.egressBroker.enabled }}
+            - name: MINDROOM_EGRESS_BROKER_PORT
+              value: {{ .Values.egressBroker.port | quote }}
+            - name: MINDROOM_EGRESS_BROKER_HOST
+              value: "0.0.0.0"
+            - name: MINDROOM_EGRESS_BROKER_URL
+              value: {{ include "mindroom-runtime.egressBrokerWorkerUrl" . | quote }}
+            {{- if .Values.egressBroker.tokenTtlSeconds }}
+            - name: MINDROOM_EGRESS_BROKER_TOKEN_TTL_SECONDS
+              value: {{ .Values.egressBroker.tokenTtlSeconds | quote }}
+            {{- end }}
+            {{- end }}
+            {{- if .Values.tailnetSsh.enabled }}
+            # The listener the tailnet SSH gateway alone calls; see templates/tailnet-ssh.yaml.
+            - name: MINDROOM_TAILNET_SSH_PORT
+              value: {{ .Values.tailnetSsh.port | quote }}
+            - name: MINDROOM_TAILNET_SSH_GATEWAY_TOKEN
+              valueFrom:
+                secretKeyRef: {{ include "mindroom-runtime.tailnetSshTokenSecretKeyRef" . }}
+            {{- end }}
             {{- if .Values.workers.kubernetes.nodeName }}
             - name: MINDROOM_KUBERNETES_WORKER_NODE_NAME
               value: {{ .Values.workers.kubernetes.nodeName | quote }}
@@ -364,46 +403,11 @@ spec:
             - name: MINDROOM_KUBERNETES_WORKER_OWNER_DEPLOYMENT_NAME
               value: {{ default $fullname .Values.workers.kubernetes.ownerDeploymentName | quote }}
             {{- end }}
-            {{- with .Values.workers.kubernetes.agentVault }}
-            {{- if .enabled }}
-            - name: MINDROOM_KUBERNETES_AGENT_VAULT_ENABLED
-              value: "true"
-            - name: MINDROOM_KUBERNETES_AGENT_VAULT_CLI_IMAGE
-              value: {{ required "workers.kubernetes.agentVault.cliImage is required when agentVault is enabled" .cliImage | quote }}
-            - name: MINDROOM_KUBERNETES_AGENT_VAULT_OWNER_EMAIL
-              value: {{ required "workers.kubernetes.agentVault.ownerEmail is required when agentVault is enabled" .ownerEmail | quote }}
-            - name: MINDROOM_KUBERNETES_AGENT_VAULT_VAULT_NAME_PREFIX
-              value: {{ .vaultNamePrefix | quote }}
-            - name: MINDROOM_KUBERNETES_AGENT_VAULT_API_URL
-              value: {{ .apiUrl | quote }}
-            - name: MINDROOM_KUBERNETES_AGENT_VAULT_PROXY_URL
-              value: {{ include "mindroom-runtime.agentVaultProxyUrl" $ | quote }}
-            - name: MINDROOM_KUBERNETES_AGENT_VAULT_BOOTSTRAP_SECRET_NAME
-              value: {{ .bootstrapSecretName | quote }}
-            {{- if .workerCaConfigMapName }}
-            - name: MINDROOM_KUBERNETES_AGENT_VAULT_WORKER_CA_CONFIGMAP_NAME
-              value: {{ .workerCaConfigMapName | quote }}
             {{- end }}
-            {{- end }}
-            {{- end }}
-            {{- with .Values.workers.kubernetes.agentVault }}
-            {{- if .accessTool.enabled }}
-            - name: MINDROOM_AGENT_VAULT_ACCESS_API_URL
-              value: {{ .apiUrl | quote }}
-            - name: MINDROOM_AGENT_VAULT_ACCESS_UI_BASE_URL
-              value: {{ required "workers.kubernetes.agentVault.accessTool.uiBaseUrl is required when the access tool is enabled" .accessTool.uiBaseUrl | quote }}
-            - name: MINDROOM_AGENT_VAULT_ACCESS_EMAIL_DOMAIN
-              value: {{ required "workers.kubernetes.agentVault.accessTool.emailDomain is required when the access tool is enabled" .accessTool.emailDomain | quote }}
-            - name: MINDROOM_AGENT_VAULT_ACCESS_VAULT_NAME_PREFIX
-              value: {{ .vaultNamePrefix | quote }}
-            - name: MINDROOM_AGENT_VAULT_ACCESS_OWNER_EMAIL
-              value: {{ required "workers.kubernetes.agentVault.ownerEmail is required when the access tool is enabled" .ownerEmail | quote }}
-            # Mounted Secret file, not env: the kubelet refreshes the mount in
-            # place, so a bootstrap re-run (token rotation) needs no restart.
-            - name: MINDROOM_AGENT_VAULT_ACCESS_ADMIN_TOKEN_FILE
-              value: {{ printf "/etc/agent-vault-access/%s" .accessTool.adminTokenSecret.key | quote }}
-            {{- end }}
-            {{- end }}
+            {{- if not .Values.egressBroker.enabled }}
+            # MindRoom runs a loopback broker unless told otherwise, on every worker backend.
+            - name: MINDROOM_EGRESS_BROKER_PORT
+              value: "off"
             {{- end }}
             {{- if .Values.matrix.homeserverUrl }}
             - name: MATRIX_HOMESERVER
@@ -443,6 +447,9 @@ spec:
                 secretKeyRef:
                   name: {{ $entry.existingSecret }}
                   key: {{ $entry.key }}
+            {{- end }}
+            {{- with include "mindroom-runtime.trustedUpstreamAuthEnv" . | fromJsonArray }}
+            {{- toYaml . | nindent 12 }}
             {{- end }}
             {{- with include "mindroom-runtime.envList" (list . .Values.env.extra "env.extra") | fromJsonArray }}
             {{- toYaml . | nindent 12 }}
@@ -552,11 +559,6 @@ spec:
               subPath: {{ .Values.approvedEgress.allowlist.key | quote }}
               readOnly: true
             {{- end }}
-            {{- if .Values.workers.kubernetes.agentVault.accessTool.enabled }}
-            - name: agent-vault-access-admin
-              mountPath: /etc/agent-vault-access
-              readOnly: true
-            {{- end }}
             {{- with include "mindroom-runtime.keyedList" (dict "value" .Values.extraVolumeMounts "path" "extraVolumeMounts" "nameKey" "name") | fromJsonArray }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -614,6 +616,9 @@ spec:
             - name: {{ include "mindroom-runtime.storageVolumeName" . }}
               mountPath: {{ printf "%s/private_instances" $storageRoot | quote }}
               subPath: private_instances
+            - name: {{ include "mindroom-runtime.storageVolumeName" . }}
+              mountPath: {{ printf "%s/shared_directories" $storageRoot | quote }}
+              subPath: shared_directories
             - name: sandbox-workspace
               mountPath: /app/workspace
         {{- end }}
@@ -660,14 +665,6 @@ spec:
         {{- if eq .Values.workers.backend "static_runner" }}
         - name: sandbox-workspace
           emptyDir: {}
-        {{- end }}
-        {{- if .Values.workers.kubernetes.agentVault.accessTool.enabled }}
-        - name: agent-vault-access-admin
-          secret:
-            secretName: {{ .Values.workers.kubernetes.agentVault.accessTool.adminTokenSecret.name }}
-            # Optional: lets the control plane start before the first
-            # bootstrap publishes the token; the tool errors cleanly until then.
-            optional: true
         {{- end }}
         {{- with include "mindroom-runtime.keyedList" (dict "value" .Values.extraVolumes "path" "extraVolumes" "nameKey" "name") | fromJsonArray }}
         {{- toYaml . | nindent 8 }}

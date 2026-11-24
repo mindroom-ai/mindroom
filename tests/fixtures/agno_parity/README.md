@@ -1,0 +1,337 @@
+# Agno parity goldens
+
+These fixtures pin what MindRoom sends to providers and models and what it publishes, so a change to model-visible bytes shows as a golden diff, and they and the legacy inputs in `tests/fixtures/legacy_agno3/` hold the data Agno wrote, which MindRoom must keep reading.
+They were first captured while Agno 3.0.9 ran MindRoom, so the owned runtime could prove it changed neither (`docs/dev/2026-10-20-replace-agno-design.md`).
+The goldens of what owned code produces now regenerate from it, in the encodings this file describes, while the data Agno wrote stays as captured, as legacy inputs.
+The capture scripts that wrote them and the tests that checked them against Agno were deleted with Agno's runtime.
+The scripts still run from the history trees that hold Agno's provider layer (`tests/agno_parity/capture_providers.py` at `b1d5c30b1`, `tests/agno_parity/capture_prompts.py` at `58bbd84fb`), and a rerun reproduces the goldens those commits stored, which is how the send order of request bodies and prompt requests was recorded.
+
+## Regenerating the goldens
+
+`.venv/bin/python -m tests.agno_parity.regenerate_goldens`, run from the repository root with every extra installed, rewrites every golden that owned code produces from the scenarios and inputs the goldens hold, and lists the files it rewrote.
+It covers the provider, prompt, tool, and event goldens and the knowledge embedder and search goldens, each through the support functions its parity tests compare with, so an unchanged golden regenerates byte for byte.
+A deliberate change to model-visible bytes, a provider request, a tool, or the `io.mindroom.ai_run` metadata reruns it and commits the rewritten goldens with the change, so a reviewer reads the change as a golden diff.
+Nothing reaches a provider: replies come from each golden's canned response or a scripted model, provider credentials are hidden from the environment, and every network connection and name lookup is refused.
+The legacy inputs below are not goldens of owned code, so the command leaves them alone.
+
+The command keeps the authored parts of each golden as written and rewrites only what it derives from them.
+The authored parts are each provider golden's `input` and `response_raw`, the cases of `tools/arguments.json` (their `function` and `raw_arguments`), the cases of `knowledge/embedders.json` (their `embedder` and each call's `agno_method`, `purpose`, and `texts`), the `input` of `knowledge/rows.json` (the config, whose agents the searches run as, and the source files), the searches of `knowledge/search.json` (each one's `agent`, `query`, `embedding_fails` where its query embedding fails, and whether it answers with documents or with text), the requests of `events/openai_compat.json`, and which runs `events/ai_run.json` holds.
+The prompt goldens have no authored part: their scenarios are code in `tests/agno_parity/prompt_scenarios.py`.
+To rebase a branch whose goldens conflict, merge the authored parts of each conflicting golden by hand, in the current encoding, take either side for everything else, then rerun the command at the rebased head and review its diff.
+Taking one side whole would silently drop the other side's authored edits, because the command regenerates from whatever authored parts it finds.
+A conflict in a read-only golden is resolved on its own, as data, since no command rewrites it.
+
+## Legacy inputs
+
+`tests/fixtures/legacy_agno3/` (`legacy_agno3/storage/`, `legacy_agno3/runs/`, `legacy_agno3/history/`, and `legacy_agno3/codecs.json`) and the `bases` of `knowledge/rows.json` hold what Agno 3.0.9 wrote and computed, so the data a deployment kept from before the replacement stays pinned as it was; they are read-only and never change.
+Tests read them as inputs: the storage conversion, the legacy codec tests, and the resumes of runs paused before the upgrade start from them.
+Three families still compare owned results with them on purpose: history selection (`legacy_agno3/history/`), which MindRoom keeps as Agno selected; the knowledge rows, which an owned refresh must keep writing; and the storage replay in `tests/session_storage/test_store_goldens.py`, whose usage ledger, session totals, and first-turn session rows must equal what Agno wrote to `legacy_agno3/storage/`, so an upgraded conversation's totals keep adding up.
+A deliberate change to the ledger or the session row replaces that replay's comparison with authored values.
+Every other test of what MindRoom stores builds the typed records it expects itself (`tests/run_record_helpers.py`), and MindRoom's own stored schema is pinned in `tests/llm/test_stored_dicts.py`, so a deliberate change to run records edits those tests and leaves these files alone.
+
+## Provider wire goldens (`providers/`)
+
+`providers/<family>/<scenario>.json` holds one provider request and its parsed reply, first captured from the Agno-backed provider layer and now regenerated from the owned adapter.
+The owned adapters' parity tests (`tests/providers/test_*_parity.py`) replay every golden through the request pipeline and compare the golden the replay regenerates with the file, byte for byte.
+`input` and `response_raw` are the scenario as authored, and a regeneration rewrites `request` and `parsed`.
+
+### How the goldens were captured
+
+- The model was built by the Agno-backed model loader from `input.model_config`, so every hook production installed was active: request logging, the Claude prompt-cache ladder and history repairs, stream retry, and media fallback.
+- The run-message patches that storage installs (`session_storage/agno_compat_run_messages.py`) are active, which is why every reply carries `provider_data.mindroom_model`.
+- `input.deferred_tool_search` installs the native or portable deferred tool search exactly as `agents.py` does, and `input.portable_replay` calls `configure_portable_replay` as history replay planning does.
+- `input.native_compaction` calls `configure_native_compaction` with its threshold and history generation, as history planning does when it enables native compaction.
+- `input.tool_jobs` installs `install_tool_job_execution` as agent construction does, and the harness answers the per-turn job checks (a background job runtime, execution resources, and which functions are managed calls), because `Function.from_dict` cannot carry the assembled toolkit those checks read.
+- Goldens call Agno's `aresponse_stream`, the run loop's entry point, and stop after the first request completes.
+  The `output_limit_stop`, `structured_output`, `structured_output_nested`, and `tool_choice_none` scenarios were captured through `aresponse`, Agno's non-streaming path, except on Codex; the owned adapters stream them, so they hold the streamed request the owned adapter sends and the same reply as a stream, with the parsed reply regenerated from it.
+  On Groq, which answers an output schema with a forced tool call, their reply is that call, streamed.
+- Every SDK request is answered at the httpx transport layer with `response_raw`, so the SDK clients production builds (MindRoom's pooled client, Agno's shared client, SDK-built clients) are unchanged.
+- Each golden must produce exactly one provider request.
+
+### Format
+
+| Key | Content |
+| --- | --- |
+| `family`, `scenario` | The provider route and scenario names. |
+| `input.model_config` | Authored `ModelConfig` fields (`provider`, `id`, `api`, `host`, `api_key`, `extra_kwargs`). |
+| `input.messages` | The request's messages, oldest first, each as `Message.to_dict()` without the storage-only `id`, `created_at`, `from_history`, and `stop_after_tool_call`, which no adapter sends or parses. |
+| `input.tools` | The request's `ToolSpec` definitions (`name`, `description`, `parameters`, `strict`), every field present and null where the tool sets none. |
+| `input.tool_choice` | `null` or `"none"`; the owned loop never forces a call. |
+| `input.output_schema` | `null`, or the request's output schema as `{"model": "module:Class", "json_schema": ...}`; the route renders it as its structured-output support asks, and replay fails when the class's JSON schema no longer equals `json_schema`. |
+| `input.deferred_tool_search` | `null` or `{"mode": "native" \| "portable", "tool_names": [...]}`. |
+| `input.portable_replay` | `null`, or the `configure_portable_replay` setting for Responses models. |
+| `input.tool_jobs` | Present only as `{"managed": [...]}`, the functions a turn that can start tool jobs offers as managed calls. |
+| `input.native_compaction` | Present only as `{"threshold", "history_generation"}`, the arguments of `configure_native_compaction`. |
+| `request` | `method`, `url`, the stable `headers`, and the JSON `body` of the SDK request. |
+| `response_raw` | `status`, `headers`, and one of `sse` (events as `{"event"?, "data"}`, where `data` is a JSON object or the literal `[DONE]`), `ndjson` (one object per line), or `json` (the body). |
+| `parsed.message` | The assistant message once the request completes, before the run loop resolves or runs its tool calls, encoded like `input.messages` and without its `metrics`. |
+| `parsed.metrics` | That message's `MessageMetrics.to_dict()`. |
+| `parsed.stop_reason` | The finished turn's stop reason: `end`, `tool_use`, or `output_limit`; the route's own stop reason, where it records one, stays in `provider_data`. |
+
+The harness writes each `sse` event as its `event:` and `data:` lines plus a blank line, and each `ndjson` entry as one JSON line; SDKs parse both, so the byte layout is not part of the contract.
+
+### Normalization
+
+- Files are pretty-printed with sorted keys, except `request.body`, which keeps the key order the SDK sent; capture runs from that same key-sorted input, so a key order the body takes from the input is the sorted one.
+- The parity tests compare each request body's serialized text, so a reordered key fails parity, because chat templates and prompt caches see key order.
+- OpenAI-family bodies, Cerebras's included, start with `model` and `stream`, reordered by hand: OpenAI SDK 3 sends those keys first, where the SDKs of the capture placed them among the other keys.
+- Request headers are dropped when they carry credentials (`authorization`, `x-api-key`, `api-key`, `x-goog-api-key`, AWS `x-amz-*` signing headers) or SDK, platform, and transport details (`x-stainless-*`, `amz-sdk-*`, `user-agent`, `x-goog-api-client`, `host`, `content-length`, `accept-encoding`, `connection`); every other header, such as `anthropic-beta`, `anthropic-version`, `chatgpt-account-id`, and the Codex session headers, is kept.
+- The wall-clock `duration` and `time_to_first_token` are dropped from `parsed.metrics`.
+- uuid4 values Agno generates for tool calls sent without ids (every Ollama call, and the Gemini `tool_definitions` reply) become `<uuid4>`; a follow-up golden replays such a call with the id `parity-generated-call-<n>`.
+- The Cerebras SDK's `/v1/tcp_warming` request, sent when a client is built, is answered and not recorded.
+
+### Harness-supplied state
+
+- Provider environment variables (`OPENAI_*`, `ANTHROPIC_*`, `GOOGLE_*`, `AWS_*`, `AZURE_*`, and the other provider prefixes) are hidden from SDK fallbacks during each capture.
+- `<codex_home>` and `<kimi_home>` in `extra_kwargs` become directories holding fixed Codex (`auth.json` with an unexpiring token, account `parity-account`, `installation_id`) and Kimi (`credentials/kimi-code.json`) CLI credentials.
+- `vertexai_claude` gets `client_params.credentials` and Gemini with `vertexai: true` gets `credentials`, both a static Google OAuth token, because JSON cannot carry credential objects.
+- google-genai is switched from aiohttp to its httpx client for the call; the request body is the same.
+- All credentials are synthetic; the goldens never reach a provider.
+
+### Scenarios
+
+| Scenario | Pins |
+| --- | --- |
+| `plain_turn` | System prompt and one user message, text reply. |
+| `system_history` | `plain_turn` replayed as history, then a new prompt. |
+| `tool_definitions` | Two tool schemas, one tool-call reply. |
+| `complex_tool_definitions` | A toolkit function whose typed signature yields nested objects, an array of objects, nullable and defaulted parameters, an enum, and a dict, plus a raw MCP input schema with `$defs`/`$ref`, nullable `anyOf` and type lists, formats, bounds, and defaults; the reply calls the MCP tool with nested arguments. |
+| `tool_results_history` | `tool_definitions` replayed with its tool result. |
+| `parallel_tool_calls`, `parallel_tool_results` | Two calls in one reply, then both results replayed. |
+| `foreign_tool_history` | A tool turn stored by another provider (Claude, or OpenAI Chat for Claude routes) replayed after a model switch. |
+| `image_input`, `file_input`, `audio_input` | A 1x1 PNG, a tiny PDF, or an empty WAV on the prompt; routes that omit a kind pin the media-fallback note instead. |
+| `mixed_media_input` | One prompt with a PNG and an SVG image, a PDF, a DOCX, a text file, an SVG file, a file without content, an empty WAV, and a video, plus an image URL where the route sends image URLs and a file URL where it sends file URLs, recorded before per-attachment media recovery so it pins that the first request did not change; the DOCX names no type on the OpenAI-family routes, which type it by its name without the host's MIME table. |
+| `reasoning`, `reasoning_replay` | A reasoning or thinking reply, then that turn replayed. |
+| `reasoning_tool_call`, `reasoning_tool_results` | A reasoning reply that calls a tool, then the tool loop continued with its result, so signed thinking, reasoning content, and thought signatures replay inside one turn. |
+| `claude_citations`, `claude_citations_replay` | A text document, which the request sends without asking for citations, and a reply that still carries them, as turns earlier releases stored do; then that turn replayed without them. |
+| `claude_server_tool_blocks`, `claude_server_tool_blocks_replay` | Native tool-search server blocks with a deferred tool call, then the turn replayed with its result. |
+| `responses_continuation` | A stored response continued with `previous_response_id`. |
+| `responses_explicit_replay` | On Responses routes, `reasoning_tool_call` runs under portable replay and this golden replays its items and result explicitly. |
+| `responses_store_false_turn`, `responses_store_false` | The same reasoning tool turn and explicit replay with `store: false`. |
+| `structured_output` | `mindroom.routing._RoutingSuggestion` as native schema, JSON schema, forced tool call, or JSON mode, per route. |
+| `structured_output_nested` | `mindroom.scheduling.tasks.ScheduledWorkflow`, whose schema has `$defs`/`$ref`, nullable `anyOf`, defaults, a format, and a bound, the same way. |
+| `prompt_cache` | A system prompt with the session-context boundary plus the route's cache settings. |
+| `prompt_cache_disabled` | Claude with `cache_system_prompt` and `extended_cache_time` off. |
+| `deferred_tool_search`, `deferred_tool_search_replay` | Deferred tools offered natively or behind the production `dynamic_tools` functions `tool_search`/`call_tool`, then a deferred call replayed. |
+| `output_limit_stop` | A reply the output limit cut off mid-sentence, as a compaction summary can be: Claude `max_tokens`, Chat and Ollama `length`, Gemini `MAX_TOKENS`, or an incomplete Responses response. |
+| `output_limit_stop_tool_call` | A streamed reply the output limit cut off inside a tool call's arguments JSON. |
+| `approval_gated_tools` | A function the approval policy gates and a `run_subagent` stand-in marked for external execution, both through `apply_tool_approval_capability`, beside an ungated function; the gating stays with the functions, so their definitions go out like the ungated one's, and the reply calls the gated one. |
+| `tool_job_wait_parameter` | A turn whose calls can become tool jobs: the managed function gains the optional `background_after` parameter, the other function keeps its schema, and the reply passes `background_after`. |
+| `native_compaction`, `native_compaction_replay` | Native compaction with a 60,000-token trigger: the request's `context_management`, a reply that carries a compaction checkpoint, then the checkpoint and its tail replayed in place of the turns before it. |
+| `tool_choice_none` | A decision request: `tool_choice` `"none"`, which allows no tool use, with the tools still defined. |
+| `search_grounding` | Google Search grounding (`search: true`) on `gemini-3.1-pro-preview`, on Vertex AI at the `global` location: the search tool goes out in place of the two offered function tools, and the streamed reply carries grounding metadata, which the owned message does not keep, plus tool-use prompt tokens in its usage. |
+
+Skipped where the route has nothing to pin:
+
+- `reasoning`, `reasoning_replay`, `reasoning_tool_call`, `reasoning_tool_results`: `openai_chat` and `azure` (Chat Completions returns no reasoning text), `ollama`, `groq`, and `cerebras` (Agno parses no streamed reasoning on these routes); Responses routes have no `reasoning_tool_results` and use `responses_explicit_replay` instead.
+- `prompt_cache`: `openai_chat`, `azure`, `deepseek`, `zai`, `llama_cpp`, `gemini`, `gemini_vertexai`, `ollama`, `groq`, and `cerebras`, which have no MindRoom or Agno prompt-cache setting.
+- Claude-only scenarios run on `anthropic`, `vertexai_claude`, and `bedrock_claude`; the server tool-search blocks only on the first two, since Bedrock uses portable tool search.
+- `deferred_tool_search_replay`: `anthropic` and `vertexai_claude`, covered by `claude_server_tool_blocks_replay`.
+- Responses scenarios run on `openai_responses`; Codex always uses `store: false`, so it has `responses_explicit_replay` and no continuation or `store: false` variant.
+- `output_limit_stop`: `codex`, whose streamed Responses reply raises `IncompleteResponsesStreamError` at `response.incomplete`, so there is no parsed reply.
+- `output_limit_stop_tool_call`: Gemini and Ollama, which send each call whole, and the Responses routes, whose cut-off calls the harness does not reproduce.
+- `approval_gated_tools`: Claude routes, Gemini, Ollama, and Cerebras, whose request tool definitions omit Agno's approval flags (see their `tool_definitions` goldens).
+- `native_compaction`, `native_compaction_replay`: run only on `anthropic`, `vertexai_claude`, `openai_responses`, and `codex`, the routes with native compaction.
+- `search_grounding`: runs only on `gemini` and `gemini_vertexai`, the routes with Google Search grounding.
+
+## Prompt goldens (`prompts/`)
+
+`prompts/<scenario>.json` holds every model request one scenario sends, as the provider adapter receives it from the request loop; the files were first captured under Agno 3.0.9 and now regenerate from owned code.
+`tests/agno_parity/prompt_scenarios.py` builds each scenario through the production builders (`ai.stream_agent_response`, `teams.envelope.team_response_stream`, `matrix_rtc.call_tools.build_call_tools`, and each helper's call site) and records the requests the owned path sends.
+`tests/agent_loop/test_prompt_parity.py` compares the golden each helper, Matrix reply, and voice-call scenario regenerates with its file, byte for byte, and `tests/teams/test_prompt_parity.py` compares the team goldens.
+Requests MindRoom sends through its own provider layer are recorded where the provider adapter receives them, below the request pipeline.
+
+Each file has these keys:
+
+- `scenario` and `description` name what the file pins.
+- `input` records what the scenario ran: the authored `config.yaml` mapping, workspace files, the turn's prompt and thread history, and the entry point.
+- `requests` lists each request with the model `id` and `provider` string, its `messages`, its `tools`, its `tool_choice`, its `output_schema`, and its `deferred_tool_names`.
+- `exported` appears only where MindRoom hands model-visible values to a model outside its own loop: the realtime voice model's instructions and tool schemas, and the Live voice model's system prompt.
+
+The recorder replaces the provider call, so it sees every request hook MindRoom wraps around that call, such as portable tool search, but not the provider's own wire conversion, which the `providers/` goldens pin.
+Messages are turns encoded as the provider goldens' `input.messages` are: without the storage identity and flags, keys sorted.
+`tools` holds each tool's model-visible definition, its `name`, `description`, and `parameters` as `tool_definition` (`tool_system/tool_access.py`) gives them, in the order the request loop passed them to the provider call; how each route formats them, approval flags included, is the provider goldens' to pin.
+`deferred_tool_names` lists, sorted, the tools Claude's wire hook sends with `defer_loading`; below the recorder, that hook also adds the server-side tool search entry and moves the deferred tools after the others, so on that path `tools` is not the wire order.
+It is empty when no tool is natively deferred, including on models whose deferred tools use portable tool search, which appears in `tools` itself.
+An `output_schema` is recorded as `{"json_schema": <model_json_schema()>, "model": "<module>:<class>"}`, the same on every route; how a route renders it is the provider goldens' to pin.
+
+Normalization:
+
+- The scenario's temporary root becomes `<TMP>`, which appears in preloaded context-file headings.
+- Today's date in the date context, such as `Monday, October 19, 2026`, becomes `<DATE>`; the timezone is pinned to `UTC`, and message timestamps and the schedule parser's current time are fixed inputs.
+- A delegation's tool result names its record by a random 32-digit hex id under the day the delegation started; the ids become `<ID-1>`, `<ID-2>`, and so on in first-appearance order, and the day becomes `<DATE>`.
+- `requests` and `exported` keep the order in which the recorder received their values, except that each message's keys are sorted; the parity tests compare the file's text, so a reordered tool schema, output schema, or exported key fails parity; ids are numbered in the key-sorted text.
+- Requests are grouped by the model instance that received them, in the order MindRoom built those models, and each model's requests stay in call order.
+  A team builds its members before its leader, so member requests come first; members run concurrently, so their relative call order is not part of the contract.
+- Collaborate-mode members all answer `ok`, because Agno's streaming broadcast result concatenates member output in arrival order, which is not deterministic.
+
+Scenarios use Claude (`anthropic`, `claude-sonnet-5-5`) unless named otherwise.
+Structured-output helpers run on each of the three structured-output paths: `anthropic` and `cerebras` receive the schema natively or as a JSON schema, and `vertexai_claude` receives no schema and is instead asked for JSON at the end of its system message.
+
+## Tool goldens (`tools/`)
+
+`tools/schemas.json`, `tools/schemas_all_enabled.json`, and `tools/arguments.json` were first captured from Agno 3.0.9's tool preparation and tool-call handling and now regenerate from the owned toolkit adapter and tool-call execution.
+`tests/tool_system/test_agno_toolkits.py` compares every adapted toolkit with the two schema files, and `tests/tool_system/test_tool_invocation.py` runs every argument case through the owned tool-call execution.
+A regeneration builds and normalizes the entries through the same support functions the tests compare with, so an unchanged tool reproduces its entry byte for byte.
+All three are pretty JSON.
+The schema files list tools in sorted order and keep every other key in the order providers receive it, such as `parameters` as `type`, `properties`, `required`, with properties in signature order; the test compares serialized bytes, so a reordered key fails parity.
+`arguments.json` has sorted keys and is compared by value.
+
+### `tools/schemas.json`
+
+The file maps each built-in tool registration name to `{"instructions", "guidance", "functions"}`, the adapted toolkit's fields.
+`instructions` is the text the system prompt shows for the toolkit, null unless the toolkit asks for its instructions there, and `guidance` the toolkit's instructions whether or not the prompt shows them, which the agent CLI and minimal mode show; no function adds instructions of its own.
+`functions` lists the functions in the order Agno prepares them for an async run: sync functions in registration order, each replaced in place by an async variant of the same name, then async-only functions.
+Each function records `name`, `description`, `parameters`, `strict`, `gate`, and `stop_after_tool_call`, first captured after Agno's per-run preparation (`parse_tools`), which ran `process_entrypoint` and MindRoom's schema postprocessors, and regenerated from the owned adapter (`adapt_toolkit`), which derives every schema a function's signature gives through MindRoom's generator.
+`gate` is the adapted function's `ToolGate`, into which the adapter folds Agno's `requires_confirmation` and `external_execution`, or null for a function whose calls run at once.
+The function's `ToolSpec`, the definition a provider adapter receives, is the same entry, in the same key order, without `gate` and `stop_after_tool_call`; Agno's `show_result`, which the adapter ignores because MindRoom gives a tool's result only to the model, is not recorded.
+Only Agno's non-strict preparation is captured, because Agno makes functions strict only for a run with an output schema on a model with native structured outputs, and no MindRoom run that has tools sets an output schema.
+
+Each tool is built by `build_agent_toolkit` with its default configuration, for one agent of a config shaped like `mindroom config init` output; `tests/tool_system/agno_parity_support.py` holds that setup.
+File memory gives that agent a workspace, so output-file wrapping adds `mindroom_output_path`, and the agent delegates and uses the knowledge graph, so the `delegate` and `knowledge_graph` tools exist.
+`dynamic_tools` is built beside a deferred `calculator`, because tool search exists only with a deferred toolkit.
+Tools that need settings to construct get dummy credentials (`DUMMY_CREDENTIALS`), and SDK clients that contact their service during construction are replaced by mocks (`OFFLINE_CLIENTS`).
+The capture hides the host environment and refuses network connections, so the `update_awareness` instructions report an unknown latest release.
+
+Entries leave out policy that agent construction applies after a tool is built: approval capability (which pauses, hides, or job-gates functions per `tool_approval`, and gives `delegate`'s `run_subagent` and `continue_subagent` the delegation gate), persona and function filters, hook bridges, and the per-turn `background_after` parameter that tool jobs add to managed calls.
+
+Normalization: the running MindRoom version in the `update_awareness` instructions is replaced by `<MINDROOM_VERSION>`.
+
+Not captured:
+
+- `apify`, because its functions come from Apify Actor builds, which only the service returns.
+- `composio`, because its functions come from the Composio action catalog, which only the service returns.
+
+Agno behavior the golden pins as it is:
+
+- `openclaw_compat` builds a toolkit without functions.
+
+### `tools/schemas_all_enabled.json`
+
+The file maps each captured tool that has function switches to `{"overrides", "instructions", "guidance", "functions"}`, built as for `tools/schemas.json` but with `overrides` as the agent's authored tool config.
+`overrides` sets every boolean `all` and `enable_*` field to true, plus the extra settings in `EXTRA_ENABLING_OVERRIDES` that some functions need (`agentql_query`, `usage_stats`'s `admin_scope`).
+Some switches replace a default function instead of adding one, such as `tavily`'s `enable_search_context`, so a tool's functions are the union of both files.
+
+When the files were captured, every name in a tool's `ToolMetadata.function_names` appeared in one of them, except async method names that Agno registers under their sync name, helper methods, and `wikipedia`'s knowledge-base function, which needs a knowledge base object that config cannot supply.
+
+### `tools/arguments.json`
+
+The file maps a case id to `{"function", "raw_arguments", "arguments", "kwargs"}` or `{"function", "raw_arguments", "arguments", "error_text"}`.
+Each case sends one tool call, whose arguments string is `raw_arguments`, to a probe in `tests/agno_parity/tool_argument_probes.py`; the capture sent it through Agno's `Model.get_function_calls_to_run` and `Model.arun_function_calls`, and a regeneration sends it through the owned `parse_tool_arguments` and `execute_tool_call`.
+`kwargs` is what the probe body received, each value encoded by `encode_kwargs` as `{"type": <Python type name>, "value": ...}`, so coercion such as `"3"` to `3` stays visible.
+An injected framework object, such as the calling agent, is encoded as `{"type": "injected", "value": null}`, so the owned loop may inject its own stand-in.
+`error_text` is the tool message content the model reads when the call fails.
+`arguments` is the tool message's `tool_args`, which history keeps: the decoded arguments after top-level `"true"`, `"false"`, `"none"`, and `"null"` strings read as booleans and null, and after values the model sent for injected parameters such as `agent` are dropped.
+Agno converted those strings for every parameter; the owned parser keeps them for a parameter whose schema admits a string by the rule `parse_tool_arguments` documents, so `scalars_false_string_for_text` records the owned outcome rather than Agno's validation error.
+`arguments` is null when the model sent `[]`, and absent when Agno rejects the call before running it.
+The probes import no Agno code, so owned implementations keep using them after Agno is removed.
+
+Normalization: the pydantic version in error links (`https://errors.pydantic.dev/2.13/v/...`) is replaced by `<PYDANTIC_VERSION>`.
+Decoding errors embed the message of Python's `ast.literal_eval`, and probes that skip validation fail with Python's own `TypeError` text, so both depend on the interpreter version (Python 3.13).
+
+## Storage, history, and event goldens (`legacy_agno3/storage/`, `legacy_agno3/runs/`, `legacy_agno3/history/`, `events/`)
+
+A capture script, deleted with Agno's runtime, wrote `legacy_agno3/storage/`, `legacy_agno3/runs/`, `legacy_agno3/history/`, and `events/`.
+Every scenario ran MindRoom's real code path with real Agno agents and teams: `ai_response`, `stream_agent_response`, `team_response`, `team_response_stream`, the approval resume (`AgentApprovalExecution.continue_run` and `continue_paused_team_run`, called with the decisions, receipt, and continuation `ResponseRunner` builds), the OpenAI-compatible API, and MindRoom's storage, compaction, and reply-linkage functions.
+Only the provider was replaced, by the synthetic provider answering from a script.
+The `legacy_agno3/` files hold data Agno wrote and are never rewritten; the `events/` files hold what MindRoom published and regenerate from owned code.
+`tests/session_storage/test_store_goldens.py` proves that every `legacy_agno3/storage/` file converts to storage v2 and then reads and writes with nothing lost or changed.
+
+### Scenarios
+
+| Store | Session | Runs |
+| --- | --- | --- |
+| `agent_code` | `!room:example.org:$conversation` | `run-text` (blocking, cache and reasoning counters), `run-tools` (streamed, a tool call, then two parallel calls, then reasoning, `redacted_reasoning_content`, and `provider_data`), `run-media` (prompt with an image, audio, a video, a PDF, a UTF-8 text file, and a file path), `run-view` (`view_file` puts a viewed image on the tool-media follow-up message), `run-error` and `run-cancelled` (MindRoom's interrupted-turn records, stored `COMPLETED`), `run-paused-approval` (`PAUSED` on an approval-gated `multiply`, system message kept) |
+| `agent_code` | `!room:example.org:$delegation` | `run-paused-delegation`: `PAUSED` on `run_subagent` external execution, with `metadata.mindroom_delegation` projecting the child's pending approval |
+| `agent_code` | `!room:example.org:$approved` | `run-approved`: paused on `multiply` like `run-paused-approval`, then approved and continued, so the run is `COMPLETED` with its requirement resolved (`confirmation` true), the tool's result, and the follow-up answer; Agno records no metrics for a continued tool call |
+| `agent_code` | `!room:example.org:$rejected` | `run-rejected`: paused the same way, then denied with a reason, so the requirement's `confirmation` and the tool's `confirmed` are false, both carry the reason as `confirmation_note`, and the tool message holds the reason |
+| `agent_code` | `!room:example.org:$delegation-approved` | `run-delegation-approved`: paused like `run-paused-delegation`, then the child's call was approved, so the child and then the parent continued, and the `run_subagent` requirement holds the child's answer and delegation record as its external result |
+| `agent_code` | `!room:example.org:$native` | `run-native-error` (`ERROR`) and `run-native-cancelled` (`CANCELLED`), as Agno saves them when no MindRoom turn record replaces them |
+| `agent_code` | `!room:example.org:$compacted` | `run-c1` to `run-c5`; a compaction summary row covers `run-c1` and `run-c2`, an edit cut removed `run-c4` (a `_removed_runs` row), and a mid-turn fold row holds a segment of `run-c5`'s tool exchange, so `run-c5` loads without those messages; a `compaction_summary` usage row |
+| `agent_helper` | `delegate:code:helper:<id>` | The delegated child runs: `PAUSED` on its approval for `run-paused-delegation`, and continued to `COMPLETED` for `run-delegation-approved` |
+| `team_squad` | `!room:example.org:$squad` | Coordinate team runs `team-completed` (member used a tool), `team-member-error` (member row `ERROR`), and `team-paused` (member approval; the team row embeds the paused member) |
+| `team_squad` | `!room:example.org:$squad-approved` | `team-approved`: paused like `team-paused`, then the member's call was approved and the team continued, so the member and team rows are `COMPLETED` |
+| `team_panel` | `!room:example.org:$panel` | Streamed collaborate run `panel-completed` with two member rows |
+| `agno2_migrated` | `session-1` | `tests/fixtures/agno_2_6_12_code_sessions.sql` after MindRoom's open-time migration (runs moved out of the `runs` blob, `session_data` still double-encoded) |
+
+Every run with a provider request also has its usage row in `<table>_usage`.
+
+### Files
+
+- `legacy_agno3/storage/<store>.sql`: `iterdump` of each database; restore it with `sqlite3` `executescript`, as `tests.conftest.create_agno_2_sessions_db` does.
+- `legacy_agno3/storage/stores.json`: each store's database path under the storage root and its sessions with their stored session type.
+  The database `<name>.db` holds the sessions table `<name>_sessions`.
+  Open a restored store with `create_state_storage(name, <storage root>/<path without sessions/<name>.db>, owner)`, `owner` being the agent or team scope its sessions name.
+- `legacy_agno3/storage/loaded_sessions.json`: `AgentSession.to_dict()` or `TeamSession.to_dict()` of every session as `get_agent_session` or `get_team_session` loads it: runs after the scope's latest summary row plus every non-visible run and its descendants, folded messages removed, and the summary taken from the latest summary row.
+- `legacy_agno3/runs/<type>.json`: `{case: dict}` for every value of that type nested in the stored `run_data` columns, summary-row segments, and `session_data`, exactly as stored.
+  A case key is `<store>:<run id or segment:<row id>>` followed by its path, such as `agent_code:run-tools.messages[3].metrics`.
+  The types are `run_output` (`RunOutput`), `team_run_output` (`TeamRunOutput`), `message` (`Message`), `image`, `audio`, `video`, and `file` (media dicts, read through `Message.from_dict` because Agno media has no `from_dict`), `tool_execution` (`ToolExecution`), `run_requirement` (`RunRequirement`), `message_metrics` (`MessageMetrics`), `run_metrics` (`RunMetrics`), and `model_metrics` (`ModelMetrics`).
+- `legacy_agno3/history/<store>__<session>.json`: `get_messages` results for the loaded session under each selection's keyword arguments, and `filter_tool_calls` applied to `copy_history_message` copies of a selection, as Agno's message builder does.
+  Agno's builder passes `num_history_runs` as `last_n_runs`, `num_history_messages` as `limit`, `[system_message_role]` as `skip_roles` only for a role other than `user`, `assistant`, or `tool`, and the member's id as `agent_id` only for a team member.
+- `events/ai_run.json`: the `io.mindroom.ai_run` Matrix metadata each golden run publishes, keyed by run id, as the owned reply or approval resume publishes it; a turn stopped by cancelling its task and a turn paused for approval publish none.
+  `tests/test_ai_run_metadata_goldens.py` replays every run through the reply entry point that published it, with scripted models that answer as the stored run's assistant messages did and a history preparation that returns what the run's metadata says it prepared, and continues each approval resume from its pre-resume dump (`tests/ai_run_golden_helpers.py`, `tests/approval_resume_helpers.py`).
+  A run's `duration` is a clock reading, recorded as `<clock>`.
+  The capture held Agno's metadata, which also had a zero `cache_write_tokens` in `run-tools`, the summed input of every request as the context of a run that made more than one, and an entry for `run-c4`, whose row an edit cut removed, so no replay publishes it.
+  The capture also recorded two turns that Agno's own run cancellation ended with their reply still running, which Stop never caused because it cancels the reply's task first; that file was dropped, so no golden holds a cancelled run's metadata.
+- `events/openai_compat.json`: each `/v1/chat/completions` request with its status and body, parsed JSON when blocking and the raw lines of the SSE stream when streaming.
+  `tests/test_openai_compat_goldens.py` sends the same requests through the owned API path and compares the bodies; completion ids are numbered in first-appearance order and every `created` clock reading is `0`.
+- `legacy_agno3/storage/<store>__before_<run id>.sql`: the sessions one approval resume reads, dumped just before it ran: the paused run's session and, for a delegation, its child's session in the child's store, with only those sessions' rows in every table keyed by session.
+  Restore one like its store; the store golden holds the same sessions after the resume, so the two form a paused and resumed pair.
+- `legacy_agno3/history/scoped_selections.json`: for every `<store>:<session>`, `get_messages` with the scope filter history replay passes (`agent_id` in agent stores, `team_id` in team stores), its run and message limits, and the prompt roles it skips, plus one selection by another scope of the same kind, which owns no run in the store.
+
+Agno's own readers are not lossless.
+Re-serializing a stored run adds `"events": []` to it and to every member response, drops an empty `tools` list, and drops `Audio.format`, so a row written back after Agno read it carries those changes.
+The resumed runs are such rows, since Agno's continuation reads the paused run from storage before saving it, and so is any loaded run the capturing release edited and saved back whole.
+`tests/session_storage/test_store_goldens.py` pins exactly these differences.
+The store goldens carry no `matrix_response_event_id` linkage, which MindRoom adds to a run's metadata after delivering a reply.
+
+The `run-error` record holds the previous turn's answer followed by `(turn failed before completion)`, because the Agno-era interrupted-turn text fell back to replayed history when the failed request produced no assistant message; the golden keeps that stored legacy data, while the owned loop keeps only the failed reply's own text (`tests/test_agent_turn_runtime.py::test_an_error_record_never_repeats_an_earlier_answer`).
+
+### Normalization
+
+- The wall clock was frozen, and every turn started at the next minute after 2027-01-15T08:00:00Z, so Unix timestamps run `1800000060`, `1800000120`, and so on.
+- `time.time`, `datetime.now` in every `agno` and `mindroom` module, Agno's message, run, and tool timestamps, summary rows, requirement `created_at`, and the system prompt's date followed that clock, and local time was UTC.
+- Agno's timers reported every timed span as 0.5 seconds and every `time_to_first_token` as 0.25 seconds, since parallel tool calls ran concurrently and would otherwise have timed in whatever order they ran.
+- Random ids became sequential ones in first-appearance order across the dumps, the events, and then the pre-resume dumps and two capture outputs that were not kept, reply-linkage rows and cancelled-turn events, so the numbering can skip ids: UUIDs became `00000000-0000-4000-8000-<n>`, 32-digit hex ids such as delegation, child run, correlation, and viewed-image ids became `<n>` padded to 32 hex digits, and completion ids became `chatcmpl-<n>` padded to 12 hex digits.
+- The capture's temporary directory became `/mindroom-capture`.
+- Dumps sorted their `CREATE INDEX` statements, because Agno created indexes in a different order on every run, and stripped the trailing spaces SQLAlchemy left in table definitions.
+- The capture ran with `PYTHONHASHSEED=0`, because Agno's `Model.to_dict` orders `agent_data.model` and `team_data.model` by iterating a set.
+
+## Knowledge goldens (`knowledge/`)
+
+`knowledge/embedders.json`, `knowledge/rows.json`, and `knowledge/search.json` were first captured from the Agno-backed knowledge path, and the owned knowledge code's parity tests in `tests/test_knowledge_goldens.py` read them.
+All three are pretty JSON with sorted keys and are compared by value.
+`embedders.json` and `search.json` regenerate from owned code (`tests/agno_parity/knowledge_goldens.py`); `rows.json` holds the rows Agno wrote to Chroma, which owned refreshes must still write and the owned read path must still search, beside the authored `input` the refreshes and searches run on.
+
+### `knowledge/embedders.json`
+
+The file maps an embedder case to `{"embedder", "calls"}`, where `embedder` is the authored `memory.embedder` block and each call names the Agno-era method (`agno_method`), the purpose that method implied (`query` or `document`), and its `texts`.
+OpenAI-compatible and Ollama calls record each HTTP request's `method`, `url`, and JSON `body`; sentence-transformers calls record each call to the local model (`encode_query` or `encode_document`, its input, and its keyword arguments).
+Each embedder is built by `create_configured_embedder`; mock transports answer every request, and a recording model stands in for the sentence-transformers weights.
+
+### `knowledge/rows.json`
+
+`input` holds the authored config, every source file, the fixed mtime they get, and the embedding rule: each chunk's vector is `tests.agno_parity.knowledge_vectors.parity_vector` of its text.
+`bases.<base_id>` records every row Agno wrote, with its id, document, metadata, and embedding, and the `metadata` and `configuration_json` of the Chroma collection that held them.
+The parity test refreshes each base through the production refresh path into the owned SQLite store and compares the rows it published; the owned store has no collection metadata or configuration.
+Chroma returned some embeddings up to one float32 ulp from the values it was given, and the owned store keeps the given values, so embeddings compare within float32 precision.
+Rows are sorted by source path, page, row number, chunk, and document.
+
+Normalization:
+
+- Row ids, which hash a per-read uuid4 with the content hash, become `<md5>`.
+- `content_hash`, which hashes the source metadata with a temporary snapshot path, becomes `<sha256>`, and `content_id`, its uuid5, becomes `<uuid5>`.
+
+### `knowledge/search.json`
+
+The file holds only its `searches`; the agents and bases are `rows.json`'s `input`, so a search for a new agent adds that agent there.
+Each search sends one query through the `search_knowledge_base` tool as its agent, over the bases an owned refresh writes from that `input`: `librarian` searches one base, `researcher` two, and `archivist` an empty one; the search marked `"embedding_fails": true` runs with its query embedding failing.
+A search records `documents`, the tool's JSON result parsed, or `text` for `No documents found` and the error text.
+The tool lays its result out with `indent=2` and `ensure_ascii=False`, each document's keys as `name`, `meta_data`, `content`, and each `meta_data` holds the chunk's `source_path`, its reader keys, and its `distance`.
+Each cosine distance is summed in float32 in an order the CPU's vector width decides, so a distance's last bits differ between machines; a regeneration keeps a recorded `distance` that the new value matches within a relative `1e-6` (`DISTANCE_RELATIVE_TOLERANCE` in `tests/agno_parity/knowledge_goldens.py`), so every machine writes the same file, and a larger difference is written and fails the parity test.
+
+## Codec goldens (`legacy_agno3/codecs.json`)
+
+`legacy_agno3/codecs.json` maps a case name to what Agno 3.0.9 objects produced for it: the `to_dict()` of messages, media, metrics, tool executions, requirements, and agent and team runs built field by field, the results of Agno's metric addition and accumulation, requirement decisions, and lenient reads, and the names and values of Agno's `RunStatus`.
+`tests/llm/test_codecs.py` reads each case it uses with the owned types and checks that it writes back as the case, minus the keys the owned records drop (`tests/llm/agno_dict_helpers.py`).
+Dicts keep Agno's key order and its base64 media content, and a case built without an id or a timestamp keeps the random id and capture-time timestamp Agno filled in.

@@ -1,5 +1,11 @@
 import { describe, it, expect, beforeEach, vi } from "vitest";
-import { render, screen, fireEvent, waitFor } from "@testing-library/react";
+import {
+  act,
+  render,
+  screen,
+  fireEvent,
+  waitFor,
+} from "@testing-library/react";
 import { MemoryConfig } from "./MemoryConfig";
 import { useConfigStore } from "@/store/configStore";
 import { useConfigSchema } from "@/hooks/useConfigSchema";
@@ -27,14 +33,22 @@ describe("MemoryConfig", () => {
   const mockUpdateConfigValue = vi.fn();
   const mockSaveConfig = vi.fn();
 
-  beforeEach(() => {
-    vi.clearAllMocks();
+  const mockStore = (
+    config: Partial<Config>,
+    extra: Record<string, unknown> = {},
+  ) => {
     (useConfigStore as any).mockReturnValue({
-      config: mockConfig,
+      config,
       updateMemoryConfig: mockUpdateMemoryConfig,
       saveConfig: mockSaveConfig,
       isDirty: false,
+      ...extra,
     });
+  };
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mockStore(mockConfig);
   });
 
   it("renders memory configuration", () => {
@@ -66,25 +80,31 @@ describe("MemoryConfig", () => {
     expect(providerSelect).toHaveTextContent("OpenAI");
   });
 
-  it("lists sentence-transformers as an embedder provider option", async () => {
-    render(<MemoryConfig />);
-
-    const providerSelect = document.getElementById("provider");
-    expect(providerSelect).toBeInTheDocument();
-    fireEvent.click(providerSelect!);
-
-    expect(
-      await screen.findByText("Sentence Transformers"),
-    ).toBeInTheDocument();
-  });
-
   it("shows model as free-text input", () => {
     render(<MemoryConfig />);
 
     const modelInput = document.getElementById("model") as HTMLInputElement;
     expect(modelInput).toBeInTheDocument();
     expect(modelInput).toHaveValue("text-embedding-3-small");
+    expect(modelInput).toHaveAttribute(
+      "placeholder",
+      "e.g. text-embedding-3-small",
+    );
     expect(modelInput.tagName).toBe("INPUT");
+  });
+
+  it("suggests no model for an embedder provider it has no default for", () => {
+    mockStore({
+      memory: {
+        embedder: { provider: "custom_embedder", config: { model: "" } },
+      },
+    });
+    render(<MemoryConfig />);
+
+    expect(document.getElementById("model")).toHaveAttribute(
+      "placeholder",
+      "Model name",
+    );
   });
 
   it("shows host input for openai provider", () => {
@@ -129,12 +149,7 @@ describe("MemoryConfig", () => {
         },
       },
     };
-    (useConfigStore as any).mockReturnValue({
-      config: configWithCredentialService,
-      updateMemoryConfig: mockUpdateMemoryConfig,
-      saveConfig: mockSaveConfig,
-      isDirty: false,
-    });
+    mockStore(configWithCredentialService);
     render(<MemoryConfig />);
 
     const credentialsServiceInput = document.getElementById(
@@ -147,25 +162,6 @@ describe("MemoryConfig", () => {
       const nextConfig = calls[calls.length - 1]?.[0];
       expect(nextConfig.embedder.config).not.toHaveProperty(
         "credentials_service",
-      );
-    });
-  });
-
-  it("updates team reads member memory toggle", async () => {
-    render(<MemoryConfig />);
-
-    const toggle = document.getElementById("team-reads-member-memory");
-    expect(toggle).toBeInTheDocument();
-    fireEvent.click(toggle!);
-
-    const enabledOption = await screen.findByText("Enabled");
-    fireEvent.click(enabledOption);
-
-    await waitFor(() => {
-      expect(mockUpdateMemoryConfig).toHaveBeenCalledWith(
-        expect.objectContaining({
-          team_reads_member_memory: true,
-        }),
       );
     });
   });
@@ -202,18 +198,47 @@ describe("MemoryConfig", () => {
       },
     };
 
-    (useConfigStore as any).mockReturnValue({
-      config: ollamaConfig,
-      updateMemoryConfig: mockUpdateMemoryConfig,
-      saveConfig: mockSaveConfig,
-      isDirty: false,
-    });
+    mockStore(ollamaConfig);
 
     render(<MemoryConfig />);
 
     const hostInput = document.getElementById("host") as HTMLInputElement;
     expect(hostInput).toBeInTheDocument();
     expect(hostInput).toHaveValue("http://localhost:11434");
+    expect(
+      screen.getByText("Local embeddings using Ollama"),
+    ).toBeInTheDocument();
+  });
+
+  it("leaves an unset Ollama host empty, so a save keeps OLLAMA_HOST in charge", async () => {
+    mockStore({
+      memory: {
+        embedder: {
+          provider: "ollama",
+          config: { model: "nomic-embed-text" },
+        },
+      },
+    });
+
+    render(<MemoryConfig />);
+
+    const hostInput = document.getElementById("host") as HTMLInputElement;
+    expect(hostInput).toHaveValue("");
+    expect(hostInput).toHaveAttribute("placeholder", "http://localhost:11434");
+    expect(screen.getByText("Ollama Host URL")).not.toHaveTextContent("*");
+    expect(screen.getByText(/Empty uses OLLAMA_HOST/)).toBeInTheDocument();
+
+    fireEvent.change(document.getElementById("model") as HTMLInputElement, {
+      target: { value: "mxbai-embed-large" },
+    });
+
+    await waitFor(() => {
+      const calls = mockUpdateMemoryConfig.mock.calls;
+      expect(calls[calls.length - 1]?.[0]?.embedder).toEqual({
+        provider: "ollama",
+        config: { model: "mxbai-embed-large", host: "" },
+      });
+    });
   });
 
   it("hides host input for sentence-transformers provider", () => {
@@ -228,12 +253,7 @@ describe("MemoryConfig", () => {
       },
     };
 
-    (useConfigStore as any).mockReturnValue({
-      config: localConfig,
-      updateMemoryConfig: mockUpdateMemoryConfig,
-      saveConfig: mockSaveConfig,
-      isDirty: false,
-    });
+    mockStore(localConfig);
 
     render(<MemoryConfig />);
 
@@ -262,7 +282,7 @@ describe("MemoryConfig", () => {
             provider: "ollama",
             config: expect.objectContaining({
               model: "nomic-embed-text",
-              host: "http://localhost:11434",
+              host: "",
             }),
           }),
         }),
@@ -284,12 +304,7 @@ describe("MemoryConfig", () => {
       },
     };
 
-    (useConfigStore as any).mockReturnValue({
-      config: configWithHost,
-      updateMemoryConfig: mockUpdateMemoryConfig,
-      saveConfig: mockSaveConfig,
-      isDirty: false,
-    });
+    mockStore(configWithHost);
 
     render(<MemoryConfig />);
 
@@ -335,12 +350,7 @@ describe("MemoryConfig", () => {
       },
     };
 
-    (useConfigStore as any).mockReturnValue({
-      config: configWithHost,
-      updateMemoryConfig: mockUpdateMemoryConfig,
-      saveConfig: mockSaveConfig,
-      isDirty: false,
-    });
+    mockStore(configWithHost);
 
     render(<MemoryConfig />);
 
@@ -393,52 +403,151 @@ describe("MemoryConfig", () => {
     });
   });
 
-  it("loads and updates the entrypoint token cap without touching other file settings", async () => {
-    (useConfigStore as any).mockReturnValue({
-      config: {
-        memory: {
-          backend: "file",
-          embedder: mockConfig.memory!.embedder,
-          file: {
-            path: "./memory_files",
-            max_entrypoint_lines: 120,
-            max_entrypoint_tokens: 30000,
-          },
-        },
+  it("falls back to the default when a numeric field is cleared", () => {
+    mockStore({
+      memory: {
+        backend: "file",
+        embedder: mockConfig.memory!.embedder,
+        auto_flush: { flush_interval_seconds: 120 },
       },
-      updateMemoryConfig: mockUpdateMemoryConfig,
-      saveConfig: mockSaveConfig,
-      isDirty: false,
     });
     render(<MemoryConfig />);
 
-    const tokenInput = document.getElementById(
-      "entrypoint-max-tokens",
+    fireEvent.change(document.getElementById("flush-interval-seconds")!, {
+      target: { value: "" },
+    });
+
+    expect(mockUpdateMemoryConfig).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        auto_flush: expect.objectContaining({ flush_interval_seconds: 300 }),
+      }),
+    );
+  });
+
+  it("lets a numeric field be cleared and retyped", async () => {
+    const actual = await vi.importActual<typeof import("@/store/configStore")>(
+      "@/store/configStore",
+    );
+    actual.useConfigStore.setState({
+      config: {
+        ...mockConfig,
+        memory: {
+          ...mockConfig.memory!,
+          backend: "file",
+          auto_flush: { flush_interval_seconds: 120 },
+        },
+      } as Config,
+    });
+    (useConfigStore as any).mockImplementation(() => actual.useConfigStore());
+    render(<MemoryConfig />);
+
+    const input = document.getElementById(
+      "flush-interval-seconds",
     ) as HTMLInputElement;
-    expect(tokenInput.value).toBe("30000");
-    fireEvent.change(tokenInput, { target: { value: "20000" } });
+    for (const value of ["", "5", "50"]) {
+      fireEvent.change(input, { target: { value } });
+      expect(input).toHaveDisplayValue(value);
+    }
+    expect(
+      actual.useConfigStore.getState().config?.memory.auto_flush
+        ?.flush_interval_seconds,
+    ).toBe(50);
+
+    fireEvent.change(input, { target: { value: "" } });
+    fireEvent.blur(input);
+    expect(input).toHaveDisplayValue("300");
+  });
+
+  it("enables auto flush and entrypoint search from their selects", async () => {
+    mockStore({
+      memory: { backend: "file", embedder: mockConfig.memory!.embedder },
+    });
+    render(<MemoryConfig />);
+
+    fireEvent.click(document.getElementById("auto-flush-enabled")!);
+    fireEvent.click(await screen.findByRole("option", { name: "Enabled" }));
+    expect(mockUpdateMemoryConfig).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        auto_flush: expect.objectContaining({ enabled: true }),
+      }),
+    );
+
+    fireEvent.click(document.getElementById("memory-search-entrypoint")!);
+    fireEvent.click(await screen.findByRole("option", { name: "Enabled" }));
+    expect(mockUpdateMemoryConfig).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        search: expect.objectContaining({ include_entrypoint: true }),
+      }),
+    );
+  });
+
+  it("updates search include patterns without touching other search settings", async () => {
+    mockStore({
+      memory: {
+        backend: "file",
+        embedder: mockConfig.memory!.embedder,
+        search: {
+          mode: "semantic",
+          include: ["memory/**/*.md"],
+          include_entrypoint: true,
+        },
+      },
+    });
+    render(<MemoryConfig />);
+
+    fireEvent.change(document.getElementById("memory-search-include")!, {
+      target: { value: "notes/*.md, memory/*.md" },
+    });
 
     await waitFor(() => {
       expect(mockUpdateMemoryConfig).toHaveBeenCalledWith(
         expect.objectContaining({
-          file: {
-            path: "./memory_files",
-            max_entrypoint_lines: 120,
-            max_entrypoint_tokens: 20000,
+          search: {
+            mode: "semantic",
+            include: ["notes/*.md", "memory/*.md"],
+            include_entrypoint: true,
           },
         }),
       );
     });
   });
 
+  it("keeps a trailing comma typed into the include patterns", async () => {
+    const actual = await vi.importActual<typeof import("@/store/configStore")>(
+      "@/store/configStore",
+    );
+    actual.useConfigStore.setState({
+      config: {
+        ...mockConfig,
+        memory: { ...mockConfig.memory!, backend: "file" },
+      } as Config,
+    });
+    (useConfigStore as any).mockImplementation(() => actual.useConfigStore());
+    render(<MemoryConfig />);
+
+    const input = document.getElementById(
+      "memory-search-include",
+    ) as HTMLInputElement;
+    for (const value of ["a", "a,", "a, ", "a, b"]) {
+      fireEvent.change(input, { target: { value } });
+      expect(input).toHaveValue(value);
+    }
+    expect(
+      actual.useConfigStore.getState().config?.memory.search?.include,
+    ).toEqual(["a", "b"]);
+
+    act(() => {
+      actual.useConfigStore.getState().updateMemoryConfig({
+        ...actual.useConfigStore.getState().config!.memory,
+        search: { include: ["z/*.md"] },
+      });
+    });
+    expect(input).toHaveValue("z/*.md");
+  });
+
   it("calls saveConfig when save button is clicked", async () => {
     // Re-mock with isDirty: true so the button is enabled
-    (useConfigStore as any).mockReturnValue({
-      config: mockConfig,
-      updateMemoryConfig: mockUpdateMemoryConfig,
-      saveConfig: mockSaveConfig,
-      isDirty: true,
-    });
+    mockStore(mockConfig, { isDirty: true });
 
     render(<MemoryConfig />);
 
@@ -458,18 +567,30 @@ describe("MemoryConfig", () => {
     expect(saveButton).toBeDisabled();
   });
 
-  it("enables save button when dirty", () => {
-    (useConfigStore as any).mockReturnValue({
-      config: mockConfig,
-      updateMemoryConfig: mockUpdateMemoryConfig,
-      saveConfig: mockSaveConfig,
-      isDirty: true,
-    });
+  it("shows auto-flush settings without the retired memory settings", () => {
+    mockStore({ memory: { ...mockConfig.memory!, backend: "file" } });
 
     render(<MemoryConfig />);
 
-    const saveButton = screen.getByRole("button", { name: /Save/i });
-    expect(saveButton).not.toBeDisabled();
+    expect(screen.getByLabelText("Flush Interval (seconds)")).toHaveValue(300);
+    expect(screen.getByLabelText("Stale TTL (seconds)")).toHaveValue(86400);
+    expect(
+      screen.queryByLabelText("Max Dirty Age (seconds)"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByLabelText("Cross-Session Reprioritize"),
+    ).not.toBeInTheDocument();
+    expect(
+      document.getElementById("team-reads-member-memory"),
+    ).not.toBeInTheDocument();
+    expect(document.getElementById("file-memory-path")).not.toBeInTheDocument();
+    expect(
+      document.getElementById("entrypoint-max-lines"),
+    ).not.toBeInTheDocument();
+    expect(
+      document.getElementById("entrypoint-max-tokens"),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("Team Reads Members:")).not.toBeInTheDocument();
   });
 
   it("shows provider description for openai", () => {
@@ -480,40 +601,6 @@ describe("MemoryConfig", () => {
         "OpenAI or any OpenAI-compatible API (set Base URL below)",
       ),
     ).toBeInTheDocument();
-  });
-
-  it("shows provider description for ollama", async () => {
-    render(<MemoryConfig />);
-
-    const providerSelect = document.getElementById("provider");
-    fireEvent.click(providerSelect!);
-    const ollamaOption = await screen.findByText("Ollama");
-    fireEvent.click(ollamaOption);
-
-    await waitFor(() => {
-      expect(
-        screen.getByText("Local embeddings using Ollama"),
-      ).toBeInTheDocument();
-    });
-  });
-
-  it("shows provider description for sentence-transformers", async () => {
-    render(<MemoryConfig />);
-
-    const providerSelect = document.getElementById("provider");
-    fireEvent.click(providerSelect!);
-    const sentenceTransformersOption = await screen.findByText(
-      "Sentence Transformers",
-    );
-    fireEvent.click(sentenceTransformersOption);
-
-    await waitFor(() => {
-      expect(
-        screen.getByText(
-          "Fully local embeddings using the sentence-transformers Python runtime",
-        ),
-      ).toBeInTheDocument();
-    });
   });
 
   it("shows base URL in config display when set", () => {
@@ -529,12 +616,7 @@ describe("MemoryConfig", () => {
       },
     };
 
-    (useConfigStore as any).mockReturnValue({
-      config: configWithHost,
-      updateMemoryConfig: mockUpdateMemoryConfig,
-      saveConfig: mockSaveConfig,
-      isDirty: false,
-    });
+    mockStore(configWithHost);
 
     render(<MemoryConfig />);
 
@@ -545,12 +627,7 @@ describe("MemoryConfig", () => {
   });
 
   it("handles missing memory config gracefully", () => {
-    (useConfigStore as any).mockReturnValue({
-      config: {},
-      updateMemoryConfig: mockUpdateMemoryConfig,
-      saveConfig: mockSaveConfig,
-      isDirty: false,
-    });
+    mockStore({});
 
     render(<MemoryConfig />);
 
@@ -562,15 +639,11 @@ describe("MemoryConfig", () => {
   });
 
   it("edits memory settings the page does not render through More settings", () => {
-    (useConfigStore as any).mockReturnValue({
-      config: mockConfig,
+    mockStore(mockConfig, {
       agents: [],
       rooms: [],
       diagnostics: [],
-      updateMemoryConfig: mockUpdateMemoryConfig,
       updateConfigValue: mockUpdateConfigValue,
-      saveConfig: mockSaveConfig,
-      isDirty: false,
     });
     vi.mocked(useConfigSchema).mockReturnValue({
       schema: {
@@ -617,15 +690,11 @@ describe("MemoryConfig", () => {
   });
 
   it("edits embedder options the page does not render through More embedder settings", () => {
-    (useConfigStore as any).mockReturnValue({
-      config: mockConfig,
+    mockStore(mockConfig, {
       agents: [],
       rooms: [],
       diagnostics: [],
-      updateMemoryConfig: mockUpdateMemoryConfig,
       updateConfigValue: mockUpdateConfigValue,
-      saveConfig: mockSaveConfig,
-      isDirty: false,
     });
     vi.mocked(useConfigSchema).mockReturnValue({
       schema: {

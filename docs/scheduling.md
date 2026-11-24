@@ -7,9 +7,9 @@ icon: lucide/calendar-clock
 Schedule agents or teams to do one-time or recurring work, such as reminders, daily reports, or periodic checks, using natural language.
 Create schedules with the `!schedule` chat command or let an agent create them with the `scheduler` tool.
 
-<video controls playsinline preload="metadata" aria-label="A scheduled task posts a morning brief" style="width: 100%" poster="https://github.com/user-attachments/assets/4ba7b6f1-e2be-4b2a-a38a-e7a7bb49826e" data-poster-light="https://github.com/user-attachments/assets/4ba7b6f1-e2be-4b2a-a38a-e7a7bb49826e" data-poster-dark="https://github.com/user-attachments/assets/38261697-8f2a-478d-a256-32559e107315">
-  <source src="https://github.com/user-attachments/assets/e59e09c8-c8c7-4e90-8e3c-30b8f18b6de2" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/fdbc3860-9301-4d62-907a-857c818d4e73" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="A scheduled task posts a morning brief" style="width: 100%" poster="https://github.com/user-attachments/assets/ada165aa-24ad-407f-9831-30928126d091" data-poster-light="https://github.com/user-attachments/assets/ada165aa-24ad-407f-9831-30928126d091" data-poster-dark="https://github.com/user-attachments/assets/01a8d67f-f1ed-4c6a-b2df-a1681149722e">
+  <source src="https://github.com/user-attachments/assets/99f7e664-131d-4831-9c7e-64a2d95b2b6b" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/67fd537c-d810-4a3c-b5a5-d8e307708d56" type="video/mp4">
 </video>
 
 ## Commands
@@ -66,6 +66,7 @@ Replace an existing task's timing and content.
 MindRoom re-parses the description to update timing and content.
 Omitted settings stay unchanged, including the history limit, silent mode, and model.
 A task cannot switch between one-time and recurring; cancel it and create a new one instead.
+A request that would change nothing about the task is refused, and the task stays as it was.
 
 ```
 !edit_schedule task42 keep the same schedule but restore full history
@@ -96,14 +97,15 @@ Cancel one task, or every task in the room.
 ```
 
 Use `!list_schedules` to find task IDs.
+Only a pending task can be cancelled; a one-time task that already ran, and a task that failed or was cancelled, stay as they are.
 
 **Aliases:** `!cancelschedule`, `!cancel-schedule`
 
 ## [`scheduler`]
 
-<video controls playsinline preload="metadata" aria-label="A check asked for in conversation becomes a weekly scheduled task" style="width: 100%" poster="https://github.com/user-attachments/assets/5750a5bc-e5cb-4112-86ac-21ed044fa5d1" data-poster-light="https://github.com/user-attachments/assets/5750a5bc-e5cb-4112-86ac-21ed044fa5d1" data-poster-dark="https://github.com/user-attachments/assets/6194d6c7-89e7-4e66-8810-048efc3b3001">
-  <source src="https://github.com/user-attachments/assets/2fa5d666-16bd-4864-b27f-fb212609e2a1" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/7a68cee9-24d4-43cf-84de-599405fd16d7" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="A check asked for in conversation becomes a weekly scheduled task" style="width: 100%" poster="https://github.com/user-attachments/assets/7221a1d4-2429-4591-8b6f-aca242cc152b" data-poster-light="https://github.com/user-attachments/assets/7221a1d4-2429-4591-8b6f-aca242cc152b" data-poster-dark="https://github.com/user-attachments/assets/70ad19a8-6728-4344-9e6d-0258c43b5173">
+  <source src="https://github.com/user-attachments/assets/3377307e-268f-4ae0-a0e6-061dd16c1627" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/4423fd02-b6c9-4cf5-bf10-ae50149ebd2e" type="video/mp4">
 </video>
 
 The `scheduler` tool lets an agent create, edit, list, and cancel the same tasks as the chat commands.
@@ -161,9 +163,13 @@ Add `silently` or `quietly` to a request when the trigger and routine no-report 
 ```
 
 A silent schedule does not show its trigger in the room.
-A successful run that returns nothing, whitespace, or only `NO_REPLY` (any case) posts no message.
+A successful run whose final response is empty, whitespace, or has `NO_REPLY` (any case) alone on its last non-blank line posts no message.
+A final `NO_REPLY` line means do not notify, so a report must not end with it.
 Findings, failures, and messages that tools send explicitly remain visible.
 Silent runs also show no typing indicator, progress placeholder, stop control, or streaming updates.
+When a silent run pauses for a [tool approval](tool-approval.md), it shows a waiting message; when the run continues after the decision with nothing to report, that message ends with the run's text and tool calls without the `NO_REPLY` line, or `Done.` when nothing else is left, and no new message is posted.
+A team's silent run reports nothing only when its leader and every member do, so a member's finding stays visible, without any `NO_REPLY` line, even when the leader answers `NO_REPLY`.
+After an approval, a team's run that reports nothing ends its waiting message with the leader's own text, or `Done.` when the leader wrote none, instead of the team's document.
 With `new_thread=True`, a silent schedule posts any finding or failure as a new room-level message.
 Say `make this schedule silent` or `make this schedule visible` in `!edit_schedule` to change the mode.
 
@@ -222,11 +228,23 @@ Recurring schedules cannot pre-approve calls.
 
 ## Timezone
 
-The top-level `timezone` setting (default `UTC`) controls how MindRoom interprets times in requests and displays scheduled times.
+The top-level `timezone` setting (default `UTC`) is the IANA timezone MindRoom uses for the current date in agent prompts, message timestamps, file-memory daily notes, automation `cron` times, and interpreting and displaying scheduled times.
+An agent's own `timezone` overrides it for that agent, so one install can serve people in different timezones.
+A new schedule created with the `!schedule` command uses the top-level setting, even when the agent handling the command has its own `timezone`.
+A team reply uses the timezone of the account that posts it: a configured team uses the top-level setting, and an [ad hoc team](configuration/teams.md#ad-hoc-teams) uses the timezone of the agent whose account posts its reply.
+An unknown timezone name fails config validation.
 
 ```yaml
 timezone: America/Los_Angeles
+agents:
+  atlas:
+    display_name: Atlas
+    timezone: Europe/Amsterdam
 ```
+
+A schedule keeps the timezone it was created in: when `atlas` schedules "tomorrow at 9" with its `scheduler` tool, the task runs at 09:00 in Amsterdam, and later chat edits and listings use Amsterdam time too.
+The dashboard's Schedules page shows dates and times in the top-level timezone, while every recurring schedule's description names the timezone it is written in, such as `At 09:00 (Europe/Amsterdam)`.
+Schedules created before agents had their own timezone keep following the top-level setting.
 
 Recurring schedules run on UTC cron times, so their local clock time shifts when the timezone's UTC offset changes, such as at daylight-saving transitions.
 Edit or recreate a recurring schedule after an offset change if it must keep the same local time.
@@ -245,13 +263,20 @@ A run waits rather than proceeding when membership cannot be confirmed.
 ## Persistence and Missed Runs
 
 Schedules are stored in Matrix room state and survive restarts.
-MindRoom only acts on schedule state written by its own router, agent, or team accounts; schedule state written by any other account, including a room admin, is ignored and logged.
+In a room MindRoom did not create, a room admin may need to raise one MindRoom account's power level to the room's state-event level, usually 50, before schedules can be saved; the account with the most power in the room stores the schedules of every agent there, and an agent that cannot save one answers `I need moderator rights in this room to save schedules.`
+MindRoom only acts on schedule state written by its own owner, agent, or team accounts; schedule state written by any other account, including a room admin, is ignored and logged.
 The homeserver must support `GET /_matrix/client/v3/rooms/{roomId}/state/{eventType}/{stateKey}?format=event` (Matrix spec v1.16), as Synapse, Tuwunel, and Dendrite do; otherwise reading tasks fails.
 
 ### Scheduled Task Restoration
 
-The router restores a room's schedules and pending configuration changes when it joins the room after startup.
-A one-time task missed by less than 24 hours runs once Matrix sync is ready; an older one is marked failed instead.
+The agent or team that saved a schedule runs it: it posts the trigger when the schedule is due.
+A schedule saved by an earlier release that the router ran moves to the first agent or team its message mentions that is joined to the room and may post its trigger, else to the one with the lowest Matrix ID that may.
+It stays pending while no agent or team in the room may post its trigger.
+Every agent restores the schedules it runs in a room when it joins that room, at startup, when it accepts an invitation, or when it joins a [room listed under one of its rooms](rooms.md#rooms-under-a-room), and its own pending configuration previews when `/config` is enabled.
+Schedules keep running when their agent restarts, for example after a config edit: a one-time task that came due during the restart runs once the agent is back, and a recurring task runs the occurrence that came due if it is still within the catch-up window.
+A one-time task missed by less than 24 hours runs once its agent's Matrix sync is ready; an older one is marked failed instead.
+When an agent is removed from the config while MindRoom runs, each schedule it runs is marked failed and the agent says so in the schedule's thread, or in the room for a schedule without one; its schedules never move to another agent.
+When it is removed while MindRoom is stopped, a bot that may save schedule state in a room marks the agent's schedules there failed and says so when it rejoins that room, and schedules in the agent's DMs stay pending.
 
 ### Recurring task recovery
 
@@ -270,7 +295,7 @@ For `schedule:fired` hooks that run more than once for the same occurrence, see 
 ## Automations
 
 Automations are checks MindRoom runs on a cron schedule; when one passes, the agent posts the automation's prompt in its room and answers it with a normal, visible run.
-MindRoom ships two, [`prompt_curation`](#prompt_curation) and [`dreaming`](#dreaming), and [plugins](plugins.md#automations) can add more.
+MindRoom ships three, [`prompt_curation`](#prompt_curation), [`dreaming`](#dreaming), and [`exploration`](#exploration), and [plugins](plugins.md#automations) can add more.
 The check runs in code, so a schedule that finds nothing to do costs no model call and posts nothing.
 Enable them per agent in `config.yaml`, or under `defaults` for every eligible agent:
 
@@ -281,6 +306,7 @@ defaults:
 agents:
   mind:
     memory_backend: file
+    rooms: [personal]
     automations:
       - prompt_curation          # the built-in with its defaults
       # or: {name: prompt_curation, cron: "0 4 * * *", room: personal, trigger_tokens: 30000, model: opus}
@@ -290,16 +316,19 @@ agents:
 
 - An entry is a built-in name, or a mapping with `name` plus overrides; unknown fields fail config load.
 - Any other name is an automation a loaded plugin provides: it needs `cron` and takes the `options` the plugin documents; an entry no loaded plugin provides is skipped with a warning in the log and fails `mindroom config validate`.
-- `cron` is a five-field expression in the configured [timezone](#timezone).
-- `room` is a room alias or ID; it defaults to the agent's first configured room.
+- `cron` is a five-field expression in the agent's [timezone](#timezone).
+- `room` names a room as an entry of [`rooms`](rooms.md#configuration) does, and it must be a room the agent is in, because the agent posts the prompt itself; it defaults to the agent's first configured room.
 - Each run starts in a new thread, even for an agent with `thread_mode: room`, and a re-check follows up in that thread.
 - `agents.<name>.automations: []` turns inherited defaults off for one agent.
-- Automations run unattended, so requester-private agents cannot list them and do not inherit defaults.
-- The built-ins need `memory_backend: file`; an agent without it skips them when it inherits defaults, and keeps inheriting the defaults that do not need it.
+- A [private agent](configuration/agents.md#private-instances) runs its automations once for each requester who has used it, as that requester and on that requester's own files, and posts in their [personal room](personal-rooms.md) with the agent.
+  Only the agent named by `personal_rooms.agent` can run automations as a private agent, its entries cannot set `room`, and it inherits only default entries without `room`.
+  A requester without a personal room, or whom the agent may no longer answer, is skipped.
+  Everyone who can read that personal room, such as an agent the requester invited or an adopted room's other participants, sees the prompts and replies, like any other reply there.
+- `prompt_curation` and `dreaming` need `memory_backend: file`, and `exploration` needs `knowledge_graph: true`; an agent that lacks what a default entry needs skips it and keeps inheriting the others.
 - Edits apply on config reload without restarting the agent.
 - The agent posts the prompt in its own name and mentions itself, so it answers even in a room with other agents.
 - When the response to a prompt is final, or an hour after the prompt was posted without one, the automation's next step runs: it posts a notice in the prompt's thread or asks the agent again.
-- An agent runs one automation at a time; one that comes due meanwhile starts when the other ends.
+- An agent, or each requester's instance of a private agent, runs one automation at a time; one that comes due meanwhile starts when the other ends.
 - A check that cannot read what it checks posts a warning in the room.
 - A restart skips an occurrence it missed, and prompts posted before the restart get no follow-up.
 
@@ -310,13 +339,14 @@ For conditions that need your own code, write a [plugin automation](plugins.md#a
 Agents append to `MEMORY.md` and their `context_files` far more often than they condense them, and every model call re-sends those files.
 `prompt_curation` checks their total size daily and, once it passes the trigger, asks the agent for a gradual cut.
 
-1. The check measures `MEMORY.md` plus the agent's `context_files` with the estimate behind `static_prompt_tokens` (characters / 4).
-2. Above `trigger_tokens`, it posts a prompt with exact numbers, for example "bring them to at most 46876 tokens in total, but not below 44272", a cut between `min_reduction` and `max_reduction` (10 to 15%).
-3. The prompt asks the agent to commit the files to git first, keep each fact once in the file that owns it, move detail and history verbatim into `memory/` topic files with one-line pointers, and never invent facts.
+1. The check measures `MEMORY.md` plus the agent's `context_files` by the token estimate of the agent's configured model, not of a room or thread model override, which may count high ([how tokens are counted](configuration/history.md#how-tokens-are-counted)); for a private agent these are `MEMORY.md` and `private.context_files` in the requester's private root, because agent-level `context_files` load from the workspace every requester shares.
+2. Above `trigger_tokens`, or when the preload has to withhold part of a file because it passes `defaults.max_preload_file_chars` (default `30000` characters per file), it posts a prompt with exact numbers, for example "bring them to at most 19800 tokens in total, but not below 18700", a cut between `min_reduction` and `max_reduction` (10 to 15%).
+3. The prompt asks the agent to commit the files to git first, take content out of any file over that limit first (the prompt names those files), fold each later correction into the entry it corrects, keep each fact once in the file that owns it, move detail and history verbatim into `memory/` topic files with one-line pointers, and otherwise never invent facts or change their meaning.
 4. Once the run ends, verify measures the files again; when any of these holds, it lists them in the thread and mentions the agent once to re-check its change against that commit:
     - a file can no longer be read safely;
     - a file shrank by more than 25%;
     - the files total less than the floor, or did not shrink;
+    - a file was over the character limit and did not get shorter;
     - a file is no longer valid UTF-8;
     - total memory content (the files plus `memory/**`) dropped by more than `max_content_loss` of the files' size, which means detail was deleted instead of moved.
 
@@ -328,7 +358,7 @@ Verify never changes the files; the agent's answer to a re-check is not verified
 |---|---|---|
 | `cron` | `0 4 * * *` | When to check |
 | `room` | first configured room | Where to post the prompt |
-| `trigger_tokens` | `50000` (min 1) | Post the prompt once the files exceed this many estimated tokens |
+| `trigger_tokens` | `20000` (min 1) | Post the prompt once the files exceed this many estimated tokens; a `MEMORY.md` the preload cannot show whole also posts it |
 | `min_reduction` | `0.10` (at most `0.25`) | Smallest cut the prompt asks for; no file may shrink more than 25%, so no pass can be asked for more |
 | `max_reduction` | `0.15` | Largest cut before verify asks for a re-check |
 | `max_content_loss` | `0.05` | Largest net drop in total memory content, as a fraction of the files' size, before verify asks for a re-check |
@@ -359,5 +389,43 @@ Each run keeps its agenda and report, and a run that reached review also its pat
 | `model` | the agent's model | A key of `models` to run both prompts with |
 
 `dreaming` needs `memory_backend: file` and something to work from: [auto-flush](memory.md#file-auto-flush-worker) writes the daily notes it reviews and [thread exports](thread-exports.md) add threaded conversations, so with neither on, and no daily notes the agent writes itself, it never runs.
-It also needs a tool that writes workspace files, such as `file`, `coding`, or `shell`, because the agent edits its copy and writes its report and verdict as files; without one, every run stops unfinished.
+It also needs a tool that writes workspace files, such as `filesystem` or `shell`, because the agent edits its copy and writes its report and verdict as files; without one, every run stops unfinished.
 Its prompt templates are overridable as `DREAMING_PROMPT_TEMPLATE` and `DREAMING_VERIFY_TEMPLATE`.
+
+### `exploration`
+
+`exploration` asks an agent with a [knowledge graph](knowledge-graph.md) to explore its data sources on a schedule, so the graph learns about projects, people, and documents nobody has asked about yet.
+
+```yaml
+agents:
+  mind:
+    knowledge_graph: true
+    tools: [mcp_github, duckduckgo]
+    rooms: [exploration]
+    automations:
+      - name: exploration
+        cron: "0 */6 * * *"
+        room: exploration
+        max_tool_calls: 30
+```
+
+1. The check lists the tool calls the agent's conversations made since its last run, such as the repositories and searches people asked about.
+2. When there are such calls, or `revisit_days` have passed since the last run and people talked to the agent since, the agent posts a prompt in a new thread to check what the graph knows, re-read those sources for changes, and follow references to what the graph lacks; an agent with [`knowledge_graph_edits`](knowledge-graph.md#letting-the-agent-fix-its-graph) is also asked to fix the mistakes it found in the graph.
+3. The agent answers the prompt like any message, with its own tools and [approval rules](tool-approval.md); a shared agent's call that needs approval is denied, because no person asked for the run, while a private agent's call waits in the thread until its requester answers or the request expires.
+4. When the run ends, MindRoom marks the thread resolved and adds its tool results to the graph; the agent's own summary is not added, and an interrupted run adds nothing.
+
+The prompt tells the agent to only read, apart from fixing its graph when it may edit it, and to stay within `max_tool_calls`, but nothing enforces either: the agent's `max_tool_calls_per_turn` is the hard limit, and approval rules are what stop writes.
+The prompt lists recent tool calls with their arguments, credential-like values removed and mentions disabled so it wakes nobody, so a shared agent's exploration needs a `room` whose members may see what the agent's conversations looked up; a private agent posts in each requester's personal room.
+A turn whose message was redacted can still be listed until the agent next replies in that conversation.
+
+| Field | Default | Description |
+|---|---|---|
+| `cron` | `30 2 * * *` | When to check |
+| `room` | required for a shared agent | Where the prompt is posted |
+| `max_tool_calls` | `40` (1 to 1000) | Tool calls the prompt asks one run to stay within |
+| `max_leads` | `20` (0 to 200) | Most recent tool calls listed in the prompt |
+| `revisit_days` | `7` (min 1) | Run without new tool calls once this many days have passed since the last run, if people talked to the agent since |
+| `model` | the agent's model | A key of `models` to run the exploration with |
+
+Its prompt template is overridable as `EXPLORATION_PROMPT_TEMPLATE`; for an agent with `knowledge_graph_edits`, its `{fix_step}` and `{fix_exception}` placeholders insert `EXPLORATION_FIX_STEP` and `EXPLORATION_FIX_EXCEPTION`, which are overridable too and start with their own separator, a line break and a comma.
+Its model usage counts as ordinary replies, and extracting what it read counts as `knowledge_graph` usage.

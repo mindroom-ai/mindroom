@@ -12,6 +12,7 @@ import requests
 
 from mindroom.constants import resolve_runtime_paths
 from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tools.agno_compat_modelslabs import ModelsLabCompletionTools
 from mindroom.tools.modelslabs import modelslabs_tools
 
@@ -416,8 +417,9 @@ def test_fractional_polling_settings_from_runtime_config(
             "add_to_eta": add_to_eta,
             "max_wait_time": max_wait_time,
         },
-        disable_sandbox_proxy=True,
+        runs_in_worker=False,
         worker_target=None,
+        tools=builtin_tool_registry(),
     )
     assert isinstance(tool, ModelsLabCompletionTools)
 

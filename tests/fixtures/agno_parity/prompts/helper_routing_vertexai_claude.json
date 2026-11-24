@@ -1,0 +1,94 @@
+{
+  "description": "Helper agent run by mindroom.routing.suggest_responder on vertexai_claude claude-sonnet-5-5.",
+  "input": {
+    "config": {
+      "agents": {
+        "assistant": {
+          "display_name": "Assistant",
+          "role": "Answer questions about the team handbook."
+        },
+        "researcher": {
+          "display_name": "Researcher",
+          "role": "Research topics in depth."
+        }
+      },
+      "knowledge_graph": {
+        "model": "default"
+      },
+      "memory": {
+        "backend": "file"
+      },
+      "models": {
+        "default": {
+          "extra_kwargs": {
+            "project_id": "test-project",
+            "region": "us-east5"
+          },
+          "id": "claude-sonnet-5-5",
+          "provider": "vertexai_claude"
+        }
+      },
+      "router": {
+        "model": "default"
+      },
+      "teams": {
+        "launch": {
+          "agents": [
+            "assistant",
+            "researcher"
+          ],
+          "display_name": "Launch Team",
+          "role": "Plan and announce product launches."
+        }
+      },
+      "timezone": "UTC"
+    },
+    "entry_point": "mindroom.routing.suggest_responder"
+  },
+  "requests": [
+    {
+      "model": {
+        "id": "claude-sonnet-5-5",
+        "provider": "VertexAI"
+      },
+      "messages": [
+        {
+          "content": "Route messages to appropriate agents or teams\n\nAnswer with one JSON object that matches this JSON schema, and nothing else: no code fence, no text around it.\n<json_schema>\n{\n  \"description\": \"Structured output for routing decisions.\",\n  \"properties\": {\n    \"entity_name\": {\n      \"description\": \"The name of the agent or team that should respond\",\n      \"title\": \"Entity Name\",\n      \"type\": \"string\"\n    },\n    \"reasoning\": {\n      \"description\": \"Brief explanation of why this agent or team was chosen\",\n      \"title\": \"Reasoning\",\n      \"type\": \"string\"\n    }\n  },\n  \"required\": [\n    \"entity_name\",\n    \"reasoning\"\n  ],\n  \"title\": \"_RoutingSuggestion\",\n  \"type\": \"object\"\n}\n</json_schema>",
+          "role": "system"
+        },
+        {
+          "content": "Previous messages:\n@user:localhost: Can someone summarize the travel policy?\n@mindroom_assistant:localhost: Conference travel needs manager approval two weeks ahead.\n\nDecide which agent or team should respond to this message.\n\nAvailable agents and teams:\n\nassistant:\n  assistant\n  - Answer questions about the team handbook.\n  - Tools: scheduler\n\nresearcher:\n  researcher\n  - Research topics in depth.\n  - Tools: scheduler\n\nlaunch:\n  launch\n  - Plan and announce product launches.\n  - Team of agents: assistant, researcher\n  - Collaboration mode: coordinate\n\nMessage: \"Who can explain the travel policy?\"\n\nChoose the most appropriate agent or team based on their role, tools, and instructions.",
+          "role": "user"
+        }
+      ],
+      "tools": [],
+      "tool_choice": null,
+      "output_schema": {
+        "json_schema": {
+          "description": "Structured output for routing decisions.",
+          "properties": {
+            "entity_name": {
+              "description": "The name of the agent or team that should respond",
+              "title": "Entity Name",
+              "type": "string"
+            },
+            "reasoning": {
+              "description": "Brief explanation of why this agent or team was chosen",
+              "title": "Reasoning",
+              "type": "string"
+            }
+          },
+          "required": [
+            "entity_name",
+            "reasoning"
+          ],
+          "title": "_RoutingSuggestion",
+          "type": "object"
+        },
+        "model": "mindroom.routing:_RoutingSuggestion"
+      },
+      "deferred_tool_names": []
+    }
+  ],
+  "scenario": "helper_routing_vertexai_claude"
+}

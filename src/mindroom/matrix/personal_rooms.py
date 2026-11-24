@@ -13,19 +13,23 @@ from mindroom.background_tasks import create_background_task, run_blocking_until
 from mindroom.constants import (
     HOOK_SOURCE_KEY,
     ORIGINAL_SENDER_KEY,
-    ROUTER_AGENT_NAME,
     SOURCE_KIND_KEY,
     resolve_config_relative_path,
 )
 from mindroom.dispatch_source import HOOK_DISPATCH_SOURCE_KIND
-from mindroom.entity_resolution import entity_identity_registry
+from mindroom.entity_resolution import (
+    persisted_owner_matrix_id,
+    prepared_entity_names_by_user_id,
+)
 from mindroom.file_locks import async_exclusive_file_lock
 from mindroom.logging_config import get_logger
+from mindroom.managed_room_notice import join_names
 from mindroom.matrix.avatar import set_room_avatar_from_file
 from mindroom.matrix.client_delivery import send_message_result
 from mindroom.matrix.client_room_admin import (
-    admin_join_room_user,
+    admin_join_room_user_failure,
     create_room,
+    ensure_managed_room_power_levels,
     ensure_room_admin_power_levels,
     get_room_members,
     invite_to_room,
@@ -33,6 +37,7 @@ from mindroom.matrix.client_room_admin import (
 from mindroom.matrix.message_builder import build_message_content
 from mindroom.matrix.personal_room_store import (
     PersonalRoomRecord,
+    personal_room_create_lock,
     personal_room_digest,
     personal_room_record_path,
     read_personal_room,
@@ -40,8 +45,14 @@ from mindroom.matrix.personal_room_store import (
 )
 from mindroom.matrix.room_power import privileged_creators, user_power_level
 from mindroom.matrix.state import resolve_room_aliases
-from mindroom.matrix_identifiers import managed_room_alias_localpart
-from mindroom.requester_identity import is_human_requester_id, is_managed_entity_id, runtime_matrix_domain
+from mindroom.matrix.state_failures import StateFailure, state_failure
+from mindroom.matrix_identifiers import managed_room_alias
+from mindroom.requester_identity import (
+    is_human_requester_id,
+    is_managed_entity_id,
+    resolve_human_requester_alias,
+    runtime_matrix_domain,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable
@@ -58,11 +69,39 @@ _GUEST_REMOVAL_REASON = "Personal rooms are private to their owner"
 _GUEST_REMOVAL_NOTICE = (
     "This room is private to {owner}, so I removed {guests}. To work with other people, use a shared room."
 )
+# Only imported rooms remove agents: a room MindRoom created hides history from before an invite.
+_AGENT_REMOVAL_REASON = (
+    "This room existed before it became a personal room, so only the agents its personal-room record lists can stay"
+)
+_AGENT_REMOVAL_NOTICE = (
+    "I removed {agents} because this room existed before it became a personal room, "
+    "and only the agents its personal-room record lists can stay here. "
+    "Inviting {pronoun} here again will remove {pronoun} again."
+)
+_AGENT_REMOVAL_ADVICE = " To talk to {agents}, create a new room and invite {pronoun}."
 # Retries for a removal a member event could not finish. After the last one,
 # the next member event in the room or a restart reconciliation of an eligible
 # owner tries again.
 _GUEST_REMOVAL_RETRY_SECONDS = (30.0, 120.0, 600.0)
 _UNREADABLE_ROOM_ERRCODES = frozenset({"M_FORBIDDEN", "M_NOT_FOUND"})
+# A homeserver that accepts invites itself joins the owner about 100 ms after the invite; Tuwunel retries a failed
+# acceptance after 1 s, so this covers its first attempt and one retry.
+_OWNER_JOIN_WAIT_SECONDS = 2.0
+_OWNER_JOIN_POLL_SECONDS = 0.1
+
+
+def _pronoun(names: list[str]) -> str:
+    """Return the pronoun for one named agent or several."""
+    return "it" if len(names) == 1 else "them"
+
+
+async def is_onboarding_room_member(source_client: nio.AsyncClient, user_id: str, source_room_id: str) -> bool:
+    """Return whether a requester is still in the onboarding room that admits them; raise when its members are unknown."""
+    members = await get_room_members(source_client, source_room_id)
+    if members is None:
+        msg = "Personal-room onboarding membership unavailable"
+        raise RuntimeError(msg)
+    return user_id in members
 
 
 class _PolicyChangedError(Exception):
@@ -82,6 +121,14 @@ class PersonalRoomRosterMismatchError(PersonalRoomValidationError):
         self.unexpected_user_ids = tuple(sorted(unexpected_user_ids))
 
 
+class _PersonalRoomWelcomeDeviceError(PersonalRoomValidationError):
+    """A pending welcome belongs to a Matrix device this agent no longer uses, so no retry may send it.
+
+    The welcome's transaction ID deduplicates only on its device, and the runtime never logs in to an earlier device
+    again, so only restoring that device's credentials and store would let it go out.
+    """
+
+
 @dataclass
 class PersonalRoomService:
     """Keep only personal-room lifecycle state; execution remains in the normal bot."""
@@ -93,8 +140,14 @@ class PersonalRoomService:
     _guest_removal_retries: dict[str, asyncio.Task[None]] = field(default_factory=dict, init=False, repr=False)
 
     def _settings(self) -> PersonalRoomsConfig | None:
-        settings = self.runtime.config.personal_rooms
-        return settings if settings is not None and settings.agent == self.agent_name else None
+        """Return the settings this agent serves, directly or as one user's agent from the named template."""
+        config = self.runtime.config
+        settings = config.personal_rooms
+        if settings is None:
+            return None
+        instance = config.personal_agent_instance(self.agent_name)
+        served = self.agent_name if instance is None else instance.template
+        return settings if settings.agent == served else None
 
     def _client(self) -> nio.AsyncClient:
         client = self.runtime.client
@@ -116,10 +169,16 @@ class PersonalRoomService:
         )
 
     def _current_settings(self, user_id: str, source_room_id: str) -> PersonalRoomsConfig | None:
-        """Read current onboarding and access policy at an authority boundary."""
+        """Read current onboarding and access policy at an authority boundary; a user's own agent serves only them."""
         settings = self._settings()
+        config = self.runtime.config
+        instance = config.personal_agent_instance(self.agent_name)
         if (
             settings is None
+            or (
+                instance is not None
+                and resolve_human_requester_alias(user_id, config, self.runtime_paths) != instance.user_id
+            )
             or source_room_id not in resolve_room_aliases(settings.onboarding_rooms, self.runtime_paths)
             or not self._allowed(user_id, source_room_id)
         ):
@@ -161,11 +220,9 @@ class PersonalRoomService:
     ) -> PersonalRoomsConfig | None:
         if self._current_settings(user_id, source_room_id) is None:
             return None
-        members = await get_room_members(source_client, source_room_id)
-        if members is None:
-            msg = "Personal-room onboarding membership unavailable"
-            raise RuntimeError(msg)
-        return self._current_settings(user_id, source_room_id) if user_id in members else None
+        if not await is_onboarding_room_member(source_client, user_id, source_room_id):
+            return None
+        return self._current_settings(user_id, source_room_id)
 
     async def ensure(
         self,
@@ -174,8 +231,14 @@ class PersonalRoomService:
         source_client: nio.AsyncClient,
         *,
         reinvite_departed_owner: bool = False,
+        poster: Callable[[tuple[str | None, str] | None], nio.AsyncClient | None] | None = None,
+        admin: nio.AsyncClient | None = None,
     ) -> str | None:
-        """Reconcile a currently eligible human from a router-observed room."""
+        """Reconcile a currently eligible human from a room its steward observed through ``source_client``.
+
+        ``poster`` gives the account that sends the confirmation, and ``admin`` the one for the optional admin join;
+        the observing account does both where neither is given.
+        """
         if await self._eligible_settings(user_id, source_room_id, source_client) is None:
             return None
         path = personal_room_record_path(self.runtime_paths, self.agent_name, user_id)
@@ -186,13 +249,13 @@ class PersonalRoomService:
                     return None
                 record = await run_blocking_until_complete(read_personal_room, path)
                 if record is None:
-                    localpart = managed_room_alias_localpart(
-                        f"{settings.alias_prefix}_{personal_room_digest(user_id)[:20]}",
-                        self.runtime_paths,
-                    )
                     record = PersonalRoomRecord(
                         user_id=user_id,
-                        alias=f"#{localpart}:{runtime_matrix_domain(self.runtime_paths)}",
+                        alias=managed_room_alias(
+                            f"{settings.alias_prefix}_{personal_room_digest(user_id)[:20]}",
+                            runtime_matrix_domain(self.runtime_paths),
+                            self.runtime_paths,
+                        ),
                         source_room_id=source_room_id,
                     )
                     await run_blocking_until_complete(write_personal_room, path, record)
@@ -201,21 +264,25 @@ class PersonalRoomService:
                     record.resume_source_room_id = source_room_id
                     await run_blocking_until_complete(write_personal_room, path, record)
                 if record.room_id is None:
-                    record.room_id = await self._resolve_or_create(record, source_room_id)
-                    await run_blocking_until_complete(write_personal_room, path, record)
+                    async with personal_room_create_lock(path):
+                        record.room_id = await self._resolve_or_create(record, source_room_id)
+                        await run_blocking_until_complete(write_personal_room, path, record)
                 human_joined = await self._reconcile_membership(
                     record,
                     path,
-                    source_client,
+                    admin or source_client,
                     source_room_id,
                     reinvite_departed_owner,
                 )
+                # Keep the validated room's MindRoom state power levels current. The room's steward publishes its
+                # thread mode and accounts, as in any room.
+                await ensure_managed_room_power_levels(self._client(), record.room_id)
                 if human_joined is None:
                     return record.room_id
                 await self._finish(record, path, source_room_id, human_joined=human_joined)
                 settings = self._require_current_settings(user_id, source_room_id)
                 if source_room_id == record.source_room_id:
-                    await self._confirm(record, path, settings, source_client)
+                    await self._confirm(record, path, settings, poster or (lambda _sender: source_client))
                 return record.room_id
         except _PolicyChangedError:
             return None
@@ -306,8 +373,11 @@ class PersonalRoomService:
             and settings.auto_join_requester
         ):
             assert record.room_id is not None
-            if not await admin_join_room_user(source_client, record.room_id, record.user_id):
-                msg = "Personal-room initial join failed"
+            failure = await admin_join_room_user_failure(source_client, record.room_id, record.user_id)
+            # A homeserver that accepts invites itself may join the owner just after this attempt's invite.
+            invited_now = initial_owner_membership is None
+            if failure is not None and not (invited_now and await self._owner_joins_within_wait(record)):
+                msg = f"Personal-room initial join failed: the admin join {failure}"
                 raise RuntimeError(msg)
             human_joined = True
         else:
@@ -315,6 +385,26 @@ class PersonalRoomService:
         record.initial_join_pending = False
         await run_blocking_until_complete(write_personal_room, path, record)
         return human_joined
+
+    async def _owner_joins_within_wait(self, record: PersonalRoomRecord) -> bool:
+        """Return whether the owner's membership becomes `join` within a short wait, slow reads included."""
+        assert record.room_id is not None
+        try:
+            async with asyncio.timeout(_OWNER_JOIN_WAIT_SECONDS):
+                while True:
+                    response = await self._client().room_get_state_event(
+                        record.room_id,
+                        "m.room.member",
+                        record.user_id,
+                    )
+                    if (
+                        isinstance(response, nio.RoomGetStateEventResponse)
+                        and response.content.get("membership") == "join"
+                    ):
+                        return True
+                    await asyncio.sleep(_OWNER_JOIN_POLL_SECONDS)
+        except TimeoutError:
+            return False
 
     def _ownership(self, user_id: str) -> dict[str, str]:
         return {"user_id": user_id, "agent_user_id": self._client().user_id}
@@ -393,7 +483,8 @@ class PersonalRoomService:
         if record.adoption is None:
             # The owner may bring in any MindRoom agent: history visibility keeps
             # what came before its invite hidden, and agent access rules still
-            # apply. An imported room keeps its exact attested roster instead.
+            # apply. An imported room may share its history, so an agent outside
+            # its attested roster is removed instead.
             permitted_members.update(filter(self._is_agent, joined_or_invited))
         else:
             expected_creator = record.adoption.creator_user_id
@@ -401,11 +492,7 @@ class PersonalRoomService:
             permitted_members.update(record.adoption.additional_user_ids)
             router_id = record.adoption.router_user_id
             if record.adoption.agent_user_id != agent_id or (
-                router_id is not None
-                and router_id
-                != entity_identity_registry(self.runtime.config, self.runtime_paths)
-                .current_id(ROUTER_AGENT_NAME)
-                .full_id
+                router_id is not None and router_id != persisted_owner_matrix_id(self.runtime_paths)
             ):
                 msg = "Personal-room adopted ownership identity does not match"
                 raise PersonalRoomValidationError(msg)
@@ -429,9 +516,9 @@ class PersonalRoomService:
             raise PersonalRoomValidationError(msg)
         guests = joined_or_invited - permitted_members
         if guests:
-            # Only a room this agent created is removed from; an imported room
-            # keeps its exact attested roster and fails closed instead.
-            if record.adoption is not None:
+            # An imported room holding a person outside its attested roster
+            # fails closed instead; only MindRoom's own agents are removed from it.
+            if record.adoption is not None and not all(map(self._is_agent, guests)):
                 raise PersonalRoomRosterMismatchError(record.room_id, guests)
             await self._remove_guests(record, guests, state)
             roster.update(dict.fromkeys(guests, "leave"))
@@ -451,11 +538,21 @@ class PersonalRoomService:
         guests: set[str],
         state: dict[tuple[str, str], dict],
     ) -> None:
-        """Remove people other than the owner, then tell the room why once."""
+        """Remove members the room does not permit, then tell the room why once."""
         assert record.room_id is not None
         client = self._client()
+        # Validation removes only people from a room MindRoom created and only
+        # agents from an adopted one. Word the notice before any kick: once the
+        # guests are gone, no later validation finds them, so a failure after
+        # the kicks would lose it.
+        if record.adoption is None:
+            reason = _GUEST_REMOVAL_REASON
+            notice = _GUEST_REMOVAL_NOTICE.format(owner=record.user_id, guests=", ".join(sorted(guests)))
+        else:
+            reason = _AGENT_REMOVAL_REASON
+            notice = self._agent_removal_notice(guests)
         for user_id in sorted(guests):
-            response = await client.room_kick(record.room_id, user_id, reason=_GUEST_REMOVAL_REASON)
+            response = await client.room_kick(record.room_id, user_id, reason=reason)
             if not isinstance(response, nio.RoomKickResponse):
                 # A guest whose power level matches the agent's stays until
                 # someone removes it; other failures are transient.
@@ -463,9 +560,7 @@ class PersonalRoomService:
                 msg = "Personal-room guest removal failed"
                 raise (PersonalRoomValidationError if forbidden else RuntimeError)(msg)
         logger.info("personal_room_guests_removed", room_id=record.room_id, removed_count=len(guests))
-        content = build_message_content(
-            _GUEST_REMOVAL_NOTICE.format(owner=record.user_id, guests=", ".join(sorted(guests))),
-        )
+        content = build_message_content(notice)
         content["msgtype"] = "m.notice"
         membership_event_ids = "|".join(
             str(state.get(("m.room.member", user_id), {}).get("event_id", user_id)) for user_id in sorted(guests)
@@ -479,15 +574,34 @@ class PersonalRoomService:
         if delivered is None:
             logger.warning("Personal-room guest removal notice failed", room_id=record.room_id)
 
+    def _agent_removal_notice(self, agent_ids: set[str]) -> str:
+        """Explain why agents left an adopted room and what the owner can do instead."""
+        config = self.runtime.config
+        prepared = prepared_entity_names_by_user_id(config, self.runtime_paths)
+        # A blank display name or an unprepared account shows the Matrix ID.
+        names = {
+            user_id: (name and config.entity_display_name(name)) or user_id
+            for user_id in agent_ids
+            for name in (prepared.get(user_id),)
+        }
+        removed = sorted(names.values())
+        # Nobody talks to the owner account, so a new room with it helps nobody.
+        owner_id = persisted_owner_matrix_id(self.runtime_paths)
+        agents = sorted(name for user_id, name in names.items() if user_id != owner_id)
+        notice = _AGENT_REMOVAL_NOTICE.format(agents=join_names(removed, "and"), pronoun=_pronoun(removed))
+        if agents:
+            notice += _AGENT_REMOVAL_ADVICE.format(agents=join_names(agents, "and"), pronoun=_pronoun(agents))
+        return notice
+
     async def guest_membership_event(self, room: nio.MatrixRoom, user_id: str, membership: str) -> None:
-        """Remove a person the owner brought into a personal room as soon as it is seen.
+        """Remove a person the owner brought into a personal room, or an agent from an imported one, once seen.
 
         Never raises: a raising member callback would hold this room's event
         lane, so a failed removal is retried in the background instead.
         """
-        if membership not in {"invite", "join", "knock"} or self._settings() is None or self._is_agent(user_id):
+        if membership not in {"invite", "join", "knock"} or self._settings() is None:
             return
-        path = await self._owner_record_path(room, excluding=user_id)
+        path = await self._owner_record_path(room, excluding=user_id, imported=self._is_agent(user_id))
         if path is None or await self._remove_guests_now(path, room.room_id):
             return
         pending = self._guest_removal_retries.get(room.room_id)
@@ -512,8 +626,8 @@ class PersonalRoomService:
         if tasks:
             await asyncio.wait(tasks, timeout=timeout_seconds)
 
-    async def _owner_record_path(self, room: nio.MatrixRoom, *, excluding: str) -> Path | None:
-        """Return the record of the member whose personal room this is, if any.
+    async def _owner_record_path(self, room: nio.MatrixRoom, *, excluding: str, imported: bool) -> Path | None:
+        """Return the record of the member whose created or imported personal room this is, if any.
 
         Read without the owner's lock, which is only taken once a record
         matches, so a shared room never waits behind an unrelated provisioning.
@@ -529,7 +643,7 @@ class PersonalRoomService:
             except Exception:
                 logger.exception("Personal-room record invalid", record=path.name)
                 continue
-            if record is not None and record.room_id == room.room_id and record.adoption is None:
+            if record is not None and record.room_id == room.room_id and (record.adoption is not None) == imported:
                 return path
         return None
 
@@ -538,8 +652,15 @@ class PersonalRoomService:
         try:
             async with async_exclusive_file_lock(path.with_suffix(".lock")):
                 record = await run_blocking_until_complete(read_personal_room, path)
-                if record is not None and record.room_id == room_id and record.adoption is None:
+                if record is not None and record.room_id == room_id:
                     await self._validate_room(record)
+        except PersonalRoomRosterMismatchError as error:
+            # Expected until a person changes the room, so no traceback and no retry.
+            logger.warning(
+                "Personal-room imported roster has unattested members",
+                room_id=room_id,
+                unexpected_user_ids=error.unexpected_user_ids,
+            )
         except Exception:
             logger.exception("Personal-room guest removal failed", room_id=room_id)
             return False
@@ -617,7 +738,7 @@ class PersonalRoomService:
             return
         if record.welcome_device_id != client.device_id or not client.device_id:
             msg = "Personal-room pending welcome belongs to a different Matrix device"
-            raise RuntimeError(msg)
+            raise _PersonalRoomWelcomeDeviceError(msg)
         delivered = await send_message_result(
             client,
             record.room_id,
@@ -645,7 +766,7 @@ class PersonalRoomService:
         if isinstance(current, nio.RoomGetStateEventResponse):
             if current.content.get("url"):
                 return
-        elif not isinstance(current, nio.RoomGetStateEventError) or current.status_code != "M_NOT_FOUND":
+        elif not isinstance(current, nio.RoomGetStateEventError) or state_failure(current) is not StateFailure.MISSING:
             msg = "Personal-room avatar state unavailable"
             raise RuntimeError(msg)
         settings = self._current_settings(record.user_id, source_room_id)
@@ -683,21 +804,29 @@ class PersonalRoomService:
         record: PersonalRoomRecord,
         path: Path,
         settings: PersonalRoomsConfig,
-        source_client: nio.AsyncClient,
+        poster: Callable[[tuple[str | None, str] | None], nio.AsyncClient | None],
     ) -> None:
         if not settings.confirmation or record.confirmation_event_id is not None:
             return
+        # A retry keeps the account and device its transaction ID is frozen to, while that account is in the room.
+        device_id = record.confirmation_device_id
+        source_client = poster((record.confirmation_user_id, device_id) if device_id else None)
+        if source_client is None:
+            msg = "Personal-room confirmation has no account to send it"
+            raise RuntimeError(msg)
         if record.confirmation_content is None:
             record.confirmation_content = build_message_content(
                 settings.confirmation.format(**self._template_values(record)),
             )
             record.confirmation_content["msgtype"] = "m.notice"
-            record.confirmation_device_id = source_client.device_id
+            record.confirmation_user_id, record.confirmation_device_id = source_client.user_id, source_client.device_id
             await run_blocking_until_complete(write_personal_room, path, record)
         if self._current_settings(record.user_id, record.source_room_id) is None:
             return
-        if not source_client.device_id or record.confirmation_device_id != source_client.device_id:
-            msg = "Personal-room pending confirmation belongs to a different Matrix device"
+        # LEGACY_COMPAT: A record written before confirmation_user_id existed froze only the posting account's device.
+        frozen = (record.confirmation_user_id or source_client.user_id, record.confirmation_device_id)
+        if not source_client.device_id or frozen != (source_client.user_id, source_client.device_id):
+            msg = "Personal-room pending confirmation belongs to a different Matrix account or device"
             raise RuntimeError(msg)
         delivered = await send_message_result(
             source_client,

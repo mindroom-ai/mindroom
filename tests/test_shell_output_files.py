@@ -8,34 +8,57 @@ import json
 import os
 import signal
 import tempfile
-import time
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, BinaryIO
 
 import pytest
-from agno.tools.function import FunctionCall
 
 from mindroom.api import sandbox_runner
 from mindroom.constants import resolve_runtime_paths
 from mindroom.shell.execution import kill_all_records, run_command
 from mindroom.shell.output_capture import ShellOutputDestination
 from mindroom.shell.supervisor import SHELL_SUPERVISOR_SOCKET_ENV, _ShellSupervisorManager
+from mindroom.tool_system.agno_toolkits import configure_toolkit_functions, toolkit_function
 from mindroom.tool_system.metadata import get_tool_by_name
-from mindroom.tool_system.output_files import ToolOutputFilePolicy, wrap_toolkit_for_output_files
+from mindroom.tool_system.output_files import ToolOutputFilePolicy
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tools import shell as shell_module
 from mindroom.tools.shell import shell_tools
+from tests.api.sandbox_runner_support import execute_call
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterator
 
-    from agno.tools.toolkit import Toolkit
-
     from mindroom.shell.execution import ShellRunResult
+    from mindroom.tool_system.agno_toolkits import AnyToolkit
+    from mindroom.workers.protocol import ExecuteResponse
+
+
+@dataclass(frozen=True)
+class _Executed:
+    """How one shell call ended: its result, or the error it raised."""
+
+    status: str
+    result: object
+
+
+async def _run(toolkit: AnyToolkit, arguments: dict[str, object]) -> _Executed:
+    """Run ``run_shell_command`` with ``arguments`` as an agent's run calls it."""
+    function = toolkit_function(toolkit, "run_shell_command")
+    assert function is not None
+    try:
+        return _Executed("success", await function.entrypoint(**arguments))
+    except Exception as error:
+        return _Executed("failure", error)
 
 
 @pytest.fixture(params=[False, True], ids=["local", "supervisor"])
-def shell_toolkit(request: pytest.FixtureRequest, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[Toolkit]:
+def shell_toolkit(
+    request: pytest.FixtureRequest,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> Iterator[AnyToolkit]:
     """Build the registered tool, optionally backed by a real worker supervisor."""
     manager = _ShellSupervisorManager()
     monkeypatch.delenv(SHELL_SUPERVISOR_SOCKET_ENV, raising=False)
@@ -50,10 +73,11 @@ def shell_toolkit(request: pytest.FixtureRequest, tmp_path: Path, monkeypatch: p
         yield get_tool_by_name(
             "shell",
             runtime_paths,
-            disable_sandbox_proxy=True,
+            runs_in_worker=False,
             worker_target=None,
             tool_init_overrides={"base_dir": str(tmp_path)},
             tool_output_workspace_root=tmp_path,
+            tools=builtin_tool_registry(),
         )
     finally:
         manager.shutdown()
@@ -62,7 +86,7 @@ def shell_toolkit(request: pytest.FixtureRequest, tmp_path: Path, monkeypatch: p
 @pytest.mark.asyncio
 @pytest.mark.parametrize("start_fails", [False, True])
 async def test_output_ownership_is_independent_of_message_wording(
-    shell_toolkit: Toolkit,
+    shell_toolkit: AnyToolkit,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     start_fails: bool,
@@ -85,22 +109,22 @@ async def test_output_ownership_is_independent_of_message_wording(
     monkeypatch.setattr(shell_module, execute.__name__, reword(execute))
     destination = tmp_path / "wording.txt"
     destination.write_text("previous contents")
-    await FunctionCall(
-        function=shell_toolkit.async_functions["run_shell_command"],
-        arguments={
+    await _run(
+        shell_toolkit,
+        {
             "args": [str(tmp_path / "missing-command")] if start_fails else "printf complete",
             "mindroom_output_path": "wording.txt",
         },
-    ).aexecute()
+    )
 
-    expected = display_message if start_fails else "complete"
-    assert destination.read_text().split("\n", 1)[-1] == expected
+    # The saved file holds the output alone, with no cwd line before it.
+    assert destination.read_text() == (display_message if start_fails else "complete")
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(("lines", "failure"), [(125000, False), (250000, False), (125000, True)])
 async def test_redirect_saves_complete_shell_output(
-    shell_toolkit: Toolkit,
+    shell_toolkit: AnyToolkit,
     tmp_path: Path,
     lines: int,
     failure: bool,
@@ -109,10 +133,7 @@ async def test_redirect_saves_complete_shell_output(
     command = f"awk 'BEGIN {{ for (i=0; i<{lines}; i++) print \"01234567890123456789\" }}'"
     if failure:
         command += " >&2; exit 1"
-    result = await FunctionCall(
-        function=shell_toolkit.async_functions["run_shell_command"],
-        arguments={"args": command, "tail": 2, "mindroom_output_path": "captured.txt"},
-    ).aexecute()
+    result = await _run(shell_toolkit, {"args": command, "tail": 2, "mindroom_output_path": "captured.txt"})
 
     assert result.status == "success"
     saved = (tmp_path / "captured.txt").read_text()
@@ -122,59 +143,79 @@ async def test_redirect_saves_complete_shell_output(
 
 
 @pytest.mark.asyncio
-async def test_plain_shell_output_still_honors_tail(shell_toolkit: Toolkit) -> None:
+async def test_plain_shell_output_still_honors_tail(shell_toolkit: AnyToolkit) -> None:
     """An explicit redirect must not change later ordinary calls on the same toolkit."""
-    result = await FunctionCall(
-        function=shell_toolkit.async_functions["run_shell_command"],
-        arguments={"args": "printf 'one\\ntwo\\nthree\\n'", "tail": 2},
-    ).aexecute()
+    result = await _run(shell_toolkit, {"args": "printf 'one\\ntwo\\nthree\\n'", "tail": 2})
 
     assert result.status == "success"
-    assert str(result.result).splitlines()[1:] == ["two", "three"]
+    assert str(result.result).splitlines() == [
+        "[Showing the last 2 of 3 lines. Pass a larger tail, or narrow the command.]",
+        "two",
+        "three",
+    ]
 
 
 @pytest.mark.asyncio
-async def test_redirect_preserves_stdout_receipt_on_nonzero_exit(shell_toolkit: Toolkit, tmp_path: Path) -> None:
+async def test_nonzero_exit_leads_with_its_exit_code(shell_toolkit: AnyToolkit) -> None:
+    """A failed command states its exit code before both output streams, locally and on a worker."""
+    result = await _run(shell_toolkit, {"args": "echo partial; echo broken >&2; exit 7"})
+
+    assert result.status == "success"
+    assert str(result.result).splitlines() == ["Exit code 7", "Output:", "partial", "Stderr:", "broken"]
+
+
+@pytest.mark.asyncio
+async def test_a_saved_success_keeps_stdout_in_the_file_and_names_its_stderr_in_the_receipt(
+    shell_toolkit: AnyToolkit,
+    tmp_path: Path,
+) -> None:
+    """The file holds stdout exactly, and the receipt says how much stderr there was and nothing else of it."""
+    result = await _run(shell_toolkit, {"args": "echo out; echo warn >&2", "mindroom_output_path": "out.txt"})
+
+    receipt = json.loads(str(result.result))["mindroom_tool_output"]
+    assert (tmp_path / "out.txt").read_text() == "out\n"
+    assert {key: value for key, value in receipt.items() if key.startswith("stderr")} == {"stderr_bytes": 5}
+    quiet = await _run(shell_toolkit, {"args": "echo out", "mindroom_output_path": "quiet.txt"})
+    assert "stderr_bytes" not in json.loads(str(quiet.result))["mindroom_tool_output"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("shell_toolkit")
+async def test_a_saved_success_counts_all_its_stderr_past_the_capture_cap(tmp_path: Path) -> None:
+    """Stderr larger than the redirect cap, read in several chunks, is counted whole and the stdout file is saved."""
+    tool = shell_tools()(
+        base_dir=tmp_path,
+        runtime_paths=resolve_runtime_paths(
+            config_path=tmp_path / "config.yaml",
+            storage_path=tmp_path / "storage",
+            process_env={},
+        ),
+    )
+    configure_toolkit_functions(tool, output_files=ToolOutputFilePolicy(workspace_root=tmp_path, max_bytes=64))
+    result = await _run(
+        tool,
+        {"args": "echo out; head -c 30005 /dev/zero | tr '\\0' x >&2", "mindroom_output_path": "out.txt"},
+    )
+
+    receipt = json.loads(str(result.result))["mindroom_tool_output"]
+    assert (receipt["status"], receipt["stderr_bytes"]) == ("saved_to_file", 30005)
+    assert (tmp_path / "out.txt").read_text() == "out\n"
+
+
+@pytest.mark.asyncio
+async def test_redirect_preserves_stdout_receipt_on_nonzero_exit(shell_toolkit: AnyToolkit, tmp_path: Path) -> None:
     """Redirected nonterminal CLI output must use the same complete failure formatting."""
-    result = await FunctionCall(
-        function=shell_toolkit.async_functions["run_shell_command"],
-        arguments={
+    result = await _run(
+        shell_toolkit,
+        {
             "args": 'printf \'{"status":"queued","call_id":"call-1"}\'; exit 3',
             "mindroom_output_path": "receipt.txt",
         },
-    ).aexecute()
-
-    assert result.status == "success"
-    assert (tmp_path / "receipt.txt").read_text().split("\n", 1)[-1] == (
-        'Error: {"status":"queued","call_id":"call-1"}'
     )
 
-
-@pytest.mark.asyncio
-async def test_background_shell_publishes_original_destination(shell_toolkit: Toolkit, tmp_path: Path) -> None:
-    """The original output request survives the shell's native timeout and toolkit polling."""
-    result = await FunctionCall(
-        function=shell_toolkit.async_functions["run_shell_command"],
-        arguments={
-            "args": "sleep 0.2; awk 'BEGIN { for(i=0;i<10000;i++) print \"complete-line\" }'",
-            "timeout": 0,
-            "mindroom_output_path": "eventual.txt",
-        },
-    ).aexecute()
-    message = str(result.result)
-    assert "Handle: shell:" in message
-    assert not (tmp_path / "eventual.txt").exists()
-    handle = message.split("Handle: ")[1].splitlines()[0]
-    check = shell_toolkit.functions["check_shell_command"].entrypoint
-    assert check is not None
-    async with asyncio.timeout(10):
-        while True:
-            status = await asyncio.to_thread(check, handle)
-            if "saved_to_file" in status:
-                break
-            await asyncio.sleep(0.02)
-    assert json.loads(status)["mindroom_tool_output"]["path"] == "eventual.txt"
-    assert (tmp_path / "eventual.txt").read_text().count("complete-line") == 10000
+    assert result.status == "success"
+    assert json.loads(str(result.result))["mindroom_tool_output"]["exit_code"] == 3
+    assert (tmp_path / "receipt.txt").read_text() == ('Exit code 3\nOutput:\n{"status":"queued","call_id":"call-1"}')
 
 
 @pytest.mark.asyncio
@@ -189,16 +230,16 @@ async def test_capture_limit_rejects_incomplete_file(tmp_path: Path) -> None:
             process_env={},
         ),
     )
-    wrap_toolkit_for_output_files(tool, ToolOutputFilePolicy(workspace_root=tmp_path, max_bytes=60000))
+    configure_toolkit_functions(tool, output_files=ToolOutputFilePolicy(workspace_root=tmp_path, max_bytes=60000))
     destination = tmp_path / "existing.txt"
     destination.write_text("keep existing")
-    result = await FunctionCall(
-        function=tool.async_functions["run_shell_command"],
-        arguments={
+    result = await _run(
+        tool,
+        {
             "args": "awk 'BEGIN { for(i=0;i<10000;i++) print \"too-much-output\" }'",
             "mindroom_output_path": "existing.txt",
         },
-    ).aexecute()
+    )
 
     assert "exceeds" in str(result.result)
     assert "saved_to_file" not in str(result.result)
@@ -206,51 +247,101 @@ async def test_capture_limit_rejects_incomplete_file(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
-async def test_background_publication_rechecks_destination(shell_toolkit: Toolkit, tmp_path: Path) -> None:
+@pytest.mark.usefixtures("shell_toolkit")
+async def test_capture_limit_error_keeps_the_exit_code(tmp_path: Path) -> None:
+    """A failed command whose output is over the cap saves no file but still reports how it exited."""
+    tool = shell_tools()(
+        base_dir=tmp_path,
+        runtime_paths=resolve_runtime_paths(
+            config_path=tmp_path / "config.yaml",
+            storage_path=tmp_path / "storage",
+            process_env={},
+        ),
+    )
+    configure_toolkit_functions(tool, output_files=ToolOutputFilePolicy(workspace_root=tmp_path, max_bytes=60000))
+    destination = tmp_path / "existing.txt"
+    destination.write_text("keep existing")
+    result = await _run(
+        tool,
+        {
+            "args": "awk 'BEGIN { for(i=0;i<10000;i++) print \"too-much-output\" }'; exit 3",
+            "mindroom_output_path": "existing.txt",
+        },
+    )
+
+    assert json.loads(str(result.result)) == {
+        "mindroom_tool_output": {
+            "status": "error",
+            "error": "Redirected shell output exceeds the 60000 byte limit.",
+            "exit_code": 3,
+        },
+    }
+    assert destination.read_text() == "keep existing"
+
+
+@pytest.mark.asyncio
+async def test_a_killed_command_reports_its_signal_exit_code(shell_toolkit: AnyToolkit, tmp_path: Path) -> None:
+    """A command killed by a signal, such as the OOM killer's SIGKILL, saves no file but reports its exit code."""
+    destination = tmp_path / "killed.txt"
+    destination.write_text("keep existing")
+    result = await _run(shell_toolkit, {"args": "echo building; kill -KILL $$", "mindroom_output_path": "killed.txt"})
+
+    assert json.loads(str(result.result)) == {
+        "mindroom_tool_output": {
+            "status": "error",
+            "error": "Shell command or output capture was interrupted; no complete output file was saved.",
+            "exit_code": -9,
+        },
+    }
+    assert destination.read_text() == "keep existing"
+
+
+@pytest.mark.asyncio
+async def test_publication_rechecks_destination(shell_toolkit: AnyToolkit, tmp_path: Path) -> None:
     """Replacing a destination parent with an escaping symlink while running cannot write outside the workspace."""
     parent = tmp_path / "reports"
     parent.mkdir()
     outside = tmp_path.parent / f"outside-{tmp_path.name}"
     outside.mkdir()
-    result = await FunctionCall(
-        function=shell_toolkit.async_functions["run_shell_command"],
-        arguments={
-            "args": "while [ ! -f release ]; do sleep 0.01; done; printf complete",
-            "timeout": 0,
-            "mindroom_output_path": "reports/output.txt",
-        },
-    ).aexecute()
-    handle = str(result.result).split("Handle: ")[1].splitlines()[0]
+    running = asyncio.create_task(
+        _run(
+            shell_toolkit,
+            {
+                "args": "touch started; while [ ! -f release ]; do sleep 0.01; done; printf complete",
+                "mindroom_output_path": "reports/output.txt",
+            },
+        ),
+    )
+    async with asyncio.timeout(10):
+        while not (tmp_path / "started").exists():  # noqa: ASYNC110
+            await asyncio.sleep(0.01)
     parent.rmdir()
     parent.symlink_to(outside, target_is_directory=True)
     (tmp_path / "release").touch()
-    check = shell_toolkit.functions["check_shell_command"].entrypoint
-    assert check is not None
     async with asyncio.timeout(10):
-        while True:
-            status = await asyncio.to_thread(check, handle)
-            if '"status": "error"' in status:
-                break
-            await asyncio.sleep(0.02)
+        status = str((await running).result)
+    assert '"status": "error"' in status
     assert not (outside / "output.txt").exists()
     assert "saved_to_file" not in status
 
 
 @pytest.mark.asyncio
-async def test_cancelled_capture_does_not_publish(shell_toolkit: Toolkit, tmp_path: Path) -> None:
+async def test_cancelled_capture_does_not_publish(shell_toolkit: AnyToolkit, tmp_path: Path) -> None:
     """Cancellation kills an active process and cannot publish its incomplete output."""
-    run = shell_toolkit.async_functions["run_shell_command"].entrypoint
-    assert run is not None
+    function = toolkit_function(shell_toolkit, "run_shell_command")
+    assert function is not None
+    run = function.entrypoint
     task = asyncio.create_task(
         run(
             args="echo $$ > process.pid; printf partial; exec sleep 300",
             mindroom_output_path="cancelled.txt",
         ),
     )
+    pid_file = tmp_path / "process.pid"
     async with asyncio.timeout(10):
-        while not (tmp_path / "process.pid").exists():  # noqa: ASYNC110
+        while not (pid_file.exists() and pid_file.read_text()):  # noqa: ASYNC110
             await asyncio.sleep(0.01)
-    pid = int((tmp_path / "process.pid").read_text())
+    pid = int(pid_file.read_text())
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
         await task
@@ -265,34 +356,24 @@ async def test_cancelled_capture_does_not_publish(shell_toolkit: Toolkit, tmp_pa
 
 
 @pytest.mark.asyncio
-async def test_killed_capture_preserves_existing_destination(shell_toolkit: Toolkit, tmp_path: Path) -> None:
-    """Stopping a shell cannot replace the destination with incomplete stderr."""
+async def test_a_stopped_command_keeps_the_existing_destination(shell_toolkit: AnyToolkit, tmp_path: Path) -> None:
+    """A command stopped at its timeout keeps the destination and reports its output so far in the receipt."""
     destination = tmp_path / "killed.txt"
     destination.write_text("keep existing")
-    result = await FunctionCall(
-        function=shell_toolkit.async_functions["run_shell_command"],
-        arguments={
-            "args": "printf partial >&2; touch started; exec sleep 300",
-            "timeout": 0,
+    result = await _run(
+        shell_toolkit,
+        {
+            "args": "echo compiling; printf 'error: missing header' >&2; exec sleep 300",
+            "timeout": 1,
             "mindroom_output_path": "killed.txt",
         },
-    ).aexecute()
-    handle = str(result.result).split("Handle: ")[1].splitlines()[0]
-    async with asyncio.timeout(10):
-        while not (tmp_path / "started").exists():  # noqa: ASYNC110
-            await asyncio.sleep(0.01)
-    kill = shell_toolkit.functions["kill_shell_command"].entrypoint
-    check = shell_toolkit.functions["check_shell_command"].entrypoint
-    assert kill is not None
-    assert check is not None
-    await asyncio.to_thread(kill, handle)
-    async with asyncio.timeout(10):
-        while True:
-            status = await asyncio.to_thread(check, handle)
-            if "RUNNING" not in status:
-                break
-            await asyncio.sleep(0.02)
-    assert "saved_to_file" not in status
+    )
+    assert json.loads(str(result.result)) == {
+        "mindroom_tool_output": {
+            "status": "error",
+            "error": "Stopped after 1s. No output file was saved.\nOutput:\ncompiling\nStderr:\nerror: missing header",
+        },
+    }
     assert destination.read_text() == "keep existing"
 
 
@@ -378,8 +459,8 @@ async def test_spawn_cancellation_closes_capture(tmp_path: Path, monkeypatch: py
             stream.close()
 
 
-def test_worker_subprocess_preserves_background_capture(tmp_path: Path) -> None:
-    """A request process can exit while its supervisor retains capture and publishes the complete file."""
+def test_worker_subprocess_saves_supervised_capture(tmp_path: Path) -> None:
+    """A request process relays the call while its supervisor captures and publishes the complete file."""
     config_path = tmp_path / "config.yaml"
     config_path.write_text(
         "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\n"
@@ -395,40 +476,67 @@ def test_worker_subprocess_preserves_background_capture(tmp_path: Path) -> None:
 
     def execute(function_name: str, kwargs: dict[str, object]) -> str:
         response = sandbox_runner._execute_request_subprocess_sync(
-            sandbox_runner.SandboxRunnerExecuteRequest(
+            execute_call(
+                runtime_paths,
+                config,
                 tool_name="shell",
                 function_name=function_name,
                 kwargs=kwargs,
                 routing_agent_name="probe",
-                tool_init_overrides={"base_dir": str(workspace)},
+                base_dir=str(workspace),
             ),
-            runtime_paths,
-            config,
         )
         assert response.ok, response.error
         assert isinstance(response.result, str)
         return response.result
 
-    initial = execute(
+    status = execute(
         "run_shell_command",
         {
             "args": "sleep 1; awk 'BEGIN { for(i=0;i<125000;i++) print \"0123456789012345678\" }'",
             "tail": 2,
-            "timeout": 0,
             "mindroom_output_path": "worker.txt",
         },
     )
-    handle = initial.split("Handle: ")[1].splitlines()[0]
-    deadline = time.monotonic() + 10
-    while True:
-        status = execute("check_shell_command", {"handle": handle})
-        if "RUNNING" not in status:
-            break
-        assert time.monotonic() < deadline
-        time.sleep(0.02)
     assert "saved_to_file" in status
-    saved = (workspace / "worker.txt").read_bytes().split(b"\n", 1)[1]
-    assert saved == b"0123456789012345678\n" * 125000
+    assert (workspace / "worker.txt").read_bytes() == b"0123456789012345678\n" * 125000
+
+
+def test_worker_subprocess_answers_a_structured_call_with_the_exit_status_and_the_output_as_text(
+    tmp_path: Path,
+) -> None:
+    """The status crosses the supervisor, the request process and the wire; only a plain call's output is saved."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        "models:\n  default:\n    provider: openai\n    id: gpt-6-astra\n"
+        "agents:\n  probe:\n    display_name: Probe\n    role: Test shell output\n    tools: [shell]\nrouter:\n  model: default\nmemory:\n  backend: file\n",
+    )
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "storage",
+        process_env={"MINDROOM_SANDBOX_RUNNER_EXECUTION_MODE": "subprocess"},
+    )
+    config = sandbox_runner._runtime_config_or_empty(runtime_paths)
+
+    def execute(*, structured: bool) -> ExecuteResponse:
+        return sandbox_runner._execute_request_subprocess_sync(
+            execute_call(
+                runtime_paths,
+                config,
+                tool_name="shell",
+                function_name="run_shell_command",
+                kwargs={"args": "head -c 51200 /dev/zero | tr '\\0' Z; exit 3", "timeout": 30},
+                routing_agent_name="probe",
+                base_dir=str(tmp_path / "storage/agents/probe/workspace"),
+                structured_result=structured,
+            ),
+        )
+
+    plain, structured = execute(structured=False), execute(structured=True)
+
+    assert (plain.metadata, "mindroom_tool_output" in str(plain.result)) == (None, True)
+    assert structured.metadata == {"exit_code": 3}
+    assert ("mindroom_tool_output" in str(structured.result), str(structured.result).count("Z")) == (False, 51200)
 
 
 @pytest.mark.asyncio
@@ -504,12 +612,12 @@ async def test_spool_creation_failure_returns_shell_error(tmp_path: Path, monkey
 
 
 @pytest.mark.asyncio
-async def test_spawn_error_preserves_generic_redirection(shell_toolkit: Toolkit, tmp_path: Path) -> None:
+async def test_spawn_error_preserves_generic_redirection(shell_toolkit: AnyToolkit, tmp_path: Path) -> None:
     """A command that cannot start still redirects its ordinary shell error result."""
-    result = await FunctionCall(
-        function=shell_toolkit.async_functions["run_shell_command"],
-        arguments={"args": [str(tmp_path / "missing-command")], "mindroom_output_path": "error.txt"},
-    ).aexecute()
+    result = await _run(
+        shell_toolkit,
+        {"args": [str(tmp_path / "missing-command")], "mindroom_output_path": "error.txt"},
+    )
     assert "saved_to_file" in str(result.result)
     assert "Error:" in (tmp_path / "error.txt").read_text()
 
@@ -555,70 +663,48 @@ async def test_publication_io_failure_settles_capture(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("wait_seconds", [0, 30])
 async def test_inherited_pipe_cannot_publish_partial_capture(
-    shell_toolkit: Toolkit,
+    shell_toolkit: AnyToolkit,
     tmp_path: Path,
-    wait_seconds: int,
 ) -> None:
     """A descendant retaining a pipe beyond the existing grace period must not overwrite the destination."""
     destination = tmp_path / "inherited.txt"
     destination.write_text("keep existing")
     try:
         async with asyncio.timeout(10):
-            result = await FunctionCall(
-                function=shell_toolkit.async_functions["run_shell_command"],
-                arguments={
+            result = await _run(
+                shell_toolkit,
+                {
                     "args": "sleep 30 & echo $! > child.pid; printf early; sleep 0.05",
-                    "timeout": wait_seconds,
                     "mindroom_output_path": "inherited.txt",
                 },
-            ).aexecute()
+            )
             status = str(result.result)
-            if wait_seconds == 0:
-                handle = status.split("Handle: ")[1].splitlines()[0]
-                check = shell_toolkit.functions["check_shell_command"].entrypoint
-                assert check is not None
-                while True:
-                    status = await asyncio.to_thread(check, handle)
-                    if "Status: RUNNING" not in status:
-                        break
-                    await asyncio.sleep(0.02)
         assert '"status": "error"' in status
         assert "saved_to_file" not in status
         assert destination.read_text() == "keep existing"
     finally:
         pid_file = tmp_path / "child.pid"
-        if pid_file.exists():
+        if pid_file.exists() and (pid := pid_file.read_text()):
             with contextlib.suppress(ProcessLookupError):
-                os.kill(int(pid_file.read_text()), signal.SIGKILL)
+                os.kill(int(pid), signal.SIGKILL)
 
 
 @pytest.mark.asyncio
-async def test_background_capture_includes_descendant_output_within_grace(
-    shell_toolkit: Toolkit,
+async def test_capture_includes_descendant_output_within_grace(
+    shell_toolkit: AnyToolkit,
     tmp_path: Path,
 ) -> None:
-    """A short-lived descendant can finish writing before background process-group cleanup."""
-    result = await FunctionCall(
-        function=shell_toolkit.async_functions["run_shell_command"],
-        arguments={
+    """A short-lived descendant can finish writing within the grace after its command exits."""
+    result = await _run(
+        shell_toolkit,
+        {
             "args": "(sleep 0.2; printf late) & printf early; sleep 0.05",
-            "timeout": 0,
             "mindroom_output_path": "descendant.txt",
         },
-    ).aexecute()
-    handle = str(result.result).split("Handle: ")[1].splitlines()[0]
-    check = shell_toolkit.functions["check_shell_command"].entrypoint
-    assert check is not None
-    async with asyncio.timeout(10):
-        while True:
-            status = await asyncio.to_thread(check, handle)
-            if "Status: RUNNING" not in status:
-                break
-            await asyncio.sleep(0.02)
-    assert "saved_to_file" in status
-    assert (tmp_path / "descendant.txt").read_text().split("\n", 1)[-1] == "earlylate"
+    )
+    assert "saved_to_file" in str(result.result)
+    assert (tmp_path / "descendant.txt").read_text() == "earlylate"
 
 
 @pytest.mark.asyncio

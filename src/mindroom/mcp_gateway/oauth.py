@@ -27,6 +27,7 @@ from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 from mindroom.mcp_gateway.accounts import account_is_active
 from mindroom.mcp_gateway.lifecycle import owned_grants, public_grant, touch_grant
 from mindroom.mcp_gateway.store import GatewayOAuthCapacityError, GatewayOAuthStore
+from mindroom.origins import parse_browser_origin
 
 if TYPE_CHECKING:
     import sqlite3
@@ -86,6 +87,15 @@ def _valid_url(value: str) -> bool:
         return False
 
 
+def gateway_public_origin(value: str) -> str:
+    """Normalize a browser origin while retaining the gateway's HTTPS-or-loopback rule."""
+    origin = parse_browser_origin(value.strip())
+    if not _valid_url(origin):
+        msg = "MCP public URL must be an HTTPS origin or loopback HTTP origin"
+        raise ValueError(msg)
+    return origin
+
+
 class _GatewayAuthorizationCode(AuthorizationCode):
     """Code bound to the user and grant approved in the browser."""
 
@@ -111,7 +121,7 @@ class _GatewayRefreshToken(RefreshToken):
     authenticated_user_id: str
     grant_id: str
     account_id: str | None = None
-    resource: str
+    resource: str  # ty: ignore[incompatible-mutable-override]  # required here: every gateway grant is resource-bound
 
 
 @dataclass(frozen=True)
@@ -135,16 +145,12 @@ class GatewayOAuthProvider(
         public_url: str,
         clock: Callable[[], float] | None = None,
     ) -> None:
-        origin = public_url.rstrip("/")
-        parsed = urlsplit(origin)
-        if not _valid_url(origin) or parsed.path or parsed.query:
-            msg = "MCP public URL must be an HTTPS origin or loopback HTTP origin"
-            raise ValueError(msg)
+        origin = gateway_public_origin(public_url)
         self.resource_url = origin + "/mcp"
         self.issuer_url = origin + "/mcp/oauth"
         self.consent_url = origin + "/connections/mcp/authorize"
         self._clock = clock or (lambda: time.time())
-        self.scim_token = runtime_paths.env_value("MINDROOM_MCP_SCIM_TOKEN") or None
+        self.scim_token = runtime_paths.env_value("MINDROOM_MCP_SCIM_TOKEN")
         if self.scim_token is not None and len(self.scim_token) < 32:
             msg = "MINDROOM_MCP_SCIM_TOKEN must contain at least 32 characters"
             raise ValueError(msg)

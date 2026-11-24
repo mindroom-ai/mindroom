@@ -23,11 +23,16 @@ from mindroom.api.worker_computer import router
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.browser import BrowserTools
+from mindroom.tool_system.authoring import tool
+from mindroom.tool_system.media_transport import decode_media_result
+from mindroom.tool_system.tool_function import ToolValue
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key
 from mindroom.worker_computer.runtime import WorkerComputerRuntime
 from mindroom.worker_computer.worker_browser import WorkerBrowserRuntime
 from mindroom.workers.backends.local import local_worker_state_paths_for_root
 from mindroom.workers.models import WorkerHandle
+from mindroom.workers.protocol import WORKER_PROTOCOL_VERSION, ExecuteResponse
+from tests.conftest import replace_test_tool_factory
 from tests.test_worker_computer_runtime import FakeDisplay
 
 RUNNER_TOKEN = "test-runner-token"  # noqa: S105 - isolated test credential
@@ -60,13 +65,12 @@ def test_internal_routes_require_runner_token_and_preserve_stopped_status(tmp_pa
         assert client.get("/computer", headers=headers).json()["state"] == "stopped"
 
 
-@pytest.mark.parametrize("worker_scope", ["user_agent", None])
-def test_two_execute_requests_reuse_browser_and_disabled_uses_subprocess(
+def _dedicated_writer_worker(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    worker_scope: str | None,
-) -> None:
-    """Intercept only validated browser calls; preserve the dedicated subprocess fallback."""
+    process_env: dict[str, str],
+) -> tuple[FastAPI, dict[str, object], Path]:
+    """Return a runner pinned to writer's dedicated user_agent worker, a browser call payload for it, and its root."""
     identity = ToolExecutionIdentity(
         channel="matrix",
         agent_name="writer",
@@ -82,50 +86,65 @@ def test_two_execute_requests_reuse_browser_and_disabled_uses_subprocess(
         config_path=tmp_path / "config.yaml",
         storage_path=root,
         process_env={
-            "MINDROOM_WORKER_COMPUTER_ENABLED": "true",
+            **process_env,
             "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY": worker_key,
             "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT": str(root),
         },
     )
     app = FastAPI()
     initialize_sandbox_runner_app(app, paths, config=Config(), runner_token=RUNNER_TOKEN)
-    app.state.worker_computer = WorkerComputerRuntime(FakeDisplay())
     app.include_router(sandbox_runner.router)
     prepared = sandbox_worker_prep.PreparedWorkerRequest(
         handle=WorkerHandle("test", worker_key, "http://worker/execute", "secret", "ready", "docker", 0, 0),
         paths=local_worker_state_paths_for_root(root),
-        runtime_overrides={"base_dir": root / "workspace"},
+        base_dir=root / "workspace",
     )
     monkeypatch.setattr(sandbox_worker_prep, "prepare_worker_request", lambda **_kwargs: prepared)
-    pages = {}
-
-    async def browser(self: BrowserTools, action: str, targetId: str | None = None) -> str:  # noqa: N803
-        if action == "open":
-            pages[id(self)] = "target-one"
-        return json.dumps({"targetId": pages.get(id(self)), "same_target": targetId == pages.get(id(self))})
-
-    async def subprocess(*_args: object, **_kwargs: object) -> sandbox_runner.SandboxRunnerExecuteResponse:
-        return sandbox_runner.SandboxRunnerExecuteResponse(ok=True, result="subprocess")
-
-    monkeypatch.setattr(BrowserTools, "browser", browser)
-    monkeypatch.setattr(sandbox_runner, "_execute_request_subprocess", subprocess)
-    payload = {
+    payload: dict[str, object] = {
+        "protocol": WORKER_PROTOCOL_VERSION,
         "tool_name": "browser",
         "function_name": "browser_control",
         "worker_key": worker_key,
         "worker_scope": "user_agent",
         "execution_identity": asdict(identity),
         "private_agent_names": [],
-        "kwargs": {"action": "open"},
+        "kwargs": {},
     }
+    return app, payload, root
+
+
+@pytest.mark.parametrize("worker_scope", ["user_agent", None])
+def test_two_execute_requests_reuse_browser_and_disabled_uses_subprocess(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    worker_scope: str | None,
+) -> None:
+    """Intercept only validated browser calls; preserve the dedicated subprocess fallback."""
+    app, payload, root = _dedicated_writer_worker(tmp_path, monkeypatch, {"MINDROOM_WORKER_COMPUTER_ENABLED": "true"})
+    app.state.worker_computer = WorkerComputerRuntime(FakeDisplay())
+    pages = {}
+
+    @tool(name="browser_control")
+    async def browser(self: BrowserTools, action: str, targetId: str | None = None) -> str:  # noqa: N803
+        if action == "open":
+            pages[id(self)] = "target-one"
+        return json.dumps({"targetId": pages.get(id(self)), "same_target": targetId == pages.get(id(self))})
+
+    async def subprocess(*_args: object, **_kwargs: object) -> ExecuteResponse:
+        return ExecuteResponse(ok=True, result="subprocess")
+
+    monkeypatch.setattr(BrowserTools, "browser", browser)
+    monkeypatch.setattr(sandbox_runner, "_execute_request_subprocess", subprocess)
+    payload["kwargs"] = {"action": "open"}
     if worker_scope is None:
         payload.pop("worker_scope")
     headers = {"X-Mindroom-Sandbox-Token": RUNNER_TOKEN}
     with TestClient(app) as client:
         first = client.post("/api/sandbox-runner/execute", headers=headers, json=payload)
         if worker_scope is None:
-            assert first.status_code == 400, first.text
-            assert "user_agent" in first.json()["detail"]
+            assert first.status_code == 200, first.text
+            assert first.json()["failure_kind"] == "tool"
+            assert "user_agent" in first.json()["error"]
             assert not pages
             return
         assert first.status_code == 200, first.text
@@ -142,6 +161,46 @@ def test_two_execute_requests_reuse_browser_and_disabled_uses_subprocess(
         assert (
             client.post("/api/sandbox-runner/execute", headers=headers, json=payload).json()["result"] == "subprocess"
         )
+
+
+@pytest.mark.parametrize("runtime", ["headless", "computer"])
+def test_worker_browser_call_reaches_its_own_time_limit_past_a_shorter_runner_timeout(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    runtime: str,
+) -> None:
+    """The runner lets a browser call reach its own limit, so the model learns the call ran out of time."""
+    app, payload, _root = _dedicated_writer_worker(
+        tmp_path,
+        monkeypatch,
+        {"MINDROOM_SANDBOX_RUNNER_SUBPROCESS_TIMEOUT_SECONDS": "1"},
+    )
+    if runtime == "computer":
+        app.state.worker_computer = WorkerComputerRuntime(FakeDisplay())
+    else:
+        app.state.worker_browser = WorkerBrowserRuntime()
+    monkeypatch.setattr("mindroom.custom_tools.browser.HOST_CALL_TIMEOUT_SECONDS", 1.5)
+    monkeypatch.setattr("mindroom.browser.call_limit.HOST_CALL_TIMEOUT_SECONDS", 1.5)
+
+    async def unresponsive_status(_self: BrowserTools, _profile_name: str) -> Never:
+        await asyncio.Event().wait()
+        raise AssertionError
+
+    monkeypatch.setattr(BrowserTools, "_status_payload", unresponsive_status)
+    payload |= {"kwargs": {"action": "status"}, "run_as_job": True}
+    with TestClient(app) as client:
+        response = client.post(
+            "/api/sandbox-runner/execute",
+            headers={"X-Mindroom-Sandbox-Token": RUNNER_TOKEN},
+            json=payload,
+        )
+
+    assert response.json()["error"] == (
+        "Sandbox tool execution failed: HostCallTimeLimitError: Browser action=status did not finish within 1.5 "
+        "seconds, so MindRoom stopped waiting for it. Work it already sent to the page, such as a running script or a "
+        "pending upload, may continue. Check the tab with action=tabs: close it with action=close if it is marked "
+        "unresponsive, and otherwise take a snapshot before acting on it again."
+    )
 
 
 @pytest.fixture
@@ -329,60 +388,25 @@ def test_native_functions_reuse_one_guarded_session(  # noqa: PLR0915 - full HTT
     enabled: bool,
 ) -> None:
     """Current native names route through one retained toolkit; disabled mode fails closed."""
-    from agno.tools.function import ToolResult  # noqa: PLC0415
-
-    from mindroom.tool_system.media_transport import decode_media_result  # noqa: PLC0415
     from mindroom.worker_computer.mcp_provider import WorkerBrowserMCP  # noqa: PLC0415
 
-    identity = ToolExecutionIdentity(
-        channel="matrix",
-        agent_name="writer",
-        requester_id="@alice:example.org",
-        room_id="!room:example.org",
-        thread_id=None,
-        resolved_thread_id=None,
-        session_id="session",
+    app, payload, root = _dedicated_writer_worker(
+        tmp_path,
+        monkeypatch,
+        {"MINDROOM_WORKER_COMPUTER_ENABLED": str(enabled).lower()},
     )
-    worker_key = resolve_worker_key("user_agent", identity, agent_name="writer")
-    root = tmp_path / "worker"
-    paths = resolve_runtime_paths(
-        config_path=tmp_path / "config.yaml",
-        storage_path=root,
-        process_env={
-            "MINDROOM_WORKER_COMPUTER_ENABLED": str(enabled).lower(),
-            "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY": worker_key,
-            "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT": str(root),
-        },
-    )
-    app = FastAPI()
-    initialize_sandbox_runner_app(app, paths, config=Config(), runner_token=RUNNER_TOKEN)
     computer = WorkerComputerRuntime(FakeDisplay())
     app.state.worker_browser = WorkerBrowserRuntime()
     if enabled:
         app.state.worker_computer = computer
-    app.include_router(sandbox_runner.router)
-    prepared = sandbox_worker_prep.PreparedWorkerRequest(
-        handle=WorkerHandle("test", worker_key, "http://worker/execute", "secret", "ready", "docker", 0, 0),
-        paths=local_worker_state_paths_for_root(root),
-        runtime_overrides={"base_dir": root / "workspace"},
-    )
-    monkeypatch.setattr(sandbox_worker_prep, "prepare_worker_request", lambda **_kwargs: prepared)
     calls = []
 
-    async def execute(self: WorkerBrowserMCP, name: str, arguments: dict[str, object]) -> ToolResult:
+    async def execute(self: WorkerBrowserMCP, name: str, arguments: dict[str, object]) -> ToolValue:
         calls.append((id(self), name, arguments))
-        return ToolResult(content=name)
+        return ToolValue(content=name)
 
     monkeypatch.setattr(WorkerBrowserMCP, "execute", execute)
-    payload = {
-        "tool_name": "browser_mcp",
-        "function_name": "browser_snapshot",
-        "worker_key": worker_key,
-        "worker_scope": "user_agent",
-        "execution_identity": asdict(identity),
-        "private_agent_names": [],
-        "kwargs": {},
-    }
+    payload |= {"tool_name": "browser_mcp", "function_name": "browser_snapshot"}
     headers = {"X-Mindroom-Sandbox-Token": RUNNER_TOKEN}
     with TestClient(app) as client:
         for name in ["browser_snapshot", "browser_tabs", "browser_close"]:
@@ -418,12 +442,12 @@ def test_native_functions_reuse_one_guarded_session(  # noqa: PLR0915 - full HTT
         payload["function_name"] = "browser_run_code_unsafe"
         payload["kwargs"] = {}
         unsupported = client.post("/api/sandbox-runner/execute", headers=headers, json=payload)
-        assert unsupported.status_code == 400
+        assert unsupported.json()["failure_kind"] == "tool"
         payload["function_name"] = "browser_snapshot"
-        monkeypatch.setattr(sandbox_runner.TOOL_METADATA["browser_mcp"], "factory", lambda: type(None))
+        replace_test_tool_factory(monkeypatch, "browser_mcp", lambda: type(None))
         replaced = client.post("/api/sandbox-runner/execute", headers=headers, json=payload)
-        assert replaced.status_code == 400
-        assert "built-in browser factory" in replaced.json()["detail"]
+        assert replaced.json()["failure_kind"] == "tool"
+        assert "built-in browser factory" in replaced.json()["error"]
         assert len(calls) == 4
         client.portal.call(computer.close)
 
@@ -439,7 +463,7 @@ def test_computer_execute_rejects_malformed_agent_name(
     function: str,
     agent_name: object,
 ) -> None:
-    """Arbitrary identity values return a client error before provider dispatch."""
+    """Arbitrary identity values fail the call before provider dispatch."""
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
     app = FastAPI()
     initialize_sandbox_runner_app(app, paths, config=Config(), runner_token=RUNNER_TOKEN)
@@ -450,6 +474,7 @@ def test_computer_execute_rejects_malformed_agent_name(
             "/api/sandbox-runner/execute",
             headers={"X-Mindroom-Sandbox-Token": RUNNER_TOKEN},
             json={
+                "protocol": WORKER_PROTOCOL_VERSION,
                 "tool_name": provider,
                 "function_name": function,
                 "execution_identity": {
@@ -463,8 +488,9 @@ def test_computer_execute_rejects_malformed_agent_name(
                 },
             },
         )
-    assert response.status_code == 400, response.text
-    assert "agent_name" in response.json()["detail"]
+    assert response.status_code == 200, response.text
+    assert response.json()["failure_kind"] == "tool"
+    assert "agent_name" in response.json()["error"]
 
 
 @pytest.mark.parametrize(
@@ -509,3 +535,34 @@ def test_computer_startup_requires_nonroot_effective_identity(
         with TestClient(app):
             assert isinstance(app.state.worker_computer, WorkerComputerRuntime) is enabled
             assert prepared == [True]
+
+
+@pytest.mark.parametrize(
+    "worker_key",
+    ["v1:default:shared:writer", "v1:default:user:~@alice:example.org"],
+)
+def test_computer_flag_leaves_shared_and_user_workers_their_browser(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    worker_key: str,
+) -> None:
+    """Only a user_agent worker can be a Computer, so a deployment-wide flag keeps other workers' browser working."""
+
+    async def prepare(_app: FastAPI) -> None:
+        return None
+
+    monkeypatch.setattr(sandbox_runner_app, "prepare_script_worker_before_serving", prepare)
+    paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={
+            "MINDROOM_WORKER_COMPUTER_ENABLED": "true",
+            "MINDROOM_SANDBOX_DEDICATED_WORKER_KEY": worker_key,
+            "MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT": str(tmp_path),
+        },
+    )
+    app = FastAPI(lifespan=sandbox_runner_app._lifespan)
+    initialize_sandbox_runner_app(app, paths, config=Config(), runner_token=RUNNER_TOKEN)
+    with TestClient(app):
+        assert app.state.worker_computer is None
+        assert isinstance(app.state.worker_browser, WorkerBrowserRuntime)

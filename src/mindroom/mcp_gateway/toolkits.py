@@ -3,38 +3,41 @@
 from __future__ import annotations
 
 import asyncio
-import inspect
 from concurrent.futures import ThreadPoolExecutor
-from contextlib import suppress
 from contextvars import copy_context
 from functools import partial
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, cast
 
 from mindroom.credentials.manager import get_runtime_credentials_manager
-from mindroom.logging_config import get_logger
 from mindroom.mcp.toolkit import MindRoomMCPToolkit
 from mindroom.mcp_gateway.execution import retain_execution_task, run_gateway_sync
 from mindroom.mcp_gateway.types import GatewayError, GatewayErrorCode
-from mindroom.tool_system.catalog import TOOL_METADATA
-from mindroom.tool_system.tool_hooks import SyncToolCompletionTracker, track_sync_tool_completion
+from mindroom.tool_system.agent_tools import resolve_agent_tools
+from mindroom.tool_system.agno_toolkits import configure_toolkit_functions
+from mindroom.tool_system.sandbox_proxy import tool_placement
+from mindroom.tool_system.toolkit_connections import (
+    RetainedToolkitCleanups,
+    close_connected_toolkit,
+    toolkit_call_lifetime,
+)
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Coroutine
-
-    from agno.tools import Toolkit
-    from agno.tools.function import ToolResult
+    from collections.abc import Awaitable, Callable
 
     from mindroom.api.connection_agents import AgentToolContext
     from mindroom.config.models import EffectiveToolConfig
     from mindroom.mcp.manager import MCPServerManager
+    from mindroom.tool_system.agno_toolkits import AnyToolkit
+    from mindroom.tool_system.tool_function import ToolValue
 
-_CLEANUP_TASKS: set[asyncio.Task[None]] = set()
+_CLEANUPS = RetainedToolkitCleanups(failure_event="mcp_gateway_tool_cleanup_failed", adopt=retain_execution_task)
 # Toolkit construction, connect, and close, synchronous tool bodies, and the worker proxy requests of
 # async ones hold their thread until they return, even after a timeout or cancel. A separate pool keeps
-# them off the default executor that authentication, OAuth storage, and the Matrix runtime share, and
-# off the worker proxy pool that chat tool calls share; the default per-user call limit stays below its size.
+# them off the default executor that authentication, OAuth storage, and the Matrix runtime share; chat
+# tool calls give each worker proxy request its own thread instead. A call holds one thread for each such
+# body or request it runs at once, its own and those of tools it calls, so the per-user call limit bounds a
+# user's threads only for calls that run one at a time.
 _TOOL_EXECUTOR = ThreadPoolExecutor(max_workers=32, thread_name_prefix="mindroom-mcp-gateway-tool")
-logger = get_logger(__name__)
 
 
 async def _on_tool_pool[T](operation: Callable[[], T]) -> T:
@@ -42,62 +45,24 @@ async def _on_tool_pool[T](operation: Callable[[], T]) -> T:
     return await asyncio.get_running_loop().run_in_executor(_TOOL_EXECUTOR, copy_context().run, operation)
 
 
-async def _lifecycle(operation: Callable[[], object]) -> None:
-    if inspect.iscoroutinefunction(operation):
-        result = operation()
-    else:
-        # Like run_gateway_sync, a cancelled caller stops waiting while the call keeps owning the thread.
-        task = asyncio.create_task(_on_tool_pool(operation))
-        retain_execution_task(task)
-        result = await asyncio.shield(task)
-    if inspect.isawaitable(result):
-        await result
-
-
-async def _close(toolkit: Toolkit) -> None:
-    if toolkit.requires_connect:
-        await _lifecycle(toolkit.close)
-
-
-def _retain(cleanup: Coroutine[Any, Any, None]) -> asyncio.Task[None]:
-    task = asyncio.create_task(cleanup, name="mcp-gateway-tool-cleanup")
-    retain_execution_task(task)
-    _CLEANUP_TASKS.add(task)
-
-    def finished(completed: asyncio.Task[None]) -> None:
-        _CLEANUP_TASKS.discard(completed)
-        if completed.cancelled():
-            return
-        if (error := completed.exception()) is not None:
-            logger.warning("mcp_gateway_tool_cleanup_failed", error_type=type(error).__name__)
-
-    task.add_done_callback(finished)
-    return task
-
-
 async def drain_gateway_tool_cleanup() -> None:
     """Drain retained tool owners before shutting down the gateway's MCP manager."""
-    while _CLEANUP_TASKS:
-        await asyncio.gather(*(asyncio.shield(task) for task in tuple(_CLEANUP_TASKS)), return_exceptions=True)
+    await _CLEANUPS.drain()
 
 
-async def _close_after(pending: asyncio.Task[Any], toolkit: Toolkit | None = None) -> None:
-    with suppress(BaseException):
-        result = await pending
-        if toolkit is None:
-            toolkit = result
-    if toolkit is not None:
-        await _close(toolkit)
+async def _close_once_built(building: asyncio.Task[AnyToolkit]) -> None:
+    """Close the toolkit a cancelled call was building, once its construction returns."""
+    try:
+        toolkit = await building
+    except Exception:
+        return
+    await close_connected_toolkit(toolkit, executor=_TOOL_EXECUTOR)
 
 
-def _build_native(context: AgentToolContext, entry: EffectiveToolConfig) -> Toolkit:
-    from mindroom.agents import build_agent_toolkit, resolve_runtime_worker_tools  # noqa: PLC0415
+def _build_native(context: AgentToolContext, entry: EffectiveToolConfig) -> AnyToolkit:
+    from mindroom.agents import build_agent_toolkit  # noqa: PLC0415
     from mindroom.runtime_resolution import resolve_agent_runtime  # noqa: PLC0415
 
-    # Plugin metadata can change after selection while this build is scheduled.
-    metadata = TOOL_METADATA.get(entry.name)
-    if metadata is not None and metadata.requires_room_context:
-        raise GatewayError(code=GatewayErrorCode.TOOL_NOT_FOUND)
     runtime = resolve_agent_runtime(
         context.agent_name,
         context.config,
@@ -105,20 +70,15 @@ def _build_native(context: AgentToolContext, entry: EffectiveToolConfig) -> Tool
         execution_identity=context.execution_identity,
         create=True,
     )
-    worker_tools = resolve_runtime_worker_tools(
-        context.agent_name,
-        context.config,
-        context.runtime_paths,
-        [entry.name],
-        tool_registry_preloaded=True,
-    )
+    # The registry the request selected the entry from, so the build cannot meet another plugin generation.
+    agent_tools = resolve_agent_tools(context.config, context.agent_name, context.plugins.tools)
+    placement = tool_placement(context.runtime_paths, agent_tools.tools)
     toolkit = build_agent_toolkit(
         entry.name,
-        agent_name=context.agent_name,
-        config=context.config,
+        agent_tools=agent_tools,
+        placement=placement,
         runtime_paths=context.runtime_paths,
-        worker_tools=worker_tools,
-        runtime_overrides=context.config.resolve_entity(context.agent_name).tool_runtime_overrides(entry.name),
+        workspace_in_worker=agent_tools.workspace_in_worker([entry.name], placement),
         agent_runtime=runtime,
         tool_config_overrides=entry.tool_config_overrides,
         execution_identity=context.execution_identity,
@@ -138,7 +98,7 @@ class _GatewayMCPToolkit(MindRoomMCPToolkit):
         if self.require_current_access is not None:
             await run_gateway_sync(self.require_current_access)
 
-    async def _call_tool_with_error_payload(self, tool_name: str, arguments: dict[str, object]) -> ToolResult:
+    async def _call_tool_with_error_payload(self, tool_name: str, arguments: dict[str, object]) -> ToolValue:
         if self.manager is None:
             raise GatewayError(code=GatewayErrorCode.TOOL_UNAVAILABLE)
         return await self.manager.call_tool(
@@ -160,12 +120,12 @@ async def _build_selected(
     entry: EffectiveToolConfig,
     manager: MCPServerManager | None,
     require_current_access: Callable[[], None] | None,
-) -> Toolkit:
-    server_id = entry.name.removeprefix("mcp_")
-    server = context.config.mcp_servers.get(server_id) if entry.name.startswith("mcp_") else None
-    if server is not None:
-        if not server.enabled or manager is None:
+) -> AnyToolkit:
+    server_id = context.plugins.tools.mcp_server_id(entry.name)
+    if server_id is not None:
+        if manager is None:
             raise GatewayError(code=GatewayErrorCode.TOOL_UNAVAILABLE)
+        server = context.config.mcp_servers[server_id]
         credentials = get_runtime_credentials_manager(context.runtime_paths)
         catalog = await manager.get_request_catalog(
             server_id,
@@ -188,17 +148,13 @@ async def _build_selected(
         toolkit.context = context
         toolkit.require_current_access = require_current_access
         # Generic OAuth bridge dispatch cannot carry per-function approval policy.
-        typed_names = {tool.function_name for tool in catalog.tools}
-        toolkit.async_functions = {
-            name: function for name, function in toolkit.async_functions.items() if name in typed_names
-        }
-        return toolkit
+        return configure_toolkit_functions(toolkit, offered={tool.function_name for tool in catalog.tools})
     task = asyncio.create_task(_on_tool_pool(partial(_build_native, context, entry)))
     retain_execution_task(task)
     try:
         return await asyncio.shield(task)
     except asyncio.CancelledError:
-        _retain(_close_after(task))
+        _CLEANUPS.retain(asyncio.create_task(_close_once_built(task), name="mcp-gateway-tool-cleanup"))
         raise
 
 
@@ -206,27 +162,10 @@ async def run_toolkit_operation[T](
     context: AgentToolContext,
     entry: EffectiveToolConfig,
     manager: MCPServerManager | None,
-    operation: Callable[[Toolkit], Awaitable[T]],
+    operation: Callable[[AnyToolkit], Awaitable[T]],
     require_current_access: Callable[[], None] | None = None,
 ) -> T:
     """Build, connect, operate on, and close one selected gateway toolkit."""
     toolkit = await _build_selected(context, entry, manager, require_current_access)
-    tracker = SyncToolCompletionTracker(executor=_TOOL_EXECUTOR)
-    pending: asyncio.Task[Any] | None = None
-    cancelled = False
-    try:
-        if toolkit.requires_connect:
-            pending = asyncio.create_task(_lifecycle(toolkit.connect))
-            await asyncio.shield(pending)
-            pending = None
-        with track_sync_tool_completion(tracker):
-            return await operation(toolkit)
-    except asyncio.CancelledError:
-        cancelled = True
-        raise
-    finally:
-        pending = pending or tracker.started_task()
-        cleanup = _close_after(pending, toolkit) if pending is not None else _close(toolkit)
-        close_task = _retain(cleanup)
-        if not cancelled and (pending is None or pending.done()):
-            await asyncio.shield(close_task)
+    async with toolkit_call_lifetime(toolkit, _CLEANUPS, executor=_TOOL_EXECUTOR):
+        return await operation(toolkit)

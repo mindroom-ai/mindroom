@@ -7,8 +7,11 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import pytest
+from agno.tools import Toolkit
+from agno.tools.function import Function
 
 import mindroom.agents as agents_module
+import mindroom.tool_system.plugins as plugins_module
 import mindroom.tools  # noqa: F401
 from mindroom.approval.tool_approval import _matching_tool_approval_rule, tool_may_require_approval
 from mindroom.config.agent import AgentConfig
@@ -19,28 +22,37 @@ from mindroom.script_runs.models import ScriptToolGrant
 from mindroom.script_runs.policy import (
     resolve_current_script_tool,
     resolve_script_launch_grants,
+    resolve_script_launch_toolkit_names,
 )
+from mindroom.tool_system import agno_toolkits
 from mindroom.tool_system.automation_approval import build_automation_approval_config
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import (
+    GENERATION_PROBE_TOOL,
     bind_runtime_paths,
     make_conversation_reader_mock,
     make_relation_lookup,
+    publish_test_plugins,
     runtime_paths_for,
     test_runtime_paths,
+    write_generation_probe_plugin,
 )
+from tests.test_dynamic_toolkits import _egress_broker_env
+from tests.test_dynamic_toolkits import _runtime_paths as _toolkit_runtime_paths
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from agno.tools import Toolkit
-
+    from mindroom.constants import RuntimePaths
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 
-def _context_for_config(tmp_path: Path, config: Config) -> ToolRuntimeContext:
-    runtime_paths = test_runtime_paths(tmp_path)
-    bound_config = bind_runtime_paths(config, runtime_paths)
+def _context_for_config(
+    tmp_path: Path,
+    config: Config,
+    runtime_paths: RuntimePaths | None = None,
+) -> ToolRuntimeContext:
+    bound_config = bind_runtime_paths(config, runtime_paths or test_runtime_paths(tmp_path))
     return make_test_tool_runtime_context(
         agent_name="general",
         target=MessageTarget.resolve(
@@ -89,6 +101,109 @@ def test_launch_grants_resolve_defaults_implied_tools_and_function_filter(tmp_pa
     assert all(grant.toolkit_name != "dynamic_workflow" for grant in grants)
 
 
+def _echo(text: str) -> str:
+    return text
+
+
+def _context_captured_before_the_probe_broke(tmp_path: Path) -> ToolRuntimeContext:
+    """Return a context that captured the generation probe's plugin before a publication in which it no longer loads."""
+    paths = test_runtime_paths(tmp_path)
+    plugin_root = paths.config_dir / "plugins" / "generation-probe"
+    write_generation_probe_plugin(plugin_root, 1)
+    config = Config(
+        agents={"general": AgentConfig(display_name="General", tools=[GENERATION_PROBE_TOOL])},
+        defaults=DefaultsConfig(tools=[]),
+        plugins=["./plugins/generation-probe"],
+        models={"default": ModelConfig(provider="openai", id="test-model")},
+    )
+    publish_test_plugins(bind_runtime_paths(config, paths), paths)
+    context = _context_for_config(tmp_path, config, paths)
+    (plugin_root / "tools.py").write_text(
+        "raise RuntimeError('broken after the context captured it')\n",
+        encoding="utf-8",
+    )
+    plugins_module.publish_plugins(plugins_module.prepare_plugins(context.config, paths))
+    return context
+
+
+def test_launch_grants_come_from_the_plugins_the_turn_captured(tmp_path: Path) -> None:
+    """A publication after the turn captured its plugins leaves the script's grants on the turn's generation."""
+    context = _context_captured_before_the_probe_broke(tmp_path)
+
+    assert resolve_script_launch_grants(context) == (ScriptToolGrant(GENERATION_PROBE_TOOL, "which_generation"),)
+
+
+def test_launch_and_call_filters_see_the_toolkit_each_function_is_granted_from(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A context's filter reads the authored toolkit of each granted function, not Agno's name for the toolkit."""
+    context = _context_for_config(
+        tmp_path,
+        Config(
+            agents={"general": AgentConfig(display_name="General Agent", tools=["calculator"])},
+            defaults=DefaultsConfig(tools=[]),
+            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-5-5")},
+        ),
+    )
+    context = replace(
+        context,
+        tool_function_filter=lambda function: (function.toolkit, function.name) == ("calculator", "echo"),
+    )
+
+    def build_toolkit(_tool_name: str, **_kwargs: object) -> Toolkit:
+        # Agno's own name for the toolkit differs from the configured one the grant names.
+        return Toolkit(name="arithmetic", tools=[Function(name="echo", entrypoint=_echo)])
+
+    monkeypatch.setattr(agents_module, "build_agent_toolkit", build_toolkit)
+
+    assert resolve_script_launch_grants(context) == (ScriptToolGrant("calculator", "echo"),)
+    assert resolve_current_script_tool(context, ScriptToolGrant("calculator", "echo")) is not None
+
+
+def test_script_filters_see_an_implied_tools_function_under_the_authored_toolkit(tmp_path: Path) -> None:
+    """An implied tool's functions name the authored tool that implies it, as an agent's build offers them."""
+    context = _context_for_config(
+        tmp_path,
+        Config(
+            agents={"general": AgentConfig(display_name="General Agent", tools=["matrix_message"])},
+            defaults=DefaultsConfig(tools=[]),
+            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-5-5")},
+        ),
+    )
+    context = replace(
+        context,
+        tool_function_filter=lambda function: (function.toolkit, function.name) == ("matrix_message", "get_attachment"),
+    )
+
+    assert resolve_script_launch_grants(context) == (ScriptToolGrant("attachments", "get_attachment"),)
+    assert resolve_current_script_tool(context, ScriptToolGrant("attachments", "get_attachment")) is not None
+
+
+def test_launch_grants_skip_a_refused_function_the_filter_leaves_out(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A function setting a field MindRoom refuses costs the grants nothing when the context's filter drops it."""
+    context = _context_for_config(
+        tmp_path,
+        Config(
+            agents={"general": AgentConfig(display_name="General Agent", tools=["calculator"])},
+            defaults=DefaultsConfig(tools=[]),
+            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-5-5")},
+        ),
+    )
+    context = replace(context, tool_function_filter=lambda function: function.name != "hooked")
+
+    def build_toolkit(tool_name: str, **_kwargs: object) -> Toolkit:
+        hooked = Function(name="hooked", entrypoint=_echo, pre_hook=_echo)
+        return Toolkit(name=tool_name, tools=[hooked, Function(name="echo", entrypoint=_echo)])
+
+    monkeypatch.setattr(agents_module, "build_agent_toolkit", build_toolkit)
+
+    assert resolve_script_launch_grants(context) == (ScriptToolGrant("calculator", "echo"),)
+
+
 @pytest.mark.parametrize(
     "tools",
     [
@@ -112,7 +227,7 @@ def test_launch_grants_preserve_concrete_overrides_over_preset_in_any_order(
 
     grants = resolve_script_launch_grants(context)
 
-    assert ScriptToolGrant("coding", "read_file") in grants
+    assert ScriptToolGrant("filesystem", "read_file") in grants
     assert all(grant.toolkit_name != "shell" for grant in grants)
 
 
@@ -132,12 +247,39 @@ def test_launch_grants_exclude_stateful_browser_toolkit(tmp_path: Path) -> None:
     assert all(grant.toolkit_name != "browser" for grant in grants)
 
 
-def test_launch_grants_exclude_skill_manage(tmp_path: Path) -> None:
-    """Like self_config, skill_manage stays with the agent's chat even when the agent lists it."""
+@pytest.mark.parametrize("broker_on", [False, True])
+def test_launch_toolkits_include_egress_credentials_only_while_the_broker_is_on(
+    tmp_path: Path,
+    *,
+    broker_on: bool,
+) -> None:
+    """With the broker off a background script is not offered the egress credentials tool its agent lists."""
     context = _context_for_config(
         tmp_path,
         Config(
-            agents={"general": AgentConfig(display_name="General Agent", tools=["calculator", "skill_manage"])},
+            agents={"general": AgentConfig(display_name="General Agent", tools=["calculator", "egress_credentials"])},
+            defaults=DefaultsConfig(tools=[]),
+            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-5")},
+        ),
+        _toolkit_runtime_paths(tmp_path, **_egress_broker_env(broker_on=broker_on)),
+    )
+
+    names = resolve_script_launch_toolkit_names(context)
+
+    assert "calculator" in names
+    assert ("egress_credentials" in names) is broker_on
+
+
+@pytest.mark.parametrize("restricted", ["agent_manager", "contacts", "skill_manage", "workflow"])
+def test_launch_grants_exclude_chat_only_tools(tmp_path: Path, restricted: str) -> None:
+    """Like self_config, these stay with the agent's chat even when the agent lists them.
+
+    A plain script starts no workflow run: its calls have no turn whose tool ceiling the run would keep.
+    """
+    context = _context_for_config(
+        tmp_path,
+        Config(
+            agents={"general": AgentConfig(display_name="General Agent", tools=["calculator", restricted])},
             defaults=DefaultsConfig(tools=[]),
             models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-5-5")},
         ),
@@ -146,7 +288,61 @@ def test_launch_grants_exclude_skill_manage(tmp_path: Path) -> None:
     grants = resolve_script_launch_grants(context)
 
     assert ScriptToolGrant("calculator", "add") in grants
-    assert all(grant.toolkit_name != "skill_manage" for grant in grants)
+    assert all(grant.toolkit_name != restricted for grant in grants)
+
+
+def test_launch_grants_exclude_claude_agent(tmp_path: Path) -> None:
+    """Script calls have no conversation to charge, so claude_agent stays with the agent's chat."""
+    context = _context_for_config(
+        tmp_path,
+        Config(
+            agents={"general": AgentConfig(display_name="General Agent", tools=["calculator", "claude_agent"])},
+            defaults=DefaultsConfig(tools=[]),
+            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-5-5")},
+        ),
+    )
+
+    grants = resolve_script_launch_grants(context)
+
+    assert ScriptToolGrant("calculator", "add") in grants
+    assert all(grant.toolkit_name != "claude_agent" for grant in grants)
+
+
+def test_launch_grants_exclude_slack(tmp_path: Path) -> None:
+    """A script's calls rebuild the tool context without the turn's hook source, so Slack writes stay in chat."""
+    context = _context_for_config(
+        tmp_path,
+        Config(
+            agents={"general": AgentConfig(display_name="General Agent", tools=["calculator", "slack"])},
+            defaults=DefaultsConfig(tools=[]),
+            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-5-5")},
+        ),
+    )
+
+    grants = resolve_script_launch_grants(context)
+
+    assert ScriptToolGrant("calculator", "add") in grants
+    assert all(grant.toolkit_name != "slack" for grant in grants)
+    assert "slack" not in resolve_script_launch_toolkit_names(context)
+    assert resolve_current_script_tool(context, ScriptToolGrant("slack", "slack_post")) is None
+
+
+def test_launch_grants_leave_out_a_function_that_can_stop_the_run(tmp_path: Path) -> None:
+    """A script's call answers the script, never the run, so the model switch is no call a script can make."""
+    context = _context_for_config(
+        tmp_path,
+        Config(
+            agents={"general": AgentConfig(display_name="General Agent", tools=["thread_model"])},
+            defaults=DefaultsConfig(tools=[]),
+            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-5-5")},
+        ),
+    )
+
+    grants = resolve_script_launch_grants(context)
+
+    assert ScriptToolGrant("thread_model", "get_thread_model") in grants
+    assert ScriptToolGrant("thread_model", "switch_thread_model") not in grants
+    assert resolve_current_script_tool(context, ScriptToolGrant("thread_model", "switch_thread_model")) is None
 
 
 def test_requested_toolkit_is_revoked_when_the_agent_is_removed(tmp_path: Path) -> None:
@@ -184,10 +380,20 @@ def test_requested_toolkit_returns_the_granted_live_function(tmp_path: Path) -> 
     )
     context = replace(context, tool_function_filter=lambda function: function.name == "add")
 
-    toolkit = resolve_current_script_tool(context, ScriptToolGrant("calculator", "add"))
+    resolved = resolve_current_script_tool(context, ScriptToolGrant("calculator", "add"))
 
-    assert toolkit is not None
-    assert toolkit.functions["add"].name == "add"
+    assert resolved is not None
+    assert resolved.function.name == "add"
+
+
+def test_a_requested_toolkit_comes_from_the_plugins_the_call_s_context_captured(tmp_path: Path) -> None:
+    """A publication after the call's context captured its plugins leaves its toolkit on the generation of its hooks."""
+    context = _context_captured_before_the_probe_broke(tmp_path)
+
+    resolved = resolve_current_script_tool(context, ScriptToolGrant(GENERATION_PROBE_TOOL, "which_generation"))
+
+    assert resolved is not None
+    assert resolved.toolkit.name == GENERATION_PROBE_TOOL
 
 
 def test_requested_toolkit_builds_only_the_granted_toolkit(
@@ -212,10 +418,38 @@ def test_requested_toolkit_builds_only_the_granted_toolkit(
 
     monkeypatch.setattr(agents_module, "build_agent_toolkit", recording_build)
 
-    toolkit = resolve_current_script_tool(context, ScriptToolGrant("calculator", "add"))
-
-    assert toolkit is not None
+    assert resolve_current_script_tool(context, ScriptToolGrant("calculator", "add")) is not None
     assert built == ["calculator"]
+
+
+def test_a_call_adapts_only_its_granted_function(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each call checks its one function, so a large toolkit costs a call no more than a small one."""
+    context = _context_for_config(
+        tmp_path,
+        Config(
+            agents={"general": AgentConfig(display_name="General Agent", tools=["calculator"])},
+            defaults=DefaultsConfig(tools=[]),
+            models={"default": ModelConfig(provider="anthropic", id="claude-sonnet-5-5")},
+        ),
+    )
+    adapted: list[str] = []
+    adapt = agno_toolkits._adapt
+
+    def counting_adapt(function: Function, finishing: object) -> object:
+        adapted.append(function.name)
+        return adapt(function, finishing)
+
+    monkeypatch.setattr(agno_toolkits, "_adapt", counting_adapt)
+
+    resolved = resolve_current_script_tool(context, ScriptToolGrant("calculator", "add"))
+
+    assert resolved is not None
+    assert adapted == ["add"]
+    assert (resolved.function.name, resolved.function.toolkit, resolved.function.registered_toolkit) == (
+        "add",
+        "calculator",
+        "calculator",
+    )
 
 
 def test_background_approval_overlay_never_preapproves_system_mutation() -> None:

@@ -14,7 +14,7 @@ That page also lists the scopes each Google tool requests and how to restrict wh
 ## Choose Providers
 
 Add only the Google tools your agents need.
-Each Google Workspace tool connects and asks for Google approval separately.
+Each Google Workspace tool has its own connection, and the [Connections portal](../connections-portal.md#what-the-portal-shows) can connect all of an agent's Google Workspace tools with one sign-in.
 Google Cloud tools such as `google_bigquery` use one Google Cloud connection instead; see [Providers](google-services-oauth.md#providers).
 
 ```yaml
@@ -63,8 +63,10 @@ See the [Privacy Policy](../privacy.md#google-api-services) for the complete dat
 
 ## Troubleshooting
 
-- **`OAuth client configuration could not be resolved`**: MindRoom could not get a Google OAuth client, usually because the install is not paired or its pairing was revoked.
+- **`<Google service> needs its OAuth client saved in the MindRoom dashboard before it can connect`**: the install is not paired and has no custom client.
   Run `mindroom connect`, or configure a [custom client](google-services-oauth.md#custom-google-cloud-setup).
+- **`OAuth client configuration could not be resolved`**: MindRoom could not fetch its Google OAuth client, usually because the pairing was revoked or the provisioning service is unreachable.
+  Run `mindroom connect` again, or configure a [custom client](google-services-oauth.md#custom-google-cloud-setup).
 - **Google shows an unverified-app warning or blocks the Google Cloud connection**: `cloud-platform.read-only` is a sensitive scope, so an OAuth client that Google has not verified for it can be limited to test users.
   The provisioned client is not yours to change, so use a [custom client](google-services-oauth.md#custom-google-cloud-setup) instead, ideally one whose consent screen is Internal to your Google Workspace organization.
   On your own custom client, you can also add your account as a test user; see [Production Verification Follow-up](google-services-oauth.md#production-verification-follow-up).

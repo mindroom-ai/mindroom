@@ -72,6 +72,9 @@ function StatefulSection({ definition }: { definition: string }) {
   );
 }
 
+// Rendering and expanding the whole configuration schema takes seconds on a CI runner.
+vi.setConfig({ testTimeout: 15_000 });
+
 describe("forms rendered from the real configuration schema", () => {
   let consoleError: ReturnType<typeof vi.spyOn>;
 
@@ -127,6 +130,37 @@ describe("forms rendered from the real configuration schema", () => {
     expect(consoleError).not.toHaveBeenCalled();
   });
 
+  it("leaves Agent Keys settings out, so nothing of the broker shows while it is off", () => {
+    const roots = resolveSettingsSections(ROOT).flatMap((section) =>
+      section.entries.map((entry) => entry.root),
+    );
+    expect(roots).not.toContain("egress_broker");
+  });
+
+  it("shows the reranker under Search with its provider choice and errors", () => {
+    useConfigStore.setState({
+      // Config types only the roots hand-built pages edit.
+      config: { reranker: { provider: "vertex_ai" } } as never,
+      diagnostics: [
+        {
+          kind: "validation",
+          issue: {
+            loc: ["reranker", "vertex_ai", "model"],
+            msg: "Field required",
+            type: "missing",
+          },
+        },
+      ],
+    });
+    render(<Settings />);
+    fireEvent.click(screen.getByRole("button", { name: /^Search/ }));
+
+    expect(
+      screen.getByDisplayValue("Cohere, Sentence Transformers or Vertex AI"),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Field required")).toBeInTheDocument();
+  });
+
   it("shows a plugin automation entry with its name and keeps it through an edit", () => {
     const changes: unknown[] = [];
     const entry = {
@@ -151,6 +185,40 @@ describe("forms rendered from the real configuration schema", () => {
 
     expect(changes[changes.length - 1]).toEqual({
       automations: [{ ...entry, name: "daily_digest" }],
+    });
+    expect(consoleError).not.toHaveBeenCalled();
+  });
+
+  it("edits an agent's tools by name and keeps each listed tool's entry", () => {
+    const changes: unknown[] = [];
+    const fileEntry = { file: { max_file_lines: 5 } };
+    render(
+      <SchemaSection
+        title="More settings"
+        definition="AgentConfig"
+        value={{ tools: ["shell", fileEntry] }}
+        path={["probe"]}
+        onFieldChange={(key, next) => changes.push({ [key]: next })}
+      />,
+    );
+    fireEvent.click(screen.getByRole("button", { name: /^More settings/ }));
+
+    expect(
+      screen.getByRole("button", { name: "Remove shell" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Remove file" }),
+    ).toBeInTheDocument();
+    fireEvent.change(
+      screen.getByRole("combobox", { name: "New tools entry" }),
+      {
+        target: { value: "calculator" },
+      },
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Add tools entry" }));
+
+    expect(changes[changes.length - 1]).toEqual({
+      tools: ["shell", fileEntry, "calculator"],
     });
     expect(consoleError).not.toHaveBeenCalled();
   });

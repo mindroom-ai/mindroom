@@ -1,0 +1,3555 @@
+{
+ "sessions": {
+  "compacted": {
+   "metadata": {
+    "note": "kept"
+   },
+   "observed": {
+    "folded_tool_call_ids": {},
+    "force_queued": false,
+    "ledger": [
+     [
+      "compaction:03000000-0000-0000-0000-000300000001",
+      {
+       "created_at": 1750000030.0,
+       "kind": "compaction_summary",
+       "metrics": {
+        "input_tokens": 40,
+        "output_tokens": 4,
+        "total_tokens": 44
+       },
+       "model": "synthetic-model",
+       "model_provider": "Synthetic",
+       "parent_run_id": null,
+       "requests": [
+        {
+         "created_at": 1750000030.0,
+         "metrics": {
+          "input_tokens": 40,
+          "output_tokens": 4,
+          "total_tokens": 44
+         },
+         "model": "synthetic-model",
+         "model_provider": "Synthetic"
+        }
+       ],
+       "run_id": "compaction:03000000-0000-0000-0000-000300000001",
+       "team_id": null,
+       "user_id": "@alice:example.org"
+      }
+     ],
+     [
+      "r1",
+      {
+       "created_at": 1750000010,
+       "metadata": {
+        "requester_id": "@alice:example.org"
+       },
+       "metrics": {
+        "details": {
+         "model": [
+          {
+           "id": "synthetic-model",
+           "input_tokens": 20,
+           "output_tokens": 2,
+           "provider": "Synthetic",
+           "total_tokens": 22
+          }
+         ]
+        },
+        "input_tokens": 20,
+        "output_tokens": 2,
+        "total_tokens": 22
+       },
+       "model": "synthetic-model",
+       "model_provider": "Synthetic",
+       "requests": [
+        {
+         "created_at": 1750000010,
+         "metrics": {
+          "input_tokens": 10,
+          "output_tokens": 1,
+          "total_tokens": 11
+         },
+         "model": "synthetic-model",
+         "model_provider": "Synthetic"
+        },
+        {
+         "created_at": 1750000010,
+         "metrics": {
+          "input_tokens": 10,
+          "output_tokens": 1,
+          "total_tokens": 11
+         },
+         "model": "synthetic-model",
+         "model_provider": "Synthetic"
+        }
+       ],
+       "run_id": "r1",
+       "updated_at": 1750000010,
+       "user_id": "@alice:example.org"
+      }
+     ],
+     [
+      "r2",
+      {
+       "created_at": 1750000020,
+       "metadata": {
+        "requester_id": "@alice:example.org"
+       },
+       "metrics": {
+        "details": {
+         "model": [
+          {
+           "id": "synthetic-model",
+           "input_tokens": 40,
+           "output_tokens": 4,
+           "provider": "Synthetic",
+           "total_tokens": 44
+          }
+         ]
+        },
+        "input_tokens": 40,
+        "output_tokens": 4,
+        "total_tokens": 44
+       },
+       "model": "synthetic-model",
+       "model_provider": "Synthetic",
+       "requests": [
+        {
+         "created_at": 1750000020,
+         "metrics": {
+          "input_tokens": 20,
+          "output_tokens": 2,
+          "total_tokens": 22
+         },
+         "model": "synthetic-model",
+         "model_provider": "Synthetic"
+        },
+        {
+         "created_at": 1750000020,
+         "metrics": {
+          "input_tokens": 20,
+          "output_tokens": 2,
+          "total_tokens": 22
+         },
+         "model": "synthetic-model",
+         "model_provider": "Synthetic"
+        }
+       ],
+       "run_id": "r2",
+       "updated_at": 1750000020,
+       "user_id": "@alice:example.org"
+      }
+     ],
+     [
+      "r3",
+      {
+       "created_at": 1750000040,
+       "metadata": {
+        "requester_id": "@alice:example.org"
+       },
+       "metrics": {
+        "details": {
+         "model": [
+          {
+           "id": "synthetic-model",
+           "input_tokens": 60,
+           "output_tokens": 6,
+           "provider": "Synthetic",
+           "total_tokens": 66
+          }
+         ]
+        },
+        "input_tokens": 60,
+        "output_tokens": 6,
+        "total_tokens": 66
+       },
+       "model": "synthetic-model",
+       "model_provider": "Synthetic",
+       "requests": [
+        {
+         "created_at": 1750000040,
+         "metrics": {
+          "input_tokens": 30,
+          "output_tokens": 3,
+          "total_tokens": 33
+         },
+         "model": "synthetic-model",
+         "model_provider": "Synthetic"
+        },
+        {
+         "created_at": 1750000040,
+         "metrics": {
+          "input_tokens": 30,
+          "output_tokens": 3,
+          "total_tokens": 33
+         },
+         "model": "synthetic-model",
+         "model_provider": "Synthetic"
+        }
+       ],
+       "run_id": "r3",
+       "updated_at": 1750000040,
+       "user_id": "@alice:example.org"
+      }
+     ]
+    ],
+    "list_runs": [
+     {
+      "agent_id": "code",
+      "content": "answer r1",
+      "created_at": 1750000010,
+      "messages": [
+       {
+        "content": "question r1",
+        "created_at": 1750000010,
+        "from_history": false,
+        "id": "01000000-0000-0000-0000-000100000001",
+        "role": "user",
+        "stop_after_tool_call": false
+       },
+       {
+        "created_at": 1750000010,
+        "from_history": false,
+        "id": "01000000-0000-0000-0000-000100000002",
+        "metrics": {
+         "input_tokens": 10,
+         "output_tokens": 1,
+         "total_tokens": 11
+        },
+        "provider_data": {
+         "mindroom_model": {
+          "id": "synthetic-model",
+          "provider": "Synthetic"
+         }
+        },
+        "role": "assistant",
+        "stop_after_tool_call": false,
+        "tool_calls": [
+         {
+          "function": {
+           "arguments": "{\"a\": 6, \"b\": 7}",
+           "name": "multiply"
+          },
+          "id": "call-r1",
+          "type": "function"
+         }
+        ]
+       },
+       {
+        "content": "42",
+        "created_at": 1750000010,
+        "from_history": false,
+        "id": "01000000-0000-0000-0000-000100000003",
+        "role": "tool",
+        "stop_after_tool_call": false,
+        "tool_args": {
+         "a": 6,
+         "b": 7
+        },
+        "tool_call_error": false,
+        "tool_call_id": "call-r1",
+        "tool_name": "multiply"
+       },
+       {
+        "content": "answer r1",
+        "created_at": 1750000010,
+        "from_history": false,
+        "id": "01000000-0000-0000-0000-000100000004",
+        "metrics": {
+         "input_tokens": 10,
+         "output_tokens": 1,
+         "total_tokens": 11
+        },
+        "provider_data": {
+         "mindroom_model": {
+          "id": "synthetic-model",
+          "provider": "Synthetic"
+         }
+        },
+        "role": "assistant",
+        "stop_after_tool_call": false
+       }
+      ],
+      "metadata": {
+       "matrix_event_id": "$r1",
+       "requester_id": "@alice:example.org"
+      },
+      "metrics": {
+       "details": {
+        "model": [
+         {
+          "id": "synthetic-model",
+          "input_tokens": 20,
+          "output_tokens": 2,
+          "provider": "Synthetic",
+          "total_tokens": 22
+         }
+        ]
+       },
+       "input_tokens": 20,
+       "output_tokens": 2,
+       "total_tokens": 22
+      },
+      "model": "synthetic-model",
+      "model_provider": "Synthetic",
+      "run_id": "r1",
+      "session_id": "compacted",
+      "status": "COMPLETED",
+      "tools": [
+       {
+        "approval_type": null,
+        "child_run_id": null,
+        "confirmation_note": null,
+        "confirmed": null,
+        "external_execution_required": null,
+        "external_execution_silent": null,
+        "requires_confirmation": null,
+        "result": "42",
+        "stop_after_tool_call": false,
+        "tool_args": {
+         "a": 6,
+         "b": 7
+        },
+        "tool_call_error": false,
+        "tool_call_id": "call-r1",
+        "tool_name": "multiply"
+       }
+      ],
+      "user_id": "@alice:example.org"
+     },
+     {
+      "agent_id": "code",
+      "content": "answer r2",
+      "created_at": 1750000020,
+      "messages": [
+       {
+        "content": "question r2",
+        "created_at": 1750000020,
+        "from_history": false,
+        "id": "01000000-0000-0000-0000-000200000001",
+        "role": "user",
+        "stop_after_tool_call": false
+       },
+       {
+        "created_at": 1750000020,
+        "from_history": false,
+        "id": "01000000-0000-0000-0000-000200000002",
+        "metrics": {
+         "input_tokens": 20,
+         "output_tokens": 2,
+         "total_tokens": 22
+        },
+        "provider_data": {
+         "mindroom_model": {
+          "id": "synthetic-model",
+          "provider": "Synthetic"
+         }
+        },
+        "role": "assistant",
+        "stop_after_tool_call": false,
+        "tool_calls": [
+         {
+          "function": {
+           "arguments": "{\"a\": 6, \"b\": 7}",
+           "name": "multiply"
+          },
+          "id": "call-r2",
+          "type": "function"
+         }
+        ]
+       },
+       {
+        "content": "42",
+        "created_at": 1750000020,
+        "from_history": false,
+        "id": "01000000-0000-0000-0000-000200000003",
+        "role": "tool",
+        "stop_after_tool_call": false,
+        "tool_args": {
+         "a": 6,
+         "b": 7
+        },
+        "tool_call_error": false,
+        "tool_call_id": "call-r2",
+        "tool_name": "multiply"
+       },
+       {
+        "content": "answer r2",
+        "created_at": 1750000020,
+        "from_history": false,
+        "id": "01000000-0000-0000-0000-000200000004",
+        "metrics": {
+         "input_tokens": 20,
+         "output_tokens": 2,
+         "total_tokens": 22
+        },
+        "provider_data": {
+         "mindroom_model": {
+          "id": "synthetic-model",
+          "provider": "Synthetic"
+         }
+        },
+        "role": "assistant",
+        "stop_after_tool_call": false
+       }
+      ],
+      "metadata": {
+       "matrix_event_id": "$r2",
+       "requester_id": "@alice:example.org"
+      },
+      "metrics": {
+       "details": {
+        "model": [
+         {
+          "id": "synthetic-model",
+          "input_tokens": 40,
+          "output_tokens": 4,
+          "provider": "Synthetic",
+          "total_tokens": 44
+         }
+        ]
+       },
+       "input_tokens": 40,
+       "output_tokens": 4,
+       "total_tokens": 44
+      },
+      "model": "synthetic-model",
+      "model_provider": "Synthetic",
+      "run_id": "r2",
+      "session_id": "compacted",
+      "status": "COMPLETED",
+      "tools": [
+       {
+        "approval_type": null,
+        "child_run_id": null,
+        "confirmation_note": null,
+        "confirmed": null,
+        "external_execution_required": null,
+        "external_execution_silent": null,
+        "requires_confirmation": null,
+        "result": "42",
+        "stop_after_tool_call": false,
+        "tool_args": {
+         "a": 6,
+         "b": 7
+        },
+        "tool_call_error": false,
+        "tool_call_id": "call-r2",
+        "tool_name": "multiply"
+       }
+      ],
+      "user_id": "@alice:example.org"
+     },
+     {
+      "agent_id": "code",
+      "content": "answer r3",
+      "created_at": 1750000040,
+      "messages": [
+       {
+        "content": "question r3",
+        "created_at": 1750000040,
+        "from_history": false,
+        "id": "01000000-0000-0000-0000-000400000001",
+        "role": "user",
+        "stop_after_tool_call": false
+       },
+       {
+        "created_at": 1750000040,
+        "from_history": false,
+        "id": "01000000-0000-0000-0000-000400000002",
+        "metrics": {
+         "input_tokens": 30,
+         "output_tokens": 3,
+         "total_tokens": 33
+        },
+        "provider_data": {
+         "mindroom_model": {
+          "id": "synthetic-model",
+          "provider": "Synthetic"
+         }
+        },
+        "role": "assistant",
+        "stop_after_tool_call": false,
+        "tool_calls": [
+         {
+          "function": {
+           "arguments": "{\"a\": 6, \"b\": 7}",
+           "name": "multiply"
+          },
+          "id": "call-r3",
+          "type": "function"
+         }
+        ]
+       },
+       {
+        "content": "42",
+        "created_at": 1750000040,
+        "from_history": false,
+        "id": "01000000-0000-0000-0000-000400000003",
+        "role": "tool",
+        "stop_after_tool_call": false,
+        "tool_args": {
+         "a": 6,
+         "b": 7
+        },
+        "tool_call_error": false,
+        "tool_call_id": "call-r3",
+        "tool_name": "multiply"
+       },
+       {
+        "content": "answer r3",
+        "created_at": 1750000040,
+        "from_history": false,
+        "id": "01000000-0000-0000-0000-000400000004",
+        "metrics": {
+         "input_tokens": 30,
+         "output_tokens": 3,
+         "total_tokens": 33
+        },
+        "provider_data": {
+         "mindroom_model": {
+          "id": "synthetic-model",
+          "provider": "Synthetic"
+         }
+        },
+        "role": "assistant",
+        "stop_after_tool_call": false
+       }
+      ],
+      "metadata": {
+       "matrix_event_id": "$r3",
+       "requester_id": "@alice:example.org"
+      },
+      "metrics": {
+       "details": {
+        "model": [
+         {
+          "id": "synthetic-model",
+          "input_tokens": 60,
+          "output_tokens": 6,
+          "provider": "Synthetic",
+          "total_tokens": 66
+         }
+        ]
+       },
+       "input_tokens": 60,
+       "output_tokens": 6,
+       "total_tokens": 66
+      },
+      "model": "synthetic-model",
+      "model_provider": "Synthetic",
+      "run_id": "r3",
+      "session_id": "compacted",
+      "status": "COMPLETED",
+      "tools": [
+       {
+        "approval_type": null,
+        "child_run_id": null,
+        "confirmation_note": null,
+        "confirmed": null,
+        "external_execution_required": null,
+        "external_execution_silent": null,
+        "requires_confirmation": null,
+        "result": "42",
+        "stop_after_tool_call": false,
+        "tool_args": {
+         "a": 6,
+         "b": 7
+        },
+        "tool_call_error": false,
+        "tool_call_id": "call-r3",
+        "tool_name": "multiply"
+       }
+      ],
+      "user_id": "@alice:example.org"
+     }
+    ],
+    "loaded_runs": [
+     {
+      "agent_id": "code",
+      "content": "answer r2",
+      "created_at": 1750000020,
+      "messages": [
+       {
+        "content": "question r2",
+        "created_at": 1750000020,
+        "from_history": false,
+        "id": "01000000-0000-0000-0000-000200000001",
+        "role": "user",
+        "stop_after_tool_call": false
+       },
+       {
+        "created_at": 1750000020,
+        "from_history": false,
+        "id": "01000000-0000-0000-0000-000200000002",
+        "metrics": {
+         "input_tokens": 20,
+         "output_tokens": 2,
+         "total_tokens": 22
+        },
+        "provider_data": {
+         "mindroom_model": {
+          "id": "synthetic-model",
+          "provider": "Synthetic"
+         }
+        },
+        "role": "assistant",
+        "stop_after_tool_call": false,
+        "tool_calls": [
+         {
+          "function": {
+           "arguments": "{\"a\": 6, \"b\": 7}",
+           "name": "multiply"
+          },
+          "id": "call-r2",
+          "type": "function"
+         }
+        ]
+       },
+       {
+        "content": "42",
+        "created_at": 1750000020,
+        "from_history": false,
+        "id": "01000000-0000-0000-0000-000200000003",
+        "role": "tool",
+        "stop_after_tool_call": false,
+        "tool_args": {
+         "a": 6,
+         "b": 7
+        },
+        "tool_call_error": false,
+        "tool_call_id": "call-r2",
+        "tool_name": "multiply"
+       },
+       {
+        "content": "answer r2",
+        "created_at": 1750000020,
+        "from_history": false,
+        "id": "01000000-0000-0000-0000-000200000004",
+        "metrics": {
+         "input_tokens": 20,
+         "output_tokens": 2,
+         "total_tokens": 22
+        },
+        "provider_data": {
+         "mindroom_model": {
+          "id": "synthetic-model",
+          "provider": "Synthetic"
+         }
+        },
+        "role": "assistant",
+        "stop_after_tool_call": false
+       }
+      ],
+      "metadata": {
+       "matrix_event_id": "$r2",
+       "requester_id": "@alice:example.org"
+      },
+      "metrics": {
+       "details": {
+        "model": [
+         {
+          "id": "synthetic-model",
+          "input_tokens": 40,
+          "output_tokens": 4,
+          "provider": "Synthetic",
+          "total_tokens": 44
+         }
+        ]
+       },
+       "input_tokens": 40,
+       "output_tokens": 4,
+       "total_tokens": 44
+      },
+      "model": "synthetic-model",
+      "model_provider": "Synthetic",
+      "run_id": "r2",
+      "session_id": "compacted",
+      "status": "COMPLETED",
+      "tools": [
+       {
+        "approval_type": null,
+        "child_run_id": null,
+        "confirmation_note": null,
+        "confirmed": null,
+        "external_execution_required": null,
+        "external_execution_silent": null,
+        "requires_confirmation": null,
+        "result": "42",
+        "stop_after_tool_call": false,
+        "tool_args": {
+         "a": 6,
+         "b": 7
+        },
+        "tool_call_error": false,
+        "tool_call_id": "call-r2",
+        "tool_name": "multiply"
+       }
+      ],
+      "user_id": "@alice:example.org"
+     },
+     {
+      "agent_id": "code",
+      "content": "answer r3",
+      "created_at": 1750000040,
+      "messages": [
+       {
+        "content": "question r3",
+        "created_at": 1750000040,
+        "from_history": false,
+        "id": "01000000-0000-0000-0000-000400000001",
+        "role": "user",
+        "stop_after_tool_call": false
+       },
+       {
+        "created_at": 1750000040,
+        "from_history": false,
+        "id": "01000000-0000-0000-0000-000400000002",
+        "metrics": {
+         "input_tokens": 30,
+         "output_tokens": 3,
+         "total_tokens": 33
+        },
+        "provider_data": {
+         "mindroom_model": {
+          "id": "synthetic-model",
+          "provider": "Synthetic"
+         }
+        },
+        "role": "assistant",
+        "stop_after_tool_call": false,
+        "tool_calls": [
+         {
+          "function": {
+           "arguments": "{\"a\": 6, \"b\": 7}",
+           "name": "multiply"
+          },
+          "id": "call-r3",
+          "type": "function"
+         }
+        ]
+       },
+       {
+        "content": "42",
+        "created_at": 1750000040,
+        "from_history": false,
+        "id": "01000000-0000-0000-0000-000400000003",
+        "role": "tool",
+        "stop_after_tool_call": false,
+        "tool_args": {
+         "a": 6,
+         "b": 7
+        },
+        "tool_call_error": false,
+        "tool_call_id": "call-r3",
+        "tool_name": "multiply"
+       },
+       {
+        "content": "answer r3",
+        "created_at": 1750000040,
+        "from_history": false,
+        "id": "01000000-0000-0000-0000-000400000004",
+        "metrics": {
+         "input_tokens": 30,
+         "output_tokens": 3,
+         "total_tokens": 33
+        },
+        "provider_data": {
+         "mindroom_model": {
+          "id": "synthetic-model",
+          "provider": "Synthetic"
+         }
+        },
+        "role": "assistant",
+        "stop_after_tool_call": false
+       }
+      ],
+      "metadata": {
+       "matrix_event_id": "$r3",
+       "requester_id": "@alice:example.org"
+      },
+      "metrics": {
+       "details": {
+        "model": [
+         {
+          "id": "synthetic-model",
+          "input_tokens": 60,
+          "output_tokens": 6,
+          "provider": "Synthetic",
+          "total_tokens": 66
+         }
+        ]
+       },
+       "input_tokens": 60,
+       "output_tokens": 6,
+       "total_tokens": 66
+      },
+      "model": "synthetic-model",
+      "model_provider": "Synthetic",
+      "run_id": "r3",
+      "session_id": "compacted",
+      "status": "COMPLETED",
+      "tools": [
+       {
+        "approval_type": null,
+        "child_run_id": null,
+        "confirmation_note": null,
+        "confirmed": null,
+        "external_execution_required": null,
+        "external_execution_silent": null,
+        "requires_confirmation": null,
+        "result": "42",
+        "stop_after_tool_call": false,
+        "tool_args": {
+         "a": 6,
+         "b": 7
+        },
+        "tool_call_error": false,
+        "tool_call_id": "call-r3",
+        "tool_name": "multiply"
+       }
+      ],
+      "user_id": "@alice:example.org"
+     }
+    ],
+    "redaction_candidates": [
+     "$r1",
+     "$r2",
+     "$r3"
+    ],
+    "request": [
+     {
+      "content": "The earlier part of this conversation was compacted into this summary:\n\n<compacted_history>\nsummary of r1\n</compacted_history>\n\nThe conversation continues after this summary. If it records progress on the current request, continue that work from its next steps instead of starting over.",
+      "created_at": 1750000070,
+      "from_history": true,
+      "id": "01000000-0000-0000-0000-000700000001",
+      "provider_data": {
+       "mindroom_compaction_summary": "scope"
+      },
+      "role": "user",
+      "stop_after_tool_call": false
+     },
+     {
+      "content": "question r2",
+      "created_at": 1750000020,
+      "from_history": true,
+      "id": "01000000-0000-0000-0000-000200000001",
+      "role": "user",
+      "stop_after_tool_call": false
+     },
+     {
+      "created_at": 1750000020,
+      "from_history": true,
+      "id": "01000000-0000-0000-0000-000200000002",
+      "metrics": {
+       "input_tokens": 20,
+       "output_tokens": 2,
+       "total_tokens": 22
+      },
+      "provider_data": {
+       "mindroom_model": {
+        "id": "synthetic-model",
+        "provider": "Synthetic"
+       }
+      },
+      "role": "assistant",
+      "stop_after_tool_call": false,
+      "tool_calls": [
+       {
+        "function": {
+         "arguments": "{\"a\": 6, \"b\": 7}",
+         "name": "multiply"
+        },
+        "id": "call-r2",
+        "type": "function"
+       }
+      ]
+     },
+     {
+      "content": "42",
+      "created_at": 1750000020,
+      "from_history": true,
+      "id": "01000000-0000-0000-0000-000200000003",
+      "role": "tool",
+      "stop_after_tool_call": false,
+      "tool_args": {
+       "a": 6,
+       "b": 7
+      },
+      "tool_call_error": false,
+      "tool_call_id": "call-r2",
+      "tool_name": "multiply"
+     },
+     {
+      "content": "answer r2",
+      "created_at": 1750000020,
+      "from_history": true,
+      "id": "01000000-0000-0000-0000-000200000004",
+      "metrics": {
+       "input_tokens": 20,
+       "output_tokens": 2,
+       "total_tokens": 22
+      },
+      "provider_data": {
+       "mindroom_model": {
+        "id": "synthetic-model",
+        "provider": "Synthetic"
+       }
+      },
+      "role": "assistant",
+      "stop_after_tool_call": false
+     },
+     {
+      "content": "question r3",
+      "created_at": 1750000040,
+      "from_history": true,
+      "id": "01000000-0000-0000-0000-000400000001",
+      "role": "user",
+      "stop_after_tool_call": false
+     },
+     {
+      "created_at": 1750000040,
+      "from_history": true,
+      "id": "01000000-0000-0000-0000-000400000002",
+      "metrics": {
+       "input_tokens": 30,
+       "output_tokens": 3,
+       "total_tokens": 33
+      },
+      "provider_data": {
+       "mindroom_model": {
+        "id": "synthetic-model",
+        "provider": "Synthetic"
+       }
+      },
+      "role": "assistant",
+      "stop_after_tool_call": false,
+      "tool_calls": [
+       {
+        "function": {
+         "arguments": "{\"a\": 6, \"b\": 7}",
+         "name": "multiply"
+        },
+        "id": "call-r3",
+        "type": "function"
+       }
+      ]
+     },
+     {
+      "content": "42",
+      "created_at": 1750000040,
+      "from_history": true,
+      "id": "01000000-0000-0000-0000-000400000003",
+      "role": "tool",
+      "stop_after_tool_call": false,
+      "tool_args": {
+       "a": 6,
+       "b": 7
+      },
+      "tool_call_error": false,
+      "tool_call_id": "call-r3",
+      "tool_name": "multiply"
+     },
+     {
+      "content": "answer r3",
+      "created_at": 1750000040,
+      "from_history": true,
+      "id": "01000000-0000-0000-0000-000400000004",
+      "metrics": {
+       "input_tokens": 30,
+       "output_tokens": 3,
+       "total_tokens": 33
+      },
+      "provider_data": {
+       "mindroom_model": {
+        "id": "synthetic-model",
+        "provider": "Synthetic"
+       }
+      },
+      "role": "assistant",
+      "stop_after_tool_call": false
+     },
+     {
+      "content": "probe",
+      "created_at": 0,
+      "from_history": false,
+      "id": "probe",
+      "role": "user",
+      "stop_after_tool_call": false
+     }
+    ],
+    "resume_requests": {},
+    "row": {
+     "created_at": 1750000010,
+     "session_data": {
+      "session_metrics": {
+       "details": {
+        "model": [
+         {
+          "id": "synthetic-model",
+          "input_tokens": 120,
+          "output_tokens": 12,
+          "provider": "Synthetic",
+          "total_tokens": 132
+         }
+        ]
+       },
+       "input_tokens": 120,
+       "output_tokens": 12,
+       "total_tokens": 132
+      },
+      "session_state": {
+       "todo": []
+      }
+     },
+     "updated_at": 1750000040,
+     "user_id": "@alice:example.org"
+    },
+    "seen_event_ids": [],
+    "session": {
+     "created_at": 1750000010,
+     "kind": "agent",
+     "metadata": {
+      "note": "kept"
+     },
+     "owner_id": "code",
+     "session_state": {
+      "todo": []
+     },
+     "summary": {
+      "text": "summary of r1",
+      "updated_at": "2025-06-15T15:07:10+00:00"
+     }
+    },
+    "session_runs": []
+   },
+   "runs_by_id": {
+    "r1": {
+     "agent_id": "code",
+     "content": "answer r1",
+     "created_at": 1750000010,
+     "messages": [
+      {
+       "content": "question r1",
+       "created_at": 1750000010,
+       "from_history": false,
+       "id": "01000000-0000-0000-0000-000100000001",
+       "role": "user",
+       "stop_after_tool_call": false
+      },
+      {
+       "created_at": 1750000010,
+       "from_history": false,
+       "id": "01000000-0000-0000-0000-000100000002",
+       "metrics": {
+        "input_tokens": 10,
+        "output_tokens": 1,
+        "total_tokens": 11
+       },
+       "provider_data": {
+        "mindroom_model": {
+         "id": "synthetic-model",
+         "provider": "Synthetic"
+        }
+       },
+       "role": "assistant",
+       "stop_after_tool_call": false,
+       "tool_calls": [
+        {
+         "function": {
+          "arguments": "{\"a\": 6, \"b\": 7}",
+          "name": "multiply"
+         },
+         "id": "call-r1",
+         "type": "function"
+        }
+       ]
+      },
+      {
+       "content": "42",
+       "created_at": 1750000010,
+       "from_history": false,
+       "id": "01000000-0000-0000-0000-000100000003",
+       "role": "tool",
+       "stop_after_tool_call": false,
+       "tool_args": {
+        "a": 6,
+        "b": 7
+       },
+       "tool_call_error": false,
+       "tool_call_id": "call-r1",
+       "tool_name": "multiply"
+      },
+      {
+       "content": "answer r1",
+       "created_at": 1750000010,
+       "from_history": false,
+       "id": "01000000-0000-0000-0000-000100000004",
+       "metrics": {
+        "input_tokens": 10,
+        "output_tokens": 1,
+        "total_tokens": 11
+       },
+       "provider_data": {
+        "mindroom_model": {
+         "id": "synthetic-model",
+         "provider": "Synthetic"
+        }
+       },
+       "role": "assistant",
+       "stop_after_tool_call": false
+      }
+     ],
+     "metadata": {
+      "matrix_event_id": "$r1",
+      "requester_id": "@alice:example.org"
+     },
+     "metrics": {
+      "details": {
+       "model": [
+        {
+         "id": "synthetic-model",
+         "input_tokens": 20,
+         "output_tokens": 2,
+         "provider": "Synthetic",
+         "total_tokens": 22
+        }
+       ]
+      },
+      "input_tokens": 20,
+      "output_tokens": 2,
+      "total_tokens": 22
+     },
+     "model": "synthetic-model",
+     "model_provider": "Synthetic",
+     "run_id": "r1",
+     "session_id": "compacted",
+     "status": "COMPLETED",
+     "tools": [
+      {
+       "approval_type": null,
+       "child_run_id": null,
+       "confirmation_note": null,
+       "confirmed": null,
+       "external_execution_required": null,
+       "external_execution_silent": null,
+       "requires_confirmation": null,
+       "result": "42",
+       "stop_after_tool_call": false,
+       "tool_args": {
+        "a": 6,
+        "b": 7
+       },
+       "tool_call_error": false,
+       "tool_call_id": "call-r1",
+       "tool_name": "multiply"
+      }
+     ],
+     "user_id": "@alice:example.org"
+    },
+    "r2": {
+     "agent_id": "code",
+     "content": "answer r2",
+     "created_at": 1750000020,
+     "messages": [
+      {
+       "content": "question r2",
+       "created_at": 1750000020,
+       "from_history": false,
+       "id": "01000000-0000-0000-0000-000200000001",
+       "role": "user",
+       "stop_after_tool_call": false
+      },
+      {
+       "created_at": 1750000020,
+       "from_history": false,
+       "id": "01000000-0000-0000-0000-000200000002",
+       "metrics": {
+        "input_tokens": 20,
+        "output_tokens": 2,
+        "total_tokens": 22
+       },
+       "provider_data": {
+        "mindroom_model": {
+         "id": "synthetic-model",
+         "provider": "Synthetic"
+        }
+       },
+       "role": "assistant",
+       "stop_after_tool_call": false,
+       "tool_calls": [
+        {
+         "function": {
+          "arguments": "{\"a\": 6, \"b\": 7}",
+          "name": "multiply"
+         },
+         "id": "call-r2",
+         "type": "function"
+        }
+       ]
+      },
+      {
+       "content": "42",
+       "created_at": 1750000020,
+       "from_history": false,
+       "id": "01000000-0000-0000-0000-000200000003",
+       "role": "tool",
+       "stop_after_tool_call": false,
+       "tool_args": {
+        "a": 6,
+        "b": 7
+       },
+       "tool_call_error": false,
+       "tool_call_id": "call-r2",
+       "tool_name": "multiply"
+      },
+      {
+       "content": "answer r2",
+       "created_at": 1750000020,
+       "from_history": false,
+       "id": "01000000-0000-0000-0000-000200000004",
+       "metrics": {
+        "input_tokens": 20,
+        "output_tokens": 2,
+        "total_tokens": 22
+       },
+       "provider_data": {
+        "mindroom_model": {
+         "id": "synthetic-model",
+         "provider": "Synthetic"
+        }
+       },
+       "role": "assistant",
+       "stop_after_tool_call": false
+      }
+     ],
+     "metadata": {
+      "matrix_event_id": "$r2",
+      "requester_id": "@alice:example.org"
+     },
+     "metrics": {
+      "details": {
+       "model": [
+        {
+         "id": "synthetic-model",
+         "input_tokens": 40,
+         "output_tokens": 4,
+         "provider": "Synthetic",
+         "total_tokens": 44
+        }
+       ]
+      },
+      "input_tokens": 40,
+      "output_tokens": 4,
+      "total_tokens": 44
+     },
+     "model": "synthetic-model",
+     "model_provider": "Synthetic",
+     "run_id": "r2",
+     "session_id": "compacted",
+     "status": "COMPLETED",
+     "tools": [
+      {
+       "approval_type": null,
+       "child_run_id": null,
+       "confirmation_note": null,
+       "confirmed": null,
+       "external_execution_required": null,
+       "external_execution_silent": null,
+       "requires_confirmation": null,
+       "result": "42",
+       "stop_after_tool_call": false,
+       "tool_args": {
+        "a": 6,
+        "b": 7
+       },
+       "tool_call_error": false,
+       "tool_call_id": "call-r2",
+       "tool_name": "multiply"
+      }
+     ],
+     "user_id": "@alice:example.org"
+    },
+    "r3": {
+     "agent_id": "code",
+     "content": "answer r3",
+     "created_at": 1750000040,
+     "messages": [
+      {
+       "content": "question r3",
+       "created_at": 1750000040,
+       "from_history": false,
+       "id": "01000000-0000-0000-0000-000400000001",
+       "role": "user",
+       "stop_after_tool_call": false
+      },
+      {
+       "created_at": 1750000040,
+       "from_history": false,
+       "id": "01000000-0000-0000-0000-000400000002",
+       "metrics": {
+        "input_tokens": 30,
+        "output_tokens": 3,
+        "total_tokens": 33
+       },
+       "provider_data": {
+        "mindroom_model": {
+         "id": "synthetic-model",
+         "provider": "Synthetic"
+        }
+       },
+       "role": "assistant",
+       "stop_after_tool_call": false,
+       "tool_calls": [
+        {
+         "function": {
+          "arguments": "{\"a\": 6, \"b\": 7}",
+          "name": "multiply"
+         },
+         "id": "call-r3",
+         "type": "function"
+        }
+       ]
+      },
+      {
+       "content": "42",
+       "created_at": 1750000040,
+       "from_history": false,
+       "id": "01000000-0000-0000-0000-000400000003",
+       "role": "tool",
+       "stop_after_tool_call": false,
+       "tool_args": {
+        "a": 6,
+        "b": 7
+       },
+       "tool_call_error": false,
+       "tool_call_id": "call-r3",
+       "tool_name": "multiply"
+      },
+      {
+       "content": "answer r3",
+       "created_at": 1750000040,
+       "from_history": false,
+       "id": "01000000-0000-0000-0000-000400000004",
+       "metrics": {
+        "input_tokens": 30,
+        "output_tokens": 3,
+        "total_tokens": 33
+       },
+       "provider_data": {
+        "mindroom_model": {
+         "id": "synthetic-model",
+         "provider": "Synthetic"
+        }
+       },
+       "role": "assistant",
+       "stop_after_tool_call": false
+      }
+     ],
+     "metadata": {
+      "matrix_event_id": "$r3",
+      "requester_id": "@alice:example.org"
+     },
+     "metrics": {
+      "details": {
+       "model": [
+        {
+         "id": "synthetic-model",
+         "input_tokens": 60,
+         "output_tokens": 6,
+         "provider": "Synthetic",
+         "total_tokens": 66
+        }
+       ]
+      },
+      "input_tokens": 60,
+      "output_tokens": 6,
+      "total_tokens": 66
+     },
+     "model": "synthetic-model",
+     "model_provider": "Synthetic",
+     "run_id": "r3",
+     "session_id": "compacted",
+     "status": "COMPLETED",
+     "tools": [
+      {
+       "approval_type": null,
+       "child_run_id": null,
+       "confirmation_note": null,
+       "confirmed": null,
+       "external_execution_required": null,
+       "external_execution_silent": null,
+       "requires_confirmation": null,
+       "result": "42",
+       "stop_after_tool_call": false,
+       "tool_args": {
+        "a": 6,
+        "b": 7
+       },
+       "tool_call_error": false,
+       "tool_call_id": "call-r3",
+       "tool_name": "multiply"
+      }
+     ],
+     "user_id": "@alice:example.org"
+    }
+   }
+  },
+  "edited": {
+   "metadata": null,
+   "observed": {
+    "folded_tool_call_ids": {},
+    "force_queued": false,
+    "ledger": [
+     [
+      "e1",
+      {
+       "created_at": 1750000050,
+       "metadata": {
+        "requester_id": "@alice:example.org"
+       },
+       "metrics": {
+        "details": {
+         "model": [
+          {
+           "id": "synthetic-model",
+           "input_tokens": 20,
+           "output_tokens": 2,
+           "provider": "Synthetic",
+           "total_tokens": 22
+          }
+         ]
+        },
+        "input_tokens": 20,
+        "output_tokens": 2,
+        "total_tokens": 22
+       },
+       "model": "synthetic-model",
+       "model_provider": "Synthetic",
+       "requests": [
+        {
+         "created_at": 1750000050,
+         "metrics": {
+          "input_tokens": 10,
+          "output_tokens": 1,
+          "total_tokens": 11
+         },
+         "model": "synthetic-model",
+         "model_provider": "Synthetic"
+        },
+        {
+         "created_at": 1750000050,
+         "metrics": {
+          "input_tokens": 10,
+          "output_tokens": 1,
+          "total_tokens": 11
+         },
+         "model": "synthetic-model",
+         "model_provider": "Synthetic"
+        }
+       ],
+       "run_id": "e1",
+       "updated_at": 1750000050,
+       "user_id": "@alice:example.org"
+      }
+     ],
+     [
+      "e2",
+      {
+       "created_at": 1750000050,
+       "metadata": {
+        "requester_id": "@alice:example.org"
+       },
+       "metrics": {
+        "details": {
+         "model": [
+          {
+           "id": "synthetic-model",
+           "input_tokens": 20,
+           "output_tokens": 2,
+           "provider": "Synthetic",
+           "total_tokens": 22
+          }
+         ]
+        },
+        "input_tokens": 20,
+        "output_tokens": 2,
+        "total_tokens": 22
+       },
+       "model": "synthetic-model",
+       "model_provider": "Synthetic",
+       "requests": [
+        {
+         "created_at": 1750000050,
+         "metrics": {
+          "input_tokens": 10,
+          "output_tokens": 1,
+          "total_tokens": 11
+         },
+         "model": "synthetic-model",
+         "model_provider": "Synthetic"
+        },
+        {
+         "created_at": 1750000050,
+         "metrics": {
+          "input_tokens": 10,
+          "output_tokens": 1,
+          "total_tokens": 11
+         },
+         "model": "synthetic-model",
+         "model_provider": "Synthetic"
+        }
+       ],
+       "run_id": "e2",
+       "updated_at": 1750000050,
+       "user_id": "@alice:example.org"
+      }
+     ]
+    ],
+    "list_runs": [
+     {
+      "agent_id": "code",
+      "content": "answer e1",
+      "created_at": 1750000050,
+      "messages": [
+       {
+        "content": "question e1",
+        "created_at": 1750000050,
+        "from_history": false,
+        "id": "01000000-0000-0000-0000-000500000001",
+        "role": "user",
+        "stop_after_tool_call": false
+       },
+       {
+        "created_at": 1750000050,
+        "from_history": false,
+        "id": "01000000-0000-0000-0000-000500000002",
+        "metrics": {
+         "input_tokens": 10,
+         "output_tokens": 1,
+         "total_tokens": 11
+        },
+        "provider_data": {
+         "mindroom_model": {
+          "id": "synthetic-model",
+          "provider": "Synthetic"
+         }
+        },
+        "role": "assistant",
+        "stop_after_tool_call": false,
+        "tool_calls": [
+         {
+          "function": {
+           "arguments": "{\"a\": 6, \"b\": 7}",
+           "name": "multiply"
+          },
+          "id": "call-e1",
+          "type": "function"
+         }
+        ]
+       },
+       {
+        "content": "42",
+        "created_at": 1750000050,
+        "from_history": false,
+        "id": "01000000-0000-0000-0000-000500000003",
+        "role": "tool",
+        "stop_after_tool_call": false,
+        "tool_args": {
+         "a": 6,
+         "b": 7
+        },
+        "tool_call_error": false,
+        "tool_call_id": "call-e1",
+        "tool_name": "multiply"
+       },
+       {
+        "content": "answer e1",
+        "created_at": 1750000050,
+        "from_history": false,
+        "id": "01000000-0000-0000-0000-000500000004",
+        "metrics": {
+         "input_tokens": 10,
+         "output_tokens": 1,
+         "total_tokens": 11
+        },
+        "provider_data": {
+         "mindroom_model": {
+          "id": "synthetic-model",
+          "provider": "Synthetic"
+         }
+        },
+        "role": "assistant",
+        "stop_after_tool_call": false
+       }
+      ],
+      "metadata": {
+       "matrix_event_id": "$e1",
+       "requester_id": "@alice:example.org"
+      },
+      "metrics": {
+       "details": {
+        "model": [
+         {
+          "id": "synthetic-model",
+          "input_tokens": 20,
+          "output_tokens": 2,
+          "provider": "Synthetic",
+          "total_tokens": 22
+         }
+        ]
+       },
+       "input_tokens": 20,
+       "output_tokens": 2,
+       "total_tokens": 22
+      },
+      "model": "synthetic-model",
+      "model_provider": "Synthetic",
+      "run_id": "e1",
+      "session_id": "edited",
+      "status": "COMPLETED",
+      "tools": [
+       {
+        "approval_type": null,
+        "child_run_id": null,
+        "confirmation_note": null,
+        "confirmed": null,
+        "external_execution_required": null,
+        "external_execution_silent": null,
+        "requires_confirmation": null,
+        "result": "42",
+        "stop_after_tool_call": false,
+        "tool_args": {
+         "a": 6,
+         "b": 7
+        },
+        "tool_call_error": false,
+        "tool_call_id": "call-e1",
+        "tool_name": "multiply"
+       }
+      ],
+      "user_id": "@alice:example.org"
+     }
+    ],
+    "loaded_runs": [
+     {
+      "agent_id": "code",
+      "content": "answer e1",
+      "created_at": 1750000050,
+      "messages": [
+       {
+        "content": "question e1",
+        "created_at": 1750000050,
+        "from_history": false,
+        "id": "01000000-0000-0000-0000-000500000001",
+        "role": "user",
+        "stop_after_tool_call": false
+       },
+       {
+        "created_at": 1750000050,
+        "from_history": false,
+        "id": "01000000-0000-0000-0000-000500000002",
+        "metrics": {
+         "input_tokens": 10,
+         "output_tokens": 1,
+         "total_tokens": 11
+        },
+        "provider_data": {
+         "mindroom_model": {
+          "id": "synthetic-model",
+          "provider": "Synthetic"
+         }
+        },
+        "role": "assistant",
+        "stop_after_tool_call": false,
+        "tool_calls": [
+         {
+          "function": {
+           "arguments": "{\"a\": 6, \"b\": 7}",
+           "name": "multiply"
+          },
+          "id": "call-e1",
+          "type": "function"
+         }
+        ]
+       },
+       {
+        "content": "42",
+        "created_at": 1750000050,
+        "from_history": false,
+        "id": "01000000-0000-0000-0000-000500000003",
+        "role": "tool",
+        "stop_after_tool_call": false,
+        "tool_args": {
+         "a": 6,
+         "b": 7
+        },
+        "tool_call_error": false,
+        "tool_call_id": "call-e1",
+        "tool_name": "multiply"
+       },
+       {
+        "content": "answer e1",
+        "created_at": 1750000050,
+        "from_history": false,
+        "id": "01000000-0000-0000-0000-000500000004",
+        "metrics": {
+         "input_tokens": 10,
+         "output_tokens": 1,
+         "total_tokens": 11
+        },
+        "provider_data": {
+         "mindroom_model": {
+          "id": "synthetic-model",
+          "provider": "Synthetic"
+         }
+        },
+        "role": "assistant",
+        "stop_after_tool_call": false
+       }
+      ],
+      "metadata": {
+       "matrix_event_id": "$e1",
+       "requester_id": "@alice:example.org"
+      },
+      "metrics": {
+       "details": {
+        "model": [
+         {
+          "id": "synthetic-model",
+          "input_tokens": 20,
+          "output_tokens": 2,
+          "provider": "Synthetic",
+          "total_tokens": 22
+         }
+        ]
+       },
+       "input_tokens": 20,
+       "output_tokens": 2,
+       "total_tokens": 22
+      },
+      "model": "synthetic-model",
+      "model_provider": "Synthetic",
+      "run_id": "e1",
+      "session_id": "edited",
+      "status": "COMPLETED",
+      "tools": [
+       {
+        "approval_type": null,
+        "child_run_id": null,
+        "confirmation_note": null,
+        "confirmed": null,
+        "external_execution_required": null,
+        "external_execution_silent": null,
+        "requires_confirmation": null,
+        "result": "42",
+        "stop_after_tool_call": false,
+        "tool_args": {
+         "a": 6,
+         "b": 7
+        },
+        "tool_call_error": false,
+        "tool_call_id": "call-e1",
+        "tool_name": "multiply"
+       }
+      ],
+      "user_id": "@alice:example.org"
+     }
+    ],
+    "redaction_candidates": [
+     "$e1"
+    ],
+    "request": [
+     {
+      "content": "question e1",
+      "created_at": 1750000050,
+      "from_history": true,
+      "id": "01000000-0000-0000-0000-000500000001",
+      "role": "user",
+      "stop_after_tool_call": false
+     },
+     {
+      "created_at": 1750000050,
+      "from_history": true,
+      "id": "01000000-0000-0000-0000-000500000002",
+      "metrics": {
+       "input_tokens": 10,
+       "output_tokens": 1,
+       "total_tokens": 11
+      },
+      "provider_data": {
+       "mindroom_model": {
+        "id": "synthetic-model",
+        "provider": "Synthetic"
+       }
+      },
+      "role": "assistant",
+      "stop_after_tool_call": false,
+      "tool_calls": [
+       {
+        "function": {
+         "arguments": "{\"a\": 6, \"b\": 7}",
+         "name": "multiply"
+        },
+        "id": "call-e1",
+        "type": "function"
+       }
+      ]
+     },
+     {
+      "content": "42",
+      "created_at": 1750000050,
+      "from_history": true,
+      "id": "01000000-0000-0000-0000-000500000003",
+      "role": "tool",
+      "stop_after_tool_call": false,
+      "tool_args": {
+       "a": 6,
+       "b": 7
+      },
+      "tool_call_error": false,
+      "tool_call_id": "call-e1",
+      "tool_name": "multiply"
+     },
+     {
+      "content": "answer e1",
+      "created_at": 1750000050,
+      "from_history": true,
+      "id": "01000000-0000-0000-0000-000500000004",
+      "metrics": {
+       "input_tokens": 10,
+       "output_tokens": 1,
+       "total_tokens": 11
+      },
+      "provider_data": {
+       "mindroom_model": {
+        "id": "synthetic-model",
+        "provider": "Synthetic"
+       }
+      },
+      "role": "assistant",
+      "stop_after_tool_call": false
+     },
+     {
+      "content": "probe",
+      "created_at": 0,
+      "from_history": false,
+      "id": "probe",
+      "role": "user",
+      "stop_after_tool_call": false
+     }
+    ],
+    "resume_requests": {},
+    "row": {
+     "created_at": 1750000050,
+     "session_data": {
+      "session_metrics": {
+       "details": {
+        "model": [
+         {
+          "id": "synthetic-model",
+          "input_tokens": 40,
+          "output_tokens": 4,
+          "provider": "Synthetic",
+          "total_tokens": 44
+         }
+        ]
+       },
+       "input_tokens": 40,
+       "output_tokens": 4,
+       "total_tokens": 44
+      },
+      "session_state": {}
+     },
+     "updated_at": 1750000050,
+     "user_id": "@alice:example.org"
+    },
+    "seen_event_ids": [],
+    "session": {
+     "created_at": 1750000050,
+     "kind": "agent",
+     "metadata": null,
+     "owner_id": "code",
+     "session_state": {},
+     "summary": null
+    },
+    "session_runs": []
+   },
+   "runs_by_id": {
+    "e1": {
+     "agent_id": "code",
+     "content": "answer e1",
+     "created_at": 1750000050,
+     "messages": [
+      {
+       "content": "question e1",
+       "created_at": 1750000050,
+       "from_history": false,
+       "id": "01000000-0000-0000-0000-000500000001",
+       "role": "user",
+       "stop_after_tool_call": false
+      },
+      {
+       "created_at": 1750000050,
+       "from_history": false,
+       "id": "01000000-0000-0000-0000-000500000002",
+       "metrics": {
+        "input_tokens": 10,
+        "output_tokens": 1,
+        "total_tokens": 11
+       },
+       "provider_data": {
+        "mindroom_model": {
+         "id": "synthetic-model",
+         "provider": "Synthetic"
+        }
+       },
+       "role": "assistant",
+       "stop_after_tool_call": false,
+       "tool_calls": [
+        {
+         "function": {
+          "arguments": "{\"a\": 6, \"b\": 7}",
+          "name": "multiply"
+         },
+         "id": "call-e1",
+         "type": "function"
+        }
+       ]
+      },
+      {
+       "content": "42",
+       "created_at": 1750000050,
+       "from_history": false,
+       "id": "01000000-0000-0000-0000-000500000003",
+       "role": "tool",
+       "stop_after_tool_call": false,
+       "tool_args": {
+        "a": 6,
+        "b": 7
+       },
+       "tool_call_error": false,
+       "tool_call_id": "call-e1",
+       "tool_name": "multiply"
+      },
+      {
+       "content": "answer e1",
+       "created_at": 1750000050,
+       "from_history": false,
+       "id": "01000000-0000-0000-0000-000500000004",
+       "metrics": {
+        "input_tokens": 10,
+        "output_tokens": 1,
+        "total_tokens": 11
+       },
+       "provider_data": {
+        "mindroom_model": {
+         "id": "synthetic-model",
+         "provider": "Synthetic"
+        }
+       },
+       "role": "assistant",
+       "stop_after_tool_call": false
+      }
+     ],
+     "metadata": {
+      "matrix_event_id": "$e1",
+      "requester_id": "@alice:example.org"
+     },
+     "metrics": {
+      "details": {
+       "model": [
+        {
+         "id": "synthetic-model",
+         "input_tokens": 20,
+         "output_tokens": 2,
+         "provider": "Synthetic",
+         "total_tokens": 22
+        }
+       ]
+      },
+      "input_tokens": 20,
+      "output_tokens": 2,
+      "total_tokens": 22
+     },
+     "model": "synthetic-model",
+     "model_provider": "Synthetic",
+     "run_id": "e1",
+     "session_id": "edited",
+     "status": "COMPLETED",
+     "tools": [
+      {
+       "approval_type": null,
+       "child_run_id": null,
+       "confirmation_note": null,
+       "confirmed": null,
+       "external_execution_required": null,
+       "external_execution_silent": null,
+       "requires_confirmation": null,
+       "result": "42",
+       "stop_after_tool_call": false,
+       "tool_args": {
+        "a": 6,
+        "b": 7
+       },
+       "tool_call_error": false,
+       "tool_call_id": "call-e1",
+       "tool_name": "multiply"
+      }
+     ],
+     "user_id": "@alice:example.org"
+    }
+   }
+  },
+  "helper-only": {
+   "metadata": null,
+   "observed": {
+    "folded_tool_call_ids": {},
+    "force_queued": false,
+    "ledger": [
+     [
+      "memory_auto_flush:h1",
+      {
+       "created_at": 1750000070.0,
+       "kind": "memory_auto_flush",
+       "metrics": {
+        "input_tokens": 30,
+        "output_tokens": 3,
+        "total_tokens": 33
+       },
+       "model": "synthetic-model",
+       "model_provider": "Synthetic",
+       "parent_run_id": null,
+       "requests": [
+        {
+         "created_at": 1750000070.0,
+         "metrics": {
+          "input_tokens": 30,
+          "output_tokens": 3,
+          "total_tokens": 33
+         },
+         "model": "synthetic-model",
+         "model_provider": "Synthetic"
+        }
+       ],
+       "run_id": "memory_auto_flush:h1",
+       "team_id": null,
+       "user_id": "@bob:example.org"
+      }
+     ]
+    ],
+    "list_runs": [],
+    "loaded_runs": [],
+    "redaction_candidates": [],
+    "request": [
+     {
+      "content": "probe",
+      "created_at": 0,
+      "from_history": false,
+      "id": "probe",
+      "role": "user",
+      "stop_after_tool_call": false
+     }
+    ],
+    "resume_requests": {},
+    "row": {
+     "created_at": 1750000070,
+     "session_data": {
+      "session_state": {}
+     },
+     "updated_at": 1750000070,
+     "user_id": null
+    },
+    "seen_event_ids": [],
+    "session": {
+     "created_at": 1750000070,
+     "kind": "agent",
+     "metadata": null,
+     "owner_id": "code",
+     "session_state": {},
+     "summary": null
+    },
+    "session_runs": []
+   },
+   "runs_by_id": {}
+  }
+ },
+ "updated_sessions": [
+  [
+   "compacted",
+   1750000040
+  ],
+  [
+   "edited",
+   1750000050
+  ],
+  [
+   "helper-only",
+   1750000070
+  ]
+ ],
+ "usage_rows": [
+  {
+   "mode": "runs",
+   "row": {
+    "entity_id": "code",
+    "entity_kind": "agent",
+    "requester_id": "@alice:example.org",
+    "row_key": "compacted",
+    "runs": [
+     {
+      "created_at": 1750000010,
+      "kind": "run",
+      "metrics": {
+       "input_tokens": 20,
+       "output_tokens": 2,
+       "total_tokens": 22
+      },
+      "model": "synthetic-model",
+      "model_metrics": [
+       {
+        "metrics": {
+         "input_tokens": 20,
+         "output_tokens": 2,
+         "total_tokens": 22
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       }
+      ],
+      "model_provider": "Synthetic",
+      "parent_run_id": null,
+      "requester_id": "@alice:example.org",
+      "requests": [
+       {
+        "created_at": 1750000010,
+        "metrics": {
+         "input_tokens": 10,
+         "output_tokens": 1,
+         "total_tokens": 11
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       },
+       {
+        "created_at": 1750000010,
+        "metrics": {
+         "input_tokens": 10,
+         "output_tokens": 1,
+         "total_tokens": 11
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       }
+      ],
+      "run_id": "r1",
+      "team_id": null,
+      "voice_finalized": false,
+      "voice_seconds": null
+     },
+     {
+      "created_at": 1750000020,
+      "kind": "run",
+      "metrics": {
+       "input_tokens": 40,
+       "output_tokens": 4,
+       "total_tokens": 44
+      },
+      "model": "synthetic-model",
+      "model_metrics": [
+       {
+        "metrics": {
+         "input_tokens": 40,
+         "output_tokens": 4,
+         "total_tokens": 44
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       }
+      ],
+      "model_provider": "Synthetic",
+      "parent_run_id": null,
+      "requester_id": "@alice:example.org",
+      "requests": [
+       {
+        "created_at": 1750000020,
+        "metrics": {
+         "input_tokens": 20,
+         "output_tokens": 2,
+         "total_tokens": 22
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       },
+       {
+        "created_at": 1750000020,
+        "metrics": {
+         "input_tokens": 20,
+         "output_tokens": 2,
+         "total_tokens": 22
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       }
+      ],
+      "run_id": "r2",
+      "team_id": null,
+      "voice_finalized": false,
+      "voice_seconds": null
+     },
+     {
+      "created_at": 1750000030.0,
+      "kind": "compaction_summary",
+      "metrics": {
+       "input_tokens": 40,
+       "output_tokens": 4,
+       "total_tokens": 44
+      },
+      "model": "synthetic-model",
+      "model_metrics": [],
+      "model_provider": "Synthetic",
+      "parent_run_id": null,
+      "requester_id": "@alice:example.org",
+      "requests": [
+       {
+        "created_at": 1750000030.0,
+        "metrics": {
+         "input_tokens": 40,
+         "output_tokens": 4,
+         "total_tokens": 44
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       }
+      ],
+      "run_id": "compaction:03000000-0000-0000-0000-000300000001",
+      "team_id": null,
+      "voice_finalized": false,
+      "voice_seconds": null
+     },
+     {
+      "created_at": 1750000040,
+      "kind": "run",
+      "metrics": {
+       "input_tokens": 60,
+       "output_tokens": 6,
+       "total_tokens": 66
+      },
+      "model": "synthetic-model",
+      "model_metrics": [
+       {
+        "metrics": {
+         "input_tokens": 60,
+         "output_tokens": 6,
+         "total_tokens": 66
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       }
+      ],
+      "model_provider": "Synthetic",
+      "parent_run_id": null,
+      "requester_id": "@alice:example.org",
+      "requests": [
+       {
+        "created_at": 1750000040,
+        "metrics": {
+         "input_tokens": 30,
+         "output_tokens": 3,
+         "total_tokens": 33
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       },
+       {
+        "created_at": 1750000040,
+        "metrics": {
+         "input_tokens": 30,
+         "output_tokens": 3,
+         "total_tokens": 33
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       }
+      ],
+      "run_id": "r3",
+      "team_id": null,
+      "voice_finalized": false,
+      "voice_seconds": null
+     }
+    ],
+    "runs_available": true,
+    "session_metrics": {},
+    "session_metrics_available": false,
+    "session_model_metrics": []
+   },
+   "since": null
+  },
+  {
+   "mode": "runs",
+   "row": {
+    "entity_id": "code",
+    "entity_kind": "agent",
+    "requester_id": "@alice:example.org",
+    "row_key": "edited",
+    "runs": [
+     {
+      "created_at": 1750000050,
+      "kind": "run",
+      "metrics": {
+       "input_tokens": 20,
+       "output_tokens": 2,
+       "total_tokens": 22
+      },
+      "model": "synthetic-model",
+      "model_metrics": [
+       {
+        "metrics": {
+         "input_tokens": 20,
+         "output_tokens": 2,
+         "total_tokens": 22
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       }
+      ],
+      "model_provider": "Synthetic",
+      "parent_run_id": null,
+      "requester_id": "@alice:example.org",
+      "requests": [
+       {
+        "created_at": 1750000050,
+        "metrics": {
+         "input_tokens": 10,
+         "output_tokens": 1,
+         "total_tokens": 11
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       },
+       {
+        "created_at": 1750000050,
+        "metrics": {
+         "input_tokens": 10,
+         "output_tokens": 1,
+         "total_tokens": 11
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       }
+      ],
+      "run_id": "e1",
+      "team_id": null,
+      "voice_finalized": false,
+      "voice_seconds": null
+     },
+     {
+      "created_at": 1750000050,
+      "kind": "run",
+      "metrics": {
+       "input_tokens": 20,
+       "output_tokens": 2,
+       "total_tokens": 22
+      },
+      "model": "synthetic-model",
+      "model_metrics": [
+       {
+        "metrics": {
+         "input_tokens": 20,
+         "output_tokens": 2,
+         "total_tokens": 22
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       }
+      ],
+      "model_provider": "Synthetic",
+      "parent_run_id": null,
+      "requester_id": "@alice:example.org",
+      "requests": [
+       {
+        "created_at": 1750000050,
+        "metrics": {
+         "input_tokens": 10,
+         "output_tokens": 1,
+         "total_tokens": 11
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       },
+       {
+        "created_at": 1750000050,
+        "metrics": {
+         "input_tokens": 10,
+         "output_tokens": 1,
+         "total_tokens": 11
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       }
+      ],
+      "run_id": "e2",
+      "team_id": null,
+      "voice_finalized": false,
+      "voice_seconds": null
+     }
+    ],
+    "runs_available": true,
+    "session_metrics": {},
+    "session_metrics_available": false,
+    "session_model_metrics": []
+   },
+   "since": null
+  },
+  {
+   "mode": "runs",
+   "row": {
+    "entity_id": "code",
+    "entity_kind": "agent",
+    "requester_id": null,
+    "row_key": "helper-only",
+    "runs": [
+     {
+      "created_at": 1750000070.0,
+      "kind": "memory_auto_flush",
+      "metrics": {
+       "input_tokens": 30,
+       "output_tokens": 3,
+       "total_tokens": 33
+      },
+      "model": "synthetic-model",
+      "model_metrics": [],
+      "model_provider": "Synthetic",
+      "parent_run_id": null,
+      "requester_id": "@bob:example.org",
+      "requests": [
+       {
+        "created_at": 1750000070.0,
+        "metrics": {
+         "input_tokens": 30,
+         "output_tokens": 3,
+         "total_tokens": 33
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       }
+      ],
+      "run_id": "memory_auto_flush:h1",
+      "team_id": null,
+      "voice_finalized": false,
+      "voice_seconds": null
+     }
+    ],
+    "runs_available": true,
+    "session_metrics": {},
+    "session_metrics_available": false,
+    "session_model_metrics": []
+   },
+   "since": null
+  },
+  {
+   "mode": "runs",
+   "row": {
+    "entity_id": "code",
+    "entity_kind": "agent",
+    "requester_id": "@alice:example.org",
+    "row_key": "compacted",
+    "runs": [
+     {
+      "created_at": 1750000010,
+      "kind": "run",
+      "metrics": {
+       "input_tokens": 20,
+       "output_tokens": 2,
+       "total_tokens": 22
+      },
+      "model": "synthetic-model",
+      "model_metrics": [
+       {
+        "metrics": {
+         "input_tokens": 20,
+         "output_tokens": 2,
+         "total_tokens": 22
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       }
+      ],
+      "model_provider": "Synthetic",
+      "parent_run_id": null,
+      "requester_id": "@alice:example.org",
+      "requests": [
+       {
+        "created_at": 1750000010,
+        "metrics": {
+         "input_tokens": 10,
+         "output_tokens": 1,
+         "total_tokens": 11
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       },
+       {
+        "created_at": 1750000010,
+        "metrics": {
+         "input_tokens": 10,
+         "output_tokens": 1,
+         "total_tokens": 11
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       }
+      ],
+      "run_id": "r1",
+      "team_id": null,
+      "voice_finalized": false,
+      "voice_seconds": null
+     },
+     {
+      "created_at": 1750000020,
+      "kind": "run",
+      "metrics": {
+       "input_tokens": 40,
+       "output_tokens": 4,
+       "total_tokens": 44
+      },
+      "model": "synthetic-model",
+      "model_metrics": [
+       {
+        "metrics": {
+         "input_tokens": 40,
+         "output_tokens": 4,
+         "total_tokens": 44
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       }
+      ],
+      "model_provider": "Synthetic",
+      "parent_run_id": null,
+      "requester_id": "@alice:example.org",
+      "requests": [
+       {
+        "created_at": 1750000020,
+        "metrics": {
+         "input_tokens": 20,
+         "output_tokens": 2,
+         "total_tokens": 22
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       },
+       {
+        "created_at": 1750000020,
+        "metrics": {
+         "input_tokens": 20,
+         "output_tokens": 2,
+         "total_tokens": 22
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       }
+      ],
+      "run_id": "r2",
+      "team_id": null,
+      "voice_finalized": false,
+      "voice_seconds": null
+     },
+     {
+      "created_at": 1750000030.0,
+      "kind": "compaction_summary",
+      "metrics": {
+       "input_tokens": 40,
+       "output_tokens": 4,
+       "total_tokens": 44
+      },
+      "model": "synthetic-model",
+      "model_metrics": [],
+      "model_provider": "Synthetic",
+      "parent_run_id": null,
+      "requester_id": "@alice:example.org",
+      "requests": [
+       {
+        "created_at": 1750000030.0,
+        "metrics": {
+         "input_tokens": 40,
+         "output_tokens": 4,
+         "total_tokens": 44
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       }
+      ],
+      "run_id": "compaction:03000000-0000-0000-0000-000300000001",
+      "team_id": null,
+      "voice_finalized": false,
+      "voice_seconds": null
+     },
+     {
+      "created_at": 1750000040,
+      "kind": "run",
+      "metrics": {
+       "input_tokens": 60,
+       "output_tokens": 6,
+       "total_tokens": 66
+      },
+      "model": "synthetic-model",
+      "model_metrics": [
+       {
+        "metrics": {
+         "input_tokens": 60,
+         "output_tokens": 6,
+         "total_tokens": 66
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       }
+      ],
+      "model_provider": "Synthetic",
+      "parent_run_id": null,
+      "requester_id": "@alice:example.org",
+      "requests": [
+       {
+        "created_at": 1750000040,
+        "metrics": {
+         "input_tokens": 30,
+         "output_tokens": 3,
+         "total_tokens": 33
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       },
+       {
+        "created_at": 1750000040,
+        "metrics": {
+         "input_tokens": 30,
+         "output_tokens": 3,
+         "total_tokens": 33
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       }
+      ],
+      "run_id": "r3",
+      "team_id": null,
+      "voice_finalized": false,
+      "voice_seconds": null
+     }
+    ],
+    "runs_available": true,
+    "session_metrics": {},
+    "session_metrics_available": false,
+    "session_model_metrics": []
+   },
+   "since": 0
+  },
+  {
+   "mode": "runs",
+   "row": {
+    "entity_id": "code",
+    "entity_kind": "agent",
+    "requester_id": "@alice:example.org",
+    "row_key": "edited",
+    "runs": [
+     {
+      "created_at": 1750000050,
+      "kind": "run",
+      "metrics": {
+       "input_tokens": 20,
+       "output_tokens": 2,
+       "total_tokens": 22
+      },
+      "model": "synthetic-model",
+      "model_metrics": [
+       {
+        "metrics": {
+         "input_tokens": 20,
+         "output_tokens": 2,
+         "total_tokens": 22
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       }
+      ],
+      "model_provider": "Synthetic",
+      "parent_run_id": null,
+      "requester_id": "@alice:example.org",
+      "requests": [
+       {
+        "created_at": 1750000050,
+        "metrics": {
+         "input_tokens": 10,
+         "output_tokens": 1,
+         "total_tokens": 11
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       },
+       {
+        "created_at": 1750000050,
+        "metrics": {
+         "input_tokens": 10,
+         "output_tokens": 1,
+         "total_tokens": 11
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       }
+      ],
+      "run_id": "e1",
+      "team_id": null,
+      "voice_finalized": false,
+      "voice_seconds": null
+     },
+     {
+      "created_at": 1750000050,
+      "kind": "run",
+      "metrics": {
+       "input_tokens": 20,
+       "output_tokens": 2,
+       "total_tokens": 22
+      },
+      "model": "synthetic-model",
+      "model_metrics": [
+       {
+        "metrics": {
+         "input_tokens": 20,
+         "output_tokens": 2,
+         "total_tokens": 22
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       }
+      ],
+      "model_provider": "Synthetic",
+      "parent_run_id": null,
+      "requester_id": "@alice:example.org",
+      "requests": [
+       {
+        "created_at": 1750000050,
+        "metrics": {
+         "input_tokens": 10,
+         "output_tokens": 1,
+         "total_tokens": 11
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       },
+       {
+        "created_at": 1750000050,
+        "metrics": {
+         "input_tokens": 10,
+         "output_tokens": 1,
+         "total_tokens": 11
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       }
+      ],
+      "run_id": "e2",
+      "team_id": null,
+      "voice_finalized": false,
+      "voice_seconds": null
+     }
+    ],
+    "runs_available": true,
+    "session_metrics": {},
+    "session_metrics_available": false,
+    "session_model_metrics": []
+   },
+   "since": 0
+  },
+  {
+   "mode": "runs",
+   "row": {
+    "entity_id": "code",
+    "entity_kind": "agent",
+    "requester_id": null,
+    "row_key": "helper-only",
+    "runs": [
+     {
+      "created_at": 1750000070.0,
+      "kind": "memory_auto_flush",
+      "metrics": {
+       "input_tokens": 30,
+       "output_tokens": 3,
+       "total_tokens": 33
+      },
+      "model": "synthetic-model",
+      "model_metrics": [],
+      "model_provider": "Synthetic",
+      "parent_run_id": null,
+      "requester_id": "@bob:example.org",
+      "requests": [
+       {
+        "created_at": 1750000070.0,
+        "metrics": {
+         "input_tokens": 30,
+         "output_tokens": 3,
+         "total_tokens": 33
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       }
+      ],
+      "run_id": "memory_auto_flush:h1",
+      "team_id": null,
+      "voice_finalized": false,
+      "voice_seconds": null
+     }
+    ],
+    "runs_available": true,
+    "session_metrics": {},
+    "session_metrics_available": false,
+    "session_model_metrics": []
+   },
+   "since": 0
+  },
+  {
+   "mode": "both",
+   "row": {
+    "entity_id": "code",
+    "entity_kind": "agent",
+    "requester_id": "@alice:example.org",
+    "row_key": "compacted",
+    "runs": [
+     {
+      "created_at": 1750000010,
+      "kind": "run",
+      "metrics": {
+       "input_tokens": 20,
+       "output_tokens": 2,
+       "total_tokens": 22
+      },
+      "model": "synthetic-model",
+      "model_metrics": [
+       {
+        "metrics": {
+         "input_tokens": 20,
+         "output_tokens": 2,
+         "total_tokens": 22
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       }
+      ],
+      "model_provider": "Synthetic",
+      "parent_run_id": null,
+      "requester_id": "@alice:example.org",
+      "requests": [
+       {
+        "created_at": 1750000010,
+        "metrics": {
+         "input_tokens": 10,
+         "output_tokens": 1,
+         "total_tokens": 11
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       },
+       {
+        "created_at": 1750000010,
+        "metrics": {
+         "input_tokens": 10,
+         "output_tokens": 1,
+         "total_tokens": 11
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       }
+      ],
+      "run_id": "r1",
+      "team_id": null,
+      "voice_finalized": false,
+      "voice_seconds": null
+     },
+     {
+      "created_at": 1750000020,
+      "kind": "run",
+      "metrics": {
+       "input_tokens": 40,
+       "output_tokens": 4,
+       "total_tokens": 44
+      },
+      "model": "synthetic-model",
+      "model_metrics": [
+       {
+        "metrics": {
+         "input_tokens": 40,
+         "output_tokens": 4,
+         "total_tokens": 44
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       }
+      ],
+      "model_provider": "Synthetic",
+      "parent_run_id": null,
+      "requester_id": "@alice:example.org",
+      "requests": [
+       {
+        "created_at": 1750000020,
+        "metrics": {
+         "input_tokens": 20,
+         "output_tokens": 2,
+         "total_tokens": 22
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       },
+       {
+        "created_at": 1750000020,
+        "metrics": {
+         "input_tokens": 20,
+         "output_tokens": 2,
+         "total_tokens": 22
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       }
+      ],
+      "run_id": "r2",
+      "team_id": null,
+      "voice_finalized": false,
+      "voice_seconds": null
+     },
+     {
+      "created_at": 1750000030.0,
+      "kind": "compaction_summary",
+      "metrics": {
+       "input_tokens": 40,
+       "output_tokens": 4,
+       "total_tokens": 44
+      },
+      "model": "synthetic-model",
+      "model_metrics": [],
+      "model_provider": "Synthetic",
+      "parent_run_id": null,
+      "requester_id": "@alice:example.org",
+      "requests": [
+       {
+        "created_at": 1750000030.0,
+        "metrics": {
+         "input_tokens": 40,
+         "output_tokens": 4,
+         "total_tokens": 44
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       }
+      ],
+      "run_id": "compaction:03000000-0000-0000-0000-000300000001",
+      "team_id": null,
+      "voice_finalized": false,
+      "voice_seconds": null
+     },
+     {
+      "created_at": 1750000040,
+      "kind": "run",
+      "metrics": {
+       "input_tokens": 60,
+       "output_tokens": 6,
+       "total_tokens": 66
+      },
+      "model": "synthetic-model",
+      "model_metrics": [
+       {
+        "metrics": {
+         "input_tokens": 60,
+         "output_tokens": 6,
+         "total_tokens": 66
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       }
+      ],
+      "model_provider": "Synthetic",
+      "parent_run_id": null,
+      "requester_id": "@alice:example.org",
+      "requests": [
+       {
+        "created_at": 1750000040,
+        "metrics": {
+         "input_tokens": 30,
+         "output_tokens": 3,
+         "total_tokens": 33
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       },
+       {
+        "created_at": 1750000040,
+        "metrics": {
+         "input_tokens": 30,
+         "output_tokens": 3,
+         "total_tokens": 33
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       }
+      ],
+      "run_id": "r3",
+      "team_id": null,
+      "voice_finalized": false,
+      "voice_seconds": null
+     }
+    ],
+    "runs_available": true,
+    "session_metrics": {
+     "input_tokens": 120,
+     "output_tokens": 12,
+     "total_tokens": 132
+    },
+    "session_metrics_available": true,
+    "session_model_metrics": [
+     {
+      "metrics": {
+       "input_tokens": 120,
+       "output_tokens": 12,
+       "total_tokens": 132
+      },
+      "model": "synthetic-model",
+      "model_provider": "Synthetic"
+     }
+    ]
+   },
+   "since": null
+  },
+  {
+   "mode": "both",
+   "row": {
+    "entity_id": "code",
+    "entity_kind": "agent",
+    "requester_id": "@alice:example.org",
+    "row_key": "edited",
+    "runs": [
+     {
+      "created_at": 1750000050,
+      "kind": "run",
+      "metrics": {
+       "input_tokens": 20,
+       "output_tokens": 2,
+       "total_tokens": 22
+      },
+      "model": "synthetic-model",
+      "model_metrics": [
+       {
+        "metrics": {
+         "input_tokens": 20,
+         "output_tokens": 2,
+         "total_tokens": 22
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       }
+      ],
+      "model_provider": "Synthetic",
+      "parent_run_id": null,
+      "requester_id": "@alice:example.org",
+      "requests": [
+       {
+        "created_at": 1750000050,
+        "metrics": {
+         "input_tokens": 10,
+         "output_tokens": 1,
+         "total_tokens": 11
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       },
+       {
+        "created_at": 1750000050,
+        "metrics": {
+         "input_tokens": 10,
+         "output_tokens": 1,
+         "total_tokens": 11
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       }
+      ],
+      "run_id": "e1",
+      "team_id": null,
+      "voice_finalized": false,
+      "voice_seconds": null
+     },
+     {
+      "created_at": 1750000050,
+      "kind": "run",
+      "metrics": {
+       "input_tokens": 20,
+       "output_tokens": 2,
+       "total_tokens": 22
+      },
+      "model": "synthetic-model",
+      "model_metrics": [
+       {
+        "metrics": {
+         "input_tokens": 20,
+         "output_tokens": 2,
+         "total_tokens": 22
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       }
+      ],
+      "model_provider": "Synthetic",
+      "parent_run_id": null,
+      "requester_id": "@alice:example.org",
+      "requests": [
+       {
+        "created_at": 1750000050,
+        "metrics": {
+         "input_tokens": 10,
+         "output_tokens": 1,
+         "total_tokens": 11
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       },
+       {
+        "created_at": 1750000050,
+        "metrics": {
+         "input_tokens": 10,
+         "output_tokens": 1,
+         "total_tokens": 11
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       }
+      ],
+      "run_id": "e2",
+      "team_id": null,
+      "voice_finalized": false,
+      "voice_seconds": null
+     }
+    ],
+    "runs_available": true,
+    "session_metrics": {
+     "input_tokens": 40,
+     "output_tokens": 4,
+     "total_tokens": 44
+    },
+    "session_metrics_available": true,
+    "session_model_metrics": [
+     {
+      "metrics": {
+       "input_tokens": 40,
+       "output_tokens": 4,
+       "total_tokens": 44
+      },
+      "model": "synthetic-model",
+      "model_provider": "Synthetic"
+     }
+    ]
+   },
+   "since": null
+  },
+  {
+   "mode": "both",
+   "row": {
+    "entity_id": "code",
+    "entity_kind": "agent",
+    "requester_id": null,
+    "row_key": "helper-only",
+    "runs": [
+     {
+      "created_at": 1750000070.0,
+      "kind": "memory_auto_flush",
+      "metrics": {
+       "input_tokens": 30,
+       "output_tokens": 3,
+       "total_tokens": 33
+      },
+      "model": "synthetic-model",
+      "model_metrics": [],
+      "model_provider": "Synthetic",
+      "parent_run_id": null,
+      "requester_id": "@bob:example.org",
+      "requests": [
+       {
+        "created_at": 1750000070.0,
+        "metrics": {
+         "input_tokens": 30,
+         "output_tokens": 3,
+         "total_tokens": 33
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       }
+      ],
+      "run_id": "memory_auto_flush:h1",
+      "team_id": null,
+      "voice_finalized": false,
+      "voice_seconds": null
+     }
+    ],
+    "runs_available": true,
+    "session_metrics": {},
+    "session_metrics_available": true,
+    "session_model_metrics": []
+   },
+   "since": null
+  },
+  {
+   "mode": "both",
+   "row": {
+    "entity_id": "code",
+    "entity_kind": "agent",
+    "requester_id": "@alice:example.org",
+    "row_key": "compacted",
+    "runs": [
+     {
+      "created_at": 1750000010,
+      "kind": "run",
+      "metrics": {
+       "input_tokens": 20,
+       "output_tokens": 2,
+       "total_tokens": 22
+      },
+      "model": "synthetic-model",
+      "model_metrics": [
+       {
+        "metrics": {
+         "input_tokens": 20,
+         "output_tokens": 2,
+         "total_tokens": 22
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       }
+      ],
+      "model_provider": "Synthetic",
+      "parent_run_id": null,
+      "requester_id": "@alice:example.org",
+      "requests": [
+       {
+        "created_at": 1750000010,
+        "metrics": {
+         "input_tokens": 10,
+         "output_tokens": 1,
+         "total_tokens": 11
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       },
+       {
+        "created_at": 1750000010,
+        "metrics": {
+         "input_tokens": 10,
+         "output_tokens": 1,
+         "total_tokens": 11
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       }
+      ],
+      "run_id": "r1",
+      "team_id": null,
+      "voice_finalized": false,
+      "voice_seconds": null
+     },
+     {
+      "created_at": 1750000020,
+      "kind": "run",
+      "metrics": {
+       "input_tokens": 40,
+       "output_tokens": 4,
+       "total_tokens": 44
+      },
+      "model": "synthetic-model",
+      "model_metrics": [
+       {
+        "metrics": {
+         "input_tokens": 40,
+         "output_tokens": 4,
+         "total_tokens": 44
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       }
+      ],
+      "model_provider": "Synthetic",
+      "parent_run_id": null,
+      "requester_id": "@alice:example.org",
+      "requests": [
+       {
+        "created_at": 1750000020,
+        "metrics": {
+         "input_tokens": 20,
+         "output_tokens": 2,
+         "total_tokens": 22
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       },
+       {
+        "created_at": 1750000020,
+        "metrics": {
+         "input_tokens": 20,
+         "output_tokens": 2,
+         "total_tokens": 22
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       }
+      ],
+      "run_id": "r2",
+      "team_id": null,
+      "voice_finalized": false,
+      "voice_seconds": null
+     },
+     {
+      "created_at": 1750000030.0,
+      "kind": "compaction_summary",
+      "metrics": {
+       "input_tokens": 40,
+       "output_tokens": 4,
+       "total_tokens": 44
+      },
+      "model": "synthetic-model",
+      "model_metrics": [],
+      "model_provider": "Synthetic",
+      "parent_run_id": null,
+      "requester_id": "@alice:example.org",
+      "requests": [
+       {
+        "created_at": 1750000030.0,
+        "metrics": {
+         "input_tokens": 40,
+         "output_tokens": 4,
+         "total_tokens": 44
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       }
+      ],
+      "run_id": "compaction:03000000-0000-0000-0000-000300000001",
+      "team_id": null,
+      "voice_finalized": false,
+      "voice_seconds": null
+     },
+     {
+      "created_at": 1750000040,
+      "kind": "run",
+      "metrics": {
+       "input_tokens": 60,
+       "output_tokens": 6,
+       "total_tokens": 66
+      },
+      "model": "synthetic-model",
+      "model_metrics": [
+       {
+        "metrics": {
+         "input_tokens": 60,
+         "output_tokens": 6,
+         "total_tokens": 66
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       }
+      ],
+      "model_provider": "Synthetic",
+      "parent_run_id": null,
+      "requester_id": "@alice:example.org",
+      "requests": [
+       {
+        "created_at": 1750000040,
+        "metrics": {
+         "input_tokens": 30,
+         "output_tokens": 3,
+         "total_tokens": 33
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       },
+       {
+        "created_at": 1750000040,
+        "metrics": {
+         "input_tokens": 30,
+         "output_tokens": 3,
+         "total_tokens": 33
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       }
+      ],
+      "run_id": "r3",
+      "team_id": null,
+      "voice_finalized": false,
+      "voice_seconds": null
+     }
+    ],
+    "runs_available": true,
+    "session_metrics": {},
+    "session_metrics_available": false,
+    "session_model_metrics": []
+   },
+   "since": 0
+  },
+  {
+   "mode": "both",
+   "row": {
+    "entity_id": "code",
+    "entity_kind": "agent",
+    "requester_id": "@alice:example.org",
+    "row_key": "edited",
+    "runs": [
+     {
+      "created_at": 1750000050,
+      "kind": "run",
+      "metrics": {
+       "input_tokens": 20,
+       "output_tokens": 2,
+       "total_tokens": 22
+      },
+      "model": "synthetic-model",
+      "model_metrics": [
+       {
+        "metrics": {
+         "input_tokens": 20,
+         "output_tokens": 2,
+         "total_tokens": 22
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       }
+      ],
+      "model_provider": "Synthetic",
+      "parent_run_id": null,
+      "requester_id": "@alice:example.org",
+      "requests": [
+       {
+        "created_at": 1750000050,
+        "metrics": {
+         "input_tokens": 10,
+         "output_tokens": 1,
+         "total_tokens": 11
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       },
+       {
+        "created_at": 1750000050,
+        "metrics": {
+         "input_tokens": 10,
+         "output_tokens": 1,
+         "total_tokens": 11
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       }
+      ],
+      "run_id": "e1",
+      "team_id": null,
+      "voice_finalized": false,
+      "voice_seconds": null
+     },
+     {
+      "created_at": 1750000050,
+      "kind": "run",
+      "metrics": {
+       "input_tokens": 20,
+       "output_tokens": 2,
+       "total_tokens": 22
+      },
+      "model": "synthetic-model",
+      "model_metrics": [
+       {
+        "metrics": {
+         "input_tokens": 20,
+         "output_tokens": 2,
+         "total_tokens": 22
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       }
+      ],
+      "model_provider": "Synthetic",
+      "parent_run_id": null,
+      "requester_id": "@alice:example.org",
+      "requests": [
+       {
+        "created_at": 1750000050,
+        "metrics": {
+         "input_tokens": 10,
+         "output_tokens": 1,
+         "total_tokens": 11
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       },
+       {
+        "created_at": 1750000050,
+        "metrics": {
+         "input_tokens": 10,
+         "output_tokens": 1,
+         "total_tokens": 11
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       }
+      ],
+      "run_id": "e2",
+      "team_id": null,
+      "voice_finalized": false,
+      "voice_seconds": null
+     }
+    ],
+    "runs_available": true,
+    "session_metrics": {},
+    "session_metrics_available": false,
+    "session_model_metrics": []
+   },
+   "since": 0
+  },
+  {
+   "mode": "both",
+   "row": {
+    "entity_id": "code",
+    "entity_kind": "agent",
+    "requester_id": null,
+    "row_key": "helper-only",
+    "runs": [
+     {
+      "created_at": 1750000070.0,
+      "kind": "memory_auto_flush",
+      "metrics": {
+       "input_tokens": 30,
+       "output_tokens": 3,
+       "total_tokens": 33
+      },
+      "model": "synthetic-model",
+      "model_metrics": [],
+      "model_provider": "Synthetic",
+      "parent_run_id": null,
+      "requester_id": "@bob:example.org",
+      "requests": [
+       {
+        "created_at": 1750000070.0,
+        "metrics": {
+         "input_tokens": 30,
+         "output_tokens": 3,
+         "total_tokens": 33
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       }
+      ],
+      "run_id": "memory_auto_flush:h1",
+      "team_id": null,
+      "voice_finalized": false,
+      "voice_seconds": null
+     }
+    ],
+    "runs_available": true,
+    "session_metrics": {},
+    "session_metrics_available": false,
+    "session_model_metrics": []
+   },
+   "since": 0
+  }
+ ]
+}

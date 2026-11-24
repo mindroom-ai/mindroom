@@ -1,0 +1,434 @@
+"""Egress broker secret storage and resolution."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any, Literal
+
+from mindroom.credentials.manager import (
+    delete_scoped_credentials,
+    load_scoped_credentials,
+    save_scoped_credentials,
+    scoped_credentials_path,
+)
+from mindroom.credentials.policy import egress_credential_service
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+    from pathlib import Path
+
+    from mindroom.config.egress_broker import EgressGitHubApp, EgressService
+    from mindroom.credentials.manager import CredentialsManager
+    from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
+
+__all__ = [
+    "PERSONAL_WORKER_SCOPES",
+    "EgressServiceStatus",
+    "OAuthAccess",
+    "OAuthStatus",
+    "OAuthStatusReader",
+    "Secret",
+    "SecretGitHubAppUnavailable",
+    "SecretMissing",
+    "SecretNeedsReconnect",
+    "SecretNotForAgent",
+    "SecretReadOnly",
+    "SecretRepositoryNotAllowed",
+    "SecretRequest",
+    "SecretResult",
+    "SecretServiceChanged",
+    "SecretUnavailable",
+    "delete_egress_document",
+    "delete_secret",
+    "egress_key_path",
+    "is_personal_target",
+    "load_egress_document",
+    "load_github_app_credentials",
+    "load_secret",
+    "save_egress_document",
+    "save_secret",
+    "service_status",
+    "validate_secret",
+]
+
+_MAX_SECRET_SIZE = 16 * 1024  # 16 KiB
+# An administrator key's slot in the global store. Service names start with `[a-z0-9]`, so no scope's own key, which
+# is stored as `egress_<name>`, can take an `egress__` name.
+_ADMIN_KEY_SERVICE_PREFIX = "egress__admin_key_"
+# Worker scopes whose sandbox and egress store belong to one requester.
+PERSONAL_WORKER_SCOPES: frozenset[str] = frozenset({"user", "user_agent"})
+
+# What Agent Keys may do with an allowed account: only read (the service's `read_only` says how its API reads), or
+# read and write.
+type OAuthAccess = Literal["read", "read_write"]
+
+
+def is_personal_target(target: ResolvedWorkerTarget | None) -> bool:
+    """Return whether `target` has a personal worker scope; None is the global store, which is not personal."""
+    return target is not None and target.worker_scope in PERSONAL_WORKER_SCOPES
+
+
+def _key_location(
+    target: ResolvedWorkerTarget | None,
+    name: str,
+    *,
+    admin_key: bool,
+) -> tuple[ResolvedWorkerTarget | None, str]:
+    """Return the store and credential service that hold service `name`'s key for `target`.
+
+    That is the scope's own `egress_<name>`, or for an `admin_key` service one slot of the global store that no scope
+    writes, so the key that agents without a worker scope share never becomes the administrator's.
+    """
+    if admin_key:
+        return None, f"{_ADMIN_KEY_SERVICE_PREFIX}{name}"
+    return target, egress_credential_service(name)
+
+
+def load_egress_document(
+    manager: CredentialsManager,
+    target: ResolvedWorkerTarget | None,
+    credential_service: str,
+) -> dict[str, Any] | None:
+    """Load one egress credential document from the primary-only store of a worker target or the global store.
+
+    `target=None` is the global (unscoped) store. Egress documents never come from a shared layer or a worker store.
+    """
+    return load_scoped_credentials(credential_service, credentials_manager=manager, worker_target=target)
+
+
+def save_egress_document(
+    manager: CredentialsManager,
+    target: ResolvedWorkerTarget | None,
+    credential_service: str,
+    document: dict[str, Any],
+) -> None:
+    """Save one egress credential document to the store `load_egress_document` reads for the same target."""
+    save_scoped_credentials(credential_service, document, credentials_manager=manager, worker_target=target)
+
+
+def delete_egress_document(
+    manager: CredentialsManager,
+    target: ResolvedWorkerTarget | None,
+    credential_service: str,
+) -> None:
+    """Delete one egress credential document from the store `load_egress_document` reads for the same target."""
+    delete_scoped_credentials(credential_service, credentials_manager=manager, worker_target=target)
+
+
+def load_secret(
+    manager: CredentialsManager,
+    target: ResolvedWorkerTarget | None,
+    name: str,
+    *,
+    admin_key: bool = False,
+) -> str | None:
+    """Load an egress secret for a worker target or the global store.
+
+    Args:
+        manager: Credentials manager
+        target: Worker target, or None for the global (unscoped) store
+        name: Service name
+        admin_key: Read the service's administrator key instead, which is the same for every target
+
+    Returns the secret string, or None if not configured.
+    Requester-scoped targets (user, user_agent) do not fall back to shared/global.
+
+    """
+    credentials = load_egress_document(manager, *_key_location(target, name, admin_key=admin_key))
+    if credentials is None:
+        return None
+    return credentials.get("secret")
+
+
+def load_github_app_credentials(manager: CredentialsManager, app: EgressGitHubApp) -> dict[str, Any] | None:
+    """Load the App credential a `github_app` service names, from the store Git knowledge bases read it from.
+
+    None unless it is stored with `auth_type: github_app`. It holds the App's ids and the path of its private key, which
+    only the primary reads.
+    """
+    credentials = manager.shared_manager().load_credentials(app.credentials_service)
+    if credentials is None or credentials.get("auth_type") != "github_app":
+        return None
+    return credentials
+
+
+def validate_secret(secret: str) -> None:
+    """Raise ValueError if the secret is empty/whitespace, over 16 KiB, or contains ASCII control characters.
+
+    The message never repeats the value.
+    """
+    if not secret or not secret.strip():
+        msg = "Secret cannot be empty or whitespace"
+        raise ValueError(msg)
+
+    # Check for ASCII control characters (ord < 0x20 or 0x7f)
+    for char in secret:
+        char_ord = ord(char)
+        if char_ord < 0x20 or char_ord == 0x7F:
+            msg = f"Secret contains invalid control character (ord {char_ord})"
+            raise ValueError(msg)
+
+    if len(secret.encode("utf-8")) > _MAX_SECRET_SIZE:
+        msg = f"Secret size exceeds maximum of 16 KiB ({len(secret.encode('utf-8'))} bytes)"
+        raise ValueError(msg)
+
+
+def save_secret(
+    manager: CredentialsManager,
+    target: ResolvedWorkerTarget | None,
+    name: str,
+    secret: str,
+    *,
+    admin_key: bool = False,
+) -> None:
+    """Save an egress secret for a worker target or the global store.
+
+    Args:
+        manager: Credentials manager
+        target: Worker target, or None for the global (unscoped) store
+        name: Service name
+        secret: Secret value to store
+        admin_key: Save the service's administrator key instead, which is the same for every target
+
+    Raises ValueError as `validate_secret` does.
+
+    """
+    validate_secret(secret)
+
+    # Build credential document with secret and timestamp
+    credentials = {
+        "secret": secret,
+        "_updated_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
+    }
+    save_egress_document(manager, *_key_location(target, name, admin_key=admin_key), credentials)
+
+
+def egress_key_path(manager: CredentialsManager, target: ResolvedWorkerTarget | None, name: str) -> Path | None:
+    """Return the file `save_secret` writes service `name`'s key to for `target`, None when the target has no store."""
+    store_target, credential_service = _key_location(target, name, admin_key=False)
+    try:
+        return scoped_credentials_path(credential_service, credentials_manager=manager, worker_target=store_target)
+    except ValueError:
+        return None
+
+
+def delete_secret(
+    manager: CredentialsManager,
+    target: ResolvedWorkerTarget | None,
+    name: str,
+    *,
+    admin_key: bool = False,
+) -> None:
+    """Delete an egress secret for a worker target or the global store.
+
+    Args:
+        manager: Credentials manager
+        target: Worker target, or None for the global (unscoped) store
+        name: Service name
+        admin_key: Delete the service's administrator key instead, which is the same for every target
+
+    """
+    delete_egress_document(manager, *_key_location(target, name, admin_key=admin_key))
+
+
+@dataclass(frozen=True)
+class SecretRequest:
+    """What the broker knows about the request it resolves a secret for, which an access level can depend on.
+
+    `method` is the request's method as sent, `host` the host it was routed to, `path` its path without the query,
+    `websocket` whether it asks to switch to a WebSocket, and `method_override` whether it carries a header that asks
+    the server to read another method.
+    """
+
+    method: str
+    host: str
+    path: str
+    websocket: bool = False
+    method_override: bool = False
+
+
+@dataclass(frozen=True)
+class Secret:
+    """The secret the broker injects for one request; its value never appears in a repr."""
+
+    value: str = field(repr=False)
+
+
+@dataclass(frozen=True)
+class SecretMissing:
+    """No secret in scope: no stored key and no usable OAuth connection.
+
+    `provider` and `connect_url` name the OAuth account the user can connect instead, when the service has a
+    connectable provider. The URL carries a one-time connect token, so it stays out of reprs and logs.
+    `reuse_off` means nobody allowed Agent Keys to use the `provider` account for this service, so it was not read
+    and there is no link; `requester_owned` says the account is the requester's own, which only they can allow.
+    `own_account` means the service's own account is not connected, or with `reuse_off` not allowed, which only its row
+    on the egress page does. `admin_key` means the service's one key is the administrator's, which nobody else sets,
+    and `github_app` that the service's GitHub App credential is not stored, which only an administrator does.
+    """
+
+    provider: str | None = None
+    connect_url: str | None = field(default=None, repr=False)
+    reuse_off: bool = False
+    requester_owned: bool = False
+    own_account: bool = False
+    admin_key: bool = False
+    github_app: bool = False
+
+
+@dataclass(frozen=True)
+class SecretNotForAgent:
+    """The service's `agents` list leaves out the requesting agent, so nothing was read."""
+
+
+@dataclass(frozen=True)
+class SecretNeedsReconnect:
+    """The scope's OAuth connection cannot supply a token until the user reconnects: its grant was revoked.
+
+    `reset_required` means the stored credential is unreadable and must be reset before reconnecting.
+    `requester_owned` says the account is the requester's own, which only they can reconnect.
+    """
+
+    provider: str
+    connect_url: str | None = field(default=None, repr=False)
+    reset_required: bool = False
+    requester_owned: bool = False
+
+
+@dataclass(frozen=True)
+class SecretUnavailable:
+    """Refreshing the scope's OAuth token failed for a reason that may pass, such as a provider outage."""
+
+    provider: str
+
+
+@dataclass(frozen=True)
+class SecretReadOnly:
+    """The `provider` account may only read for this service, and the request may write; the connection was not read.
+
+    `requester_owned` says the account is the requester's own, which only they can allow to write.
+    """
+
+    provider: str
+    requester_owned: bool = False
+
+
+@dataclass(frozen=True)
+class SecretRepositoryNotAllowed:
+    """The request names `repository` (`owner/repository`), which the service's GitHub App does not cover; no token."""
+
+    repository: str
+
+
+@dataclass(frozen=True)
+class SecretGitHubAppUnavailable:
+    """GitHub issued no token for the service's App, or its credential is unusable; the reason is only logged."""
+
+
+@dataclass(frozen=True)
+class SecretServiceChanged:
+    """The service no longer has the definition whose rule routed the request, so its credential may be for other hosts.
+
+    Nothing is resolved; a retry is routed by the current definition.
+    """
+
+
+type SecretResult = (
+    Secret
+    | SecretMissing
+    | SecretNeedsReconnect
+    | SecretUnavailable
+    | SecretReadOnly
+    | SecretServiceChanged
+    | SecretNotForAgent
+    | SecretRepositoryNotAllowed
+    | SecretGitHubAppUnavailable
+)
+
+
+@dataclass(frozen=True)
+class OAuthStatus:
+    """Connection state of a service's OAuth provider for one scope; never holds a token.
+
+    `connected` means the broker would inject a personal access token. A configured service account
+    (`service_account`) is not a token the broker can inject, so it never makes a scope connected by itself
+    and its provider is never connectable. `unavailable_reason` says why the broker never uses this provider's
+    accounts in the scope (`shared_sandbox`: a requester's own account in a sandbox that several requesters share).
+    `shared_worker_opt_in` marks such a sandbox where the service allows it anyway, so every user of the agent can
+    act with the connected account. `reuse_enabled` says whether Agent Keys may use the connection for this service;
+    without it a connected account serves only its tools. `reuse_access` is the level it may use it at, None while off.
+    """
+
+    provider: str
+    display_name: str
+    connected: bool
+    account_label: str | None
+    can_connect: bool
+    reset_required: bool
+    service_account: bool = False
+    unavailable_reason: Literal["shared_sandbox"] | None = None
+    shared_worker_opt_in: bool = False
+    reuse_enabled: bool = False
+    reuse_access: OAuthAccess | None = None
+
+
+type OAuthStatusReader = Callable[[str, ResolvedWorkerTarget | None], OAuthStatus | None]
+
+
+@dataclass(frozen=True)
+class EgressServiceStatus:
+    """Which secret source a service has in one scope; an explicit key wins over an OAuth connection it may use.
+
+    A `github_app` service has only its App, which every scope shares.
+    """
+
+    configured: bool
+    active_source: Literal["key", "oauth", "github_app"] | None
+    key_configured: bool
+    key_updated_at: str | None
+    oauth: OAuthStatus | None
+
+
+def service_status(
+    manager: CredentialsManager,
+    target: ResolvedWorkerTarget | None,
+    service: EgressService,
+    name: str,
+    *,
+    oauth_status: OAuthStatusReader,
+) -> EgressServiceStatus:
+    """Return both secret sources of an egress service for a worker target or the global store.
+
+    `oauth_status(provider_id, target)` reports the service's OAuth provider for the same target; it is not
+    called for services without one. A service with its own account (`oauth_separate_account`) has no key, as the
+    broker never uses one for it, and an `admin_key` service's key is its administrator key (`_key_location`).
+    A `github_app` service is configured while its App credential is stored. Never returns a secret or token.
+    """
+    if service.github_app is not None:
+        app_stored = load_github_app_credentials(manager, service.github_app) is not None
+        return EgressServiceStatus(
+            configured=app_stored,
+            active_source="github_app" if app_stored else None,
+            key_configured=False,
+            key_updated_at=None,
+            oauth=None,
+        )
+    key = (
+        None
+        if service.oauth_separate_account
+        else load_egress_document(manager, *_key_location(target, name, admin_key=service.admin_key))
+    )
+    oauth = oauth_status(service.oauth_provider, target) if service.oauth_provider is not None else None
+    active_source: Literal["key", "oauth", "github_app"] | None = None
+    if key is not None:
+        active_source = "key"
+    elif oauth is not None and oauth.connected and oauth.reuse_enabled:
+        active_source = "oauth"
+    return EgressServiceStatus(
+        configured=active_source is not None,
+        active_source=active_source,
+        key_configured=key is not None,
+        key_updated_at=None if key is None else key.get("_updated_at"),
+        oauth=oauth,
+    )

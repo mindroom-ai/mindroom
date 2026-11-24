@@ -4,40 +4,40 @@ from __future__ import annotations
 
 import asyncio
 import tempfile
-from contextlib import nullcontext
+from itertools import count
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from agno.db.base import SessionType
-from agno.models.message import Message
-from agno.run.agent import RunCancelledEvent, RunContentEvent, RunOutput
-from agno.run.base import RunStatus
+from structlog.testing import capture_logs
 
-from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG, USER_STOP_CANCEL_MSG, request_task_cancel
+from mindroom.cancellation import SYNC_RESTART_CANCEL_MSG, USER_STOP_CANCEL_MSG
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import STREAM_STATUS_ERROR, STREAM_STATUS_KEY
-from mindroom.final_delivery import StreamTransportOutcome
-from mindroom.history.session_context import ScopeSessionContext
-from mindroom.history.types import HistoryScope, PreparedHistoryState
-from mindroom.hooks import HookRegistry
+from mindroom.error_handling import get_user_friendly_error_message
+from mindroom.final_delivery import Cancelled
+from mindroom.history.types import HistoryScope
 from mindroom.knowledge.utils import _KnowledgeResolution
-from mindroom.matrix.client import DeliveredMatrixEvent
+from mindroom.llm.errors import RateLimited
+from mindroom.llm.provider import TextDelta
+from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.message_target import MessageTarget
-from mindroom.response_runner import ResponseRequest, _ResponseGenerationOutcome
+from mindroom.participation import ParticipationGate
+from mindroom.reply_turn.request import ResponseRequest
 from mindroom.response_sources import ResponseSources
 from mindroom.streaming import _INTERRUPTED_RESPONSE_NOTE, build_restart_interrupted_body
-from tests.ai_user_id_helpers import _claimed_reply_span
-from tests.bot_helpers import make_test_agent_bot
+from tests.bot_helpers import make_test_agent_bot, unique_room_send_responses
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
+    install_model_providers,
     install_runtime_journal_support,
     make_matrix_client_mock,
+    patch_response_runner_module,
     replace_delivery_gateway_deps,
     replace_response_runner_deps,
     request_envelope,
@@ -45,13 +45,14 @@ from tests.conftest import (
     test_runtime_paths,
     unwrap_extracted_collaborator,
 )
-from tests.reply_span_helpers import response_span
+from tests.fakes.scripted_model import ScriptedModel
 from tests.response_attempt_helpers import install_direct_response_admission
+from tests.response_runner_helpers import _noop_typing, stream_transport, streamed_answer
+from tests.scripted_agent_helpers import stop_turn
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
-
     from mindroom.bot import AgentBot
+    from mindroom.final_delivery import FinalDeliveryOutcome
 
 
 def _runtime_bound_config() -> Config:
@@ -64,7 +65,7 @@ def _runtime_bound_config() -> Config:
     )
 
 
-def _mock_bot(tmp_path: Path) -> AgentBot:
+def _mock_bot() -> AgentBot:
     """Create a bot test instance with explicit mocked collaborators."""
     config = _runtime_bound_config()
     bot = make_test_agent_bot(
@@ -74,7 +75,6 @@ def _mock_bot(tmp_path: Path) -> AgentBot:
             display_name="Test Agent",
             user_id="@mindroom_test_agent:localhost",
         ),
-        tmp_path,
         config,
         runtime_paths_for(config),
         rooms=["!room:localhost"],
@@ -82,10 +82,6 @@ def _mock_bot(tmp_path: Path) -> AgentBot:
     install_direct_response_admission(bot)
     bot.logger = MagicMock()
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
-    bot.client.user_id = "@mindroom_test_agent:localhost"
-    bot.hook_registry = HookRegistry.empty()
-    bot.enable_streaming = True
-    bot.orchestrator = None
     install_runtime_journal_support(bot)
     bot._conversation_resolver.build_message_target = MagicMock(
         return_value=MessageTarget.resolve("!room:localhost", None, None, room_mode=True),
@@ -99,35 +95,13 @@ def _mock_bot(tmp_path: Path) -> AgentBot:
     bot._conversation_state_writer.team_history_scope = MagicMock(
         return_value=HistoryScope(kind="team", scope_id=bot.agent_name),
     )
-    bot._conversation_state_writer.session_type_for_scope = MagicMock(return_value=SessionType.AGENT)
     bot._knowledge_access_support = _knowledge_access_support()
     return bot
 
 
 def _knowledge_access_support() -> SimpleNamespace:
     return SimpleNamespace(
-        for_agent=MagicMock(return_value=None),
-        resolve_for_agent=MagicMock(return_value=_KnowledgeResolution(knowledge=None)),
         resolve_for_agent_async=AsyncMock(return_value=_KnowledgeResolution(knowledge=None)),
-    )
-
-
-def _empty_storage_factory() -> MagicMock:
-    """Return a fresh session-storage double with no persisted session."""
-    storage = MagicMock()
-    storage.get_session.return_value = None
-    return storage
-
-
-def _empty_scope_context() -> ScopeSessionContext:
-    """Supply the complete conversation owner used by cancellation response tests."""
-    return ScopeSessionContext(
-        scope=HistoryScope("agent", "test_agent"),
-        storage=MagicMock(),
-        storage_factory=_empty_storage_factory,
-        session=None,
-        session_id="session-1",
-        session_exists=False,
     )
 
 
@@ -149,11 +123,10 @@ def _build_response_runner(bot: AgentBot) -> None:
 
 def _response_request(
     *,
-    room_id: str = "!test:localhost",
+    room_id: str = "!room:localhost",
     reply_to_event_id: str = "$user_msg",
     thread_id: str | None = None,
     prompt: str = "Help me with something",
-    existing_event_id: str | None = None,
 ) -> ResponseRequest:
     """Build one response request for direct bot seam tests."""
     return ResponseRequest(
@@ -169,32 +142,33 @@ def _response_request(
             thread_id=thread_id,
             prompt=prompt,
         ),
-        existing_event_id=existing_event_id,
     )
 
 
-async def _respond_in_span(
-    bot: AgentBot,
-    request: ResponseRequest,
-    *,
-    placeholder_event_id: str | None = None,
-) -> _ResponseGenerationOutcome:
-    """Respond in the request's reply span, then end the span as the locked turn does, so any note lands."""
+async def _respond(bot: AgentBot, request: ResponseRequest, *, streaming: bool = False) -> FinalDeliveryOutcome:
+    """Run the request's locked turn, streamed or delivered whole, and return how its reply ended."""
     runner = unwrap_extracted_collaborator(bot._response_runner)
-    async with response_span(runner, request, placeholder_event_id=placeholder_event_id) as handle:
-        generation = await runner._process_and_respond(request)
-        if not handle.exited:
-            await runner._end_span_after_outcome(
-                handle,
-                generation.delivery,
-                target=request.response_envelope.target,
-                delivery_started=False,
-            )
-    return generation
+    outcomes: list[FinalDeliveryOutcome] = []
+
+    async def record_outcome(outcome: FinalDeliveryOutcome, *_args: object) -> None:
+        outcomes.append(outcome)
+
+    with patch_response_runner_module(
+        should_use_streaming=AsyncMock(return_value=streaming),
+        typing_indicator=_noop_typing,
+        apply_post_response_effects=AsyncMock(side_effect=record_outcome),
+    ):
+        await runner.generate_response(request)
+    [outcome] = outcomes
+    return outcome
 
 
 def _record_reply_edits(edited: list[tuple[str, dict[str, object]]]) -> AsyncMock:
-    """Record each reply write Matrix receives as the event it replaces and its new content."""
+    """Record each reply edit Matrix receives as the event it replaces and its new content.
+
+    Each new message, as a reply's placeholder is, gets its own ``$thinking_<n>`` event.
+    """
+    placeholders = count(1)
 
     async def send(
         _client: object,
@@ -202,387 +176,214 @@ def _record_reply_edits(edited: list[tuple[str, dict[str, object]]]) -> AsyncMoc
         envelope: dict[str, object],
         **_kwargs: object,
     ) -> DeliveredMatrixEvent:
+        if "m.new_content" not in envelope:
+            return DeliveredMatrixEvent(event_id=f"$thinking_{next(placeholders)}", content_sent=envelope)
         edited.append((envelope["m.relates_to"]["event_id"], envelope["m.new_content"]))
         return DeliveredMatrixEvent(event_id="$edit", content_sent=envelope)
 
     return AsyncMock(side_effect=send)
 
 
-def _prepared_run(agent: object, *, prompt: str = "Help me with something") -> SimpleNamespace:
-    """Return one minimal prepared-run stub for response-runner tests."""
-    return SimpleNamespace(
-        agent=agent,
-        run_input=[Message(role="user", content=prompt)],
-        unseen_event_ids=[],
-        prepared_history=PreparedHistoryState(),
-        runtime_model_name="default",
-    )
-
-
 class TestAIErrorDisplay:
     """Test that AI errors are shown to users properly."""
 
     @pytest.mark.asyncio
-    async def test_non_streaming_error_edits_thinking_message(self, tmp_path: Path) -> None:
+    async def test_non_streaming_error_edits_thinking_message(self) -> None:
         """Test that when AI fails in non-streaming mode, the thinking message is edited with the error."""
-        bot = _mock_bot(tmp_path)
+        bot = _mock_bot()
 
-        edited_messages = []
+        edited_messages: list[tuple[str, dict[str, object]]] = []
 
-        async def mock_gateway_edit_message(
-            client: object,  # noqa: ARG001
-            room_id: str,  # noqa: ARG001
-            envelope: dict[str, object],
-            **_kwargs: object,
-        ) -> DeliveredMatrixEvent:
-            # The outbox sends the finished replace event, so the edit target
-            # and its text come out of the envelope, not off the call.
-            target = envelope["m.relates_to"]["event_id"]
-            body = envelope["m.new_content"]["body"]
-            edited_messages.append((target, body))
-            return DeliveredMatrixEvent(event_id="$edit", content_sent=envelope)
-
+        error_msg = "[test_agent] 🔴 Authentication failed. Please check your API key configuration."
         with (
-            patch("mindroom.response_runner.ai_response") as mock_ai,
             patch(
-                "mindroom.delivery_gateway.send_message_outcome",
-                new=AsyncMock(side_effect=mock_gateway_edit_message),
+                "mindroom.response_runner.stream_agent_response",
+                new=streamed_answer(AsyncMock(return_value=error_msg)),
             ),
+            patch("mindroom.delivery_gateway.send_message_outcome", new=_record_reply_edits(edited_messages)),
         ):
             _build_response_runner(bot)
-            error_msg = "[test_agent] 🔴 Authentication failed. Please check your API key configuration."
-            mock_ai.return_value = error_msg
-
-            await _respond_in_span(
-                bot,
-                _response_request(existing_event_id="$thinking_msg"),
-                placeholder_event_id="$thinking_msg",
-            )
+            await _respond(bot, _response_request())
 
             assert len(edited_messages) == 1
-            event_id, text = edited_messages[0]
-            assert event_id == "$thinking_msg"
-            assert "Authentication failed" in text
-            assert "API key" in text
+            event_id, content = edited_messages[0]
+            assert event_id == "$thinking_1"
+            assert "Authentication failed" in content["body"]
+            assert "API key" in content["body"]
 
     @pytest.mark.asyncio
-    async def test_streaming_error_updates_message(self, tmp_path: Path) -> None:
+    async def test_streaming_error_updates_message(self) -> None:
         """Test that when streaming AI fails, the message is updated with the error."""
-        bot = _mock_bot(tmp_path)
+        bot = _mock_bot()
 
-        # Mock the _edit_message method to track what gets edited
-        edited_messages = []
-
-        async def mock_edit_message(
-            room_id: str,  # noqa: ARG001
-            event_id: str,
-            text: str,
-            thread_id: str | None,  # noqa: ARG001
-            extra_content: object | None = None,  # noqa: ARG001
-        ) -> None:
-            edited_messages.append((event_id, text))
-
-        bot._edit_message = mock_edit_message
-
-        # Mock stream_agent_response to yield an error message
-        with patch("mindroom.response_runner.stream_agent_response") as mock_stream:
-
-            async def error_stream() -> AsyncIterator[str]:
-                yield "[test_agent] 🔴 Rate limited. Please wait before trying again."
-
-            mock_stream.return_value = error_stream()
-
-            _build_response_runner(bot)
-            error_text = "[test_agent] 🔴 Rate limited. Please wait before trying again."
-            with patch(
+        error_text = "[test_agent] 🔴 Rate limited. Please wait before trying again."
+        edited_messages: list[tuple[str, dict[str, object]]] = []
+        with (
+            patch(
+                "mindroom.response_runner.stream_agent_response",
+                new=streamed_answer(AsyncMock(return_value=error_text)),
+            ),
+            patch("mindroom.delivery_gateway.send_message_outcome", new=_record_reply_edits(edited_messages)),
+            patch(
                 "mindroom.delivery_gateway.DeliveryGateway.deliver_stream",
-                new=AsyncMock(
-                    return_value=StreamTransportOutcome(
-                        last_physical_stream_event_id="$msg_id",
-                        terminal_status="completed",
-                        rendered_body=error_text,
-                        visible_body_state="visible_body",
-                    ),
-                ),
-            ) as mock_deliver_stream:
-                # Call the method with an existing_event_id
-                await bot._response_runner._process_and_respond_streaming(
-                    _response_request(existing_event_id="$thinking_msg"),
-                )
+                new=AsyncMock(return_value=stream_transport("$thinking_1", error_text)),
+            ) as mock_deliver_stream,
+        ):
+            _build_response_runner(bot)
+            await _respond(bot, _response_request(), streaming=True)
 
-                # Verify the delivery gateway was asked to stream the response.
-                mock_deliver_stream.assert_awaited_once()
+        # Verify the delivery gateway was asked to stream the response into the thinking message.
+        mock_deliver_stream.assert_awaited_once()
+        assert mock_deliver_stream.await_args.args[0].existing_event_id == "$thinking_1"
 
     @pytest.mark.asyncio
-    async def test_cancellation_shows_cancelled_message(self, tmp_path: Path) -> None:
+    async def test_cancellation_shows_cancelled_message(self) -> None:
         """Test that when a response is cancelled, it shows a cancellation message."""
-        bot = _mock_bot(tmp_path)
+        bot = _mock_bot()
         edited_messages: list[tuple[str, dict[str, object]]] = []
 
         # Mock ai_response to raise a generic interruption.
         with (
-            patch("mindroom.response_runner.ai_response") as mock_ai,
+            patch(
+                "mindroom.response_runner.stream_agent_response",
+                new=streamed_answer(AsyncMock(side_effect=asyncio.CancelledError())),
+            ),
             patch("mindroom.delivery_gateway.send_message_outcome", new=_record_reply_edits(edited_messages)),
         ):
             _build_response_runner(bot)
-            mock_ai.side_effect = asyncio.CancelledError()
-
-            await _respond_in_span(
-                bot,
-                _response_request(existing_event_id="$thinking_msg"),
-                placeholder_event_id="$thinking_msg",
-            )
+            await _respond(bot, _response_request())
 
             # Verify the thinking message was edited with the generic interruption message.
             assert len(edited_messages) == 1
             event_id, content = edited_messages[0]
-            assert event_id == "$thinking_msg"
+            assert event_id == "$thinking_1"
             assert content["body"] == _INTERRUPTED_RESPONSE_NOTE
 
     @pytest.mark.asyncio
-    async def test_user_stop_reports_a_user_stop_outcome(self, tmp_path: Path) -> None:
+    async def test_user_stop_reports_a_user_stop_outcome(self) -> None:
         """Explicit stop-button cancellations should keep the user-stop outcome its reply's note shows."""
-        bot = _mock_bot(tmp_path)
+        bot = _mock_bot()
 
-        with (
-            patch("mindroom.response_runner.ai_response") as mock_ai,
+        unique_room_send_responses(bot.client)
+        with patch(
+            "mindroom.response_runner.stream_agent_response",
+            new=streamed_answer(AsyncMock(side_effect=asyncio.CancelledError(USER_STOP_CANCEL_MSG))),
         ):
             _build_response_runner(bot)
-            mock_ai.side_effect = asyncio.CancelledError(USER_STOP_CANCEL_MSG)
+            outcome = await _respond(bot, _response_request())
 
-            runner = unwrap_extracted_collaborator(bot._response_runner)
-            async with _claimed_reply_span(runner, _response_request()) as request:
-                outcome = await runner._process_and_respond(request)
-
-        assert outcome.delivery.terminal_status == "cancelled"
-        assert outcome.delivery.failure_reason == "cancelled_by_user"
+        assert outcome.ending == Cancelled("user_stop")
 
     @pytest.mark.asyncio
-    async def test_cancelled_run_status_preserves_user_stop_outcome(self, tmp_path: Path) -> None:
-        """Legacy non-streaming RunStatus.cancelled should keep the user-stop outcome its reply's note shows."""
-        bot = _mock_bot(tmp_path)
-        bot.config.agents["test_agent"].show_tool_calls = False
+    @pytest.mark.parametrize("show_tool_calls", [False, True])
+    async def test_a_user_stop_mid_run_keeps_the_user_stop_outcome(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        show_tool_calls: bool,
+    ) -> None:
+        """A stop the user asks for while the model streams ends the blocking reply as stopped by the user."""
+        bot = _mock_bot()
+        unique_room_send_responses(bot.client)
+        bot.config.agents["test_agent"].show_tool_calls = show_tool_calls
+        model = ScriptedModel([[TextDelta("Partial answer"), stop_turn("user_stop")]])
+        install_model_providers(monkeypatch, {"default": model})
+        _build_response_runner(bot)
 
-        mock_agent = MagicMock()
-        mock_agent.model = MagicMock()
-        mock_agent.model.id = "test-model"
-        mock_agent.add_history_to_context = False
+        outcome = await _respond(bot, _response_request())
 
-        async def fake_cached_run(*_args: object, **_kwargs: object) -> RunOutput:
-            current_task = asyncio.current_task()
-            assert current_task is not None
-            request_task_cancel(current_task, cancel_source="user_stop")
-            return RunOutput(
-                run_id="run-1",
-                agent_id="test_agent",
-                session_id="session-1",
-                content="Run run-1 was cancelled",
-                messages=[Message(role="assistant", content="Run run-1 was cancelled")],
-                status=RunStatus.cancelled,
-            )
-
-        with (
-            patch(
-                "mindroom.ai.open_resolved_scope_session_context",
-                new=lambda **_kwargs: nullcontext(_empty_scope_context()),
-            ),
-            patch("mindroom.ai._prepare_agent_and_prompt", new=AsyncMock(return_value=_prepared_run(mock_agent))),
-            patch("mindroom.ai.ai_runtime.cached_agent_run", new=AsyncMock(side_effect=fake_cached_run)),
-        ):
-            _build_response_runner(bot)
-
-            runner = unwrap_extracted_collaborator(bot._response_runner)
-            async with _claimed_reply_span(runner, _response_request()) as request:
-                outcome = await runner._process_and_respond(request)
-
-        assert outcome.delivery.terminal_status == "cancelled"
-        assert outcome.delivery.failure_reason == "cancelled_by_user"
+        assert outcome.ending == Cancelled("user_stop")
 
     @pytest.mark.asyncio
-    async def test_collected_stream_cancelled_event_preserves_user_stop_outcome(self, tmp_path: Path) -> None:
-        """Collected non-streaming RunCancelledEvent should keep the user-stop outcome its reply's note shows."""
-        bot = _mock_bot(tmp_path)
-        bot.config.agents["test_agent"].show_tool_calls = True
+    async def test_a_user_stop_mid_stream_keeps_the_streamed_text_and_the_user_stop_outcome(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A stop the user asks for mid-stream keeps the text streamed so far and ends as stopped by the user."""
+        bot = _mock_bot()
+        unique_room_send_responses(bot.client)
+        model = ScriptedModel([[TextDelta("Partial answer"), stop_turn("user_stop")]])
+        install_model_providers(monkeypatch, {"default": model})
+        _build_response_runner(bot)
 
-        mock_agent = MagicMock()
-        mock_agent.model = MagicMock()
-        mock_agent.model.id = "test-model"
-        mock_agent.name = "Test Agent"
-        mock_agent.add_history_to_context = False
+        outcome = await _respond(bot, _response_request(), streaming=True)
 
-        async def fake_arun_stream(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
-            yield RunContentEvent(content="Partial answer")
-            current_task = asyncio.current_task()
-            assert current_task is not None
-            request_task_cancel(current_task, cancel_source="user_stop")
-            yield RunCancelledEvent(
-                run_id="run-2",
-                session_id="session-1",
-                reason="Run run-2 was cancelled",
-            )
-
-        with (
-            patch(
-                "mindroom.ai.open_resolved_scope_session_context",
-                new=lambda **_kwargs: nullcontext(_empty_scope_context()),
-            ),
-            patch("mindroom.ai._prepare_agent_and_prompt", new=AsyncMock(return_value=_prepared_run(mock_agent))),
-        ):
-            _build_response_runner(bot)
-            mock_agent.arun = MagicMock(return_value=fake_arun_stream())
-
-            runner = unwrap_extracted_collaborator(bot._response_runner)
-            async with _claimed_reply_span(runner, _response_request()) as request:
-                outcome = await runner._process_and_respond(request)
-
-        assert outcome.delivery.terminal_status == "cancelled"
-        assert outcome.delivery.failure_reason == "cancelled_by_user"
+        # The stopped stream's message keeps what it showed, with the interruption noted below it.
+        final_content = bot.client.room_send.await_args.kwargs["content"]["m.new_content"]
+        assert final_content["body"] == f"Partial answer\n\n{_INTERRUPTED_RESPONSE_NOTE}"
+        assert outcome.ending == Cancelled("user_stop")
 
     @pytest.mark.asyncio
-    async def test_run_cancelled_event_preserves_user_stop_outcome_in_streaming(self, tmp_path: Path) -> None:
-        """A streamed RunCancelledEvent should keep the user-stop outcome its reply's note shows."""
-        bot = _mock_bot(tmp_path)
-
-        mock_agent = MagicMock()
-        mock_agent.model = MagicMock()
-        mock_agent.model.id = "test-model"
-        mock_agent.name = "Test Agent"
-        mock_agent.add_history_to_context = False
-
-        async def fake_arun_stream(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
-            yield RunContentEvent(content="Partial answer")
-            current_task = asyncio.current_task()
-            assert current_task is not None
-            request_task_cancel(current_task, cancel_source="user_stop")
-            yield RunCancelledEvent(
-                run_id="run-2",
-                session_id="session-1",
-                reason="Run run-2 was cancelled",
-            )
-
-        with (
-            patch(
-                "mindroom.ai.open_resolved_scope_session_context",
-                new=lambda **_kwargs: nullcontext(_empty_scope_context()),
-            ),
-            patch("mindroom.ai._prepare_agent_and_prompt", new=AsyncMock(return_value=_prepared_run(mock_agent))),
-        ):
-            _build_response_runner(bot)
-            mock_agent.arun = MagicMock(return_value=fake_arun_stream())
-
-            runner = unwrap_extracted_collaborator(bot._response_runner)
-            async with _claimed_reply_span(runner, _response_request()) as request:
-                outcome = await runner._process_and_respond_streaming(request)
-
-        assert bot.client.room_send.await_args.kwargs["content"]["body"] == "Partial answer"
-        assert outcome.delivery.terminal_status == "cancelled"
-        assert outcome.delivery.failure_reason == "cancelled_by_user"
-
-    @pytest.mark.asyncio
-    async def test_various_error_messages_are_user_friendly(self, tmp_path: Path) -> None:
+    async def test_various_error_messages_are_user_friendly(self) -> None:
         """Test that various error types result in user-friendly messages."""
-        bot = _mock_bot(tmp_path)
+        bot = _mock_bot()
 
-        edited_messages = []
+        edited_messages: list[tuple[str, dict[str, object]]] = []
+        # One homeserver for every turn, so each placeholder is its own event.
+        send_message_outcome = _record_reply_edits(edited_messages)
 
-        async def mock_gateway_edit_message(
-            client: object,  # noqa: ARG001
-            room_id: str,  # noqa: ARG001
-            envelope: dict[str, object],
-            **_kwargs: object,
-        ) -> DeliveredMatrixEvent:
-            # The outbox sends the finished replace event, so the edit target
-            # and its text come out of the envelope, not off the call.
-            body = envelope["m.new_content"]["body"]
-            edited_messages.append(body)
-            return DeliveredMatrixEvent(event_id="$edit", content_sent=envelope)
-
-        error_messages = [
-            "[test_agent] 🔴 Authentication failed. Please check your API key configuration.",
-            "[test_agent] 🔴 Rate limited. Please wait before trying again.",
-            "[test_agent] 🔴 Request timed out. Please try again.",
-            "[test_agent] 🔴 Service temporarily unavailable. Please try again later.",
-            "[test_agent] 🔴 Error: Invalid model specified. Please check your configuration.",
+        error_cases = [
+            ("[test_agent] 🔴 Authentication failed. Please check your API key configuration.", "Authentication"),
+            ("[test_agent] 🔴 Rate limited. Please wait before trying again.", "Rate limited"),
+            ("[test_agent] 🔴 Request timed out. Please try again.", "timed out"),
+            ("[test_agent] 🔴 Service temporarily unavailable. Please try again later.", "unavailable"),
+            ("[test_agent] 🔴 Error: Invalid model specified. Please check your configuration.", "Invalid model"),
         ]
 
-        for error_msg in error_messages:
+        for index, (error_msg, expected_fragment) in enumerate(error_cases):
             edited_messages.clear()
 
             with (
-                patch("mindroom.response_runner.ai_response") as mock_ai,
                 patch(
-                    "mindroom.delivery_gateway.send_message_outcome",
-                    new=AsyncMock(side_effect=mock_gateway_edit_message),
+                    "mindroom.response_runner.stream_agent_response",
+                    new=streamed_answer(AsyncMock(return_value=error_msg)),
                 ),
+                patch("mindroom.delivery_gateway.send_message_outcome", new=send_message_outcome),
             ):
                 _build_response_runner(bot)
-                mock_ai.return_value = error_msg
-
                 # Each iteration is a separate turn, so it needs a separate
                 # causing event. Sharing one would make the outbox treat the
                 # later answers as resends of the first and replay it.
-                index = error_messages.index(error_msg)
-                await _respond_in_span(
+                await _respond(
                     bot,
-                    _response_request(
-                        prompt="Help me",
-                        reply_to_event_id=f"$user_msg_{index}",
-                        existing_event_id=f"$thinking_{index}",
-                    ),
-                    placeholder_event_id=f"$thinking_{index}",
+                    _response_request(prompt="Help me", reply_to_event_id=f"$user_msg_{index}"),
                 )
 
                 assert len(edited_messages) == 1
-                displayed_msg = edited_messages[0]
-
-                if "Authentication" in error_msg:
-                    assert "Authentication" in displayed_msg
-                elif "Rate limited" in error_msg:
-                    assert "Rate limited" in displayed_msg
-                elif "timed out" in error_msg:
-                    assert "timed out" in displayed_msg
-                elif "unavailable" in error_msg:
-                    assert "unavailable" in displayed_msg
-                elif "Invalid model" in error_msg:
-                    assert "Invalid model" in displayed_msg
+                assert expected_fragment in str(edited_messages[0][1]["body"])
 
     @pytest.mark.asyncio
     async def test_non_streaming_sync_restart_edits_thinking_message_with_restart_status(
         self,
-        tmp_path: Path,
     ) -> None:
         """Sync restarts should not render as user-initiated cancellation."""
-        bot = _mock_bot(tmp_path)
+        bot = _mock_bot()
 
         edited_messages: list[tuple[str, dict[str, object]]] = []
 
         with (
-            patch("mindroom.response_runner.ai_response") as mock_ai,
+            patch(
+                "mindroom.response_runner.stream_agent_response",
+                new=streamed_answer(AsyncMock(side_effect=asyncio.CancelledError(SYNC_RESTART_CANCEL_MSG))),
+            ),
             patch("mindroom.delivery_gateway.send_message_outcome", new=_record_reply_edits(edited_messages)),
         ):
             _build_response_runner(bot)
-            mock_ai.side_effect = asyncio.CancelledError(SYNC_RESTART_CANCEL_MSG)
-
-            await _respond_in_span(
-                bot,
-                _response_request(existing_event_id="$thinking_msg"),
-                placeholder_event_id="$thinking_msg",
-            )
+            await _respond(bot, _response_request())
 
         assert len(edited_messages) == 1
         event_id, content = edited_messages[0]
-        assert event_id == "$thinking_msg"
+        assert event_id == "$thinking_1"
         assert content["body"] == build_restart_interrupted_body("")
         assert content[STREAM_STATUS_KEY] == STREAM_STATUS_ERROR
 
     @pytest.mark.asyncio
-    async def test_unavailable_knowledge_falls_back_to_response_without_knowledge(self, tmp_path: Path) -> None:
+    async def test_unavailable_knowledge_falls_back_to_response_without_knowledge(self) -> None:
         """Matrix reply paths should continue when no published knowledge is available."""
-        bot = _mock_bot(tmp_path)
-        bot._knowledge_access_support = _knowledge_access_support()
+        bot = _mock_bot()
 
+        mock_ai = AsyncMock(return_value="Response without knowledge")
         with (
-            patch("mindroom.response_runner.ai_response", new_callable=AsyncMock) as mock_ai,
+            patch("mindroom.response_runner.stream_agent_response", new=streamed_answer(mock_ai)),
             patch(
                 "mindroom.delivery_gateway.send_message_outcome",
                 new=AsyncMock(
@@ -594,10 +395,61 @@ class TestAIErrorDisplay:
             ),
         ):
             _build_response_runner(bot)
-            mock_ai.return_value = "Response without knowledge"
+            outcome = await _respond(bot, _response_request())
 
-            generation = await _respond_in_span(bot, _response_request())
-
-        assert generation.delivery.event_id == "$response_id"
-        assert mock_ai.call_args.kwargs["knowledge"] is None
+        assert outcome.event_id == "$response_id"
+        assert mock_ai.call_args.args[0].knowledge is None
         bot.logger.exception.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("case", ["normal", "gated_skip", "start_failure", "prep_failure"])
+    async def test_failed_streaming_turn_logs_one_error_with_traceback(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        case: str,
+    ) -> None:
+        """Every streaming failure path logs exactly one ERROR record and preserves the traceback."""
+        bot = _mock_bot()
+        unique_room_send_responses(bot.client)
+        err = RateLimited("rate limited", provider="OpenRouter")
+        install_model_providers(monkeypatch, {"default": ScriptedModel([[err]])})
+        _build_response_runner(bot)
+        request = _response_request()
+        if case == "gated_skip":
+            monkeypatch.setattr(
+                "mindroom.response_runner._participation_for_request",
+                lambda *_args, **_kwargs: ParticipationGate(),
+            )
+            monkeypatch.setattr("mindroom.ai._start_agent_run", MagicMock(side_effect=err))
+        if case == "start_failure":
+            monkeypatch.setattr("mindroom.ai._start_agent_run", MagicMock(side_effect=RuntimeError("start boom")))
+        if case == "prep_failure":
+            monkeypatch.setattr(
+                "mindroom.ai._prepare_agent_run_context",
+                AsyncMock(side_effect=RuntimeError("prep boom")),
+            )
+
+        with capture_logs() as logs:
+            await _respond(bot, request, streaming=True)
+
+        error_logs = [entry for entry in logs if entry["log_level"] == "error"]
+        if case == "gated_skip":
+            assert [entry["event"] for entry in error_logs] == [
+                "Streaming AI response failed before participation decision",
+            ]
+            assert error_logs[0].get("exc_info") is err
+        else:
+            assert [entry["event"] for entry in error_logs] == ["agent_error"]
+            expected_warning = {
+                "normal": "Error during streaming AI response",
+                "start_failure": "Error starting streaming AI response",
+                "prep_failure": "Error preparing agent",
+            }[case]
+            warnings = [entry for entry in logs if entry["event"] == expected_warning]
+            assert len(warnings) == 1
+            assert warnings[0]["log_level"] == "warning"
+            assert warnings[0].get("exc_info") is True
+
+        with capture_logs() as non_streaming_logs:
+            get_user_friendly_error_message(RuntimeError("boom"), "test_agent")
+        assert [entry["event"] for entry in non_streaming_logs if entry["log_level"] == "error"] == ["agent_error"]

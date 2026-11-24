@@ -8,15 +8,27 @@ from dataclasses import replace
 import pytest
 
 from mindroom.desktop.protocol import (
+    DESKTOP_DISCONNECT_CONFIRMED_EVENT_TYPE,
+    DESKTOP_DISCONNECT_REQUEST_EVENT_TYPE,
+    DESKTOP_PAIRING_CONFIRM_EVENT_TYPE,
+    DESKTOP_PAIRING_CONFIRMED_EVENT_TYPE,
+    DESKTOP_SETUP_OFFER_EVENT_TYPE,
+    DESKTOP_SETUP_REQUEST_EVENT_TYPE,
     MAX_COMMAND_TTL_MS,
     MAX_SHELL_OUTPUT_BYTES,
     SHELL_OUTPUT_MIME_TYPE,
     DesktopCommand,
+    DesktopDisconnectConfirmed,
+    DesktopDisconnectRequest,
     DesktopPairingAccepted,
     DesktopPairingClaim,
+    DesktopPairingConfirm,
+    DesktopPairingConfirmed,
     DesktopProtocolError,
     DesktopResponse,
     DesktopSetupDescriptor,
+    DesktopSetupOffer,
+    DesktopSetupRequest,
     EncryptedDesktopMedia,
     desktop_pairing_verification,
 )
@@ -284,3 +296,124 @@ def test_response_content_bytes_match_the_olm_plaintext_serializer() -> None:
     expected = len(json.dumps(response.to_content(), separators=(",", ":")).encode())
     assert response.content_bytes() == expected
     assert expected > len(json.dumps(response.to_content(), ensure_ascii=False, separators=(",", ":")).encode())
+
+
+def test_olm_setup_and_disconnect_requests_round_trip_and_validate() -> None:
+    """Olm setup and disconnect requests enforce version 1, bounded nonces, and agent names."""
+    assert DESKTOP_SETUP_REQUEST_EVENT_TYPE == "io.mindroom.desktop.setup_request.v1"
+    assert DESKTOP_DISCONNECT_REQUEST_EVENT_TYPE == "io.mindroom.desktop.disconnect_request.v1"
+    nonce = "nonce-0123456789"
+    for cls in (DesktopSetupRequest, DesktopDisconnectRequest):
+        req = cls(nonce=nonce, agent_name="computer")
+        content = req.to_content()
+        assert content == {"v": 1, "nonce": nonce, "agent_name": "computer"}
+        assert cls.from_content(content) == req
+        for change in (
+            {"v": 2},
+            {"v": True},
+            {"nonce": "short"},
+            {"nonce": " " * 20},
+            {"nonce": "x" * 129},
+            {"nonce": 123},
+            {"agent_name": "   "},
+            {"agent_name": "a" * 129},
+            {"agent_name": None},
+        ):
+            with pytest.raises(DesktopProtocolError):
+                cls.from_content({**content, **change})
+
+
+def test_olm_setup_offer_round_trips_and_enforces_eligibility_invariants() -> None:
+    """Setup offers strictly separate eligible pairing codes from ineligible error replies."""
+    assert DESKTOP_SETUP_OFFER_EVENT_TYPE == "io.mindroom.desktop.setup_offer.v1"
+    nonce = "nonce-0123456789"
+    eligible = DesktopSetupOffer(
+        nonce=nonce,
+        agent_name="computer",
+        eligible=True,
+        homeserver="https://matrix.example.org",
+        user_id="@alice:example.org",
+        code="short-lived-code",
+        cloudflare_access=True,
+    )
+    content = eligible.to_content()
+    assert content["v"] == 1
+    assert DesktopSetupOffer.from_content(content) == eligible
+    assert DesktopSetupOffer.from_content({**content, "homeserver": "http://localhost:8008"}).homeserver == (
+        "http://localhost:8008"
+    )
+
+    ineligible = DesktopSetupOffer(
+        nonce=nonce,
+        agent_name="computer",
+        eligible=False,
+        error="Desktop pairing is disabled.",
+    )
+    ineligible_content = ineligible.to_content()
+    assert ineligible_content["v"] == 1
+    assert DesktopSetupOffer.from_content(ineligible_content) == ineligible
+
+    for payload in (
+        {**content, "v": 2},
+        {**content, "nonce": "too-short"},
+        {**content, "eligible": "true"},
+        {**content, "cloudflare_access": "false"},
+        {**content, "error": "should not be present"},
+        {**content, "code": None},
+        {**content, "user_id": None},
+        {**content, "homeserver": "http://matrix.example.org"},
+        {**content, "homeserver": "https://matrix.example.org@evil.example"},
+        {**ineligible_content, "error": None},
+        {**ineligible_content, "error": "   "},
+        {**ineligible_content, "code": "leaked-code"},
+    ):
+        with pytest.raises(DesktopProtocolError):
+            DesktopSetupOffer.from_content(payload)
+
+
+def test_olm_pairing_confirm_and_status_responses_round_trip_and_validate() -> None:
+    """Confirmation requests and ok/error status replies enforce version 1 and strict invariants."""
+    assert DESKTOP_PAIRING_CONFIRM_EVENT_TYPE == "io.mindroom.desktop.pairing_confirm.v1"
+    assert DESKTOP_PAIRING_CONFIRMED_EVENT_TYPE == "io.mindroom.desktop.pairing_confirmed.v1"
+    assert DESKTOP_DISCONNECT_CONFIRMED_EVENT_TYPE == "io.mindroom.desktop.disconnect_confirmed.v1"
+    nonce = "nonce-0123456789"
+    code = "pair-code"
+    confirm = DesktopPairingConfirm(
+        nonce=nonce,
+        token=code,
+        verification="ABCDEF0123456789",
+        device_id="HELPER1",
+        device_ed25519="helper-key",
+    )
+    confirm_content = confirm.to_content()
+    assert confirm_content["v"] == 1
+    assert DesktopPairingConfirm.from_content(confirm_content) == confirm
+    for change in (
+        {"v": 2},
+        {"nonce": "   "},
+        {"token": ""},
+        {"token": "t" * 257},
+        {"verification": "v" * 65},
+        {"device_id": "d" * 257},
+        {"device_ed25519": "k" * 257},
+    ):
+        with pytest.raises(DesktopProtocolError):
+            DesktopPairingConfirm.from_content({**confirm_content, **change})
+
+    for cls in (DesktopPairingConfirmed, DesktopDisconnectConfirmed):
+        ok_reply = cls(nonce=nonce, agent_name="computer", ok=True)
+        err_reply = cls(nonce=nonce, agent_name="computer", ok=False, error="rejected")
+        assert ok_reply.to_content()["v"] == 1
+        assert cls.from_content(ok_reply.to_content()) == ok_reply
+        assert cls.from_content(err_reply.to_content()) == err_reply
+        for bad in (
+            {**ok_reply.to_content(), "v": 2},
+            {**ok_reply.to_content(), "ok": "true"},
+            {**ok_reply.to_content(), "error": "unexpected"},
+            {**err_reply.to_content(), "error": None},
+            {**err_reply.to_content(), "error": "   "},
+            {**err_reply.to_content(), "nonce": "short"},
+            {**err_reply.to_content(), "agent_name": "a" * 129},
+        ):
+            with pytest.raises(DesktopProtocolError):
+                cls.from_content(bad)

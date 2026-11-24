@@ -8,8 +8,18 @@ import {
   within,
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import {
+  credentialService,
+  expectNoAction,
+  oauthStatus,
+  pressInDialog,
+} from "@/test/egressServiceTestKit";
 import { Connections } from "./Connections";
-import type { ConnectionService } from "./types";
+import type {
+  AgentConnections,
+  ConnectionService,
+  EgressCredentialService,
+} from "./types";
 
 const service: ConnectionService = {
   icon: null,
@@ -19,6 +29,7 @@ const service: ConnectionService = {
   display_name: "Mail",
   description: "Read your email.",
   tools: ["mail"],
+  consent_group: null,
 };
 const status = {
   provider: "mail",
@@ -26,6 +37,7 @@ const status = {
   can_connect: true,
   reset_required: false,
   account_label: null,
+  service_account: false,
 };
 const json = (value: unknown, code = 200) =>
   new Response(JSON.stringify(value), { status: code });
@@ -36,6 +48,7 @@ const catalog = (services: (typeof service)[]) => ({
       agent_name: "personal",
       agent_display_name: "Personal assistant",
       is_shared: false,
+      managers: [],
       can_use: true,
       mcp_available: true,
       services,
@@ -45,7 +58,7 @@ const catalog = (services: (typeof service)[]) => ({
           display_name: item.display_name,
           description: item.description,
           provider: item.provider,
-          requires_room_context: false,
+          mcp_available: true,
           icon: item.icon,
         })),
       ),
@@ -85,10 +98,12 @@ it("shows shared connection availability without account controls for agent user
   render(<Connections />);
   await expandAgent();
   expect(
-    await screen.findByText("Shared connection configured"),
+    await screen.findByText(
+      "Connected · shared with everyone using Personal assistant",
+    ),
   ).toBeInTheDocument();
   expect(
-    screen.queryByRole("button", { name: "Disconnect Mail" }),
+    screen.queryByRole("button", { name: "Disconnect for Mail" }),
   ).not.toBeInTheDocument();
   expect(
     screen.queryByRole("button", { name: "Connect Mail" }),
@@ -119,6 +134,153 @@ it("keeps account management available without offering MCP access to management
   expect(screen.getByText("Credential management only")).toBeInTheDocument();
 });
 
+describe("brokered API keys on agent cards", () => {
+  const egressService = credentialService();
+
+  it("says how many of the agent's API keys and accounts are set and links to where they are set", async () => {
+    installEgress([
+      { ...egressService, configured: true, key_configured: true },
+      { ...egressService, name: "openai", display_name: "OpenAI" },
+      // A limit is neither a key nor an account.
+      { ...egressService, name: "github-limited", restrict_only: true },
+    ]);
+    render(<Connections />);
+    await expandAgent();
+
+    expect(
+      await screen.findByRole("heading", { name: "API keys and accounts" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("1 of 2 set")).toBeInTheDocument();
+    expect(
+      screen.getByRole("link", { name: "Manage services" }),
+    ).toHaveAttribute(
+      "href",
+      `/connections/egress#egress-agent-${catalog([service]).agents[0].agent_name}`,
+    );
+    // The keys are set on the Agent Keys page only.
+    expect(screen.queryByRole("row", { name: "GitHub" })).toBeNull();
+    await expectNoAction(/key for |Connect GitHub/);
+  });
+
+  it("shows no API key section for agents without egress services", async () => {
+    render(<Connections />);
+    await expandAgent();
+    await screen.findByRole("button", { name: "Connect Mail" });
+    expect(
+      screen.queryByRole("heading", { name: "API keys and accounts" }),
+    ).toBeNull();
+    expect(screen.queryByRole("link", { name: "Manage services" })).toBeNull();
+  });
+
+  it("shows no API key section when the agent's state sends null", async () => {
+    installEgress(null);
+    render(<Connections />);
+    await expandAgent();
+    await screen.findByRole("button", { name: "Connect Mail" });
+    expect(
+      screen.queryByRole("heading", { name: "API keys and accounts" }),
+    ).toBeNull();
+    expect(screen.queryByRole("link", { name: "Manage services" })).toBeNull();
+  });
+
+  it("links an eligible agent without services to the page where one can be added", async () => {
+    installEgress([]);
+    render(<Connections />);
+    await expandAgent();
+
+    expect(
+      await screen.findByRole("heading", { name: "API keys and accounts" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("link", { name: "Manage services" }),
+    ).toHaveAttribute(
+      "href",
+      `/connections/egress#egress-agent-${catalog([service]).agents[0].agent_name}`,
+    );
+    expect(screen.getByText("None")).toBeInTheDocument();
+  });
+
+  it("says View services instead of Manage services to someone who can change none of them", async () => {
+    installEgress([{ ...egressService, is_shared: true, can_manage: false }]);
+    render(<Connections />);
+    await expandAgent();
+
+    const link = await screen.findByRole("link", { name: "View services" });
+    expect(link).toHaveAttribute(
+      "href",
+      `/connections/egress#egress-agent-${catalog([service]).agents[0].agent_name}`,
+    );
+    expect(screen.queryByRole("link", { name: "Manage services" })).toBeNull();
+  });
+
+  it("keeps Manage services when the viewer can change at least one service", async () => {
+    installEgress([
+      { ...egressService, can_manage: false },
+      { ...egressService, name: "openai", display_name: "OpenAI" },
+    ]);
+    render(<Connections />);
+    await expandAgent();
+    expect(
+      await screen.findByRole("link", { name: "Manage services" }),
+    ).toBeVisible();
+    expect(screen.queryByRole("link", { name: "View services" })).toBeNull();
+  });
+
+  describe("one account in both sections", () => {
+    // The Mail tool and the Gmail key service use the same account.
+    let connected: boolean;
+    beforeEach(() => {
+      connected = true;
+      const disconnect = async () => {
+        connected = false;
+        return json({ status: "disconnected", provider: "mail" });
+      };
+      installApi({
+        "/api/connections": async () =>
+          json(
+            withEgress([
+              {
+                ...egressService,
+                name: "gmail",
+                display_name: "Gmail",
+                configured: connected,
+                active_source: connected ? "oauth" : null,
+                oauth: oauthStatus({
+                  provider: "mail",
+                  display_name: "Mail",
+                  connected,
+                  account_label: connected ? "user@example.com" : null,
+                }),
+              },
+            ]),
+          ),
+        "/api/connections/agents/personal/mail/status": async () =>
+          json({
+            ...status,
+            connected,
+            account_label: connected ? "user@example.com" : null,
+          }),
+        "/api/connections/agents/personal/mail/disconnect": disconnect,
+      });
+    });
+
+    it("updates the API key count after a disconnect in the tool section", async () => {
+      render(<Connections />);
+      await expandAgent();
+      expect(await screen.findByText("1 of 1 set")).toBeInTheDocument();
+      fireEvent.click(
+        await screen.findByRole("button", { name: "Disconnect for Mail" }),
+      );
+      await pressInDialog("Disconnect");
+
+      expect(await screen.findByText("0 of 1 set")).toBeInTheDocument();
+      // The change reloads the agent's state; the catalog itself is read once.
+      expect(requests("/api/connections/agents/personal/state")).toBe(2);
+      expect(requests("/api/connections")).toBe(1);
+    });
+  });
+});
+
 it("keeps agents that are not available through MCP out of the MCP selection", async () => {
   const data = catalog([{ ...service, is_shared: true, can_manage: false }]);
   data.agents[0].mcp_available = false;
@@ -132,7 +294,7 @@ it("keeps agents that are not available through MCP out of the MCP selection", a
   render(<Connections />);
   await expandAgent();
   expect(
-    await screen.findByText("Shared connection configured"),
+    await screen.findByText(/shared with everyone using Personal assistant/),
   ).toBeInTheDocument();
   expect(
     screen.queryAllByRole("checkbox", { name: /Expose .* through MCP/ }),
@@ -156,15 +318,71 @@ it("does not explain MCP availability while the gateway is disabled", async () =
   ).not.toBeInTheDocument();
 });
 
+/** The catalog of the personal agent, with these API key services. */
+const withEgress = (egress_services: unknown[] | null) => ({
+  agents: [{ ...catalog([service]).agents[0], egress_services }],
+});
+const installEgress = (egress_services: unknown[] | null) =>
+  installApi({
+    "/api/connections": async () => json(withEgress(egress_services)),
+  });
+
+type FixtureAgent = AgentConnections & {
+  services: (ConnectionService & { connected?: boolean })[];
+};
+
+/**
+ * A catalog fixture also spells out each agent's state, as the page shows it
+ * once merged: whether each service is `connected` and the agent's
+ * `egress_services`. The catalog route serves the fixture without them, and
+ * an agent's state route serves them, read from the fixture anew each time.
+ */
+async function fixtureRoute(response: Response, agentName?: string) {
+  const fixture = (await response
+    .clone()
+    .json()
+    .catch(() => null)) as { agents: FixtureAgent[] } | null;
+  if (!response.ok || !fixture) return response;
+  const { agents } = fixture;
+  if (agentName === undefined)
+    return json({
+      agents: agents.map(({ egress_services: _keys, ...agent }) => ({
+        ...agent,
+        services: agent.services.map(({ connected: _set, ...item }) => item),
+      })),
+    });
+  const agent = agents.find((item) => item.agent_name === agentName)!;
+  return json({
+    connected: Object.fromEntries(
+      agent.services.map((item) => [item.provider, item.connected ?? false]),
+    ),
+    egress_services: agent.egress_services ?? null,
+  });
+}
+
 function installApi(overrides: Record<string, () => Promise<Response>> = {}) {
+  const fixture =
+    overrides["/api/connections"] ?? (async () => json(catalog([service])));
   vi.mocked(fetch).mockImplementation(async (input, options) => {
     const path = String(input);
+    if (path === "/api/connections") return fixtureRoute(await fixture());
     if (overrides[path]) return overrides[path]();
-    if (path === "/api/connections") return json(catalog([service]));
+    const state = /^\/api\/connections\/agents\/([^/]+)\/state$/.exec(path);
+    if (state)
+      return fixtureRoute(await fixture(), decodeURIComponent(state[1]));
     if (path === "/api/connections/mcp/selection")
       return json({ enabled: false, agents: {} });
     if (path === "/api/connections/mcp/clients")
       return json({ enabled: false, clients: [] });
+    if (path === "/api/connections/me")
+      return json({
+        matrix_user_id: "@bob:example.org",
+        display_name: "Bob Builder",
+        email: null,
+        is_administrator: false,
+        egress_enabled: true,
+        dashboard_url: "/",
+      });
     if (path === "/api/connections/agents/personal/mail/status")
       return json(status);
     if (path.endsWith("/disconnect")) {
@@ -174,6 +392,11 @@ function installApi(overrides: Record<string, () => Promise<Response>> = {}) {
     throw new Error(`Unexpected request: ${path}`);
   });
 }
+
+/** How many times the page requested `path`. */
+const requests = (path: string) =>
+  vi.mocked(fetch).mock.calls.filter(([input]) => String(input) === path)
+    .length;
 
 async function expandAgent(name = "Personal assistant") {
   fireEvent.click(
@@ -281,9 +504,11 @@ describe("connections", () => {
     ).toEqual(
       [
         "/api/connections",
+        "/api/connections/agents/personal/state",
         "/api/connections/agents/personal/mail/status",
         "/api/connections/mcp/clients",
         "/api/connections/mcp/selection",
+        "/api/connections/me",
       ].sort(),
     );
   });
@@ -318,7 +543,7 @@ describe("connections", () => {
     render(<Connections />);
     await expandAgent();
     expect(
-      await screen.findByRole("button", { name: "Disconnect Calendar" }),
+      await screen.findByRole("button", { name: "Disconnect for Calendar" }),
     ).toBeEnabled();
     await act(async () =>
       finishMail(json({ detail: "Internal configuration details" }, 500)),
@@ -330,7 +555,7 @@ describe("connections", () => {
       screen.queryByText("Internal configuration details"),
     ).not.toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "Disconnect Calendar" }),
+      screen.getByRole("button", { name: "Disconnect for Calendar" }),
     ).toBeEnabled();
   });
 
@@ -371,7 +596,7 @@ describe("connections", () => {
     render(<Connections />);
     await expandAgent();
     fireEvent.click(
-      await screen.findByRole("button", { name: "Disconnect Mail" }),
+      await screen.findByRole("button", { name: "Disconnect for Mail" }),
     );
     expect(connected).toBe(true);
     const dialog = screen.getByRole("dialog");
@@ -395,7 +620,7 @@ describe("connections", () => {
     render(<Connections />);
     await expandAgent();
     fireEvent.click(
-      await screen.findByRole("button", { name: "Reset Mail connection" }),
+      await screen.findByRole("button", { name: "Reset connection for Mail" }),
     );
     fireEvent.click(
       within(screen.getByRole("dialog")).getByRole("button", {
@@ -414,6 +639,7 @@ describe("connections", () => {
         closed: false,
         close: vi.fn(),
         location: { href: "about:blank" },
+        document: document.implementation.createHTMLDocument(),
       };
       const open = vi
         .spyOn(window, "open")
@@ -453,7 +679,7 @@ describe("connections", () => {
             origin: window.location.origin,
             source: popup as unknown as Window,
             data: {
-              type: "mindroom:oauth-complete",
+              type: "mindroom-oauth",
               provider: "mail",
               status: "connected",
             },
@@ -461,10 +687,82 @@ describe("connections", () => {
         ),
       );
       expect(
-        await screen.findByRole("button", { name: "Disconnect Mail" }),
+        await screen.findByRole("button", { name: "Disconnect for Mail" }),
       ).toBeEnabled();
     },
   );
+
+  it.each([
+    [true, "Disconnect for Mail"],
+    [false, "Connect Mail"],
+  ])(
+    "reads the status once when the popup closes without answering, and treats connected=%s as the answer",
+    async (connectedAfter, expectedButton) => {
+      const popup = {
+        closed: false,
+        close: vi.fn(),
+        location: { href: "about:blank" },
+        document: document.implementation.createHTMLDocument(),
+      };
+      vi.spyOn(window, "open").mockReturnValue(popup as unknown as Window);
+      let connected = false;
+      let statusReads = 0;
+      installApi({
+        "/api/connections/agents/personal/mail/status": async () => {
+          statusReads += 1;
+          return json({ ...status, connected });
+        },
+        "/api/connections/agents/personal/mail/connect": async () =>
+          json({
+            provider: "mail",
+            auth_url: "https://auth.example.com/start",
+            completion_origin: window.location.origin,
+          }),
+      });
+      render(<Connections />);
+      await expandAgent();
+      fireEvent.click(
+        await screen.findByRole("button", { name: "Connect Mail" }),
+      );
+      await waitFor(() =>
+        expect(popup.location.href).toBe("https://auth.example.com/start"),
+      );
+      const readsBefore = statusReads;
+      connected = connectedAfter;
+      popup.closed = true;
+      if (!connectedAfter)
+        expect(await screen.findByRole("alert")).toHaveTextContent(
+          "Authorization was cancelled.",
+        );
+      expect(
+        await screen.findByRole("button", { name: expectedButton }),
+      ).toBeEnabled();
+      // One read to decide; a connection also reloads the portal's own status.
+      if (connectedAfter)
+        expect(statusReads - readsBefore).toBeGreaterThanOrEqual(1);
+      else expect(statusReads - readsBefore).toBe(1);
+    },
+  );
+
+  it("points an agent's toggle at its details only while they are shown", async () => {
+    installApi();
+    render(<Connections />);
+    const toggle = await screen.findByRole("button", {
+      name: "Expand Personal assistant",
+    });
+    expect(toggle).not.toHaveAttribute("aria-controls");
+    fireEvent.click(toggle);
+    const opened = screen.getByRole("button", {
+      name: "Collapse Personal assistant",
+    });
+    expect(
+      document.getElementById(opened.getAttribute("aria-controls") ?? ""),
+    ).not.toBeNull();
+    fireEvent.click(opened);
+    expect(
+      screen.getByRole("button", { name: "Expand Personal assistant" }),
+    ).not.toHaveAttribute("aria-controls");
+  });
 
   it("shows an empty state for no configured services", async () => {
     installApi({
@@ -501,7 +799,7 @@ describe("connections", () => {
     expect(screen.queryByText(/<html>/)).not.toBeInTheDocument();
   });
 
-  it("keeps an unavailable provider disabled", async () => {
+  it("keeps an unavailable provider disabled and says why", async () => {
     installApi({
       "/api/connections/agents/personal/mail/status": async () =>
         json({ ...status, can_connect: false }),
@@ -511,7 +809,24 @@ describe("connections", () => {
     expect(
       await screen.findByRole("button", { name: "Connect Mail" }),
     ).toBeDisabled();
-    expect(screen.getByText(/not ready to connect/i)).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "This service needs its OAuth client saved in the MindRoom dashboard before it can connect.",
+      ),
+    ).toBeInTheDocument();
+    cleanup();
+
+    installApi({
+      "/api/connections/agents/personal/mail/status": async () =>
+        json({ ...status, can_connect: false, service_account: true }),
+    });
+    render(<Connections />);
+    await expandAgent();
+    expect(
+      await screen.findByText(
+        "This service uses a shared service account, so there is no account to connect here.",
+      ),
+    ).toBeInTheDocument();
   });
 
   it("closes an in-flight popup when the portal unmounts", async () => {
@@ -519,6 +834,7 @@ describe("connections", () => {
       closed: false,
       close: vi.fn(),
       location: { href: "about:blank" },
+      document: document.implementation.createHTMLDocument(),
     };
     vi.spyOn(window, "open").mockReturnValue(popup as unknown as Window);
     installApi({
@@ -532,6 +848,79 @@ describe("connections", () => {
     );
     unmount();
     await waitFor(() => expect(popup.close).toHaveBeenCalledOnce());
+  });
+
+  it("connects an agent's unconnected Google services with one sign-in and drops the button once they are connected", async () => {
+    const popup = {
+      closed: false,
+      close: vi.fn(),
+      location: { href: "about:blank" },
+      document: document.implementation.createHTMLDocument(),
+    };
+    vi.spyOn(window, "open").mockReturnValue(popup as unknown as Window);
+    const google = (provider: string, display_name: string) => ({
+      ...service,
+      provider,
+      display_name,
+      tools: [provider],
+      consent_group: { key: "google", display_name: "Google" },
+    });
+    let connected = false;
+    const groupStatus = (provider: string) => async () =>
+      json({ ...status, provider, connected });
+    installApi({
+      "/api/connections": async () =>
+        json(
+          catalog([
+            google("google_drive", "Google Drive"),
+            google("google_sheets", "Google Sheets"),
+          ]),
+        ),
+      "/api/connections/agents/personal/google_drive/status":
+        groupStatus("google_drive"),
+      "/api/connections/agents/personal/google_sheets/status":
+        groupStatus("google_sheets"),
+      "/api/connections/agents/personal/consent-groups/google/connect":
+        async () =>
+          json({
+            provider: "google_drive",
+            auth_url: "https://auth.example.com/start",
+            completion_origin: window.location.origin,
+          }),
+    });
+    render(<Connections />);
+    await expandAgent();
+    expect(
+      await screen.findByText("2 Google services are not connected."),
+    ).toBeVisible();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Connect all Google services" }),
+    );
+    await waitFor(() =>
+      expect(popup.location.href).toBe("https://auth.example.com/start"),
+    );
+    connected = true;
+    act(() =>
+      window.dispatchEvent(
+        new MessageEvent("message", {
+          origin: window.location.origin,
+          source: popup as unknown as Window,
+          data: {
+            type: "mindroom-oauth",
+            provider: "google_drive",
+            status: "connected",
+          },
+        }),
+      ),
+    );
+    expect(
+      await screen.findByRole("button", {
+        name: "Disconnect for Google Sheets",
+      }),
+    ).toBeEnabled();
+    expect(
+      screen.queryByRole("button", { name: /Connect all/ }),
+    ).not.toBeInTheDocument();
   });
 });
 
@@ -548,6 +937,7 @@ describe("shared agent connections", () => {
               agent_name: "research",
               agent_display_name: "Research Team",
               is_shared: true,
+              managers: [],
               tools: catalog([service]).agents[0].tools,
               services: [service],
             },
@@ -568,10 +958,14 @@ describe("shared agent connections", () => {
     });
     const shared = await screen.findByRole("region", { name: "Research Team" });
     expect(
-      await within(personal).findByRole("button", { name: "Disconnect Mail" }),
+      await within(personal).findByRole("button", {
+        name: "Disconnect for Mail",
+      }),
     ).toBeEnabled();
     fireEvent.click(
-      await within(shared).findByRole("button", { name: "Disconnect Mail" }),
+      await within(shared).findByRole("button", {
+        name: "Disconnect for Mail",
+      }),
     );
     fireEvent.click(
       within(screen.getByRole("dialog")).getByRole("button", {
@@ -595,6 +989,7 @@ describe("shared agent connections", () => {
               agent_name: "research",
               agent_display_name: "Research Team",
               is_shared: true,
+              managers: [],
               tools: catalog([service]).agents[0].tools,
               services: [service],
             },
@@ -623,6 +1018,7 @@ describe("shared agent connections", () => {
               agent_name: "research",
               agent_display_name: "Research Team",
               is_shared: true,
+              managers: [],
               tools: catalog([service]).agents[0].tools,
               services: [{ ...service, is_shared: true }],
             },
@@ -655,11 +1051,14 @@ describe("shared agent connections", () => {
         .closest("tr"),
     ).toHaveTextContent("Shared");
     fireEvent.click(
-      await within(shared).findByRole("button", { name: "Disconnect Mail" }),
+      await within(shared).findByRole("button", {
+        name: "Disconnect for Mail",
+      }),
     );
     const dialog = screen.getByRole("dialog");
-    expect(dialog).toHaveTextContent("Research Team");
-    expect(dialog).toHaveTextContent(/anyone using this connection/i);
+    expect(dialog).toHaveTextContent(
+      "This removes the saved Mail connection for Research Team.",
+    );
     fireEvent.click(within(dialog).getByRole("button", { name: "Disconnect" }));
     expect(
       await within(shared).findByRole("button", { name: "Connect Mail" }),
@@ -671,7 +1070,7 @@ describe("shared agent connections", () => {
   });
 });
 
-it("describes a requester-only connection on a shared agent as personal", async () => {
+it("does not call a requester-only connection on a shared agent shared", async () => {
   installApi({
     "/api/connections": async () =>
       json({
@@ -680,6 +1079,7 @@ it("describes a requester-only connection on a shared agent as personal", async 
             agent_name: "research",
             agent_display_name: "Research Team",
             is_shared: true,
+            managers: [],
             tools: catalog([service]).agents[0].tools,
             services: [service],
           },
@@ -691,11 +1091,13 @@ it("describes a requester-only connection on a shared agent as personal", async 
   render(<Connections />);
   await expandAgent("Research Team");
   fireEvent.click(
-    await screen.findByRole("button", { name: "Disconnect Mail" }),
+    await screen.findByRole("button", { name: "Disconnect for Mail" }),
   );
   const dialog = screen.getByRole("dialog");
-  expect(dialog).toHaveTextContent(/your saved connection/i);
-  expect(dialog).not.toHaveTextContent(/anyone using this connection/i);
+  expect(dialog).toHaveTextContent(
+    "This removes the saved Mail connection for Research Team.",
+  );
+  expect(screen.queryByText(/shared with everyone/i)).toBeNull();
 });
 
 describe("MCP agent selection", () => {
@@ -712,7 +1114,7 @@ describe("MCP agent selection", () => {
             description: "Calculate numbers.",
             provider: null,
             icon: null,
-            requires_room_context: false,
+            mcp_available: true,
           },
           {
             name: "matrix_message",
@@ -720,7 +1122,7 @@ describe("MCP agent selection", () => {
             description: "Send room messages.",
             provider: null,
             icon: null,
-            requires_room_context: true,
+            mcp_available: false,
           },
         ],
       },
@@ -728,6 +1130,7 @@ describe("MCP agent selection", () => {
         agent_name: "shared",
         agent_display_name: "Research Team",
         is_shared: true,
+        managers: [],
         can_use: true,
         mcp_available: true,
         services: [],
@@ -738,7 +1141,7 @@ describe("MCP agent selection", () => {
             description: "Search the web.",
             provider: null,
             icon: null,
-            requires_room_context: false,
+            mcp_available: true,
           },
         ],
       },
@@ -828,9 +1231,18 @@ describe("MCP agent selection", () => {
     render(<Connections />);
     await screen.findByRole("button", { name: "Expand Research Team" });
     const search = screen.getByRole("searchbox", {
-      name: "Search agents or tools",
+      name: "Search agents, tools, or services",
     });
     const filter = screen.getByRole("combobox", { name: "Filter agents" });
+    // Each agent's type is read with its button.
+    expect(
+      screen.getByRole("button", { name: "Expand Research Team" }),
+    ).toHaveAccessibleDescription("Shared");
+    expect(
+      screen.getByRole("button", { name: "Expand Personal assistant" }),
+    ).toHaveAccessibleDescription("Personal");
+    // The count shows only while the search or filter leaves agents out.
+    expect(screen.queryByText(/^Showing /)).toBeNull();
     fireEvent.change(search, { target: { value: "WEB SEARCH" } });
     expect(
       screen.queryByRole("button", { name: "Expand Personal assistant" }),
@@ -838,7 +1250,9 @@ describe("MCP agent selection", () => {
     expect(
       screen.getByRole("button", { name: "Expand Research Team" }),
     ).toBeInTheDocument();
+    expect(screen.getByText("Showing 1 of 2 agents")).toBeInTheDocument();
     fireEvent.change(search, { target: { value: "" } });
+    expect(screen.queryByText(/^Showing /)).toBeNull();
     fireEvent.change(filter, { target: { value: "personal" } });
     expect(
       screen.queryByRole("button", { name: "Expand Research Team" }),
@@ -983,5 +1397,863 @@ describe("MCP agent selection", () => {
     expect(screen.getByRole("button", { name: "Connect Mail" })).toBeEnabled();
     fireEvent.click(screen.getByRole("button", { name: "Reload selection" }));
     await waitFor(() => expect(personal).toBeEnabled());
+  });
+});
+
+describe("shared accounts on agent cards", () => {
+  const sharedCatalog = (egress_services?: unknown[]) => ({
+    agents: [
+      {
+        agent_name: "research",
+        agent_display_name: "Research Team",
+        is_shared: true,
+        managers: [],
+        can_use: true,
+        services: [{ ...service, is_shared: true }],
+        tools: catalog([service]).agents[0].tools,
+        ...(egress_services ? { egress_services } : {}),
+      },
+    ],
+  });
+  const statusPath = "/api/connections/agents/research/mail/status";
+
+  it("shows a connected shared account to its managers and to everyone else", async () => {
+    for (const canManage of [true, false]) {
+      installApi({
+        "/api/connections": async () =>
+          json({
+            agents: [
+              {
+                ...sharedCatalog().agents[0],
+                services: [
+                  { ...service, is_shared: true, can_manage: canManage },
+                ],
+              },
+            ],
+          }),
+        [statusPath]: async () =>
+          json({
+            ...status,
+            connected: true,
+            can_connect: canManage,
+            account_label: "team@example.org",
+          }),
+      });
+      const { unmount } = render(<Connections />);
+      await expandAgent("Research Team");
+      expect(
+        await screen.findByText(
+          "Connected as team@example.org · shared with everyone using Research Team",
+        ),
+      ).toBeInTheDocument();
+      unmount();
+    }
+  });
+
+  describe("Connect", () => {
+    const popup = {
+      closed: false,
+      close: vi.fn(),
+      location: { href: "about:blank" },
+      document: document.implementation.createHTMLDocument(),
+    };
+    beforeEach(() => {
+      vi.spyOn(window, "open").mockReturnValue(popup as unknown as Window);
+    });
+
+    const renderShared = async (connectCalls: string[]) => {
+      installApi({
+        "/api/connections": async () => json(sharedCatalog()),
+        [statusPath]: async () => json(status),
+        "/api/connections/agents/research/mail/connect": async () => {
+          connectCalls.push("connect");
+          return new Promise(() => {});
+        },
+      });
+      render(<Connections />);
+      await expandAgent("Research Team");
+      fireEvent.click(
+        await screen.findByRole("button", { name: "Connect Mail" }),
+      );
+      return screen.findByRole("dialog", { name: "Connect a shared account?" });
+    };
+
+    it("asks Connect a shared account? and only goes on after Continue", async () => {
+      const connectCalls: string[] = [];
+      const dialog = await renderShared(connectCalls);
+      expect(
+        within(dialog).getByText(
+          "Everyone who uses Research Team will act as the Mail account you pick. Use a team account, not your personal one.",
+        ),
+      ).toBeVisible();
+      expect(connectCalls).toEqual([]);
+
+      fireEvent.click(within(dialog).getByRole("button", { name: "Continue" }));
+      await waitFor(() => expect(connectCalls).toEqual(["connect"]));
+    });
+
+    it("sends nothing when the question is cancelled", async () => {
+      const connectCalls: string[] = [];
+      const dialog = await renderShared(connectCalls);
+      fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+      expect(connectCalls).toEqual([]);
+      expect(window.open).not.toHaveBeenCalled();
+    });
+
+    it("does not ask for an agent's own account", async () => {
+      const connectCalls: string[] = [];
+      installApi({
+        "/api/connections/agents/personal/mail/connect": async () => {
+          connectCalls.push("connect");
+          return new Promise(() => {});
+        },
+      });
+      render(<Connections />);
+      await expandAgent();
+      fireEvent.click(
+        await screen.findByRole("button", { name: "Connect Mail" }),
+      );
+      await waitFor(() => expect(connectCalls).toEqual(["connect"]));
+      expect(screen.queryByRole("dialog")).toBeNull();
+    });
+  });
+
+  describe("naming who manages a shared agent", () => {
+    const egressRow = credentialService({
+      name: "openai",
+      display_name: "OpenAI",
+      description: "OpenAI API",
+      is_shared: true,
+      can_manage: false,
+      configured: true,
+      active_source: "key",
+      key_configured: true,
+    });
+    const catalogWith = (
+      agent: Record<string, unknown>,
+      serviceChanges: Record<string, unknown> = {},
+    ) => ({
+      agents: [
+        {
+          ...sharedCatalog([egressRow]).agents[0],
+          ...agent,
+          services: [{ ...service, is_shared: true, ...serviceChanges }],
+        },
+      ],
+    });
+    const open = async (data: unknown) => {
+      installApi({
+        "/api/connections": async () => json(data),
+        [statusPath]: async () => json({ ...status, can_connect: false }),
+      });
+      render(<Connections />);
+      await expandAgent("Research Team");
+    };
+
+    it("tells a non-manager beside the account which managers can change the keys", async () => {
+      await open(
+        catalogWith(
+          { managers: ["@alice:example.org", "@mallory:example.org"] },
+          { can_manage: false },
+        ),
+      );
+      const note =
+        "Only @alice:example.org and @mallory:example.org can change keys for this shared agent.";
+      expect(await screen.findByText(note)).toBeVisible();
+    });
+
+    it("says administrators when no manager is named", async () => {
+      await open(catalogWith({ managers: [] }, { can_manage: false }));
+      expect(
+        await screen.findByText(
+          "Only administrators can change keys for this shared agent.",
+        ),
+      ).toBeVisible();
+    });
+
+    it("does not mention keys beside the account while the agent shows no keys", async () => {
+      await open({
+        agents: [
+          {
+            ...catalogWith(
+              { managers: ["@alice:example.org", "@mallory:example.org"] },
+              { can_manage: false },
+            ).agents[0],
+            egress_services: null,
+          },
+        ],
+      });
+      expect(
+        await screen.findByText(
+          "Only @alice:example.org and @mallory:example.org can change this shared agent's accounts.",
+        ),
+      ).toBeVisible();
+      expect(screen.queryByText(/keys/)).toBeNull();
+    });
+
+    it("says administrators can change the accounts when no manager is named and the agent shows no keys", async () => {
+      await open({
+        agents: [
+          {
+            ...catalogWith({ managers: [] }, { can_manage: false }).agents[0],
+            egress_services: null,
+          },
+        ],
+      });
+      expect(
+        await screen.findByText(
+          "Only administrators can change this shared agent's accounts.",
+        ),
+      ).toBeVisible();
+    });
+  });
+
+  it("lists every service of the agent that uses the provider when disconnecting", async () => {
+    const egress = (name: string, display_name: string, provider: string) =>
+      credentialService({
+        name,
+        display_name,
+        description: "",
+        configured: true,
+        active_source: "oauth",
+        oauth: oauthStatus({ provider, display_name: "Mail", connected: true }),
+      });
+    installApi({
+      "/api/connections": async () =>
+        json(
+          withEgress([
+            egress("mail_api", "Mail API", "mail"),
+            egress("mail_labels", "Mail labels", "mail"),
+            egress("calendar", "Calendar", "calendar"),
+          ]),
+        ),
+      "/api/connections/agents/personal/mail/status": async () =>
+        json({ ...status, connected: true }),
+    });
+    render(<Connections />);
+    await expandAgent();
+    const tools = await screen.findByRole("table", {
+      name: "Personal assistant tools",
+    });
+    fireEvent.click(
+      await within(tools).findByRole("button", { name: "Disconnect for Mail" }),
+    );
+    expect(
+      within(
+        screen.getByRole("dialog", { name: "Disconnect Mail?" }),
+      ).getByText(
+        "This removes the saved Mail connection for Personal assistant. These services stop working until an account is connected again: Mail API, Mail labels, and Mail.",
+      ),
+    ).toBeVisible();
+  });
+});
+
+describe("agent table summary, search, and order", () => {
+  const egress = (
+    name: string,
+    display_name: string,
+    overrides: Partial<EgressCredentialService> = {},
+  ) => credentialService({ name, display_name, description: "", ...overrides });
+  const agentWith = (name: string, display_name: string, extra = {}) => ({
+    ...catalog([service]).agents[0],
+    agent_name: name,
+    agent_display_name: display_name,
+    ...extra,
+  });
+  const agentRow = (name: string) =>
+    screen
+      .getByRole("button", { name: new RegExp(`^(Expand|Collapse) ${name}$`) })
+      .closest("tr")!;
+  const statesLoaded = () =>
+    waitFor(() => expect(screen.queryByText(/Checking accounts/)).toBeNull());
+  const withCalculator = () => {
+    const base = agentWith("personal", "Personal assistant");
+    return {
+      ...base,
+      tools: [
+        ...base.tools,
+        {
+          name: "calculator",
+          display_name: "Calculator",
+          description: "Calculate.",
+          provider: null,
+          icon: null,
+          requires_room_context: false,
+        },
+      ],
+    };
+  };
+
+  it("counts the accounts and keys that are set against all of them", async () => {
+    installApi({
+      "/api/connections": async () =>
+        json({
+          agents: [
+            {
+              ...withCalculator(),
+              services: [{ ...service, connected: true }],
+              egress_services: [
+                egress("github", "GitHub", {
+                  configured: true,
+                  key_configured: true,
+                  active_source: "key",
+                }),
+                egress("openai", "OpenAI"),
+              ],
+            },
+          ],
+        }),
+      "/api/connections/agents/personal/mail/status": async () =>
+        json({ ...status, connected: true }),
+    });
+    render(<Connections />);
+    // Mail's account and GitHub's key, before any status is read.
+    await waitFor(() =>
+      expect(agentRow("Personal assistant")).toHaveTextContent(
+        "2 tools / 2 of 3 accounts and keys set",
+      ),
+    );
+    await expandAgent();
+    await screen.findByRole("button", { name: "Disconnect for Mail" });
+    expect(agentRow("Personal assistant")).toHaveTextContent(
+      "2 tools / 2 of 3 accounts and keys set",
+    );
+  });
+
+  it("counts only accounts while the agent shows no keys", async () => {
+    installApi({
+      "/api/connections": async () =>
+        json({
+          agents: [
+            {
+              ...withCalculator(),
+              services: [{ ...service, connected: true }],
+              egress_services: null,
+            },
+          ],
+        }),
+    });
+    render(<Connections />);
+    await waitFor(() =>
+      expect(agentRow("Personal assistant")).toHaveTextContent(
+        "2 tools / 1 of 1 account set",
+      ),
+    );
+    expect(agentRow("Personal assistant")).not.toHaveTextContent(/keys/);
+  });
+
+  it("counts only the tools of an agent with no accounts or keys to set", async () => {
+    installApi({
+      "/api/connections": async () =>
+        json({
+          agents: [
+            agentWith("personal", "Personal assistant", {
+              services: [],
+              egress_services: null,
+            }),
+            agentWith("research", "Research Team", {
+              services: [],
+              egress_services: [],
+            }),
+          ],
+        }),
+    });
+    render(<Connections />);
+    await screen.findByRole("button", { name: "Expand Personal assistant" });
+    await statesLoaded();
+    for (const name of ["Personal assistant", "Research Team"]) {
+      expect(within(agentRow(name)).getByText("1 tool")).toBeInTheDocument();
+      expect(agentRow(name)).not.toHaveTextContent(/accounts?|keys?|set/);
+    }
+  });
+
+  it("does not count a service that only limits paths as an account or a key", async () => {
+    installApi({
+      "/api/connections": async () =>
+        json({
+          agents: [
+            {
+              ...withCalculator(),
+              services: [],
+              egress_services: [
+                egress("github", "GitHub", {
+                  configured: true,
+                  key_configured: true,
+                  active_source: "key",
+                }),
+                egress("github-limited", "GitHub (a/b)", {
+                  source: "user",
+                  restrict_only: true,
+                }),
+              ],
+            },
+          ],
+        }),
+    });
+    render(<Connections />);
+    await waitFor(() =>
+      expect(agentRow("Personal assistant")).toHaveTextContent(
+        "2 tools / 1 of 1 account or key set",
+      ),
+    );
+  });
+
+  it("counts an account as it is disconnected", async () => {
+    let connected = true;
+    installApi({
+      "/api/connections": async () =>
+        json({ agents: [{ ...withCalculator(), egress_services: [] }] }),
+      "/api/connections/agents/personal/mail/status": async () =>
+        json({ ...status, connected }),
+      "/api/connections/agents/personal/mail/disconnect": async () => {
+        connected = false;
+        return json({ status: "disconnected", provider: "mail" });
+      },
+    });
+    render(<Connections />);
+    await expandAgent();
+    await waitFor(() =>
+      expect(agentRow("Personal assistant")).toHaveTextContent(
+        "2 tools / 1 of 1 account or key set",
+      ),
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Disconnect for Mail" }),
+    );
+    fireEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", {
+        name: "Disconnect",
+      }),
+    );
+    await waitFor(() =>
+      expect(agentRow("Personal assistant")).toHaveTextContent(
+        "2 tools / 0 of 1 account or key set",
+      ),
+    );
+  });
+
+  it("counts a connected account from the agent's state before the agent is opened, and lets a loaded status correct it", async () => {
+    const connected = (agent: ReturnType<typeof withCalculator>) => ({
+      ...agent,
+      services: agent.services.map((item) => ({ ...item, connected: true })),
+      egress_services: [],
+    });
+    installApi({
+      "/api/connections": async () =>
+        json({ agents: [connected(withCalculator())] }),
+      // The account was disconnected elsewhere since the agent's state was read.
+      "/api/connections/agents/personal/mail/status": async () =>
+        json({ ...status, connected: false }),
+    });
+    render(<Connections />);
+    await waitFor(() =>
+      expect(agentRow("Personal assistant")).toHaveTextContent(
+        "2 tools / 1 of 1 account or key set",
+      ),
+    );
+    await expandAgent();
+    await waitFor(() =>
+      expect(agentRow("Personal assistant")).toHaveTextContent(
+        "2 tools / 0 of 1 account or key set",
+      ),
+    );
+  });
+
+  it("follows a refreshed state for an agent that was opened and closed, as after a disconnect through another agent", async () => {
+    // Both agents use the requester's own Mail account.
+    let connected = true;
+    const agent = (name: string, display_name: string) =>
+      agentWith(name, display_name, {
+        services: [{ ...service, connected }],
+        egress_services: [],
+      });
+    installApi({
+      "/api/connections": async () =>
+        json({
+          agents: [
+            agent("personal", "Personal assistant"),
+            agent("research", "Research Team"),
+          ],
+        }),
+      "/api/connections/agents/personal/mail/status": async () =>
+        json({ ...status, connected }),
+      "/api/connections/agents/research/mail/status": async () =>
+        json({ ...status, connected }),
+      "/api/connections/agents/research/mail/disconnect": async () => {
+        connected = false;
+        return json({ status: "disconnected", provider: "mail" });
+      },
+    });
+    render(<Connections />);
+    await expandAgent();
+    await screen.findByRole("button", { name: "Disconnect for Mail" });
+    fireEvent.click(
+      screen.getByRole("button", { name: "Collapse Personal assistant" }),
+    );
+    await expandAgent("Research Team");
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Disconnect for Mail" }),
+    );
+    fireEvent.click(
+      within(screen.getByRole("dialog")).getByRole("button", {
+        name: "Disconnect",
+      }),
+    );
+    await waitFor(() =>
+      expect(agentRow("Research Team")).toHaveTextContent(
+        "1 tool / 0 of 1 account or key set",
+      ),
+    );
+    // The closed agent cannot load its status again, so its refreshed state decides.
+    await waitFor(() =>
+      expect(agentRow("Personal assistant")).toHaveTextContent(
+        "1 tool / 0 of 1 account or key set",
+      ),
+    );
+  });
+
+  it("shows the agents at once and their counts and keys once each agent's state arrives", async () => {
+    let answer = (_response: Response) => {};
+    installApi({
+      "/api/connections/agents/personal/state": () =>
+        new Promise((resolve) => {
+          answer = resolve;
+        }),
+      "/api/connections/agents/personal/mail/status": async () =>
+        json({ ...status, connected: true }),
+    });
+    render(<Connections />);
+    await expandAgent();
+    await screen.findByRole("button", { name: "Disconnect for Mail" });
+    const row = agentRow("Personal assistant");
+    // Nothing says an account or key is missing before the state says so.
+    expect(row).toHaveTextContent("1 tool / Checking accounts…");
+    expect(row).not.toHaveTextContent(/ of \d/);
+    expect(
+      screen.queryByRole("heading", { name: "API keys and accounts" }),
+    ).toBeNull();
+
+    answer(
+      json({
+        connected: { mail: true },
+        egress_services: [
+          egress("github", "GitHub", {
+            configured: true,
+            key_configured: true,
+            active_source: "key",
+          }),
+        ],
+      }),
+    );
+
+    await waitFor(() =>
+      expect(row).toHaveTextContent("1 tool / 2 of 2 accounts and keys set"),
+    );
+    expect(
+      screen.getByRole("heading", { name: "API keys and accounts" }),
+    ).toBeInTheDocument();
+    expect(requests("/api/connections")).toBe(1);
+  });
+
+  const keyed = () => [
+    egress("github", "GitHub", {
+      configured: true,
+      key_configured: true,
+      active_source: "key",
+    }),
+  ];
+
+  it("says it could not check the accounts of an agent whose state cannot load", async () => {
+    installApi({
+      "/api/connections/agents/personal/state": async () =>
+        json({ detail: "unavailable" }, 500),
+    });
+    render(<Connections />);
+    await waitFor(() =>
+      expect(agentRow("Personal assistant")).toHaveTextContent(
+        "1 tool / Could not check accounts",
+      ),
+    );
+    expect(agentRow("Personal assistant")).not.toHaveTextContent(/ of \d/);
+  });
+
+  it("keeps an agent's last state, keys included, when reloading it fails", async () => {
+    let stateRequests = 0;
+    let connected = true;
+    installApi({
+      "/api/connections/agents/personal/state": async () => {
+        stateRequests += 1;
+        return stateRequests === 1
+          ? json({ connected: { mail: true }, egress_services: keyed() })
+          : json({ detail: "restarting" }, 503);
+      },
+      "/api/connections/agents/personal/mail/status": async () =>
+        json({ ...status, connected }),
+      "/api/connections/agents/personal/mail/disconnect": async () => {
+        connected = false;
+        return json({ status: "disconnected", provider: "mail" });
+      },
+    });
+    render(<Connections />);
+    await expandAgent();
+    const row = agentRow("Personal assistant");
+    await waitFor(() =>
+      expect(row).toHaveTextContent("1 tool / 2 of 2 accounts and keys set"),
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Disconnect for Mail" }),
+    );
+    await pressInDialog("Disconnect");
+
+    await waitFor(() => expect(stateRequests).toBe(2));
+    // The card's own status says Mail is gone; the key still comes from the last state.
+    await waitFor(() =>
+      expect(row).toHaveTextContent("1 tool / 1 of 2 accounts and keys set"),
+    );
+    expect(
+      screen.getByRole("heading", { name: "API keys and accounts" }),
+    ).toBeInTheDocument();
+  });
+
+  it("keeps a card's status that arrives before its agent's state", async () => {
+    let answer = (_response: Response) => {};
+    installApi({
+      "/api/connections/agents/personal/state": () =>
+        new Promise((resolve) => {
+          answer = resolve;
+        }),
+      // The account was disconnected after the agent's state was read.
+      "/api/connections/agents/personal/mail/status": async () =>
+        json({ ...status, connected: false }),
+    });
+    render(<Connections />);
+    await expandAgent();
+    await screen.findByRole("button", { name: "Connect Mail" });
+
+    answer(json({ connected: { mail: true }, egress_services: keyed() }));
+
+    await waitFor(() =>
+      expect(agentRow("Personal assistant")).toHaveTextContent(
+        "1 tool / 1 of 2 accounts and keys set",
+      ),
+    );
+  });
+
+  it("keeps a card's status over an agent state that was requested before it arrived", async () => {
+    let stateRequests = 0;
+    let answerReload = (_response: Response) => {};
+    let connected = true;
+    installApi({
+      "/api/connections/agents/personal/state": () => {
+        stateRequests += 1;
+        if (stateRequests === 1)
+          return Promise.resolve(
+            json({ connected: { mail: true }, egress_services: [] }),
+          );
+        return new Promise((resolve) => {
+          answerReload = resolve;
+        });
+      },
+      "/api/connections/agents/personal/mail/status": async () =>
+        json({ ...status, connected }),
+      "/api/connections/agents/personal/mail/disconnect": async () => {
+        connected = false;
+        return json({ status: "disconnected", provider: "mail" });
+      },
+    });
+    render(<Connections />);
+    await expandAgent();
+    const row = agentRow("Personal assistant");
+    await waitFor(() =>
+      expect(row).toHaveTextContent("1 tool / 1 of 1 account or key set"),
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Disconnect for Mail" }),
+    );
+    await pressInDialog("Disconnect");
+    await screen.findByRole("button", { name: "Connect Mail" });
+    await waitFor(() => expect(stateRequests).toBe(2));
+
+    // The reloaded state was read before the card's status and still says Mail is connected.
+    answerReload(json({ connected: { mail: true }, egress_services: keyed() }));
+
+    await waitFor(() =>
+      expect(row).toHaveTextContent("1 tool / 1 of 2 accounts and keys set"),
+    );
+  });
+
+  it("loads every agent's state, at most six at a time", async () => {
+    const names = Array.from({ length: 10 }, (_, index) => `agent${index}`);
+    const requested: string[] = [];
+    const answers: (() => void)[] = [];
+    let inFlight = 0;
+    let most = 0;
+    installApi({
+      "/api/connections": async () =>
+        json({ agents: names.map((name) => agentWith(name, name)) }),
+      ...Object.fromEntries(
+        names.map((name) => [
+          `/api/connections/agents/${name}/state`,
+          () => {
+            requested.push(name);
+            inFlight += 1;
+            most = Math.max(most, inFlight);
+            return new Promise<Response>((resolve) =>
+              answers.push(() => {
+                inFlight -= 1;
+                resolve(
+                  json({ connected: { mail: true }, egress_services: null }),
+                );
+              }),
+            );
+          },
+        ]),
+      ),
+    });
+    render(<Connections />);
+    await waitFor(() => expect(requested).toHaveLength(6));
+    for (const _name of names) {
+      await waitFor(() => expect(answers.length).toBeGreaterThan(0));
+      await act(async () => answers.shift()!());
+    }
+
+    expect(requested).toEqual(names);
+    expect(most).toBe(6);
+    for (const name of names)
+      await waitFor(() =>
+        expect(agentRow(name)).toHaveTextContent("1 tool / 1 of 1 account set"),
+      );
+  });
+
+  const twoAgents = () => ({
+    agents: [
+      {
+        ...agentWith("research", "Research Team"),
+        egress_services: [
+          egress("billing", "Billing API", {
+            rules: [
+              { host: "billing.example.com", port: null, path_prefix: "/" },
+            ],
+          }),
+        ],
+      },
+      {
+        ...agentWith("writer", "Writer"),
+        services: [],
+        tools: [],
+        egress_services: [],
+      },
+    ],
+  });
+  const search = (text: string) =>
+    fireEvent.change(
+      screen.getByRole("searchbox", {
+        name: "Search agents, tools, or services",
+      }),
+      { target: { value: text } },
+    );
+  const shown = () =>
+    screen
+      .getAllByRole("button", { name: /^(Expand|Collapse) / })
+      .map((button) => button.getAttribute("aria-label"));
+
+  it.each([
+    ["a service's display name", "billing api"],
+    ["a service's name", "billing"],
+    ["a rule's host", "BILLING.example.com"],
+    ["an account's display name", "Mail"],
+  ])("search finds an agent by %s", async (_what, text) => {
+    installApi({ "/api/connections": async () => json(twoAgents()) });
+    render(<Connections />);
+    await screen.findByRole("button", { name: "Expand Research Team" });
+    await statesLoaded();
+    expect(shown()).toEqual(["Expand Research Team", "Expand Writer"]);
+    search(text);
+    expect(shown()).toEqual(["Expand Research Team"]);
+    search("nothing like this");
+    expect(screen.getByText("No agents match your search.")).toBeVisible();
+  });
+
+  it("keeps the agents in the order the API sends them", async () => {
+    const order = ["zeta", "alpha", "mid"];
+    installApi({
+      "/api/connections": async () =>
+        json({
+          agents: [
+            ...order.map((name) => agentWith(name, name.toUpperCase())),
+          ].map((agent, index) =>
+            // The personal agent is not first, and an agent with a key is not moved up.
+            index === 2
+              ? {
+                  ...agent,
+                  egress_services: [egress("k", "Key", { configured: true })],
+                }
+              : agent,
+          ),
+        }),
+    });
+    render(<Connections />);
+    await screen.findByRole("button", { name: "Expand ZETA" });
+    expect(shown()).toEqual(["Expand ZETA", "Expand ALPHA", "Expand MID"]);
+    fireEvent.click(screen.getByRole("button", { name: "Expand MID" }));
+    expect(shown()).toEqual(["Expand ZETA", "Expand ALPHA", "Collapse MID"]);
+  });
+
+  it("falls back to the agent's icon without a word when its picture is a 204", async () => {
+    const consoleError = vi
+      .spyOn(console, "error")
+      .mockImplementation(() => {});
+    const consoleWarn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    installApi({ "/api/connections": async () => json(twoAgents()) });
+    render(<Connections />);
+    const button = await screen.findByRole("button", {
+      name: "Expand Research Team",
+    });
+    // An empty 204 body is a broken image to the browser.
+    fireEvent.error(button.querySelector("img")!);
+    expect(button.querySelector("img")).toBeNull();
+    expect(button.querySelector("svg.lucide-user-round")).not.toBeNull();
+    expect(consoleError).not.toHaveBeenCalled();
+    expect(consoleWarn).not.toHaveBeenCalled();
+  });
+});
+
+describe("connections header", () => {
+  it("shows who is signed in and links the other page", async () => {
+    render(<Connections />);
+    expect(
+      await screen.findByText("Signed in as Bob Builder"),
+    ).toBeInTheDocument();
+    const nav = screen.getByRole("navigation", { name: "Connections pages" });
+    expect(within(nav).getByRole("link", { name: "Agents" })).toHaveAttribute(
+      "aria-current",
+      "page",
+    );
+    expect(
+      within(nav).getByRole("link", { name: "Agent Keys" }),
+    ).toHaveAttribute("href", "/connections/egress");
+    expect(within(nav).queryByRole("link", { name: "Dashboard" })).toBeNull();
+  });
+
+  it("does not link Agent Keys while the egress broker is off", async () => {
+    installApi({
+      "/api/connections/me": async () =>
+        json({
+          matrix_user_id: "@bob:example.org",
+          display_name: "Bob Builder",
+          email: null,
+          is_administrator: false,
+          egress_enabled: false,
+          dashboard_url: "/",
+        }),
+    });
+    render(<Connections />);
+    expect(
+      await screen.findByText("Signed in as Bob Builder"),
+    ).toBeInTheDocument();
+    const nav = screen.getByRole("navigation", { name: "Connections pages" });
+    expect(within(nav).getByRole("link", { name: "Agents" })).toBeVisible();
+    expect(within(nav).queryByRole("link", { name: "Agent Keys" })).toBeNull();
   });
 });

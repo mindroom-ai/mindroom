@@ -60,7 +60,7 @@ if TYPE_CHECKING:
     ],
     managed_init_args=(ToolManagedInitArg.TOOL_OUTPUT_WORKSPACE_ROOT, ToolManagedInitArg.FILE_ACCESS),
     dependencies=[],  # No additional dependencies required beyond agno
-    docs_url="https://docs.agno.com/tools/toolkits/others/airflow",
+    docs_url="https://docs.mindroom.chat/tools/automation-and-platforms/#airflow",
     function_names=("read_dag_file", "save_dag_file"),
 )
 def airflow_tools() -> type[MindRoomAirflowTools]:

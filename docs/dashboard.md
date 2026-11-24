@@ -12,7 +12,8 @@ This page covers opening the dashboard, what each tab does, saving and conflict 
 
 **Standalone:** run `mindroom run` and open `http://localhost:8765`.
 When running from a source checkout, MindRoom builds the dashboard assets on first start if Bun is available.
-When `MINDROOM_API_KEY` is set, the dashboard first asks for that key, and the login page shows which `.env` file holds it.
+When `MINDROOM_API_KEY` is set, the dashboard first asks for that key, and the login page points to the `.env` file when the key comes from `.env`, or to the service environment when supplied through the process environment.
+When `MINDROOM_PUBLIC_URL` is an HTTPS address, sign in to the dashboard through that address, because the dashboard does not work through a plain-HTTP address of the same server.
 See [Authorization](authorization.md#dashboard-configuration) for who can open the dashboard and [Environment Variables](configuration/index.md#dashboard-and-api) for the related settings.
 
 **SaaS platform:** open `https://<instance-id>.mindroom.chat`.
@@ -39,10 +40,10 @@ The exported JSON summary lists counts, agents, rooms, teams, and model configur
 
 - **Display name**, **Role description**, **Model**, **Instructions**, and **Rooms**
 - **Memory backend** - inherit the global backend or override it per agent (`mem0`, `file`, or `none`)
-- **Tools** - configured tools (green badge) and tools that need no setup
-- **Learning** and **Learning mode** (`always` or `agentic`); see [Agent Configuration](configuration/agents.md)
-- **Lazy tool loading** - open a checked tool's settings and enable **Load lazily** (`defer`) or **Load at session start** (`initial`, which requires `defer`); presets and control-plane tools such as `dynamic_tools` do not offer it (see [Dynamic Tools](tools/dynamic-tools.md))
+- **Tools** - configured tools (green badge) and tools that need no setup; unchecking a tool discards its settings
+- **Deferred tools** - open a checked tool's settings and enable **Defer until searched** (`defer`) or **Send on every request** (`initial`, which requires `defer`); presets and control-plane tools such as `dynamic_tools` do not offer it (see [Dynamic Tools](tools/dynamic-tools.md))
 - **More settings** - every other agent field, such as `participation`, `mid_turn`, `accept_invites`, `access`, `memory_search`, `thread_exports`, and `room_thread_modes`
+- **Personal agents** - a read-only list of the agents generated from [`personal_agents`](personal-agents.md) templates, with each owner, Matrix ID, template, and status; edit the templates under Settings → Personal rooms
 
 ### Teams
 
@@ -57,11 +58,12 @@ The exported JSON summary lists counts, agents, rooms, teams, and model configur
 - **Display name** and **Description**
 - **Room model** - optional model override
 - **Agents in room**
-- **More settings** - per-room `join_policy`, `listed`, `encrypted`, `invite_users`, and `admins` overrides (see [Rooms](rooms.md))
+- **More settings** - per-room `join_policy`, `listed`, `encrypted`, `invite_users`, and `admins` overrides (see [Rooms](rooms.md)), and the room's `reply_mode` (see [Reply Mode](configuration/threads.md#reply-mode))
 
 ### Schedules
 
 Lists scheduled tasks across rooms with room, status, schedule type, delivery mode, and next run time.
+A room whose schedules cannot be read, for example because no running agent has joined it, is named above the list with the reason, and the home tab counts it, instead of showing as empty.
 You can edit a task's timing, description, and visible or silent delivery, or cancel it.
 See [Scheduling](scheduling.md).
 
@@ -76,11 +78,18 @@ Add and edit models with provider, model ID, host URL, and advanced settings, an
 A row's **Save** only updates the draft; click **Save All Changes** to write model changes to `config.yaml`.
 The add-model dropdown does not have a preset for every supported provider, but the dashboard keeps any provider already in the configuration.
 A model's **More settings** section appears below the table while its row is being edited, and **Cancel** on the row also reverts More settings changes made since the last save.
+Saving a row whose provider changed keeps the model's provider-neutral fields, such as its display name, icon, context window, and pricing, and only the `extra_kwargs` values changed in More settings during that edit.
+It drops every other `extra_kwargs` key, even one More settings still shows, including sampling options such as `temperature` and `max_tokens`, and the model's existing API key, so after saving, edit the row again and add back the options you need in More settings.
+Switching back to the original provider before saving keeps the model's saved settings.
 See [Models](configuration/models.md) for providers and fields.
 
 ### Usage
 
 See [Usage Tracking](usage.md#dashboard-usage-tab).
+
+### Budgets
+
+See [Budgets](budgets.md#dashboard-budgets-page).
 
 ### Memory
 
@@ -105,7 +114,7 @@ See [Knowledge Bases](knowledge.md) for configuration and sync behavior; assign 
 
 A new service named after a provider key environment variable, such as `ANTHROPIC_API_KEY`, is saved as the canonical provider service (`anthropic`) that the Models tab and runtime read.
 An existing service with an environment-variable name keeps receiving writes, because config may reference it by that exact name.
-See [Credential Storage](oauth-framework.md#credential-storage) for credentials imported from `.env`, such as `GITHUB_TOKEN`.
+See [Credentials from the Environment](oauth-framework.md#credentials-from-the-environment) for credentials read from `.env`, such as `GITHUB_TOKEN`.
 
 ### Voice
 
@@ -126,7 +135,7 @@ See [Skills](skills.md#installing-and-managing-skills).
 
 The **Settings** tab edits every top-level configuration section without a dedicated tab, grouped into Responses, History and context, Tools and workers, Router, Personal rooms, Room defaults, Tool approval, Prompts, MCP servers, Plugins, Access and identity, Matrix and runtime, and Diagnostics.
 Any option no tab claims appears under **Other**.
-**Tools and workers** also edits per-tool overrides for the default tools every agent inherits.
+**Tools and workers** also edits per-tool overrides for the default tools every agent inherits; removing a tool from the default tools discards its overrides.
 
 ## Editing and Saving
 
@@ -173,18 +182,7 @@ The dashboard uses the backend REST API under `/api/`, with the same authenticat
 | GET | `/api/config/raw` | Fetch raw `config.yaml` text |
 | PUT | `/api/config/raw` | Replace raw `config.yaml` text |
 | GET | `/api/config/schema` | Configuration JSON schema used by Settings and More settings |
-| GET | `/api/config/agents` | List agents |
-| POST | `/api/config/agents` | Create agent |
-| PUT | `/api/config/agents/{id}` | Update agent |
-| DELETE | `/api/config/agents/{id}` | Delete agent |
-| GET | `/api/config/teams` | List teams |
-| POST | `/api/config/teams` | Create team |
-| PUT | `/api/config/teams/{id}` | Update team |
-| DELETE | `/api/config/teams/{id}` | Delete team |
-| GET | `/api/config/models` | List model configurations |
-| PUT | `/api/config/models/{id}` | Update model configuration |
-| GET | `/api/config/room-models` | Get room model overrides |
-| PUT | `/api/config/room-models` | Update room model overrides |
+| GET | `/api/config/personal-agents` | List generated personal agents |
 | POST | `/api/config/agent-policies` | Derived agent policies for a draft config |
 
 ### Credentials API
@@ -232,7 +230,7 @@ Upload and delete return HTTP 409 for Git-backed bases (see [Sync Behavior](know
 
 | Method | Endpoint | Description |
 |--------|----------|-------------|
-| GET | `/api/schedules` | List scheduled tasks, optionally filtered by room, including each task's `silent` flag |
+| GET | `/api/schedules` | List scheduled tasks, optionally filtered by room, including each task's `silent` flag; `unreadable_rooms` names each room whose tasks could not be read, with the reason |
 | PUT | `/api/schedules/{task_id}` | Edit a scheduled task, including `silent` |
 | DELETE | `/api/schedules/{task_id}` | Cancel a scheduled task |
 
@@ -248,7 +246,6 @@ Upload and delete return HTTP 409 for Git-backed bases (see [Sync Behavior](know
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | GET | `/api/tools` | List available tools |
-| GET | `/api/rooms` | List configured rooms |
 | GET | `/api/matrix/agents/rooms` | All agents' room memberships |
 | GET | `/api/matrix/agents/{id}/rooms` | One agent's rooms |
 | POST | `/api/matrix/rooms/leave` | Leave one room |

@@ -1,0 +1,294 @@
+"""Resume a persisted paused agent run on the agent loop, as an approval or a delegation continues it.
+
+A resume replays the stored history a replay plan selects and continues the paused request with the decisions on
+exactly the calls it waits for; the loop refuses anything but exact coverage of those calls before it runs any of
+them. ``ResumeRunner`` resumes a rebuilt agent, for an approval or a delegated child, and a live turn continuing
+after its delegations calls ``resume_from_session`` with its own plan.
+"""
+
+from __future__ import annotations
+
+from copy import deepcopy
+from dataclasses import asdict, dataclass, field, replace
+from functools import cached_property
+from typing import TYPE_CHECKING, Protocol
+
+from mindroom.agent_loop.run import resume_agent
+from mindroom.agent_loop.spec import RunContext
+from mindroom.approval.receipt_readers import add_approval_receipt_reader
+from mindroom.history.native import restore_native_history, with_native_history
+from mindroom.history.replay import configured_replay_plan
+from mindroom.history.request_messages import build_resume_request, replayed_history
+from mindroom.llm.request_context import RequestAttribution
+from mindroom.loop_hooks import HookTurn, agent_loop_hooks
+from mindroom.providers.pipeline.prompt_hold import prompt_hold_path
+from mindroom.response_turn import stream_with_llm_request_log_context
+from mindroom.run_storage import TerminalRecord, persist_into
+from mindroom.tool_system.context_bound_streams import closing_async_stream
+from mindroom.tool_system.runtime_context import get_tool_runtime_context
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Callable, Mapping, Sequence
+
+    from mindroom.agent_loop.build import AgentBuild
+    from mindroom.agent_loop.model_loop import LoopHooks
+    from mindroom.agent_loop.run import Persist
+    from mindroom.agent_loop.spec import AgentSpec
+    from mindroom.config.main import Config
+    from mindroom.constants import RuntimePaths
+    from mindroom.event_journal import ApprovalCall
+    from mindroom.history.types import HistoryScope, ResolvedHistorySettings, ResolvedReplayPlan
+    from mindroom.llm.events import RunEvent
+    from mindroom.llm.messages import Message
+    from mindroom.llm.provider import ModelRequest
+    from mindroom.llm.runs import AnyRunRecord, RunRecord
+    from mindroom.run_storage import RunStorage
+
+type ResumeEvents = Callable[[RunEvent], None]
+
+
+@dataclass(frozen=True, slots=True)
+class ResumeDecisions:
+    """What one resume answers: the approved calls, the denied calls with the reasons given, and the external results.
+
+    A denial's reason is None or empty when the requester gave none; the denied run records its default note.
+    ``external_results`` holds what an externally executed call (a delegation) returned, by the member whose run
+    waits for it, None for the run's own call, and the call id.
+    """
+
+    approved: tuple[ApprovalCall, ...] = ()
+    denied: Mapping[str, str | None] = field(default_factory=dict)
+    external_results: Mapping[tuple[str | None, str], str] = field(default_factory=dict)
+
+
+class ContinueRun[R: AnyRunRecord](Protocol):
+    """How the delegation driver continues a paused parent run with its children's results.
+
+    ``storage`` is where the run's row lives, which the driver also writes the run's delegation state to.
+    """
+
+    @property
+    def storage(self) -> RunStorage:
+        """Where the paused run's row lives."""
+        ...
+
+    def events(self, paused: R, decisions: ResumeDecisions) -> AsyncIterator[RunEvent]:
+        """Resume ``paused`` with ``decisions``; the stream ends with ``RunFinished`` and the run's terminal record."""
+        ...
+
+
+def approval_decisions(calls: Sequence[ApprovalCall]) -> ResumeDecisions:
+    """Return the decisions one approval generation took on ``calls``: each call not approved is denied with its reason."""
+    return ResumeDecisions(
+        approved=tuple(call for call in calls if call.approved),
+        denied={call.tool_call_id: call.reason for call in calls if not call.approved},
+    )
+
+
+def resume_inputs(
+    paused: AnyRunRecord,
+    storage: RunStorage,
+    settings: ResolvedHistorySettings,
+    plan: ResolvedReplayPlan | None,
+    *,
+    user_id: str | None,
+    model_name: str,
+    history_scope: HistoryScope | None,
+) -> tuple[list[Message], Callable[[str], RunContext]]:
+    """Return the resume request of ``paused`` where ``storage`` stores it, and the context of its resumed run.
+
+    The request is the paused run's stored messages after the summary and history ``plan`` replays. The context
+    shares the stored session's state with the run's tools, carries the paused run's metadata and ``model_name``,
+    and names ``history_scope``: a team run's scope, or None for an agent's own run.
+    """
+    session = storage.session
+    history, summary = replayed_history(session, storage.scope, settings, plan)
+    return (
+        build_resume_request(paused=paused.messages, summary=summary, history=history),
+        lambda run_id: RunContext(
+            run_id=run_id,
+            user_id=user_id,
+            metadata=deepcopy(paused.metadata),
+            session=session,
+            history_scope=history_scope,
+            model_name=model_name,
+        ),
+    )
+
+
+def resume_from_session(
+    spec: AgentSpec,
+    paused: RunRecord,
+    decisions: ResumeDecisions,
+    *,
+    storage: RunStorage,
+    settings: ResolvedHistorySettings,
+    plan: ResolvedReplayPlan | None,
+    user_id: str | None,
+    hooks: LoopHooks,
+    persist: Persist[RunRecord],
+    request_template: ModelRequest,
+    model_name: str,
+) -> AsyncIterator[RunEvent]:
+    """Resume ``paused`` where ``storage`` stores it with ``decisions``: the history ``plan`` replays, then the request.
+
+    The resume reuses the paused run's stored system messages and shares the session's state with its tools; the
+    stream ends with ``RunFinished`` as ``resume_agent``'s does. ``model_name`` is the configured model the run uses,
+    which its tool calls carry.
+    """
+    request, context = resume_inputs(
+        paused,
+        storage,
+        settings,
+        plan,
+        user_id=user_id,
+        model_name=model_name,
+        history_scope=None,
+    )
+    return resume_agent(
+        spec,
+        paused,
+        request,
+        approved=decisions.approved,
+        denied=decisions.denied,
+        # An agent's run waits only for calls of its own; a result naming a member answers none of them.
+        external_results={
+            call_id: result for (member, call_id), result in decisions.external_results.items() if member is None
+        },
+        context=context,
+        hooks=hooks,
+        persist=persist,
+        request_template=request_template,
+    )
+
+
+def with_resumed_turn_log_context[EventT](
+    events: AsyncIterator[EventT],
+    *,
+    entity_name: str | None = None,
+) -> AsyncIterator[EventT]:
+    """Return ``events`` with the request-log attribution of the turn it resumes bound around every pull.
+
+    A resume runs under the tool runtime context of the turn it continues, which names the entity, session, room,
+    thread, source event, requester, and correlation id a fresh turn of it binds; without one ``events`` is returned
+    as is. ``entity_name`` replaces the context's agent when the turn logged another entity: an ad hoc team's
+    context names the member whose account handles it, while its requests carry the team's label.
+    """
+    context = get_tool_runtime_context()
+    if context is None:
+        return events
+    target = context.target
+    attribution = asdict(
+        RequestAttribution(
+            agent_id=context.agent_name if entity_name is None else entity_name,
+            session_id=target.session_id,
+            room_id=target.room_id,
+            thread_id=target.resolved_thread_id,
+            reply_to_event_id=target.reply_to_event_id,
+            requester_id=context.requester_id,
+            correlation_id=context.correlation_id,
+        ),
+    )
+    return stream_with_llm_request_log_context(events, request_context=attribution)
+
+
+async def forward_resume[R: AnyRunRecord](
+    events: AsyncIterator[RunEvent],
+    on_event: ResumeEvents | None,
+    *,
+    paused: R,
+) -> R:
+    """Drain the resume of ``paused``, handing ``on_event`` every event but a completed or paused record; return it.
+
+    A failed resume's record reaches ``on_event`` before its failure propagates, as its stream ended with it.
+    """
+    finished = TerminalRecord(type(paused))
+    async with closing_async_stream(events):
+        async for event in events:
+            if not finished.collect(event) and on_event is not None:
+                on_event(event)
+    return finished.terminal(paused.run_id)
+
+
+@dataclass(frozen=True, kw_only=True)
+class ResumeRunner:
+    """Resumes one paused run of a rebuilt agent where ``storage`` stores it, with the hooks an agent turn installs.
+
+    A resume replays the history the configured policy selects from the stored session now, not a turn's narrowed
+    plan; the run's native history settings come from the paused request's last response. A resume that answers the
+    run's own paused calls with an approval's decisions makes the run a reader of that approval's receipt. The run
+    keeps one set of hooks for its whole life, so per-run hook state, such as the output-limit count or a failed
+    compaction's stop, carries across its delegation continuations.
+    """
+
+    build: AgentBuild
+    config: Config
+    runtime_paths: RuntimePaths
+    model_name: str
+    storage: RunStorage
+    user_id: str | None
+    steering: bool = False
+    """Whether the resumed run owns its reply, as a top-level approval's does; a delegated child's does not."""
+    checkpoints: bool = False
+    """Whether the resume saves checkpoints: a paused reply's approval settles from the paused row, so its does not."""
+
+    @cached_property
+    def _replay_plan(self) -> ResolvedReplayPlan:
+        return configured_replay_plan(history_settings=self.build.history_settings, estimated_tokens=0)
+
+    @cached_property
+    def _hooks(self) -> LoopHooks:
+        return agent_loop_hooks(
+            self.build,
+            HookTurn(
+                config=self.config,
+                runtime_paths=self.runtime_paths,
+                model_name=self.model_name,
+                storage=self.storage,
+                replay_plan=self._replay_plan,
+                prompt_id=None,
+                checkpoints=self.checkpoints,
+            ),
+            steering=self.steering,
+        )
+
+    def events(self, paused: RunRecord, decisions: ResumeDecisions) -> AsyncIterator[RunEvent]:
+        """Resume ``paused`` with ``decisions``; the stream ends with ``RunFinished`` as ``resume_agent``'s does."""
+        build = self.build
+        native = restore_native_history(build.spec.model, persisted_run=paused, session=self.storage.session)
+        template = with_native_history(build.request_template, native)
+        if self.storage.store is not None and build.spec.model.capabilities.system_updates:
+            # The paused run was sent the prompt its conversation held: the resume's requests all send it, read only.
+            hold = prompt_hold_path(self.storage.store.path, self.storage.session.session_id)
+            template = replace(template, prompt_hold=hold, prompt_hold_pin=[])
+        if decisions.approved or decisions.denied:
+            add_approval_receipt_reader(paused.run_id)
+        events = resume_from_session(
+            build.spec,
+            paused,
+            decisions,
+            storage=self.storage,
+            settings=build.history_settings,
+            plan=self._replay_plan,
+            user_id=self.user_id,
+            hooks=self._hooks,
+            # A failed or cancelled resume stores its terminal row over the paused run on purpose: the resume ends its
+            # approval anyway (``_store_interrupted`` in ``agent_loop/run.py``).
+            persist=persist_into(None, self.storage),
+            request_template=template,
+            model_name=self.model_name,
+        )
+        return with_resumed_turn_log_context(events)
+
+
+__all__ = [
+    "ContinueRun",
+    "ResumeDecisions",
+    "ResumeEvents",
+    "ResumeRunner",
+    "approval_decisions",
+    "forward_resume",
+    "resume_from_session",
+    "resume_inputs",
+    "with_resumed_turn_log_context",
+]

@@ -8,26 +8,26 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
-from agno.metrics import RunMetrics
-from agno.run.agent import RunOutput
-from agno.session.agent import AgentSession
 
-from mindroom.agent_storage import create_state_storage
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
 from mindroom.custom_tools.usage_stats import UsageStatsTools
+from mindroom.llm.runs import RunRecord
+from mindroom.llm.usage import RunMetrics, TokenCounts
 from mindroom.private_storage.legacy_private_storage_aliases import historical_private_instance_worker_key
 from mindroom.private_storage.private_instance_identity_store import (
     ensure_private_instance_identity,
     load_private_instance_identity,
 )
 from mindroom.runtime_resolution import resolve_agent_storage
+from mindroom.session_storage.agent_storage import create_agent_state_storage
+from mindroom.session_storage.types import ConversationSession
 from mindroom.tool_system.worker_routing import build_tool_execution_identity, private_instance_scope_root_path
 from mindroom.usage import stats as usage_stats
-from tests.conftest import seed_session
-from tests.test_usage_stats import _config, _metrics, _model_metrics, _paths, _row, _run, _source, _wire
+from tests.conftest import persist_session, seed_session_metrics
+from tests.test_usage_stats import _baseline, _config, _metrics, _model_metrics, _paths, _row, _run, _source, _wire
 from tests.test_usage_stats_tool import _context
 
 if TYPE_CHECKING:
@@ -80,7 +80,7 @@ def seed_private_usage(
     stored_requester: str | None,
     owner_record: bool = True,
 ) -> Path:
-    """Seed real Agno storage without storing conversation content."""
+    """Seed the agent's real conversation store without storing conversation content."""
     identity = build_tool_execution_identity(
         channel="matrix",
         agent_name=agent,
@@ -99,28 +99,22 @@ def seed_private_usage(
             worker_key=resolved.execution.worker_key,
             requester_id=requester,
         )
-    storage = create_state_storage(
-        agent,
-        resolved.session_state_root,
-        subdir="sessions",
-        session_table=f"{agent}_sessions",
-    )
-    try:
-        seed_session(
-            storage,
-            AgentSession(
-                session_id="same-session-id",
-                agent_id=agent,
-                user_id=stored_requester,
-                session_data={"session_metrics": {"total_tokens": session_tokens}},
-                runs=[
-                    RunOutput(
-                        run_id="same-run-id",
-                        user_id=stored_requester,
-                        model_provider="test-provider",
-                        model="test-model",
-                        created_at=1_700_000_000 if agent == "code" else 1_700_086_400,
-                        metrics=RunMetrics(
+    storage = create_agent_state_storage(agent, resolved.session_state_root)
+    persist_session(
+        storage,
+        ConversationSession(
+            kind="agent",
+            session_id="same-session-id",
+            owner_id=agent,
+            runs=[
+                RunRecord(
+                    run_id="same-run-id",
+                    user_id=stored_requester,
+                    model_provider="test-provider",
+                    model="test-model",
+                    created_at=1_700_000_000 if agent == "code" else 1_700_086_400,
+                    metrics=RunMetrics(
+                        tokens=TokenCounts(
                             input_tokens=run_tokens - 3,
                             output_tokens=3,
                             total_tokens=run_tokens,
@@ -128,11 +122,11 @@ def seed_private_usage(
                             cache_write_tokens=1,
                         ),
                     ),
-                ],
-            ),
-        )
-    finally:
-        storage.close()
+                ),
+            ],
+        ),
+    )
+    seed_session_metrics(storage, "same-session-id", {"total_tokens": session_tokens})
     return resolved.session_state_root / "sessions" / f"{agent}.db"
 
 
@@ -273,7 +267,7 @@ def test_private_rows_share_report_wide_run_deduplication(tmp_path: Path, monkey
     """Conflicting requester metadata on a duplicate run cannot double count private detail."""
     source = _source(scope="private_agent", requester_isolated=True)
     row = replace(
-        _row(source, _run(requester_id=ALICE), _run(requester_id=BOB), session_metrics=_metrics(100)),
+        _row(source, _run(requester_id=ALICE), _run(requester_id=BOB), _baseline(_metrics(80))),
         requester_id=ALICE,
     )
     _wire(monkeypatch, (source,), {source.path_label: (row,)})
@@ -294,14 +288,13 @@ def test_combined_private_ownership_differs_from_recorded_requester(
     private_row = _row(
         private_source,
         _run(requester_id=BOB, total_tokens=20),
-        session_metrics=_metrics(100),
-        session_model_metrics=(_model_metrics("cumulative-provider", "cumulative-model", **dict(_metrics(100))),),
+        _baseline(_metrics(80), _model_metrics("cumulative-provider", "cumulative-model", **dict(_metrics(80)))),
     )
     shared_row = _row(
         shared_source,
         _run(requester_id=BOB, total_tokens=30),
         _run(requester_id=shared_only_user, run_id="shared-only", total_tokens=40),
-        session_metrics=_metrics(80),
+        _baseline(_metrics(10)),
     )
     _wire(
         monkeypatch,
@@ -321,9 +314,10 @@ def test_combined_private_ownership_differs_from_recorded_requester(
     }
     private = {row["user_id"]: row for row in report["private_agent_breakdown"]}
     assert private[ALICE]["totals"]["total_tokens"] == 100
-    assert private[ALICE]["cumulative_model_breakdown"][0]["provider"] == "cumulative-provider"
-    assert private[ALICE]["cumulative_model_breakdown"][0]["totals"]["total_tokens"] == 100
-    assert private[ALICE]["cumulative_model_breakdown"][0]["session_count"] == 1
+    assert [
+        (row["provider"], row["totals"]["total_tokens"], row["session_count"])
+        for row in private[ALICE]["cumulative_model_breakdown"]
+    ] == [("cumulative-provider", 80, 1), ("openai", 20, 1)]
     assert private[ALICE]["retained_run_totals"]["total_tokens"] == 0
     assert private[BOB]["totals"]["total_tokens"] == 0
     assert private[BOB]["cumulative_model_breakdown"] == []
@@ -344,7 +338,7 @@ def test_unknown_summary_preserves_private_ownership_reconciliation(
     """Unknown requester detail can still be replaced with known private ownership."""
     source = replace(_source(scope="private_agent", requester_isolated=True), owner_id=ALICE)
     summary = replace(_run(requester_id=None, run_id="summary", total_tokens=110), kind="compaction_summary")
-    row = _row(source, _run(requester_id=ALICE), summary, session_metrics=_metrics(10))
+    row = _row(source, _run(requester_id=ALICE), summary)
     _wire(monkeypatch, (source,), {source.path_label: (row,)})
     report = usage_stats.collect_admin_usage(config=_config(), runtime_paths=_paths(tmp_path))
     users = {row.user_id: row.totals.total_tokens for row in report.user_breakdown}
@@ -366,9 +360,11 @@ def test_private_self_exports_only_owned_cumulative_models(tmp_path: Path) -> No
         runtime_paths=data.paths,
     ).to_dict()
 
-    assert report["cumulative_model_breakdown"][0]["provider"] == "unknown"
-    assert report["cumulative_model_breakdown"][0]["totals"]["total_tokens"] == 150
-    assert report["cumulative_model_breakdown"][0]["session_count"] == 2
+    # Stored totals without model detail leave what they counted beyond the runs under no model.
+    assert [
+        (row["provider"], row["totals"]["total_tokens"], row["session_count"])
+        for row in report["cumulative_model_breakdown"]
+    ] == [("unknown", 120, 2), ("test-provider", 30, 2)]
     assert report["cumulative_model_coverage"]["unavailable_sources"] == 2
 
     shared = usage_stats.collect_self_usage(
@@ -394,7 +390,7 @@ def test_private_self_exports_only_owned_cumulative_models(tmp_path: Path) -> No
 def test_private_rows_report_unreadable_run_detail(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Unavailable retained runs must not make private coverage look complete."""
     source = _source(scope="private_agent", requester_isolated=True)
-    row = replace(_row(source, session_metrics=_metrics(100), runs_available=False), requester_id=ALICE)
+    row = replace(_row(source, _baseline(_metrics(100)), runs_available=False), requester_id=ALICE)
     _wire(monkeypatch, (source,), {source.path_label: (row,)})
     report = usage_stats.collect_admin_usage(config=_config(), runtime_paths=_paths(tmp_path)).to_dict()
     assert report["private_agent_breakdown"][0]["totals"]["total_tokens"] == 100

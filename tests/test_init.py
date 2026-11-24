@@ -1,5 +1,6 @@
 """Tests for package-level import side effects."""
 
+import enum
 import importlib
 import json
 import os
@@ -33,7 +34,7 @@ def test_package_init_disables_vendor_telemetry(monkeypatch: pytest.MonkeyPatch)
 
 def test_disable_vendor_telemetry_updates_supplied_env() -> None:
     """Telemetry opt-outs should be reusable for subprocess env construction."""
-    env = {"AGNO_TELEMETRY": "true"}
+    env = {"DO_NOT_TRACK": "0"}
 
     disable_vendor_telemetry(env)
 
@@ -75,9 +76,25 @@ def test_composio_tools_reapplies_vendor_telemetry_after_lazy_import(
         pass
 
     sentry_module.update_dsn = update_dsn
+    # Fake every SDK module the loader imports, so the real SDK never initializes against the fake Sentry module.
+    composio_module = types.ModuleType("composio")
+    composio_module.AppType = str
+    workspace_module = types.ModuleType("composio.tools.env.base")
+    workspace_module.WorkspaceConfigType = object
+    toolset_module = types.ModuleType("composio.tools.toolset")
+    toolset_module.MetadataType = toolset_module.ProcessorsType = dict
+    logging_module = types.ModuleType("composio.utils.logging")
+    logging_module.LogLevel = enum.Enum("LogLevel", "INFO")
     unregistered: list[object] = []
-    monkeypatch.setitem(sys.modules, "composio_agno", composio_agno_module)
-    monkeypatch.setitem(sys.modules, "composio.utils.sentry", sentry_module)
+    for module in (
+        composio_module,
+        workspace_module,
+        toolset_module,
+        logging_module,
+        sentry_module,
+        composio_agno_module,
+    ):
+        monkeypatch.setitem(sys.modules, module.__name__, module)
     monkeypatch.setattr(vendor_telemetry.atexit, "unregister", unregistered.append)
 
     assert issubclass(composio_tools(), Toolkit)

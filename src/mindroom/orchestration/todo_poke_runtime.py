@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from mindroom.authorization import ReplyMembershipPendingError, is_sender_allowed_for_responder
+from mindroom.background_tasks import SupervisedLoop, run_coroutine_until_complete
 from mindroom.constants import ORIGINAL_SENDER_KEY
 from mindroom.custom_tools.todo_poke import (
     TodoPokeDeliveryUnavailableError,
@@ -31,7 +32,7 @@ if TYPE_CHECKING:
     from collections.abc import Callable
 
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
-    from mindroom.bot import AgentBot, TeamBot
+    from mindroom.bot import AgentBot
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
 
@@ -43,25 +44,31 @@ logger = get_logger(__name__)
 class TodoPokeRuntimeCoordinator:
     """Own the todo poke worker lifecycle and its orchestrator-facing adapters."""
 
+    name = "todo_poke"
     runtime_paths: RuntimePaths
-    config_provider: Callable[[], Config | None]
-    bot_provider: Callable[[str], AgentBot | TeamBot | None]
+    config_provider: Callable[[], Config]
+    bot_provider: Callable[[str], AgentBot | None]
     agent_reply_memberships: AgentReplyMembershipIndex
-    _worker: TodoPokeWorker | None = field(default=None, init=False)
-    _task: asyncio.Task | None = field(default=None, init=False)
+    _loop: SupervisedLoop = field(init=False)
 
-    async def sync(self) -> None:
+    def __post_init__(self) -> None:
+        """Create the supervised worker loop."""
+        self._loop = SupervisedLoop("todo_poke_worker", self._run_worker)
+
+    async def sync(self, config: Config) -> None:  # noqa: ARG002 - the runtime env enables pokes, not the config
         """Start or stop the todo poke worker from runtime env policy."""
-        policy = todo_poke_policy(self.runtime_paths)
-        if self.config_provider() is None or policy.interval_seconds == 0:
+        if todo_poke_policy(self.runtime_paths).interval_seconds == 0:
             await self.stop()
             return
+        self._loop.start()
 
-        if self._task is not None and not self._task.done():
-            return
+    async def stop(self) -> None:
+        """Stop the todo poke worker once its scan in progress finishes."""
+        await self._loop.stop()
 
+    async def _run_worker(self) -> None:
         worker = TodoPokeWorker(
-            policy=policy,
+            policy=todo_poke_policy(self.runtime_paths),
             deps=TodoPokeDeps(
                 state_root=todo_state_root(self.runtime_paths),
                 schedule_query=self._schedule_query,
@@ -71,25 +78,13 @@ class TodoPokeRuntimeCoordinator:
                 clock=lambda: datetime.now(UTC),
             ),
         )
-        self._worker = worker
-        self._task = asyncio.create_task(worker.run(), name="todo_poke_worker")
-
-    async def stop(self) -> None:
-        """Stop the todo poke worker if running."""
-        worker = self._worker
-        task = self._task
-        self._worker = None
-        self._task = None
-
-        if worker is not None:
-            worker.stop()
-        if task is not None:
-            await asyncio.gather(task, return_exceptions=True)
+        # A stop lets the scan in progress finish, so a poke it sent is recorded and never sent again.
+        await run_coroutine_until_complete(worker.run(), on_cancelled=worker.stop)
 
     def _agent_is_idle(self, agent_name: str) -> bool:
         """Return whether an agent and its running configured teams are idle."""
         config = self.config_provider()
-        if config is None or agent_name not in config.agents:
+        if agent_name not in config.agents:
             return False
 
         agent_bot = self.bot_provider(agent_name)
@@ -104,7 +99,7 @@ class TodoPokeRuntimeCoordinator:
                 return False
         return True
 
-    def _agent_bot(self, agent_name: str) -> AgentBot | TeamBot | None:
+    def _agent_bot(self, agent_name: str) -> AgentBot | None:
         """Return the assigned agent bot when todo poke I/O is ready."""
         agent_bot = self.bot_provider(agent_name)
         if agent_bot is None or not agent_bot.running or agent_bot.client is None:
@@ -115,7 +110,7 @@ class TodoPokeRuntimeCoordinator:
         self,
         room_id: str,
         agent_names: tuple[str, ...],
-    ) -> AgentBot | TeamBot | None:
+    ) -> AgentBot | None:
         """Return the first ready candidate with authoritative membership in the target room."""
         for agent_name in agent_names:
             agent_bot = self._agent_bot(agent_name)
@@ -155,18 +150,18 @@ class TodoPokeRuntimeCoordinator:
     def _requester_kind(self, requester_id: str, agent_name: str, room_id: str) -> TodoPokeRequesterKind:
         """Classify a recorded todo requester for one assignee and room under the current config."""
         config = self.config_provider()
-        if config is None:
-            raise TodoPokeDeliveryUnavailableError
         try:
             internal_sender_ids = current_internal_sender_ids(config, self.runtime_paths)
         except MissingManagedEntityAccountError as exc:
             raise TodoPokeDeliveryUnavailableError from exc
-        # Access policies never restrict internal senders, so their work runs as the assignee's own turn.
-        if requester_id in internal_sender_ids:
-            return TodoPokeRequesterKind.INTERNAL
+        # Work from MindRoom's own accounts runs as the assignee's own turn once the assignee's access admits its author.
+        internal = requester_id in internal_sender_ids
         # Ingress promotes only a human or configured bot-account original sender to requester; any other sender would run with the assignee's authority.
-        # Pokes act only for humans, and ingress refuses a human the assignee may not reply to, so such work would only take poke slots.
-        if not is_human_requester_id(requester_id, config, self.runtime_paths) or agent_name not in config.agents:
+        # Other pokes act only for humans, and ingress refuses a human the assignee may not reply to, so such work would only take poke slots.
+        if (
+            not (internal or is_human_requester_id(requester_id, config, self.runtime_paths))
+            or agent_name not in config.agents
+        ):
             return TodoPokeRequesterKind.REFUSED
         try:
             allowed = is_sender_allowed_for_responder(
@@ -181,7 +176,9 @@ class TodoPokeRuntimeCoordinator:
         except ReplyMembershipPendingError as exc:
             # Unresolved membership is no refusal, so skip the scan without pruning this requester's dedup state.
             raise TodoPokeDeliveryUnavailableError from exc
-        return TodoPokeRequesterKind.HUMAN if allowed else TodoPokeRequesterKind.REFUSED
+        if not allowed:
+            return TodoPokeRequesterKind.REFUSED
+        return TodoPokeRequesterKind.INTERNAL if internal else TodoPokeRequesterKind.HUMAN
 
     async def _send_poke(
         self,
@@ -193,8 +190,6 @@ class TodoPokeRuntimeCoordinator:
     ) -> str | None:
         """Send one assigned-agent todo poke that enters normal dispatch as its human requester or internally."""
         config = self.config_provider()
-        if config is None:
-            raise TodoPokeDeliveryUnavailableError
         agent_bot = await self._joined_agent_bot(room_id, (agent_name,))
         if agent_bot is None or agent_bot.client is None:
             raise TodoPokeDeliveryUnavailableError
@@ -202,7 +197,7 @@ class TodoPokeRuntimeCoordinator:
         # A human original sender makes the assignee apply its access policy and tool authorization to that human.
         original_sender = requester_id if requester_id is not None else mindroom_user_id(config, self.runtime_paths)
         extra_content = {ORIGINAL_SENDER_KEY: original_sender} if original_sender is not None else None
-        return await agent_bot._hook_send_message(
+        return await agent_bot.hook_context.send_message(
             room_id,
             body,
             thread_id,

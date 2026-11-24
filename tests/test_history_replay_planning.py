@@ -3,97 +3,87 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
+import httpx
 import pytest
-from agno.media import Image
-from agno.models.message import Message
-from agno.session.summary import SessionSummary
 
-from mindroom.agent_storage import create_session_storage, get_agent_session
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import CompactionConfig, CompactionOverrideConfig, DefaultsConfig, ModelConfig
+from mindroom.history.compaction import _compaction_fallback_is_distinct
 from mindroom.history.policy import (
     classify_compaction_decision,
     context_budget_after_reserve,
     resolve_history_execution_plan,
 )
 from mindroom.history.replay import (
-    _HistorySummaryBudgetError,
-    apply_replay_plan,
+    HistorySummaryBudgetError,
     estimate_prompt_visible_history_tokens,
+    estimate_summary_text_tokens,
     plan_replay_that_fits,
 )
-from mindroom.history.runtime import _compaction_fallback_is_distinct
+from mindroom.history.request_size import request_sizer
+from mindroom.history.runtime import (
+    finalize_history_preparation,
+    prepare_scope_history,
+    resolve_entity_preparation_inputs,
+)
+from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.storage import (
     read_scope_state,
-    set_force_compaction_state,
+    with_force_compaction,
 )
 from mindroom.history.types import (
     COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS,
     HistoryPolicy,
     HistoryScope,
-    HistoryScopeState,
+    PreparedHistoryState,
     ResolvedHistoryExecutionPlan,
     ResolvedHistorySettings,
     ResolvedReplayPlan,
+    ScopeSummary,
 )
-from mindroom.token_budget import estimate_text_tokens
+from mindroom.llm.media import Image
+from mindroom.llm.messages import Message
+from mindroom.llm.provider import ModelRequest
+from mindroom.session_storage.agent_storage import create_session_storage
+from mindroom.token_counting.requests import MEDIA_ALLOWANCE_TOKENS
+from mindroom.turn_model import ModelScope, resolve_turn_model
 from tests.conftest import (
-    FakeModel,
     bind_runtime_paths,
+    install_model_providers,
     prepare_history_for_run_for_test,
+    request_frame,
     seed_session,
 )
-from tests.history_helpers import (  # noqa: F401
-    _agent,
-    _close_test_storages,
+from tests.fakes.scripted_model import ScriptedModel, estimate_only_model
+from tests.fakes.summary_model import summary_model
+from tests.fakes.token_counter import quarter_tokens
+from tests.history_helpers import (
     _completed_run,
     _make_config,
     _runtime_paths,
     _session,
-    archived_run_ids,
+    folded_run_ids,
+    replay_settings,
 )
+from tests.providers.golden_support import golden_paths, load_golden
+from tests.providers.openai_family_support import openai_family_adapter
+
+if TYPE_CHECKING:
+    from mindroom.constants import RuntimePaths
 
 
-class _RecordingVisualReplayEstimate:
-    """Record the shared history projection while supplying a visual estimate."""
-
-    def __init__(self) -> None:
-        self.messages: list[Message] = []
-
-    def estimate_portable_replay_tokens(self, messages: list[Message]) -> int:
-        self.messages = messages
-        return 100
-
-    def portable_replay_uses_visual_tokens(self) -> bool:
-        return True
-
-
-class _UnavailableVisualReplayEstimate:
-    def __init__(self) -> None:
-        self.messages: list[Message] = []
-
-    def estimate_portable_replay_tokens(self, messages: list[Message]) -> None:
-        self.messages = messages
-
-    def portable_replay_uses_visual_tokens(self) -> bool:
-        return True
-
-
-class _DominantTextReplayEstimate:
-    def __init__(self) -> None:
-        self.messages: list[Message] = []
-
-    def estimate_portable_replay_tokens(self, messages: list[Message]) -> int:
-        self.messages = messages
-        return 12_000
-
-    def portable_replay_uses_visual_tokens(self) -> bool:
-        return False
+def _agent_settings(config: Config) -> ResolvedHistorySettings:
+    """Return the test agent's resolved history settings, which hold its compaction config."""
+    return config.resolve_scope("test_agent").history_settings
 
 
 def _viewed_image_message(index: int) -> Message:
@@ -104,36 +94,80 @@ def _viewed_image_message(index: int) -> Message:
     )
 
 
-@pytest.mark.parametrize("native_route", [None, "native-route"])
-def test_history_estimate_projects_bounded_viewed_images_without_mutating_session(native_route: str | None) -> None:
-    """The planner and provider estimator see the same bounded newest-first media replay."""
+@dataclass
+class _RecordingModel(ScriptedModel):
+    """A fake provider that keeps every request it sized."""
+
+    sized: list[ModelRequest] = field(default_factory=list)
+
+    def request_tokens(self, request: ModelRequest, *, start: int = 0) -> int:
+        self.sized.append(request)
+        return super().request_tokens(request, start=start)
+
+
+def test_an_empty_media_list_adds_nothing_to_a_message_estimate() -> None:
+    """A message estimates by its text and tool calls; an empty media list carries neither."""
+    with_empty_media = Message(role="user", content="abcdefg", images=[], files=[])
+
+    assert ScriptedModel([]).request_tokens(ModelRequest(messages=[with_empty_media])) == 1
+
+
+def test_history_estimate_projects_bounded_viewed_images_without_mutating_session() -> None:
+    """The planner sizes the same bounded newest-first media replay a request sends."""
     messages = [_viewed_image_message(index) for index in range(6)]
     session = _session("viewed-images", runs=[_completed_run("run-1", messages=messages)])
-    before = session.to_dict()
-    replay_model = _RecordingVisualReplayEstimate()
+    before = deepcopy(session)
+    model = _RecordingModel([])
 
     estimate_prompt_visible_history_tokens(
         session=session,
-        scope=HistoryScope(kind="agent", scope_id="test_agent"),
-        history_settings=ResolvedHistorySettings(
-            policy=HistoryPolicy(mode="all"),
-            max_tool_calls_from_history=None,
-        ),
-        replay_model=replay_model,  # type: ignore[arg-type]
-        native_route=native_route,
+        history_settings=replay_settings(),
+        model=model,
     )
 
-    replayed_ids = [image.id for message in replay_model.messages for image in message.images or []]
+    [request] = [sized for sized in model.sized if sized.messages]
+    replayed_ids = [image.id for message in request.messages for image in message.images or []]
     assert replayed_ids == ["mindroom_viewed_2", "mindroom_viewed_3", "mindroom_viewed_4", "mindroom_viewed_5"]
-    assert sum("omitted from replay" in str(message.content) for message in replay_model.messages) == 2
-    assert session.to_dict() == before
+    assert sum("omitted from replay" in str(message.content) for message in request.messages) == 2
+    assert session == before
 
 
-@pytest.mark.parametrize("native_route", [None, "native-route"])
-def test_history_estimate_charges_conservative_visual_cost_without_provider_estimator(native_route: str | None) -> None:
-    """Fallback planning charges visual tokens without treating image bytes as prompt text."""
-    settings = ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None)
-    scope = HistoryScope(kind="agent", scope_id="test_agent")
+@pytest.mark.parametrize("estimate", ["history", "summary"])
+def test_history_estimates_leave_out_the_instructions_a_route_sends_with_every_request(
+    tmp_path: Path,
+    estimate: str,
+) -> None:
+    """Codex sends its default instructions in every request, which the request without its history already counts."""
+    config = load_golden(golden_paths(("codex",))[0])["input"]["model_config"]
+    session = _session(
+        "codex",
+        runs=[
+            _completed_run(
+                "run-1",
+                messages=[Message(role="user", content="Hi"), Message(role="assistant", content="Hello")],
+            ),
+        ],
+    )
+
+    def estimated(instructions: str) -> int:
+        root = tmp_path / str(len(instructions))
+        root.mkdir()
+        authored = {**config, "extra_kwargs": {**config["extra_kwargs"], "default_instructions": instructions}}
+        model = openai_family_adapter(authored, root, lambda _request: httpx.Response(500))
+        if estimate == "history":
+            return estimate_prompt_visible_history_tokens(
+                session=session,
+                history_settings=replay_settings(),
+                model=model,
+            )
+        return estimate_summary_text_tokens("The user greeted the agent.", model)
+
+    assert estimated("Be brief.") == estimated("Be brief. " * 1_000)
+
+
+def test_history_estimate_charges_conservative_visual_cost() -> None:
+    """Planning charges each replayed image its allowance without treating image bytes as prompt text."""
+    settings = replay_settings()
     without_image = _session(
         "without-image",
         runs=[
@@ -147,76 +181,12 @@ def test_history_estimate_charges_conservative_visual_cost_without_provider_esti
         "with-image",
         runs=[_completed_run("run-1", messages=[_viewed_image_message(1)])],
     )
+    estimate = partial(estimate_prompt_visible_history_tokens, history_settings=settings, model=ScriptedModel([]))
 
-    text_tokens = estimate_prompt_visible_history_tokens(
-        session=without_image,
-        scope=scope,
-        history_settings=settings,
-        native_route=native_route,
-    )
-    visual_tokens = estimate_prompt_visible_history_tokens(
-        session=with_image,
-        scope=scope,
-        history_settings=settings,
-        native_route=native_route,
-    )
+    text_tokens = estimate(session=without_image)
+    visual_tokens = estimate(session=with_image)
 
-    assert 5_000 <= visual_tokens - text_tokens < 5_100
-
-
-@pytest.mark.parametrize("native_route", [None, "native-route"])
-def test_history_estimate_uses_visual_fallback_when_provider_estimate_is_unavailable(native_route: str | None) -> None:
-    """A declared visual capability cannot erase image cost when its estimate is unavailable."""
-    session = _session("with-image", runs=[_completed_run("run-1", messages=[_viewed_image_message(1)])])
-
-    tokens = estimate_prompt_visible_history_tokens(
-        session=session,
-        scope=HistoryScope(kind="agent", scope_id="test_agent"),
-        history_settings=ResolvedHistorySettings(
-            policy=HistoryPolicy(mode="all"),
-            max_tool_calls_from_history=None,
-        ),
-        replay_model=_UnavailableVisualReplayEstimate(),  # type: ignore[arg-type]
-        native_route=native_route,
-    )
-
-    assert tokens >= 5_000
-
-
-@pytest.mark.parametrize("native_route", [None, "native-route"])
-def test_history_estimate_adds_visual_fallback_after_dominant_provider_text_estimate(
-    native_route: str | None,
-) -> None:
-    """A larger provider text estimate cannot hide the fallback image charge."""
-    settings = ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None)
-    scope = HistoryScope(kind="agent", scope_id="test_agent")
-    without_image = _session(
-        "without-image",
-        runs=[_completed_run("run-1", messages=[Message(role="user", content="Viewed output")])],
-    )
-    with_image = _session(
-        "with-image",
-        runs=[_completed_run("run-1", messages=[_viewed_image_message(1)])],
-    )
-    replay_model = _DominantTextReplayEstimate()
-
-    text_tokens = estimate_prompt_visible_history_tokens(
-        session=without_image,
-        scope=scope,
-        history_settings=settings,
-        native_route=native_route,
-        replay_model=replay_model,  # type: ignore[arg-type]
-    )
-    visual_tokens = estimate_prompt_visible_history_tokens(
-        session=with_image,
-        scope=scope,
-        history_settings=settings,
-        native_route=native_route,
-        replay_model=replay_model,  # type: ignore[arg-type]
-    )
-
-    assert visual_tokens - text_tokens >= 5_000
-    assert replay_model.messages[0].images is None
+    assert visual_tokens - text_tokens == MEDIA_ALLOWANCE_TOKENS
 
 
 @pytest.mark.asyncio
@@ -250,9 +220,7 @@ async def test_prepare_history_for_run_authored_compaction_still_plans_safe_repl
     )
     seed_session(storage, session)
 
-    agent = _agent(db=storage)
     prepared = await prepare_history_for_run_for_test(
-        agent=agent,
         agent_name="test_agent",
         full_prompt="Current prompt",
         session_id="session-1",
@@ -263,11 +231,11 @@ async def test_prepare_history_for_run_authored_compaction_still_plans_safe_repl
         session=session,
     )
 
-    persisted = get_agent_session(storage, "session-1")
+    persisted = storage.load_session("session-1")
     assert persisted is not None
     assert persisted.summary is None
     assert [run.run_id for run in persisted.runs] == ["run-1", "run-2"]
-    assert prepared.compaction_outcomes == []
+    assert prepared.compaction_reply_outcome == "none"
     assert prepared.replay_plan is not None
     assert prepared.replay_plan.mode == "limited"
     assert prepared.replay_plan.add_history_to_context is True
@@ -284,11 +252,9 @@ def test_small_replay_window_does_not_cap_compaction_model_input(tmp_path: Path)
 
     execution_plan = resolve_history_execution_plan(
         config=config,
-        compaction_config=config.resolve_entity("test_agent").compaction_config,
-        has_authored_compaction_config=config.resolve_entity("test_agent").has_authored_compaction_config,
+        history_settings=_agent_settings(config),
         active_model_name="default",
         active_context_window=1_000_000,
-        static_prompt_tokens=10,
     )
 
     assert execution_plan.replay_window_tokens == 1
@@ -298,9 +264,21 @@ def test_small_replay_window_does_not_cap_compaction_model_input(tmp_path: Path)
 
 
 @pytest.mark.asyncio
-async def test_prepare_history_for_run_without_authored_compaction_and_no_window_skips_warning(tmp_path: Path) -> None:
-    config, runtime_paths = _make_config(tmp_path, context_window=None)
-    config.defaults.compaction = None
+@pytest.mark.parametrize("compaction_disabled", [False, True], ids=["unauthored", "disabled"])
+async def test_prepare_history_for_run_without_active_compaction_and_no_window_skips_warning(
+    tmp_path: Path,
+    *,
+    compaction_disabled: bool,
+) -> None:
+    if compaction_disabled:
+        config, runtime_paths = _make_config(
+            tmp_path,
+            compaction=CompactionOverrideConfig(enabled=False),
+            context_window=None,
+        )
+    else:
+        config, runtime_paths = _make_config(tmp_path, context_window=None)
+        config.defaults.compaction = None
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     session = _session(
         "session-1",
@@ -313,7 +291,6 @@ async def test_prepare_history_for_run_without_authored_compaction_and_no_window
 
     with patch("mindroom.history.runtime.logger.warning") as mock_warning:
         prepared = await prepare_history_for_run_for_test(
-            agent=_agent(db=storage),
             agent_name="test_agent",
             full_prompt="Current prompt",
             session_id="session-1",
@@ -324,50 +301,11 @@ async def test_prepare_history_for_run_without_authored_compaction_and_no_window
             session=session,
         )
 
-    persisted = get_agent_session(storage, "session-1")
+    persisted = storage.load_session("session-1")
     assert persisted is not None
     assert persisted.summary is None
     assert [run.run_id for run in persisted.runs] == ["run-1", "run-2"]
-    assert prepared.compaction_outcomes == []
-    assert prepared.replays_persisted_history is True
-    assert mock_warning.call_args_list == []
-
-
-@pytest.mark.asyncio
-async def test_prepare_history_for_run_with_disabled_compaction_and_no_window_skips_warning(tmp_path: Path) -> None:
-    config, runtime_paths = _make_config(
-        tmp_path,
-        compaction=CompactionOverrideConfig(enabled=False),
-        context_window=None,
-    )
-    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
-    session = _session(
-        "session-1",
-        runs=[
-            _completed_run("run-1"),
-            _completed_run("run-2"),
-        ],
-    )
-    seed_session(storage, session)
-
-    with patch("mindroom.history.runtime.logger.warning") as mock_warning:
-        prepared = await prepare_history_for_run_for_test(
-            agent=_agent(db=storage),
-            agent_name="test_agent",
-            full_prompt="Current prompt",
-            session_id="session-1",
-            runtime_paths=runtime_paths,
-            config=config,
-            execution_identity=None,
-            storage=storage,
-            session=session,
-        )
-
-    persisted = get_agent_session(storage, "session-1")
-    assert persisted is not None
-    assert persisted.summary is None
-    assert [run.run_id for run in persisted.runs] == ["run-1", "run-2"]
-    assert prepared.compaction_outcomes == []
+    assert prepared.compaction_reply_outcome == "none"
     assert prepared.replays_persisted_history is True
     assert mock_warning.call_args_list == []
 
@@ -391,7 +329,6 @@ async def test_prepare_history_for_run_warns_once_when_authored_compaction_is_un
 
     with patch("mindroom.history.runtime.logger.warning") as mock_warning:
         await prepare_history_for_run_for_test(
-            agent=_agent(db=storage),
             agent_name="test_agent",
             full_prompt="Current prompt",
             session_id="session-1",
@@ -444,7 +381,7 @@ def test_resolved_compaction_config_merges_authored_overrides(tmp_path: Path) ->
         runtime_paths,
     )
 
-    resolved = config.resolve_entity("test_agent").compaction_config
+    resolved = _agent_settings(config).compaction_config
 
     assert resolved.enabled is True
     assert resolved.threshold_tokens is None
@@ -454,11 +391,9 @@ def test_resolved_compaction_config_merges_authored_overrides(tmp_path: Path) ->
     assert resolved.timeout_seconds == 75.0
     execution_plan = resolve_history_execution_plan(
         config=config,
-        compaction_config=resolved,
-        has_authored_compaction_config=True,
+        history_settings=_agent_settings(config),
         active_model_name="default",
         active_context_window=48_000,
-        static_prompt_tokens=2_000,
     )
     assert execution_plan.compaction_timeout_seconds == 75.0
 
@@ -473,114 +408,49 @@ def test_compaction_timeout_defaults_to_ten_minutes_and_must_be_positive() -> No
         CompactionOverrideConfig(timeout_seconds=-1)
 
 
-def test_authored_empty_defaults_compaction_enables_text_compaction(tmp_path: Path) -> None:
-    runtime_paths = _runtime_paths(tmp_path)
+@pytest.mark.parametrize(
+    ("defaults", "agent", "automatic"),
+    [
+        pytest.param({}, {}, True, id="omitted-defaults"),
+        pytest.param({"compaction": {}}, {}, True, id="empty-defaults"),
+        pytest.param({"compaction": {"enabled": False}}, {"compaction": {}}, False, id="disabled-defaults"),
+        pytest.param({"compaction": None}, {}, False, id="null-defaults"),
+    ],
+)
+def test_only_an_authored_enabled_compaction_config_compacts_automatically(
+    tmp_path: Path,
+    defaults: dict[str, object],
+    agent: dict[str, object],
+    *,
+    automatic: bool,
+) -> None:
+    """The settings own whether compaction runs on its own, and the plan carries their answer.
+
+    ``defaults.compaction: null`` leaves the built-in config, which is enabled but authored by nobody, so like
+    ``enabled: false`` it has no trigger and keeps ``reserve_tokens`` free for the reply. On this 48k window, fitting
+    requests to the 80% trigger instead would let a request reach 38,400 tokens and leave 9,600 for the reply, below
+    the 16,384 reserve. With automatic compaction the trigger is capped at the limit for the same reason.
+    """
     config = Config.validate_with_runtime(
         {
-            "agents": {
-                "test_agent": {
-                    "display_name": "Test Agent",
-                },
-            },
-            "defaults": {
-                "tools": [],
-                "compaction": {},
-            },
-            "models": {
-                "default": {
-                    "provider": "openai",
-                    "id": "test-model",
-                    "context_window": 48_000,
-                },
-            },
+            "agents": {"test_agent": {"display_name": "Test Agent", **agent}},
+            "defaults": {"tools": [], **defaults},
+            "models": {"default": {"provider": "openai", "id": "test-model", "context_window": 48_000}},
         },
-        runtime_paths,
+        _runtime_paths(tmp_path),
     )
 
     execution_plan = resolve_history_execution_plan(
         config=config,
-        compaction_config=config.resolve_entity("test_agent").compaction_config,
-        has_authored_compaction_config=config.resolve_entity("test_agent").has_authored_compaction_config,
+        history_settings=_agent_settings(config),
         active_model_name="default",
         active_context_window=48_000,
-        static_prompt_tokens=2_000,
     )
 
-    assert execution_plan.authored_compaction_enabled is True
-
-
-def test_omitted_defaults_compaction_enables_text_compaction(tmp_path: Path) -> None:
-    runtime_paths = _runtime_paths(tmp_path)
-    config = Config.validate_with_runtime(
-        {
-            "agents": {
-                "test_agent": {
-                    "display_name": "Test Agent",
-                },
-            },
-            "defaults": {
-                "tools": [],
-            },
-            "models": {
-                "default": {
-                    "provider": "openai",
-                    "id": "test-model",
-                    "context_window": 48_000,
-                },
-            },
-        },
-        runtime_paths,
-    )
-
-    execution_plan = resolve_history_execution_plan(
-        config=config,
-        compaction_config=config.resolve_entity("test_agent").compaction_config,
-        has_authored_compaction_config=config.resolve_entity("test_agent").has_authored_compaction_config,
-        active_model_name="default",
-        active_context_window=48_000,
-        static_prompt_tokens=2_000,
-    )
-
-    assert execution_plan.authored_compaction_enabled is True
-
-
-def test_empty_agent_compaction_override_stays_disabled_with_disabled_defaults(tmp_path: Path) -> None:
-    runtime_paths = _runtime_paths(tmp_path)
-    config = Config.validate_with_runtime(
-        {
-            "agents": {
-                "test_agent": {
-                    "display_name": "Test Agent",
-                    "compaction": {},
-                },
-            },
-            "defaults": {
-                "tools": [],
-                "compaction": {
-                    "enabled": False,
-                },
-            },
-            "models": {
-                "default": {
-                    "provider": "openai",
-                    "id": "test-model",
-                    "context_window": 48_000,
-                },
-            },
-        },
-        runtime_paths,
-    )
-
-    execution_plan = resolve_history_execution_plan(
-        config=config,
-        compaction_config=config.resolve_entity("test_agent").compaction_config,
-        has_authored_compaction_config=config.resolve_entity("test_agent").has_authored_compaction_config,
-        active_model_name="default",
-        active_context_window=48_000,
-        static_prompt_tokens=2_000,
-    )
-
-    assert execution_plan.authored_compaction_enabled is False
+    assert _agent_settings(config).automatic_compaction is automatic
+    assert execution_plan.automatic_compaction is automatic
+    assert execution_plan.trigger_tokens == execution_plan.limit_tokens == 48_000 - 16_384
+    assert execution_plan.trigger_threshold_tokens == (38_400 if automatic else None)
 
 
 def test_validate_compaction_model_references_does_not_emit_availability_warnings(tmp_path: Path) -> None:
@@ -739,7 +609,7 @@ def test_resolved_compaction_config_inherits_disabled_defaults_for_pure_model_cl
         runtime_paths,
     )
 
-    compaction_config = config.resolve_entity("test_agent").compaction_config
+    compaction_config = _agent_settings(config).compaction_config
 
     assert compaction_config.enabled is False
     assert compaction_config.model is None
@@ -818,7 +688,7 @@ def _fallback_inheritance_config(tmp_path: Path, *, override: CompactionOverride
 def test_resolved_compaction_config_inherits_fallback_model_from_defaults(tmp_path: Path) -> None:
     config = _fallback_inheritance_config(tmp_path, override=CompactionOverrideConfig(enabled=True))
 
-    compaction_config = config.resolve_entity("test_agent").compaction_config
+    compaction_config = _agent_settings(config).compaction_config
 
     assert compaction_config.enabled is True
     assert compaction_config.model == "summary-model"
@@ -833,7 +703,7 @@ def test_resolved_compaction_config_inherits_disabled_defaults_for_pure_model_fi
     ):
         config = _fallback_inheritance_config(tmp_path, override=override)
 
-        compaction_config = config.resolve_entity("test_agent").compaction_config
+        compaction_config = _agent_settings(config).compaction_config
 
         assert compaction_config.enabled is False
         assert compaction_config.fallback_model is None
@@ -844,11 +714,9 @@ def test_resolve_history_execution_plan_carries_fallback_model_name(tmp_path: Pa
 
     execution_plan = resolve_history_execution_plan(
         config=config,
-        compaction_config=config.resolve_entity("test_agent").compaction_config,
-        has_authored_compaction_config=True,
+        history_settings=_agent_settings(config),
         active_model_name="default",
         active_context_window=48_000,
-        static_prompt_tokens=1_000,
     )
 
     assert execution_plan.compaction_model_name == "summary-model"
@@ -882,11 +750,9 @@ def test_resolve_history_execution_plan_uses_each_compaction_model_window_for_su
 
     execution_plan = resolve_history_execution_plan(
         config=config,
-        compaction_config=config.resolve_entity("test_agent").compaction_config,
-        has_authored_compaction_config=True,
+        history_settings=_agent_settings(config),
         active_model_name="default",
         active_context_window=1_000_000,
-        static_prompt_tokens=10_000,
     )
 
     assert execution_plan.replay_window_tokens == 200_000
@@ -917,12 +783,15 @@ def test_compaction_fallback_is_distinct_guards_same_alias_and_same_target(tmp_p
                     id="claude-sonnet-5",
                     context_window=32_000,
                 ),
+                # ``openai_codex`` is an alias of ``codex``, so both select the same route.
+                "codex-summary": ModelConfig(provider="codex", id="gpt-6.1-sol", context_window=32_000),
+                "codex-summary-alias": ModelConfig(provider="openai_codex", id="gpt-6.1-sol", context_window=32_000),
             },
         ),
         _runtime_paths(tmp_path),
     )
 
-    with patch("mindroom.history.runtime.logger.warning") as warning_mock:
+    with patch("mindroom.history.compaction.logger.warning") as warning_mock:
         assert (
             _compaction_fallback_is_distinct(
                 config,
@@ -950,13 +819,21 @@ def test_compaction_fallback_is_distinct_guards_same_alias_and_same_target(tmp_p
         assert (
             _compaction_fallback_is_distinct(
                 config,
+                primary_model_name="codex-summary",
+                fallback_model_name="codex-summary-alias",
+            )
+            is False
+        )
+        assert (
+            _compaction_fallback_is_distinct(
+                config,
                 primary_model_name="summary-model",
                 fallback_model_name="fallback-model",
             )
             is True
         )
 
-    assert warning_mock.call_count == 3
+    assert warning_mock.call_count == 4
     assert all(
         call.args[0] == "Compaction fallback resolves to the primary serving model; continuing without a fallback"
         for call in warning_mock.call_args_list
@@ -1001,33 +878,34 @@ def test_resolve_history_execution_plan_uses_compaction_model_window_only_for_su
 
     execution_plan = resolve_history_execution_plan(
         config=config,
-        compaction_config=config.resolve_entity("test_agent").compaction_config,
-        has_authored_compaction_config=config.resolve_entity("test_agent").has_authored_compaction_config,
+        history_settings=_agent_settings(config),
         active_model_name="default",
         active_context_window=None,
-        static_prompt_tokens=2_000,
     )
 
-    assert execution_plan.compaction_context_window == 32_000
+    # The summary model's 32,000 window, half of it reserved, minus prompt overhead and a 10% margin.
+    assert execution_plan.summary_input_budget_tokens == 10_800
     assert execution_plan.replay_window_tokens == 20_000
-    assert execution_plan.summary_input_budget_tokens is not None
     assert execution_plan.trigger_threshold_tokens == 16_000
-    assert execution_plan.replay_budget_tokens == 8_000
-    assert execution_plan.hard_replay_budget_tokens == 8_000
+    # The 20,000-token replay window minus its reserve, clamped to half the window, caps the 16,000 trigger.
+    assert execution_plan.trigger_tokens == 10_000
+    assert execution_plan.limit_tokens == 10_000
     assert execution_plan.text_compaction_available is True
 
+    # A request of a 2,000-token static prompt and 8,001 tokens of history.
     decision = classify_compaction_decision(
         plan=execution_plan,
         force_compact_before_next_run=False,
-        current_history_tokens=8_001,
+        request_tokens=10_001,
+        summary_request_tokens=2_000,
+        allow_native_compaction=True,
     )
     assert decision.mode == "required"
-    assert decision.reason == "history_exceeds_hard_budget"
+    assert decision.reason == "request_exceeds_limit"
 
 
-def test_resolve_runtime_model_uses_room_override_for_team(
+def test_resolve_turn_model_uses_room_override_for_team(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(
@@ -1042,7 +920,7 @@ def test_resolve_runtime_model_uses_room_override_for_team(
                 ),
             },
             defaults=DefaultsConfig(tools=[]),
-            room_models={"lobby": "large"},
+            room_models={"!room:localhost": "large"},
             models={
                 "default": ModelConfig(provider="openai", id="default-model", context_window=None),
                 "large": ModelConfig(provider="openai", id="large-model", context_window=32_000),
@@ -1050,28 +928,27 @@ def test_resolve_runtime_model_uses_room_override_for_team(
         ),
         runtime_paths,
     )
-    monkeypatch.setattr("mindroom.matrix.state.get_room_alias_from_id", lambda *_args: "lobby")
 
-    runtime_model = config.resolve_runtime_model(
-        entity_name="team_123",
-        room_id="!room:localhost",
-        runtime_paths=runtime_paths,
+    runtime_model = resolve_turn_model(
+        config,
+        runtime_paths,
+        ModelScope(entity="team_123", room_id="!room:localhost"),
+        None,
     )
 
     assert runtime_model.model_name == "large"
     assert runtime_model.context_window == 32_000
 
 
-def test_resolve_runtime_model_uses_room_override_for_agent(
+def test_resolve_turn_model_uses_room_override_for_agent(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(
         Config(
             agents={"test_agent": AgentConfig(display_name="Test Agent", model="default")},
             defaults=DefaultsConfig(tools=[]),
-            room_models={"lobby": "large"},
+            room_models={"!room:localhost": "large"},
             models={
                 "default": ModelConfig(provider="openai", id="default-model", context_window=None),
                 "large": ModelConfig(provider="openai", id="large-model", context_window=48_000),
@@ -1079,12 +956,12 @@ def test_resolve_runtime_model_uses_room_override_for_agent(
         ),
         runtime_paths,
     )
-    monkeypatch.setattr("mindroom.matrix.state.get_room_alias_from_id", lambda *_args: "lobby")
 
-    runtime_model = config.resolve_runtime_model(
-        entity_name="test_agent",
-        room_id="!room:localhost",
-        runtime_paths=runtime_paths,
+    runtime_model = resolve_turn_model(
+        config,
+        runtime_paths,
+        ModelScope(entity="test_agent", room_id="!room:localhost"),
+        None,
     )
 
     assert runtime_model.model_name == "large"
@@ -1100,11 +977,9 @@ def test_resolve_history_execution_plan_marks_non_positive_summary_budget_unavai
 
     execution_plan = resolve_history_execution_plan(
         config=config,
-        compaction_config=config.resolve_entity("test_agent").compaction_config,
-        has_authored_compaction_config=config.resolve_entity("test_agent").has_authored_compaction_config,
+        history_settings=_agent_settings(config),
         active_model_name="default",
         active_context_window=4_096,
-        static_prompt_tokens=500,
     )
 
     assert execution_plan.summary_input_budget_tokens == 0
@@ -1133,11 +1008,9 @@ def test_resolve_history_execution_plan_enforces_minimum_summary_input_budget(
 
     execution_plan = resolve_history_execution_plan(
         config=config,
-        compaction_config=config.resolve_entity("test_agent").compaction_config,
-        has_authored_compaction_config=config.resolve_entity("test_agent").has_authored_compaction_config,
+        history_settings=_agent_settings(config),
         active_model_name="default",
         active_context_window=context_window_tokens,
-        static_prompt_tokens=10,
     )
 
     assert execution_plan.summary_input_budget_tokens == expected_summary_input_budget
@@ -1146,22 +1019,20 @@ def test_resolve_history_execution_plan_enforces_minimum_summary_input_budget(
 
 
 @pytest.mark.parametrize(
-    ("context_window_tokens", "reserve_tokens", "spent_tokens", "expected"),
+    ("context_window_tokens", "reserve_tokens", "expected"),
     [
-        (1_000, 100, 25, 875),
-        (1_000, 800, 10, 490),
-        (1_000, 100, 2_000, 0),
-        (0, 100, 10, 0),
-        (-10, 5, 3, 0),
+        (1_000, 100, 900),
+        (1_000, 800, 500),
+        (0, 100, 0),
+        (-10, 5, 0),
     ],
 )
 def test_context_budget_after_reserve_preserves_replay_budget_bounds(
     context_window_tokens: int,
     reserve_tokens: int,
-    spent_tokens: int,
     expected: int,
 ) -> None:
-    assert context_budget_after_reserve(context_window_tokens, reserve_tokens, spent_tokens) == expected
+    assert context_budget_after_reserve(context_window_tokens, reserve_tokens) == expected
 
 
 def test_resolve_history_execution_plan_keeps_replay_headroom_when_compaction_disabled(
@@ -1178,15 +1049,14 @@ def test_resolve_history_execution_plan_keeps_replay_headroom_when_compaction_di
 
     execution_plan = resolve_history_execution_plan(
         config=config,
-        compaction_config=config.resolve_entity("test_agent").compaction_config,
-        has_authored_compaction_config=config.resolve_entity("test_agent").has_authored_compaction_config,
+        history_settings=_agent_settings(config),
         active_model_name="default",
         active_context_window=1_000,
-        static_prompt_tokens=10,
     )
 
     assert execution_plan.trigger_threshold_tokens is None
-    assert execution_plan.replay_budget_tokens == 490
+    # Without automatic compaction a request fits the limit: the window minus its reserve, clamped to half the window.
+    assert execution_plan.trigger_tokens == execution_plan.limit_tokens == 500
 
 
 @pytest.mark.parametrize(
@@ -1210,43 +1080,42 @@ def test_resolve_history_execution_plan_caps_replay_without_capping_summary_inpu
 
     execution_plan = resolve_history_execution_plan(
         config=config,
-        compaction_config=config.resolve_entity("test_agent").compaction_config,
-        has_authored_compaction_config=config.resolve_entity("test_agent").has_authored_compaction_config,
+        history_settings=_agent_settings(config),
         active_model_name="default",
         active_context_window=active_context_window,
-        static_prompt_tokens=10_000,
     )
 
-    assert execution_plan.compaction_context_window == active_context_window
     assert execution_plan.replay_window_tokens == expected_replay_window
     assert execution_plan.summary_input_budget_tokens == expected_summary_input_budget
     assert execution_plan.trigger_threshold_tokens == int(expected_replay_window * 0.8)
-    hard_replay_budget = execution_plan.hard_replay_budget_tokens
-    assert hard_replay_budget is not None
-    assert hard_replay_budget == expected_replay_window - 16_384 - 10_000
+    # The trigger falls below the limit here, so a request compacts at the trigger.
+    assert execution_plan.trigger_tokens == int(expected_replay_window * 0.8)
+    limit = execution_plan.limit_tokens
+    assert limit is not None
+    assert limit == expected_replay_window - 16_384
 
     decision = classify_compaction_decision(
         plan=execution_plan,
         force_compact_before_next_run=False,
-        current_history_tokens=hard_replay_budget + 1,
+        request_tokens=limit + 1,
+        summary_request_tokens=10_000,
+        allow_native_compaction=True,
     )
     assert decision.mode == "required"
-    assert decision.reason == "history_exceeds_hard_budget"
+    assert decision.reason == "request_exceeds_limit"
 
 
 def test_classify_compaction_decision_forced_compaction_takes_priority() -> None:
     execution_plan = ResolvedHistoryExecutionPlan(
-        authored_compaction_enabled=True,
+        automatic_compaction=True,
         text_compaction_available=True,
         explicit_compaction_model=True,
         compaction_model_name="summary-model",
-        compaction_context_window=32_000,
         replay_window_tokens=32_000,
         trigger_threshold_tokens=24_000,
         reserve_tokens=16_384,
-        static_prompt_tokens=2_000,
-        replay_budget_tokens=10_000,
-        hard_replay_budget_tokens=10_000,
+        trigger_tokens=12_000,
+        limit_tokens=12_000,
         summary_input_budget_tokens=5_000,
         compaction_timeout_seconds=600.0,
     )
@@ -1254,42 +1123,63 @@ def test_classify_compaction_decision_forced_compaction_takes_priority() -> None
     decision = classify_compaction_decision(
         plan=execution_plan,
         force_compact_before_next_run=True,
-        current_history_tokens=None,
+        request_tokens=7_000,
+        summary_request_tokens=2_000,
+        allow_native_compaction=True,
     )
 
     assert decision.mode == "required"
     assert decision.reason == "forced"
 
 
-def test_classify_compaction_decision_does_not_compact_when_over_trigger_but_within_hard_budget() -> None:
+@pytest.mark.parametrize(
+    ("request_tokens", "allow_native_compaction", "expected_mode", "expected_reason"),
+    [
+        (12_000, True, "none", "under_trigger"),
+        (12_000, False, "none", "under_trigger"),
+        (12_001, True, "none", "within_limit"),
+        (12_001, False, "required", "over_trigger_native_disabled"),
+        (22_001, True, "required", "request_exceeds_limit"),
+        (22_001, False, "required", "request_exceeds_limit"),
+    ],
+)
+def test_classify_compaction_decision_compacts_at_trigger_only_without_native_compaction(
+    request_tokens: int,
+    expected_mode: str,
+    expected_reason: str,
+    *,
+    allow_native_compaction: bool,
+) -> None:
+    """Native compaction owns the range between the trigger and the limit, so runs without it compact there."""
     execution_plan = ResolvedHistoryExecutionPlan(
-        authored_compaction_enabled=True,
+        automatic_compaction=True,
         text_compaction_available=True,
         explicit_compaction_model=True,
         compaction_model_name="summary-model",
-        compaction_context_window=32_000,
         replay_window_tokens=32_000,
         trigger_threshold_tokens=24_000,
         reserve_tokens=16_384,
-        static_prompt_tokens=2_000,
-        replay_budget_tokens=10_000,
+        trigger_tokens=12_000,
+        limit_tokens=22_000,
         summary_input_budget_tokens=5_000,
-        hard_replay_budget_tokens=20_000,
         compaction_timeout_seconds=600.0,
     )
 
+    # The request without history, a 2,000-token static prompt, stays well under the trigger.
     decision = classify_compaction_decision(
         plan=execution_plan,
         force_compact_before_next_run=False,
-        current_history_tokens=10_001,
+        request_tokens=request_tokens,
+        summary_request_tokens=2_000,
+        allow_native_compaction=allow_native_compaction,
     )
 
-    assert decision.mode == "none"
-    assert decision.reason == "within_hard_budget"
+    assert decision.mode == expected_mode
+    assert decision.reason == expected_reason
+    assert (decision.request_tokens, decision.trigger_tokens, decision.limit_tokens) == (request_tokens, 12_000, 22_000)
 
 
-def test_plan_replay_that_fits_reduces_replay_for_non_authored_scope(tmp_path: Path) -> None:
-    _config, _runtime_paths_value = _make_config(tmp_path)
+def test_plan_replay_that_fits_reduces_replay_for_non_authored_scope() -> None:
     session = _session(
         "session-1",
         runs=[
@@ -1310,21 +1200,17 @@ def test_plan_replay_that_fits_reduces_replay_for_non_authored_scope(tmp_path: P
         ],
     )
 
-    scope = HistoryScope(kind="agent", scope_id="test_agent")
-    history_settings = ResolvedHistorySettings(
-        policy=HistoryPolicy(mode="runs", limit=2),
-        max_tool_calls_from_history=None,
-    )
+    history_settings = replay_settings(HistoryPolicy(mode="runs", limit=2))
     replay_plan = plan_replay_that_fits(
         session=session,
-        scope=scope,
         history_settings=history_settings,
         available_history_budget=250,
         current_history_tokens=estimate_prompt_visible_history_tokens(
             session=session,
-            scope=scope,
             history_settings=history_settings,
+            model=ScriptedModel([]),
         ),
+        model=ScriptedModel([]),
     )
 
     assert replay_plan.mode == "limited"
@@ -1347,12 +1233,10 @@ async def test_prepare_history_for_run_forced_compaction_without_budget_clears_f
             _completed_run("run-2"),
         ],
     )
-    scope = HistoryScope(kind="agent", scope_id="test_agent")
-    set_force_compaction_state(session, scope, HistoryScopeState(), force=True)
+    session.metadata = with_force_compaction(session.metadata)
     seed_session(storage, session)
 
     prepared = await prepare_history_for_run_for_test(
-        agent=_agent(db=storage),
         agent_name="test_agent",
         full_prompt="Current prompt",
         session_id="session-1",
@@ -1363,12 +1247,12 @@ async def test_prepare_history_for_run_forced_compaction_without_budget_clears_f
         session=session,
     )
 
-    persisted = get_agent_session(storage, "session-1")
+    persisted = storage.load_session("session-1")
     assert persisted is not None
     assert persisted.summary is None
     assert [run.run_id for run in persisted.runs] == ["run-1", "run-2"]
-    assert read_scope_state(persisted, scope).force_compact_before_next_run is False
-    assert prepared.compaction_outcomes == []
+    assert read_scope_state(persisted).force_compact_before_next_run is False
+    assert prepared.compaction_reply_outcome == "none"
 
 
 @pytest.mark.asyncio
@@ -1389,7 +1273,6 @@ async def test_prepare_history_for_run_without_budget_returns_configured_replay_
     seed_session(storage, session)
 
     prepared = await prepare_history_for_run_for_test(
-        agent=_agent(db=storage, num_history_runs=2),
         agent_name="test_agent",
         full_prompt="Current prompt",
         session_id="session-1",
@@ -1404,11 +1287,8 @@ async def test_prepare_history_for_run_without_budget_returns_configured_replay_
         mode="configured",
         estimated_tokens=estimate_prompt_visible_history_tokens(
             session=session,
-            scope=HistoryScope(kind="agent", scope_id="test_agent"),
-            history_settings=ResolvedHistorySettings(
-                policy=HistoryPolicy(mode="runs", limit=2),
-                max_tool_calls_from_history=None,
-            ),
+            history_settings=replay_settings(HistoryPolicy(mode="runs", limit=2)),
+            model=ScriptedModel([]),
         ),
         add_history_to_context=True,
         num_history_runs=2,
@@ -1449,7 +1329,6 @@ async def test_prepare_history_for_run_tracks_disabled_replay_separately_from_se
     seed_session(storage, session)
 
     prepared = await prepare_history_for_run_for_test(
-        agent=_agent(db=storage, num_history_runs=2),
         agent_name="test_agent",
         full_prompt="Current prompt",
         session_id="session-1",
@@ -1465,9 +1344,42 @@ async def test_prepare_history_for_run_tracks_disabled_replay_separately_from_se
     assert prepared.replays_persisted_history is False
 
 
+async def _prepare_then_finalize_with_a_larger_prompt(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    scope_context: ScopeSessionContext,
+) -> PreparedHistoryState:
+    """Prepare under a short system prompt, then plan replay for a final request whose prompt nearly fills the limit."""
+    resolved_inputs = resolve_entity_preparation_inputs(
+        config=config,
+        runtime_paths=runtime_paths,
+        history_settings=_agent_settings(config),
+        active_model_name="default",
+        active_context_window=None,
+    )
+    limit = resolved_inputs.execution_plan.limit_tokens
+    assert limit == 64_000 - 16_384
+    prepared = await prepare_scope_history(
+        sizer=request_sizer(estimate_only_model(), config, "default"),
+        # The prompt compaction ran for left room for the summary.
+        frame=request_frame(system="You are helpful."),
+        resolved_inputs=resolved_inputs,
+        runtime_paths=runtime_paths,
+        config=config,
+        scope_context=scope_context,
+        compaction_lifecycle=None,
+        pipeline_timing=None,
+        allow_native_compaction=True,
+    )
+    # The final request without history leaves one token of the limit: (characters + 14 prompt characters) / 4.
+    final_frame = request_frame(system="s" * (4 * (limit - 1) - len("Current prompt")))
+    return finalize_history_preparation(prepared_scope_history=prepared, frame=final_frame, pipeline_timing=None)
+
+
 @pytest.mark.asyncio
 async def test_prepare_history_for_run_preserves_compaction_when_summary_exceeds_final_budget(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config, runtime_paths = _make_config(
         tmp_path,
@@ -1494,75 +1406,88 @@ async def test_prepare_history_for_run_preserves_compaction_when_summary_exceeds
             ),
         ],
     )
-    scope = HistoryScope(kind="agent", scope_id="test_agent")
-    set_force_compaction_state(session, scope, HistoryScopeState(), force=True)
+    session.metadata = with_force_compaction(session.metadata)
     seed_session(storage, session)
 
-    agent = _agent(db=storage)
+    install_model_providers(monkeypatch, {"default": summary_model()})
     with (
-        patch(
-            "mindroom.providers.model_loading.get_model_instance",
-            return_value=FakeModel(id="summary-model", provider="fake"),
-        ),
         patch(
             "mindroom.history.compaction.generate_compaction_summary",
             new=AsyncMock(
-                return_value=SessionSummary(summary="merged summary", updated_at=datetime.now(UTC)),
+                return_value="merged summary",
             ),
         ),
-        pytest.raises(_HistorySummaryBudgetError, match=r"summary.*budget"),
+        pytest.raises(HistorySummaryBudgetError, match=r"summary.*budget"),
     ):
-        await prepare_history_for_run_for_test(
-            agent=agent,
-            agent_name="test_agent",
-            full_prompt="Current prompt",
-            session_id="session-1",
-            runtime_paths=runtime_paths,
-            config=config,
-            execution_identity=None,
-            storage=storage,
-            session=session,
-            available_history_budget=1,
+        await _prepare_then_finalize_with_a_larger_prompt(
+            config,
+            runtime_paths,
+            ScopeSessionContext(
+                HistoryScope(kind="agent", scope_id="test_agent"),
+                storage,
+                session,
+                "session-1",
+                storage_factory=lambda: storage,
+            ),
         )
 
-    persisted = get_agent_session(storage, "session-1")
+    persisted = storage.load_session("session-1")
     assert persisted is not None
     assert persisted.summary is not None
-    assert persisted.summary.summary == "merged summary"
+    assert persisted.summary.text == "merged summary"
     assert persisted.runs == []
-    state = read_scope_state(persisted, scope)
-    assert len(archived_run_ids(storage)) == 2
+    state = read_scope_state(persisted)
+    assert len(folded_run_ids(storage)) == 2
     assert state.force_compact_before_next_run is False
+
+
+def test_a_history_size_that_fits_replays_even_where_the_summary_estimate_does_not() -> None:
+    """A reported history size holds the summary as the provider counted it, below an estimate padded by its margin."""
+    session = _session("summary-only", runs=[])
+    session.summary = ScopeSummary(text="Project fact. " * 2000, updated_at=datetime.now(UTC))
+
+    plan = plan_replay_that_fits(
+        session=session,
+        history_settings=replay_settings(),
+        available_history_budget=5_000,
+        current_history_tokens=4_000,
+        model=ScriptedModel([]),
+    )
+
+    assert (plan.mode, plan.estimated_tokens) == ("configured", 4_000)
 
 
 def test_replay_planner_rejects_summary_that_exceeds_budget_without_changing_history() -> None:
     """A summary-only session must fail explicitly instead of returning an oversized replay plan."""
-    summary = SessionSummary(summary="Project fact. " * 2000)
+    summary = ScopeSummary(text="Project fact. " * 2000, updated_at=datetime.now(UTC))
     session = _session("summary-only", runs=[])
     session.summary = summary
-    scope = HistoryScope(kind="agent", scope_id="test_agent")
-    settings = ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None)
-    size = estimate_prompt_visible_history_tokens(session=session, scope=scope, history_settings=settings)
+    settings = replay_settings()
+    size = estimate_prompt_visible_history_tokens(
+        session=session,
+        history_settings=settings,
+        model=ScriptedModel([]),
+    )
 
-    with pytest.raises(_HistorySummaryBudgetError, match=r"summary.*budget"):
+    with pytest.raises(HistorySummaryBudgetError, match=r"summary.*budget"):
         plan_replay_that_fits(
             session=session,
-            scope=scope,
             history_settings=settings,
             available_history_budget=500,
             current_history_tokens=size,
+            model=ScriptedModel([]),
         )
 
     assert session.summary is summary
-    assert session.summary.summary == "Project fact. " * 2000
+    assert session.summary.text == "Project fact. " * 2000
     assert session.runs == []
 
     recovered = plan_replay_that_fits(
         session=session,
-        scope=scope,
         history_settings=settings,
         available_history_budget=10_000,
         current_history_tokens=size,
+        model=ScriptedModel([]),
     )
     assert recovered.mode == "configured"
     assert recovered.estimated_tokens <= 10_000
@@ -1574,28 +1499,26 @@ def test_replay_planner_retains_fitting_summary_when_raw_history_cannot_fit() ->
         "summary-and-runs",
         runs=[_completed_run("run-1", messages=[Message(role="user", content="x" * 4000)])],
     )
-    session.summary = SessionSummary(summary="Project facts")
-    scope = HistoryScope(kind="agent", scope_id="test_agent")
-    settings = ResolvedHistorySettings(policy=HistoryPolicy(mode="all"), max_tool_calls_from_history=None)
+    session.summary = ScopeSummary(text="Project facts", updated_at=datetime.now(UTC))
+    settings = replay_settings()
     plan = plan_replay_that_fits(
         session=session,
-        scope=scope,
         history_settings=settings,
         available_history_budget=100,
         current_history_tokens=estimate_prompt_visible_history_tokens(
             session=session,
-            scope=scope,
             history_settings=settings,
+            model=ScriptedModel([]),
         ),
+        model=ScriptedModel([]),
     )
     assert plan.mode == "disabled"
     assert 0 < plan.estimated_tokens <= 100
-    assert session.summary.summary == "Project facts"
+    assert session.summary.text == "Project facts"
 
 
 def test_plan_replay_that_fits_disables_replay_when_no_history_fits_budget() -> None:
-    available_history_budget = estimate_text_tokens("budget")
-    agent = _agent()
+    available_history_budget = quarter_tokens("budget")
     session = _session(
         "session-1",
         runs=[
@@ -1609,25 +1532,21 @@ def test_plan_replay_that_fits_disables_replay_when_no_history_fits_budget() -> 
         ],
     )
 
-    scope = HistoryScope(kind="agent", scope_id="test_agent")
-    history_settings = ResolvedHistorySettings(
-        policy=HistoryPolicy(mode="all"),
-        max_tool_calls_from_history=None,
-    )
+    history_settings = replay_settings()
     replay_plan = plan_replay_that_fits(
         session=session,
-        scope=scope,
         history_settings=history_settings,
         available_history_budget=available_history_budget,
         current_history_tokens=estimate_prompt_visible_history_tokens(
             session=session,
-            scope=scope,
             history_settings=history_settings,
+            model=ScriptedModel([]),
         ),
+        model=ScriptedModel([]),
     )
-    apply_replay_plan(target=agent, replay_plan=replay_plan)
 
     assert replay_plan.mode == "disabled"
-    assert agent.add_history_to_context is False
-    assert agent.num_history_runs is None
-    assert agent.num_history_messages is None
+    # History stays on with zero raw runs so the saved summary still replays first.
+    assert replay_plan.add_history_to_context is True
+    assert replay_plan.num_history_runs == 0
+    assert replay_plan.num_history_messages is None

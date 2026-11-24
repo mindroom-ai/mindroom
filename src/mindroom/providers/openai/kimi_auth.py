@@ -1,0 +1,124 @@
+"""Borrow the Kimi Code CLI's OAuth login for the Kimi route, refreshing its access token when about to expire."""
+
+from __future__ import annotations
+
+import json
+import time
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+from mindroom.providers.errors import CliLoginError
+from mindroom.providers.openai.cli_login import borrow_under_lock, post_token_refresh, write_private_json
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+__all__ = ["KIMI_BASE_URL", "KimiAuthError", "borrow_kimi_token", "kimi_login_status"]
+
+KIMI_BASE_URL = "https://api.kimi.com/coding/v1"
+_KIMI_REFRESH_URL = "https://auth.kimi.com/api/oauth/token"
+_KIMI_CLIENT_ID = "17e5f671-d194-4dfb-9706-5516cb48c098"
+_KIMI_REFRESH_SKEW_SECONDS = 30
+_KIMI_CREDENTIALS_RELATIVE_PATH = Path("credentials") / "kimi-code.json"
+
+
+class KimiAuthError(CliLoginError):
+    """Raised when the local Kimi Code CLI OAuth state cannot provide a usable token."""
+
+
+def kimi_login_status(*, kimi_home: str | Path | None) -> bool:
+    """Return whether Kimi Code credentials hold a usable or refreshable OAuth token, without refreshing."""
+    credentials_path = _kimi_home_path(kimi_home=kimi_home) / _KIMI_CREDENTIALS_RELATIVE_PATH
+    if not credentials_path.is_file():
+        return False
+    try:
+        with credentials_path.open(encoding="utf-8") as credentials_file:
+            credentials = json.load(credentials_file)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return False
+    access_token = credentials.get("access_token") if isinstance(credentials, dict) else None
+    if not isinstance(credentials, dict) or not isinstance(access_token, str) or not access_token.strip():
+        return False
+    refresh_token = credentials.get("refresh_token")
+    has_refresh = isinstance(refresh_token, str) and bool(refresh_token.strip())
+    return _usable_access_token(credentials) is not None or has_refresh
+
+
+def borrow_kimi_token(*, kimi_home: str | Path | None) -> str:
+    """Return a valid Kimi Code CLI OAuth access token, refreshing it when expired."""
+    credentials_path = _kimi_credentials_path(kimi_home=kimi_home)
+    return borrow_under_lock(
+        credentials_path,
+        usable=lambda: _usable_access_token(_read_kimi_credentials(credentials_path)),
+        refresh=lambda: _refresh_kimi_credentials(credentials_path),
+    )
+
+
+def _refresh_kimi_credentials(credentials_path: Path) -> str:
+    credentials = _read_kimi_credentials(credentials_path)
+    refresh_token = credentials.get("refresh_token")
+    if not refresh_token:
+        msg = "No Kimi Code refresh token found. Run `kimi` and `/login` to re-authenticate."
+        raise KimiAuthError(msg)
+
+    refreshed = _refresh_kimi_tokens(str(refresh_token))
+    if not refreshed.get("access_token"):
+        msg = "Kimi token refresh response did not include an access token."
+        raise KimiAuthError(msg)
+
+    _update_credentials(credentials, refreshed)
+    write_private_json(credentials_path, credentials)
+    return str(credentials["access_token"])
+
+
+def _kimi_credentials_path(*, kimi_home: str | Path | None) -> Path:
+    credentials_path = _kimi_home_path(kimi_home=kimi_home) / _KIMI_CREDENTIALS_RELATIVE_PATH
+    if not credentials_path.exists():
+        msg = f"Kimi Code credentials not found at {credentials_path}. Run `kimi` and `/login` first."
+        raise KimiAuthError(msg)
+    return credentials_path
+
+
+def _kimi_home_path(*, kimi_home: str | Path | None) -> Path:
+    return Path(kimi_home if kimi_home is not None else "~/.kimi-code").expanduser()
+
+
+def _read_kimi_credentials(credentials_path: Path) -> dict[str, Any]:
+    with credentials_path.open(encoding="utf-8") as credentials_file:
+        credentials = json.load(credentials_file)
+    if not isinstance(credentials, dict) or not credentials.get("access_token"):
+        msg = "No Kimi Code access token found in credentials. Run `kimi` and `/login` first."
+        raise KimiAuthError(msg)
+    return credentials
+
+
+def _usable_access_token(credentials: Mapping[str, Any]) -> str | None:
+    access_token = str(credentials["access_token"])
+    expires_at = credentials.get("expires_at")
+    if not isinstance(expires_at, int | float) or time.time() >= expires_at - _KIMI_REFRESH_SKEW_SECONDS:
+        return None
+    return access_token
+
+
+def _refresh_kimi_tokens(refresh_token: str) -> dict[str, Any]:
+    return post_token_refresh(
+        _KIMI_REFRESH_URL,
+        service="Kimi",
+        error=KimiAuthError,
+        refused=lambda response: (
+            f"Kimi token refresh failed (HTTP {response.status_code}): {response.text}. "
+            "Run `kimi` and `/login` to re-authenticate if the refresh token expired."
+        ),
+        form_body={"client_id": _KIMI_CLIENT_ID, "grant_type": "refresh_token", "refresh_token": refresh_token},
+    )
+
+
+def _update_credentials(credentials: dict[str, Any], refreshed: dict[str, Any]) -> None:
+    for key in ("access_token", "refresh_token", "token_type", "scope"):
+        if refreshed.get(key):
+            credentials[key] = refreshed[key]
+    if isinstance(refreshed.get("expires_at"), int | float):
+        credentials["expires_at"] = refreshed["expires_at"]
+    elif isinstance(refreshed.get("expires_in"), int | float):
+        credentials["expires_in"] = refreshed["expires_in"]
+        credentials["expires_at"] = int(time.time()) + int(refreshed["expires_in"])

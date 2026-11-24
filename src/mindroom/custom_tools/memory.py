@@ -9,9 +9,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from agno.tools import Toolkit
-
 from mindroom.embeddings.errors import classified_embedder_error, is_embedder_auth_failure_detail
+from mindroom.failure_text import failure_text
 from mindroom.logging_config import get_logger
 from mindroom.memory import (
     add_agent_memory,
@@ -21,16 +20,18 @@ from mindroom.memory import (
     search_agent_memories,
     update_agent_memory,
 )
+from mindroom.redaction import redact_sensitive_text
+from mindroom.tool_system.authoring import Toolkit
 
 if TYPE_CHECKING:
-    from pathlib import Path
-
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.memory import MemoryResult, MemorySearchOutcome
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 logger = get_logger(__name__)
+
+_SIMILAR_MEMORY_LIMIT = 3
 
 
 def _memory_result_lines(results: list[MemoryResult]) -> list[str]:
@@ -46,6 +47,19 @@ def _memory_result_lines(results: list[MemoryResult]) -> list[str]:
 
 def _embedder_credential_advice(config: Config) -> str:
     """Describe the active credential binding without recommending a fallback that cannot win."""
+    if config.memory.embedder.provider == "ollama":
+        # The Mem0 backend's own Ollama client reads OLLAMA_API_KEY only from the process environment, while the file
+        # backend's embedder also reads the .env beside config.yaml, so the advice names the place both read.
+        return (
+            "Repair the embedder credential: the Ollama embedder sends only OLLAMA_API_KEY, "
+            "so set it in the environment of the MindRoom process and restart MindRoom."
+        )
+    if config.memory.embedder.provider == "vertex_ai":
+        return (
+            "Repair the embedder credential: the Vertex AI embedder authenticates with GOOGLE_APPLICATION_CREDENTIALS "
+            "or Application Default Credentials, which need permission to call Vertex AI in its project, and then "
+            "restart MindRoom."
+        )
     credentials_service = config.memory.embedder.config.credentials_service
     if credentials_service is not None:
         return (
@@ -79,12 +93,16 @@ def _degraded_search_text(outcome: MemorySearchOutcome, config: Config) -> str:
 
 
 def _memory_tool_failure(exc: Exception, *, action: str, **context: object) -> str:
-    """Log and render provider failures without exposing raw response text."""
+    """Log a failure and return what the model may see of it, without credentials.
+
+    A classified embedder failure becomes its fixed detail. Any other failure keeps its text with credentials
+    redacted, because a failed memory LLM call carries the provider's error body, which can quote the rejected key.
+    """
     if (detail := classified_embedder_error(exc)) is not None:
         logger.warning(f"Failed to {action} memory via tool", error=detail, **context)
         return detail
     logger.exception(f"Failed to {action} memory via tool", error_type=type(exc).__name__, **context)
-    return str(exc)
+    return redact_sensitive_text(failure_text(exc))
 
 
 class MemoryTools(Toolkit):
@@ -93,13 +111,11 @@ class MemoryTools(Toolkit):
     def __init__(
         self,
         agent_name: str,
-        storage_path: Path,
         config: Config,
         runtime_paths: RuntimePaths,
         execution_identity: ToolExecutionIdentity | None = None,
     ) -> None:
         self._agent_name = agent_name
-        self._storage_path = storage_path
         self._config = config
         self._runtime_paths = runtime_paths
         self._execution_identity = execution_identity
@@ -121,19 +137,21 @@ class MemoryTools(Toolkit):
 
         Use this when explicitly asked to remember something, or when you
         encounter important information worth retaining for future conversations.
+        To correct something already stored, use update_memory on that entry instead of adding a new one.
 
         Args:
             content: The fact or information to memorize.
 
         Returns:
-            Confirmation message.
+            Confirmation message, followed by similar existing memories when there are any.
 
         """
+        # Look up before storing, so the new entry cannot list itself as similar.
+        similar = await self._similar_memories(content)
         try:
             await add_agent_memory(
                 content,
                 self._agent_name,
-                self._storage_path,
                 self._config,
                 self._runtime_paths,
                 metadata={"source": "explicit_tool"},
@@ -142,8 +160,33 @@ class MemoryTools(Toolkit):
         except Exception as e:
             detail = _memory_tool_failure(e, action="add", agent=self._agent_name)
             return f"Failed to store memory: {detail}"
-        else:
+        if not similar:
             return f"Memorized: {content}"
+        lines = [f"Memorized: {content}", "", "Similar existing memories:"]
+        for i, mem in enumerate(similar, 1):
+            lines.append(f"{i}. [id={mem.get('id', '?')}] {mem.get('memory', '')}")
+        lines.append(
+            "If the new memory corrects one of these, rewrite that entry with update_memory, "
+            "keeping its other details, so no stored memory contradicts the correction.",
+        )
+        return "\n".join(lines)
+
+    async def _similar_memories(self, content: str) -> list[MemoryResult]:
+        """Return a few existing memories related to ``content``; a failed lookup returns none."""
+        try:
+            outcome = await search_agent_memories(
+                content,
+                self._agent_name,
+                self._config,
+                self._runtime_paths,
+                limit=_SIMILAR_MEMORY_LIMIT,
+                execution_identity=self._execution_identity,
+                editable=True,
+            )
+        except Exception as e:
+            _memory_tool_failure(e, action="find similar", agent=self._agent_name)
+            return []
+        return outcome.results
 
     async def search_memories(self, query: str, limit: int = 5) -> str:
         """Search your memories for information relevant to a query.
@@ -168,7 +211,6 @@ class MemoryTools(Toolkit):
             outcome = await search_agent_memories(
                 query,
                 self._agent_name,
-                self._storage_path,
                 self._config,
                 self._runtime_paths,
                 limit=limit,
@@ -198,7 +240,6 @@ class MemoryTools(Toolkit):
         try:
             results = await list_all_agent_memories(
                 self._agent_name,
-                self._storage_path,
                 self._config,
                 self._runtime_paths,
                 limit=limit,
@@ -232,7 +273,6 @@ class MemoryTools(Toolkit):
             result = await get_agent_memory(
                 memory_id,
                 self._agent_name,
-                self._storage_path,
                 self._config,
                 self._runtime_paths,
                 execution_identity=self._execution_identity,
@@ -262,7 +302,6 @@ class MemoryTools(Toolkit):
                 memory_id,
                 new_content,
                 self._agent_name,
-                self._storage_path,
                 self._config,
                 self._runtime_paths,
                 execution_identity=self._execution_identity,
@@ -290,7 +329,6 @@ class MemoryTools(Toolkit):
             await delete_agent_memory(
                 memory_id,
                 self._agent_name,
-                self._storage_path,
                 self._config,
                 self._runtime_paths,
                 execution_identity=self._execution_identity,

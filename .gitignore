@@ -202,6 +202,8 @@ matrix_state.yaml
 
 # Vite cache
 frontend/.vite/
+# TypeScript build info that `bun run type-check` writes for the composite tsconfig.node.json
+frontend/*.tsbuildinfo
 # Test and setup files
 test_gmail*.py
 complete_gmail_oauth.py

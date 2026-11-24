@@ -1,0 +1,265 @@
+"""One conversation-scoped management function for all managed tool jobs."""
+
+from __future__ import annotations
+
+import inspect
+import json
+from typing import TYPE_CHECKING, Any, Literal
+
+from mindroom.active_runs import pause_current_active_run
+from mindroom.tool_jobs.consumption import StagedConsumptions, job_failure, job_failure_text
+from mindroom.tool_jobs.control import waiting_on_jobs
+from mindroom.tool_jobs.conversation import current_approval_wait_timeout, current_ended_jobs
+from mindroom.tool_jobs.runtime import (
+    JobAccessError,
+    JobUnavailableError,
+    describe_job,
+    format_job_handle,
+    get_background_runtime,
+    job_summary,
+)
+from mindroom.tool_system.agno_toolkits import configure_toolkit_functions
+from mindroom.tool_system.authoring import Toolkit
+from mindroom.tool_system.output_files import (
+    ToolOutputFileHandled,
+    active_tool_output_file_request,
+    finalize_tool_output_file,
+    is_tool_output_error,
+    saved_output_envelope,
+)
+from mindroom.tool_system.runtime_context import current_execution_identity
+from mindroom.tool_system.tool_function import ToolValue
+
+if TYPE_CHECKING:
+    from collections.abc import Collection, Sequence
+
+    from mindroom.constants import RuntimePaths
+    from mindroom.tool_jobs.consumption import PreparedConsumption
+    from mindroom.tool_jobs.runtime import BackgroundJob, JobClaim, ToolJobRuntime
+    from mindroom.tool_system.output_files import ToolOutputFilePolicy
+    from mindroom.tool_system.tool_function import ToolFunction
+    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+
+# One answer for every reason, so a caller never learns whether a job of another conversation or caller exists.
+_UNAVAILABLE = (
+    "No job with this ID is available to you in this conversation. The ID may be wrong or incomplete, the job may "
+    "have been deleted after its retention period, it may belong to another conversation or caller, or your access "
+    'to it may have changed. Call job(action="list") to see the jobs you can access.'
+)
+
+
+def is_job_function(function: ToolFunction) -> bool:
+    """Recognize the reserved implementation through its validation and output wrappers, never a same-named plugin."""
+    entrypoint = inspect.unwrap(function.entrypoint)
+    return (
+        inspect.ismethod(entrypoint)
+        and isinstance(entrypoint.__self__, JobTools)
+        and entrypoint.__func__ is JobTools.job
+    )
+
+
+async def _finish_staged_result(staging: StagedConsumptions, result: object) -> Any:  # noqa: ANN401 - Tool value.
+    """Apply any active output-file policy before committing claims, releasing them if output redirection errors."""
+    output_request = active_tool_output_file_request()
+    if output_request is None:
+        await staging.commit()
+        return result
+    finalized = finalize_tool_output_file(output_request, result)
+    output_errored = (
+        saved_output_envelope(finalized) is None
+        if output_request.path is not None
+        else finalized is not result and is_tool_output_error(finalized)
+    )
+    if output_errored:
+        await staging.release()
+        return ToolOutputFileHandled(finalized)
+    await staging.commit()
+    return ToolOutputFileHandled(finalized)
+
+
+def _render_collected(
+    entries: Sequence[tuple[BackgroundJob, int | None]],
+    prepared: Sequence[PreparedConsumption],
+) -> str | ToolValue:
+    sections: list[str] = []
+    collected: list[ToolValue] = []
+    for job, index in entries:
+        if index is None:
+            sections.append(f"{describe_job(job)} {job.status}: its result could not be read now")
+            continue
+        item = prepared[index]
+        value = item.value
+        if isinstance(value, ToolValue):
+            collected.append(value)
+            value = value.content
+        detail = job_failure_text(value, item.payload) if job.status == "failed" else value or ""
+        sections.append(f"{describe_job(job)} {job.status}:\n{detail}".rstrip())
+    content = "\n\n".join(sections)
+    images = tuple(item for result in collected for item in result.images)
+    audios = tuple(item for result in collected for item in result.audios)
+    videos = tuple(item for result in collected for item in result.videos)
+    files = tuple(item for result in collected for item in result.files)
+    if images or audios or videos or files:
+        return ToolValue(content=content, images=images, audios=audios, videos=videos, files=files)
+    return content
+
+
+async def _claimed_result(runtime: ToolJobRuntime, job: BackgroundJob, claim: JobClaim) -> Any:  # noqa: ANN401 - Tool value.
+    """Return a completed job's outcome as this call's own result; every other outcome raises its reason.
+
+    The call that started the job fails the same way (``job_failure``).
+    """
+    staging = StagedConsumptions()
+    try:
+        await staging.stage(runtime, job, claim)
+        (prepared,) = staging.prepare_values()
+        failure = job_failure(job, prepared.value, prepared.payload)
+        if failure is None:
+            return await _finish_staged_result(staging, prepared.value)
+        await staging.commit()
+    except BaseException:
+        await staging.release()
+        raise
+    raise RuntimeError(failure)
+
+
+async def _collect(runtime: ToolJobRuntime, owner: ToolExecutionIdentity) -> Any:  # noqa: ANN401 - Tool value.
+    """Return every ended, unacknowledged job of this caller with its result, acknowledging each once this call saves."""
+    entries: list[tuple[BackgroundJob, int | None]] = []
+    staging = StagedConsumptions()
+    try:
+        for job in await current_ended_jobs():
+            try:
+                waited = await runtime.wait(job.job_id, owner=owner, depth=0, timeout=0)
+            except JobAccessError:
+                # A team member collects only its own jobs; the team collects them all.
+                continue
+            if waited.claim is None:
+                # Another caller is reading this outcome now.
+                continue
+            try:
+                index = await staging.stage(runtime, waited.job, waited.claim)
+            except ValueError:
+                # Unavailable or undecodable; its claim is released, so a later collect reads it, and the others arrive now.
+                entries.append((job, None))
+                continue
+            entries.append((job, index))
+        if not entries:
+            return "No ended background jobs."
+        # All awaits are finished; merge live session state synchronously before finalizing output and committing.
+        result = _render_collected(entries, staging.prepare_values())
+        return await _finish_staged_result(staging, result)
+    except BaseException:
+        await staging.release()
+        raise
+
+
+class JobTools(Toolkit):
+    """Discover and manage jobs belonging to the exact caller and conversation."""
+
+    def __init__(self, runtime_paths: RuntimePaths) -> None:
+        self._runtime_paths = runtime_paths
+        super().__init__(
+            name="job",
+            tools=[self.job],
+            instructions=(
+                "Only use background_after when the tool schema exposes it; excluded toolkits keep their native controls. "
+                "Calls made inside an already running job stay with that job and accept no background_after. "
+                'Use job(action="list") to rediscover jobs and their status after a new turn, '
+                'job(action="wait", job_id=...) to retrieve the actual result, and job(action="cancel", job_id=...) to ask '
+                "one to stop; the next notice says how it ended. "
+                'When told background jobs ended, call job(action="collect") once to read and acknowledge all of them. '
+                "You can access the jobs you started; when you answer as a team, also the jobs your members started for it."
+            ),
+        )
+
+    @staticmethod
+    def build(
+        offered: Collection[str],
+        runtime_paths: RuntimePaths,
+        owner: ToolExecutionIdentity | None,
+        *,
+        depth: int,
+        enabled: bool,
+        output_file_policy: ToolOutputFilePolicy | None = None,
+    ) -> Toolkit | None:
+        """Build the reserved toolkit for a top-level Matrix caller while the job runtime runs, else nothing.
+
+        ``offered`` names the functions the caller's other toolkits offer, none of which may be ``job``.
+        """
+        if (
+            not enabled
+            or depth != 0
+            or owner is None
+            or owner.channel != "matrix"
+            or get_background_runtime(runtime_paths) is None
+        ):
+            return None
+        if "job" in offered:
+            msg = "Tool function name job is reserved for managed job controls"
+            raise ValueError(msg)
+        return configure_toolkit_functions(JobTools(runtime_paths), output_files=output_file_policy)
+
+    async def job(  # noqa: PLR0911 - Each public action returns its own result.
+        self,
+        action: Literal["list", "wait", "cancel", "collect"],
+        job_id: str | None = None,
+        limit: int = 20,
+        offset: int = 0,
+        wait_timeout: float | None = None,
+    ) -> Any:  # noqa: ANN401 - Preserve the original tool result type.
+        """Discover, wait for, or cancel this caller's managed work.
+
+        Args:
+            action: Operation; list reports status, saved summaries, and the latest progress of running work, wait
+                retrieves the stored result or, when it times out, the job's progress, and collect returns and
+                acknowledges every ended job.
+            job_id: Job ID (or a unique prefix of at least 8 hex characters), required for wait and cancel.
+            limit: Maximum number of jobs to list, from 1 to 100; active jobs first.
+            offset: Number of accessible jobs to skip, at least zero.
+            wait_timeout: Seconds to wait; null waits until completion or a newer message, zero returns immediately.
+
+        Returns:
+            Scoped job summaries, the original result, or an error message.
+
+        """
+        runtime = get_background_runtime(self._runtime_paths)
+        # The jobs the running call's caller started in its conversation, as its identity names them.
+        owner = current_execution_identity()
+        if runtime is None or owner is None:
+            return "Job controls require a managed conversation."
+        # Job controls exist only for the top-level caller, so every job they reach has depth 0.
+        try:
+            if action == "list":
+                return json.dumps(
+                    [
+                        job_summary(job)
+                        for job in await runtime.list_jobs(owner=owner, depth=0, limit=limit, offset=offset)
+                    ],
+                )
+            if action == "collect":
+                return await _collect(runtime, owner)
+            if job_id is None:
+                return "job_id is required for this action."
+            if action == "wait":
+                # A newer human message releases a reply whose running calls all only wait, without its judge.
+                with waiting_on_jobs():
+                    waited = await runtime.wait(
+                        job_id,
+                        owner=owner,
+                        depth=0,
+                        timeout=wait_timeout,
+                        # A job awaiting a human decision holds the reply no longer than the gated call itself does.
+                        approval_timeout=current_approval_wait_timeout(),
+                        pause_on_human_wait=pause_current_active_run,
+                    )
+                if waited.claim is not None:
+                    return await _claimed_result(runtime, waited.job, waited.claim)
+                return format_job_handle(waited.job)
+            # The job stops on its own time; the next notice reports how it ended.
+            return format_job_handle(await runtime.cancel(job_id, owner=owner, depth=0))
+        except JobUnavailableError:
+            return _UNAVAILABLE
+        except ValueError as error:
+            # Invalid limits, offsets, or wait budgets are the model's to correct.
+            return str(error)

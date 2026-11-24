@@ -10,12 +10,13 @@ import shutil
 import sqlite3
 import threading
 from contextlib import asynccontextmanager
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 import httpx
+import httpx2
 import pytest
 from google.auth.exceptions import TransportError as GoogleTransportError
 from requests import exceptions as requests_exceptions
@@ -36,21 +37,32 @@ from mindroom.oauth.credential_lifecycle import (
     OAuthCredentialConflictError,
     OAuthCredentialContext,
     OAuthCredentialsSnapshot,
+    OAuthGroupConnectResult,
+    OAuthGroupMember,
     exchange_and_store_oauth_credentials,
+    exchange_and_store_oauth_group_credentials,
     load_oauth_credentials_snapshot,
     refresh_oauth_credentials_sync,
     refresh_oauth_credentials_with_result,
 )
 from mindroom.oauth.credential_store import OAuthCredentialTransaction, _oauth_credential_database_path
+from mindroom.oauth.google import google_oauth_provider
 from mindroom.oauth.providers import (
     OAuthClientConfig,
+    OAuthConsentGroup,
     OAuthProvider,
     OAuthProviderError,
     OAuthRefreshRejectedError,
+    OAuthTokenResponseBodyError,
     OAuthTokenResult,
     oauth_connection_required_payload,
+    oauth_consent_group_provider,
 )
-from mindroom.oauth.service import OAUTH_RESET_REQUIRED_REASON, oauth_connection_required
+from mindroom.oauth.service import (
+    OAUTH_RESET_REQUIRED_REASON,
+    oauth_connection_required,
+    oauth_provider_service_account_configured,
+)
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 from tests.oauth_test_utils import (
     DelayedTokenEndpointOutcome,
@@ -63,6 +75,7 @@ from tests.oauth_test_utils import (
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
     from multiprocessing.queues import Queue
+    from types import ModuleType
     from typing import Any
 
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
@@ -98,6 +111,7 @@ class _FakeOAuthProvider:
     scopes: tuple[str, ...] = ()
     claim_validator = None
     token_url = "https://oauth.example.test/token"  # noqa: S105
+    legacy_credentials = None
 
     def __init__(self, refresh: Callable[[Mapping[str, Any]], Awaitable[dict[str, Any] | None]]) -> None:
         self._refresh = refresh
@@ -229,6 +243,25 @@ def _load(context: OAuthCredentialContext) -> dict[str, Any] | None:
 
 def _connection_generation(context: OAuthCredentialContext) -> str:
     return credential_lifecycle.load_oauth_credentials_snapshot_sync(context).connection_generation
+
+
+@pytest.mark.parametrize(
+    ("env_file", "configured"),
+    [
+        pytest.param("GOOGLE_SERVICE_ACCOUNT_FILE=google/sa.json\n", True, id="env-file"),
+        pytest.param("", False, id="none"),
+    ],
+)
+def test_a_blank_exported_service_account_file_does_not_hide_the_env_file_path(
+    tmp_path: Path,
+    env_file: str,
+    configured: bool,
+) -> None:
+    """A blank export, as a compose passthrough of an unset variable produces, counts as unset."""
+    (tmp_path / ".env").write_text(env_file, encoding="utf-8")
+    runtime_paths = _runtime_paths(tmp_path, process_env={"GOOGLE_SERVICE_ACCOUNT_FILE": ""})
+
+    assert oauth_provider_service_account_configured(google_oauth_provider("google_drive"), runtime_paths) is configured
 
 
 def test_reset_required_guidance_uses_authenticated_dashboard_for_shared_scope(tmp_path: Path) -> None:
@@ -492,6 +525,25 @@ async def test_different_scopes_refresh_concurrently(tmp_path: Path) -> None:
     assert started == {"alice", "bob"}
 
 
+class _CallbackAccessTokenClient:
+    """Answer every code exchange with one access token, without a token endpoint."""
+
+    def __init__(self, **_kwargs: object) -> None:
+        pass
+
+    async def __aenter__(self) -> _CallbackAccessTokenClient:
+        return self
+
+    async def __aexit__(self, *_args: object) -> None:
+        return None
+
+    def register_compliance_hook(self, _hook_type: str, _hook: object) -> None:
+        return None
+
+    async def fetch_token(self, _url: str, **_kwargs: object) -> dict[str, str]:
+        return {"access_token": "callback-access"}
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("blocked_callback", ["token_parser", "claim_validator"])
 async def test_blocked_sync_provider_callback_does_not_block_different_scope(
@@ -502,19 +554,6 @@ async def test_blocked_sync_provider_callback_does_not_block_different_scope(
     """Provider callbacks in one scope must not stall another scope's transaction."""
     callback_started = threading.Event()
     release_callback = threading.Event()
-
-    class TokenClient:
-        def __init__(self, **_kwargs: object) -> None:
-            pass
-
-        async def __aenter__(self) -> TokenClient:
-            return self
-
-        async def __aexit__(self, *_args: object) -> None:
-            return None
-
-        async def fetch_token(self, _url: str, **_kwargs: object) -> dict[str, str]:
-            return {"access_token": "callback-access"}
 
     def parse_token(
         _provider: OAuthProvider,
@@ -538,7 +577,7 @@ async def test_blocked_sync_provider_callback_does_not_block_different_scope(
             callback_started.set()
             release_callback.wait()
 
-    monkeypatch.setattr("authlib.integrations.httpx_client.AsyncOAuth2Client", TokenClient)
+    monkeypatch.setattr("authlib.integrations.httpx_client.AsyncOAuth2Client", _CallbackAccessTokenClient)
     provider = OAuthProvider(
         id="demo_provider",
         display_name="Demo Provider",
@@ -975,6 +1014,158 @@ async def test_callback_advances_connection_generation_and_rejects_second_callba
         )
 
 
+GROUP_SCOPE_A = "https://example.test/auth/a"
+GROUP_SCOPE_B = "https://example.test/auth/b"
+
+
+@dataclass
+class _ConsentGroup:
+    """Two consent group members, the lead built from them, and every code exchange the lead served."""
+
+    lead: OAuthProvider
+    member_a: OAuthGroupMember
+    member_b: OAuthGroupMember
+    exchanges: list[str]
+
+
+def _consent_group(
+    tmp_path: Path,
+    *,
+    granted_scopes: tuple[str, ...] = (GROUP_SCOPE_A, GROUP_SCOPE_B),
+    b_allowed_email_domains: tuple[str, ...] = (),
+) -> _ConsentGroup:
+    """Build members "a" and "b" of one group whose single sign-in grants `granted_scopes` to an example.test account."""
+    exchanges: list[str] = []
+
+    async def exchange(
+        _provider: OAuthProvider,
+        code: str,
+        _client_config: OAuthClientConfig,
+        _runtime_paths: RuntimePaths,
+        _code_verifier: str | None,
+    ) -> OAuthTokenResult:
+        assert credential_lifecycle._oauth_provider_adapter_active.get()
+        exchanges.append(code)
+        return OAuthTokenResult(
+            token_data={"token": "group-access", "refresh_token": "group-refresh", "scopes": list(granted_scopes)},
+            claims={"sub": "subject-1", "email": "user@example.test", "email_verified": True},
+            claims_verified=True,
+        )
+
+    def provider(provider_id: str, scope: str, allowed_email_domains: tuple[str, ...] = ()) -> OAuthProvider:
+        return OAuthProvider(
+            id=provider_id,
+            display_name=provider_id.upper(),
+            authorization_url="https://oauth.example.test/authorize",
+            token_url="https://oauth.example.test/token",  # noqa: S106
+            scopes=(scope,),
+            credential_service=f"{provider_id}_oauth",
+            client_config_services=("group_demo_oauth_client",),
+            allowed_email_domains=allowed_email_domains,
+            token_exchanger=exchange,
+            consent_group=OAuthConsentGroup("demo", "Demo"),
+        )
+
+    runtime_paths = _runtime_paths(tmp_path)
+    credentials_manager = get_runtime_credentials_manager(runtime_paths)
+    credentials_manager.save_credentials(
+        "group_demo_oauth_client",
+        {"client_id": "group-client", "client_secret": "group-secret"},
+    )
+
+    def member(oauth_provider: OAuthProvider) -> OAuthGroupMember:
+        context = OAuthCredentialContext(
+            provider=oauth_provider,
+            runtime_paths=runtime_paths,
+            credentials_manager=credentials_manager,
+            worker_target=_worker_target(),
+        )
+        return OAuthGroupMember(context, expected_connection_generation=_connection_generation(context))
+
+    provider_a = provider("a", GROUP_SCOPE_A)
+    provider_b = provider("b", GROUP_SCOPE_B, b_allowed_email_domains)
+    return _ConsentGroup(
+        lead=oauth_consent_group_provider((provider_a, provider_b)),
+        member_a=member(provider_a),
+        member_b=member(provider_b),
+        exchanges=exchanges,
+    )
+
+
+async def _connect_group(group: _ConsentGroup) -> OAuthGroupConnectResult:
+    return await exchange_and_store_oauth_group_credentials(
+        group.lead,
+        [group.member_a, group.member_b],
+        "test-code",
+        None,
+        token_url=group.lead.token_url,
+    )
+
+
+@pytest.mark.asyncio
+async def test_group_exchange_stores_each_member_under_its_own_provider(tmp_path: Path) -> None:
+    """One code exchange connects every member, and each stored copy names its own provider."""
+    group = _consent_group(tmp_path)
+
+    result = await _connect_group(group)
+
+    assert result == OAuthGroupConnectResult(connected=("a", "b"), skipped=())
+    stored_a, stored_b = _load(group.member_a.context), _load(group.member_b.context)
+    assert stored_a is not None
+    assert stored_b is not None
+    assert stored_a["_oauth_provider"] == "a"
+    assert stored_b["_oauth_provider"] == "b"
+    assert stored_a["refresh_token"] == stored_b["refresh_token"] == "group-refresh"  # noqa: S105
+    assert stored_a["_oauth_claims"] == stored_b["_oauth_claims"]
+    assert group.exchanges == ["test-code"]
+    assert _connection_generation(group.member_a.context) != group.member_a.expected_connection_generation
+    assert _connection_generation(group.member_b.context) != group.member_b.expected_connection_generation
+
+
+@pytest.mark.asyncio
+async def test_group_exchange_skips_a_member_whose_scopes_were_not_granted(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A member whose scope the user unticked stays unconnected, and the others still connect."""
+    logger = _CapturingLogger()
+    monkeypatch.setattr(credential_lifecycle, "logger", logger)
+    group = _consent_group(tmp_path, granted_scopes=(GROUP_SCOPE_A,))
+
+    result = await _connect_group(group)
+
+    assert result == OAuthGroupConnectResult(connected=("a",), skipped=(("b", "scopes_not_granted"),))
+    assert _load(group.member_a.context) is not None
+    assert _load(group.member_b.context) is None
+    assert logger.info_calls == [("oauth_group_member_skipped", {"provider_id": "b", "reason": "scopes_not_granted"})]
+
+
+@pytest.mark.asyncio
+async def test_group_exchange_skips_a_member_that_rejects_the_account(tmp_path: Path) -> None:
+    """A member whose allowed-domain rules refuse the signed-in account stays unconnected."""
+    group = _consent_group(tmp_path, b_allowed_email_domains=("other.example",))
+
+    result = await _connect_group(group)
+
+    assert result == OAuthGroupConnectResult(connected=("a",), skipped=(("b", "account_not_allowed"),))
+    assert _load(group.member_a.context) is not None
+    assert _load(group.member_b.context) is None
+
+
+@pytest.mark.asyncio
+async def test_group_exchange_keeps_a_connection_made_meanwhile(tmp_path: Path) -> None:
+    """A member connected after the flow started keeps its newer connection."""
+    group = _consent_group(tmp_path)
+    _save(group.member_b.context, {"token": "made-meanwhile", "_source": "oauth", "_oauth_provider": "b"})
+
+    result = await _connect_group(group)
+
+    assert result == OAuthGroupConnectResult(connected=("a",), skipped=(("b", "changed"),))
+    stored_b = _load(group.member_b.context)
+    assert stored_b is not None
+    assert stored_b["token"] == "made-meanwhile"  # noqa: S105
+
+
 @pytest.mark.asyncio
 async def test_refresh_cancellation_while_waiting_for_lock_does_not_call_provider(
     monkeypatch: pytest.MonkeyPatch,
@@ -1348,24 +1539,29 @@ async def test_nonterminal_refresh_failure_preserves_credentials_and_bounds_logs
     ("transport_error", "expected_diagnostics"),
     [
         pytest.param(
-            httpx.ConnectTimeout("secret-transport-detail"),
+            httpx2.ConnectTimeout("secret-transport-detail"),
             {"transport_error_category": "timeout", "transport_error_type": "ConnectTimeout"},
             id="connect-timeout",
         ),
         pytest.param(
-            httpx.ReadTimeout("secret-transport-detail"),
+            httpx2.ReadTimeout("secret-transport-detail"),
             {"transport_error_category": "timeout", "transport_error_type": "ReadTimeout"},
             id="read-timeout",
         ),
         pytest.param(
-            type("secret-provider-class", (httpx.ReadTimeout,), {})("secret-transport-detail"),
+            type("secret-provider-class", (httpx2.ReadTimeout,), {})("secret-transport-detail"),
             {"transport_error_category": "timeout", "transport_error_type": "ReadTimeout"},
             id="provider-subclass-name-is-not-logged",
         ),
         pytest.param(
-            httpx.ConnectError("secret-transport-detail"),
+            httpx2.ConnectError("secret-transport-detail"),
             {"transport_error_category": "network", "transport_error_type": "NetworkError"},
             id="connect-error",
+        ),
+        pytest.param(
+            httpx.ConnectError("secret-transport-detail"),
+            {"transport_error_category": "network", "transport_error_type": "NetworkError"},
+            id="discovery-httpx-connect-error",
         ),
         pytest.param(
             requests_exceptions.ReadTimeout("secret-transport-detail"),
@@ -1381,6 +1577,11 @@ async def test_nonterminal_refresh_failure_preserves_credentials_and_bounds_logs
             UnicodeDecodeError("utf-8", b"secret-response-body", 0, 1, "secret-transport-detail"),
             {"transport_error_category": "invalid_response", "transport_error_type": "UnicodeDecodeError"},
             id="non-utf8-response",
+        ),
+        pytest.param(
+            OAuthTokenResponseBodyError("secret-transport-detail"),
+            {"transport_error_category": "invalid_response", "transport_error_type": "OAuthTokenResponseBodyError"},
+            id="non-object-json-response",
         ),
         pytest.param(
             TimeoutError("secret-transport-detail"),
@@ -1436,8 +1637,12 @@ async def test_repeat_after_lost_refresh_response_releases_lock_before_waiting_c
     repeat_seconds: float,
     expected_grants: int,
 ) -> None:
-    """Scaled 1:10: a full read timeout plus the repeat must still let a same-credential lock waiter succeed."""
-    scale = 0.1
+    """Scaled 1:5: a full read timeout plus the repeat must still let a same-credential lock waiter succeed.
+
+    At 1:5 the waiter has 1 second to spare after the grant deadline; 1:10 left half a second, which a busy CI runner
+    could spend.
+    """
+    scale = 0.2
     monkeypatch.setattr(
         credential_store,
         "_LOCK_WAIT_TIMEOUT_SECONDS",
@@ -1447,7 +1652,7 @@ async def test_repeat_after_lost_refresh_response_releases_lock_before_waiting_c
     monkeypatch.setattr(providers, "_REFRESH_REPEAT_MIN_SECONDS", providers._REFRESH_REPEAT_MIN_SECONDS * scale)
     first_attempt = DelayedTokenEndpointOutcome(
         providers._DEFAULT_AUTHORIZE_TIMEOUT_SECONDS * scale,
-        lambda request: httpx.ReadTimeout("timed out", request=request),
+        lambda request: httpx2.ReadTimeout("timed out", request=request),
     )
     first_request = threading.Event()
     presented = serve_token_endpoint(
@@ -1502,19 +1707,21 @@ def test_refresh_failure_diagnostics_ignore_unrecognized_cyclic_causes() -> None
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("http_module", [httpx2, httpx], ids=["authlib-httpx2", "discovery-httpx"])
 @pytest.mark.parametrize(("status_code", "oauth_error"), [(429, None), (503, None), (400, "invalid_grant")])
 async def test_refresh_failure_logs_http_status_without_provider_response(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     status_code: int,
     oauth_error: str | None,
+    http_module: ModuleType,
 ) -> None:
     """HTTP status remains visible without request/response contents or changed invalidation."""
     logger = _CapturingLogger()
     monkeypatch.setattr(credential_lifecycle, "logger", logger)
-    request = httpx.Request("POST", "https://provider.example/token?secret=query", content=b"secret-request")
-    response = httpx.Response(status_code, request=request, content=b"secret-response")
-    transport_error = httpx.HTTPStatusError("secret-transport-detail", request=request, response=response)
+    request = http_module.Request("POST", "https://provider.example/token?secret=query", content=b"secret-request")
+    response = http_module.Response(status_code, request=request, content=b"secret-response")
+    transport_error = http_module.HTTPStatusError("secret-transport-detail", request=request, response=response)
 
     async def refresh(_credentials: Mapping[str, Any]) -> dict[str, Any]:
         message = "secret-provider-detail"
@@ -1550,9 +1757,9 @@ async def test_refresh_failure_preserves_oauth_error_when_status_metadata_raises
     """Broken diagnostic properties cannot replace the refresh error or change invalidation."""
     logger = _CapturingLogger()
     monkeypatch.setattr(credential_lifecycle, "logger", logger)
-    request = httpx.Request("POST", "https://provider.example/token?secret=query")
-    response = httpx.Response(503, request=request)
-    transport_error = httpx.HTTPStatusError("secret-transport-detail", request=request, response=response)
+    request = httpx2.Request("POST", "https://provider.example/token?secret=query")
+    response = httpx2.Response(503, request=request)
+    transport_error = httpx2.HTTPStatusError("secret-transport-detail", request=request, response=response)
 
     def unreadable_metadata(_self: object) -> None:
         message = "secret-metadata-detail"
@@ -1612,7 +1819,10 @@ def test_sync_refresh_adapter_reentrancy_fails_instead_of_deadlocking(tmp_path: 
     process = process_context.Process(target=_run_nested_sync_refresh, args=(str(tmp_path), result_queue))
 
     process.start()
-    process.join(timeout=2)
+    # Starting a fresh interpreter and importing MindRoom takes seconds on a busy machine. The deadline only bounds a
+    # hang: it stays 15 s above the credential store's write-lock wait, so a missing reentry guard fails on the result
+    # check below with the store's lock timeout instead of being killed here.
+    process.join(timeout=credential_store._LOCK_WAIT_TIMEOUT_SECONDS + 15)
     if process.is_alive():
         process.terminate()
         process.join()

@@ -29,7 +29,7 @@ The sandbox and platform tools read their key from the environment when none is 
 | --- | --- |
 | `e2b` | `E2B_API_KEY` |
 | `daytona` | `DAYTONA_API_KEY` (and `DAYTONA_API_URL` for `api_url`) |
-| `composio` | `COMPOSIO_API_KEY`, or cached Composio user data |
+| `composio` | `COMPOSIO_API_KEY` in the process environment, not the `.env`, or cached Composio user data |
 
 All these tools run in the primary runtime by default; `e2b`, `daytona`, and `composio` always do, even when listed in `worker_tools` (see [Worker Routing](../deployment/sandbox-proxy.md#worker-routed-execution)).
 Missing Python dependencies install on first use; see [Automatic Dependency Installation](index.md#automatic-dependency-installation).
@@ -120,13 +120,12 @@ It provides:
 `upload_file()` follows the agent's [`file_access`](../architecture/security-posture.md#file-access) and refuses local files larger than 64 MiB, so fetch larger data from inside the sandbox instead.
 `download_file_from_sandbox()` and `read_file_content()` refuse sandbox files larger than 64 MiB, and a refused download leaves no partial file.
 `run_python_code()` and `run_command()` refuse output larger than 64 MiB with a tool error, and `stream_command()` returns only its first 64 MiB, so write larger output to a sandbox file instead.
-Downloads always land inside the agent workspace at workspace-relative paths; absolute paths, `..`, and links leaving the workspace are refused, and agents without a workspace cannot download.
+Downloads always land inside the agent workspace at workspace-relative paths; absolute paths, `..`, and links leaving the workspace are refused.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `api_key` | `password` | `null` | E2B API key. |
 | `timeout` | `number` | `300` | Sandbox timeout in seconds. |
-| `sandbox_options` | `text` | `null` | Extra E2B sandbox-creation options; the SDK expects a mapping that tool config cannot express, so leave it unset. |
 
 ```yaml
 agents:
@@ -140,10 +139,11 @@ agents:
 
 `daytona` runs code and shell commands in a remote Daytona sandbox.
 It provides `run_code()`, `run_shell_command()`, `create_file()`, `read_file()`, `list_files()`, `delete_file()`, and `change_directory()`.
-With `persistent: true`, the same sandbox is reused across calls in one agent session; set `sandbox_id` to use a known sandbox across sessions.
-The working directory persists in the session, so later relative paths resolve from it.
+With `persistent: true`, the same sandbox is reused across calls within one reply, and each new reply creates a new sandbox unless `sandbox_id` is set.
+The working directory persists only within one reply, so later relative paths in that reply resolve from it and the next reply starts in `/home/daytona`.
 Change it with `change_directory()` or a `run_shell_command()` call that is only `cd <directory>`; a combined command such as `cd project && ls` fails instead.
 When no reusable sandbox is found, the tool creates one, even with `auto_create_sandbox: false`.
+The agent's prompt includes the default instructions, which tell the model to run any code it writes and show the output, only while `include_tools` or `exclude_tools` leaves every function in; instructions you set with `instructions` are always included.
 
 `verify_ssl: false` disables certificate checks for every Daytona tool in the MindRoom process until it restarts, exposing the API key and sandbox traffic to anyone who can intercept the connection.
 Set it only for a self-hosted Daytona API whose certificate you cannot otherwise trust.
@@ -152,7 +152,7 @@ Set it only for a self-hosted Daytona API whose certificate you cannot otherwise
 | --- | --- | --- | --- |
 | `api_key` | `password` | `null` | Daytona API key. |
 | `api_url` | `url` | `null` | Daytona API URL. |
-| `sandbox_id` | `text` | `null` | Existing sandbox to use instead of a session sandbox. |
+| `sandbox_id` | `text` | `null` | Existing sandbox to use for every reply instead of creating one. |
 | `sandbox_language` | `text` | `python` | `python`, `javascript`, or `typescript`. |
 | `sandbox_target` | `text` | `null` | Daytona target. |
 | `sandbox_os` | `text` | `null` | Accepted but not applied to created sandboxes. |
@@ -164,10 +164,9 @@ Set it only for a self-hosted Daytona API whose certificate you cannot otherwise
 | `timeout` | `number` | `300` | Timeout in seconds for sandbox operations. |
 | `auto_create_sandbox` | `boolean` | `true` | Create a replacement sandbox when finding, creating, or starting one fails. |
 | `verify_ssl` | `boolean` | `true` | Verify Daytona TLS certificates; see the warning above. |
-| `persistent` | `boolean` | `true` | Reuse one sandbox across calls in the current agent session. |
+| `persistent` | `boolean` | `true` | Reuse one sandbox across calls within one reply. |
 | `sandbox_public` | `boolean` | `null` | Make created sandboxes public. |
 | `instructions` | `text` | `null` | Custom toolkit instructions replacing the bundled write, run, and show-results guidance. |
-| `add_instructions` | `boolean` | `false` | Add the toolkit instructions to the agent prompt. |
 
 ```yaml
 agents:
@@ -176,7 +175,6 @@ agents:
       - daytona:
           api_url: https://api.daytona.io
           auto_stop_interval: 30
-          add_instructions: true
 ```
 
 ## [`composio`]
@@ -184,7 +182,7 @@ agents:
 `composio` exposes the Composio actions listed in `actions` as agent tools.
 Callable names are the lowercase action IDs; for example, `GITHUB_GET_THE_AUTHENTICATED_USER` becomes `github_get_the_authenticated_user`.
 Before loading the tool, configure the API key and connect the apps' accounts for the chosen `entity_id` in Composio, because the agent cannot create connections itself.
-A missing or empty `actions` list fails with `Composio requires a nonempty actions list.`
+An empty `actions` list in a tool entry fails config validation, and when no setting provides `actions`, the tool fails to load with `Composio requires a nonempty actions list.`
 `composio` does not accept `include_tools` or `exclude_tools`; choose its functions with `actions`.
 It is not confined by `file_access` and cannot run in a worker, so enable it only for agents trusted with the primary runtime (see [File access](../architecture/security-posture.md#file-access)).
 
@@ -195,10 +193,6 @@ It is not confined by `file_access` and cannot run in a worker, so enable it onl
 | `base_url` | `url` | `null` | Composio API base URL. |
 | `entity_id` | `text` | `default` | Composio entity whose connected accounts run the actions. |
 | `workspace_id` | `text` | `null` | Composio workspace ID. |
-| `workspace_config` | `text` | `null` | Composio workspace configuration object; tool config cannot express it, so leave it unset. |
-| `connected_account_ids` | `text` | `null` | Mapping of apps to connected account IDs; tool config cannot express it, so leave it unset. |
-| `metadata` | `text` | `null` | Action metadata mapping; tool config cannot express it, so leave it unset. |
-| `processors` | `text` | `null` | Request, response, and schema processor mapping; tool config cannot express it, so leave it unset. |
 | `output_dir` | `text` | `null` | Directory for file-based results. |
 | `output_in_file` | `boolean` | `false` | Write action output to files. |
 | `lockfile` | `text` | `null` | Lockfile path for action-version locking. |
@@ -206,7 +200,6 @@ It is not confined by `file_access` and cannot run in a worker, so enable it onl
 | `max_retries` | `number` | `3` | Retries for failed Composio operations. |
 | `verbosity_level` | `number` | `null` | Verbosity from `0` to `3`. |
 | `allow_tracing` | `boolean` | `false` | Enable Composio tracing. |
-| `logging_level` | `text` | `INFO` | `DEBUG`, `INFO`, `WARNING`, `ERROR`, or `CRITICAL`. |
 
 ```yaml
 agents:
@@ -246,7 +239,7 @@ A body larger than 8 MiB, or one the server compressed despite being asked not t
 | `api_key` | `password` | `null` | Bearer token. |
 | `headers` | `password` | `null` | Default headers as a JSON object of strings, such as `{"X-Api-Key": "value"}`. |
 | `verify_ssl` | `boolean` | `true` | Verify TLS certificates. |
-| `timeout` | `number` | `30` | Request timeout in seconds. |
+| `timeout` | `number` | `30` | Seconds the whole request may take, including redirects and the response body. |
 | `enable_make_request` | `boolean` | `true` | Enable `make_request()`. |
 | `all` | `boolean` | `false` | Enable `make_request()`. |
 

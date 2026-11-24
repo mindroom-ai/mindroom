@@ -17,9 +17,12 @@ from urllib.parse import urlsplit
 
 from mindroom.agent_cli.shell_contract import AgentCliShellEnv
 from mindroom.runtime_state import get_api_server_address
-from mindroom.tool_system.sandbox_proxy import sandbox_proxy_enabled_for_tool
+from mindroom.tool_system.agent_tools import resolve_agent_tools
+from mindroom.tool_system.plugins import config_plugins
+from mindroom.tool_system.sandbox_proxy import tool_placement
+from mindroom.tools.shell import shell_refuses_commands
+from mindroom.workers.backend_kinds import WorkerBackendKind, worker_backend_kind
 from mindroom.workers.backends.docker_config import DOCKER_HOST_ALIAS
-from mindroom.workers.runtime import primary_worker_backend_name
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
@@ -38,10 +41,10 @@ _LAUNCHER = (
 
 
 def _shell_runs_in_primary(config: Config, runtime_paths: RuntimePaths, agent_name: str) -> bool:
-    return not sandbox_proxy_enabled_for_tool(
+    tools = config_plugins(config, runtime_paths).tools
+    return not resolve_agent_tools(config, agent_name, tools).runs_in_worker(
         "shell",
-        runtime_paths=runtime_paths,
-        worker_tools_override=config.get_agent_worker_tools(agent_name),
+        tool_placement(runtime_paths, tools),
     )
 
 
@@ -112,7 +115,7 @@ def _worker_primary_url(runtime_paths: RuntimePaths) -> str | None:
         return None
     host = api_address.host
     if host in {"0.0.0.0", "::"}:  # noqa: S104
-        if primary_worker_backend_name(runtime_paths) != "docker":
+        if worker_backend_kind(runtime_paths) is not WorkerBackendKind.DOCKER:
             return None
         host = DOCKER_HOST_ALIAS
     return _safe_origin(f"http://{f'[{host}]' if ':' in host else host}:{api_address.port}")
@@ -125,13 +128,6 @@ def _worker_problems(runtime_paths: RuntimePaths) -> list[str]:
         problems.append(
             "Set `MINDROOM_API_KEY` to a long random secret, because minimal-mode worker shells can reach "
             "the MindRoom API; the dashboard then asks for this key.",
-        )
-    if runtime_paths.env_flag("MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED") and not runtime_paths.env_flag(
-        "MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT",
-    ):
-        problems.append(
-            "Set `MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT=true`, because worker shells could forge "
-            "trusted-upstream headers.",
         )
     if runtime_paths.env_flag("OPENAI_COMPAT_ALLOW_UNAUTHENTICATED"):
         problems.append(
@@ -155,9 +151,14 @@ def minimal_shell_problems(config: Config, runtime_paths: RuntimePaths, agent_na
     # Only this process's API serves the response grants, wherever the shell runs.
     if get_api_server_address() is None:
         return ["Run MindRoom with its API server (without `--no-api`), because the CLI calls back through it."]
-    if _shell_runs_in_primary(config, runtime_paths, agent_name):
-        return []
-    return _worker_problems(runtime_paths)
+    if not _shell_runs_in_primary(config, runtime_paths, agent_name):
+        return _worker_problems(runtime_paths)
+    if shell_refuses_commands(runtime_paths, allow_without_worker=config.defaults.allow_shell_without_worker):
+        return [
+            "Route `shell` to a worker or set `defaults.allow_shell_without_worker: true`, "
+            "because the shell refuses commands in MindRoom's own process.",
+        ]
+    return []
 
 
 def agent_cli_shell_env(config: Config, runtime_paths: RuntimePaths, agent_name: str, token: str) -> AgentCliShellEnv:

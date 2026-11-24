@@ -3,21 +3,21 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import nullcontext
 from dataclasses import dataclass, field
+from functools import partial
 from typing import TYPE_CHECKING
 from weakref import WeakValueDictionary
 
-from mindroom.commands.handler import (
-    COMMAND_TYPES_WITH_SIDE_EFFECTS,
-    CommandHandlerContext,
-    agent_owns_command,
-    handle_command,
-)
-from mindroom.commands.parsing import CommandType
-from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths
-from mindroom.hooks import build_hook_matrix_admin
+from mindroom.commands.handler import CommandHandlerContext, handle_command
+from mindroom.commands.parsing import COMMAND_TYPES_WITH_SIDE_EFFECTS, CommandType
 from mindroom.inbound_turn_normalizer import TextNormalizationRequest
-from mindroom.model_selection import model_selection_targets_other_runtime
+from mindroom.model_selection import model_selection_names_runtime, model_selection_targets_other_runtime
+from mindroom.steward_duties import (
+    put_room_state_as_steward,
+    room_state_response_as_steward,
+    steward_may_write_state,
+)
 from mindroom.turn_record import canonicalize_turn_record
 
 if TYPE_CHECKING:
@@ -27,16 +27,16 @@ if TYPE_CHECKING:
     import structlog
 
     from mindroom.commands.parsing import Command
+    from mindroom.constants import RuntimePaths
     from mindroom.desktop.identity import DesktopControllerIdentity
     from mindroom.dispatch_handoff import PreparedIngress
-    from mindroom.handled_turns import TurnRecord
-    from mindroom.hooks import HookMatrixAdmin
     from mindroom.inbound_turn_normalizer import InboundTurnNormalizer
     from mindroom.matrix.conversation_reads import ConversationReader
     from mindroom.message_target import MessageTarget
     from mindroom.model_selection import CommandResultContent
     from mindroom.runtime_protocols import SupportsClientConfigOrchestrator
-    from mindroom.turn_policy import TurnPolicy
+    from mindroom.turn_policy import PreparedDispatch, TurnPolicy
+    from mindroom.turn_record import TurnRecord
     from mindroom.turn_store import TurnStore
     from mindroom.visible_response_reconciliation import VisibleResponseReconciler
 
@@ -53,7 +53,6 @@ class CommandTurnExecutorDeps:
     runtime: SupportsClientConfigOrchestrator
     logger: structlog.stdlib.BoundLogger
     runtime_paths: RuntimePaths
-    agent_name: str
     normalizer: InboundTurnNormalizer
     conversation_reader: ConversationReader
     turn_policy: TurnPolicy
@@ -88,26 +87,27 @@ class CommandTurnExecutor:
         *,
         target: MessageTarget,
         handled_turn: TurnRecord,
+        acts_for_requester: bool,
     ) -> None:
-        """Run one explicit command under its durable turn journal."""
-        if command.type is CommandType.MODEL and model_selection_targets_other_runtime(
-            event.source.get("content", {}),
-            self._client().user_id,
-            self._client().device_id,
-        ):
-            return
+        """Run one explicit command under its durable turn journal.
+
+        ``acts_for_requester`` says an entity wrote the command for ``requester_user_id``.
+        """
+        lock: asyncio.Lock | nullcontext[None] = nullcontext()
         if command.type is CommandType.MODEL:
-            key = room.room_id, target.resolved_thread_id
-            lock = self._model_command_locks.get(key)
-            if lock is None:
-                lock = asyncio.Lock()
-                self._model_command_locks[key] = lock
             # Keep a strong local reference while waiting. Text and structured
             # model commands share the same order across requester ingress lanes.
-            async with lock:
-                await self._execute(room, event, requester_user_id, command, target=target, handled_turn=handled_turn)
-        else:
-            await self._execute(room, event, requester_user_id, command, target=target, handled_turn=handled_turn)
+            lock = self._model_command_locks.setdefault((room.room_id, target.resolved_thread_id), asyncio.Lock())
+        async with lock:
+            await self._execute(
+                room,
+                event,
+                requester_user_id,
+                command,
+                target=target,
+                handled_turn=handled_turn,
+                acts_for_requester=acts_for_requester,
+            )
 
     async def _execute(
         self,
@@ -118,6 +118,7 @@ class CommandTurnExecutor:
         *,
         target: MessageTarget,
         handled_turn: TurnRecord,
+        acts_for_requester: bool,
     ) -> None:
         """Execute after target ownership and any model command ordering barrier."""
         event = await self.deps.normalizer.resolve_text_event(
@@ -147,17 +148,13 @@ class CommandTurnExecutor:
             return
         active_command_turn = command_turn
 
-        async def send_response(
-            response_text: str,
-            *,
-            skip_mentions: bool = False,
-        ) -> str | None:
+        async def send_response(response_text: str) -> str | None:
             return await self.deps.visible_responses.deliver_recoverable_text(
                 active_command_turn,
                 target=target,
                 response_text=active_command_turn.command_result_text or response_text,
                 recovered_response_event_id=recovered_response_event_id,
-                skip_mentions=skip_mentions,
+                skip_mentions=True,
             )
 
         async def record_command_result(
@@ -172,31 +169,38 @@ class CommandTurnExecutor:
                 command_result_extra_content=extra_content,
             )
 
-        async def record_command_turn(outcome: TurnRecord) -> None:
+        async def record_command_turn(response_event_id: str) -> None:
             await self.deps.turn_store.record_responded_turn(
-                canonicalize_turn_record(active_command_turn, response_event_id=outcome.response_event_id),
+                canonicalize_turn_record(active_command_turn, response_event_id=response_event_id),
             )
 
         orchestrator = self.deps.runtime.orchestrator
-        reload_plugins = (
-            (lambda: orchestrator.reload_plugins_now(source="command")) if orchestrator is not None else None
-        )
+
+        async def admit_compaction(name: str, target: MessageTarget, requester_id: str) -> bool:
+            bot = orchestrator.agent_bots.get(name)
+            return bot is not None and await bot.admit_compaction(target, requester_id)
+
         context = CommandHandlerContext(
             client=self._client(),
             config=self.deps.runtime.config,
             runtime_paths=self.deps.runtime_paths,
             logger=self.deps.logger,
             conversation_reader=self.deps.conversation_reader,
-            matrix_admin=self._matrix_admin(),
             stable_target=target,
             record_handled_turn=record_command_turn,
             record_command_result=record_command_result,
             send_response=send_response,
-            reload_plugins=reload_plugins,
+            reload_plugins=lambda: orchestrator.reload_plugins_now(source="command"),
             responder_candidates_for_room=self.deps.turn_policy.responder_candidates_for_room,
             controller_identity=self.deps.controller_identity,
             agent_reply_memberships=self.deps.runtime.agent_reply_memberships,
-            config_provider=lambda: orchestrator.config if orchestrator is not None else self.deps.runtime.config,
+            scheduled_tasks=orchestrator.scheduled_tasks,
+            put_room_state=partial(put_room_state_as_steward, orchestrator.room_steward),
+            room_state_response=partial(room_state_response_as_steward, orchestrator.room_steward),
+            steward_may_write_state=partial(steward_may_write_state, orchestrator.room_steward),
+            budget_monitor=orchestrator.budgets,
+            workflow_engine=orchestrator.workflow_engine,
+            admit_compaction=admit_compaction,
         )
         await handle_command(
             context=context,
@@ -204,19 +208,7 @@ class CommandTurnExecutor:
             event=event,
             command=command,
             requester_user_id=requester_user_id,
-            acts_for_requester=event.acts_for_requester,
-        )
-
-    def _matrix_admin(self) -> HookMatrixAdmin | None:
-        orchestrator = self.deps.runtime.orchestrator
-        if orchestrator is not None:
-            return orchestrator.hook_matrix_admin()
-        if self.deps.agent_name != ROUTER_AGENT_NAME:
-            return None
-        return build_hook_matrix_admin(
-            self._client(),
-            self.deps.runtime_paths,
-            config=self.deps.runtime.config,
+            acts_for_requester=acts_for_requester,
         )
 
     async def _recover_visible_response(
@@ -236,6 +228,7 @@ class CommandTurnExecutor:
             return False
         await self.deps.turn_store.record_responded_turn(
             canonicalize_turn_record(command_turn, response_event_id=response_event_id),
+            room_id=room_id,
         )
         return True
 
@@ -243,23 +236,15 @@ class CommandTurnExecutor:
         self,
         command_turn: TurnRecord,
         *,
-        command_execution_started: bool | None = None,
         command_result_text: str | None = None,
         command_result_extra_content: CommandResultContent | None = None,
     ) -> TurnRecord:
-        persisted_turn = await self.deps.turn_store.record_pending_turn(
-            canonicalize_turn_record(
-                command_turn,
-                command_execution_started=(
-                    command_turn.command_execution_started
-                    if command_execution_started is None
-                    else command_execution_started
-                ),
-                command_result_text=command_result_text,
-                command_result_extra_content=command_result_extra_content,
-            ),
+        persisted_turn = await self.deps.turn_store.record_command_checkpoint(
+            command_turn,
+            result_text=command_result_text,
+            result_extra_content=command_result_extra_content,
         )
-        if persisted_turn is None or persisted_turn.completed:
+        if persisted_turn is None:
             msg = "Failed to persist pending command checkpoint"
             raise RuntimeError(msg)
         return persisted_turn
@@ -310,10 +295,7 @@ class CommandTurnExecutor:
             )
             return None
         if command_type in COMMAND_TYPES_WITH_SIDE_EFFECTS:
-            return await self._persist_checkpoint(
-                command_turn,
-                command_execution_started=True,
-            )
+            return await self._persist_checkpoint(command_turn)
         return command_turn
 
     async def execute_if_owned(
@@ -323,22 +305,25 @@ class CommandTurnExecutor:
         requester_user_id: str,
         command: Command,
         *,
-        target: MessageTarget,
+        dispatch: PreparedDispatch,
         handled_turn: TurnRecord,
+        acts_for_requester: bool,
     ) -> bool:
         """Execute only on the bot that owns this command response."""
-        if command.type is CommandType.MODEL and model_selection_targets_other_runtime(
-            event.source.get("content", {}),
-            self._client().user_id,
-            self._client().device_id,
-        ):
+        client = self._client()
+        content = event.source.get("content", {})
+        is_model = command.type is CommandType.MODEL
+        if is_model and model_selection_targets_other_runtime(content, client.user_id, client.device_id):
             return False
-        if not agent_owns_command(
+        # A model selection names the device that answered its discovery: that bot runs it, under the command's claim.
+        if not await self.deps.turn_policy.aims_command_at_me(
+            room,
+            dispatch.requester_user_id,
             command,
-            agent_name=self.deps.agent_name,
-            config=self.deps.runtime.config,
-            room=room,
-            requester_user_id=requester_user_id,
+            dispatch.context.mentioned_agents,
+            dispatch.context.planning_thread_history,
+            source_event_id=event.event_id,
+            names_me=is_model and model_selection_names_runtime(content, client.user_id),
         ):
             return False
         await self.execute(
@@ -346,7 +331,8 @@ class CommandTurnExecutor:
             event=event,
             requester_user_id=requester_user_id,
             command=command,
-            target=target,
+            target=dispatch.target,
             handled_turn=handled_turn,
+            acts_for_requester=acts_for_requester,
         )
         return True

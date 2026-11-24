@@ -37,7 +37,7 @@ _VALID_PLUGIN_FILES = {
 
 _BROKEN_PLUGIN_FILES = {
     "mindroom.plugin.json": json.dumps({"name": "broken", "hooks_module": "hooks.py"}),
-    "hooks.py": "raise RuntimeError('plugin exploded')\n",
+    "hooks.py": "raise RuntimeError('plugin exploded: list[str] [/x] :100:')\n",
 }
 
 
@@ -296,18 +296,16 @@ def test_plugins_install_cli_reports_result_and_config_snippet(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """CLI install should report provenance and print the config entry to add."""
+    """CLI install should report provenance and print the config entry to add, with markup and emoji codes as is."""
     _fake_github(monkeypatch)
+    plugins_dir = tmp_path / "vendor[" / "x]"
 
-    result = runner.invoke(
-        app,
-        ["plugins", "install", "acme/demo-plugin", "--plugins-dir", str(tmp_path / "plugins")],
-    )
+    result = runner.invoke(app, ["plugins", "install", "acme/demo[y]:100:", "--plugins-dir", str(plugins_dir)])
 
     assert result.exit_code == 0
-    assert "Installed plugin: compat-demo" in result.stdout
-    assert f"acme/demo-plugin@{'a' * 12}" in result.stdout
-    assert "- path:" in result.stdout
+    assert f"Installed plugin: compat-demo (acme/demo[y]:100:@{'a' * 12})\n" in result.stdout
+    assert f"  Location: {plugins_dir / 'demo[y]:100:'}\n" in result.stdout
+    assert f"  - path: {plugins_dir / 'demo[y]:100:'}\n" in result.stdout
 
 
 def test_plugins_install_cli_honors_config_path_and_prints_relative_snippet(
@@ -330,7 +328,7 @@ def test_plugins_install_cli_reports_failure_without_traceback(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """CLI install should surface plugin errors without a Typer traceback."""
+    """CLI install should surface plugin errors as is, with markup and emoji codes, without a Typer traceback."""
     _fake_github(monkeypatch, files=_BROKEN_PLUGIN_FILES)
 
     result = runner.invoke(
@@ -339,8 +337,8 @@ def test_plugins_install_cli_reports_failure_without_traceback(
     )
 
     assert result.exit_code == 1
-    assert "Plugin install failed:" in result.stdout
-    assert "plugin exploded" in result.stdout
+    assert result.stdout.startswith("Plugin install failed: ")
+    assert result.stdout.endswith("plugin exploded: list[str] [/x] :100:\n")
     assert "Traceback (most recent call last)" not in result.output
 
 
@@ -371,10 +369,34 @@ def test_plugins_update_cli_requires_exactly_one_target(tmp_path: Path) -> None:
     assert "exactly one of NAME or --all" in result.output
 
 
-@pytest.mark.parametrize("name", ["../outside", "..", "a/b", "a\\b", ""])
+def test_plugins_update_cli_prints_markup_literally(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Markup-like paths, plugin names, and errors should print as is, not vanish or crash the CLI."""
+    plugins_dir = tmp_path / "vendor[" / "x]"
+    empty = runner.invoke(app, ["plugins", "update", "--all", "--plugins-dir", str(plugins_dir)])
+    assert empty.exit_code == 0
+    assert empty.stdout == f"No vendored plugins found in {plugins_dir}\n"
+
+    _fake_github(monkeypatch)
+    install_plugin(parse_plugin_spec("acme/demo-plugin"), plugins_dir)
+    (plugins_dir / "demo-plugin").rename(plugins_dir / "demo[y]")
+    current = runner.invoke(app, ["plugins", "update", "--all", "--plugins-dir", str(plugins_dir)])
+    assert current.exit_code == 0
+    assert current.stdout == f"Already up to date: demo[y] ({'a' * 12})\n"
+
+    _fake_github(monkeypatch, commit="b" * 40, files=_BROKEN_PLUGIN_FILES)
+    failed = runner.invoke(app, ["plugins", "update", "demo[y]", "--plugins-dir", str(plugins_dir)])
+    assert failed.exit_code == 1
+    assert "Plugin update failed: demo[y]: " in failed.stdout
+    assert "plugin exploded: list[str] [/x] :100:\n" in failed.stdout
+
+
+@pytest.mark.parametrize("name", ["../outside", "..", "a/b", "a\\b", "a\\", "", "x[/y]"])
 def test_plugins_update_cli_rejects_traversal_names(tmp_path: Path, name: str) -> None:
-    """Update targets must stay inside the plugins directory."""
+    """Update targets must stay inside the plugins directory, and the rejected name prints exactly."""
     result = runner.invoke(app, ["plugins", "update", name, "--plugins-dir", str(tmp_path)])
 
     assert result.exit_code == 2
-    assert "Invalid plugin name" in result.output
+    assert result.output == f"Invalid plugin name (expected a plain directory name): {name}\n"

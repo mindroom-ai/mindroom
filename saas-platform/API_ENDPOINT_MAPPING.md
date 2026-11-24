@@ -8,9 +8,9 @@ Backend filenames below are relative to `platform-backend/src/backend/routes/`; 
 
 ## Summary
 
-- **OpenAPI operations**: 52, counting each HTTP method and path template once.
-- **OpenAPI operations called by platform frontend code**: 32, including browser requests and server authentication checks.
-- **OpenAPI operations without a direct platform frontend caller**: 20, comprising six system operations, six Matrix OIDC operations, one Stripe webhook, and seven other routes.
+- **OpenAPI operations**: 50, counting each HTTP method and path template once.
+- **OpenAPI operations called by platform frontend code**: 31, including browser requests and server authentication checks.
+- **OpenAPI operations without a direct platform frontend caller**: 19, comprising six system operations, six Matrix OIDC operations, one Stripe webhook, and six other routes.
 
 Ordinary browser requests go directly to the configured platform API through `src/lib/api.ts`.
 The frontend also makes server-side authentication checks in `src/lib/auth/admin.ts` and `src/app/auth/callback/route.ts`.
@@ -41,7 +41,6 @@ An operation without a platform frontend caller can still serve an external inte
 
 | Method | Path | Backend module | Frontend caller or purpose |
 | --- | --- | --- | --- |
-| GET | `/admin/stats` | `admin.py` | `src/app/admin/page.tsx`: platform statistics |
 | GET | `/admin/metrics/dashboard` | `admin.py` | `src/app/admin/page.tsx`: dashboard metrics |
 | GET | `/admin/instance-lifecycle` | `admin.py` | `src/app/admin/lifecycle/page.tsx`: instance lifecycle overview |
 | POST | `/admin/instances/{instance_id}/start` | `admin.py` | `src/components/admin/InstanceActions.tsx`: start |
@@ -86,7 +85,6 @@ The shared service owns the Kubernetes and Helm lifecycle work.
 | Method | Path | Backend module | Frontend caller or purpose |
 | --- | --- | --- | --- |
 | GET | `/pricing/config` | `pricing.py` | `src/lib/api.ts` → billing and upgrade pages |
-| GET | `/pricing/stripe-price/{plan}/{billing_cycle}` | `pricing.py` | No current frontend caller; look up one Stripe price ID |
 | POST | `/stripe/checkout` | `stripe_routes.py` | `src/lib/api.ts` → `src/app/dashboard/billing/upgrade/page.tsx` |
 | POST | `/stripe/portal` | `stripe_routes.py` | `src/lib/api.ts` → `src/app/dashboard/billing/page.tsx` |
 | POST | `/webhooks/stripe` | `webhooks.py` | External Stripe webhook; no platform frontend caller |
@@ -111,12 +109,12 @@ Setting `active` through `PUT /admin/accounts/{account_id}/status` on an account
 | POST | `/my/sso-cookie` | `sso.py` | `src/lib/api.ts` → auth completion and dashboard: set the SSO cookie |
 | DELETE | `/my/sso-cookie` | `sso.py` | `src/lib/api.ts` → `src/hooks/useAuth.tsx`: clear the SSO cookie |
 | GET | `/instance-sso/authorize` | `sso.py` | Instance runtime login redirect: issue a single-use login ticket to an owned instance dashboard |
-| GET | `/matrix-oidc/.well-known/openid-configuration` | `matrix_oidc.py` | OIDC discovery for Synapse |
+| GET | `/matrix-oidc/.well-known/openid-configuration` | `matrix_oidc.py` | OIDC discovery for tenant homeservers |
 | GET | `/.well-known/openid-configuration/matrix-oidc` | `matrix_oidc.py` | Alternate OIDC discovery path |
 | GET | `/matrix-oidc/jwks.json` | `matrix_oidc.py` | Public signing keys for the OIDC client |
-| GET | `/matrix-oidc/authorize` | `matrix_oidc.py` | Synapse browser redirect flow using platform-cookie authentication |
-| POST | `/matrix-oidc/token` | `matrix_oidc.py` | Synapse authorization-code exchange with client authentication |
-| GET | `/matrix-oidc/userinfo` | `matrix_oidc.py` | Synapse user-info request with an OIDC access token |
+| GET | `/matrix-oidc/authorize` | `matrix_oidc.py` | Tenant homeserver browser redirect flow using platform-cookie authentication |
+| POST | `/matrix-oidc/token` | `matrix_oidc.py` | Tenant homeserver authorization-code exchange with client authentication |
+| GET | `/matrix-oidc/userinfo` | `matrix_oidc.py` | Tenant homeserver user-info request with an OIDC access token |
 
 The six Matrix OIDC operations participate in the Matrix login flow rather than direct platform frontend API calls.
 They are registered even when OIDC is disabled; their handlers check whether the integration is enabled.

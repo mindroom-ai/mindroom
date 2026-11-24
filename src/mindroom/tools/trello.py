@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     config_fields=[
         ConfigField(
             name="api_key",
+            env=("TRELLO_API_KEY",),
             label="API Key",
             type="password",
             required=False,
@@ -31,6 +32,7 @@ if TYPE_CHECKING:
         ),
         ConfigField(
             name="api_secret",
+            env=("TRELLO_API_SECRET",),
             label="API Secret",
             type="password",
             required=False,
@@ -38,6 +40,7 @@ if TYPE_CHECKING:
         ),
         ConfigField(
             name="token",
+            env=("TRELLO_TOKEN",),
             label="Token",
             type="password",
             required=False,
@@ -45,7 +48,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["py-trello"],
-    docs_url="https://docs.agno.com/tools/toolkits/others/trello",
+    docs_url="https://docs.mindroom.chat/tools/project-management/#trello",
     function_names=(
         "create_board",
         "create_card",

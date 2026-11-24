@@ -14,10 +14,15 @@ from mindroom.config.main import Config
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix.state import MatrixState
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from tests.matrix_state_helpers import save_matrix_state
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping, Sequence
     from pathlib import Path
+
+    from mindroom.constants import RuntimePaths
+
+OBSERVER_USER_ID = "@mindroom_router:example.com"
 
 
 def membership_config(
@@ -86,7 +91,8 @@ def with_responder_access(
     return config
 
 
-def _joined_members(room_id: str, user_ids: Sequence[str]) -> nio.JoinedMembersResponse:
+def joined_members_response(room_id: str, *user_ids: str) -> nio.JoinedMembersResponse:
+    """Return a joined-members response listing ``user_ids`` in ``room_id``."""
     return nio.JoinedMembersResponse(
         members=[nio.RoomMember(user_id, None, None) for user_id in user_ids],
         room_id=room_id,
@@ -107,17 +113,38 @@ async def membership_index(
         room_id = f"!{room_key}:example.com"
         room_ids[room_key] = room_id
         state.add_room(room_key, room_id, f"#{room_key}:example.com", room_key.title())
-    state.save(runtime_paths=runtime_paths)
+    save_matrix_state(state, runtime_paths)
 
     client = AsyncMock()
     client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=list(room_ids.values()))
     client.joined_members.side_effect = [
-        _joined_members(room_ids[room_key], sorted(memberships_by_room_key[room_key]))
+        joined_members_response(room_ids[room_key], *sorted(memberships_by_room_key[room_key]))
         for room_key in sorted(memberships_by_room_key)
     ]
     index = AgentReplyMembershipIndex(clock=clock)
-    await index.refresh(config, runtime_paths, client)
+    await refresh_memberships(index, config, runtime_paths, client)
     return index
+
+
+async def refresh_memberships(
+    index: AgentReplyMembershipIndex,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    client: nio.AsyncClient | AsyncMock,
+    *,
+    observer_user_id: str | None = None,
+) -> None:
+    """Refresh ``index`` with ``client`` as its only observing account, under ``observer_user_id`` when given.
+
+    A mock client without a Matrix ID of its own observes as ``OBSERVER_USER_ID``.
+    """
+    if observer_user_id is not None or not isinstance(getattr(client, "user_id", None), str):
+        client.user_id = observer_user_id or OBSERVER_USER_ID
+    await index.refresh(
+        config,
+        runtime_paths,
+        lambda: ([client], lambda _room_id, user_ids: min(user_ids, default=None), True),
+    )
 
 
 def unresolved_membership_index(config: Config) -> AgentReplyMembershipIndex:
@@ -125,3 +152,27 @@ def unresolved_membership_index(config: Config) -> AgentReplyMembershipIndex:
     index = AgentReplyMembershipIndex()
     index.invalidate(config, reason="test_unresolved_room")
     return index
+
+
+def member_event(
+    user_id: str,
+    membership: str,
+    previous: str | None = None,
+    *,
+    sender: str | None = None,
+    event_id: str | None = None,
+) -> nio.RoomMemberEvent:
+    """Build one membership event, with the earlier membership in ``unsigned`` when given."""
+    source: dict[str, object] = {
+        "type": "m.room.member",
+        "event_id": event_id or f"${membership}-{user_id}",
+        "origin_server_ts": 1,
+        "sender": sender or user_id,
+        "state_key": user_id,
+        "content": {"membership": membership},
+    }
+    if previous is not None:
+        source["unsigned"] = {"prev_content": {"membership": previous}}
+    event = nio.RoomMemberEvent.from_dict(source)
+    assert isinstance(event, nio.RoomMemberEvent)
+    return event

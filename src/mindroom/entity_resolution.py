@@ -3,16 +3,21 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import cached_property
 from typing import TYPE_CHECKING, Literal
 
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix import state as matrix_state
-from mindroom.matrix.identity import MatrixID, managed_account_key, managed_account_user_id
+from mindroom.matrix.identity import MatrixID, managed_account_key, matrix_account_user_id
 from mindroom.matrix.invited_rooms_store import should_persist_invited_rooms
-from mindroom.matrix_identifiers import (
-    room_alias_identifier_candidates,
+from mindroom.matrix_identifiers import agent_username_localpart, managed_room_key_for_alias
+from mindroom.requester_identity import (
+    INTERNAL_USER_ENTITY_NAME,
+    IdentityMemo,
+    memoized_entity_identities,
+    mindroom_user_id,
+    runtime_matrix_domain,
 )
-from mindroom.requester_identity import INTERNAL_USER_ENTITY_NAME, mindroom_user_id, runtime_matrix_domain
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
@@ -21,6 +26,7 @@ if TYPE_CHECKING:
     from mindroom.config.agent import AgentConfig, TeamConfig
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.matrix.state import MatrixState
 
 
 class MissingManagedEntityAccountError(RuntimeError):
@@ -31,29 +37,21 @@ class DuplicateManagedEntityIdentityError(RuntimeError):
     """Raised when persisted managed Matrix accounts are ambiguous."""
 
 
-def validate_call_agent_room_ownership(config: Config, runtime_paths: RuntimePaths) -> None:
-    """Reject runtime-resolved rooms assigned to more than one call agent."""
-    agents_by_room: dict[str, list[str]] = {}
-    for agent_name in config.calls.agents:
-        for room in config.agents[agent_name].rooms:
-            room_key = _call_room_ownership_key(room, runtime_paths)
-            agents_by_room.setdefault(room_key, []).append(agent_name)
-    conflicts = [
-        f"{room} ({', '.join(sorted(agent_names))})"
-        for room, agent_names in sorted(agents_by_room.items())
-        if len(agent_names) > 1
-    ]
-    if conflicts:
-        msg = "calls.agents configures multiple agents for room(s): " + "; ".join(conflicts)
-        raise ValueError(msg)
-
-
-def _call_room_ownership_key(room_ref: str, runtime_paths: RuntimePaths) -> str:
-    """Normalize a call-room reference before live Matrix state is available."""
+def canonical_room_reference(room_ref: str, runtime_paths: RuntimePaths) -> str:
+    """Return a configured room reference's room ID in MindRoom's record, else the room key its alias names, else itself."""
     resolved = matrix_state.resolve_room_id(room_ref, runtime_paths)
     if resolved != room_ref:
         return resolved
-    return room_alias_identifier_candidates(room_ref, runtime_paths)[-1]
+    return managed_room_key_for_alias(room_ref, runtime_matrix_domain(runtime_paths), runtime_paths) or room_ref
+
+
+def names_room(config: Config, room_ref: str, runtime_paths: RuntimePaths) -> bool:
+    """Return whether the runtime can map a configured room reference to a room ID, as it does through MindRoom's record.
+
+    A configured room key and the alias MindRoom gives it name a room before the room is created and recorded.
+    """
+    room = canonical_room_reference(room_ref, runtime_paths)
+    return room.startswith("!") or room in config.managed_room_keys()
 
 
 def configured_call_agent_name_for_room(
@@ -63,8 +61,13 @@ def configured_call_agent_name_for_room(
     *,
     room_aliases: Iterable[str] = (),
     invited_rooms_by_agent: Mapping[str, AbstractSet[str]],
+    personal_rooms_by_agent: Mapping[str, AbstractSet[str]],
 ) -> str | None:
-    """Return the sole calls-enabled agent for a live room, failing on ambiguity."""
+    """Return the sole calls-enabled agent for a live room, failing on ambiguity.
+
+    An agent creates its owners' personal rooms itself, so ``personal_rooms_by_agent`` lists rooms that are neither
+    configured nor invited.
+    """
     routable_names = configured_routable_entity_names_for_room(
         config,
         room_id,
@@ -75,9 +78,11 @@ def configured_call_agent_name_for_room(
     if len(call_agents) == 1:
         return next(iter(call_agents))
     for agent_name in config.calls.agents:
-        if not should_persist_invited_rooms(config, agent_name):
-            continue
-        if room_id in invited_rooms_by_agent.get(agent_name, ()):
+        invited = should_persist_invited_rooms(config, agent_name) and room_id in invited_rooms_by_agent.get(
+            agent_name,
+            (),
+        )
+        if invited or room_id in personal_rooms_by_agent.get(agent_name, ()):
             call_agents.add(agent_name)
     call_agents = sorted(call_agents)
     if len(call_agents) > 1:
@@ -103,12 +108,7 @@ def configured_bot_user_ids_for_room(
     if not configured_names:
         return set()
     config_ids = entity_identity_registry(config, runtime_paths).current_ids
-    configured_bots = {config_ids[entity_name].full_id for entity_name in configured_names}
-
-    if configured_bots:
-        configured_bots.add(config_ids[ROUTER_AGENT_NAME].full_id)
-
-    return configured_bots
+    return {config_ids[entity_name].full_id for entity_name in (*configured_names, ROUTER_AGENT_NAME)}
 
 
 def is_configured_room(
@@ -119,8 +119,7 @@ def is_configured_room(
     room_aliases: Iterable[str] = (),
 ) -> bool:
     """Return whether one Matrix room is present in the configured room set."""
-    room_identifiers = _room_reference_identifiers(room_id, runtime_paths, room_aliases=room_aliases)
-    return _room_refs_match(list(config.get_all_configured_rooms()), room_identifiers, runtime_paths)
+    return bool(_configured_refs_naming_room(config, room_id, runtime_paths, room_aliases=room_aliases))
 
 
 def configured_routable_entity_names_for_room(
@@ -131,32 +130,36 @@ def configured_routable_entity_names_for_room(
     room_aliases: Iterable[str] = (),
 ) -> list[str]:
     """Return non-router agent and team names statically configured for one room."""
-    room_identifiers = _room_reference_identifiers(room_id, runtime_paths, room_aliases=room_aliases)
+    room_refs = _configured_refs_naming_room(config, room_id, runtime_paths, room_aliases=room_aliases)
     configured_names: list[str] = []
 
     for agent_name, agent_config in config.agents.items():
-        if agent_name == ROUTER_AGENT_NAME:
-            continue
-        if _room_refs_match(agent_config.rooms, room_identifiers, runtime_paths):
+        if not room_refs.isdisjoint(agent_config.rooms):
             configured_names.append(agent_name)
 
     for team_name, team_config in config.teams.items():
-        if _room_refs_match(team_config.rooms, room_identifiers, runtime_paths):
+        if not room_refs.isdisjoint(team_config.rooms):
             configured_names.append(team_name)
 
     return configured_names
 
 
-def _room_refs_match(
-    configured_room_refs: list[str],
-    room_identifiers: set[str],
+def _configured_refs_naming_room(
+    config: Config,
+    room_id: str,
     runtime_paths: RuntimePaths,
-) -> bool:
-    """Return whether authored room refs match any known identifier for a live room."""
-    if room_identifiers.intersection(configured_room_refs):
-        return True
-    resolved_refs = matrix_state.resolve_room_aliases(configured_room_refs, runtime_paths)
-    return bool(room_identifiers.intersection(resolved_refs))
+    *,
+    room_aliases: Iterable[str] = (),
+) -> set[str]:
+    """Return the authored room refs that name a live room, mapping all of them through MindRoom's record at once."""
+    room_identifiers = _room_reference_identifiers(room_id, runtime_paths, room_aliases=room_aliases)
+    configured_refs = list(config.get_all_configured_rooms())
+    resolved_refs = matrix_state.resolve_room_aliases(configured_refs, runtime_paths)
+    return {
+        ref
+        for ref, resolved_ref in zip(configured_refs, resolved_refs, strict=True)
+        if ref in room_identifiers or resolved_ref in room_identifiers
+    }
 
 
 def _room_reference_identifiers(
@@ -165,39 +168,18 @@ def _room_reference_identifiers(
     *,
     room_aliases: Iterable[str] = (),
 ) -> set[str]:
-    """Return room ID, alias, and managed key identifiers for one live room."""
-    identifiers: list[str] = []
+    """Return room ID, alias, and managed key identifiers for one live room.
 
-    def add(identifier: str | None) -> None:
-        if identifier:
-            identifiers.append(identifier)
-
-    add(room_id)
-    if room_id.startswith("#"):
-        _add_room_alias_identifiers(identifiers, room_id, runtime_paths)
-    for room_alias in room_aliases:
-        _add_room_alias_identifiers(identifiers, room_alias, runtime_paths)
-
-    matched_identifiers = set(identifiers)
-    state = matrix_state.matrix_state_for_runtime(runtime_paths)
-    for room_key, room in state.rooms.items():
-        persisted_identifiers = {room_key, room.room_id, room.alias}
-        if not matched_identifiers.intersection(persisted_identifiers):
-            continue
-        add(room_key)
-        add(room.room_id)
-        _add_room_alias_identifiers(identifiers, room.alias, runtime_paths)
-        matched_identifiers = set(identifiers)
-
-    return set(identifiers)
-
-
-def _add_room_alias_identifiers(
-    identifiers: list[str],
-    room_alias: str,
-    runtime_paths: RuntimePaths,
-) -> None:
-    identifiers.extend(room_alias_identifier_candidates(room_alias, runtime_paths))
+    An alias names a managed room key only when it is exactly the alias MindRoom gives that room.
+    ``_configured_refs_naming_room`` maps configured refs through MindRoom's record, so a recorded room matches by its room ID.
+    """
+    domain = runtime_matrix_domain(runtime_paths)
+    room_refs = (room_id, *room_aliases)
+    identifiers = set(room_refs)
+    for room_ref in room_refs:
+        if managed_key := managed_room_key_for_alias(room_ref, domain, runtime_paths):
+            identifiers.add(managed_key)
+    return identifiers
 
 
 def configured_routable_entity_ids_for_room(
@@ -238,7 +220,10 @@ def managed_entity_power_user_ids_for_room(
 
 @dataclass(frozen=True)
 class EntityIdentityRegistry:
-    """Current configured entity aliases mapped to actual persisted Matrix IDs."""
+    """Current configured entity aliases mapped to actual persisted Matrix IDs.
+
+    One registry is shared by every caller until its inputs change, so it must not be mutated.
+    """
 
     current_ids: dict[str, MatrixID]
 
@@ -246,14 +231,21 @@ class EntityIdentityRegistry:
         """Return one configured entity's current persisted Matrix ID."""
         return self.current_ids[entity_name]
 
+    @cached_property
+    def _entity_names_by_user_id(self) -> dict[str, str]:
+        """Return each current Matrix ID's entity, which is unique because the registry was validated."""
+        return {matrix_id.full_id: entity_name for entity_name, matrix_id in self.current_ids.items()}
+
     def current_entity_name_for_user_id(self, user_id: str, *, include_router: bool = True) -> str | None:
         """Return the configured entity currently represented by one Matrix user ID."""
-        for entity_name, current_id in self.current_ids.items():
-            if not include_router and entity_name == ROUTER_AGENT_NAME:
-                continue
-            if current_id.full_id == user_id:
-                return entity_name
-        return None
+        entity_name = self._entity_names_by_user_id.get(user_id)
+        if not include_router and entity_name == ROUTER_AGENT_NAME:
+            return None
+        return entity_name
+
+    def entity_name_or_username(self, matrix_id: MatrixID) -> str:
+        """Return the configured entity, router included, behind one Matrix ID, else the ID's username."""
+        return self.current_entity_name_for_user_id(matrix_id.full_id) or matrix_id.username
 
     def is_managed_user_id(self, user_id: str, *, include_router: bool = True) -> bool:
         """Return whether a Matrix user ID belongs to a current configured entity."""
@@ -265,33 +257,106 @@ class EntityIdentityRegistry:
         return frozenset(matrix_id.full_id for matrix_id in self.current_ids.values())
 
 
+_REGISTRIES: IdentityMemo[EntityIdentityRegistry] = {}
+
+
 def entity_identity_registry(config: Config, runtime_paths: RuntimePaths) -> EntityIdentityRegistry:
     """Return current persisted Matrix identities for configured runtime entities."""
-    current_ids = _persisted_entity_id_map(config, runtime_paths)
-    _validate_unique_entity_ids(current_ids)
-    _validate_internal_user_id_is_unique(config, runtime_paths, current_ids)
-    return EntityIdentityRegistry(current_ids=current_ids)
+
+    def derive(domain: str, state: MatrixState) -> EntityIdentityRegistry:
+        current_ids = _persisted_entity_id_map(config, domain, state)
+        _validate_unique_entity_ids(current_ids)
+        _validate_internal_user_id_is_unique(config, runtime_paths, current_ids)
+        return EntityIdentityRegistry(current_ids=current_ids)
+
+    return memoized_entity_identities(_REGISTRIES, config, runtime_paths, derive)
+
+
+def persist_offline_entity_accounts(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    *,
+    usernames: Mapping[str, str] | None = None,
+    password: str | None = None,
+) -> None:
+    """Record a Matrix account for the router, every agent and team, and the internal user, without a homeserver.
+
+    A run that never reaches Matrix still resolves its entities' Matrix IDs. An entity keeps the account it already
+    has unless ``usernames`` names it; the others get their generated username, or the one ``usernames`` gives.
+    """
+    usernames = usernames or {}
+    domain = config.get_domain(runtime_paths)
+    mindroom_user = config.mindroom_user
+    user_key = managed_account_key(INTERNAL_USER_ENTITY_NAME)
+
+    def add_missing(state: MatrixState) -> None:
+        for entity_name in [ROUTER_AGENT_NAME, *config.agents, *config.teams]:
+            account_key = managed_account_key(entity_name)
+            if account_key in state.accounts and entity_name not in usernames:
+                continue
+            username = usernames.get(entity_name, agent_username_localpart(entity_name, runtime_paths))
+            state.add_account(account_key, username, password, domain=domain)
+        if mindroom_user is not None and user_key not in state.accounts:
+            state.add_account(
+                user_key,
+                mindroom_user.username,
+                password,
+                requested_username=mindroom_user.username,
+                domain=domain,
+            )
+
+    matrix_state.update_matrix_state(runtime_paths, add_missing)
 
 
 def current_entity_id(entity_name: str, runtime_paths: RuntimePaths) -> MatrixID:
     """Return one persisted Matrix ID without resolving unrelated configured entities."""
-    return _persisted_entity_matrix_id(entity_name, runtime_matrix_domain(runtime_paths), runtime_paths)
+    return _persisted_entity_matrix_id(
+        entity_name,
+        runtime_matrix_domain(runtime_paths),
+        matrix_state.matrix_state_for_runtime(runtime_paths),
+    )
 
 
-def _persisted_entity_id_map(config: Config, runtime_paths: RuntimePaths) -> dict[str, MatrixID]:
+def prepared_entity_names_by_user_id(config: Config, runtime_paths: RuntimePaths) -> dict[str, str]:
+    """Return the configured entities whose Matrix accounts are prepared, keyed by their current user ID."""
     domain = runtime_matrix_domain(runtime_paths)
+    state = matrix_state.matrix_state_for_runtime(runtime_paths)
+    names: dict[str, str] = {}
+    for entity_name in [ROUTER_AGENT_NAME, *config.agents, *config.teams]:
+        account = state.get_account(managed_account_key(entity_name))
+        if account is not None:
+            names[matrix_account_user_id(account, domain)] = entity_name
+    return names
+
+
+def _persisted_entity_id_map(config: Config, domain: str, state: MatrixState) -> dict[str, MatrixID]:
+    # The owner account is prepared apart from the agents', only for a config that needs it: listed once persisted.
+    owner_known = state.get_account(managed_account_key(ROUTER_AGENT_NAME)) is not None
     return {
-        entity_name: _persisted_entity_matrix_id(entity_name, domain, runtime_paths)
-        for entity_name in [ROUTER_AGENT_NAME, *config.agents, *config.teams]
+        entity_name: _persisted_entity_matrix_id(entity_name, domain, state)
+        for entity_name in [*([ROUTER_AGENT_NAME] if owner_known else ()), *config.agents, *config.teams]
     }
 
 
-def _persisted_entity_matrix_id(entity_name: str, domain: str, runtime_paths: RuntimePaths) -> MatrixID:
-    persisted_user_id = managed_account_user_id(managed_account_key(entity_name), domain, runtime_paths)
-    if persisted_user_id is None:
+def _persisted_entity_matrix_id(entity_name: str, domain: str, state: MatrixState) -> MatrixID:
+    account = state.get_account(managed_account_key(entity_name))
+    if account is None:
         msg = f"Matrix account for configured entity {entity_name!r} has not been prepared"
         raise MissingManagedEntityAccountError(msg)
-    return MatrixID.parse(persisted_user_id)
+    return MatrixID.parse(matrix_account_user_id(account, domain))
+
+
+def persisted_owner_matrix_id(runtime_paths: RuntimePaths) -> str | None:
+    """Return the owner account's Matrix ID once its account is persisted: the only ID that may gain privileges."""
+    account = matrix_state.matrix_state_for_runtime(runtime_paths).get_account(managed_account_key(ROUTER_AGENT_NAME))
+    return None if account is None else matrix_account_user_id(account, runtime_matrix_domain(runtime_paths))
+
+
+def owner_matrix_id(runtime_paths: RuntimePaths) -> str:
+    """Return the owner account's Matrix ID for bookkeeping: its persisted one, else its generated username's."""
+    domain = runtime_matrix_domain(runtime_paths)
+    generated = MatrixID.from_username(agent_username_localpart(ROUTER_AGENT_NAME, runtime_paths), domain)
+    return persisted_owner_matrix_id(runtime_paths) or generated.full_id
 
 
 def _validate_unique_entity_ids(current_ids: dict[str, MatrixID]) -> None:
@@ -346,7 +411,7 @@ def persisted_bot_user_ids(runtime_paths: RuntimePaths) -> frozenset[str]:
     domain = runtime_matrix_domain(runtime_paths)
     internal_user_account_key = managed_account_key(INTERNAL_USER_ENTITY_NAME)
     return frozenset(
-        MatrixID.from_username(account.username, account.domain or domain).full_id
+        matrix_account_user_id(account, domain)
         for account_key, account in matrix_state.matrix_state_for_runtime(runtime_paths).accounts.items()
         if account_key.startswith("agent_") and account_key != internal_user_account_key
     )
@@ -405,36 +470,20 @@ def router_agents_for_room(
     return router_agents or set(agents)
 
 
-def effective_entity_model_name(
-    config: Config,
-    entity_name: str,
+def resolve_room_scoped_value[T](
+    by_room: Mapping[str, T],
     room_id: str | None,
     runtime_paths: RuntimePaths,
-) -> str:
-    """Return the effective model for one entity in one room context."""
-    if entity_name not in config.agents and entity_name not in config.teams and entity_name != ROUTER_AGENT_NAME:
-        return "default"
-    if room_override := resolve_room_scoped_model_override(config.room_models, room_id, runtime_paths):
-        return room_override
-    return config.resolve_entity(entity_name).model_name
-
-
-def resolve_room_scoped_model_override(
-    overrides: Mapping[str, str],
-    room_id: str | None,
-    runtime_paths: RuntimePaths,
-    *,
-    allow_raw_room_id: bool = False,
-) -> str | None:
-    """Return a model override keyed by persisted room key or alias."""
-    if room_id is None or not overrides:
+) -> T | None:
+    """Return the value ``by_room`` holds for one room under its Matrix room ID, or its persisted room key or alias."""
+    if room_id is None or not by_room:
         return None
-    if allow_raw_room_id and room_id in overrides:
-        return overrides[room_id]
+    if room_id in by_room:
+        return by_room[room_id]
     room_alias = matrix_state.get_room_alias_from_id(room_id, runtime_paths)
-    if room_alias and room_alias in overrides:
-        return overrides[room_alias]
+    if room_alias and room_alias in by_room:
+        return by_room[room_alias]
     for room in matrix_state.matrix_state_for_runtime(runtime_paths).rooms.values():
-        if room.room_id == room_id and room.alias in overrides:
-            return overrides[room.alias]
+        if room.room_id == room_id and room.alias in by_room:
+            return by_room[room.alias]
     return None

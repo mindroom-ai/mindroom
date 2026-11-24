@@ -3,16 +3,20 @@
 from __future__ import annotations
 
 import json
-from types import SimpleNamespace
-from typing import TYPE_CHECKING, TextIO
+import threading
+import weakref
+from concurrent.futures import ThreadPoolExecutor
+from typing import TYPE_CHECKING, TextIO, cast
 
 import pytest
+from structlog.testing import capture_logs
 
+from mindroom.workers import named as named_module
 from mindroom.workers.backend import effective_idle_status, filter_and_sort_worker_handles
-from mindroom.workers.backends import _metadata_store as metadata_store_module
 from mindroom.workers.backends import local as local_module
 from mindroom.workers.backends._lifecycle import (
     WorkerLifecycleState,
+    WorkerLocks,
     mark_worker_failed,
     mark_worker_idle,
     touch_worker_lifecycle,
@@ -20,9 +24,12 @@ from mindroom.workers.backends._lifecycle import (
 from mindroom.workers.backends._metadata_store import save_worker_metadata
 from mindroom.workers.backends.static_runner import StaticSandboxRunnerBackend
 from mindroom.workers.models import WorkerHandle, WorkerSpec, WorkerStatus
+from tests.conftest import SETTLE_TIMEOUT_SECONDS
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from mindroom.workers.backend import WorkerBackend
 
 
 def _handle(worker_key: str, *, status: WorkerStatus, last_used_at: float) -> WorkerHandle:
@@ -36,6 +43,30 @@ def _handle(worker_key: str, *, status: WorkerStatus, last_used_at: float) -> Wo
         last_used_at=last_used_at,
         created_at=0.0,
     )
+
+
+def test_worker_lock_is_shared_with_waiters_and_freed_after_they_finish() -> None:
+    """Waiters keep the same live lock, but a finished key does not remain in the backend forever."""
+    locks = WorkerLocks()
+    worker_key = "test-worker"
+    held = locks.for_key(worker_key)
+    reference = weakref.ref(held)
+    ready = threading.Event()
+
+    def wait_for_lock() -> bool:
+        lock = locks.for_key(worker_key)
+        ready.set()
+        with lock:
+            return lock is reference()
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        with held:
+            waiter = pool.submit(wait_for_lock)
+            assert ready.wait(timeout=SETTLE_TIMEOUT_SECONDS)
+            assert locks.for_key(worker_key) is held
+        assert waiter.result(timeout=SETTLE_TIMEOUT_SECONDS)
+    del held
+    assert reference() is None
 
 
 def test_effective_idle_status_only_marks_ready_workers_idle_at_timeout_boundary() -> None:
@@ -114,6 +145,7 @@ def test_mark_failed_increments_count_and_records_reason() -> None:
     assert failed.last_used_at == 9.0
 
 
+@pytest.mark.usefixtures("current_static_runner")
 def test_static_backend_touch_revives_idle_worker() -> None:
     """The static backend adopts the helper: a touch revives an idled worker."""
     backend = StaticSandboxRunnerBackend(
@@ -131,6 +163,7 @@ def test_static_backend_touch_revives_idle_worker() -> None:
     assert touched.status == "ready"
 
 
+@pytest.mark.usefixtures("current_static_runner")
 def test_static_backend_touch_does_not_revive_failed_worker() -> None:
     """Touching a failed static worker keeps it failed (only idle revives)."""
     backend = StaticSandboxRunnerBackend(
@@ -145,6 +178,32 @@ def test_static_backend_touch_does_not_revive_failed_worker() -> None:
     assert touched is not None
     assert touched.status == "failed"
     assert touched.failure_reason == "boom"
+
+
+def test_worker_backends_without_named_workers_use_safe_defaults(tmp_path: Path) -> None:
+    """Shared and local runners report no named workers and cannot retire an exact worker."""
+    key = "v1:t:shared:a"
+    for backend in (
+        StaticSandboxRunnerBackend(api_root="http://runner", auth_token=None),
+        local_module._LocalWorkerBackend(
+            worker_root=tmp_path / "workers",
+            api_root="/api/sandbox-runner",
+            idle_timeout_seconds=10.0,
+        ),
+    ):
+        assert backend.named_workers_max == 0
+        assert not backend.has_named_worker(key)
+        assert backend.named_worker_keys() == frozenset()
+        assert not hasattr(backend, "retire_worker")
+
+
+def test_retiring_a_named_worker_without_a_capable_backend_logs_the_error() -> None:
+    """An incapable backend takes the same logged failure path as a retirement that fails."""
+    with capture_logs() as logs:
+        named_module._retire_named_worker(cast("WorkerBackend", object()), "v1:t:shared:a")
+    [warning] = logs
+    assert warning["event"] == "named_worker_retire_failed"
+    assert warning["log_level"] == "warning"
 
 
 def test_local_backend_touch_revives_idle_worker_and_clears_failure(tmp_path: Path) -> None:
@@ -164,10 +223,7 @@ def test_local_backend_touch_revives_idle_worker_and_clears_failure(tmp_path: Pa
             worker_key=worker_key,
             endpoint="/api/sandbox-runner/execute",
             backend_name=backend.backend_name,
-            created_at=0.0,
-            last_used_at=0.0,
-            status="idle",
-            failure_reason="boom",
+            lifecycle=WorkerLifecycleState(created_at=0.0, last_used_at=0.0, status="idle", failure_reason="boom"),
         ),
     )
 
@@ -175,6 +231,39 @@ def test_local_backend_touch_revives_idle_worker_and_clears_failure(tmp_path: Pa
     assert touched is not None
     assert touched.status == "ready"
     assert touched.failure_reason is None
+
+
+def test_worker_metadata_stores_its_lifecycle_flat_beside_its_other_fields(tmp_path: Path) -> None:
+    """A record round-trips through one flat sorted-key document, and a document with an unknown key is no record."""
+    backend = local_module._LocalWorkerBackend(
+        worker_root=tmp_path / "workers",
+        api_root="/api/sandbox-runner",
+        idle_timeout_seconds=1800.0,
+    )
+    paths = local_module._local_worker_state_paths("v1:t:shared:a", worker_root=backend.worker_root)
+    metadata = backend._default_metadata("v1:t:shared:a", 1.0)
+    metadata.lifecycle = mark_worker_failed(metadata.lifecycle, now=2.0, failure_reason="boom")
+    save_worker_metadata(paths, metadata, ensure_root=True)
+
+    document = json.loads(paths.metadata_file.read_text(encoding="utf-8"))
+    assert list(document) == sorted(document)
+    assert document == {
+        "backend_name": "local_sandbox_runner",
+        "created_at": 1.0,
+        "endpoint": "/api/sandbox-runner/execute",
+        "failure_count": 1,
+        "failure_reason": "boom",
+        "last_started_at": None,
+        "last_used_at": 2.0,
+        "startup_count": 0,
+        "status": "failed",
+        "worker_id": metadata.worker_id,
+        "worker_key": "v1:t:shared:a",
+    }
+    assert backend._load_metadata(paths) == metadata
+
+    paths.metadata_file.write_text(json.dumps({**document, "lifecycle": {}}), encoding="utf-8")
+    assert backend._load_metadata(paths) is None
 
 
 def test_worker_metadata_replace_preserves_previous_document_when_serialization_fails(
@@ -188,8 +277,7 @@ def test_worker_metadata_replace_preserves_previous_document_when_serialization_
         idle_timeout_seconds=1800.0,
     )
     paths = local_module._local_worker_state_paths("v1:t:shared:a", worker_root=backend.worker_root)
-    original = SimpleNamespace(worker_key="v1:t:shared:a", last_used_at=1.0)
-    save_worker_metadata(paths, original, ensure_root=True)
+    save_worker_metadata(paths, backend._default_metadata("v1:t:shared:a", 1.0), ensure_root=True)
     original_bytes = paths.metadata_file.read_bytes()
 
     def fail_after_partial_write(_payload: object, stream: TextIO, **_kwargs: object) -> None:
@@ -200,9 +288,6 @@ def test_worker_metadata_replace_preserves_previous_document_when_serialization_
     monkeypatch.setattr(json, "dump", fail_after_partial_write)
 
     with pytest.raises(RuntimeError, match="serialization interrupted"):
-        metadata_store_module.save_worker_metadata(
-            paths,
-            SimpleNamespace(worker_key="v1:t:shared:a", last_used_at=2.0),
-        )
+        save_worker_metadata(paths, backend._default_metadata("v1:t:shared:a", 2.0))
 
     assert paths.metadata_file.read_bytes() == original_bytes

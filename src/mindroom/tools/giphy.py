@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     config_fields=[
         ConfigField(
             name="api_key",
+            env=("GIPHY_API_KEY",),
             label="API Key",
             type="password",
             required=False,
@@ -53,7 +54,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["httpx"],
-    docs_url="https://docs.agno.com/tools/toolkits/others/giphy",
+    docs_url="https://docs.mindroom.chat/tools/media-and-content/#giphy",
     function_names=("search_gifs",),
 )
 def giphy_tools() -> type[GiphyTools]:

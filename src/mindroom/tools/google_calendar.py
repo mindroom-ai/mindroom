@@ -56,7 +56,7 @@ if TYPE_CHECKING:
         ToolManagedInitArg.RUNTIME_CONFIG,
     ),
     dependencies=["google-api-python-client", "google-auth", "google-auth-httplib2", "google-auth-oauthlib"],
-    docs_url="https://docs.agno.com/tools/toolkits/others/googlecalendar",
+    docs_url="https://docs.mindroom.chat/tools/calendar-and-scheduling/#google_calendar",
     function_names=(
         "check_availability",
         "create_event",

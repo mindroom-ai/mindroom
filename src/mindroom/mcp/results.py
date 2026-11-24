@@ -1,4 +1,4 @@
-"""Helpers for converting MCP tool responses into Agno results."""
+"""Helpers for converting MCP tool responses into tool values."""
 
 from __future__ import annotations
 
@@ -6,8 +6,6 @@ import base64
 import json
 from typing import TYPE_CHECKING
 
-from agno.media import Audio, Image
-from agno.tools.function import ToolResult
 from mcp.types import (
     AudioContent,
     BlobResourceContents,
@@ -19,7 +17,9 @@ from mcp.types import (
     TextResourceContents,
 )
 
+from mindroom.llm.media import Audio, Image
 from mindroom.mcp.errors import MCPToolCallError
+from mindroom.tool_system.tool_function import ToolValue
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -101,8 +101,8 @@ def _raise_for_mcp_call_error(server_id: str, result: CallToolResult) -> None:
     raise MCPToolCallError(server_id, message)
 
 
-def tool_result_from_call_result(server_id: str, result: CallToolResult) -> ToolResult:
-    """Convert one MCP call result into an Agno tool result."""
+def tool_value_from_call_result(server_id: str, result: CallToolResult) -> ToolValue:
+    """Convert one MCP call result into a tool value."""
     _raise_for_mcp_call_error(server_id, result)
     lines = _text_lines_from_blocks(result.content)
     structured = _compact_structured_content(result)
@@ -111,4 +111,4 @@ def tool_result_from_call_result(server_id: str, result: CallToolResult) -> Tool
     content = "\n\n".join(line for line in lines if line).strip() or "MCP tool completed successfully."
     images = _image_artifacts_from_blocks(result.content)
     audios = _audio_artifacts_from_blocks(result.content)
-    return ToolResult(content=content, images=images or None, audios=audios or None)
+    return ToolValue(content=content, images=tuple(images), audios=tuple(audios))

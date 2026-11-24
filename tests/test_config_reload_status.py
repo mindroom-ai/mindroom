@@ -11,8 +11,7 @@ import pytest
 
 from mindroom.config.main import load_config
 from mindroom.constants import resolve_runtime_paths
-from mindroom.orchestration.config_lifecycle import ConfigReloadLifecycle
-from mindroom.response_admission import ResponseAdmissionGate
+from tests.conftest import make_config_reload_lifecycle
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -46,33 +45,20 @@ def test_loaded_fingerprint_covers_includes_and_survives_disk_changes(tmp_path: 
     assert copied.source_fingerprint == original.source_fingerprint
 
 
-def _lifecycle(tmp_path: Path) -> ConfigReloadLifecycle:
-    return ConfigReloadLifecycle(
-        runtime_paths=_paths(tmp_path),
-        is_running=lambda: True,
-        current_config=lambda: None,
-        agent_bots=dict,
-        load_initial_config=AsyncMock(return_value=True),
-        apply_update_plan=AsyncMock(return_value=True),
-        response_admission_gate=ResponseAdmissionGate(),
-        before_runtime_replacement=AsyncMock(),
-    )
-
-
 @pytest.mark.asyncio
 async def test_confirmation_waits_for_apply_completion(tmp_path: Path) -> None:
     """Loading and publishing a config cannot acknowledge a blocked runtime apply."""
     (tmp_path / "config.yaml").write_text("defaults: {enable_streaming: false}\n")
-    lifecycle = _lifecycle(tmp_path)
+    lifecycle = make_config_reload_lifecycle(_paths(tmp_path))
     entered = asyncio.Event()
     release = asyncio.Event()
 
-    async def apply(_config: object) -> bool:
+    async def apply(_config: object, _plan: object) -> bool:
         entered.set()
         await release.wait()
         return True
 
-    lifecycle.load_initial_config = apply
+    lifecycle.apply_update_plan = apply
     task = asyncio.create_task(lifecycle._apply_queued_config_reload())
     try:
         await asyncio.wait_for(entered.wait(), 2)
@@ -92,14 +78,16 @@ async def test_comment_only_edit_is_acknowledged(tmp_path: Path) -> None:
     """Equivalent authored config still acknowledges the newly loaded source bytes."""
     path = tmp_path / "config.yaml"
     path.write_text("{}\n")
-    lifecycle = _lifecycle(tmp_path)
+    lifecycle = make_config_reload_lifecycle(_paths(tmp_path))
     current = load_config(lifecycle.runtime_paths)
     lifecycle.current_config = lambda: current
-    lifecycle.record_applied(current)
+    lifecycle._record_applied(current)
     path.write_text("# reformatted\n{}\n")
     await lifecycle._apply_queued_config_reload()
     assert lifecycle.status.status == "applied"
     assert lifecycle.status.fingerprint != current.source_fingerprint
+    # The dashboard's generation advanced with the new bytes, so trigger delivery rebinds to it.
+    lifecycle.rebind_published_config_consumers.assert_called_once_with()
 
 
 @pytest.mark.asyncio
@@ -108,10 +96,10 @@ async def test_failure_reports_the_attempted_source(tmp_path: Path, failure: str
     """Rejected config and failed runtime application cannot produce a success receipt."""
     path = tmp_path / "config.yaml"
     path.write_text("{}\n")
-    lifecycle = _lifecycle(tmp_path)
+    lifecycle = make_config_reload_lifecycle(_paths(tmp_path))
     current = load_config(lifecycle.runtime_paths)
     lifecycle.current_config = lambda: current
-    lifecycle.record_applied(current)
+    lifecycle._record_applied(current)
     path.write_text(
         "defaults: {enable_streaming: invalid}\n"
         if failure == "validation"
@@ -129,7 +117,7 @@ async def test_failure_reports_the_attempted_source(tmp_path: Path, failure: str
 async def test_malformed_include_failure_has_no_unproven_fingerprint(tmp_path: Path) -> None:
     """An incomplete parse cannot attribute its failure to a complete source tree."""
     (tmp_path / "config.yaml").write_text("defaults: !include missing.yaml\n")
-    lifecycle = _lifecycle(tmp_path)
+    lifecycle = make_config_reload_lifecycle(_paths(tmp_path))
     await lifecycle._apply_queued_config_reload()
     assert lifecycle.status.status == "failed"
     assert lifecycle.status.fingerprint is None
@@ -138,16 +126,16 @@ async def test_malformed_include_failure_has_no_unproven_fingerprint(tmp_path: P
 @pytest.mark.asyncio
 async def test_queued_change_preserves_active_failure_fingerprint(tmp_path: Path) -> None:
     """A newer file event cannot erase attribution for an apply already in progress."""
-    (tmp_path / "config.yaml").write_text("{}\n")
-    lifecycle = _lifecycle(tmp_path)
+    (tmp_path / "config.yaml").write_text("defaults: {enable_streaming: false}\n")
+    lifecycle = make_config_reload_lifecycle(_paths(tmp_path))
     expected = load_config(lifecycle.runtime_paths).source_fingerprint
 
-    async def fail_after_new_change(_config: object) -> bool:
+    async def fail_after_new_change(_config: object, _plan: object) -> bool:
         lifecycle.request_reload()
         msg = "apply failed"
         raise RuntimeError(msg)
 
-    lifecycle.load_initial_config = fail_after_new_change
+    lifecycle.apply_update_plan = fail_after_new_change
     task = asyncio.create_task(lifecycle._apply_queued_config_reload())
     lifecycle._reload_task = task
     await task

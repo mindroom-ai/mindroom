@@ -23,6 +23,8 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Self
 
+from mindroom.background_tasks import drain_tasks
+
 if TYPE_CHECKING:
     from collections.abc import Callable
 
@@ -105,8 +107,7 @@ class ThreadOffload:
 
     async def drain(self) -> None:
         """Wait until no statement of this backend is still on a worker thread."""
-        while running := {work for work in self._running if not work.done()}:
-            await asyncio.wait(running)
+        await drain_tasks(self._running)
 
     def shutdown(self) -> None:
         """Release the owned pool after its submitted work and connections stop."""

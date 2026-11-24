@@ -50,7 +50,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=[],  # httpx already included in main dependencies
-    docs_url="https://docs.agno.com/tools/toolkits/search/searxng",
+    docs_url="https://docs.mindroom.chat/tools/web-search/#searxng",
     function_names=(
         "image_search",
         "it_search",

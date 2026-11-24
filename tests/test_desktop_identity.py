@@ -8,13 +8,14 @@ from typing import TYPE_CHECKING
 
 import pytest
 
+from mindroom.config.main import Config
 from mindroom.desktop.identity import (
     DesktopControllerIdentity,
     DesktopIdentityError,
     controller_identity_for_live_bot,
 )
 from mindroom.orchestrator import _MultiAgentOrchestrator
-from tests.conftest import test_runtime_paths
+from tests.conftest import swap_fleet_bot, test_runtime_paths
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -92,21 +93,21 @@ def test_controller_identity_fails_closed_for_missing_or_mismatched_live_bot(
 
 def test_orchestrator_resolver_tracks_live_bot_replacement(tmp_path: Path) -> None:
     """The injected resolver reads the current registry entry on every call."""
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=test_runtime_paths(tmp_path))
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=test_runtime_paths(tmp_path), config=Config())
     first = _live_bot(fingerprint="first")
     replacement = _live_bot(fingerprint="replacement")
-    orchestrator.agent_bots["computer"] = first
+    orchestrator.fleet.add("computer", first)
 
     assert orchestrator.desktop_controller_identity("computer").ed25519 == "first"
 
     first.running = False
-    orchestrator.agent_bots["computer"] = replacement
+    swap_fleet_bot(orchestrator, "computer", replacement)
     assert orchestrator.desktop_controller_identity("computer").ed25519 == "replacement"
 
 
 def test_orchestrator_resolver_rejects_missing_target(tmp_path: Path) -> None:
     """No persisted-store fallback is available when the live target is absent."""
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=test_runtime_paths(tmp_path))
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=test_runtime_paths(tmp_path), config=Config())
 
     with pytest.raises(DesktopIdentityError, match="not running"):
         orchestrator.desktop_controller_identity("computer")

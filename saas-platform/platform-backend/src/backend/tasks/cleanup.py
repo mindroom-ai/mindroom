@@ -20,9 +20,9 @@ from backend.services.instance_lifecycle import (
     resume_subscriptions,
     tear_down_account,
 )
+from backend.utils.paging import select_all_pages
 
 logger = logging.getLogger(__name__)
-_PAGE_SIZE = 1000
 
 
 async def cleanup_soft_deleted_accounts() -> dict:
@@ -72,21 +72,9 @@ async def cleanup_soft_deleted_accounts() -> dict:
 
 def _pending_deletion_accounts(sb: Any) -> list[dict[str, Any]]:  # noqa: ANN401
     """Return every account pending deletion, paged past PostgREST's row limit."""
-    rows: list[dict[str, Any]] = []
-    while True:
-        page = (
-            sb.table("accounts")
-            .select("id,deleted_at")
-            .not_.is_("deleted_at", "null")
-            .order("id")
-            .range(len(rows), len(rows) + _PAGE_SIZE - 1)
-            .execute()
-            .data
-            or []
-        )
-        if not page:
-            return rows
-        rows.extend(page)
+    return select_all_pages(
+        lambda: sb.table("accounts").select("id,deleted_at").not_.is_("deleted_at", "null").order("id")
+    )
 
 
 async def _end_billing_unless_restored(sb: Any, account_id: str) -> None:  # noqa: ANN401

@@ -35,7 +35,7 @@ if TYPE_CHECKING:
     icon="FaChrome",
     icon_color="text-orange-500",
     dependencies=["playwright"],
-    docs_url="https://github.com/openclaw/openclaw/blob/main/docs/tools/browser.md",
+    docs_url="https://docs.mindroom.chat/tools/web-scraping-and-browser/#browser",
     managed_init_args=(
         ToolManagedInitArg.RUNTIME_PATHS,
         ToolManagedInitArg.TOOL_OUTPUT_WORKSPACE_ROOT,

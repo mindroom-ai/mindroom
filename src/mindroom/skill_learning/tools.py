@@ -14,7 +14,6 @@ import json
 import weakref
 from dataclasses import dataclass, field
 from functools import partial
-from pathlib import Path
 from typing import TYPE_CHECKING, Literal, assert_never
 
 from mindroom.background_tasks import run_coroutine_until_complete
@@ -29,19 +28,25 @@ from mindroom.skill_learning.library import (
     support_file_paths,
     write_skill_file,
 )
-from mindroom.tool_system.skills import SKILL_FILENAME, build_agent_skills, list_skill_listings, parse_skill_markdown
+from mindroom.tool_system.plugins import config_plugins
+from mindroom.tool_system.skills import (
+    SKILL_FILENAME,
+    build_skills_toolkit,
+    list_skill_listings,
+    parse_skill_markdown,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
-
-    from agno.skills import Skills
+    from pathlib import Path
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.tool_system.skills import SkillsToolkit
 
 # A plain alias: Agno does not unwrap PEP 695 type aliases when it builds the provider schema.
 SkillAction = Literal["create", "patch", "edit", "write_file", "remove_file"]
-# Agno runs the tool calls of one reply concurrently, and chat, a review, and archival may change one library at once,
+# The tool calls of one reply run concurrently, and chat, a review, and archival may change one library at once,
 # while each change builds on the last read of its file; like Hermes, which never runs skill_manage in parallel, they
 # take turns.
 _LIBRARY_TURNS: weakref.WeakValueDictionary[Path, asyncio.Lock] = weakref.WeakValueDictionary()
@@ -88,17 +93,24 @@ class _CatalogEntry:
 class SkillCatalog:
     """The agent's effective skills and every name a new skill must not shadow."""
 
-    skills: Skills | None
+    skills: SkillsToolkit | None
     entries: dict[str, _CatalogEntry]
     reserved_names: frozenset[str]
 
 
 def load_skill_catalog(config: Config, runtime_paths: RuntimePaths, agent_name: str, skills_root: Path) -> SkillCatalog:
     """Return the skills the agent loads now, with the strict ownership check that edits use."""
-    skills = build_agent_skills(agent_name, config, runtime_paths, workspace_root=skills_root.parent)
-    loaded = skills.get_all_skills() if skills is not None else []
+    plugin_skill_roots = config_plugins(config, runtime_paths).skill_roots
+    skills = build_skills_toolkit(
+        agent_name,
+        config,
+        runtime_paths,
+        workspace_root=skills_root.parent,
+        plugin_skill_roots=plugin_skill_roots,
+    )
+    loaded = skills.skills if skills is not None else ()
     workspace_directories = {
-        skill.name: Path(skill.source_path).name for skill in loaded if Path(skill.source_path).parent == skills_root
+        skill.name: skill.source_path.name for skill in loaded if skill.source_path.parent == skills_root
     }
     learned = learned_skill_directories(skills_root, workspace_directories.values())
     entries = {
@@ -111,15 +123,27 @@ def load_skill_catalog(config: Config, runtime_paths: RuntimePaths, agent_name: 
         )
         for skill in loaded
     }
-    reserved = {name.lower() for name in entries} | {listing.name.lower() for listing in list_skill_listings()}
+    reserved = {name.lower() for name in entries} | {
+        listing.name.lower() for listing in list_skill_listings(plugin_skill_roots)
+    }
     return SkillCatalog(skills, entries, frozenset(reserved))
 
 
 @dataclass
+class ReviewFile:
+    """One file a review changed: its content before the review's first change and after its last, None when absent."""
+
+    skill: str
+    before: str | None
+    after: str | None = None
+
+
+@dataclass
 class ReviewProgress:
-    """The skills a review changed, recorded as each write lands."""
+    """The skills and files a review changed, recorded as each write lands; ``files`` keeps the order of first change."""
 
     changes: dict[str, str] = field(default_factory=dict)
+    files: dict[tuple[str, str], ReviewFile] = field(default_factory=dict)
 
 
 async def manage_skill_in_chat(
@@ -172,14 +196,9 @@ class SkillTools:
         self,
         skill_name: str,
         script_path: str | None = None,
-        execute: bool = False,
-        args: list[str] | None = None,  # noqa: ARG002 - the agent's tool schema offers it
-        timeout: int = 30,  # noqa: ARG002, ASYNC109 - the agent's tool schema offers it
         mindroom_output_path: str | None = None,
     ) -> str:
-        """Load one file under a skill's scripts/; a review never runs scripts."""
-        if execute:
-            return _refusal("Scripts never run during a skill review; load the script without execute.")
+        """Load one file under a skill's scripts/."""
         return await self._view(skill_name, _support_path("scripts", script_path), mindroom_output_path)
 
     async def _view(self, skill_name: str, relative_path: str | None, output_path: str | None) -> str:
@@ -292,7 +311,16 @@ class SkillTools:
             return _refusal(f"Skill {name!r} is {entry.owner}-owned and read-only; mention the needed change instead.")
         return None
 
-    async def _file(self, operation: Callable[[], None], *, name: str, action: str) -> None:
+    async def _file(
+        self,
+        operation: Callable[[], None],
+        *,
+        name: str,
+        action: str,
+        path: tuple[str, str],
+        before: SkillFile | None,
+        after: str | None,
+    ) -> None:
         """Run one file change in a thread that lands before a cancellation goes through, keeping this turn held.
 
         A review records the change when the write lands, so a notice after a timeout or a stop still names it.
@@ -302,6 +330,8 @@ class SkillTools:
             await asyncio.to_thread(operation)
             if self.progress is not None:
                 self.progress.changes.setdefault(name, action)
+                previous = before.content if before is not None else None
+                self.progress.files.setdefault(path, ReviewFile(name, previous)).after = after
 
         await run_coroutine_until_complete(change())
 
@@ -323,6 +353,9 @@ class SkillTools:
             ),
             name=name,
             action="created",
+            path=(name, SKILL_FILENAME),
+            before=None,
+            after=content,
         )
         frontmatter, instructions = parse_skill_markdown(content)
         self.catalog[name] = _CatalogEntry(
@@ -347,6 +380,9 @@ class SkillTools:
             ),
             name=name,
             action="updated",
+            path=(directory, relative_path),
+            before=read,
+            after=None,
         )
         self._reads.pop((directory, relative_path), None)
 
@@ -370,6 +406,9 @@ class SkillTools:
             ),
             name=name,
             action="updated",
+            path=(directory, relative_path),
+            before=read,
+            after=content,
         )
         self._reads[directory, relative_path] = SkillFile(
             content,

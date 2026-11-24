@@ -2,19 +2,32 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import PurePath, PureWindowsPath
 from typing import Any, Literal, Self, cast
 from urllib.parse import urlsplit
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_serializer, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_serializer, model_validator
 
 from mindroom.config.access import InviteAcceptancePolicy, ResponderAccessConfig  # noqa: TC001
 from mindroom.config.automations import AutomationList  # noqa: TC001
 from mindroom.config.judgment import ProbabilityJudgmentConfig  # noqa: TC001
-from mindroom.config.legacy_fields import reject_legacy_defaults_fields
+from mindroom.config.legacy_fields import (
+    RETIRED_DEFAULTS_FIELDS,
+    drop_retired_fields,
+    reject_legacy_defaults_fields,
+)
+from mindroom.config.room_activity import RoomActivityConfig
 from mindroom.config.schema_hints import dashboard_hint
-from mindroom.config.validation import duplicate_items, validate_history_limit_choice
+from mindroom.config.tool_aliases import ToolNames, canonical_tool_name
+from mindroom.config.validation import (
+    CredentialServiceName,
+    OptionalNonBlankStr,
+    non_empty_stripped,
+    validate_history_limit_choice,
+    validate_unique_entries,
+)
 from mindroom.constants import (
     DEFAULT_COMPACTION_TIMEOUT_SECONDS,
     DEFAULT_TOOL_OUTPUT_AUTO_SAVE_THRESHOLD_BYTES,
@@ -23,6 +36,7 @@ from mindroom.credentials.manager import validate_service_name
 from mindroom.credentials.policy import credential_service_policy
 from mindroom.matrix.identity import valid_matrix_server_name
 from mindroom.model_defaults import OPENAI_EMBEDDING_SMALL
+from mindroom.providers.names import PROVIDER_ROUTES, provider_route
 from mindroom.tool_system.worker_routing import WorkerScope  # noqa: TC001
 
 
@@ -38,15 +52,43 @@ class EffectiveToolConfig:
     authored_name: str | None = None
 
 
-AgentLearningMode = Literal["always", "agentic"]
 FileAccess = Literal["workspace", "unrestricted"]
 _LargeMessageStrategy = Literal["sidecar", "split"]
 _DEFAULT_DEFAULT_TOOLS = ("scheduler",)
 _TOOL_CONFIG_CONTROL_KEYS = frozenset({"defer", "initial"})
+# Config-only tool names that expand to their member tools wherever they are authored.
+TOOL_PRESETS: dict[str, tuple[str, ...]] = {
+    "openclaw_compat": ("shell", "filesystem", "duckduckgo", "website", "browser", "scheduler", "matrix_message"),
+}
+# Tools that runtime policy injects, so they are never lazy-loading units.
+_DEFER_PROHIBITED_CONTROL_TOOLS = frozenset(
+    {
+        "agent_manager",
+        "contacts",
+        "delegate",
+        "dynamic_tools",
+        "self_config",
+        "skill_manage",
+    },
+)
+
+
+def lazy_loading_prohibited_reason(tool_name: str) -> str | None:
+    """Return why an entry for ``tool_name`` may not set defer or initial, or None when it may."""
+    if tool_name in TOOL_PRESETS:
+        return f"'{tool_name}' is a preset and cannot be deferred; defer/initial are only valid on individual tools."
+    if canonical_tool_name(tool_name) in _DEFER_PROHIBITED_CONTROL_TOOLS:
+        return (
+            f"'{tool_name}' is a control-plane tool and cannot be deferred; "
+            "defer/initial are only valid on runtime tools."
+        )
+    return None
 
 
 class StreamingConfig(BaseModel):
     """Timing parameters for streaming response edits."""
+
+    model_config = ConfigDict(extra="forbid")
 
     update_interval: float = Field(
         default=5.0,
@@ -68,6 +110,13 @@ class StreamingConfig(BaseModel):
             "a background timer)."
         ),
     )
+    live_frames: bool = Field(
+        default=True,
+        description=(
+            "Stream live updates as ephemeral frames when the homeserver relays them, "
+            "editing the message only every update_interval"
+        ),
+    )
 
 
 class CoalescingConfig(BaseModel):
@@ -79,14 +128,39 @@ class CoalescingConfig(BaseModel):
         default=1000,
         ge=0,
         description=(
-            "Sliding window in milliseconds that a media-tailed live batch waits for more "
-            "attachments or a trailing caption; batches ending in text dispatch immediately"
+            "Sliding window in milliseconds that a live batch ending in unmarked media waits for more "
+            "attachments or a trailing caption; batches ending in text dispatch immediately, and events "
+            "marked as part of a composer submission wait for its last event instead"
+        ),
+    )
+
+
+class BackgroundToolJobsConfig(BaseModel):
+    """Generic execution policy for registered toolkits; its feature switch and exclusions are pinned at startup."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = Field(default=True, description="Enable managed tool waits and durable jobs; requires restart.")
+    exclude_toolkits: ToolNames = Field(
+        default_factory=list,
+        description="Registered toolkit names that keep their own waiting behavior; requires restart.",
+        json_schema_extra=dashboard_hint(reference="tool"),
+    )
+    approval_wait_timeout: float | None = Field(
+        default=300,
+        ge=0,
+        allow_inf_nan=False,
+        description=(
+            "Seconds a reply waits for the approval of a gated call that runs as a job before continuing while the job "
+            "waits; null waits until the decision or a newer message."
         ),
     )
 
 
 class DebugConfig(BaseModel):
     """Debug and diagnostic settings."""
+
+    model_config = ConfigDict(extra="forbid")
 
     log_llm_requests: bool = Field(
         default=False,
@@ -108,7 +182,7 @@ def _normalize_tool_entry_overrides(
         return {}
     if not isinstance(overrides, dict):
         raise ValueError(error_message)  # noqa: TRY004 - keep Pydantic validation errors structured
-    return cast("dict[str, object]", dict(overrides))
+    return dict(overrides)
 
 
 def _coerce_named_tool_entry(data: dict[object, object]) -> dict[str, object]:
@@ -172,12 +246,19 @@ class ToolConfigEntry(BaseModel):
     )
     defer: bool = Field(
         default=False,
-        description="Hide the tool schema until the agent loads the tool for the current session",
+        description="Keep the tool's function definitions out of the model's context until the agent searches for them",
     )
     initial: bool = Field(
         default=False,
-        description="Load a deferred tool at session start and keep it loaded; requires defer",
+        description="Send a deferred tool as an ordinary tool on every request; requires defer",
     )
+    # Every name this entry's layer authored it under when one is an alias, so no spelling is read as another's layer.
+    _spellings: tuple[str, ...] = PrivateAttr(default=())
+
+    @property
+    def spellings(self) -> tuple[str, ...]:
+        """Return every name this entry's layer authored it under, which may be aliases of ``name``."""
+        return self._spellings or (self.name,)
 
     @model_validator(mode="before")
     @classmethod
@@ -201,15 +282,13 @@ class ToolConfigEntry(BaseModel):
     @classmethod
     def validate_name(cls, value: str) -> str:
         """Strip surrounding whitespace and reject empty tool names."""
-        stripped = value.strip()
-        if not stripped:
-            msg = "Tool name must not be empty"
-            raise ValueError(msg)
-        return stripped
+        return non_empty_stripped(value, field_name="Tool name")
 
     @model_validator(mode="after")
     def validate_lazy_flags(self) -> Self:
-        """Reject redundant initial entries that are not deferred."""
+        """Reject lazy-loading flags, even false ones, on tools that cannot be deferred, and initial without defer."""
+        if self.model_fields_set & _TOOL_CONFIG_CONTROL_KEYS and (reason := lazy_loading_prohibited_reason(self.name)):
+            raise ValueError(reason)
         if self.initial and not self.defer:
             msg = "Tool entry initial=true requires defer=true"
             raise ValueError(msg)
@@ -233,12 +312,32 @@ def validate_unique_tool_entries(
     *,
     scope_name: str,
 ) -> list[ToolConfigEntry]:
-    """Ensure each normalized tool name appears at most once within one scope."""
-    duplicates = duplicate_items([entry.name for entry in tools])
-    if duplicates:
-        msg = f"Duplicate {scope_name} tools are not allowed: {', '.join(duplicates)}"
+    """Ensure each tool appears once within one scope, with a toolkit's other names read as its registered name."""
+    validate_unique_entries([entry.name for entry in tools], field_name=f"{scope_name} tools")
+    kept: dict[str, ToolConfigEntry] = {}
+    for entry in tools:
+        name = canonical_tool_name(entry.name)
+        first = kept.get(name)
+        if first is not None:
+            reject_unmergeable_spellings(first, entry, scope=f"{scope_name} tools")
+        spellings = (*(first.spellings if first is not None else ()), entry.name)
+        if spellings == (name,):
+            kept[name] = entry
+        else:
+            kept[name] = (entry if first is None else first).model_copy(update={"name": name})
+            kept[name]._spellings = spellings
+    return list(kept.values())
+
+
+def reject_unmergeable_spellings(first: ToolConfigEntry, other: ToolConfigEntry, *, scope: str) -> None:
+    """Fail unless two entries naming one toolkit by different names are plain and agree on lazy loading."""
+    if first.overrides or other.overrides or (first.defer, first.initial) != (other.defer, other.initial):
+        mine, theirs = next((a, b) for a in first.spellings for b in other.spellings if a != b)
+        msg = (
+            f"{scope} '{mine}' and '{theirs}' both select {first.name}; "
+            f"keep one entry named {first.name} and put its settings and lazy-loading flags there"
+        )
         raise ValueError(msg)
-    return tools
 
 
 def _validate_compaction_threshold_choice(
@@ -256,6 +355,8 @@ class CompactionOverrideConfig(BaseModel):
 
     An authored null clears the value inherited from defaults, except for ``enabled``, where it turns compaction off.
     """
+
+    model_config = ConfigDict(extra="forbid")
 
     enabled: bool | None = Field(
         default=None,
@@ -316,6 +417,8 @@ class CompactionOverrideConfig(BaseModel):
 
 class CompactionConfig(BaseModel):
     """Concrete text compaction configuration."""
+
+    model_config = ConfigDict(extra="forbid")
 
     enabled: bool = Field(
         default=True,
@@ -387,7 +490,10 @@ class DefaultsConfig(BaseModel):
         description="Tool entries automatically added to every agent, with optional inline overrides",
         json_schema_extra=dashboard_hint(reference="tool"),
     )
-    markdown: bool = Field(default=True, description="Default markdown setting")
+    markdown: bool = Field(
+        default=True,
+        description="Default for whether system prompts tell agents and team leaders their replies are shown as Markdown",
+    )
     enable_streaming: bool = Field(
         default=True,
         description="Enable streaming responses via progressive message edits",
@@ -404,6 +510,10 @@ class DefaultsConfig(BaseModel):
         description="Live message coalescing settings for rapid same-sender turns",
     )
     show_stop_button: bool = Field(default=True, description="Whether to automatically show stop button on messages")
+    room_activity: RoomActivityConfig = Field(
+        default_factory=RoomActivityConfig,
+        description="Opt-in note in thread replies listing the room's other threads with new messages",
+    )
     max_consecutive_agent_replies: int = Field(
         default=50,
         ge=1,
@@ -412,8 +522,13 @@ class DefaultsConfig(BaseModel):
             "other agents and teams; a message from a person resets the count"
         ),
     )
-    learning: bool = Field(default=True, description="Default Agno Learning setting")
-    learning_mode: AgentLearningMode = Field(default="always", description="Default Agno Learning mode")
+    knowledge_graph: bool = Field(default=False, description="Default knowledge graph setting")
+    knowledge_graph_edits: bool = Field(default=True, description="Default knowledge graph edits setting")
+    cheap_model: str | None = Field(
+        default=None,
+        description="Cheaper model key for agents without their own cheap_model, used by cold_cache",
+        json_schema_extra=dashboard_hint(reference="model"),
+    )
     compaction: CompactionConfig | None = Field(
         default_factory=CompactionConfig,
         description="Default text compaction policy (set to null or enabled=false to disable automatic pre-reply compaction)",
@@ -421,19 +536,12 @@ class DefaultsConfig(BaseModel):
     num_history_runs: int | None = Field(
         default=None,
         ge=1,
-        description="Default number of prior Agno runs to include as history context (None = all)",
+        description="Default number of prior runs to include as history context (None = all)",
     )
     num_history_messages: int | None = Field(
         default=None,
         ge=1,
         description="Default max messages from history (mutually exclusive with num_history_runs)",
-    )
-    compress_tool_results: bool = Field(
-        default=False,
-        description=(
-            "Compress tool results in history to save context. Disabled by default because on Anthropic/Vertex "
-            "Claude this can mutate replayed tool messages and invalidate prompt-cache prefixes."
-        ),
     )
     max_tool_calls_from_history: int | None = Field(
         default=None,
@@ -452,16 +560,20 @@ class DefaultsConfig(BaseModel):
         default=True,
         description="Whether to show tool call details inline in responses",
     )
+    show_reasoning: bool = Field(
+        default=True,
+        description="Whether streamed replies show the model's reasoning to the room",
+    )
     file_access: FileAccess = Field(
         default="workspace",
         description=(
-            "Where in-process path-taking tools (file, coding, attachments, matrix_message, gmail, google_drive, browser) "
+            "Where in-process path-taking tools (filesystem, attachments, matrix_message, gmail, google_drive, browser) "
             "may read and write files: workspace confines them to the agent workspace and its attachments, "
             "unrestricted allows any path their process can reach. Code-execution tools such as shell and python "
             "are always unrestricted; isolate them with worker_tools"
         ),
     )
-    worker_tools: list[str] | None = Field(
+    worker_tools: ToolNames | None = Field(
         default=None,
         description="Tool names to route through scoped workers by default (None = use the built-in default routing policy)",
         json_schema_extra=dashboard_hint(reference="tool"),
@@ -469,6 +581,13 @@ class DefaultsConfig(BaseModel):
     worker_scope: WorkerScope | None = Field(
         default=None,
         description="Default worker runtime reuse mode for routed tools: shared, user, or user_agent. user reuses one runtime per requester across agents and is not an agent-level filesystem isolation boundary",
+    )
+    allow_shell_without_worker: bool = Field(
+        default=False,
+        description=(
+            "Whether the shell tool may run commands in MindRoom's own process when an agent's shell calls "
+            "do not run in a worker; off refuses each such call"
+        ),
     )
     worker_grantable_credentials: list[str] | None = Field(
         default=None,
@@ -491,10 +610,23 @@ class DefaultsConfig(BaseModel):
         default=False,
         description="Default setting for allowing agents to modify their own configuration",
     )
-    max_preload_chars: int = Field(
-        default=50000,
+    desktop_pairing: Literal["self_service", "explicit_only", "disabled"] = Field(
+        default="self_service",
+        description=(
+            "Desktop pairing policy for agents: 'self_service' lets requesters pair any concrete agent and "
+            "activates the desktop tool only for paired requesters, 'explicit_only' requires agents to declare "
+            "the desktop tool, and 'disabled' disables desktop pairing for all agents"
+        ),
+    )
+    max_preload_file_chars: int = Field(
+        default=30000,
         ge=1,
-        description="Hard cap for extra role preload context loaded from context_files",
+        # The limit's next character must fit the 1 MiB read of a file even at 4 bytes a character.
+        le=200_000,
+        description=(
+            "Characters of each file inlined into the system prompt, context files and MEMORY.md alike; "
+            "a longer file keeps its first whole lines within this limit"
+        ),
     )
     automations: AutomationList = Field(
         default_factory=list,
@@ -522,9 +654,9 @@ class DefaultsConfig(BaseModel):
         description=(
             "Temperature override for automatic thread summaries. "
             "Set to null to omit temperature and use provider defaults. "
-            "MindRoom always uses provider temperature defaults for GPT-6 Astra, Sol, and Luna, Vertex Claude, "
-            "Claude Opus 5.5, Sonnet 5.5, Opus 5, Sonnet 5, Fable 5.1, and direct Google Gemini 3.8 Flash and "
-            "Gemini 3.5 Flash-Lite thread summaries."
+            "MindRoom always uses provider temperature defaults for OpenAI GPT-5 and GPT-6 models, Vertex Claude, "
+            "Claude Opus 4.7, Opus 4.8, Mythos Preview, Claude 5 and 5.x models, and direct Google Gemini 4 Carbon, "
+            "Argon, and Hydrogen, Gemini 3.8 Flash, Gemini 3.6 Flash, and Gemini 3.5 Flash-Lite thread summaries."
         ),
     )
     thread_summary_first_threshold: int = Field(
@@ -541,8 +673,8 @@ class DefaultsConfig(BaseModel):
     @model_validator(mode="before")
     @classmethod
     def reject_legacy_defaults_fields(cls, data: object) -> object:
-        """Reject removed legacy fields to prevent silent misconfiguration."""
-        return reject_legacy_defaults_fields(data)
+        """Drop retired fields that changed nothing, and reject removed legacy fields to prevent silent misconfiguration."""
+        return reject_legacy_defaults_fields(drop_retired_fields(data, RETIRED_DEFAULTS_FIELDS))
 
     @model_validator(mode="after")
     def _check_history_config(self) -> Self:
@@ -562,7 +694,7 @@ class DefaultsConfig(BaseModel):
     def validate_unique_tools(cls, tools: list[ToolConfigEntry]) -> list[ToolConfigEntry]:
         """Ensure each default tool appears at most once."""
         validated = validate_unique_tool_entries(tools, scope_name="default")
-        lazy_entries = [entry.name for entry in validated if entry.model_fields_set & {"defer", "initial"}]
+        lazy_entries = [entry.name for entry in validated if entry.model_fields_set & _TOOL_CONFIG_CONTROL_KEYS]
         if lazy_entries:
             msg = "defaults.tools does not support defer or initial flags: " + ", ".join(lazy_entries)
             raise ValueError(msg)
@@ -579,11 +711,7 @@ class DefaultsConfig(BaseModel):
             return None
         normalized_services = [validate_service_name(service) for service in services]
         unsupported_services = sorted(
-            {
-                service
-                for service in normalized_services
-                if not credential_service_policy(service, None).worker_grantable_supported
-            },
+            {service for service in normalized_services if not credential_service_policy(service, None).grantable},
         )
         if unsupported_services:
             msg = (
@@ -598,42 +726,47 @@ class DefaultsConfig(BaseModel):
 class EmbedderConfig(BaseModel):
     """Configuration for memory embedder."""
 
+    model_config = ConfigDict(extra="forbid")
+
     model: str = Field(default=OPENAI_EMBEDDING_SMALL, description="Model name for embeddings")
-    credentials_service: str | None = Field(
+    credentials_service: CredentialServiceName | None = Field(
         default=None,
         description=(
-            "Optional credential service used only by this embedder. When omitted, legacy resolution checks the "
-            "dedicated 'embedder' service and then the provider credential"
+            "Optional credential service used only by this embedder, for the openai provider. When omitted, legacy "
+            "resolution checks the dedicated 'embedder' service and then the provider credential"
         ),
     )
     api_key: str | None = Field(
         default=None,
         description=(
-            "Explicit embedder API key. Highest priority, above credentials_service and the legacy "
-            "dedicated embedder-to-openai fallback"
+            "Explicit embedder API key for the openai provider. Highest priority, above credentials_service and the "
+            "legacy dedicated embedder-to-openai fallback"
         ),
         json_schema_extra=dashboard_hint(secret=True),
     )
-    host: str | None = Field(default=None, description="Host URL for self-hosted models (Ollama, llama.cpp, etc.)")
+    host: OptionalNonBlankStr = Field(
+        default=None,
+        description="Host URL for self-hosted models (Ollama, llama.cpp, etc.)",
+    )
     dimensions: int | None = Field(
         default=None,
         ge=1,
-        description="Optional embedding dimension override for OpenAI-compatible providers",
+        description="Optional embedding dimension override for OpenAI-compatible providers and vertex_ai",
     )
-
-    @field_validator("credentials_service")
-    @classmethod
-    def _validate_credentials_service(cls, value: str | None) -> str | None:
-        """Normalize an optional named credential reference."""
-        return None if value is None else validate_service_name(value)
-
-    @field_validator("host")
-    @classmethod
-    def _normalize_blank_host(cls, value: str | None) -> str | None:
-        """Treat a blank host (e.g. a cleared dashboard field) as unset so provider defaults apply."""
-        if value is None:
-            return None
-        return value.strip() or None
+    query_prefix: str | None = Field(
+        default=None,
+        description=(
+            "Text prepended to search queries for OpenAI-compatible providers and vertex_ai, for models that expect a "
+            "query prompt (EmbeddingGemma 2: 'task: search result | query: ')"
+        ),
+    )
+    document_prefix: str | None = Field(
+        default=None,
+        description=(
+            "Text prepended to indexed documents for OpenAI-compatible providers and vertex_ai, for models that expect "
+            "a document prompt (EmbeddingGemma 2: 'title: none | text: ')"
+        ),
+    )
 
 
 def normalize_api_key_setting(settings: dict[str, Any], field_name: str) -> dict[str, Any]:
@@ -650,28 +783,121 @@ def normalize_api_key_setting(settings: dict[str, Any], field_name: str) -> dict
     return normalized
 
 
+def _is_blank(value: object) -> bool:
+    """Return whether ``value`` is null or a string of only whitespace."""
+    return value is None or (isinstance(value, str) and not value.strip())
+
+
+def _endpoint_settings(settings: Mapping[str, Any], field_name: str) -> dict[str, Any]:
+    """Return ``settings`` without a null or blank endpoint, project, or region key; reject a non-string ``base_url``."""
+    endpoint = settings.get("base_url")
+    if endpoint is not None and not isinstance(endpoint, str):
+        msg = f"{field_name}.base_url must be a string, not {type(endpoint).__name__}"
+        raise ValueError(msg)
+    return {
+        key: item
+        for key, item in settings.items()
+        if key not in {"base_url", "project_id", "region", "location", "aws_region"} or not _is_blank(item)
+    }
+
+
+class ModelPricing(BaseModel):
+    """Provider prices in USD per million tokens."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    input: float = Field(ge=0, allow_inf_nan=False, description="USD per million uncached input tokens")
+    output: float = Field(
+        ge=0,
+        allow_inf_nan=False,
+        description="USD per million output tokens, including reasoning tokens",
+    )
+    cache_read: float | None = Field(
+        default=None,
+        ge=0,
+        allow_inf_nan=False,
+        description="USD per million cache-read input tokens; unset uses the input price",
+    )
+    cache_write: float | None = Field(
+        default=None,
+        ge=0,
+        allow_inf_nan=False,
+        description="USD per million cache-write input tokens; unset uses the input price",
+    )
+
+    @property
+    def cache_read_price(self) -> float:
+        """Return the cache-read price, charging the input price when none is set."""
+        return self.input if self.cache_read is None else self.cache_read
+
+    @property
+    def cache_write_price(self) -> float:
+        """Return the cache-write price, charging the input price when none is set."""
+        return self.input if self.cache_write is None else self.cache_write
+
+
+_ReasoningLevel = Literal["off", "minimal", "low", "medium", "high", "xhigh", "max"]
+
+
+class ReasoningConfig(BaseModel):
+    """The reasoning levels one model offers and the level its plain name runs at."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    levels: list[_ReasoningLevel] = Field(
+        min_length=1,
+        description="Levels clients offer for this model, in order; `name@level` runs the model at one of them",
+    )
+    default: _ReasoningLevel = Field(description="Level the plain model name runs at; one of levels")
+
+    @field_validator("levels", "default", mode="before")
+    @classmethod
+    def _reject_bare_yaml_off(cls, value: object) -> object:
+        """Explain the ``false`` YAML reads from a bare ``off``, which the level words would only call invalid."""
+        if value is False or (isinstance(value, list) and any(level is False for level in value)):
+            msg = 'YAML reads a bare off as false; write "off" in quotes'
+            raise ValueError(msg)
+        return value
+
+    @model_validator(mode="after")
+    def _validate_levels(self) -> Self:
+        if len(set(self.levels)) != len(self.levels):
+            msg = "reasoning.levels must not repeat a level"
+            raise ValueError(msg)
+        if self.default not in self.levels:
+            msg = f"reasoning.default {self.default!r} must be one of reasoning.levels"
+            raise ValueError(msg)
+        return self
+
+    def describe(self) -> str:
+        """Return the levels and the default for model listings."""
+        return f"levels: {', '.join(self.levels)}; default {self.default}"
+
+
 class ModelConfig(BaseModel):
     """Configuration for an AI model."""
+
+    model_config = ConfigDict(extra="forbid")
 
     provider: str = Field(
         description="Model provider (openai, anthropic, vertexai_claude, ollama, etc)",
     )
     id: str = Field(description="Model ID specific to the provider")
-    display_name: str | None = Field(default=None, description="Friendly model name shown in clients")
+    display_name: OptionalNonBlankStr = Field(default=None, description="Friendly model name shown in clients")
     icon: str | None = Field(default=None, description="Config-relative image path or Matrix mxc URI")
     api: Literal["responses", "chat_completions"] | None = Field(
         default=None,
         description="OpenAI API transport; unset keeps automatic model/endpoint selection",
     )
     host: str | None = Field(default=None, description="Optional host URL (e.g., for Ollama)")
-    api_key: str | None = Field(
+    api_key: OptionalNonBlankStr = Field(
         default=None,
         description="Optional model-specific API key used instead of the provider's shared key",
         json_schema_extra=dashboard_hint(secret=True),
     )
     extra_kwargs: dict[str, Any] | None = Field(
         default=None,
-        description="Additional provider-specific parameters passed directly to the model; may include api_key",
+        description="Additional provider-specific parameters the model's provider accepts; config load rejects any other key; may include api_key",
         json_schema_extra=dashboard_hint(secret=True),
     )
     context_window: int | None = Field(
@@ -682,8 +908,8 @@ class ModelConfig(BaseModel):
             "the default replay-planning window unless compaction.replay_window_tokens sets a smaller replay cap. "
             "An explicit compaction.model or compaction.fallback_model also needs its own context_window for "
             "summary generation. "
-            "On vertexai_claude models it additionally "
-            "enables request-time fitting that trims replayed history when a request would exceed the window"
+            "With compaction enabled, every model request of a reply is also checked against it, and the reply "
+            "compacts when its next request would not fit"
         ),
     )
     stream_idle_timeout_seconds: float | None = Field(
@@ -695,28 +921,51 @@ class ModelConfig(BaseModel):
             "built-in endpoint and no limit for ollama, llama_cpp, or a configured endpoint; 0 disables the limit"
         ),
     )
+    pricing: ModelPricing | None = Field(
+        default=None,
+        description="Provider prices in USD per million tokens, used to measure spend against budgets",
+    )
+    reasoning: ReasoningConfig | None = Field(
+        default=None,
+        description=(
+            "Reasoning levels this model offers; its provider's reasoning key in extra_kwargs then follows the level"
+        ),
+    )
 
-    @field_validator("display_name")
+    @field_validator("provider")
     @classmethod
-    def _normalize_display_name(cls, value: str | None) -> str | None:
-        """Trim an optional display name and treat blank input as unset."""
-        if value is None:
-            return None
-        return value.strip() or None
-
-    @field_validator("api_key")
-    @classmethod
-    def _normalize_api_key(cls, value: str | None) -> str | None:
-        """Trim the key and treat blank input as unset so the provider's shared key applies."""
-        if value is None:
-            return None
-        return value.strip() or None
+    def _validate_provider(cls, value: str) -> str:
+        """Reject a provider no route serves, so a misspelling fails config load instead of the model's first build."""
+        if provider_route(value) not in PROVIDER_ROUTES:
+            msg = f"Unknown provider '{value}': use one of {', '.join(sorted(PROVIDER_ROUTES))}"
+            raise ValueError(msg)
+        return value
 
     @field_validator("extra_kwargs")
     @classmethod
     def _normalize_extra_kwargs_api_key(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
         """Trim ``extra_kwargs.api_key`` like ``api_key`` and drop it when null or blank."""
         return None if value is None else normalize_api_key_setting(value, "extra_kwargs.api_key")
+
+    @field_validator("extra_kwargs")
+    @classmethod
+    def _validate_client_settings(cls, value: dict[str, Any] | None) -> dict[str, Any] | None:
+        """Drop a null or blank endpoint, project, or region key; reject a wrongly typed ``client_params`` or ``base_url``.
+
+        The providers that accept these keys pass ``client_params`` to their API client.
+        A dropped key sets nothing on any route, so the runtime env fills it where a route reads one.
+        """
+        if value is None:
+            return None
+        client_params = value.get("client_params")
+        if client_params is not None and not isinstance(client_params, Mapping):
+            msg = f"extra_kwargs.client_params must be a mapping, not {type(client_params).__name__}"
+            raise ValueError(msg)
+        endpoint_params = _endpoint_settings(client_params or {}, "extra_kwargs.client_params")
+        settings = _endpoint_settings(value, "extra_kwargs")
+        if client_params:
+            settings["client_params"] = endpoint_params
+        return settings
 
     @field_validator("icon")
     @classmethod
@@ -780,9 +1029,72 @@ class ModelConfig(BaseModel):
         """Return the key set through ``api_key`` or ``extra_kwargs.api_key``, if any."""
         return self.api_key or (self.extra_kwargs or {}).get("api_key")
 
+    def at_level(self, level: _ReasoningLevel) -> ModelConfig:
+        """Return this model running at ``level``, named ``"<display name> (<level>)"``."""
+        assert self.reasoning is not None
+        return self.model_copy(
+            update={
+                "reasoning": self.reasoning.model_copy(update={"default": level}),
+                "display_name": f"{self.display_name} ({level})" if self.display_name else None,
+            },
+        )
+
+
+def split_model_reference(reference: str) -> tuple[str, str | None]:
+    """Split a model reference ``name@level`` into the model name and the level, which is None without ``@``."""
+    name, separator, level = reference.partition("@")
+    return name, level if separator else None
+
+
+def unsupported_level_message(models: Mapping[str, ModelConfig], reference: object) -> str | None:
+    """Describe why ``name@level`` is rejected when ``name`` exists but ``level`` is not one of its levels."""
+    if not isinstance(reference, str):
+        return None
+    name, level = split_model_reference(reference)
+    if level is None or (model := models.get(name)) is None:
+        return None
+    if model.reasoning is not None and level in model.reasoning.levels:
+        return None
+    supported = ", ".join(model.reasoning.levels) if model.reasoning else "none"
+    return f"unsupported level {level!r} for {name}; supported: {supported}"
+
+
+class ModelTable(dict[str, ModelConfig]):
+    """The configured models by name; a reference ``name@level`` also finds the model at one of its levels.
+
+    Iteration, ``len``, and serialization see only the configured names, so listings and saved config never show
+    a level.
+    """
+
+    def _at_level(self, reference: object) -> ModelConfig | None:
+        """Return the model a ``name@level`` reference names, or None for any other key."""
+        if not isinstance(reference, str):
+            return None
+        name, level = split_model_reference(reference)
+        model = super().get(name)
+        if level is None or model is None or model.reasoning is None or level not in model.reasoning.levels:
+            return None
+        return model if level == model.reasoning.default else model.at_level(level)
+
+    def __contains__(self, reference: object) -> bool:
+        """Return whether ``reference`` names a configured model or one of its levels."""
+        return super().__contains__(reference) or self._at_level(reference) is not None
+
+    def __getitem__(self, reference: str) -> ModelConfig:
+        """Return the model ``reference`` names, at its level for ``name@level``."""
+        model = self._at_level(reference)
+        return super().__getitem__(reference) if model is None else model
+
+    def get(self, reference: str, default: ModelConfig | None = None) -> ModelConfig | None:  # ty: ignore[incompatible-method-override]
+        """Return the model ``reference`` names, at its level for ``name@level``, or ``default``."""
+        model = self._at_level(reference)
+        return super().get(reference, default) if model is None else model
+
 
 class RouterConfig(BaseModel):
-    """Configuration for the router system."""
+    """Configuration for routing and for the MindRoom owner account."""
+
+    model_config = ConfigDict(extra="forbid")
 
     model: str = Field(
         default="default",
@@ -793,12 +1105,16 @@ class RouterConfig(BaseModel):
         default=None,
         description="Optional System One or OpenAI Decisions responder selection before the LLM router",
     )
-    accept_invites: InviteAcceptancePolicy = Field(
-        default=True,
-        description=(
-            "true accepts every room invite to the router, false accepts none, and a list accepts only "
-            "invites from matching inviter Matrix IDs or glob patterns"
-        ),
+    # LEGACY_COMPAT: `router.accept_invites` in a config file.
+    # Legacy format: `accept_invites: true|false|[patterns]` under `router:`, which chose the invites the router took.
+    # Last legacy release: every release before the router-free change ships, v2026.11.459 the newest when written,
+    #   honors it; replacement: unreleased, the owner account accepts no invites, so nothing replaces the field.
+    # Handling: the field still validates so such configs load; a set value logs one deprecation warning at load
+    #   and on reload (`orchestration/config_warnings.py`) and changes nothing.
+    # Coverage: tests/test_access_schema.py::test_accept_invites_loads_with_deprecation_warning
+    accept_invites: InviteAcceptancePolicy | None = Field(
+        default=None,
+        description="Deprecated and ignored: the MindRoom owner account accepts no room invites",
     )
     access: ResponderAccessConfig | None = Field(
         default=None,

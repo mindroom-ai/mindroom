@@ -3,13 +3,8 @@
 from __future__ import annotations
 
 import copy
-import json
 
-from mindroom.event_journal.approval_card_state import (
-    ApprovalDecisionMetadata,
-    stored_resolution,
-    terminal_content,
-)
+from mindroom.event_journal.approval_cards import ApprovalDecisionMetadata, terminal_content
 
 
 def _original() -> dict[str, object]:
@@ -90,27 +85,3 @@ def test_automatic_original_keeps_full_arguments_and_immutable_grant_provenance(
     assert "auto_approval" not in result
     assert "auto_approve_options" not in result
     assert result["approvable"] is False
-
-
-def test_actual_journal_outcome_overrides_offered_actor_and_grant() -> None:
-    """A deadline winner must never publish the rejected grant decision."""
-    result = stored_resolution(
-        {"payload_json": json.dumps(_original())},
-        metadata=ApprovalDecisionMetadata(
-            resolved_by="@alice:example.org",
-            resolved_at="2026-09-12T12:00:00Z",
-            provenance={"kind": "timed_grant", "grant_id": "rejected"},
-            auto_approval={"grant_id": "rejected"},
-        ),
-        requested_status="approved",
-        decision="expired",
-        reason="Tool approval request timed out.",
-        description="approval payload",
-    )
-    assert result["status"] == "expired"
-    assert result["body"] == "Expired: write_file"
-    assert result["resolved_by"] is None
-    assert result["resolution_reason"] == "Tool approval request timed out."
-    assert result["approval_scope"] == {"id": "scope", "tool_name": "write_file"}
-    assert "approval_provenance" not in result
-    assert "auto_approval" not in result

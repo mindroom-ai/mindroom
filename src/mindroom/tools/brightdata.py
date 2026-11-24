@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     config_fields=[
         ConfigField(
             name="api_key",
+            env=("BRIGHT_DATA_API_KEY",),
             label="API Key",
             type="password",
             required=False,
@@ -67,6 +68,7 @@ if TYPE_CHECKING:
         ),
         ConfigField(
             name="serp_zone",
+            env=("BRIGHT_DATA_SERP_ZONE",),
             label="Serp Zone",
             type="text",
             required=False,
@@ -74,6 +76,7 @@ if TYPE_CHECKING:
         ),
         ConfigField(
             name="web_unlocker_zone",
+            env=("BRIGHT_DATA_WEB_UNLOCKER_ZONE",),
             label="Web Unlocker Zone",
             type="text",
             required=False,
@@ -95,7 +98,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["requests"],
-    docs_url="https://docs.agno.com/tools/toolkits/web_scrape/brightdata",
+    docs_url="https://docs.mindroom.chat/tools/web-scraping-and-browser/#brightdata",
     function_names=("get_screenshot", "scrape_as_markdown", "search_engine", "web_data_feed"),
 )
 def brightdata_tools() -> type[BrightDataTools]:

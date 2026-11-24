@@ -2,33 +2,41 @@
 
 from __future__ import annotations
 
+import functools
 import json
-from collections import Counter
+import re
 from typing import TYPE_CHECKING
 
-from agno.tools import Toolkit
-from agno.tools.function import Function
-
 from mindroom.mcp.config import resolved_mcp_tool_prefix
-from mindroom.mcp.errors import MCPToolUnavailableError
-from mindroom.mcp.function_surface import local_mcp_function_name_collisions
+from mindroom.mcp.errors import MCPToolCallError, MCPToolUnavailableError
 from mindroom.oauth.providers import OAuthConnectionRequired, oauth_connection_required_payload
+from mindroom.tool_system.authoring import Toolkit, passthrough_tool
+from mindroom.tool_system.filters import tool_name_allowed
 
 if TYPE_CHECKING:
-    from agno.tools.function import ToolResult
+    from collections.abc import Awaitable, Callable, Mapping
 
     from mindroom.constants import RuntimePaths
     from mindroom.credentials.manager import CredentialsManager
     from mindroom.mcp.config import MCPServerConfig
     from mindroom.mcp.manager import MCPServerManager
     from mindroom.mcp.types import MCPDiscoveredTool, MCPServerCatalog
+    from mindroom.tool_system.tool_function import ToolValue
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 _ACTIVE_MCP_SERVER_MANAGER: MCPServerManager | None = None
+# How servers word a refusal of a call's arguments: the JSON-RPC invalid-params code, the MCP SDKs' "Input validation
+# error", and pydantic's "validation error for".
+_ARGUMENT_REJECTION = re.compile(r"-32602|validation error|invalid (?:arguments|params)", re.IGNORECASE)
+# The most of an input schema a failed call's error repeats, so a schema with long descriptions or enums cannot fill
+# the conversation.
+_MAX_SCHEMA_HINT_CHARACTERS = 4000
+# The most unlisted argument names a failed call's error names one by one.
+_MAX_UNLISTED_NAMES = 20
 
 
 def bind_mcp_server_manager(manager: MCPServerManager | None) -> None:
-    """Bind the active runtime manager used by dynamic registry factories."""
+    """Bind the runtime manager that configured MCP servers' tool factories build their toolkits with."""
     global _ACTIVE_MCP_SERVER_MANAGER
     _ACTIVE_MCP_SERVER_MANAGER = manager
 
@@ -42,50 +50,13 @@ def _normalize_tool_name_filter(value: list[str] | str | None) -> list[str] | No
     """Normalize filter values passed from tool config and runtime overrides."""
     if value is None:
         return None
-    if isinstance(value, str):
-        normalized = [part.strip() for part in value.replace("\n", ",").split(",") if part.strip()]
-        return normalized or None
-    normalized = [part.strip() for part in value if part.strip()]
+    parts = value.replace("\n", ",").split(",") if isinstance(value, str) else value
+    normalized = [part.strip() for part in parts if part.strip()]
     return normalized or None
 
 
-def hide_mcp_function_collisions(toolkits: list[Toolkit]) -> dict[str, tuple[str, ...]]:
-    """Hide MCP functions colliding in this exact runtime projection."""
-    local_function_names = {
-        function_name
-        for toolkit in toolkits
-        if not isinstance(toolkit, MindRoomMCPToolkit)
-        for function_name in (*toolkit.get_functions(), *toolkit.get_async_functions())
-    }
-    mcp_toolkit_function_names = [
-        (toolkit, {*toolkit.get_functions(), *toolkit.get_async_functions()})
-        for toolkit in toolkits
-        if isinstance(toolkit, MindRoomMCPToolkit)
-    ]
-    mcp_function_name_counts = Counter(
-        function_name for _, function_names in mcp_toolkit_function_names for function_name in function_names
-    )
-    hidden_by_server: dict[str, tuple[str, ...]] = {}
-    for toolkit, function_names in mcp_toolkit_function_names:
-        hidden = tuple(
-            sorted(
-                local_mcp_function_name_collisions(local_function_names, function_names)
-                | {name for name in function_names if mcp_function_name_counts[name] > 1},
-            ),
-        )
-        if not hidden:
-            continue
-        for function_name in hidden:
-            toolkit.functions.pop(function_name, None)
-            toolkit.async_functions.pop(function_name, None)
-        hidden_by_server[toolkit.server_id] = tuple(
-            sorted(set(hidden_by_server.get(toolkit.server_id, ())) | set(hidden)),
-        )
-    return hidden_by_server
-
-
 class MindRoomMCPToolkit(Toolkit):
-    """Toolkit that exposes cached MCP tools as async Agno functions."""
+    """Toolkit that exposes cached MCP tools as async functions that take the model's arguments as sent."""
 
     def __init__(
         self,
@@ -102,10 +73,7 @@ class MindRoomMCPToolkit(Toolkit):
         credentials_manager: CredentialsManager | None = None,
         worker_target: ResolvedWorkerTarget | None = None,
     ) -> None:
-        super().__init__(
-            name=catalog.tool_name if catalog is not None else (tool_name or server_id),
-            auto_register=False,
-        )
+        super().__init__(name=catalog.tool_name if catalog is not None else (tool_name or server_id))
         self.server_id = server_id
         self.manager = manager
         self.catalog = catalog
@@ -125,41 +93,30 @@ class MindRoomMCPToolkit(Toolkit):
                 )
                 if cached_catalog is not None:
                     self.catalog = cached_catalog
-                    self._register_catalog_tools(self._filtered_tools())
+                    self._register_catalog_tools(self._filtered_catalog_tools(cached_catalog))
             return
         if self.manager is None or self.catalog is None:
             return
-        filtered_tools = self._filtered_tools()
-        self._register_catalog_tools(filtered_tools)
+        self._register_catalog_tools(self._filtered_catalog_tools(self.catalog))
 
     def _is_oauth_backed(self) -> bool:
         return self.server_config is not None and self.server_config.auth is not None
 
     def _filtered_catalog_tools(self, catalog: MCPServerCatalog) -> list[MCPDiscoveredTool]:
-        filtered: list[MCPDiscoveredTool] = []
-        include_tools = set(self.include_tools or [])
-        exclude_tools = set(self.exclude_tools or [])
-        for tool in catalog.tools:
-            if exclude_tools and tool.remote_name in exclude_tools:
-                continue
-            if include_tools and tool.remote_name not in include_tools:
-                continue
-            filtered.append(tool)
-        return filtered
-
-    def _filtered_tools(self) -> list[MCPDiscoveredTool]:
-        if self.catalog is None:
-            return []
-        return self._filtered_catalog_tools(self.catalog)
+        include_tools = set(self.include_tools) if self.include_tools else None
+        exclude_tools = set(self.exclude_tools) if self.exclude_tools else None
+        return [
+            tool
+            for tool in catalog.tools
+            if tool_name_allowed(tool.remote_name, include=include_tools, exclude=exclude_tools)
+        ]
 
     def _register_catalog_tools(self, tools: list[MCPDiscoveredTool]) -> None:
-        seen: set[str] = set(self.async_functions)
         for tool in tools:
-            if tool.function_name in seen:
+            if tool.function_name in self.functions:
                 msg = f"Duplicate MCP function name '{tool.function_name}' for server '{self.server_id}'"
                 raise ValueError(msg)
-            seen.add(tool.function_name)
-            self.async_functions[tool.function_name] = self._build_function(tool)
+            self.functions[tool.function_name] = self._build_function(tool)
 
     def _register_oauth_bridge_tools(self) -> None:
         if self.server_config is None:
@@ -169,40 +126,41 @@ class MindRoomMCPToolkit(Toolkit):
         # model-visible surface for the server, so the configured description
         # is the model's only hint about what connecting would unlock.
         suffix = f" {self.server_config.description}" if self.server_config.description else ""
-        self.async_functions[f"{tool_prefix}_connection_status"] = Function(
-            name=f"{tool_prefix}_connection_status",
-            description=f"Check whether MCP server '{self.server_id}' is connected for this agent's credential scope.{suffix}",
-            parameters={"type": "object", "properties": {}},
-            entrypoint=self._oauth_connection_status,
-            skip_entrypoint_processing=True,
-        )
-        self.async_functions[f"{tool_prefix}_list_tools"] = Function(
-            name=f"{tool_prefix}_list_tools",
-            description=f"List remote tools exposed by MCP server '{self.server_id}' for this agent's credential scope.{suffix}",
-            parameters={"type": "object", "properties": {}},
-            entrypoint=self._oauth_list_tools,
-            skip_entrypoint_processing=True,
-        )
-        self.async_functions[f"{tool_prefix}_call_tool"] = Function(
-            name=f"{tool_prefix}_call_tool",
-            description=f"Call one remote tool on MCP server '{self.server_id}' for this agent's credential scope.{suffix}",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "tool_name": {
-                        "type": "string",
-                        "description": "Remote MCP tool name to call.",
+        bridge = {
+            "connection_status": (
+                f"Check whether MCP server '{self.server_id}' is connected for this agent's credential scope.{suffix}",
+                {"type": "object", "properties": {}},
+                self._oauth_connection_status,
+            ),
+            "list_tools": (
+                f"List remote tools exposed by MCP server '{self.server_id}' for this agent's credential scope.{suffix}",
+                {"type": "object", "properties": {}},
+                self._oauth_list_tools,
+            ),
+            "call_tool": (
+                f"Call one remote tool on MCP server '{self.server_id}' for this agent's credential scope.{suffix}",
+                {
+                    "type": "object",
+                    "properties": {
+                        "tool_name": {
+                            "type": "string",
+                            "description": "Remote MCP tool name to call.",
+                        },
+                        "arguments": {
+                            "type": "object",
+                            "description": "Arguments to pass to the remote MCP tool.",
+                        },
                     },
-                    "arguments": {
-                        "type": "object",
-                        "description": "Arguments to pass to the remote MCP tool.",
-                    },
+                    "required": ["tool_name", "arguments"],
                 },
-                "required": ["tool_name", "arguments"],
-            },
-            entrypoint=self._oauth_call_tool,
-            skip_entrypoint_processing=True,
-        )
+                self._oauth_call_tool,
+            ),
+        }
+        for operation, (description, parameters, method) in bridge.items():
+            name = f"{tool_prefix}_{operation}"
+            self.functions[name] = passthrough_tool(name=name, description=description, parameters=parameters)(
+                _forwarding(method),
+            )
 
     def _oauth_payload(self, exc: OAuthConnectionRequired) -> str:
         return json.dumps(oauth_connection_required_payload(exc))
@@ -253,15 +211,45 @@ class MindRoomMCPToolkit(Toolkit):
             return self._oauth_payload(exc)
         return json.dumps(self._catalog_payload(catalog))
 
-    async def _oauth_call_tool(self, *, tool_name: str, arguments: dict[str, object] | None = None) -> ToolResult | str:
+    async def _oauth_call_tool(self, *, tool_name: str, arguments: dict[str, object] | None = None) -> ToolValue | str:
         return await self._call_tool_with_error_payload(tool_name, dict(arguments or {}))
+
+    def _argument_hint(self, error: MCPToolCallError, tool_name: str, arguments: Mapping[str, object]) -> str | None:
+        """Return what ``error`` gains about the call's arguments from the called tool's input schema, or None.
+
+        The schema is the one the call was sent against, which the error carries. A server's refusal of the arguments
+        gets the schema, which the model may not have loaded. So does any failure of a call that sent top-level names
+        the schema's ``properties`` do not list, which first names them, since a schema that admits other names lets
+        the server fail generically. The call itself was sent as the model made it. The schema is cut at
+        ``_MAX_SCHEMA_HINT_CHARACTERS``, saying so.
+        """
+        schema = error.input_schema
+        if schema is None:
+            return None
+        properties = schema.get("properties")
+        unknown = [name for name in arguments if name not in properties] if isinstance(properties, dict) else []
+        if not unknown and not _ARGUMENT_REJECTION.search(str(error)):
+            return None
+        note = ""
+        if unknown:
+            names = ", ".join(f"'{name}'" for name in unknown[:_MAX_UNLISTED_NAMES])
+            if len(unknown) > _MAX_UNLISTED_NAMES:
+                names = f"{names}, and {len(unknown) - _MAX_UNLISTED_NAMES} more"
+            note = f"Arguments not listed in the properties of the input schema of '{tool_name}': {names}.\n"
+        text = json.dumps(schema, ensure_ascii=False)
+        if len(text) > _MAX_SCHEMA_HINT_CHARACTERS:
+            text = f"{text[:_MAX_SCHEMA_HINT_CHARACTERS]}... [truncated, {len(text)} characters in all]"
+        return f"{note}Input schema of '{tool_name}': {text}"
 
     async def _call_tool_with_error_payload(
         self,
         tool_name: str,
         arguments: dict[str, object],
-    ) -> ToolResult | str:
-        """Call one manager-owned tool and preserve structured reconnect/catalog errors."""
+    ) -> ToolValue | str:
+        """Call one manager-owned tool and preserve structured reconnect/catalog errors.
+
+        A failed call's error ends with ``_argument_hint`` when it has one.
+        """
         if self.manager is None:
             msg = f"MCP server '{self.server_id}' is not connected"
             raise RuntimeError(msg)
@@ -285,15 +273,26 @@ class MindRoomMCPToolkit(Toolkit):
                     "available_tools": list(exc.available_tools),
                 },
             )
+        except MCPToolCallError as exc:
+            if (hint := self._argument_hint(exc, tool_name, arguments)) is None:
+                raise
+            msg = f"{exc}\n\n{hint}"
+            raise MCPToolCallError(self.server_id, msg) from exc
 
-    def _build_function(self, tool: MCPDiscoveredTool) -> Function:
-        async def _call_tool(**kwargs: object) -> ToolResult | str:
+    def _build_function(self, tool: MCPDiscoveredTool) -> Callable[..., Awaitable[ToolValue | str]]:
+        async def _call_tool(**kwargs: object) -> ToolValue | str:
             return await self._call_tool_with_error_payload(tool.remote_name, dict(kwargs))
 
-        return Function(
-            name=tool.function_name,
-            description=tool.description,
-            parameters=tool.input_schema,
-            entrypoint=_call_tool,
-            skip_entrypoint_processing=True,
+        return passthrough_tool(name=tool.function_name, description=tool.description, parameters=tool.input_schema)(
+            _call_tool,
         )
+
+
+def _forwarding[T](method: Callable[..., Awaitable[T]]) -> Callable[..., Awaitable[T]]:
+    """Return a function of its own that calls ``method``, so marking it as a tool leaves the method unmarked."""
+
+    @functools.wraps(method)
+    async def forward(*args: object, **kwargs: object) -> T:
+        return await method(*args, **kwargs)
+
+    return forward

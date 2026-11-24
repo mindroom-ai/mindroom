@@ -7,6 +7,7 @@ and it applies that module's validation and dial-time address pinning unchanged.
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import ssl  # noqa: TC003 - Required for runtime get_type_hints on public transport constructors.
 from collections.abc import Iterable  # noqa: TC003
 
@@ -18,12 +19,16 @@ from httpx2._types import CertTypes  # noqa: TC002
 
 from mindroom.server_fetch_url import connect_validated_async, validate_server_fetch_url, validated_connect_addresses
 
+# A runtime alias, so get_type_hints resolves the public constructor's annotations.
+_IPNetwork = ipaddress.IPv4Network | ipaddress.IPv6Network
+
 
 class _ServerFetchAsyncNetworkBackend(httpcore2.AsyncNetworkBackend):
     """httpcore2 async network backend that validates the address it dials."""
 
-    def __init__(self, *, allow_private_networks: bool) -> None:
+    def __init__(self, *, allow_private_networks: bool, private_networks: tuple[_IPNetwork, ...] = ()) -> None:
         self._allow_private_networks = allow_private_networks
+        self._private_networks = private_networks
         self._backend: httpcore2.AsyncNetworkBackend = AnyIOBackend()
 
     async def connect_tcp(
@@ -40,6 +45,7 @@ class _ServerFetchAsyncNetworkBackend(httpcore2.AsyncNetworkBackend):
             host,
             port=port,
             allow_private_networks=self._allow_private_networks,
+            private_networks=self._private_networks,
         )
         return await connect_validated_async(
             addresses,
@@ -66,12 +72,16 @@ class _ServerFetchAsyncNetworkBackend(httpcore2.AsyncNetworkBackend):
 
 
 class ServerFetchAsyncHTTPX2Transport(httpx2.AsyncHTTPTransport):
-    """Async httpx2 transport that validates server-fetch URLs and dialed addresses."""
+    """Async httpx2 transport that validates server-fetch URLs and dialed addresses.
+
+    `private_networks` lets requests reach private addresses in those networks; loopback and metadata stay blocked.
+    """
 
     def __init__(
         self,
         *,
         allow_private_networks: bool = False,
+        private_networks: tuple[_IPNetwork, ...] = (),
         verify: ssl.SSLContext | str | bool = True,
         cert: CertTypes | None = None,
         trust_env: bool = True,
@@ -83,6 +93,7 @@ class ServerFetchAsyncHTTPX2Transport(httpx2.AsyncHTTPTransport):
         socket_options: Iterable[httpcore2.SOCKET_OPTION] | None = None,
     ) -> None:
         self._allow_private_networks = allow_private_networks
+        self._private_networks = private_networks
         ssl_context = httpx2.create_ssl_context(verify=verify, cert=cert, trust_env=trust_env)
         self._pool: httpcore2.AsyncConnectionPool = httpcore2.AsyncConnectionPool(
             ssl_context=ssl_context,
@@ -92,7 +103,10 @@ class ServerFetchAsyncHTTPX2Transport(httpx2.AsyncHTTPTransport):
             http1=http1,
             http2=http2,
             local_address=local_address,
-            network_backend=_ServerFetchAsyncNetworkBackend(allow_private_networks=allow_private_networks),
+            network_backend=_ServerFetchAsyncNetworkBackend(
+                allow_private_networks=allow_private_networks,
+                private_networks=private_networks,
+            ),
             retries=retries,
             socket_options=socket_options,
         )
@@ -103,6 +117,7 @@ class ServerFetchAsyncHTTPX2Transport(httpx2.AsyncHTTPTransport):
             str(request.url),
             allow_private_networks=self._allow_private_networks,
             resolve_hostnames=False,
+            private_networks=self._private_networks,
         )
         return await super().handle_async_request(request)
 

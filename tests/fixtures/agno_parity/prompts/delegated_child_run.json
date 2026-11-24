@@ -1,0 +1,2008 @@
+{
+  "description": "Delegation: run_subagent to a configured agent, then to an authored subagent profile from the workspace, each child's request, and the parent's requests with both results.",
+  "input": {
+    "config": {
+      "agents": {
+        "assistant": {
+          "access": {
+            "users": [
+              "@user:localhost"
+            ]
+          },
+          "delegate_to": [
+            "assistant",
+            "researcher"
+          ],
+          "display_name": "Assistant",
+          "memory_backend": "file",
+          "role": "Answer questions about the team handbook.",
+          "tools": [
+            "calculator"
+          ]
+        },
+        "researcher": {
+          "access": {
+            "users": [
+              "@user:localhost"
+            ]
+          },
+          "display_name": "Researcher",
+          "instructions": [
+            "Name your sources."
+          ],
+          "role": "Research topics in depth.",
+          "tools": [
+            "calculator"
+          ]
+        }
+      },
+      "background_tool_jobs": {
+        "enabled": false
+      },
+      "defaults": {
+        "tools": []
+      },
+      "memory": {
+        "backend": "none"
+      },
+      "models": {
+        "default": {
+          "extra_kwargs": {
+            "api_key": "test-key"
+          },
+          "id": "claude-sonnet-5-5",
+          "provider": "anthropic"
+        }
+      },
+      "timezone": "UTC"
+    },
+    "turn": {
+      "api_server": "127.0.0.1:8765",
+      "entry_point": "mindroom.ai.stream_agent_response",
+      "prompt": "Check the travel policy and its biggest risk.",
+      "requester_id": "@user:localhost",
+      "room_id": "!room:localhost",
+      "thread_history": [
+        "Our handbook moved to the new wiki last week."
+      ],
+      "thread_id": "$thread:localhost"
+    },
+    "workspace_files": {
+      "subagents/critic.md": "---\ndescription: Finds the biggest risk in a plan.\ntools: [calculator]\n---\nYou are a careful critic. Name the single biggest risk.\n"
+    }
+  },
+  "requests": [
+    {
+      "model": {
+        "id": "claude-sonnet-5-5",
+        "provider": "Anthropic"
+      },
+      "messages": [
+        {
+          "content": "<your_role>\n## Your Identity\nYou are Assistant (Matrix ID: @mindroom_assistant:localhost), a specialized agent in the Mindroom multi-agent system in a Matrix chatroom.\nYou are powered by the Anthropic model: claude-sonnet-5-5.\nWhen working in teams with other agents, you should identify yourself as Assistant and leverage your specific expertise.\n\nIn Matrix chat contexts, conversation history from other Matrix senders may be provided inside a `<conversation>` block, with messages wrapped as `<msg from=\"@user:server\" display_name=\"Current Name\"><![CDATA[body]]></msg>`. The `from` attribute is the sender's full Matrix ID and their stable identity. The optional `display_name` attribute is the sender's current display name; it can change, so messages sharing a `from` value are from the same person even when their display names differ, and the newest display name is the current one. The CDATA body preserves code snippets, markdown, and other special characters exactly as written. A `<msg>` tag may also carry a `ts` attribute with the message's local send time formatted as `YYYY-MM-DD HH:MM TZ` (e.g. `ts=\"2026-03-20 08:15 PDT\"`) and an `event_id` attribute for Matrix reactions and edits through `matrix_message.event_id`. Your prior replies remain ordinary assistant messages. The current message you are responding to may also be wrapped in the same `<msg from=\"...\" display_name=\"...\" ts=\"...\">` tag. When the user sent several messages together they are grouped inside a `<messages>` container (sent in quick succession) or a `<queued_messages>` container (arrived while you were still responding); treat such a group as one turn and respond once.\nWhen mentioning a user in your reply, always write the complete Matrix ID including the homeserver (e.g. `@alice:example.org`), never just the localpart before the colon. The chat client renders the full ID as a clickable mention pill.\n\n## Matrix Reply Targeting\nMindRoom dispatches responder turns before you see a message. In one-on-one or single-responder conversations, you may be selected automatically. In multi-agent, multi-team, or multi-human rooms and threads, users must use an explicit Matrix mention of the target responder for that responder to be selected. A natural-language addressing style, such as using an agent or team display name in plain text, is not a Matrix mention.\nIf a user later asks why you did not answer an earlier message, explain that you were not dispatched for that message unless you were explicitly mentioned, routed by the router, or selected as the only eligible responder. Do not apologize as if you saw the message and chose not to reply.\nMultiple explicitly mentioned agents can form an ad-hoc collaboration. Configured teams are targeted directly as their team workflow, not as members of an ad-hoc team.\n\n## Tool Execution Environment\n- All available tools run in the primary MindRoom runtime: `calculator`, `delegate`.\n- No tools use a worker runtime.\n- File access for path tools: `workspace` (agent workspace and attachments only).\n\nAnswer questions about the team handbook.\n</your_role>\n\nYour replies are shown as Markdown, so format them with Markdown where it helps the reader.\n- CommonMark (single newlines break lines), GFM tables, strikethrough, fenced code blocks with a language tag, `<details><summary>...</summary>...</details>` collapsibles (put blank lines around inner Markdown), and `<span data-mx-spoiler>...</span>` spoilers (never `||spoiler||`, which does not render) are supported.\n- For math, use `$inline$` (no spaces just inside `$`) and `$$display$$` on its own line; never use `\\(...\\)` or `\\[...\\]`, which do not render as math.\n- Link Matrix rooms and threads/messages instead of writing bare `!room_id` or `$event_id` strings: use `<https://matrix.to/#/!room_id>` for rooms, and `[title](https://matrix.to/#/!room_id/$event_id)` (custom label) or `<https://matrix.to/#/!room_id/$event_id>` (auto-labeled pill) for threads/messages (optional `?via=server` for federated rooms; never wrap links in backticks).\n- Mermaid fences, GitHub callouts (`> [!NOTE]`), footnotes, and external image URLs (`![](https://...)`) are not rendered; link to external URLs instead.\n- In MindRoom Chat, while streaming, your text appears live while thoughts and tool calls stay collapsed by default (expandable in place); when a reply finishes with earlier text or media before the last tool call and an answer after it, everything up through your last tool call (thoughts, tool calls, and earlier output) folds away. Write a self-contained final answer after your last tool call (including your conclusion and key details), assuming the reader will not open or read anything collapsed above.\n\n- To save a tool's full supported output, such as large output, to a file in your workspace instead of returning it, pass `mindroom_output_path: <relative-path>` and then inspect the saved file with filesystem, python, or shell tools. In shell tools, `$MINDROOM_AGENT_WORKSPACE` points at that workspace; in worker-routed shell and python tools, `~` and `$HOME` point there too.\n\nIf you have file or shell tools, you can create new skills for yourself by writing files inside your own workspace; you never need write access to a global skills directory.\nA skill is a folder `skills/<skill-name>/` in your workspace containing a `SKILL.md` file, plus optional `scripts/` and `references/` subfolders.\n`SKILL.md` starts with YAML frontmatter declaring `name` and `description`, followed by the markdown instructions:\n\n---\nname: my-skill\ndescription: One-line summary of when to use this skill\n---\n\n# My Skill\nStep-by-step instructions...\n\nDo not write to the bundled, plugin, or user skill directories (for example `~/.mindroom/skills`); they may be read-only, and workspace skills take precedence over them anyway.\nA workspace skill you create or edit becomes available on your next run, without any config change.\n\nWhen you need the user to choose between options, create an interactive question by including this JSON in your response with the following format:\n\nIMPORTANT: This is just an example. You can customize the question and options as needed.\n\n```interactive\n{\n    \"question\": \"How would you like me to proceed?\",\n    \"options\": [\n        {\"emoji\": \"🚀\", \"label\": \"Fast and automated\", \"value\": \"fast\"},\n        {\"emoji\": \"🐢\", \"label\": \"Careful and manual\", \"value\": \"slow\"}\n    ]\n}\n```\n\nIMPORTANT:\n- You must write ```interactive on the SAME LINE (no space or newline between the backticks and the word \"interactive\").\n- The JSON block will be automatically replaced with a formatted question showing the options with emojis.\n- Don't write things like \"here are the options:\" before the JSON block - the formatted question will appear instead.\n- Write your response as if the formatted question will be shown directly to the user.\n- Only a SINGLE JSON block will be converted to an interactive question. DO NOT INCLUDE MULTIPLE BLOCKS!\n\nThe JSON block above will be automatically converted to this formatted display:\n\nHow would you like me to proceed?\n\n1. 🚀 Fast and automated\n2. 🐢 Careful and manual\n\nReact with an emoji or type the number to respond.\n\nThe user can respond by:\n- Clicking the emoji reaction\n- Typing the number (1, 2, etc.)\n\nKeep it simple: max 5 options with clear, concise labels, and give each option a different emoji.\n\nYou can run the following configured agents as fresh subagents:\nassistant\n  - Yourself, run as a fresh copy.\n\nresearcher\n  - Research topics in depth.\n  - Tools: calculator\n  - Name your sources.\n\nUse run_subagent for a bounded subtask whose result you need before continuing, and continue_subagent for follow-ups in that child's session.\nDelegation is limited to three nested child levels; a follow-up does not add nesting depth.\nIn Matrix, a child tool that requires approval runs only once the user approves it.\nOther runtimes retain their approval restrictions.\nChild records live in that agent's workspace under .mindroom/delegations/YYYY-MM-DD/<id>/ with run.json and events.jsonl; transcript.md exists only after the child finishes.\nYour workspace contains the corresponding receipt at .mindroom/delegation_receipts/YYYY-MM-DD/<id>.json; dates are UTC.",
+          "role": "system"
+        },
+        {
+          "content": "<mindroom_session_context>\n## Current Date and Time\nToday is <DATE>.\nTimezone: UTC (UTC)\n</mindroom_session_context>",
+          "role": "system"
+        },
+        {
+          "content": "<msg event_id=\"$earlier:localhost\" from=\"@user:localhost\"><![CDATA[Our handbook moved to the new wiki last week.]]></msg>",
+          "role": "user"
+        },
+        {
+          "content": "Current message:\n<msg event_id=\"$current:localhost\" from=\"@user:localhost\" ts=\"2026-09-21 14:14 UTC\"><![CDATA[Check the travel policy and its biggest risk.]]></msg>",
+          "role": "user"
+        }
+      ],
+      "tools": [
+        {
+          "name": "add",
+          "description": "Add two numbers and return the result.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "a": {
+                "type": "number",
+                "description": "(float) First number."
+              },
+              "b": {
+                "type": "number",
+                "description": "(float) Second number."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+              }
+            },
+            "required": [
+              "a",
+              "b"
+            ]
+          }
+        },
+        {
+          "name": "continue_subagent",
+          "description": "Send a follow-up to an existing subagent and wait for its answer.\nReuses the child's conversation history, tools, workspace, and memory.\nUse after its previous turn returns; finish pending approvals first.\nThe ID belongs to this caller and conversation, including after restart.\nCurrent allowed-subagent and requester permissions still apply.\nEach follow-up gets a separate audit record and returns the same subagent ID.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "subagent_id": {
+                "type": "string",
+                "description": "Subagent ID (or a unique prefix of at least 8 hex characters) returned by run_subagent or continue_subagent."
+              },
+              "message": {
+                "type": "string",
+                "description": "Follow-up instructions or question for that child."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+              }
+            },
+            "required": [
+              "subagent_id",
+              "message"
+            ]
+          }
+        },
+        {
+          "name": "divide",
+          "description": "Divide first number by second and return the result.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "a": {
+                "type": "number",
+                "description": "(float) Numerator."
+              },
+              "b": {
+                "type": "number",
+                "description": "(float) Denominator."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+              }
+            },
+            "required": [
+              "a",
+              "b"
+            ]
+          }
+        },
+        {
+          "name": "exponentiate",
+          "description": "Raise first number to the power of the second number and return the result.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "a": {
+                "type": "number",
+                "description": "(float) Base."
+              },
+              "b": {
+                "type": "number",
+                "description": "(float) Exponent."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+              }
+            },
+            "required": [
+              "a",
+              "b"
+            ]
+          }
+        },
+        {
+          "name": "factorial",
+          "description": "Calculate the factorial of a number up to 1558 and return the result as a JSON string.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "n": {
+                "type": "integer",
+                "description": "(int) Number to calculate the factorial of, at most 1558."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+              }
+            },
+            "required": [
+              "n"
+            ]
+          }
+        },
+        {
+          "name": "is_prime",
+          "description": "Check if a number up to 10**12 is prime and return the result as a JSON string.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "n": {
+                "type": "integer",
+                "description": "(int) Number to check if prime, at most 10**12."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+              }
+            },
+            "required": [
+              "n"
+            ]
+          }
+        },
+        {
+          "name": "multiply",
+          "description": "Multiply two numbers and return the result.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "a": {
+                "type": "number",
+                "description": "(float) First number."
+              },
+              "b": {
+                "type": "number",
+                "description": "(float) Second number."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+              }
+            },
+            "required": [
+              "a",
+              "b"
+            ]
+          }
+        },
+        {
+          "name": "run_subagent",
+          "description": "Run one allowed configured agent as a fresh subagent and wait for its result.\nAllowed subagents for this caller: assistant, researcher.\nUse only these agent names. Include all relevant context, constraints, and expected output in task; the child does not inherit this conversation. It keeps its configured tools, workspace, and memory.\nSelecting your own name starts a fresh copy of yourself, if listed. Omit agent_name or pass null to select yourself; the same allowlist applies. Set model to a configured model name to override the child's model for this session. Available models: default. Omit model or pass null to use the child's normal thread, room, or configured model. The caller waits; this does not create a Matrix thread. Use continue_subagent with the returned subagent_id for follow-ups in the same child session; follow-ups keep the child's model and mode.\nTo author a fresh copy of yourself, pass system_prompt, which replaces your role and instructions, and optionally tools, a subset of your toolkit names or toolkit.function entries; skills, a subset of your skill names; and knowledge, a subset of your knowledge base IDs to search. Omit tools to keep all of yours; a copy that lists tools gets only the skills and knowledge bases it lists, while one without tools keeps all of yours unless it lists some. The child keeps your workspace, credentials, and approval rules, sees that prompt instead of your configured role and instructions, and gets only those tools, skills, and knowledge bases. Or pass profile to run a saved subagents/<name>.md file from your workspace: YAML frontmatter with description and optional tools, skills, knowledge, model, and mode, then the system prompt as the body. An explicit model overrides the profile. Follow-ups keep the subagent's prompt even if its profile later changes.\nSaved profiles:\n- critic: Finds the biggest risk in a plan.\nIn Matrix, approval-required child tools pause for the user's approval before continuing. Returns the child's answer, stable subagent ID, and an audit reference scoped to the child agent.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "task": {
+                "type": "string",
+                "description": "Self-contained task with relevant context, constraints, and expected output."
+              },
+              "agent_name": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Allowed subagent name; omitted or null selects yourself, if allowed."
+              },
+              "model": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Configured model name from models; omitted or null uses normal model selection."
+              },
+              "system_prompt": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Prompt for a fresh copy of yourself, replacing your role and instructions; omit to use the configured prompt."
+              },
+              "tools": {
+                "anyOf": [
+                  {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Your toolkit names or toolkit.function entries the copy may use; omit to keep all of yours."
+              },
+              "skills": {
+                "anyOf": [
+                  {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Your skill names the copy may use; omitted keeps all of yours only when tools is omitted too."
+              },
+              "knowledge": {
+                "anyOf": [
+                  {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Your knowledge base IDs the copy may search; omitted keeps all of yours only when tools is omitted too."
+              },
+              "profile": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Name of a subagents/<name>.md profile in your workspace; excludes system_prompt, tools, skills, and knowledge."
+              },
+              "title": {
+                "type": "string",
+                "description": "Short title of 3-6 words naming the task, shown to people watching the run."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+              }
+            },
+            "required": [
+              "task",
+              "title"
+            ],
+            "additionalProperties": false
+          }
+        },
+        {
+          "name": "square_root",
+          "description": "Calculate the square root of a number and return the result.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "n": {
+                "type": "number",
+                "description": "(float) Number to calculate the square root of."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+              }
+            },
+            "required": [
+              "n"
+            ]
+          }
+        },
+        {
+          "name": "subtract",
+          "description": "Subtract second number from first and return the result.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "a": {
+                "type": "number",
+                "description": "(float) First number."
+              },
+              "b": {
+                "type": "number",
+                "description": "(float) Second number."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+              }
+            },
+            "required": [
+              "a",
+              "b"
+            ]
+          }
+        }
+      ],
+      "tool_choice": null,
+      "output_schema": null,
+      "deferred_tool_names": []
+    },
+    {
+      "model": {
+        "id": "claude-sonnet-5-5",
+        "provider": "Anthropic"
+      },
+      "messages": [
+        {
+          "content": "<your_role>\n## Your Identity\nYou are Assistant (Matrix ID: @mindroom_assistant:localhost), a specialized agent in the Mindroom multi-agent system in a Matrix chatroom.\nYou are powered by the Anthropic model: claude-sonnet-5-5.\nWhen working in teams with other agents, you should identify yourself as Assistant and leverage your specific expertise.\n\nIn Matrix chat contexts, conversation history from other Matrix senders may be provided inside a `<conversation>` block, with messages wrapped as `<msg from=\"@user:server\" display_name=\"Current Name\"><![CDATA[body]]></msg>`. The `from` attribute is the sender's full Matrix ID and their stable identity. The optional `display_name` attribute is the sender's current display name; it can change, so messages sharing a `from` value are from the same person even when their display names differ, and the newest display name is the current one. The CDATA body preserves code snippets, markdown, and other special characters exactly as written. A `<msg>` tag may also carry a `ts` attribute with the message's local send time formatted as `YYYY-MM-DD HH:MM TZ` (e.g. `ts=\"2026-03-20 08:15 PDT\"`) and an `event_id` attribute for Matrix reactions and edits through `matrix_message.event_id`. Your prior replies remain ordinary assistant messages. The current message you are responding to may also be wrapped in the same `<msg from=\"...\" display_name=\"...\" ts=\"...\">` tag. When the user sent several messages together they are grouped inside a `<messages>` container (sent in quick succession) or a `<queued_messages>` container (arrived while you were still responding); treat such a group as one turn and respond once.\nWhen mentioning a user in your reply, always write the complete Matrix ID including the homeserver (e.g. `@alice:example.org`), never just the localpart before the colon. The chat client renders the full ID as a clickable mention pill.\n\n## Matrix Reply Targeting\nMindRoom dispatches responder turns before you see a message. In one-on-one or single-responder conversations, you may be selected automatically. In multi-agent, multi-team, or multi-human rooms and threads, users must use an explicit Matrix mention of the target responder for that responder to be selected. A natural-language addressing style, such as using an agent or team display name in plain text, is not a Matrix mention.\nIf a user later asks why you did not answer an earlier message, explain that you were not dispatched for that message unless you were explicitly mentioned, routed by the router, or selected as the only eligible responder. Do not apologize as if you saw the message and chose not to reply.\nMultiple explicitly mentioned agents can form an ad-hoc collaboration. Configured teams are targeted directly as their team workflow, not as members of an ad-hoc team.\n\n## Tool Execution Environment\n- All available tools run in the primary MindRoom runtime: `calculator`, `delegate`.\n- No tools use a worker runtime.\n- File access for path tools: `workspace` (agent workspace and attachments only).\n\nAnswer questions about the team handbook.\n</your_role>\n\nYour replies are shown as Markdown, so format them with Markdown where it helps the reader.\n- CommonMark (single newlines break lines), GFM tables, strikethrough, fenced code blocks with a language tag, `<details><summary>...</summary>...</details>` collapsibles (put blank lines around inner Markdown), and `<span data-mx-spoiler>...</span>` spoilers (never `||spoiler||`, which does not render) are supported.\n- For math, use `$inline$` (no spaces just inside `$`) and `$$display$$` on its own line; never use `\\(...\\)` or `\\[...\\]`, which do not render as math.\n- Link Matrix rooms and threads/messages instead of writing bare `!room_id` or `$event_id` strings: use `<https://matrix.to/#/!room_id>` for rooms, and `[title](https://matrix.to/#/!room_id/$event_id)` (custom label) or `<https://matrix.to/#/!room_id/$event_id>` (auto-labeled pill) for threads/messages (optional `?via=server` for federated rooms; never wrap links in backticks).\n- Mermaid fences, GitHub callouts (`> [!NOTE]`), footnotes, and external image URLs (`![](https://...)`) are not rendered; link to external URLs instead.\n- In MindRoom Chat, while streaming, your text appears live while thoughts and tool calls stay collapsed by default (expandable in place); when a reply finishes with earlier text or media before the last tool call and an answer after it, everything up through your last tool call (thoughts, tool calls, and earlier output) folds away. Write a self-contained final answer after your last tool call (including your conclusion and key details), assuming the reader will not open or read anything collapsed above.\n\n- To save a tool's full supported output, such as large output, to a file in your workspace instead of returning it, pass `mindroom_output_path: <relative-path>` and then inspect the saved file with filesystem, python, or shell tools. In shell tools, `$MINDROOM_AGENT_WORKSPACE` points at that workspace; in worker-routed shell and python tools, `~` and `$HOME` point there too.\n\nIf you have file or shell tools, you can create new skills for yourself by writing files inside your own workspace; you never need write access to a global skills directory.\nA skill is a folder `skills/<skill-name>/` in your workspace containing a `SKILL.md` file, plus optional `scripts/` and `references/` subfolders.\n`SKILL.md` starts with YAML frontmatter declaring `name` and `description`, followed by the markdown instructions:\n\n---\nname: my-skill\ndescription: One-line summary of when to use this skill\n---\n\n# My Skill\nStep-by-step instructions...\n\nDo not write to the bundled, plugin, or user skill directories (for example `~/.mindroom/skills`); they may be read-only, and workspace skills take precedence over them anyway.\nA workspace skill you create or edit becomes available on your next run, without any config change.\n\nWhen you need the user to choose between options, create an interactive question by including this JSON in your response with the following format:\n\nIMPORTANT: This is just an example. You can customize the question and options as needed.\n\n```interactive\n{\n    \"question\": \"How would you like me to proceed?\",\n    \"options\": [\n        {\"emoji\": \"🚀\", \"label\": \"Fast and automated\", \"value\": \"fast\"},\n        {\"emoji\": \"🐢\", \"label\": \"Careful and manual\", \"value\": \"slow\"}\n    ]\n}\n```\n\nIMPORTANT:\n- You must write ```interactive on the SAME LINE (no space or newline between the backticks and the word \"interactive\").\n- The JSON block will be automatically replaced with a formatted question showing the options with emojis.\n- Don't write things like \"here are the options:\" before the JSON block - the formatted question will appear instead.\n- Write your response as if the formatted question will be shown directly to the user.\n- Only a SINGLE JSON block will be converted to an interactive question. DO NOT INCLUDE MULTIPLE BLOCKS!\n\nThe JSON block above will be automatically converted to this formatted display:\n\nHow would you like me to proceed?\n\n1. 🚀 Fast and automated\n2. 🐢 Careful and manual\n\nReact with an emoji or type the number to respond.\n\nThe user can respond by:\n- Clicking the emoji reaction\n- Typing the number (1, 2, etc.)\n\nKeep it simple: max 5 options with clear, concise labels, and give each option a different emoji.\n\nYou can run the following configured agents as fresh subagents:\nassistant\n  - Yourself, run as a fresh copy.\n\nresearcher\n  - Research topics in depth.\n  - Tools: calculator\n  - Name your sources.\n\nUse run_subagent for a bounded subtask whose result you need before continuing, and continue_subagent for follow-ups in that child's session.\nDelegation is limited to three nested child levels; a follow-up does not add nesting depth.\nIn Matrix, a child tool that requires approval runs only once the user approves it.\nOther runtimes retain their approval restrictions.\nChild records live in that agent's workspace under .mindroom/delegations/YYYY-MM-DD/<id>/ with run.json and events.jsonl; transcript.md exists only after the child finishes.\nYour workspace contains the corresponding receipt at .mindroom/delegation_receipts/YYYY-MM-DD/<id>.json; dates are UTC.",
+          "role": "system"
+        },
+        {
+          "content": "<mindroom_session_context>\n## Current Date and Time\nToday is <DATE>.\nTimezone: UTC (UTC)\n</mindroom_session_context>",
+          "role": "system"
+        },
+        {
+          "content": "<msg event_id=\"$earlier:localhost\" from=\"@user:localhost\"><![CDATA[Our handbook moved to the new wiki last week.]]></msg>",
+          "role": "user"
+        },
+        {
+          "content": "Current message:\n<msg event_id=\"$current:localhost\" from=\"@user:localhost\" ts=\"2026-09-21 14:14 UTC\"><![CDATA[Check the travel policy and its biggest risk.]]></msg>",
+          "role": "user"
+        },
+        {
+          "provider_data": {
+            "mindroom_model": {
+              "id": "claude-sonnet-5-5",
+              "provider": "Anthropic"
+            }
+          },
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "call_child",
+              "type": "function",
+              "function": {
+                "name": "run_subagent",
+                "arguments": "{\"agent_name\": \"researcher\", \"task\": \"Summarize the travel policy.\"}"
+              }
+            }
+          ]
+        },
+        {
+          "content": "ok\n\nDelegation <ID-1> record: researcher:.mindroom/delegations/<DATE>/<ID-1>\nSubagent ID: <ID-1>",
+          "role": "tool",
+          "tool_args": {
+            "agent_name": "researcher",
+            "task": "Summarize the travel policy."
+          },
+          "tool_call_error": false,
+          "tool_call_id": "call_child",
+          "tool_name": "run_subagent"
+        }
+      ],
+      "tools": [
+        {
+          "name": "add",
+          "description": "Add two numbers and return the result.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "a": {
+                "type": "number",
+                "description": "(float) First number."
+              },
+              "b": {
+                "type": "number",
+                "description": "(float) Second number."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+              }
+            },
+            "required": [
+              "a",
+              "b"
+            ]
+          }
+        },
+        {
+          "name": "continue_subagent",
+          "description": "Send a follow-up to an existing subagent and wait for its answer.\nReuses the child's conversation history, tools, workspace, and memory.\nUse after its previous turn returns; finish pending approvals first.\nThe ID belongs to this caller and conversation, including after restart.\nCurrent allowed-subagent and requester permissions still apply.\nEach follow-up gets a separate audit record and returns the same subagent ID.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "subagent_id": {
+                "type": "string",
+                "description": "Subagent ID (or a unique prefix of at least 8 hex characters) returned by run_subagent or continue_subagent."
+              },
+              "message": {
+                "type": "string",
+                "description": "Follow-up instructions or question for that child."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+              }
+            },
+            "required": [
+              "subagent_id",
+              "message"
+            ]
+          }
+        },
+        {
+          "name": "divide",
+          "description": "Divide first number by second and return the result.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "a": {
+                "type": "number",
+                "description": "(float) Numerator."
+              },
+              "b": {
+                "type": "number",
+                "description": "(float) Denominator."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+              }
+            },
+            "required": [
+              "a",
+              "b"
+            ]
+          }
+        },
+        {
+          "name": "exponentiate",
+          "description": "Raise first number to the power of the second number and return the result.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "a": {
+                "type": "number",
+                "description": "(float) Base."
+              },
+              "b": {
+                "type": "number",
+                "description": "(float) Exponent."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+              }
+            },
+            "required": [
+              "a",
+              "b"
+            ]
+          }
+        },
+        {
+          "name": "factorial",
+          "description": "Calculate the factorial of a number up to 1558 and return the result as a JSON string.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "n": {
+                "type": "integer",
+                "description": "(int) Number to calculate the factorial of, at most 1558."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+              }
+            },
+            "required": [
+              "n"
+            ]
+          }
+        },
+        {
+          "name": "is_prime",
+          "description": "Check if a number up to 10**12 is prime and return the result as a JSON string.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "n": {
+                "type": "integer",
+                "description": "(int) Number to check if prime, at most 10**12."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+              }
+            },
+            "required": [
+              "n"
+            ]
+          }
+        },
+        {
+          "name": "multiply",
+          "description": "Multiply two numbers and return the result.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "a": {
+                "type": "number",
+                "description": "(float) First number."
+              },
+              "b": {
+                "type": "number",
+                "description": "(float) Second number."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+              }
+            },
+            "required": [
+              "a",
+              "b"
+            ]
+          }
+        },
+        {
+          "name": "run_subagent",
+          "description": "Run one allowed configured agent as a fresh subagent and wait for its result.\nAllowed subagents for this caller: assistant, researcher.\nUse only these agent names. Include all relevant context, constraints, and expected output in task; the child does not inherit this conversation. It keeps its configured tools, workspace, and memory.\nSelecting your own name starts a fresh copy of yourself, if listed. Omit agent_name or pass null to select yourself; the same allowlist applies. Set model to a configured model name to override the child's model for this session. Available models: default. Omit model or pass null to use the child's normal thread, room, or configured model. The caller waits; this does not create a Matrix thread. Use continue_subagent with the returned subagent_id for follow-ups in the same child session; follow-ups keep the child's model and mode.\nTo author a fresh copy of yourself, pass system_prompt, which replaces your role and instructions, and optionally tools, a subset of your toolkit names or toolkit.function entries; skills, a subset of your skill names; and knowledge, a subset of your knowledge base IDs to search. Omit tools to keep all of yours; a copy that lists tools gets only the skills and knowledge bases it lists, while one without tools keeps all of yours unless it lists some. The child keeps your workspace, credentials, and approval rules, sees that prompt instead of your configured role and instructions, and gets only those tools, skills, and knowledge bases. Or pass profile to run a saved subagents/<name>.md file from your workspace: YAML frontmatter with description and optional tools, skills, knowledge, model, and mode, then the system prompt as the body. An explicit model overrides the profile. Follow-ups keep the subagent's prompt even if its profile later changes.\nSaved profiles:\n- critic: Finds the biggest risk in a plan.\nIn Matrix, approval-required child tools pause for the user's approval before continuing. Returns the child's answer, stable subagent ID, and an audit reference scoped to the child agent.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "task": {
+                "type": "string",
+                "description": "Self-contained task with relevant context, constraints, and expected output."
+              },
+              "agent_name": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Allowed subagent name; omitted or null selects yourself, if allowed."
+              },
+              "model": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Configured model name from models; omitted or null uses normal model selection."
+              },
+              "system_prompt": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Prompt for a fresh copy of yourself, replacing your role and instructions; omit to use the configured prompt."
+              },
+              "tools": {
+                "anyOf": [
+                  {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Your toolkit names or toolkit.function entries the copy may use; omit to keep all of yours."
+              },
+              "skills": {
+                "anyOf": [
+                  {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Your skill names the copy may use; omitted keeps all of yours only when tools is omitted too."
+              },
+              "knowledge": {
+                "anyOf": [
+                  {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Your knowledge base IDs the copy may search; omitted keeps all of yours only when tools is omitted too."
+              },
+              "profile": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Name of a subagents/<name>.md profile in your workspace; excludes system_prompt, tools, skills, and knowledge."
+              },
+              "title": {
+                "type": "string",
+                "description": "Short title of 3-6 words naming the task, shown to people watching the run."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+              }
+            },
+            "required": [
+              "task",
+              "title"
+            ],
+            "additionalProperties": false
+          }
+        },
+        {
+          "name": "square_root",
+          "description": "Calculate the square root of a number and return the result.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "n": {
+                "type": "number",
+                "description": "(float) Number to calculate the square root of."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+              }
+            },
+            "required": [
+              "n"
+            ]
+          }
+        },
+        {
+          "name": "subtract",
+          "description": "Subtract second number from first and return the result.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "a": {
+                "type": "number",
+                "description": "(float) First number."
+              },
+              "b": {
+                "type": "number",
+                "description": "(float) Second number."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+              }
+            },
+            "required": [
+              "a",
+              "b"
+            ]
+          }
+        }
+      ],
+      "tool_choice": null,
+      "output_schema": null,
+      "deferred_tool_names": []
+    },
+    {
+      "model": {
+        "id": "claude-sonnet-5-5",
+        "provider": "Anthropic"
+      },
+      "messages": [
+        {
+          "content": "<your_role>\n## Your Identity\nYou are Assistant (Matrix ID: @mindroom_assistant:localhost), a specialized agent in the Mindroom multi-agent system in a Matrix chatroom.\nYou are powered by the Anthropic model: claude-sonnet-5-5.\nWhen working in teams with other agents, you should identify yourself as Assistant and leverage your specific expertise.\n\nIn Matrix chat contexts, conversation history from other Matrix senders may be provided inside a `<conversation>` block, with messages wrapped as `<msg from=\"@user:server\" display_name=\"Current Name\"><![CDATA[body]]></msg>`. The `from` attribute is the sender's full Matrix ID and their stable identity. The optional `display_name` attribute is the sender's current display name; it can change, so messages sharing a `from` value are from the same person even when their display names differ, and the newest display name is the current one. The CDATA body preserves code snippets, markdown, and other special characters exactly as written. A `<msg>` tag may also carry a `ts` attribute with the message's local send time formatted as `YYYY-MM-DD HH:MM TZ` (e.g. `ts=\"2026-03-20 08:15 PDT\"`) and an `event_id` attribute for Matrix reactions and edits through `matrix_message.event_id`. Your prior replies remain ordinary assistant messages. The current message you are responding to may also be wrapped in the same `<msg from=\"...\" display_name=\"...\" ts=\"...\">` tag. When the user sent several messages together they are grouped inside a `<messages>` container (sent in quick succession) or a `<queued_messages>` container (arrived while you were still responding); treat such a group as one turn and respond once.\nWhen mentioning a user in your reply, always write the complete Matrix ID including the homeserver (e.g. `@alice:example.org`), never just the localpart before the colon. The chat client renders the full ID as a clickable mention pill.\n\n## Matrix Reply Targeting\nMindRoom dispatches responder turns before you see a message. In one-on-one or single-responder conversations, you may be selected automatically. In multi-agent, multi-team, or multi-human rooms and threads, users must use an explicit Matrix mention of the target responder for that responder to be selected. A natural-language addressing style, such as using an agent or team display name in plain text, is not a Matrix mention.\nIf a user later asks why you did not answer an earlier message, explain that you were not dispatched for that message unless you were explicitly mentioned, routed by the router, or selected as the only eligible responder. Do not apologize as if you saw the message and chose not to reply.\nMultiple explicitly mentioned agents can form an ad-hoc collaboration. Configured teams are targeted directly as their team workflow, not as members of an ad-hoc team.\n\n## Tool Execution Environment\n- All available tools run in the primary MindRoom runtime: `calculator`, `delegate`.\n- No tools use a worker runtime.\n- File access for path tools: `workspace` (agent workspace and attachments only).\n\nAnswer questions about the team handbook.\n</your_role>\n\nYour replies are shown as Markdown, so format them with Markdown where it helps the reader.\n- CommonMark (single newlines break lines), GFM tables, strikethrough, fenced code blocks with a language tag, `<details><summary>...</summary>...</details>` collapsibles (put blank lines around inner Markdown), and `<span data-mx-spoiler>...</span>` spoilers (never `||spoiler||`, which does not render) are supported.\n- For math, use `$inline$` (no spaces just inside `$`) and `$$display$$` on its own line; never use `\\(...\\)` or `\\[...\\]`, which do not render as math.\n- Link Matrix rooms and threads/messages instead of writing bare `!room_id` or `$event_id` strings: use `<https://matrix.to/#/!room_id>` for rooms, and `[title](https://matrix.to/#/!room_id/$event_id)` (custom label) or `<https://matrix.to/#/!room_id/$event_id>` (auto-labeled pill) for threads/messages (optional `?via=server` for federated rooms; never wrap links in backticks).\n- Mermaid fences, GitHub callouts (`> [!NOTE]`), footnotes, and external image URLs (`![](https://...)`) are not rendered; link to external URLs instead.\n- In MindRoom Chat, while streaming, your text appears live while thoughts and tool calls stay collapsed by default (expandable in place); when a reply finishes with earlier text or media before the last tool call and an answer after it, everything up through your last tool call (thoughts, tool calls, and earlier output) folds away. Write a self-contained final answer after your last tool call (including your conclusion and key details), assuming the reader will not open or read anything collapsed above.\n\n- To save a tool's full supported output, such as large output, to a file in your workspace instead of returning it, pass `mindroom_output_path: <relative-path>` and then inspect the saved file with filesystem, python, or shell tools. In shell tools, `$MINDROOM_AGENT_WORKSPACE` points at that workspace; in worker-routed shell and python tools, `~` and `$HOME` point there too.\n\nIf you have file or shell tools, you can create new skills for yourself by writing files inside your own workspace; you never need write access to a global skills directory.\nA skill is a folder `skills/<skill-name>/` in your workspace containing a `SKILL.md` file, plus optional `scripts/` and `references/` subfolders.\n`SKILL.md` starts with YAML frontmatter declaring `name` and `description`, followed by the markdown instructions:\n\n---\nname: my-skill\ndescription: One-line summary of when to use this skill\n---\n\n# My Skill\nStep-by-step instructions...\n\nDo not write to the bundled, plugin, or user skill directories (for example `~/.mindroom/skills`); they may be read-only, and workspace skills take precedence over them anyway.\nA workspace skill you create or edit becomes available on your next run, without any config change.\n\nWhen you need the user to choose between options, create an interactive question by including this JSON in your response with the following format:\n\nIMPORTANT: This is just an example. You can customize the question and options as needed.\n\n```interactive\n{\n    \"question\": \"How would you like me to proceed?\",\n    \"options\": [\n        {\"emoji\": \"🚀\", \"label\": \"Fast and automated\", \"value\": \"fast\"},\n        {\"emoji\": \"🐢\", \"label\": \"Careful and manual\", \"value\": \"slow\"}\n    ]\n}\n```\n\nIMPORTANT:\n- You must write ```interactive on the SAME LINE (no space or newline between the backticks and the word \"interactive\").\n- The JSON block will be automatically replaced with a formatted question showing the options with emojis.\n- Don't write things like \"here are the options:\" before the JSON block - the formatted question will appear instead.\n- Write your response as if the formatted question will be shown directly to the user.\n- Only a SINGLE JSON block will be converted to an interactive question. DO NOT INCLUDE MULTIPLE BLOCKS!\n\nThe JSON block above will be automatically converted to this formatted display:\n\nHow would you like me to proceed?\n\n1. 🚀 Fast and automated\n2. 🐢 Careful and manual\n\nReact with an emoji or type the number to respond.\n\nThe user can respond by:\n- Clicking the emoji reaction\n- Typing the number (1, 2, etc.)\n\nKeep it simple: max 5 options with clear, concise labels, and give each option a different emoji.\n\nYou can run the following configured agents as fresh subagents:\nassistant\n  - Yourself, run as a fresh copy.\n\nresearcher\n  - Research topics in depth.\n  - Tools: calculator\n  - Name your sources.\n\nUse run_subagent for a bounded subtask whose result you need before continuing, and continue_subagent for follow-ups in that child's session.\nDelegation is limited to three nested child levels; a follow-up does not add nesting depth.\nIn Matrix, a child tool that requires approval runs only once the user approves it.\nOther runtimes retain their approval restrictions.\nChild records live in that agent's workspace under .mindroom/delegations/YYYY-MM-DD/<id>/ with run.json and events.jsonl; transcript.md exists only after the child finishes.\nYour workspace contains the corresponding receipt at .mindroom/delegation_receipts/YYYY-MM-DD/<id>.json; dates are UTC.",
+          "role": "system"
+        },
+        {
+          "content": "<mindroom_session_context>\n## Current Date and Time\nToday is <DATE>.\nTimezone: UTC (UTC)\n</mindroom_session_context>",
+          "role": "system"
+        },
+        {
+          "content": "<msg event_id=\"$earlier:localhost\" from=\"@user:localhost\"><![CDATA[Our handbook moved to the new wiki last week.]]></msg>",
+          "role": "user"
+        },
+        {
+          "content": "Current message:\n<msg event_id=\"$current:localhost\" from=\"@user:localhost\" ts=\"2026-09-21 14:14 UTC\"><![CDATA[Check the travel policy and its biggest risk.]]></msg>",
+          "role": "user"
+        },
+        {
+          "provider_data": {
+            "mindroom_model": {
+              "id": "claude-sonnet-5-5",
+              "provider": "Anthropic"
+            }
+          },
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "call_child",
+              "type": "function",
+              "function": {
+                "name": "run_subagent",
+                "arguments": "{\"agent_name\": \"researcher\", \"task\": \"Summarize the travel policy.\"}"
+              }
+            }
+          ]
+        },
+        {
+          "content": "ok\n\nDelegation <ID-1> record: researcher:.mindroom/delegations/<DATE>/<ID-1>\nSubagent ID: <ID-1>",
+          "role": "tool",
+          "tool_args": {
+            "agent_name": "researcher",
+            "task": "Summarize the travel policy."
+          },
+          "tool_call_error": false,
+          "tool_call_id": "call_child",
+          "tool_name": "run_subagent"
+        },
+        {
+          "provider_data": {
+            "mindroom_model": {
+              "id": "claude-sonnet-5-5",
+              "provider": "Anthropic"
+            }
+          },
+          "role": "assistant",
+          "tool_calls": [
+            {
+              "id": "call_persona",
+              "type": "function",
+              "function": {
+                "name": "run_subagent",
+                "arguments": "{\"profile\": \"critic\", \"task\": \"Name the biggest risk in the travel policy.\"}"
+              }
+            }
+          ]
+        },
+        {
+          "content": "ok\n\nDelegation <ID-2> record: assistant:.mindroom/delegations/<DATE>/<ID-2>\nSubagent ID: <ID-2>",
+          "role": "tool",
+          "tool_args": {
+            "profile": "critic",
+            "task": "Name the biggest risk in the travel policy."
+          },
+          "tool_call_error": false,
+          "tool_call_id": "call_persona",
+          "tool_name": "run_subagent"
+        }
+      ],
+      "tools": [
+        {
+          "name": "add",
+          "description": "Add two numbers and return the result.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "a": {
+                "type": "number",
+                "description": "(float) First number."
+              },
+              "b": {
+                "type": "number",
+                "description": "(float) Second number."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+              }
+            },
+            "required": [
+              "a",
+              "b"
+            ]
+          }
+        },
+        {
+          "name": "continue_subagent",
+          "description": "Send a follow-up to an existing subagent and wait for its answer.\nReuses the child's conversation history, tools, workspace, and memory.\nUse after its previous turn returns; finish pending approvals first.\nThe ID belongs to this caller and conversation, including after restart.\nCurrent allowed-subagent and requester permissions still apply.\nEach follow-up gets a separate audit record and returns the same subagent ID.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "subagent_id": {
+                "type": "string",
+                "description": "Subagent ID (or a unique prefix of at least 8 hex characters) returned by run_subagent or continue_subagent."
+              },
+              "message": {
+                "type": "string",
+                "description": "Follow-up instructions or question for that child."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+              }
+            },
+            "required": [
+              "subagent_id",
+              "message"
+            ]
+          }
+        },
+        {
+          "name": "divide",
+          "description": "Divide first number by second and return the result.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "a": {
+                "type": "number",
+                "description": "(float) Numerator."
+              },
+              "b": {
+                "type": "number",
+                "description": "(float) Denominator."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+              }
+            },
+            "required": [
+              "a",
+              "b"
+            ]
+          }
+        },
+        {
+          "name": "exponentiate",
+          "description": "Raise first number to the power of the second number and return the result.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "a": {
+                "type": "number",
+                "description": "(float) Base."
+              },
+              "b": {
+                "type": "number",
+                "description": "(float) Exponent."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+              }
+            },
+            "required": [
+              "a",
+              "b"
+            ]
+          }
+        },
+        {
+          "name": "factorial",
+          "description": "Calculate the factorial of a number up to 1558 and return the result as a JSON string.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "n": {
+                "type": "integer",
+                "description": "(int) Number to calculate the factorial of, at most 1558."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+              }
+            },
+            "required": [
+              "n"
+            ]
+          }
+        },
+        {
+          "name": "is_prime",
+          "description": "Check if a number up to 10**12 is prime and return the result as a JSON string.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "n": {
+                "type": "integer",
+                "description": "(int) Number to check if prime, at most 10**12."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+              }
+            },
+            "required": [
+              "n"
+            ]
+          }
+        },
+        {
+          "name": "multiply",
+          "description": "Multiply two numbers and return the result.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "a": {
+                "type": "number",
+                "description": "(float) First number."
+              },
+              "b": {
+                "type": "number",
+                "description": "(float) Second number."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+              }
+            },
+            "required": [
+              "a",
+              "b"
+            ]
+          }
+        },
+        {
+          "name": "run_subagent",
+          "description": "Run one allowed configured agent as a fresh subagent and wait for its result.\nAllowed subagents for this caller: assistant, researcher.\nUse only these agent names. Include all relevant context, constraints, and expected output in task; the child does not inherit this conversation. It keeps its configured tools, workspace, and memory.\nSelecting your own name starts a fresh copy of yourself, if listed. Omit agent_name or pass null to select yourself; the same allowlist applies. Set model to a configured model name to override the child's model for this session. Available models: default. Omit model or pass null to use the child's normal thread, room, or configured model. The caller waits; this does not create a Matrix thread. Use continue_subagent with the returned subagent_id for follow-ups in the same child session; follow-ups keep the child's model and mode.\nTo author a fresh copy of yourself, pass system_prompt, which replaces your role and instructions, and optionally tools, a subset of your toolkit names or toolkit.function entries; skills, a subset of your skill names; and knowledge, a subset of your knowledge base IDs to search. Omit tools to keep all of yours; a copy that lists tools gets only the skills and knowledge bases it lists, while one without tools keeps all of yours unless it lists some. The child keeps your workspace, credentials, and approval rules, sees that prompt instead of your configured role and instructions, and gets only those tools, skills, and knowledge bases. Or pass profile to run a saved subagents/<name>.md file from your workspace: YAML frontmatter with description and optional tools, skills, knowledge, model, and mode, then the system prompt as the body. An explicit model overrides the profile. Follow-ups keep the subagent's prompt even if its profile later changes.\nSaved profiles:\n- critic: Finds the biggest risk in a plan.\nIn Matrix, approval-required child tools pause for the user's approval before continuing. Returns the child's answer, stable subagent ID, and an audit reference scoped to the child agent.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "task": {
+                "type": "string",
+                "description": "Self-contained task with relevant context, constraints, and expected output."
+              },
+              "agent_name": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Allowed subagent name; omitted or null selects yourself, if allowed."
+              },
+              "model": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Configured model name from models; omitted or null uses normal model selection."
+              },
+              "system_prompt": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Prompt for a fresh copy of yourself, replacing your role and instructions; omit to use the configured prompt."
+              },
+              "tools": {
+                "anyOf": [
+                  {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Your toolkit names or toolkit.function entries the copy may use; omit to keep all of yours."
+              },
+              "skills": {
+                "anyOf": [
+                  {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Your skill names the copy may use; omitted keeps all of yours only when tools is omitted too."
+              },
+              "knowledge": {
+                "anyOf": [
+                  {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    }
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Your knowledge base IDs the copy may search; omitted keeps all of yours only when tools is omitted too."
+              },
+              "profile": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Name of a subagents/<name>.md profile in your workspace; excludes system_prompt, tools, skills, and knowledge."
+              },
+              "title": {
+                "type": "string",
+                "description": "Short title of 3-6 words naming the task, shown to people watching the run."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+              }
+            },
+            "required": [
+              "task",
+              "title"
+            ],
+            "additionalProperties": false
+          }
+        },
+        {
+          "name": "square_root",
+          "description": "Calculate the square root of a number and return the result.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "n": {
+                "type": "number",
+                "description": "(float) Number to calculate the square root of."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+              }
+            },
+            "required": [
+              "n"
+            ]
+          }
+        },
+        {
+          "name": "subtract",
+          "description": "Subtract second number from first and return the result.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "a": {
+                "type": "number",
+                "description": "(float) First number."
+              },
+              "b": {
+                "type": "number",
+                "description": "(float) Second number."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+              }
+            },
+            "required": [
+              "a",
+              "b"
+            ]
+          }
+        }
+      ],
+      "tool_choice": null,
+      "output_schema": null,
+      "deferred_tool_names": []
+    },
+    {
+      "model": {
+        "id": "claude-sonnet-5-5",
+        "provider": "Anthropic"
+      },
+      "messages": [
+        {
+          "content": "<your_role>\n## Your Identity\nYou are Researcher (Matrix ID: @mindroom_researcher:localhost), a specialized agent in the Mindroom multi-agent system in a Matrix chatroom.\nYou are powered by the Anthropic model: claude-sonnet-5-5.\nWhen working in teams with other agents, you should identify yourself as Researcher and leverage your specific expertise.\n\nIn Matrix chat contexts, conversation history from other Matrix senders may be provided inside a `<conversation>` block, with messages wrapped as `<msg from=\"@user:server\" display_name=\"Current Name\"><![CDATA[body]]></msg>`. The `from` attribute is the sender's full Matrix ID and their stable identity. The optional `display_name` attribute is the sender's current display name; it can change, so messages sharing a `from` value are from the same person even when their display names differ, and the newest display name is the current one. The CDATA body preserves code snippets, markdown, and other special characters exactly as written. A `<msg>` tag may also carry a `ts` attribute with the message's local send time formatted as `YYYY-MM-DD HH:MM TZ` (e.g. `ts=\"2026-03-20 08:15 PDT\"`) and an `event_id` attribute for Matrix reactions and edits through `matrix_message.event_id`. Your prior replies remain ordinary assistant messages. The current message you are responding to may also be wrapped in the same `<msg from=\"...\" display_name=\"...\" ts=\"...\">` tag. When the user sent several messages together they are grouped inside a `<messages>` container (sent in quick succession) or a `<queued_messages>` container (arrived while you were still responding); treat such a group as one turn and respond once.\nWhen mentioning a user in your reply, always write the complete Matrix ID including the homeserver (e.g. `@alice:example.org`), never just the localpart before the colon. The chat client renders the full ID as a clickable mention pill.\n\n## Matrix Reply Targeting\nMindRoom dispatches responder turns before you see a message. In one-on-one or single-responder conversations, you may be selected automatically. In multi-agent, multi-team, or multi-human rooms and threads, users must use an explicit Matrix mention of the target responder for that responder to be selected. A natural-language addressing style, such as using an agent or team display name in plain text, is not a Matrix mention.\nIf a user later asks why you did not answer an earlier message, explain that you were not dispatched for that message unless you were explicitly mentioned, routed by the router, or selected as the only eligible responder. Do not apologize as if you saw the message and chose not to reply.\nMultiple explicitly mentioned agents can form an ad-hoc collaboration. Configured teams are targeted directly as their team workflow, not as members of an ad-hoc team.\n\n## Tool Execution Environment\n- All available tools run in the primary MindRoom runtime: `calculator`.\n- No tools use a worker runtime.\n- File access for path tools: `workspace` (agent workspace and attachments only).\n\nResearch topics in depth.\n</your_role>\n\nYour replies are shown as Markdown, so format them with Markdown where it helps the reader.\n- CommonMark (single newlines break lines), GFM tables, strikethrough, fenced code blocks with a language tag, `<details><summary>...</summary>...</details>` collapsibles (put blank lines around inner Markdown), and `<span data-mx-spoiler>...</span>` spoilers (never `||spoiler||`, which does not render) are supported.\n- For math, use `$inline$` (no spaces just inside `$`) and `$$display$$` on its own line; never use `\\(...\\)` or `\\[...\\]`, which do not render as math.\n- Link Matrix rooms and threads/messages instead of writing bare `!room_id` or `$event_id` strings: use `<https://matrix.to/#/!room_id>` for rooms, and `[title](https://matrix.to/#/!room_id/$event_id)` (custom label) or `<https://matrix.to/#/!room_id/$event_id>` (auto-labeled pill) for threads/messages (optional `?via=server` for federated rooms; never wrap links in backticks).\n- Mermaid fences, GitHub callouts (`> [!NOTE]`), footnotes, and external image URLs (`![](https://...)`) are not rendered; link to external URLs instead.\n- In MindRoom Chat, while streaming, your text appears live while thoughts and tool calls stay collapsed by default (expandable in place); when a reply finishes with earlier text or media before the last tool call and an answer after it, everything up through your last tool call (thoughts, tool calls, and earlier output) folds away. Write a self-contained final answer after your last tool call (including your conclusion and key details), assuming the reader will not open or read anything collapsed above.\n\n- Name your sources.\n\n- To save a tool's full supported output, such as large output, to a file in your workspace instead of returning it, pass `mindroom_output_path: <relative-path>` and then inspect the saved file with filesystem, python, or shell tools. In shell tools, `$MINDROOM_AGENT_WORKSPACE` points at that workspace; in worker-routed shell and python tools, `~` and `$HOME` point there too.\n\nIf you have file or shell tools, you can create new skills for yourself by writing files inside your own workspace; you never need write access to a global skills directory.\nA skill is a folder `skills/<skill-name>/` in your workspace containing a `SKILL.md` file, plus optional `scripts/` and `references/` subfolders.\n`SKILL.md` starts with YAML frontmatter declaring `name` and `description`, followed by the markdown instructions:\n\n---\nname: my-skill\ndescription: One-line summary of when to use this skill\n---\n\n# My Skill\nStep-by-step instructions...\n\nDo not write to the bundled, plugin, or user skill directories (for example `~/.mindroom/skills`); they may be read-only, and workspace skills take precedence over them anyway.\nA workspace skill you create or edit becomes available on your next run, without any config change.",
+          "role": "system"
+        },
+        {
+          "content": "<mindroom_session_context>\n## Current Date and Time\nToday is <DATE>.\nTimezone: UTC (UTC)\n</mindroom_session_context>",
+          "role": "system"
+        },
+        {
+          "content": "Current message:\n<msg from=\"@user:localhost\"><![CDATA[Summarize the travel policy.]]></msg>",
+          "role": "user"
+        }
+      ],
+      "tools": [
+        {
+          "name": "add",
+          "description": "Add two numbers and return the result.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "a": {
+                "type": "number",
+                "description": "(float) First number."
+              },
+              "b": {
+                "type": "number",
+                "description": "(float) Second number."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+              }
+            },
+            "required": [
+              "a",
+              "b"
+            ]
+          }
+        },
+        {
+          "name": "divide",
+          "description": "Divide first number by second and return the result.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "a": {
+                "type": "number",
+                "description": "(float) Numerator."
+              },
+              "b": {
+                "type": "number",
+                "description": "(float) Denominator."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+              }
+            },
+            "required": [
+              "a",
+              "b"
+            ]
+          }
+        },
+        {
+          "name": "exponentiate",
+          "description": "Raise first number to the power of the second number and return the result.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "a": {
+                "type": "number",
+                "description": "(float) Base."
+              },
+              "b": {
+                "type": "number",
+                "description": "(float) Exponent."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+              }
+            },
+            "required": [
+              "a",
+              "b"
+            ]
+          }
+        },
+        {
+          "name": "factorial",
+          "description": "Calculate the factorial of a number up to 1558 and return the result as a JSON string.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "n": {
+                "type": "integer",
+                "description": "(int) Number to calculate the factorial of, at most 1558."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+              }
+            },
+            "required": [
+              "n"
+            ]
+          }
+        },
+        {
+          "name": "is_prime",
+          "description": "Check if a number up to 10**12 is prime and return the result as a JSON string.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "n": {
+                "type": "integer",
+                "description": "(int) Number to check if prime, at most 10**12."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+              }
+            },
+            "required": [
+              "n"
+            ]
+          }
+        },
+        {
+          "name": "multiply",
+          "description": "Multiply two numbers and return the result.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "a": {
+                "type": "number",
+                "description": "(float) First number."
+              },
+              "b": {
+                "type": "number",
+                "description": "(float) Second number."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+              }
+            },
+            "required": [
+              "a",
+              "b"
+            ]
+          }
+        },
+        {
+          "name": "square_root",
+          "description": "Calculate the square root of a number and return the result.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "n": {
+                "type": "number",
+                "description": "(float) Number to calculate the square root of."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+              }
+            },
+            "required": [
+              "n"
+            ]
+          }
+        },
+        {
+          "name": "subtract",
+          "description": "Subtract second number from first and return the result.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "a": {
+                "type": "number",
+                "description": "(float) First number."
+              },
+              "b": {
+                "type": "number",
+                "description": "(float) Second number."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+              }
+            },
+            "required": [
+              "a",
+              "b"
+            ]
+          }
+        }
+      ],
+      "tool_choice": null,
+      "output_schema": null,
+      "deferred_tool_names": []
+    },
+    {
+      "model": {
+        "id": "claude-sonnet-5-5",
+        "provider": "Anthropic"
+      },
+      "messages": [
+        {
+          "content": "You are a careful critic. Name the single biggest risk.\n\n<your_role>\n## Tool Execution Environment\n- All available tools run in the primary MindRoom runtime: `calculator`.\n- No tools use a worker runtime.\n- File access for path tools: `workspace` (agent workspace and attachments only).\n</your_role>\n\nYour replies are shown as Markdown, so format them with Markdown where it helps the reader.\n- CommonMark (single newlines break lines), GFM tables, strikethrough, fenced code blocks with a language tag, `<details><summary>...</summary>...</details>` collapsibles (put blank lines around inner Markdown), and `<span data-mx-spoiler>...</span>` spoilers (never `||spoiler||`, which does not render) are supported.\n- For math, use `$inline$` (no spaces just inside `$`) and `$$display$$` on its own line; never use `\\(...\\)` or `\\[...\\]`, which do not render as math.\n- Link Matrix rooms and threads/messages instead of writing bare `!room_id` or `$event_id` strings: use `<https://matrix.to/#/!room_id>` for rooms, and `[title](https://matrix.to/#/!room_id/$event_id)` (custom label) or `<https://matrix.to/#/!room_id/$event_id>` (auto-labeled pill) for threads/messages (optional `?via=server` for federated rooms; never wrap links in backticks).\n- Mermaid fences, GitHub callouts (`> [!NOTE]`), footnotes, and external image URLs (`![](https://...)`) are not rendered; link to external URLs instead.\n- In MindRoom Chat, while streaming, your text appears live while thoughts and tool calls stay collapsed by default (expandable in place); when a reply finishes with earlier text or media before the last tool call and an answer after it, everything up through your last tool call (thoughts, tool calls, and earlier output) folds away. Write a self-contained final answer after your last tool call (including your conclusion and key details), assuming the reader will not open or read anything collapsed above.\n\nTo save a tool's full supported output, such as large output, to a file in your workspace instead of returning it, pass `mindroom_output_path: <relative-path>` and then inspect the saved file with filesystem, python, or shell tools. In shell tools, `$MINDROOM_AGENT_WORKSPACE` points at that workspace; in worker-routed shell and python tools, `~` and `$HOME` point there too.",
+          "role": "system"
+        },
+        {
+          "content": "<mindroom_session_context>\n## Current Date and Time\nToday is <DATE>.\nTimezone: UTC (UTC)\n</mindroom_session_context>",
+          "role": "system"
+        },
+        {
+          "content": "Current message:\n<msg from=\"@user:localhost\"><![CDATA[Name the biggest risk in the travel policy.]]></msg>",
+          "role": "user"
+        }
+      ],
+      "tools": [
+        {
+          "name": "add",
+          "description": "Add two numbers and return the result.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "a": {
+                "type": "number",
+                "description": "(float) First number."
+              },
+              "b": {
+                "type": "number",
+                "description": "(float) Second number."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+              }
+            },
+            "required": [
+              "a",
+              "b"
+            ]
+          }
+        },
+        {
+          "name": "divide",
+          "description": "Divide first number by second and return the result.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "a": {
+                "type": "number",
+                "description": "(float) Numerator."
+              },
+              "b": {
+                "type": "number",
+                "description": "(float) Denominator."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+              }
+            },
+            "required": [
+              "a",
+              "b"
+            ]
+          }
+        },
+        {
+          "name": "exponentiate",
+          "description": "Raise first number to the power of the second number and return the result.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "a": {
+                "type": "number",
+                "description": "(float) Base."
+              },
+              "b": {
+                "type": "number",
+                "description": "(float) Exponent."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+              }
+            },
+            "required": [
+              "a",
+              "b"
+            ]
+          }
+        },
+        {
+          "name": "factorial",
+          "description": "Calculate the factorial of a number up to 1558 and return the result as a JSON string.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "n": {
+                "type": "integer",
+                "description": "(int) Number to calculate the factorial of, at most 1558."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+              }
+            },
+            "required": [
+              "n"
+            ]
+          }
+        },
+        {
+          "name": "is_prime",
+          "description": "Check if a number up to 10**12 is prime and return the result as a JSON string.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "n": {
+                "type": "integer",
+                "description": "(int) Number to check if prime, at most 10**12."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+              }
+            },
+            "required": [
+              "n"
+            ]
+          }
+        },
+        {
+          "name": "multiply",
+          "description": "Multiply two numbers and return the result.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "a": {
+                "type": "number",
+                "description": "(float) First number."
+              },
+              "b": {
+                "type": "number",
+                "description": "(float) Second number."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+              }
+            },
+            "required": [
+              "a",
+              "b"
+            ]
+          }
+        },
+        {
+          "name": "square_root",
+          "description": "Calculate the square root of a number and return the result.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "n": {
+                "type": "number",
+                "description": "(float) Number to calculate the square root of."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+              }
+            },
+            "required": [
+              "n"
+            ]
+          }
+        },
+        {
+          "name": "subtract",
+          "description": "Subtract second number from first and return the result.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "a": {
+                "type": "number",
+                "description": "(float) First number."
+              },
+              "b": {
+                "type": "number",
+                "description": "(float) Second number."
+              },
+              "mindroom_output_path": {
+                "anyOf": [
+                  {
+                    "type": "string"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "default": null,
+                "description": "Optional workspace-relative path: save the full supported output there and return a short receipt."
+              }
+            },
+            "required": [
+              "a",
+              "b"
+            ]
+          }
+        }
+      ],
+      "tool_choice": null,
+      "output_schema": null,
+      "deferred_tool_names": []
+    }
+  ],
+  "scenario": "delegated_child_run"
+}

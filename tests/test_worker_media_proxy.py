@@ -10,11 +10,11 @@ from typing import TYPE_CHECKING
 
 import httpcore
 import pytest
-from agno.media import File
-from agno.tools.function import ToolResult
 
+from mindroom.llm.media import File
 from mindroom.tool_system import media_transport
 from mindroom.tool_system.media_transport import decode_media_result
+from mindroom.tool_system.tool_function import ToolValue
 from mindroom.tool_system.worker_media import serialize_worker_tool_result
 
 if TYPE_CHECKING:
@@ -23,7 +23,7 @@ if TYPE_CHECKING:
 _CONNECT_OK = b"HTTP/1.1 200 Connection established\r\n\r\n"
 
 
-class _RecordingStream(httpcore.MockStream):
+class _RecordingStream(httpcore.AsyncMockStream):
     """Record HTTP bytes and TLS authority below the real HTTPX transports."""
 
     def __init__(self, responses: list[bytes]) -> None:
@@ -32,26 +32,26 @@ class _RecordingStream(httpcore.MockStream):
         self.tls_hosts: list[str | None] = []
         self.closed = False
 
-    def write(self, buffer: bytes, timeout: float | None = None) -> None:
+    async def write(self, buffer: bytes, timeout: float | None = None) -> None:  # noqa: ASYNC109
         """Keep wire requests while letting httpcore own HTTP framing."""
         del timeout
         self.written.extend(buffer)
 
-    def start_tls(
+    async def start_tls(
         self,
         ssl_context: ssl.SSLContext,
         server_hostname: str | None = None,
-        timeout: float | None = None,
-    ) -> httpcore.NetworkStream:
+        timeout: float | None = None,  # noqa: ASYNC109
+    ) -> httpcore.AsyncNetworkStream:
         """Capture the authority selected by the real CONNECT/TLS implementation."""
         del ssl_context, timeout
         self.tls_hosts.append(server_hostname)
         return self
 
-    def close(self) -> None:
+    async def aclose(self) -> None:
         """Expose stream cleanup after successful and rejected responses."""
         self.closed = True
-        super().close()
+        await super().aclose()
 
 
 @dataclass(frozen=True)
@@ -112,31 +112,29 @@ def _capture_connections(
 ) -> list[_Connection]:
     connections: list[_Connection] = []
 
-    def connect(
-        _backend: httpcore.SyncBackend,
+    async def connect(
+        _backend: httpcore.AnyIOBackend,
         host: str,
         port: int,
         **_kwargs: object,
-    ) -> httpcore.NetworkStream:
+    ) -> httpcore.AsyncNetworkStream:
         assert host in responses, f"Unexpected connection to {host}; direct fallback is forbidden"
         stream = _RecordingStream(list(responses[host]))
         connections.append(_Connection(host, port, stream))
         return stream
 
-    monkeypatch.setattr(httpcore.SyncBackend, "connect_tcp", connect)
+    monkeypatch.setattr(httpcore.AnyIOBackend, "connect_tcp", connect)
     return connections
 
 
 def _inline_file(url: str) -> File:
-    result = ToolResult(content="Media", files=[File(url=url)])
+    result = ToolValue(content="Media", files=(File(url=url),))
     decoded = decode_media_result(json.loads(json.dumps(serialize_worker_tool_result(result))))
-    assert isinstance(decoded, ToolResult)
+    assert isinstance(decoded, ToolValue)
     assert decoded.files
     item = decoded.files[0]
     assert item.url is None
     assert item.filepath is None
-    assert item.media_reference is None
-    assert item.external is None
     return item
 
 
@@ -339,11 +337,11 @@ class _UnreadBodyStream(_RecordingStream):
         super().__init__([headers])
         self.read_calls = 0
 
-    def read(self, max_bytes: int, timeout: float | None = None) -> bytes:
+    async def read(self, max_bytes: int, timeout: float | None = None) -> bytes:  # noqa: ASYNC109
         """Expose header-only progress and reject any attempt to fetch the body."""
         self.read_calls += 1
         assert self.read_calls == 1, "Response body must remain unread"
-        return super().read(max_bytes, timeout=timeout)
+        return await super().read(max_bytes, timeout=timeout)
 
 
 def _unread_redirect(location: str, framing: str = "Content-Length: 1000000000000") -> _UnreadBodyStream:
@@ -364,12 +362,12 @@ def _capture_scripted_connections(
 ) -> list[_Connection]:
     connections: list[_Connection] = []
 
-    def connect(
-        _backend: httpcore.SyncBackend,
+    async def connect(
+        _backend: httpcore.AnyIOBackend,
         host: str,
         port: int,
         **_kwargs: object,
-    ) -> httpcore.NetworkStream:
+    ) -> httpcore.AsyncNetworkStream:
         assert len(connections) < len(script), "Unexpected request after the redirect limit"
         expected = script[len(connections)]
         assert (host, port) == (expected.host, expected.port)
@@ -377,7 +375,7 @@ def _capture_scripted_connections(
         connections.append(expected)
         return expected.stream
 
-    monkeypatch.setattr(httpcore.SyncBackend, "connect_tcp", connect)
+    monkeypatch.setattr(httpcore.AnyIOBackend, "connect_tcp", connect)
     return connections
 
 
@@ -407,29 +405,29 @@ def test_worker_media_redirect_body_is_never_read(
     assert b"/final.txt HTTP/1.1\r\n" in final.written
 
 
-@pytest.mark.parametrize(("redirect_count", "loop"), [(5, False), (6, False), (6, True)])
+@pytest.mark.parametrize(("redirect_count", "loop"), [(10, False), (11, False), (11, True)])
 def test_worker_media_manual_redirect_limit(
     monkeypatch: pytest.MonkeyPatch,
     redirect_count: int,
     loop: bool,
 ) -> None:
-    """Five hops succeed; a sixth redirect or a loop fails without a seventh request."""
+    """Ten hops succeed; an eleventh redirect or a loop fails without a twelfth request."""
     monkeypatch.setenv("HTTP_PROXY", "http://10.0.0.10:3128")
     redirects = [_unread_redirect("/start.txt" if loop else f"/hop-{index}.txt") for index in range(redirect_count)]
     streams: list[_RecordingStream] = list(redirects)
-    if redirect_count == 5:
+    if redirect_count == 10:
         streams.append(_RecordingStream([_response()]))
     script = [_Connection("10.0.0.10", 3128, stream) for stream in streams]
     connections = _capture_scripted_connections(monkeypatch, script)
 
-    if redirect_count == 5:
+    if redirect_count == 10:
         assert _inline_file("http://media.example/start.txt").content == b"media"
     else:
         with pytest.raises(ValueError, match="Unable to read worker media resource"):
             _inline_file("http://media.example/start.txt")
 
     assert connections == script
-    assert len(connections) == 6
+    assert len(connections) == 11
     assert all(stream.read_calls == 1 for stream in redirects)
     assert all(stream.closed for stream in streams)
 

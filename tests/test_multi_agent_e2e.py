@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, cast
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
@@ -14,37 +14,42 @@ from mindroom.config.models import ModelConfig
 from mindroom.constants import STREAM_STATUS_KEY, RuntimePaths, resolve_runtime_paths
 from mindroom.final_delivery import StreamTransportOutcome
 from mindroom.knowledge.utils import _KnowledgeResolution
-from mindroom.matrix.client import ResolvedVisibleMessage
+from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.media_inputs import MediaInputs
-from mindroom.orchestrator import _MultiAgentOrchestrator
-from mindroom.teams import TeamMode
+from mindroom.teams.spec import TeamMode
 from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import make_test_agent_bot, owned_matrix_login
 from tests.conftest import (
     TEST_ACCESS_TOKEN,
     TEST_PASSWORD,
-    bind_mock_config_event_journal,
     bind_runtime_paths,
     drain_coalescing,
+    install_model_providers,
     install_runtime_journal_support,
     make_matrix_client_mock,
     patch_response_runner_module,
     runtime_paths_for,
 )
+from tests.fakes.scripted_model import ScriptedModel, answer
 from tests.response_attempt_helpers import install_direct_response_admission
+from tests.response_runner_helpers import streamed_answer
 from tests.threading_helpers import seed_thread_history
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncGenerator
+    from collections.abc import AsyncGenerator, AsyncIterator
     from pathlib import Path
 
 
 def _runtime_paths(storage_path: Path) -> RuntimePaths:
     config_path = storage_path / "config.yaml"
     config_path.write_text("router:\n  model: default\n", encoding="utf-8")
-    return resolve_runtime_paths(config_path=config_path, storage_path=storage_path, process_env={})
+    return resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=storage_path,
+        process_env={"MATRIX_HOMESERVER": "http://localhost:8008"},
+    )
 
 
 def _make_config(storage_path: Path) -> Config:
@@ -56,23 +61,13 @@ def _make_config(storage_path: Path) -> Config:
                     "general": AgentConfig(display_name="GeneralAgent", rooms=["!test:localhost"]),
                 },
                 teams={},
-                models={"default": ModelConfig(provider="test", id="test-model")},
+                models={"default": ModelConfig(provider="openai", id="test-model")},
             ),
         ),
         _runtime_paths(storage_path),
     )
     config.memory.backend = "file"
     return config
-
-
-def _visible_message(*, sender: str, body: str, event_id: str, timestamp: int) -> ResolvedVisibleMessage:
-    """Build one typed visible message for thread-history tests."""
-    return ResolvedVisibleMessage.synthetic(
-        sender=sender,
-        body=body,
-        event_id=event_id,
-        timestamp=timestamp,
-    )
 
 
 @pytest.fixture
@@ -125,7 +120,6 @@ async def test_agent_processes_direct_mention(  # noqa: PLR0915
 
         bot = make_test_agent_bot(
             mock_calculator_agent,
-            tmp_path,
             config,
             runtime_paths_for(config),
             rooms=[test_room_id],
@@ -160,7 +154,7 @@ async def test_agent_processes_direct_mention(  # noqa: PLR0915
 
         room = nio.MatrixRoom(test_room_id, mock_calculator_agent.user_id)
 
-        async def mock_streaming_response() -> AsyncGenerator[str, None]:
+        async def mock_streaming_response() -> AsyncGenerator[str]:
             yield "15% of 200 is 30"
 
         mock_ai = MagicMock(return_value=mock_streaming_response())
@@ -174,12 +168,19 @@ async def test_agent_processes_direct_mention(  # noqa: PLR0915
                 should_use_streaming=AsyncMock(return_value=True),
             ),
         ):
-            mock_send_streaming_response.return_value = StreamTransportOutcome(
+            transport = StreamTransportOutcome(
                 last_physical_stream_event_id="$response",
-                terminal_status="completed",
                 rendered_body="15% of 200 is 30",
                 visible_body_state="visible_body",
             )
+
+            async def consume_stream(*args: object, **_kwargs: object) -> StreamTransportOutcome:
+                # The turn's stream starts the agent once the streamer reads it.
+                async for _chunk in cast("AsyncIterator[object]", args[4]):
+                    pass
+                return transport
+
+            mock_send_streaming_response.side_effect = consume_stream
             await bot._on_message(room, message_event)
             await drain_coalescing(bot)
 
@@ -189,25 +190,24 @@ async def test_agent_processes_direct_mention(  # noqa: PLR0915
         ai_ctx = mock_ai.call_args.args[0]
         assert ai_ctx.entity_label == "calculator"
         assert (
-            ai_kwargs["prompt"]
-            == f"@mindroom_calculator:{config.get_domain(runtime_paths_for(config))} What's 15% of 200?"
+            ai_ctx.prompt == f"@mindroom_calculator:{config.get_domain(runtime_paths_for(config))} What's 15% of 200?"
         )
         assert (
-            ai_kwargs["model_prompt"]
+            ai_ctx.model_prompt
             == f"@mindroom_calculator:{config.get_domain(runtime_paths_for(config))} What's 15% of 200?"
         )
-        assert ai_kwargs["current_timestamp_ms"] == 1234567890.0
+        assert ai_ctx.current_timestamp_ms == 1234567890.0
         assert ai_ctx.session_id == f"{test_room_id}:$thread_root:localhost"
-        assert ai_kwargs["thread_history"] == []
-        assert ai_kwargs["runtime_paths"].storage_root == runtime_paths_for(config).storage_root
-        assert ai_kwargs["config"] == config
+        assert ai_ctx.thread_history == []
+        assert mock_ai.call_args.args[1].storage_root == runtime_paths_for(config).storage_root
+        assert mock_ai.call_args.args[2] == config
         assert ai_ctx.room_id == test_room_id
-        assert ai_kwargs["knowledge"] is None
+        assert ai_ctx.knowledge is None
         assert ai_ctx.requester_id == test_user_id
-        assert ai_kwargs["media"] == MediaInputs()
+        assert ai_ctx.media == MediaInputs()
         assert ai_ctx.reply_to_event_id == "$test_event:localhost"
-        assert ai_kwargs["show_tool_calls"] is True
-        assert ai_kwargs["run_metadata_collector"] == {}
+        assert ai_ctx.show_tool_calls is True
+        assert ai_kwargs["sinks"].run_metadata_collector == {}
 
         mock_send_streaming_response.assert_awaited_once()
         send_args = mock_send_streaming_response.await_args.args
@@ -235,7 +235,6 @@ async def test_agent_ignores_other_agents(
 
         bot = make_test_agent_bot(
             mock_calculator_agent,
-            tmp_path,
             config,
             runtime_paths_for(config),
             rooms=[test_room_id],
@@ -271,25 +270,21 @@ async def test_agent_ignores_other_agents(
 
 
 @pytest.mark.asyncio
-@patch("mindroom.teams.resolve_agent_knowledge_access")
-@patch("mindroom.teams.create_agent")
-@patch("mindroom.teams.Team.arun")
+@patch("mindroom.teams.members.resolve_agent_knowledge_access")
 async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR0915
-    mock_team_arun: AsyncMock,
-    mock_create_agent: MagicMock,
     mock_resolve_agent_knowledge_access: MagicMock,
     mock_calculator_agent: AgentMatrixUser,
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Test that agents respond in threads based on whether other agents are participating."""
     # Create the config first to get the actual domain
     mock_config = _make_config(tmp_path)
     mock_config.models = {"default": ModelConfig(provider="anthropic", id="claude-haiku-4-5")}
     mock_resolve_agent_knowledge_access.return_value = _KnowledgeResolution(knowledge=None)
-    fake_member = MagicMock()
-    fake_member.name = "MockAgent"
-    fake_member.instructions = []
-    mock_create_agent.return_value = fake_member
+    # Every model builds as the team's leader, which answers on its own; the members are never asked.
+    team_leader = ScriptedModel([answer("Team response")])
+    install_model_providers(monkeypatch, {"default": team_leader})
 
     # Use the actual domain from config (which comes from MATRIX_HOMESERVER env var)
     domain = mock_config.get_domain(runtime_paths_for(mock_config))
@@ -303,7 +298,7 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
     with (
         patch("mindroom.bot.login_agent_owned_session") as mock_login,
         patch("mindroom.config.main.load_config", return_value=mock_config),
-        patch("mindroom.teams._select_team_mode", new=AsyncMock()) as mock_select_mode,
+        patch("mindroom.turns.dispatch.select_ad_hoc_team_mode", new=AsyncMock()) as mock_select_mode,
     ):
         mock_client = make_matrix_client_mock(user_id=mock_calculator_agent.user_id)
         mock_client.user_id = mock_calculator_agent.user_id
@@ -315,27 +310,16 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
         mock_select_mode.return_value = TeamMode.COLLABORATE
 
         config = _make_config(tmp_path)
+        config.defaults.enable_streaming = False
 
         bot = make_test_agent_bot(
             mock_calculator_agent,
-            tmp_path,
             config,
             runtime_paths_for(config),
             rooms=[test_room_id],
-            enable_streaming=False,
         )
         install_direct_response_admission(bot)
         install_runtime_journal_support(bot)
-
-        # Mock orchestrator
-        mock_orchestrator = MagicMock()
-        mock_agent_bot = MagicMock()
-        mock_agent_bot.agent = MagicMock()
-        mock_orchestrator.agent_bots = {"calculator": mock_agent_bot, "general": mock_agent_bot}
-        mock_orchestrator.current_config = mock_config
-        mock_orchestrator.config = mock_config  # This is what teams.py uses
-        bot.orchestrator = mock_orchestrator
-        mock_team_arun.return_value = "Team response"
 
         await bot.start()
 
@@ -369,44 +353,45 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
         }
         room.members_synced = True
 
-        with (
-            patch("mindroom.text_ingress_dispatch.is_dm_room", return_value=False),  # Not a DM room
+        # Only this agent in the thread
+        thread_history = [
+            ResolvedVisibleMessage.synthetic(
+                sender=test_user_id,
+                body="What's 10% of 100?",
+                timestamp=123,
+                event_id="msg1",
+            ),
+            ResolvedVisibleMessage.synthetic(
+                sender=mock_calculator_agent.user_id,
+                body="10% of 100 is 10",
+                timestamp=124,
+                event_id="msg2",
+            ),
+        ]
+        # Participation is read from the projection, so the thread has to
+        # really contain this agent's earlier reply.
+        await seed_thread_history(
+            bot,
+            room_id=test_room_id,
+            thread_id=thread_root_id,
+            messages=thread_history,
+        )
+
+        mock_ai = AsyncMock(return_value="20% of 300 is 60")
+        with patch_response_runner_module(
+            stream_agent_response=streamed_answer(mock_ai),
+            should_use_streaming=AsyncMock(return_value=False),
         ):
-            # Only this agent in the thread
-            thread_history = [
-                _visible_message(sender=test_user_id, body="What's 10% of 100?", timestamp=123, event_id="msg1"),
-                _visible_message(
-                    sender=mock_calculator_agent.user_id,
-                    body="10% of 100 is 10",
-                    timestamp=124,
-                    event_id="msg2",
-                ),
-            ]
-            # Participation is read from the projection, so the thread has to
-            # really contain this agent's earlier reply.
-            await seed_thread_history(
-                bot,
-                room_id=test_room_id,
-                thread_id=thread_root_id,
-                messages=thread_history,
-            )
+            await bot._on_message(room, message_event)
+            await drain_coalescing(bot)
 
-            mock_ai = AsyncMock(return_value="20% of 300 is 60")
-            with patch_response_runner_module(
-                ai_response=mock_ai,
-                should_use_streaming=AsyncMock(return_value=False),
-            ):
-                await bot._on_message(room, message_event)
-                await drain_coalescing(bot)
-
-            # Should process the message as only agent in thread
-            mock_ai.assert_called_once()
-            # With stop button support: placeholder + reaction + final
-            assert bot.client.room_send.call_count >= 2
+        # Should process the message as only agent in thread
+        mock_ai.assert_called_once()
+        # With stop button support: placeholder + reaction + final
+        assert bot.client.room_send.call_count >= 2
 
         # Test 2: Thread with multiple agents - should form team and respond
         bot.client.room_send.reset_mock()
-        mock_team_arun.reset_mock()
 
         # Create a new message event with a different ID for Test 2
         message_event_2 = nio.RoomMessageText(
@@ -430,61 +415,63 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
         )
         message_event_2.sender = test_user_id
 
-        with (
-            patch("mindroom.text_ingress_dispatch.is_dm_room", return_value=False),  # Not a DM room
+        # Multiple agents in the thread
+        thread_history = [
+            ResolvedVisibleMessage.synthetic(
+                sender=test_user_id,
+                body="What's 10% of 100?",
+                timestamp=123,
+                event_id="msg1",
+            ),
+            ResolvedVisibleMessage.synthetic(
+                sender=mock_calculator_agent.user_id,
+                body="10% of 100 is 10",
+                timestamp=124,
+                event_id="msg2",
+            ),
+            ResolvedVisibleMessage.synthetic(
+                sender=f"@mindroom_general:{domain}",
+                body="I can also help",
+                timestamp=125,
+                event_id="msg3",
+            ),
+        ]
+        # A second agent joins the thread; re-seeding the two already
+        # admitted messages is idempotent.
+        await seed_thread_history(
+            bot,
+            room_id=test_room_id,
+            thread_id=thread_root_id,
+            messages=thread_history,
+        )
+        # A homeserver never reuses an event ID, and each reply is bound to the one it created.
+        bot.client.room_send.side_effect = [
+            nio.RoomSendResponse.from_dict({"event_id": "$placeholder-team"}, test_room_id),
+            nio.RoomSendResponse.from_dict({"event_id": "$edit-team"}, test_room_id),
+        ]
+
+        mock_ai = AsyncMock()
+        mock_team_response = AsyncMock(return_value="Team response")
+        with patch_response_runner_module(
+            stream_agent_response=streamed_answer(mock_ai),
+            team_response_stream=streamed_answer(mock_team_response),
+            should_use_streaming=AsyncMock(return_value=False),
         ):
-            # Multiple agents in the thread
-            thread_history = [
-                _visible_message(sender=test_user_id, body="What's 10% of 100?", timestamp=123, event_id="msg1"),
-                _visible_message(
-                    sender=mock_calculator_agent.user_id,
-                    body="10% of 100 is 10",
-                    timestamp=124,
-                    event_id="msg2",
-                ),
-                _visible_message(
-                    sender=f"@mindroom_general:{domain}",
-                    body="I can also help",
-                    timestamp=125,
-                    event_id="msg3",
-                ),
-            ]
-            # A second agent joins the thread; re-seeding the two already
-            # admitted messages is idempotent.
-            await seed_thread_history(
-                bot,
-                room_id=test_room_id,
-                thread_id=thread_root_id,
-                messages=thread_history,
-            )
-            # A homeserver never reuses an event ID, and each reply is bound to the one it created.
-            bot.client.room_send.side_effect = [
-                nio.RoomSendResponse.from_dict({"event_id": "$placeholder-team"}, test_room_id),
-                nio.RoomSendResponse.from_dict({"event_id": "$edit-team"}, test_room_id),
-            ]
+            await bot._on_message(room, message_event_2)
+            await drain_coalescing(bot)
 
-            mock_ai = AsyncMock()
-            mock_team_response = AsyncMock(return_value="Team response")
-            with patch_response_runner_module(
-                ai_response=mock_ai,
-                team_response=mock_team_response,
-                should_use_streaming=AsyncMock(return_value=False),
-            ):
-                await bot._on_message(room, message_event_2)
-                await drain_coalescing(bot)
-
-            # Should form team and send team response when multiple agents in thread
-            mock_ai.assert_not_called()
-            mock_team_response.assert_awaited_once()
-            assert bot.client.room_send.call_count == 2
-            placeholder_content = bot.client.room_send.call_args_list[0].kwargs["content"]
-            final_content = bot.client.room_send.call_args_list[1].kwargs["content"]
-            assert placeholder_content[STREAM_STATUS_KEY] == "pending"
-            assert placeholder_content["body"].startswith("🤝 Team Response: Thinking...")
-            assert final_content["m.relates_to"]["rel_type"] == "m.replace"
-            assert final_content["m.relates_to"]["event_id"] == "$placeholder-team"
-            assert final_content["m.new_content"]["body"] != placeholder_content["body"]
-            bot.client.room_send.side_effect = None
+        # Should form team and send team response when multiple agents in thread
+        mock_ai.assert_not_called()
+        mock_team_response.assert_awaited_once()
+        assert bot.client.room_send.call_count == 2
+        placeholder_content = bot.client.room_send.call_args_list[0].kwargs["content"]
+        final_content = bot.client.room_send.call_args_list[1].kwargs["content"]
+        assert placeholder_content[STREAM_STATUS_KEY] == "pending"
+        assert placeholder_content["body"].startswith("🤝 Team Response: Thinking...")
+        assert final_content["m.relates_to"]["rel_type"] == "m.replace"
+        assert final_content["m.relates_to"]["event_id"] == "$placeholder-team"
+        assert final_content["m.new_content"]["body"] != placeholder_content["body"]
+        bot.client.room_send.side_effect = None
 
         # Reset mocks for Test 3
         bot.client.room_send.reset_mock()
@@ -492,7 +479,6 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
             nio.RoomSendResponse.from_dict({"event_id": "$placeholder-mention"}, test_room_id),
             nio.RoomSendResponse.from_dict({"event_id": "$edit-mention"}, test_room_id),
         ]
-        mock_team_arun.reset_mock()
 
         # Test 3: Thread with multiple agents WITH mention - should respond
         message_event_with_mention = nio.RoomMessageText(
@@ -520,17 +506,21 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
 
         with (
             patch.object(bot._conversation_resolver, "fetch_thread_history") as mock_refresh_history,
-            patch("mindroom.text_ingress_dispatch.is_dm_room", return_value=False),  # Not a DM room
         ):
             thread_history = [
-                _visible_message(sender=test_user_id, body="What's 10% of 100?", timestamp=123, event_id="msg1"),
-                _visible_message(
+                ResolvedVisibleMessage.synthetic(
+                    sender=test_user_id,
+                    body="What's 10% of 100?",
+                    timestamp=123,
+                    event_id="msg1",
+                ),
+                ResolvedVisibleMessage.synthetic(
                     sender=mock_calculator_agent.user_id,
                     body="10% of 100 is 10",
                     timestamp=124,
                     event_id="msg2",
                 ),
-                _visible_message(
+                ResolvedVisibleMessage.synthetic(
                     sender=f"@mindroom_general:{domain}",
                     body="I can also help",
                     timestamp=125,
@@ -541,7 +531,7 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
 
             mock_ai = AsyncMock(return_value="20% of 300 is 60")
             with patch_response_runner_module(
-                ai_response=mock_ai,
+                stream_agent_response=streamed_answer(mock_ai),
                 should_use_streaming=AsyncMock(return_value=False),
             ):
                 await bot._on_message(room, message_event_with_mention)
@@ -552,25 +542,25 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
             ai_kwargs = mock_ai.call_args.kwargs
             ai_ctx = mock_ai.call_args.args[0]
             assert ai_ctx.entity_label == "calculator"
-            assert ai_kwargs["prompt"] == f"@mindroom_calculator:{domain} What about 20% of 300?"
-            assert ai_kwargs["model_prompt"] == f"@mindroom_calculator:{domain} What about 20% of 300?"
-            assert ai_kwargs["current_timestamp_ms"] == 1234567890.0
+            assert ai_ctx.prompt == f"@mindroom_calculator:{domain} What about 20% of 300?"
+            assert ai_ctx.model_prompt == f"@mindroom_calculator:{domain} What about 20% of 300?"
+            assert ai_ctx.current_timestamp_ms == 1234567890.0
             assert ai_ctx.session_id == f"{test_room_id}:{thread_root_id}"
-            assert ai_kwargs["thread_history"][0].body.startswith("[")
-            assert ai_kwargs["thread_history"][0].body.endswith("What's 10% of 100?")
-            assert ai_kwargs["thread_history"][1].body == "10% of 100 is 10"
-            assert ai_kwargs["thread_history"][2].body == "I can also help"
-            assert ai_kwargs["runtime_paths"].storage_root == runtime_paths_for(config).storage_root
-            assert ai_kwargs["config"] == config
+            assert ai_ctx.thread_history[0].body.startswith("[")
+            assert ai_ctx.thread_history[0].body.endswith("What's 10% of 100?")
+            assert ai_ctx.thread_history[1].body == "10% of 100 is 10"
+            assert ai_ctx.thread_history[2].body == "I can also help"
+            assert mock_ai.call_args.args[1].storage_root == runtime_paths_for(config).storage_root
+            assert mock_ai.call_args.args[2] == config
             assert ai_ctx.room_id == test_room_id
-            assert ai_kwargs["knowledge"] is None
+            assert ai_ctx.knowledge is None
             assert ai_ctx.requester_id == test_user_id
-            assert ai_kwargs["media"] == MediaInputs()
+            assert ai_ctx.media == MediaInputs()
             assert ai_ctx.reply_to_event_id == f"$test_event2:{domain}"
-            assert ai_kwargs["show_tool_calls"] is True
-            assert ai_kwargs["collect_streamed_response"] is True
-            assert ai_kwargs["tool_trace_collector"] == []
-            assert ai_kwargs["run_metadata_collector"] == {}
+            assert ai_ctx.show_tool_calls is True
+            # The runner collects the trace from the stream itself; the turn writes its record.
+            assert ai_kwargs["sinks"].turn_recorder is not None
+            assert ai_kwargs["sinks"].run_metadata_collector == {}
 
             # Verify a response stays in the target thread.
             sent_contents = [call.kwargs["content"] for call in bot.client.room_send.call_args_list]
@@ -580,55 +570,6 @@ async def test_agent_responds_in_threads_based_on_participation(  # noqa: PLR091
                 and content.get("m.relates_to", {}).get("event_id") == thread_root_id
                 for content in sent_contents
             )
-
-
-@pytest.mark.asyncio
-@pytest.mark.requires_matrix  # Requires real Matrix server for multi-agent orchestration
-@pytest.mark.timeout(10)  # Add timeout to prevent hanging on real server connection
-async def test_orchestrator_manages_multiple_agents(tmp_path: Path) -> None:
-    """Test that the orchestrator manages multiple agents correctly."""
-    with patch("mindroom.orchestrator.load_config") as mock_from_yaml:
-        mock_config = MagicMock()
-        mock_config.agents = {
-            "calculator": MagicMock(display_name="CalculatorAgent", rooms=["room1"]),
-            "general": MagicMock(display_name="GeneralAgent", rooms=["room1"]),
-        }
-        mock_config.teams = {}
-        bind_mock_config_event_journal(mock_config)
-        mock_from_yaml.return_value = mock_config
-
-        with patch("mindroom.orchestrator._MultiAgentOrchestrator._ensure_user_account", new=AsyncMock()):
-            orchestrator = _MultiAgentOrchestrator(runtime_paths=_runtime_paths(tmp_path))
-            await orchestrator.initialize()
-
-            # Verify agents were created (2 agents + 1 router)
-            assert len(orchestrator.agent_bots) == 3
-            assert "calculator" in orchestrator.agent_bots
-            assert "general" in orchestrator.agent_bots
-            assert "router" in orchestrator.agent_bots
-
-            # Test that agents can be started
-            with (
-                patch("mindroom.bot.login_agent_owned_session") as mock_login,
-                patch("mindroom.bot.AgentBot.ensure_user_account", new=AsyncMock()),
-            ):
-                mock_client = AsyncMock()
-                mock_client.add_event_callback = MagicMock()
-                mock_client.add_response_callback = MagicMock()
-                mock_client.user_id = "@mindroom_calculator:localhost"
-                mock_client.join = AsyncMock(return_value=nio.JoinResponse(room_id="!test:localhost"))
-                # Don't run sync_forever, just verify setup
-                mock_client.sync_forever = AsyncMock()
-                mock_login.return_value = owned_matrix_login(mock_client)
-
-                # Manually start agents without running sync_forever
-                for bot in orchestrator.agent_bots.values():
-                    await bot.start()
-
-                # Verify all agents were started (2 agents + 1 router = 3)
-                assert mock_login.call_count == 3
-                assert all(bot.running for bot in orchestrator.agent_bots.values())
-                assert all(bot.client is not None for bot in orchestrator.agent_bots.values())
 
 
 @pytest.mark.asyncio
@@ -648,7 +589,6 @@ async def test_agent_handles_room_invite(mock_calculator_agent: AgentMatrixUser,
 
         bot = make_test_agent_bot(
             mock_calculator_agent,
-            tmp_path,
             config,
             runtime_paths_for(config),
             rooms=[initial_room],
@@ -663,8 +603,8 @@ async def test_agent_handles_room_invite(mock_calculator_agent: AgentMatrixUser,
         mock_room.inviter = mock_event.sender
         bot.client.invited_rooms = {invite_room: mock_room}
 
-        await bot._room_lifecycle.record_pending_room_invite(mock_room.room_id, mock_event.sender)
-        await bot._room_lifecycle.handle_recorded_invite(mock_room, mock_event.sender)
+        await bot._room_lifecycle._record_pending_room_invite(mock_room.room_id, mock_event.sender)
+        await bot._room_lifecycle._handle_recorded_invite(mock_room, mock_event.sender)
 
         # Verify new room was joined (not the initial room)
         bot.client.join.assert_called_with(invite_room)

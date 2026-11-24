@@ -127,7 +127,6 @@ class _ContractCase:
 
 def _contract_cases() -> tuple[_ContractCase, ...]:
     actions = (
-        _ContractCase("show_computer", "", "show_computer"),
         *(
             _ContractCase(f"open_settings/{section}", "", "open_settings", section)
             for section in get_args(get_type_hints(ChatUITools.open_settings)["section"])
@@ -140,9 +139,11 @@ def _contract_cases() -> tuple[_ContractCase, ...]:
         _ContractCase("show_canvas/update", "", "show_canvas", "update"),
         _ContractCase("show_canvas/document", "", "show_canvas", "document"),
         _ContractCase("show_canvas/shared", "", "show_canvas", "shared"),
+        _ContractCase("show_canvas/inline", "", "show_canvas", "inline"),
+        _ContractCase("show_canvas/page", "", "show_canvas", "page"),
     )
     # read_canvas_state only reads, so it sends no UI action for Chat to handle.
-    registered_actions = set(ChatUITools(enable_show_canvas=True).get_async_functions()) - {"read_canvas_state"}
+    registered_actions = set(ChatUITools(enable_show_canvas=True).functions) - {"read_canvas_state"}
     exported_actions = {case.action for case in actions}
     if registered_actions != exported_actions:
         msg = (
@@ -158,13 +159,19 @@ def _contract_cases() -> tuple[_ContractCase, ...]:
 
 
 async def _invoke_contract_case(tool: ChatUITools, case: _ContractCase) -> str:
-    if case.action == "show_computer":
-        return await tool.show_computer()
     if case.action == "open_settings":
         return await tool.open_settings(section=case.argument)  # type: ignore[arg-type]
     if case.action == "show_canvas":
         html = CONTRACT_CANVAS_DOCUMENT_HTML if case.argument == "document" else CONTRACT_CANVAS_HTML
-        return await tool.show_canvas(title=CONTRACT_CANVAS_TITLE, html=html, share_state=case.argument == "shared")
+        return await tool.show_canvas(
+            title=CONTRACT_CANVAS_TITLE,
+            html=html,
+            share_state=case.argument == "shared",
+            inline=case.argument in {"inline", "page"},
+            raw=case.argument == "page",
+            width=1440 if case.argument == "page" else None,
+            libraries=["chartjs", "katex"] if case.argument == "page" else None,
+        )
     return await tool.open_panel(panel=case.argument)  # type: ignore[arg-type]
 
 
@@ -221,7 +228,8 @@ async def build_chat_ui_contract(tmp_path: Path) -> dict[str, object]:
             msg = f"Chat UI contract case {case_id!r} failed to emit: {result!r}"
             raise RuntimeError(msg)
         exported: dict[str, object] = {"id": case_id, "event": _contract_event(context, event_id)}
-        if case.argument in {"update", "shared"}:
+        # A page preview is checked as first shown, so the client reads its raw presentation and width.
+        if case.argument in {"update", "shared", "inline"}:
             edit_id = f"{event_id}-edit"
             update = json.loads(await _update_contract_canvas(context, exported["event"], edit_id))  # type: ignore[arg-type]
             if update.get("status") != "ok" or update.get("revision_event_id") != edit_id:

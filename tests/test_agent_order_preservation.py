@@ -12,7 +12,8 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig
 from mindroom.constants import ROUTER_AGENT_NAME
-from mindroom.teams import TeamMode, TeamOutcome, decide_team_formation
+from mindroom.teams.formation import TeamOutcome, decide_team_formation
+from mindroom.teams.spec import TeamMode
 from mindroom.thread_utils import check_agent_mentioned, get_agents_in_thread, get_all_mentioned_agents_in_thread
 from tests.conftest import bind_runtime_paths, make_visible_message, runtime_paths_for, test_runtime_paths
 from tests.identity_helpers import actual_entity_usernames, entity_ids, entity_name_for_id, persist_entity_accounts
@@ -290,9 +291,12 @@ class TestIntegrationWithTeamFormation:
             tagged_agents=tagged_agents,
             agents_in_thread=[],
             all_mentioned_in_thread=[],
-            room=None,
             runtime_paths=runtime_paths,
             config=mock_config,
+            is_dm_room=False,
+            is_thread=False,
+            available_responders_in_room=tagged_agents,
+            materializable_agent_names=None,
         )
 
         # Agents should be in the same order as tagged

@@ -19,6 +19,7 @@ from mindroom.matrix import _owned_session, appservice, users
 from mindroom.matrix.client_session import MindRoomAsyncClient, PermanentMatrixStartupError, olm_store_dir
 from mindroom.matrix.state import MatrixState
 from mindroom.matrix.users import AgentMatrixUser
+from tests.durable_sync_helpers import skip_crypto_maintenance
 from tests.test_matrix_agent_manager import _runtime_paths
 
 if TYPE_CHECKING:
@@ -61,6 +62,11 @@ def _credential_http(monkeypatch: pytest.MonkeyPatch) -> list[str]:
     monkeypatch.setattr(_owned_session, "create_matrix_http_client", client)
     monkeypatch.setattr(users, "ensure_agent_cross_signing", AsyncMock())
     monkeypatch.setattr(MindRoomAsyncClient, "set_displayname", AsyncMock())
+    monkeypatch.setattr(
+        MindRoomAsyncClient,
+        "get_displayname",
+        AsyncMock(return_value=nio.ProfileGetDisplayNameResponse("Agent")),
+    )
 
     async def appservice_login(*_args: object, payload: dict[str, object], **_kwargs: object) -> httpx.Response:
         requested_devices.append(str(payload.get("device_id", "")))
@@ -109,7 +115,7 @@ async def test_soft_logout_keeps_stream_crypto_and_retained_input(
             first.session._transport.request = AsyncMock(
                 return_value=json.dumps({"next_batch": "retained", "rooms": {}}).encode(),
             )
-            first.session._maintain_crypto = AsyncMock()
+            skip_crypto_maintenance(first.session)
             producer = asyncio.create_task(first.session.run())
             try:
                 await asyncio.wait_for(first.session.wait_for_work(), timeout=2)

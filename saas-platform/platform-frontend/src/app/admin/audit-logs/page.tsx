@@ -26,10 +26,8 @@ export default function AuditLogsPage() {
   useEffect(() => {
     const fetchAuditLogs = async () => {
       try {
-        // Get last 100 audit logs
-        const response = await apiCall(
-          '/admin/audit_logs?_sort=created_at&_order=DESC&_start=0&_end=100'
-        )
+        // The 100 newest audit logs.
+        const response = await apiCall('/admin/audit_logs?limit=100')
 
         if (response.ok) {
           const data = await response.json()

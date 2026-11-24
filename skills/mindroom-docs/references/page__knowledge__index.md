@@ -2,7 +2,7 @@
 
 Knowledge bases give agents access to your own documents.
 Point a knowledge base at a folder or Git repository and assign it to agents.
-In `semantic` mode (the default), MindRoom indexes the files with an embedder into a vector database, and assigned agents get a `search_knowledge_base` tool.
+In `semantic` mode (the default), MindRoom indexes the files with an embedder into a vector index, and assigned agents get a `search_knowledge_base` tool.
 In `files` mode, MindRoom skips embeddings and agents inspect the files directly with their file and shell tools.
 
 ## Quick Start
@@ -45,13 +45,12 @@ agents:
   assistant:
     display_name: Assistant
     role: A helpful assistant with direct file access to source docs
-    memory_backend: file
-    tools: [file, shell]
+    tools: [filesystem, shell]
     knowledge_bases: [source_docs]
 ```
 
 A files-mode base has no vector index, does not use the embedder, and does not provide `search_knowledge_base`.
-The agent needs a workspace, which `memory_backend: file` creates at `${MINDROOM_STORAGE_PATH}/agents/<agent>/workspace` (private agents use their private root).
+The agent's workspace is `${MINDROOM_STORAGE_PATH}/agents/<agent>/workspace` (private agents use their private root).
 When the base's path is inside that workspace and the folder exists, MindRoom exposes it as `knowledge/<base_id>` and tells the agent to use file tools on it.
 Bases outside the workspace are not linked, and with the default [`file_access: workspace`](https://docs.mindroom.chat/configuration/agents/#configuration-options) the agent's file tools cannot reach them.
 
@@ -72,12 +71,15 @@ knowledge_bases:
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `description` | string | `""` | What the base contains; shown to agents in the `search_knowledge_base` tool description and in files-mode instructions so they know when to use it |
-| `mode` | `semantic` or `files` | `semantic` | `semantic` builds an embedding-backed search index; `files` skips embeddings and exposes the files to workspace-aware agents |
+| `mode` | `semantic` or `files` | `semantic` | `semantic` builds an embedding-backed search index; `files` skips embeddings and exposes the files to agents' file tools |
 | `path` | string | `./knowledge_docs` | Folder path, relative to the config file directory or absolute |
-| `watch` | bool | `true` | Watch the local folder and refresh in the background when files change. When `false`, direct external edits require an explicit reindex; dashboard/API uploads and deletes still trigger a refresh |
+| `watch` | bool | `true` | Watch the local folder and refresh in the background when files change. When `false`, direct external edits require an explicit reindex unless `poll_interval_seconds` is set; dashboard/API uploads and deletes still trigger a refresh |
+| `poll_interval_seconds` | int | `null` | Schedule a background refresh of the local folder this often (minimum `5`), for folders that another host writes to; see [Folders Written by Another Host](#folders-written-by-another-host). Unset means no polling. Semantic mode only, so `mode: files` bases reject it. Git-backed bases use `git.poll_interval_seconds` instead, and setting both is rejected |
 | `require_content_before_publish` | bool | `false` | Keep a new semantic index in the initializing state until at least one source file exists, instead of publishing an empty index |
 | `chunk_size` | int | `5000` | Maximum characters per chunk for plain-text and Markdown files (minimum `128`); other formats such as JSON and PDF use their reader's own chunking; semantic mode only |
 | `chunk_overlap` | int | `0` | Overlap characters between adjacent plain-text and Markdown chunks; must be smaller than `chunk_size`; semantic mode only |
+| `chunk_context_model` | string | `null` | Model (a key under `models`) that writes a short context for each chunk of a multi-chunk file before it is indexed; see [Contextual Chunk Headers](#contextual-chunk-headers); semantic mode only |
+| `chunk_strategy` | `fixed` or `memory_entries` | `fixed` | `fixed` splits plain-text and Markdown files every `chunk_size` characters; `memory_entries` makes each memory entry (a `- [id=...]` line) or Markdown section up to `###` its own chunk of at most `chunk_size` characters, as semantic file memory does at 1,200; semantic mode only |
 | `include_patterns` | list | `[]` | Root-anchored glob patterns a file must match to be included |
 | `exclude_patterns` | list | `[]` | Root-anchored glob patterns removed after include filtering |
 | `include_extensions` | list | `null` | Exact set of extensions to index instead of the default text-like set (semantic mode only) |
@@ -87,30 +89,57 @@ knowledge_bases:
 | `git` | object | `null` | Sync the folder from a Git repository; see [Git-Backed Knowledge Bases](#git-backed-knowledge-bases) |
 
 Set `skip_hidden: false` if the folder intentionally contains dot-prefixed files that should be indexed.
-Use a smaller `chunk_size` when your embedding server has lower token or batch limits; chunks that are too large make indexing fail with embedder 500 errors.
+A file is left out of the base and its file listing when its name, or the name of a folder above it, is not valid UTF-8; rename it to include it.
+Use a smaller `chunk_size` when your embedding server has lower token or batch limits; a chunk too long for the embedding model fails the file that holds it, and with it the refresh, for example with `embedder request failed (HTTP 400)` from OpenAI, or `(HTTP 500)` from a llama.cpp server whose physical batch size is smaller than the chunk.
 
 ### Keeping Indexes Fresh
 
 Chat never waits for indexing or Git sync.
 Agents search the last successfully published index, and a missing, stale, or failed base schedules a background refresh while the current request continues.
 A successful refresh replaces the published index; a failed refresh keeps the previous one and shows the error in the base's status.
+On Linux, `watch: true` watches at most 2,000 folders of a base, and changes in folders past that cap are picked up when an agent searches the base, at most every five minutes.
+Folders such as `.git` and `node_modules` do not count toward the cap, since changes in them never start a refresh.
+A folder holding a file or folder name that is not valid UTF-8 may not be watched either; MindRoom logs a warning naming that folder, and changes in it are picked up when an agent searches the base.
 
 A refresh reuses the stored vectors of unchanged files and only embeds files that were added or edited.
-Changing `chunk_size`, `chunk_overlap`, the embedder, or any file filter re-embeds the whole base on the next refresh.
+A semantic base keeps the index it last replaced on disk beside the live one, so the next refresh rewrites only the files that changed instead of copying the whole index; between refreshes the base therefore stores two indexes.
+Rewriting leaves free space inside an index file, which later writes reuse; once a quarter of a kept index is free space, for example after many files were deleted, the next refresh copies the live index instead, so neither file stays much larger than its contents.
+Changing `chunk_size`, `chunk_overlap`, `chunk_context_model`, `chunk_strategy`, the embedder, or any file filter re-embeds the whole base on the next refresh.
 An explicit reindex from the dashboard or API rebuilds every vector, which is how you replace an index you no longer trust.
-An interrupted or failed semantic build continues where it stopped on the next refresh instead of starting over.
-Temporary embedding failures (timeouts, connection errors, HTTP 408, 429, and 5xx) are retried, while permanent failures such as authentication errors stop the refresh until you fix the cause.
+A reindex requested while a refresh of the base runs starts once that refresh finishes.
+Closing the dashboard or dropping the API request does not stop a reindex once it is requested.
+An interrupted or failed semantic build, including a reindex, continues where it stopped on the next refresh instead of starting over.
+Temporary embedding failures (timeouts, connection errors, and HTTP 408, 409, 429, and any other 5xx status) are retried, while permanent failures such as authentication errors, or a 429 that says the OpenAI account has no credit left or reached its monthly spend or usage limit, stop the refresh until you fix the cause.
+A batch of chunks larger than the account's tokens-per-minute limit is embedded again one chunk per request.
 
 Knowledge base configuration hot-reloads.
-After a `chunk_size` or `chunk_overlap` change, agents keep searching the previous index until the rebuild succeeds.
+After a `chunk_size`, `chunk_overlap`, `chunk_context_model`, or `chunk_strategy` change, agents keep searching the previous index until the rebuild succeeds.
 After a change to `path`, `mode`, the embedder, the Git source, or any file filter, the base is not searchable until its new index is built.
+
+### Folders Written by Another Host
+
+Writes from another host, such as a job writing to an NFS share, produce no filesystem events.
+With `watch: true`, MindRoom notices them only when an agent searches the base, at most every five minutes, and that search still uses the previous index.
+With `watch: false`, MindRoom never notices them.
+Set `poll_interval_seconds` on the base to refresh on a timer instead.
+
+```yaml
+knowledge_bases:
+  synced_docs:
+    path: /mnt/shared/synced_docs
+    poll_interval_seconds: 300
+```
+
+The first poll runs one interval after startup and after each config reload.
+Each poll reads every file to detect changes, so choose an interval suited to the folder size.
+Polling works with `watch` on or off, and private agent knowledge is not polled.
 
 ### Indexing Performance
 
 | Environment variable | Default | Description |
 |----------------------|---------|-------------|
-| `MINDROOM_KNOWLEDGE_FILE_INDEX_CONCURRENCY` | `4` | Files indexed concurrently within one semantic refresh, from `1` through `128`; invalid values are rejected at startup |
-| `MINDROOM_KNOWLEDGE_REFRESH_CONCURRENCY` | `1` | Knowledge base refreshes that run at the same time; must be at least `1` |
+| `MINDROOM_KNOWLEDGE_FILE_INDEX_CONCURRENCY` | `4` | Files indexed concurrently within one semantic refresh, from `1` through `128`; it also caps the batched embedding requests a refresh keeps in flight, at most 4; invalid values are rejected at startup |
+| `MINDROOM_KNOWLEDGE_REFRESH_CONCURRENCY` | `1` | Knowledge base refreshes that run at the same time, file-memory index refreshes included; must be at least `1` |
 | `MINDROOM_KNOWLEDGE_REFRESH_SUBPROCESS_TIMEOUT_SECONDS` | `3600` | Maximum seconds for one background refresh; must be a finite positive number. Raise it for very large corpora |
 
 Local `sentence_transformers` embedding indexes one file at a time regardless of `MINDROOM_KNOWLEDGE_FILE_INDEX_CONCURRENCY`.
@@ -132,7 +161,7 @@ knowledge_bases:
 - `exclude_extensions` removes extensions last and wins over both.
 
 The allowed set depends only on this configuration, never on the embedder or installed packages.
-Formats such as `.pdf`, `.docx`, or `.pptx` need their reader package (for example `pypdf`, `python-docx`, or `python-pptx`) installed in the MindRoom environment.
+Formats such as `.docx` or `.pptx` need their reader package (for example `python-docx` or `python-pptx`) installed in the MindRoom environment; the PDF reader is installed with MindRoom.
 When a reader package is missing, the refresh indexes the other files, logs a warning naming the file and the missing package, and reports an indexing error instead of publishing an index that silently lacks those files.
 Extension filtering does not apply in `files` mode.
 Semantic indexing skips symlinked files and folders inside a base, so copy linked documents into the base instead.
@@ -211,6 +240,92 @@ Private knowledge has no background file watcher: with `watch: true` or `git`, i
 An agent can combine private knowledge with shared top-level `knowledge_bases`, which stay the mechanism for documents shared across agents or users.
 Private knowledge is available in normal agent conversations, not through the OpenAI-compatible `/v1` API.
 With `private.knowledge.git`, use a dedicated subtree such as `kb_repo`; MindRoom rejects `.` and any path that overlaps private file memory (`memory/`, `MEMORY.md`) or content copied from `template_dir`.
+
+## Search
+
+`search_knowledge_base` ranks a base's chunks two ways and merges the two rankings.
+One compares the query's embedding with every chunk's embedding, exactly rather than approximately.
+The other scores the query's words with BM25 over a keyword index that matches English word forms, so `leads` finds `lead`.
+Reciprocal rank fusion merges them, so a chunk that names the exact command, setting, or error message in the query ranks high even when its embedding is not the closest.
+Each result still reports its cosine distance as `distance`.
+A base whose folder sandboxed workers can write, or that contains such a folder, such as private knowledge or a base inside an agent workspace or shared directory, can hold 256 MiB of vectors, about 43,000 chunks with the default `text-embedding-3-small` embedder; past that its searches fail until files are removed and the base is refreshed.
+
+### Reranking
+
+A reranker reads the query together with each candidate chunk and reorders them.
+A strong reranker improves on the merged ranking, but a small one can make it worse: on MindRoom's own documentation with the default 5000-character chunks, the right page came first for 79% of questions without a reranker, 86% with `BAAI/bge-reranker-v2-m3` (measured before MindRoom capped its input at 1024 tokens), and 92% with Vertex AI's `semantic-ranker-default@latest`, while models limited to 512 tokens, such as `cross-encoder/ms-marco-MiniLM-L6-v2` and `BAAI/bge-reranker-base`, ranked worse than no reranker.
+Strong rerankers need a GPU or a hosted API to answer quickly: Vertex AI ranked 20 candidates in about 0.3 seconds and 400 in 0.8, while `bge-reranker-v2-m3` took about 30 seconds per search on a 32-core CPU.
+
+```yaml
+reranker:
+  provider: cohere                 # or sentence_transformers, vertex_ai, typesafe, openai_decisions
+  model: rerank-v3.5
+```
+
+Earlier releases named this setting `knowledge_reranker`; that name still loads, but a config that sets both fails.
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `provider` | `cohere`, `sentence_transformers`, `vertex_ai`, `typesafe`, or `openai_decisions` | required | `cohere` calls a rerank API in Cohere's request format; `sentence_transformers` runs a cross-encoder such as `BAAI/bge-reranker-v2-m3` inside MindRoom, installing the `sentence-transformers` extra on first use; `vertex_ai` calls Google's Vertex AI ranking API; `typesafe` and `openai_decisions` ask a [judgment backend](#judgment-rerankers) |
+| `model` | string | required | Rerank model name, such as `semantic-ranker-default@latest` for `vertex_ai`; not set for `typesafe` and `openai_decisions` |
+| `url` | string | `https://api.cohere.com/v2/rerank` | Rerank endpoint for `cohere`; Jina (`https://api.jina.ai/v1/rerank`), vLLM, and Infinity accept the same format |
+| `api_key` | string | `null` | API key for `cohere` |
+| `credentials_service` | string | `cohere` | Credential service that holds the `cohere` API key when `api_key` is unset |
+| `threshold` | number from 0 to 1 | `0.5`, or `0.3` for `typesafe` and `openai_decisions` | Minimum score of a memory that per-turn recall adds with [`memory.search.rerank`](https://docs.mindroom.chat/memory/#searching-file-memory) |
+
+`vertex_ai` signs in with the credential file `GOOGLE_APPLICATION_CREDENTIALS` names, or else Google Application Default Credentials, and ranks in `GOOGLE_CLOUD_PROJECT`, or else the project those credentials name, such as the cluster's project on GKE.
+Both variables may be set in MindRoom's `.env`, as for Gemini on Vertex AI.
+That project needs the `discoveryengine.googleapis.com` API, and the identity needs `roles/discoveryengine.viewer`, the smallest predefined role that may rank.
+The ranking API reads the first 1024 tokens of each chunk with its default models, 512 with older ones; MindRoom sends candidates in concurrent requests of 100, the unit Google bills as one query.
+
+The reranker sees the top 20 chunks of every base one search covers and returns the best of them across bases.
+It applies to `search_knowledge_base`, and to file-memory searches when [`memory.search.rerank`](https://docs.mindroom.chat/memory/#searching-file-memory) is on, which it is by default for `typesafe` and `openai_decisions`; with it off, automatic memory search keeps the merged ranking and adds no latency to replies.
+If the reranker fails, the search returns its results in the merged order and logs a warning.
+
+Each provider scores a chunk from 0 to 1, and a chunk missing from the response ranks last.
+`sentence_transformers` uses the score of the cross-encoder's own activation, a sigmoid for one-label models such as `BAAI/bge-reranker-v2-m3`.
+It truncates each query and chunk pair to 1024 tokens, or to the model's own limit if that is shorter, which cuts ordinary default chunks too, since most full 5,000-character chunks exceed 1024 `BAAI/bge-reranker-v2-m3` tokens.
+The cap limits how much memory one search can need, but it does not guarantee a peak.
+The order of results never depends on that scale, so an endpoint in Cohere's format that returns raw logits still reranks `search_knowledge_base`; memory recall's `threshold` needs scores from 0 to 1, and recall ignores a reranker answer with a score outside that range.
+
+#### Judgment rerankers
+
+`typesafe` (System One, with `TYPESAFE_API_KEY`) and `openai_decisions` (the OpenAI Decisions API) rerank with the [judgment backends](https://docs.mindroom.chat/configuration/threads/#judgment-backends) and take the same fields: `threshold`, `timeout_seconds` (default `1.5`), and for `openai_decisions` a `credentials_service`.
+
+```yaml
+reranker:
+  provider: openai_decisions
+```
+
+One request asks, for every candidate, whether it helps reply to the query, and a candidate's score is the probability of yes.
+The query and each candidate are sent clipped to their first and last 1,000 characters, with credential-like values redacted, and candidate text is marked as data, never instructions.
+A request holds up to 128,000 bytes, about 50 clipped candidates; the candidates after those, any the backend refuses to judge, and any redaction cannot read score 0, so they rank in their merged order behind every candidate judged above 0, and pass only a recall `threshold` of 0.
+A failed request, or a missing API key, fails reranking as described above.
+At most eight rerank requests run at once, under a limit of their own, so reranking and other judgments never wait for each other.
+Their default `threshold` is `0.3`, the value a [recall benchmark](https://docs.mindroom.chat/memory/#searching-file-memory) picked, rather than the `0.8` their other judgment uses keep.
+
+### Contextual Chunk Headers
+
+A chunk taken out of a long document often loses what it is about, such as which product or section it belongs to.
+With `chunk_context_model`, a model reads each chunk of a multi-chunk file together with the document around it and writes a sentence or two that places the chunk in that document.
+
+```yaml
+models:
+  fast:
+    provider: openai
+    id: gpt-6-luna
+
+knowledge_bases:
+  docs:
+    path: ./knowledge_docs
+    chunk_context_model: fast
+```
+
+The context is stored in front of its chunk, so it is embedded, keyword-indexed, and shown to agents with the chunk.
+It costs one model call per chunk of every added or changed multi-chunk file; single-chunk files are indexed as they are, and unchanged files keep their stored chunks.
+Turning `chunk_context_model` on, or changing it, rebuilds the base, so every multi-chunk file gets new contexts once.
+A file whose context call fails is not indexed in that refresh and is retried on the next one.
+Usage is recorded under `knowledge_chunk_context`.
 
 ## Git-Backed Knowledge Bases
 
@@ -394,8 +509,7 @@ agents:
   analyst:
     display_name: Analyst
     role: Answers questions from the team's knowledge bundles
-    memory_backend: file
-    tools: [file]
+    tools: [filesystem]
     knowledge_bases: [acme_okf]
     skills: [open-knowledge-format]
 ```
@@ -417,26 +531,36 @@ knowledge_bases:
 ## Embedder Configuration
 
 Semantic knowledge bases use the embedder configured under `memory.embedder`; files-mode bases use none.
-Semantic knowledge and file-memory indexes support the `openai`, `ollama`, and `sentence_transformers` providers, while the Mem0 memory backend also supports `huggingface`.
+Semantic knowledge and file-memory indexes support the `openai`, `ollama`, `sentence_transformers`, and `vertex_ai` providers, while the Mem0 memory backend supports `huggingface` instead of `vertex_ai`.
 
 | Provider | Model example | Notes |
 |----------|---------------|-------|
 | `openai` | `text-embedding-3-small` | Also works with keyless OpenAI-compatible local endpoints |
-| `ollama` | `nomic-embed-text` | Self-hosted; set `host` or `OLLAMA_HOST` |
+| `ollama` | `nomic-embed-text` | Self-hosted |
 | `sentence_transformers` | `sentence-transformers/all-MiniLM-L6-v2` | Runs locally in MindRoom; the optional extra installs on first use |
+| `vertex_ai` | `gemini-embedding-2` | Gemini embeddings on Vertex AI, with Google Cloud credentials (`GOOGLE_APPLICATION_CREDENTIALS` or Application Default Credentials), in the location `GOOGLE_CLOUD_LOCATION` names (default `global`) and in `GOOGLE_CLOUD_PROJECT`, or else the project those credentials name |
+
+For multilingual text and code, use `google/embeddinggemma-2` with `sentence_transformers`; its first use downloads about 1.4 GB.
+MindRoom applies the query and document prompts that a `sentence_transformers` model defines, so knowledge and file-memory searches need no manual task prefixes.
 
 See [Memory](https://docs.mindroom.chat/memory/#embedder) for the embedder fields, API key resolution, and how embedder failures are reported.
 
 ## Storage
 
 Semantic indexes are stored under `<storage_path>/knowledge_db/<base_id>_<hash>/`, where the hash comes from the resolved knowledge path.
-For private agent knowledge, the requester's private root is part of that path, so each requester gets a separate index.
-Files-mode bases need no vector database.
+Each published index is one SQLite file there, holding the chunks, their vectors, and a keyword index, and searches run inside the MindRoom process.
+Searching needs numpy, whose `numpy` extra installs on first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set; otherwise install `mindroom[numpy]`.
+Private agent knowledge is indexed under `<storage_path>/knowledge_db/private/<requester>/`, outside the private roots that sandboxed workers can write, with one directory per requester and agent.
+Removing a private instance leaves its index behind; each index directory's `publication.json` names the `knowledge_path` it was built from under `settings`.
 The storage path defaults to `mindroom_data/` next to `config.yaml` and can be changed with `MINDROOM_STORAGE_PATH`.
 
-## Search Limits
-
-A search times out after 30 seconds, and at most four searches run at once; a search that finds no free slot can fail with `Knowledge reader is busy; try again shortly`.
+A shared base's index that earlier MindRoom versions stored in Chroma is converted on its first refresh after upgrading: its chunks and vectors are copied out of Chroma, and only files changed since are embedded again.
+MindRoom schedules that refresh for every such base when it starts, so conversion does not wait for the base's first use.
+The copy needs the `chromadb` extra, which installs on first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set; without it, the base is rebuilt, which embeds every file again.
+Private agent indexes are rebuilt in their new location.
+A base cannot be searched until its converted index publishes, which for a very large base can take a while.
+A shared base's old `chroma.sqlite3` and segment directories are removed once its new index is published.
+Private agent indexes used to live in the agent's state root, `<storage_path>/private_instances/<scope>/<agent>/knowledge_db/`, beside the private root rather than inside it; MindRoom no longer reads that directory, so it can be deleted after upgrading.
 
 ## Dashboard and API
 

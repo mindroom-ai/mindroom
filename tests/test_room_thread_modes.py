@@ -1,12 +1,13 @@
-"""Tests for room-level thread mode overrides and chat command handling."""
+"""Tests for a room's `thread_mode` setting, the override an older runtime stored for it, and `!thread_mode`."""
 
 from __future__ import annotations
 
 import json
 from dataclasses import dataclass
-from pathlib import Path
+from functools import partial
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock
+from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock, MagicMock, Mock
 
 import nio
 import pytest
@@ -16,16 +17,9 @@ from mindroom.commands.parsing import Command, CommandType, command_parser, get_
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
-from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
-from mindroom.handled_turns import TurnRecord
+from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths, tracking_dir
 from mindroom.message_target import MessageTarget
-from mindroom.room_thread_modes import (
-    _get_room_thread_mode_override,
-    _store_path,
-    clear_room_thread_mode_override,
-    get_room_thread_mode_override,
-    set_room_thread_mode_override,
-)
+from mindroom.room_settings import THREAD_MODE, on_thread_mode_change, refresh_room_settings, resolve_room_setting
 from tests.authorization_helpers import (
     make_test_command_handler_context,
 )
@@ -35,8 +29,21 @@ from tests.conftest import (
     runtime_paths_for,
     test_runtime_paths,
 )
+from tests.room_settings_helpers import RoomStateHomeserver, set_room_thread_mode_override
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from mindroom.constants import RuntimePaths
 
 ROOM_ID = "!room:localhost"
+SETTING = ("io.mindroom.room_settings", "thread_mode")
+resolve_room_thread_mode_override = partial(resolve_room_setting, THREAD_MODE)
+
+
+def _store_path(runtime_paths: RuntimePaths) -> Path:
+    """The file an older runtime stored room thread mode overrides in."""
+    return tracking_dir(runtime_paths) / "room_thread_modes.json"
 
 
 @dataclass(frozen=True)
@@ -52,20 +59,11 @@ def _runtime_bound_config(config: Config, tmp_path: Path) -> Config:
     return bind_runtime_paths(config, runtime_paths)
 
 
-def _power_levels_response(
-    *,
-    users: dict[str, int],
-    users_default: int = 0,
-) -> nio.RoomGetStateEventResponse:
-    return nio.RoomGetStateEventResponse(
-        content={
-            "users": users,
-            "users_default": users_default,
-        },
-        event_type="m.room.power_levels",
-        state_key="",
-        room_id=ROOM_ID,
-    )
+def _homeserver(admin: str = "@admin:localhost") -> RoomStateHomeserver:
+    """A room whose only admin is ``admin``."""
+    homeserver = RoomStateHomeserver()
+    homeserver.events["m.room.power_levels", ""] = {"users": {admin: 100}, "users_default": 0}
+    return homeserver
 
 
 def _thread_mode_context(tmp_path: Path, client: AsyncMock) -> CommandHandlerContext:
@@ -84,6 +82,15 @@ def _thread_mode_context(tmp_path: Path, client: AsyncMock) -> CommandHandlerCon
     )
 
 
+@pytest.fixture
+def thread_mode_published(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Let the room take the thread mode state, which these tests do not look at."""
+    monkeypatch.setattr(
+        "mindroom.commands.thread_mode_commands.reconcile_room_thread_mode",
+        AsyncMock(return_value=True),
+    )
+
+
 def _thread_mode_event(sender: str, body: str) -> _ThreadModeEvent:
     return _ThreadModeEvent(
         sender=sender,
@@ -93,46 +100,30 @@ def _thread_mode_event(sender: str, body: str) -> _ThreadModeEvent:
     )
 
 
-def test_room_thread_mode_store_roundtrip(tmp_path: Path) -> None:
-    """Room thread mode overrides should persist outside config.yaml."""
+def test_room_thread_mode_setting_is_scoped_by_room(tmp_path: Path) -> None:
+    """A room's thread mode setting applies to that room alone."""
     runtime_paths = test_runtime_paths(tmp_path)
 
-    assert _get_room_thread_mode_override(runtime_paths, ROOM_ID) is None
+    assert resolve_room_thread_mode_override(runtime_paths, ROOM_ID) is None
+    set_room_thread_mode_override(runtime_paths, room_id=ROOM_ID, mode="room")
 
-    set_room_thread_mode_override(
-        runtime_paths,
-        room_id=ROOM_ID,
-        mode="room",
-        set_by="@admin:localhost",
-    )
-    assert _get_room_thread_mode_override(runtime_paths, ROOM_ID) == "room"
-    assert _get_room_thread_mode_override(runtime_paths, "!other:localhost") is None
-
-    assert clear_room_thread_mode_override(runtime_paths, ROOM_ID) is True
-    assert _get_room_thread_mode_override(runtime_paths, ROOM_ID) is None
-    assert clear_room_thread_mode_override(runtime_paths, ROOM_ID) is False
+    assert resolve_room_thread_mode_override(runtime_paths, ROOM_ID) == "room"
+    assert resolve_room_thread_mode_override(runtime_paths, "!other:localhost") is None
+    assert resolve_room_thread_mode_override(runtime_paths, None) is None
 
 
-def test_room_thread_mode_store_ignores_corrupt_file(tmp_path: Path) -> None:
-    """A corrupt room-mode store should read as empty and be replaced on write."""
+def test_an_older_runtimes_thread_mode_file_reads_as_empty_when_corrupt(tmp_path: Path) -> None:
+    """A corrupt file an older runtime left reads as no override."""
     runtime_paths = test_runtime_paths(tmp_path)
     path = _store_path(runtime_paths)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text("not json", encoding="utf-8")
 
-    assert _get_room_thread_mode_override(runtime_paths, ROOM_ID) is None
-
-    set_room_thread_mode_override(
-        runtime_paths,
-        room_id=ROOM_ID,
-        mode="thread",
-        set_by="@admin:localhost",
-    )
-    assert _get_room_thread_mode_override(runtime_paths, ROOM_ID) == "thread"
+    assert resolve_room_thread_mode_override(runtime_paths, ROOM_ID) is None
 
 
-def test_room_thread_mode_store_drops_invalid_records(tmp_path: Path) -> None:
-    """Invalid persisted mode records should be ignored."""
+def test_an_older_runtimes_thread_mode_file_ignores_invalid_records(tmp_path: Path) -> None:
+    """Records an older runtime stored with no thread mode are ignored."""
     runtime_paths = test_runtime_paths(tmp_path)
     path = _store_path(runtime_paths)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -140,24 +131,22 @@ def test_room_thread_mode_store_drops_invalid_records(tmp_path: Path) -> None:
         json.dumps(
             {
                 ROOM_ID: {"mode": "invalid", "set_at": "2026-06-17T00:00:00+00:00"},
-                "!other:localhost": {"mode": "room", "set_at": 12345},
                 "!container:localhost": {"mode": [], "set_at": "2026-06-17T00:00:00+00:00"},
             },
         ),
         encoding="utf-8",
     )
 
-    assert _get_room_thread_mode_override(runtime_paths, ROOM_ID) is None
-    assert _get_room_thread_mode_override(runtime_paths, "!other:localhost") is None
-    assert _get_room_thread_mode_override(runtime_paths, "!container:localhost") is None
+    assert resolve_room_thread_mode_override(runtime_paths, ROOM_ID) is None
+    assert resolve_room_thread_mode_override(runtime_paths, "!container:localhost") is None
 
 
-def test_room_thread_mode_store_detects_file_created_after_missing_read(tmp_path: Path) -> None:
-    """A missing-file read should not hide a later externally-created store."""
+def test_an_older_runtimes_thread_mode_file_is_found_after_a_missing_read(tmp_path: Path) -> None:
+    """A missing-file read should not hide a file found later."""
     runtime_paths = test_runtime_paths(tmp_path)
     path = _store_path(runtime_paths)
 
-    assert _get_room_thread_mode_override(runtime_paths, ROOM_ID) is None
+    assert resolve_room_thread_mode_override(runtime_paths, ROOM_ID) is None
 
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
@@ -165,53 +154,7 @@ def test_room_thread_mode_store_detects_file_created_after_missing_read(tmp_path
         encoding="utf-8",
     )
 
-    assert _get_room_thread_mode_override(runtime_paths, ROOM_ID) == "thread"
-
-
-def test_room_thread_mode_store_removes_temp_file_when_replace_fails(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Failed durable replacement should preserve cache and remove its temp file."""
-    runtime_paths = test_runtime_paths(tmp_path)
-    path = _store_path(runtime_paths)
-    set_room_thread_mode_override(
-        runtime_paths,
-        room_id=ROOM_ID,
-        mode="thread",
-        set_by="@admin:localhost",
-    )
-    real_read_text = Path.read_text
-    read_count = 0
-
-    def tracked_read_text(read_path: Path, *args: object, **kwargs: object) -> str:
-        nonlocal read_count
-        if read_path == path:
-            read_count += 1
-        return real_read_text(read_path, *args, **kwargs)
-
-    monkeypatch.setattr(Path, "read_text", tracked_read_text)
-    assert _get_room_thread_mode_override(runtime_paths, ROOM_ID) == "thread"
-    assert read_count == 1
-
-    def fail_room_mode_replace(_temp_path: Path, target: Path) -> None:
-        if target == path:
-            message = "replace failed"
-            raise OSError(message)
-
-    monkeypatch.setattr("mindroom.durable_write.safe_replace", fail_room_mode_replace)
-
-    with pytest.raises(OSError, match="replace failed"):
-        set_room_thread_mode_override(
-            runtime_paths,
-            room_id=ROOM_ID,
-            mode="room",
-            set_by="@admin:localhost",
-        )
-
-    assert not list(path.parent.glob("*.tmp"))
-    assert _get_room_thread_mode_override(runtime_paths, ROOM_ID) == "thread"
-    assert read_count == 1
+    assert resolve_room_thread_mode_override(runtime_paths, ROOM_ID) == "thread"
 
 
 def test_get_entity_thread_mode_prefers_runtime_room_override(tmp_path: Path) -> None:
@@ -250,7 +193,6 @@ def test_get_entity_thread_mode_prefers_runtime_room_override(tmp_path: Path) ->
         runtime_paths,
         room_id=ROOM_ID,
         mode="room",
-        set_by="@admin:localhost",
     )
 
     assert config.get_entity_thread_mode("assistant", runtime_paths, room_id=ROOM_ID) == "room"
@@ -294,10 +236,66 @@ def test_thread_mode_help_accepts_command_aliases() -> None:
 
 
 @pytest.mark.asyncio
+async def test_thread_mode_show_reports_the_room_override(tmp_path: Path) -> None:
+    """`!thread_mode show` names the room's override, or says configured modes apply without one."""
+    homeserver = _homeserver()
+    context = _thread_mode_context(tmp_path, homeserver.client())
+    command = Command(type=CommandType.THREAD_MODE, args={"args_text": "show"}, raw_text="!thread_mode show")
+
+    async def show() -> str:
+        await handle_command(
+            context=context,
+            room=SimpleNamespace(room_id=ROOM_ID),
+            event=_thread_mode_event("@user:localhost", "!thread_mode show"),
+            command=command,
+            requester_user_id="@user:localhost",
+        )
+        return context.send_response.await_args.args[0]
+
+    assert (await show()).startswith("No room thread mode override is set.")
+    # A client's change the runtime's copy has not seen: the command reads the room itself.
+    homeserver.events[SETTING] = {"value": "room"}
+    assert (await show()).startswith("This room uses the `room` thread mode override.")
+    context.client.room_get_state_event.side_effect = None
+    context.client.room_get_state_event.return_value = nio.RoomGetStateEventError("unavailable", "M_UNKNOWN")
+    assert await show() == "❌ Could not read this room's thread mode setting. Try again."
+
+
+@pytest.mark.asyncio
+async def test_a_changed_thread_mode_that_show_finds_first_is_still_republished(tmp_path: Path) -> None:
+    """`!thread_mode show` that finds a change no sync showed tells the runtime, though the next turn finds none."""
+    homeserver = _homeserver()
+    homeserver.events[SETTING] = {"value": "thread"}
+    context = _thread_mode_context(tmp_path, homeserver.client())
+    changed = Mock()
+    on_thread_mode_change(context.runtime_paths, changed)
+    command = Command(type=CommandType.THREAD_MODE, args={"args_text": "show"}, raw_text="!thread_mode show")
+
+    async def show() -> None:
+        await handle_command(
+            context=context,
+            room=SimpleNamespace(room_id=ROOM_ID),
+            event=_thread_mode_event("@user:localhost", "!thread_mode show"),
+            command=command,
+            requester_user_id="@user:localhost",
+        )
+
+    await show()
+    changed.assert_not_called()
+    homeserver.events[SETTING] = {"value": "room"}
+    await show()
+    await refresh_room_settings(context.client, context.runtime_paths, ROOM_ID, put_state=None)
+
+    changed.assert_called_once_with(ROOM_ID)
+    # The turn's read found the copy fresh: only the two commands read the setting.
+    assert [read.args[1:] for read in context.client.room_get_state_event.await_args_list].count(SETTING) == 2
+
+
+@pytest.mark.asyncio
 async def test_thread_mode_command_requires_room_admin_for_set(tmp_path: Path) -> None:
     """Only Matrix room admins should be able to change a room thread mode override."""
-    client = AsyncMock()
-    client.room_get_state_event.return_value = _power_levels_response(users={"@admin:localhost": 100})
+    homeserver = _homeserver("@admin:localhost")
+    client = homeserver.client()
     context = _thread_mode_context(tmp_path, client)
     command = Command(type=CommandType.THREAD_MODE, args={"args_text": "room"}, raw_text="!thread_mode room")
 
@@ -310,14 +308,15 @@ async def test_thread_mode_command_requires_room_admin_for_set(tmp_path: Path) -
     )
 
     assert context.send_response.await_args.args[0] == "❌ Room admin only."
-    assert _get_room_thread_mode_override(context.runtime_paths, ROOM_ID) is None
+    assert resolve_room_thread_mode_override(context.runtime_paths, ROOM_ID) is None
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("thread_mode_published")
 async def test_thread_mode_command_admin_sets_runtime_override_without_config_write(tmp_path: Path) -> None:
     """Room admins should set a durable runtime override without touching config.yaml."""
-    client = AsyncMock()
-    client.room_get_state_event.return_value = _power_levels_response(users={"@admin:localhost": 100})
+    homeserver = _homeserver("@admin:localhost")
+    client = homeserver.client()
     context = _thread_mode_context(tmp_path, client)
     config_before = context.runtime_paths.config_path.read_text(encoding="utf-8")
     command = Command(type=CommandType.THREAD_MODE, args={"args_text": "room"}, raw_text="!thread_mode room")
@@ -331,18 +330,18 @@ async def test_thread_mode_command_admin_sets_runtime_override_without_config_wr
     )
 
     assert "now uses `room`" in context.send_response.await_args.args[0]
-    assert _get_room_thread_mode_override(context.runtime_paths, ROOM_ID) == "room"
+    assert resolve_room_thread_mode_override(context.runtime_paths, ROOM_ID) == "room"
+    assert homeserver.events[SETTING] == {"value": "room"}
     assert context.runtime_paths.config_path.read_text(encoding="utf-8") == config_before
-    context.record_handled_turn.assert_called_once_with(
-        TurnRecord.create(["$event"], response_event_id="$reply"),
-    )
+    context.record_handled_turn.assert_called_once_with("$reply")
 
 
 @pytest.mark.asyncio
-async def test_thread_mode_command_records_sender_when_sender_authorizes_requester(tmp_path: Path) -> None:
-    """Audit metadata should name the Matrix user who satisfied the admin check."""
-    client = AsyncMock()
-    client.room_get_state_event.return_value = _power_levels_response(users={"@bridge-admin:localhost": 100})
+@pytest.mark.usefixtures("thread_mode_published")
+async def test_thread_mode_command_accepts_admin_sender_for_bridged_requester(tmp_path: Path) -> None:
+    """The Matrix sender's room admin power must authorize a bridged requester's command."""
+    homeserver = _homeserver("@bridge-admin:localhost")
+    client = homeserver.client()
     context = _thread_mode_context(tmp_path, client)
     command = Command(type=CommandType.THREAD_MODE, args={"args_text": "room"}, raw_text="!thread_mode room")
 
@@ -354,23 +353,17 @@ async def test_thread_mode_command_records_sender_when_sender_authorizes_request
         requester_user_id="@puppet-user:localhost",
     )
 
-    override = get_room_thread_mode_override(context.runtime_paths, ROOM_ID)
-    assert override.mode == "room"
-    assert override.set_by == "@bridge-admin:localhost"
+    assert resolve_room_thread_mode_override(context.runtime_paths, ROOM_ID) == "room"
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("thread_mode_published")
 async def test_thread_mode_command_admin_reset_clears_runtime_override(tmp_path: Path) -> None:
     """Room admins should reset the runtime override back to static config behavior."""
-    client = AsyncMock()
-    client.room_get_state_event.return_value = _power_levels_response(users={"@admin:localhost": 100})
+    homeserver = _homeserver("@admin:localhost")
+    client = homeserver.client()
     context = _thread_mode_context(tmp_path, client)
-    set_room_thread_mode_override(
-        context.runtime_paths,
-        room_id=ROOM_ID,
-        mode="room",
-        set_by="@admin:localhost",
-    )
+    homeserver.events[SETTING] = {"value": "room"}
     command = Command(type=CommandType.THREAD_MODE, args={"args_text": "reset"}, raw_text="!thread_mode reset")
 
     await handle_command(
@@ -382,7 +375,8 @@ async def test_thread_mode_command_admin_reset_clears_runtime_override(tmp_path:
     )
 
     assert "override removed" in context.send_response.await_args.args[0]
-    assert _get_room_thread_mode_override(context.runtime_paths, ROOM_ID) is None
+    assert resolve_room_thread_mode_override(context.runtime_paths, ROOM_ID) is None
+    assert homeserver.events[SETTING] == {}
 
 
 @pytest.mark.asyncio
@@ -402,4 +396,4 @@ async def test_thread_mode_command_fails_closed_when_power_levels_unavailable(tm
     )
 
     assert context.send_response.await_args.args[0] == "❌ Room admin only."
-    assert _get_room_thread_mode_override(context.runtime_paths, ROOM_ID) is None
+    assert resolve_room_thread_mode_override(context.runtime_paths, ROOM_ID) is None

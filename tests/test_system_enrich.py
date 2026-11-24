@@ -3,30 +3,19 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import asynccontextmanager
-from types import SimpleNamespace
+from dataclasses import replace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from agno.agent import Agent
-from agno.models.message import Message
-from agno.models.ollama import Ollama
-from agno.run import RunContext
-from agno.session.agent import AgentSession
-from agno.session.team import TeamSession
-from agno.team import Team
 
-from mindroom.ai import _prepare_agent_and_prompt
+from mindroom.ai import ai_response
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
-from mindroom.config.plugin import PluginEntryConfig
-from mindroom.dispatch_source import MESSAGE_SOURCE_KIND
-from mindroom.execution_preparation import _PreparedExecutionContext
-from mindroom.final_delivery import FinalDeliveryOutcome, StreamTransportOutcome
-from mindroom.history.session_context import open_bound_scope_session_context
-from mindroom.history.types import PreparedHistoryState
+from mindroom.delivery_gateway import DeliveryGateway
+from mindroom.dispatch_source import MESSAGE_SOURCE_KIND, SILENT_SCHEDULE_SOURCE_KIND
+from mindroom.final_delivery import Completed, FinalDeliveryOutcome, StreamTransportOutcome
 from mindroom.hooks import (
     BUILTIN_EVENT_NAMES,
     EVENT_SYSTEM_ENRICH,
@@ -39,34 +28,61 @@ from mindroom.hooks import (
     render_system_enrichment_block,
 )
 from mindroom.hooks.types import default_timeout_ms_for_event, validate_event_name
+from mindroom.llm.messages import system_text
 from mindroom.logging_config import get_logger
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.media_inputs import MediaInputs
 from mindroom.memory import MemoryPromptParts
 from mindroom.message_target import MessageTarget
-from mindroom.response_runner import ResponseRequest
-from mindroom.response_sources import ResponseSources
-from mindroom.team_exact_members import ResolvedExactTeamMembers
-from mindroom.teams import TeamMode, build_materialized_team_instance, prepare_materialized_team_execution
+from mindroom.reply_turn.request import ResponseRequest
+from mindroom.response_sources import Owned, ResponseSources
+from mindroom.response_turn import CompletedApprovalRun
+from mindroom.session_storage.agent_storage import create_session_storage
+from mindroom.teams.envelope import prepare_materialized_team_execution
+from mindroom.teams.members import BuiltTeam, ResolvedExactTeamMembers, build_team_spec, resolve_exact_team_members
+from mindroom.teams.spec import TeamMode
+from mindroom.tool_jobs.runtime import BackgroundOutcome
+from mindroom.turn_model import ModelScope, resolve_turn_model
+from mindroom.turn_origin import TurnIntent
 from tests.access_schema_support import with_current_room_member_access
-from tests.bot_helpers import make_test_agent_bot
+from tests.approval_continuation_helpers import approval_continuation, resumed_approval
+from tests.bot_helpers import _hook_plugin, make_test_agent_bot, unique_room_send_responses
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
+    install_model_providers,
     make_turn_context,
+    make_visible_message,
     message_origin,
     patch_response_runner_module,
     request_envelope,
     runtime_paths_for,
     test_runtime_paths,
+    unstored_team_scope_context,
     unwrap_extracted_collaborator,
 )
-from tests.reply_span_helpers import response_span
+from tests.delegation_helpers import turn_tool_context
+from tests.fakes.scripted_model import ScriptedModel, answer
+from tests.reply_span_helpers import paused_for_approval
+from tests.response_runner_helpers import _bot, _noop_typing, _plain_request, _target, stream_transport
+from tests.test_reply_records_turns import (
+    _acknowledge_selection,
+    _answer,
+    _model_stream,
+    _regeneration,
+    _reply,
+    _streaming_bot,
+)
+from tests.test_response_payload_preparation import _preparation, _request
+from tests.test_response_runner_focused import _admit_approval_source
+from tests.test_tool_job_follow_ups import _ended, _follow_up, _runner_key, _runner_owner, _runner_runtime
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from pathlib import Path
 
     from mindroom.bot import AgentBot
+    from mindroom.response_turn import ResponseTurnContext
 
 
 def _config(tmp_path: Path) -> Config:
@@ -86,16 +102,6 @@ def _config(tmp_path: Path) -> Config:
             ),
         ),
         runtime_paths,
-    )
-
-
-def _plugin(name: str, callbacks: list[object]) -> SimpleNamespace:
-    return SimpleNamespace(
-        name=name,
-        discovered_hooks=tuple(callbacks),
-        discovered_automations=(),
-        entry_config=PluginEntryConfig(path=f"./plugins/{name}"),
-        plugin_order=0,
     )
 
 
@@ -136,40 +142,6 @@ def _system_context(tmp_path: Path, *, room_id: str = "!room:localhost") -> Syst
     )
 
 
-def _agent(agent_id: str, display_name: str) -> Agent:
-    return Agent(
-        id=agent_id,
-        name=display_name,
-        role=f"{display_name} role",
-        model=Ollama(id="test-model"),
-        instructions=["Stay concise."],
-    )
-
-
-def _agent_system_message(agent: Agent) -> str:
-    message = agent.get_system_message(
-        session=AgentSession(session_id="session-1", agent_id=agent.id),
-        run_context=RunContext(run_id="run-1", session_id="session-1", session_state={}),
-        tools=None,
-        add_session_state_to_context=False,
-    )
-    assert message is not None
-    assert message.content is not None
-    return str(message.content)
-
-
-def _team_system_message(team: Team) -> str:
-    message = team.get_system_message(
-        session=TeamSession(session_id="session-1", team_id=team.id or "team"),
-        run_context=RunContext(run_id="run-1", session_id="session-1", session_state={}),
-        tools=None,
-        add_session_state_to_context=False,
-    )
-    assert message is not None
-    assert message.content is not None
-    return str(message.content)
-
-
 def _make_bot(tmp_path: Path) -> AgentBot:
     config = _config(tmp_path)
     agent_user = AgentMatrixUser(
@@ -180,20 +152,13 @@ def _make_bot(tmp_path: Path) -> AgentBot:
     )
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["!room:localhost"],
     )
     bot.client = MagicMock()
     bot.client.user_id = agent_user.user_id
-    bot._knowledge_access_support.for_agent = MagicMock(return_value=None)
     return bot
-
-
-@asynccontextmanager
-async def _noop_typing_indicator(*_args: object, **_kwargs: object) -> AsyncIterator[None]:
-    yield
 
 
 def test_system_enrich_event_and_context_helpers(tmp_path: Path) -> None:
@@ -271,7 +236,7 @@ async def test_emit_collect_system_enrich_merges_in_order_and_respects_scope(tmp
         ctx.add_instruction("second", "fast")
 
     registry = HookRegistry.from_plugins(
-        [_plugin("system-enrich", [slow_valid, wrong_agent, wrong_room, fast_valid])],
+        [_hook_plugin("system-enrich", [slow_valid, wrong_agent, wrong_room, fast_valid])],
     )
     context = _system_context(tmp_path)
 
@@ -297,7 +262,7 @@ async def test_emit_collect_system_enrich_rendered_output_is_deterministic(tmp_p
         ctx.add_instruction("volatile-a", "early volatile", cache_policy="volatile")
         ctx.add_instruction("stable-a", "early stable", cache_policy="stable")
 
-    registry = HookRegistry.from_plugins([_plugin("system-enrich", [slow_hook, fast_hook])])
+    registry = HookRegistry.from_plugins([_hook_plugin("system-enrich", [slow_hook, fast_hook])])
     items = await emit_collect(registry, EVENT_SYSTEM_ENRICH, _system_context(tmp_path))
 
     assert render_system_enrichment_block(items) == (
@@ -319,370 +284,253 @@ async def test_emit_collect_system_enrich_rendered_output_is_deterministic(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_prepare_agent_and_prompt_applies_system_enrichment_to_agent_additional_context(
+async def test_a_reply_renders_system_enrichment_into_its_system_message(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Agent prep should set additional_context before prompt preparation and keep it in the system message."""
+    """A reply's system enrichment lands in the system message the model receives, after the agent's prompt."""
     config = _config(tmp_path)
     system_items = (
         EnrichmentItem(key="alpha", text="stable", cache_policy="stable"),
         EnrichmentItem(key="omega", text="volatile", cache_policy="volatile"),
     )
     rendered = render_system_enrichment_block(system_items)
-    prepared_agent = _agent("code", "CodeAgent")
+    model = ScriptedModel([answer("Done.")])
+    install_model_providers(monkeypatch, {"default": model})
 
-    async def fake_prepare_agent_execution_context(
-        _ctx: object,
-        **kwargs: object,
-    ) -> _PreparedExecutionContext:
-        agent = kwargs["agent"]
-        assert isinstance(agent, Agent)
-        assert agent.additional_context == rendered
-        return _PreparedExecutionContext(
-            messages=(Message(role="user", content="prepared prompt"),),
-            unseen_event_ids=[],
-            prepared_history=PreparedHistoryState(),
-        )
+    await ai_response(
+        replace(make_turn_context("code", system_enrichment_items=system_items), prompt="prompt"),
+        runtime_paths_for(config),
+        config,
+    )
 
-    with (
-        patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
-        patch("mindroom.ai.create_agent", return_value=prepared_agent),
-        patch(
-            "mindroom.ai.prepare_agent_execution_context",
-            new=AsyncMock(side_effect=fake_prepare_agent_execution_context),
-        ),
-    ):
-        prepared_run = await _prepare_agent_and_prompt(
-            make_turn_context("code", system_enrichment_items=system_items),
-            prompt="prompt",
-            runtime_paths=runtime_paths_for(config),
-            config=config,
-        )
-
-    agent = prepared_run.agent
-    full_prompt = prepared_run.prompt_text
-    unseen_event_ids = prepared_run.unseen_event_ids
-    prepared_history = prepared_run.prepared_history
-    assert agent is prepared_agent
-    assert full_prompt == "prepared prompt"
-    assert unseen_event_ids == []
-    assert prepared_history.compaction_outcomes == []
-    assert agent.additional_context == rendered
-    assert rendered in _agent_system_message(agent)
+    [request] = model.requests
+    stable, turn = request.messages[:2]
+    assert (stable.role, turn.role) == ("system", "system")
+    assert isinstance(turn.content, str)
+    assert turn.content.rstrip().endswith(rendered.strip())
+    assert "Write code" in str(stable.content)
+    assert rendered.strip() not in str(stable.content)
 
 
 @pytest.mark.asyncio
-async def test_prepare_agent_keeps_transient_enrichment_out_of_system_prompt(
+async def test_a_reply_keeps_transient_enrichment_out_of_its_system_message_and_stores_it_after_the_prompt(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Transient context should share one non-persisted user message after the cacheable prefix."""
+    """Transient context shares one user message after the prompt, which the run stores there as turn context."""
     config = _config(tmp_path)
-    prepared_agent = _agent("code", "CodeAgent")
     transient_items = (EnrichmentItem(key="location", text="Current location: Amsterdam", persist=False),)
+    model = ScriptedModel([answer("Done.")])
+    install_model_providers(monkeypatch, {"default": model})
+    monkeypatch.setattr(
+        "mindroom.ai.build_memory_prompt_parts",
+        AsyncMock(return_value=MemoryPromptParts(transient_turn_context="Retrieved memory")),
+    )
 
-    async def fake_prepare_agent_execution_context(
-        _ctx: object,
-        **kwargs: object,
-    ) -> _PreparedExecutionContext:
-        transient_messages = kwargs["transient_context_messages"]
-        assert len(transient_messages) == 1
-        assert transient_messages[0].add_to_agent_memory is False
-        assert "Retrieved memory" in transient_messages[0].content
-        assert "Current location: Amsterdam" in transient_messages[0].content
-        return _PreparedExecutionContext(
-            messages=(*transient_messages, Message(role="user", content="prepared prompt")),
-            unseen_event_ids=[],
-            prepared_history=PreparedHistoryState(),
-        )
-
-    with (
-        patch(
-            "mindroom.ai.build_memory_prompt_parts",
-            new=AsyncMock(return_value=MemoryPromptParts(transient_turn_context="Retrieved memory")),
-        ),
-        patch("mindroom.ai.create_agent", return_value=prepared_agent),
-        patch(
-            "mindroom.ai.prepare_agent_execution_context",
-            new=AsyncMock(side_effect=fake_prepare_agent_execution_context),
-        ),
-    ):
-        prepared_run = await _prepare_agent_and_prompt(
-            make_turn_context("code", transient_enrichment_items=transient_items),
+    await ai_response(
+        replace(
+            make_turn_context("code", session_id="session-1", transient_enrichment_items=transient_items),
             prompt="prompt",
-            runtime_paths=runtime_paths_for(config),
-            config=config,
-        )
+        ),
+        runtime_paths_for(config),
+        config,
+    )
 
-    system_message = _agent_system_message(prepared_run.agent)
-    assert "Current location: Amsterdam" not in system_message
-    assert "Retrieved memory" not in system_message
+    [request] = model.requests
+    system, *turn = request.messages
+    assert "Current location: Amsterdam" not in str(system.content)
+    assert "Retrieved memory" not in str(system.content)
+    *_, prompt, transient = turn
+    assert prompt.role == transient.role == "user"
+    assert "prompt" in str(prompt.content)
+    assert transient.add_to_agent_memory is False
+    assert "Retrieved memory" in str(transient.content)
+    assert "Current location: Amsterdam" in str(transient.content)
+    storage = create_session_storage("code", config, runtime_paths_for(config), execution_identity=None)
+    [run] = storage.list_runs("session-1")
+    stored_prompt, stored_transient, _answer = run.messages
+    assert "Current location: Amsterdam" not in str(stored_prompt.content)
+    assert stored_transient.content == transient.content
+    assert stored_transient.add_to_agent_memory is False
+
+
+def _team_members(config: Config, monkeypatch: pytest.MonkeyPatch) -> ResolvedExactTeamMembers:
+    """Materialize the code and research members on scripted providers, as a team reply does."""
+    install_model_providers(monkeypatch, {"default": ScriptedModel([])})
+    return resolve_exact_team_members(
+        ["code", "research"],
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        execution_identity=None,
+        refresh_scheduler=None,
+        active_model_names=dict.fromkeys(["code", "research"], "default"),
+    )
+
+
+def _built_team(config: Config, members: ResolvedExactTeamMembers, *, system_enrichment: str = "") -> BuiltTeam:
+    return build_team_spec(
+        members=members,
+        mode=TeamMode.COORDINATE,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        scope_context=unstored_team_scope_context(config, members.requested_agent_names, team_name=None),
+        execution_identity=None,
+        model_name="default",
+        configured_team_name=None,
+        timezone="UTC",
+        system_enrichment=system_enrichment,
+    )
 
 
 @pytest.mark.asyncio
-async def test_prepare_materialized_team_execution_applies_system_enrichment_to_team_and_members(
+async def test_a_team_turn_renders_system_enrichment_for_the_leader_and_every_member(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Team prep should set additional_context on the team coordinator and every member."""
+    """The leader and every member get the turn's system enrichment; transient context stays a separate message."""
     config = _config(tmp_path)
-    runtime_paths = runtime_paths_for(config)
-    member_agents = [_agent("code", "CodeAgent"), _agent("research", "ResearchAgent")]
-    prepared_team = Team(
-        id="team-code-research",
-        name="Code + Research",
-        members=member_agents,
-        model=Ollama(id="test-model"),
-    )
-    team_members = ResolvedExactTeamMembers(
-        requested_agent_names=["code", "research"],
-        agents=member_agents,
-        display_names=["CodeAgent", "ResearchAgent"],
-        materialized_agent_names={"code", "research"},
-        failed_agent_names=[],
-    )
     system_items = (
         EnrichmentItem(key="a", text="stable", cache_policy="stable"),
         EnrichmentItem(key="b", text="volatile", cache_policy="volatile"),
     )
     transient_items = (EnrichmentItem(key="location", text="Current location", persist=False),)
     rendered = render_system_enrichment_block(system_items)
+    built = _built_team(config, _team_members(config, monkeypatch), system_enrichment=rendered)
+    spec = built.spec
 
-    async def fake_prepare_bound_team_execution_context(
-        _ctx: object,
-        **kwargs: object,
-    ) -> _PreparedExecutionContext:
-        team = kwargs["team"]
-        agents = kwargs["agents"]
-        assert isinstance(team, Team)
-        assert team.additional_context == rendered
-        assert all(agent.additional_context == rendered for agent in agents)
-        transient_messages = kwargs["transient_context_messages"]
-        assert len(transient_messages) == 1
-        assert transient_messages[0].add_to_agent_memory is False
-        assert "Current location" in transient_messages[0].content
-        return _PreparedExecutionContext(
-            messages=(Message(role="user", content="prepared team prompt"),),
-            unseen_event_ids=[],
-            prepared_history=PreparedHistoryState(),
-        )
-
-    with (
-        open_bound_scope_session_context(
-            agents=team_members.agents,
-            session_id="session-1",
-            runtime_paths=runtime_paths,
-            config=config,
-            execution_identity=None,
-        ) as scope_context,
-        patch("mindroom.teams._create_team_instance", return_value=prepared_team),
-        patch(
-            "mindroom.teams.prepare_bound_team_run_context",
-            new=AsyncMock(side_effect=fake_prepare_bound_team_execution_context),
+    assert rendered.strip() in system_text(spec.leader.system_messages)
+    assert all(rendered.strip() in system_text(member.build().spec.system_messages) for member in spec.members)
+    prepared = await prepare_materialized_team_execution(
+        make_turn_context(
+            room_id="!room:localhost",
+            thread_id="$thread",
+            requester_id="@user:localhost",
+            correlation_id="$event",
+            reply_to_event_id="$event",
+            transient_enrichment_items=transient_items,
+            system_enrichment_items=system_items,
         ),
-    ):
-        assert scope_context is not None
-        team = build_materialized_team_instance(
-            requested_agent_names=team_members.requested_agent_names,
-            agents=team_members.agents,
-            mode=TeamMode.COORDINATE,
-            config=config,
-            runtime_paths=runtime_paths,
-            scope_context=scope_context,
-            model_name="default",
-            configured_team_name=None,
-            execution_identity=None,
-        )
-        await prepare_materialized_team_execution(
-            make_turn_context(
-                room_id="!room:localhost",
-                thread_id="$thread",
-                requester_id="@user:localhost",
-                correlation_id="$event",
-                reply_to_event_id="$event",
-                active_event_ids=frozenset(),
-                transient_enrichment_items=transient_items,
-                system_enrichment_items=system_items,
-            ),
-            scope_context=scope_context,
-            agents=team_members.agents,
-            team=team,
-            message="Coordinate",
-            thread_history=[],
-            config=config,
-            runtime_paths=runtime_paths,
-            runtime_model=config.resolve_runtime_model(entity_name=None),
-            response_sender_id="@mindroom_code:localhost",
-            current_sender_id=None,
-            configured_team_name=None,
-        )
+        scope_context=unstored_team_scope_context(
+            config,
+            [member.id for member in built.spec.members],
+            team_name=None,
+        ),
+        built=built,
+        message="Coordinate",
+        thread_history=[],
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        runtime_model=resolve_turn_model(config, runtime_paths_for(config), ModelScope(entity=None), None),
+        response_sender_id="@mindroom_code:localhost",
+        current_sender_id=None,
+    )
 
-    assert team is prepared_team
-    assert team.additional_context == rendered
-    assert rendered in _team_system_message(team)
-    assert all(agent.additional_context == rendered for agent in member_agents)
-    assert all(rendered in _agent_system_message(agent) for agent in member_agents)
+    [transient] = prepared.turn.transient
+    assert transient.add_to_agent_memory is False
+    assert "Current location" in str(transient.content)
+    assert "Current location" not in system_text(spec.leader.system_messages)
 
 
 @pytest.mark.asyncio
-async def test_prepare_materialized_team_execution_returns_message_helpers(tmp_path: Path) -> None:
-    """Prepared team execution should expose message helpers without exporting its carrier type."""
-    import mindroom.teams as teams_module  # noqa: PLC0415
-
+async def test_a_prepared_team_turn_sends_the_prompt_without_unseen_context(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A team turn without thread history sends its prompt alone, with no unseen context ahead of it."""
     config = _config(tmp_path)
-    runtime_paths = runtime_paths_for(config)
-    member_agents = [_agent("code", "CodeAgent"), _agent("research", "ResearchAgent")]
-    prepared_team = Team(
-        id="team-code-research",
-        name="Code + Research",
-        members=member_agents,
-        model=Ollama(id="test-model"),
-    )
-    team_members = ResolvedExactTeamMembers(
-        requested_agent_names=["code", "research"],
-        agents=member_agents,
-        display_names=["CodeAgent", "ResearchAgent"],
-        materialized_agent_names={"code", "research"},
-        failed_agent_names=[],
+    built = _built_team(config, _team_members(config, monkeypatch))
+
+    prepared = await prepare_materialized_team_execution(
+        make_turn_context(room_id=None, thread_id=None, requester_id=None, reply_to_event_id="$event"),
+        scope_context=unstored_team_scope_context(
+            config,
+            [member.id for member in built.spec.members],
+            team_name=None,
+        ),
+        built=built,
+        message="Coordinate",
+        thread_history=[],
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        runtime_model=resolve_turn_model(config, runtime_paths_for(config), ModelScope(entity=None), None),
+        response_sender_id="@mindroom_code:localhost",
+        current_sender_id=None,
     )
 
-    async def fake_prepare_bound_team_execution_context(
-        _ctx: object,
+    assert prepared.turn.context == ()
+    assert [message.content for message in prepared.run_input(MediaInputs())] == ["Coordinate"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("first_as_shown", ["The release date is Thursday.", "recording.ogg"], ids=["text", "voice"])
+async def test_a_routed_team_reads_each_message_of_its_batch_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    first_as_shown: str,
+) -> None:
+    """A team a route names gets the route's prompt, and the thread's copies of the messages it holds are left out."""
+    config = _config(tmp_path)
+    built = _built_team(config, _team_members(config, monkeypatch))
+    turn = make_turn_context(
+        room_id="!room:localhost",
+        thread_id="$root",
+        requester_id="@user:localhost",
+        reply_to_event_id="$question",
+    )
+
+    prepared = await prepare_materialized_team_execution(
+        # What the runner's shared turn context holds for a routed request: the messages its route names.
+        replace(turn, prompt_source_event_ids=("$first", "$question")),
+        scope_context=unstored_team_scope_context(
+            config,
+            [member.id for member in built.spec.members],
+            team_name=None,
+        ),
+        built=built,
+        message="The release date is Thursday.\n\nWhat day did I say?",
+        thread_history=[
+            make_visible_message(sender="@user:localhost", body="Planning the release", event_id="$root"),
+            make_visible_message(sender="@user:localhost", body=first_as_shown, event_id="$first"),
+            make_visible_message(sender="@user:localhost", body="What day did I say?", event_id="$question"),
+        ],
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        runtime_model=resolve_turn_model(config, runtime_paths_for(config), ModelScope(entity=None), None),
+        response_sender_id="@mindroom_code:localhost",
+        current_sender_id="@user:localhost",
+    )
+
+    rendered = "\n".join(str(message.content) for message in prepared.run_input(MediaInputs()))
+    assert "Planning the release" in rendered
+    assert rendered.count("The release date is Thursday.") == 1
+    assert rendered.count("What day did I say?") == 1
+    assert "recording.ogg" not in rendered
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_agent_delivery_threads_system_enrichment_items(tmp_path: Path, streaming: bool) -> None:
+    """Agent delivery, streamed or delivered whole, forwards system enrichment items into the AI layer."""
+    bot = _make_bot(tmp_path)
+    system_items = (
+        EnrichmentItem(key="alpha", text="stable", cache_policy="stable"),
+        EnrichmentItem(key="omega", text="volatile", cache_policy="volatile"),
+    )
+    seen_items: list[object] = []
+
+    async def fake_stream_agent_response(
+        ctx: ResponseTurnContext,
+        *_args: object,
         **_kwargs: object,
-    ) -> _PreparedExecutionContext:
-        return _PreparedExecutionContext(
-            messages=(Message(role="user", content="prepared team prompt"),),
-            unseen_event_ids=[],
-            prepared_history=PreparedHistoryState(),
-        )
-
-    assert "PreparedMaterializedTeamExecution" not in teams_module.__all__
-
-    with (
-        open_bound_scope_session_context(
-            agents=team_members.agents,
-            session_id="session-1",
-            runtime_paths=runtime_paths,
-            config=config,
-            execution_identity=None,
-        ) as scope_context,
-        patch("mindroom.teams._create_team_instance", return_value=prepared_team),
-        patch(
-            "mindroom.teams.prepare_bound_team_run_context",
-            new=AsyncMock(side_effect=fake_prepare_bound_team_execution_context),
-        ),
-    ):
-        assert scope_context is not None
-        team = build_materialized_team_instance(
-            requested_agent_names=team_members.requested_agent_names,
-            agents=team_members.agents,
-            mode=TeamMode.COORDINATE,
-            config=config,
-            runtime_paths=runtime_paths,
-            scope_context=scope_context,
-            model_name="default",
-            configured_team_name=None,
-            execution_identity=None,
-        )
-        prepared_execution = await prepare_materialized_team_execution(
-            make_turn_context(
-                room_id=None,
-                thread_id=None,
-                requester_id=None,
-                reply_to_event_id="$event",
-                active_event_ids=frozenset(),
-            ),
-            scope_context=scope_context,
-            agents=team_members.agents,
-            team=team,
-            message="Coordinate",
-            thread_history=[],
-            config=config,
-            runtime_paths=runtime_paths,
-            runtime_model=config.resolve_runtime_model(entity_name=None),
-            response_sender_id="@mindroom_code:localhost",
-            current_sender_id=None,
-            configured_team_name=None,
-        )
-
-    assert [message.content for message in prepared_execution.run_input] == ["prepared team prompt"]
-    assert prepared_execution.context_messages == ()
-
-
-@pytest.mark.asyncio
-async def test_process_and_respond_threads_system_enrichment_items(tmp_path: Path) -> None:
-    """Non-streaming agent delivery should forward system enrichment items into the AI layer."""
-    bot = _make_bot(tmp_path)
-    system_items = (
-        EnrichmentItem(key="alpha", text="stable", cache_policy="stable"),
-        EnrichmentItem(key="omega", text="volatile", cache_policy="volatile"),
-    )
-
-    async def fake_ai_response(*args: object, **_kwargs: object) -> str:
-        assert args[0].system_enrichment_items == system_items
-        return "handled"
-
-    with (
-        patch(
-            "mindroom.delivery_gateway.DeliveryGateway.deliver_final",
-            new=AsyncMock(
-                return_value=FinalDeliveryOutcome(
-                    terminal_status="completed",
-                    event_id="$response",
-                    is_visible_response=True,
-                    final_visible_body="handled",
-                    delivery_kind="sent",
-                ),
-            ),
-        ),
-        patch_response_runner_module(
-            typing_indicator=_noop_typing_indicator,
-            ai_response=AsyncMock(side_effect=fake_ai_response),
-        ),
-    ):
-        generation = await bot._response_runner._process_and_respond(
-            ResponseRequest(
-                sources=ResponseSources(
-                    pending_event_ids=("$event",),
-                    logical_source_event_ids=("$event",),
-                ),
-                thread_history=[],
-                prompt="Please reply",
-                user_id="@user:localhost",
-                response_envelope=request_envelope(
-                    room_id="!room:localhost",
-                    reply_to_event_id="$event",
-                    prompt="Please reply",
-                    user_id="@user:localhost",
-                ),
-                system_enrichment_items=system_items,
-            ),
-        )
-
-    assert generation.delivery.event_id == "$response"
-    assert generation.delivery.response_text == "handled"
-
-
-@pytest.mark.asyncio
-async def test_process_and_respond_streaming_threads_system_enrichment_items(tmp_path: Path) -> None:
-    """Streaming agent delivery should forward system enrichment items into the AI layer."""
-    bot = _make_bot(tmp_path)
-    system_items = (
-        EnrichmentItem(key="alpha", text="stable", cache_policy="stable"),
-        EnrichmentItem(key="omega", text="volatile", cache_policy="volatile"),
-    )
-
-    async def fake_stream_agent_response(*args: object, **_kwargs: object) -> AsyncIterator[str]:
-        assert args[0].system_enrichment_items == system_items
-        yield "stream chunk"
+    ) -> AsyncIterator[str]:
+        seen_items.append(ctx.system_enrichment_items)
+        yield "handled"
 
     async def fake_send_streaming_response(*args: object, **_kwargs: object) -> StreamTransportOutcome:
         response_stream = args[4]
         chunks = [str(chunk) async for chunk in response_stream]
-        return StreamTransportOutcome(
-            last_physical_stream_event_id="$response",
-            terminal_status="completed",
-            rendered_body="".join(chunks),
-            visible_body_state="visible_body",
-        )
+        return stream_transport("$response", "".join(chunks))
 
     request = ResponseRequest(
         sources=ResponseSources(
@@ -701,18 +549,257 @@ async def test_process_and_respond_streaming_threads_system_enrichment_items(tmp
         system_enrichment_items=system_items,
     )
     runner = unwrap_extracted_collaborator(bot._response_runner)
+    effects = AsyncMock()
+    delivered = FinalDeliveryOutcome(
+        ending=Completed(),
+        event_id="$response",
+        is_visible_response=True,
+        final_visible_body="handled",
+        delivery_kind="sent",
+    )
     with (
+        patch.object(DeliveryGateway, "send_text", new=AsyncMock(return_value="$placeholder")),
+        patch.object(DeliveryGateway, "deliver_final", new=AsyncMock(return_value=delivered)),
         patch(
             "mindroom.delivery_gateway.send_streaming_response",
             new=AsyncMock(side_effect=fake_send_streaming_response),
         ),
+        patch.object(DeliveryGateway, "finalize_streamed_response", new=AsyncMock(return_value=delivered)),
         patch_response_runner_module(
-            typing_indicator=_noop_typing_indicator,
+            typing_indicator=_noop_typing,
             stream_agent_response=fake_stream_agent_response,
+            should_use_streaming=AsyncMock(return_value=streaming),
+            apply_post_response_effects=effects,
         ),
     ):
-        async with response_span(runner, request):
-            generation = await runner._process_and_respond_streaming(request)
+        assert await runner.generate_response(request) == Owned()
 
-    assert generation.delivery.event_id == "$response"
-    assert generation.delivery.response_text == "stream chunk"
+    # The finalized answer reached the reply's post-response effects.
+    assert effects.await_args.args[0].final_visible_event_id == "$response"
+
+    assert seen_items == [system_items]
+
+
+_MARKER = EnrichmentItem(key="marker", text="Marker from a system:enrich hook.", cache_policy="stable")
+
+
+def _install_marker_hook(bot: AgentBot) -> list[SystemEnrichContext]:
+    """Give ``bot`` a plugin whose system:enrich hook adds ``_MARKER``; return the contexts the hook runs with."""
+    seen: list[SystemEnrichContext] = []
+
+    @hook(EVENT_SYSTEM_ENRICH)
+    async def add_marker(ctx: SystemEnrichContext) -> None:
+        seen.append(ctx)
+        ctx.add_instruction(_MARKER.key, _MARKER.text, cache_policy=_MARKER.cache_policy)
+
+    bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins([_hook_plugin("marker", [add_marker])])
+    return seen
+
+
+def _message_turn(*, source_kind: str = MESSAGE_SOURCE_KIND) -> ResponseRequest:
+    """Return a message turn as dispatch hands it over, its payload left for the runner to build under the lock."""
+    target = _target()
+    preparation = _preparation(target)
+    envelope = replace(
+        preparation.dispatch.envelope,
+        origin=message_origin(sender_id="@user:localhost", requester_id="@user:localhost", source_kind=source_kind),
+    )
+    preparation = replace(preparation, dispatch=replace(preparation.dispatch, envelope=envelope, correlation_id="corr"))
+    return replace(
+        _request(target, preparation, thread_history=[]),
+        response_envelope=envelope,
+        correlation_id="corr",
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_message_turn_runs_system_enrich_once(tmp_path: Path) -> None:
+    """A message turn, whose payload the runner builds under the lock, gets the hook's instructions from one run."""
+    bot = await _streaming_bot(tmp_path)
+    seen = _install_marker_hook(bot)
+    model = AsyncMock(return_value="An answer.")
+
+    assert await _answer(bot, _message_turn(), model) == Owned()
+
+    assert model.await_args.args[0].system_enrichment_items == (_MARKER,)
+    [ctx] = seen
+    assert (ctx.target_entity_name, ctx.target_member_names) == ("general", None)
+    assert (ctx.envelope.source_event_id, ctx.correlation_id) == ("$event", "corr")
+
+
+@pytest.mark.asyncio
+async def test_hook_instructions_come_ahead_of_the_runtimes_own(tmp_path: Path) -> None:
+    """A silent schedule's quiet-delivery guidance, which the runtime adds, follows the hook's instructions."""
+    bot = await _streaming_bot(tmp_path)
+    _install_marker_hook(bot)
+    model = AsyncMock(return_value="A finding.")
+
+    assert await _answer(bot, _message_turn(source_kind=SILENT_SCHEDULE_SOURCE_KIND), model) == Owned()
+
+    keys = [item.key for item in model.await_args.args[0].system_enrichment_items]
+    assert keys == [_MARKER.key, "silent_schedule_delivery"]
+
+
+@pytest.mark.asyncio
+async def test_an_edit_regeneration_runs_system_enrich(tmp_path: Path) -> None:
+    """The answer an edit regenerates gets the hook's instructions, with the edit as the hook's message."""
+    bot = await _streaming_bot(tmp_path)
+    seen = _install_marker_hook(bot)
+    await _answer(bot, _plain_request(_target()), AsyncMock(return_value="First answer."))
+    regenerated = AsyncMock(return_value="Second answer.")
+
+    assert await _answer(bot, _regeneration(answer_event_id=(await _reply(bot)).event_id), regenerated) == Owned()
+
+    assert regenerated.await_args.args[0].system_enrichment_items == (_MARKER,)
+    assert seen[-1].envelope.source_event_id == "$edit"
+    assert (seen[-1].target_entity_name, seen[-1].target_member_names) == ("general", None)
+
+
+@pytest.mark.asyncio
+async def test_an_interactive_selection_answer_runs_system_enrich(tmp_path: Path) -> None:
+    """The answer to a selection, which fills its acknowledgement, gets the hook's instructions."""
+    bot = await _streaming_bot(tmp_path)
+    seen = _install_marker_hook(bot)
+    ack_event_id, span_id = await _acknowledge_selection(bot)
+    request = replace(_plain_request(_target()), existing_event_id=ack_event_id, interactive_span_id=span_id)
+    model = AsyncMock(return_value="Selected answer.")
+
+    assert await _answer(bot, request, model) == Owned()
+
+    assert model.await_args.args[0].system_enrichment_items == (_MARKER,)
+    [ctx] = seen
+    assert ctx.envelope.source_event_id == "$event"
+
+
+@pytest.mark.asyncio
+async def test_a_job_follow_up_runs_system_enrich(tmp_path: Path) -> None:
+    """The turn that reports ended background jobs gets the hook's instructions, with the follow-up as its message."""
+    bot = _bot(tmp_path)
+    await bot._take_over_replies()
+    unique_room_send_responses(bot.client)
+    seen = _install_marker_hook(bot)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    key = _runner_key(bot)
+    runtime = await _runner_runtime(bot, tmp_path)
+    turns: list[ResponseTurnContext] = []
+
+    async def stream(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> AsyncIterator[str]:
+        turns.append(ctx)
+        yield "The job finished."
+
+    try:
+        await _ended(runtime, "work", BackgroundOutcome("completed", "done"), owner=_runner_owner(key))
+        event = await _follow_up(bot.journal_principal(), key, "job-follow-up:1")
+        with patch_response_runner_module(
+            stream_agent_response=stream,
+            should_use_streaming=AsyncMock(return_value=True),
+            typing_indicator=_noop_typing,
+        ):
+            await runner._run_job_follow_up(event)
+    finally:
+        await runtime.shutdown()
+
+    [turn] = turns
+    assert turn.system_enrichment_items == (_MARKER,)
+    [ctx] = seen
+    assert (ctx.envelope.source_event_id, ctx.correlation_id) == ("job-follow-up:1", "job-follow-up:1")
+    assert ctx.envelope.origin.intent is TurnIntent.JOB_FOLLOW_UP
+
+
+@pytest.mark.asyncio
+async def test_a_team_turn_tells_system_enrich_its_members(tmp_path: Path) -> None:
+    """A team turn handed over with its prompt built names its members to the hook and gets the hook's instructions."""
+    bot = await _streaming_bot(tmp_path)
+    seen = _install_marker_hook(bot)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    model = AsyncMock(return_value="Team answer.")
+
+    with patch_response_runner_module(
+        team_response_stream=_model_stream(model),
+        should_use_streaming=AsyncMock(return_value=False),
+        typing_indicator=_noop_typing,
+    ):
+        assert (
+            await runner.generate_team_response_helper(
+                _plain_request(_target()),
+                member_names=[bot.agent_name],
+                team_mode="coordinate",
+            )
+            == Owned()
+        )
+
+    assert model.await_args.args[1].system_enrichment_items == (_MARKER,)
+    [ctx] = seen
+    assert (ctx.target_entity_name, ctx.target_member_names) == ("general", ("general",))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("entity_kind", "member_names"), [("agent", None), ("team", ("alpha", "beta"))])
+@pytest.mark.parametrize(
+    ("source_kind", "keys"),
+    [
+        pytest.param(MESSAGE_SOURCE_KIND, [_MARKER.key], id="message"),
+        pytest.param(SILENT_SCHEDULE_SOURCE_KIND, [_MARKER.key, "silent_schedule_delivery"], id="silent-schedule"),
+    ],
+)
+async def test_an_approval_resume_runs_system_enrich_for_the_run_it_resumes(
+    tmp_path: Path,
+    entity_kind: str,
+    member_names: tuple[str, ...] | None,
+    source_kind: str,
+    keys: list[str],
+) -> None:
+    """A reply resumed after a tool approval runs the hook once, on its paused message, and resumes with its instructions.
+
+    A team's resume names the team's members to the hook and runs on the model its run paused on. A silent schedule's
+    resume also carries its quiet-delivery guidance after the hook's instructions, as its turn did.
+    """
+    bot = _bot(tmp_path)
+    runner = unwrap_extracted_collaborator(bot._response_runner)
+    runner.deps.runtime.config.models["large"] = runner.deps.runtime.config.models["default"]
+    await _admit_approval_source(runner.deps.replies.store)
+    seen = _install_marker_hook(bot)
+    tool_context = turn_tool_context(
+        runner.deps.runtime.config,
+        runner.deps.runtime_paths,
+        approval_continuation().execution_identity,
+    )
+    continuation = approval_continuation(
+        entity_kind=entity_kind,
+        origin=message_origin(sender_id="@user:localhost", source_kind=source_kind),
+        correlation_id="corr-resume",
+        execution_identity=tool_context.execution_identity,
+        runtime_model_name="large",
+        team_member_names=member_names or (),
+        team_mode="coordinate" if member_names else None,
+    )
+    assert await paused_for_approval(runner.deps.replies.store, continuation) is not None
+    target = _target(thread_id="$thread")
+    agent_resume = AsyncMock(return_value=CompletedApprovalRun(response_text="Done.", metadata_content={}))
+    team_resume = AsyncMock(return_value=CompletedApprovalRun(response_text="Done.", metadata_content={}))
+
+    with (
+        patch.object(runner.deps.tool_runtime, "build_turn_context", return_value=tool_context),
+        patch("mindroom.approval.execution.AgentApprovalExecution.continue_run", new=agent_resume),
+        patch("mindroom.approval.continuation_runner.continue_paused_team_run", new=team_resume),
+    ):
+        async with resumed_approval(bot, continuation) as claimed:
+            await runner.approvals._continue_entity_call(
+                claimed,
+                request=runner.approvals.approval_response_request(claimed, target=target),
+                target=target,
+                tool_trace_collector=[],
+                progress=None,
+                cli_approval_handler=None,
+            )
+
+    [ctx] = seen
+    assert (ctx.target_entity_name, ctx.target_member_names) == ("general", member_names)
+    assert (ctx.envelope.source_event_id, ctx.correlation_id) == ("$source", "corr-resume")
+    resumed, skipped = (team_resume, agent_resume) if member_names else (agent_resume, team_resume)
+    skipped.assert_not_awaited()
+    items = resumed.await_args.kwargs["system_enrichment_items"]
+    assert items[0] == _MARKER
+    assert [item.key for item in items] == keys
+    if member_names:
+        assert team_resume.await_args.kwargs["model_name"] == "large"

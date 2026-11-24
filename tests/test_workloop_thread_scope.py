@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import importlib
 import json
 import re
@@ -10,24 +9,17 @@ import shutil
 import sys
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from functools import partial
 from pathlib import Path
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-import mindroom.tool_system.plugin_imports as plugin_module
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import ROUTER_AGENT_NAME
-from mindroom.delivery_gateway import (
-    DeliveryGateway,
-    DeliveryGatewayDeps,
-    FinalDeliveryRequest,
-    ResponseHookService,
-    ResponseIdentity,
-)
 from mindroom.hooks import (
     EVENT_MESSAGE_AFTER_RESPONSE,
     EVENT_MESSAGE_CANCELLED,
@@ -42,28 +34,25 @@ from mindroom.hooks import (
     MessageReceivedContext,
     ResponseResult,
     ScheduleFiredContext,
-    hook,
 )
-from mindroom.hooks.context import CancelledResponseInfo, HookContextSupport
+from mindroom.hooks.context import CancelledResponseInfo
 from mindroom.hooks.execution import emit, emit_collect
 from mindroom.hooks.registry import HookRegistryState
 from mindroom.logging_config import get_logger
 from mindroom.message_target import MessageTarget
-from mindroom.response_sources import ResponseSources
+from mindroom.room_steward import room_steward
 from mindroom.scheduling.tasks import ScheduledWorkflow
 from mindroom.session_ids import create_session_id
-from mindroom.tool_system.metadata import TOOL_METADATA, TOOL_REGISTRY, get_tool_by_name
-from mindroom.tool_system.plugins import load_plugins
+from mindroom.steward_duties import runs_room_hooks
+from mindroom.tool_system import plugins as plugins_module
+from mindroom.tool_system.metadata import get_tool_by_name
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
-from mindroom.tool_system.skills import _get_plugin_skill_roots, set_plugin_skill_roots
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )
 from tests.conftest import (
     bind_runtime_paths,
-    ignore_final_delivery_handoff,
     make_conversation_reader_mock,
-    make_outbox_mock,
     make_relation_lookup,
     message_origin,
     runtime_paths_for,
@@ -75,6 +64,8 @@ if TYPE_CHECKING:
     from types import ModuleType
 
     from mindroom.constants import RuntimePaths
+    from mindroom.event_journal import EventJournalStore
+    from mindroom.tool_system.registry import ToolRegistry
 
 
 @dataclass(frozen=True)
@@ -82,6 +73,7 @@ class _LoadedWorkloop:
     config: Config
     runtime_paths: RuntimePaths
     registry: HookRegistry
+    tools: ToolRegistry
     poke_module: ModuleType
 
 
@@ -97,20 +89,6 @@ pytestmark = pytest.mark.skipif(
     not _plugin_root().is_dir(),
     reason="workloop plugin checkout is not available in this environment",
 )
-
-
-def _plugin(name: str, callbacks: list[object]) -> object:
-    return type(
-        "PluginStub",
-        (),
-        {
-            "name": name,
-            "discovered_hooks": tuple(callbacks),
-            "discovered_automations": (),
-            "entry_config": PluginEntryConfig(path=f"./plugins/{name}"),
-            "plugin_order": 0,
-        },
-    )()
 
 
 def _copy_plugin_root(tmp_path: Path) -> Path:
@@ -205,18 +183,6 @@ def _todo_titles(state: dict[str, object]) -> list[str]:
     return titles
 
 
-def _registry_callbacks(registry: HookRegistry) -> list[object]:
-    callbacks: list[object] = []
-    seen_callbacks: set[object] = set()
-    for hooks in registry._hooks_by_event.values():
-        for registered_hook in hooks:
-            if registered_hook.callback in seen_callbacks:
-                continue
-            seen_callbacks.add(registered_hook.callback)
-            callbacks.append(registered_hook.callback)
-    return callbacks
-
-
 def _tool_context(
     loaded: _LoadedWorkloop,
     *,
@@ -274,7 +240,7 @@ def _message_envelope(
 
 
 @pytest.fixture
-def loaded_workloop(tmp_path: Path) -> Generator[_LoadedWorkloop, None, None]:
+def loaded_workloop(tmp_path: Path) -> Generator[_LoadedWorkloop]:
     """Load the workloop plugin into an isolated runtime rooted at tmp_path."""
     runtime_paths = test_runtime_paths(tmp_path)
     plugin_root = _copy_plugin_root(tmp_path)
@@ -286,36 +252,21 @@ def loaded_workloop(tmp_path: Path) -> Generator[_LoadedWorkloop, None, None]:
         ),
         runtime_paths,
     )
-
-    original_registry = TOOL_REGISTRY.copy()
-    original_metadata = TOOL_METADATA.copy()
-    original_plugin_roots = _get_plugin_skill_roots()
-    original_plugin_cache = plugin_module._PLUGIN_CACHE.copy()
-    original_module_cache = plugin_module._MODULE_IMPORT_CACHE.copy()
-
     try:
-        plugins = load_plugins(config, runtime_paths_for(config))
-        registry = HookRegistry.from_plugins(plugins)
+        plugins_module.publish_plugins(plugins_module.prepare_plugins(config, runtime_paths_for(config)))
+        plugins = plugins_module.config_plugins(config, runtime_paths_for(config))
         poke_module = importlib.import_module("plugins.workloop.poke")
         yield _LoadedWorkloop(
             config=config,
             runtime_paths=runtime_paths_for(config),
-            registry=registry,
+            registry=plugins.hooks,
+            tools=plugins.tools,
             poke_module=poke_module,
         )
     finally:
         for module_name in list(sys.modules):
             if module_name == "plugins.workloop" or module_name.startswith("plugins.workloop."):
                 sys.modules.pop(module_name, None)
-        TOOL_REGISTRY.clear()
-        TOOL_REGISTRY.update(original_registry)
-        TOOL_METADATA.clear()
-        TOOL_METADATA.update(original_metadata)
-        plugin_module._PLUGIN_CACHE.clear()
-        plugin_module._PLUGIN_CACHE.update(original_plugin_cache)
-        plugin_module._MODULE_IMPORT_CACHE.clear()
-        plugin_module._MODULE_IMPORT_CACHE.update(original_module_cache)
-        set_plugin_skill_roots(original_plugin_roots)
         if sys.path and sys.path[0] == str(tmp_path):
             sys.path.pop(0)
 
@@ -326,6 +277,7 @@ def test_tool_scope_uses_resolved_thread_id(loaded_workloop: _LoadedWorkloop) ->
         "workloop_todo_manager",
         loaded_workloop.runtime_paths,
         worker_target=None,
+        tools=loaded_workloop.tools,
     )
 
     with tool_runtime_context(_tool_context(loaded_workloop)):
@@ -345,6 +297,7 @@ async def test_enrichment_uses_resolved_thread_scope_and_clears_busy_state(
         "workloop_todo_manager",
         loaded_workloop.runtime_paths,
         worker_target=None,
+        tools=loaded_workloop.tools,
     )
 
     with tool_runtime_context(_tool_context(loaded_workloop)):
@@ -396,14 +349,15 @@ async def test_enrichment_uses_resolved_thread_scope_and_clears_busy_state(
 
 
 @pytest.mark.asyncio
-async def test_schedule_fired_auto_poke_uses_thread_from_stored_state(
+async def test_schedule_fired_auto_poke_is_suppressed_without_sending(
     loaded_workloop: _LoadedWorkloop,
 ) -> None:
-    """Auto-poke should send back into the stored thread scope."""
+    """A scheduled auto-poke tick for a stored thread task is suppressed and sends nothing."""
     tool = get_tool_by_name(
         "workloop_todo_manager",
         loaded_workloop.runtime_paths,
         worker_target=None,
+        tools=loaded_workloop.tools,
     )
 
     with tool_runtime_context(_tool_context(loaded_workloop)):
@@ -468,6 +422,49 @@ async def test_room_level_todo_command_stays_in_main_scope(loaded_workloop: _Loa
 
 
 @pytest.mark.asyncio
+async def test_router_filtered_command_runs_once_per_message_in_a_room_with_no_owner_account(
+    loaded_workloop: _LoadedWorkloop,
+    journal_store: EventJournalStore,
+) -> None:
+    """The fixture's `agents=(ROUTER_AGENT_NAME,)` command hook runs once for a message two agents' bots both emit."""
+    room = SimpleNamespace(power_levels=SimpleNamespace(get_user_level=lambda _user_id: 0))
+    bots = {
+        name: SimpleNamespace(
+            agent_name=name,
+            running=True,
+            client=SimpleNamespace(user_id=f"@mindroom_{name}:localhost", rooms={"!room:localhost": room}),
+        )
+        for name in ("general", "code")
+    }
+    orchestrator = SimpleNamespace(
+        room_steward=lambda room_id: room_steward(bots, room_id),
+        event_journal_store=lambda: journal_store,
+    )
+    runtime = HookRegistryState(loaded_workloop.registry, room_hook_owner=partial(runs_room_hooks, orchestrator))
+    sender = AsyncMock(return_value="$todo-event")
+
+    for agent_name in bots:
+        command_context = MessageReceivedContext(
+            event_name=EVENT_MESSAGE_RECEIVED,
+            plugin_name="",
+            settings={},
+            config=loaded_workloop.config,
+            runtime_paths=loaded_workloop.runtime_paths,
+            logger=get_logger("tests.workloop").bind(event_name=EVENT_MESSAGE_RECEIVED),
+            correlation_id="corr-command",
+            message_sender=sender,
+            envelope=_message_envelope(body="!todo add Only once", agent_name=agent_name),
+            _hook_registry_state=runtime.lifetime(agent_name),
+        )
+        await emit(runtime.registry, EVENT_MESSAGE_RECEIVED, command_context)
+
+    assert ROUTER_AGENT_NAME not in bots
+    assert sender.await_count == 1
+    state = _todo_state(loaded_workloop, room_id="!room:localhost", thread_id="main")
+    assert _todo_titles(state) == ["Only once"]
+
+
+@pytest.mark.asyncio
 async def test_room_level_todos_are_isolated_per_room(loaded_workloop: _LoadedWorkloop) -> None:
     """Room-level main scopes must stay isolated between rooms."""
     room_a = "!room-a:localhost"
@@ -477,6 +474,7 @@ async def test_room_level_todos_are_isolated_per_room(loaded_workloop: _LoadedWo
         "workloop_todo_manager",
         loaded_workloop.runtime_paths,
         worker_target=None,
+        tools=loaded_workloop.tools,
     )
 
     room_a_context = MessageReceivedContext(
@@ -570,6 +568,7 @@ async def test_cancelled_response_clears_active_run_without_updating_last_respon
         "workloop_todo_manager",
         loaded_workloop.runtime_paths,
         worker_target=None,
+        tools=loaded_workloop.tools,
     )
 
     with tool_runtime_context(_tool_context(loaded_workloop)):
@@ -632,6 +631,7 @@ async def test_cancelled_then_poke_scan_can_repoke(
         "workloop_todo_manager",
         loaded_workloop.runtime_paths,
         worker_target=None,
+        tools=loaded_workloop.tools,
     )
 
     with tool_runtime_context(_tool_context(loaded_workloop)):
@@ -686,122 +686,3 @@ async def test_cancelled_then_poke_scan_can_repoke(
         min_idle=0,
     )
     assert can_poke, "agent should be pokeable after cancellation clears active_run"
-
-
-@pytest.mark.asyncio
-async def test_late_after_response_cancellation_still_runs_workloop_cleanup(
-    loaded_workloop: _LoadedWorkloop,
-) -> None:
-    """Late cancellation during after_response should still clear busy state as delivered."""
-    tool = get_tool_by_name(
-        "workloop_todo_manager",
-        loaded_workloop.runtime_paths,
-        worker_target=None,
-    )
-    response_envelope = _message_envelope(body="hello", agent_name="code")
-
-    with tool_runtime_context(_tool_context(loaded_workloop)):
-        tool.plan(agent=MagicMock(), tasks="Task that must clear after late cancellation")
-
-    await emit_collect(
-        loaded_workloop.registry,
-        EVENT_MESSAGE_ENRICH,
-        MessageEnrichContext(
-            event_name=EVENT_MESSAGE_ENRICH,
-            plugin_name="",
-            settings={},
-            config=loaded_workloop.config,
-            runtime_paths=loaded_workloop.runtime_paths,
-            logger=get_logger("tests.workloop").bind(event_name=EVENT_MESSAGE_ENRICH),
-            correlation_id="corr-enrich-late-cancel",
-            envelope=response_envelope,
-            target_entity_name="code",
-            target_member_names=None,
-        ),
-    )
-
-    agent_state_path = _state_root(loaded_workloop) / "agents" / "code.json"
-    agent_state = _read_json(agent_state_path)
-    assert "!room:localhost:$thread_root" in agent_state["active_runs"]
-    assert agent_state.get("last_response_at") is None
-
-    after_started = asyncio.Event()
-
-    @hook(EVENT_MESSAGE_AFTER_RESPONSE, priority=50)
-    async def slow_after_response(ctx: AfterResponseContext) -> None:
-        del ctx
-        after_started.set()
-        await asyncio.Event().wait()
-
-    registry = HookRegistry.from_plugins(
-        [
-            _plugin("slow-after", [slow_after_response]),
-            _plugin("workloop", _registry_callbacks(loaded_workloop.registry)),
-        ],
-    )
-    hook_context = HookContextSupport(
-        runtime=type(
-            "RT",
-            (),
-            {"client": None, "orchestrator": None, "config": loaded_workloop.config, "runtime_started_at": 0.0},
-        )(),
-        logger=get_logger("tests.workloop.delivery"),
-        runtime_paths=loaded_workloop.runtime_paths,
-        agent_name="code",
-        hook_registry_state=HookRegistryState(registry),
-        hook_send_message=AsyncMock(),
-    )
-    gateway = DeliveryGateway(
-        DeliveryGatewayDeps(
-            runtime=hook_context.runtime,
-            runtime_paths=loaded_workloop.runtime_paths,
-            agent_name="code",
-            logger=get_logger("tests.workloop.delivery"),
-            redact_message_event=AsyncMock(return_value=True),
-            resolver=MagicMock(),
-            response_hooks=ResponseHookService(hook_context=hook_context),
-            outbox=make_outbox_mock(),
-            turn_handoff=ignore_final_delivery_handoff,
-        ),
-    )
-
-    parsed = MagicMock()
-    parsed.formatted_text = "visible response"
-    parsed.interactive_metadata = None
-
-    delivery_result = None
-
-    async def deliver_response() -> None:
-        nonlocal delivery_result
-        delivery_result = await gateway.deliver_final(
-            FinalDeliveryRequest(
-                target=response_envelope.target,
-                existing_event_id=None,
-                response_text="visible response",
-                identity=ResponseIdentity(
-                    response_kind="ai",
-                    response_envelope=response_envelope,
-                    correlation_id="corr-late-workloop-cleanup",
-                    sources=ResponseSources((response_envelope.source_event_id,), (response_envelope.source_event_id,)),
-                ),
-                tool_trace=None,
-                extra_content=None,
-            ),
-        )
-
-    with (
-        patch("mindroom.delivery_gateway.interactive.parse_and_format_interactive", return_value=parsed),
-        patch.object(DeliveryGateway, "send_text", new=AsyncMock(return_value="$response")),
-    ):
-        task = asyncio.create_task(deliver_response())
-        await asyncio.wait_for(after_started.wait(), timeout=1)
-        task.cancel()
-        await task
-
-    assert delivery_result is not None
-    assert delivery_result.event_id == "$response"
-    assert delivery_result.delivery_kind == "sent"
-
-    cleared_state = _read_json(agent_state_path)
-    assert cleared_state["active_runs"] == {}
-    assert isinstance(cleared_state.get("last_response_at"), str)

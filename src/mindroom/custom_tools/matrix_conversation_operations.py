@@ -2,25 +2,30 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
 from dataclasses import asdict, dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
 import nio
 
-from mindroom.attachments import AttachmentRecord
+from mindroom.attachments.storage import AttachmentRecord
 from mindroom.constants import (
     ACTING_REQUESTER_KEY,
     ATTACHMENT_IDS_KEY,
     ORIGINAL_SENDER_KEY,
     SKIP_MENTIONS_KEY,
     SOURCE_KIND_KEY,
+    STREAM_VISIBLE_BODY_KEY,
 )
+from mindroom.contacts.policy import ContactVerdict, check_contact_message
+from mindroom.contacts.turns import contact_room
 from mindroom.custom_tools.attachments import (
-    resolve_send_attachments,
+    resolve_send_attachment,
     send_resolved_attachments,
 )
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 from mindroom.interactive import parse_and_format_interactive
+from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import edit_message_result, send_message_result, send_room_event_result
 from mindroom.matrix.client_visible_messages import (
     is_visible_room_message,
@@ -29,23 +34,50 @@ from mindroom.matrix.client_visible_messages import (
     trusted_visible_sender_ids,
 )
 from mindroom.matrix.conversation_reads import complete_thread_history
+from mindroom.matrix.guarded_rooms import allowed_send
 from mindroom.matrix.mentions import format_message_with_mentions
 from mindroom.matrix.message_builder import build_reaction_content
 from mindroom.matrix.message_extras import build_message_extras_content
+from mindroom.matrix.thread_fork_access import authorize_cross_room_fork_access
+from mindroom.matrix.thread_forks import with_fork_prefix
 from mindroom.requester_identity import is_human_requester_id
+from mindroom.tool_system.events import body_without_tool_markers, has_tool_trace, strip_visible_tool_markers
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
+    from contextlib import AbstractContextManager
     from pathlib import Path
 
     from mindroom.config.models import FileAccess
     from mindroom.custom_tools.matrix_message_idempotency import MatrixMessageSendClaim
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
-    from mindroom.matrix.message_extras import MessageExtraSection
+    from mindroom.matrix.message_extras import MatrixMessageExtra
     from mindroom.matrix.runtime_media import RuntimeEncryptedMediaAttachment
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
+logger = get_logger(__name__)
+
 _DIRECT_INTERACTIVE_ERROR = "Interactive prompts are only supported in normal agent responses."
+_CONTACT_TEXT_ONLY_ERROR = "Error: contact rooms accept text only"
+
+
+def _message_payload(
+    message: ResolvedVisibleMessage,
+    *,
+    room_id: str | None = None,
+) -> dict[str, object]:
+    """Return one message for the agent, with its text free of tool display markers."""
+    payload = message.to_dict()
+    if room_id is not None and message.room_id not in (None, room_id):
+        payload = {**payload, "room_id": message.room_id}
+    if not has_tool_trace(message.content):
+        return payload
+    body = strip_visible_tool_markers(message.body)
+    # The rendered HTML and the streaming canonical body repeat the markers, and the plain body carries the text.
+    dropped = {"format", "formatted_body", STREAM_VISIBLE_BODY_KEY}
+    content = {key: value for key, value in message.content.items() if key not in dropped}
+    content["body"] = strip_visible_tool_markers(str(content.get("body", "")))
+    return {**payload, "body": body, "content": content}
 
 
 @dataclass(frozen=True)
@@ -66,6 +98,18 @@ class _MessageSendState:
     attachment_event_ids: list[str] = field(default_factory=list)
     resolved_attachment_ids: list[str] = field(default_factory=list)
     newly_registered_attachment_ids: list[str] = field(default_factory=list)
+
+
+def _contact_policy_fields(verdict: ContactVerdict | None, done: str) -> dict[str, str]:
+    """Return the result fields that tell the agent the contact policy changed what went out, and to what."""
+    if verdict is None or not verdict.rewritten:
+        return {}
+    return {"note": f"{done} (changed by the contact policy)", "sent_text": verdict.text}
+
+
+def _policy_approved(verdict: ContactVerdict | None) -> AbstractContextManager[None]:
+    """Return the scope a send runs in: one that reaches the turn's guarded contact room once the policy approved it."""
+    return allowed_send() if verdict is not None else nullcontext()
 
 
 def _format_direct_text(text: str) -> str | None:
@@ -90,6 +134,53 @@ class MatrixMessageOperations:
     def _result(status: Literal["ok", "error"], **kwargs: object) -> MatrixMessageOperationResult:
         return MatrixMessageOperationResult(status=status, fields=kwargs)
 
+    async def _contact_gate(
+        self,
+        context: ToolRuntimeContext,
+        *,
+        action: Literal["send", "edit", "react"],
+        room_id: str,
+        thread_id: str | None,
+        text: str | None,
+        text_only: bool,
+    ) -> ContactVerdict | MatrixMessageOperationResult | None:
+        """Run the contact policy on a message into a contact room of this agent, before anything is sent or stored.
+
+        Return None for any other room, the verdict whose text to send, or the result that stops the message.
+        A removed contact's room takes nothing more, even from a turn that started before the removal or a message
+        whose policy check was still running.
+        """
+        contact = contact_room(context.current_config, context.runtime_paths, room_id, context.agent_name)
+        if contact is None:
+            return None
+        record, side = contact
+        removed = self._result(
+            "error",
+            action=action,
+            room_id=room_id,
+            message=f"Error: contact {record.id} was removed, so nothing more can be sent into its room",
+        )
+        if record.status != "active":
+            return removed
+        if text is None or not text_only:
+            return self._result("error", action=action, room_id=room_id, message=_CONTACT_TEXT_ONLY_ERROR)
+        verdict = await check_contact_message(
+            context,
+            record,
+            side,
+            room_id=room_id,
+            thread_id=thread_id,
+            text=text,
+            adds_message=action == "send",
+        )
+        current = contact_room(context.current_config, context.runtime_paths, room_id, context.agent_name)
+        if current is None or current[0].status != "active":
+            return removed
+        if verdict.action == "send":
+            return verdict
+        retry = " Revise the message and send it again." if verdict.action == "revise" else ""
+        return self._result("error", action=action, room_id=room_id, message=f"Not sent: {verdict.feedback}{retry}")
+
     async def _send_matrix_text(
         self,
         context: ToolRuntimeContext,
@@ -98,7 +189,7 @@ class MatrixMessageOperations:
         text: str,
         thread_id: str | None,
         recipient_user_id: str | None,
-        message_extras: list[MessageExtraSection] | None,
+        message_extras: list[MatrixMessageExtra] | None,
         known_latest_thread_event_id: str | None = None,
         attachment_ids: list[str] | None = None,
         send_claim: MatrixMessageSendClaim | None = None,
@@ -203,7 +294,7 @@ class MatrixMessageOperations:
         recipient_user_id: str | None,
         room_mode: bool,
         new_thread: bool,
-        message_extras: list[MessageExtraSection] | None,
+        message_extras: list[MatrixMessageExtra] | None,
         send_claim: MatrixMessageSendClaim | None = None,
         recipient_name: str | None = None,
     ) -> MatrixMessageOperationResult:
@@ -220,7 +311,7 @@ class MatrixMessageOperations:
                     ),
                 ),
             )
-        text = message.strip() if message and message.strip() else None
+        text = (message or "").strip() or None
         if text is None and message_extras:
             return self._result("error", action="send", message="message_extras requires a non-empty message body.")
         if text is None and not attachments:
@@ -229,23 +320,35 @@ class MatrixMessageOperations:
             text = _format_direct_text(text)
             if text is None:
                 return self._result("error", action="send", room_id=room_id, message=_DIRECT_INTERACTIVE_ERROR)
+        contact_verdict = await self._contact_gate(
+            context,
+            action="send",
+            room_id=room_id,
+            thread_id=thread_id,
+            text=text,
+            text_only=not attachments and not message_extras,
+        )
+        if isinstance(contact_verdict, MatrixMessageOperationResult):
+            return contact_verdict
+        if contact_verdict is not None:
+            text = contact_verdict.text
 
         state = _MessageSendState(room_id=room_id, thread_id=thread_id)
         resolved: list[AttachmentRecord | RuntimeEncryptedMediaAttachment] = []
         for reference in attachments:
-            is_id = reference.startswith("att_")
-            files, ids, registered_ids, error = resolve_send_attachments(
+            resolution = resolve_send_attachment(
                 context,
-                attachment_ids=[reference] if is_id else [],
-                attachment_file_paths=[] if is_id else [reference],
+                reference,
                 workspace_root=self._tool_output_workspace_root,
                 file_access=self._file_access,
             )
-            if error is not None:
-                return self._result("error", action="send", message=error, **asdict(state))
-            resolved.extend(files)
-            state.resolved_attachment_ids.extend(ids)
-            state.newly_registered_attachment_ids.extend(registered_ids)
+            if isinstance(resolution, str):
+                return self._result("error", action="send", message=resolution, **asdict(state))
+            attachment, newly_registered = resolution
+            resolved.append(attachment)
+            state.resolved_attachment_ids.append(attachment.attachment_id)
+            if newly_registered:
+                state.newly_registered_attachment_ids.append(attachment.attachment_id)
 
         if (
             recipient_user_id is not None
@@ -271,20 +374,23 @@ class MatrixMessageOperations:
             if error is not None:
                 return self._result("error", action="send", message=error, **asdict(state))
         if text is not None or recipient_user_id is not None:
-            state.event_id = await self._send_matrix_text(
-                context,
-                room_id=room_id,
-                text=text or "",
-                send_claim=send_claim,
-                recipient_name=recipient_name,
-                starts_thread=state.thread_id is None
-                and (new_thread or (not room_mode and recipient_user_id is not None)),
-                thread_id=state.thread_id,
-                recipient_user_id=recipient_user_id,
-                attachment_ids=state.resolved_attachment_ids if recipient_user_id is not None else None,
-                message_extras=message_extras,
-                known_latest_thread_event_id=(state.attachment_event_ids[-1] if state.attachment_event_ids else None),
-            )
+            with _policy_approved(contact_verdict):
+                state.event_id = await self._send_matrix_text(
+                    context,
+                    room_id=room_id,
+                    text=text or "",
+                    send_claim=send_claim,
+                    recipient_name=recipient_name,
+                    starts_thread=state.thread_id is None
+                    and (new_thread or (not room_mode and recipient_user_id is not None)),
+                    thread_id=state.thread_id,
+                    recipient_user_id=recipient_user_id,
+                    attachment_ids=state.resolved_attachment_ids if recipient_user_id is not None else None,
+                    message_extras=message_extras,
+                    known_latest_thread_event_id=(
+                        state.attachment_event_ids[-1] if state.attachment_event_ids else None
+                    ),
+                )
             if state.event_id is None:
                 return self._result(
                     "error",
@@ -306,7 +412,7 @@ class MatrixMessageOperations:
                 return self._result("error", action="send", message=error, **asdict(state))
         if state.event_id is None and state.attachment_event_ids:
             state.event_id = state.attachment_event_ids[0]
-        return self._result("ok", action="send", **asdict(state))
+        return self._result("ok", action="send", **asdict(state), **_contact_policy_fields(contact_verdict, "Sent"))
 
     async def _message_react(
         self,
@@ -314,19 +420,33 @@ class MatrixMessageOperations:
         *,
         message: str | None,
         room_id: str,
+        thread_id: str | None,
         event_id: str | None,
     ) -> MatrixMessageOperationResult:
         if event_id is None:
             return self._result("error", action="react", message="event_id is required.")
 
-        reaction = message.strip() if message and message.strip() else "👍"
-        response = await send_room_event_result(
-            context.client,
-            room_id,
-            "m.reaction",
-            build_reaction_content(event_id, reaction),
-            operation="matrix_message_react",
+        reaction = (message or "").strip() or "👍"
+        contact_verdict = await self._contact_gate(
+            context,
+            action="react",
+            room_id=room_id,
+            thread_id=thread_id,
+            text=reaction,
+            text_only=True,
         )
+        if isinstance(contact_verdict, MatrixMessageOperationResult):
+            return contact_verdict
+        if contact_verdict is not None:
+            reaction = contact_verdict.text
+        with _policy_approved(contact_verdict):
+            response = await send_room_event_result(
+                context.client,
+                room_id,
+                "m.reaction",
+                build_reaction_content(event_id, reaction),
+                operation="matrix_message_react",
+            )
         if isinstance(response, nio.RoomSendResponse):
             return self._result(
                 "ok",
@@ -335,6 +455,7 @@ class MatrixMessageOperations:
                 reacted_event_id=event_id,
                 reaction=reaction,
                 event_id=response.event_id,
+                **_contact_policy_fields(contact_verdict, "Reacted"),
             )
         return self._result(
             "error",
@@ -356,7 +477,6 @@ class MatrixMessageOperations:
         if effective_thread_id is not None:
             return await self._thread_read_payload(
                 context,
-                action="read",
                 room_id=room_id,
                 thread_id=effective_thread_id,
                 read_limit=read_limit,
@@ -396,18 +516,21 @@ class MatrixMessageOperations:
             action="read",
             room_id=room_id,
             limit=read_limit,
-            messages=[message.to_dict() for message in messages],
+            messages=[_message_payload(message) for message in messages],
         )
 
     @staticmethod
     def _build_edit_options(
         context: ToolRuntimeContext,
         *,
+        room_id: str | None = None,
         messages: Sequence[ResolvedVisibleMessage],
     ) -> list[dict[str, object]]:
         current_user_id = context.client.user_id
         options: list[dict[str, object]] = []
         for message in reversed(messages):
+            if room_id is not None and message.room_id not in (None, room_id):
+                continue
             event_id = message.event_id
             sender = message.sender
             can_edit = current_user_id is not None and sender == current_user_id
@@ -415,7 +538,7 @@ class MatrixMessageOperations:
                 "event_id": event_id,
                 "sender": sender,
                 "can_edit": can_edit,
-                "body_preview": message_preview(message.body),
+                "body_preview": message_preview(body_without_tool_markers(message.body, message.content)),
             }
             if can_edit:
                 option["edit_action"] = {"action": "edit", "event_id": event_id}
@@ -426,21 +549,39 @@ class MatrixMessageOperations:
         self,
         context: ToolRuntimeContext,
         *,
-        action: str,
         room_id: str,
         thread_id: str,
         read_limit: int,
     ) -> MatrixMessageOperationResult:
-        thread_messages = await complete_thread_history(context.conversation_reader, room_id, thread_id)
+        reader = context.conversation_reader
+        # A fork reads as its parent's messages up to the fork point, then its own.
+        thread_messages = await with_fork_prefix(
+            await complete_thread_history(reader, room_id, thread_id),
+            room_id=room_id,
+            thread_id=thread_id,
+            read_thread=lambda parent_room_id, parent_id: complete_thread_history(reader, parent_room_id, parent_id),
+            authorize_cross_room=lambda hop: authorize_cross_room_fork_access(
+                client=context.client,
+                config=context.config,
+                runtime_paths=context.runtime_paths,
+                hop=hop,
+                requester_id=context.requester_id,
+                nonblocking=False,
+                target_room=context.room if context.room is not None and context.room.room_id == room_id else None,
+                output_room_id=context.room_id,
+                output_room=context.room,
+            ),
+            logger=logger,
+        )
         recent_messages = thread_messages[-read_limit:]
         return self._result(
             "ok",
-            action=action,
+            action="read",
             room_id=room_id,
             thread_id=thread_id,
             limit=read_limit,
-            messages=[message.to_dict() for message in recent_messages],
-            edit_options=self._build_edit_options(context, messages=recent_messages),
+            messages=[_message_payload(message, room_id=room_id) for message in recent_messages],
+            edit_options=self._build_edit_options(context, room_id=room_id, messages=recent_messages),
         )
 
     async def _message_edit(
@@ -451,17 +592,29 @@ class MatrixMessageOperations:
         thread_id: str | None,
         event_id: str | None,
         message: str | None,
-        message_extras: list[MessageExtraSection] | None,
+        message_extras: list[MatrixMessageExtra] | None,
     ) -> MatrixMessageOperationResult:
         if event_id is None:
             return self._result("error", action="edit", message="event_id is required for edit.")
-        new_text = message.strip() if isinstance(message, str) and message.strip() else None
-        if new_text is None:
+        new_text = (message or "").strip()
+        if not new_text:
             return self._result("error", action="edit", message="message is required for edit.")
 
         formatted_text = _format_direct_text(new_text)
         if formatted_text is None:
             return self._result("error", action="edit", room_id=room_id, message=_DIRECT_INTERACTIVE_ERROR)
+        contact_verdict = await self._contact_gate(
+            context,
+            action="edit",
+            room_id=room_id,
+            thread_id=thread_id,
+            text=formatted_text,
+            text_only=not message_extras,
+        )
+        if isinstance(contact_verdict, MatrixMessageOperationResult):
+            return contact_verdict
+        if contact_verdict is not None:
+            formatted_text = contact_verdict.text
         extras_content = build_message_extras_content(message_extras) if message_extras else {}
         content = format_message_with_mentions(
             context.config,
@@ -469,14 +622,15 @@ class MatrixMessageOperations:
             formatted_text,
             extra_content=extras_content or None,
         )
-        delivered = await edit_message_result(
-            context.client,
-            room_id,
-            event_id,
-            content,
-            formatted_text,
-            extra_content=extras_content or None,
-        )
+        with _policy_approved(contact_verdict):
+            delivered = await edit_message_result(
+                context.client,
+                room_id,
+                event_id,
+                content,
+                formatted_text,
+                extra_content=extras_content or None,
+            )
         if delivered is None:
             return self._result(
                 "error",
@@ -493,6 +647,7 @@ class MatrixMessageOperations:
             thread_id=thread_id,
             edited_event_id=event_id,
             event_id=delivered.event_id,
+            **_contact_policy_fields(contact_verdict, "Edited"),
         )
 
     async def dispatch_action(
@@ -508,7 +663,7 @@ class MatrixMessageOperations:
         recipient_user_id: str | None,
         room_mode: bool,
         new_thread: bool,
-        message_extras: list[MessageExtraSection] | None,
+        message_extras: list[MatrixMessageExtra] | None,
         read_limit: int,
         send_claim: MatrixMessageSendClaim | None = None,
         recipient_name: str | None = None,
@@ -536,7 +691,13 @@ class MatrixMessageOperations:
                 read_limit=read_limit,
             )
         if action == "react":
-            return await self._message_react(context, message=message, room_id=room_id, event_id=event_id)
+            return await self._message_react(
+                context,
+                message=message,
+                room_id=room_id,
+                thread_id=thread_id,
+                event_id=event_id,
+            )
         return await self._message_edit(
             context,
             room_id=room_id,

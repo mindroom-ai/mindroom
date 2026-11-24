@@ -5,20 +5,19 @@ from __future__ import annotations
 import json
 import sqlite3
 import time
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 
 import httpx
 import pytest
-from agno.metrics import MessageMetrics, RunMetrics
-from agno.models.message import Message
-from agno.run.agent import RunOutput
 
 from mindroom import helper_usage
 from mindroom.config.main import Config
 from mindroom.config.voice import VoiceConfig, VoiceSTTConfig
 from mindroom.usage.stats import collect_admin_usage
 from mindroom.voice import handler as voice_handler
-from tests.conftest import test_runtime_paths
+from tests.conftest import install_model_providers, test_runtime_paths
+from tests.fakes.scripted_model import ScriptedModel, answer, usage
 from tests.identity_helpers import persist_actual_entity_accounts
 
 if TYPE_CHECKING:
@@ -97,6 +96,36 @@ async def test_transcription_records_one_provider_request_without_content(
 
 
 @pytest.mark.asyncio
+async def test_transcription_usage_is_dated_when_its_request_was_sent(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A slow transcription still counts from when it was sent, not from when its usage is recorded."""
+    paths = test_runtime_paths(tmp_path)
+    config = Config(voice=VoiceConfig(enabled=True, stt=VoiceSTTConfig(api_key="test-key")))
+    client_type = httpx.AsyncClient
+    reply = {
+        "text": "transcript",
+        "usage": {"type": "tokens", "input_tokens": 4, "output_tokens": 1, "total_tokens": 5},
+    }
+    monkeypatch.setattr(voice_handler, "time", SimpleNamespace(time=lambda: 1_700_000_000.5))
+    monkeypatch.setattr(
+        voice_handler.httpx,
+        "AsyncClient",
+        lambda *, timeout: client_type(
+            transport=httpx.MockTransport(lambda _request: httpx.Response(200, json=reply)),
+            timeout=timeout,
+        ),
+    )
+
+    assert await voice_handler._transcribe_audio(b"audio", config, paths) == "transcript"
+
+    [stored] = _stored_usage(paths)
+    assert stored["created_at"] == 1_700_000_000
+    assert [request["created_at"] for request in stored["requests"]] == [1_700_000_000]
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "usage",
     [None, {"type": "duration", "seconds": 2.5}, {"type": "tokens", "input_tokens": "bad"}],
@@ -168,6 +197,8 @@ async def test_custom_stt_uses_submitted_model_without_guessing_provider(
     assert "audio_total_tokens" not in stored[0]["metrics"]
     assert "audio_input_tokens" not in stored[0]["requests"][0]["metrics"]
     assert "audio_total_tokens" not in stored[0]["requests"][0]["metrics"]
+    assert "model" not in stored[0]["requests"][0]
+    assert "model_provider" not in stored[0]["requests"][0]
     report = collect_admin_usage(config=config, runtime_paths=paths, include_requests=True)
     assert report.totals.total_tokens == 5
     assert report.request_breakdown == ()
@@ -186,30 +217,8 @@ async def test_normalizer_records_usage_before_rejecting_empty_content(
     paths = test_runtime_paths(tmp_path)
     config = Config(voice=VoiceConfig(enabled=True))
     persist_actual_entity_accounts(config, paths, password="test-password")  # noqa: S106 - local fixture account
-    response = RunOutput(
-        run_id="voice-normalizer-paid",
-        model="normalizer-model",
-        model_provider="test-provider",
-        content="normalized transcript" if storage_failure else None,
-        metrics=RunMetrics(input_tokens=7, output_tokens=2, total_tokens=9),
-        messages=[
-            Message(
-                role="assistant",
-                created_at=1_700_000_000,
-                metrics=MessageMetrics(input_tokens=7, output_tokens=2, total_tokens=9),
-            ),
-        ],
-    )
-
-    class FakeAgent:
-        def __init__(self, **_kwargs: object) -> None:
-            pass
-
-        async def arun(self, *_args: object, **_kwargs: object) -> RunOutput:
-            return response
-
-    monkeypatch.setattr(voice_handler, "Agent", FakeAgent)
-    monkeypatch.setattr(voice_handler.model_loading, "get_model_instance", lambda *_args: object())
+    model = ScriptedModel([answer("normalized transcript" if storage_failure else "", usage(7, 2))])
+    install_model_providers(monkeypatch, {"default": model})
     if storage_failure:
 
         async def fail_write(*_args: object, **_kwargs: object) -> None:

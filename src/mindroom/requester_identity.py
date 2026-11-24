@@ -4,15 +4,27 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.constants import ROUTER_AGENT_NAME, runtime_matrix_homeserver
-from mindroom.matrix.identity import MatrixID, managed_account_key, managed_account_user_id
+from mindroom.constants import ROUTER_AGENT_NAME, runtime_matrix_homeserver, runtime_mindroom_namespace
+from mindroom.logging_config import get_logger
+from mindroom.matrix.identity import MatrixID, managed_account_key, managed_account_user_id, matrix_account_user_id
+from mindroom.matrix.state import matrix_state_for_runtime
 from mindroom.matrix_identifiers import agent_username_localpart, extract_server_name_from_homeserver
+from mindroom.private_storage.private_instance_identity import private_instances_for_agent
 
 if TYPE_CHECKING:
+    from collections.abc import Callable, Iterable
+
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.matrix.state import MatrixState
 
+logger = get_logger(__name__)
 INTERNAL_USER_ENTITY_NAME = "user"
+# How many input combinations one identity memo keeps, enough for the runtime's and the API's configs.
+_IDENTITY_MEMO_LIMIT = 8
+type IdentityMemo[T] = dict[tuple[object, ...], tuple[MatrixState, T]]
+_MANAGED_ENTITY_IDS: IdentityMemo[frozenset[str]] = {}
+_PERSISTED_MANAGED_ENTITY_IDS: IdentityMemo[frozenset[str]] = {}
 
 
 def runtime_matrix_domain(runtime_paths: RuntimePaths) -> str:
@@ -40,16 +52,109 @@ def is_managed_entity_id(
     runtime_paths: RuntimePaths,
 ) -> bool:
     """Return whether one Matrix user ID is a configured router, agent, or team account."""
+    return user_id in _managed_entity_ids(config, runtime_paths)
+
+
+def is_persisted_managed_entity_id(
+    user_id: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> bool:
+    """Return whether one Matrix user ID matches a persisted/prepared router, agent, or team account.
+
+    Unlike ``is_managed_entity_id``, never matches unconfigured synthetic generated usernames; use this
+    for positive privilege grants such as ``include_bots`` exemptions.
+    """
+    return user_id in persisted_managed_entity_ids(config, runtime_paths)
+
+
+def persisted_managed_entity_ids(config: Config, runtime_paths: RuntimePaths) -> frozenset[str]:
+    """Return ONLY persisted/prepared Matrix IDs of configured router, agent, and team accounts."""
+
+    def derive(domain: str, state: MatrixState) -> frozenset[str]:
+        user_ids: set[str] = set()
+        for entity_name in [ROUTER_AGENT_NAME, *config.agents, *config.teams]:
+            account = state.get_account(managed_account_key(entity_name))
+            if account is not None:
+                user_ids.add(matrix_account_user_id(account, domain))
+        return frozenset(user_ids)
+
+    return memoized_entity_identities(_PERSISTED_MANAGED_ENTITY_IDS, config, runtime_paths, derive)
+
+
+def managed_entity_user_ids(
+    entity_name: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> frozenset[str]:
+    """Return persisted and generated Matrix user IDs for a configured agent or team (including team members)."""
+    entity_names: set[str] = {entity_name}
+    team_config = config.teams.get(entity_name)
+    if team_config is not None:
+        entity_names.update(team_config.agents)
     domain = runtime_matrix_domain(runtime_paths)
-    for entity_name in [ROUTER_AGENT_NAME, *config.agents, *config.teams]:
-        persisted_user_id = managed_account_user_id(managed_account_key(entity_name), domain, runtime_paths)
-        generated_user_id = MatrixID.from_username(
-            agent_username_localpart(entity_name, runtime_paths),
-            domain,
-        ).full_id
-        if user_id in {persisted_user_id, generated_user_id}:
-            return True
-    return False
+    state = matrix_state_for_runtime(runtime_paths)
+    user_ids: set[str] = set()
+    for name in entity_names:
+        account = state.get_account(managed_account_key(name))
+        if account is not None:
+            user_ids.add(matrix_account_user_id(account, domain))
+        if name != ROUTER_AGENT_NAME or account is not None:
+            user_ids.add(MatrixID.from_username(agent_username_localpart(name, runtime_paths), domain).full_id)
+    return frozenset(user_ids)
+
+
+def memoized_entity_identities[T](
+    memo: IdentityMemo[T],
+    config: Config,
+    runtime_paths: RuntimePaths,
+    derive: Callable[[str, MatrixState], T],
+) -> T:
+    """Return ``derive(domain, state)`` for the configured entities, deriving it again only when an input changes.
+
+    Every agent authorizes each message once per responder in the room, so deriving the entities' Matrix IDs on
+    each check made a burst of messages cost the fourth power of the agent count.
+    The inputs are the entity names, the domain, the namespace, whether an internal user is configured, and the
+    persisted state, which ``matrix_state_for_runtime`` returns as one shared object until its file changes.
+    """
+    domain = runtime_matrix_domain(runtime_paths)
+    state = matrix_state_for_runtime(runtime_paths)
+    key = (
+        domain,
+        runtime_mindroom_namespace(runtime_paths),
+        config.mindroom_user is not None,
+        ROUTER_AGENT_NAME,
+        *config.agents,
+        *config.teams,
+    )
+    cached = memo.get(key)
+    if cached is not None and cached[0] is state:
+        return cached[1]
+    value = derive(domain, state)
+    if len(memo) >= _IDENTITY_MEMO_LIMIT:
+        memo.clear()
+    memo[key] = (state, value)
+    return value
+
+
+def _managed_entity_ids(config: Config, runtime_paths: RuntimePaths) -> frozenset[str]:
+    """Return the persisted and the generated Matrix ID of every configured router, agent, and team.
+
+    Not the owner's generated ID while no owner account is persisted: anyone may register that name.
+    """
+
+    def derive(domain: str, state: MatrixState) -> frozenset[str]:
+        user_ids: set[str] = set()
+        for entity_name in [ROUTER_AGENT_NAME, *config.agents, *config.teams]:
+            account = state.get_account(managed_account_key(entity_name))
+            if account is not None:
+                user_ids.add(matrix_account_user_id(account, domain))
+            elif entity_name == ROUTER_AGENT_NAME:
+                continue
+            user_ids.add(MatrixID.from_username(agent_username_localpart(entity_name, runtime_paths), domain).full_id)
+        return frozenset(user_ids)
+
+    return memoized_entity_identities(_MANAGED_ENTITY_IDS, config, runtime_paths, derive)
 
 
 def is_human_requester_id(
@@ -90,6 +195,11 @@ def resolve_human_requester_alias(
     return canonical_user_id
 
 
+def is_platform_administrator(user_id: str, config: Config, runtime_paths: RuntimePaths) -> bool:
+    """Return whether a requester has platform-wide administrative authority."""
+    return resolve_human_requester_alias(user_id, config, runtime_paths) in config.administrators
+
+
 def equivalent_requester_ids(
     user_id: str,
     config: Config,
@@ -105,3 +215,37 @@ def equivalent_requester_ids(
             if resolve_human_requester_alias(alias, config, runtime_paths) == canonical_user_id
         ),
     }
+
+
+def agent_instances(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    agent_names: Iterable[str],
+) -> list[tuple[str, str | None]]:
+    """Return ``(agent, None)`` for each shared agent and ``(agent, requester)`` for each private instance.
+
+    Only the primary's copy of an owner record names a requester, so an instance worker code created is not listed.
+    A requester now aliased to another ID is skipped, because ingress would route that requester to the other ID's
+    instance, and so is an instance owned by one of MindRoom's own accounts, which may not own one.
+    """
+    instances: list[tuple[str, str | None]] = []
+    for agent_name in agent_names:
+        private = config.get_agent(agent_name).private
+        if private is None:
+            instances.append((agent_name, None))
+            continue
+        try:
+            records = private_instances_for_agent(runtime_paths.storage_root, agent_name, private.per)
+        except OSError as exc:
+            # Instances can be created or removed while they are listed; the next pass lists them again.
+            logger.warning("Private instances could not be listed", agent=agent_name, error=str(exc))
+            continue
+        requesters = {
+            record.requester_id
+            for record in records
+            if record.requester_id is not None
+            and is_access_checked_requester_id(record.requester_id, config, runtime_paths)
+            and resolve_human_requester_alias(record.requester_id, config, runtime_paths) == record.requester_id
+        }
+        instances.extend((agent_name, requester_id) for requester_id in sorted(requesters))
+    return instances

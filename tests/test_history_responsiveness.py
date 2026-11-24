@@ -4,35 +4,112 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from copy import deepcopy
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock
 
 import pytest
-from agno.db.sqlite import SqliteDb
-from agno.models.message import Message
-from agno.session.summary import SessionSummary
 
-from mindroom.agent_storage import get_agent_session
-from mindroom.error_handling import MODEL_SAFEGUARD_REFUSAL_MESSAGE, ModelSafeguardRefusalError
+from mindroom.config.resolution import entity_model_name
 from mindroom.execution_preparation import _finalize_prepared_history
-from mindroom.history.compaction import SummaryModel, _generate_compaction_summary_with_retry, compact_scope_history
+from mindroom.history.compaction import SummaryModel, _summarize_chunk, compact_scope_history
+from mindroom.history.request_size import request_sizer
 from mindroom.history.runtime import (
     PreparedScopeHistory,
-    _run_scope_compaction_with_lifecycle,
+    _compact_stored_scope,
     prepare_scope_history,
-    resolve_agent_preparation_inputs,
+    resolve_entity_preparation_inputs,
 )
 from mindroom.history.session_context import ScopeSessionContext
-from mindroom.history.storage import archive_compaction_chunk, reconcile_compaction_state, set_force_compaction_state
+from mindroom.history.storage import append_compaction_chunk, read_chunk_basis, with_force_compaction
 from mindroom.history.summary_call import CompactionSummaryOutputLimitError
 from mindroom.history.types import HistoryScope, HistoryScopeState
-from mindroom.providers.openai_models import MindRoomOpenAIResponses
-from mindroom.token_budget import estimate_compaction_input_tokens
-from tests.conftest import FakeModel, seed_session
-from tests.history_helpers import _ALL_HISTORY_SETTINGS, _agent, _completed_run, _make_config, _session
+from mindroom.llm.errors import ModelSafeguardRefusal
+from mindroom.llm.messages import Message
+from mindroom.llm.usage import MessageMetrics
+from mindroom.providers.openai.responses import ResponsesAdapter
+from mindroom.session_storage.agent_storage import create_agent_state_storage
+from mindroom.token_counting.counts import count
+from tests.conftest import (
+    install_model_providers,
+    loop_runs_while_blocked,
+    request_frame,
+    runtime_paths_for,
+    seed_session,
+)
+from tests.fakes.summary_model import summary_model
+from tests.history_helpers import (
+    RecordingCompactionLifecycle,
+    _completed_run,
+    _make_config,
+    _reported,
+    _session,
+    _summarizer,
+    completed_outcome,
+)
+from tests.providers.openai_family_support import responses_adapter
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
+
+    from mindroom.config.main import Config
+    from mindroom.constants import RuntimePaths
+    from mindroom.history.runtime import HistoryPreparationInputs
+    from mindroom.history.types import CompactionLifecycle
+    from mindroom.llm.provider import ModelRequest
+
+
+def _agent_inputs(config: Config) -> HistoryPreparationInputs:
+    """Resolve the configured test agent's history inputs."""
+    return resolve_entity_preparation_inputs(
+        history_settings=config.resolve_scope("test_agent").history_settings,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        active_model_name=entity_model_name(config, "test_agent"),
+        active_context_window=None,
+    )
+
+
+# A request's frame around its history: a short system prompt and turn.
+_FRAME = request_frame(system="You are helpful.")
+
+
+def _holds_history(request: ModelRequest) -> bool:
+    """Report whether ``request`` holds the seeded run's message, not only the frame around it."""
+    return any(message.content == "Hello" for message in request.messages)
+
+
+async def _prepare(
+    model: ResponsesAdapter,
+    config: Config,
+    paths: RuntimePaths,
+    scope_context: ScopeSessionContext,
+    *,
+    compaction_lifecycle: CompactionLifecycle | None = None,
+) -> PreparedScopeHistory:
+    return await prepare_scope_history(
+        sizer=request_sizer(model, config, entity_model_name(config, "test_agent")),
+        frame=_FRAME,
+        resolved_inputs=_agent_inputs(config),
+        runtime_paths=paths,
+        config=config,
+        scope_context=scope_context,
+        compaction_lifecycle=compaction_lifecycle,
+        pipeline_timing=None,
+        allow_native_compaction=True,
+    )
+
+
+def _noting_loop_progress(operation: Callable[..., Any], loop_progress: list[bool]) -> Callable[..., Any]:
+    """Wrap ``operation`` to note, before each call, whether the event loop runs while the call blocks."""
+    loop = asyncio.get_running_loop()
+
+    def controlled(*args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+        loop_progress.append(loop_runs_while_blocked(loop))
+        return operation(*args, **kwargs)
+
+    return controlled
 
 
 @pytest.mark.asyncio
@@ -44,184 +121,104 @@ async def test_history_sizing_allows_loop_progress(
 ) -> None:
     """A pending loop callback can run while the provider sizes saved history."""
     config, paths = _make_config(tmp_path)
-    model = MindRoomOpenAIResponses(id="gpt-6-astra", store=True)
+    model = responses_adapter(tmp_path, store=True)
     session = _session("session", runs=[_completed_run("run", messages=[Message(role="user", content="Hello")])])
-    original = session.to_dict()
-    storage = SqliteDb(db_file=str(tmp_path / "history.db"))
+    storage = create_agent_state_storage("test_agent", tmp_path)
+    # The session then holds its runs as the store does.
     seed_session(storage, session)
+    original = deepcopy(session)
     scope = HistoryScope(kind="agent", scope_id="test_agent")
-    agent = _agent(model=model, db=storage)
-    resolved = resolve_agent_preparation_inputs(
-        agent=agent,
-        agent_name="test_agent",
-        full_prompt="Continue",
-        config=config,
-        static_prompt_tokens=100,
-    )
 
     async def prepare() -> PreparedScopeHistory:
-        return await prepare_scope_history(
-            agent=agent,
-            agent_name="test_agent",
-            resolved_inputs=resolved,
-            runtime_paths=paths,
-            config=config,
-            scope_context=ScopeSessionContext(scope, storage, session),
+        return await _prepare(
+            model,
+            config,
+            paths,
+            ScopeSessionContext(scope, storage, session, "session", storage_factory=lambda: storage),
         )
 
     prepared = await prepare()
-    loop = asyncio.get_running_loop()
-    entered = asyncio.Event()
-    released = threading.Event()
     loop_progress: list[bool] = []
-    estimate = MindRoomOpenAIResponses.estimate_portable_replay_tokens
-
-    def controlled_estimate(self: MindRoomOpenAIResponses, messages: list[Message]) -> int:
-        loop.call_soon_threadsafe(entered.set)
-        loop_progress.append(released.wait(timeout=1))
-        return estimate(self, messages)
-
-    async def release_from_loop() -> None:
-        await entered.wait()
-        released.set()
-
-    def controlled_text_estimate(
-        value: str,
-        *,
-        model_id: str | None = None,
-        conservative_fallback: bool = False,
-    ) -> int:
-        loop.call_soon_threadsafe(entered.set)
-        loop_progress.append(released.wait(timeout=1))
-        return estimate_compaction_input_tokens(
-            value,
-            model_id=model_id,
-            conservative_fallback=conservative_fallback,
-        )
-
     if stage == "summary":
-        monkeypatch.setattr("mindroom.history.compaction.estimate_compaction_input_tokens", controlled_text_estimate)
+        monkeypatch.setattr(
+            "mindroom.history.compaction.count",
+            _noting_loop_progress(count, loop_progress),
+        )
     else:
-        monkeypatch.setattr(MindRoomOpenAIResponses, "estimate_portable_replay_tokens", controlled_estimate)
-    heartbeat = asyncio.create_task(release_from_loop())
-    try:
-        if stage == "prepare":
-            await prepare()
-        elif stage == "finalize":
-            await _finalize_prepared_history(
-                prepared_scope_history=prepared,
-                config=config,
-                static_prompt_tokens=100,
-            )
-        else:
-            monkeypatch.setattr(
-                "mindroom.history.compaction.generate_compaction_summary",
-                AsyncMock(return_value=SessionSummary(summary="Greeting received.")),
-            )
-            outcome = await compact_scope_history(
-                storage=storage,
-                session=session,
-                scope=scope,
-                state=HistoryScopeState(force_compact_before_next_run=True),
-                history_settings=_ALL_HISTORY_SETTINGS,
-                available_history_budget=1000,
-                summary_model=SummaryModel(FakeModel(id="summary", provider="fake"), "summary", 1000),
-                replay_window_tokens=2000,
-                threshold_tokens=1000,
-                summary_prompt="Summarize",
-                summary_timeout_seconds=30,
-                replay_model=model,
-            )
-            assert outcome is not None
-        await heartbeat
-        assert loop_progress
-        assert all(loop_progress)
-        if stage in {"prepare", "finalize"}:
-            assert session.to_dict() == original
-    finally:
-        released.set()
-        heartbeat.cancel()
-        storage.close()
+        monkeypatch.setattr(
+            ResponsesAdapter,
+            "request_tokens",
+            _noting_loop_progress(ResponsesAdapter.request_tokens, loop_progress),
+        )
+    if stage == "prepare":
+        await prepare()
+    elif stage == "finalize":
+        await _finalize_prepared_history(prepared_scope_history=prepared, frame=_FRAME)
+    else:
+        monkeypatch.setattr(
+            "mindroom.history.compaction.generate_compaction_summary",
+            AsyncMock(return_value="Greeting received."),
+        )
+        outcome = await compact_scope_history(
+            storage=storage,
+            session=session,
+            state=HistoryScopeState(force_compact_before_next_run=True),
+            summarizer=_summarizer(summary_model(model_id="summary"), 1000, name="summary"),
+            available_history_budget=1000,
+            max_summary_tokens=None,
+            before_tokens=0,
+            replay_window_tokens=2000,
+            threshold_tokens=1000,
+            progress=None,
+            complete=_reported,
+            model=model,
+        )
+        assert outcome is not None
+    assert loop_progress
+    assert all(loop_progress)
+    if stage in {"prepare", "finalize"}:
+        assert session == original
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("stage", ["reconcile", "archive"])
+@pytest.mark.parametrize("stage", ["basis", "append"])
 async def test_history_storage_work_allows_loop_progress(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     stage: str,
 ) -> None:
-    """A pending loop callback can run while history preparation reconciles or archives saved runs."""
-    config, paths = _make_config(tmp_path)
-    model = MindRoomOpenAIResponses(id="gpt-6-astra", store=True)
+    """A pending loop callback can run while compaction reads its basis or appends its summary row."""
+    model = responses_adapter(tmp_path, store=True)
     session = _session("session", runs=[_completed_run("run", messages=[Message(role="user", content="Hello")])])
-    storage = SqliteDb(db_file=str(tmp_path / "history.db"))
+    storage = create_agent_state_storage("test_agent", tmp_path)
     seed_session(storage, session)
-    scope = HistoryScope(kind="agent", scope_id="test_agent")
-    loop = asyncio.get_running_loop()
-    entered = asyncio.Event()
-    released = threading.Event()
     loop_progress: list[bool] = []
     target, operation = (
-        ("mindroom.history.runtime.reconcile_compaction_state", reconcile_compaction_state)
-        if stage == "reconcile"
-        else ("mindroom.history.compaction.archive_compaction_chunk", archive_compaction_chunk)
+        ("mindroom.history.compaction.read_chunk_basis", read_chunk_basis)
+        if stage == "basis"
+        else ("mindroom.history.compaction.append_compaction_chunk", append_compaction_chunk)
     )
-
-    def controlled(*args: Any, **kwargs: Any) -> None:  # noqa: ANN401
-        loop.call_soon_threadsafe(entered.set)
-        loop_progress.append(released.wait(timeout=1))
-        operation(*args, **kwargs)
-
-    async def release_from_loop() -> None:
-        await entered.wait()
-        released.set()
-
-    monkeypatch.setattr(target, controlled)
-    heartbeat = asyncio.create_task(release_from_loop())
-    try:
-        if stage == "reconcile":
-            agent = _agent(model=model, db=storage)
-            await prepare_scope_history(
-                agent=agent,
-                agent_name="test_agent",
-                resolved_inputs=resolve_agent_preparation_inputs(
-                    agent=agent,
-                    agent_name="test_agent",
-                    full_prompt="Continue",
-                    config=config,
-                    static_prompt_tokens=100,
-                ),
-                runtime_paths=paths,
-                config=config,
-                scope_context=ScopeSessionContext(scope, storage, session),
-            )
-        else:
-            monkeypatch.setattr(
-                "mindroom.history.compaction.generate_compaction_summary",
-                AsyncMock(return_value=SessionSummary(summary="Greeting received.")),
-            )
-            outcome = await compact_scope_history(
-                storage=storage,
-                session=session,
-                scope=scope,
-                state=HistoryScopeState(force_compact_before_next_run=True),
-                history_settings=_ALL_HISTORY_SETTINGS,
-                available_history_budget=1000,
-                summary_model=SummaryModel(FakeModel(id="summary", provider="fake"), "summary", 1000),
-                replay_window_tokens=2000,
-                threshold_tokens=1000,
-                summary_prompt="Summarize",
-                summary_timeout_seconds=30,
-                replay_model=model,
-            )
-            assert outcome is not None
-        await heartbeat
-        assert loop_progress == [True]
-    finally:
-        released.set()
-        heartbeat.cancel()
-        storage.close()
+    monkeypatch.setattr(target, _noting_loop_progress(operation, loop_progress))
+    monkeypatch.setattr(
+        "mindroom.history.compaction.generate_compaction_summary",
+        AsyncMock(return_value="Greeting received."),
+    )
+    outcome = await compact_scope_history(
+        storage=storage,
+        session=session,
+        state=HistoryScopeState(force_compact_before_next_run=True),
+        summarizer=_summarizer(summary_model(model_id="summary"), 1000, name="summary"),
+        available_history_budget=1000,
+        max_summary_tokens=None,
+        before_tokens=0,
+        replay_window_tokens=2000,
+        threshold_tokens=1000,
+        progress=None,
+        complete=_reported,
+        model=model,
+    )
+    assert outcome is not None
+    assert loop_progress == [True]
 
 
 @pytest.mark.asyncio
@@ -231,53 +228,43 @@ async def test_forced_compaction_reuses_canonical_history_count(
 ) -> None:
     """One unchanged canonical history is tokenized once before rewriting it."""
     config, paths = _make_config(tmp_path)
-    model = MindRoomOpenAIResponses(id="gpt-6-astra", store=True)
+    model = responses_adapter(tmp_path, store=True)
     session = _session("session", runs=[_completed_run("run", messages=[Message(role="user", content="Hello")])])
     scope = HistoryScope(kind="agent", scope_id="test_agent")
-    set_force_compaction_state(session, scope, HistoryScopeState(), force=True)
-    storage = SqliteDb(db_file=str(tmp_path / "history.db"))
+    session.metadata = with_force_compaction(session.metadata)
+    storage = create_agent_state_storage("test_agent", tmp_path)
     seed_session(storage, session)
-    agent = _agent(model=model, db=storage)
-    resolved = resolve_agent_preparation_inputs(
-        agent=agent,
-        agent_name="test_agent",
-        full_prompt="Continue",
-        config=config,
-        static_prompt_tokens=100,
-    )
+    # The history's share of the request: its size beyond the same request without the seeded run.
+    history_tokens = model.request_tokens(
+        _FRAME.request(summary=None, history=session.runs[0].messages),
+    ) - model.request_tokens(_FRAME.request())
     counted_history: list[list[str]] = []
-    estimate = MindRoomOpenAIResponses.estimate_portable_replay_tokens
+    request_tokens = ResponsesAdapter.request_tokens
 
-    def record_estimate(self: MindRoomOpenAIResponses, messages: list[Message]) -> int:
-        if messages:
-            counted_history.append([str(message.content) for message in messages])
-        return estimate(self, messages)
+    def record_request_tokens(self: ResponsesAdapter, request: ModelRequest, *, start: int = 0) -> int:
+        if _holds_history(request):
+            counted_history.append([str(message.content) for message in request.messages])
+        return request_tokens(self, request, start=start)
 
-    monkeypatch.setattr(MindRoomOpenAIResponses, "estimate_portable_replay_tokens", record_estimate)
-    monkeypatch.setattr(
-        "mindroom.history.runtime._load_compaction_model",
-        lambda *_args: FakeModel(id="summary", provider="fake"),
-    )
+    monkeypatch.setattr(ResponsesAdapter, "request_tokens", record_request_tokens)
+    install_model_providers(monkeypatch, {"default": summary_model(model_id="summary")})
     monkeypatch.setattr(
         "mindroom.history.compaction.generate_compaction_summary",
-        AsyncMock(return_value=SessionSummary(summary="Greeting received.")),
+        AsyncMock(return_value="Greeting received."),
     )
-    try:
-        prepared = await prepare_scope_history(
-            agent=agent,
-            agent_name="test_agent",
-            resolved_inputs=resolved,
-            runtime_paths=paths,
-            config=config,
-            scope_context=ScopeSessionContext(scope, storage, session),
-        )
-        assert counted_history == [["Hello"]]
-        assert len(prepared.compaction_outcomes) == 1
-        assert prepared.compaction_outcomes[0].before_tokens == 11
-        assert session.summary is not None
-        assert session.summary.summary == "Greeting received."
-    finally:
-        storage.close()
+    lifecycle = RecordingCompactionLifecycle()
+    prepared = await _prepare(
+        model,
+        config,
+        paths,
+        ScopeSessionContext(scope, storage, session, "session", storage_factory=lambda: storage),
+        compaction_lifecycle=lifecycle,
+    )
+    assert counted_history == [["You are helpful.", "Hello", "Current prompt"]]
+    assert prepared.compaction_reply_outcome == "success"
+    assert completed_outcome(lifecycle).before_tokens == history_tokens
+    assert session.summary is not None
+    assert session.summary.text == "Greeting received."
 
 
 @pytest.mark.asyncio
@@ -290,59 +277,60 @@ async def test_cancelling_history_sizing_preserves_durable_state(  # noqa: PLR09
 ) -> None:
     """Committed compaction completes its hooks and lifecycle before cancellation."""
     config, paths = _make_config(tmp_path)
-    model = MindRoomOpenAIResponses(id="gpt-6-astra", store=True)
+    model = responses_adapter(tmp_path, store=True)
     session = _session("session", runs=[_completed_run("run", messages=[Message(role="user", content="Hello")])])
-    storage = SqliteDb(db_file=str(tmp_path / "history.db"))
+    storage = create_agent_state_storage("test_agent", tmp_path)
     seed_session(storage, session)
-    original = session.to_dict()
-    resolved = resolve_agent_preparation_inputs(
-        agent=_agent(model=model, db=storage),
-        agent_name="test_agent",
-        full_prompt="Continue",
-        config=config,
-        static_prompt_tokens=100,
-    )
+    original = deepcopy(session)
+    resolved = _agent_inputs(config)
     loop = asyncio.get_running_loop()
     entered = asyncio.Event()
     release = threading.Event()
-    estimate = MindRoomOpenAIResponses.estimate_portable_replay_tokens
+    request_tokens = ResponsesAdapter.request_tokens
+    sized: list[ModelRequest] = []
 
-    def controlled_estimate(self: MindRoomOpenAIResponses, messages: list[Message]) -> int:
-        loop.call_soon_threadsafe(entered.set)
-        assert release.wait(timeout=5)
-        return estimate(self, messages)
+    def controlled_request_tokens(self: ResponsesAdapter, request: ModelRequest, *, start: int = 0) -> int:
+        # A size of what messages add also sizes the request without them, which holds nothing to wait on.
+        if request.messages:
+            sized.append(request)
+        # The first size checks the new summary before it is stored; the sizing after the store is the one held.
+        if len(sized) > 1:
+            loop.call_soon_threadsafe(entered.set)
+            assert release.wait(timeout=5)
+        return request_tokens(self, request, start=start)
 
-    async def generate(**_kwargs: object) -> SessionSummary:
+    async def generate(**_kwargs: object) -> str:
         if not after_persist:
             entered.set()
             await asyncio.Event().wait()
-        return SessionSummary(summary="Greeting received.")
+        return "Greeting received."
 
     lifecycle = AsyncMock()
     lifecycle.start.return_value = "notice"
     hook = AsyncMock()
-    monkeypatch.setattr(MindRoomOpenAIResponses, "estimate_portable_replay_tokens", controlled_estimate)
+    monkeypatch.setattr(ResponsesAdapter, "request_tokens", controlled_request_tokens)
     monkeypatch.setattr("mindroom.history.compaction.generate_compaction_summary", generate)
     monkeypatch.setattr("mindroom.history.compaction._emit_compaction_hook", hook)
-    monkeypatch.setattr(
-        "mindroom.history.runtime._load_compaction_model",
-        lambda *_args: FakeModel(id="summary", provider="fake"),
-    )
+    install_model_providers(monkeypatch, {"default": summary_model(model_id="summary")})
     task = asyncio.create_task(
-        _run_scope_compaction_with_lifecycle(
-            mode="manual",
-            storage=storage,
-            session=session,
-            scope=HistoryScope(kind="agent", scope_id="test_agent"),
+        _compact_stored_scope(
+            ScopeSessionContext(
+                HistoryScope(kind="agent", scope_id="test_agent"),
+                storage,
+                session,
+                session.session_id,
+                lambda: storage,
+            ),
+            resolved,
+            model,
+            config,
+            paths,
             state=HistoryScopeState(force_compact_before_next_run=True),
-            resolved_inputs=resolved,
             history_budget=1000,
-            current_history_tokens=11,
+            max_summary_tokens=None,
+            before_tokens=11,
             runs_before=1,
-            config=config,
-            runtime_paths=paths,
-            compaction_lifecycle=lifecycle,
-            replay_model=model,
+            lifecycle=lifecycle,
         ),
     )
     try:
@@ -357,10 +345,10 @@ async def test_cancelling_history_sizing_preserves_durable_state(  # noqa: PLR09
         with pytest.raises(asyncio.CancelledError, match="original cancellation"):
             await task
         if after_persist:
-            persisted = get_agent_session(storage, "session")
+            persisted = storage.load_session("session")
             assert persisted is not None
             assert persisted.summary is not None
-            assert persisted.summary.summary == "Greeting received."
+            assert persisted.summary.text == "Greeting received."
             assert persisted.runs == []
             assert hook.await_args_list[-1].kwargs["event_name"] == "compaction:after"
             lifecycle.complete_success.assert_awaited_once()
@@ -369,71 +357,59 @@ async def test_cancelling_history_sizing_preserves_durable_state(  # noqa: PLR09
             assert outcome.lifecycle_notice_event_id == "notice"
             assert outcome.duration_ms >= 0
         else:
-            assert session.to_dict() == original
+            assert session == original
             lifecycle.complete_success.assert_not_awaited()
             lifecycle.complete_failure.assert_awaited_once()
     finally:
         release.set()
-        storage.close()
 
 
 @pytest.mark.asyncio
-async def test_cancelled_finalization_finishes_before_agent_reuse(  # noqa: PLR0915
+async def test_cancelled_finalization_finishes_before_the_session_is_reused(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Cancelling planning must not release caller ownership of a still-mutating model."""
+    """Cancelling planning must not hand the live session back while the sizing worker still reads it."""
     config, paths = _make_config(tmp_path)
-    model = MindRoomOpenAIResponses(id="gpt-6-astra", store=False)
+    model = responses_adapter(tmp_path, store=False)
     session = _session("session", runs=[_completed_run("run", messages=[Message(role="user", content="Hello")])])
-    storage = SqliteDb(db_file=str(tmp_path / "history.db"))
+    storage = create_agent_state_storage("test_agent", tmp_path)
     seed_session(storage, session)
-    agent = _agent(model=model, db=storage)
-    resolved = resolve_agent_preparation_inputs(
-        agent=agent,
-        agent_name="test_agent",
-        full_prompt="Continue",
-        config=config,
-        static_prompt_tokens=100,
+    scope = HistoryScope(kind="agent", scope_id="test_agent")
+    prepared = await _prepare(
+        model,
+        config,
+        paths,
+        ScopeSessionContext(scope, storage, session, "session", storage_factory=lambda: storage),
     )
-    prepared = await prepare_scope_history(
-        agent=agent,
-        agent_name="test_agent",
-        resolved_inputs=resolved,
-        runtime_paths=paths,
-        config=config,
-        scope_context=ScopeSessionContext(HistoryScope(kind="agent", scope_id="test_agent"), storage, session),
-    )
-    model.configure_native_compaction(threshold=1000)
-    assert model.native_compaction is not None
     loop = asyncio.get_running_loop()
     entered = asyncio.Event()
     release = threading.Event()
     ownership = asyncio.Lock()
     reuse_attempted = asyncio.Event()
     reused = asyncio.Event()
-    estimate = MindRoomOpenAIResponses.estimate_portable_replay_tokens
+    request_tokens = ResponsesAdapter.request_tokens
 
-    def controlled_estimate(self: MindRoomOpenAIResponses, messages: list[Message]) -> int:
+    def controlled_request_tokens(self: ResponsesAdapter, request: ModelRequest, *, start: int = 0) -> int:
         loop.call_soon_threadsafe(entered.set)
         assert release.wait(timeout=5)
-        return estimate(self, messages)
+        return request_tokens(self, request, start=start)
 
     async def finalize() -> None:
         async with ownership:
+            # A system prompt over the replay limit sends planning on to trim the history.
             await _finalize_prepared_history(
                 prepared_scope_history=prepared,
-                config=config,
-                static_prompt_tokens=100_000,
+                frame=request_frame(system="word " * 100_000),
             )
 
     async def reuse() -> None:
         reuse_attempted.set()
         async with ownership:
-            model.configure_native_compaction(threshold=2000)
+            session.runs.append(_completed_run("later"))
             reused.set()
 
-    monkeypatch.setattr(MindRoomOpenAIResponses, "estimate_portable_replay_tokens", controlled_estimate)
+    monkeypatch.setattr(ResponsesAdapter, "request_tokens", controlled_request_tokens)
     task = asyncio.create_task(finalize())
     reuse_task: asyncio.Task[None] | None = None
     try:
@@ -447,14 +423,12 @@ async def test_cancelled_finalization_finishes_before_agent_reuse(  # noqa: PLR0
         with pytest.raises(asyncio.CancelledError):
             await task
         await reuse_task
-        assert model.native_compaction is not None
-        assert model.native_compaction.threshold == 2000
+        assert [run.run_id for run in session.runs] == ["run", "later"]
     finally:
         release.set()
         await asyncio.gather(task, return_exceptions=True)
         if reuse_task is not None:
             await reuse_task
-        storage.close()
 
 
 @pytest.mark.asyncio
@@ -464,43 +438,35 @@ async def test_summary_retry_sizing_allows_loop_progress(
     retry: str,
 ) -> None:
     """Every estimate lets queued loop work run, including after a model refusal."""
-    loop = asyncio.get_running_loop()
     loop_progress: list[bool] = []
-
-    def controlled_estimate(value: str, *, model_id: str | None = None, conservative_fallback: bool = False) -> int:
-        released = threading.Event()
-        loop.call_soon_threadsafe(released.set)
-        loop_progress.append(released.wait(timeout=1))
-        return estimate_compaction_input_tokens(
-            value,
-            model_id=model_id,
-            conservative_fallback=conservative_fallback,
-        )
-
-    monkeypatch.setattr("mindroom.history.compaction.estimate_compaction_input_tokens", controlled_estimate)
-    summary = SessionSummary(summary="Greeting received.")
-    responses = [summary]
+    monkeypatch.setattr(
+        "mindroom.history.compaction.count",
+        _noting_loop_progress(count, loop_progress),
+    )
+    summary = "Greeting received."
+    responses: list[object] = [summary]
     if retry == "fallback":
-        responses.insert(0, ModelSafeguardRefusalError(message=MODEL_SAFEGUARD_REFUSAL_MESSAGE))
+        responses.insert(0, ModelSafeguardRefusal(provider="fake", usage=MessageMetrics()))
     elif retry == "shrink":
         responses.insert(0, CompactionSummaryOutputLimitError("Output limit reached"))
     generate = AsyncMock(side_effect=responses)
     monkeypatch.setattr("mindroom.history.compaction.generate_compaction_summary", generate)
-    run = _completed_run("run", messages=[Message(role="user", content="Hello")])
-    primary = SummaryModel(FakeModel(id="primary", provider="fake"), "primary", 10000)
-    fallback = SummaryModel(FakeModel(id="fallback", provider="fake"), "fallback", 1000)
-    result = await _generate_compaction_summary_with_retry(
-        summary_model=primary,
-        previous_summary=None,
-        compactable_runs=[run],
-        initial_summary_input="Hello " * 8000 if retry == "shrink" else "Hello",
-        initial_included_runs=[run],
-        session_id="session",
-        scope=HistoryScope(kind="agent", scope_id="test_agent"),
-        history_settings=_ALL_HISTORY_SETTINGS,
-        summary_prompt="Summarize",
-        timeout_seconds=30,
-        fallback_model=fallback if retry == "fallback" else None,
+    # A shrink retry needs an input large enough to halve.
+    run = _completed_run(
+        "run",
+        messages=[Message(role="user", content="Hello " * 8000 if retry == "shrink" else "Hello")],
+    )
+    fallback = SummaryModel(summary_model(model_id="fallback"), "fallback", 1000)
+    result = await _summarize_chunk(
+        _summarizer(
+            summary_model(model_id="primary"),
+            10000,
+            name="primary",
+            fallback=fallback if retry == "fallback" else None,
+            session_id="session",
+        ),
+        None,
+        [run],
     )
     assert result.summary == summary
     assert generate.await_count == (1 if retry == "none" else 2)
@@ -515,41 +481,32 @@ async def test_cancelling_preparation_sizing_preserves_input(
 ) -> None:
     """Late sizing cannot mutate history or roll back an already persisted summary."""
     config, paths = _make_config(tmp_path)
-    model = MindRoomOpenAIResponses(id="gpt-6-astra", store=True)
+    model = responses_adapter(tmp_path, store=True)
     session = _session("session", runs=[_completed_run("run", messages=[Message(role="user", content="Hello")])])
-    storage = SqliteDb(db_file=str(tmp_path / "history.db"))
+    storage = create_agent_state_storage("test_agent", tmp_path)
     seed_session(storage, session)
-    original = session.to_dict()
-    agent = _agent(model=model, db=storage)
-    resolved = resolve_agent_preparation_inputs(
-        agent=agent,
-        agent_name="test_agent",
-        full_prompt="Continue",
-        config=config,
-        static_prompt_tokens=100,
-    )
+    original = deepcopy(session)
+    scope = HistoryScope(kind="agent", scope_id="test_agent")
     loop = asyncio.get_running_loop()
     entered = asyncio.Event()
     finished = asyncio.Event()
     release = threading.Event()
-    estimate = MindRoomOpenAIResponses.estimate_portable_replay_tokens
+    request_tokens = ResponsesAdapter.request_tokens
 
-    def controlled_estimate(self: MindRoomOpenAIResponses, messages: list[Message]) -> int:
+    def controlled_request_tokens(self: ResponsesAdapter, request: ModelRequest, *, start: int = 0) -> int:
         loop.call_soon_threadsafe(entered.set)
         try:
             assert release.wait(timeout=5)
-            return estimate(self, messages)
+            return request_tokens(self, request, start=start)
         finally:
             loop.call_soon_threadsafe(finished.set)
 
-    monkeypatch.setattr(MindRoomOpenAIResponses, "estimate_portable_replay_tokens", controlled_estimate)
-    operation = prepare_scope_history(
-        agent=agent,
-        agent_name="test_agent",
-        resolved_inputs=resolved,
-        runtime_paths=paths,
-        config=config,
-        scope_context=ScopeSessionContext(HistoryScope(kind="agent", scope_id="test_agent"), storage, session),
+    monkeypatch.setattr(ResponsesAdapter, "request_tokens", controlled_request_tokens)
+    operation = _prepare(
+        model,
+        config,
+        paths,
+        ScopeSessionContext(scope, storage, session, "session", storage_factory=lambda: storage),
     )
     task = asyncio.create_task(operation)
     try:
@@ -560,7 +517,6 @@ async def test_cancelling_preparation_sizing_preserves_input(
         assert not finished.is_set()
         release.set()
         await asyncio.wait_for(finished.wait(), timeout=5)
-        assert session.to_dict() == original
+        assert session == original
     finally:
         release.set()
-        storage.close()

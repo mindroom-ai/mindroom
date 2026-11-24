@@ -39,27 +39,10 @@ export function getConfigValidationIssues(
 export function getGlobalConfigDiagnostics(
   diagnostics: ConfigDiagnostic[],
 ): GlobalConfigDiagnostic[] {
-  const explicitGlobals = diagnostics.filter(
+  return diagnostics.filter(
     (diagnostic): diagnostic is GlobalConfigDiagnostic =>
       diagnostic.kind === "global",
   );
-  const rootValidationGlobals = getConfigValidationIssues(diagnostics)
-    .filter((issue) => issue.loc.length === 0)
-    .map((issue) => ({
-      kind: "global" as const,
-      message: issue.msg,
-      blocking: false,
-    }));
-  const seen = new Set<string>();
-
-  return [...explicitGlobals, ...rootValidationGlobals].filter((diagnostic) => {
-    const key = `${diagnostic.blocking}:${diagnostic.message}`;
-    if (seen.has(key)) {
-      return false;
-    }
-    seen.add(key);
-    return true;
-  });
 }
 
 export function findConfigValidationIssue(

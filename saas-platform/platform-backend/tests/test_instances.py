@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import pytest
+from backend.routes.instances import _background_sync_instance_status, _syncing_instances
 from fastapi.testclient import TestClient
 
 from tests.fake_supabase import FakeQuery, FakeResult, FakeSupabase
@@ -28,6 +29,13 @@ class TestInstancesEndpoints:
             mock.return_value = sb
             yield sb
 
+    @pytest.fixture
+    def db(self):
+        """In-memory Supabase for routes that query several tables."""
+        db = FakeSupabase()
+        with patch("backend.routes.instances.ensure_supabase", return_value=db):
+            yield db
+
     @pytest.fixture(autouse=True)
     def account_not_pending_deletion(self):
         """These tests use accounts that are not pending deletion; test_instance_lifecycle covers the refusal."""
@@ -46,20 +54,6 @@ class TestInstancesEndpoints:
         app.dependency_overrides[verify_user] = override_verify_user
         yield
         app.dependency_overrides.clear()
-
-    @pytest.fixture
-    def mock_check_deployment(self):
-        """Mock deployment existence check."""
-        with patch("backend.routes.instances.check_deployment_exists") as mock:
-            mock.return_value = True  # Default exists
-            yield mock
-
-    @pytest.fixture
-    def mock_kubectl(self):
-        """Mock kubectl commands."""
-        with patch("backend.routes.instances.run_kubectl") as mock:
-            mock.return_value = (0, "1", "")  # Default success with 1 replica
-            yield mock
 
     @pytest.fixture
     def mock_provision_instance(self):
@@ -137,27 +131,36 @@ class TestInstancesEndpoints:
     def test_list_user_instances_triggers_background_sync(
         self, client: TestClient, mock_supabase: MagicMock, mock_verify_user: Mock
     ):
-        """Test that stale instances trigger background sync."""
-        # Setup - instance with stale sync time
-        stale_time = datetime.now(UTC) - timedelta(minutes=5)
-        instances = [
-            {
-                "id": "1",
-                "instance_id": "123",
-                "subscription_id": "sub_123",
+        """Only rows whose Kubernetes status is missing or stale, and not already syncing, get a background sync."""
+        now = datetime.now(UTC)
+        stale = (now - timedelta(minutes=5)).isoformat().replace("+00:00", "Z")
+
+        def row(instance_id: int, synced_at: str | None) -> dict:
+            return {
+                "id": str(instance_id),
+                "instance_id": instance_id,
+                "subscription_id": f"sub_{instance_id}",
                 "account_id": "acc_test_123",
                 "status": "running",
-                "kubernetes_synced_at": stale_time.isoformat(),
+                "kubernetes_synced_at": synced_at,
             }
-        ]
-        mock_supabase.table().select().eq().execute.return_value = Mock(data=instances)
 
-        # Make request
-        response = client.get("/my/instances")
+        mock_supabase.table().select().eq().execute.return_value = Mock(
+            data=[row(1, stale), row(2, None), row(3, now.isoformat()), row(4, stale)]
+        )
+        sync = AsyncMock()
 
-        # Verify
+        _syncing_instances.add("4")
+        try:
+            with patch("backend.routes.instances._background_sync_instance_status", sync):
+                response = client.get("/my/instances")
+        finally:
+            _syncing_instances.discard("4")
+
         assert response.status_code == 200
-        # Background task would be scheduled for stale instance
+        assert [call.args for call in sync.await_args_list] == [("1",), ("2",)]
+        hints = [instance["status_hint"] for instance in response.json()["instances"]]
+        assert hints == [None, "Running (awaiting initial Kubernetes health check).", None, None]
 
     def test_list_user_instances_no_instances(
         self, client: TestClient, mock_supabase: MagicMock, mock_verify_user: Mock
@@ -177,38 +180,15 @@ class TestInstancesEndpoints:
     def test_provision_user_instance_success(
         self,
         client: TestClient,
-        mock_supabase: MagicMock,
+        db: FakeSupabase,
         mock_verify_user: Mock,
         mock_provision_instance: Mock,
     ):
         """Test provisioning a new instance for user."""
-        # Setup
-        subscription = {"id": "sub_123", "account_id": "acc_test_123", "tier": "byok", "status": "active"}
-
-        # Setup mock chains for different queries
-        subscription_mock = MagicMock()
-        subscription_mock.select.return_value = subscription_mock
-        subscription_mock.eq.return_value = subscription_mock
-        subscription_mock.limit.return_value = subscription_mock
-        subscription_mock.execute.return_value = Mock(data=[subscription])
-
-        instance_mock = MagicMock()
-        instance_mock.select.return_value = instance_mock
-        instance_mock.eq.return_value = instance_mock
-        instance_mock.limit.return_value = instance_mock
-        instance_mock.execute.return_value = Mock(data=[])  # No existing instance
-
-        call_count = [0]
-
-        def table_side_effect(table_name):
-            call_count[0] += 1
-            if table_name == "subscriptions":
-                return subscription_mock
-            elif table_name == "instances":
-                return instance_mock
-            return MagicMock()
-
-        mock_supabase.table = Mock(side_effect=table_side_effect)
+        # Setup: a subscription and no existing instance
+        db.tables["subscriptions"] = [
+            {"id": "sub_123", "account_id": "acc_test_123", "tier": "byok", "status": "active"}
+        ]
 
         # Make request
         response = client.post("/my/instances/provision")
@@ -226,15 +206,14 @@ class TestInstancesEndpoints:
         assert call_args["data"]["subscription_id"] == "sub_123"
         assert call_args["data"]["tier"] == "byok"
 
-    def test_provision_user_instance_existing(
-        self, client: TestClient, mock_supabase: MagicMock, mock_verify_user: Mock
-    ):
+    def test_provision_user_instance_existing(self, client: TestClient, db: FakeSupabase, mock_verify_user: Mock):
         """Test provisioning when instance already exists."""
         # Setup
         subscription = {"id": "sub_123", "account_id": "acc_test_123", "tier": "byok", "status": "active"}
         existing_instance = {
             "id": 1,
             "instance_id": "456",
+            "subscription_id": "sub_123",
             "status": "running",
             "frontend_url": "https://456.mindroom.test",
             "backend_url": "https://456.api.mindroom.test",
@@ -244,32 +223,7 @@ class TestInstancesEndpoints:
             "instance_url": "https://456.mindroom.test",  # Some fields check both
         }
 
-        # Setup mock chain for subscription query
-        mock_sub_chain = MagicMock()
-        mock_sub_chain.execute.return_value = Mock(data=[subscription])
-
-        # Setup mock chain for instance query
-        mock_inst_chain = MagicMock()
-        mock_inst_chain.execute.return_value = Mock(data=[existing_instance])
-
-        # Configure mocks to return proper chains
-        call_count = 0
-
-        def table_side_effect(name):
-            nonlocal call_count
-            if name == "subscriptions":
-                return mock_sub_chain
-            elif name == "instances":
-                return mock_inst_chain
-            return MagicMock()
-
-        mock_supabase.table.side_effect = table_side_effect
-        mock_sub_chain.select.return_value = mock_sub_chain
-        mock_sub_chain.eq.return_value = mock_sub_chain
-        mock_sub_chain.limit.return_value = mock_sub_chain
-        mock_inst_chain.select.return_value = mock_inst_chain
-        mock_inst_chain.eq.return_value = mock_inst_chain
-        mock_inst_chain.limit.return_value = mock_inst_chain
+        db.tables.update(subscriptions=[subscription], instances=[existing_instance])
 
         # Make request
         response = client.post("/my/instances/provision")
@@ -285,7 +239,7 @@ class TestInstancesEndpoints:
     def test_provision_user_instance_deprovisioned(
         self,
         client: TestClient,
-        mock_supabase: MagicMock,
+        db: FakeSupabase,
         mock_verify_user: Mock,
         mock_provision_instance: Mock,
     ):
@@ -295,6 +249,7 @@ class TestInstancesEndpoints:
         deprovisioned_instance = {
             "id": 1,
             "instance_id": "789",
+            "subscription_id": "sub_123",
             "status": "deprovisioned",
             "frontend_url": None,
             "backend_url": None,
@@ -304,32 +259,7 @@ class TestInstancesEndpoints:
             "instance_url": None,
         }
 
-        # Setup mock chain for subscription query
-        subscription_mock = MagicMock()
-        subscription_mock.select.return_value = subscription_mock
-        subscription_mock.eq.return_value = subscription_mock
-        subscription_mock.limit.return_value = subscription_mock
-        subscription_mock.execute.return_value = Mock(data=[subscription])
-
-        # Setup mock chain for instance query
-        instance_mock = MagicMock()
-        instance_mock.select.return_value = instance_mock
-        instance_mock.eq.return_value = instance_mock
-        instance_mock.limit.return_value = instance_mock
-        instance_mock.execute.return_value = Mock(data=[deprovisioned_instance])
-
-        # Configure table method to return different mocks
-        call_count = [0]
-
-        def table_side_effect(table_name):
-            call_count[0] += 1
-            if table_name == "subscriptions":
-                return subscription_mock
-            elif table_name == "instances":
-                return instance_mock
-            return MagicMock()
-
-        mock_supabase.table = Mock(side_effect=table_side_effect)
+        db.tables.update(subscriptions=[subscription], instances=[deprovisioned_instance])
 
         # Make request
         response = client.post("/my/instances/provision")
@@ -390,33 +320,14 @@ class TestInstancesEndpoints:
     def test_provision_user_instance_rejects_free_subscription(
         self,
         client: TestClient,
-        mock_supabase: MagicMock,
+        db: FakeSupabase,
         mock_verify_user: Mock,
         mock_provision_instance: Mock,
     ):
         """Test free accounts cannot provision hosted infrastructure."""
-        subscription = {"id": "sub_123", "account_id": "acc_test_123", "tier": "free", "status": "active"}
-
-        subscription_mock = MagicMock()
-        subscription_mock.select.return_value = subscription_mock
-        subscription_mock.eq.return_value = subscription_mock
-        subscription_mock.limit.return_value = subscription_mock
-        subscription_mock.execute.return_value = Mock(data=[subscription])
-
-        instance_mock = MagicMock()
-        instance_mock.select.return_value = instance_mock
-        instance_mock.eq.return_value = instance_mock
-        instance_mock.limit.return_value = instance_mock
-        instance_mock.execute.return_value = Mock(data=[])
-
-        def table_side_effect(table_name):
-            if table_name == "subscriptions":
-                return subscription_mock
-            if table_name == "instances":
-                return instance_mock
-            return MagicMock()
-
-        mock_supabase.table = Mock(side_effect=table_side_effect)
+        db.tables["subscriptions"] = [
+            {"id": "sub_123", "account_id": "acc_test_123", "tier": "free", "status": "active"}
+        ]
 
         response = client.post("/my/instances/provision")
 
@@ -427,31 +338,15 @@ class TestInstancesEndpoints:
     def test_start_user_instance_success(
         self,
         client: TestClient,
-        mock_supabase: MagicMock,
+        db: FakeSupabase,
         mock_verify_user: Mock,
         mock_start_instance: Mock,
     ):
         """Test starting user's instance successfully."""
-        instance_mock = MagicMock()
-        instance_mock.select.return_value = instance_mock
-        instance_mock.eq.return_value = instance_mock
-        instance_mock.limit.return_value = instance_mock
-        instance_mock.execute.return_value = Mock(data=[{"id": 1, "subscription_id": "sub_123"}])
-
-        subscription_mock = MagicMock()
-        subscription_mock.select.return_value = subscription_mock
-        subscription_mock.eq.return_value = subscription_mock
-        subscription_mock.limit.return_value = subscription_mock
-        subscription_mock.execute.return_value = Mock(data=[{"id": "sub_123", "tier": "byok", "status": "active"}])
-
-        def table_side_effect(table_name):
-            if table_name == "instances":
-                return instance_mock
-            if table_name == "subscriptions":
-                return subscription_mock
-            return MagicMock()
-
-        mock_supabase.table = Mock(side_effect=table_side_effect)
+        db.tables.update(
+            instances=[{"id": 1, "instance_id": "123", "account_id": "acc_test_123", "subscription_id": "sub_123"}],
+            subscriptions=[{"id": "sub_123", "tier": "byok", "status": "active"}],
+        )
 
         # Make request
         response = client.post("/my/instances/123/start")
@@ -468,7 +363,7 @@ class TestInstancesEndpoints:
     def test_start_user_instance_rejects_expired_trial(
         self,
         client: TestClient,
-        mock_supabase: MagicMock,
+        db: FakeSupabase,
         mock_verify_user: Mock,
         mock_start_instance: Mock,
     ):
@@ -480,27 +375,10 @@ class TestInstancesEndpoints:
             "status": "trialing",
             "trial_ends_at": (datetime.now(UTC) - timedelta(days=1)).isoformat(),
         }
-
-        instance_mock = MagicMock()
-        instance_mock.select.return_value = instance_mock
-        instance_mock.eq.return_value = instance_mock
-        instance_mock.limit.return_value = instance_mock
-        instance_mock.execute.return_value = Mock(data=[{"id": 1, "subscription_id": "sub_123"}])
-
-        subscription_mock = MagicMock()
-        subscription_mock.select.return_value = subscription_mock
-        subscription_mock.eq.return_value = subscription_mock
-        subscription_mock.limit.return_value = subscription_mock
-        subscription_mock.execute.return_value = Mock(data=[expired_trial])
-
-        def table_side_effect(table_name):
-            if table_name == "instances":
-                return instance_mock
-            if table_name == "subscriptions":
-                return subscription_mock
-            return MagicMock()
-
-        mock_supabase.table = Mock(side_effect=table_side_effect)
+        db.tables.update(
+            instances=[{"id": 1, "instance_id": "123", "account_id": "acc_test_123", "subscription_id": "sub_123"}],
+            subscriptions=[expired_trial],
+        )
 
         response = client.post("/my/instances/123/start")
 
@@ -546,31 +424,15 @@ class TestInstancesEndpoints:
     def test_restart_user_instance_success(
         self,
         client: TestClient,
-        mock_supabase: MagicMock,
+        db: FakeSupabase,
         mock_verify_user: Mock,
         mock_restart_instance: Mock,
     ):
         """Test restarting user's instance successfully."""
-        instance_mock = MagicMock()
-        instance_mock.select.return_value = instance_mock
-        instance_mock.eq.return_value = instance_mock
-        instance_mock.limit.return_value = instance_mock
-        instance_mock.execute.return_value = Mock(data=[{"id": 1, "subscription_id": "sub_123"}])
-
-        subscription_mock = MagicMock()
-        subscription_mock.select.return_value = subscription_mock
-        subscription_mock.eq.return_value = subscription_mock
-        subscription_mock.limit.return_value = subscription_mock
-        subscription_mock.execute.return_value = Mock(data=[{"id": "sub_123", "tier": "byok", "status": "active"}])
-
-        def table_side_effect(table_name):
-            if table_name == "instances":
-                return instance_mock
-            if table_name == "subscriptions":
-                return subscription_mock
-            return MagicMock()
-
-        mock_supabase.table = Mock(side_effect=table_side_effect)
+        db.tables.update(
+            instances=[{"id": 1, "instance_id": "456", "account_id": "acc_test_123", "subscription_id": "sub_123"}],
+            subscriptions=[{"id": "sub_123", "tier": "byok", "status": "active"}],
+        )
 
         # Make request
         response = client.post("/my/instances/456/restart")
@@ -584,92 +446,25 @@ class TestInstancesEndpoints:
         # Verify the provisioner service restart function was called
         mock_restart_instance.assert_called_once_with(456)
 
-    def test_background_sync_task(
-        self, mock_supabase: MagicMock, mock_check_deployment: AsyncMock, mock_kubectl: AsyncMock
-    ):
-        """Test background sync task functionality."""
-        from backend.routes.instances import _background_sync_instance_status
-
-        # Setup
-        mock_supabase.table().select().eq().execute.return_value = Mock(data=[{"status": "running"}])
-        mock_check_deployment.return_value = True
-        mock_kubectl.return_value = (0, "0", "")  # 0 replicas = stopped
-        mock_supabase.table().update().eq().execute.return_value = Mock()
-
-        # Run the background task
-        asyncio.run(_background_sync_instance_status("123"))
-
-        # Verify database was updated
-        update_call = mock_supabase.table().update.call_args[0][0]
-        assert update_call["status"] == "stopped"
-        assert "kubernetes_synced_at" in update_call
-
-    def test_background_sync_task_deployment_not_found(
-        self, mock_supabase: MagicMock, mock_check_deployment: AsyncMock
-    ):
-        """Test background sync when deployment doesn't exist."""
-        from backend.routes.instances import _background_sync_instance_status
-
-        # Setup
-        mock_supabase.table().select().eq().execute.return_value = Mock(data=[{"status": "running"}])
-        mock_check_deployment.return_value = False
-        mock_supabase.table().update().eq().execute.return_value = Mock()
-
-        # Run the background task
-        asyncio.run(_background_sync_instance_status("123"))
-
-        # Verify database was updated to error
-        update_call = mock_supabase.table().update.call_args[0][0]
-        assert update_call["status"] == "error"
-
-    def test_background_sync_keeps_a_claim_made_during_its_kubernetes_check(self):
-        """A provision claiming a deprovisioned instance during the sync is not undone by the status the sync read."""
-        from backend.routes.instances import _background_sync_instance_status
-
-        db = FakeSupabase({"instances": [{"instance_id": "789", "status": "deprovisioned"}]})
-
-        async def claim_during_check(_instance_id: str) -> bool:
-            db.row("instances", instance_id="789")["status"] = "provisioning"
-            return False
-
-        with (
-            patch("backend.routes.instances.ensure_supabase", return_value=db),
-            patch("backend.routes.instances.check_deployment_exists", side_effect=claim_during_check),
-        ):
-            asyncio.run(_background_sync_instance_status("789"))
-
-        assert db.row("instances", instance_id="789")["status"] == "provisioning"
-
-    def test_background_sync_task_instance_row_missing(
-        self, mock_supabase: MagicMock, mock_check_deployment: AsyncMock
-    ):
+    def test_background_sync_task_instance_row_missing(self, mock_supabase: MagicMock):
         """Background sync returns early when the instance row vanished from the database."""
-        from backend.routes.instances import _background_sync_instance_status
-
         mock_supabase.table().select().eq().execute.return_value = Mock(data=[])
 
-        asyncio.run(_background_sync_instance_status("123"))
+        with patch("backend.services.provisioner_service.sync_instance_status") as sync:
+            asyncio.run(_background_sync_instance_status("123"))
 
-        mock_check_deployment.assert_not_called()
-        mock_supabase.table().update.assert_not_called()
+        sync.assert_not_called()
 
     def test_background_sync_prevents_duplicate(self):
         """Test that background sync prevents duplicate syncs."""
-        from backend.routes.instances import _background_sync_instance_status, _syncing_instances
-
-        # Setup
-        original_size = len(_syncing_instances)
         _syncing_instances.add("123")  # Mark as already syncing
-
-        # Run the background task - should return immediately without database calls
-        with patch("backend.routes.instances.ensure_supabase") as mock_sb:
-            asyncio.run(_background_sync_instance_status("123"))
-            # Should not have called database at all
+        try:
+            # Run the background task - should return immediately without database calls
+            with patch("backend.routes.instances.ensure_supabase") as mock_sb:
+                asyncio.run(_background_sync_instance_status("123"))
             mock_sb.assert_not_called()
-
-        # Clean up
-        _syncing_instances.discard("123")
-        assert len(_syncing_instances) == original_size
+        finally:
+            _syncing_instances.discard("123")
 
     def test_unauthorized_access(self, client: TestClient):
         """Test accessing endpoints without authentication."""
@@ -687,15 +482,14 @@ class TestInstancesEndpoints:
         finally:
             app.dependency_overrides.clear()
 
-    def test_provision_with_existing_provisioning(
-        self, client: TestClient, mock_supabase: MagicMock, mock_verify_user: Mock
-    ):
+    def test_provision_with_existing_provisioning(self, client: TestClient, db: FakeSupabase, mock_verify_user: Mock):
         """Test provisioning when instance is already provisioning."""
         # Setup
         subscription = {"id": "sub_123", "account_id": "acc_test_123", "tier": "byok", "status": "active"}
         provisioning_instance = {
             "id": 1,
             "instance_id": "456",
+            "subscription_id": "sub_123",
             "status": "provisioning",
             "frontend_url": "https://456.mindroom.test",
             "backend_url": "https://456.api.mindroom.test",
@@ -705,32 +499,7 @@ class TestInstancesEndpoints:
             "instance_url": "https://456.mindroom.test",
         }
 
-        # Setup mock chain for subscription query
-        subscription_mock = MagicMock()
-        subscription_mock.select.return_value = subscription_mock
-        subscription_mock.eq.return_value = subscription_mock
-        subscription_mock.limit.return_value = subscription_mock
-        subscription_mock.execute.return_value = Mock(data=[subscription])
-
-        # Setup mock chain for instance query
-        instance_mock = MagicMock()
-        instance_mock.select.return_value = instance_mock
-        instance_mock.eq.return_value = instance_mock
-        instance_mock.limit.return_value = instance_mock
-        instance_mock.execute.return_value = Mock(data=[provisioning_instance])
-
-        # Configure table method to return different mocks
-        call_count = [0]
-
-        def table_side_effect(table_name):
-            call_count[0] += 1
-            if table_name == "subscriptions":
-                return subscription_mock
-            elif table_name == "instances":
-                return instance_mock
-            return MagicMock()
-
-        mock_supabase.table = Mock(side_effect=table_side_effect)
+        db.tables.update(subscriptions=[subscription], instances=[provisioning_instance])
 
         # Make request
         response = client.post("/my/instances/provision")

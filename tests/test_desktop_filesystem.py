@@ -108,16 +108,16 @@ def test_vanished_entry_is_skipped_not_fatal(tmp_path: Path, monkeypatch: pytest
         files.close()
 
 
-def test_symlink_loop_runtime_error_still_closes_earlier_descriptors(
+def test_unknown_home_directory_still_closes_earlier_descriptors(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A symlink loop reported as RuntimeError (Python 3.12) closes descriptors already opened."""
+    """A root whose home directory cannot be determined closes descriptors already opened."""
     good = tmp_path / "good"
     good.mkdir()
-    looping = tmp_path / "looping"
-    looping.mkdir()
-    original_resolve = Path.resolve
+    homeless = tmp_path / "homeless"
+    homeless.mkdir()
+    original_expanduser = Path.expanduser
     original_close = os.close
     closed_descriptors: list[int] = []
 
@@ -125,15 +125,15 @@ def test_symlink_loop_runtime_error_still_closes_earlier_descriptors(
         closed_descriptors.append(descriptor)
         original_close(descriptor)
 
-    def flaky_resolve(path: Path, *, strict: bool = False) -> Path:
-        if path == looping:
-            message = "Symlink loop"
+    def flaky_expanduser(path: Path) -> Path:
+        if path == homeless:
+            message = "Could not determine home directory."
             raise RuntimeError(message)
-        return original_resolve(path, strict=strict)
+        return original_expanduser(path)
 
-    monkeypatch.setattr(Path, "resolve", flaky_resolve)
+    monkeypatch.setattr(Path, "expanduser", flaky_expanduser)
     monkeypatch.setattr(os, "close", close_and_record)
     with pytest.raises(DesktopFilesystemError) as exc_info:
-        DesktopFilesystem((good, looping))
+        DesktopFilesystem((good, homeless))
     assert isinstance(exc_info.value.__cause__, RuntimeError)
     assert len(closed_descriptors) == 1

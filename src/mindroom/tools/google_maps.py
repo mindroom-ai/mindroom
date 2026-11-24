@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     config_fields=[
         ConfigField(
             name="key",
+            env=("GOOGLE_MAPS_API_KEY",),
             label="Key",
             type="password",
             required=False,
@@ -87,7 +88,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["googlemaps", "google-maps-places"],
-    docs_url="https://docs.agno.com/tools/toolkits/others/google_maps",
+    docs_url="https://docs.mindroom.chat/tools/location-commerce-and-home/#google_maps",
     function_names=(
         "geocode_address",
         "get_directions",

@@ -21,7 +21,6 @@ from mindroom.desktop.accessibility import (
 )
 from mindroom.desktop.displays import DisplayGeometry, DisplayMappingError
 from mindroom.desktop.provider import (
-    DesktopEmergencyStopError,
     DesktopProviderError,
     PyAutoGuiDesktopProvider,
     _capture_macos_primary_screen,
@@ -66,22 +65,18 @@ class FakeImage:
         output.write(b"jpeg")
 
 
-class FakeFailSafeError(Exception):
-    """Fake PyAutoGUI fail-safe exception type."""
+class FakeInputError(Exception):
+    """Fake PyAutoGUI input failure."""
 
 
 class FakePyAutoGui:
     """Expose logical screen points separately from Retina capture pixels."""
 
-    FailSafeException = FakeFailSafeError
-    FAILSAFE = True
-    FAILSAFE_POINTS: ClassVar[list[tuple[int, int]]] = [(0, 0)]
     KEYBOARD_KEYS: ClassVar[list[str]] = ["enter", "command", "l"]
 
     def __init__(self) -> None:
         self.calls: list[tuple[str, object]] = []
         self.cursor = (10, 20)
-        self.fail_during_input = False
 
     @staticmethod
     def size() -> SimpleNamespace:
@@ -99,15 +94,11 @@ class FakePyAutoGui:
 
     def click(self, *, x: int, y: int, button: str) -> None:
         """Record a logical click."""
-        if self.fail_during_input:
-            raise FakeFailSafeError
         self.calls.append(("click", (x, y, button)))
 
     def moveTo(self, x: int, y: int, *, duration: float = 0) -> None:  # noqa: N802
         """Record the corresponding external pointer operation."""
         self.calls.append(("move", (x, y, duration)))
-        if self.fail_during_input:
-            raise FakeFailSafeError
 
     def mouseDown(self, *, button: str) -> None:  # noqa: N802
         """Record the corresponding external pointer operation."""
@@ -252,16 +243,18 @@ def test_launch_app_uses_accessibility_backend_without_pixel_input() -> None:
     assert accessibility.calls == [("launch_app", "com.example.Editor")]
 
 
-def test_launch_app_checks_emergency_stop_before_accessibility_backend() -> None:
-    """An app launch is local control and honors the same pointer fail-safe as input."""
+def test_pointer_in_screen_corner_does_not_stop_input() -> None:
+    """The upper-left corner is an ordinary point; Revoke and Stop Access end control instead."""
     provider, pyautogui, accessibility = _provider()
     pyautogui.cursor = (0, 0)
 
-    with pytest.raises(DesktopEmergencyStopError, match="emergency stop"):
-        provider.launch_app("com.example.Editor")
+    provider.launch_app("com.example.Editor")
+    provider.set_value(app_id="com.example.Editor", state_id="state-1", element_index=3, value="draft")
 
-    assert pyautogui.calls == []
-    assert accessibility.calls == []
+    assert accessibility.calls == [
+        ("launch_app", "com.example.Editor"),
+        ("set_value", ("com.example.Editor", "state-1", 3, "draft")),
+    ]
 
 
 def test_capture_rejects_window_outside_primary_screen() -> None:
@@ -328,26 +321,6 @@ def test_set_value_accepts_empty_string_to_clear_semantic_field() -> None:
     provider.set_value(app_id="com.example.Editor", state_id="state-1", element_index=3, value="")
 
     assert accessibility.calls == [("set_value", ("com.example.Editor", "state-1", 3, ""))]
-
-
-def test_corner_emergency_stop_blocks_semantic_control() -> None:
-    """The pointer fail-safe covers AX actions as well as PyAutoGUI input."""
-    provider, pyautogui, accessibility = _provider()
-    pyautogui.cursor = (0, 0)
-
-    with pytest.raises(DesktopEmergencyStopError, match="emergency stop"):
-        provider.set_value(app_id="com.example.Editor", state_id="state-1", element_index=3, value="draft")
-
-    assert accessibility.calls == []
-
-
-def test_mid_action_pyautogui_fail_safe_is_translated() -> None:
-    """PyAutoGUI raising during an operation reaches the bridge as an emergency stop."""
-    provider, pyautogui, _ = _provider()
-    pyautogui.fail_during_input = True
-
-    with pytest.raises(DesktopEmergencyStopError, match="emergency stop"):
-        provider.click(app_id="com.example.Editor", state_id="state-1", x=10, y=20, button="left")
 
 
 def test_macos_type_text_uses_layout_independent_unicode(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -643,14 +616,13 @@ def test_drag_releases_when_motion_fails(monkeypatch: pytest.MonkeyPatch) -> Non
 
     def fail_motion(x: int, y: int, *, duration: float = 0) -> None:
         if duration:
-            raise FakeFailSafeError
+            raise FakeInputError
         move(x, y, duration=duration)
 
     monkeypatch.setattr(pointer, "moveTo", fail_motion)
-    with pytest.raises(DesktopEmergencyStopError):
+    with pytest.raises(FakeInputError):
         provider.drag(app_id="com.example.Editor", state_id="state-1", start_x=0, start_y=0, end_x=1000, end_y=1000)
     assert pointer.calls[-1] == ("up", "left")
-    assert pointer.FAILSAFE is True
 
 
 def test_element_targeted_typing_checks_focus_before_keyboard_input(monkeypatch: pytest.MonkeyPatch) -> None:

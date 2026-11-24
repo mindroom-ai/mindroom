@@ -36,7 +36,7 @@ class _ScheduledAutomation(BaseModel):
     cron: str
     room: str | None = Field(
         default=None,
-        description="Room alias or ID for the prompt; defaults to the agent's first configured room",
+        description="Room key or Matrix room ID of a room the agent is in, for the prompt; defaults to the agent's first configured room",
     )
     model: str | None = Field(
         default=None,
@@ -65,11 +65,14 @@ class PromptCurationAutomation(_ScheduledAutomation):
     """Daily check that asks the agent to condense its always-loaded prompt files once they grow too large."""
 
     name: Literal["prompt_curation"] = Field(default="prompt_curation", description="Built-in automation name")
-    cron: str = Field(default="0 4 * * *", description="When to check, in the configured timezone")
+    cron: str = Field(default="0 4 * * *", description="When to check, in the agent's timezone")
     trigger_tokens: int = Field(
-        default=50_000,
+        default=20_000,
         ge=1,
-        description="Post the prompt once MEMORY.md and the context files total more than this many estimated tokens",
+        description=(
+            "Post the prompt once MEMORY.md and the context files total more than this many of the agent model's tokens; "
+            "a file the preload cannot show whole (over defaults.max_preload_file_chars) also posts it"
+        ),
     )
     min_reduction: float = Field(
         default=0.10,
@@ -109,11 +112,38 @@ class DreamingAutomation(_ScheduledAutomation):
         default="dreaming",
         description="Built-in automation name",
     )
-    cron: str = Field(default="15 3 * * *", description="When to check, in the configured timezone")
+    cron: str = Field(default="15 3 * * *", description="When to check, in the agent's timezone")
+
+
+class ExplorationAutomation(_ScheduledAutomation):
+    """A scheduled prompt asking the agent to explore the sources its tools reach, feeding its knowledge graph."""
+
+    # Exploration feeds the knowledge graph, which every memory backend can use.
+    requires_file_memory: ClassVar[bool] = False
+
+    name: Literal["exploration"] = Field(default="exploration", description="Built-in automation name")
+    cron: str = Field(default="30 2 * * *", description="When to check, in the agent's timezone")
+    max_tool_calls: int = Field(
+        default=40,
+        ge=1,
+        le=1000,
+        description="Tool calls the exploration prompt asks the agent to stay within",
+    )
+    max_leads: int = Field(
+        default=20,
+        ge=0,
+        le=200,
+        description="Most tool calls seen in conversations that one exploration prompt lists",
+    )
+    revisit_days: int = Field(
+        default=7,
+        ge=1,
+        description="Explore without new leads once this many days have passed since the last run",
+    )
 
 
 # Reserved for the built-ins, so every entry matches one kind of automation.
-BUILTIN_AUTOMATION_NAMES = ("prompt_curation", "dreaming")
+BUILTIN_AUTOMATION_NAMES = ("prompt_curation", "dreaming", "exploration")
 
 
 class PluginAutomation(_ScheduledAutomation):
@@ -127,7 +157,7 @@ class PluginAutomation(_ScheduledAutomation):
         description="Name of an automation a loaded plugin provides",
         json_schema_extra={"not": {"enum": list(BUILTIN_AUTOMATION_NAMES)}},
     )
-    cron: str = Field(description="When to check, in the configured timezone")
+    cron: str = Field(description="When to check, in the agent's timezone")
     options: dict[str, Any] = Field(default_factory=dict, description="Settings the plugin's automation reads")
 
     @model_validator(mode="before")
@@ -155,7 +185,7 @@ class PluginAutomation(_ScheduledAutomation):
 
 def _automation_kind(value: object) -> str:
     """Pick the entry's model: a built-in name selects that built-in, any other name a plugin automation."""
-    if isinstance(value, PromptCurationAutomation | DreamingAutomation | PluginAutomation):
+    if isinstance(value, PromptCurationAutomation | DreamingAutomation | ExplorationAutomation | PluginAutomation):
         return value.name if value.name in BUILTIN_AUTOMATION_NAMES else "plugin"
     name = cast("Mapping[str, object]", value).get("name") if isinstance(value, Mapping) else None
     return name if isinstance(name, str) and name in BUILTIN_AUTOMATION_NAMES else "plugin"
@@ -164,6 +194,7 @@ def _automation_kind(value: object) -> str:
 Automation = Annotated[
     Annotated[PromptCurationAutomation, Tag("prompt_curation")]
     | Annotated[DreamingAutomation, Tag("dreaming")]
+    | Annotated[ExplorationAutomation, Tag("exploration")]
     | Annotated[PluginAutomation, Tag("plugin")],
     Discriminator(_automation_kind),
 ]

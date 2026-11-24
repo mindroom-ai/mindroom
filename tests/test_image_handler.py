@@ -8,12 +8,11 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
-from agno.media import Image
-from agno.utils.models.claude import _format_image_for_message
 from nio.exceptions import EncryptionError
 from PIL import Image as PILImage
 
 import mindroom.matrix.media as media_module
+from mindroom.llm.media import Image
 from mindroom.matrix import image_handler
 from mindroom.matrix.media import (
     _sniff_image_mime_type,
@@ -442,14 +441,6 @@ class TestDownloadImage:
 
         assert isinstance(result, Image)
         assert result.mime_type is None
-
-    def test_anthropic_image_formatter_handles_raw_png_bytes(self) -> None:
-        """Anthropic image formatting should work for Matrix-downloaded image bytes."""
-        formatted = _format_image_for_message(Image(content=b"\x89PNG\r\n\x1a\npayload"))
-
-        assert formatted is not None
-        assert formatted["type"] == "image"
-        assert formatted["source"]["media_type"] == "image/png"
 
 
 class TestSniffImageMimeType:

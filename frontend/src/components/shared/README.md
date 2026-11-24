@@ -105,24 +105,19 @@ const EmptyRoomsExample = () => (
 
 ### Shared Styles
 
-Utility functions and consistent className patterns for common UI elements.
+Consistent className patterns for common UI elements.
 
 #### Usage
 
 ```tsx
-import { sharedStyles, getSelectionStyles, getIconStyles } from '@/components/shared';
+import { sharedStyles } from "@/components/shared";
 
 // Use predefined styles
 <div className={sharedStyles.panel.container}>
   <header className={sharedStyles.panel.header}>
     <h1 className={sharedStyles.header.title}>Title</h1>
   </header>
-</div>
-
-// Use selection utilities
-<button className={getSelectionStyles(isSelected, 'card')}>
-  <Icon className={getIconStyles(isSelected)} />
-</button>
+</div>;
 ```
 
 ## Design Principles

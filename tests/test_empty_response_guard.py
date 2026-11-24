@@ -1,534 +1,200 @@
-"""Tests for the empty-completed-response guard (retry, fallback notice, history scrub)."""
+"""Tests for the empty-completed-response guard: one retry, the fallback notice, and no empty run in history."""
 
 from __future__ import annotations
 
-import time
-from typing import TYPE_CHECKING, cast
-from unittest.mock import AsyncMock, MagicMock, patch
+from dataclasses import replace
+from typing import TYPE_CHECKING, Any
 
 import pytest
-from agno.db.base import BaseDb
-from agno.models.message import Message
-from agno.models.response import ToolExecution
-from agno.run.agent import RunCompletedEvent, RunContentEvent, RunOutput
-from agno.run.base import RunStatus
-from agno.run.team import TeamRunOutput
-from agno.session.agent import AgentSession
-from agno.session.team import TeamSession
 
-from mindroom import ai_runtime
-from mindroom.agent_storage import create_state_storage, get_agent_session, get_team_session
-from mindroom.ai import _PreparedAgentRun, ai_response, stream_agent_response
-from mindroom.ai_runtime import (
-    EMPTY_RESPONSE_NOTICE,
-    discard_empty_completed_run,
-    is_empty_completed_run,
-)
+from mindroom.ai import TurnResult, ai_response, stream_agent_response
+from mindroom.ai_runtime import EMPTY_RESPONSE_NOTICE
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
-from mindroom.constants import resolve_runtime_paths
-from mindroom.history.session_context import ScopeSessionContext
+from mindroom.constants import AI_RUN_METADATA_KEY, resolve_runtime_paths
 from mindroom.history.turn_recorder import TurnRecorder
-from mindroom.history.types import HistoryScope, PreparedHistoryState
+from mindroom.response_turn import TurnSinks
 from mindroom.timing import DispatchPipelineTiming
-from tests.conftest import make_turn_context, seed_session
+from tests.conftest import (
+    bind_runtime_paths,
+    install_model_providers,
+    make_turn_context,
+    runtime_paths_for,
+)
+from tests.fakes.scripted_model import ScriptedModel, answer
+from tests.scripted_agent_helpers import stored_runs, streamed_text
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
     from pathlib import Path
 
-    from mindroom.constants import RuntimePaths
-    from mindroom.media_inputs import MediaInputs
+    from mindroom.ai import AIStreamChunk
+    from mindroom.response_turn import ResponseTurnContext
 
 
-def _runtime_paths(tmp_path: Path) -> RuntimePaths:
-    return resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
-
-
-@pytest.fixture
-def media_preparation_times(monkeypatch: pytest.MonkeyPatch) -> list[float]:
-    """Observe real input copying/attachment before each Agno invocation."""
-    completed_at: list[float] = []
-    attach_media = ai_runtime.attach_media_to_run_input
-
-    def attach(run_input: ai_runtime.ModelRunInput, media: MediaInputs) -> list[Message]:
-        prepared = attach_media(run_input, media)
-        completed_at.append(time.perf_counter())
-        return prepared
-
-    monkeypatch.setattr(ai_runtime, "attach_media_to_run_input", attach)
-    return completed_at
-
-
-def _config() -> Config:
-    return Config(
-        agents={"general": AgentConfig(display_name="General")},
-        models={"default": ModelConfig(provider="openai", id="test-model")},
+def _config(tmp_path: Path) -> Config:
+    return bind_runtime_paths(
+        Config(
+            agents={"general": AgentConfig(display_name="General")},
+            models={"default": ModelConfig(provider="openai", id="test-model")},
+        ),
+        resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
     )
 
 
-def _mock_agent(run_output: RunOutput) -> MagicMock:
-    agent = MagicMock()
-    agent.model = MagicMock()
-    agent.model.__class__.__name__ = "OpenAIChat"
-    agent.model.id = "test-model"
-    agent.name = "GeneralAgent"
-    agent.add_history_to_context = False
-    agent.arun = AsyncMock(return_value=run_output)
-    return agent
+def _ctx(**turn_inputs: object) -> ResponseTurnContext:
+    return replace(make_turn_context("general", session_id="session-1"), prompt="test", **turn_inputs)
 
 
-def _mock_streaming_agent(stream: AsyncIterator[object]) -> MagicMock:
-    agent = MagicMock()
-    agent.model = MagicMock()
-    agent.model.__class__.__name__ = "OpenAIChat"
-    agent.model.id = "test-model"
-    agent.name = "GeneralAgent"
-    agent.add_history_to_context = False
-    agent.arun = MagicMock(return_value=stream)
-    return agent
+async def _respond(config: Config, *, sinks: TurnSinks = TurnSinks(), **turn_inputs: object) -> TurnResult:  # noqa: B008
+    return await ai_response(_ctx(**turn_inputs), runtime_paths_for(config), config, sinks=sinks)
 
 
-def _prepared_prompt_result(agent: object) -> _PreparedAgentRun:
-    return _PreparedAgentRun(
-        agent=agent,
-        messages=(Message(role="user", content="test prompt"),),
-        unseen_event_ids=[],
-        prepared_history=PreparedHistoryState(prepared_context_tokens=None),
-        runtime_model_name="default",
-    )
-
-
-def _completed_run(run_id: str, content: str | None) -> RunOutput:
-    return RunOutput(
-        run_id=run_id,
-        agent_id="general",
-        session_id="session-1",
-        content=content,
-        messages=[Message(role="assistant", content=content)],
-        status=RunStatus.completed,
-    )
-
-
-def _completed_team_run_output(run_id: str, content: str | None) -> TeamRunOutput:
-    output = TeamRunOutput(
-        run_id=run_id,
-        team_id="team_general",
-        session_id="session-1",
-        content=content,
-    )
-    output.status = RunStatus.completed
-    return output
-
-
-def test_is_empty_completed_run_detects_contentless_completed_runs() -> None:
-    """Completed runs with no tool calls and no visible content are empty."""
-    assert is_empty_completed_run(_completed_run("r1", None))
-    assert is_empty_completed_run(_completed_run("r1", ""))
-    assert is_empty_completed_run(_completed_run("r1", "  \n"))
-
-
-def test_is_empty_completed_run_ignores_runs_with_content_tools_or_other_status() -> None:
-    """Real responses, tool-only runs, and non-completed statuses are not empty."""
-    assert not is_empty_completed_run(_completed_run("r1", "hello"))
-
-    tool_run = _completed_run("r1", None)
-    tool_run.tools = [ToolExecution(tool_name="run_shell_command", tool_args={"cmd": "pwd"}, result="/app")]
-    assert not is_empty_completed_run(tool_run)
-
-    errored = _completed_run("r1", None)
-    errored.status = RunStatus.error
-    assert not is_empty_completed_run(errored)
-
-
-def test_discard_empty_completed_run_removes_run_from_loaded_session_and_storage(tmp_path: Path) -> None:
-    """The empty run must disappear from both the in-memory session and persisted history."""
-    storage = create_state_storage(
-        "general",
-        tmp_path,
-        subdir="sessions",
-        session_table="general_sessions",
-    )
-    try:
-        session = AgentSession(
-            session_id="session-1",
-            agent_id="general",
-            runs=[
-                _completed_run("run-good", "First response"),
-                _completed_run("run-empty", None),
-            ],
-            metadata={},
-            created_at=1,
-            updated_at=1,
-        )
-        seed_session(storage, session)
-        scope_context = ScopeSessionContext(
-            scope=HistoryScope(kind="agent", scope_id="general"),
-            storage=storage,
-            session=session,
-        )
-
-        discard_empty_completed_run(
-            scope_context=scope_context,
-            session_id="session-1",
-            run_id="run-empty",
-            entity_name="general",
-            output_tokens=2,
-        )
-
-        assert session.runs is not None
-        assert [run.run_id for run in session.runs] == ["run-good"]
-        persisted = get_agent_session(storage, "session-1")
-        assert persisted is not None
-        assert persisted.runs is not None
-        assert [run.run_id for run in persisted.runs] == ["run-good"]
-    finally:
-        storage.close()
-
-
-def test_discard_empty_completed_run_deletes_a_run_the_live_session_never_saw(tmp_path: Path) -> None:
-    """Agno persists the run through its own session object; the scope session loaded before it lacks the run."""
-    storage = create_state_storage(
-        "general",
-        tmp_path,
-        subdir="sessions",
-        session_table="general_sessions",
-    )
-    try:
-        live_session = seed_session(
-            storage,
-            AgentSession(
-                session_id="session-1",
-                agent_id="general",
-                runs=[_completed_run("run-good", "First response")],
-                metadata={},
-                created_at=1,
-                updated_at=1,
-            ),
-        )
-        # What agno's run does behind the live session's back.
-        storage.upsert_run(run=_completed_run("run-empty", None), session_id="session-1")
-
-        discard_empty_completed_run(
-            scope_context=ScopeSessionContext(
-                scope=HistoryScope(kind="agent", scope_id="general"),
-                storage=storage,
-                session=live_session,
-            ),
-            session_id="session-1",
-            run_id="run-empty",
-            entity_name="general",
-            output_tokens=2,
-        )
-
-        assert [run.run_id for run in live_session.runs or []] == ["run-good"]
-        persisted = get_agent_session(storage, "session-1")
-    finally:
-        storage.close()
-
-    assert persisted is not None
-    assert [run.run_id for run in persisted.runs or []] == ["run-good"]
-
-
-def test_discard_empty_completed_team_run_removes_run_from_session_and_storage(tmp_path: Path) -> None:
-    """The TEAM-typed discard must purge the run from memory and persisted history."""
-    storage = create_state_storage(
-        "team_general",
-        tmp_path,
-        subdir="sessions",
-        session_table="team_general_sessions",
-    )
-    try:
-        session = TeamSession(
-            session_id="session-1",
-            team_id="team_general",
-            runs=[
-                _completed_team_run_output("run-good", "First response"),
-                _completed_team_run_output("run-empty", None),
-                RunOutput(run_id="member-of-empty", agent_id="general", parent_run_id="run-empty"),
-            ],
-            metadata={},
-            created_at=1,
-            updated_at=1,
-        )
-        seed_session(storage, session)
-        scope_context = ScopeSessionContext(
-            scope=HistoryScope(kind="team", scope_id="team_general"),
-            storage=storage,
-            session=session,
-        )
-
-        discard_empty_completed_run(
-            scope_context=scope_context,
-            session_id="session-1",
-            run_id="run-empty",
-            entity_name="team_general",
-            output_tokens=2,
-        )
-
-        assert session.runs is not None
-        assert [run.run_id for run in session.runs] == ["run-good"]
-        persisted = get_team_session(storage, "session-1")
-        assert persisted is not None
-        assert persisted.runs is not None
-        assert [run.run_id for run in persisted.runs] == ["run-good"]
-    finally:
-        storage.close()
+async def _stream(config: Config, *, sinks: TurnSinks = TurnSinks(), **turn_inputs: object) -> list[AIStreamChunk]:  # noqa: B008
+    return [
+        chunk
+        async for chunk in stream_agent_response(_ctx(**turn_inputs), runtime_paths_for(config), config, sinks=sinks)
+    ]
 
 
 @pytest.mark.asyncio
 async def test_ai_response_retries_once_after_empty_completed_run(
     tmp_path: Path,
-    media_preparation_times: list[float],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """One empty completed response should trigger exactly one fresh model attempt."""
-    empty_agent = _mock_agent(_completed_run("run-empty", None))
-    recovered_agent = _mock_agent(_completed_run("run-good", "Recovered"))
+    """One empty completed response triggers exactly one fresh model attempt, and only the answer is kept."""
+    config = _config(tmp_path)
+    model = ScriptedModel([answer(""), answer("Recovered")])
+    install_model_providers(monkeypatch, {"default": model})
     timing = DispatchPipelineTiming(source_event_id="$event", room_id="!room")
 
-    with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
-        mock_prepare.side_effect = [
-            _prepared_prompt_result(empty_agent),
-            _prepared_prompt_result(recovered_agent),
-        ]
+    result = await _respond(config, pipeline_timing=timing)
 
-        result = await ai_response(
-            make_turn_context("general", session_id="session-1"),
-            prompt="test",
-            runtime_paths=_runtime_paths(tmp_path),
-            config=_config(),
-            pipeline_timing=timing,
-        )
-
-    assert result == "Recovered"
-    empty_agent.arun.assert_called_once()
-    recovered_agent.arun.assert_called_once()
-    assert media_preparation_times[0] <= timing.marks["first_model_request_sent"]
-    assert media_preparation_times[-1] <= timing.marks["model_request_sent"]
+    assert result.text == "Recovered"
+    assert len(model.requests) == 2
     assert timing.marks["first_model_request_sent"] < timing.marks["model_request_sent"]
+    assert len(stored_runs(config, runtime_paths_for(config), "session-1")) == 1
 
 
 @pytest.mark.asyncio
-async def test_ai_response_closes_spent_agent_state_dbs_before_empty_retry(tmp_path: Path) -> None:
-    """The empty-retry handoff must close the discarded attempt's runtime DB handles."""
-    empty_agent = _mock_agent(_completed_run("run-empty", None))
-    empty_agent.db = MagicMock(spec=BaseDb)
-    recovered_agent = _mock_agent(_completed_run("run-good", "Recovered"))
-
-    with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
-        mock_prepare.side_effect = [
-            _prepared_prompt_result(empty_agent),
-            _prepared_prompt_result(recovered_agent),
-        ]
-
-        result = await ai_response(
-            make_turn_context("general", session_id="session-1"),
-            prompt="test",
-            runtime_paths=_runtime_paths(tmp_path),
-            config=_config(),
-        )
-
-    assert result == "Recovered"
-    empty_agent.db.close.assert_called_once()
-
-
-@pytest.mark.asyncio
-async def test_ai_response_returns_fallback_notice_when_retry_is_also_empty(tmp_path: Path) -> None:
+async def test_ai_response_returns_fallback_notice_when_retry_is_also_empty(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """Two consecutive empty responses surface a visible notice, and neither empty run is kept."""
-    first_agent = _mock_agent(_completed_run("run-empty-1", None))
-    second_agent = _mock_agent(_completed_run("run-empty-2", ""))
+    config = _config(tmp_path)
+    model = ScriptedModel([answer(""), answer("  ")])
+    install_model_providers(monkeypatch, {"default": model})
 
-    with (
-        patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare,
-        patch("mindroom.ai.ai_runtime.discard_empty_completed_run") as mock_discard,
-    ):
-        mock_prepare.side_effect = [
-            _prepared_prompt_result(first_agent),
-            _prepared_prompt_result(second_agent),
-        ]
+    result = await _respond(config)
 
-        result = await ai_response(
-            make_turn_context("general", session_id="session-1"),
-            prompt="test",
-            runtime_paths=_runtime_paths(tmp_path),
-            config=_config(),
-        )
-
-    assert result == EMPTY_RESPONSE_NOTICE
-    first_agent.arun.assert_called_once()
-    second_agent.arun.assert_called_once()
-    # The retry's empty run is discarded too; the notice is delivery-only.
-    assert [call.kwargs["run_id"] for call in mock_discard.call_args_list] == ["run-empty-1", "run-empty-2"]
+    # The retry's whitespace streamed before the notice, as a streamed reply shows it.
+    assert result.text == f"  {EMPTY_RESPONSE_NOTICE}"
+    assert len(model.requests) == 2
+    # The retry's empty run is not stored either; the notice is delivery-only.
+    assert stored_runs(config, runtime_paths_for(config), "session-1") == []
 
 
 @pytest.mark.asyncio
-async def test_ai_response_fallback_notice_stays_out_of_the_turn_recorder(tmp_path: Path) -> None:
+async def test_a_blocking_reply_that_ends_empty_publishes_the_error_status_a_streamed_one_does(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A blocking reply whose retry is empty too publishes its run as failed, as the streamed reply does."""
+    config = _config(tmp_path)
+    install_model_providers(monkeypatch, {"default": ScriptedModel([answer(""), answer(""), answer(""), answer("")])})
+    streamed: dict[str, Any] = {}
+
+    result = await _respond(config)
+    chunks = await _stream(config, sinks=TurnSinks(run_metadata_collector=streamed))
+
+    assert result.text == EMPTY_RESPONSE_NOTICE
+    assert streamed_text(chunks) == [EMPTY_RESPONSE_NOTICE]
+    assert result.run_metadata[AI_RUN_METADATA_KEY]["status"] == "error"
+    assert streamed[AI_RUN_METADATA_KEY]["status"] == "error"
+
+
+@pytest.mark.asyncio
+async def test_ai_response_fallback_notice_stays_out_of_the_turn_recorder(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The delivery-only notice must never be recorded as model text it could replay from history."""
+    config = _config(tmp_path)
+    install_model_providers(monkeypatch, {"default": ScriptedModel([answer(""), answer("")])})
     recorder = TurnRecorder(user_message="test")
-    first_agent = _mock_agent(_completed_run("run-empty-1", None))
-    second_agent = _mock_agent(_completed_run("run-empty-2", None))
 
-    with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
-        mock_prepare.side_effect = [
-            _prepared_prompt_result(first_agent),
-            _prepared_prompt_result(second_agent),
-        ]
+    result = await _respond(config, sinks=TurnSinks(turn_recorder=recorder))
 
-        result = await ai_response(
-            make_turn_context("general", session_id="session-1"),
-            prompt="test",
-            runtime_paths=_runtime_paths(tmp_path),
-            config=_config(),
-            turn_recorder=recorder,
-        )
-
-    assert result == EMPTY_RESPONSE_NOTICE
+    assert result.text == EMPTY_RESPONSE_NOTICE
     assert recorder.outcome == "completed"
     assert recorder.assistant_text == ""
 
 
 @pytest.mark.asyncio
+async def test_the_turn_recorder_holds_the_run_id_of_the_attempt_that_answered(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After an empty attempt's retry, the recorder names the retry's stored run, which an interruption would record."""
+    config = _config(tmp_path)
+    install_model_providers(monkeypatch, {"default": ScriptedModel([answer(""), answer("Recovered")])})
+    recorder = TurnRecorder(user_message="test")
+
+    await _stream(config, sinks=TurnSinks(turn_recorder=recorder))
+
+    [run] = stored_runs(config, runtime_paths_for(config), "session-1")
+    assert recorder.run_id == run.run_id
+
+
+@pytest.mark.asyncio
 async def test_stream_agent_response_retries_once_after_empty_completed_stream(
     tmp_path: Path,
-    media_preparation_times: list[float],
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """One empty completed stream should trigger exactly one fresh streaming attempt."""
-
-    async def empty_stream() -> AsyncIterator[object]:
-        yield RunCompletedEvent(content=None)
-
-    async def recovered_stream() -> AsyncIterator[object]:
-        yield RunContentEvent(content="Recovered")
-        yield RunCompletedEvent(content="Recovered")
-
-    empty_agent = _mock_streaming_agent(empty_stream())
-    recovered_agent = _mock_streaming_agent(recovered_stream())
+    """One empty completed stream triggers exactly one fresh streaming attempt."""
+    config = _config(tmp_path)
+    model = ScriptedModel([answer(""), answer("Recovered", chunk=len("Recovered"))])
+    install_model_providers(monkeypatch, {"default": model})
     timing = DispatchPipelineTiming(source_event_id="$event", room_id="!room")
 
-    with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
-        mock_prepare.side_effect = [
-            _prepared_prompt_result(empty_agent),
-            _prepared_prompt_result(recovered_agent),
-        ]
+    chunks = await _stream(config, pipeline_timing=timing)
 
-        chunks = [
-            chunk
-            async for chunk in stream_agent_response(
-                make_turn_context("general", session_id="session-1"),
-                prompt="test",
-                runtime_paths=_runtime_paths(tmp_path),
-                config=_config(),
-                pipeline_timing=timing,
-            )
-        ]
-
-    contents = [cast("str", chunk.content) for chunk in chunks if isinstance(chunk, RunContentEvent)]
-    assert contents == ["Recovered"]
-    empty_agent.arun.assert_called_once()
-    recovered_agent.arun.assert_called_once()
-    assert media_preparation_times[0] <= timing.marks["first_model_request_sent"]
-    assert media_preparation_times[-1] <= timing.marks["model_request_sent"]
+    assert streamed_text(chunks) == ["Recovered"]
+    assert len(model.requests) == 2
     assert timing.marks["first_model_request_sent"] < timing.marks["model_request_sent"]
+    assert len(stored_runs(config, runtime_paths_for(config), "session-1")) == 1
 
 
 @pytest.mark.asyncio
-async def test_stream_agent_response_closes_spent_agent_state_dbs_before_empty_retry(tmp_path: Path) -> None:
-    """The streamed empty-retry handoff must close the discarded attempt's runtime DB handles too."""
+async def test_stream_agent_response_yields_fallback_notice_when_retry_is_also_empty(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Two consecutive empty streams end with a visible notice, never a blank edit, and keep neither run."""
+    config = _config(tmp_path)
+    model = ScriptedModel([answer(""), answer("")])
+    install_model_providers(monkeypatch, {"default": model})
 
-    async def empty_stream() -> AsyncIterator[object]:
-        yield RunCompletedEvent(content=None)
+    chunks = await _stream(config)
 
-    async def recovered_stream() -> AsyncIterator[object]:
-        yield RunContentEvent(content="Recovered")
-        yield RunCompletedEvent(content="Recovered")
-
-    empty_agent = _mock_streaming_agent(empty_stream())
-    empty_agent.db = MagicMock(spec=BaseDb)
-    recovered_agent = _mock_streaming_agent(recovered_stream())
-
-    with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
-        mock_prepare.side_effect = [
-            _prepared_prompt_result(empty_agent),
-            _prepared_prompt_result(recovered_agent),
-        ]
-
-        chunks = [
-            chunk
-            async for chunk in stream_agent_response(
-                make_turn_context("general", session_id="session-1"),
-                prompt="test",
-                runtime_paths=_runtime_paths(tmp_path),
-                config=_config(),
-            )
-        ]
-
-    contents = [cast("str", chunk.content) for chunk in chunks if isinstance(chunk, RunContentEvent)]
-    assert contents == ["Recovered"]
-    empty_agent.db.close.assert_called_once()
+    assert streamed_text(chunks) == [EMPTY_RESPONSE_NOTICE]
+    assert len(model.requests) == 2
+    assert stored_runs(config, runtime_paths_for(config), "session-1") == []
 
 
 @pytest.mark.asyncio
-async def test_stream_agent_response_yields_fallback_notice_when_retry_is_also_empty(tmp_path: Path) -> None:
-    """Two consecutive empty streams should end with a visible notice, never a blank edit."""
-
-    async def empty_stream() -> AsyncIterator[object]:
-        yield RunCompletedEvent(content=None)
-
-    first_agent = _mock_streaming_agent(empty_stream())
-    second_agent = _mock_streaming_agent(empty_stream())
-
-    with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
-        mock_prepare.side_effect = [
-            _prepared_prompt_result(first_agent),
-            _prepared_prompt_result(second_agent),
-        ]
-
-        chunks = [
-            chunk
-            async for chunk in stream_agent_response(
-                make_turn_context("general", session_id="session-1"),
-                prompt="test",
-                runtime_paths=_runtime_paths(tmp_path),
-                config=_config(),
-            )
-        ]
-
-    contents = [cast("str", chunk.content) for chunk in chunks if isinstance(chunk, RunContentEvent)]
-    assert contents == [EMPTY_RESPONSE_NOTICE]
-    first_agent.arun.assert_called_once()
-    second_agent.arun.assert_called_once()
-
-
-@pytest.mark.asyncio
-async def test_stream_agent_response_fallback_notice_stays_out_of_the_turn_recorder(tmp_path: Path) -> None:
+async def test_stream_agent_response_fallback_notice_stays_out_of_the_turn_recorder(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """The streamed delivery-only notice must never be recorded as model text either."""
-
-    async def empty_stream() -> AsyncIterator[object]:
-        yield RunCompletedEvent(content=None)
-
+    config = _config(tmp_path)
+    install_model_providers(monkeypatch, {"default": ScriptedModel([answer(""), answer("")])})
     recorder = TurnRecorder(user_message="test")
-    first_agent = _mock_streaming_agent(empty_stream())
-    second_agent = _mock_streaming_agent(empty_stream())
 
-    with patch("mindroom.ai._prepare_agent_and_prompt", new_callable=AsyncMock) as mock_prepare:
-        mock_prepare.side_effect = [
-            _prepared_prompt_result(first_agent),
-            _prepared_prompt_result(second_agent),
-        ]
+    chunks = await _stream(config, sinks=TurnSinks(turn_recorder=recorder))
 
-        chunks = [
-            chunk
-            async for chunk in stream_agent_response(
-                make_turn_context("general", session_id="session-1"),
-                prompt="test",
-                runtime_paths=_runtime_paths(tmp_path),
-                config=_config(),
-                turn_recorder=recorder,
-            )
-        ]
-
-    contents = [cast("str", chunk.content) for chunk in chunks if isinstance(chunk, RunContentEvent)]
-    assert contents == [EMPTY_RESPONSE_NOTICE]
+    assert streamed_text(chunks) == [EMPTY_RESPONSE_NOTICE]
     assert recorder.outcome == "completed"
     assert recorder.assistant_text == ""

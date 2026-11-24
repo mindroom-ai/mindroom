@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import suppress
-from dataclasses import dataclass, field, replace
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, Literal
 
 import aiohttp
@@ -16,20 +16,23 @@ from nio.exceptions import ProtocolError
 from pydantic import BaseModel, ConfigDict, Field
 
 from mindroom.api import config_lifecycle
+from mindroom.api.app_state import ensure_app_state
+from mindroom.api.client_sessions import allowed_client_origin, offered_credential
 from mindroom.background_tasks import run_coroutine_until_complete
-from mindroom.constants import RuntimePaths, runtime_env_flag
 from mindroom.logging_config import get_logger
+from mindroom.matrix_openid import MatrixOpenIDError, MatrixOpenIDToken, verify_matrix_openid
 from mindroom.runtime_env_policy import WORKER_COMPUTER_ENABLED_ENV
-from mindroom.worker_computer.auth import MatrixOpenIDToken, computer_origins, verify_openid
 from mindroom.worker_computer.client import computer_request, computer_stream
 from mindroom.worker_computer.sessions import ComputerError, ComputerSession, ComputerSessionStore, ComputerTarget
-from mindroom.workers.backend import WorkerBackend, WorkerBackendError
+from mindroom.workers.backend import WorkerBackendError
+from mindroom.workers.backend_kinds import worker_backend_kind
 from mindroom.workers.runtime import lease_configured_primary_worker_manager
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Coroutine
 
     from mindroom.config.main import Config
+    from mindroom.constants import RuntimePaths
     from mindroom.worker_computer.protocol import ComputerStatus
     from mindroom.workers.models import WorkerHandle
 
@@ -49,23 +52,6 @@ class ComputerRuntime:
     config: Config = field(repr=False)
 
 
-def rebind_computer_runtime(app: FastAPI, preload: config_lifecycle.ApiSnapshot, *, loaded: bool) -> None:
-    """Keep a prebound authorizer across initial API configuration publication."""
-    state = config_lifecycle.app_state(app)
-    runtime = state.computer_runtime
-    if runtime is None or preload.runtime_config is not None or preload.config_load_result is not None:
-        return
-    if loaded:
-        state.computer_runtime = replace(
-            runtime,
-            config_generation=config_lifecycle.require_api_state(app).snapshot.generation,
-        )
-    else:
-        state.computer_runtime = None
-        if state.computer_sessions is not None:
-            state.computer_sessions.close_all()
-
-
 class _ComputerRoute(APIRoute):
     def get_route_handler(self) -> Callable[[Request], Coroutine[Any, Any, Response]]:
         original = super().get_route_handler()
@@ -76,7 +62,7 @@ class _ComputerRoute(APIRoute):
             except ComputerError as error:
                 response = JSONResponse({"detail": error.detail}, status_code=error.status_code)
             except RequestValidationError:
-                # FastAPI's default validation response echoes input, including credentials.
+                # These requests carry credentials, so a malformed one gets no validation details.
                 response = JSONResponse({"detail": "Invalid computer request."}, status_code=401)
             except HTTPException as error:
                 response = JSONResponse({"detail": "Computer runtime is unavailable."}, status_code=error.status_code)
@@ -104,7 +90,7 @@ class _Control(BaseModel):
 
 
 def _store(app: FastAPI) -> ComputerSessionStore:
-    state = config_lifecycle.ensure_app_state(app)
+    state = ensure_app_state(app)
     if state.computer_sessions is None:
         state.computer_sessions = ComputerSessionStore()
     return state.computer_sessions
@@ -114,10 +100,7 @@ def _runtime(connection: Request | WebSocket) -> ComputerRuntime:
     state = config_lifecycle.app_state(connection.app)
     snapshot = config_lifecycle.require_api_state(connection.app).snapshot
     runtime = state.computer_runtime
-    if runtime is None or not runtime_env_flag(
-        WORKER_COMPUTER_ENABLED_ENV,
-        runtime_paths=snapshot.runtime_paths,
-    ):
+    if runtime is None or not snapshot.runtime_paths.env_flag(WORKER_COMPUTER_ENABLED_ENV):
         raise ComputerError(503, "Computer authorization runtime is unavailable.")
     if (
         runtime.config_generation != snapshot.generation
@@ -135,14 +118,14 @@ def _session(request: Request, session_id: str) -> ComputerSession:
     return _store(request.app).authenticate(session_id, authorization[7:])
 
 
-def _resolve_worker(config: Config, paths: RuntimePaths, target: ComputerTarget, *, start: bool) -> WorkerHandle:
+def _resolve_worker(paths: RuntimePaths, target: ComputerTarget, *, start: bool) -> WorkerHandle:
     try:
-        lease = lease_configured_primary_worker_manager(paths, runtime_config=config)
+        if not worker_backend_kind(paths).dedicated:
+            raise ComputerError(503, "Computer requires a dedicated Docker or Kubernetes backend.")
+        lease = lease_configured_primary_worker_manager(paths)
         if lease is None:
             raise ComputerError(503, "A dedicated computer worker backend is required.")
         with lease as manager:
-            if manager.backend_name not in {"docker", "kubernetes"}:
-                raise ComputerError(503, "Computer requires a dedicated Docker or Kubernetes backend.")
             handle = manager.ensure_worker(target.spec) if start else manager.touch_worker(target.spec.worker_key)
         if handle is None or handle.status != "ready" or not handle.auth_token:
             raise ComputerError(503, "Computer worker is unavailable; create a new session to restart.")
@@ -187,8 +170,8 @@ async def _checked_status(connection: Request | WebSocket, session: ComputerSess
     try:
         store.get(session.session_id)
         await _authorize(connection, session.target)
-        config, paths = config_lifecycle.read_app_committed_runtime_config(connection.app)
-        handle = await asyncio.to_thread(_resolve_worker, config, paths, session.target, start=False)
+        paths = config_lifecycle.require_api_state(connection.app).snapshot.runtime_paths
+        handle = await asyncio.to_thread(_resolve_worker, paths, session.target, start=False)
         if session.handle is None or not _same_worker(session.handle, handle):
             raise ComputerError(409, "Computer worker changed; create a new session.")  # noqa: TRY301 - revoke below
         status = await computer_request(handle, "status", session.session_id)
@@ -214,15 +197,18 @@ def _public_status(session: ComputerSession, status: ComputerStatus) -> dict[str
 async def create_session(payload: _CreateSession, request: Request) -> dict[str, str | float]:
     """Exchange configured-homeserver OpenID for a requester-bound computer viewer."""
     runtime = _runtime(request)
-    config, paths = config_lifecycle.read_app_committed_runtime_config(request.app)
-    requester_id = await verify_openid(payload.openid_token, paths)
+    paths = config_lifecycle.require_api_state(request.app).snapshot.runtime_paths
+    try:
+        requester_id = await verify_matrix_openid(payload.openid_token, paths, request_origin=str(request.base_url))
+    except MatrixOpenIDError as error:
+        raise ComputerError(error.status_code, error.detail) from None
     target = await _authorized_target(runtime, requester_id, payload.room_id, payload.agent_user_id)
     if runtime is not _runtime(request):
         raise ComputerError(409, "Computer configuration changed; retry session creation.")
     store = _store(request.app)
     session = store.create(target)
     try:
-        session.handle = await asyncio.to_thread(_resolve_worker, config, paths, target, start=True)
+        session.handle = await asyncio.to_thread(_resolve_worker, paths, target, start=True)
         status = await computer_request(session.handle, "start", session.session_id)
         session.generation = status["generation"]
         await _authorize(request, target)
@@ -292,16 +278,18 @@ async def delete_session(request: Request, session_id: str) -> Response:
     return Response(status_code=204)
 
 
+def withdraw_computer_runtime(app: FastAPI) -> None:
+    """Withdraw the computer runtime bound to ``app`` and close every viewer session it served."""
+    state = ensure_app_state(app)
+    state.computer_runtime = None
+    if state.computer_sessions is not None:
+        state.computer_sessions.close_all()
+
+
 def active_computer_worker_keys(app: FastAPI) -> frozenset[str]:
     """Collect live Computer worker keys on the app's owning event loop."""
     sessions = config_lifecycle.app_state(app).computer_sessions
     return sessions.active_worker_keys() if sessions is not None else frozenset()
-
-
-def touch_computer_workers(app: FastAPI, manager: WorkerBackend) -> None:
-    """Keep live streams active during manual cleanup on the owning loop."""
-    for worker_key in active_computer_worker_keys(app):
-        manager.touch_worker(worker_key)
 
 
 async def _upstream(websocket: WebSocket, upstream: aiohttp.ClientWebSocketResponse) -> None:
@@ -355,15 +343,12 @@ async def _maintain(websocket: WebSocket, session: ComputerSession, stream: asyn
 
 
 def _stream_session(websocket: WebSocket, session_id: str) -> ComputerSession:
-    paths = config_lifecycle.require_api_state(websocket.app).snapshot.runtime_paths
-    if websocket.headers.get("origin") not in computer_origins(paths):
+    if not allowed_client_origin(websocket):
         raise ComputerError(403, "Computer stream origin is not allowed.")
-    # Uvicorn SansIO can expose comma-separated header values instead of tokens.
-    protocols = [protocol.strip() for value in websocket.scope.get("subprotocols", []) for protocol in value.split(",")]
-    tickets = [value.removeprefix("mindroom-ticket.") for value in protocols if value.startswith("mindroom-ticket.")]
-    if "binary" not in protocols or len(tickets) != 1:
+    ticket = offered_credential(websocket, "binary", "mindroom-ticket.")
+    if ticket is None:
         raise ComputerError(401, "A computer stream ticket is required.")
-    return _store(websocket.app).consume_stream_ticket(session_id, tickets[0])
+    return _store(websocket.app).consume_stream_ticket(session_id, ticket)
 
 
 @router.websocket("/sessions/{session_id}/stream")

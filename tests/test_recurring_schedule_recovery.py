@@ -5,36 +5,45 @@ from __future__ import annotations
 import asyncio
 import json
 from contextlib import suppress
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, Mock
 
+import aiohttp
 import nio
 import pytest
+from structlog.testing import capture_logs
 
 from mindroom.config.main import Config
 from mindroom.config.plugin import PluginEntryConfig
-from mindroom.hooks import EVENT_SCHEDULE_FIRED, HookRegistry, ScheduleFiredContext, hook
+from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.hooks import EVENT_SCHEDULE_FIRED, HookRegistry, HookRegistryState, ScheduleFiredContext, hook
 from mindroom.matrix import client_delivery
 from mindroom.matrix.large_messages import MatrixEventTooLargeError
 from mindroom.scheduling import executor as scheduling_executor
 from mindroom.scheduling import recurring_schedule
-from mindroom.scheduling import tasks as scheduling
+from mindroom.scheduling import runtime as scheduling
 from mindroom.scheduling.tasks import CronSchedule, ScheduledWorkflow
 from tests.conftest import delivered_matrix_event, delivered_matrix_side_effect
 from tests.conftest import test_runtime_paths as runtime_paths
-from tests.scheduling_helpers import persist_schedule_writer, serve_task_state_events
+from tests.scheduling_helpers import (
+    persist_schedule_writer,
+    run_cron_task,
+    scheduled_task_runtime,
+    scheduling_bot,
+    serve_task_state_events,
+)
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from mindroom.hooks import HookCallback
+    from mindroom.hooks import HookCallback, HookRegistryLifetime
     from mindroom.scheduling.recurring_schedule import RecurringOccurrence
 
 
-def install_schedule_hook(monkeypatch: pytest.MonkeyPatch, callback: HookCallback) -> None:
-    """Install one real hook with test-scoped registry restoration."""
+def schedule_hooks(callback: HookCallback) -> HookRegistryLifetime:
+    """Return the scheduled-task runtime's view of a hook registry holding one real hook."""
     plugin = SimpleNamespace(
         name="schedule-test",
         discovered_hooks=(callback,),
@@ -42,11 +51,7 @@ def install_schedule_hook(monkeypatch: pytest.MonkeyPatch, callback: HookCallbac
         entry_config=PluginEntryConfig(path="./schedule-test"),
         plugin_order=0,
     )
-    monkeypatch.setattr(
-        scheduling_executor._SCHEDULING_HOOK_REGISTRY_STATE,
-        "registry",
-        HookRegistry.from_plugins([plugin]),
-    )
+    return HookRegistryState(HookRegistry.from_plugins([plugin])).lifetime()
 
 
 class Clock:
@@ -74,6 +79,11 @@ def workflow(hour: str = "7") -> ScheduledWorkflow:
         created_by="@user:example.org",
         new_thread=True,
     )
+
+
+def close_owner_session(client: AsyncMock) -> None:
+    """Do to a fake client what a stopping bot's closed ingestion session does to a real one."""
+    client._durable_session = SimpleNamespace(_closed=True)
 
 
 def client_for(task: ScheduledWorkflow) -> AsyncMock:
@@ -127,19 +137,20 @@ async def run_until_wait(
     client: AsyncMock,
     tmp_path: Path,
     config: Config | None = None,
+    hooks: HookRegistryLifetime | None = None,
 ) -> None:
     """Run the production scheduler until it sleeps or finishes a delivery."""
     paths = runtime_paths(tmp_path)
     persist_schedule_writer(paths, client.user_id)
     with suppress(asyncio.CancelledError):
-        await scheduling._run_cron_task(
+        await run_cron_task(
             client,
             "daily",
             task,
-            {},
             config or Config(),
             paths,
             AsyncMock(),
+            hooks=hooks,
         )
 
 
@@ -390,6 +401,40 @@ async def test_live_timer_fires_with_catch_up_disabled(
 
 
 @pytest.mark.asyncio
+async def test_an_owner_restart_before_planning_counts_against_the_catch_up_window(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    controlled_clock: Clock,
+) -> None:
+    """A due occurrence whose planning waited out its owner's restart follows catch-up, so with 0 it is skipped."""
+    due = datetime(2026, 1, 15, 7, 0, tzinfo=UTC)
+    sleeps = 0
+
+    async def reach_due_time_once(_delay: float) -> None:
+        nonlocal sleeps
+        sleeps += 1
+        if sleeps > 1:
+            raise asyncio.CancelledError
+        controlled_clock.now = due
+
+    checkpoint_identity = scheduling._TaskRunner._checkpoint_identity
+
+    async def owner_restarts_while_planning(runner: scheduling._TaskRunner) -> tuple[str, str]:
+        identity = await checkpoint_identity(runner)
+        if controlled_clock.now == due:
+            controlled_clock.now = due + timedelta(seconds=5)
+        return identity
+
+    monkeypatch.setattr(scheduling.asyncio, "sleep", reach_due_time_once)
+    monkeypatch.setattr(scheduling._TaskRunner, "_checkpoint_identity", owner_restarts_while_planning)
+    sent = AsyncMock(side_effect=delivered_matrix_side_effect("$trigger"))
+    monkeypatch.setattr(client_delivery, "send_message_outcome", sent)
+    task = workflow()
+    await run_until_wait(task, client_for(task), tmp_path, Config(scheduler_catch_up_grace_seconds=0))
+    sent.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_transaction_identity_reaches_matrix_transport(
     tmp_path: Path,
     controlled_clock: Clock,
@@ -491,6 +536,205 @@ async def test_retry_keeps_prepared_transport_payload(
     first, retry = client.room_send.await_args_list
     assert first.kwargs["content"] == retry.kwargs["content"]
     assert preparations == 1
+
+
+@pytest.mark.asyncio
+async def test_owner_stopped_during_a_durable_wait_leaves_the_full_trigger_to_its_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A trigger whose owner stops while its sidecar upload waits is prepared again by the replacement, not truncated.
+
+    The stopped bot's ingestion session disposes its client, so the upload's next try fails for good.
+    """
+    monkeypatch.setattr("mindroom.matrix.media._DURABLE_UPLOAD_RETRY_SECONDS", 0)
+    monkeypatch.setattr(scheduling, "SYNC_SHUTDOWN_PREPARATION_TIMEOUT_SECONDS", 0.01)
+    task = workflow()
+    task.message = "full trigger " + ("x" * 100_000)
+    paths = runtime_paths(tmp_path)
+    old_client = client_for(task)
+    disposed = nio.LocalProtocolError("durable sync session is poisoned; reopen with a fresh client")
+    old_client.room_send.side_effect = disposed
+    runtime = scheduled_task_runtime(paths, scheduling_bot(old_client), config=Config())
+    runner = scheduling._TaskRunner(runtime, ROUTER_AGENT_NAME, "!room:example.org", "daily")
+    outage = aiohttp.ClientConnectionError("Connection refused")
+
+    async def upload_until_the_owner_stops(**_kwargs: object) -> object:
+        if old_client.upload.await_count == 1:
+            await runtime.release({ROUTER_AGENT_NAME})
+            close_owner_session(old_client)
+            raise outage
+        raise disposed
+
+    old_client.upload.side_effect = upload_until_the_owner_stops
+    due = datetime(2026, 1, 15, 7, 0, 5, tzinfo=UTC)
+    occurrence = await plan_at(tmp_path, task, due)
+
+    with capture_logs() as logs:
+        stopped = await runner._execute(task, occurrence)
+
+    new_client = client_for(task)
+    new_client.upload.return_value = (nio.UploadResponse("mxc://example.org/sidecar"), None)
+    new_client.room_send.return_value = nio.RoomSendResponse("$trigger", "!room:example.org")
+    runtime.bots()[ROUTER_AGENT_NAME] = scheduling_bot(new_client)
+    resumed = await runner._execute(task, await plan_at(tmp_path, task, due))
+
+    assert stopped.status == "retry"
+    levels = [(log["event"], log["log_level"]) for log in logs]
+    assert ("Failed to upload text", "warning") in levels
+    assert [entry for entry in levels if entry[1] == "error"] == []
+    assert resumed.status == "delivered"
+    sent = new_client.room_send.await_args.kwargs
+    assert sent["tx_id"] == occurrence.transaction_id
+    assert sent["content"]["file"]["url"] == "mxc://example.org/sidecar"
+    assert "truncated" not in sent["content"]["body"]
+
+
+@pytest.mark.asyncio
+async def test_owner_stopped_after_the_freeze_leaves_the_frozen_trigger_without_an_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A send its stopped owner's disposed client refuses after the freeze is a retry, logged at warning."""
+    monkeypatch.setattr(scheduling, "SYNC_SHUTDOWN_PREPARATION_TIMEOUT_SECONDS", 0.01)
+    task = workflow()
+    old_client = client_for(task)
+    old_client.room_send.side_effect = nio.LocalProtocolError(
+        "durable sync session is poisoned; reopen with a fresh client",
+    )
+    runtime = scheduled_task_runtime(runtime_paths(tmp_path), scheduling_bot(old_client), config=Config())
+    runner = scheduling._TaskRunner(runtime, ROUTER_AGENT_NAME, "!room:example.org", "daily")
+    freeze = scheduling_executor.prepare_recurring_delivery
+
+    async def freeze_then_stop(*args: object) -> RecurringOccurrence:
+        frozen = await freeze(*args)
+        await runtime.release({ROUTER_AGENT_NAME})
+        close_owner_session(old_client)
+        return frozen
+
+    monkeypatch.setattr(scheduling_executor, "prepare_recurring_delivery", freeze_then_stop)
+    occurrence = await plan_at(tmp_path, task, datetime(2026, 1, 15, 7, 0, 5, tzinfo=UTC))
+
+    with capture_logs() as logs:
+        stopped = await runner._execute(task, occurrence)
+
+    assert stopped.status == "retry"
+    levels = [(log["event"], log["log_level"]) for log in logs]
+    assert ("matrix_message_delivery_exception", "warning") in levels
+    assert [entry for entry in levels if entry[1] == "error"] == []
+
+
+def one_time_owner_stop(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> tuple[ScheduledWorkflow, scheduling._TaskRunner, AsyncMock, AsyncMock]:
+    """Return a due one-time task whose owner stops during its send, and the replacement's client."""
+    monkeypatch.setattr(scheduling, "SYNC_SHUTDOWN_PREPARATION_TIMEOUT_SECONDS", 0.01)
+    task = ScheduledWorkflow(
+        schedule_type="once",
+        execute_at=datetime(2026, 1, 15, 7, 0, tzinfo=UTC),
+        message="Remind the team about the deadline",
+        description="Deadline reminder",
+        room_id="!room:example.org",
+        created_by="@user:example.org",
+    )
+    paths = runtime_paths(tmp_path)
+    old_client = client_for(task)
+    persist_schedule_writer(paths, old_client.user_id)
+    runtime = scheduled_task_runtime(paths, scheduling_bot(old_client), config=Config())
+    runner = scheduling._TaskRunner(runtime, ROUTER_AGENT_NAME, "!room:example.org", "daily")
+    new_client = client_for(task)
+    new_client.room_send.return_value = nio.RoomSendResponse("$trigger", "!room:example.org")
+    new_client.room_put_state.return_value = nio.RoomPutStateResponse("$state", "!room:example.org")
+
+    async def stop_during_the_send(**_kwargs: object) -> object:
+        await runtime.release({ROUTER_AGENT_NAME})
+        close_owner_session(old_client)
+        runtime.bots()[ROUTER_AGENT_NAME] = scheduling_bot(new_client)
+        raise refused
+
+    refused = nio.LocalProtocolError("durable sync session is poisoned; reopen with a fresh client")
+    old_client.room_send.side_effect = stop_during_the_send
+    return task, runner, old_client, new_client
+
+
+@pytest.mark.asyncio
+async def test_owner_stopped_during_a_one_time_send_leaves_the_trigger_to_its_replacement(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A one-time send its stopping owner's closed session refused is sent once by the replacement, not failed.
+
+    Both tries carry the task's own transaction ID, so a send the homeserver already accepted stays one event.
+    """
+    task, runner, old_client, new_client = one_time_owner_stop(tmp_path, monkeypatch)
+
+    with capture_logs() as logs:
+        await runner.run_once(task)
+
+    assert old_client.room_send.await_count == new_client.room_send.await_count == 1
+    assert new_client.room_send.await_args.kwargs["tx_id"] == old_client.room_send.await_args.kwargs["tx_id"]
+    # The ID names the task and the saved workflow, so an edited task fires under another one.
+    assert new_client.room_send.await_args.kwargs["tx_id"].startswith("schedule_!room:example.org_daily_")
+    assert task.message in new_client.room_send.await_args.kwargs["content"]["body"]
+    assert [call.kwargs["content"]["status"] for call in new_client.room_put_state.await_args_list] == ["completed"]
+    assert [(log["event"], log["log_level"]) for log in logs if log["log_level"] == "error"] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("change", ["cancelled", "deleted"])
+async def test_one_time_task_cancelled_or_deleted_while_its_owner_restarts_is_not_sent(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    change: str,
+) -> None:
+    """The replacement reads the task again before sending, so a task cancelled or deleted meanwhile is not sent."""
+    task, runner, old_client, new_client = one_time_owner_stop(tmp_path, monkeypatch)
+    new_client.room_get_state_event.return_value = (
+        nio.RoomGetStateEventResponse.from_dict(
+            {"workflow": task.model_dump_json(), "status": "cancelled"},
+            room_id="!room:example.org",
+            event_type="com.mindroom.scheduled.task",
+            state_key="daily",
+        )
+        if change == "cancelled"
+        else nio.RoomGetStateEventError("not found", status_code="M_NOT_FOUND")
+    )
+
+    with capture_logs() as logs:
+        await asyncio.wait_for(runner.run_once(task), 10)
+
+    assert old_client.room_send.await_count == 1
+    assert new_client.room_send.await_count == 0
+    assert new_client.room_put_state.await_count == old_client.room_put_state.await_count == 0
+    assert ("One-time task is no longer pending, stopping", "info") in [
+        (log["event"], log["log_level"]) for log in logs
+    ]
+
+
+@pytest.mark.asyncio
+async def test_one_time_task_edited_while_its_owner_restarts_is_sent_and_stored_with_the_edit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The replacement sends the edited task and its final status keeps the edit, not the definition read first."""
+    task, runner, old_client, new_client = one_time_owner_stop(tmp_path, monkeypatch)
+    edited = task.model_copy(update={"message": "Remind the team the deadline moved to Friday"})
+    new_client.room_get_state_event.return_value = nio.RoomGetStateEventResponse.from_dict(
+        {"workflow": edited.model_dump_json(), "status": "pending"},
+        room_id="!room:example.org",
+        event_type="com.mindroom.scheduled.task",
+        state_key="daily",
+    )
+
+    await asyncio.wait_for(runner.run_once(task), 10)
+
+    assert task.message in old_client.room_send.await_args.kwargs["content"]["body"]
+    assert new_client.room_send.await_count == 1
+    assert edited.message in new_client.room_send.await_args.kwargs["content"]["body"]
+    stored = [call.kwargs["content"] for call in new_client.room_put_state.await_args_list]
+    assert [content["status"] for content in stored] == ["completed"]
+    assert ScheduledWorkflow.model_validate_json(stored[0]["workflow"]) == edited
 
 
 @pytest.mark.asyncio
@@ -603,7 +847,7 @@ async def test_checkpoint_retry_rechecks_time_and_task_state(
     failed = False
     pauses = 0
 
-    def fail_final_plan(
+    def fail_plan_of_due_occurrence(
         path: Path,
         workflow_key: str,
         cron: str,
@@ -612,8 +856,8 @@ async def test_checkpoint_retry_rechecks_time_and_task_state(
     ) -> recurring_schedule.RecurringOccurrence:
         nonlocal plans
         plans += 1
-        if stage == "plan" and plans == 2:
-            msg = "temporary final planning failure"
+        if stage == "plan" and plans == 1:
+            msg = "temporary planning failure"
             raise OSError(msg)
         return plan(path, workflow_key, cron, now, grace_seconds)
 
@@ -642,7 +886,7 @@ async def test_checkpoint_retry_rechecks_time_and_task_state(
                 state_key="daily",
             )
 
-    monkeypatch.setattr(recurring_schedule, "_plan", fail_final_plan)
+    monkeypatch.setattr(recurring_schedule, "_plan", fail_plan_of_due_occurrence)
     monkeypatch.setattr(recurring_schedule, "_save", fail_preparation)
     monkeypatch.setattr(scheduling.asyncio, "sleep", change_during_retry)
     await run_until_wait(task, client, tmp_path)
@@ -663,7 +907,7 @@ async def test_hook_retry_identity_is_specific_to_the_occurrence(
     async def record_identity(ctx: ScheduleFiredContext) -> None:
         identities.append(ctx.correlation_id)
 
-    install_schedule_hook(monkeypatch, record_identity)
+    hooks = schedule_hooks(record_identity)
     task = workflow()
     client = client_for(task)
     content = {"body": "summary", "msgtype": "m.text"}
@@ -676,14 +920,14 @@ async def test_hook_retry_identity_is_specific_to_the_occurrence(
         side_effect=[asyncio.CancelledError, delivered_matrix_event("$first"), delivered_matrix_event("$next")],
     )
     monkeypatch.setattr(client_delivery, "send_message_outcome", sent)
-    await run_until_wait(task, client, tmp_path)
+    await run_until_wait(task, client, tmp_path, hooks=hooks)
     controlled_clock.now = datetime(2026, 1, 15, 7, 1, tzinfo=UTC)
-    await run_until_wait(task, client, tmp_path)
-    await run_until_wait(task, client, tmp_path)
-    await run_until_wait(task, client, tmp_path)
+    await run_until_wait(task, client, tmp_path, hooks=hooks)
+    await run_until_wait(task, client, tmp_path, hooks=hooks)
+    await run_until_wait(task, client, tmp_path, hooks=hooks)
     assert len(identities) == 2  # Frozen delivery retries no longer invoke hooks.
     controlled_clock.now = datetime(2026, 1, 16, 7, 1, tzinfo=UTC)
-    await run_until_wait(task, client, tmp_path)
+    await run_until_wait(task, client, tmp_path, hooks=hooks)
     assert len(identities) == 3
     assert identities[0] == identities[1]
     assert identities[1] != identities[2]
@@ -698,13 +942,14 @@ async def test_permanent_preparation_failure_advances_occurrence(
     failure: str,
 ) -> None:
     """Invalid content fails visibly once rather than being retried every thirty seconds."""
+    hooks = None
     if failure == "empty":
 
         @hook(EVENT_SCHEDULE_FIRED)
         async def empty_body(ctx: ScheduleFiredContext) -> None:
             ctx.message_text = ""
 
-        install_schedule_hook(monkeypatch, empty_body)
+        hooks = schedule_hooks(empty_body)
     else:
         monkeypatch.setattr(
             client_delivery,
@@ -715,9 +960,9 @@ async def test_permanent_preparation_failure_advances_occurrence(
     client = client_for(task)
     sent = AsyncMock(side_effect=delivered_matrix_side_effect("$failure"))
     monkeypatch.setattr(client_delivery, "send_message_outcome", sent)
-    await run_until_wait(task, client, tmp_path)
+    await run_until_wait(task, client, tmp_path, hooks=hooks)
     controlled_clock.now = datetime(2026, 1, 15, 7, 1, tzinfo=UTC)
-    await run_until_wait(task, client, tmp_path)
+    await run_until_wait(task, client, tmp_path, hooks=hooks)
     assert sent.await_count == 1
     assert "Scheduled task failed" in sent.await_args.args[2]["body"]
     checkpoint = json.loads(next((tmp_path / "mindroom_data/tracking/recurring_schedules").glob("*.json")).read_text())
@@ -791,6 +1036,7 @@ async def test_preparation_failure_uses_matrix_classification(
         Config(),
         runtime_paths(tmp_path),
         AsyncMock(),
+        HookRegistryState(HookRegistry.empty()),
         occurrence=occurrence,
     )
     assert outcome.status == expected_status
@@ -819,6 +1065,7 @@ async def test_unexpected_preparation_value_error_retries(
         Config(),
         runtime_paths(tmp_path),
         AsyncMock(),
+        HookRegistryState(HookRegistry.empty()),
         occurrence=occurrence,
     )
     assert outcome.status == "retry"
@@ -841,6 +1088,7 @@ async def test_device_mismatch_is_held(tmp_path: Path) -> None:
         Config(),
         runtime_paths(tmp_path),
         AsyncMock(),
+        HookRegistryState(HookRegistry.empty()),
         occurrence=resumed,
     )
     assert outcome.status == "held"
@@ -867,6 +1115,7 @@ async def test_frozen_delivery_failure_preserves_retry_identity(
         Config(),
         runtime_paths(tmp_path),
         AsyncMock(),
+        HookRegistryState(HookRegistry.empty()),
         occurrence=occurrence,
     )
     assert outcome.status == "retry"
@@ -883,6 +1132,7 @@ async def test_frozen_delivery_failure_preserves_retry_identity(
         Config(),
         runtime_paths(tmp_path),
         AsyncMock(),
+        HookRegistryState(HookRegistry.empty()),
         occurrence=resumed,
     )
     assert outcome.status == "delivered"

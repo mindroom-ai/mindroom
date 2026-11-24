@@ -1,4 +1,4 @@
-"""Tests for durable room-level model overrides."""
+"""Tests for a room's `model` setting: `!room_model`, and the model it gives every agent, team and the router."""
 
 from __future__ import annotations
 
@@ -10,7 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
-from agno.run.agent import RunOutput
+from structlog.testing import capture_logs
 
 import mindroom.commands.handler as handler_module
 import mindroom.routing
@@ -19,19 +19,18 @@ from mindroom.commands.parsing import Command, CommandType, command_parser, get_
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
-from mindroom.history.session_context import close_team_runtime_state_dbs
+from mindroom.constants import tracking_dir
+from mindroom.matrix.event_types import ROOM_SETTINGS_EVENT_TYPE
 from mindroom.message_target import MessageTarget
-from mindroom.room_model_overrides import (
-    _store_path,
-    clear_room_model_override,
-    resolve_room_model_override,
-    set_room_model_override,
-)
-from mindroom.teams import materialize_exact_team_members
+from mindroom.room_settings import resolve_room_model_override
+from mindroom.teams.members import resolve_exact_team_members
 from mindroom.thread_models import set_thread_model_override
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+from mindroom.turn_model import ModelScope, resolve_turn_model
 from tests.authorization_helpers import make_test_command_handler_context
 from tests.conftest import bind_runtime_paths, make_conversation_reader_mock, runtime_paths_for, test_runtime_paths
+from tests.fakes.scripted_model import ScriptedModel, answer
+from tests.room_settings_helpers import RoomStateHomeserver, set_room_model_override
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -47,13 +46,11 @@ class _RoomModelEvent:
     source: dict[str, dict[str, str]]
 
 
-def _power_levels_response(*, users: dict[str, int]) -> nio.RoomGetStateEventResponse:
-    return nio.RoomGetStateEventResponse(
-        content={"users": users, "users_default": 0},
-        event_type="m.room.power_levels",
-        state_key="",
-        room_id=ROOM_ID,
-    )
+def _homeserver(admin: str = "@admin:localhost") -> RoomStateHomeserver:
+    """A room whose only admin is ``admin``."""
+    homeserver = RoomStateHomeserver()
+    homeserver.events["m.room.power_levels", ""] = {"users": {admin: 100}, "users_default": 0}
+    return homeserver
 
 
 def _room_model_context(
@@ -126,8 +123,8 @@ def test_room_model_help_accepts_supported_spellings(topic: str) -> None:
 @pytest.mark.asyncio
 async def test_room_model_command_sets_runtime_default_without_writing_config(tmp_path: Path) -> None:
     """Missing room state must not leave future room turns on entity config."""
-    client = AsyncMock()
-    client.room_get_state_event.return_value = _power_levels_response(users={"@admin:localhost": 100})
+    homeserver = _homeserver("@admin:localhost")
+    client = homeserver.client()
     context = _room_model_context(tmp_path, client)
     config_before = context.runtime_paths.config_path.read_text(encoding="utf-8")
     command = Command(type=CommandType.ROOM_MODEL, args={"args_text": "large"}, raw_text="!room_model large")
@@ -140,21 +137,23 @@ async def test_room_model_command_sets_runtime_default_without_writing_config(tm
         requester_user_id="@admin:localhost",
     )
 
-    runtime_model = context.config.resolve_runtime_model(
-        entity_name="assistant",
-        room_id=ROOM_ID,
-        runtime_paths=context.runtime_paths,
+    runtime_model = resolve_turn_model(
+        context.config,
+        context.runtime_paths,
+        ModelScope(entity="assistant", room_id=ROOM_ID),
+        None,
     )
     assert runtime_model.model_name == "large"
     assert runtime_model.context_window == 32_000
+    assert homeserver.events[ROOM_SETTINGS_EVENT_TYPE, "model"] == {"value": "large"}
     assert context.runtime_paths.config_path.read_text(encoding="utf-8") == config_before
 
 
 @pytest.mark.asyncio
 async def test_room_model_command_reset_restores_configured_default(tmp_path: Path) -> None:
     """Missing reset support must not leave a removed room choice active."""
-    client = AsyncMock()
-    client.room_get_state_event.return_value = _power_levels_response(users={"@admin:localhost": 100})
+    homeserver = _homeserver("@admin:localhost")
+    client = homeserver.client()
     context = _room_model_context(tmp_path, client)
 
     await handle_command(
@@ -180,12 +179,14 @@ async def test_room_model_command_reset_restores_configured_default(tmp_path: Pa
         requester_user_id="@admin:localhost",
     )
 
-    runtime_model = context.config.resolve_runtime_model(
-        entity_name="assistant",
-        room_id=ROOM_ID,
-        runtime_paths=context.runtime_paths,
+    runtime_model = resolve_turn_model(
+        context.config,
+        context.runtime_paths,
+        ModelScope(entity="assistant", room_id=ROOM_ID),
+        None,
     )
     assert runtime_model.model_name == "default"
+    assert homeserver.events[ROOM_SETTINGS_EVENT_TYPE, "model"] == {}
     response = context.send_response.await_args.args[0]
     assert "override removed" in response
     assert "Room default returns to configured room or entity models" in response
@@ -195,7 +196,8 @@ async def test_room_model_command_reset_restores_configured_default(tmp_path: Pa
 @pytest.mark.asyncio
 async def test_room_model_command_show_lists_state_and_available_models(tmp_path: Path) -> None:
     """Missing status support must not hide room state or valid model choices."""
-    client = AsyncMock()
+    homeserver = _homeserver()
+    client = homeserver.client()
     context = _room_model_context(tmp_path, client)
 
     await handle_command(
@@ -214,15 +216,14 @@ async def test_room_model_command_show_lists_state_and_available_models(tmp_path
     assert "`large` (openai large-model)" in response
 
 
-def test_room_model_store_scopes_records_by_room_and_preserves_audit_metadata(tmp_path: Path) -> None:
-    """A room override must not leak into another room or lose its author."""
+def test_room_model_setting_is_scoped_by_room(tmp_path: Path) -> None:
+    """A room override must not leak into another room."""
     runtime_paths = test_runtime_paths(tmp_path)
 
     set_room_model_override(
         runtime_paths,
         room_id=ROOM_ID,
         model_name="large",
-        set_by="@admin:localhost",
     )
 
     state = resolve_room_model_override(runtime_paths, ROOM_ID, configured_models={"default", "large"})
@@ -233,43 +234,33 @@ def test_room_model_store_scopes_records_by_room_and_preserves_audit_metadata(tm
     )
     assert state.active == "large"
     assert state.stale is None
-    assert state.set_by == "@admin:localhost"
-    assert state.set_at is not None
     assert other_state.active is None
-    assert clear_room_model_override(runtime_paths, ROOM_ID) is True
-    assert clear_room_model_override(runtime_paths, ROOM_ID) is False
 
 
-def test_room_model_overrides_do_not_silently_evict_active_rooms(tmp_path: Path) -> None:
-    """A durable room default must remain until reset, even after many other rooms are set."""
-    context = _room_model_context(tmp_path, AsyncMock())
-    for index in range(1001):
-        set_room_model_override(
-            context.runtime_paths,
-            room_id=f"!room-{index}:localhost",
-            model_name="large",
-            set_by="@admin:localhost",
-        )
-
-    oldest = resolve_room_model_override(
-        context.runtime_paths,
-        "!room-0:localhost",
-        configured_models=context.config.models,
-    )
-
-    assert oldest.active == "large"
-
-
-def test_room_model_store_ignores_corrupt_records_and_classifies_removed_models(tmp_path: Path) -> None:
-    """Malformed or removed model names must never become active runtime choices."""
+def test_a_model_this_runtime_lacks_is_kept_and_ignored_until_the_config_has_it(tmp_path: Path) -> None:
+    """A setting naming no configured model is logged once and ignored, and applies once a reload configures it."""
     runtime_paths = test_runtime_paths(tmp_path)
-    path = _store_path(runtime_paths)
+    set_room_model_override(runtime_paths, room_id=ROOM_ID, model_name="later@high")
+
+    with capture_logs() as logs:
+        for _ in range(2):
+            state = resolve_room_model_override(runtime_paths, ROOM_ID, configured_models={"default"})
+            assert (state.active, state.stale) == (None, "later@high")
+    assert [log["event"] for log in logs] == ["room_model_setting_ignored"]
+
+    state = resolve_room_model_override(runtime_paths, ROOM_ID, configured_models={"default", "later@high"})
+    assert (state.active, state.stale) == ("later@high", None)
+
+
+def test_an_older_runtimes_model_file_ignores_corrupt_records_and_classifies_removed_models(tmp_path: Path) -> None:
+    """Malformed or removed model names an older runtime stored must never become active runtime choices."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    path = tracking_dir(runtime_paths) / "room_model_overrides.json"
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(
         json.dumps(
             {
                 ROOM_ID: {"model": [], "set_at": "2026-08-15T00:00:00+00:00"},
-                "!bad-time:localhost": {"model": "large", "set_at": 12345},
                 "!removed:localhost": {"model": "removed", "set_at": "2026-08-15T00:00:00+00:00"},
             },
         ),
@@ -277,11 +268,6 @@ def test_room_model_store_ignores_corrupt_records_and_classifies_removed_models(
     )
 
     invalid = resolve_room_model_override(runtime_paths, ROOM_ID, configured_models={"default", "large"})
-    invalid_time = resolve_room_model_override(
-        runtime_paths,
-        "!bad-time:localhost",
-        configured_models={"default", "large"},
-    )
     stale = resolve_room_model_override(
         runtime_paths,
         "!removed:localhost",
@@ -289,8 +275,6 @@ def test_room_model_store_ignores_corrupt_records_and_classifies_removed_models(
     )
     assert invalid.active is None
     assert invalid.stale is None
-    assert invalid_time.active is None
-    assert invalid_time.stale is None
     assert stale.active is None
     assert stale.stale == "removed"
 
@@ -299,7 +283,7 @@ def test_runtime_room_override_precedence(tmp_path: Path, monkeypatch: pytest.Mo
     """Room runtime state must beat static room config while thread and explicit choices still win."""
     config = bind_runtime_paths(
         Config(
-            agents={"assistant": AgentConfig(display_name="Assistant", model="default")},
+            agents={"assistant": AgentConfig(display_name="Assistant", model="default", rooms=["lobby"])},
             room_models={"lobby": "default"},
             models={
                 "default": ModelConfig(provider="openai", id="default-model"),
@@ -314,15 +298,10 @@ def test_runtime_room_override_precedence(tmp_path: Path, monkeypatch: pytest.Mo
         runtime_paths,
         room_id=ROOM_ID,
         model_name="large",
-        set_by="@admin:localhost",
     )
 
     assert (
-        config.resolve_runtime_model(
-            entity_name="assistant",
-            room_id=ROOM_ID,
-            runtime_paths=runtime_paths,
-        ).model_name
+        resolve_turn_model(config, runtime_paths, ModelScope(entity="assistant", room_id=ROOM_ID), None).model_name
         == "large"
     )
 
@@ -331,27 +310,24 @@ def test_runtime_room_override_precedence(tmp_path: Path, monkeypatch: pytest.Mo
         runtime_paths,
         thread_id=thread_id,
         model_name="default",
-        room_id=ROOM_ID,
-        set_by="@user:localhost",
         entity_names=("assistant",),
         config=config,
     )
     assert (
-        config.resolve_runtime_model(
-            entity_name="assistant",
-            room_id=ROOM_ID,
-            thread_id=thread_id,
-            runtime_paths=runtime_paths,
+        resolve_turn_model(
+            config,
+            runtime_paths,
+            ModelScope(entity="assistant", room_id=ROOM_ID, thread_id=thread_id),
+            None,
         ).model_name
         == "default"
     )
     assert (
-        config.resolve_runtime_model(
-            entity_name="assistant",
-            active_model_name="large",
-            room_id=ROOM_ID,
-            thread_id=thread_id,
-            runtime_paths=runtime_paths,
+        resolve_turn_model(
+            config,
+            runtime_paths,
+            ModelScope(entity="assistant", room_id=ROOM_ID, thread_id=thread_id, explicit="large"),
+            None,
         ).model_name
         == "large"
     )
@@ -365,22 +341,14 @@ async def test_runtime_room_override_selects_router_model(tmp_path: Path) -> Non
         context.runtime_paths,
         room_id=ROOM_ID,
         model_name="large",
-        set_by="@admin:localhost",
     )
     selected_models: list[str] = []
 
-    def load_model(_config: Config, _runtime_paths: object, model_name: str) -> MagicMock:
+    def load_model(_config: Config, _runtime_paths: object, model_name: str) -> ScriptedModel:
         selected_models.append(model_name)
-        return MagicMock(id=f"{model_name}-model")
+        return ScriptedModel([answer(json.dumps({"entity_name": "assistant", "reasoning": "Only candidate"}))])
 
-    router = AsyncMock()
-    router.arun.return_value = RunOutput(
-        content={"entity_name": "assistant", "reasoning": "Only candidate"},
-    )
-    with (
-        patch("mindroom.routing.model_loading.get_model_instance", side_effect=load_model),
-        patch("mindroom.routing.Agent", return_value=router),
-    ):
+    with patch("mindroom.providers.registry.build_model_provider", side_effect=load_model):
         result = await mindroom.routing.suggest_responder(
             "Help me",
             ["assistant"],
@@ -401,10 +369,9 @@ def test_runtime_model_precedence_applies_to_materialized_team_members(tmp_path:
         context.runtime_paths,
         room_id=ROOM_ID,
         model_name="large",
-        set_by="@admin:localhost",
     )
 
-    members = materialize_exact_team_members(
+    members = resolve_exact_team_members(
         ["assistant"],
         config=context.config,
         runtime_paths=context.runtime_paths,
@@ -417,24 +384,27 @@ def test_runtime_model_precedence_applies_to_materialized_team_members(tmp_path:
             resolved_thread_id=None,
             session_id=None,
         ),
+        refresh_scheduler=None,
+        active_model_names={
+            "assistant": resolve_turn_model(
+                context.config,
+                context.runtime_paths,
+                ModelScope(entity="assistant", room_id=ROOM_ID),
+                None,
+            ).model_name,
+        },
     )
-    try:
-        assert members.agents[0].model is not None
-        assert members.agents[0].model.id == "large-model"
-    finally:
-        close_team_runtime_state_dbs(agents=members.agents, team_db=None)
+    assert members.build("assistant", members.model_names["assistant"]).spec.model.identity.id == "large-model"
 
     thread_id = "$thread:localhost"
     set_thread_model_override(
         context.runtime_paths,
         thread_id=thread_id,
         model_name="default",
-        room_id=ROOM_ID,
-        set_by="@user:localhost",
         entity_names=("assistant",),
         config=context.config,
     )
-    thread_members = materialize_exact_team_members(
+    thread_members = resolve_exact_team_members(
         ["assistant"],
         config=context.config,
         runtime_paths=context.runtime_paths,
@@ -447,12 +417,20 @@ def test_runtime_model_precedence_applies_to_materialized_team_members(tmp_path:
             resolved_thread_id=thread_id,
             session_id=f"{ROOM_ID}:{thread_id}",
         ),
+        refresh_scheduler=None,
+        active_model_names={
+            "assistant": resolve_turn_model(
+                context.config,
+                context.runtime_paths,
+                ModelScope(entity="assistant", room_id=ROOM_ID, thread_id=thread_id),
+                None,
+            ).model_name,
+        },
     )
-    try:
-        assert thread_members.agents[0].model is not None
-        assert thread_members.agents[0].model.id == "default-model"
-    finally:
-        close_team_runtime_state_dbs(agents=thread_members.agents, team_db=None)
+    assert (
+        thread_members.build("assistant", thread_members.model_names["assistant"]).spec.model.identity.id
+        == "default-model"
+    )
 
 
 def test_stale_runtime_room_override_falls_back_to_static_room_model(
@@ -462,7 +440,7 @@ def test_stale_runtime_room_override_falls_back_to_static_room_model(
     """Removed runtime aliases must not mask a still-valid static room model."""
     config = bind_runtime_paths(
         Config(
-            agents={"assistant": AgentConfig(display_name="Assistant", model="large")},
+            agents={"assistant": AgentConfig(display_name="Assistant", model="large", rooms=["lobby"])},
             room_models={"lobby": "default"},
             models={
                 "default": ModelConfig(provider="openai", id="default-model"),
@@ -477,22 +455,36 @@ def test_stale_runtime_room_override_falls_back_to_static_room_model(
         runtime_paths,
         room_id=ROOM_ID,
         model_name="removed",
-        set_by="@admin:localhost",
     )
 
-    runtime_model = config.resolve_runtime_model(
-        entity_name="assistant",
-        room_id=ROOM_ID,
-        runtime_paths=runtime_paths,
-    )
+    runtime_model = resolve_turn_model(config, runtime_paths, ModelScope(entity="assistant", room_id=ROOM_ID), None)
     assert runtime_model.model_name == "default"
+
+
+def test_static_room_model_applies_to_a_room_listed_by_room_id(tmp_path: Path) -> None:
+    """A room MindRoom did not create gets its authored room model through its ! room ID."""
+    config = bind_runtime_paths(
+        Config(
+            agents={"assistant": AgentConfig(display_name="Assistant", model="large")},
+            room_models={ROOM_ID: "default"},
+            models={
+                "default": ModelConfig(provider="openai", id="default-model"),
+                "large": ModelConfig(provider="openai", id="large-model"),
+            },
+        ),
+        test_runtime_paths(tmp_path),
+    )
+    runtime_paths = runtime_paths_for(config)
+
+    room_model = resolve_turn_model(config, runtime_paths, ModelScope(entity="assistant", room_id=ROOM_ID), None)
+    assert room_model.model_name == "default"
 
 
 @pytest.mark.asyncio
 async def test_room_model_command_rejects_non_admin_without_changing_state(tmp_path: Path) -> None:
     """A regular room member must not change defaults for every conversation."""
-    client = AsyncMock()
-    client.room_get_state_event.return_value = _power_levels_response(users={"@admin:localhost": 100})
+    homeserver = _homeserver("@admin:localhost")
+    client = homeserver.client()
     context = _room_model_context(tmp_path, client)
 
     await handle_command(
@@ -513,10 +505,10 @@ async def test_room_model_command_rejects_non_admin_without_changing_state(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_room_model_command_records_authorizing_sender(tmp_path: Path) -> None:
-    """Bridge-mediated commands must audit the Matrix user satisfying the admin check."""
-    client = AsyncMock()
-    client.room_get_state_event.return_value = _power_levels_response(users={"@bridge-admin:localhost": 100})
+async def test_room_model_command_accepts_admin_sender_for_bridged_requester(tmp_path: Path) -> None:
+    """The Matrix sender's room admin power must authorize a bridged requester's command."""
+    homeserver = _homeserver("@bridge-admin:localhost")
+    client = homeserver.client()
     context = _room_model_context(tmp_path, client)
 
     await handle_command(
@@ -533,7 +525,6 @@ async def test_room_model_command_records_authorizing_sender(tmp_path: Path) -> 
 
     state = resolve_room_model_override(context.runtime_paths, ROOM_ID, configured_models=context.config.models)
     assert state.active == "large"
-    assert state.set_by == "@bridge-admin:localhost"
 
 
 @pytest.mark.asyncio
@@ -542,8 +533,8 @@ async def test_room_model_command_ignores_room_power_of_an_entity_posting_for_a_
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An agent's own room power must not authorize a command it posted on a human's behalf."""
-    client = AsyncMock()
-    client.room_get_state_event.return_value = _power_levels_response(users={"@agent:localhost": 100})
+    homeserver = _homeserver("@agent:localhost")
+    client = homeserver.client()
     context = _room_model_context(tmp_path, client)
     monkeypatch.setattr(
         handler_module,
@@ -571,14 +562,10 @@ async def test_room_model_command_ignores_room_power_of_an_entity_posting_for_a_
 @pytest.mark.asyncio
 async def test_room_model_command_reports_stale_override(tmp_path: Path) -> None:
     """Status must distinguish an ignored removed alias from no stored choice."""
-    client = AsyncMock()
+    homeserver = _homeserver()
+    client = homeserver.client()
     context = _room_model_context(tmp_path, client)
-    set_room_model_override(
-        context.runtime_paths,
-        room_id=ROOM_ID,
-        model_name="removed",
-        set_by="@admin:localhost",
-    )
+    homeserver.events[ROOM_SETTINGS_EVENT_TYPE, "model"] = {"value": "removed"}
 
     await handle_command(
         context=context,
@@ -598,8 +585,8 @@ async def test_room_model_command_reports_stale_override(tmp_path: Path) -> None
 @pytest.mark.asyncio
 async def test_room_model_command_configured_reset_name_sets_model(tmp_path: Path) -> None:
     """A configured model named reset must remain selectable instead of clearing state."""
-    client = AsyncMock()
-    client.room_get_state_event.return_value = _power_levels_response(users={"@admin:localhost": 100})
+    homeserver = _homeserver("@admin:localhost")
+    client = homeserver.client()
     context = _room_model_context(
         tmp_path,
         client,
@@ -628,7 +615,8 @@ async def test_room_model_command_configured_reset_name_sets_model(tmp_path: Pat
 @pytest.mark.asyncio
 async def test_room_model_command_unknown_name_lists_available_models(tmp_path: Path) -> None:
     """An invalid choice must leave state unchanged and provide actionable choices."""
-    client = AsyncMock()
+    homeserver = _homeserver()
+    client = homeserver.client()
     context = _room_model_context(tmp_path, client)
 
     await handle_command(
@@ -649,3 +637,60 @@ async def test_room_model_command_unknown_name_lists_available_models(tmp_path: 
     assert "Unknown model `missing`" in response
     assert "`default` (openai default-model)" in response
     assert "`large` (openai large-model)" in response
+
+
+async def _run_room_model_command(context: CommandHandlerContext, sender: str, args_text: str) -> str:
+    """Run `!room_model <args_text>` as ``sender`` and return the reply."""
+    body = f"!room_model {args_text}".strip()
+    await handle_command(
+        context=context,
+        room=SimpleNamespace(room_id=ROOM_ID),
+        event=_room_model_event(sender, body),
+        command=Command(type=CommandType.ROOM_MODEL, args={"args_text": args_text}, raw_text=body),
+        requester_user_id=sender,
+    )
+    return context.send_response.await_args.args[0]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status_code", "answer"),
+    [
+        ("M_FORBIDDEN", "I need moderator rights in this room to change the room model."),
+        ("M_UNKNOWN", "❌ The room did not take the change. Run the command again to retry."),
+    ],
+)
+async def test_room_model_command_says_when_the_room_refuses_the_change(
+    tmp_path: Path,
+    status_code: str,
+    answer: str,
+) -> None:
+    """An admin's change the room refuses from its steward leaves the model as it was and says what would help."""
+    client = _homeserver().client()
+    client.room_put_state.side_effect = None
+    client.room_put_state.return_value = nio.RoomPutStateError("refused", status_code)
+    context = _room_model_context(tmp_path, client)
+
+    assert await _run_room_model_command(context, "@admin:localhost", "large") == answer
+    state = resolve_room_model_override(context.runtime_paths, ROOM_ID, configured_models=context.config.models)
+    assert state == (None, None)
+
+
+@pytest.mark.asyncio
+async def test_room_model_command_reads_the_room_before_it_answers(tmp_path: Path) -> None:
+    """`/room_model` shows a client's change the runtime's copy missed, and claims no model it could not read."""
+    homeserver = _homeserver()
+    client = homeserver.client()
+    context = _room_model_context(tmp_path, client)
+    set_room_model_override(context.runtime_paths, room_id=ROOM_ID, model_name="default")
+    homeserver.events[ROOM_SETTINGS_EVENT_TYPE, "model"] = {"value": "large"}
+
+    assert "uses the `large` override" in await _run_room_model_command(context, "@user:localhost", "show")
+    assert await _run_room_model_command(context, "@admin:localhost", "reset") != "This room has no model override."
+    assert await _run_room_model_command(context, "@admin:localhost", "reset") == "This room has no model override."
+
+    client.room_get_state_event.side_effect = None
+    client.room_get_state_event.return_value = nio.RoomGetStateEventError("unavailable", "M_UNKNOWN")
+    assert await _run_room_model_command(context, "@user:localhost", "") == (
+        "❌ Could not read this room's model setting. Try again."
+    )

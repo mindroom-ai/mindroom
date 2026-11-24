@@ -10,11 +10,14 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 from unittest.mock import Mock
 
+import aiohttp
 import nio
 import pytest
+from structlog.testing import capture_logs
 
-from mindroom.attachments import register_thread_history_media_attachments
+from mindroom.attachments.storage import register_thread_history_media_attachments
 from mindroom.constants import (
+    STREAM_STATUS_APPROVAL_PENDING,
     STREAM_STATUS_CANCELLED,
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_ERROR,
@@ -22,32 +25,36 @@ from mindroom.constants import (
     STREAM_STATUS_KEY,
     STREAM_STATUS_PENDING,
     STREAM_STATUS_STREAMING,
+    UNREADABLE_EDIT_NOTICE,
 )
-from mindroom.event_journal import EventClass, EventKind, HistoryRecoveryState, HydrationPolicy, ProjectedEvent
+from mindroom.event_journal import EventClass, EventKind, HistoryRecoveryState, HydrationPolicy, ProjectedEvent, reads
+from mindroom.execution_preparation import _get_unseen_messages_for_sender
 from mindroom.matrix.agent_message_snapshot import AgentMessageSnapshot
 from mindroom.matrix.client_delivery import build_edit_event_content
 from mindroom.matrix.conversation_hydration import (
     _MESSAGES_PAGE_LIMIT,
-    _UNREADABLE_EDIT_NOTICE,
     HYDRATED_PROMPT_WINDOW_MESSAGES,
     ConversationHydrator,
-    _HydrationError,
+    ConversationReadError,
     _projected_from_event,
     _reduce_current_revision,
 )
 from mindroom.matrix.conversation_reads import (
     _LATEST_SENDER_MESSAGE_WINDOW_MESSAGES,
     ConversationReader,
-    _StaleConversationError,
+    complete_thread_history,
     latest_agent_message_snapshot,
     projected_thread_history,
+    refetched_thread_history,
 )
 from mindroom.matrix.journal_ingress import _inbound_event, _projected_event
 from mindroom.matrix.sidecar_content import holds_unresolved_sidecar
 from tests.conftest import TEST_ACCESS_TOKEN, FakeMediaResponse, serve_media_download
+from tests.journal_helpers import record_room_history_recovery
+from tests.tool_position_helpers import _SENT_CASES, _sent, _wire, reply_with_calls
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Iterable, Iterator
+    from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator
     from pathlib import Path
 
     from nio.api import RelationshipType
@@ -161,6 +168,7 @@ class FakeClient:
     relations: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     history: list[dict[str, Any]] = field(default_factory=list)
     reported_depth: int | None = 3
+    event_calls: int = 0
     relation_calls: int = 0
     relation_events: int = 0
     # A relation tree that outlives any one walk, which is what a long thread of
@@ -168,7 +176,6 @@ class FakeClient:
     endless_relations: bool = False
     endless_relation_edits: int = 0
     history_pages: int = 0
-    history_end_token: str | None = None
     # A room whose history outlives any startup walk, which is what a
     # long-lived room actually looks like.
     endless_history: bool = False
@@ -231,6 +238,7 @@ class FakeClient:
     ) -> nio.RoomGetEventResponse | nio.RoomGetEventError:
         """Return one stored event."""
         del room_id
+        self.event_calls += 1
         if event_id in self.hidden_events:
             errcode = self.hidden_events[event_id]
             return nio.RoomGetEventError(f"{errcode}: Event not found.", errcode)
@@ -335,7 +343,7 @@ class FakeClient:
         direction: object = None,
         limit: int = 10,
     ) -> nio.RoomMessagesResponse | nio.RoomMessagesError:
-        """Return one page of history, then successful exhaustion."""
+        """Return the explicit pages, an endless room, or the whole history as one last page."""
         del room_id, start, direction, limit
         self.history_pages += 1
         if self.pages is not None:
@@ -349,14 +357,7 @@ class FakeClient:
                 "start",
                 f"token-{self.history_pages}",
             )
-        if self.history_pages > 1:
-            return nio.RoomMessagesResponse(ROOM, [], "start", self.history_end_token)
-        return nio.RoomMessagesResponse(
-            ROOM,
-            [parse(source) for source in self.history],
-            "start",
-            self.history_end_token,
-        )
+        return nio.RoomMessagesResponse(ROOM, [parse(source) for source in self.history], "start", None)
 
     def _endless_page(self, page: int) -> list[nio.Event]:
         """Return one page of an inexhaustible room."""
@@ -472,6 +473,21 @@ async def admit_all(store: PrincipalStore, sources: Iterable[dict[str, Any]]) ->
             _inbound_event(ROOM, event, EventKind.MESSAGE, EventClass.ACTIONABLE),
             _projected_event(ROOM, event, EventKind.MESSAGE, self_sender=BOT),
         )
+
+
+def conversation_reader(store: PrincipalStore, client: FakeClient | None = None) -> ConversationReader:
+    """Return a reader whose hydrator asks ``client``, or a homeserver that has nothing."""
+    return ConversationReader(store=store, hydrator=hydrator(store, client or FakeClient()))
+
+
+async def redact_current_edit(store: PrincipalStore, *, edited_body: str = "second") -> None:
+    """Admit a message and one edit of it, then redact that edit, leaving the projection owing a refetch."""
+    await admit_all(store, [raw("$m", "first"), raw("$e", edited_body, ts=2_000, replaces="$m")])
+    deletion = parse(redaction("$r", "$e", ts=3_000))
+    await store.admit(
+        _inbound_event(ROOM, deletion, EventKind.REDACTION, EventClass.ACTIONABLE),
+        _projected_event(ROOM, deletion, EventKind.REDACTION, self_sender=BOT),
+    )
 
 
 async def bodies(store: PrincipalStore, thread_id: str | None = None) -> list[str]:
@@ -659,6 +675,13 @@ class TestRevisionReduction:
         assert projected is not None
         assert projected.redacts_event_id == "$m"
 
+    async def test_a_decrypted_redaction_deletes_nothing(self) -> None:
+        """A redaction is never encrypted, so one read out of Megolm plaintext is a sender's claim, not a deletion."""
+        event = parse(redaction("$r", "$m", ts=3_000))
+        event.decrypted = True
+
+        assert _projected_from_event(ROOM, event, self_sender=BOT) is None
+
     async def test_a_redacted_event_this_projection_never_held_deletes_nothing(self) -> None:
         """Only a message can be deleted from a projection, because only a message is in one.
 
@@ -758,27 +781,10 @@ class TestThreadHydration:
             reported_depth=None,
         )
 
-        with pytest.raises(_HydrationError, match="recursion depth"):
+        with pytest.raises(ConversationReadError, match="recursion depth"):
             await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id="$root")
 
         assert not await alice.conversation_is_hydrated(room_id=ROOM, thread_id="$root")
-
-    async def test_a_shallow_reported_depth_is_accepted(self, alice: PrincipalStore) -> None:
-        """Verified against a live Tuwunel: a complete page can report 0.
-
-        Tuwunel reports the depth of the deepest event it returned, so a
-        relation tree that is genuinely one level deep reports one level. A
-        floor above zero would reject ordinary conversations.
-        """
-        client = FakeClient(
-            events={"$root": raw("$root", "root")},
-            relations={"$root": [raw("$reply", "reply", ts=2_000, thread_id="$root")]},
-            reported_depth=0,
-        )
-
-        await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id="$root")
-
-        assert await bodies(alice, "$root") == ["root", "reply"]
 
     async def test_an_empty_relation_page_is_not_a_failure(
         self,
@@ -802,7 +808,7 @@ class TestThreadHydration:
         """A failed hydration is retried not cached."""
         client = FakeClient(events={}, relations={})
 
-        with pytest.raises(_HydrationError):
+        with pytest.raises(ConversationReadError):
             await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id="$root")
 
         client.events["$root"] = raw("$root", "root")
@@ -900,7 +906,7 @@ class TestThreadHydrationBounds:
 
     @pytest.mark.parametrize(
         ("ceiling", "expected"),
-        [(3, f"root\n\n{_UNREADABLE_EDIT_NOTICE}"), (4, "root edited")],
+        [(3, f"root\n\n{UNREADABLE_EDIT_NOTICE}"), (4, "root edited")],
         ids=["edits_past_ceiling", "edit_before_ceiling"],
     )
     async def test_others_edits_filling_the_root_edit_fetch_do_not_pass_the_root_off_as_unedited(
@@ -937,6 +943,12 @@ class TestThreadHydrationBounds:
         was accumulated into one list and written in one projection
         transaction, so a first strict read paid for the whole tree before it
         returned anything.
+
+        Reaching the ceiling still marks the thread hydrated: the marker records
+        that the one-time walk ran, not that it filled. Withholding it would
+        re-run the whole truncated walk on every read of that thread, which is
+        far worse than a prompt with less history than its maximum. This is the
+        room walk's recorded trade and it transfers.
         """
         client = FakeClient(events={"$root": raw("$root", "root")}, endless_relations=True, endless_relation_edits=19)
 
@@ -950,26 +962,6 @@ class TestThreadHydrationBounds:
         assert client.relation_events == 200
         page = await alice.read_conversation(room_id=ROOM, thread_id="$root", limit=100)
         assert len(page.messages) < 50
-
-    async def test_reaching_the_ceiling_still_marks_the_thread_hydrated(
-        self,
-        alice: PrincipalStore,
-    ) -> None:
-        """The marker records that the one-time walk ran, not that it filled.
-
-        Withholding it would re-run the whole truncated walk on every read of
-        that thread, which is far worse than a prompt with less history than
-        its maximum. This is the room walk's recorded trade and it transfers.
-        """
-        client = FakeClient(events={"$root": raw("$root", "root")}, endless_relations=True, endless_relation_edits=19)
-
-        await hydrator(
-            alice,
-            client,
-            prompt_window_messages=50,
-            max_fetched_events=200,
-        ).ensure_hydrated(room_id=ROOM, thread_id="$root")
-
         assert await alice.conversation_is_hydrated(room_id=ROOM, thread_id="$root")
 
     async def test_a_bounded_thread_is_hydrated_but_not_complete(
@@ -994,12 +986,13 @@ class TestThreadHydrationBounds:
         self,
         alice: PrincipalStore,
     ) -> None:
-        """Running out of relations is completeness, and it is recorded as such."""
+        """Running out of relations is completeness, and it is recorded as such: a whole thread is not a suffix."""
         client = edited_thread(answers=4, edits=1)
 
         await hydrator(alice, client, prompt_window_messages=50).ensure_hydrated(room_id=ROOM, thread_id="$root")
 
         assert await alice.conversation_is_complete(room_id=ROOM, thread_id="$root")
+        assert not await alice.conversation_hydration_was_truncated(room_id=ROOM, thread_id="$root")
 
     async def test_a_truncated_walk_is_the_only_thing_that_proves_a_page_is_a_suffix(
         self,
@@ -1020,17 +1013,6 @@ class TestThreadHydrationBounds:
         await hydrator(alice, client, prompt_window_messages=2).ensure_hydrated(room_id=ROOM, thread_id="$root")
 
         assert await alice.conversation_hydration_was_truncated(room_id=ROOM, thread_id="$root")
-
-    async def test_a_walk_that_reached_the_end_is_not_truncated(
-        self,
-        alice: PrincipalStore,
-    ) -> None:
-        """The other direction: a whole thread must not be reported as a suffix."""
-        client = edited_thread(answers=4, edits=1)
-
-        await hydrator(alice, client, prompt_window_messages=50).ensure_hydrated(room_id=ROOM, thread_id="$root")
-
-        assert not await alice.conversation_hydration_was_truncated(room_id=ROOM, thread_id="$root")
 
 
 class TestCompletenessRequirement:
@@ -1109,7 +1091,7 @@ class TestCompletenessRequirement:
                 ([raw("$root", "root", ts=1_000)], None),
             ],
         )
-        await alice.record_room_history_recovery(ROOM)
+        await record_room_history_recovery(alice, ROOM)
         await hydrator(alice, client, max_requests=1).ensure_hydrated(room_id=ROOM, thread_id="$root")
         recovery = await alice.room_history_recovery(ROOM)
         assert recovery is not None
@@ -1147,7 +1129,7 @@ class TestCompletenessRequirement:
                 ([raw("$root", "root", ts=1_000)], None),
             ],
         )
-        await alice.record_room_history_recovery(ROOM)
+        await record_room_history_recovery(alice, ROOM)
         await hydrator(alice, client, max_requests=1, **EXPORT_CALLER).ensure_hydrated(
             room_id=ROOM,
             thread_id="$root",
@@ -1160,7 +1142,7 @@ class TestCompletenessRequirement:
         )
         assert client.history_pages == 0
 
-        await alice.record_room_history_recovery(ROOM)
+        await record_room_history_recovery(alice, ROOM)
         await hydrator(alice, client, max_requests=1).ensure_hydrated(room_id=ROOM, thread_id="$root")
         recovery = await alice.room_history_recovery(ROOM)
         assert recovery is not None
@@ -1175,6 +1157,27 @@ class TestCompletenessRequirement:
         assert await alice.room_history_recovery(ROOM) is None
         assert await alice.conversation_is_complete(room_id=ROOM, thread_id="$root")
         assert client.history_pages == 2
+
+    async def test_a_truncated_gap_is_not_walked_again_under_the_policy_that_truncated_it(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A strict caller pays for a truncated gap once per policy, not on every read."""
+        client = FakeClient(
+            events={"$root": raw("$root", "root", ts=1_000)},
+            relations={"$root": [raw("$reply", "reply", ts=2_000, thread_id="$root")]},
+            endless_history=True,
+        )
+        await record_room_history_recovery(alice, ROOM)
+        export = hydrator(alice, client, max_requests=1, **EXPORT_CALLER)
+
+        await export.ensure_hydrated(room_id=ROOM, thread_id="$root")
+        await export.ensure_hydrated(room_id=ROOM, thread_id="$root")
+
+        recovery = await alice.room_history_recovery(ROOM)
+        assert recovery is not None
+        assert recovery.state is HistoryRecoveryState.TRUNCATED
+        assert client.history_pages == 1
 
     async def test_a_strict_caller_accepts_a_walk_that_already_reached_the_end(
         self,
@@ -1329,11 +1332,12 @@ class TestRoomHydration:
 
         This shape used to be read as failure and left rooms unready.
         """
-        client = FakeClient(history=[raw("$a", "first")], history_end_token=None)
+        client = FakeClient(pages=[([raw("$a", "first")], "t1"), ([], None)])
 
         await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id=None)
 
-        assert await alice.conversation_is_hydrated(room_id=ROOM, thread_id=None)
+        assert client.history_pages == 2
+        assert await alice.conversation_is_complete(room_id=ROOM, thread_id=None)
         assert await bodies(alice) == ["first"]
 
     async def test_hydration_stops_once_the_prompt_window_is_full(
@@ -1452,10 +1456,48 @@ class TestRoomHydration:
         """
         client = FakeClient(pages=[([], "same"), ([], "same")], repeat_last=True)
 
-        with pytest.raises(_HydrationError):
+        with pytest.raises(ConversationReadError):
             await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id=None)
 
         assert not await alice.conversation_is_hydrated(room_id=ROOM, thread_id=None)
+
+    @pytest.mark.parametrize(
+        ("bounds", "originals_per_page", "logged"),
+        [
+            ({"max_requests": 2}, 1, True),
+            ({"max_fetched_events": 3}, 2, True),
+            ({"prompt_window_messages": 1}, 1, False),
+        ],
+        ids=["request-ceiling", "partial-page", "window-met"],
+    )
+    async def test_a_walk_cut_short_by_its_cost_bounds_says_so(
+        self,
+        alice: PrincipalStore,
+        bounds: dict[str, int],
+        originals_per_page: int,
+        *,
+        logged: bool,
+    ) -> None:
+        """A room walk that stops at a ceiling is logged; one that fills its prompt window is not."""
+        client = FakeClient(endless_history=True, endless_originals_per_page=originals_per_page)
+
+        with capture_logs() as logs:
+            await hydrator(alice, client, **bounds).ensure_hydrated(room_id=ROOM, thread_id=None)
+
+        ceilings = [log for log in logs if log["event"] == "conversation_hydration_ceiling_reached"]
+        assert len(ceilings) == int(logged)
+
+    async def test_a_last_page_cut_at_the_event_ceiling_is_not_the_start_of_the_room(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """The events a cut page left behind are history the walk skipped, even on the room's last page."""
+        client = FakeClient(pages=[([raw("$newer", "newer", ts=2_000), raw("$older", "older", ts=1_000)], None)])
+
+        await hydrator(alice, client, max_fetched_events=1).ensure_hydrated(room_id=ROOM, thread_id=None)
+
+        assert await alice.conversation_is_hydrated(room_id=ROOM, thread_id=None)
+        assert not await alice.conversation_is_complete(room_id=ROOM, thread_id=None)
 
     async def test_the_request_ceiling_is_not_the_event_ceiling(self, alice: PrincipalStore) -> None:
         """One event per page must not be mistaken for a full event budget.
@@ -1634,25 +1676,11 @@ class TestStreamingProgressIsTransport:
         answer = stream_raw("$answer", "Thinking...", STREAM_STATUS_PENDING, ts=2_000)
         terminal = stream_raw("$terminal", "the whole answer", STREAM_STATUS_COMPLETED, ts=2_100, replaces="$answer")
         progress = stream_raw("$late", "half an ans", status, ts=2_200, replaces="$answer")
-        for source in (answer, terminal):
-            event = parse(source)
-            await alice.admit(
-                _inbound_event(ROOM, event, EventKind.MESSAGE, EventClass.ACTIONABLE),
-                _projected_event(ROOM, event, EventKind.MESSAGE, self_sender=BOT),
-            )
-        redaction = parse(
-            {
-                "event_id": "$redact",
-                "sender": BOT,
-                "origin_server_ts": 2_300,
-                "type": "m.room.redaction",
-                "redacts": "$terminal",
-                "content": {},
-            },
-        )
+        await admit_all(alice, (answer, terminal))
+        deletion = parse(redaction("$redact", "$terminal", ts=2_300, sender=BOT))
         await alice.admit(
-            _inbound_event(ROOM, redaction, EventKind.REDACTION, EventClass.ACTIONABLE),
-            _projected_event(ROOM, redaction, EventKind.REDACTION, self_sender=BOT),
+            _inbound_event(ROOM, deletion, EventKind.REDACTION, EventClass.ACTIONABLE),
+            _projected_event(ROOM, deletion, EventKind.REDACTION, self_sender=BOT),
         )
         client = FakeClient(events={"$answer": answer}, relations={"$answer": [progress]})
 
@@ -1661,6 +1689,632 @@ class TestStreamingProgressIsTransport:
 
         assert await bodies(alice) == ["Thinking..."]
         assert await revisions(alice) == ["$answer"]
+
+
+@dataclass
+class ParentFirstWalk(FakeClient):
+    """A homeserver whose recursive walk sends each reply before its own edits.
+
+    Tuwunel pages a recursive relation walk this way: newest first between
+    messages, but a reply's edits come back after the reply, or on no page at
+    all. Only the order inside one message changes here.
+    """
+
+    def _ordered_relations(
+        self,
+        event_id: str,
+        direction: nio.MessageDirection,
+    ) -> Iterator[dict[str, Any]]:
+        """Return stored relations newest message first, each reply ahead of its edits."""
+        del direction
+        sources = self.relations.get(event_id, [])
+        timestamps = {source["event_id"]: source["origin_server_ts"] for source in sources}
+
+        def position(source: dict[str, Any]) -> tuple[int, bool, int]:
+            relation = source["content"].get("m.relates_to") or {}
+            target = relation.get("event_id") if relation.get("rel_type") == "m.replace" else None
+            message_ts = source["origin_server_ts"] if target is None else timestamps[target]
+            return (message_ts, target is None, source["origin_server_ts"])
+
+        return iter(sorted(sources, key=position, reverse=True))
+
+
+@dataclass
+class RecursionWithoutEdits(FakeClient):
+    """A homeserver whose recursive walks return no edits, while its direct edit lookups do."""
+
+    def _ordered_relations(
+        self,
+        event_id: str,
+        direction: nio.MessageDirection,
+    ) -> Iterator[dict[str, Any]]:
+        """Return stored relations in server order, without any edit."""
+        return (
+            source
+            for source in super()._ordered_relations(event_id, direction)
+            if (source["content"].get("m.relates_to") or {}).get("rel_type") != "m.replace"
+        )
+
+
+def streamed_reply_client(*endings: dict[str, Any], client_type: type[FakeClient] = FakeClient) -> FakeClient:
+    """Return a thread whose recursive walk holds a placeholder reply but not how it ended.
+
+    The reply's own edit lookup does hold its endings, which is what Tuwunel
+    answers: its recursive walk misses edits that its direct lookup returns.
+    """
+    placeholder = stream_raw("$answer", "Thinking...", STREAM_STATUS_PENDING, ts=2_000, thread_id="$root")
+    return client_type(
+        events={"$root": raw("$root", "the question"), "$answer": placeholder},
+        relations={"$root": [placeholder], "$answer": list(endings)},
+    )
+
+
+def completed_ending(event_id: str = "$ending", *, target: str = "$answer", ts: int = 2_100) -> dict[str, Any]:
+    """Return the edit that ends a streamed reply."""
+    return stream_raw(event_id, "the whole answer", STREAM_STATUS_COMPLETED, ts=ts, replaces=target)
+
+
+class TestEditsTheThreadWalkMissed:
+    """A reply a thread walk leaves mid-stream still gets the ending the server holds.
+
+    A recursive relation walk can miss edits: Tuwunel's paging drops edits of
+    a reply whose parent fell on an earlier page, and sends the rest after the
+    reply. A reply installed at its placeholder is a missing message rather
+    than a stale one, because prompts drop a placeholder as nothing to read,
+    and the walk's marker keeps it that way for the whole membership.
+    """
+
+    async def test_a_reply_whose_ending_the_walk_missed_shows_the_ending(self, alice: PrincipalStore) -> None:
+        """The reply's own edit lookup answers what the recursive walk left out."""
+        client = streamed_reply_client(completed_ending())
+
+        await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id="$root")
+
+        assert await bodies(alice, "$root") == ["the question", "the whole answer"]
+        assert await revisions(alice, "$root") == ["$root", "$ending"]
+        # The walk, and one edit lookup for the reply it left mid-stream.
+        assert client.relation_calls == 2
+        assert await alice.conversation_is_complete(room_id=ROOM, thread_id="$root")
+
+    async def test_a_long_ending_the_walk_missed_is_read_from_its_attachment(self, alice: PrincipalStore) -> None:
+        """An ending too long for one event is found the same way, and its attachment is what is read.
+
+        Reading the attachment refetches the reply, and that refetch must not
+        trust a recursive walk either: it would reduce the reply to its
+        placeholder and settle it there.
+        """
+        whole = "the whole answer, far too long for a single Matrix event"
+        preview = {
+            "msgtype": "m.file",
+            "body": "the whole an [Message continues in attached file]",
+            "url": "mxc://s/ending",
+            "io.mindroom.long_text": {"version": 2, "encoding": "matrix_event_content_json"},
+            STREAM_STATUS_KEY: STREAM_STATUS_COMPLETED,
+        }
+        ending = {
+            "event_id": "$ending",
+            "sender": BOT,
+            "origin_server_ts": 2_100,
+            "type": "m.room.message",
+            "content": {
+                "msgtype": "m.text",
+                "body": f"* {preview['body']}",
+                "m.new_content": preview,
+                "m.relates_to": {"rel_type": "m.replace", "event_id": "$answer"},
+            },
+        }
+        client = streamed_reply_client(ending, client_type=RecursionWithoutEdits)
+        client.sidecars["mxc://s/ending"] = json.dumps(
+            build_edit_event_content(
+                event_id="$answer",
+                new_content={"msgtype": "m.text", "body": whole},
+                new_text=whole,
+                extra_content={STREAM_STATUS_KEY: STREAM_STATUS_COMPLETED},
+            ),
+        )
+        reader = ConversationReader(store=alice, hydrator=hydrator(alice, client))
+
+        page = await reader.read_strict(room_id=ROOM, thread_id="$root", limit=10)
+
+        assert [message.content["body"] for message in page.messages] == ["the question", whole]
+        assert [message.revision_event_id for message in page.messages] == ["$root", "$ending"]
+
+    async def test_a_reply_the_walk_left_waiting_for_an_approval_shows_the_ending(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A reply paused for a tool approval is unfinished too, though its pause is not transport."""
+        waiting = stream_raw(
+            "$waiting",
+            "Waiting for approval to run a tool",
+            STREAM_STATUS_APPROVAL_PENDING,
+            ts=2_050,
+            replaces="$answer",
+        )
+        client = streamed_reply_client(waiting, completed_ending())
+        client.relations["$root"].append(waiting)
+
+        await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id="$root")
+
+        assert await bodies(alice, "$root") == ["the question", "the whole answer"]
+        assert client.relation_calls == 2
+
+    @pytest.mark.parametrize("status", [[], {}], ids=["list", "object"])
+    async def test_a_malformed_stream_status_from_another_participant_fails_nothing(
+        self,
+        alice: PrincipalStore,
+        status: object,
+    ) -> None:
+        """Anyone can write a status, so one that is not text is not a stream and costs no lookup."""
+        message = raw("$odd", "an ordinary message", ts=2_000, thread_id="$root")
+        message["content"][STREAM_STATUS_KEY] = status
+        client = FakeClient(events={"$root": raw("$root", "the question")}, relations={"$root": [message]})
+
+        await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id="$root")
+
+        assert await bodies(alice, "$root") == ["the question", "an ordinary message"]
+        # The walk, and the request that asks a walk holding no edit how deep
+        # it went. This server reached the edits, so no lookup follows.
+        assert client.relation_calls == 2
+
+    @pytest.mark.parametrize("reader_sender", [ALICE, BOT], ids=["another_participant", "its_author"])
+    async def test_a_prompt_reads_the_ending_the_walk_missed(
+        self,
+        alice: PrincipalStore,
+        reader_sender: str,
+    ) -> None:
+        """A model is shown the reply, not nothing.
+
+        A placeholder is dropped from prompts as a message with nothing to read
+        in it, so a reply stuck there disappears from the conversation a model
+        answers for anyone reading the thread, its author included.
+        """
+        reader = ConversationReader(store=alice, hydrator=hydrator(alice, streamed_reply_client(completed_ending())))
+
+        page = await reader.read_strict(room_id=ROOM, thread_id="$root", limit=10)
+        unseen, _ = _get_unseen_messages_for_sender(
+            projected_thread_history(page, complete=True).messages,
+            sender_id=reader_sender,
+            seen_event_ids=set(),
+            current_event_id=None,
+            active_event_ids=set(),
+        )
+
+        assert [(message.event_id, message.body) for message in unseen] == [
+            ("$root", "the question"),
+            ("$answer", "the whole answer"),
+        ]
+
+    async def test_the_last_reply_a_bounded_walk_admits_keeps_the_ending_sent_after_it(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """The window closes right after a message is admitted, which is before its edits on this server."""
+        client = streamed_reply_client(completed_ending(), client_type=ParentFirstWalk)
+        newer = raw("$newer", "a newer question", ts=3_000, thread_id="$root")
+        client.relations["$root"] = [newer, *client.relations["$root"], completed_ending()]
+
+        await hydrator(alice, client, prompt_window_messages=2).ensure_hydrated(room_id=ROOM, thread_id="$root")
+
+        assert await bodies(alice, "$root") == ["the question", "the whole answer", "a newer question"]
+
+    async def test_a_reply_the_walk_read_whole_costs_no_lookup(self, alice: PrincipalStore) -> None:
+        """A server whose recursive walk is right pays nothing for the guard."""
+        client = streamed_reply_client(completed_ending())
+        client.relations["$root"].append(completed_ending())
+
+        await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id="$root")
+
+        assert await bodies(alice, "$root") == ["the question", "the whole answer"]
+        assert client.relation_calls == 1
+
+    async def test_a_stream_that_never_ended_costs_one_lookup_and_keeps_its_placeholder(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A reply cut off before its ending is looked up once and stays what the server holds."""
+        progress = stream_raw("$progress", "half an ans", STREAM_STATUS_STREAMING, ts=2_050, replaces="$answer")
+        client = streamed_reply_client(progress)
+
+        await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id="$root")
+
+        assert await bodies(alice, "$root") == ["the question", "Thinking..."]
+        assert client.relation_calls == 2
+        assert await alice.conversation_is_complete(room_id=ROOM, thread_id="$root")
+
+    async def test_edit_lookups_stop_at_the_request_ceiling(self, alice: PrincipalStore) -> None:
+        """Lookups run newest reply first and stop at the ceiling, leaving the thread incomplete."""
+        placeholders = [
+            stream_raw(
+                f"$answer{index}",
+                "Thinking...",
+                STREAM_STATUS_PENDING,
+                ts=2_000 + index * 100,
+                thread_id="$root",
+            )
+            for index in range(3)
+        ]
+        client = FakeClient(
+            events={"$root": raw("$root", "the question")},
+            relations={
+                "$root": placeholders,
+                **{
+                    f"$answer{index}": [
+                        completed_ending(f"$ending{index}", target=f"$answer{index}", ts=2_050 + index * 100),
+                    ]
+                    for index in range(3)
+                },
+            },
+        )
+
+        await hydrator(alice, client, max_requests=2).ensure_hydrated(room_id=ROOM, thread_id="$root")
+
+        assert await bodies(alice, "$root") == ["the question", "Thinking...", "the whole answer", "the whole answer"]
+        assert client.relation_calls == 3
+        assert await alice.conversation_is_hydrated(room_id=ROOM, thread_id="$root")
+        assert not await alice.conversation_is_complete(room_id=ROOM, thread_id="$root")
+
+
+def _relation_target(source: dict[str, Any]) -> object:
+    """Return the event one raw relation points at."""
+    return (source["content"].get("m.relates_to") or {}).get("event_id")
+
+
+@dataclass
+class DirectRelationsOnly(FakeClient):
+    """A homeserver whose recursive walk serves only the root's direct relations and says so.
+
+    The Tuwunel fork does this once a thread passes its walk limits: it serves
+    fewer whole levels, down to the direct relations alone, and reports the
+    depth it reached on every page. A reply's own edit lookup is still whole.
+    """
+
+    reported_depth: int | None = 0
+
+    def _ordered_relations(
+        self,
+        event_id: str,
+        direction: nio.MessageDirection,
+    ) -> Iterator[dict[str, Any]]:
+        """Return the stored relations that point at the walked event itself."""
+        return (
+            source for source in super()._ordered_relations(event_id, direction) if _relation_target(source) == event_id
+        )
+
+
+@dataclass
+class DeepestEventDepthPages(FakeClient):
+    """A homeserver that reports each recursive page's depth as the depth of its deepest event.
+
+    Older and upstream Tuwunel report the depth this way, so a page holding
+    only replies reports 0 although the walk recursed. nio checks the required
+    depth on every non-empty page, and this checks it the same way.
+    """
+
+    page_size: int = 2
+
+    async def room_get_event_relations(
+        self,
+        *,
+        room_id: str,
+        event_id: str,
+        rel_type: RelationshipType | None = None,
+        direction: nio.MessageDirection = nio.MessageDirection.back,
+        recurse: bool = False,
+        minimum_recursion_depth: int | None = None,
+    ) -> AsyncIterator[nio.Event]:
+        """Yield a recursive walk page by page, refusing a page below the required depth."""
+        if not recurse:
+            async for event in super().room_get_event_relations(
+                room_id=room_id,
+                event_id=event_id,
+                rel_type=rel_type,
+                direction=direction,
+            ):
+                yield event
+            return
+        self.relation_calls += 1
+        sources = list(self._ordered_relations(event_id, direction))
+        for start in range(0, len(sources), self.page_size):
+            page = sources[start : start + self.page_size]
+            depth = max(0 if _relation_target(source) == event_id else 1 for source in page)
+            if minimum_recursion_depth is not None and depth < minimum_recursion_depth:
+                raise nio.InsufficientRecursionDepthError(minimum_recursion_depth, depth)
+            for source in page:
+                self.relation_events += 1
+                yield parse(source)
+
+
+@dataclass
+class BrokenOffClient(FakeClient):
+    """A homeserver whose responses break off mid-body, which nio raises instead of returning an error response."""
+
+    async def room_get_event(self, room_id: str, event_id: str) -> nio.RoomGetEventResponse:
+        """Fail every event read the way a truncated response body does."""
+        del room_id, event_id
+        msg = "Response payload is not completed"
+        raise aiohttp.ClientPayloadError(msg)
+
+
+@dataclass
+class FailingRecursiveRelations(FakeClient):
+    """A homeserver that answers the first ``answered`` recursive relations requests and fails every later one.
+
+    nio reports a relations request that comes back as an error response by
+    raising a plain ``RemoteProtocolError`` from the iterator.
+    """
+
+    answered: int = 1
+    recursive_requests: int = 0
+
+    async def room_get_event_relations(
+        self,
+        *,
+        room_id: str,
+        event_id: str,
+        rel_type: RelationshipType | None = None,
+        direction: nio.MessageDirection = nio.MessageDirection.back,
+        recurse: bool = False,
+        minimum_recursion_depth: int | None = None,
+    ) -> AsyncIterator[nio.Event]:
+        """Yield the answered recursive walks, and fail the ones after them."""
+        if recurse:
+            self.recursive_requests += 1
+            if self.recursive_requests > self.answered:
+                msg = "M_UNKNOWN: the homeserver could not answer"
+                raise nio.RemoteProtocolError(msg)
+        async for event in super().room_get_event_relations(
+            room_id=room_id,
+            event_id=event_id,
+            rel_type=rel_type,
+            direction=direction,
+            recurse=recurse,
+            minimum_recursion_depth=minimum_recursion_depth,
+        ):
+            yield event
+
+
+class TestAWalkThatStoppedAboveTheReplyEdits:
+    """A thread walk that did not reach the depth replies' edits sit at does not pass them off as unedited.
+
+    The edits of a thread's replies sit one level below the root's direct
+    relations. A server may answer a recursive walk with the direct relations
+    alone, and a walk read as whole would install every edited reply at its
+    first wording for the whole membership.
+    """
+
+    async def test_an_edit_below_a_walk_reporting_depth_zero_is_looked_up(self, alice: PrincipalStore) -> None:
+        """An ordinary edit the walk left out is read from the reply's own edit lookup."""
+        reply = raw("$reply", "first wording", sender=BOB, ts=2_000, thread_id="$root")
+        edit = raw("$edit", "second wording", sender=BOB, ts=3_000, replaces="$reply")
+        client = DirectRelationsOnly(
+            events={"$root": raw("$root", "the question")},
+            relations={"$root": [reply, edit], "$reply": [edit]},
+        )
+
+        await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id="$root")
+
+        assert await bodies(alice, "$root") == ["the question", "second wording"]
+        assert await revisions(alice, "$root") == ["$root", "$edit"]
+        # The walk, one request asking how deep it went, and the reply's lookup.
+        assert client.relation_calls == 3
+        assert await alice.conversation_is_complete(room_id=ROOM, thread_id="$root")
+
+    async def test_an_edit_of_the_root_does_not_show_the_walk_reached_reply_edits(self, alice: PrincipalStore) -> None:
+        """The root's edits are among its direct relations, so a walk that stopped above reply edits still holds them."""
+        root_edit = raw("$root-edit", "the question, clarified", ts=1_500, replaces="$root")
+        reply = raw("$reply", "first wording", sender=BOB, ts=2_000, thread_id="$root")
+        edit = raw("$edit", "second wording", sender=BOB, ts=3_000, replaces="$reply")
+        client = DirectRelationsOnly(
+            events={"$root": raw("$root", "the question")},
+            relations={"$root": [root_edit, reply, edit], "$reply": [edit]},
+        )
+
+        await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id="$root")
+
+        assert await bodies(alice, "$root") == ["the question, clarified", "second wording"]
+        assert client.relation_calls == 3
+
+    @pytest.mark.parametrize("answered", [0, 1], ids=["thread walk", "depth check"])
+    async def test_a_relations_request_the_server_fails_fails_the_read(
+        self,
+        alice: PrincipalStore,
+        answered: int,
+    ) -> None:
+        """A failed thread walk, or a failed depth check after it, fails the read with the reason.
+
+        Only a server saying it stopped above the edits sends the replies to
+        their lookups; any other failure of the request is a failure to answer,
+        which leaves the thread for the next read.
+        """
+        client = FailingRecursiveRelations(
+            events={"$root": raw("$root", "the question")},
+            relations={"$root": [raw("$reply", "a reply", sender=BOB, ts=2_000, thread_id="$root")]},
+            answered=answered,
+        )
+
+        with pytest.raises(ConversationReadError, match=r"Could not fetch the relations of '\$root'.*M_UNKNOWN"):
+            await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id="$root")
+
+        assert client.recursive_requests == answered + 1
+        assert not await alice.conversation_is_hydrated(room_id=ROOM, thread_id="$root")
+
+    async def test_pages_reporting_varying_depths_hydrate_normally(self, alice: PrincipalStore) -> None:
+        """A page holding only replies reports 0 on older servers, and that neither fails the read nor costs lookups.
+
+        The first and last pages hold only replies and the middle one holds an
+        edit, so neither the first page nor any single page speaks for the walk.
+        """
+        client = DeepestEventDepthPages(
+            events={"$root": raw("$root", "root")},
+            relations={
+                "$root": [
+                    raw("$r1", "first", ts=2_000, thread_id="$root"),
+                    raw("$r2", "second", ts=3_000, thread_id="$root"),
+                    raw("$r2-edit", "second edited", ts=3_500, replaces="$r2"),
+                    raw("$r3", "third", ts=4_000, thread_id="$root"),
+                    raw("$r4", "fourth", ts=5_000, thread_id="$root"),
+                ],
+            },
+        )
+
+        await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id="$root")
+
+        assert await bodies(alice, "$root") == ["root", "first", "second edited", "third", "fourth"]
+        assert client.relation_calls == 1
+        assert await alice.conversation_is_complete(room_id=ROOM, thread_id="$root")
+
+    async def test_a_walk_without_edits_costs_one_request_on_a_server_that_reached_their_depth(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A walk holding no edits cannot show its depth, so the server is asked once instead of every reply looked up."""
+        client = FakeClient(
+            events={"$root": raw("$root", "root")},
+            relations={
+                "$root": [
+                    raw("$r1", "first", ts=2_000, thread_id="$root"),
+                    raw("$r2", "second", ts=3_000, thread_id="$root"),
+                ],
+            },
+        )
+
+        await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id="$root")
+
+        assert await bodies(alice, "$root") == ["root", "first", "second"]
+        assert client.relation_calls == 2
+        assert await alice.conversation_is_complete(room_id=ROOM, thread_id="$root")
+
+    async def test_unfinished_replies_are_looked_up_first_and_the_ceiling_leaves_the_thread_incomplete(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A placeholder is a missing reply and an unedited message is an older one, so the request ceiling spends on the first."""
+        placeholder = stream_raw("$answer", "Thinking...", STREAM_STATUS_PENDING, ts=2_000, thread_id="$root")
+        reply = raw("$reply", "first wording", sender=BOB, ts=3_000, thread_id="$root")
+        edit = raw("$edit", "second wording", sender=BOB, ts=3_500, replaces="$reply")
+        client = DirectRelationsOnly(
+            events={"$root": raw("$root", "the question")},
+            relations={
+                "$root": [placeholder, reply, edit, completed_ending(ts=2_100)],
+                "$answer": [completed_ending(ts=2_100)],
+                "$reply": [edit],
+            },
+        )
+
+        await hydrator(alice, client, max_requests=1).ensure_hydrated(room_id=ROOM, thread_id="$root")
+
+        assert await bodies(alice, "$root") == ["the question", "the whole answer", "first wording"]
+        assert client.relation_calls == 3
+        assert await alice.conversation_is_hydrated(room_id=ROOM, thread_id="$root")
+        assert not await alice.conversation_is_complete(room_id=ROOM, thread_id="$root")
+
+
+class TestMarkersFromAnOlderWalk:
+    """A thread marked hydrated by a walk that could miss edits is walked again.
+
+    Such a walk left replies at their placeholders and marked the thread whole,
+    so nothing would ever have read those threads from the server again.
+    """
+
+    @staticmethod
+    async def _left_by_an_older_walk(store: PrincipalStore, journal_store: EventJournalStore) -> None:
+        """Install what an older walk left: the reply at its placeholder, in a thread marked whole."""
+        await store.install_hydrated_conversation(
+            room_id=ROOM,
+            thread_id="$root",
+            events=(
+                _projected(raw("$root", "the question")),
+                _projected(stream_raw("$answer", "Thinking...", STREAM_STATUS_PENDING, ts=2_000, thread_id="$root")),
+            ),
+            complete=True,
+            attempted_policy_rank=HydrationPolicy.EXPORT,
+            expected_membership_epoch=await store.membership_epoch(ROOM),
+        )
+        await journal_store.backend.write(
+            lambda transaction: transaction.execute(
+                "UPDATE conversation_hydration SET walk_version = walk_version - 1",
+            ),
+        )
+
+    async def test_a_thread_an_older_walk_marked_is_walked_again(
+        self,
+        alice: PrincipalStore,
+        journal_store: EventJournalStore,
+    ) -> None:
+        """The next read walks the thread under the current walk, which repairs the reply."""
+        await self._left_by_an_older_walk(alice, journal_store)
+        client = streamed_reply_client(completed_ending())
+
+        assert not await alice.conversation_is_hydrated(room_id=ROOM, thread_id="$root")
+        await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id="$root")
+
+        assert await bodies(alice, "$root") == ["the question", "the whole answer"]
+        assert await alice.conversation_is_complete(room_id=ROOM, thread_id="$root")
+
+    async def test_a_new_walk_does_not_inherit_what_an_older_walk_claimed(
+        self,
+        alice: PrincipalStore,
+        journal_store: EventJournalStore,
+    ) -> None:
+        """A bounded walk now does not stand for the whole thread an older walk claimed to have read."""
+        await self._left_by_an_older_walk(alice, journal_store)
+        client = streamed_reply_client(completed_ending())
+        client.relations["$root"].append(raw("$newer", "a newer question", ts=3_000, thread_id="$root"))
+
+        await hydrator(alice, client, prompt_window_messages=1).ensure_hydrated(room_id=ROOM, thread_id="$root")
+        assert not await alice.conversation_is_complete(room_id=ROOM, thread_id="$root")
+        walked = client.relation_calls
+        await hydrator(alice, client, **EXPORT_CALLER).ensure_hydrated(room_id=ROOM, thread_id="$root")
+
+        assert client.relation_calls > walked
+        assert await bodies(alice, "$root") == ["the question", "the whole answer", "a newer question"]
+        assert await alice.conversation_is_complete(room_id=ROOM, thread_id="$root")
+
+    async def test_the_previous_walk_versions_markers_walk_threads_again_and_keep_rooms(
+        self,
+        alice: PrincipalStore,
+        journal_store: EventJournalStore,
+    ) -> None:
+        """A thread the previous walk marked gets back an ordinary edit, and the room it marked is not walked again.
+
+        Only the thread walk changed. The previous one trusted a recursive walk
+        to deliver ordinary edits, which older Tuwunel paging dropped.
+        """
+        epoch = await alice.membership_epoch(ROOM)
+        reply = raw("$reply", "first wording", sender=BOB, ts=2_000, thread_id="$root")
+        edit = raw("$edit", "second wording", sender=BOB, ts=3_000, replaces="$reply")
+        await alice.install_hydrated_conversation(
+            room_id=ROOM,
+            thread_id="$root",
+            events=(_projected(raw("$root", "the question")), _projected(reply)),
+            complete=True,
+            attempted_policy_rank=HydrationPolicy.PROMPT,
+            expected_membership_epoch=epoch,
+        )
+        await alice.install_hydrated_conversation(
+            room_id=ROOM,
+            thread_id=None,
+            events=(),
+            complete=True,
+            attempted_policy_rank=HydrationPolicy.PROMPT,
+            expected_membership_epoch=epoch,
+        )
+        await journal_store.backend.write(
+            lambda transaction: transaction.execute("UPDATE conversation_hydration SET walk_version = 1"),
+        )
+        client = FakeClient(
+            events={"$root": raw("$root", "the question")},
+            relations={"$root": [reply, edit], "$reply": [edit]},
+        )
+        hydrate = hydrator(alice, client)
+
+        await hydrate.ensure_hydrated(room_id=ROOM, thread_id=None)
+        await hydrate.ensure_hydrated(room_id=ROOM, thread_id="$root")
+
+        assert client.history_pages == 0
+        assert client.relation_calls == 1
+        assert await bodies(alice, "$root") == ["the question", "second wording"]
 
 
 def _projected(source: dict[str, Any]) -> ProjectedEvent:
@@ -1734,6 +2388,31 @@ class TestSidecarResolution:
 
         assert [message.content["body"] for message in page.messages] == [whole]
         assert page.refresh_pending == ()
+
+    async def test_a_resolved_attachment_stores_only_the_fields_readers_use(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """The text, its formatting, and MindRoom's metadata are stored; anything else the uploader wrote is not."""
+        source = self._sidecar_source("$long", "preview [Message continues in attached file]", "mxc://s/long")
+        await admit_all(alice, [source])
+        read_fields = {
+            "msgtype": "m.text",
+            "body": "whole",
+            "format": "org.matrix.custom.html",
+            "formatted_body": "<p>whole</p>",
+            "m.mentions": {"user_ids": [BOB]},
+            STREAM_STATUS_KEY: STREAM_STATUS_COMPLETED,
+        }
+        client = FakeClient(
+            events={"$long": source},
+            sidecars={"mxc://s/long": json.dumps({**read_fields, "pad": [1e15] * 10})},
+        )
+        reader = await self._reader(alice, client)
+
+        page = await reader.read_strict(room_id=ROOM, thread_id=None, limit=10)
+
+        assert [dict(message.content) for message in page.messages] == [read_fields]
 
     async def test_a_non_strict_read_reports_the_message_as_missing_rather_than_truncated(
         self,
@@ -1862,6 +2541,41 @@ class TestSidecarResolution:
         assert [message.content["body"] for message in page.messages] == ["answer v3"]
         assert client.downloads == ["mxc://s/v3"]
 
+    async def test_a_strict_read_retries_when_a_streaming_edit_lands_during_refetch(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A newer sidecar edit admitted mid-refetch moves the debt rather than failing the read."""
+        original = self._sidecar_source("$m", "p0 [Message continues in attached file]", "mxc://s/v0", ts=1_000)
+        edit_1 = self._sidecar_source("$e1", "p1 [continues]", "mxc://s/v1", ts=2_000)
+        edit_1["content"]["m.relates_to"] = {"rel_type": "m.replace", "event_id": "$m"}
+        edit_2 = self._sidecar_source("$e2", "p2 [continues]", "mxc://s/v2", ts=3_000)
+        edit_2["content"]["m.relates_to"] = {"rel_type": "m.replace", "event_id": "$m"}
+        await admit_all(alice, [original, edit_1])
+
+        class _StreamingEditClient(FakeClient):
+            async def download(self, mxc: str) -> nio.DownloadResponse | nio.DownloadError:
+                if mxc == "mxc://s/v1" and edit_2 not in self.relations["$m"]:
+                    self.relations["$m"].append(edit_2)
+                    await admit_all(alice, [edit_2])
+                return await super().download(mxc)
+
+        client = _StreamingEditClient(
+            events={"$m": original},
+            relations={"$m": [edit_1]},
+            sidecars={
+                "mxc://s/v1": self._payload("answer v1"),
+                "mxc://s/v2": self._payload("answer v2"),
+            },
+        )
+        reader = await self._reader(alice, client)
+
+        page = await reader.read_strict(room_id=ROOM, thread_id=None, limit=10)
+
+        assert [message.content["body"] for message in page.messages] == ["answer v2"]
+        assert page.refresh_pending == ()
+        assert client.downloads == ["mxc://s/v1", "mxc://s/v2"]
+
     @pytest.mark.parametrize(
         "sidecar",
         [
@@ -1940,6 +2654,83 @@ class TestSidecarResolution:
             ]
             assert page.refresh_pending == ()
 
+    @pytest.mark.parametrize("nested_layer", [False, True], ids=["whole_edit", "nested_edit_layer"])
+    async def test_a_refetched_long_edit_stores_the_text_it_shows(
+        self,
+        alice: PrincipalStore,
+        nested_layer: bool,
+    ) -> None:
+        """An edit's attachment holds the whole edit, and only its new content is installed.
+
+        The outer body is the ``* `` fallback for clients that do not apply
+        edits, and the new content repeats the text, so installing the whole
+        edit would serve the fallback and store the text twice. A layer nested
+        in the new content is dropped, so a sidecar reference hidden there
+        cannot leave the message owing a refetch.
+        """
+        original = raw("$m", "first answer", ts=1_000)
+        preview = self._sidecar_source("$e1", "The edit beg [continues]", "mxc://s/edit", ts=2_000)
+        edit = {
+            **preview,
+            "content": {
+                "msgtype": "m.text",
+                "body": "* The edit beg [continues]",
+                "m.new_content": preview["content"],
+                "m.relates_to": {"rel_type": "m.replace", "event_id": "$m"},
+            },
+        }
+        await admit_all(alice, [original, edit])
+        whole_edit = build_edit_event_content(
+            event_id="$m",
+            new_content={"msgtype": "m.text", "body": "The edit, whole"},
+            new_text="The edit, whole",
+        )
+        if nested_layer:
+            nested = self._sidecar_source("$e2", "nested [continues]", "mxc://s/nested", ts=2_000)["content"]
+            whole_edit["m.new_content"] = {**whole_edit["m.new_content"], "m.new_content": nested}
+        client = FakeClient(
+            events={"$m": original},
+            relations={"$m": [edit]},
+            sidecars={"mxc://s/edit": json.dumps(whole_edit)},
+        )
+        reader = await self._reader(alice, client)
+
+        page = await reader.read_strict(room_id=ROOM, thread_id=None, limit=10)
+
+        assert [dict(message.content) for message in page.messages] == [
+            {"msgtype": "m.text", "body": "The edit, whole"},
+        ]
+        assert page.refresh_pending == ()
+
+    async def test_an_edit_whose_attachment_holds_its_replacement_alone_installs_it(
+        self,
+        alice: PrincipalStore,
+    ) -> None:
+        """A reply row wrapped as an edit only when it was sent had uploaded its replacement, not the edit."""
+        original = raw("$m", "first answer", ts=1_000)
+        preview = self._sidecar_source("$e1", "The edit beg [continues]", "mxc://s/edit", ts=2_000)
+        # As a claimed row is wrapped: the fallback repeats the preview, sidecar reference included.
+        wrapped = build_edit_event_content(
+            event_id="$m",
+            new_content=preview["content"],
+            new_text=preview["content"]["body"],
+        )
+        edit = {**preview, "content": wrapped}
+        await admit_all(alice, [original, edit])
+        client = FakeClient(
+            events={"$m": original},
+            relations={"$m": [edit]},
+            sidecars={"mxc://s/edit": json.dumps({"msgtype": "m.text", "body": "The edit, whole"})},
+        )
+        reader = await self._reader(alice, client)
+
+        page = await reader.read_strict(room_id=ROOM, thread_id=None, limit=10)
+
+        assert [dict(message.content) for message in page.messages] == [
+            {"msgtype": "m.text", "body": "The edit, whole"},
+        ]
+        assert page.refresh_pending == ()
+
     async def test_an_unreadable_edit_with_a_nested_edit_layer_settles_once(
         self,
         alice: PrincipalStore,
@@ -2008,28 +2799,6 @@ class TestSidecarResolution:
 class TestPointRefetch:
     """Redacting the visible edit is repaired by asking the server."""
 
-    @staticmethod
-    async def _redact_current_edit(store: PrincipalStore) -> None:
-        await admit_all(
-            store,
-            [raw("$m", "first"), raw("$e", "second", ts=2_000, replaces="$m")],
-        )
-        redaction = nio.Event.parse_event(
-            {
-                "event_id": "$r",
-                "sender": ALICE,
-                "origin_server_ts": 3_000,
-                "type": "m.room.redaction",
-                "redacts": "$e",
-                "content": {},
-            },
-        )
-        assert isinstance(redaction, nio.Event)
-        await store.admit(
-            _inbound_event(ROOM, redaction, EventKind.REDACTION, EventClass.ACTIONABLE),
-            _projected_event(ROOM, redaction, EventKind.REDACTION, self_sender=BOT),
-        )
-
     async def test_the_prior_edit_is_restored_when_the_server_still_has_it(
         self,
         alice: PrincipalStore,
@@ -2043,19 +2812,10 @@ class TestPointRefetch:
                 raw("$e2", "third", ts=3_000, replaces="$m"),
             ],
         )
-        redaction = parse(
-            {
-                "event_id": "$r",
-                "sender": ALICE,
-                "origin_server_ts": 4_000,
-                "type": "m.room.redaction",
-                "redacts": "$e2",
-                "content": {},
-            },
-        )
+        deletion = parse(redaction("$r", "$e2", ts=4_000))
         await alice.admit(
-            _inbound_event(ROOM, redaction, EventKind.REDACTION, EventClass.ACTIONABLE),
-            _projected_event(ROOM, redaction, EventKind.REDACTION, self_sender=BOT),
+            _inbound_event(ROOM, deletion, EventKind.REDACTION, EventClass.ACTIONABLE),
+            _projected_event(ROOM, deletion, EventKind.REDACTION, self_sender=BOT),
         )
         client = FakeClient(
             events={"$m": raw("$m", "first")},
@@ -2074,7 +2834,7 @@ class TestPointRefetch:
 
     @pytest.mark.parametrize(
         ("ceiling", "expected"),
-        [(3, f"first\n\n{_UNREADABLE_EDIT_NOTICE}"), (5, "second")],
+        [(3, f"first\n\n{UNREADABLE_EDIT_NOTICE}"), (5, "second")],
         ids=["edits_past_ceiling", "edit_before_ceiling"],
     )
     async def test_others_relations_filling_the_walk_do_not_pass_the_original_off_as_unedited(
@@ -2085,8 +2845,8 @@ class TestPointRefetch:
     ) -> None:
         """A walk stopped before any of the sender's edits cannot vouch for the original.
 
-        Relations arrive newest first, so enough reactions sent after the
-        surviving edit end the walk before it. Installing the original as
+        Edits arrive newest first, so enough edits by someone else sent after
+        the surviving edit end the walk before it. Installing the original as
         though it had never been edited would let any room member roll the
         message back. An edit by the sender found before the ceiling is still
         their newest and needs no notice.
@@ -2104,23 +2864,16 @@ class TestPointRefetch:
             _inbound_event(ROOM, deletion, EventKind.REDACTION, EventClass.ACTIONABLE),
             _projected_event(ROOM, deletion, EventKind.REDACTION, self_sender=BOT),
         )
-        reactions = [
-            {
-                "event_id": f"$reaction{index}",
-                "sender": BOB,
-                "origin_server_ts": 5_000 + index,
-                "type": "m.reaction",
-                "content": {"m.relates_to": {"rel_type": "m.annotation", "event_id": "$m", "key": str(index)}},
-            }
-            for index in range(3)
-        ]
         client = FakeClient(
             events={"$m": raw("$m", "first")},
             relations={
                 "$m": [
                     raw("$e1", "second", ts=2_000, replaces="$m"),
                     raw("$e2", "third", ts=3_000, replaces="$m", redacted=True),
-                    *reactions,
+                    *(
+                        raw(f"$forged{index}", "forged", sender=BOB, ts=5_000 + index, replaces="$m")
+                        for index in range(3)
+                    ),
                 ],
             },
         )
@@ -2140,7 +2893,7 @@ class TestPointRefetch:
         Both answers are correct, because both are what every other Matrix
         client in the room sees.
         """
-        await self._redact_current_edit(alice)
+        await redact_current_edit(alice)
         client = FakeClient(events={"$m": raw("$m", "first")}, relations={"$m": []})
 
         assert await hydrator(alice, client).refresh(
@@ -2150,7 +2903,7 @@ class TestPointRefetch:
 
     async def test_a_message_the_server_lost_is_removed(self, alice: PrincipalStore) -> None:
         """A message the server lost is removed."""
-        await self._redact_current_edit(alice)
+        await redact_current_edit(alice)
         client = FakeClient(events={"$m": raw("$m", "first", redacted=True)}, relations={})
 
         assert (
@@ -2168,7 +2921,7 @@ class TestPointRefetch:
         alice: PrincipalStore,
     ) -> None:
         """An unreachable server keeps the message hidden."""
-        await self._redact_current_edit(alice)
+        await redact_current_edit(alice)
         client = FakeClient(events={}, relations={})
 
         assert (
@@ -2274,13 +3027,13 @@ class TestEncryptedRelations:
         client = self._thread_of_encrypted_replies(readable=False)
         if recover_room:
             client.history = [client.events["$root"], *client.relations["$root"]]
-            client.repeat_last = True
-            client.pages = [(client.history, None)]
-            await alice.record_room_history_recovery(ROOM)
+            await record_room_history_recovery(alice, ROOM)
         strict = hydrator(alice, client, **EXPORT_CALLER)
         with pytest.raises(RuntimeError, match="unreadable events remain"):
             await strict.ensure_hydrated(room_id=ROOM, thread_id="$root")
         assert not await alice.conversation_is_hydrated(room_id=ROOM, thread_id="$root")
+        if recover_room:
+            assert await bodies(alice) == ["root"]
         client.room_keys = self._thread_of_encrypted_replies(readable=True).room_keys
         await strict.ensure_hydrated(room_id=ROOM, thread_id="$root")
         assert await bodies(alice, "$root") == ["root", "first reply", "second reply"]
@@ -2305,7 +3058,7 @@ class TestEncryptedRelations:
         refuses it.
         """
         client = self._readable_thread_beside_an_unreadable_welcome()
-        await alice.record_room_history_recovery(ROOM)
+        await record_room_history_recovery(alice, ROOM)
 
         await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id="$root")
 
@@ -2314,7 +3067,7 @@ class TestEncryptedRelations:
         assert await alice.conversation_is_complete(room_id=ROOM, thread_id="$root")
         assert await alice.conversation_is_hydrated(room_id=ROOM, thread_id=None)
         assert not await alice.conversation_is_complete(room_id=ROOM, thread_id=None)
-        with pytest.raises(_HydrationError, match="unreadable events remain"):
+        with pytest.raises(ConversationReadError, match="unreadable events remain"):
             await hydrator(alice, client, **EXPORT_CALLER).ensure_hydrated(room_id=ROOM, thread_id=None)
 
     async def test_an_export_reads_a_thread_past_an_unreadable_event_outside_it(
@@ -2323,7 +3076,7 @@ class TestEncryptedRelations:
     ) -> None:
         """An export refuses the threads holding an unreadable event, not every thread in the room."""
         client = self._readable_thread_beside_an_unreadable_welcome()
-        await alice.record_room_history_recovery(ROOM)
+        await record_room_history_recovery(alice, ROOM)
 
         await hydrator(alice, client, **EXPORT_CALLER).ensure_hydrated(room_id=ROOM, thread_id="$root")
 
@@ -2361,7 +3114,7 @@ class TestEncryptedRelations:
                 attempted_policy_rank=HydrationPolicy.EXPORT,
                 expected_membership_epoch=0,
             )
-        await alice.record_room_history_recovery(ROOM)
+        await record_room_history_recovery(alice, ROOM)
         prompt = hydrator(alice, client)
 
         await prompt.ensure_hydrated(room_id=ROOM, thread_id="$root")
@@ -2374,7 +3127,7 @@ class TestEncryptedRelations:
         assert await alice.conversation_is_complete(room_id=ROOM, thread_id="$other")
         assert not await alice.conversation_is_complete(room_id=ROOM, thread_id=None)
         for thread_id in (None, "$root"):
-            with pytest.raises(_HydrationError, match="unreadable events remain"):
+            with pytest.raises(ConversationReadError, match="unreadable events remain"):
                 await hydrator(alice, client, **EXPORT_CALLER).ensure_hydrated(room_id=ROOM, thread_id=thread_id)
 
     @pytest.mark.parametrize("thread_id", [None, "$root"])
@@ -2392,7 +3145,7 @@ class TestEncryptedRelations:
             olm=object(),
         )
 
-        with pytest.raises(_HydrationError, match="unreadable events remain") as failure:
+        with pytest.raises(ConversationReadError, match="unreadable events remain") as failure:
             await hydrator(alice, client, **EXPORT_CALLER).ensure_hydrated(room_id=ROOM, thread_id=thread_id)
 
         diagnostic = str(failure.value)
@@ -2431,7 +3184,7 @@ class TestEncryptedRelations:
         decrypt = Mock(return_value=decrypted)
         monkeypatch.setattr(client, "decrypt_event", decrypt)
 
-        with pytest.raises(_HydrationError, match="unreadable events remain") as failure:
+        with pytest.raises(ConversationReadError, match="unreadable events remain") as failure:
             await hydrator(alice, client, **EXPORT_CALLER).ensure_hydrated(room_id=ROOM, thread_id=thread_id)
 
         diagnostic = str(failure.value)
@@ -2458,7 +3211,7 @@ class TestEncryptedRelations:
             olm=object(),
         )
 
-        with pytest.raises(_HydrationError) as failure:
+        with pytest.raises(ConversationReadError) as failure:
             await hydrator(alice, client, **EXPORT_CALLER).ensure_hydrated(room_id=ROOM, thread_id="$root")
 
         diagnostic = str(failure.value)
@@ -2492,7 +3245,7 @@ class TestEncryptedRelations:
         let the edit's sender fail every strict read of the conversation for as
         long as the edit stayed unreadable, so the body says what is missing.
         """
-        await TestPointRefetch._redact_current_edit(alice)
+        await redact_current_edit(alice)
         client = FakeClient(
             events={"$m": raw("$m", "first")},
             relations={"$m": [encrypted("$e2", ts=4_000, relates_to={"rel_type": "m.replace", "event_id": "$m"})]},
@@ -2502,7 +3255,7 @@ class TestEncryptedRelations:
         assert await hydrator(alice, client).refresh(
             (await refreshes(alice))[0],
         )
-        assert await bodies(alice) == [f"first\n\n{_UNREADABLE_EDIT_NOTICE}"]
+        assert await bodies(alice) == [f"first\n\n{UNREADABLE_EDIT_NOTICE}"]
         assert await refreshes(alice) == ()
 
     async def test_an_unreadable_edit_older_than_the_winning_one_adds_no_notice(
@@ -2510,7 +3263,7 @@ class TestEncryptedRelations:
         alice: PrincipalStore,
     ) -> None:
         """An unreadable edit that a newer readable edit supersedes changes nothing on screen."""
-        await TestPointRefetch._redact_current_edit(alice)
+        await redact_current_edit(alice)
         client = FakeClient(
             events={"$m": raw("$m", "first")},
             relations={
@@ -2537,7 +3290,7 @@ class TestEncryptedRelations:
         Anyone in the room can relate an unreadable event to any message, and
         keeping the debt for it failed every strict read of the conversation.
         """
-        await TestPointRefetch._redact_current_edit(alice)
+        await redact_current_edit(alice)
         client = FakeClient(
             events={"$m": raw("$m", "first")},
             relations={
@@ -2574,7 +3327,7 @@ class TestEncryptedRelations:
         this device has no key for. Reading the second as the first drops a row
         for a message every other client in the room can still see.
         """
-        await TestPointRefetch._redact_current_edit(alice)
+        await redact_current_edit(alice)
         client = FakeClient(events={"$m": encrypted("$m")}, relations={"$m": []}, olm=object())
 
         assert (
@@ -2640,7 +3393,7 @@ class TestEncryptedRelations:
             hidden_events={"$root": "M_LIMIT_EXCEEDED"},
         )
 
-        with pytest.raises(_HydrationError, match="Could not fetch thread root"):
+        with pytest.raises(ConversationReadError, match="Could not fetch thread root"):
             await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id="$root")
 
         assert not await alice.conversation_is_hydrated(room_id=ROOM, thread_id="$root")
@@ -2665,24 +3418,122 @@ class TestEncryptedRelations:
         assert not await alice.conversation_is_complete(room_id=ROOM, thread_id=None)
 
 
+AGENT = "@mindroom_other:example.org"
+
+
+class TestRepliesWithToolCalls:
+    """A fetched reply is stored as a synced one is: an agent's with its tool markers in its text."""
+
+    @pytest.mark.parametrize("sender", [AGENT, ALICE])
+    async def test_a_refresh_past_an_unreadable_edit_puts_the_notice_after_the_reply_as_its_agent_built_it(
+        self,
+        alice: PrincipalStore,
+        sender: str,
+    ) -> None:
+        """The notice follows the whole reply, and nobody else's message gets marker lines its sender never wrote."""
+        built, held = reply_with_calls("Before.\n\n🔧 `shell` [1]", 1)
+        await redact_current_edit(alice)
+        edit_of_it = {"rel_type": "m.replace", "event_id": "$m"}
+        client = FakeClient(
+            events={"$m": {**raw("$m", "first", sender=sender), "content": held}},
+            relations={"$m": [encrypted("$e2", sender=sender, ts=4_000, relates_to=edit_of_it)]},
+            olm=object(),
+        )
+
+        assert await hydrator(alice, client).refresh((await refreshes(alice))[0])
+
+        page = await alice.read_conversation(room_id=ROOM, thread_id=None, limit=50)
+        read_as = built if sender == AGENT else held
+        assert [m.content for m in page.messages] == [
+            {**read_as, "body": f"{read_as['body']}\n\n{UNREADABLE_EDIT_NOTICE}"},
+        ]
+
+    async def test_a_hydrated_thread_holds_each_reply_of_an_agent_as_it_was_built(self, alice: PrincipalStore) -> None:
+        """History, summaries, exports, judges and the read tool read these rows with main's code, unchanged."""
+        thread = {"m.relates_to": {"rel_type": "m.thread", "event_id": "$root"}}
+        replies = [
+            {**raw(f"$reply{ts}", "", sender=AGENT, ts=ts), "content": {**_wire(case), **thread}}
+            for ts, case in enumerate(_SENT_CASES, start=2)
+        ]
+        client = FakeClient(events={"$root": raw("$root", "root")}, relations={"$root": replies})
+
+        await hydrator(alice, client).ensure_hydrated(room_id=ROOM, thread_id="$root")
+
+        page = await alice.read_conversation(room_id=ROOM, thread_id="$root", limit=50)
+        held = {m.logical_event_id: m.content for m in page.messages}
+        for ts, case in enumerate(_SENT_CASES, start=2):
+            assert held[f"$reply{ts}"] == {**_sent(case), **thread}
+
+    @pytest.mark.parametrize("sender", [AGENT, ALICE])
+    async def test_a_refreshed_v3_sidecar_restores_markers_only_for_an_agent_sender(
+        self,
+        alice: PrincipalStore,
+        sender: str,
+    ) -> None:
+        """Sidecar refresh passes the revision sender so any v3 attachment restores markers for agent senders alone."""
+        thread = {"m.relates_to": {"rel_type": "m.thread", "event_id": "$root"}}
+        built, held = reply_with_calls("Before.\n\n🔧 `shell` [1]\n\nAfter.", 1)
+        preview = {
+            "msgtype": "m.file",
+            "body": "Before. [Message continues in attached file]",
+            "url": "mxc://s/v3sidecar",
+            "io.mindroom.long_text": {"version": 2, "encoding": "matrix_event_content_json"},
+            **thread,
+        }
+        event = {**raw("$m", "", sender=sender, ts=2_000), "content": preview}
+        client = FakeClient(
+            events={"$root": raw("$root", "root"), "$m": event},
+            relations={"$root": [event]},
+            sidecars={"mxc://s/v3sidecar": json.dumps({**held, **thread})},
+        )
+        reader = ConversationReader(store=alice, hydrator=hydrator(alice, client))
+
+        page = await reader.read_strict(room_id=ROOM, thread_id="$root", limit=10)
+
+        expected = {**(built if sender == AGENT else held), **thread}
+        assert page.messages[-1].content == expected
+
+    async def test_a_hydrated_thread_fills_its_pages_as_a_synced_one_does(
+        self,
+        journal_store: EventJournalStore,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A page ends at a size, so the same replies must have the same size whichever way they arrived."""
+        built, held = reply_with_calls("\n\n".join(["Looked.", *(f"🔧 `shell` [{index}]" for index in range(1, 9))]), 8)
+        sizes = [len(json.dumps(content, separators=(",", ":"))) for content in (built, held)]
+        monkeypatch.setattr(reads, "PAGE_CONTENT_BUDGET_BYTES", sum(sizes))
+
+        async def page_of(principal: str, content: dict[str, Any]) -> tuple[list[object], bool]:
+            """Return the bodies of the newest page of a thread of two such replies, and whether it is the whole thread."""
+            store = journal_store.principal(principal)
+            thread = {"m.relates_to": {"rel_type": "m.thread", "event_id": "$root"}}
+            replies = [
+                {**raw(f"$reply{ts}", "", sender=AGENT, ts=ts), "content": {**content, **thread}} for ts in (2, 3)
+            ]
+            client = FakeClient(events={"$root": raw("$root", "root")}, relations={"$root": replies})
+            await hydrator(store, client).ensure_hydrated(room_id=ROOM, thread_id="$root")
+            page = await store.read_conversation(room_id=ROOM, thread_id="$root", limit=50)
+            return [m.content["body"] for m in page.messages], page.next_cursor is None
+
+        page = await page_of("agent@held", held)
+        assert page == await page_of("agent@built", built)
+        assert (len(page[0]), page[1]) == (2, False)
+
+
 class TestReplyFallback:
     """What a thread-blind client is told this message is replying to."""
-
-    @staticmethod
-    def _reader(store: PrincipalStore) -> ConversationReader:
-        return ConversationReader(store=store, hydrator=hydrator(store, FakeClient()))
 
     async def test_the_newest_projected_reply_answers(self, alice: PrincipalStore) -> None:
         """The newest projected reply answers."""
         await admit_all(alice, [raw("$root", "root"), raw("$reply", "reply", ts=2_000, thread_id="$root")])
 
-        assert await self._reader(alice).latest_thread_event_id(room_id=ROOM, thread_id="$root") == "$reply"
+        assert await conversation_reader(alice).latest_thread_event_id(room_id=ROOM, thread_id="$root") == "$reply"
 
     async def test_an_empty_thread_answers_with_its_root(self, alice: PrincipalStore) -> None:
         """An empty thread answers with its root."""
         await admit_all(alice, [raw("$root", "root")])
 
-        assert await self._reader(alice).latest_thread_event_id(room_id=ROOM, thread_id="$root") == "$root"
+        assert await conversation_reader(alice).latest_thread_event_id(room_id=ROOM, thread_id="$root") == "$root"
 
     async def test_a_caller_that_just_sent_is_believed_over_the_projection(
         self,
@@ -2691,7 +3542,7 @@ class TestReplyFallback:
         """Reads after a send are echo-ordered, so the sender holds the newer fact."""
         await admit_all(alice, [raw("$root", "root"), raw("$reply", "reply", ts=2_000, thread_id="$root")])
 
-        answer = await self._reader(alice).latest_thread_event_id(
+        answer = await conversation_reader(alice).latest_thread_event_id(
             room_id=ROOM,
             thread_id="$root",
             known_latest_thread_event_id="$just-sent",
@@ -2704,7 +3555,7 @@ class TestReplyFallback:
         alice: PrincipalStore,
     ) -> None:
         """A room-level send has no thread relation to hang a fallback on."""
-        answer = await self._reader(alice).latest_thread_event_id(
+        answer = await conversation_reader(alice).latest_thread_event_id(
             room_id=ROOM,
             thread_id=None,
             known_latest_thread_event_id="$just-sent",
@@ -2718,7 +3569,7 @@ class TestReplyFallback:
     ) -> None:
         """An explicit reply target outranks both the projection and a known send."""
         await admit_all(alice, [raw("$root", "root"), raw("$reply", "reply", ts=2_000, thread_id="$root")])
-        reader = self._reader(alice)
+        reader = conversation_reader(alice)
 
         assert (
             await reader.latest_thread_event_id(
@@ -2743,30 +3594,12 @@ class TestReplyFallback:
 class TestReadModes:
     """The two callers, and what each is allowed to see."""
 
-    @staticmethod
-    async def _hidden_message(store: PrincipalStore) -> None:
-        await admit_all(store, [raw("$m", "first"), raw("$e", "deleted", ts=2_000, replaces="$m")])
-        redaction = parse(
-            {
-                "event_id": "$r",
-                "sender": ALICE,
-                "origin_server_ts": 3_000,
-                "type": "m.room.redaction",
-                "redacts": "$e",
-                "content": {},
-            },
-        )
-        await store.admit(
-            _inbound_event(ROOM, redaction, EventKind.REDACTION, EventClass.ACTIONABLE),
-            _projected_event(ROOM, redaction, EventKind.REDACTION, self_sender=BOT),
-        )
-
     async def test_a_non_strict_read_omits_rather_than_waits(
         self,
         alice: PrincipalStore,
     ) -> None:
         """A non strict read omits rather than waits."""
-        await self._hidden_message(alice)
+        await redact_current_edit(alice, edited_body="deleted")
         client = FakeClient(events={}, relations={})
         reader = ConversationReader(store=alice, hydrator=hydrator(alice, client))
 
@@ -2780,7 +3613,7 @@ class TestReadModes:
         alice: PrincipalStore,
     ) -> None:
         """A strict read repairs before returning."""
-        await self._hidden_message(alice)
+        await redact_current_edit(alice, edited_body="deleted")
         client = FakeClient(events={"$m": raw("$m", "first")}, relations={"$m": []})
         await alice.install_hydrated_conversation(
             room_id=ROOM,
@@ -2800,7 +3633,7 @@ class TestReadModes:
         alice: PrincipalStore,
     ) -> None:
         """Prompt assembly cannot tell an omission from an absence."""
-        await self._hidden_message(alice)
+        await redact_current_edit(alice, edited_body="deleted")
         client = FakeClient(events={}, relations={})
         await alice.install_hydrated_conversation(
             room_id=ROOM,
@@ -2811,15 +3644,34 @@ class TestReadModes:
         )
         reader = ConversationReader(store=alice, hydrator=hydrator(alice, client))
 
-        with pytest.raises(_StaleConversationError):
+        with pytest.raises(ConversationReadError, match="awaiting a server refetch"):
             await reader.read_strict(room_id=ROOM, thread_id=None, limit=10)
+        assert client.event_calls == 1
+
+    @pytest.mark.parametrize(
+        "read",
+        [
+            lambda reader: complete_thread_history(reader, ROOM, "$root"),
+            lambda reader: refetched_thread_history(reader, ROOM, "$root", unreadable_is_missing=True),
+        ],
+        ids=["strict", "rewalk"],
+    )
+    async def test_a_response_that_broke_off_fails_the_read(
+        self,
+        alice: PrincipalStore,
+        read: Callable[[ConversationReader], Awaitable[object]],
+    ) -> None:
+        """Nio raises a response whose body broke off, and the read fails with the conversation layer's own error."""
+        client = BrokenOffClient(events={"$root": raw("$root", "the question")}, relations={"$root": []})
+
+        with pytest.raises(ConversationReadError, match="could not be read from the homeserver: ClientPayloadError"):
+            await read(conversation_reader(alice, client))
+
+        assert not await alice.conversation_is_hydrated(room_id=ROOM, thread_id="$root")
 
 
 class TestUnreadHistory:
     """Only hydration proves a conversation has nothing behind it."""
-
-    def _reader(self, store: PrincipalStore) -> ConversationReader:
-        return ConversationReader(store=store, hydrator=hydrator(store, FakeClient()))
 
     async def test_an_unhydrated_conversation_cannot_prove_it_is_fresh(
         self,
@@ -2835,7 +3687,7 @@ class TestUnreadHistory:
         """
         await admit_all(alice, [raw("$first", "first event this journal ever saw")])
 
-        assert await self._reader(alice).may_have_unread_history(room_id=ROOM, thread_id=None)
+        assert await conversation_reader(alice).may_have_unread_history(room_id=ROOM, thread_id=None)
 
     async def test_a_hydrated_conversation_is_proven_fresh(
         self,
@@ -2855,7 +3707,7 @@ class TestUnreadHistory:
             expected_membership_epoch=await alice.membership_epoch(ROOM),
         )
 
-        assert not await self._reader(alice).may_have_unread_history(room_id=ROOM, thread_id=None)
+        assert not await conversation_reader(alice).may_have_unread_history(room_id=ROOM, thread_id=None)
 
     async def test_hydration_is_scoped_to_one_conversation(
         self,
@@ -2870,24 +3722,35 @@ class TestUnreadHistory:
             expected_membership_epoch=await alice.membership_epoch(ROOM),
         )
 
-        assert await self._reader(alice).may_have_unread_history(room_id=ROOM, thread_id="$root")
+        assert await conversation_reader(alice).may_have_unread_history(room_id=ROOM, thread_id="$root")
 
 
 class TestWindowTruncation:
     """A bounded page is not the whole conversation."""
 
-    async def test_a_page_with_more_behind_it_is_not_full_history(
+    @pytest.mark.parametrize(
+        ("message_count", "limit", "is_full_history"),
+        [pytest.param(5, 3, False, id="more-behind"), pytest.param(3, 10, True, id="reaches-the-start")],
+    )
+    async def test_a_page_is_full_history_only_when_nothing_is_behind_it(
         self,
         alice: PrincipalStore,
+        message_count: int,
+        limit: int,
+        is_full_history: bool,
     ) -> None:
-        """A conversation longer than the read window reports itself truncated.
+        """A conversation longer than the read window reports itself truncated, and a page that reaches the start does not.
 
         Consumers do not all just render what they get. Thread summaries count
         the messages returned and record that count as the size of the thread,
         so a suffix reported as complete is written down as the whole history
-        and the next pass compares against it.
+        and the next pass compares against it. Without the second case, "not
+        full history" could be hard-coded and still pass.
         """
-        await admit_all(alice, [raw(f"$m{index}", f"message {index}", ts=1_000 + index) for index in range(5)])
+        await admit_all(
+            alice,
+            [raw(f"$m{index}", f"message {index}", ts=1_000 + index) for index in range(message_count)],
+        )
         client = FakeClient()
         reader = ConversationReader(store=alice, hydrator=hydrator(alice, client))
         await alice.install_hydrated_conversation(
@@ -2898,39 +3761,12 @@ class TestWindowTruncation:
             expected_membership_epoch=await alice.membership_epoch(ROOM),
         )
 
-        page = await reader.read_strict(room_id=ROOM, thread_id=None, limit=3)
+        page = await reader.read_strict(room_id=ROOM, thread_id=None, limit=limit)
         history = projected_thread_history(page, complete=True)
 
         assert len(history) == 3
-        assert page.next_cursor is not None
-        assert not history.is_full_history
-
-    async def test_a_page_that_reaches_the_start_is_full_history(
-        self,
-        alice: PrincipalStore,
-    ) -> None:
-        """Nothing behind the page means the page is the conversation.
-
-        The mirror of the case above: without it, "not full history" could be
-        hard-coded and still pass.
-        """
-        await admit_all(alice, [raw(f"$m{index}", f"message {index}", ts=1_000 + index) for index in range(3)])
-        client = FakeClient()
-        reader = ConversationReader(store=alice, hydrator=hydrator(alice, client))
-        await alice.install_hydrated_conversation(
-            room_id=ROOM,
-            thread_id=None,
-            events=(),
-            complete=True,
-            expected_membership_epoch=await alice.membership_epoch(ROOM),
-        )
-
-        page = await reader.read_strict(room_id=ROOM, thread_id=None, limit=10)
-        history = projected_thread_history(page, complete=True)
-
-        assert len(history) == 3
-        assert page.next_cursor is None
-        assert history.is_full_history
+        assert (page.next_cursor is None) is is_full_history
+        assert history.is_full_history is is_full_history
 
 
 class TestRefreshStarvation:
@@ -2983,10 +3819,6 @@ class TestRefreshStarvation:
 class TestLatestSenderMessage:
     """What a hook is told one sender's newest visible message is."""
 
-    @staticmethod
-    def _reader(store: PrincipalStore, client: FakeClient | None = None) -> ConversationReader:
-        return ConversationReader(store=store, hydrator=hydrator(store, client or FakeClient()))
-
     async def test_the_newest_message_from_that_sender_answers(self, alice: PrincipalStore) -> None:
         """Someone else speaking last must not hide the sender that was asked about."""
         await admit_all(
@@ -2999,7 +3831,7 @@ class TestLatestSenderMessage:
         )
 
         snapshot = await latest_agent_message_snapshot(
-            self._reader(alice),
+            conversation_reader(alice),
             room_id=ROOM,
             thread_id=None,
             sender=ALICE,
@@ -3018,7 +3850,7 @@ class TestLatestSenderMessage:
         )
 
         snapshot = await latest_agent_message_snapshot(
-            self._reader(alice),
+            conversation_reader(alice),
             room_id=ROOM,
             thread_id=None,
             sender=ALICE,
@@ -3034,7 +3866,7 @@ class TestLatestSenderMessage:
     ) -> None:
         """Room scope is the unthreaded conversation, not everything in the room."""
         await admit_all(alice, [raw("$root", "root"), raw("$reply", "in thread", ts=2_000, thread_id="$root")])
-        reader = self._reader(alice)
+        reader = conversation_reader(alice)
 
         room_scope = await latest_agent_message_snapshot(
             reader,
@@ -3060,7 +3892,7 @@ class TestLatestSenderMessage:
 
         assert (
             await latest_agent_message_snapshot(
-                self._reader(alice),
+                conversation_reader(alice),
                 room_id=ROOM,
                 thread_id=None,
                 sender=ALICE,
@@ -3070,11 +3902,11 @@ class TestLatestSenderMessage:
 
     async def test_a_message_awaiting_refetch_is_never_served(self, alice: PrincipalStore) -> None:
         """The redacted revision is content the sender deleted; absence is the honest answer."""
-        await TestReadModes._hidden_message(alice)
+        await redact_current_edit(alice, edited_body="deleted")
 
         assert (
             await latest_agent_message_snapshot(
-                self._reader(alice),
+                conversation_reader(alice),
                 room_id=ROOM,
                 thread_id=None,
                 sender=ALICE,
@@ -3088,7 +3920,7 @@ class TestLatestSenderMessage:
         client = FakeClient(events={"$m": raw("$m", "only local")}, history=[raw("$old", "older", ts=500)])
 
         snapshot = await latest_agent_message_snapshot(
-            self._reader(alice, client),
+            conversation_reader(alice, client),
             room_id=ROOM,
             thread_id=None,
             sender=ALICE,
@@ -3117,7 +3949,7 @@ class TestLatestSenderMessage:
 
         assert (
             await latest_agent_message_snapshot(
-                self._reader(alice),
+                conversation_reader(alice),
                 room_id=ROOM,
                 thread_id=None,
                 sender=ALICE,
@@ -3146,7 +3978,7 @@ class TestLatestSenderMessage:
         await admit_all(alice, [raw("$greeted", "hello, I am here", ts=1_000)])
 
         snapshot = await latest_agent_message_snapshot(
-            self._reader(alice),
+            conversation_reader(alice),
             room_id=ROOM,
             thread_id=None,
             sender=ALICE,

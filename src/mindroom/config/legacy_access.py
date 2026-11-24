@@ -41,7 +41,7 @@ from typing import Any, cast
 from pydantic import TypeAdapter, ValidationError
 
 from mindroom import yaml_io
-from mindroom.matrix_identifiers import split_concrete_matrix_user_ids
+from mindroom.matrix_identifiers import is_managed_room_key, split_concrete_matrix_user_ids
 
 _RETIRED_AUTHORIZATION_FIELDS = frozenset(
     {
@@ -315,9 +315,7 @@ def _apply_reply_policy(
 
 def _managed_room_keys(config: dict[str, Any]) -> set[str]:
     room_keys = {
-        room_key
-        for room_key in config.get("rooms", {})
-        if isinstance(room_key, str) and not room_key.startswith(("!", "#"))
+        room_key for room_key in config.get("rooms", {}) if isinstance(room_key, str) and is_managed_room_key(room_key)
     }
     for section_name in ("agents", "teams"):
         entities = config.get(section_name)
@@ -329,7 +327,7 @@ def _managed_room_keys(config: dict[str, Any]) -> set[str]:
             room_keys.update(
                 room_key
                 for room_key in entity_data.get("rooms", [])
-                if isinstance(room_key, str) and not room_key.startswith(("!", "#"))
+                if isinstance(room_key, str) and is_managed_room_key(room_key)
             )
     return room_keys
 

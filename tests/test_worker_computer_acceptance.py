@@ -2,22 +2,31 @@
 
 from __future__ import annotations
 
+import asyncio
 import importlib.util
+import os
+import signal
 import sys
-from contextlib import nullcontext
+from contextlib import nullcontext, suppress
+from dataclasses import replace
 from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 import yaml
-from agno.tools.function import ToolResult
 
 from mindroom.api import computers
 from mindroom.config.main import Config
 from mindroom.tool_system.media_transport import encode_media_result
+from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.registry import builtin_tool_registry
+from mindroom.tool_system.tool_function import ToolValue
+from mindroom.tool_system.worker_routing import parse_tool_execution_identity_payload
 from mindroom.workers.backend import WorkerBackendError
+from mindroom.workers.protocol import WORKER_PROTOCOL_VERSION, ExecuteRequest
 from tests.test_docker_worker_backend import _backend
+from tests.test_shell_async import _make_runtime_paths
 
 
 def _helper() -> ModuleType:
@@ -54,11 +63,6 @@ def test_native_result_parser_accepts_void_page_actions() -> None:
     assert _helper().native_json("### Result\nundefined\n### Ran Playwright code\n...") is None
 
 
-def test_shell_readback_removes_only_known_cwd_header() -> None:
-    """Native absolute upload paths use command stdout, not the display header."""
-    assert _helper().shell_stdout("[cwd: /workspace]\n/workspace\n") == "/workspace\n"
-
-
 def test_native_tab_indices_remain_current() -> None:
     """The native server exposes mutable indices, not stable CDP targets."""
     module = _helper()
@@ -89,7 +93,7 @@ async def test_native_call_accepts_native_function_argument(tmp_path: Path, monk
     fixture = object.__new__(module.Fixture)
     fixture.args = SimpleNamespace(output=tmp_path)
     fixture.execute = AsyncMock(
-        return_value={"ok": True, "result": encode_media_result(ToolResult(content="### Result\n1"))},
+        return_value={"ok": True, "result": encode_media_result(ToolValue(content="### Result\n1"))},
     )
     result = await fixture.native("browser_evaluate", function="()=>1")
     fixture.execute.assert_awaited_once_with("browser_mcp", "browser_evaluate", {"function": "()=>1"})
@@ -105,6 +109,75 @@ def _driver(monkeypatch: pytest.MonkeyPatch) -> ModuleType:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def test_runner_requests_speak_this_worker_protocol(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The acceptance driver's direct runner calls carry this release's protocol and a parseable identity."""
+    module = _driver(monkeypatch)
+    fixture = object.__new__(module.Fixture)
+    fixture.room = "!fixture:computer.localhost"
+    worker_key = "v1:default:user_agent:@alice:computer.localhost:writer"
+
+    request = fixture.runner_request(
+        "browser",
+        "browser_control",
+        {"action": "status"},
+        user="@alice:computer.localhost",
+        worker_key=worker_key,
+    )
+
+    sent = ExecuteRequest.model_validate(request.model_dump(mode="json"))
+    assert sent.protocol == WORKER_PROTOCOL_VERSION
+    assert sent.worker_key == worker_key
+    assert sent.tool_config_overrides == {"allow_private_networks": True}
+    assert sent.execution_identity is not None
+    assert parse_tool_execution_identity_payload(sent.execution_identity) == fixture.identity(
+        "@alice:computer.localhost",
+    )
+
+
+@pytest.mark.asyncio
+async def test_background_shell_leaves_a_process_running_after_the_call_returns(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The shell tool has no background mode, so the fixture detaches with nohup and the call still returns."""
+    module = _driver(monkeypatch)
+    toolkit = get_tool_by_name(
+        "shell",
+        _make_runtime_paths(tmp_path),
+        runs_in_worker=False,
+        worker_target=None,
+        tool_init_overrides={"base_dir": str(tmp_path)},
+        tools=builtin_tool_registry(),
+    )
+    entrypoint = toolkit.functions["run_shell_command"]
+
+    async def execute(tool: str, function: str, kwargs: dict[str, object], *, user: str | None = None) -> dict:
+        assert (tool, function, user) == ("shell", "run_shell_command", None)
+        return {"ok": True, "result": await entrypoint(**kwargs)}
+
+    fixture = object.__new__(module.Fixture)
+    fixture.execute = execute
+    pid_file = tmp_path / "pid"
+    pid: int | None = None
+    try:
+        async with asyncio.timeout(10):
+            await fixture.shell(
+                ["sh", "-c", 'echo $$ > "$0.tmp" && mv "$0.tmp" "$0" && exec tail -f /dev/null', str(pid_file)],
+                background=True,
+            )
+            while not pid_file.exists():  # noqa: ASYNC110 - the detached process writes its PID asynchronously
+                await asyncio.sleep(0.05)
+        pid = int(pid_file.read_text())
+        os.kill(pid, 0)  # Raises ProcessLookupError when the shell call's return took the process with it.
+    finally:
+        # A timed-out wait still leaves the detached process to clean up.
+        if pid is None and pid_file.exists():
+            pid = int(pid_file.read_text())
+        if pid is not None:
+            with suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGKILL)
 
 
 @pytest.mark.parametrize("host_uid", [501, 1000, 1001])
@@ -191,6 +264,7 @@ async def test_acceptance_reconciles_config_before_browser_continuity(
                 },
             },
             "knowledge_bases": {"history": {"path": str(history)}},
+            "models": {"default": {"provider": "openai", "id": "test-model"}},
         },
     )
     backend, client, _sync_calls = _backend(monkeypatch, tmp_path, config_text=config_text)
@@ -201,7 +275,11 @@ async def test_acceptance_reconciles_config_before_browser_continuity(
     )
     fixture = object.__new__(module.Fixture)
     fixture.config = Config.model_validate(yaml.safe_load(config_text))
-    fixture.paths = backend._runtime_paths
+    # The live fixture selects the Docker backend whose manager the patched lease returns.
+    fixture.paths = replace(
+        backend._runtime_paths,
+        process_env={**backend._runtime_paths.process_env, "MINDROOM_WORKER_BACKEND": "docker"},
+    )
     fixture.viewer = "@alice:example.org"
     fixture.room = "!room:example.org"
     fixture.agent = "@writer:example.org"

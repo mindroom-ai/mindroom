@@ -190,6 +190,21 @@ def event_ids_of_spans(
     return frozenset(str(row["event_id"]) for row in rows)
 
 
+def open_event_id(transaction: Transaction, principal_id: str, room_id: str, thread_id: str | None) -> str | None:
+    """Return the bound event of the newest unfinished reply in one conversation."""
+    row = transaction.fetchone(
+        """
+        SELECT event_id FROM reply_messages
+        WHERE principal_id = ? AND room_id = ? AND thread_id IS NOT DISTINCT FROM ?
+          AND event_id IS NOT NULL AND state IN (?, ?)
+        ORDER BY created_at_ns DESC, reply_id DESC
+        LIMIT 1
+        """,
+        (principal_id, room_id, thread_id, ReplyState.ACTIVE.value, ReplyState.PAUSED.value),
+    )
+    return None if row is None else str(row["event_id"])
+
+
 def depart_room(transaction: Transaction, principal_id: str, room_id: str, *, now_ns: int) -> None:
     """End the room's replies as its membership ends, without touching Matrix.
 
@@ -231,18 +246,20 @@ def naming_logical_source(transaction: Transaction, principal_id: str, event_id:
 def waiting_to_replay(transaction: Transaction, principal_id: str, event_ids: tuple[str, ...]) -> tuple[str, ...]:
     """Return the active replies no span runs whose last span left one of these sources pending."""
     placeholders = ", ".join("?" for _ in event_ids)
+    # Sorted here: an ORDER BY makes the planner walk every reply of the principal by its key.
     rows = transaction.fetchall(
         f"""
-        SELECT DISTINCT reply.reply_id FROM reply_span_sources AS source
-        JOIN reply_messages AS reply
-            ON reply.principal_id = source.principal_id AND reply.last_span_id = source.span_id
-        WHERE source.principal_id = ? AND source.role = 'pending' AND source.event_id IN ({placeholders})
-            AND reply.state = 'active' AND reply.current_span_id IS NULL
-        ORDER BY reply.reply_id
+        SELECT reply.reply_id FROM reply_messages AS reply
+        WHERE reply.principal_id = ? AND reply.state = 'active' AND reply.current_span_id IS NULL
+            AND EXISTS (
+                SELECT 1 FROM reply_span_sources AS source
+                WHERE source.principal_id = reply.principal_id AND source.span_id = reply.last_span_id
+                    AND source.role = 'pending' AND source.event_id IN ({placeholders})
+            )
         """,  # noqa: S608 - fixed placeholders
         (principal_id, *event_ids),
     )
-    return tuple(str(row["reply_id"]) for row in rows)
+    return tuple(sorted(str(row["reply_id"]) for row in rows))
 
 
 @dataclass(frozen=True, slots=True)
@@ -276,59 +293,70 @@ def take_deletion_endings(transaction: Transaction, principal_id: str) -> tuple[
     return tuple(sorted(endings, key=lambda ending: ending.reply_id))
 
 
-def forget_finished(transaction: Transaction, principal_id: str, *, before_ns: int, limit: int) -> int:
-    """Delete up to ``limit`` finished replies unchanged since ``before_ns``, with their spans; return how many.
+# Whether the finished reply `reply` is forgettable; the one parameter is ``before_ns``.
+_FORGETTABLE = """
+    reply.state IN ('completed', 'cancelled', 'failed', 'gone')
+      AND reply.updated_at_ns < ?
+      AND reply.redaction_pending_json IS NULL AND reply.owed_write_json IS NULL
+      AND NOT EXISTS (
+        SELECT 1 FROM approval_continuations AS continuation
+        JOIN reply_spans AS named ON named.principal_id = continuation.principal_id AND named.span_id = continuation.span_id
+        WHERE named.principal_id = reply.principal_id AND named.reply_id = reply.reply_id
+      )
+      AND (reply.stop_receipt_order IS NULL OR reply.stop_applied_receipt_order >= reply.stop_receipt_order)
+      AND NOT EXISTS (
+        SELECT 1 FROM matrix_delivery_outbox AS row
+        WHERE row.principal_id = reply.principal_id AND row.reply_id = reply.reply_id
+          AND row.acknowledged_event_id IS NULL AND row.retired = 0 AND row.permanent_failure_reason IS NULL
+      )
+"""
+
+
+def forgettable_replies(transaction: Transaction, principal_id: str, *, before_ns: int) -> tuple[str, ...]:
+    """Return the finished replies unchanged since ``before_ns`` that owe nothing.
 
     Only replies that owe nothing: no redaction, note, unsent row, or Stop still
     to apply, and that no continuation names, superseded or not: its cleanup
-    reads the reply. Pending Stops that old are dropped too.
+    reads the reply.
     """
     rows = transaction.fetchall(
-        """
-        SELECT reply.reply_id FROM reply_messages AS reply
-        WHERE reply.principal_id = ? AND reply.state IN ('completed', 'cancelled', 'failed', 'gone')
-          AND reply.updated_at_ns < ?
-          AND reply.redaction_pending_json IS NULL AND reply.owed_write_json IS NULL
-          AND NOT EXISTS (
-            SELECT 1 FROM approval_continuations AS continuation
-            JOIN reply_spans AS named ON named.principal_id = continuation.principal_id AND named.span_id = continuation.span_id
-            WHERE named.principal_id = reply.principal_id AND named.reply_id = reply.reply_id
-          )
-          AND (reply.stop_receipt_order IS NULL OR reply.stop_applied_receipt_order >= reply.stop_receipt_order)
-          AND NOT EXISTS (
-            SELECT 1 FROM matrix_delivery_outbox AS row
-            WHERE row.principal_id = reply.principal_id AND row.reply_id = reply.reply_id
-              AND row.acknowledged_event_id IS NULL AND row.retired = 0 AND row.permanent_failure_reason IS NULL
-          )
-        LIMIT ?
-        """,
-        (principal_id, before_ns, limit),
+        f"SELECT reply.reply_id FROM reply_messages AS reply WHERE reply.principal_id = ? AND {_FORGETTABLE}",  # noqa: S608
+        (principal_id, before_ns),
     )
-    reply_ids = tuple(str(row["reply_id"]) for row in rows)
-    if reply_ids:
-        placeholders = ", ".join("?" for _ in reply_ids)
-        for table in ("reply_span_sources", "reply_tool_calls"):
-            transaction.execute(
-                f"""
-                DELETE FROM {table} WHERE principal_id = ? AND span_id IN (
-                    SELECT span_id FROM reply_spans WHERE principal_id = ? AND reply_id IN ({placeholders})
-                )
-                """,  # noqa: S608 - fixed table names and placeholders
-                (principal_id, principal_id, *reply_ids),
+    return tuple(str(row["reply_id"]) for row in rows)
+
+
+# Whether one reply, by key, is still forgettable: a lookup by its primary key, never a walk of the finished replies.
+_STILL_FORGETTABLE = (
+    "SELECT 1 FROM reply_messages AS reply "  # noqa: S608 - a fixed predicate
+    f"WHERE reply.principal_id = ? AND reply.reply_id = ? AND {_FORGETTABLE}"
+)
+
+
+def forget_reply(transaction: Transaction, principal_id: str, *, before_ns: int, reply_id: str) -> bool:
+    """Delete one reply with its spans if it is still forgettable; return whether it went."""
+    if transaction.fetchone(_STILL_FORGETTABLE, (principal_id, reply_id, before_ns)) is None:
+        return False
+    for table in ("reply_span_sources", "reply_tool_calls"):
+        transaction.execute(
+            f"""
+            DELETE FROM {table} WHERE principal_id = ? AND span_id IN (
+                SELECT span_id FROM reply_spans WHERE principal_id = ? AND reply_id = ?
             )
-        transaction.execute(
-            f"DELETE FROM reply_spans WHERE principal_id = ? AND reply_id IN ({placeholders})",  # noqa: S608
-            (principal_id, *reply_ids),
+            """,  # noqa: S608 - fixed table names
+            (principal_id, principal_id, reply_id),
         )
-        transaction.execute(
-            f"DELETE FROM reply_messages WHERE principal_id = ? AND reply_id IN ({placeholders})",  # noqa: S608
-            (principal_id, *reply_ids),
-        )
+    transaction.execute("DELETE FROM reply_spans WHERE principal_id = ? AND reply_id = ?", (principal_id, reply_id))
+    transaction.execute("DELETE FROM reply_messages WHERE principal_id = ? AND reply_id = ?", (principal_id, reply_id))
+    return True
+
+
+def forget_pending_stops(transaction: Transaction, principal_id: str, *, before_ns: int) -> None:
+    """Drop Stops that have waited since before ``before_ns`` for a reply to bind their event."""
     transaction.execute(
         "DELETE FROM pending_reply_stops WHERE principal_id = ? AND created_at_ns < ?",
         (principal_id, before_ns),
     )
-    return len(reply_ids)
 
 
 def spans_in_room(
@@ -376,7 +404,7 @@ def with_pending_work(transaction: Transaction, principal_id: str) -> tuple[Repl
 
 
 def for_sources(transaction: Transaction, principal_id: str, event_ids: tuple[str, ...]) -> Reply | None:
-    """Return the most recently created reply a span of which answers any of these sources."""
+    """Return the most recently created reply whose last span answers any of these sources."""
     reply_id = reply_spans.newest_reply_id_for_sources(transaction, principal_id, event_ids)
     return None if reply_id is None else load(transaction, principal_id, reply_id)
 

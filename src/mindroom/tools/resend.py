@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     config_fields=[
         ConfigField(
             name="api_key",
+            env=("RESEND_API_KEY",),
             label="API Key",
             type="password",
             required=False,
@@ -52,7 +53,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["resend"],
-    docs_url="https://docs.agno.com/tools/toolkits/others/resend",
+    docs_url="https://docs.mindroom.chat/tools/messaging-and-social/#resend",
     function_names=("send_email",),
 )
 def resend_tools() -> type[ResendTools]:

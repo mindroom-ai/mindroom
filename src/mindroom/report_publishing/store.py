@@ -20,7 +20,7 @@ from mindroom.report_publishing.static_site import (
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
-_PUBLIC_REPORT_SLUG_RE = re.compile(r"^pub_[a-f0-9]{32}$")
+PUBLIC_REPORT_SLUG_RE = re.compile(r"^pub_[a-f0-9]{32}$")
 _ARTIFACT_KIND_HTML_FILE = "html_file"
 ARTIFACT_KIND_STATIC_SITE = "static_site"
 _REQUIRED_PUBLISHED_REPORT_FIELDS = frozenset(
@@ -230,16 +230,16 @@ def _published_report_from_json(data: dict[str, object]) -> PublishedReport:
 
 
 def _validate_public_report_slug(value: str) -> None:
-    if not _PUBLIC_REPORT_SLUG_RE.fullmatch(value):
-        msg = f"public report slug must match {_PUBLIC_REPORT_SLUG_RE.pattern}."
+    if not PUBLIC_REPORT_SLUG_RE.fullmatch(value):
+        msg = f"public report slug must match {PUBLIC_REPORT_SLUG_RE.pattern}."
         raise ReportPublishingError(msg)
 
 
 def _public_report_url(base_url: str | None, slug: str, *, artifact_kind: str) -> str | None:
-    if base_url is None or not base_url.strip():
+    if base_url is None:
         return None
     suffix = f"/reports/public/{slug}/" if artifact_kind == ARTIFACT_KIND_STATIC_SITE else f"/reports/public/{slug}"
-    return f"{base_url.rstrip('/')}{suffix}"
+    return f"{base_url}{suffix}"
 
 
 def _relative_artifact_path(artifact_path: Path, storage_root: Path) -> str:

@@ -27,10 +27,13 @@ from mindroom.event_journal.replies import (
     ApprovalEnded,
     Decide,
     ReplyCreation,
-    TurnCompleted,
+    ReplyStopped,
     WakeApproval,
 )
+from mindroom.final_delivery import Cancelled, Failed, FailureCause
+from mindroom.history.reply_compactions import ReplyCompactions
 from mindroom.logging_config import get_logger
+from mindroom.redaction import redact_sensitive_text
 from mindroom.reply_presentation import (
     AGENT_PLACEHOLDER,
     NoteKind,
@@ -56,6 +59,7 @@ from mindroom.tool_system.events import (
     remap_visible_tool_marker_indices,
     serialize_tool_trace,
 )
+from mindroom.tool_system.tool_function import ToolOutcome, ToolValue
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable, Iterable, Iterator, Mapping
@@ -64,7 +68,6 @@ if TYPE_CHECKING:
     from mindroom.event_journal import ApprovalContinuation, PrincipalStore
     from mindroom.event_journal.matrix_delivery import ReplyRowEnqueuer
     from mindroom.event_journal.replies import PostCommitEffect
-    from mindroom.turn_record import TurnRecord
 
 
 @dataclass
@@ -82,6 +85,16 @@ class SpanHandle:
     # The span's last direct progress edit that Matrix accepted and no durable
     # write has recorded yet.
     unconfirmed_progress: rl.ProgressConfirmation | None = None
+    # Set once the reply shows an event in the room, which the span's Stop button goes on.
+    reply_shown: asyncio.Event = field(default_factory=asyncio.Event, repr=False, compare=False)
+    # The automatic compactions this span's answer ran, which every write of it carries, its terminal note included.
+    compactions: ReplyCompactions = field(default_factory=ReplyCompactions, repr=False, compare=False)
+    # The active model payload this span's writes carry until settled run metadata replaces it.
+    reply_model: dict[str, str] | None = None
+
+    def __post_init__(self) -> None:
+        """Know from the start whether the claimed reply already shows an event."""
+        self.note_reply(self.reply)
 
     @property
     def exited(self) -> bool:
@@ -98,11 +111,21 @@ class SpanHandle:
         """Return the reply this span writes."""
         return self.reply.reply_id
 
+    def stopped(self) -> bool:
+        """Return whether a Stop reached this span, whose calls then start no background job."""
+        return self.runtime.spans.stopped(self.span_id)
+
+    def note_reply(self, reply: rl.Reply) -> None:
+        """Remember the reply as last committed or read."""
+        self.reply = reply
+        if reply.event_id is not None:
+            self.reply_shown.set()
+
     def note(self, applied: AppliedTransition) -> None:
         """Remember what a committed transition left, for later renders."""
         transition = applied.transition
         if transition.reply is not None and transition.reply.reply_id == self.reply.reply_id:
-            self.reply = transition.reply
+            self.note_reply(transition.reply)
         for span in transition.spans:
             if span.span_id == self.span.span_id:
                 self.span = span
@@ -117,11 +140,14 @@ class SpanHandle:
         *,
         team_state: Mapping[str, object] | None = None,
     ) -> Segment:
-        """Return this span's answer as one segment, its markers counted from one."""
+        """Return this span's answer as one segment, its markers counted from one.
+
+        A stream that continues a stopped attempt starts with what that attempt showed; a whole answer is the span's own.
+        """
         resumed = self.resumed
         own_text = text
         own_trace = tool_trace
-        if resumed is not None:
+        if resumed is not None and text.startswith(resumed.resumed_text):
             own_text = text.removeprefix(resumed.resumed_text)
             resumed_count = len(resumed.tool_trace)
             own_trace = tool_trace[resumed_count:]
@@ -168,6 +194,18 @@ def current_span() -> SpanHandle | None:
     return None if slot is None else slot.handle
 
 
+def current_reply_event_id() -> str | None:
+    """Return the event the current span's reply shows, if any."""
+    handle = current_span()
+    return None if handle is None else handle.reply.event_id
+
+
+def current_span_stopped() -> bool:
+    """Return whether a Stop of its user reached the span the current task executes."""
+    handle = current_span()
+    return handle is not None and handle.stopped()
+
+
 def current_slot() -> SpanSlot | None:
     """Return the slot of the span scope the current task runs in, if any."""
     return _current_slot.get()
@@ -181,9 +219,13 @@ _INTERRUPTED_OUTCOMES = frozenset(
 )
 
 
+# The interrupted outcomes a restart causes: the process died, or it shut down and released the reply.
+_RESTART_OUTCOMES = frozenset({rl.SpanOutcome.LOST, rl.SpanOutcome.RELEASED})
+
+
 def _entry_json(entry: ToolTraceEntry) -> str:
-    """Return one tool call as the reply records store it."""
-    (encoded,) = serialize_tool_trace((entry,))
+    """Return one tool call as the reply records store it, with whether it failed."""
+    (encoded,) = serialize_tool_trace((entry,), include_internal=True)
     return json.dumps(encoded)
 
 
@@ -215,8 +257,12 @@ class _SpanToolCalls:
         if handle is None:
             return
         if isinstance(result, BaseException):
-            result = f"{type(result).__name__}: {result}"
-        _, entry = format_tool_combined(tool_name, dict(args), result)
+            result, is_error = f"{type(result).__name__}: {result}", True
+        else:
+            # A value that carries text and media is recorded as the text the model reads.
+            is_error = isinstance(result, ToolOutcome) and result.is_error
+            result = result.content if isinstance(result, ToolValue) else result
+        _, entry = format_tool_combined(tool_name, dict(args), result, is_error=is_error)
         try:
             await self.runtime.store.replies.record_tool_call(
                 span_id=handle.span_id,
@@ -242,10 +288,18 @@ class ClaimRefused(Enum):
     RETIRED = "retired"
 
 
-# As long as the handled-turn ledger keeps a turn: nothing reaches a finished
-# reply after its turn is forgotten.
+# As long as turn retention keeps a turn: nothing reaches a finished reply after
+# its turn is forgotten.
 _FINISHED_REPLY_RETENTION_NS = 30 * 24 * 60 * 60 * 1_000_000_000
-_FORGET_BATCH = 500
+
+# Bot instances this process replaced to apply a config change. The process
+# kept running, so the notes of the replies they left name the config change.
+_REPLACED_FOR_CONFIG_CHANGE: set[str] = set()
+
+
+def replaced_for_config_change(generation: str | None) -> bool:
+    """Return whether this process replaced the bot instance ``generation`` to apply a config change."""
+    return generation in _REPLACED_FOR_CONFIG_CHANGE
 
 
 @dataclass
@@ -256,12 +310,10 @@ class ReplyRuntime:
     entity_name: str
     generation: str
     retry_sources: Callable[[str, tuple[str, ...]], None]
-    # Tells the turn ledger about a turn a reply's settlement already recorded answered.
-    complete_turn: Callable[[TurnRecord], Awaitable[object]]
-    # Keeps a pending approval's conversation busy, for the approvals a start finds.
-    hold_conversation: Callable[[ApprovalContinuation], None]
-    # Releases the conversation the ended approval held, and settles what its reply owes.
-    approval_ended: Callable[[ApprovalEnded], None]
+    # Settles what the reply of an ended approval owes, given the reply's id.
+    approval_ended: Callable[[str], None]
+    # Refuses approvals to the jobs a stopped reply's calls started, given the reply's id.
+    reply_stopped: Callable[[str], Awaitable[None]]
     # The task of each span this bot instance executes, which a Stop cancels.
     spans: SpanRegistry = field(default_factory=SpanRegistry)
     # Sources whose claim waited until the reply could be claimed, by reply.
@@ -274,22 +326,24 @@ class ReplyRuntime:
     async def run_effects(self, effects: tuple[PostCommitEffect, ...]) -> None:
         """Run what committed reply transitions left for after their commit.
 
-        Span cancels run last: the acknowledgement that applies a Stop can run
-        in the span's own task, whose next await the cancel interrupts. The
-        in-memory effects run even when an awaited one fails, so a failed read
-        cannot keep a stopped span running or a conversation held.
+        Span cancels run last: a Stop acknowledgement can run in its own span, whose next await cancellation interrupts.
+        Run in-memory effects even when an awaited effect fails, so spans stop and waiting claims wake.
+        A Stop first marks its span so pending admissions cannot launch after awaited effects.
         """
+        for effect in effects:
+            if isinstance(effect, rl.CancelSpan) and effect.by_stop:
+                self.spans.stop(effect.span_id)
         try:
             for effect in effects:
-                if isinstance(effect, TurnCompleted):
-                    await self.complete_turn(effect.record)
-                elif isinstance(effect, WakeApproval):
+                if isinstance(effect, WakeApproval):
                     await self._wake_fenced_approval(effect.approval_id)
+                elif isinstance(effect, ReplyStopped):
+                    await self.reply_stopped(effect.reply_id)
         finally:
             for effect in effects:
                 if isinstance(effect, ApprovalEnded):
                     self.claim_may_proceed(effect.reply_id)
-                    self.approval_ended(effect)
+                    self.approval_ended(effect.reply_id)
             for effect in effects:
                 if isinstance(effect, rl.CancelSpan):
                     self.spans.cancel(effect.span_id, cancel_source="user_stop" if effect.by_stop else None)
@@ -299,13 +353,13 @@ class ReplyRuntime:
         stored = await self.store.replies.tool_calls(span_ids)
         return tuple(deserialize_tool_trace([json.loads(entry) for entry in stored]))
 
-    async def interrupted_tool_calls(self, handle: SpanHandle) -> tuple[ToolTraceEntry, ...]:
-        """Return the tool calls of the attempts this span takes over: the latest spans that left its turn unanswered.
+    async def _interrupted(self, handle: SpanHandle) -> list[rl.Span]:
+        """Return the attempts this span takes over, oldest first: the latest spans that left its turn unanswered.
 
         A regeneration redoes its edit's turn, so it takes over only the earlier attempts of the same edit.
         """
         regeneration = handle.span.kind is rl.SpanKind.REGENERATION
-        interrupted: list[str] = []
+        interrupted: list[rl.Span] = []
         for span in reversed(await self.store.replies.spans(handle.reply_id)):
             if span.span_id == handle.span_id:
                 continue
@@ -313,24 +367,42 @@ class ReplyRuntime:
                 regeneration and span.delivery_id != handle.span.delivery_id
             ):
                 break
-            interrupted.append(span.span_id)
-        return await self._span_tool_calls(tuple(reversed(interrupted)))
+            interrupted.append(span)
+        return interrupted[::-1]
+
+    async def interrupted_tool_calls(self, handle: SpanHandle) -> tuple[ToolTraceEntry, ...]:
+        """Return the tool calls of the attempts this span takes over (``_interrupted``)."""
+        return await self._span_tool_calls(tuple(span.span_id for span in await self._interrupted(handle)))
+
+    async def restart_interruptions(self, handle: SpanHandle) -> int:
+        """Return how many of the attempts this span takes over a restart cut short.
+
+        An attempt that paused for an approval, or that a newer one superseded, ended on its own.
+        """
+        return sum(span.outcome in _RESTART_OUTCOMES for span in await self._interrupted(handle))
 
     async def finish_approval(self, approval_id: str) -> bool:
         """Finish a paused run once its FINAL is terminal, settling its turn; return whether it finished."""
-        return await run_coroutine_until_complete(self._ran(self.store.finish_approval_continuation(approval_id)))
+        return await run_coroutine_until_complete(
+            self._ran(self.store.approvals.finish_approval_continuation(approval_id)),
+        )
 
     async def release_approval(self, approval_id: str, expected_generation: int) -> bool:
         """Release an interrupted run's approval as ``rl.approval_released`` decides; return whether it was released."""
         return await run_coroutine_until_complete(
-            self._ran(self.store.release_approval_continuation(approval_id, expected_generation=expected_generation)),
+            self._ran(
+                self.store.approvals.release_approval_continuation(
+                    approval_id,
+                    expected_generation=expected_generation,
+                ),
+            ),
         )
 
     async def _ran(self, ending: Awaitable[tuple[PostCommitEffect, ...] | None]) -> bool:
         """Run what an ended approval's commit left, returning whether it ended.
 
         Callers run it to completion even when they are cancelled, so a
-        committed end always releases the conversation its approval held.
+        committed end always retries the claims that waited for it and settles what its reply owes.
         """
         effects = await ending
         if effects is None:
@@ -340,7 +412,7 @@ class ReplyRuntime:
 
     async def _wake_fenced_approval(self, approval_id: str) -> None:
         """Run a fenced approval's failure settlement."""
-        continuation = await self.store.approval_continuation(approval_id)
+        continuation = await self.store.approvals.approval_continuation(approval_id)
         if continuation is None:
             return
         # Its source worker settles it once whatever owns the source lets go of it.
@@ -399,7 +471,8 @@ class ReplyRuntime:
     async def deletions_ended(self) -> tuple[str, ...]:
         """Cancel the spans source deletions ended and wake the approvals they cancelled; return the replies they ended.
 
-        Each tombstone's projection ended its replies, and fenced the approval
+        Projecting each deletion -- a redaction, or an event that arrived
+        already redacted -- ended its replies, and fenced the approval
         that held one, in its own commit and recorded the span it cancelled.
         The debt of the replies it ended is now due.
         """
@@ -416,30 +489,31 @@ class ReplyRuntime:
         return tuple(ending.reply_id for ending in endings)
 
     async def forget_finished(self) -> None:
-        """Drop the records of replies finished as long ago as the handled-turn ledger forgets their turns."""
-        before_ns = time.time_ns() - _FINISHED_REPLY_RETENTION_NS
-        while await self.store.replies.forget_finished(before_ns=before_ns, limit=_FORGET_BATCH) == _FORGET_BATCH:
-            pass
+        """Drop the records of replies finished as long ago as turn retention forgets their turns."""
+        await self.store.replies.forget_finished(before_ns=time.time_ns() - _FINISHED_REPLY_RETENTION_NS)
 
     async def take_ownership(self) -> None:
         """Make this bot instance the owner of its principal's replies, before it writes any of them."""
         await self.store.replies.write_generation(self.generation)
 
-    async def start(self) -> None:
+    def retire_for_config_change(self) -> None:
+        """Record that a config reload replaces this instance, for the one taking over its replies."""
+        _REPLACED_FOR_CONFIG_CHANGE.add(self.generation)
+
+    async def start(self) -> frozenset[str]:
         """Make this bot instance the owner of its principal's replies, then end what older instances left running.
 
         Runs before journal replay: replay claims continue the replies whose
         sources are still pending, and the notes this owes are delivered by the
-        outbox recovery after each room syncs.
+        outbox recovery after each room syncs. Returns the sources of the
+        replies left to continue, whose answer began before this instance did.
         """
         await self.take_ownership()
         # No span a deletion ended before this start survived it; recovery delivers what their replies owe.
         await self.store.replies.take_deletion_endings()
         for applied in await self.store.replies.owner_lost(self.generation, now_ns=time.time_ns()):
             await self.run_effects(applied.post_commit)
-        # A message to a conversation an approval still holds waits for that approval, after a restart too.
-        for continuation in await self.store.pending_approvals():
-            self.hold_conversation(continuation)
+        return await self.store.replies.continued_sources()
 
     @asynccontextmanager
     async def span_scope(self) -> AsyncIterator[SpanSlot]:
@@ -457,7 +531,6 @@ class ReplyRuntime:
     async def claim(
         self,
         *,
-        delivery_id: str,
         sources: ResponseSources,
         room_id: str,
         thread_id: str | None,
@@ -467,10 +540,9 @@ class ReplyRuntime:
         existing_event_id: str | None = None,
         interactive_span_id: str | None = None,
     ) -> SpanHandle | ClaimRefused:
-        """Claim the reply one span answers, or say why no span opened."""
+        """Claim the reply one span answers, its rows named by its sources, or say why no span opened."""
         empty = Presentation(placeholder=placeholder, show_tool_calls=show_tool_calls)
         request = await self._new_request(
-            delivery_id=delivery_id,
             sources=sources,
             room_id=room_id,
             thread_id=thread_id,
@@ -529,12 +601,16 @@ class ReplyRuntime:
             assert transition.reply is not None, "only a reply with earlier writes defers a claim"
             await self._wait_to_claim(transition.reply.reply_id, room_id, pending)
             return ClaimRefused.DEFERRED
-        return _handle_for(self, transition.reply, transition.claimed, empty)
+        claimed = transition.claimed
+        # A replay's note names why the span it continues stopped: the one claimed before it.
+        spans = await self.store.replies.spans(claimed.reply_id) if claimed.kind is rl.SpanKind.REPLAY else ()
+        stopped = [span.bot_generation for span in spans if span.span_id != claimed.span_id]
+        config_change = bool(stopped) and replaced_for_config_change(stopped[-1])
+        return _handle_for(self, transition.reply, claimed, empty, config_change=config_change)
 
     async def _new_request(
         self,
         *,
-        delivery_id: str,
         sources: ResponseSources,
         room_id: str,
         thread_id: str | None,
@@ -544,7 +620,7 @@ class ReplyRuntime:
     ) -> rl.ClaimRequest:
         return rl.ClaimRequest(
             span_id=_new_id(),
-            delivery_id=delivery_id,
+            delivery_id=sources.delivery_id,
             sources=sources,
             bot_generation=self.generation,
             now_ns=time.time_ns(),
@@ -570,15 +646,18 @@ class ReplyRuntime:
         earlier writes are unresolved, which retry the sources once they resolve.
         """
         empty = Presentation(placeholder=placeholder, show_tool_calls=continuation.show_tool_calls)
-        claim = await self._new_request(
-            delivery_id=continuation.source_event_ids[0],
-            sources=continuation.sources,
-            room_id=continuation.room_id,
-            thread_id=continuation.thread_id,
-            empty=empty,
+        # A resume writes the run's final answer under its paused span's name, where the continuation looks for it.
+        claim = replace(
+            await self._new_request(
+                sources=continuation.sources,
+                room_id=continuation.room_id,
+                thread_id=continuation.thread_id,
+                empty=empty,
+            ),
+            delivery_id=continuation.final_delivery_id,
         )
         with self._expecting((claim.span_id,)):
-            claimed, applied = await self.store.claim_approval_resume(continuation.approval_id, claim=claim)
+            claimed, applied = await self.store.approvals.claim_approval_resume(continuation.approval_id, claim=claim)
             if applied is not None:
                 applied = await self.committed(applied)
         if applied is None:
@@ -601,7 +680,6 @@ class ReplyRuntime:
     async def acknowledgement(
         self,
         *,
-        delivery_id: str,
         pending: tuple[str, ...],
         logical: tuple[str, ...],
         discovery: tuple[str, ...],
@@ -614,7 +692,6 @@ class ReplyRuntime:
         No task runs for its span until the selection's answer claims it, which a Stop or departure before then refuses.
         """
         claim = await self._new_request(
-            delivery_id=delivery_id,
             sources=ResponseSources(pending, logical, discovery),
             room_id=room_id,
             thread_id=thread_id,
@@ -634,7 +711,13 @@ class ReplyRuntime:
             handle,
         )
 
-    async def write_ahead(self, handle: SpanHandle, presentation: Presentation) -> ProgressPermission:
+    async def write_ahead(
+        self,
+        handle: SpanHandle,
+        presentation: Presentation,
+        *,
+        shown_live: bool = False,
+    ) -> ProgressPermission:
         """Record the presentation of the next direct progress edit, and say whether to send it."""
         applied = await self.store.replies.write_ahead(
             reply_id=handle.reply_id,
@@ -643,8 +726,9 @@ class ReplyRuntime:
             previous=handle.unconfirmed_progress,
             active_generation=self.generation,
             now_ns=time.time_ns(),
+            shown_live=shown_live,
         )
-        if applied.transition.outcome is rl.Outcome.DEFERRED:
+        if applied.transition.outcome in {rl.Outcome.DEFERRED, rl.Outcome.STOPPED}:
             return ProgressPermission.DEFER
         if not applied.transition.applied:
             await self.run_effects(applied.post_commit)
@@ -658,7 +742,14 @@ def _new_id() -> str:
     return uuid4().hex
 
 
-def _handle_for(runtime: ReplyRuntime, reply: rl.Reply, span: rl.Span, empty: Presentation) -> SpanHandle:
+def _handle_for(
+    runtime: ReplyRuntime,
+    reply: rl.Reply,
+    span: rl.Span,
+    empty: Presentation,
+    *,
+    config_change: bool = False,
+) -> SpanHandle:
     """Build the handle a claimed span runs with, from the records alone."""
     canonical = decode_presentation(reply.presentation)
     shown = decode_presentation(reply.possibly_shown) if reply.possibly_shown is not None else canonical
@@ -668,10 +759,14 @@ def _handle_for(runtime: ReplyRuntime, reply: rl.Reply, span: rl.Span, empty: Pr
     if span.kind is rl.SpanKind.APPROVAL_RESUME:
         return SpanHandle(runtime=runtime, span=span, reply=reply, base=continued_by(canonical, span.span_id))
     # A replay continues below what the stopped attempt may have shown: its work, then the restart note.
-    restarted = after_restart(shown)
+    restarted = after_restart(shown, config_change=config_change)
     work = restarted.segments[0] if restarted.segments else None
     base = restarted if work is not None else replace(empty, segments=())
-    resumed = None if work is None else UnfinishedStreamedReply(visible_text=work.text, tool_trace=work.tool_trace)
+    resumed = (
+        None
+        if work is None
+        else UnfinishedStreamedReply(work.text, work.tool_trace, restart_note=restarted.segments[-1].text)
+    )
     return SpanHandle(
         runtime=runtime,
         span=span,
@@ -686,10 +781,11 @@ def _handle_for(runtime: ReplyRuntime, reply: rl.Reply, span: rl.Span, empty: Pr
 
 
 class ReplyWriteRefusedError(Exception):
-    """A reply write's rule refused the prepared payload; nothing was written.
+    """A reply write's rule recorded no row for the prepared payload, so nothing is sent.
 
     ``Recompute`` means a Stop, deletion, or departure committed after the
-    payload was rendered; ``Stale`` means the span no longer owns the reply.
+    payload was rendered; ``Stale`` means the span no longer owns the reply;
+    an applied transition ended the span without a row, as a restore does.
     """
 
     def __init__(self, transition: rl.Transition) -> None:
@@ -914,36 +1010,43 @@ class _NotedEnd:
     note: Segment
 
 
-def interruption_note(cancel_source: CancelSource) -> NoteKind:
+# The note of each failure whose kind, not an error text, says what failed.
+_FAILURE_NOTES = {
+    FailureCause.APPROVAL_NOT_STARTED: NoteKind.APPROVAL_FAILED,
+    FailureCause.DELIVERY_FAILED: NoteKind.DELIVERY_FAILED,
+    FailureCause.NOTHING_TO_SHOW: NoteKind.NOTHING_TO_SHOW,
+}
+
+
+def _interruption_note(cancel_source: CancelSource) -> NoteKind:
     """Return the note a reply shows below what it showed when a restart or another cancellation cut it short."""
     return NoteKind.RESTART if cancel_source == "sync_restart" else NoteKind.INTERRUPTED
 
 
 def interrupted_end(
     reply: rl.Reply,
+    ending: Cancelled | Failed,
     *,
-    cancel_source: CancelSource | None,
-    failure_reason: str | None,
     delivery_started: bool,
 ) -> _NotedEnd | None:
     """Return the noted end of a span whose response was cancelled or failed with a settled outcome.
 
-    ``None`` means the span is released, so its sources retry. ``cancel_source``
-    is ``None`` for a failure. A recorded Stop ends the reply cancelled, as the
-    rules decide for every exit. A failure ends the reply failed with its error
-    note, and its turn is not retried. An interruption of a reply with no event
-    yet leaves Matrix untouched and its sources retry; before delivery starts,
-    the reply shows the interruption's note while its sources retry, and once
-    delivery started, it ends failed with that note.
+    ``None`` means the span is released, so its sources retry. A recorded Stop
+    ends the reply cancelled, as the rules decide for every exit. A failure ends
+    the reply failed with its note, and its turn is not retried; an error's note
+    shows its detail redacted, and never an internal code. An interruption of a
+    reply with no event yet leaves Matrix untouched and its sources retry;
+    before delivery starts, the reply shows the interruption's note while its
+    sources retry, and once delivery started, it ends failed with that note.
     """
     if reply.unapplied_stop:
         return _NotedEnd(rl.ReplyState.CANCELLED, note_segment(NoteKind.CANCELLED))
-    if cancel_source is None:
-        return _NotedEnd(
-            rl.ReplyState.FAILED,
-            note_segment(NoteKind.ERROR, format_error_note(failure_reason or "interrupted")),
-        )
+    if isinstance(ending, Failed):
+        if (kind := _FAILURE_NOTES.get(ending.cause)) is not None:
+            return _NotedEnd(rl.ReplyState.FAILED, note_segment(kind))
+        detail = "" if ending.detail is None else redact_sensitive_text(ending.detail)
+        return _NotedEnd(rl.ReplyState.FAILED, note_segment(NoteKind.ERROR, format_error_note(detail)))
     if reply.event_id is None:
         return None
-    note = note_segment(interruption_note(cancel_source))
+    note = note_segment(_interruption_note(ending.source))
     return _NotedEnd(rl.ReplyState.FAILED if delivery_started else rl.ReplyState.ACTIVE, note)

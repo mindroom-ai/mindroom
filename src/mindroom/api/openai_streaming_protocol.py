@@ -2,34 +2,29 @@
 
 Owns the protocol-formatting side of the OpenAI-compatible API: SSE chunk
 assembly, per-stream completion state, tool-call trace encoding, error-body
-shaping, error-string detection, and the finalizer-aware response classes.
+shaping, and the finalizer-aware response classes.
 Input is core stream chunk events; output is wire format. No agent, team,
 or config imports.
 """
 
 from __future__ import annotations
 
-import re
 import time
+from collections.abc import AsyncGenerator
 from dataclasses import dataclass, field
 from html import escape
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING
 from uuid import uuid4
 
-from agno.run.agent import RunContentEvent, RunErrorEvent, ToolCallCompletedEvent, ToolCallStartedEvent
-from agno.run.team import ToolCallCompletedEvent as TeamToolCallCompletedEvent
-from agno.run.team import ToolCallStartedEvent as TeamToolCallStartedEvent
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import JSONResponse, Response, StreamingResponse
 from pydantic import BaseModel
 
-from mindroom.tool_system.events import format_tool_completed_event, format_tool_started_event
+from mindroom.llm.events import TextDelta, ToolCompleted, ToolStarted
+from mindroom.tool_system.events import FailedReply, format_tool_completed_event, format_tool_started_event
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Awaitable, Callable
 
-    from agno.models.response import ToolExecution
-    from agno.run.agent import RunOutputEvent
-    from agno.run.team import TeamRunOutputEvent
     from starlette.background import BackgroundTask
     from starlette.types import Receive, Scope, Send
 
@@ -43,86 +38,69 @@ SSE_DONE = "data: [DONE]\n\n"
 # ---------------------------------------------------------------------------
 
 
-async def _run_openai_response_backgrounds(
-    *,
-    completed: bool,
-    response_error: BaseException | None,
-    completion_background: BackgroundTask | None,
-    always_background: BackgroundTask | None,
-) -> None:
-    """Run completion-scoped and always-run OpenAI response backgrounds."""
-    finalizer_error: BaseException | None = None
-    if always_background is not None:
-        try:
-            await always_background()
-        except BaseException as error:
-            finalizer_error = error
+class _FinalizedResponse(Response):
+    """A response whose own background runs only after a completed send, and whose ``always_background`` always runs.
 
-    background_error: BaseException | None = None
-    if completed and completion_background is not None:
-        try:
-            await completion_background()
-        except BaseException as error:
-            background_error = error
-
-    if response_error is not None:
-        raise response_error
-    if background_error is not None:
-        raise background_error
-    if finalizer_error is not None:
-        raise finalizer_error
-
-
-class OpenAIJSONResponse(JSONResponse):
-    """JSON response with separate completion-scoped and always-run finalizers."""
-
-    always_background: BackgroundTask | None = None
-
-    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        """Send the response, then run completion-scoped and always-run finalizers."""
-        completion_background = self.background
-        self.background = None
-        completed = False
-        response_error: BaseException | None = None
-        try:
-            await super().__call__(scope, receive, send)
-        except BaseException as error:
-            response_error = error
-        else:
-            completed = True
-        await _run_openai_response_backgrounds(
-            completed=completed,
-            response_error=response_error,
-            completion_background=completion_background,
-            always_background=self.always_background,
-        )
-
-
-class OpenAIStreamingResponse(StreamingResponse):
-    """Streaming response with completion-aware compaction and always-run finalizers."""
+    ``completion_predicate``, when set, decides whether the send completed, since a stream can end early either way.
+    """
 
     always_background: BackgroundTask | None = None
     completion_predicate: Callable[[], bool] | None = None
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        """Stream the response, then run completion-scoped and always-run finalizers."""
+        """Send the response, then run the always-run finalizer and, after a completed send, the completion one."""
         completion_background = self.background
         self.background = None
-        completed = False
         response_error: BaseException | None = None
         try:
             await super().__call__(scope, receive, send)
         except BaseException as error:
             response_error = error
-            completed = self.completion_predicate() if self.completion_predicate is not None else False
-        else:
-            completed = self.completion_predicate() if self.completion_predicate is not None else True
-        await _run_openai_response_backgrounds(
-            completed=completed,
-            response_error=response_error,
-            completion_background=completion_background,
-            always_background=self.always_background,
-        )
+        try:
+            await self._close_body()
+        except BaseException as error:
+            response_error = response_error or error
+        completed = self.completion_predicate() if self.completion_predicate is not None else response_error is None
+        finalizer_error: BaseException | None = None
+        if self.always_background is not None:
+            try:
+                await self.always_background()
+            except BaseException as error:
+                finalizer_error = error
+        background_error: BaseException | None = None
+        if completed and completion_background is not None:
+            try:
+                await completion_background()
+            except BaseException as error:
+                background_error = error
+        if response_error is not None:
+            raise response_error
+        if background_error is not None:
+            raise background_error
+        if finalizer_error is not None:
+            raise finalizer_error
+
+    async def _close_body(self) -> None:
+        """Close what the response sent from, before the finalizers release what it held; a whole body has nothing."""
+
+
+class OpenAIJSONResponse(_FinalizedResponse, JSONResponse):
+    """JSON response with separate completion-scoped and always-run finalizers."""
+
+
+class OpenAIStreamingResponse(_FinalizedResponse, StreamingResponse):
+    """Streaming response with completion-aware compaction and always-run finalizers."""
+
+    # Closes the stream the body reads from, which a body that never started, such as when sending the headers
+    # failed, cannot close itself.
+    close_stream: Callable[[], Awaitable[None]] | None = None
+
+    async def _close_body(self) -> None:
+        """Close a stream the client left early, so the turn cut short is stored while its session is still held."""
+        if isinstance(self.body_iterator, AsyncGenerator):
+            await self.body_iterator.aclose()
+        if self.close_stream is not None:
+            await self.close_stream()
 
 
 # ---------------------------------------------------------------------------
@@ -157,61 +135,6 @@ def error_response(
         error=_OpenAIError(message=message, type=error_type, param=param, code=code),
     )
     return OpenAIJSONResponse(status_code=status_code, content=body.model_dump())
-
-
-# ---------------------------------------------------------------------------
-# Error-string detection
-# ---------------------------------------------------------------------------
-
-
-def is_error_response(text: str) -> bool:
-    """Detect error strings returned by ai_response() / stream_agent_response().
-
-    Checks for:
-    - Emoji-prefixed errors from get_user_friendly_error_message()
-    - [agent_name] bracket prefix followed by error emoji
-    - Raw provider error strings (e.g. "Error code: 404 - ...")
-    - Raw provider JSON error payloads
-    """
-    error_prefixes = ("❌", "⏱️", "⏰", "⚠️")
-    stripped = text.lstrip()
-    if not stripped:
-        return False
-
-    # Check for [agent_name] prefix followed by error emoji
-    if stripped.startswith("["):
-        bracket_end = stripped.find("]")
-        if bracket_end != -1:
-            after_bracket = stripped[bracket_end + 1 :].lstrip()
-            return any(after_bracket.startswith(p) for p in error_prefixes)
-
-    if any(stripped.startswith(p) for p in error_prefixes):
-        return True
-
-    # Raw provider errors (agno may surface these as response content)
-    return _looks_like_raw_provider_error(stripped)
-
-
-_RAW_PROVIDER_ERROR_PREFIX_RE = re.compile(
-    r"^(?:[\w.]+(?:error|exception):\s*)?error\s*code:\s*",
-    re.IGNORECASE,
-)
-_RAW_PROVIDER_JSON_PREFIXES = (
-    '{"error":',
-    "{'error':",
-    '{"type":"error"',
-    '{"type": "error"',
-    "{'type': 'error'",
-)
-
-
-def _looks_like_raw_provider_error(text: str) -> bool:
-    """Detect raw provider error payloads surfaced as text."""
-    lowered = text.casefold()
-    if _RAW_PROVIDER_ERROR_PREFIX_RE.search(text):
-        return True
-    # Some providers return error payloads directly as serialized JSON-ish text.
-    return lowered.startswith(_RAW_PROVIDER_JSON_PREFIXES)
 
 
 # ---------------------------------------------------------------------------
@@ -266,32 +189,19 @@ class CompletionStreamState:
         return cls(completion_id=new_completion_id(), created=int(time.time()), model=model)
 
 
-def _chunk_json(
-    completion_id: str,
-    created: int,
-    model: str,
-    delta: dict,
-    finish_reason: str | None = None,
-) -> str:
-    """Build a JSON string for a single SSE chunk."""
-    chunk = _ChatCompletionChunk(
-        id=completion_id,
-        created=created,
-        model=model,
-        choices=[
-            _ChatCompletionChunkChoice(delta=delta, finish_reason=finish_reason),
-        ],
-    )
-    return chunk.model_dump_json()
-
-
 def sse_chunk(
     state: CompletionStreamState,
     delta: dict,
     finish_reason: str | None = None,
 ) -> str:
     """Build one framed SSE line for a streaming chunk."""
-    return f"data: {_chunk_json(state.completion_id, state.created, state.model, delta=delta, finish_reason=finish_reason)}\n\n"
+    chunk = _ChatCompletionChunk(
+        id=state.completion_id,
+        created=state.created,
+        model=state.model,
+        choices=[_ChatCompletionChunkChoice(delta=delta, finish_reason=finish_reason)],
+    )
+    return f"data: {chunk.model_dump_json()}\n\n"
 
 
 # ---------------------------------------------------------------------------
@@ -299,104 +209,23 @@ def sse_chunk(
 # ---------------------------------------------------------------------------
 
 
-def _extract_tool_call_id(tool: ToolExecution) -> str:
-    """Extract the required tool call identifier for streaming tool events."""
-    tool_call_id = str(tool.tool_call_id).strip()
-    if not tool_call_id:
-        msg = "Streaming tool events require a non-empty tool_call_id"
-        raise ValueError(msg)
-    return tool_call_id
-
-
-def _allocate_next_tool_id(tool_state: ToolStreamState) -> str:
-    tool_id = str(tool_state.next_tool_id)
-    tool_state.next_tool_id += 1
-    return tool_id
-
-
-def _resolve_started_tool_id(tool: ToolExecution, tool_state: ToolStreamState) -> str:
-    tool_call_id = _extract_tool_call_id(tool)
-
-    existing_tool_id = tool_state.tool_ids_by_call_id.get(tool_call_id)
-    if existing_tool_id is not None:
-        return existing_tool_id
-
-    tool_id = _allocate_next_tool_id(tool_state)
-    tool_state.tool_ids_by_call_id[tool_call_id] = tool_id
-    return tool_id
-
-
-def _resolve_completed_tool_id(tool: ToolExecution, tool_state: ToolStreamState) -> str:
-    tool_call_id = _extract_tool_call_id(tool)
-
-    existing_tool_id = tool_state.tool_ids_by_call_id.pop(tool_call_id, None)
-    if existing_tool_id is not None:
-        return existing_tool_id
-
-    return _allocate_next_tool_id(tool_state)
-
-
-def _inject_tool_metadata(tool_message: str, *, tool_id: str, state: Literal["start", "done"]) -> str:
-    return f'<tool id="{tool_id}" state="{state}">{tool_message}</tool>'
-
-
-def _escape_tool_payload_text(text: str) -> str:
-    return escape(text, quote=True)
-
-
-def _format_openai_tool_call_display(tool_name: str, args_preview: str | None) -> str:
-    safe_tool_name = _escape_tool_payload_text(tool_name)
-    if not args_preview:
-        return f"{safe_tool_name}()"
-    return f"{safe_tool_name}({_escape_tool_payload_text(args_preview)})"
-
-
-def _format_openai_stream_tool_message(
-    tool: ToolExecution,
-    *,
-    completed: bool,
-) -> str:
-    if completed:
-        _, trace = format_tool_completed_event(tool)
-    else:
-        _, trace = format_tool_started_event(tool)
-    if trace is None:
-        return ""
-
-    call_display = _format_openai_tool_call_display(trace.tool_name, trace.args_preview)
-    if not completed:
-        return call_display
-
-    if trace.result_preview is None:
-        return f"{call_display}\n"
-    return f"{call_display}\n{_escape_tool_payload_text(trace.result_preview)}"
-
-
-def format_stream_tool_event(
-    event: RunOutputEvent | TeamRunOutputEvent,
-    tool_state: ToolStreamState,
-) -> str | None:
-    """Format tool events as inline text for the SSE stream with stable IDs."""
-    if isinstance(event, (ToolCallStartedEvent, TeamToolCallStartedEvent)):
-        tool = event.tool
-        if tool is None:
-            return None
-        tool_msg = _format_openai_stream_tool_message(tool, completed=False)
-        tool_id = _resolve_started_tool_id(tool, tool_state)
-        state: Literal["start", "done"] = "start"
-    elif isinstance(event, (ToolCallCompletedEvent, TeamToolCallCompletedEvent)):
-        tool = event.tool
-        if tool is None:
-            return None
-        tool_msg = _format_openai_stream_tool_message(tool, completed=True)
-        tool_id = _resolve_completed_tool_id(tool, tool_state)
-        state = "done"
-    else:
-        return None
-
-    if not tool_msg:
-        return None
-    return _inject_tool_metadata(tool_msg, tool_id=tool_id, state=state)
+def format_stream_tool_event(event: ToolStarted | ToolCompleted, tool_state: ToolStreamState) -> str:
+    """Format one tool event as an inline tool block whose id the call's start and completion share."""
+    tool_call_id = event.call.tool_call_id
+    started = isinstance(event, ToolStarted)
+    ids = tool_state.tool_ids_by_call_id
+    tool_id = ids.get(tool_call_id) if started else ids.pop(tool_call_id, None)
+    if tool_id is None:
+        # A completion that was never announced still gets a fresh id.
+        tool_id = str(tool_state.next_tool_id)
+        tool_state.next_tool_id += 1
+        if started:
+            ids[tool_call_id] = tool_id
+    trace = format_tool_started_event(event.call)[1] if started else format_tool_completed_event(event.call)
+    message = f"{escape(trace.tool_name, quote=True)}({escape(trace.args_preview or '', quote=True)})"
+    if not started:
+        message += f"\n{escape(trace.result_preview or '', quote=True)}"
+    return f'<tool id="{tool_id}" state="{"start" if started else "done"}">{message}</tool>'
 
 
 def finalize_pending_tools(tool_state: ToolStreamState) -> str | None:
@@ -416,18 +245,10 @@ def finalize_pending_tools(tool_state: ToolStreamState) -> str | None:
 
 
 def extract_stream_text(event: AIStreamChunk, tool_state: ToolStreamState) -> str | None:
-    """Extract text content from a stream event."""
-    if isinstance(event, RunContentEvent) and event.content:
-        return str(event.content)
-    if isinstance(event, str):
-        return event
-    return format_stream_tool_event(event, tool_state)
-
-
-def extract_agent_stream_failure(event: AIStreamChunk) -> str | None:
-    """Return terminal agent-stream failure text when the chunk represents one."""
-    if isinstance(event, RunErrorEvent):
-        return str(event.content or "Agent execution failed.")
-    if isinstance(event, str) and is_error_response(event):
-        return event
+    """Return the wire text of one agent stream chunk: reply text, a failed turn's reply, or a tool block."""
+    if isinstance(event, TextDelta | FailedReply):
+        return event.text
+    if isinstance(event, ToolStarted | ToolCompleted):
+        return format_stream_tool_event(event, tool_state)
+    # ``RunFinished``: its text already streamed as deltas, or the caller sends it as the completed body.
     return None

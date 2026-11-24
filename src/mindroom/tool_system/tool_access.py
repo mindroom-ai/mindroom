@@ -9,12 +9,10 @@ from jsonschema import Draft202012Validator
 from referencing import Registry
 from referencing.exceptions import NoSuchResource
 
-from mindroom.tool_system.tool_schema_cache import cached_processed_schema
-
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
-    from agno.tools.function import Function
+    from mindroom.llm.provider import ToolSpec
 
 
 class _InvalidToolArgumentsError(ValueError):
@@ -36,27 +34,9 @@ class ToolKey:
     function: str
 
 
-@dataclass(frozen=True, slots=True)
-class ToolDescriptor:
-    """Selected tool details loaded only when a caller asks for its schema."""
-
-    key: ToolKey
-    description: str
-    input_schema: dict[str, object]
-    instructions: tuple[str, ...]
-
-
-def function_schema(function: Function) -> dict[str, Any]:
-    """Return a processed input schema without mutating the live function."""
-    if function.skip_entrypoint_processing or function.entrypoint is None:
-        return function.parameters
-    strict = function.strict is True
-    snapshot = cached_processed_schema(function, strict=strict)
-    if snapshot is not None:
-        return snapshot.parameters
-    prepared = function.model_copy(deep=True)
-    prepared.process_entrypoint(strict=strict)
-    return prepared.parameters
+def tool_definition(tool: ToolSpec) -> dict[str, object]:
+    """Return the name, description, and input schema the model is shown for one tool definition."""
+    return {"name": tool.name, "description": tool.description or "", "parameters": dict(tool.parameters)}
 
 
 def _no_remote_schema(uri: str) -> Never:

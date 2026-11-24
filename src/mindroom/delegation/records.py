@@ -7,43 +7,42 @@ import json
 import os
 import re
 import threading
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, date, datetime
 from functools import partial
 from itertools import islice
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal, cast
-from uuid import uuid4
 from weakref import WeakValueDictionary
 
 from mindroom.atomic_file import atomic_write_bytes_at, atomic_write_file_at
 from mindroom.background_tasks import run_blocking_until_complete
 from mindroom.constants import primary_records_dir
+from mindroom.delegation.legacy_records import WorkspaceOnlyRecord, read_workspace_only_record
+from mindroom.delegation.state import TERMINAL_CHILD_STATUSES
 from mindroom.durable_write import create_directory_durable, write_json_file_durable
 from mindroom.logging_config import get_logger
 from mindroom.path_confinement import open_directory_within_root, open_regular_file_at, write_file_within_root
 from mindroom.redaction import redact_sensitive_data
-from mindroom.runtime_resolution import resolve_agent_storage
+from mindroom.runtime_resolution import record_private_instance_owner, resolve_agent_storage
+from mindroom.tool_system.output_files import current_tool_workdir
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
-    agent_workspace_root_path,
     parse_tool_execution_identity_payload,
     serialize_tool_execution_identity,
 )
-from mindroom.workspaces import resolve_agent_workspace_from_state_path
 
 if TYPE_CHECKING:
     from collections.abc import Iterator, Mapping
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
-    from mindroom.delegation.state import SubagentPersona
+    from mindroom.delegation.state import DelegationTerminalStatus, SubagentPersona
 
 logger = get_logger(__name__)
 
 type _DelegationActiveStatus = Literal["running", "paused"]
-type DelegationTerminalStatus = Literal["completed", "failed", "cancelled", "denied"]
 type _DelegationEventKind = Literal[
     "delegation_started",
     "delegation_finished",
@@ -73,8 +72,11 @@ _MAX_EVENTS = 65536
 _FINISH_EVENT_HEADROOM_BYTES = 1 << 20
 # A new run.json keeps room for the three inline values and timestamps finish adds.
 _FINISH_RUN_HEADROOM_BYTES = 3 * _MAX_INLINE_VALUE_BYTES + 256
+# The state snapshot, run.json, and the receipt catch up on each status change, every this many events, and each time
+# the event log grows past a multiple of this many bytes, which bounds the log a load replays past the snapshot.
+_REFRESH_EVERY_EVENTS = 32
+_REFRESH_EVERY_BYTES = 256 << 10
 _ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}")
-_TERMINAL_STATUSES = frozenset({"completed", "failed", "cancelled", "denied"})
 # Writers of one record exclude each other in this process, without a lock file worker code could hold.
 _RECORD_LOCKS: WeakValueDictionary[Path, threading.Lock] = WeakValueDictionary()
 _RECORD_LOCKS_GUARD = threading.Lock()
@@ -97,8 +99,8 @@ class DelegationMetadata:
     source_thread_id: str | None
     model_name: str | None
     task: str
+    subagent_id: str
     parent_delegation_id: str | None = None
-    subagent_id: str | None = None
     previous_delegation_id: str | None = None
     persona: SubagentPersona | None = None
 
@@ -188,8 +190,15 @@ class DelegationRecordHandle:
         return f"{self.locator.child_agent_name}:{self.scoped_path}"
 
     def to_receipt(self) -> str:
-        """Render a concise caller-visible record reference."""
-        return f"Delegation {self.locator.delegation_id} record: {self._record_reference}"
+        """Render a concise caller-visible record reference.
+
+        Beside a workdir the caller's tools resolve relative paths there, so the record is named by its absolute path in
+        the child's workspace.
+        """
+        reference = (
+            self._record_reference if current_tool_workdir() is None else str(self.child_workspace / self.scoped_path)
+        )
+        return f"Delegation {self.locator.delegation_id} record: {reference}"
 
 
 @dataclass(frozen=True)
@@ -205,7 +214,7 @@ class DelegationEvent:
 
 @dataclass
 class _RecordState:
-    """One record's committed state, kept beside its event log in primary-only storage."""
+    """One record's committed state; state.json holds a snapshot of it that the event log beside it extends."""
 
     # The run.json document the workspace receives.
     run: dict[str, Any]
@@ -226,7 +235,7 @@ class DelegationRecordOwner:
         *,
         caller_execution_identity: ToolExecutionIdentity | None,
         child_execution_identity: ToolExecutionIdentity | None,
-        delegation_id: str | None = None,
+        delegation_id: str,
     ) -> DelegationRecordHandle:
         """Create an initial record and caller-scoped receipt before child execution."""
         return await run_blocking_until_complete(
@@ -242,6 +251,10 @@ class DelegationRecordOwner:
     async def reopen(self, locator: DelegationRecordLocator) -> DelegationRecordHandle:
         """Re-resolve and validate one record from its persisted identity."""
         return await run_blocking_until_complete(self._reopen, locator)
+
+    async def highest_event_index(self, handle: DelegationRecordHandle, prefix: str) -> int:
+        """Return the largest integer a committed event id carries after ``prefix``, or 0 when none does."""
+        return await run_blocking_until_complete(self._highest_event_index, handle, prefix)
 
     async def append_event(
         self,
@@ -278,10 +291,10 @@ class DelegationRecordOwner:
         *,
         caller_execution_identity: ToolExecutionIdentity | None,
         child_execution_identity: ToolExecutionIdentity | None,
-        delegation_id: str | None,
+        delegation_id: str,
     ) -> DelegationRecordHandle:
         _validate_metadata(metadata)
-        resolved_id = _validated_id(delegation_id or uuid4().hex)
+        resolved_id = _validated_id(delegation_id)
         timestamp = _utc_timestamp()
         locator = DelegationRecordLocator(
             delegation_id=resolved_id,
@@ -292,6 +305,17 @@ class DelegationRecordOwner:
             child_execution_identity=child_execution_identity,
         )
         handle = self._resolve_handle(locator)
+        # A new private child's first data can be this record, written before the child runs.
+        record_private_instance_owner(
+            metadata.child_agent_name,
+            resolve_agent_storage(
+                metadata.child_agent_name,
+                self.config,
+                self.runtime_paths,
+                execution_identity=child_execution_identity,
+            ).execution,
+            self.runtime_paths,
+        )
         run = redact_sensitive_data(
             {
                 "schema_version": _SCHEMA_VERSION,
@@ -330,6 +354,7 @@ class DelegationRecordOwner:
                     event_id="delegation_started",
                 ),
             )
+            _write_state(handle, state)
             _write_exports(handle, state, line)
         return handle
 
@@ -339,14 +364,25 @@ class DelegationRecordOwner:
             _load_state(handle)
         return handle
 
+    def _highest_event_index(self, handle: DelegationRecordHandle, prefix: str) -> int:
+        handle = self._validated_handle(handle)
+        with _record_lock(handle):
+            state = _load_state(handle)
+            if isinstance(state, WorkspaceOnlyRecord):
+                return 0
+            indexes = (_event_index(json.loads(line)["event_id"], prefix) for line in _committed_lines(handle, state))
+            return max(indexes, default=0)
+
     def _append_event(self, handle: DelegationRecordHandle, event: DelegationEvent) -> None:
         handle = self._validated_handle(handle)
         with _record_lock(handle):
             state = _load_state(handle)
-            if state is None:
+            if isinstance(state, WorkspaceOnlyRecord):
                 return
             if event.event_id is not None and _event_id_digest(event.event_id) in state.event_ids:
-                _write_exports(handle, state)
+                _sync_log(handle)
+                # A replay repairs the event export a crash may have left short, and a replayed status change the views.
+                _write_exports(handle, state, refresh=event.status is not None)
                 return
             _ensure_active(state.run)
             sequence = state.run["event_count"] + 1
@@ -359,7 +395,16 @@ class DelegationRecordOwner:
                 status=event.status,
                 event_id=event.event_id,
             )
-            _write_exports(handle, state, _commit_event(handle, state, payload), artifacts)
+            line = _commit_event(handle, state, payload)
+            refresh = (
+                event.status is not None
+                or sequence % _REFRESH_EVERY_EVENTS == 0
+                or (state.log_bytes - len(line)) // _REFRESH_EVERY_BYTES != state.log_bytes // _REFRESH_EVERY_BYTES
+            )
+            # The exports go first: an artifact exists only in them, and a failed snapshot leaves the event committed.
+            _write_exports(handle, state, line, artifacts, refresh=refresh)
+            if refresh:
+                _write_state(handle, state)
 
     def _finish(
         self,
@@ -370,18 +415,18 @@ class DelegationRecordOwner:
         error: object | None,
         usage: object | None,
     ) -> None:
-        if status not in _TERMINAL_STATUSES:
+        if status not in TERMINAL_CHILD_STATUSES:
             msg = f"Invalid delegation terminal status: {status}"
             raise ValueError(msg)
         handle = self._validated_handle(handle)
         with _record_lock(handle):
             state = _load_state(handle)
-            if state is None:
+            if isinstance(state, WorkspaceOnlyRecord):
                 return
             line = b""
             artifacts: dict[str, bytes] = {}
             # The first terminal outcome stands, so a later finish, even with another status, only refreshes exports.
-            if state.run["status"] not in _TERMINAL_STATUSES:
+            if state.run["status"] not in TERMINAL_CHILD_STATUSES:
                 sequence = state.run["event_count"] + 1
                 terminal_data, artifacts = _redacted_event_data(
                     sequence=sequence,
@@ -396,8 +441,12 @@ class DelegationRecordOwner:
                     event_id="delegation_finished",
                 )
                 line = _commit_event(handle, state, payload, terminal=True)
+            else:
+                _sync_log(handle)
             # Every finish, a replayed one included, rewrites the exports and renders transcript.md.
             _write_exports(handle, state, line, artifacts, final=True)
+            if line:
+                _write_state(handle, state)
 
     def _resolve_handle(self, locator: DelegationRecordLocator) -> DelegationRecordHandle:
         delegation_id = _validated_id(locator.delegation_id)
@@ -468,11 +517,7 @@ def _parse_optional_execution_identity(
 ) -> ToolExecutionIdentity | None:
     if payload is None:
         return None
-    return parse_tool_execution_identity_payload(
-        payload,
-        strict=True,
-        error_prefix=f"Delegation locator {field_name}",
-    )
+    return parse_tool_execution_identity_payload(payload, error_prefix=f"Delegation locator {field_name}")
 
 
 def _validate_metadata(metadata: DelegationMetadata) -> None:
@@ -497,16 +542,7 @@ def _resolve_workspace(
     )
     # Record lookup must not seed templates or reconcile knowledge with a
     # retained storage-only config during cancellation or restart recovery.
-    workspace = resolve_agent_workspace_from_state_path(
-        agent_name,
-        config,
-        runtime_paths=runtime_paths,
-        state_storage_path=resolved.state_root,
-        use_state_storage_path=resolved.execution.policy.private_workspace_enabled,
-    )
-    if workspace is None:
-        return agent_workspace_root_path(runtime_paths.storage_root, agent_name), resolved.state_root
-    return workspace.root, resolved.state_root
+    return resolved.workspace(config, runtime_paths).root, resolved.state_root
 
 
 def _utc_timestamp() -> str:
@@ -529,22 +565,28 @@ def _record_lock(handle: DelegationRecordHandle) -> Iterator[None]:
         yield
 
 
-def _load_state(handle: DelegationRecordHandle) -> _RecordState | None:
-    """Return the record's committed state, or None for a record that predates primary-owned state."""
+def _load_state(handle: DelegationRecordHandle) -> _RecordState | WorkspaceOnlyRecord:
+    """Return the record's committed state, or the marker of a record that predates primary-owned state.
+
+    The event log is the commit point: the state snapshot plus each whole event logged after it.
+    """
     try:
         payload = (handle.state_dir / _STATE_FILE).read_bytes()
     except FileNotFoundError:
-        # LEGACY_COMPAT: Delegation records whose working state lived only in their workspace files.
-        # Legacy format: A record directory below the child workspace's .mindroom/delegations/ with no state.json below
-        # tracking/; selected when the state file is missing while that workspace directory exists.
-        # Last legacy release: v2026.10.101; replacement: the next release keeps each record's state below tracking/
-        # and writes run.json, events.jsonl, and transcript.md as exports of it.
-        # Handling: Such a record's operations return without reading or writing its workspace files, so a delegation
-        # still in flight at the upgrade settles and its record stays as it was; a record found in neither place is missing.
-        # Coverage: tests/test_delegation_records.py::test_a_record_started_before_primary_state_is_left_as_it_was.
-        with _record_directory(handle):
-            return None
-    return _RecordState(**json.loads(payload))
+        return read_workspace_only_record(handle.child_workspace, handle.scoped_path)
+    state = _RecordState(**json.loads(payload))
+    with (handle.state_dir / _EVENT_LOG).open("rb") as log:
+        log.seek(state.log_bytes)
+        for line in log:
+            # A torn or garbled tail never counts, and the next append truncates it.
+            try:
+                event = json.loads(line) if line.endswith(b"\n") else None
+            except ValueError:
+                event = None
+            if not isinstance(event, dict) or event.get("sequence") != state.run["event_count"] + 1:
+                break
+            _fold_event(state, event, len(line))
+    return state
 
 
 def _event_id_digest(event_id: str) -> str:
@@ -552,12 +594,19 @@ def _event_id_digest(event_id: str) -> str:
     return hashlib.blake2b(event_id.encode("utf-8", "surrogatepass"), digest_size=16).hexdigest()
 
 
+def _event_index(event_id: object, prefix: str) -> int:
+    """Return the integer ``event_id`` carries after ``prefix``, or 0 for an id of another shape."""
+    if not isinstance(event_id, str) or not event_id.startswith(prefix):
+        return 0
+    suffix = event_id[len(prefix) :]
+    return int(suffix) if suffix.isascii() and suffix.isdigit() else 0
+
+
 @contextmanager
-def _record_directory(handle: DelegationRecordHandle, *, create: bool = False) -> Iterator[int]:
-    """Pin the workspace record directory by a no-follow walk from the child workspace."""
-    if create:
-        handle.child_workspace.mkdir(parents=True, exist_ok=True)
-    with open_directory_within_root(handle.child_workspace, handle.scoped_path, create=create, mode=0o700) as record_fd:
+def _record_directory(handle: DelegationRecordHandle) -> Iterator[int]:
+    """Pin the workspace record directory by a no-follow walk from the child workspace, creating what is missing."""
+    handle.child_workspace.mkdir(parents=True, exist_ok=True)
+    with open_directory_within_root(handle.child_workspace, handle.scoped_path, create=True, mode=0o700) as record_fd:
         yield record_fd
 
 
@@ -578,7 +627,7 @@ def _commit_event(
     *,
     terminal: bool = False,
 ) -> bytes:
-    """Append one event to the primary log, then commit the state that counts it, and return the event's line."""
+    """Commit one event by a durable append to the primary log, count it in the state, and return its line."""
     line = (json.dumps(payload, ensure_ascii=False, sort_keys=True) + "\n").encode("utf-8")
     log_limit = _MAX_EVENT_LOG_BYTES if terminal else _MAX_EVENT_LOG_BYTES - _FINISH_EVENT_HEADROOM_BYTES
     event_limit = _MAX_EVENTS if terminal else _MAX_EVENTS - 1
@@ -591,22 +640,58 @@ def _commit_event(
         raise DelegationRecordLimitError(msg)
     descriptor = os.open(handle.state_dir / _EVENT_LOG, os.O_WRONLY | os.O_APPEND | os.O_CREAT | os.O_CLOEXEC, 0o600)
     try:
-        # The state file is the commit point, so an append whose state never committed is dropped first.
+        # Bytes past the committed events, a torn or failed append, are dropped first.
         os.ftruncate(descriptor, state.log_bytes)
-        _write_all(descriptor, line)
-        os.fsync(descriptor)
+        try:
+            _write_all(descriptor, line)
+            os.fsync(descriptor)
+        except BaseException:
+            # An append that failed must not count when the record is next loaded, after a power loss either.
+            with suppress(OSError):
+                os.ftruncate(descriptor, state.log_bytes)
+                os.fsync(descriptor)
+            raise
     finally:
         os.close(descriptor)
-    _apply_event(state.run, payload)
-    state.log_bytes += len(line)
-    if payload["event_id"] is not None:
-        state.event_ids.append(_event_id_digest(payload["event_id"]))
-    write_json_file_durable(handle.state_dir / _STATE_FILE, asdict(state), strict_atomic_replace=True)
+    _fold_event(state, payload, len(line))
     return line
 
 
+def _sync_log(handle: DelegationRecordHandle) -> None:
+    """Flush the primary log before acknowledging an event it already holds, which a crashed writer may not have."""
+    descriptor = os.open(handle.state_dir / _EVENT_LOG, os.O_WRONLY | os.O_APPEND | os.O_CLOEXEC)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _write_state(handle: DelegationRecordHandle, state: _RecordState) -> None:
+    """Snapshot the state, so a load replays only the events logged after it."""
+    write_json_file_durable(handle.state_dir / _STATE_FILE, asdict(state), strict_atomic_replace=True)
+
+
+def _fold_event(state: _RecordState, event: Mapping[str, Any], line_bytes: int) -> None:
+    """Fold one committed event of ``line_bytes`` log bytes into the state and its run view."""
+    run = state.run
+    run["event_count"] = event["sequence"]
+    run["updated_at"] = event["timestamp"]
+    if event["status"] is not None:
+        run["status"] = event["status"]
+    if event["kind"] == "delegation_finished":
+        terminal_data = event["data"]
+        run["status"] = terminal_data["status"]
+        run["finished_at"] = event["timestamp"]
+        run["output"] = terminal_data["output"]
+        run["error"] = terminal_data["error"]
+        run["usage"] = terminal_data["usage"]
+    state.log_bytes += line_bytes
+    if event["event_id"] is not None:
+        state.event_ids.append(_event_id_digest(event["event_id"]))
+
+
 def _ensure_active(run: Mapping[str, Any]) -> None:
-    if run["status"] in _TERMINAL_STATUSES:
+    if run["status"] in TERMINAL_CHILD_STATUSES:
         msg = f"Delegation record is already terminal: {run['delegation_id']}"
         raise ValueError(msg)
 
@@ -631,21 +716,6 @@ def _event_payload(
     }
 
 
-def _apply_event(run: dict[str, Any], event: Mapping[str, Any]) -> None:
-    """Fold one committed event into the run view."""
-    run["event_count"] = event["sequence"]
-    run["updated_at"] = event["timestamp"]
-    if event["status"] is not None:
-        run["status"] = event["status"]
-    if event["kind"] == "delegation_finished":
-        terminal_data = event["data"]
-        run["status"] = terminal_data["status"]
-        run["finished_at"] = event["timestamp"]
-        run["output"] = terminal_data["output"]
-        run["error"] = terminal_data["error"]
-        run["usage"] = terminal_data["usage"]
-
-
 def _write_exports(
     handle: DelegationRecordHandle,
     state: _RecordState,
@@ -653,18 +723,21 @@ def _write_exports(
     artifacts: Mapping[str, bytes] | None = None,
     *,
     final: bool = False,
+    refresh: bool = True,
 ) -> None:
-    """Rewrite the workspace exports and the caller's receipt from the committed state, never reading them back.
+    """Write the workspace exports and the caller's receipt from the committed state, never reading them back.
 
+    The event export is appended for each event; run.json and the receipt are rewritten only with ``refresh``.
     Worker code can replace these files or their directories at will, so a failed write is only logged.
     """
     try:
-        with _record_directory(handle, create=True) as record_fd:
+        with _record_directory(handle) as record_fd:
             if artifacts:
                 with open_directory_within_root(record_fd, "artifacts", create=True, mode=0o700) as artifacts_fd:
                     for artifact_name, encoded in artifacts.items():
                         atomic_write_bytes_at(artifacts_fd, artifact_name, encoded)
-            atomic_write_bytes_at(record_fd, "run.json", _json_bytes(state.run))
+            if refresh:
+                atomic_write_bytes_at(record_fd, "run.json", _json_bytes(state.run))
             if final or not _append_export(record_fd, line, size_before=state.log_bytes - len(line)):
                 with atomic_write_file_at(record_fd, _EVENT_LOG) as export:
                     export.writelines(_committed_lines(handle, state))
@@ -672,6 +745,8 @@ def _write_exports(
                 _write_transcript(handle, record_fd, state)
     except (OSError, ValueError) as exc:
         logger.warning("delegation_record_export_failed", delegation_id=handle.locator.delegation_id, error=str(exc))
+    if not refresh:
+        return
     try:
         _write_receipt(handle, state.run)
     except (OSError, ValueError) as exc:
@@ -743,6 +818,7 @@ def _write_receipt(
         "delegation_id": handle.locator.delegation_id,
         "caller_agent_name": handle.locator.caller_agent_name,
         "child_agent_name": handle.locator.child_agent_name,
+        "subagent_id": run["subagent_id"],
         "status": run["status"],
         "record_reference": handle._record_reference,
         "started_at": run["started_at"],

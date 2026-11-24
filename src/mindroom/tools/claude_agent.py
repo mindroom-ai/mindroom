@@ -14,6 +14,7 @@ if TYPE_CHECKING:
 @register_tool_with_metadata(
     name="claude_agent",
     requires_primary_runtime=True,
+    requires_conversation=True,
     display_name="Claude Agent SDK",
     description="Run persistent Claude coding sessions with tool-use and subagents",
     category=ToolCategory.DEVELOPMENT,
@@ -102,7 +103,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["claude-agent-sdk"],
-    docs_url="https://platform.claude.com/docs/en/agent-sdk/python",
+    docs_url="https://docs.mindroom.chat/tools/agent-orchestration/#claude_agent",
     function_names=(
         "claude_end_session",
         "claude_interrupt",
@@ -110,6 +111,7 @@ if TYPE_CHECKING:
         "claude_session_status",
         "claude_start_session",
     ),
+    workspace_writers=("claude_send", "claude_start_session"),
 )
 def claude_agent_tools() -> type[ClaudeAgentTools]:
     """Return tools for managing persistent Claude Agent SDK sessions."""

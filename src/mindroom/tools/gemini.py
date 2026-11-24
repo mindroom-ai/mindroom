@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     config_fields=[
         ConfigField(
             name="api_key",
+            env=("GOOGLE_API_KEY",),
             label="API Key",
             type="password",
             required=False,
@@ -40,6 +41,7 @@ if TYPE_CHECKING:
         ),
         ConfigField(
             name="project_id",
+            env=("GOOGLE_CLOUD_PROJECT",),
             label="Project ID",
             type="text",
             required=False,
@@ -47,6 +49,7 @@ if TYPE_CHECKING:
         ),
         ConfigField(
             name="location",
+            env=("GOOGLE_CLOUD_LOCATION",),
             label="Location",
             type="text",
             required=False,
@@ -89,7 +92,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["google-genai"],
-    docs_url="https://docs.agno.com/tools/toolkits/models/gemini",
+    docs_url="https://docs.mindroom.chat/tools/ai-and-generation/#gemini",
     function_names=("generate_image", "generate_video"),
 )
 def gemini_tools() -> type[MindRoomGeminiTools]:

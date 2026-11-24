@@ -4,17 +4,26 @@ icon: lucide/messages-square
 
 # Threads, Replies & Participation
 
-This page covers how agents group replies into threads or one room conversation, when agents answer in threads with several people, how agents can opt into judging untagged messages, what happens to messages sent while an agent is still working, and how edits and restarts affect replies.
+This page covers how agents group replies into threads or one room conversation, whether a message must mention an agent or team to start a conversation, the settings a room's moderators change in the room itself, when agents answer in threads with several people, how agents can opt into judging untagged messages, what happens to messages sent while an agent is still working, how an agent hears about the room's other threads, and how edits and restarts affect replies.
 See also [Routing & Responder Selection](router.md), [Access Control](../authorization.md), and [Logs & Monitoring](../deployment/operational-log-events.md).
 
 ## Thread Mode Resolution
 
 Each agent's `thread_mode` and `room_thread_modes` fields (see [Agent Configuration](agents.md)) choose between Matrix threads and one continuous conversation per room.
-A room override set with [`!thread_mode`](#thread_mode) takes precedence for every agent, team, and the router in that room.
-Without one, an agent uses the `room_thread_modes` entry matching the current room by Matrix room ID, room key, or alias, and otherwise its `thread_mode`.
+A room override set with [`!thread_mode`](#thread_mode) takes precedence for every agent and team in that room, and for routing there.
+Without one, an agent uses the `room_thread_modes` entry matching the current room by Matrix room ID, room key, or a managed room's full alias, and otherwise its `thread_mode`.
 
 A team uses its members' mode for the room when all members agree, and `thread` when they differ.
-The router uses the mode shared by all agents relevant to the room, including agents that join through `teams.<name>.rooms`, and `thread` when they differ.
+Routing uses the mode shared by all agents relevant to the room, including agents that join through `teams.<name>.rooms`, and `thread` when they differ.
+
+MindRoom publishes each managed room's effective reply placement in room state event `io.mindroom.thread_mode`, with an empty state key and content `{"mode": "room"}`, `{"mode": "thread"}`, or `{"mode": "mixed"}`.
+`room` means all joined responding agents and teams use the main timeline, `thread` means all use threads, and `mixed` means both modes are present.
+Rooms without joined responders are left unchanged.
+When a room has configured responders, other visiting agents and teams do not affect its mode.
+One MindRoom account in the room, the one with the highest power level there, updates this state during setup and reconciliation, after configuration or thread mode override changes, when it joins the room, and when responders join or leave, so clients can choose the appropriate conversation view.
+MindRoom writes the event only when its current value differs from the effective mode.
+Setting or resetting `!thread_mode` reconciles the resulting mode; `show` only reads the override.
+Unavailable room-state permissions do not prevent setup or replies.
 
 ### `!thread_mode`
 
@@ -33,8 +42,72 @@ Show or switch how future agent replies are grouped in the current Matrix room.
 Room-mode conversations are not included in [thread exports](../thread-exports.md).
 `!thread_mode thread` uses Matrix threads for separate conversations in this room.
 `!thread_mode reset` (also `clear`) removes the room override so agents use their configured `thread_mode` and `room_thread_modes` again.
+When no MindRoom account in the room may send state events, the command changes nothing and answers `I need moderator rights in this room to change the thread mode.`
 Only Matrix room admins can set or reset the override; others get `Room admin only.`
-The override is stored in MindRoom's runtime state under `mindroom_data/tracking`, not in `config.yaml`, so it works when config is static or read-only.
+[Plugin routes](../plugins.md#http-routes) change the override as this command does, for room admins only.
+The override is the room's `thread_mode` [room setting](#room-settings), so it works when config is static or read-only.
+
+## Reply Mode
+
+A room's reply mode decides whether a message that mentions no agent or team can start a conversation.
+Set it with `rooms.<key>.reply_mode` (see [Room policy](../rooms.md#room-policy)) or with [`!reply_mode`](#reply_mode).
+
+- `auto` (default): the room's only agent or team, or the one routing picks, answers such a message, as described in [Routing & Responder Selection](router.md#how-routing-works) and [Multi-Human Thread Protection](#multi-human-thread-protection).
+- `mentions`: no agent or team answers such a message, and none is routed, unless it is in a thread an agent or team already replied in or is still answering, where the rules below apply as in `auto`.
+
+```yaml
+rooms:
+  lobby:
+    reply_mode: mentions
+```
+
+A message that mentions an agent or team is answered the same way in both modes, and mentions count as described in [Multi-Human Thread Protection](#multi-human-thread-protection).
+Editing a message that got no answer to add a mention does not get one; send a new message that mentions the agent or team. A message still waiting behind a reply in progress is read with its latest edit, so an edit there that adds a mention does count.
+Scheduled tasks, hooks, and external triggers are not affected, and a direct-message room follows its reply mode like any other room.
+With `thread_mode: room`, every message is room-level, so each one needs a mention in a `mentions` room.
+
+### `!reply_mode`
+
+Show or switch the reply mode of the current Matrix room.
+
+```
+!reply_mode
+!reply_mode show
+!reply_mode mentions
+!reply_mode auto
+!reply_mode reset
+```
+
+`!reply_mode` and `!reply_mode show` (also `list` or `status`) show the mode the room uses and whether it is an override.
+`!reply_mode mentions` and `!reply_mode auto` set an override that takes precedence over `rooms.<key>.reply_mode`.
+`!reply_mode reset` (also `clear`) removes the override so the configured mode applies again.
+Only Matrix room admins can set or reset the override; others get `Room admin only.`
+[Plugin routes](../plugins.md#http-routes) change the override as this command does, for room admins only.
+The override is the room's `reply_mode` [room setting](#room-settings).
+An agent or team in the room answers `!reply_mode`, so the command works in any room, such as a direct-message room with one agent; it answers that it needs moderator rights when the room lets no MindRoom account send that state.
+
+## Room Settings
+
+Members with permission to write room state can change these settings in the room itself, without editing `config.yaml`.
+Each is an `io.mindroom.room_settings` state event with the state key below and content `{"value": "<value>"}`; content `{}` clears it.
+
+| State key | Value | What it sets | Chat command |
+|---|---|---|---|
+| `reply_mode` | `auto` or `mentions` | The room's [reply mode](#reply-mode), over `rooms.<key>.reply_mode` | [`!reply_mode`](#reply_mode) |
+| `thread_mode` | `thread` or `room` | The [thread mode](#thread-mode-resolution) of every agent and team in the room, over their `thread_mode` and `room_thread_modes` | [`!thread_mode`](#thread_mode) |
+| `model` | A `models:` key, or `key@level` for one of its [reasoning levels](models.md#reasoning-levels) | The room's [default model](models.md#model-overrides-in-chat) for every agent and team and for routing, over `room_models` | [`!room_model`](models.md#room_model) |
+| `thread_summary_model` | A `models:` key, or `key@level` | The model that writes the room's [thread titles](../tools/matrix-and-attachments.md#automatic-thread-summaries), over `room_thread_summary_models` | None |
+| `thread_summary_instructions` | Text | Extra rules for the room's [thread titles](../tools/matrix-and-attachments.md#automatic-thread-summaries) | None |
+| `agent_instructions` | Text (up to 2,000 characters) | Extra instructions passed to every agent and team answering in the room (rendered through `ROOM_INSTRUCTIONS_TEMPLATE`; grants no permissions) | None |
+
+MindRoom Chat sets them from the room settings dialog, and any client may send the events.
+They fall under the room's `state_default` power level (normally 50, i.e., moderators and admins by default) unless the room sets a power level for `io.mindroom.room_settings`, and agent tools cannot write them.
+The chat commands set the same events through a MindRoom account in the room, for Matrix room admins only.
+A `model` or `thread_summary_model` that names no model in `models:` is ignored until the config defines that model, and `!room_model` reports it as unavailable.
+Agents take a changed `reply_mode`, `thread_mode`, or `model` as soon as their sync shows it, and read them again before handling a room's next event when the last read is more than ten minutes old; the two thread title settings are read each time a title is written.
+`agent_instructions` is read on each chat turn and each cascaded or Live-delegated call reply, while Realtime and Live direct-speech sessions read it at call start (from the call's originating room when started from a chat room or thread), so an edit applies to those direct-speech sessions from the next call.
+The settings live in the room, so they also apply to a room without a `rooms` entry.
+A `!reply_mode`, `!thread_mode`, or `!room_model` override an older MindRoom stored under `mindroom_data/tracking` moves into the room's setting the first time an agent reads a room that has none.
 
 ## Threading (MSC3440)
 
@@ -43,10 +116,22 @@ In `thread` mode, an agent answering a room-level message starts a new thread on
 Clients and bridges that send plain replies instead of thread replies still work: a plain reply whose reply chain reaches a thread joins that thread, and one that never reaches a thread stays room-level.
 Edits, reactions, and redactions belong to the same thread as the message they target.
 
+## Forked Threads
+
+A client can fork a thread within the same room or into another room: the new thread's root carries an `io.mindroom.fork` reference with `thread_id`, `event_id` (the last parent message the fork includes), and an optional `room_id` naming the immediate parent's room when crossing rooms.
+Agents in the fork, and `matrix_message` reads of it, see the parent's messages up to that fork point, then the fork's own messages, and a parent message after the fork point is never included.
+For same-room forks, an agent that answered in the parent counts as a participant of the fork and the fork inherits the parent's per-thread model overrides; for cross-room forks, participation, multi-human detection, reply mode, and default models follow the target room instead.
+Cross-room parent reads (agent turns, `matrix_message` reads, and provisional titles) fail closed: neither room may be a contact room, the reading agent, the current requester, the fork-root author, and every human joined or invited to the target room must currently be joined to the parent room, the target room must not have `world_readable` history visibility, and encrypted parent rooms cannot cross into unencrypted target rooms.
+When a cross-room hop is denied, agents omit the parent's messages, title, and attachments while still answering normally in the target thread.
+Agents in an authorized fork can use the attachments carried by its parent prefix up to the fork point.
+An edit of a fork's root must keep `io.mindroom.fork` in its `m.new_content`, or agents treat the fork as a plain thread from then on.
+Only the conversation is inherited: tags and other per-thread state stay on the parent, and the fork starts with its own session runs and no compaction summaries from the parent.
+Moving a fork to another room copies only the fork's own messages.
+
 ## Multi-Human Thread Protection
 
 When two or more people have posted in a thread, agents answer only when explicitly mentioned, so they do not interrupt a human conversation.
-The router stays silent in such threads, and they never automatically form ad hoc teams.
+Nothing is routed in such threads, and they never automatically form ad hoc teams.
 Agents that already replied there can opt into [Adaptive Participation](#adaptive-participation) to judge untagged messages.
 
 The rules are:
@@ -58,10 +143,12 @@ The rules are:
 5. **Mentioning another joined room participant**: if a message tags only joined users who are neither agents, teams, nor configured bot accounts, agents and teams stay silent.
 
 MindRoom reads a message's mentions from `m.mentions.user_ids`, or when that is empty from HTML mention pills in `formatted_body`, or otherwise from plain `@name` text in the body, so bridged messages without mention metadata still count.
+A hook or tool send with [`mentions`](../hooks.md#sending-messages) mentions only the users listed there, and one with `wake_mentioned=False` mentions none of the agents it names.
 Mentions of users who are not in the room or only invited do not suppress normal responses.
 Mentioning a configured agent that has not joined the room still counts as an explicit mention for the other agents.
 
-A thread too long to read at once, more than 2,000 messages or 16 MiB of stored content, is not continued from an untagged message when the room has more than one possible responder, unless an agent is still answering there; mention the agent or team to continue it.
+A thread MindRoom cannot read in full, because it holds more than 2,000 messages or 16 MiB of stored content or because reading it failed, is not continued from an untagged message when the room has more than one possible responder, unless an agent is still answering there; mention the agent or team to continue it.
+In a `mentions` room such a thread needs a mention even when the room has one possible responder.
 
 ### Bot accounts
 
@@ -101,7 +188,8 @@ An agent judges a message only when all of these hold:
 Configured human aliases count as one participant, while agents, the internal service account, and `bot_accounts` do not count as humans.
 Agents merely present in the room never join: with 50 agents in a room and two already in the thread, only those two can judge, and only if each opted in.
 Each eligible agent decides separately.
-Commands and scheduled work never use adaptive participation.
+Commands, scheduled work, and a queued message the [mid-turn judge](#mid-turn-coalescing) said a running reply cannot wait for never use adaptive participation, so the agent answers that message once the reply ends.
+The judge decides once for all queued messages, so when new messages from two people were judged together, or a message was edited after the judgment, participation still decides.
 
 An agent that declines sends no reply; with `decline_reaction` set, it reacts once to the latest message of the turn.
 Choose the emoji with care, because 👍 can read as agreement with the message.
@@ -157,20 +245,27 @@ A model alias whose provider adds native tools that cannot be disabled is refuse
 For participation, a TypeSafe or OpenAI Decisions probability at or above `threshold` approves; the default `0.8` has not been calibrated on representative conversations.
 All backends get the same question and context, but their judgments can differ.
 
-At most eight judgments run at once across the process, including [router judgments](router.md#responder-selection-judgments), and one per agent; a judgment that finds the limit full is not queued and is treated as failed.
+At most eight judgments run at once across the process, including [router judgments](router.md#responder-selection-judgments) but not [reranking](../knowledge.md#judgment-rerankers), and one per agent; a judgment that finds the limit full is not queued and is treated as failed.
 Judgment outcome logs record backend, model, decision, latency, token usage, input size, and failure category, plus probability and threshold for TypeSafe and OpenAI Decisions, without request text or credentials.
 
 #### Participation Context and Fallback
 
-A participation judgment sends the agent's guidance and up to eight recent user and assistant messages, with Matrix identities replaced by aliases.
-System prompts, memory, tool definitions and results, and media are not sent, but message text can still contain private information.
-When the context contains media, attachment references, detected secrets, or more than 16 KB of text, the backend is skipped and the reply model decides instead.
+A participation judgment sends the agent's display name, its guidance, and up to eight recent messages, where one reply's consecutive agent messages count as one, with Matrix identities replaced by aliases that tell people (`speaker_1`) from agents (`agent_1`).
+The newest message is sent whole, while long earlier messages are shortened to their start and end and the oldest drop out first, so the request fits 16 KB.
+The agent's own tool calls appear as `[used tools: shell, web_search]` and a file or image as `[sent a file]` or `[sent an image]`, with its caption when it has one, so threads where agents use tools and people share files are judged too.
+MindRoom does not send tool inputs or results, file names or contents, media, conversation summaries, system prompts, memory, or tool definitions.
+Message text is sent as it appears in the thread, so it can still contain private information: a file name someone typed, tool output an agent quoted in its reply, or the closing line of a reply that ended because a tool kept failing, which names the tool and its last error, redacted (see `max_tool_calls_per_turn` in [Agent Configuration](agents.md#configuration-options)).
+When anything the judge would see looks like a credential, including a tool name or sender, or the newest message alone exceeds 16 KB, the backend is skipped and the reply model decides instead.
 Missing credentials, a full limit, a timeout, a provider error, malformed output, or an abstention also fall back to the reply model's decision, and the agent stays quiet if that fails too.
+Each decision logs `Participation judged` with `judge=decisions` when the judgment backend decided, whichever `provider` it uses, or `judge=reply_model` with a `fallback` reason such as `essential_input_redacted`, `timeout`, or `abstained`.
 
 ## Mid-Turn Coalescing
 
 When another human message arrives while an agent is responding, MindRoom normally sends the agent a wrap-up notice after its current tool batch, asking it to stop making new tool calls and summarize its progress.
 A "thanks" or "is this still running?" can therefore cut a long task short.
+These messages send the agent no wrap-up notice and get no ⏳ reaction from it: one that mentions only other agents or people who have joined the room (unless it asks for a team the agent answers for), and one outside any thread that a `mentions` room leaves unanswered, because it mentions no agent or team (see [Reply Mode](#reply-mode)).
+A person's edit of a text message still waiting in the coalescing queue decides it again, though a ⏳ already on it stays; an edited media caption, or a message not yet queued, is not decided again.
+A running agent hears of a voice message only once it is transcribed, so a voice message for someone else sends no notice and gets no ⏳.
 Set `agents.<name>.mid_turn` to let a judge decide whether the queued messages can wait until the task finishes.
 The setting applies in every room where the agent may reply and has no per-room override; teams do not inherit it from their members.
 
@@ -178,7 +273,7 @@ The setting applies in every room where the agent may reply and has no per-room 
 |-------|------|---------|-------------|
 | `judgment` | object | Required | LLM model alias, TypeSafe, or OpenAI Decisions backend; see [Judgment Backends](#judgment-backends) |
 | `instructions` | string | `""` | Extra guidance for the continue-or-wrap-up decision |
-| `defer_reaction` | string or null | `null` | Reaction such as `"👀"` on a queued message that can wait |
+| `defer_reaction` | string or null | `null` | Reaction such as `"👀"` on a queued message that can wait, except another person's message that mentions nobody, which the agent may decline to answer after the task |
 
 ```yaml
 agents:
@@ -194,38 +289,117 @@ agents:
 ```
 
 The judge lets the task continue for acknowledgements, thanks, "continue", "do not interrupt", and unrelated requests, which wait for a later turn.
-It asks for a wrap-up when a message stops, pauses, or corrects the task, changes a relevant requirement, or asks to switch tasks now, even alongside praise.
-When the judge is unsure, times out, or fails, the agent gets the wrap-up notice.
+It also lets the task continue for a message from another person than the one the agent is answering that is not about the task, such as a remark to someone else in the thread.
+It decides a message cannot wait when it stops, pauses, or corrects the task, changes a relevant requirement, or asks to switch tasks now, even alongside praise, whoever sends it.
+When the judge is unsure, times out, or fails, the agent gets the wrap-up notice, except for the queued messages described below.
 With TypeSafe or OpenAI Decisions, the task continues only when the probability that no interruption is needed is at least `threshold` (default `0.8`).
 
-The judge sees the active request, recent earlier messages in the thread, up to eight queued messages, the reply text the agent had published when each message arrived, and your `instructions`.
+The judge sees the active request, recent earlier messages in the thread, up to eight queued messages, whether each was sent by the person the agent is answering or by another person, the reply text the agent had published when each message arrived, and your `instructions`.
 Long earlier messages are shortened and the oldest drop out first, so the request fits the judge's 16 KB limit.
 Earlier files and images appear only as their file name and any caption, such as `[file: report.pdf]`.
-Attachment contents, tool arguments and results, system prompts, and memory are never sent, but message text can still contain private information.
+Tool calls appear as `<tool name="..." input="..." output="..."/>` tags built from the previews the chat shows in its tool details: up to 1,200 characters of input and 500 of output per call, with recognized secrets already removed.
+Attachment contents, full tool output, system prompts, and memory are never sent, but message text and tool previews can still contain private information.
 
-The agent gets the wrap-up notice without a judgment when:
+Except for the queued messages described after this list, the agent gets the wrap-up notice without a judgment when:
 
 - the thread's history could not be read completely;
-- the active request or a queued message has an attachment or is not typed text, such as a scheduled task or a voice message;
+- the active request has an attachment or is not typed text, such as a scheduled task or a voice message;
+- a queued message has an attachment or is not typed text, except a transcribed voice message, whose transcript the judge reads;
 - the active request and queued messages alone exceed 16 KB, or more than eight messages are queued;
 - anything the judge would see looks like a credential;
 - the agent replies in `thread_mode: room`.
 
-Each skip logs `Mid-turn judgment skipped` with a `reason` such as `history_unavailable` or `essential_input_too_large`, and judge timeouts and errors log `Mid-turn continuation evaluated` with a `failure`.
+When the judgment is skipped, fails, or gives no answer, and every queued message comes from another person than the one the agent is answering and mentions nobody, the task continues instead, without a `defer_reaction`.
+This does not apply when the agent answers a scheduled task, a hook, or another agent.
+Each skip logs `Mid-turn judgment skipped` with a `reason` such as `history_unavailable` or `essential_input_too_large` and an `outcome` of `waits` or `wraps_up`, and judge timeouts and errors log `Mid-turn continuation evaluated` with a `failure`.
 
 The check runs between completed tool batches and never interrupts a running tool.
+With background tool jobs enabled, the judge also decides whether a queued message moves a waiting tool call to the background; see [When a call becomes a job](../tools/agent-orchestration.md#when-a-call-becomes-a-job).
+A reply that is doing nothing but waiting on its background jobs, with no model step and no other tool running, gets the wrap-up notice for a queued message at once and without a judgment, even when the judge let that message wait during earlier work; its jobs keep running and their results arrive in a later reply.
 Queued messages are handled after the active response finishes either way.
 A reply waiting for a [tool approval](../tool-approval.md) counts as responding, so messages queue behind it until the approval ends.
-A decision to continue covers only the messages the judge saw, so a later message gets its own decision, and a wrap-up notice once sent is not taken back.
-The wrap-up notice asks the agent to hand off; it does not cancel tools, abort the response, or show the agent the queued text, and stopping a response and tool approval work as usual.
+A decision to continue covers only the messages the judge saw, so a later message gets its own decision.
+A wrap-up notice once sent is not taken back.
+The wrap-up notice asks the agent to hand off without new tool calls.
+It does not cancel running tools or show the agent the queued text.
+Tool calls the agent makes in answer to it end the response without running.
+Stopping a response and tool approval work as usual.
 With `defer_reaction` set, each message that can wait gets that reaction once.
+
+### Steer, Queue and Auto
+
+A client chooses what a message does when it arrives during a reply by adding `io.mindroom.mid_turn` to its content, with the value `steer`, `queue`, or `auto`.
+A message without the key or with an unknown value is `auto`, so Element and other clients behave as described above.
+There is no config setting for this; the mode travels on each message.
+
+```json
+{"msgtype": "m.text", "body": "Also print the date.", "io.mindroom.mid_turn": "steer"}
+```
+
+**Steer** redirects the running reply, but only from the person that reply answers; a Steer from anyone else is handled as Auto.
+The reply ends after its current tool batch, with no wrap-up notice and no summary, and its message stays in the thread as completed with its text and tool calls so far.
+The steering message then gets its own new reply below it, which is answered without a participation check and told to carry on with the task, taking the message into account.
+The earlier tool calls and results reach it through normal [history](history.md), so your configured history limits apply to what it sees.
+That follow-up extends the cut-off reply's last model request, so provider prompt caching still applies.
+A Steer that arrives while the agent is writing its final text simply becomes the next turn, still carrying on the task, and a Steer while the agent is idle is an ordinary message.
+A Steer also releases a tool call waiting to move to the background at once; see [When a call becomes a job](../tools/agent-orchestration.md#when-a-call-becomes-a-job).
+A steered reply that showed nothing, because it wrote no text and its tool calls are hidden, has its placeholder removed with no failure note.
+The exception is a steered reply resuming after a [tool approval](../tool-approval.md), which ends with the usual "Tool approval continuation completed" text.
+
+**Queue** never interrupts: the message is not judged, sends no wrap-up notice, and does not move a waiting tool call to the background.
+It gets the agent's `defer_reaction`, if set, and is answered as its own turn after the reply finishes.
+
+**Auto** lets the mid-turn judge decide, as described above.
+When the judge explicitly says a message cannot wait, which includes a TypeSafe or OpenAI Decisions probability below `threshold`, the reply ends at the batch and the message continues the task in a new reply, exactly as for Steer, instead of getting the wrap-up notice.
+A skipped, failed, or timed-out judgment, or an agent with no `mid_turn` judge, still sends the wrap-up notice.
+
+## Activity in Other Threads
+
+An agent's context is the thread it replies in, so it does not know that another thread of the same room, where the same people worked a few minutes ago, exists.
+Turn on `room_activity` to add a short note to the agent's thread replies listing the room's other threads with new messages since its last reply in this thread, or within the window for its first reply there:
+
+```text
+Other threads in this room with activity since your last reply here:
+- "Main game work" (thread $abc...): Max, Daniel; 14 new messages, last 3 min ago; you replied there 10 min ago
+- "Design assets" (thread $def...): Kinsey; 3 new messages, last 20 min ago
+Read one with matrix_message(action="read", thread_id="...") if it bears on this request.
+```
+
+Each line has the thread's title (its current summary title, else the first line of its first message), who wrote there by display name, how many new messages and when the last one came, and whether the agent itself replied there.
+The note never quotes messages beyond the title, never lists the current thread or another room's threads, and lists only messages the agent's own Matrix account received in that room.
+The agent decides from the note whether to read a thread with `matrix_message`, so the note appears only for agents that have the `matrix_message` tool.
+
+```yaml
+defaults:
+  room_activity:
+    window_minutes: 60
+
+agents:
+  helper:
+    display_name: Helper
+    tools: [matrix_message]
+    room_activity:
+      enabled: true
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `false` | Add the note to this agent's thread replies |
+| `window_minutes` | int, 1-1440 | `120` | How far back the note looks; it never looks back past the agent's last reply in the current thread |
+| `max_threads` | int, 1-20 | `5` | Most threads one note lists, the most recently active first |
+
+`defaults.room_activity` applies to every agent, and `agents.<name>.room_activity` overrides it field by field, so the example above gives `helper` a 60-minute window.
+Only an agent's thread replies get the note: replies outside a thread, team replies, subagents, and agents in minimal mode do not.
+A turn with nothing new in the room's other threads gets no note, so a quiet room costs nothing.
+Otherwise the note adds about 70 tokens per listed thread, most of them the thread ID the agent needs to read it, plus about 35 for its first and last lines, to that turn's requests.
+It goes after the current message, so it never changes the system prompt or the earlier part of a request, and prompt-cache hits stay as they were.
 
 ## Message Edits
 
 When a user edits the latest message of a conversation, the agent regenerates its reply to that message for the updated content and edits the reply in place.
 If that reply is still streaming, the edit stops it first and the regenerated answer replaces it.
-A text message edited while it still waits to be gathered with the messages sent around it is answered as edited; an edit made after that, before the reply shows anything, leaves the original text as the one answered.
+A text message edited while it still waits to be gathered with the messages sent around it is answered as edited; an edit made after that, before the agent starts sending its reply, leaves the original text as the one answered.
 Once someone other than an agent writes again in the conversation, an edit of an earlier message changes no reply.
 While a reply waits for a tool approval, an edit of its message cancels that approval and regenerates the reply.
-Edits by agents never trigger regeneration.
+Edits by agents never trigger regeneration, and an agent's message edited while it still waits is answered with its original text.
 When another agent's reply finishes with a mention of this agent, it reaches this agent as a new message.

@@ -27,6 +27,7 @@ it('keeps development dashboard auth local, including sign-out', async () => {
     back: jest.fn(),
     forward: jest.fn(),
     prefetch: jest.fn(),
+    bfcacheId: 'test-bfcache-id',
   }
   const auth = {
     getUser: jest.fn(),

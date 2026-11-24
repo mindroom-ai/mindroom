@@ -12,26 +12,22 @@ from collections import deque
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
-from typing import TYPE_CHECKING, Any, LiteralString, cast
-
-if TYPE_CHECKING:
-    from pathlib import Path
+from pathlib import Path
+from typing import Any, LiteralString, cast
 
 _AI_RUN_KEY = "io.mindroom.ai_run"
-_JOURNAL_SOURCES = ("turn_records", "journal_events", "delivery_outbox")
+_JOURNAL_SOURCES = ("turns", "event_redactions", "journal_events", "delivery_outbox")
 _MAX_JSONL_RECORDS = 1000
-_MAX_AGNO_RUNS = 100
+_MAX_RUNS = 100
+# The JSON text columns of a run row and of its message and tool rows.
+_RUN_JSON_COLUMNS = frozenset({"record", "requirements", "metadata", "data"})
 _MAX_LOG_LINES = 2000
 _MAX_LOG_LINE_CHARS = 4000
 _TOOL_CALL_ROTATIONS = 5
-# Where the runtime writes Agno session databases under the session root: shared agents, teams, private instances
-# (`<worker>/<agent>`), and system usage. Agent workspaces are never walked, so a planted sessions/ folder is not read.
-_SESSION_DATABASE_GLOBS = (
-    "agents/*/sessions/*.db",
-    "teams/*/sessions/*.db",
-    "private_instances/*/*/sessions/*.db",
-    "system/sessions/*.db",
-)
+# Where the runtime keeps the state roots of its conversation databases under the session root: shared agents, teams,
+# private instances (`<worker>/<agent>`), and system usage. Agent workspaces are never walked, so a planted sessions/
+# folder is not read.
+_STATE_ROOT_GLOBS = ("agents/*", "teams/*", "private_instances/*/*", "system")
 
 _Query = Callable[[str, Sequence[object]], list[dict[str, Any]]]
 
@@ -128,7 +124,7 @@ def _decode_json_columns(row: Mapping[str, Any]) -> dict[str, Any]:
     """Decode JSON stored as text, so the report nests objects instead of escaped strings."""
     decoded: dict[str, Any] = {}
     for key, value in row.items():
-        if isinstance(value, str) and (key.endswith("_json") or key == "run_data"):
+        if isinstance(value, str) and (key.endswith("_json") or key in _RUN_JSON_COLUMNS):
             try:
                 decoded[key] = json.loads(value)
             # JSONDecodeError and the integer digit limit are ValueErrors; deep nesting is a RecursionError.
@@ -185,7 +181,7 @@ def _journal_results(status: str, location: str, error: str | None = None) -> di
 
 
 def _read_journal(query: _Query, ids: _DebugReportIds, location: str) -> dict[str, _SourceResult]:
-    """Read turn records, admitted events, and outbound deliveries for the identifiers."""
+    """Read turns, redactions, admitted events, and outbound deliveries for the identifiers."""
     results = _journal_results("ok", location)
     thread_known = bool(ids.room_id and ids.thread_id)
 
@@ -207,15 +203,44 @@ def _read_journal(query: _Query, ids: _DebugReportIds, location: str) -> dict[st
         results["journal_events"].items = [_decode_json_columns(row) for row in rows]
         admitted_event_ids = {row["event_id"] for row in rows}
 
-    # A thread names events the report did not list, so their turn records follow the admitted events.
+    # A thread names events the report did not list, so their turns follow the admitted events.
     marks, event_ids = _in_list(ids.event_ids | admitted_event_ids)
     if event_ids:
-        rows = query(
-            f"SELECT * FROM turn_records WHERE index_event_id IN ({marks}) OR anchor_event_id IN ({marks}) "  # noqa: S608 - placeholders only
-            "ORDER BY agent_name, index_event_id",
+        turns = query(
+            "SELECT * FROM turns AS turn WHERE EXISTS ("  # noqa: S608 - placeholders only
+            "SELECT 1 FROM turn_sources AS source WHERE source.agent_name = turn.agent_name "
+            f"AND source.turn_key = turn.turn_key AND source.event_id IN ({marks})"
+            ") OR EXISTS ("
+            "SELECT 1 FROM turn_aliases AS alias WHERE alias.agent_name = turn.agent_name "
+            f"AND alias.turn_key = turn.turn_key AND alias.event_id IN ({marks})"
+            ") ORDER BY turn.agent_name, turn.anchor_event_id",
             [*event_ids, *event_ids],
         )
-        results["turn_records"].items = [_decode_json_columns(row) for row in rows]
+        items = [_decode_json_columns(turn) for turn in turns]
+        for item in items:
+            turn = [item["agent_name"], item["turn_key"]]
+            item["sources"] = [
+                _decode_json_columns(source)
+                for source in query(
+                    "SELECT * FROM turn_sources WHERE agent_name = ? AND turn_key = ? ORDER BY ordinal",
+                    turn,
+                )
+            ]
+            item["aliases"] = query(
+                "SELECT * FROM turn_aliases WHERE agent_name = ? AND turn_key = ? ORDER BY event_id",
+                turn,
+            )
+            item["revisions"] = query(
+                "SELECT * FROM turn_revisions WHERE agent_name = ? AND turn_key = ? "
+                "ORDER BY source_event_id, timestamp_ms, revision_id",
+                turn,
+            )
+        results["turns"].items = items
+        results["event_redactions"].items = query(
+            f"SELECT * FROM event_redactions WHERE event_id IN ({marks}) "  # noqa: S608 - placeholders only
+            "ORDER BY agent_name, room_id, event_id",
+            event_ids,
+        )
 
     if thread_known:
         rows = query(
@@ -226,18 +251,29 @@ def _read_journal(query: _Query, ids: _DebugReportIds, location: str) -> dict[st
     return results
 
 
-def _read_agno_runs(session_root: Path, ids: _DebugReportIds) -> _SourceResult:
-    """Read Agno runs by run ID or session ID from every session database under the session root.
+def _session_databases(session_root: Path) -> list[Path]:
+    """Return every conversation database in the state roots under `session_root`, whatever its storage name."""
+    # The schema module loads the history package, which the CLI's import path keeps out (tests/test_cli_config.py).
+    from mindroom.session_storage.schema import TableNames  # noqa: PLC0415
+
+    # A wildcard storage name matches the database of every storage name.
+    wildcard = TableNames("*")
+    patterns = (str(wildcard.database_path(Path(state_root))) for state_root in _STATE_ROOT_GLOBS)
+    return sorted({database for pattern in patterns for database in session_root.glob(pattern)})
+
+
+def _read_runs(session_root: Path, ids: _DebugReportIds) -> _SourceResult:
+    """Read stored runs by run ID or session ID from every conversation database under the session root.
 
     Databases are found by the runtime's path layouts rather than from the config so deleted agents' history is
     included.
-    Only the newest `_MAX_AGNO_RUNS` matching runs across all databases are kept, returned oldest first, and
+    Only the newest `_MAX_RUNS` matching runs across all databases are kept, returned oldest first, and
     `dropped` counts the rest: an unthreaded report matches the room's whole session, which can span months.
     One unreadable database (locked by a live run, corrupt) is isolated: the runs of the others are kept and
     the failure is recorded as `<path>: <error>` in `error`. The status is "error" only when every database
     failed, and a database that fails part-way contributes none of its rows.
     """
-    databases = sorted({database for pattern in _SESSION_DATABASE_GLOBS for database in session_root.glob(pattern)})
+    databases = _session_databases(session_root)
     if not databases:
         return _SourceResult("missing", [str(session_root)])
     result = _SourceResult("ok", [str(database) for database in databases])
@@ -258,14 +294,14 @@ def _read_agno_runs(session_root: Path, ids: _DebugReportIds) -> _SourceResult:
     runs: list[dict[str, Any]] = []
     for database in databases:
         try:
-            database_matches, database_runs = _read_agno_database(database, conditions, [*run_ids, *session_ids])
+            database_matches, database_runs = _read_run_database(database, conditions, [*run_ids, *session_ids])
         except (sqlite3.Error, OSError) as error:
             failures.append(f"{database}: {_describe_error(error)}")
             continue
         matches += database_matches
         runs.extend(database_runs)
     # The stable sort keeps each table's rowid order among runs created at the same time.
-    result.items = sorted(runs, key=_run_age)[-_MAX_AGNO_RUNS:]
+    result.items = sorted(runs, key=_run_age)[-_MAX_RUNS:]
     result.dropped = matches - len(result.items)
     if failures:
         result.error = "; ".join(failures)
@@ -280,31 +316,55 @@ def _run_age(run: Mapping[str, Any]) -> float:
     return created_at if isinstance(created_at, int | float) else float("-inf")
 
 
-def _read_agno_database(
+def _read_run_database(
     database: Path,
     conditions: Sequence[str],
     params: Sequence[object],
 ) -> tuple[int, list[dict[str, Any]]]:
-    """Return how many runs match and the newest `_MAX_AGNO_RUNS` of each table, oldest first."""
+    """Return how many runs match and the newest `_MAX_RUNS` runs, oldest first, with their messages and tools.
+
+    The tables are the ones `TableNames.of_database` names for the database's file. A message a mid-turn fold took
+    names that fold's summary row in `folded_by`. A database the storage conversion has not reached raises.
+    """
+    # The schema module loads the history package, which the CLI's import path keeps out (tests/test_cli_config.py).
+    from mindroom.session_storage.schema import TableNames  # noqa: PLC0415
+
     where = " OR ".join(conditions)
-    matches = 0
-    runs: list[dict[str, Any]] = []
+    names = TableNames.of_database(database)
+    runs_table = names.log_runs
     with _sqlite_query(database) as query:
-        tables = [row["name"] for row in query("SELECT name FROM sqlite_master WHERE type = 'table'", [])]
-        for table in sorted(name for name in tables if name.endswith("_runs")):
-            columns = {row["name"] for row in query(f'PRAGMA table_info("{table}")', [])}
-            if not {"run_id", "session_id", "run_data", "created_at"} <= columns:
-                continue
-            # Table names come from sqlite_master; values are placeholders.
-            matches += query(f'SELECT COUNT(*) AS matches FROM "{table}" WHERE {where}', params)[0]["matches"]  # noqa: S608
-            rows = query(
-                f'SELECT * FROM "{table}" WHERE {where} ORDER BY created_at DESC, rowid DESC LIMIT ?',  # noqa: S608
-                [*params, _MAX_AGNO_RUNS],
-            )
-            runs.extend(
-                {"database": str(database), "table": table, **_decode_json_columns(row)} for row in reversed(rows)
-            )
-    return matches, runs
+        if not query("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?", [names.log_meta]):
+            msg = "not converted to the current storage layout"
+            raise sqlite3.DatabaseError(msg)
+        # The table names come from the database's file name; values are placeholders.
+        [counted] = query(f'SELECT COUNT(*) AS matches FROM "{runs_table}" WHERE {where}', params)  # noqa: S608
+        rows = query(
+            f'SELECT * FROM "{runs_table}" WHERE {where} ORDER BY created_at DESC, rowid DESC LIMIT ?',  # noqa: S608
+            [*params, _MAX_RUNS],
+        )
+        selected = [json.dumps([row["run_id"] for row in rows])]
+        # Each fold numbers its messages from 0, so the stored messages come first, then each fold's in order.
+        message_rows = query(
+            f'SELECT run_id, folded_by, data FROM "{names.log_messages}" WHERE run_id IN '  # noqa: S608
+            "(SELECT value FROM json_each(?)) ORDER BY folded_by IS NOT NULL, folded_by, ord",
+            selected,
+        )
+        tool_rows = query(
+            f'SELECT run_id, data FROM "{names.log_tools}" WHERE run_id IN (SELECT value FROM json_each(?)) ORDER BY ord',  # noqa: S608
+            selected,
+        )
+    messages: dict[str, list[dict[str, Any]]] = {}
+    for message in message_rows:
+        messages.setdefault(message.pop("run_id"), []).append(_decode_json_columns(message))
+    tools: dict[str, list[object]] = {}
+    for tool in tool_rows:
+        tools.setdefault(tool["run_id"], []).append(_decode_json_columns(tool)["data"])
+    runs = [{"database": str(database), "table": runs_table, **_decode_json_columns(row)} for row in reversed(rows)]
+    for run in runs:
+        run["messages"] = messages.get(run["run_id"], [])
+        # A run without a tool list reports none; a row worker code wrote without the flag does too, not a failure.
+        run["tools"] = tools.get(run["run_id"], []) if run.pop("has_tools", None) else None
+    return counted["matches"], runs
 
 
 def _record_matches(record: Mapping[str, Any], ids: _DebugReportIds) -> bool:
@@ -442,7 +502,7 @@ def build_debug_report(sources: DebugReportSources, ids: _DebugReportIds, *, gen
     tool_call_logs.append(tracking / "tool_calls.jsonl")
     logs_dir = sources.storage_root / "logs"
     results = _read_journal_source(sources, tracking / "event_journal.db", ids)
-    results["agno_runs"] = _read_guarded(lambda: _read_agno_runs(sources.session_root, ids), sources.session_root)
+    results["runs"] = _read_guarded(lambda: _read_runs(sources.session_root, ids), sources.session_root)
     results["tool_calls"] = _read_guarded(
         lambda: _read_jsonl_records(tool_call_logs, ids, location=tracking / "tool_calls.jsonl"),
         tracking / "tool_calls.jsonl",

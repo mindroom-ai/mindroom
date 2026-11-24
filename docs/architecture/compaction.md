@@ -1,79 +1,75 @@
 # History compaction
 
-History preparation chooses native provider checkpoints when the resolved policy permits them, or portable conversation summaries when configured.
-The provider choice, configuration schema, durable state format, and retry attempt limit are independent of this module split.
+This page records the assumptions and decisions behind portable history compaction before and during a reply, its summary rows, and seen-message tracking.
+User-facing behavior is in [Context Window](../configuration/history.md#context-window).
 
-## Ownership
+## Assumptions
 
-All paths below are relative to `src/mindroom/`.
+Runs are saved whole from in-memory snapshots, so a stale save can arrive after a compaction or a redaction has moved on.
+The summary rows are therefore authoritative: `session.summary` is derived from the owner scope's latest row on every read, and a full save of a run is refused once it, or a member's team run, has completed, or once a cut has removed it.
+Only an interrupted record, which holds what the user saw or heard, replaces a completed run, and facts added after a run ends, such as its reply event or delegation state, are patched onto its stored row.
+A compaction, a redaction, and an approval's completion can overlap on one scope, so each summary chunk checks, under the write lock, that the history it summarized is still the stored history before it appends.
 
-| Module | Owns |
-| --- | --- |
-| `history/policy.py` | Resolving configuration and deciding whether compaction is available or needed. |
-| `history/runtime.py` | Preparing one response, model construction, compaction notices, failure handling, and applying the final replay decision. |
-| `history/session_context.py` | Canonical agent/team scope identity, opening the correct session store, and closing owned handles. |
-| `history/replay.py` | Materializing visible persisted history, estimating its cost, and fitting replay limits. |
-| `history/compaction.py` | Selecting runs, executing summary chunks, switching fallback models, and committing chunk progress. |
-| `history/summary_input.py` | Serializing conversation and prior summary into bounded inputs; preserving a progress-making run envelope when shrinking. |
-| `history/message_content.py` | The shared text and media projection used by serialization and token estimation. |
-| `history/summary_call.py` | One cancellable summary call, a typed wall deadline, complete-output validation, and bounded retry policy. |
-| `history/storage.py` | Durable scope state, the cached replay summary, seen ids derived from live runs and the archive, archive reconciliation before each run, and generation-precise redaction. |
-| `history/archive.py` | The `<session_table>_compactions` and `<session_table>_compacted_runs` tables: summary generations and archived runs, moved in one transaction with the live run rows. |
-| `history/archive_schema.py` | The archive table layout, shared with the legacy migration. |
-| `history/legacy_compaction_state.py` | The one-time migration, run when a conversation database opens, that adopts scope state written when compaction deleted runs as content-free generations. |
-| `history/native.py` | Selecting and configuring native compaction for the resolved history route. |
-| `native_compaction.py` | Provider-neutral checkpoint and native replay data. |
+## Decisions
 
-`SummaryModel` binds the serving model, its configured name, and its input budget.
-A fallback switch replaces that whole value, so later chunks cannot accidentally use the previous model's budget or identity.
-Persisted replay fitting and the Vertex full-request guard remain separate because they measure different inputs at different boundaries.
+- A summary request goes out with the provider's own retries and prompt cache off, and on the Claude routes without the model's authored thinking setting, because the summary retry policy owns retries, thinking spends the output budget the summary needs, and a one-off summary never reuses its prefix; other routes keep the authored setting.
+  Leaving it out turns thinking off only on the Claude models before Claude 5 other than Mythos Preview; every Claude 5 and 5.x model and Mythos Preview runs adaptive thinking when a request sets none, so their summaries still think.
+  The request sends no `disabled` or `between_tools` setting, which only some of those models accept; Fable 5.1, Fable 5, Mythos 5.1, Mythos 5, Mythos Preview, and Opus 5.5 cannot turn thinking off at all.
+  It keeps the route's transport timeout instead of overriding it with `timeout_seconds`, because a shorter authored provider timeout must still apply; the summary call's own deadline cancels a slower request.
+- A summary counts as complete only when the provider reports that it ended on its own; a summary cut off by the output limit, a content filter, or a tool call is never stored.
+  A route that reports no stop reason cannot show a cut-off, so its summaries count as complete.
+- Compaction keeps every run in the runs table and appends a summary row positioned after the newest run it covers, instead of moving runs into a second store, because keeping two stores consistent produced repeated bugs once summaries had to cover part of a running turn (see `docs/dev/2026-10-12-compaction-log-store-design.md`).
+- Edits and redactions cut the log from the earliest element holding the event; rows that only end earlier summaries (barriers) survive cuts, so retired summaries never replay again.
+  Summaries written when compaction deleted runs cannot be split by run, so while such a summary is in force, redacting an event it may contain cuts at it, removing every run and summary row of the scope.
+- Seen ids are derived from the loaded runs and the summary rows after the latest barrier rather than stored, so they follow the remaining history after compaction, an edit, or a redaction.
+  A team turn records the events it consumed only in its stored run, as an agent turn does, because a second copy in session metadata would outlive the runs an edit removes and hide their messages from the regenerated turn.
+  For the same reason, seen ids that earlier releases copied into session metadata are not read: every event that history still represents is also held by its stored run or summary row.
+- A manual compaction request is one flag that the compacting reply clears, not a request id, because no reply of the scope can run alongside the one compacting; the [Limitations](#limitations) name the one writer that can.
+- A completed approval moves to the end of the log, after the turns that happened while it waited, because its continuation saw them.
+- The summary replays as the first history message instead of inside the system prompt, so a compaction never changes the cached prompt prefix, and minimal agents with a string system message see it too.
+  After a mid-turn compaction it follows that turn's prompt instead, in the rewritten request, its resume, and later turns while that run replays first, because a fast model that reads the prompt last restarts the request even when the summary records it finished (evidence in `docs/dev/2026-10-10-compaction-unification-design.md`).
+  It is marked as history, so it is never stored in a run and an approval resume rebuilds it with the rest of its history.
+- Persisted replay fitting runs once before a reply, and the mid-turn hook checks every model request of the reply, the first included, against the replay window minus the reserve; both size a request by one rule, the latest answer's reported size when the request extends that answer's request, else the route's estimate ([token counting](token-counting.md)).
+  The check before a reply compares the reply's provisional first request, with the current message's attachments when they fit beside the turn and the summary, with the trigger, and the hook the request that is sent, with its receipt and notices; they share the sizer and the limit but decide different things, so neither passes its size to the other.
+  The reported size wins even when the estimate is larger, because the estimate carries its family margin, which counts most text high (Claude's by up to half again, by the ratios in [token counting](token-counting.md#evidence)), and taking the larger count would compact conversations early on every reply.
+  When a request is over the limit, the plan trims by estimates against the history's room scaled by the estimate's ratio to the reported size, since only estimates can size a candidate subset of runs.
+  The history estimate keeps its margin because no fixed tokenizer fits every provider: on one Qwen thread, tool results counted 1.49 times their characters / 4, tool call arguments 1.44 times, and assistant text 1.20 times, `o200k_base` still undercounted by about 10%, and a history estimated under the trigger went out as a 126,847-token request in a 128K window.
+  A native checkpoint stands in for the transcript before it only on its own route, and the response that created it was billed for that transcript; before any checkpoint, a native request sends the same history as any other.
+- A mid-turn compaction folds everything but the system prompt, the current prompt, the current turn's transient messages, and queued notices, summarizing the scope's stored runs after the latest summary row together with the running turn's exchanges.
+  Earlier turns' transient messages (turn context such as memory results and the approval receipt) are stored with their runs and replay where they were sent, so a later turn's request can extend the previous one whole, which Codex's prompt cache needs; a summary leaves them out because they are context, not conversation.
+  It reads those runs from storage, not from the running loop's session, because that session still holds every run loaded when the turn started, so a second fold of the same turn would summarize them again.
+  The request keeps each tool batch whole, but the summarizer reads every folded message as its own unit, because a model can read several large files in one parallel batch, and a batch larger than one summary input would be cut short and lose the later results.
+  Each tool result names its own tool and arguments in the summary input, so it reads correctly apart from its call message, including for providers whose calls carry no ids.
+- A fold appends one summary row and, in the same transaction, stores the messages it took and the member runs that had ended as rows of its running run, flagged with that row, because a run is stored only when it ends; a running run without a row gets a cancelled one.
+  A flagged message never replays again, whichever copy of the run is saved later, and the running run sorts after the row (a stored paused or checkpointed copy moves there).
+  The row keeps the event ids the running run had answered and read at the fold, so a cut finds what the fold summarized even after that run's row is gone.
+- A cut removes a run whole: when a removed run folded into an earlier summary row, the cut starts at that row, and the running run of every removed fold row is fenced, so a running turn whose row the cut removed stores nothing more.
+  Retiring summaries also removes every run that folded mid-turn, because its stored part starts mid-turn and would replay without what it built on.
+- The fold's in-memory effects (the request rewrite, the recorder's folded tool calls, the folded requests' usage in run metadata, and the live session summary) and its success notice happen together with its commit, even when the turn is cancelled meanwhile, so a stopped reply never reports a stored fold as failed.
+  An interrupted record therefore leaves out exactly the calls the stored summary holds; its write also reads that set from the run's folded rows, so paths without a turn recorder and a restarted CLI approval recovery leave them out too.
+  The folded rows name the attempt that folded them, so the recorder's set is what keeps an earlier attempt's folded calls out of the record of a turn cut short in a later attempt.
+- A fold survives a crash of its turn: the restarted attempt replays its summary and knows which tool calls already ran and what they returned, and an edit or redaction of the turn's message still removes it through the fold's row.
+- Text compaction starts from the latest readable native checkpoint, because the provider already summarized everything its request replayed, and re-summarizing that history after a model switch took a local model over an hour.
+  The checkpoint's text also covers its own run's prompt and the work before it, so the summary input holds that run from the checkpoint on, as native replay sends it, and the summary built on it always folds the whole run; an edit or redaction of the prompt then removes that summary with the run.
+  Reading the checkpoint's run whole summarized again what its text already held: the first reply in one thread after a provider switch sent a 408,592-token summary input, almost all of it tool output from before a checkpoint in the thread's first run.
+  Each checkpoint records the summary and run ids its request replayed, and stands in only while those still precede its run, because a completed approval sorts after the turns it waited for and retiring a legacy summary keeps its runs; checkpoints recorded without this record are not reused.
+  A native request that replays from a checkpoint not covering the runs before it records an empty basis, since its own checkpoints miss those runs too; a checkpoint of unknown history, such as one recorded before this record existed, counts as covering, as native replay assumes, and an approval continuation records what its paused request replayed.
+  A checkpoint too large to leave room for the rest of its run in the summary input is not used, so compaction still progresses.
+- A summary input that shrank after a failure keeps that size for the compaction's later chunks, because they would otherwise repeat the failure, and a slow model spends its whole timeout on each one; a chunk still grows to hold its first run whole.
+- A request without persisted replay (team members, workflow participants, scheduled tasks with `history_limit: 0`) compacts run-locally: its summary is an ordinary message of its own run and is stored with it.
+- Replay never drops a saved summary, so neither compaction stores one larger than the limit leaves beside the rest of the reply's request.
+  Both compactions size a summary as the reply's route sends the summary message, never below its text's count, because the rewritten or next request is checked against the limit with that route's estimate.
+  During a reply, what the fold keeps stands in for the static prompt of the scope's next reply, which is unknown when the fold commits: a next prompt much larger than the current one can still fail on the summary, and a current prompt that fills the replay window refuses every summary.
+  A refused fold leaves the request unchanged and stops compacting for the reply, as a failed one does.
+  Keeping the summary only in this request would store the turn's folded tool calls and results nowhere, and storing it with the run instead would replay it beside the raw runs it covers.
 
-## Compatibility code
+## Limitations
 
-Agno internals use named `agno_compat_<subject>.py` boundaries beside their owners.
-Each boundary records the upstream issue or tracking gap, proposed PR, removal condition, and regression coverage in source comments.
-The [Agno compatibility inventory](agno-compatibility.md) covers the full runtime; the table below describes the history-related boundaries and the shared tool-hook patch.
-
-| Module | Workaround and installation point |
-| --- | --- |
-| `history/agno_compat_message_builder.py` | Preserves roleful Team inputs and strips historical inline media in Agent/Team message builders; installed explicitly by `agents._initialize_agent_instance` and `teams._create_team_instance`. |
-| `agno_compat_session_persistence.py` | Guards and adapts Agno's asynchronous persistence against the owned session store; installed by `agent_storage._create_sqlite_state_storage` before filesystem work. |
-| `agno_compat_prepared_tools.py` | Shares private Agent/Team tool preparation between RTC execution and prompt inspection; temporarily supplies Team tool instructions, restoring the original list even on failure. |
-| `tool_system/agno_compat_tool_hooks.py` | Adapts Agno's private sync/async hook chains to deferred results and owner-controlled synchronous execution; installed by `tool_system/tool_hooks.py`, which retains dispatch, approval, and cancellation ownership. |
-| `history/claude_replay_compat.py` | Removes stale signed reasoning from completed portable turns after rewriting; native checkpoint replay retains its separate provider policy. |
-| `history/summary_provider_compat.py` | Normalizes effective Claude request overrides, preserves shorter HTTP limits and injected transports, disables nested Claude/OpenAI SDK retries, and classifies provider completion signals. |
-| `providers/agno_compat_provider_errors.py` | Interprets legacy provider error strings and SDK cause chains when typed errors are unavailable. |
-
-Importing the history engine does not install either global Agno patch.
-The explicit installers remain idempotent, and the persistence patch retains its pinned-version guard.
-When upgrading Agno or a provider SDK, inspect these compatibility modules first and run their contract tests before removing a workaround.
-Mantle currently needs its existing HTTP transport passed explicitly when copying SDK client options.
-
-## Invariants
-
-- Summary instructions occupy their own system message; serialized conversation and prior summary occupy the user message.
-- System/developer prompt roles and bulky request metadata are excluded from the portable conversation input.
-- Claude summaries stopped by an output or context limit, and incomplete OpenAI Chat/Responses summaries, cannot be committed as complete summaries.
-- Summary overrides preserve effective output-cap precedence while removing thinking from typed fields, request parameters, and raw body parameters.
-- The outer retry policy disables Agno-level retries; Claude and OpenAI summary adapters also disable SDK retries while preserving caller-owned clients and transports.
-- If the saved summary alone exceeds the final history budget, replay preparation raises an explicit budget error before a reply model call; the durable summary and already committed compaction progress remain intact.
-- A chunk moves its runs, member runs included, into the archive and records its summary generation in the same transaction that deletes their live rows; nothing compaction touches is lost.
-- The session summary is a cache of the latest generation's summary, written after that transaction; before each run, reconciliation refreshes it from the archive and deletes live runs that are already archived.
-- A row whose cached summary had to be refreshed was written from an older snapshot, so reconciliation also drops its metadata seen ids; dropping ids can only re-offer messages, never hide them.
-- Seen ids are derived rather than stored: live runs supply their own, the archive supplies those of the runs the replayed summary covers, and session metadata keeps only ids no stored run carries, such as team consumption.
-- Archived runs keep the seen ids they counted while live apart from the wider set redaction matches, so compaction never changes which messages count as seen.
-- Metadata seen ids have no archive counterpart, so a stale whole-row session write can restore ids a redaction dropped; that only withholds those messages from unseen thread context.
-- Earlier committed chunks survive later failure or cancellation; compacted runs cannot silently reappear.
-- Redacting an event represented by an archived run removes that run and everything after it, returns the generation's earlier runs to replay, and replays the previous generation's summary.
-- Content-free legacy generations cannot be split: while one still replays its summary, an event it may contain (its captured seen ids or retained source ownership) clears it together with every later generation, their archived runs, and all live runs, as before the archive existed.
-- A live run removed for any other event only retires the scope's summaries, because legacy provenance may be incomplete; live runs stay, and archived runs stay stored without counting as compacted history.
-- Legacy provenance takes precedence over an archive hit, because every later generation was built on the legacy summary.
-- After any redaction change, the scope's metadata seen ids are dropped and the derived ids follow the remaining history, so removed messages return as unseen thread context unless a stale whole-row write restores those metadata ids (see above).
-- Redaction keeps the archived runs it removes as content-free tombstones, so a stale save of such a run is pruned like any other archived run; only conversation deletion removes archive rows.
-- State written by releases before the archive is adopted once, when the conversation database opens and before any response loads it; the archive tables' presence marks it done.
-
-- Only the affected scope is rewritten; current-turn media and current-turn reasoning retain their existing replay rules.
-
-The history, provider transport, Agno patch, import-boundary, and native compaction tests exercise these contracts, and `tests/test_compaction_fuzz.py` checks the archive invariants over generated histories with interrupted chunks, stale session writes, and redactions.
-
-See [Context Window](../configuration/history.md#context-window).
+A `compact_context` call running as a background tool job can request compaction while a later reply of the same scope compacts on an earlier request; that reply's clear drops the new request, which its compaction covers unless it fails.
+Stored history grows until the conversation is deleted.
+On a route whose model window exceeds its replay window, a refused fold can leave a request over the model's window when one tool batch outgrows that gap (tools with output files save outputs above 50 KiB by default to the workspace, so it takes several large parallel outputs or a tool without that support), and the reply then fails with a provider error.
+Storing the summary in that case was rejected, because it would answer that reply but fail every later reply that replays it.
+Folded requests' usage lives in the run's metadata, so it is lost when the run never saves, as a crashed run's usage is.
+An approval resume loads a fresh session, which can replay turns stored after its run's mid-turn fold, so an edit or redaction of such a turn during the resume leaves the resuming run unfenced, because the run sorts before that turn, and its completion can store content derived from the cut turn.
+A run paused before that turn has the same race (`tests/test_summary_rows.py::test_a_pending_approval_before_the_cut_survives`); both need an edit or redaction of a recent turn while an approval of an older turn is resuming.
+A voice-call reply runs outside the conversation's lifecycle lock, so an edit or redaction of an earlier turn that lands after the reply folded mid-turn removes the reply's run row and fences it, and its answer is not stored.

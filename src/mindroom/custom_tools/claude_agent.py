@@ -5,80 +5,48 @@ from __future__ import annotations
 import asyncio
 import collections
 import typing
-from contextlib import suppress
 from contextvars import Context
 from dataclasses import dataclass, field
 from time import monotonic
-from typing import Any, ClassVar, Literal, Protocol, cast, runtime_checkable
+from typing import ClassVar, Literal, get_args
 from uuid import uuid4
 
-from agno.metrics import ModelMetrics, RunMetrics
-from agno.run.agent import RunOutput
-from agno.tools import Toolkit
 from claude_agent_sdk import (
     AssistantMessage,
     ClaudeAgentOptions,
-    ClaudeSDKClient,
     ClaudeSDKError,
     ResultMessage,
+    SystemMessage,
     TextBlock,
     ToolUseBlock,
+    UserMessage,
 )
 
-from mindroom.helper_usage import get_helper_usage_owner, record_helper_usage
+from mindroom.background_tasks import create_background_task, wait_for_background_tasks
+from mindroom.claude_sdk_process import ClaudeProcess, user_message
+from mindroom.helper_usage import HelperUsageOwner, get_helper_usage_owner, record_helper_usage
+from mindroom.llm.usage import HelperUsage, MessageMetrics, RunMetrics, TokenCounts
 from mindroom.logging_config import get_logger
-from mindroom.tool_system.runtime_context import get_detached_requester_context, get_tool_runtime_context
+from mindroom.providers.names import ROUTE_PROVIDERS
+from mindroom.runtime_shutdown import close_at_process_shutdown
+from mindroom.tool_system.authoring import Toolkit, current_call
+from mindroom.tool_system.invocation import DETACHED_SESSION_ID
+from mindroom.tool_system.runtime_context import current_requester_id, get_tool_runtime_context
 
 _PermissionMode = Literal["default", "acceptEdits", "plan", "bypassPermissions"]
-_VALID_PERMISSION_MODES: tuple[_PermissionMode, ...] = (
-    "default",
-    "acceptEdits",
-    "plan",
-    "bypassPermissions",
-)
+_VALID_PERMISSION_MODES: tuple[_PermissionMode, ...] = get_args(_PermissionMode)
 _DEFAULT_PERMISSION_MODE: _PermissionMode = "default"
 _DEFAULT_SESSION_TTL_MINUTES = 60
 _DEFAULT_MAX_SESSIONS = 200
 _DEFAULT_LIMITS = (_DEFAULT_SESSION_TTL_MINUTES * 60, _DEFAULT_MAX_SESSIONS)
+_MIN_SESSION_TTL_SECONDS = 60
+# As often as the shortest TTL, so an idle session closes at most that long after its TTL passed.
+_SWEEP_INTERVAL_SECONDS = _MIN_SESSION_TTL_SECONDS
 _MAX_STDERR_LINES = 12
-_START_CLEANUP_TIMEOUT_SECONDS = 5.0
 
 logger = get_logger(__name__)
 _SYNTHETIC_MODEL = "<synthetic>"
-
-
-@runtime_checkable
-class _Agent(Protocol):
-    """Minimal agent protocol needed by this tool."""
-
-    name: str | None
-
-
-@runtime_checkable
-class _AgentWithId(Protocol):
-    """Agent protocol that exposes a stable id field."""
-
-    id: str | None
-
-
-@runtime_checkable
-class _AgentWithModel(Protocol):
-    """Agent protocol that exposes a model object."""
-
-    model: Any | None
-
-
-@runtime_checkable
-class _ModelWithId(Protocol):
-    """Model protocol that exposes an id field."""
-
-    id: str | None
-
-
-class _RunContext(Protocol):
-    """Minimal run context protocol needed by this tool."""
-
-    session_id: str
+_NO_TEXT = "Claude session completed without text output."
 
 
 def _parse_csv_list(raw_value: str | None) -> list[str]:
@@ -93,7 +61,7 @@ def _normalize_permission_mode(permission_mode: str | None) -> _PermissionMode:
     normalized = permission_mode.strip()
     if normalized not in _VALID_PERMISSION_MODES:
         return _DEFAULT_PERMISSION_MODE
-    return cast("_PermissionMode", normalized)
+    return normalized
 
 
 def _parse_int(value: int | None, *, default: int, minimum: int) -> int:
@@ -114,9 +82,8 @@ class _ClaudeSessionState:
 
     key: str
     namespace: str
-    client: ClaudeSDKClient
-    owner: asyncio.Task[None]
-    close_requested: asyncio.Event
+    process: ClaudeProcess
+    model: str | None
     lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     created_at: float = field(default_factory=monotonic)
     last_used_at: float = field(default_factory=monotonic)
@@ -125,12 +92,16 @@ class _ClaudeSessionState:
     stderr_lines: collections.deque[str] = field(
         default_factory=lambda: collections.deque(maxlen=_MAX_STDERR_LINES),
     )
+    # The conversation and requester of the latest call, toward which the turns it reads, or leaves unread, count.
+    usage_owner: HelperUsageOwner | None = None
+    requester_id: str | None = None
 
 
 @dataclass
 class _ClaudeTurn:
-    """One Claude Code turn: the responses of its main conversation by message id, and its result."""
+    """One Claude Code turn: its text, the responses of its main conversation by message id, and its result."""
 
+    text_parts: list[str] = field(default_factory=list)
     responses: dict[str, AssistantMessage] = field(default_factory=dict)
     result: ResultMessage | None = None
 
@@ -142,6 +113,7 @@ class _ClaudeSessionManager:
         self._sessions: dict[str, _ClaudeSessionState] = {}
         self._lock = asyncio.Lock()
         self._namespace_limits: dict[str, tuple[int, int]] = {}
+        self._sweep: asyncio.Task[None] | None = None
 
     def configure_namespace(
         self,
@@ -151,7 +123,7 @@ class _ClaudeSessionManager:
         max_sessions: int,
     ) -> None:
         """Update limits for one namespace (typically one agent)."""
-        ttl_seconds = max(60, ttl_minutes * 60)
+        ttl_seconds = max(_MIN_SESSION_TTL_SECONDS, ttl_minutes * 60)
         self._namespace_limits[namespace] = (ttl_seconds, max(1, max_sessions))
 
     async def get_or_create(
@@ -161,34 +133,35 @@ class _ClaudeSessionManager:
         options: ClaudeAgentOptions,
     ) -> tuple[_ClaudeSessionState, bool]:
         """Get an existing session or create a new one for the given key."""
-        stale: list[_ClaudeSessionState] = []
+        closing = self._close_many([])
         try:
             async with self._lock:
-                stale.extend(self._collect_expired_locked())
-
                 existing = self._sessions.get(session_key)
                 if existing is not None:
                     existing.last_used_at = monotonic()
                     existing.ttl_seconds = self._namespace_ttl_seconds(namespace)
                     return existing, False
 
-                stale.extend(self._evict_if_needed_locked(namespace))
+                # Evicted sessions close while this one starts, so a shutdown meanwhile waits for their closes.
+                closing = self._close_many(self._evict_if_needed_locked(namespace))
 
-                client = ClaudeSDKClient(options=options)
-                close_requested = asyncio.Event()
-                owner = await self._open(client, close_requested)
                 session = _ClaudeSessionState(
                     key=session_key,
                     namespace=namespace,
-                    client=client,
-                    owner=owner,
-                    close_requested=close_requested,
+                    process=await ClaudeProcess.open(options),
+                    model=options.model,
                     ttl_seconds=self._namespace_ttl_seconds(namespace),
                 )
                 self._sessions[session_key] = session
+                if self._sweep is None or self._sweep.done():
+                    self._sweep = create_background_task(
+                        self._sweep_idle(),
+                        name="claude_session_sweep",
+                        context=Context(),
+                    )
                 return session, True
         finally:
-            await self._disconnect_many(stale)
+            await closing
 
     async def close(self, session_key: str) -> bool:
         """Close and remove a session by key."""
@@ -196,21 +169,45 @@ class _ClaudeSessionManager:
             session = self._sessions.pop(session_key, None)
         if session is None:
             return False
-        await self._disconnect(session)
+        await self._close_many([session])
         return True
 
+    async def close_session(self, session: _ClaudeSessionState) -> None:
+        """Close and remove ``session`` unless it has already left the manager, where a newer one may share its key."""
+        async with self._lock:
+            if self._sessions.get(session.key) is not session:
+                return
+            del self._sessions[session.key]
+        await self._close_many([session])
+
     async def get(self, session_key: str) -> _ClaudeSessionState | None:
-        """Get a session by key, cleaning up expired sessions first."""
-        stale: list[_ClaudeSessionState] = []
-        try:
+        """Get a session by key."""
+        async with self._lock:
+            session = self._sessions.get(session_key)
+            if session is not None:
+                session.last_used_at = monotonic()
+            return session
+
+    async def close_all(self) -> None:
+        """Close every session no call is using, and wait for every close under way, so each counts its unread turns.
+
+        Sessions that a call still uses or is still opening, such as an API request's that shutdown leaves running, end
+        with the process; the manager's lock is not taken, because opening a session holds it.
+        """
+        idle = [session for session in self._sessions.values() if not session.lock.locked()]
+        for session in idle:
+            del self._sessions[session.key]
+        await self._close_many(idle)
+        # Closes that started earlier, such as the idle sweep's, finish too.
+        await wait_for_background_tasks(owner=self)
+
+    async def _sweep_idle(self) -> None:
+        """Close each session idle past its TTL, whether or not calls still come, while the manager holds any."""
+        while self._sessions:
+            await asyncio.sleep(_SWEEP_INTERVAL_SECONDS)
             async with self._lock:
-                stale.extend(self._collect_expired_locked())
-                session = self._sessions.get(session_key)
-                if session is not None:
-                    session.last_used_at = monotonic()
-                return session
-        finally:
-            await self._disconnect_many(stale)
+                expired = self._collect_expired_locked()
+            await self._close_many(expired)
 
     def _collect_expired_locked(self) -> list[_ClaudeSessionState]:
         now = monotonic()
@@ -243,72 +240,59 @@ class _ClaudeSessionManager:
     def _namespace_max_sessions(self, namespace: str) -> int:
         return self._namespace_limits.get(namespace, _DEFAULT_LIMITS)[1]
 
-    @staticmethod
-    async def _open(client: ClaudeSDKClient, close_requested: asyncio.Event) -> asyncio.Task[None]:
-        """Connect on a task that owns the client until ``close_requested`` is set.
+    def _close_many(self, sessions: list[_ClaudeSessionState]) -> asyncio.Future[list[None]]:
+        """Start closing sessions that have left the manager, on tasks of their own that a stopped caller cannot cut short.
 
-        The SDK's reader tasks and subprocess copy the connecting context and live as long as the session,
-        which outlives the tool call and turn that open it; that turn's contextvars hold its Agent and tools.
+        Return a future that ends once every close has.
         """
-        connected = asyncio.get_running_loop().create_future()
-
-        async def own() -> None:
-            try:
-                await client.connect()
-            except Exception as exc:
-                # The SDK has already disconnected; the caller raises the failure.
-                connected.set_exception(exc)
-                return
-            except BaseException:
-                connected.cancel()
-                raise
-            connected.set_result(None)
-            try:
-                await close_requested.wait()
-            finally:
-                await client.disconnect()
-
-        owner = asyncio.create_task(own(), name="claude_session", context=Context())
-        try:
-            await asyncio.shield(connected)
-        except BaseException:
-            owner.cancel()
-            await _drain_failed_start(owner)
-            if connected.done() and not connected.cancelled():
-                connected.exception()
-            raise
-        return owner
-
-    async def _disconnect(self, session: _ClaudeSessionState) -> None:
-        async with session.lock:
-            session.close_requested.set()
-            with suppress(Exception):
-                await session.owner
-
-    async def _disconnect_many(self, sessions: list[_ClaudeSessionState]) -> None:
-        for session in sessions:
-            await self._disconnect(session)
+        closes = [
+            create_background_task(_close(session), name="claude_session_close", owner=self) for session in sessions
+        ]
+        return asyncio.shield(asyncio.gather(*closes))
 
 
-async def _drain_failed_start(owner: asyncio.Task[None]) -> None:
-    """Give the SDK a bounded chance to disconnect a start that nothing tracks yet, even when cancelled again.
+async def _close(session: _ClaudeSessionState) -> None:
+    """Stop the session's client once no call reads it, then count the complete turns no call read.
 
-    The caller holds the session manager's lock and re-raises what interrupted the start, so a failing or stuck
-    disconnect is only logged.
+    Such a turn is, for example, a stopped call's answer.
     """
-    loop = asyncio.get_running_loop()
-    deadline = loop.time() + _START_CLEANUP_TIMEOUT_SECONDS
-    while not owner.done() and (remaining := deadline - loop.time()) > 0:
-        with suppress(asyncio.CancelledError):
-            await asyncio.wait({owner}, timeout=remaining)
-    if not owner.done():
-        logger.warning("Claude session cleanup timed out", timeout_seconds=_START_CLEANUP_TIMEOUT_SECONDS)
-    elif not owner.cancelled() and (error := owner.exception()) is not None:
-        logger.warning("Claude session cleanup failed", error=str(error))
+    async with session.lock:
+        await session.process.close()
+        turn = _ClaudeTurn()
+        while not session.process.messages.empty():
+            message = session.process.messages.get_nowait()
+            if isinstance(message, AssistantMessage):
+                _add_response(turn, message)
+            elif isinstance(message, ResultMessage):
+                turn.result = message
+                await _record_turn_usage(turn, session.model, session.usage_owner, session.requester_id)
+                turn = _ClaudeTurn()
 
 
-async def _record_turn_usage(turn: _ClaudeTurn, session_model: str | None) -> None:
-    """Count one Claude Code turn's main-conversation usage toward the conversation and requester that ran it.
+def _input_counts(usage: dict[str, typing.Any]) -> TokenCounts:
+    """Return the input and cache counters one Claude Code usage report gives."""
+    return TokenCounts(
+        input_tokens=usage.get("input_tokens") or 0,
+        cache_read_tokens=usage.get("cache_read_input_tokens") or 0,
+        cache_write_tokens=usage.get("cache_creation_input_tokens") or 0,
+    )
+
+
+def _add_response(turn: _ClaudeTurn, message: AssistantMessage) -> None:
+    """Keep ``message`` as one of the turn's main-conversation responses, whose usage it reports."""
+    # Placeholder messages, such as a request that failed every retry, name no real model.
+    if message.parent_tool_use_id is None and message.model != _SYNTHETIC_MODEL and message.message_id:
+        # Parallel tool uses split one response into messages that share its id and usage.
+        turn.responses.setdefault(message.message_id, message)
+
+
+async def _record_turn_usage(
+    turn: _ClaudeTurn,
+    session_model: str | None,
+    owner: HelperUsageOwner | None,
+    requester_id: str | None,
+) -> None:
+    """Count one Claude Code turn's main-conversation usage toward ``owner``'s conversation and ``requester_id``.
 
     The result's usage covers the turn's main conversation, including responses that sent no message, such as an
     empty reply Claude Code retried. Each message-bearing response reports its own input and cache usage when it
@@ -316,65 +300,54 @@ async def _record_turn_usage(turn: _ClaudeTurn, session_model: str | None) -> No
     go to the model that finished it. The result's model usage is a running total that also restores earlier spend
     when a session resumes, so it is not used.
     """
-    owner = get_helper_usage_owner()
     responses = list(turn.responses.values())
     finishing_model = responses[-1].model if responses else session_model
     if owner is None or finishing_model is None:
         return
-    models: dict[str, ModelMetrics] = {}
+    models: dict[str, TokenCounts] = {}
     for response in responses:
-        usage = response.usage or {}
-        model = models.setdefault(response.model, ModelMetrics(id=response.model, provider="Anthropic"))
-        model.input_tokens += usage.get("input_tokens") or 0
-        model.cache_read_tokens += usage.get("cache_read_input_tokens") or 0
-        model.cache_write_tokens += usage.get("cache_creation_input_tokens") or 0
+        models[response.model] = models.get(response.model, TokenCounts()) + _input_counts(response.usage or {})
     result_usage = (turn.result.usage if turn.result is not None else None) or {}
     # A crashed turn's result can report zeroes, so the result only ever adds to what its messages reported.
-    unseen_input = (result_usage.get("input_tokens") or 0) - sum(model.input_tokens for model in models.values())
-    unseen_cache_reads = (result_usage.get("cache_read_input_tokens") or 0) - sum(
-        model.cache_read_tokens for model in models.values()
+    unseen = _input_counts(result_usage) - sum(models.values(), TokenCounts())
+    models[finishing_model] = models.get(finishing_model, TokenCounts()) + TokenCounts(
+        input_tokens=max(unseen.input_tokens, 0),
+        output_tokens=result_usage.get("output_tokens") or 0,
+        cache_read_tokens=max(unseen.cache_read_tokens, 0),
+        cache_write_tokens=max(unseen.cache_write_tokens, 0),
     )
-    unseen_cache_writes = (result_usage.get("cache_creation_input_tokens") or 0) - sum(
-        model.cache_write_tokens for model in models.values()
-    )
-    finishing = models.setdefault(finishing_model, ModelMetrics(id=finishing_model, provider="Anthropic"))
-    finishing.input_tokens += max(unseen_input, 0)
-    finishing.cache_read_tokens += max(unseen_cache_reads, 0)
-    finishing.cache_write_tokens += max(unseen_cache_writes, 0)
-    finishing.output_tokens = result_usage.get("output_tokens") or 0
-    metrics = RunMetrics(details={"model": list(models.values())})
-    for model in models.values():
-        model.total_tokens = model.input_tokens + model.output_tokens
-        metrics.input_tokens += model.input_tokens
-        metrics.output_tokens += model.output_tokens
-        metrics.total_tokens += model.total_tokens
-        metrics.cache_read_tokens += model.cache_read_tokens
-        metrics.cache_write_tokens += model.cache_write_tokens
-    if not (metrics.total_tokens or metrics.cache_read_tokens or metrics.cache_write_tokens):
+    metrics = RunMetrics()
+    for model, counts in models.items():
+        metrics.add(MessageMetrics(tokens=counts.with_totals()), model_id=model, provider=ROUTE_PROVIDERS["anthropic"])
+    if not metrics.reported:
         return
-    # An OpenAI-compatible request has no Matrix conversation, only its authenticated requester.
-    requester_context = get_tool_runtime_context() or get_detached_requester_context()
-    invocation_id = uuid4().hex
-    await record_helper_usage(
-        RunOutput(run_id=invocation_id, metrics=metrics),
-        owner=owner,
-        invocation_id=invocation_id,
-        kind="claude_agent",
-        requester_id=requester_context.requester_id if requester_context is not None else None,
-    )
+    try:
+        await record_helper_usage(
+            HelperUsage(run_id=uuid4().hex, model=None, provider=None, metrics=metrics),
+            owner=owner,
+            kind="claude_agent",
+            requester_id=requester_id,
+        )
+    except Exception as error:
+        # Claude has already done the work, so a usage write failure must not hide its reply.
+        logger.warning("claude_session_usage_save_failed", error_type=type(error).__name__)
 
 
-def _response_text(text_parts: list[str], result: ResultMessage | None) -> str:
-    """Return Claude's reply text, falling back to the result summary and marking reported errors."""
-    response_text = "\n".join(part for part in text_parts if part).strip()
-    if not response_text:
-        if result is not None and result.result:
-            response_text = str(result.result).strip()
-        else:
-            response_text = "Claude session completed without text output."
+def _self_started(result: ResultMessage) -> bool:
+    """Return whether Claude Code started the turn ``result`` ends on its own, such as after a background task."""
+    # The CLI supplies the origin; one without a kind counts as none.
+    return (result.origin or {}).get("kind") not in {None, "human"}
+
+
+def _turn_text(turn: _ClaudeTurn) -> str:
+    """Return one turn's text, falling back to its result summary and marking an error the turn reported."""
+    text = "\n".join(part for part in turn.text_parts if part).strip()
+    result = turn.result
+    if not text and result is not None and result.result:
+        text = result.result.strip()
     if result is not None and result.is_error:
-        return f"Claude reported an error: {response_text}"
-    return response_text
+        return f"Claude reported an error: {text or _NO_TEXT}"
+    return text
 
 
 class ClaudeAgentTools(Toolkit):
@@ -463,6 +436,8 @@ class ClaudeAgentTools(Toolkit):
             cli_path=self.cli_path,
             env=env,
             stderr=stderr_callback,
+            # Echo each prompt inside the turn that uses it, which tells that turn apart from the ones Claude Code starts.
+            extra_args={"replay-user-messages": None},
         )
 
     @staticmethod
@@ -502,51 +477,30 @@ class ClaudeAgentTools(Toolkit):
             details.extend(f"- {line}" for line in list(stderr_lines)[-5:])
         return "\n".join([message, *details])
 
-    def _namespace(self, agent: _Agent | None) -> str:
-        if isinstance(agent, _AgentWithId):
-            agent_id = agent.id
-            if agent_id and agent_id.strip():
-                return agent_id.strip()
-        if not isinstance(agent, _Agent):
-            return "mindroom"
-        agent_name = agent.name
-        if agent_name and agent_name.strip():
-            return agent_name.strip()
-        return "mindroom"
+    def _namespace(self) -> str:
+        context = get_tool_runtime_context()
+        agent_name = context.agent_name.strip() if context is not None else ""
+        return agent_name or "mindroom"
 
-    def _ensure_namespace_config(self, namespace: str) -> None:
-        self._session_manager.configure_namespace(
-            namespace=namespace,
-            ttl_minutes=self.session_ttl_minutes,
-            max_sessions=self.max_sessions,
-        )
-
-    def _session_key(
-        self,
-        *,
-        session_label: str | None,
-        run_context: _RunContext | None,
-        agent: _Agent | None,
-    ) -> str:
-        agent_name = self._namespace(agent)
-        run_session = run_context.session_id if run_context is not None else "default"
+    def _session_key(self, *, session_label: str | None) -> str:
+        agent_name = self._namespace()
+        call = current_call()
+        run_session = call.session_id if call is not None else DETACHED_SESSION_ID
         if session_label and session_label.strip():
             return f"{agent_name}:{run_session}:{session_label.strip()}"
         return f"{agent_name}:{run_session}"
 
-    def _resolve_model(self, agent: _Agent | None) -> str | None:
+    def _resolve_model(self) -> str | None:
         if self.model and self.model.strip():
             return self.model.strip()
-
-        if not isinstance(agent, _AgentWithModel):
+        # Without a configured model, each turn runs on the reply's own model, such as an over-budget fallback.
+        context = get_tool_runtime_context()
+        if context is None or context.active_model_name is None:
             return None
-        model_obj = agent.model
-        if not isinstance(model_obj, _ModelWithId):
+        model_config = context.current_config.models.get(context.active_model_name)
+        if model_config is None or not model_config.id.strip():
             return None
-        model_id = model_obj.id
-        if model_id and model_id.strip():
-            return model_id.strip()
-        return None
+        return model_config.id.strip()
 
     async def _get_or_create_session(
         self,
@@ -554,22 +508,24 @@ class ClaudeAgentTools(Toolkit):
         session_label: str | None,
         resume: str | None,
         fork_session: bool,
-        run_context: _RunContext | None,
-        agent: _Agent | None,
     ) -> tuple[_ClaudeSessionState, bool, str, str | None] | str:
         """Shared session acquisition logic.
 
         Returns ``(session, created, session_key, resolved_model)`` on success,
         or an error string on failure.
         """
-        normalized_resume = resume.strip() if isinstance(resume, str) else None
+        normalized_resume = resume.strip() if resume is not None else None
         if fork_session and not normalized_resume:
             return "Invalid session options: `fork_session` requires a non-empty `resume` session ID."
 
-        namespace = self._namespace(agent)
-        resolved_model = self._resolve_model(agent)
-        self._ensure_namespace_config(namespace)
-        session_key = self._session_key(session_label=session_label, run_context=run_context, agent=agent)
+        namespace = self._namespace()
+        resolved_model = self._resolve_model()
+        self._session_manager.configure_namespace(
+            namespace=namespace,
+            ttl_minutes=self.session_ttl_minutes,
+            max_sessions=self.max_sessions,
+        )
+        session_key = self._session_key(session_label=session_label)
 
         stderr_lines: collections.deque[str] = collections.deque(maxlen=_MAX_STDERR_LINES)
         stderr_callback = self._build_stderr_callback(stderr_lines)
@@ -608,16 +564,12 @@ class ClaudeAgentTools(Toolkit):
         session_label: str | None = None,
         resume: str | None = None,
         fork_session: bool = False,
-        run_context: _RunContext | None = None,
-        agent: _Agent | None = None,
     ) -> str:
         """Start or reuse a persistent Claude coding session for this conversation."""
         result = await self._get_or_create_session(
             session_label=session_label,
             resume=resume,
             fork_session=fork_session,
-            run_context=run_context,
-            agent=agent,
         )
         if isinstance(result, str):
             return result
@@ -631,8 +583,6 @@ class ClaudeAgentTools(Toolkit):
         session_label: str | None = None,
         resume: str | None = None,
         fork_session: bool = False,
-        run_context: _RunContext | None = None,
-        agent: _Agent | None = None,
     ) -> str:
         """Send a prompt to a persistent Claude session and return Claude's response."""
         trimmed_prompt = prompt.strip()
@@ -643,25 +593,27 @@ class ClaudeAgentTools(Toolkit):
             session_label=session_label,
             resume=resume,
             fork_session=fork_session,
-            run_context=run_context,
-            agent=agent,
         )
         if isinstance(acquire_result, str):
             return acquire_result
         session, _created, session_key, resolved_model = acquire_result
 
-        normalized_resume = resume.strip() if isinstance(resume, str) else None
-        response_text = ""
-        tool_names: list[str] = []
-        turn = _ClaudeTurn()
+        normalized_resume = resume.strip() if resume is not None else None
         session_error: str | None = None
         async with session.lock:
             session.last_used_at = monotonic()
+            session.usage_owner = get_helper_usage_owner()
+            session.requester_id = current_requester_id()
             try:
-                await session.client.query(trimmed_prompt)
-                response_text, tool_names, turn = await self._collect_response(session)
-                session.last_used_at = monotonic()
-            except ClaudeSDKError as exc:
+                if session.model != resolved_model:
+                    # A reused session runs each turn on that reply's model, such as an over-budget fallback.
+                    await session.process.client.set_model(resolved_model)
+                    session.model = resolved_model
+                prompt_id = str(uuid4())
+                await session.process.client.query(user_message(trimmed_prompt, uuid=prompt_id))
+                response = await self._collect_response(session, prompt_id)
+            except Exception as exc:
+                # Any failure leaves the session unusable, such as a control request Claude Code never answered.
                 session_error = self._format_session_error(
                     f"Claude session error: {exc}",
                     session_key=session_key,
@@ -670,51 +622,71 @@ class ClaudeAgentTools(Toolkit):
                     fork_session=fork_session,
                     stderr_lines=session.stderr_lines,
                 )
+            finally:
+                # The session is idle from the end of the call, however it ends, such as a stopped one.
+                session.last_used_at = monotonic()
 
         if session_error is not None:
-            await self._session_manager.close(session_key)
+            await self._session_manager.close_session(session)
             return session_error
 
-        try:
-            await _record_turn_usage(turn, resolved_model)
-        except Exception as error:
-            # Claude has already done the work, so a usage write failure must not hide its reply.
-            logger.warning("claude_session_usage_save_failed", error_type=type(error).__name__)
-        return self._format_response_output(response_text, tool_names, turn.result)
+        return response
 
-    async def _collect_response(
+    async def _collect_response(  # noqa: C901
         self,
         session: _ClaudeSessionState,
-    ) -> tuple[str, list[str], _ClaudeTurn]:
-        text_parts: list[str] = []
-        tool_names: list[str] = []
-        turn = _ClaudeTurn()
+        prompt_id: str,
+    ) -> str:
+        """Read Claude Code's turns through the one that answers the prompt sent as ``prompt_id``, and return the reply.
 
-        async for message in session.client.receive_response():
-            if isinstance(message, AssistantMessage):
-                # Placeholder messages, such as a request that failed every retry, name no real model.
-                if message.parent_tool_use_id is None and message.model != _SYNTHETIC_MODEL and message.message_id:
-                    # Parallel tool uses split one response into messages that share its id and usage.
-                    turn.responses.setdefault(message.message_id, message)
+        Results of turns Claude Code started on its own, such as after a background task, are read past unless the
+        prompt joined that turn, which its echo shows, or Claude Code dropped a prompt there. Turns read before the
+        answer stay in the reply, and each turn counts toward this call's requester as soon as it ends. A stopped
+        call's unread answer, unless it came in a turn Claude Code started itself, ends the next call's read instead.
+        """
+        tool_names: list[str] = []
+        turns = [_ClaudeTurn()]
+        answered = False
+
+        while True:
+            message = await session.process.messages.get()
+            if isinstance(message, Exception):
+                # The stream has ended, so a call already waiting for this session reads the same error.
+                session.process.messages.put_nowait(message)
+                raise message
+            turn = turns[-1]
+            if isinstance(message, UserMessage):
+                answered = answered or message.uuid == prompt_id
+            elif isinstance(message, SystemMessage) and message.data.get("prevent_continuation"):
+                # Claude Code dropped a prompt without running it, such as one a hook blocked, and says why.
+                reason = message.data.get("content")
+                if isinstance(reason, str) and reason:
+                    turn.text_parts.append(reason)
+                answered = True
+            elif isinstance(message, AssistantMessage):
+                _add_response(turn, message)
                 for block in message.content:
                     if isinstance(block, TextBlock) and block.text:
-                        text_parts.append(block.text)
+                        turn.text_parts.append(block.text)
                     elif isinstance(block, ToolUseBlock):
                         tool_names.append(block.name)
             elif isinstance(message, ResultMessage):
                 turn.result = message
                 session.claude_session_id = message.session_id
-
-        return _response_text(text_parts, turn.result), tool_names, turn
+                await _record_turn_usage(turn, session.model, session.usage_owner, session.requester_id)
+                if answered or not _self_started(message):
+                    text = "\n".join(filter(None, map(_turn_text, turns))) or _NO_TEXT
+                    return self._format_response_output(text, tool_names, message)
+                turns.append(_ClaudeTurn())
 
     def _format_response_output(
         self,
         response_text: str,
         tool_names: list[str],
-        result: ResultMessage | None,
+        result: ResultMessage,
     ) -> str:
         lines = [response_text]
-        if result is not None and result.total_cost_usd is not None:
+        if result.total_cost_usd is not None:
             lines.append(f"[Claude session cost: ${result.total_cost_usd:.4f}]")
         if tool_names:
             unique_tools = ", ".join(sorted(set(tool_names)))
@@ -724,11 +696,9 @@ class ClaudeAgentTools(Toolkit):
     async def claude_session_status(
         self,
         session_label: str | None = None,
-        run_context: _RunContext | None = None,
-        agent: _Agent | None = None,
     ) -> str:
         """Show status information for the current persistent Claude session."""
-        session_key = self._session_key(session_label=session_label, run_context=run_context, agent=agent)
+        session_key = self._session_key(session_label=session_label)
         session = await self._session_manager.get(session_key)
         if session is None:
             return f"No active Claude session for `{session_key}`."
@@ -747,17 +717,15 @@ class ClaudeAgentTools(Toolkit):
     async def claude_interrupt(
         self,
         session_label: str | None = None,
-        run_context: _RunContext | None = None,
-        agent: _Agent | None = None,
     ) -> str:
         """Send an interrupt signal to an active Claude session."""
-        session_key = self._session_key(session_label=session_label, run_context=run_context, agent=agent)
+        session_key = self._session_key(session_label=session_label)
         session = await self._session_manager.get(session_key)
         if session is None:
             return f"No active Claude session for `{session_key}`."
 
         try:
-            await session.client.interrupt()
+            await session.process.client.interrupt()
             session.last_used_at = monotonic()
         except ClaudeSDKError as exc:
             return f"Failed to interrupt Claude session: {exc}"
@@ -766,12 +734,14 @@ class ClaudeAgentTools(Toolkit):
     async def claude_end_session(
         self,
         session_label: str | None = None,
-        run_context: _RunContext | None = None,
-        agent: _Agent | None = None,
     ) -> str:
         """Close and remove an active Claude session."""
-        session_key = self._session_key(session_label=session_label, run_context=run_context, agent=agent)
+        session_key = self._session_key(session_label=session_label)
         removed = await self._session_manager.close(session_key)
         if not removed:
             return f"No active Claude session for `{session_key}`."
         return f"Closed Claude session `{session_key}`."
+
+
+# The runtime's orderly shutdown closes the sessions, which counts the turns no call read, such as a stopped call's answer.
+close_at_process_shutdown(lambda: ClaudeAgentTools._session_manager.close_all())

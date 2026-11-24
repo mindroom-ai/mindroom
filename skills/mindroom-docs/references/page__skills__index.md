@@ -1,7 +1,7 @@
 # Skills
 
 Skills are instruction packs: a `SKILL.md` file with optional scripts and reference documents that guide an agent through a task without adding new code capabilities.
-MindRoom uses Agno's skills system with OpenClaw-compatible metadata.
+Skills use OpenClaw-compatible metadata.
 This page covers writing, installing, and allowlisting skills, skills agents keep in their own workspace, and opt-in automatic skill learning.
 
 ## Skill directory structure
@@ -44,8 +44,8 @@ metadata: '{openclaw:{requires:{bins:["git"], env:["GITHUB_TOKEN"]}}}'
 A skill without any frontmatter still loads with the name and description fallbacks, but frontmatter gives clearer listings.
 Keep each skill focused on one capability, give it a descriptive name such as `code-review`, and declare its dependencies with `metadata.openclaw.requires`.
 
-Workspace skill frontmatter must not use YAML aliases, `%TAG` directives, or unusually large or deeply nested structures.
-A workspace skill that breaks these limits is skipped with a warning, while bundled, plugin, and `~/.mindroom/skills` skills are parsed like any YAML.
+Workspace skill frontmatter must not use YAML aliases, `%TAG` directives, or unusually large or deeply nested structures, while bundled, plugin, and `~/.mindroom/skills` skills are parsed like any YAML.
+A workspace skill whose frontmatter is not valid YAML, for example because an unquoted `description` contains `: `, or breaks these limits is skipped with a warning.
 
 ## Installing and managing skills
 
@@ -89,7 +89,7 @@ They do not appear in the dashboard Skills page or the skills API, because those
 Hidden entries such as `.usage.json`, `.history/`, and `.archive/` are never loaded as skills.
 
 Agents never need write access to a global skill root to create skills, so the bundled, plugin, and user roots can stay read-only, for example in container or Kubernetes deployments.
-An agent with a workspace and workspace-rooted file or shell tools can write a skill to `<workspace>/skills/<skill-name>/SKILL.md`, which its file tools address as `skills/<skill-name>/SKILL.md`.
+An agent with workspace-rooted file or shell tools can write a skill to `<workspace>/skills/<skill-name>/SKILL.md`, which its file tools address as `skills/<skill-name>/SKILL.md`.
 Such agents are told how in their system prompt through the `WORKSPACE_SKILL_AUTHORING_PROMPT` built-in prompt, which you can change through [Built-In Prompt Overrides](https://docs.mindroom.chat/configuration/#built-in-prompt-overrides).
 A new or edited workspace skill is picked up on the agent's next run without a config change.
 
@@ -97,6 +97,7 @@ Being able to write workspace skills does not make an agent create them.
 To have agents save reusable workflows on their own, add that guidance to the agent's instructions, or enable [automatic skill learning](#automatic-skill-learning).
 
 MindRoom loads at most 256 workspace skills per agent, skips a skill whose `SKILL.md` exceeds 1 MiB or whose name exceeds 64 characters, and truncates descriptions to 1,024 characters, logging a warning in each case.
+Until the file is fixed, the owning agent's system prompt names each workspace skill skipped for its frontmatter or name, and why.
 
 ## Eligibility gating (OpenClaw metadata)
 
@@ -104,7 +105,7 @@ If `metadata.openclaw` is present, MindRoom loads the skill only when these rule
 
 - `os: ["linux", "darwin", "windows"]`: the current OS must be listed
 - `always: true` bypasses `requires`, but not an OS mismatch
-- `requires.env`: each environment variable is set, or a stored credential with that key exists
+- `requires.env`: each environment variable is set, directly or through its [`_FILE` variant](https://docs.mindroom.chat/configuration/models/#file-based-secrets), or a stored credential with that key exists
 - `requires.config`: each config path is truthy, for example `agents.code.tools`
 - `requires.bins`: all binaries exist in `PATH`
 - `requires.anyBins`: at least one binary exists in `PATH`
@@ -113,14 +114,14 @@ Skills without `metadata.openclaw` are always eligible.
 
 ## Using skills at runtime
 
-Agents see their available skills in the system prompt and load details with these tools:
+Agents see the name and description of each available skill in the system prompt and load details with these tools:
 
-- `get_skill_instructions(skill_name)` loads the full instructions for a skill
-- `get_skill_reference(skill_name, reference_path)` reads a reference document
-- `get_skill_script(skill_name, script_path, execute=False, args=None, timeout=30)` reads or executes a script
+- `get_skill_instructions(skill_name)` loads the full instructions for a skill and lists its references and scripts
+- `get_skill_reference(skill_name, reference_path)` reads a reference document, and lists the skill's references when called without a path
+- `get_skill_script(skill_name, script_path)` reads a script, and lists the skill's scripts when called without a path
 
-Workspace skill scripts can be read with `get_skill_script`, but not executed through it.
-Agents with shell or file execution tools can still run workspace files through those tools.
+`get_skill_script` never runs a script, whichever skill it comes from.
+Agents with a shell tool run scripts with it, where their shell commands run.
 
 Added, removed, or edited `SKILL.md` files take effect on the agent's next request, within about a second.
 A workspace skill created during a turn becomes available on the next agent run, not in the same response.
@@ -144,8 +145,7 @@ agents:
       archive_after_days: 30
 ```
 
-Hosted MindRoom instances enable it for the agents of a newly provisioned instance; set `agents.<name>.skill_learning.enabled: false` to turn it off.
-Self-hosted configurations from `mindroom config init` leave it off.
+`mindroom config init` and newly provisioned hosted instances enable it for the starter Mind agent; set `agents.<name>.skill_learning.enabled: false` to turn it off.
 Reviews incur additional model usage, reported under `kind: skill_learning` in [usage tracking](https://docs.mindroom.chat/usage/#token-usage).
 Learned skills are generated from conversation content, so review them before relying on them for sensitive work.
 

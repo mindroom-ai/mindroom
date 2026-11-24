@@ -37,6 +37,8 @@ Every environment variable is listed in [Configuration — Environment Variables
 ## Related Setup
 
 - [Bridges](bridges/index.md) - connect Telegram and other messaging platforms to Matrix.
+- [OIDC & Single Sign-On](oidc-sso.md) - sign in to self-hosted Tuwunel and MindRoom Chat with Pocket ID, Authelia, Authentik, Keycloak, or another OIDC provider.
+- [Cloudflare Access & Tunnel](cloudflare-access.md) - Chat, Matrix, calls, and the runtime on one host behind Cloudflare Access.
 - [Connect Google Accounts](google-services-user-oauth.md) - Google tools on a paired local install, with no Google Cloud setup.
 - [Google OAuth Apps & Scopes](google-services-oauth.md) - your own Google OAuth client for remote, public, or shared deployments.
 - [Upgrade Notes](upgrades.md) - required steps when upgrading, including the [Nio 1.0 cutover](upgrades.md#upgrading-to-nio-10).

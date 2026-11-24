@@ -16,27 +16,35 @@ from mindroom.constants import (
     ACTING_REQUESTER_KEY,
     AI_RUN_METADATA_KEY,
     ATTACHMENT_IDS_KEY,
+    CALL_TRANSCRIPT_CONTENT_KEY,
     HOOK_MESSAGE_RECEIVED_DEPTH_KEY,
     HOOK_SOURCE_KEY,
+    NONTERMINAL_STREAM_STATUSES,
     ORIGINAL_SENDER_KEY,
     PER_FIRE_THREAD_ROOT_EVENT_ID_KEY,
     PER_FIRE_THREAD_ROOT_KEY,
+    REASONING_CONTENT_KEY,
+    SCHEDULED_HISTORY_LIMIT_KEY,
+    SCHEDULED_MODEL_KEY,
     SKIP_MENTIONS_KEY,
     SOURCE_KIND_KEY,
     STREAM_STATUS_KEY,
-    STREAM_STATUS_PENDING,
-    STREAM_STATUS_STREAMING,
     STREAM_VISIBLE_BODY_KEY,
     STREAM_WARMUP_SUFFIX_KEY,
     TOOL_TRACE_CONTENT_KEY,
+    VISIBLE_ROUTER_VOICE_ECHO_KEY,
     VOICE_RAW_AUDIO_FALLBACK_KEY,
+    VOICE_SOURCE_EVENT_ID_KEY,
     VOICE_TRANSCRIPT_KEY,
 )
-from mindroom.legacy_delivery_payloads import DURABLE_FINAL_OUTCOME_KEY, without_inline_final_result
+from mindroom.live_frames.frames import utf16_length
 from mindroom.logging_config import get_logger
 from mindroom.matrix.encrypted_event_metadata import encryption_visible_metadata
-from mindroom.matrix.media import prepare_media_upload, upload_content_uri, upload_media_bytes
+from mindroom.matrix.media import durable_session_closed, prepare_media_upload, upload_content_uri, upload_media_bytes
 from mindroom.matrix.message_builder import markdown_to_html
+from mindroom.matrix.state_failures import is_transient_homeserver_status, response_http_status
+from mindroom.matrix_identifiers import has_agent_username
+from mindroom.tool_system.events import has_placeholder_body, tool_markers_out_of_text
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -46,6 +54,8 @@ logger = get_logger(__name__)
 # Conservative limits accounting for Matrix overhead
 _NORMAL_MESSAGE_LIMIT = 55000  # ~55KB for regular messages
 EDIT_MESSAGE_SIZE_LIMIT = 27000  # ~27KB for edits (they roughly double in size)
+# The most reasoning a progress edit carries when it goes out as a sidecar; its terminal update carries all of it.
+_PROGRESS_SIDECAR_REASONING_CHARACTERS = 16_000
 _LARGE_MESSAGE_PREVIEW_OVERHEAD_BYTES = 5000  # Reserve room for Matrix relation and preview metadata.
 _PASSTHROUGH_CONTENT_KEYS = frozenset(
     {
@@ -59,23 +69,29 @@ _PASSTHROUGH_CONTENT_KEYS = frozenset(
         ORIGINAL_SENDER_KEY,
         PER_FIRE_THREAD_ROOT_EVENT_ID_KEY,
         PER_FIRE_THREAD_ROOT_KEY,
+        SCHEDULED_HISTORY_LIMIT_KEY,
+        SCHEDULED_MODEL_KEY,
         AI_RUN_METADATA_KEY,
         STREAM_STATUS_KEY,
         STREAM_WARMUP_SUFFIX_KEY,
+        VISIBLE_ROUTER_VOICE_ECHO_KEY,
         VOICE_RAW_AUDIO_FALLBACK_KEY,
+        VOICE_SOURCE_EVENT_ID_KEY,
         VOICE_TRANSCRIPT_KEY,
     },
 )
 _SIDECAR_ONLY_MINDROOM_KEYS = frozenset(
     {
         "io.mindroom.long_text",
+        CALL_TRANSCRIPT_CONTENT_KEY,
         TOOL_TRACE_CONTENT_KEY,
+        REASONING_CONTENT_KEY,
         STREAM_VISIBLE_BODY_KEY,
     },
 )
 _FILE_FALLBACK_KEYS = ("url", "file", "filename", "info")
-_NONTERMINAL_STREAM_STATUSES = frozenset({STREAM_STATUS_PENDING, STREAM_STATUS_STREAMING})
 _NONTERMINAL_STREAM_PREVIEW_BYTES = 12000
+_PREVIEW_SHRINK_MARGIN = 0.9
 _MATRIX_EVENT_HARD_LIMIT = 64000
 _MEGOLM_AES_BLOCK_BYTES = 16
 _MEGOLM_MAX_MESSAGE_INDEX_VARINT_BYTES = 5
@@ -102,12 +118,7 @@ def _is_passthrough_preview_key(key: object) -> bool:
 
 def _is_passthrough_edit_wrapper_key(key: object) -> bool:
     """Return whether one source key should be mirrored onto the edit wrapper."""
-    return (
-        isinstance(key, str)
-        and key.startswith("io.mindroom.")
-        and key not in _SIDECAR_ONLY_MINDROOM_KEYS
-        and key != DURABLE_FINAL_OUTCOME_KEY
-    )
+    return isinstance(key, str) and key.startswith("io.mindroom.") and key not in _SIDECAR_ONLY_MINDROOM_KEYS
 
 
 def _copy_preview_metadata(source_content: dict[str, Any], target_content: dict[str, Any]) -> None:
@@ -147,15 +158,6 @@ def _wrap_large_edit(
         _copy_file_edit_fallback_fields(replacement_content, wrapper)
     _copy_edit_wrapper_metadata(source_content, wrapper)
     return wrapper
-
-
-def _copy_inline_streaming_preview_metadata(source_content: dict[str, Any], target_content: dict[str, Any]) -> None:
-    """Copy metadata that should remain inline on rich streaming previews."""
-    _copy_preview_metadata(source_content, target_content)
-
-
-def _room_is_encrypted(client: nio.AsyncClient, room_id: str | None) -> bool:
-    return bool(room_id and room_id in client.rooms and client.rooms[room_id].encrypted)
 
 
 def _add_sidecar_metadata(
@@ -276,6 +278,20 @@ def _delivery_event_size_calculator(
     return calculate
 
 
+def fits_one_event(client: nio.AsyncClient, room_id: str, content: dict[str, Any], *, room_encrypted: bool) -> bool:
+    """Return whether a message goes out as it is: within the limit of its kind, and one event once it is encrypted.
+
+    An event without text, such as a hidden route, has nothing a sidecar could carry: only the event limit binds it.
+    """
+    is_edit = is_edit_message(content)
+    source_content = content["m.new_content"] if is_edit and "m.new_content" in content else content
+    size_limit = EDIT_MESSAGE_SIZE_LIMIT if is_edit else _NORMAL_MESSAGE_LIMIT
+    delivery_size = _delivery_event_size_calculator(client, room_id=room_id, room_encrypted=room_encrypted)
+    if "body" in source_content and calculate_event_size(content) > size_limit:
+        return False
+    return delivery_size(content) <= _MATRIX_EVENT_HARD_LIMIT
+
+
 def is_edit_message(content: dict[str, Any]) -> bool:
     """Check if this is an edit message."""
     return "m.new_content" in content or (
@@ -285,7 +301,7 @@ def is_edit_message(content: dict[str, Any]) -> bool:
 
 def _is_nonterminal_stream_content(content: dict[str, Any]) -> bool:
     """Return whether content is an in-progress streaming payload."""
-    return content.get(STREAM_STATUS_KEY) in _NONTERMINAL_STREAM_STATUSES
+    return content.get(STREAM_STATUS_KEY) in NONTERMINAL_STREAM_STATUSES
 
 
 def _prune_expired_oversized_nonterminal_streaming_edit_rate_limits(now: float) -> None:
@@ -315,6 +331,27 @@ def should_send_oversized_nonterminal_streaming_edit(
     event_size = calculate_event_size(edit_content)
     if event_size <= EDIT_MESSAGE_SIZE_LIMIT:
         return True
+    if REASONING_CONTENT_KEY in source_content:
+        # Reasoning is cut to fit an edit that is ordinary without it, so only the rest can make one oversized. An
+        # oversized edit carries a bounded part of it, which its size paces as the upload it is.
+        without_reasoning = {key: value for key, value in edit_content.items() if key != REASONING_CONTENT_KEY}
+        without_reasoning["m.new_content"] = {
+            key: value for key, value in source_content.items() if key != REASONING_CONTENT_KEY
+        }
+        if calculate_event_size(without_reasoning) <= EDIT_MESSAGE_SIZE_LIMIT:
+            return True
+        reasoning = source_content[REASONING_CONTENT_KEY]
+        text = reasoning.get("text") if isinstance(reasoning, dict) else None
+        if isinstance(text, str) and len(text) > _PROGRESS_SIDECAR_REASONING_CHARACTERS:
+            # Sized as fit_reasoning_to_ordinary_event sends it: the text cut, and the segments it no longer reaches.
+            kept = text[:_PROGRESS_SIDECAR_REASONING_CHARACTERS]
+            reasoning = {**reasoning, "text": f"{kept}…"}
+            segments = reasoning.get("segments")
+            if isinstance(segments, list):
+                end = utf16_length(kept)
+                reasoning["segments"] = [segment for segment in segments if segment["start"] < end]
+        without_reasoning["m.new_content"][REASONING_CONTENT_KEY] = reasoning
+        event_size = calculate_event_size(without_reasoning)
 
     key = (room_id, original_event_id)
     now = monotonic()
@@ -357,7 +394,7 @@ def _build_nonterminal_streaming_edit_preview(
             "format": "org.matrix.custom.html",
             "formatted_body": formatted_preview,
         }
-        _copy_inline_streaming_preview_metadata(source_content, preview_content)
+        _copy_preview_metadata(source_content, preview_content)
         _add_sidecar_metadata(
             preview_content,
             room_encrypted=room_encrypted,
@@ -382,6 +419,20 @@ def _build_nonterminal_streaming_edit_preview(
     return None
 
 
+def _set_preview_text(preview_content: dict[str, Any], text: str, full_text: str) -> None:
+    """Show *text* in one preview, keeping its HTML and sidecar size in step.
+
+    A preview that holds the whole text keeps the reply's own HTML, mention
+    pills included; a truncated one renders the text it shows.
+    """
+    preview_content["body"] = text
+    if "formatted_body" in preview_content and text != full_text:
+        preview_content["formatted_body"] = markdown_to_html(text)
+    sidecar_metadata = preview_content.get("io.mindroom.long_text")
+    if isinstance(sidecar_metadata, dict):
+        preview_content["io.mindroom.long_text"] = {**sidecar_metadata, "preview_size": len(text)}
+
+
 def _build_terminal_edit_preview(
     content: dict[str, Any],
     source_content: dict[str, Any],
@@ -392,28 +443,6 @@ def _build_terminal_edit_preview(
     calculate_event_size: Callable[[dict[str, Any]], int],
 ) -> dict[str, Any]:
     """Fit a terminal edit after all replacement and wrapper metadata is present."""
-    preview_body = preview_content.get("body")
-    if not isinstance(preview_body, str):
-        msg = "Large-message preview body must be text"
-        raise TypeError(msg)
-
-    def build_inner(inner_limit: int) -> dict[str, Any]:
-        inner_content = dict(preview_content)
-        inner_content["body"] = (
-            _create_preview(
-                preview_text,
-                inner_limit,
-                continuation_indicator=continuation_indicator,
-            )
-            if inner_limit > 0
-            else ""
-        )
-        sidecar_metadata = inner_content.get("io.mindroom.long_text")
-        if isinstance(sidecar_metadata, dict):
-            sidecar_metadata = dict(sidecar_metadata)
-            sidecar_metadata["preview_size"] = len(inner_content["body"])
-            inner_content["io.mindroom.long_text"] = sidecar_metadata
-        return inner_content
 
     def build_event(inner_content: dict[str, Any], outer_limit: int) -> dict[str, Any]:
         outer_body = (
@@ -425,75 +454,52 @@ def _build_terminal_edit_preview(
         modified_content["body"] = outer_body
         return modified_content
 
-    def fits(inner_content: dict[str, Any], outer_limit: int) -> bool:
-        return calculate_event_size(build_event(inner_content, outer_limit)) <= _MATRIX_EVENT_HARD_LIMIT
-
-    empty_inner = build_inner(0)
-    if not fits(empty_inner, 0):
-        raise MatrixEventTooLargeError(_UNREPRESENTABLE_MESSAGE_ERROR)
-
-    maximum_inner_limit = len(preview_body.encode("utf-8"))
-    full_inner = build_inner(maximum_inner_limit)
-    if fits(full_inner, 0):
-        fitted_inner = full_inner
-    else:
-        inner_limit = _largest_fitting_limit(
-            maximum_inner_limit,
-            lambda candidate_limit: fits(build_inner(candidate_limit), 0),
-        )
-        fitted_inner = build_inner(inner_limit)
-
+    fitted_inner = _fit_preview(
+        preview_content,
+        preview_text,
+        continuation_indicator=continuation_indicator,
+        calculate_event_size=lambda inner_content: calculate_event_size(build_event(inner_content, 0)),
+    )
     outer_limit = _largest_fitting_limit(
         len(fitted_inner["body"].encode("utf-8")),
-        lambda candidate_limit: fits(fitted_inner, candidate_limit),
+        lambda candidate_limit: (
+            calculate_event_size(build_event(fitted_inner, candidate_limit)) <= _MATRIX_EVENT_HARD_LIMIT
+        ),
     )
     return build_event(fitted_inner, outer_limit)
 
 
-def _fit_regular_preview(
+def _fit_preview(
     preview_content: dict[str, Any],
     preview_text: str,
     *,
     continuation_indicator: str,
     calculate_event_size: Callable[[dict[str, Any]], int],
 ) -> dict[str, Any]:
-    """Fit a non-edit preview after all metadata and relations are present."""
-    preview_body = preview_content.get("body")
-    if not isinstance(preview_body, str):
-        msg = "Large-message preview body must be text"
-        raise TypeError(msg)
+    """Return the preview whose event fits, shrinking its text in proportion to the overshoot.
 
-    def build_event(preview_limit: int) -> dict[str, Any]:
-        event = dict(preview_content)
-        event["body"] = (
-            _create_preview(
-                preview_text,
-                preview_limit,
-                continuation_indicator=continuation_indicator,
-            )
-            if preview_limit > 0
-            else ""
-        )
-        sidecar_metadata = event.get("io.mindroom.long_text")
-        if isinstance(sidecar_metadata, dict):
-            sidecar_metadata = dict(sidecar_metadata)
-            sidecar_metadata["preview_size"] = len(event["body"])
-            event["io.mindroom.long_text"] = sidecar_metadata
-        return event
+    Each candidate with HTML renders Markdown, which takes tens of milliseconds
+    on the event loop for a long preview, so this takes one to three renders
+    where a bisection takes about twenty, for a preview somewhat shorter than
+    the largest that fits.
+    """
 
-    empty_preview = build_event(0)
-    if calculate_event_size(empty_preview) > _MATRIX_EVENT_HARD_LIMIT:
+    def build(limit: int) -> dict[str, Any]:
+        preview = dict(preview_content)
+        text = _create_preview(preview_text, limit, continuation_indicator=continuation_indicator) if limit > 0 else ""
+        _set_preview_text(preview, text, preview_text)
+        return preview
+
+    overhead = calculate_event_size(build(0))
+    if overhead > _MATRIX_EVENT_HARD_LIMIT:
         raise MatrixEventTooLargeError(_UNREPRESENTABLE_MESSAGE_ERROR)
-
-    maximum_preview_limit = len(preview_body.encode("utf-8"))
-    full_preview = build_event(maximum_preview_limit)
-    if calculate_event_size(full_preview) <= _MATRIX_EVENT_HARD_LIMIT:
-        return full_preview
-    preview_limit = _largest_fitting_limit(
-        maximum_preview_limit,
-        lambda candidate_limit: calculate_event_size(build_event(candidate_limit)) <= _MATRIX_EVENT_HARD_LIMIT,
-    )
-    return build_event(preview_limit)
+    budget = _MATRIX_EVENT_HARD_LIMIT - overhead
+    limit = len(preview_content["body"].encode("utf-8"))
+    preview = build(limit)
+    while (used := calculate_event_size(preview) - overhead) > budget:
+        limit = int(limit * budget / used * _PREVIEW_SHRINK_MARGIN)
+        preview = build(limit)
+    return preview
 
 
 def _largest_fitting_limit(maximum: int, fits: Callable[[int], bool]) -> int:
@@ -576,78 +582,6 @@ def _create_preview(
     return _prefix_by_bytes(text, target_bytes) + continuation_indicator
 
 
-async def _upload_text_as_mxc(
-    client: nio.AsyncClient,
-    text: str,
-    room_id: str | None = None,
-    *,
-    mimetype: str = "text/plain",
-    room_encrypted: bool | None = None,
-) -> tuple[str | None, dict[str, Any] | None]:
-    """Upload text content as an MXC file.
-
-    Args:
-        client: The Matrix client
-        text: The text content to upload
-        room_id: Optional room ID to check for encryption
-        mimetype: MIME type for the uploaded content (default: "text/plain")
-        room_encrypted: Authoritative encryption state when the room cache is unavailable
-
-    Returns:
-        Tuple of (mxc_uri, file_info_dict) or (None, None) on failure
-
-    """
-    text_bytes = text.encode("utf-8")
-
-    if mimetype == "text/html":
-        filename = "message.html"
-    elif mimetype == "application/json":
-        filename = "message-content.json"
-    else:
-        filename = "message.txt"
-
-    if room_encrypted is None:
-        room_encrypted = _room_is_encrypted(client, room_id)
-
-    try:
-        prepared = prepare_media_upload(text_bytes, filename=filename, mimetype=mimetype, encrypt=room_encrypted)
-        file_info = prepared.encrypted_file_content(url="") or prepared.info()
-    except Exception:
-        logger.exception("Failed to encrypt attachment")
-        return None, None
-
-    try:
-        # nio.upload returns Tuple[Union[UploadResponse, UploadError], Optional[Dict[str, Any]]]
-        upload_result, _encryption_dict = await upload_media_bytes(
-            client,
-            prepared.data,
-            content_type=prepared.content_type,
-            filename=prepared.filename,
-        )
-
-        # Check if upload was successful
-        if not isinstance(upload_result, nio.UploadResponse):
-            logger.error(
-                "large_message_sidecar_upload_failed",
-                room_id=room_id,
-                error=str(upload_result),
-            )
-            return None, None
-
-        mxc_uri = upload_content_uri(upload_result)
-        if mxc_uri is None:
-            logger.error("Upload response missing content_uri")
-            return None, None
-
-        file_info["url"] = mxc_uri
-
-    except Exception:
-        logger.exception("Failed to upload text")
-        return None, None
-    else:
-        return mxc_uri, file_info
-
-
 async def _build_file_content(
     client: nio.AsyncClient,
     room_id: str,
@@ -656,6 +590,7 @@ async def _build_file_content(
     size_limit: int,
     *,
     room_encrypted: bool,
+    durable: bool,
 ) -> tuple[str | None, dict[str, Any] | None, dict[str, Any]]:
     """Upload full original content JSON and build preview ``m.file`` event."""
     mxc_uri, file_info = await upload_json_sidecar(
@@ -663,6 +598,7 @@ async def _build_file_content(
         room_id,
         full_content,
         room_encrypted=room_encrypted,
+        durable=durable,
     )
 
     available = size_limit - _LARGE_MESSAGE_PREVIEW_OVERHEAD_BYTES
@@ -731,30 +667,139 @@ def content_fits_normal_event(content: dict[str, Any]) -> bool:
     return calculate_event_size(content) <= _NORMAL_MESSAGE_LIMIT
 
 
+def fit_reasoning_to_ordinary_event(
+    client: nio.AsyncClient,
+    room_id: str,
+    content: dict[str, Any],
+    *,
+    room_encrypted: bool,
+    size_limit: int | None = None,
+) -> dict[str, Any]:
+    """Keep a reply's reasoning from pushing an ordinary-size reply into a sidecar or segments.
+
+    An edit carries reasoning only in ``m.new_content``, since clients that read the fallback do not show it, and the
+    reasoning text is cut to the space the answer leaves. An answer too large on its own keeps its reasoning whole,
+    for the sidecar that carries the full content. ``size_limit`` replaces the sidecar threshold with the size at which
+    the split strategy segments a reply.
+    """
+    new_content = content.get("m.new_content")
+    holder: dict[str, Any] = new_content if isinstance(new_content, dict) else content
+    reasoning = holder.get(REASONING_CONTENT_KEY) or content.get(REASONING_CONTENT_KEY)
+    if not isinstance(reasoning, dict) or not isinstance(reasoning.get("text"), str):
+        return content
+    limit = size_limit or (EDIT_MESSAGE_SIZE_LIMIT if is_edit_message(content) else _NORMAL_MESSAGE_LIMIT)
+    delivery_size = _delivery_event_size_calculator(client, room_id=room_id, room_encrypted=room_encrypted)
+
+    def fits(candidate: dict[str, Any]) -> bool:
+        return calculate_event_size(candidate) <= limit and delivery_size(candidate) <= _MATRIX_EVENT_HARD_LIMIT
+
+    base = {key: value for key, value in content.items() if key != REASONING_CONTENT_KEY}
+    if isinstance(new_content, dict):
+        base["m.new_content"] = {key: value for key, value in new_content.items() if key != REASONING_CONTENT_KEY}
+
+    def with_text(kept_text: str, marker: str = "") -> dict[str, Any]:
+        fitted = dict(base)
+        target = dict(fitted["m.new_content"]) if isinstance(new_content, dict) else fitted
+        target[REASONING_CONTENT_KEY] = {**reasoning, "text": kept_text + marker}
+        segments = reasoning.get("segments")
+        if isinstance(segments, list):
+            end = utf16_length(kept_text)
+            target[REASONING_CONTENT_KEY]["segments"] = [segment for segment in segments if segment["start"] < end]
+        if isinstance(new_content, dict):
+            fitted["m.new_content"] = target
+        return fitted
+
+    full_text = reasoning["text"]
+    if not fits(base):
+        # A progress edit that goes out as a sidecar keeps a bounded part of the reasoning, so each one stays within
+        # its upload budget; the terminal update keeps all of it.
+        if not _is_nonterminal_stream_content(holder):
+            return content
+        bounded = len(full_text) > _PROGRESS_SIDECAR_REASONING_CHARACTERS
+        return with_text(full_text[:_PROGRESS_SIDECAR_REASONING_CHARACTERS], "…" if bounded else "")
+    if fits(with_text(full_text)):
+        return with_text(full_text)
+    kept = _largest_fitting_limit(len(full_text), lambda length: fits(with_text(full_text[:length], "…")))
+    return with_text(full_text[:kept], "…") if kept else base
+
+
 async def upload_json_sidecar(
     client: nio.AsyncClient,
     room_id: str,
     payload: dict[str, Any],
     *,
-    room_encrypted: bool | None = None,
+    room_encrypted: bool,
+    durable: bool = False,
 ) -> tuple[str | None, dict[str, Any] | None]:
-    """Upload one JSON payload as an MXC sidecar and return ``(mxc_uri, file_info)``."""
-    text = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return await _upload_text_as_mxc(
-        client,
-        text,
-        room_id,
-        mimetype="application/json",
-        room_encrypted=room_encrypted,
-    )
+    """Upload one JSON payload as an MXC sidecar and return ``(mxc_uri, file_info)``.
+
+    ``room_encrypted`` is the authoritative room encryption state and decides whether the upload is encrypted.
+    Returns ``(None, None)`` on failure. A ``durable`` caller freezes the result, so a homeserver that stays
+    down or rate limiting past nio's retry bound is waited out instead of failing the upload.
+    """
+    text_bytes = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    try:
+        prepared = prepare_media_upload(
+            text_bytes,
+            filename="message-content.json",
+            mimetype="application/json",
+            encrypt=room_encrypted,
+        )
+        file_info = prepared.encrypted_file_content(url="") or prepared.info()
+    except Exception:
+        logger.exception("Failed to encrypt attachment")
+        return None, None
+
+    try:
+        # nio.upload returns Tuple[Union[UploadResponse, UploadError], Optional[Dict[str, Any]]]
+        upload_result, _encryption_dict = await upload_media_bytes(
+            client,
+            prepared.data,
+            content_type=prepared.content_type,
+            filename=prepared.filename,
+            durable=durable,
+            room_id=room_id,
+        )
+
+        # Check if upload was successful
+        if not isinstance(upload_result, nio.UploadResponse):
+            http_status = response_http_status(upload_result)
+            # Durable uploads wait out 502/503/504 in upload_media_bytes; non-durable sends fall back to an inline or truncated preview.
+            log = logger.warning if not durable and is_transient_homeserver_status(http_status) else logger.error
+            log(
+                "large_message_sidecar_upload_failed",
+                room_id=room_id,
+                error=str(upload_result),
+                http_status=http_status,
+            )
+            return None, None
+
+        mxc_uri = upload_content_uri(upload_result)
+        if mxc_uri is None:
+            logger.error("Upload response missing content_uri")
+            return None, None
+
+        file_info["url"] = mxc_uri
+
+    except Exception:
+        log = logger.warning if durable_session_closed(client) else logger.exception
+        log("Failed to upload text")
+        return None, None
+    else:
+        return mxc_uri, file_info
 
 
 def _build_text_fallback_content(
     source_content: dict[str, Any],
     preview_text: str,
     size_limit: int,
+    *,
+    sidecar_required: bool,
 ) -> dict[str, Any]:
-    """Build a text preview when the full-content sidecar is unavailable."""
+    """Build a text preview when the full-content sidecar is unavailable, unless the message must keep its sidecar."""
+    if sidecar_required:
+        msg = "Large message needs a sidecar, which could not be used"
+        raise MatrixEventTooLargeError(msg)
     preview_limit = max(0, size_limit - _LARGE_MESSAGE_PREVIEW_OVERHEAD_BYTES)
     preview_msgtype = "m.notice" if source_content.get("msgtype") == "m.notice" else "m.text"
     while True:
@@ -786,6 +831,9 @@ def _ensure_minimum_preview_can_fit(
     smallest possible fallback cannot fit, uploading cannot make the event
     deliverable and would only leave an unreferenced attachment behind.
     """
+    if "body" not in source_content:
+        msg = f"Matrix event without text exceeds the event size limit in room {room_id}"
+        raise MatrixEventTooLargeError(msg)
     preview_msgtype = "m.notice" if source_content.get("msgtype") == "m.notice" else "m.text"
     minimum_preview: dict[str, Any] = {"msgtype": preview_msgtype, "body": ""}
     _copy_preview_metadata(source_content, minimum_preview)
@@ -828,7 +876,7 @@ def _fit_large_message_preview(
             continuation_indicator=continuation_indicator,
             calculate_event_size=calculate_event_size,
         )
-    return _fit_regular_preview(
+    return _fit_preview(
         preview_content,
         preview_text,
         continuation_indicator=continuation_indicator,
@@ -836,13 +884,34 @@ def _fit_large_message_preview(
     )
 
 
+def _large_message_preview(
+    client: nio.AsyncClient,
+    content: dict[str, Any],
+    source_content: dict[str, Any],
+    *,
+    is_edit: bool,
+) -> tuple[dict[str, Any], str, str]:
+    """Return the layer a preview shows, its text, and the text sent in the preview's place without a sidecar.
+
+    An agent's preview shows its text without its tool markers, as its events that fit are sent. A reply of calls
+    alone then shows a placeholder for the calls its sidecar holds. Without a sidecar nothing sent names them, so
+    the text sent in its place keeps their markers.
+    """
+    sent = tool_markers_out_of_text(content) if has_agent_username(client.user_id) else content
+    preview_source = sent["m.new_content"] if is_edit and "m.new_content" in sent else sent
+    preview_text = preview_source.get("body", "")
+    fallback_text = source_content.get("body", "") if has_placeholder_body(preview_source) else preview_text
+    return preview_source, preview_text, fallback_text
+
+
 async def prepare_large_message(
     client: nio.AsyncClient,
     room_id: str,
     content: dict[str, Any],
     *,
-    room_encrypted: bool | None = None,
+    room_encrypted: bool,
     prepare_for_encrypted_delivery: bool = False,
+    sidecar_required: bool = False,
 ) -> dict[str, Any]:
     """Check if message is too large and prepare it if needed.
 
@@ -856,8 +925,11 @@ async def prepare_large_message(
         client: The Matrix client
         room_id: The room to send to
         content: The message content dictionary
-        room_encrypted: Authoritative encryption state when the room cache is unavailable
-        prepare_for_encrypted_delivery: Encrypt sidecars and fit a durable payload for later encrypted delivery
+        room_encrypted: Authoritative room encryption state from the delivery boundary
+        prepare_for_encrypted_delivery: Encrypt sidecars and fit a durable payload for later encrypted delivery,
+            waiting out a homeserver outage for the sidecar rather than freezing a truncated text
+        sidecar_required: Raise ``MatrixEventTooLargeError`` instead of falling back to a truncated text without
+            the content's sidecar-only keys, for a message that must arrive whole or not at all
 
     Returns:
         The original content object when no preparation is needed, otherwise
@@ -866,23 +938,26 @@ async def prepare_large_message(
         when this coroutine completed without yielding.
 
     """
-    content = without_inline_final_result(content)
+    encrypted_delivery_safe = room_encrypted or prepare_for_encrypted_delivery
+    if fits_one_event(client, room_id, content, room_encrypted=encrypted_delivery_safe):
+        return content
     is_edit = is_edit_message(content)
     size_limit = EDIT_MESSAGE_SIZE_LIMIT if is_edit else _NORMAL_MESSAGE_LIMIT
-    if room_encrypted is None:
-        room_encrypted = _room_is_encrypted(client, room_id)
-    encrypted_delivery_safe = room_encrypted or prepare_for_encrypted_delivery
     calculate_delivery_event_size = _delivery_event_size_calculator(
         client,
         room_id=room_id,
         room_encrypted=encrypted_delivery_safe,
     )
     current_size = calculate_event_size(content)
-    if current_size <= size_limit and calculate_delivery_event_size(content) <= _MATRIX_EVENT_HARD_LIMIT:
-        return content
-
     source_content = content["m.new_content"] if is_edit and "m.new_content" in content else content
-    preview_text = source_content["body"]
+
+    # The sidecar holds the message as it was built, tool markers in its text, as every reader takes it.
+    preview_source, preview_text, fallback_text = _large_message_preview(
+        client,
+        content,
+        source_content,
+        is_edit=is_edit,
+    )
     _ensure_minimum_preview_can_fit(
         content,
         source_content,
@@ -901,6 +976,7 @@ async def prepare_large_message(
             room_id,
             content,
             room_encrypted=encrypted_delivery_safe,
+            durable=prepare_for_encrypted_delivery,
         )
         if not sidecar_upload_is_usable(
             mxc_uri,
@@ -920,7 +996,7 @@ async def prepare_large_message(
         modified_content = _build_nonterminal_streaming_edit_preview(
             content,
             source_content,
-            preview_text,
+            fallback_text if mxc_uri is None else preview_text,
             room_encrypted=encrypted_delivery_safe,
             mxc_uri=mxc_uri,
             file_info=file_info,
@@ -953,6 +1029,7 @@ async def prepare_large_message(
         preview_text,
         size_limit,
         room_encrypted=encrypted_delivery_safe,
+        durable=prepare_for_encrypted_delivery,
     )
 
     sidecar_usable = sidecar_upload_is_usable(
@@ -961,6 +1038,9 @@ async def prepare_large_message(
         room_encrypted=encrypted_delivery_safe,
     )
     if sidecar_usable:
+        if source_content.get("msgtype") == "m.notice":
+            # A notice's preview stays a notice, so the push rule that keeps notices quiet still matches it.
+            modified_content["msgtype"] = "m.notice"
         _copy_preview_metadata(source_content, modified_content)
         _add_sidecar_metadata(
             modified_content,
@@ -969,7 +1049,18 @@ async def prepare_large_message(
             file_info=file_info,
             original_size=current_size,
         )
+        if isinstance(preview_source.get("formatted_body"), str):
+            # Clients render the preview until the sidecar loads, so it carries
+            # the HTML of the text it shows; fitting re-renders it if truncated.
+            modified_content["format"] = "org.matrix.custom.html"
+            modified_content["formatted_body"] = preview_source["formatted_body"]
     else:
+        modified_content = _build_text_fallback_content(
+            source_content,
+            fallback_text,
+            size_limit,
+            sidecar_required=sidecar_required,
+        )
         logger.warning(
             "large_message_sidecar_unavailable_using_text_fallback",
             room_id=room_id,
@@ -978,14 +1069,13 @@ async def prepare_large_message(
             has_mxc_uri=bool(mxc_uri),
             has_file_info=bool(file_info),
         )
-        modified_content = _build_text_fallback_content(source_content, preview_text, size_limit)
 
     try:
         modified_content = _fit_large_message_preview(
             content,
             source_content,
             modified_content,
-            preview_text,
+            preview_text if sidecar_usable else fallback_text,
             is_edit=is_edit,
             continuation_indicator=(_CONTINUATION_INDICATOR if sidecar_usable else _SIDECAR_UPLOAD_FALLBACK_INDICATOR),
             calculate_event_size=calculate_delivery_event_size,
@@ -997,6 +1087,12 @@ async def prepare_large_message(
         # cannot be proven before upload. The empty text envelope was proven
         # above; fall back to it instead of failing and uploading again on the
         # next delivery attempt.
+        text_fallback = _build_text_fallback_content(
+            source_content,
+            fallback_text,
+            size_limit,
+            sidecar_required=sidecar_required,
+        )
         logger.warning(
             "large_message_sidecar_envelope_too_large_using_text_fallback",
             room_id=room_id,
@@ -1006,8 +1102,8 @@ async def prepare_large_message(
         modified_content = _fit_large_message_preview(
             content,
             source_content,
-            _build_text_fallback_content(source_content, preview_text, size_limit),
-            preview_text,
+            text_fallback,
+            fallback_text,
             is_edit=is_edit,
             continuation_indicator=_SIDECAR_UPLOAD_FALLBACK_INDICATOR,
             calculate_event_size=calculate_delivery_event_size,

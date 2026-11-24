@@ -37,8 +37,7 @@ if TYPE_CHECKING:
             default=False,
         ),
     ],
-    dependencies=["agno"],  # From agno requirements
-    docs_url="https://docs.agno.com/tools/toolkits/local/sleep",
+    docs_url="https://docs.mindroom.chat/tools/execution-and-coding/#sleep",
     function_names=("sleep",),
 )
 def sleep_tools() -> type[SleepTools]:

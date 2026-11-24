@@ -16,7 +16,7 @@ const paddingMap = {
 
 const variantMap = {
   default: 'border-gray-100 dark:border-gray-700',
-  highlight: 'border-orange-200/50 dark:border-orange-800/30 bg-gradient-to-r from-orange-50 to-yellow-50 dark:from-orange-900/10 dark:to-yellow-900/10',
+  highlight: 'border-brand-200/50 dark:border-brand-800/30 bg-gradient-to-r from-brand-50 to-white dark:from-brand-900/20 dark:to-transparent',
   danger: 'border-red-200/50 dark:border-red-800/30 bg-gradient-to-r from-red-50 to-pink-50 dark:from-red-900/10 dark:to-pink-900/10',
   success: 'border-green-200/50 dark:border-green-800/30 bg-gradient-to-r from-green-50 to-emerald-50 dark:from-green-900/10 dark:to-emerald-900/10',
 }

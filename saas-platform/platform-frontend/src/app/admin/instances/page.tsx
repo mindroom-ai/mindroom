@@ -98,16 +98,13 @@ export default function InstancesPage() {
           <h1 className="text-3xl font-bold text-gray-900 dark:text-gray-100">Instances</h1>
           <p className="text-gray-600 dark:text-gray-400 mt-2">Manage customer MindRoom instances</p>
         </div>
-        <div className="space-x-2">
-          <Button
-            variant="outline"
-            onClick={syncInstances}
-            disabled={syncing}
-          >
-            {syncing ? 'Syncing...' : 'Refresh All'}
-          </Button>
-          <Button>Deploy New</Button>
-        </div>
+        <Button
+          variant="outline"
+          onClick={syncInstances}
+          disabled={syncing}
+        >
+          {syncing ? 'Syncing...' : 'Refresh All'}
+        </Button>
       </div>
 
       <Card className="bg-white dark:bg-gray-900 border-gray-200 dark:border-gray-800">

@@ -12,24 +12,26 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
+import difflib
+import json
+import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from functools import partial
 from typing import TYPE_CHECKING, Protocol
 
-from agno.run.agent import RunOutput
-
-from mindroom.agent_storage import create_session_storage
 from mindroom.background_tasks import create_background_task, run_blocking_until_complete
 from mindroom.constants import SKILL_REVIEW_NOTICE_CONTENT_KEY, SKIP_MENTIONS_KEY
-from mindroom.llm_request_logging import bind_llm_request_log_context
+from mindroom.llm.request_context import bind_llm_request_log_context
+from mindroom.llm.runs import RunRecord
 from mindroom.logging_config import bound_log_context, get_logger
 from mindroom.matrix.client_delivery import send_message_result
 from mindroom.matrix.message_builder import build_message_content
 from mindroom.runtime_resolution import resolve_agent_execution, resolve_agent_runtime
+from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.skill_learning.library import archive_unused_skills
 from mindroom.skill_learning.reviewer import review_conversation
-from mindroom.skill_learning.tools import ReviewProgress, library_turn
+from mindroom.skill_learning.tools import ReviewFile, ReviewProgress, library_turn
 from mindroom.skill_learning.transcript import count_model_replies
 from mindroom.tool_system.skills import agent_workspace_skills_root
 
@@ -45,6 +47,9 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 logger = get_logger(__name__)
+# Diff characters a notice carries per file and in total, so the event stays far below Matrix's 64 KiB limit.
+_NOTICE_FILE_DIFF_CHARS = 4_000
+_NOTICE_DIFF_CHARS = 12_000
 
 
 class _NoticeBot(Protocol):
@@ -64,9 +69,9 @@ class _ReviewScope:
     session: str
     identity: ToolExecutionIdentity | None
 
-    def key(self, config: Config) -> str:
+    def key(self, config: Config, runtime_paths: RuntimePaths) -> str:
         """Return the conversation's key: its agent, private worker scope, and session."""
-        execution = resolve_agent_execution(self.agent, config, execution_identity=self.identity)
+        execution = resolve_agent_execution(self.agent, config, runtime_paths, execution_identity=self.identity)
         worker = f"{execution.worker_key}:" if execution.is_private else ""
         return f"{self.agent}:{worker}{self.session}"
 
@@ -78,11 +83,8 @@ def _response_replies(
     run_id: str,
 ) -> tuple[int, bool]:
     storage = create_session_storage(scope.agent, config, runtime_paths, execution_identity=scope.identity)
-    try:
-        run = storage.get_run(run_id)
-    finally:
-        storage.close()
-    return count_model_replies(run if isinstance(run, RunOutput) else None)
+    run = storage.get_run(run_id)
+    return count_model_replies(run if isinstance(run, RunRecord) else None)
 
 
 def _review_log_context(scope: _ReviewScope, correlation_id: str) -> dict[str, str]:
@@ -104,8 +106,7 @@ def _review_log_context(scope: _ReviewScope, correlation_id: str) -> dict[str, s
 def _skills_root(config: Config, runtime_paths: RuntimePaths, scope: _ReviewScope) -> Path:
     """Return the workspace skills directory that this conversation's reviews maintain."""
     runtime = resolve_agent_runtime(scope.agent, config, runtime_paths, execution_identity=scope.identity)
-    workspace_root = runtime.workspace.root if runtime.workspace is not None else None
-    return agent_workspace_skills_root(runtime_paths, scope.agent, workspace_root=workspace_root)
+    return agent_workspace_skills_root(runtime.workspace.root)
 
 
 @dataclass
@@ -127,7 +128,8 @@ class SkillReviewRunner:
         identity: ToolExecutionIdentity | None,
     ) -> None:
         """Stop a conversation's review because a response starts in it."""
-        if (task := self._reviews.get(_ReviewScope(agent_name, session_id, identity).key(config))) is not None:
+        key = _ReviewScope(agent_name, session_id, identity).key(config, self.runtime_paths)
+        if (task := self._reviews.get(key)) is not None:
             task.cancel()
 
     async def count(
@@ -148,7 +150,7 @@ class SkillReviewRunner:
         """
         scope = _ReviewScope(agent_name, session_id, identity)
         replies, restarted = await asyncio.to_thread(_response_replies, config, self.runtime_paths, scope, run_id)
-        key = scope.key(config)
+        key = scope.key(config, self.runtime_paths)
         replies += 0 if restarted else self._replies.get(key, 0)
         running = self._reviews.get(key)
         if (
@@ -168,8 +170,8 @@ class SkillReviewRunner:
                 correlation_id,
             ),
             name=f"skill_review:{scope.agent}",
-            # The response's context carries its queued-message and mid-turn state, which the reused model's hooks
-            # would otherwise apply to the review's requests.
+            # A fresh context keeps the response's turn state, such as its log fields and queued messages, out of
+            # the review.
             context=contextvars.Context(),
         )
         self._reviews[key] = task
@@ -234,16 +236,17 @@ class SkillReviewRunner:
             # The notice runs on its own, so a new response that stops the review after its writes landed cannot stop
             # the notice too; shutdown sends none.
             if settings.notify and progress.changes and not self._stopped:
-                create_background_task(self._notify(scope, progress.changes), name=f"skill_notice:{scope.agent}")
+                create_background_task(self._notify(scope, progress), name=f"skill_notice:{scope.agent}")
         logger.info("Skill review finished", changed=sorted(progress.changes))
 
-    async def _notify(self, scope: _ReviewScope, changes: dict[str, str]) -> None:
+    async def _notify(self, scope: _ReviewScope, progress: ReviewProgress) -> None:
         """Tell the conversation which skills its review changed, like Hermes' self-improvement summary."""
         identity = scope.identity
         bot = self.bot_provider(scope.agent)
         client = bot.client if bot is not None and bot.running else None
         if bot is None or client is None or identity is None or identity.channel != "matrix" or not identity.room_id:
             return
+        changes = progress.changes
         body = "💾 Skill review: " + " · ".join(f"{action} `{name}`" for name, action in sorted(changes.items()))
         thread_id = identity.resolved_thread_id
         # Like approval events, the reply fallback names the thread's newest event for clients without threads.
@@ -255,9 +258,43 @@ class SkillReviewRunner:
             # The marker keeps the notice out of later model context, like compaction notices.
             extra_content={
                 "msgtype": "m.notice",
-                SKILL_REVIEW_NOTICE_CONTENT_KEY: {"changes": changes},
+                SKILL_REVIEW_NOTICE_CONTENT_KEY: {"changes": changes, "files": _notice_files(progress.files)},
                 SKIP_MENTIONS_KEY: True,
             },
         )
         if await send_message_result(client, identity.room_id, content) is None:
             logger.warning("Could not post skill review notice")
+
+
+def _notice_files(files: dict[tuple[str, str], ReviewFile]) -> list[dict[str, object]]:
+    """Describe each file a review changed, with exact line counts and a diff cut at whole lines to fit the budgets."""
+    budget = _NOTICE_DIFF_CHARS
+    entries: list[dict[str, object]] = []
+    for (directory, relative_path), file in files.items():
+        if file.before is None and file.after is None:
+            continue
+        # Lines split on newlines only, so a changed final newline or another line separator is a changed line.
+        before, after = (re.findall(r"[^\n]*\n|[^\n]+\Z", text or "") for text in (file.before, file.after))
+        # The first two lines are the ---/+++ headers.
+        lines = [
+            line if line.endswith("\n") else f"{line}\n\\ No newline at end of file\n"
+            for line in difflib.unified_diff(before, after, n=2)
+        ][2:]
+        # A line counts at its escaped JSON size, the most it can add to the event.
+        kept, used, limit = 0, 0, min(_NOTICE_FILE_DIFF_CHARS, budget)
+        while kept < len(lines) and used + (size := len(json.dumps(lines[kept]))) <= limit:
+            used += size
+            kept += 1
+        diff = "".join(lines[:kept])
+        budget -= used
+        entry: dict[str, object] = {
+            "skill": file.skill,
+            "path": f"{directory}/{relative_path}",
+            "action": "created" if file.before is None else "removed" if file.after is None else "updated",
+            "added": sum(line.startswith("+") for line in lines),
+            "removed": sum(line.startswith("-") for line in lines),
+        }
+        if kept or not lines:
+            entry["diff"] = diff
+        entries.append({**entry, "diff_truncated": kept < len(lines)})
+    return entries

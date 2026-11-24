@@ -6,73 +6,152 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import sys
 from dataclasses import replace
+from typing import TYPE_CHECKING
 from uuid import uuid4
 
 import pytest
-from agno.agent import Agent
-from agno.models.message import Message
-from agno.models.response import ModelResponse
-from agno.skills import LocalSkills, Skills
-from agno.tools.function import Function, FunctionCall
+from agno.tools.function import Function
 from agno.tools.toolkit import Toolkit
 
 from mindroom import agents
 from mindroom.agent_cli import cli_approval_recovery
 from mindroom.agent_cli.approval import CliApprovalCall
 from mindroom.agent_cli.delegation import advance_cli_delegation, approval_calls_for_cli_pause
-from mindroom.agent_cli.events import project_cli_execution, stream_cli_events
-from mindroom.agent_cli.lifetime import response_cli_lifetime
-from mindroom.agent_cli.minimal_agent import MinimalAgent
+from mindroom.agent_cli.events import stream_cli_events
+from mindroom.agent_cli.lifetime import cli_control_calls, response_cli_lifetime
 from mindroom.agent_cli.protocol import ContextReadOperation, ToolCallOperation, ToolDescribeOperation
-from mindroom.agent_cli.session import CliBashWindowRequiredError, CliTurnOwner
+from mindroom.agent_cli.session import CliBashWindowRequiredError, CliTurnOwner, TurnToolRegistry
 from mindroom.agent_cli.shell_contract import AgentCliShellEnv
-from mindroom.agent_cli.turn import LiveTurnTools
-from mindroom.agent_storage import create_session_storage, create_state_storage
-from mindroom.agno_compat_prepared_tools import prepare_agent_tools
-from mindroom.ai import collect_streamed_response_content
-from mindroom.approval.tool_owners import toolkit_owners_for_agents
+from mindroom.ai import run_delegated_child_response
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.custom_tools.compact_context import CompactContextTools
 from mindroom.custom_tools.memory import MemoryTools
-from mindroom.delegation.lifecycle import child_execution_identity
 from mindroom.delegation.state import DelegationState
-from mindroom.dynamic_tool_continuation import continuation_decision_from_tools
 from mindroom.interactive import parse_and_format_interactive
+from mindroom.llm.events import ReportedCall, ToolCallOrigin
+from mindroom.llm.runs import RunRecord, RunRequirement, RunStatus
 from mindroom.mcp.manager import MCPServerManager
-from mindroom.mcp.registry import sync_mcp_tool_registry
 from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.memory import search_agent_memories
 from mindroom.prompts import INTERACTIVE_QUESTION_PROMPT
 from mindroom.response_turn import (
     PausedAnswer,
     PausedAttempt,
-    ResponsePausedForApproval,
     apply_exact_approval_decisions,
-    paused_attempt_from_response,
+    collect_streamed_response_content,
 )
-from mindroom.tool_system.agent_tool_calls import DeferredAgentToolkit, execute_agent_tool_call
+from mindroom.run_storage import RunStorage
+from mindroom.session_storage.agent_storage import create_agent_state_storage, create_session_storage
+from mindroom.tool_system.agent_tool_calls import AgentToolCallWaiting, DeferredAgentToolkit, execute_agent_tool_call
+from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.events import CollectedStreamPresentation
 from mindroom.tool_system.metadata import get_tool_by_name
-from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
+from mindroom.tool_system.output_files import ToolOutputFilePolicy
+from mindroom.tool_system.plugins import config_plugins
+from mindroom.tool_system.runtime_context import get_call_progress_sink, note_call_refusal, tool_runtime_context
+from mindroom.tool_system.skills import Skill, SkillsToolkit
 from mindroom.tool_system.tool_access import ToolKey
-from mindroom.tools.shell import shell_tools
+from mindroom.tool_system.tool_function import AdaptedToolkit, ToolGate
+from mindroom.tool_system.worker_routing import agent_workspace_root_path
+from mindroom.turn_continuation import continuation_decision_from_tools
 from tests.access_schema_support import with_responder_access
-from tests.approval_continuation_helpers import approval_continuation
-from tests.conftest import bind_runtime_paths
-from tests.minimal_agent_fixtures import cli_window
-from tests.test_agent_tool_calls import _catalog
+from tests.agent_tool_helpers import offered_agno_function
+from tests.approval_continuation_helpers import answered_calls, approval_continuation
+from tests.conftest import bind_runtime_paths, live_turn_tools_for_test, seed_session_row
+from tests.delegation_helpers import ScriptedAgents, _delegate_runtime_context, _runtime_paths, registered_report_tool
+from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
+from tests.identity_helpers import entity_ids
+from tests.minimal_agent_fixtures import cli_window, run_bash_batch, settled_receipt
+from tests.test_agent_tool_calls import _catalog, _toolkit
 from tests.test_compact_context import _make_config
-from tests.test_delegate_tools import _delegate_runtime_context, _runtime_paths
-from tests.test_delegation_execution import DelegationModel, _call
+from tests.turn_model_helpers import turn_model
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from mindroom.agent_cli.turn import LiveTurnTools
+
+
+def _output_policy(catalog) -> ToolOutputFilePolicy:
+    """Return the output-file policy of the catalog agent's workspace, as its CLI turn's surface does."""
+    runtime = catalog.runtime_context
+    workspace = agent_workspace_root_path(runtime.runtime_paths.storage_root, runtime.agent_name)
+    return ToolOutputFilePolicy.from_runtime(workspace, runtime.runtime_paths)
+
+
+def _owner(catalog, **options) -> LiveTurnTools:
+    async def authorize(key, arguments):
+        return None
+
+    return live_turn_tools_for_test(
+        CliTurnOwner(catalog.runtime_context.execution_identity, "turn", "run"),
+        catalog=catalog,
+        authorize=authorize,
+        **({"output_file_policy": _output_policy(catalog)} | options),
+    )
+
+
+def _flagged(
+    name: str,
+    *entrypoints: Callable[..., object],
+    gate: ToolGate | None = None,
+    **flags: object,
+) -> AdaptedToolkit:
+    """Return a toolkit named ``name`` whose Agno functions all carry ``flags``; ``gate`` replaces the gate they give."""
+    functions = []
+    for entrypoint in entrypoints:
+        function = Function.from_callable(entrypoint)
+        for flag, value in flags.items():
+            setattr(function, flag, value)
+        adapted = offered_agno_function(function)
+        functions.append(adapted if gate is None else replace(adapted, gate=gate))
+    return AdaptedToolkit(name=name, functions=tuple(functions), instructions=None)
+
+
+async def _delegation_catalog(
+    tmp_path,
+    config,
+    paths,
+    toolkits,
+    *,
+    max_tool_calls_per_turn=None,
+    approval_handler=None,
+):
+    """Return a delegating turn's catalog: a stored session, the parent run and its checkpoint, and its requester."""
+    entity_ids(config, paths)
+    catalog = await _catalog(tmp_path, toolkits, max_tool_calls_per_turn=max_tool_calls_per_turn)
+    runtime = _delegate_runtime_context(config, paths)
+    runtime = replace(
+        runtime,
+        agent_name="helper",
+        target=replace(runtime.target, session_id="session"),
+        cli_approval_handler=approval_handler,
+    )
+    catalog.runtime_context = runtime
+    identity = runtime.execution_identity
+    store = create_session_storage("helper", config, paths, identity)
+    catalog.store = store
+    seed_session_row(store, catalog.session)
+    catalog.record = RunRecord(
+        run_id="run",
+        session_id="session",
+        agent_id="helper",
+        user_id=identity.requester_id,
+        status=RunStatus.running,
+    )
+    # A delegating CLI call runs inside a Bash call, which first saved the run as its cancelled checkpoint.
+    store.save_run(catalog.session, replace(catalog.record, status=RunStatus.cancelled), record_usage=False)
+    return catalog, runtime, identity
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("control", [True, False])
 @pytest.mark.parametrize("raises", [False, True])
-async def test_control_stops_batch_and_settles_admitted_work(tmp_path, control, raises) -> None:  # noqa: C901
+async def test_control_stops_batch_and_settles_admitted_work(tmp_path, control, raises) -> None:
     effects = []
     payload = json.dumps(
         {"tool": "thread_model", "action": "switch", "status": "ok", "model": "next", "when": "after-toolcall"},
@@ -88,7 +167,7 @@ async def test_control_stops_batch_and_settles_admitted_work(tmp_path, control, 
         effects.append("mutated")
         return "done"
 
-    async def run_shell_command(args: str) -> str:
+    async def run_shell_command(args: str, tail: int = 100) -> str:
         effects.append(args)
         if control:
             for function in ("switch_thread_model", "mutate"):
@@ -109,58 +188,23 @@ async def test_control_stops_batch_and_settles_admitted_work(tmp_path, control, 
     switch.stop_after_tool_call = True
     catalog = await _catalog(
         tmp_path,
-        [Toolkit(name="shell", tools=[run_shell_command]), Toolkit(name="control", tools=[switch, mutate])],
+        [_toolkit("shell", run_shell_command), adapt_toolkit(Toolkit(name="control", tools=[switch, mutate]))],
     )
-    catalog.run_response.agent_id = "helper"
-    catalog.agent.db = create_state_storage("helper", tmp_path, subdir="sessions", session_table="sessions")
+    catalog.store = create_agent_state_storage("helper", tmp_path)
     receipts = []
-
-    async def authorize(key, arguments):
-        return None
-
-    owner = LiveTurnTools(
-        CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
-        catalog=catalog,
-        authorize=authorize,
-    )
+    owner = _owner(catalog)
     owner.shell_env = AgentCliShellEnv("http://127.0.0.1:9", "test-grant")
-
-    async def bash(command: str, fc: FunctionCall) -> str:
-        return await owner.execute_bash(ToolKey("shell", "run_shell_command"), {"args": command}, fc)
-
-    function = Function.from_callable(bash)
-    # Real Agno preparation injects the owning FunctionCall.
-
-    function = prepare_agent_tools(
-        catalog.agent,
-        processed_tools=[function],
-        run_response=catalog.run_response,
-        run_context=catalog.run_context,
-        session=catalog.session,
-    )[0]
-    message = Message(
-        role="assistant",
-        tool_calls=[
-            {
-                "id": f"bash-{index}",
-                "type": "function",
-                "function": {"name": "bash", "arguments": json.dumps({"command": f"outer-{index}"})},
-            }
-            for index in range(2)
-        ],
-    )
-    messages = [message]
-    results = []
-    async with response_cli_lifetime() as lifetime:
-        lifetime.bind_provider(owner.checkpoint, function)
-        calls = catalog.agent.model.get_function_calls_to_run(message, messages, {"bash": function})
-        async with asyncio.timeout(5):
-            async for event in catalog.agent.model.arun_function_calls(calls, messages):
-                results.extend(event.tool_executions or [])
+    async with asyncio.timeout(5):
+        record = await run_bash_batch(owner, "outer-0", "outer-1")
+    results = record.tools or []
     if control:
         assert effects == ["outer-0"]
-        assert any(item.tool_name == "bash" and item.stop_after_tool_call for item in results)
-        assert function.stop_after_tool_call is False
+        # The control ends the run after its batch, so no further request is sent.
+        assert record.content is None
+        assert [item.stop_after_call for item in results] == [True, True]
+        # The second Bash call never ran, so it answers as a failed call, as a call over the limit does.
+        assert [item.is_error for item in results] == [False, True]
+        assert results[1].result == "Bash cancelled before dispatch: continuation requires a rebuilt tool catalog."
         first, second = [await owner.get_call(item["call_id"]) for item in receipts]
         assert first["status"] == ("failed" if raises else "completed")
         assert first["outcome"] == ("switch rejected" if raises else payload)
@@ -168,29 +212,40 @@ async def test_control_stops_batch_and_settles_admitted_work(tmp_path, control, 
         assert "continuation" in second["outcome"].lower()
         assert second["parent_bash_call_id"] == "bash-0"
         decision = continuation_decision_from_tools(
-            owner.control_executions,
+            owner.control_calls,
             original_prompt="task",
             continuation_count=0,
         )
-        assert decision.should_continue
-        assert decision.model_switch_name == (None if raises else "next")
+        # Only the switch that succeeded continues the turn, on its model.
+        continued = decision.continuation
+        assert (None if continued is None else continued.model_name) == (None if raises else "next")
     else:
         assert effects == ["outer-0", "outer-1"]
-        assert not owner.control_executions
+        assert not owner.control_calls
+        assert record.content == "done"
     assert all(item.tool_name == "bash" for item in results)
     await owner.close()
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("limit", [None, 1])
-@pytest.mark.parametrize("model", [None, "alternate"])
-@pytest.mark.parametrize(("target", "depth", "allowed"), [("code", 0, True), ("other", 0, False), ("code", 3, False)])
-async def test_hidden_delegation_uses_native_child_owner(tmp_path, target, depth, allowed, limit, model) -> None:
+async def test_a_later_attempt_never_reads_the_controls_of_an_earlier_run(tmp_path) -> None:
+    """The response's owner outlives its attempts, so a control belongs only to the run whose catalog ran it."""
+    owner = _owner(await _catalog(tmp_path, []))
+    control = ReportedCall("control-call", "switch_thread_model", {}, result="switched")
+    owner.control_calls.append(control)
+    async with response_cli_lifetime() as lifetime:
+        lifetime.register(owner, TurnToolRegistry())
+        assert cli_control_calls("run") == (control,)
+        # The next attempt retires this catalog, but binds none of its own, as when its CLI is unavailable.
+        await lifetime.retire_attempt()
+        assert cli_control_calls("next-run") == ()
 
-    config = with_responder_access(
+
+def _delegation_config(**helper) -> Config:
+    return with_responder_access(
         Config(
             agents={
-                "helper": AgentConfig(display_name="Helper", delegate_to=["code"]),
+                "helper": AgentConfig(display_name="Helper", delegate_to=["code"], **helper),
                 "code": AgentConfig(display_name="Code"),
                 "other": AgentConfig(display_name="Other"),
             },
@@ -204,59 +259,52 @@ async def test_hidden_delegation_uses_native_child_owner(tmp_path, target, depth
         "code",
         users=["@alice:example.org"],
     )
+
+
+async def run_subagent(agent_name: str, task: str, model: str | None = None) -> str:
+    pytest.fail("external raw body")
+
+
+async def continue_subagent(subagent_id: str, message: str) -> str:
+    pytest.fail("external raw body")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("limit", [None, 1])
+@pytest.mark.parametrize("model", [None, "alternate"])
+@pytest.mark.parametrize(("target", "depth", "allowed"), [("code", 0, True), ("other", 0, False), ("code", 3, False)])
+async def test_hidden_delegation_uses_native_child_owner(
+    tmp_path,
+    monkeypatch,
+    target,
+    depth,
+    allowed,
+    limit,
+    model,
+) -> None:
+    config = _delegation_config()
     paths = _runtime_paths(tmp_path)
-
-    async def run_subagent(agent_name: str, task: str, model: str | None = None) -> str:
-        pytest.fail("external raw body")
-
-    async def continue_subagent(subagent_id: str, message: str) -> str:
-        pytest.fail("external raw body")
-
-    followup = Function.from_callable(continue_subagent)
-    followup.owning_toolkit = "delegate"
-    followup.external_execution = True
-    function = Function.from_callable(run_subagent)
-    function.owning_toolkit = "delegate"
-    function.external_execution = True
-    catalog = await _catalog(tmp_path, [function, followup], tool_call_limit=limit)
-    runtime = _delegate_runtime_context(config, paths)
-    runtime = replace(runtime, agent_name="helper", target=replace(runtime.target, session_id="session"))
-    catalog.runtime_context = runtime
-    # Bind exact live runtime while preparing the actual external Function.
-    catalog._bindings.clear()
-    await catalog.prepare([function, followup])
-    identity = build_execution_identity_from_runtime_context(runtime)
-    catalog.agent.db = create_session_storage("helper", config, paths, identity)
-    catalog.agent.db.upsert_session(catalog.session)
-    catalog.run_response.agent_id = "helper"
-    catalog.run_response.user_id = identity.requester_id
+    ScriptedAgents({"code": ScriptedModel([answer("child done"), answer("child done")])}).install(monkeypatch)
+    catalog, _runtime, identity = await _delegation_catalog(
+        tmp_path,
+        config,
+        paths,
+        [_flagged("delegate", run_subagent, continue_subagent, gate=ToolGate.DELEGATION)],
+        max_tool_calls_per_turn=limit,
+    )
     children = []
 
     async def child_response(child, **kwargs):
-
         children.append(child)
-        child_identity = child_execution_identity(child)
-        child_agent = Agent(
-            id="code",
-            db=create_session_storage("code", config, paths, child_identity),
-            model=DelegationModel(id="test", responses=[ModelResponse(content="child done")]),
-        )
-        await child_agent.arun(
-            child.task,
-            run_id=child.run_id,
-            session_id=child.session_id,
-            user_id=identity.requester_id,
-        )
-        return "ignored"
+        return await run_delegated_child_response(child, **kwargs)
 
-    async def authorize(key, arguments):
-        return None
+    monkeypatch.setattr("mindroom.ai.run_delegated_child_response", child_response)
 
-    owner = LiveTurnTools(
+    owner = live_turn_tools_for_test(
         CliTurnOwner(identity, "turn", "run"),
         catalog=catalog,
-        authorize=authorize,
-        run_child=child_response,
+        authorize=_allow,
+        output_file_policy=_output_policy(catalog),
         delegation_depth=depth,
     )
     call_id = uuid4()
@@ -272,7 +320,8 @@ async def test_hidden_delegation_uses_native_child_owner(tmp_path, target, depth
             ),
         )
     receipt = await owner.get_call(str(call_id))
-    assert receipt["status"] == "completed", receipt
+    # A refused delegation answers as a failed call.
+    assert receipt["status"] == ("completed" if allowed else "failed"), receipt
     assert len(children) == int(allowed)
     if allowed:
         assert receipt["outcome"].startswith("child done\n\nDelegation")
@@ -280,9 +329,13 @@ async def test_hidden_delegation_uses_native_child_owner(tmp_path, target, depth
         assert child.model_name == (model or "default")
         assert child.parent_tool_call_id == str(call_id)
         assert child.execution_identity["requester_id"] == "@alice:example.org"
-        state = DelegationState.from_metadata(catalog.run_response.metadata)
+        assert catalog.record is not None
+        state = DelegationState.from_metadata(catalog.record.metadata)
         assert state.children[0].run_id == child.run_id
-        assert catalog.agent.db.get_session("session").runs[0].requirements is None
+        assert catalog.store is not None
+        saved = catalog.store.get_run("run")
+        assert saved is not None
+        assert saved.requirements == []
         followup_id = uuid4()
         async with owner._window("bash-followup"):
             await owner.operation(
@@ -313,36 +366,24 @@ async def test_hidden_delegation_uses_native_child_owner(tmp_path, target, depth
     await owner.close()
 
 
+async def _allow(key, arguments) -> None:
+    return None
+
+
 @pytest.mark.asyncio
+@pytest.mark.parametrize("saved_gate", [True, False])
 @pytest.mark.parametrize("approved", [True, False])
 async def test_hidden_delegation_never_inherits_an_approval_under_a_reused_call_id(
     tmp_path,
     monkeypatch,
     approved,
+    saved_gate,
 ) -> None:
-    """The CLI caller chooses call IDs, so an approval saved under one in the run never admits a new call."""
-    config = with_responder_access(
-        Config(
-            agents={
-                "helper": AgentConfig(display_name="Helper", delegate_to=["code"]),
-                "code": AgentConfig(display_name="Code"),
-            },
-            defaults=DefaultsConfig(tools=[]),
-            memory={"backend": "none"},
-            tool_approval={"default": "require_approval"},
-        ),
-        "code",
-        users=["@alice:example.org"],
-    )
+    """The CLI caller chooses call IDs, so a decision saved under one in the run never decides a new call."""
+    config = _delegation_config()
+    config.tool_approval.default = "require_approval"
     paths = _runtime_paths(tmp_path)
-
-    async def run_subagent(agent_name: str, task: str) -> str:
-        pytest.fail("external raw body")
-
-    function = Function.from_callable(run_subagent)
-    function.owning_toolkit = "delegate"
-    function.external_execution = True
-    catalog = await _catalog(tmp_path, [function])
+    ScriptedAgents({"code": ScriptedModel([answer("child done")])}).install(monkeypatch)
     asked = []
 
     async def decide(paused):
@@ -350,43 +391,34 @@ async def test_hidden_delegation_never_inherits_an_approval_under_a_reused_call_
         return tuple(
             apply_exact_approval_decisions(
                 paused.requirements,
-                decisions=dict.fromkeys(asked, approved),
-                denial_reasons=dict.fromkeys(asked, "denied"),
+                answered_calls(asked, approved=approved, reason="denied"),
             ),
         )
 
-    runtime = _delegate_runtime_context(config, paths)
-    runtime = replace(
-        runtime,
-        agent_name="helper",
-        target=replace(runtime.target, session_id="session"),
-        cli_approval_handler=decide,
+    catalog, _runtime, identity = await _delegation_catalog(
+        tmp_path,
+        config,
+        paths,
+        [_flagged("delegate", run_subagent, gate=ToolGate.DELEGATION)],
+        approval_handler=decide,
     )
-    catalog.runtime_context = runtime
-    catalog._bindings.clear()
-    await catalog.prepare([function])
-    identity = build_execution_identity_from_runtime_context(runtime)
-    catalog.agent.db = create_session_storage("helper", config, paths, identity)
-    catalog.agent.db.upsert_session(catalog.session)
-    catalog.run_response.agent_id = "helper"
-    catalog.run_response.user_id = identity.requester_id
     call_id = uuid4()
-    # A recovered follow-up turn inherits the run metadata that approved an earlier call under this ID.
-    catalog.run_response.metadata = {"mindroom_delegation": DelegationState(gates={str(call_id): True}).to_dict()}
+    # A recovered follow-up turn inherits the run metadata that decided an earlier call under this ID.
+    assert catalog.record is not None
+    catalog.record.metadata = {"mindroom_delegation": DelegationState(gates={str(call_id): saved_gate}).to_dict()}
     children = []
 
     async def child_response(child, **kwargs):
         children.append(child)
-        return "child done"
+        return await run_delegated_child_response(child, **kwargs)
 
-    async def authorize(key, arguments):
-        return None
+    monkeypatch.setattr("mindroom.ai.run_delegated_child_response", child_response)
 
-    owner = LiveTurnTools(
+    owner = live_turn_tools_for_test(
         CliTurnOwner(identity, "turn", "run"),
         catalog=catalog,
-        authorize=authorize,
-        run_child=child_response,
+        authorize=_allow,
+        output_file_policy=_output_policy(catalog),
     )
 
     async def checkpoint(parent):
@@ -408,7 +440,138 @@ async def test_hidden_delegation_never_inherits_an_approval_under_a_reused_call_
 
     assert asked == [str(call_id)]
     assert [child.task for child in children] == (["a task nobody approved"] if approved else [])
+    # The requester's denial answers as a failed call.
+    assert receipt["status"] == ("completed" if approved else "failed"), receipt
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_a_cancel_while_a_delegation_awaits_approval_is_deferred(tmp_path, monkeypatch) -> None:
+    """A cancel during a delegate call's approval wait only marks the call, so a sibling's approval still works."""
+    config = _delegation_config()
+    config.tool_approval.default = "require_approval"
+    paths = _runtime_paths(tmp_path)
+    ScriptedAgents({"code": ScriptedModel([answer("child done")])}).install(monkeypatch)
+    asking = asyncio.Event()
+    release = asyncio.Event()
+    asked: list[str] = []
+    interrupted: list[str] = []
+
+    async def decide(paused):
+        ids = [str(tool.tool_call_id) for tool in paused.tools]
+        asked.extend(ids)
+        if len(asked) == 1:
+            asking.set()
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                interrupted.extend(ids)
+                raise
+        return tuple(apply_exact_approval_decisions(paused.requirements, answered_calls(ids, approved=True)))
+
+    catalog, _runtime, identity = await _delegation_catalog(
+        tmp_path,
+        config,
+        paths,
+        [_flagged("delegate", run_subagent, gate=ToolGate.DELEGATION)],
+        approval_handler=decide,
+    )
+    children = []
+
+    async def child_response(child, **kwargs):
+        children.append(child)
+        return await run_delegated_child_response(child, **kwargs)
+
+    monkeypatch.setattr("mindroom.ai.run_delegated_child_response", child_response)
+    owner = live_turn_tools_for_test(
+        CliTurnOwner(identity, "turn", "run"),
+        catalog=catalog,
+        authorize=_allow,
+        output_file_policy=_output_policy(catalog),
+    )
+
+    async def checkpoint(parent):
+        assert parent == "bash-parent"
+
+    monkeypatch.setattr(owner.checkpoint, "persist_approval", checkpoint)
+
+    def delegation(call_id, task: str) -> ToolCallOperation:
+        return ToolCallOperation(
+            operation="tools.call",
+            call_id=call_id,
+            toolkit="delegate",
+            function="run_subagent",
+            arguments={"agent_name": "code", "task": task},
+        )
+
+    first_id, second_id = uuid4(), uuid4()
+    async with asyncio.timeout(30), owner._window("bash-parent"):
+        await owner.operation(window="bash-parent", operation=delegation(first_id, "cancelled task"))
+        await asking.wait()
+        await owner.operation(window="bash-parent", operation=delegation(second_id, "sibling task"))
+        deferred = await owner.cancel_call(str(first_id))
+        assert deferred["status"] not in {"cancelled", "failed", "completed"}
+        release.set()
+    first = await owner.get_call(str(first_id))
+    second = await owner.get_call(str(second_id))
+
+    assert interrupted == []
+    assert first["status"] == "cancelled", first
+    assert second["status"] == "completed", second
+    assert asked == [str(first_id), str(second_id)]
+    assert [child.task for child in children] == ["sibling task"]
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_a_delegated_child_never_reports_on_its_delegate_call_receipt(tmp_path, monkeypatch) -> None:
+    """A child's worker progress and named-worker refusal belong to the child's calls, not to the delegate call."""
+    config = _delegation_config()
+    paths = _runtime_paths(tmp_path)
+    ScriptedAgents({"code": ScriptedModel([answer("child done")])}).install(monkeypatch)
+    catalog, _runtime, identity = await _delegation_catalog(
+        tmp_path,
+        config,
+        paths,
+        [_flagged("delegate", run_subagent, gate=ToolGate.DELEGATION)],
+    )
+    sinks = []
+
+    async def child_response(child, **kwargs):
+        sink = get_call_progress_sink()
+        sinks.append(sink)
+        if sink is not None:
+            sink("starting worker of the child...")
+        note_call_refusal()
+        # A reported progress message reaches its receipt on the next pass of the loop.
+        await asyncio.sleep(0)
+        return await run_delegated_child_response(child, **kwargs)
+
+    monkeypatch.setattr("mindroom.ai.run_delegated_child_response", child_response)
+    owner = live_turn_tools_for_test(
+        CliTurnOwner(identity, "turn", "run"),
+        catalog=catalog,
+        authorize=_allow,
+        output_file_policy=_output_policy(catalog),
+    )
+    call_id = uuid4()
+    async with owner._window("bash-parent"):
+        await owner.operation(
+            window="bash-parent",
+            operation=ToolCallOperation(
+                operation="tools.call",
+                call_id=call_id,
+                toolkit="delegate",
+                function="run_subagent",
+                arguments={"agent_name": "code", "task": "work"},
+            ),
+        )
+    receipt = await owner.get_call(str(call_id))
+
+    assert sinks == [None]
     assert receipt["status"] == "completed", receipt
+    assert receipt["progress"] is None
+    assert receipt["error_kind"] is None
     await owner.close()
 
 
@@ -417,281 +580,263 @@ async def test_hidden_delegation_never_inherits_an_approval_under_a_reused_call_
 async def test_hidden_child_pause_reuses_native_resume(tmp_path, monkeypatch, mode) -> None:  # noqa: C901
     # Delegation records fsync every event; disk flush latency under parallel runs is not under test.
     monkeypatch.setattr(os, "fsync", lambda _descriptor: None)
-    config = with_responder_access(
-        Config(
-            agents={
-                "helper": AgentConfig(display_name="Helper", delegate_to=["code"]),
-                "code": AgentConfig(display_name="Code", tools=["file"]),
-            },
-            defaults=DefaultsConfig(tools=[]),
-            memory={"backend": "none"},
-        ),
-        "code",
-        users=["@alice:example.org"],
-    )
     paths = _runtime_paths(tmp_path)
-    effects = []
     child_ids = []
     reached = asyncio.Event()
-
-    async def run_subagent(agent_name: str, task: str) -> str:
-        pytest.fail("external raw body")
+    control_payload = '{"tool":"thread_model","action":"switch","status":"ok","model":"next","when":"after-toolcall"}'
 
     async def switch_thread_model() -> str:
-        return '{"tool":"thread_model","action":"switch","status":"ok","model":"next","when":"after-toolcall"}'
+        return control_payload
 
-    control = Function.from_callable(switch_thread_model)
-    control.owning_toolkit = "control"
-    control.stop_after_tool_call = True
-    function = Function.from_callable(run_subagent)
-    function.owning_toolkit = "delegate"
-    function.external_execution = True
-    catalog = await _catalog(tmp_path, [function, control])
-    runtime = _delegate_runtime_context(config, paths)
-    runtime = replace(runtime, agent_name="helper", target=replace(runtime.target, session_id="session"))
-    catalog.runtime_context = runtime
-    catalog._bindings.clear()
-    await catalog.prepare([function, control])
-    identity = build_execution_identity_from_runtime_context(runtime)
-    catalog.agent.db = create_session_storage("helper", config, paths, identity)
-    catalog.agent.db.upsert_session(catalog.session)
-    catalog.run_response.agent_id = "helper"
-    catalog.run_response.user_id = identity.requester_id
-
-    async def write_report() -> str:
-        effects.append("written")
-        return "written"
-
-    child_model = DelegationModel(
-        id="test",
-        responses=[
-            ModelResponse(tool_calls=[_call("write_report", "child-write")]),
-            ModelResponse(tool_calls=[_call("write_report", "child-write-again")])
-            if mode == "recover_again"
-            else ModelResponse(content="child done"),
-        ],
-    )
-
-    def build_child(agent_name, current_config, runtime_paths, execution_identity, **kwargs):
-        gate = Function.from_callable(write_report)
-        gate.requires_confirmation = True
-        gate.owning_toolkit = "file"
-        return Agent(
-            id="code",
-            tools=[gate],
-            db=kwargs.get("history_storage") or create_session_storage("code", config, paths, execution_identity),
-            model=child_model,
-        )
-
-    async def child_response(child, **kwargs):
-        child_ids.append(
-            (child.run_id, child.session_id, child.parent_tool_call_id, child.execution_identity["requester_id"]),
-        )
-        reached.set()
-        if mode == "cancel":
-            await asyncio.Event().wait()
-        child_agent = build_child("code", config, paths, child_execution_identity(child))
-        response = await child_agent.arun(
-            child.task,
-            run_id=child.run_id,
-            session_id=child.session_id,
-            user_id=identity.requester_id,
-        )
-        paused = paused_attempt_from_response(
-            response,
-            fallback_session_id=child.session_id,
-            fallback_run_id=child.run_id,
-            toolkit_owners=toolkit_owners_for_agents([child_agent]),
-        )
-        assert paused is not None
-        raise ResponsePausedForApproval(paused)
-
-    monkeypatch.setattr(agents, "create_agent", build_child)
-    approval_ids = []
-
-    async def approve(paused):
-        assert effects == []
-        assert paused.approval_agent_name == "code"
-        assert paused.toolkit_owners == {("code", "write_report"): "file"}
-        approval_ids.extend(str(tool.tool_call_id) for tool in paused.tools)
-        if mode == "control":
-            switched = await owner.operation(
-                window="bash-parent",
-                operation=ToolCallOperation(
-                    operation="tools.call",
-                    call_id=uuid4(),
-                    toolkit="control",
-                    function="switch_thread_model",
-                ),
-            )
-            while (await owner.get_call(switched["call_id"]))["status"] in {"queued", "running"}:  # noqa: ASYNC110
-                await asyncio.sleep(0)
-        return tuple(
-            apply_exact_approval_decisions(
-                paused.requirements,
-                decisions=dict.fromkeys(approval_ids, mode != "deny"),
-                denial_reasons=dict.fromkeys(approval_ids, "denied"),
+    with registered_report_tool() as report:
+        config = with_responder_access(
+            Config(
+                agents={
+                    "helper": AgentConfig(display_name="Helper", tools=["shell"], delegate_to=["code"]),
+                    "code": AgentConfig(display_name="Code", tools=["report"]),
+                },
+                defaults=DefaultsConfig(tools=[]),
+                memory={"backend": "none"},
+                tool_approval={"rules": [{"match": "write_report", "action": "require_approval"}]},
             ),
+            "code",
+            users=["@alice:example.org"],
         )
-
-    runtime = replace(runtime, cli_approval_handler=approve)
-    catalog.runtime_context = runtime
-    catalog._bindings.clear()
-    await catalog.prepare([function, control])
-
-    async def authorize(key, arguments):
-        return None
-
-    owner = LiveTurnTools(
-        CliTurnOwner(identity, "turn", "run"),
-        catalog=catalog,
-        authorize=authorize,
-        run_child=child_response,
-    )
-
-    async def checkpoint(parent):
-        assert parent == "bash-parent"
-
-    monkeypatch.setattr(owner.checkpoint, "persist_approval", checkpoint)
-    call_id = uuid4()
-    arguments = {"agent_name": "code", "task": "work"}
-    if mode in {"recover", "recover_again"}:
-        shell_toolkit = shell_tools()(runtime_paths=runtime.runtime_paths)
-        agents._set_toolkit_approval_origin(shell_toolkit, "shell")
-        catalog.agent = MinimalAgent(
-            id="helper",
-            model=catalog.agent.model,
-            db=catalog.agent.db,
-            tools=[function, control, shell_toolkit],
+        code = ScriptedModel(
+            [
+                calls(tool_call("write_report", "child-write")),
+                calls(tool_call("write_report", "child-write-again"))
+                if mode == "recover_again"
+                else answer("child done"),
+            ],
         )
-        binding = await catalog.bind(ToolKey("delegate", "run_subagent"))
-        events = [event async for event in execute_agent_tool_call(binding, str(call_id), arguments)]
-        requirement = next(event.requirement for event in events if event.kind == "waiting")
-        paused = await advance_cli_delegation(
-            binding,
-            requirement,
-            parent_bash_call_id="bash-parent",
-            delegation_depth=0,
-            run_child=child_response,
-        )
-        assert isinstance(paused, PausedAttempt)
-        calls = approval_calls_for_cli_pause(paused, "helper")
-        decisions = {call.tool_call_id: True for call in calls}
+        ScriptedAgents({"helper": ScriptedModel([]), "code": code}).install(monkeypatch)
+        approval_ids = []
 
-        presentation = CollectedStreamPresentation(show_tool_calls=True, track_hidden_tools=True)
-        presentation.start_tool(
-            project_cli_execution(requirement.tool_execution, parent="bash-parent", toolkit_name="delegate"),
-        )
-        for tool in paused.tools:
-            presentation.start_tool(project_cli_execution(tool, parent="bash-parent", toolkit_name="file"))
-        continuation = approval_continuation(
-            continuation_count=2,
-            run_id="run",
-            session_id="session",
-            entity_name="helper",
-            room_id=runtime.room_id,
-            thread_id=runtime.thread_id,
-            requester_id=runtime.requester_id,
-            response_event_id="$response",
-            state="claimed",
-            calls=calls,
-            cli_call=paused.cli_call,
-        )
-
-        async def authorize_binding(binding):
-            return None
-
-        with tool_runtime_context(runtime):
-            result = await cli_approval_recovery.continue_cli_approval(
-                catalog.agent,
-                continuation,
-                CliApprovalCall.from_dict(continuation.cli_call),
-                catalog.run_response,
-                catalog.session,
-                paused_answer=PausedAnswer(text=presentation.final_text(), tool_trace=tuple(presentation.tool_trace)),
-                runtime_context=runtime,
-                decisions=decisions,
-                denial_reasons=dict.fromkeys(decisions),
-                tool_trace_collector=[],
-                refresh_scheduler=None,
-                authorize=authorize_binding,
-                progress=None,
-            )
-        if mode == "recover_again":
-            assert isinstance(result, PausedAttempt)
-            assert result.continuation_count == 2
-            assert result.tools[0].tool_call_id.endswith(":child-write-again")
-            assert [entry.type for entry in result.tool_trace] == [
-                "tool_call_started",
-                "tool_call_completed",
-                "tool_call_started",
-            ]
-            assert [entry.toolkit_name for entry in result.tool_trace] == ["delegate", "file", "file"]
-            assert all(entry.parent_bash_call_id == "bash-parent" for entry in result.tool_trace)
-        else:
-            assert isinstance(result, cli_approval_recovery.CliFollowUpTurn)
-            trace = result.presentation.tool_trace
-            assert len(trace) == 2
-            assert all(entry.type == "tool_call_completed" for entry in trace)
-            assert [entry.toolkit_name for entry in trace] == ["delegate", "file"]
-            assert all(entry.parent_bash_call_id == "bash-parent" for entry in trace)
-            assert trace[1].tool_call_id == calls[0].tool_call_id
-            assert "written" in trace[1].result_preview
-            assert "⏳" not in result.presentation.final_text()
-            assert "child done" in result.ctx.transient_enrichment_items[0].text
-    else:
-
-        async def run_window():
-            async with owner._window("bash-parent"):
-                await owner.operation(
+        async def approve(paused):
+            assert report.written == []
+            assert paused.approval_agent_name == "code"
+            assert paused.toolkit_owners == {("code", "write_report"): "report"}
+            # The parent run's model, which the approved child's follow-up continues the parent on.
+            assert paused.runtime_model_name == "parent-model"
+            approval_ids.extend(str(tool.tool_call_id) for tool in paused.tools)
+            if mode == "control":
+                switched = await owner.operation(
                     window="bash-parent",
                     operation=ToolCallOperation(
                         operation="tools.call",
-                        call_id=call_id,
-                        toolkit="delegate",
-                        function="run_subagent",
-                        arguments=arguments,
+                        call_id=uuid4(),
+                        toolkit="control",
+                        function="switch_thread_model",
                     ),
                 )
+                await settled_receipt(owner, switched["call_id"])
+            return tuple(
+                apply_exact_approval_decisions(
+                    paused.requirements,
+                    answered_calls(approval_ids, approved=mode != "deny", reason="denied"),
+                ),
+            )
 
-        async def source():
-            await run_window()
-            yield None
-
-        running = asyncio.create_task(
-            collect_streamed_response_content(
-                stream_cli_events(source()),
-                presentation=CollectedStreamPresentation(show_tool_calls=True),
-            ),
+        catalog, runtime, identity = await _delegation_catalog(
+            tmp_path,
+            config,
+            paths,
+            [
+                _flagged("delegate", run_subagent, gate=ToolGate.DELEGATION),
+                _flagged("control", switch_thread_model, stop_after_tool_call=True),
+            ],
+            approval_handler=approve,
         )
-        if mode == "cancel":
-            await reached.wait()
-            running.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await running
+        catalog.run = replace(catalog.run, model_name="parent-model")
+
+        async def child_response(child, **kwargs):
+            child_ids.append(
+                (child.run_id, child.session_id, child.parent_tool_call_id, child.execution_identity["requester_id"]),
+            )
+            reached.set()
+            if mode == "cancel":
+                await asyncio.Event().wait()
+            return await run_delegated_child_response(child, **kwargs)
+
+        monkeypatch.setattr("mindroom.ai.run_delegated_child_response", child_response)
+
+        owner = live_turn_tools_for_test(
+            CliTurnOwner(identity, "turn", "run"),
+            catalog=catalog,
+            authorize=_allow,
+            output_file_policy=_output_policy(catalog),
+        )
+
+        async def checkpoint(parent):
+            assert parent == "bash-parent"
+
+        monkeypatch.setattr(owner.checkpoint, "persist_approval", checkpoint)
+        call_id = uuid4()
+        arguments = {"agent_name": "code", "task": "work"}
+        if mode in {"recover", "recover_again"}:
+            binding = await catalog.bind(ToolKey("delegate", "run_subagent"))
+            events = [event async for event in execute_agent_tool_call(binding, str(call_id), arguments)]
+            requirement = next(event.requirement for event in events if isinstance(event, AgentToolCallWaiting))
+            with tool_runtime_context(catalog.runtime_context):
+                paused = await advance_cli_delegation(
+                    binding,
+                    requirement,
+                    parent_bash_call_id="bash-parent",
+                    delegation_depth=0,
+                    refresh_scheduler=None,
+                    approval_calls=None,
+                    on_event=lambda _event: None,
+                )
+            assert isinstance(paused, PausedAttempt)
+            assert paused.cli_call is not None
+            assert paused.runtime_model_name == "parent-model"
+            approved = [
+                RunRequirement(replace(waiting.tool_execution, confirmed=True)) for waiting in paused.requirements
+            ]
+            approval_calls = approval_calls_for_cli_pause(paused, "helper", approved)
+
+            presentation = CollectedStreamPresentation(show_tool_calls=True, track_hidden_tools=True)
+            presentation.start_tool(
+                requirement.tool_execution.call,
+                origin=ToolCallOrigin("bash-parent", "delegate"),
+            )
+            for tool in paused.tools:
+                presentation.start_tool(tool.call, origin=ToolCallOrigin("bash-parent", "report"))
+            continuation = approval_continuation(
+                continuation_count=2,
+                run_id="run",
+                session_id="session",
+                entity_name="helper",
+                room_id=runtime.room_id,
+                thread_id=runtime.thread_id,
+                requester_id=runtime.requester_id,
+                response_event_id="$response",
+                state="claimed",
+                calls=approval_calls,
+                cli_call=paused.cli_call,
+            )
+            assert catalog.store is not None
+            persisted = catalog.store.get_run("run")
+            session = catalog.store.load_session("session")
+            assert isinstance(persisted, RunRecord)
+            assert session is not None
+            build = agents.create_agent(
+                "helper",
+                config,
+                paths,
+                identity,
+                agent_mode="minimal",
+                supports_native_tool_approval=True,
+                knowledge=None,
+                model=turn_model(config, paths, "helper"),
+                plugins=config_plugins(config, paths),
+            )
+
+            async def authorize_binding(binding):
+                return None
+
+            with tool_runtime_context(runtime):
+                result = await cli_approval_recovery.continue_cli_approval(
+                    build,
+                    continuation,
+                    CliApprovalCall.from_dict(continuation.cli_call),
+                    persisted,
+                    RunStorage(catalog.store, session, None),
+                    paused_answer=PausedAnswer(
+                        text=presentation.final_text(),
+                        tool_trace=tuple(presentation.tool_trace),
+                    ),
+                    runtime_context=runtime,
+                    tool_trace_collector=[],
+                    refresh_scheduler=None,
+                    authorize=authorize_binding,
+                    progress=None,
+                )
+            if mode == "recover_again":
+                assert isinstance(result, PausedAttempt)
+                assert result.continuation_count == 2
+                assert str(result.tools[0].tool_call_id).endswith(":child-write-again")
+                assert [entry.type for entry in result.tool_trace] == [
+                    "tool_call_started",
+                    "tool_call_completed",
+                    "tool_call_started",
+                ]
+                assert [entry.toolkit_name for entry in result.tool_trace] == ["delegate", "report", "report"]
+                assert all(entry.parent_bash_call_id == "bash-parent" for entry in result.tool_trace)
+            else:
+                assert isinstance(result, cli_approval_recovery.CliFollowUpTurn)
+                trace = result.presentation.tool_trace
+                assert len(trace) == 2
+                assert all(entry.type == "tool_call_completed" for entry in trace)
+                assert [entry.toolkit_name for entry in trace] == ["delegate", "report"]
+                assert all(entry.parent_bash_call_id == "bash-parent" for entry in trace)
+                assert trace[1].tool_call_id == approval_calls[0].tool_call_id
+                assert trace[1].result_preview is not None
+                assert "report written" in trace[1].result_preview
+                assert "⏳" not in result.presentation.final_text()
+                assert "child done" in result.ctx.transient_enrichment_items[0].text
         else:
-            async with asyncio.timeout(5):
-                await running
-            receipt = await owner.get_call(str(call_id))
-            assert receipt["status"] == "completed", receipt
-            assert "child done" in receipt["outcome"]
-            assert len(approval_ids) == 1
-            assert approval_ids[0].endswith(":child-write")
-            text, trace = running.result()
-            child_trace = [entry for entry in trace if entry.tool_name == "write_report"]
-            assert len(child_trace) == 1
-            assert child_trace[0].type == "tool_call_completed"
-            assert child_trace[0].parent_bash_call_id == "bash-parent"
-            assert child_trace[0].toolkit_name == "file"
-            assert child_trace[0].tool_call_id == approval_ids[0]
-            assert "⏳" not in text
-    assert effects == (["written"] if mode in {"live", "recover", "recover_again", "control"} else [])
+
+            async def run_window():
+                async with owner._window("bash-parent"):
+                    await owner.operation(
+                        window="bash-parent",
+                        operation=ToolCallOperation(
+                            operation="tools.call",
+                            call_id=call_id,
+                            toolkit="delegate",
+                            function="run_subagent",
+                            arguments=arguments,
+                        ),
+                    )
+
+            async def source():
+                await run_window()
+                yield None
+
+            running = asyncio.create_task(
+                collect_streamed_response_content(
+                    stream_cli_events(source()),
+                    presentation=CollectedStreamPresentation(show_tool_calls=True),
+                ),
+            )
+            if mode == "cancel":
+                await reached.wait()
+                running.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await running
+            else:
+                async with asyncio.timeout(10):
+                    await running
+                receipt = await owner.get_call(str(call_id))
+                assert receipt["status"] == "completed", receipt
+                assert "child done" in receipt["outcome"]
+                if mode == "deny":
+                    # The child's model is answered with the reason the requester denied its call with.
+                    assert [
+                        (message.tool_call_id, str(message.content))
+                        for message in code.requests[-1].messages
+                        if message.role == "tool"
+                    ] == [("child-write", "denied")]
+                assert len(approval_ids) == 1
+                assert approval_ids[0].endswith(":child-write")
+                text, trace = running.result()
+                child_trace = [entry for entry in trace if entry.tool_name == "write_report"]
+                assert len(child_trace) == 1
+                assert child_trace[0].type == "tool_call_completed"
+                assert child_trace[0].parent_bash_call_id == "bash-parent"
+                assert child_trace[0].toolkit_name == "report"
+                assert child_trace[0].tool_call_id == approval_ids[0]
+                assert "⏳" not in text
+        assert report.written == (["written"] if mode in {"live", "recover", "recover_again", "control"} else [])
     assert len(child_ids) == 1
-    state_metadata = catalog.run_response.metadata
+    assert catalog.record is not None
+    state_metadata = catalog.record.metadata
     if mode in {"recover", "recover_again"}:
-        saved_run = next(
-            run for run in catalog.agent.db.get_session("session").runs if run.run_id == catalog.run_response.run_id
-        )
+        assert catalog.store is not None
+        saved_run = catalog.store.get_run("run")
+        assert saved_run is not None
         state_metadata = saved_run.metadata
     child = DelegationState.from_metadata(state_metadata).children[0]
     assert (
@@ -712,52 +857,42 @@ async def test_hidden_memory_write_standard_read_and_live_compaction(tmp_path) -
     config.agents["helper"] = AgentConfig(display_name="Helper", memory_backend="file")
     config.memory.backend = "file"
     bind_runtime_paths(config, paths)
-    memory = MemoryTools("helper", paths.storage_root, config, paths)
+    memory = adapt_toolkit(MemoryTools("helper", config, paths))
     catalog = await _catalog(tmp_path, [memory])
-    identity = build_execution_identity_from_runtime_context(catalog.runtime_context)
-    compact = CompactContextTools("helper", config, paths, identity)
-    await catalog.prepare([compact])
+    identity = catalog.runtime_context.execution_identity
+    await catalog.prepare(
+        [adapt_toolkit(CompactContextTools("helper", config, paths, identity), key="compact_context")],
+    )
     binding = await catalog.bind(ToolKey("memory", "add_memory"))
     events = [
         event
         async for event in execute_agent_tool_call(binding, "memory-write", {"content": "Canonical hidden memory"})
     ]
-    assert events[-1].execution.result == "Memorized: Canonical hidden memory"
-    memories = await search_agent_memories("Canonical hidden", "helper", paths.storage_root, config, paths, limit=5)
+    assert events[-1].call.result == "Memorized: Canonical hidden memory"
+    memories = await search_agent_memories("Canonical hidden", "helper", config, paths, limit=5)
     assert any(item["memory"] == "Canonical hidden memory" for item in memories.results)
-    catalog.run_context.session_state["sentinel"] = "kept"
-    original = catalog.run_context.session_state
+    catalog.run.session_state["sentinel"] = "kept"
+    original = catalog.run.session_state
     compact_binding = await catalog.bind(ToolKey("compact_context", "compact_context"))
     events = [event async for event in execute_agent_tool_call(compact_binding, "compact", {})]
     assert events[-1].kind == "completed"
-    assert "before the next reply" in events[-1].execution.result
-    assert catalog.run_context.session_state is original
-    assert catalog.run_context.session_state["sentinel"] == "kept"
-    assert len(catalog.run_context.session_state) > 1
+    assert "before the next reply" in events[-1].call.result
+    assert catalog.run.session_state is original
+    assert catalog.run.session_state["sentinel"] == "kept"
     await catalog.close()
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("flag", ["external_execution", "requires_user_input"])
-async def test_hidden_unsupported_requirement_never_runs_body(tmp_path, flag) -> None:
+async def test_hidden_unsupported_requirement_never_runs_body(tmp_path) -> None:
+    """A call only an outside party could finish is refused, never run, unless it is a delegation."""
     effects = []
 
     async def unsupported(answer: str) -> str:
         effects.append(answer)
         return answer
 
-    function = Function.from_callable(unsupported)
-    setattr(function, flag, True)
-    catalog = await _catalog(tmp_path, [function])
-
-    async def authorize(key, arguments):
-        return None
-
-    owner = LiveTurnTools(
-        CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
-        catalog=catalog,
-        authorize=authorize,
-    )
+    catalog = await _catalog(tmp_path, [_flagged("tools", unsupported, gate=ToolGate.DELEGATION)])
+    owner = _owner(catalog)
     with pytest.raises(ExceptionGroup) as error:
         async with owner._window("bash-parent"):
             await owner.operation(
@@ -776,24 +911,60 @@ async def test_hidden_unsupported_requirement_never_runs_body(tmp_path, flag) ->
 
 
 @pytest.mark.asyncio
+async def test_a_waiting_delegation_whose_function_no_longer_delegates_is_refused(tmp_path) -> None:
+    """Only a delegate function that still pauses for the delegation driver may advance a waiting delegation."""
+    config = _delegation_config()
+    paths = _runtime_paths(tmp_path)
+    catalog, _runtime, _identity = await _delegation_catalog(
+        tmp_path,
+        config,
+        paths,
+        [_flagged("delegate", run_subagent, gate=ToolGate.DELEGATION)],
+    )
+    binding = await catalog.bind(ToolKey("delegate", "run_subagent"))
+    arguments = {"agent_name": "code", "task": "work"}
+    events = [event async for event in execute_agent_tool_call(binding, "delegation-call", arguments)]
+    requirement = next(event.requirement for event in events if isinstance(event, AgentToolCallWaiting))
+    changed = replace(binding, function=replace(binding.function, gate=None))
+
+    with (
+        tool_runtime_context(catalog.runtime_context),
+        pytest.raises(ValueError, match="not owned by the delegate toolkit"),
+    ):
+        await advance_cli_delegation(
+            changed,
+            requirement,
+            parent_bash_call_id="bash-parent",
+            delegation_depth=0,
+            refresh_scheduler=None,
+            approval_calls=None,
+            on_event=lambda _event: None,
+        )
+
+
+@pytest.mark.asyncio
 async def test_generated_skills_and_deferred_upstream_mcp_keep_live_catalog(tmp_path) -> None:
 
-    skill = tmp_path / "skills" / "local-guide"
-    skill.mkdir(parents=True)
-    (skill / "SKILL.md").write_text(
-        "---\nname: local-guide\ndescription: Local guide\n---\nUse the original session.\n",
+    skill_dir = tmp_path / "skills" / "local-guide"
+    skill_dir.mkdir(parents=True)
+    skill = Skill(
+        name="local-guide",
+        description="Local guide",
+        instructions="Use the original session.",
+        source_path=skill_dir / "SKILL.md",
     )
-    catalog = await _catalog(tmp_path, [], skills=Skills(loaders=[LocalSkills(str(skill.parent))]))
+    skills = adapt_toolkit(SkillsToolkit({skill.name: skill}, workspace_roots={}))
+    catalog = await _catalog(tmp_path, [skills], owners={})
     binding = await catalog.bind(ToolKey("agent", "get_skill_instructions"))
     events = [event async for event in execute_agent_tool_call(binding, "skill-read", {"skill_name": "local-guide"})]
-    assert "Use the original session." in events[-1].execution.result
+    assert "Use the original session." in events[-1].call.result
     script = tmp_path / "server.py"
     script.write_text(
         'from mcp.server.mcpserver import MCPServer\nserver = MCPServer("echo")\n@server.tool()\ndef echo(text: str) -> str:\n    return "echo:" + text\nserver.run()\n',
     )
     paths = catalog.runtime_context.runtime_paths
     config = Config.validate_with_runtime(
-        {"mcp_servers": {"echo": {"transport": "stdio", "command": "uv", "args": ["run", str(script)]}}},
+        {"mcp_servers": {"echo": {"transport": "stdio", "command": sys.executable, "args": [str(script)]}}},
         paths,
     )
     manager = MCPServerManager(paths)
@@ -803,8 +974,9 @@ async def test_generated_skills_and_deferred_upstream_mcp_keep_live_catalog(tmp_
     async def materialize():
         materialized.append(True)
         await manager.sync_servers(config)
-        sync_mcp_tool_registry(config)
-        return get_tool_by_name("mcp_echo", paths, worker_target=None)
+        return adapt_toolkit(
+            get_tool_by_name("mcp_echo", paths, worker_target=None, tools=config_plugins(config, paths).tools),
+        )
 
     catalog.add_deferred(DeferredAgentToolkit("upstream", "Echo", materialize))
     assert not materialized
@@ -812,55 +984,27 @@ async def test_generated_skills_and_deferred_upstream_mcp_keep_live_catalog(tmp_
     binding = await catalog.bind(ToolKey("upstream", "echo_echo"))
     events = [event async for event in execute_agent_tool_call(binding, "mcp-call", {"text": "same-owner"})]
     assert events[-1].kind == "completed"
-    assert "echo:same-owner" in events[-1].execution.result
+    assert "echo:same-owner" in events[-1].call.result
     assert binding.catalog is catalog
     assert materialized == [True]
     await catalog.close()
-    bind_mcp_server_manager(None)
-    sync_mcp_tool_registry(None)
     await manager.shutdown()
 
 
 @pytest.mark.asyncio
-async def test_interactive_context_renders_native_question_and_keeps_session(tmp_path) -> None:
-
+async def test_interactive_context_renders_native_question(tmp_path) -> None:
+    """The interactive guidance minimal mode reads through the CLI produces questions the reply renders natively."""
     catalog = await _catalog(tmp_path, [])
-    catalog.agent.db = create_state_storage("helper", tmp_path, subdir="sessions", session_table="sessions")
-
-    async def authorize(key, arguments):
-        return None
-
-    owner = LiveTurnTools(
-        CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
-        catalog=catalog,
-        authorize=authorize,
-        context={"interactive": INTERACTIVE_QUESTION_PROMPT},
-    )
+    owner = _owner(catalog, context={"interactive": INTERACTIVE_QUESTION_PROMPT})
     guidance = await owner.operation(
         window=None,
         operation=ContextReadOperation(operation="context.read", name="interactive"),
     )
     question = "```interactive" + guidance["text"].split("```interactive", 1)[1].split("```", 1)[0] + "```"
-    model = DelegationModel(
-        id="test",
-        responses=[ModelResponse(content=question), ModelResponse(content="Continue fast")],
-    )
-    catalog.agent.model = model
-    first = await catalog.agent.arun("Ask a question", session_id="session", user_id="@alice:test")
-    rendered = parse_and_format_interactive(first.content, extract_mapping=True)
+    rendered = parse_and_format_interactive(question, extract_mapping=True)
     assert "Fast and automated" in rendered.formatted_text
-    selection = rendered.interactive_metadata.option_map["1"]
-    second = await catalog.agent.arun(
-        f"The user selected: {selection}",
-        session_id=first.session_id,
-        user_id="@alice:test",
-    )
-    assert first.agent_id == second.agent_id == "helper"
-    assert first.session_id == second.session_id == "session"
-    assert second.content == "Continue fast"
-    assert any(
-        "Ask a question" in str(message.content) for message in catalog.agent.db.get_session("session").runs[0].messages
-    )
+    assert rendered.interactive_metadata is not None
+    assert rendered.interactive_metadata.option_map["1"]
     await owner.close()
 
 
@@ -876,27 +1020,17 @@ async def test_control_fences_deferred_materialization_waiting_for_catalog(tmp_p
         await release.wait()
         return '{"tool":"thread_model","action":"switch","status":"ok","model":"next","when":"after-toolcall"}'
 
-    switch = Function.from_callable(switch_thread_model)
-    switch.stop_after_tool_call = True
-    catalog = await _catalog(tmp_path, [Toolkit(name="control", tools=[switch])])
+    catalog = await _catalog(tmp_path, [_flagged("control", switch_thread_model, stop_after_tool_call=True)])
 
     async def late() -> str:
         return "must not run"
 
     async def materialize():
         materialized.append(True)
-        return Toolkit(name="late", tools=[late])
+        return _toolkit("late", late)
 
     catalog.add_deferred(DeferredAgentToolkit("late", "Deferred", materialize))
-
-    async def authorize(key, arguments):
-        return None
-
-    owner = LiveTurnTools(
-        CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
-        catalog=catalog,
-        authorize=authorize,
-    )
+    owner = _owner(catalog)
     async with owner._window("bash-parent"):
         switch_call = await owner.operation(
             window="bash-parent",
@@ -920,8 +1054,7 @@ async def test_control_fences_deferred_materialization_waiting_for_catalog(tmp_p
         )
         await asyncio.sleep(0)
         release.set()
-        while (await owner.get_call(switch_call["call_id"]))["status"] in {"queued", "running"}:  # noqa: ASYNC110
-            await asyncio.sleep(0)
+        await settled_receipt(owner, switch_call["call_id"])
         # The fence rejects calls from every window, even one whose command is still running.
         with pytest.raises(CliBashWindowRequiredError, match="continuation requires a rebuilt tool catalog"):
             await owner.operation(

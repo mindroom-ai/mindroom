@@ -10,7 +10,7 @@ _MAX_SLEEP_SECONDS = 300
 
 
 # AGNO_COMPAT: SleepTools blocks a thread in time.sleep for any requested duration.
-# Reason: Agno 3.0.9 SleepTools.sleep is synchronous and unbounded, so each call holds a thread of the
+# Reason: Agno 3.2.1 SleepTools.sleep is synchronous and unbounded, so each call holds a thread of the
 # primary process's shared default executor for as long as the model asks, and parallel calls exhaust it.
 # Upstream issue: Tracking gap; no matching issue has been verified.
 # Upstream PR: No matching fix has been verified.
@@ -21,7 +21,7 @@ _MAX_SLEEP_SECONDS = 300
 class SleepTools(AgnoSleepTools):
     """Agno sleep toolkit whose pauses are capped and awaited, because it runs in the process shared by every agent."""
 
-    async def sleep(self, seconds: int) -> str:  # ty: ignore[invalid-method-override]  # Agno awaits async tools
+    async def sleep(self, seconds: int) -> str:  # ty: ignore[incompatible-method-override]  # Agno awaits async tools
         """Use this function to sleep for a given number of seconds, at most 300."""
         if not 0 <= seconds <= _MAX_SLEEP_SECONDS:
             return f"Sleep duration must be between 0 and {_MAX_SLEEP_SECONDS} seconds."

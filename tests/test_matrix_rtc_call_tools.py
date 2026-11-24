@@ -1,71 +1,110 @@
-"""Tests for bridging MindRoom agent tools into the realtime call session."""
+"""Tests for materializing a MindRoom agent's tools and prompt for realtime and cascaded voice calls."""
 
 from __future__ import annotations
 
 import asyncio
+import inspect
+import os
 import threading
-from contextlib import asynccontextmanager, nullcontext
+import time
+from contextlib import asynccontextmanager
+from dataclasses import replace
+from pathlib import Path
 from threading import Event
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from agno.knowledge.knowledge import Knowledge
-from agno.metrics import RunMetrics
-from agno.models.anthropic import Claude
-from agno.run.base import RunStatus
-from agno.tools.function import Function
+from agno.tools.function import Function, ToolResult
+from agno.tools.toolkit import Toolkit
 
-from mindroom.agent_knowledge_descriptions import KnowledgeToolDescribingAgent
+from mindroom.agent_loop.build import AgentBuild, AgentSurface, prompt_for_turn
+from mindroom.agent_loop.prompt import MARKDOWN_OUTPUT_FORMAT, MATRIX_MARKDOWN_OUTPUT_FORMAT, PromptSpec
+from mindroom.agent_loop.spec import AgentSpec
+from mindroom.agent_loop.tools import offered_toolkits
+from mindroom.agents import create_agent
+from mindroom.ai import TurnResult
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
+from mindroom.config.budgets import BudgetsConfig
 from mindroom.config.main import Config
-from mindroom.config.models import ModelConfig
+from mindroom.config.models import BackgroundToolJobsConfig, ModelConfig, ModelPricing
 from mindroom.constants import AI_RUN_METADATA_KEY
-from mindroom.custom_tools.invite_router import InviteRouterTools
-from mindroom.history.types import HistoryScope
-from mindroom.hooks import EnrichmentItem
+from mindroom.helper_usage import HelperUsageOwner, get_helper_usage_owner, record_helper_usage
+from mindroom.history.turn_recorder import TurnRecorder
+from mindroom.hooks import EnrichmentItem, HookBindings
 from mindroom.knowledge.availability import KnowledgeAvailability
+from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, KnowledgeSourceDescription
 from mindroom.knowledge.utils import KnowledgeAvailabilityDetail
+from mindroom.llm.messages import system_text
+from mindroom.llm.provider import ModelIdentity, ModelRequest
+from mindroom.llm.runs import RunStatus
+from mindroom.llm.usage import HelperUsage, ModelMetrics, RunMetrics, TokenCounts
 from mindroom.matrix_rtc.call_tools import (
-    CallAgentResponse,
+    _TEXT_CHAT_REQUIRED_MESSAGE,
+    CallAgentTooling,
+    _call_agent_run_state,
+    _call_instructions,
     _CallAgentCache,
     _CallAgentRunState,
     _CallResponseTracker,
-    _close_cascaded_call_resources,
-    _wrap_agno_function,
+    _spoken,
+    _wrap_tool_function,
     build_call_tools,
     matrix_message_available_during_call,
 )
+from mindroom.matrix_rtc.voice_agent import CallAgentResponse
 from mindroom.memory import MemoryPromptParts
-from mindroom.providers.bedrock_claude import MindRoomBedrockClaude
-from mindroom.providers.claude_prompt_cache import install_claude_prompt_cache_hook
+from mindroom.message_target import MessageTarget
 from mindroom.runtime_resolution import resolve_agent_runtime
+from mindroom.session_storage.store import ConversationStore
+from mindroom.shell.background_scope import ShellBackgroundScope
+from mindroom.tool_jobs.execution import agent_tool_middleware
+from mindroom.tool_jobs.instances import pin_background_tool_jobs
+from mindroom.tool_jobs.runtime import register_background_runtime
+from mindroom.tool_system import plugins as plugins_module
+from mindroom.tool_system.agno_toolkits import adapt_toolkit
+from mindroom.tool_system.call_record import recording_tool_calls
 from mindroom.tool_system.events import ToolTraceEntry
+from mindroom.tool_system.invocation import ToolCall, ToolCallContext, run_tool_call
+from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
-    ToolRuntimeModelBinding,
     get_tool_runtime_context,
-    tool_runtime_context,
 )
+from mindroom.tool_system.tool_function import ToolGate
 from mindroom.tool_system.worker_routing import build_tool_execution_identity
+from mindroom.usage.stats import collect_admin_usage
+from tests.agent_tool_helpers import offered_agno_function
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )
+from tests.budget_helpers import budget_monitor_with_spend, set_month_spend
 from tests.conftest import bind_runtime_paths, make_conversation_reader_mock, make_relation_lookup, test_runtime_paths
+from tests.fakes.scripted_model import ScriptedModel, answer
+from tests.fakes.token_counter import fake_token_counter
+from tests.history_helpers import replay_settings
+from tests.tool_job_helpers import tool_job_runtime
+from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable
-    from pathlib import Path
+    from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 
-    from agno.agent import Agent as AgnoAgent
-
-    from mindroom.message_target import MessageTarget
-    from mindroom.response_turn import ResponseTurnContext
+    from mindroom.constants import RuntimePaths
+    from mindroom.history.interrupted_replay import InterruptedReplaySnapshot
+    from mindroom.llm.provider import TokenCounter
+    from mindroom.response_turn import ResponseTurnContext, TurnSinks
+    from mindroom.session_storage.types import ConversationSession
+    from mindroom.tool_system.invocation import ToolMiddleware, ToolNext
+    from mindroom.tool_system.tool_function import AdaptedToolkit, ToolFunction
+    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 AGENT = "helper"
 REQUESTER = "@alice:example.org"
+_USAGE_OWNER = HelperUsageOwner(storage_factory=MagicMock(), session_id="call")
+_CALL_CONTEXT = ToolCallContext(run_id="call:voice", session_id="call", user_id=REQUESTER)
+_EMPTY_SCHEMA = {"type": "object", "properties": {}}
 
 
 @asynccontextmanager
@@ -74,27 +113,28 @@ async def _authorized_call_operation() -> AsyncIterator[bool]:
     yield True
 
 
-class FakeAgnoAgent:
-    """Small typed stand-in for Agno's effective async tool surface."""
+def _interruption(run_id: str, snapshot: InterruptedReplaySnapshot) -> dict[str, object]:
+    """Return what a call stores of an interrupted reply: its run and the facts of its record."""
+    return {
+        "run_id": run_id,
+        "user_message": snapshot.user_message,
+        "user_message_is_structured": snapshot.user_message_is_structured,
+        "partial_text": snapshot.partial_text,
+        "completed_tools": snapshot.completed_tools,
+        "interrupted_tools": snapshot.interrupted_tools,
+        "run_metadata": snapshot.run_metadata,
+        "original_status": snapshot.original_status,
+    }
 
-    def __init__(self, tools: list[Function], *, prompt: str = "THE CHAT SYSTEM PROMPT") -> None:
-        self.name = "Helper"
-        self.model = SimpleNamespace(supports_native_structured_outputs=False)
-        self._tool_instructions: list[str] = []
-        self._team = None
-        self.tool_hooks = None
-        self._tools = tools
-        self._prompt = prompt
-        self.tool_user_ids: list[str | None] = []
 
-    async def aget_tools(self, **kwargs: object) -> list[Function]:
-        """Return the prepared effective tools and capture requester identity."""
-        self.tool_user_ids.append(kwargs.get("user_id") if isinstance(kwargs.get("user_id"), str) else None)
-        return self._tools
+async def _unconnected() -> None:
+    """Connect nothing, for a function whose toolkit holds no connection."""
 
-    async def aget_system_message(self, *_args: object, **_kwargs: object) -> SimpleNamespace:
-        """Return a deterministic rendered prompt."""
-        return SimpleNamespace(content=self._prompt)
+
+def _ready_knowledge() -> AgentKnowledge:
+    """Return an agent's knowledge handle over one published index."""
+    source = KnowledgeSource(description=KnowledgeSourceDescription(base_id="docs", description=""), index=object())
+    return AgentKnowledge(sources=(source,))
 
 
 def _config() -> Config:
@@ -102,11 +142,13 @@ def _config() -> Config:
 
 
 def _context() -> SimpleNamespace:
-    # The wrapper only stores and re-binds the context; a stand-in suffices.
+    # The wrapper only stores and re-binds the context, and a call reads whether it may save its result to a file; a
+    # stand-in suffices.
     return SimpleNamespace(
         room_id="!room:example.org",
-        hook_registry=object(),
+        hooks=HookBindings(registry=object()),  # type: ignore[arg-type]
         orchestrator=None,
+        tool_output_paths=True,
     )
 
 
@@ -128,9 +170,16 @@ def _runtime_context(
         runtime_paths=runtime_paths,  # type: ignore[arg-type]
         relations=make_relation_lookup(),
         conversation_reader=make_conversation_reader_mock(),
-        hook_registry=hook_registry or MagicMock(),  # type: ignore[arg-type]
+        hooks=HookBindings(registry=hook_registry or MagicMock()),  # type: ignore[arg-type]
         orchestrator=orchestrator,  # type: ignore[arg-type]
     )
+
+
+def _bound_tool_context() -> ToolRuntimeContext:
+    """Return the tool runtime context the call bound around its agent turn."""
+    context = get_tool_runtime_context()
+    assert context is not None
+    return context
 
 
 def _function(entrypoint: object, parameters: dict | None = None, *, name: str = "add") -> Function:
@@ -142,14 +191,151 @@ def _function(entrypoint: object, parameters: dict | None = None, *, name: str =
     )
 
 
-def _wrap(function: Function):  # noqa: ANN202
-    return _wrap_agno_function(
-        function,
-        context=_context(),
-        agent_name=AGENT,
-        config=_config(),
-        authorize_operation=_authorized_call_operation,
+def _toolkit(*functions: Function) -> Toolkit:
+    toolkit = Toolkit(name="call_tools")
+    toolkit.functions = {function.name: function for function in functions}
+    return toolkit
+
+
+def _build(*toolkits: Toolkit, policy: tuple[ToolMiddleware, ...] = (), role: str = "THE CHAT ROLE") -> AgentBuild:
+    """Return an agent build offering ``toolkits`` under the tool-call ``policy``, as ``create_agent`` returns one."""
+    return AgentBuild(
+        spec=AgentSpec(
+            id=AGENT,
+            name="Helper",
+            model=ScriptedModel([]),
+            system_messages=(),
+            toolkits=offered_toolkits([adapt_toolkit(toolkit, key=toolkit.name) for toolkit in toolkits], agent=AGENT),
+        ),
+        prompt=PromptSpec(role=role, instructions=()),
+        request_template=ModelRequest(messages=()),
+        history_settings=replay_settings(),
+        surface=AgentSurface(
+            mode="standard",
+            cli_shell=False,
+            deferred=(),
+            context_documents=(),
+            context_files=(),
+            knowledge_sources=(),
+            output_file_policy=None,
+        ),
+        tool_policy=policy,
+        tool_jobs=None,
     )
+
+
+def test_a_call_s_build_leaves_out_the_chat_s_markdown_format() -> None:
+    """A call speaks its replies, so its build drops the Markdown block the chat prompt states."""
+    build = _build()
+    chat = replace(
+        build,
+        prompt=replace(
+            build.prompt,
+            markdown=True,
+            markdown_format=MATRIX_MARKDOWN_OUTPUT_FORMAT,
+            turn_context="Today.",
+        ),
+    )
+
+    assert MATRIX_MARKDOWN_OUTPUT_FORMAT in system_text(prompt_for_turn(chat))
+    instructions = _call_instructions(_spoken(chat))
+    assert MARKDOWN_OUTPUT_FORMAT not in instructions
+    assert MATRIX_MARKDOWN_OUTPUT_FORMAT not in instructions
+    assert instructions == "<your_role>\nTHE CHAT ROLE\n</your_role>\n\nToday."
+
+
+def _functions(build: AgentBuild) -> Mapping[str, ToolFunction]:
+    return build.spec.functions
+
+
+def _wrap(function: Function, *, middleware: tuple[ToolMiddleware, ...] = ()):  # noqa: ANN202
+    return _wrap_tool_function(
+        offered_agno_function(function),
+        middleware=middleware,
+        call_context=_CALL_CONTEXT,
+        context=_context(),  # type: ignore[arg-type]
+        agent_name=AGENT,
+        authorize_operation=_authorized_call_operation,
+        usage_owner=_USAGE_OWNER,
+        shell_scope=ShellBackgroundScope(),
+        connect=_unconnected,
+    )
+
+
+def _tool_names(tools: tuple[Any, ...]) -> list[str]:
+    return [tool.info.raw_schema["name"] for tool in tools]
+
+
+def _ollama_config(runtime_paths: object, **agent: Any) -> Config:  # noqa: ANN401
+    """Return a one-agent config on a local model whose builds never contact a provider."""
+    return bind_runtime_paths(
+        Config(
+            agents={AGENT: AgentConfig(display_name="Helper", **agent)},
+            models={"default": ModelConfig(provider="ollama", id="test")},
+        ),
+        runtime_paths,  # type: ignore[arg-type]
+    )
+
+
+def _identity(runtime_paths: RuntimePaths) -> ToolExecutionIdentity:
+    return build_tool_execution_identity(
+        channel="matrix",
+        agent_name=AGENT,
+        runtime_paths=runtime_paths,
+        requester_id=REQUESTER,
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="!room:example.org",
+    )
+
+
+def _room_target() -> MessageTarget:
+    """Return the room-level target a call in ``!room:example.org`` runs its turns for."""
+    return MessageTarget(
+        room_id="!room:example.org",
+        source_thread_id=None,
+        resolved_thread_id=None,
+        reply_to_event_id=None,
+        session_id="!room:example.org",
+    )
+
+
+def _tool_support(config: Config, runtime_paths: object) -> SimpleNamespace:
+    """Return the call manager's tool support for the requester in one Matrix room."""
+    return SimpleNamespace(
+        build_context=lambda target, **_kwargs: _runtime_context(
+            config=config,
+            runtime_paths=runtime_paths,
+            target=target,
+        ),
+    )
+
+
+def _chat_build(config: Config, runtime_paths: RuntimePaths, context: ToolRuntimeContext) -> AgentBuild:
+    """Return the build a text-chat reply in the call's room runs for the call's requester."""
+    return create_agent(
+        AGENT,
+        config,
+        runtime_paths,
+        context.execution_identity,
+        supports_native_tool_approval=True,
+        knowledge=None,
+        model=turn_model(config, runtime_paths, AGENT),
+        plugins=config_plugins(config, runtime_paths),
+    )
+
+
+def _cached_call_build(config: Config, runtime_paths: RuntimePaths, context: ToolRuntimeContext) -> AgentBuild:
+    """Return the build a cascaded or Live call's cache makes for its turns."""
+    cache = _CallAgentCache(
+        agent_name=AGENT,
+        config=config,
+        runtime_paths=runtime_paths,
+        context=context,
+        active_model_name=None,
+    )
+    return cache._build(knowledge=None, refresh_scheduler=None)
 
 
 @pytest.mark.asyncio
@@ -157,497 +343,237 @@ async def test_realtime_call_tool_does_not_run_after_authorization_is_revoked() 
     """A realtime provider cannot invoke a tool after current call access is denied."""
     calls: list[dict[str, object]] = []
 
-    async def entrypoint(**kwargs: object) -> str:
-        calls.append(kwargs)
+    async def entrypoint(a: int, b: int) -> str:
+        calls.append({"a": a, "b": b})
         return "unexpected"
 
     @asynccontextmanager
     async def denied_operation() -> AsyncIterator[bool]:
         yield False
 
-    wrapped = _wrap_agno_function(
-        _function(entrypoint),
-        context=_context(),
+    wrapped = _wrap_tool_function(
+        offered_agno_function(_function(entrypoint)),
+        middleware=(),
+        call_context=_CALL_CONTEXT,
+        context=_context(),  # type: ignore[arg-type]
         agent_name=AGENT,
-        config=_config(),
         authorize_operation=denied_operation,
+        usage_owner=_USAGE_OWNER,
+        shell_scope=ShellBackgroundScope(),
+        connect=_unconnected,
     )
 
     assert await wrapped({"a": 2, "b": 3}) == "Call access was revoked before this tool could run."
     assert calls == []
 
 
-def test_call_agent_cache_closes_history_storage_when_agent_build_fails(
+@pytest.mark.parametrize("jobs", [False, True], ids=["paused-run", "job-approval"])
+@pytest.mark.asyncio
+async def test_call_agent_keeps_chat_tool_surface_and_refuses_text_chat_functions(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    *,
+    jobs: bool,
 ) -> None:
-    """A failed cached-agent build must not leak its caller-opened history DB."""
-    history_storage = MagicMock()
-    monkeypatch.setattr(
-        "mindroom.matrix_rtc.call_tools.create_scope_session_storage",
-        MagicMock(return_value=history_storage),
-    )
-    monkeypatch.setattr(
-        "mindroom.matrix_rtc.call_tools.create_agent",
-        MagicMock(side_effect=RuntimeError("agent build failed")),
-    )
-    cache = _CallAgentCache(
-        agent_name=AGENT,
-        config=_config(),
-        runtime_paths=test_runtime_paths(tmp_path),
-        context=SimpleNamespace(hook_registry=None, tool_function_filter=None),  # type: ignore[arg-type]
-        execution_identity=SimpleNamespace(),  # type: ignore[arg-type]
-        session_id="call-session",
-        active_model_name="default",
-    )
+    """The cached call agent offers chat's functions and prompt, less the Markdown line a spoken reply has no use for.
 
-    with pytest.raises(RuntimeError, match="agent build failed"):
-        cache._build_agent(knowledge=None, refresh_scheduler=None)
-
-    history_storage.close.assert_called_once_with()
-
-
-def test_call_agent_cache_closes_agent_runtime_when_prewarm_fails(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A prewarm failure must reclaim the already-created cached agent."""
-    history_storage = MagicMock()
-    agent = MagicMock()
-    close_runtime = MagicMock()
-    monkeypatch.setattr(
-        "mindroom.matrix_rtc.call_tools.create_scope_session_storage",
-        MagicMock(return_value=history_storage),
+    No job runtime runs here, so chat's prompt has no background-job guidance for the call's to leave out either.
+    A gated call is refused in a call whether chat would pause for it or ask as its job, before any other tool-call
+    policy sees it, so no card is posted and nothing is recorded.
+    """
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                AGENT: AgentConfig(display_name="Helper", tools=["calculator"], delegate_to=["other"]),
+                "other": AgentConfig(display_name="Other"),
+            },
+            models={"default": ModelConfig(provider="ollama", id="test")},
+            tool_approval=ToolApprovalConfig(rules=[ApprovalRuleConfig(match="add", action="require_approval")]),
+            background_tool_jobs=BackgroundToolJobsConfig(enabled=jobs),
+        ),
+        runtime_paths,
     )
-    monkeypatch.setattr(
-        "mindroom.matrix_rtc.call_tools.create_agent",
-        MagicMock(return_value=agent),
-    )
-    monkeypatch.setattr(
-        "mindroom.pre_model_preparation.prewarm_anthropic_async_client",
-        MagicMock(side_effect=RuntimeError("prewarm failed")),
-    )
-    monkeypatch.setattr(
-        "mindroom.pre_model_preparation.close_agent_runtime_state_dbs",
-        close_runtime,
-    )
-    cache = _CallAgentCache(
-        agent_name=AGENT,
-        config=_config(),
-        runtime_paths=test_runtime_paths(tmp_path),
-        context=SimpleNamespace(hook_registry=None, tool_function_filter=None),  # type: ignore[arg-type]
-        execution_identity=SimpleNamespace(),  # type: ignore[arg-type]
-        session_id="call-session",
-        active_model_name="default",
-    )
+    context = _runtime_context(config=config, runtime_paths=runtime_paths, target=_room_target())
+    call_build = _cached_call_build(config, runtime_paths, context)
+    chat_build = _chat_build(config, runtime_paths, context)
+    call_functions = _functions(call_build)
+    chat_functions = _functions(chat_build)
 
-    with pytest.raises(RuntimeError, match="prewarm failed"):
-        cache._build_agent(knowledge=None, refresh_scheduler=None)
+    assert list(call_functions) == list(chat_functions)
+    assert MATRIX_MARKDOWN_OUTPUT_FORMAT in system_text(prompt_for_turn(chat_build))
+    assert MATRIX_MARKDOWN_OUTPUT_FORMAT not in system_text(prompt_for_turn(call_build))
+    assert system_text(prompt_for_turn(call_build)) == system_text(
+        prompt_for_turn(replace(chat_build, prompt=replace(chat_build.prompt, markdown=False))),
+    )
+    assert chat_functions["add"].gate is (ToolGate.JOB if jobs else ToolGate.POLICY)
+    add = call_functions["add"]
+    assert add.gate is None
+    # Chat runs a subagent call as its job with jobs on, else pauses for the native driver; a call runs it directly.
+    assert chat_functions["run_subagent"].gate is (None if jobs else ToolGate.DELEGATION)
+    assert call_functions["run_subagent"].gate is None
 
-    close_runtime.assert_called_once_with(agent, shared_scope_storage=history_storage)
-    history_storage.close.assert_called_once_with()
+    started: list[str] = []
+
+    class _Recorder:
+        async def started(self, tool_name: str, _args: Mapping[str, object]) -> str:
+            started.append(tool_name)
+            return tool_name
+
+        async def finished(self, *_args: object) -> None:
+            return None
+
+    with recording_tool_calls(_Recorder()):
+        refused = await run_tool_call(
+            add,
+            {"a": 1, "b": 2},
+            _CALL_CONTEXT,
+            middleware=agent_tool_middleware(call_build),
+        )
+        subtracted = await run_tool_call(
+            call_functions["subtract"],
+            {"a": 3, "b": 1},
+            _CALL_CONTEXT,
+            middleware=agent_tool_middleware(call_build),
+        )
+
+    assert refused.value == _TEXT_CHAT_REQUIRED_MESSAGE
+    assert '"result": 2' in str(subtracted.value)
+    assert started == ["subtract"]
+    # The call refuses only what needs text chat; its delegation goes on to run the child turn.
+    refuse = call_build.tool_policy[0]
+
+    async def delegate(_arguments: dict[str, object]) -> str:
+        return "delegated"
+
+    delegation = ToolCall(function=call_functions["run_subagent"], arguments={}, context=_CALL_CONTEXT)
+    assert await refuse(delegation, delegate) == "delegated"
+
+
+@pytest.mark.parametrize("realtime", [False, True], ids=["cascaded", "realtime"])
+@pytest.mark.asyncio
+async def test_a_call_s_agent_is_not_offered_background_subagent_waits(tmp_path: Path, *, realtime: bool) -> None:
+    """A call runs its tools inline, so its agent is never told a subagent call can continue as a background job.
+
+    Chat's agent, built while the same instance runs background jobs, is told so.
+    """
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                AGENT: AgentConfig(display_name="Helper", delegate_to=["other"]),
+                "other": AgentConfig(display_name="Other"),
+            },
+            models={"default": ModelConfig(provider="ollama", id="test")},
+            background_tool_jobs=BackgroundToolJobsConfig(enabled=True),
+        ),
+        runtime_paths,
+    )
+    pin_background_tool_jobs(config, runtime_paths)
+    runtime = await tool_job_runtime(runtime_paths.storage_root)
+    register_background_runtime(runtime_paths, runtime)
+    try:
+        context = _runtime_context(config=config, runtime_paths=runtime_paths, target=_room_target())
+        chat_build = _chat_build(config, runtime_paths, context)
+        if realtime:
+            tooling = await build_call_tools(
+                agent_name=AGENT,
+                config=config,
+                runtime_paths=runtime_paths,
+                tool_support=_tool_support(config, runtime_paths),  # type: ignore[arg-type]
+                room_id="!room:example.org",
+                requester_id=REQUESTER,
+                authorize_operation=_authorized_call_operation,
+            )
+            [description] = [
+                tool.info.raw_schema["description"]
+                for tool in tooling.tools
+                if tool.info.raw_schema["name"] == "run_subagent"
+            ]
+            instructions = tooling.instructions
+        else:
+            call_build = _cached_call_build(config, runtime_paths, context)
+            description = _functions(call_build)["run_subagent"].description
+            instructions = _call_instructions(call_build)
+    finally:
+        await runtime.shutdown()
+
+    background_instructions = config.get_prompt("DELEGATE_BACKGROUND_JOB_INSTRUCTIONS")
+    assert "background_after" in (_functions(chat_build)["run_subagent"].description or "")
+    assert background_instructions in system_text(prompt_for_turn(chat_build))
+    assert "background_after" not in (description or "")
+    assert background_instructions not in instructions
 
 
 @pytest.mark.asyncio
-async def test_call_agent_cache_build_cancellation_reclaims_completed_agent(
+async def test_call_agent_cache_build_cancellation_waits_for_the_build(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Cancellation must drain an accepted build and close its unreturned result."""
+    """Cancellation during a build waits for the accepted build to finish and keeps nothing it produced."""
     build_started = Event()
     release_build = Event()
     build_finished = Event()
-    history_storage = MagicMock()
-    agent = MagicMock(model=None)
-    close_client = AsyncMock()
-    close_runtime = MagicMock()
 
-    def _build_agent(*_args: object, **_kwargs: object) -> MagicMock:
+    def _create_agent(*_args: object, **_kwargs: object) -> AgentBuild:
         build_started.set()
         if not release_build.wait(timeout=5):
             msg = "test did not release cached agent construction"
             raise TimeoutError(msg)
         build_finished.set()
-        return agent
+        return _build()
 
-    monkeypatch.setattr(
-        "mindroom.matrix_rtc.call_tools.create_scope_session_storage",
-        MagicMock(return_value=history_storage),
-    )
-    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.create_agent", _build_agent)
-    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.aclose_anthropic_async_client", close_client)
-    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.close_agent_runtime_state_dbs", close_runtime)
+    async def render(_build: AgentBuild) -> str:
+        return "rendered"
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.create_agent", _create_agent)
+    config = _config()
+    runtime_paths = test_runtime_paths(tmp_path)
     cache = _CallAgentCache(
         agent_name=AGENT,
-        config=_config(),
-        runtime_paths=test_runtime_paths(tmp_path),
-        context=SimpleNamespace(hook_registry=None, tool_function_filter=None),  # type: ignore[arg-type]
-        execution_identity=SimpleNamespace(),  # type: ignore[arg-type]
-        session_id="call-session",
+        config=config,
+        runtime_paths=runtime_paths,
+        context=_runtime_context(config=config, runtime_paths=runtime_paths, target=_room_target()),
         active_model_name="default",
     )
 
-    build_task = asyncio.create_task(
-        cache._get_agent(
+    run_task = asyncio.create_task(
+        cache.run(
             knowledge=None,
-            knowledge_identity=(),
             refresh_scheduler=None,
+            active_model_name=cache.active_model_name,
+            operation=render,
         ),
     )
     try:
         assert await asyncio.to_thread(build_started.wait, 5)
-        build_task.cancel()
+        run_task.cancel()
         await asyncio.sleep(0)
-        assert not build_task.done()
+        assert not run_task.done()
 
         release_build.set()
         with pytest.raises(asyncio.CancelledError):
-            await build_task
+            await run_task
     finally:
         release_build.set()
-        assert await asyncio.to_thread(build_finished.wait, 5)
-        await asyncio.gather(build_task, return_exceptions=True)
+        await asyncio.gather(run_task, return_exceptions=True)
 
-    assert cache.agent is None
-    close_client.assert_awaited_once_with(agent.model)
-    close_runtime.assert_called_once_with(agent)
+    assert build_finished.is_set()
+    assert cache.build is None
 
 
 @pytest.mark.asyncio
-async def test_call_agent_cache_refreshes_session_client_before_reused_turn(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A long-lived call agent must refresh session credentials between turns."""
-    model = MindRoomBedrockClaude(
-        id="anthropic.claude-opus-5",
-        aws_region="us-east-1",
-        session=object(),
-    )
-    built_clients: list[_FakeSessionClient] = []
-
-    class _FakeSessionClient:
-        def __init__(self) -> None:
-            self.closed = False
-
-        def is_closed(self) -> bool:
-            return self.closed
-
-        async def close(self) -> None:
-            self.closed = True
-
-    def _build_client(**_kwargs: object) -> _FakeSessionClient:
-        client = _FakeSessionClient()
-        built_clients.append(client)
-        return client
-
-    vars(model)["_get_client_params"] = dict
-    monkeypatch.setattr("mindroom.providers.bedrock_claude.AsyncAnthropicBedrockMantle", _build_client)
-    agent = MagicMock(model=model)
-    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.create_scope_session_storage", MagicMock())
-    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.create_agent", MagicMock(return_value=agent))
-    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.close_agent_runtime_state_dbs", MagicMock())
-    cache = _CallAgentCache(
-        agent_name=AGENT,
-        config=_config(),
-        runtime_paths=test_runtime_paths(tmp_path),
-        context=SimpleNamespace(hook_registry=None, tool_function_filter=None),  # type: ignore[arg-type]
-        execution_identity=SimpleNamespace(),  # type: ignore[arg-type]
-        session_id="call-session",
-        active_model_name="default",
-    )
-    used_clients: list[_FakeSessionClient] = []
-
-    async def _use_client(cached_agent: object) -> str:
-        used_clients.append(cached_agent.model.get_async_client())  # type: ignore[attr-defined]
-        return "ok"
-
-    try:
-        assert (
-            await cache.run(
-                knowledge=None,
-                knowledge_identity=(),
-                refresh_scheduler=None,
-                operation=_use_client,
-            )
-            == "ok"
-        )
-        assert (
-            await cache.run(
-                knowledge=None,
-                knowledge_identity=(),
-                refresh_scheduler=None,
-                operation=_use_client,
-            )
-            == "ok"
-        )
-
-        assert used_clients == built_clients
-        assert len(built_clients) == 2
-        assert built_clients[0].closed is True
-        assert built_clients[1].closed is False
-        assert model.async_client is built_clients[1]
-    finally:
-        await cache.aclose()
-        for client in built_clients:
-            if not client.closed:
-                await client.close()
-
-
-@pytest.mark.asyncio
-async def test_call_agent_cache_prewarms_and_reuses_anthropic_async_client(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """A cached call agent must initialize one reusable async client off the event loop."""
-    model = Claude(id="claude-sonnet-5", api_key="test-key")
-    install_claude_prompt_cache_hook(model)
-    client_parameter_thread_ids: list[int] = []
-    event_loop_thread_id = threading.get_ident()
-    original_client_parameters = model._get_client_params
-
-    def _record_client_parameters() -> dict[str, object]:
-        client_parameter_thread_ids.append(threading.get_ident())
-        return original_client_parameters()
-
-    vars(model)["_get_client_params"] = _record_client_parameters
-    agent = MagicMock(model=model)
-    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.create_scope_session_storage", MagicMock())
-    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.create_agent", MagicMock(return_value=agent))
-    cache = _CallAgentCache(
-        agent_name=AGENT,
-        config=_config(),
-        runtime_paths=test_runtime_paths(tmp_path),
-        context=SimpleNamespace(hook_registry=None, tool_function_filter=None),  # type: ignore[arg-type]
-        execution_identity=SimpleNamespace(),  # type: ignore[arg-type]
-        session_id="call-session",
-        active_model_name="default",
-    )
-
-    try:
-        cached_agent = await cache._get_agent(
-            knowledge=None,
-            knowledge_identity=(),
-            refresh_scheduler=None,
-        )
-        first_client = cached_agent.model.get_async_client()
-        second_client = cached_agent.model.get_async_client()
-
-        assert first_client._client is second_client._client
-        assert vars(model)["async_client"] is first_client._client
-        assert client_parameter_thread_ids == [client_parameter_thread_ids[0]]
-        assert client_parameter_thread_ids[0] != event_loop_thread_id
-    finally:
-        async_client = vars(model).get("async_client")
-        if async_client is not None:
-            await async_client.close()
-
-
-@pytest.mark.asyncio
-async def test_call_agent_cache_closes_prewarmed_async_client_on_aclose(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Closing a call cache must release the retained model connection pool."""
-    model = Claude(id="claude-sonnet-5", api_key="test-key")
-    agent = MagicMock(model=model)
-    close_agent_mock = MagicMock()
-    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.create_scope_session_storage", MagicMock())
-    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.create_agent", MagicMock(return_value=agent))
-    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.close_agent_runtime_state_dbs", close_agent_mock)
-    cache = _CallAgentCache(
-        agent_name=AGENT,
-        config=_config(),
-        runtime_paths=test_runtime_paths(tmp_path),
-        context=SimpleNamespace(hook_registry=None, tool_function_filter=None),  # type: ignore[arg-type]
-        execution_identity=SimpleNamespace(),  # type: ignore[arg-type]
-        session_id="call-session",
-        active_model_name="default",
-    )
-
-    cached_agent = await cache._get_agent(
-        knowledge=None,
-        knowledge_identity=(),
-        refresh_scheduler=None,
-    )
-    async_client = vars(model)["async_client"]
-    try:
-        await cache.aclose()
-
-        assert async_client.is_closed()
-        assert model.async_client is None
-        close_agent_mock.assert_called_once_with(cached_agent)
-    finally:
-        if not async_client.is_closed():
-            await async_client.close()
-
-
-@pytest.mark.asyncio
-async def test_call_agent_cache_closes_prewarmed_async_client_on_replacement(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Replacing a call agent must release the previous model connection pool."""
-    first_model = Claude(id="claude-sonnet-5", api_key="test-key")
-    second_model = Claude(id="claude-sonnet-5", api_key="test-key")
-    first_agent = MagicMock(model=first_model)
-    second_agent = MagicMock(model=second_model)
-    close_agent_mock = MagicMock()
-    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.create_scope_session_storage", MagicMock())
-    monkeypatch.setattr(
-        "mindroom.matrix_rtc.call_tools.create_agent",
-        MagicMock(side_effect=(first_agent, second_agent)),
-    )
-    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.close_agent_runtime_state_dbs", close_agent_mock)
-    cache = _CallAgentCache(
-        agent_name=AGENT,
-        config=_config(),
-        runtime_paths=test_runtime_paths(tmp_path),
-        context=SimpleNamespace(hook_registry=None, tool_function_filter=None),  # type: ignore[arg-type]
-        execution_identity=SimpleNamespace(),  # type: ignore[arg-type]
-        session_id="call-session",
-        active_model_name="default",
-    )
-
-    await cache._get_agent(
-        knowledge=None,
-        knowledge_identity=(1,),
-        refresh_scheduler=None,
-    )
-    first_async_client = vars(first_model)["async_client"]
-    second_async_client = None
-    try:
-        await cache._get_agent(
-            knowledge=None,
-            knowledge_identity=(2,),
-            refresh_scheduler=None,
-        )
-        second_async_client = vars(second_model)["async_client"]
-
-        assert first_async_client.is_closed()
-        assert first_model.async_client is None
-        assert not second_async_client.is_closed()
-        close_agent_mock.assert_called_once_with(first_agent)
-    finally:
-        await cache.aclose()
-        for async_client in (first_async_client, second_async_client):
-            if async_client is not None and not async_client.is_closed():
-                await async_client.close()
-
-
-@pytest.mark.asyncio
-async def test_call_agent_cache_closes_runtime_dbs_when_async_client_close_is_cancelled(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Client-close cancellation must not skip the existing runtime DB cleanup."""
-    async_client = MagicMock()
-    async_client.is_closed.return_value = False
-    async_client.close = AsyncMock(side_effect=asyncio.CancelledError)
-    model = Claude(id="claude-sonnet-5", api_key="test-key", async_client=async_client)
-    agent = MagicMock(model=model)
-    close_agent_mock = MagicMock()
-    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.close_agent_runtime_state_dbs", close_agent_mock)
-    cache = _CallAgentCache(
-        agent_name=AGENT,
-        config=_config(),
-        runtime_paths=test_runtime_paths(tmp_path),
-        context=SimpleNamespace(hook_registry=None, tool_function_filter=None),  # type: ignore[arg-type]
-        execution_identity=SimpleNamespace(),  # type: ignore[arg-type]
-        session_id="call-session",
-        active_model_name="default",
-        agent=agent,
-    )
-
-    with pytest.raises(asyncio.CancelledError):
-        await cache.aclose()
-
-    async_client.close.assert_awaited_once_with()
-    close_agent_mock.assert_called_once_with(agent)
-    assert cache.agent is None
-
-
-@pytest.mark.asyncio
-async def test_call_agent_cache_drains_cleanup_before_propagating_outer_cancellation(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Accepted client and DB cleanup must finish before caller cancellation escapes."""
-    client_close_started = asyncio.Event()
-    allow_client_close = asyncio.Event()
-    client_close_finished = asyncio.Event()
-    db_close_started = Event()
-    allow_db_close = Event()
-    db_close_finished = Event()
-
-    async def close_client() -> None:
-        client_close_started.set()
-        await allow_client_close.wait()
-        client_close_finished.set()
-
-    def close_runtime_dbs(_agent: object) -> None:
-        db_close_started.set()
-        if not allow_db_close.wait(timeout=1):
-            msg = "test did not release runtime DB cleanup"
-            raise TimeoutError(msg)
-        db_close_finished.set()
-
-    async_client = MagicMock()
-    async_client.close = AsyncMock(side_effect=close_client)
-    model = Claude(id="claude-sonnet-5", api_key="test-key", async_client=async_client)
-    agent = MagicMock(model=model)
-    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.close_agent_runtime_state_dbs", close_runtime_dbs)
-    cache = _CallAgentCache(
-        agent_name=AGENT,
-        config=_config(),
-        runtime_paths=test_runtime_paths(tmp_path),
-        context=SimpleNamespace(hook_registry=None, tool_function_filter=None),  # type: ignore[arg-type]
-        execution_identity=SimpleNamespace(),  # type: ignore[arg-type]
-        session_id="call-session",
-        active_model_name="default",
-        agent=agent,
-    )
-
-    close_task = asyncio.create_task(cache.aclose())
-    try:
-        await asyncio.wait_for(client_close_started.wait(), timeout=1)
-        close_task.cancel()
-        await asyncio.sleep(0)
-        assert not close_task.done()
-
-        allow_client_close.set()
-        assert await asyncio.to_thread(db_close_started.wait, 1)
-        assert not close_task.done()
-
-        allow_db_close.set()
-        with pytest.raises(asyncio.CancelledError):
-            await close_task
-
-        assert client_close_finished.is_set()
-        assert db_close_finished.is_set()
-    finally:
-        allow_client_close.set()
-        allow_db_close.set()
-        if not close_task.done():
-            close_task.cancel()
-            with pytest.raises(asyncio.CancelledError):
-                await close_task
-
-
-@pytest.mark.asyncio
-async def test_wrapped_tool_executes_sync_entrypoint_in_context() -> None:
-    """Sync entrypoints run in a worker thread with the runtime context bound."""
-    seen_context: list[object] = []
+async def test_wrapped_tool_executes_sync_entrypoint_off_the_loop_in_context() -> None:
+    """Sync entrypoints run in a worker thread with the call's runtime context bound."""
+    seen: list[tuple[object, int]] = []
 
     def add(a: int, b: int) -> int:
-        seen_context.append(get_tool_runtime_context())
+        seen.append((get_tool_runtime_context(), threading.get_ident()))
         return a + b
 
-    tool = _wrap(_function(add))
-    result = await tool({"a": 2, "b": 3})
-    assert result == "5"
-    assert seen_context
-    assert seen_context[0] is not None
+    assert await _wrap(_function(add))({"a": 2, "b": 3}) == "5"
+    assert seen
+    assert seen[0][0] is not None
+    assert seen[0][1] != threading.get_ident()
 
 
 @pytest.mark.asyncio
@@ -657,90 +583,54 @@ async def test_wrapped_tool_executes_async_entrypoint() -> None:
     async def add(a: int, b: int) -> str:
         return f"sum={a + b}"
 
-    tool = _wrap(_function(add))
-    assert await tool({"a": 1, "b": 1}) == "sum=2"
+    assert await _wrap(_function(add))({"a": 1, "b": 1}) == "sum=2"
 
 
 @pytest.mark.asyncio
-async def test_wrapped_tool_runs_agno_tool_hooks() -> None:
-    """Voice tool execution preserves Agno hook policy and result transformations."""
+async def test_wrapped_tool_gives_the_realtime_model_the_text_of_a_tool_result() -> None:
+    """A tool that returns a tool result, as MCP-backed tools do, gives the voice model its text, not its repr."""
+
+    async def add(a: int, b: int) -> ToolResult:
+        return ToolResult(content=f"sum={a + b}")
+
+    assert await _wrap(_function(add))({"a": 1, "b": 1}) == "sum=2"
+
+
+@pytest.mark.asyncio
+async def test_wrapped_tool_runs_under_the_builds_tool_call_policy() -> None:
+    """A voice tool call runs through the build's policy, which sees the call and may change its result."""
     calls: list[str] = []
+    seen: list[tuple[str, dict[str, object], str | None]] = []
 
     def add(a: int, b: int) -> int:
         calls.append("tool")
         return a + b
 
-    def hook(name: str, function: object, arguments: dict[str, int]) -> str:
-        calls.append(name)
-        result = function(**arguments)  # type: ignore[operator]
-        return f"hooked={result}"
+    async def policy(call: ToolCall, call_next: ToolNext) -> object:
+        seen.append((call.function.name, dict(call.arguments), call.context.user_id))
+        return f"hooked={await call_next(call.arguments)}"
 
-    function = _function(add)
-    function.tool_hooks = [hook]
-    tool = _wrap(function)
-
-    assert await tool({"a": 2, "b": 4}) == "hooked=6"
-    assert calls == ["add", "tool"]
+    assert await _wrap(_function(add), middleware=(policy,))({"a": 2, "b": 4}) == "hooked=6"
+    assert calls == ["tool"]
+    assert seen == [("add", {"a": 2, "b": 4}, REQUESTER)]
 
 
 @pytest.mark.asyncio
-async def test_wrapped_tool_refuses_agno_interactive_execution_policy() -> None:
-    """Agno-managed confirmation flows do not execute without their text UI."""
-    calls: list[str] = []
-
-    def add(a: int, b: int) -> int:
-        calls.append("tool")
-        return a + b
-
-    function = _function(add)
-    function.requires_confirmation = True
-    tool = _wrap(function)
-
-    result = await tool({"a": 2, "b": 4})
-
-    assert "text chat" in result
-    assert calls == []
-
-
-@pytest.mark.asyncio
-async def test_wrapped_tool_refuses_when_approval_required() -> None:
-    """The canonical agent hook owns approval evaluation for voice tools."""
+async def test_wrapped_tool_does_not_run_when_the_policy_declines_it() -> None:
+    """A policy that answers the call itself, such as a declining plugin hook, keeps the tool from running."""
     calls: list[object] = []
-    approval_checks: list[dict[str, int]] = []
 
     def add(a: int, b: int) -> int:
         calls.append((a, b))
         return a + b
 
-    async def approval_hook(name: str, function: object, arguments: dict[str, int]) -> str:
-        del name, function
-        approval_checks.append(dict(arguments))
+    async def decline(_call: ToolCall, _call_next: ToolNext) -> object:
         return "Tool approval is required; use the text chat."
 
-    function = _function(add)
-    function.tool_hooks = [approval_hook]
-    tool = _wrap(function)
-    result = await tool({"a": 1, "b": 2})
+    result = await _wrap(_function(add), middleware=(decline,))({"a": 1, "b": 2})
+
     assert "approval" in result.lower()
-    assert approval_checks == [{"a": 1, "b": 2}]
     assert calls == []
-
-
-@pytest.mark.asyncio
-async def test_wrapped_async_tool_awaits_coroutine_returned_by_sync_hook() -> None:
-    """A synchronous hook may delegate to an asynchronous tool entrypoint."""
-
-    async def add(a: int, b: int) -> int:
-        return a + b
-
-    def hook(name: str, function: object, arguments: dict[str, int]) -> object:
-        del name
-        return function(**arguments)  # type: ignore[operator]
-
-    function = _function(add)
-    function.tool_hooks = [hook]
-
-    assert await _wrap(function)({"a": 2, "b": 5}) == "7"
 
 
 @pytest.mark.asyncio
@@ -751,24 +641,65 @@ async def test_wrapped_tool_reports_failures_to_the_model() -> None:
         msg = "database on fire"
         raise RuntimeError(msg)
 
-    tool = _wrap(_function(boom, parameters={"type": "object", "properties": {}}))
-    result = await tool({})
+    result = await _wrap(_function(boom, parameters=_EMPTY_SCHEMA))({})
     assert "failed" in result
     assert "database on fire" in result
 
 
-def test_wrap_processes_unprocessed_toolkit_function_schema() -> None:
-    """Toolkit functions start with an empty schema; wrapping must build the real one."""
+def _add_numbers(a: int, b: int) -> int:
+    """Add two numbers.
 
-    def add(a: int, b: int) -> int:
-        return a + b
+    Args:
+        a: First number.
+        b: Second number.
 
-    # Simulate an agno toolkit function before entrypoint processing.
-    function = Function(name="add", description="Add two numbers", entrypoint=add)
-    assert function.parameters == {"type": "object", "properties": {}, "required": []}
-    _wrap(function)
-    assert set(function.parameters["properties"]) == {"a", "b"}
-    assert set(function.parameters["required"]) == {"a", "b"}
+    """
+    return a + b
+
+
+def _ping() -> str:
+    """Check that the service answers."""
+    return "pong"
+
+
+def _mcp_function(parameters: dict[str, Any]) -> Function:
+    """Return a function built the way the MCP toolkit builds one: the server's schema, used as is."""
+
+    async def call_tool(**_kwargs: object) -> str:
+        return "ok"
+
+    return Function(
+        name="docs_search",
+        description="Search the docs.",
+        parameters=parameters,
+        entrypoint=call_tool,
+        skip_entrypoint_processing=True,
+    )
+
+
+_SEARCH_SCHEMA = {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]}
+
+
+@pytest.mark.parametrize(
+    "function",
+    [
+        pytest.param(Function(name="add", entrypoint=_add_numbers), id="derived-with-arguments"),
+        pytest.param(Function(name="ping", entrypoint=_ping), id="derived-without-arguments"),
+        pytest.param(_mcp_function(_SEARCH_SCHEMA), id="mcp-schema"),
+    ],
+)
+def test_realtime_schemas_are_the_schemas_every_other_model_is_offered(function: Function) -> None:
+    """The realtime model reads a function's parameters schema as text chat offers it, an MCP tool's as sent."""
+    parameters = _wrap(function).info.raw_schema["parameters"]
+
+    assert parameters == offered_agno_function(function).parameters
+    if function.skip_entrypoint_processing:
+        assert parameters == _SEARCH_SCHEMA
+
+
+def test_realtime_schemas_send_an_empty_schema_as_an_object_without_properties() -> None:
+    """A tool that supplies an empty schema reaches the realtime model as an object without properties."""
+    assert _wrap(_mcp_function({})).info.raw_schema["parameters"] == {"type": "object", "properties": {}}
 
 
 @pytest.mark.asyncio
@@ -792,8 +723,9 @@ async def test_call_responder_prepares_full_requester_prompt_before_first_turn(
         runtime_paths,
     )
 
-    async def respond(_turn: ResponseTurnContext, **kwargs: object) -> str:
-        return cast("AgnoAgent", kwargs["reusable_agent"]).role or ""
+    async def respond(turn: ResponseTurnContext, *_args: object, **_kwargs: object) -> TurnResult:
+        assert turn.reusable_build is not None
+        return TurnResult(system_text(prompt_for_turn(turn.reusable_build)))
 
     monkeypatch.setattr("mindroom.ai.ai_response", respond)
     for requester, name, other in (("@alice:example.org", "Alice", "Bob"), ("@bob:example.org", "Bob", "Alice")):
@@ -827,10 +759,8 @@ async def test_call_responder_prepares_full_requester_prompt_before_first_turn(
                 runtime_paths=runtime_paths,
                 relations=make_relation_lookup(),
                 conversation_reader=make_conversation_reader_mock(),
-                hook_registry=MagicMock(),
+                hooks=HookBindings(registry=MagicMock()),
             ),
-            build_execution_identity=lambda identity=identity, **_kwargs: identity,
-            run_in_context=lambda *, operation, **_kwargs: operation(),
         )
         tooling = await build_call_tools(
             agent_name=AGENT,
@@ -853,7 +783,7 @@ async def test_call_responder_prepares_full_requester_prompt_before_first_turn(
             assert "Use a warm, concise voice." in prompt
             assert "Keep the caller's preferences." in prompt
             assert tooling.tools == ()
-            # The first delegated turn reuses the prepared agent and its context snapshot.
+            # The first delegated turn reuses the prepared build and its context snapshot.
             (workspace.root / "USER.md").write_text("This file changed after the call started.")
             assert tooling.responder is not None
             response = await tooling.responder("Who am I?", None)
@@ -864,24 +794,65 @@ async def test_call_responder_prepares_full_requester_prompt_before_first_turn(
 
 
 @pytest.mark.asyncio
+async def test_each_transcript_of_a_call_runs_its_tools_under_a_turn_id_of_its_own(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A call's transcripts are separate turns, so the tool calls of each carry a turn ID the other's do not."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = _ollama_config(runtime_paths)
+    turn_ids: list[str | None] = []
+
+    async def respond(*_args: object, **_kwargs: object) -> TurnResult:
+        turn_ids.append(_bound_tool_context().turn_id)
+        return TurnResult("Sure.")
+
+    monkeypatch.setattr("mindroom.ai.ai_response", respond)
+    tooling = await build_call_tools(
+        agent_name=AGENT,
+        config=config,
+        runtime_paths=runtime_paths,
+        tool_support=_tool_support(config, runtime_paths),
+        room_id="!call:example.org",
+        requester_id=REQUESTER,
+        authorize_operation=_authorized_call_operation,
+        enable_responder=True,
+        reconcile_spoken_response=False,
+    )
+    assert tooling.close is not None
+    try:
+        assert tooling.responder is not None
+        await tooling.responder("What time is it?", None)
+        await tooling.responder("And the weather?", None)
+    finally:
+        await tooling.close()
+
+    assert len(turn_ids) == 2
+    assert len(set(turn_ids) - {None}) == 2
+
+
+@pytest.mark.asyncio
 async def test_build_call_tools_returns_same_agent_prompt_and_tools(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The bridge materializes the chat agent's toolkits and system prompt."""
+    """The bridge materializes the chat agent's functions and system prompt for the call's requester."""
     bound_filters: list[object] = []
+    call_contexts: list[ToolCallContext] = []
 
     def add(a: int, b: int) -> int:
         runtime_context = get_tool_runtime_context()
         bound_filters.append(runtime_context.tool_function_filter if runtime_context is not None else None)
         return a + b
 
-    fake_agent = FakeAgnoAgent([_function(add)])
+    async def record_call(call: ToolCall, call_next: ToolNext) -> object:
+        call_contexts.append(call.context)
+        return await call_next(call.arguments)
 
+    built = _build(_toolkit(_function(add)), policy=(record_call,))
     create_calls: list[tuple[object, ...]] = []
     create_kwargs: dict[str, object] = {}
     knowledge = object()
-    hook_registry = object()
     refresh_scheduler = object()
     config = _config()
     runtime_paths = test_runtime_paths(tmp_path)
@@ -897,15 +868,14 @@ async def test_build_call_tools_returns_same_agent_prompt_and_tools(
     )
     knowledge_calls: list[dict[str, object]] = []
 
-    def fake_create_agent(*args: object, **kwargs: object) -> FakeAgnoAgent:
+    def fake_create_agent(*args: object, **kwargs: object) -> AgentBuild:
+        # Bind the real signature so a stale keyword fails here instead of in production.
+        inspect.signature(create_agent).bind(*args, **kwargs)
         create_calls.append(args)
         create_kwargs.update(kwargs)
-        return fake_agent
+        return built
 
-    monkeypatch.setattr(
-        "mindroom.matrix_rtc.call_tools.create_agent",
-        fake_create_agent,
-    )
+    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.create_agent", fake_create_agent)
 
     async def fake_resolve_knowledge(*_args: object, **kwargs: object) -> SimpleNamespace:
         knowledge_calls.append(kwargs)
@@ -916,6 +886,7 @@ async def test_build_call_tools_returns_same_agent_prompt_and_tools(
         fake_resolve_knowledge,
     )
     seen_targets: list[MessageTarget] = []
+    built_contexts: list[ToolRuntimeContext] = []
 
     class StrictToolSupport:
         def build_context(
@@ -928,27 +899,18 @@ async def test_build_call_tools_returns_same_agent_prompt_and_tools(
         ) -> ToolRuntimeContext:
             assert user_id == REQUESTER
             assert agent_name == AGENT
-            assert active_model_name is None
+            assert active_model_name == "default"
             seen_targets.append(target)
-            return _runtime_context(
+            context = _runtime_context(
                 config=config,
                 runtime_paths=runtime_paths,
                 target=target,
-                hook_registry=hook_registry,
-                orchestrator=SimpleNamespace(knowledge_refresh_scheduler=refresh_scheduler),
+                orchestrator=SimpleNamespace(knowledge_refresh_scheduler=refresh_scheduler, budgets=None),
             )
-
-        def build_execution_identity(
-            self,
-            *,
-            target: MessageTarget,
-            user_id: str | None,
-            agent_name: str | None = None,
-        ) -> object:
-            assert user_id == REQUESTER
-            assert agent_name == AGENT
-            seen_targets.append(target)
-            return execution_identity
+            built_contexts.append(context)
+            # A publication after the turn captured its plugins must not reach the turn's agent build.
+            plugins_module.publish_plugins(plugins_module.PluginGeneration())
+            return context
 
     tooling = await build_call_tools(
         agent_name=AGENT,
@@ -959,28 +921,32 @@ async def test_build_call_tools_returns_same_agent_prompt_and_tools(
         requester_id=REQUESTER,
         authorize_operation=_authorized_call_operation,
     )
-    assert len(tooling.tools) == 1
-    assert tooling.instructions == "THE CHAT SYSTEM PROMPT"
+    assert _tool_names(tooling.tools) == ["add"]
+    assert tooling.instructions == "<your_role>\nTHE CHAT ROLE\n</your_role>"
     assert create_kwargs["eager_deferred_tools"] is True
-    assert create_kwargs["hook_registry"] is hook_registry
+    assert create_kwargs["include_interactive_questions"] is False
+    [built_context] = built_contexts
+    assert create_kwargs["plugins"] is built_context.plugins
+    assert built_context.plugins is not config_plugins(config, runtime_paths)
     assert create_kwargs["knowledge"] is knowledge
     assert create_kwargs["refresh_scheduler"] is refresh_scheduler
     assert create_kwargs["tool_function_filter"] is not None
     assert create_calls
-    assert create_calls[0][3] is execution_identity
-    assert knowledge_calls[0]["execution_identity"] is execution_identity
-    assert tooling.execution_identity is execution_identity
-    assert len(seen_targets) == 2
-    assert seen_targets[0] is seen_targets[1]
-    assert seen_targets[0].session_id == "!room:example.org"
-    assert fake_agent.tool_user_ids == [REQUESTER]
+    # The call runs for the identity its context derives from the call's target and requester.
+    assert create_calls[0][3] == execution_identity
+    assert knowledge_calls[0]["execution_identity"] == execution_identity
+    assert tooling.execution_identity == execution_identity
+    [seen_target] = seen_targets
+    assert seen_target.session_id == "!room:example.org"
     assert await tooling.tools[0]({"a": 2, "b": 3}) == "5"
     assert bound_filters[0] is create_kwargs["tool_function_filter"]
+    [call_context] = call_contexts
+    assert (call_context.user_id, call_context.session_id) == (REQUESTER, "!room:example.org")
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("reconcile_spoken_response", [True, False], ids=["cascaded", "live"])
-async def test_call_responder_uses_normal_agent_turn_and_filters_unsafe_functions(  # noqa: C901, PLR0915
+async def test_call_responder_uses_normal_agent_turn_and_refuses_unsafe_functions(  # noqa: C901, PLR0915
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     reconcile_spoken_response: bool,
@@ -990,18 +956,28 @@ async def test_call_responder_uses_normal_agent_turn_and_filters_unsafe_function
     config.tool_approval = ToolApprovalConfig(
         rules=[ApprovalRuleConfig(match="policy_approval", action="require_approval")],
     )
-    knowledge = SimpleNamespace(vector_db=None)
+    knowledge = _ready_knowledge()
     refresh_scheduler = object()
-    execution_identity = SimpleNamespace()
-    calls: list[tuple[ResponseTurnContext, dict[str, object]]] = []
+    calls: list[tuple[ResponseTurnContext, Config]] = []
     persisted_interruptions: list[dict[str, object]] = []
     completed_tools = [
         ToolTraceEntry(type="tool_call_completed", tool_name="weather"),
         ToolTraceEntry(type="tool_call_completed", tool_name="weather"),
     ]
     contexts: list[ToolRuntimeContext] = []
+    turn_contexts: list[ToolRuntimeContext] = []
     recorded_tool_uses: list[list[str]] = []
     runtime_paths = test_runtime_paths(tmp_path)
+    execution_identity = build_tool_execution_identity(
+        channel="matrix",
+        agent_name=AGENT,
+        runtime_paths=runtime_paths,
+        requester_id=REQUESTER,
+        room_id="!room:example.org",
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="!room:example.org:call:one",
+    )
     authorization_allowed = True
 
     @asynccontextmanager
@@ -1026,61 +1002,71 @@ async def test_call_responder_uses_normal_agent_turn_and_filters_unsafe_function
                 runtime_paths=runtime_paths,
                 relations=make_relation_lookup(),
                 conversation_reader=make_conversation_reader_mock(),
-                hook_registry=MagicMock(),
-                orchestrator=SimpleNamespace(knowledge_refresh_scheduler=refresh_scheduler),  # type: ignore[arg-type]
+                hooks=HookBindings(registry=MagicMock()),
+                orchestrator=SimpleNamespace(knowledge_refresh_scheduler=refresh_scheduler, budgets=None),  # type: ignore[arg-type]
                 active_model_name=active_model_name,
             )
             contexts.append(context)
             return context
 
-        def build_execution_identity(self, **_kwargs: object) -> SimpleNamespace:
-            return execution_identity
-
-        async def run_in_context(
-            self,
-            *,
-            tool_context: ToolRuntimeContext,
-            operation: Callable[[], Awaitable[str]],
-        ) -> str:
-            assert tool_context.tool_function_filter is not None
-            return await operation()
-
-    async def fake_ai_response(turn: ResponseTurnContext, **kwargs: object) -> str:
-        calls.append((turn, kwargs))
-        run_id_callback = cast("Callable[[str], None]", kwargs["run_id_callback"])
-        run_id_callback("call-run-1")
-        recorder = kwargs["turn_recorder"]
-        recorder.record_completed(  # type: ignore[union-attr]
+    async def fake_ai_response(
+        turn: ResponseTurnContext,
+        _paths: RuntimePaths,
+        config: Config,
+        *,
+        sinks: TurnSinks,
+    ) -> TurnResult:
+        context = _bound_tool_context()
+        assert context.tool_function_filter is not None
+        turn_contexts.append(context)
+        calls.append((turn, config))
+        recorder = sinks.turn_recorder
+        assert recorder is not None
+        # The turn driver starts the turn's record with its user message.
+        recorder.start(user_message=turn.prompt, user_message_is_structured=False, run_metadata={})
+        recorder.record_completed(
+            run_id="call-run-1",
             run_metadata={"model": "same-chat-model"},
             assistant_text="It is sunny.",
             completed_tools=completed_tools,
         )
-        return "It is sunny."
+        return TurnResult("It is sunny.")
 
-    cached_agent = SimpleNamespace(additional_context="base context", model=None)
-    create_agent_mock = MagicMock(return_value=cached_agent)
-    history_storage = MagicMock()
-    create_scope_session_storage_mock = MagicMock(return_value=history_storage)
-    close_agent_mock = MagicMock()
-    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.create_agent", create_agent_mock)
-    monkeypatch.setattr(
-        "mindroom.matrix_rtc.call_tools.create_scope_session_storage",
-        create_scope_session_storage_mock,
+    confirm = _function(lambda: "confirm", _EMPTY_SCHEMA, name="confirm")
+    confirm.requires_confirmation = True
+    cached_build = _build(
+        _toolkit(
+            _function(lambda: "safe", _EMPTY_SCHEMA, name="safe"),
+            confirm,
+            _function(lambda: "policy", _EMPTY_SCHEMA, name="policy_approval"),
+            _function(lambda: "workflow", _EMPTY_SCHEMA, name="run_workflow"),
+        ),
     )
-    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.close_agent_runtime_state_dbs", close_agent_mock)
+    create_agent_mock = MagicMock(return_value=cached_build)
+    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.create_agent", create_agent_mock)
     monkeypatch.setattr(
         "mindroom.matrix_rtc.call_tools.resolve_agent_knowledge_access_async",
         AsyncMock(return_value=SimpleNamespace(knowledge=knowledge, unavailable=())),
     )
     monkeypatch.setattr("mindroom.ai.ai_response", fake_ai_response)
-    monkeypatch.setattr(
-        "mindroom.matrix_rtc.call_tools.open_resolved_scope_session_context",
-        lambda **_kwargs: nullcontext(SimpleNamespace()),
-    )
-    monkeypatch.setattr(
-        "mindroom.matrix_rtc.call_tools.persist_interrupted_replay",
-        lambda **kwargs: persisted_interruptions.append(kwargs),
-    )
+    call_store = ConversationStore(tmp_path / "call.db")
+    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.create_session_storage", lambda *_args: call_store)
+
+    def record_interruption(
+        *,
+        storage: ConversationStore,
+        session: ConversationSession,
+        run_id: str,
+        snapshot: InterruptedReplaySnapshot,
+    ) -> None:
+        assert storage is call_store
+        # The interrupted run is written in the database's lane, behind the conversation's other storage work.
+        assert threading.current_thread().name.startswith("conversation-store")
+        persisted_interruptions.append(
+            {"session": (session.session_id, session.kind, session.owner_id), **_interruption(run_id, snapshot)},
+        )
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.persist_interrupted_replay_snapshot", record_interruption)
     if not reconcile_spoken_response:
         monkeypatch.setattr(
             "mindroom.matrix_rtc.call_tools._CallResponseTracker.register",
@@ -1103,7 +1089,7 @@ async def test_call_responder_uses_normal_agent_turn_and_filters_unsafe_function
 
     assert tooling.tools == ()
     assert tooling.instructions == ""
-    assert tooling.execution_identity is execution_identity
+    assert tooling.execution_identity == execution_identity
     assert tooling.responder is not None
     response = await tooling.responder("What is the weather?", recorded_tool_uses.append)
 
@@ -1117,29 +1103,43 @@ async def test_call_responder_uses_normal_agent_turn_and_filters_unsafe_function
     assert len(calls) == 1
     authorization_allowed = True
     create_agent_mock.assert_called_once()
-    turn, kwargs = calls[0]
+    turn, turn_config = calls[0]
     assert turn.entity_label == AGENT
     assert turn.requester_id == REQUESTER
     assert turn.session_id == "!room:example.org:call:one"
+    # No reply owns a call's outcomes afterwards, so its tool calls finish inside the turn.
+    assert turn.inline_tools
     assert turn.active_model_name == "call_fast"
     assert contexts[0].active_model_name == "call_fast"
     assert turn.system_enrichment_items[0].text == "Speak briefly."
-    assert kwargs["config"] is config
-    assert kwargs["knowledge"] is knowledge
-    assert kwargs["execution_identity"] is execution_identity
-    assert kwargs["refresh_scheduler"] is refresh_scheduler
-    assert kwargs["include_interactive_questions"] is False
-    assert kwargs["show_tool_calls"] is False
-    assert kwargs["eager_deferred_tools"] is True
-    assert kwargs["reusable_agent"] is cached_agent
-    assert create_agent_mock.call_args.kwargs["history_storage"] is history_storage
-    create_scope_session_storage_mock.assert_called_once_with(
-        agent_name=AGENT,
-        scope=HistoryScope(kind="agent", scope_id=AGENT),
-        config=config,
-        runtime_paths=runtime_paths,
-        execution_identity=execution_identity,
-    )
+    assert turn_config is config
+    assert turn.knowledge is knowledge
+    assert turn.execution_identity == execution_identity
+    assert turn.refresh_scheduler is refresh_scheduler
+    assert turn.include_interactive_questions is True
+    assert turn.tool_function_filter is None
+    assert turn.show_tool_calls is False
+    assert turn.eager_deferred_tools is True
+    used_build = turn.reusable_build
+    assert used_build is not None
+    assert used_build.prompt == cached_build.prompt
+    # The cached delegate keeps chat's tools and prompt, so calls reuse chat's prompt cache.
+    assert "tool_function_filter" not in create_agent_mock.call_args.kwargs
+    assert "include_interactive_questions" not in create_agent_mock.call_args.kwargs
+    assert create_agent_mock.call_args.kwargs["supports_native_tool_approval"] is True
+    assert "agent_cli_in_shell" not in create_agent_mock.call_args.kwargs
+    used = _functions(used_build)
+    cached = _functions(cached_build)
+    assert list(used) == ["safe", "confirm", "policy_approval", "run_workflow"]
+    assert used["safe"] is cached["safe"]
+    safe = await run_tool_call(used["safe"], {}, _CALL_CONTEXT, middleware=agent_tool_middleware(used_build))
+    assert safe.value == "safe"
+    for name in ("confirm", "policy_approval", "run_workflow"):
+        refused = used[name]
+        assert refused.gate is None
+        assert refused.parameters == cached[name].parameters
+        result = await run_tool_call(refused, {}, _CALL_CONTEXT, middleware=agent_tool_middleware(used_build))
+        assert result.value == _TEXT_CHAT_REQUIRED_MESSAGE
     if reconcile_spoken_response:
         assert tooling.finalize_spoken_response is not None
         finalize = tooling.finalize_spoken_response(response.turn_id, "It is", True)
@@ -1150,8 +1150,7 @@ async def test_call_responder_uses_normal_agent_turn_and_filters_unsafe_function
     assert persisted_interruptions == (
         [
             {
-                "scope_context": SimpleNamespace(),
-                "session_id": "!room:example.org:call:one",
+                "session": ("!room:example.org:call:one", "agent", AGENT),
                 "run_id": "call-run-1",
                 "user_message": "What is the weather?",
                 "user_message_is_structured": False,
@@ -1159,7 +1158,6 @@ async def test_call_responder_uses_normal_agent_turn_and_filters_unsafe_function
                 "completed_tools": tuple(completed_tools),
                 "interrupted_tools": (),
                 "run_metadata": {"model": "same-chat-model"},
-                "is_team": False,
                 "original_status": RunStatus.cancelled,
             },
         ]
@@ -1167,15 +1165,17 @@ async def test_call_responder_uses_normal_agent_turn_and_filters_unsafe_function
         else []
     )
 
-    async def cancel_before_playout(_turn: ResponseTurnContext, **cancel_kwargs: object) -> str:
-        run_id_callback = cast("Callable[[str], None]", cancel_kwargs["run_id_callback"])
-        run_id_callback("call-run-2")
-        recorder = cancel_kwargs["turn_recorder"]
-        recorder.record_interrupted(  # type: ignore[union-attr]
+    async def cancel_before_playout(turn: ResponseTurnContext, *_args: object, sinks: TurnSinks) -> TurnResult:
+        recorder = sinks.turn_recorder
+        assert recorder is not None
+        recorder.start(user_message=turn.prompt, user_message_is_structured=False, run_metadata={})
+        recorder.record_interrupted(
+            run_id="call-run-2",
             run_metadata={"model": "same-chat-model"},
             assistant_text="generated but never spoken",
             completed_tools=(ToolTraceEntry(type="tool_call_completed", tool_name="calendar"),),
             interrupted_tools=(),
+            original_status=RunStatus.cancelled,
         )
         raise asyncio.CancelledError
 
@@ -1188,16 +1188,19 @@ async def test_call_responder_uses_normal_agent_turn_and_filters_unsafe_function
     assert persisted_interruptions[-1]["original_status"] is RunStatus.cancelled
     assert recorded_tool_uses[-1] == ["calendar"]
 
-    async def return_error_without_run_id(_turn: ResponseTurnContext, **error_kwargs: object) -> str:
-        recorder = error_kwargs["turn_recorder"]
-        recorder.record_interrupted(  # type: ignore[union-attr]
+    async def return_error_without_run_id(turn: ResponseTurnContext, *_args: object, sinks: TurnSinks) -> TurnResult:
+        recorder = sinks.turn_recorder
+        assert recorder is not None
+        recorder.start(user_message=turn.prompt, user_message_is_structured=False, run_metadata={})
+        recorder.record_interrupted(
+            run_id=None,
             run_metadata={"model": "same-chat-model"},
             assistant_text="provider failed",
             completed_tools=(),
             interrupted_tools=(),
             original_status=RunStatus.error,
         )
-        return "provider failed"
+        return TurnResult("provider failed")
 
     monkeypatch.setattr("mindroom.ai.ai_response", return_error_without_run_id)
     error_response = await tooling.responder("Trigger an error", recorded_tool_uses.append)
@@ -1213,28 +1216,16 @@ async def test_call_responder_uses_normal_agent_turn_and_filters_unsafe_function
     assert persisted_interruptions[-1]["partial_text"] == ("provider failed" if reconcile_spoken_response else "")
     assert persisted_interruptions[-1]["original_status"] is RunStatus.error
 
-    tool_filter = cast("Callable[[Function], bool]", kwargs["tool_function_filter"])
-    safe = _function(lambda: "safe", {"type": "object", "properties": {}}, name="safe")
-    confirm = _function(lambda: "confirm", {"type": "object", "properties": {}}, name="confirm")
-    confirm.requires_confirmation = True
-    policy = _function(
-        lambda: "policy",
-        {"type": "object", "properties": {}},
-        name="policy_approval",
-    )
-    workflow = _function(
-        lambda: "workflow",
-        {"type": "object", "properties": {}},
-        name="run_workflow",
-    )
-    assert tool_filter(safe) is True
-    assert tool_filter(confirm) is False
-    assert tool_filter(policy) is False
-    assert tool_filter(workflow) is False
+    # Delegated children and script runs still hide these functions through the turn's runtime context.
+    tool_filter = turn_contexts[0].tool_function_filter
+    assert tool_filter is not None
+    assert tool_filter(cached["safe"]) is True
+    assert tool_filter(cached["confirm"]) is False
+    assert tool_filter(cached["policy_approval"]) is False
+    assert tool_filter(cached["run_workflow"]) is False
     assert contexts[0].tool_function_filter is None
     assert tooling.close is not None
     await tooling.close()
-    close_agent_mock.assert_called_once_with(cached_agent)
 
 
 @pytest.mark.asyncio
@@ -1253,12 +1244,12 @@ async def test_cascaded_responder_records_effective_selected_model_metadata(
     expected_model_id: str,
     expected_context_window: int,
 ) -> None:
-    """Call and room model selection drive both cached-agent creation and metadata."""
+    """Call and room model selection drive both the call's build and the turn's metadata."""
     runtime_paths = test_runtime_paths(tmp_path)
     config = bind_runtime_paths(
         Config(
             agents={AGENT: AgentConfig(display_name="Helper", model="default")},
-            room_models={"lobby": "large"},
+            room_models={"!room:example.org": "large"},
             models={
                 "default": ModelConfig(provider="openai", id="default-model"),
                 "large": ModelConfig(provider="openai", id="large-model", context_window=48_000),
@@ -1267,10 +1258,9 @@ async def test_cascaded_responder_records_effective_selected_model_metadata(
         ),
         runtime_paths,
     )
-    execution_identity = SimpleNamespace()
     persisted_interruptions: list[dict[str, object]] = []
 
-    class StrictToolSupport(ToolRuntimeModelBinding):
+    class StrictToolSupport:
         def build_context(
             self,
             target: MessageTarget,
@@ -1288,68 +1278,30 @@ async def test_cascaded_responder_records_effective_selected_model_metadata(
                 runtime_paths=runtime_paths,
                 relations=make_relation_lookup(),
                 conversation_reader=make_conversation_reader_mock(),
-                hook_registry=MagicMock(),
+                hooks=HookBindings(registry=MagicMock()),
                 active_model_name=active_model_name,
             )
 
-        def build_execution_identity(self, **_kwargs: object) -> SimpleNamespace:
-            return execution_identity
+    def scripted_provider(_config: Config, _runtime_paths: object, model_name: str, **_kwargs: object) -> ScriptedModel:
+        model_id = config.models[model_name].id
+        return ScriptedModel(
+            [answer("It is sunny.")],
+            identity=ModelIdentity(id=model_id, provider="OpenAI"),
+        )
 
-        async def run_in_context(
-            self,
-            *,
-            tool_context: ToolRuntimeContext,
-            operation: Callable[[], Awaitable[str]],
-        ) -> str:
-            assert get_tool_runtime_context() is None
-            with tool_runtime_context(tool_context):
-                return await operation()
-
-    mock_agent = MagicMock()
-    mock_agent.model = MagicMock()
-    mock_agent.model.__class__.__name__ = "OpenAIChat"
-    mock_agent.model.id = expected_model_id
-    mock_agent.name = "Helper"
-    mock_agent.additional_context = "base context"
-    mock_agent.add_history_to_context = False
-    mock_run_output = MagicMock()
-    mock_run_output.run_id = "call-run-1"
-    mock_run_output.session_id = "!room:example.org:call:metadata"
-    mock_run_output.status = RunStatus.completed
-    mock_run_output.model = expected_model_id
-    mock_run_output.model_provider = "openai"
-    mock_run_output.metrics = RunMetrics(input_tokens=100, output_tokens=20, total_tokens=120)
-    mock_run_output.tools = None
-    mock_run_output.content = "It is sunny."
-
-    create_agent_mock = MagicMock(return_value=mock_agent)
-    ai_close_agent_mock = MagicMock()
+    create_agent_mock = MagicMock(side_effect=create_agent)
+    monkeypatch.setattr("mindroom.providers.registry.build_model_provider", scripted_provider)
     monkeypatch.setattr("mindroom.matrix_rtc.call_tools.create_agent", create_agent_mock)
-    monkeypatch.setattr("mindroom.ai.close_agent_runtime_state_dbs", ai_close_agent_mock)
-    monkeypatch.setattr(
-        "mindroom.ai.build_memory_prompt_parts",
-        AsyncMock(return_value=MemoryPromptParts()),
-    )
-    monkeypatch.setattr(
-        "mindroom.ai_runtime.cached_agent_run",
-        AsyncMock(return_value=mock_run_output),
-    )
-    monkeypatch.setattr("mindroom.matrix.state.get_room_alias_from_id", lambda *_args: "lobby")
-    monkeypatch.setattr(
-        "mindroom.ai.open_resolved_scope_session_context",
-        lambda **_kwargs: nullcontext(None),
-    )
+    monkeypatch.setattr("mindroom.ai.build_memory_prompt_parts", AsyncMock(return_value=MemoryPromptParts()))
     monkeypatch.setattr(
         "mindroom.matrix_rtc.call_tools.resolve_agent_knowledge_access_async",
         AsyncMock(return_value=SimpleNamespace(knowledge=None, unavailable=())),
     )
     monkeypatch.setattr(
-        "mindroom.matrix_rtc.call_tools.open_resolved_scope_session_context",
-        lambda **_kwargs: nullcontext(SimpleNamespace()),
-    )
-    monkeypatch.setattr(
-        "mindroom.matrix_rtc.call_tools.persist_interrupted_replay",
-        lambda **kwargs: persisted_interruptions.append(kwargs),
+        "mindroom.matrix_rtc.call_tools.persist_interrupted_replay_snapshot",
+        lambda *, session, run_id, snapshot, **_: persisted_interruptions.append(
+            {"session": session, **_interruption(run_id, snapshot)},
+        ),
     )
 
     tooling = await build_call_tools(
@@ -1374,14 +1326,13 @@ async def test_cascaded_responder_records_effective_selected_model_metadata(
     assert finalize is not None
     await finalize
 
-    assert create_agent_mock.call_args.kwargs["active_model_name"] == expected_model_name
+    assert create_agent_mock.call_args.kwargs["model"].model_name == expected_model_name
     run_metadata = persisted_interruptions[0]["run_metadata"]
     assert isinstance(run_metadata, dict)
     payload = run_metadata[AI_RUN_METADATA_KEY]
     assert payload["model"]["config"] == expected_model_name
     assert payload["model"]["id"] == expected_model_id
     assert payload["context"]["window_tokens"] == expected_context_window
-    assert (mock_agent.additional_context, ai_close_agent_mock.call_count) == ("base context", 0)
 
 
 def test_call_response_tracker_keeps_fifo_without_retaining_settled_tokens(tmp_path: Path) -> None:
@@ -1390,7 +1341,7 @@ def test_call_response_tracker_keeps_fifo_without_retaining_settled_tokens(tmp_p
         agent_name=AGENT,
         config=_config(),
         runtime_paths=test_runtime_paths(tmp_path),
-        execution_identity=SimpleNamespace(),  # type: ignore[arg-type]
+        execution_identity=_identity(test_runtime_paths(tmp_path)),
     )
     state = _CallAgentRunState(
         session_id="call-session",
@@ -1416,18 +1367,6 @@ def test_call_response_tracker_keeps_fifo_without_retaining_settled_tokens(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_cascaded_close_releases_agent_when_settlement_wait_is_cancelled() -> None:
-    """Call cancellation cannot leak the cached agent runtime."""
-    tracker = SimpleNamespace(wait_for_settlements=AsyncMock(side_effect=asyncio.CancelledError))
-    cache = SimpleNamespace(aclose=AsyncMock())
-
-    with pytest.raises(asyncio.CancelledError):
-        await _close_cascaded_call_resources(tracker, cache)  # type: ignore[arg-type]
-
-    cache.aclose.assert_awaited_once()
-
-
-@pytest.mark.asyncio
 async def test_cascaded_cancellation_during_knowledge_resolution_persists_transcript(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1435,16 +1374,6 @@ async def test_cascaded_cancellation_during_knowledge_resolution_persists_transc
     """Cancellation during knowledge lookup must persist the admitted transcript."""
     config = _config()
     runtime_paths = test_runtime_paths(tmp_path)
-    execution_identity = build_tool_execution_identity(
-        channel="matrix",
-        agent_name=AGENT,
-        runtime_paths=runtime_paths,
-        requester_id=REQUESTER,
-        room_id="!room:example.org",
-        thread_id=None,
-        resolved_thread_id=None,
-        session_id="call-session",
-    )
     resolution_started = asyncio.Event()
 
     async def blocked_resolution(*_args: object, **_kwargs: object) -> SimpleNamespace:
@@ -1459,25 +1388,16 @@ async def test_cascaded_cancellation_during_knowledge_resolution_persists_transc
         blocked_resolution,
     )
     monkeypatch.setattr(
-        "mindroom.matrix_rtc.call_tools.open_resolved_scope_session_context",
-        lambda **_kwargs: nullcontext(SimpleNamespace()),
-    )
-    monkeypatch.setattr(
-        "mindroom.matrix_rtc.call_tools.persist_interrupted_replay",
-        lambda **kwargs: persisted_interruptions.append(kwargs),
+        "mindroom.matrix_rtc.call_tools.persist_interrupted_replay_snapshot",
+        lambda *, session, run_id, snapshot, **_: persisted_interruptions.append(
+            {"session": session, **_interruption(run_id, snapshot)},
+        ),
     )
     tooling = await build_call_tools(
         agent_name=AGENT,
         config=config,
         runtime_paths=runtime_paths,
-        tool_support=SimpleNamespace(
-            build_context=lambda target, **_kwargs: _runtime_context(
-                config=config,
-                runtime_paths=runtime_paths,
-                target=target,
-            ),
-            build_execution_identity=lambda **_kwargs: execution_identity,
-        ),  # type: ignore[arg-type]
+        tool_support=_tool_support(config, runtime_paths),  # type: ignore[arg-type]
         room_id="!room:example.org",
         requester_id=REQUESTER,
         authorize_operation=_authorized_call_operation,
@@ -1494,7 +1414,7 @@ async def test_cascaded_cancellation_during_knowledge_resolution_persists_transc
 
     assert len(persisted_interruptions) == 1
     persisted = persisted_interruptions[0]
-    assert persisted["session_id"] == "call-session"
+    assert persisted["session"].session_id == "call-session"
     assert persisted["user_message"] == "Never speak this"
     assert persisted["partial_text"] == ""
     assert persisted["original_status"] is RunStatus.cancelled
@@ -1510,7 +1430,7 @@ async def test_call_response_tracker_failed_settlement_does_not_abort_next_turn(
         agent_name=AGENT,
         config=_config(),
         runtime_paths=test_runtime_paths(tmp_path),
-        execution_identity=SimpleNamespace(),  # type: ignore[arg-type]
+        execution_identity=_identity(test_runtime_paths(tmp_path)),
     )
     state = _CallAgentRunState(
         session_id="call-session",
@@ -1549,6 +1469,501 @@ async def test_call_response_tracker_failed_settlement_does_not_abort_next_turn(
 
 
 @pytest.mark.asyncio
+async def test_waiting_for_settlements_returns_when_one_finished_before_its_done_callback_ran(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A finished settlement still in the set, because its done callback has not run yet, does not hold the next turn."""
+    tracker = _settlement_tracker(tmp_path)
+
+    async def persisted(*_args: object) -> None:
+        return None
+
+    monkeypatch.setattr(tracker, "_persist_serialized", persisted)
+    settlement = tracker.finalize(tracker.register(_completed_run_state("settled-run")), "partial", True)
+    assert isinstance(settlement, asyncio.Task)
+    # The settlement's only step runs just before this coroutine resumes, so its done callback has not run yet.
+    await asyncio.sleep(0)
+    assert settlement.done()
+    assert settlement in tracker.settlements
+    waited, stuck = threading.Event(), threading.Event()
+
+    def unstick() -> None:
+        # A wait spinning on the finished settlement never yields to the loop, so only another thread can end it.
+        if not waited.wait(5):
+            stuck.set()
+            tracker.settlements.discard(settlement)
+
+    watchdog = threading.Thread(target=unstick, daemon=True)
+    watchdog.start()
+    await tracker.wait_for_settlements()
+    waited.set()
+    watchdog.join()
+    assert not stuck.is_set()
+
+
+@pytest.mark.asyncio
+async def test_waiting_for_settlements_also_waits_for_one_started_meanwhile(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A settlement started while the next turn waits, as a later playout's is, is waited for too."""
+    tracker = _settlement_tracker(tmp_path)
+    later = tracker.register(_completed_run_state("later-run"))
+    settled: list[str] = []
+
+    async def persisted(state: _CallAgentRunState, *_args: object) -> None:
+        if state.run_id != "later-run":
+            tracker.finalize(later, "partial", True)
+            return
+        # Still running several loop iterations after the wait for the first settlement returns.
+        for _ in range(10):
+            await asyncio.sleep(0)
+        settled.append(state.run_id)
+
+    monkeypatch.setattr(tracker, "_persist_serialized", persisted)
+    tracker.finalize(tracker.register(_completed_run_state("first-run")), "partial", True)
+    await tracker.wait_for_settlements()
+    assert settled == ["later-run"]
+
+
+def _settlement_tracker(tmp_path: Path) -> _CallResponseTracker:
+    runtime_paths = test_runtime_paths(tmp_path)
+    return _CallResponseTracker(
+        agent_name=AGENT,
+        config=_config(),
+        runtime_paths=runtime_paths,
+        execution_identity=_identity(runtime_paths),  # type: ignore[arg-type]
+    )
+
+
+def _completed_run_state(run_id: str) -> _CallAgentRunState:
+    return _CallAgentRunState(
+        session_id="call-session",
+        run_id=run_id,
+        user_message="hello",
+        completed_tools=(),
+        interrupted_tools=(),
+        run_metadata={},
+        outcome="completed",
+        original_status=None,
+    )
+
+
+@pytest.mark.asyncio
+async def test_cancelled_realtime_tooling_finishes_its_agent_build_first(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A call that stops while its realtime agent is built waits for the build, so no build outlives the call."""
+    config = Config(agents={AGENT: AgentConfig(display_name="Helper")})
+    runtime_paths = test_runtime_paths(tmp_path)
+    started = threading.Event()
+    release = threading.Event()
+
+    def blocked_create_agent(*_args: object, **_kwargs: object) -> AgentBuild:
+        started.set()
+        release.wait(timeout=5)
+        return _build()
+
+    class ToolSupport:
+        def build_context(self, target: MessageTarget, **_kwargs: object) -> ToolRuntimeContext:
+            return _runtime_context(config=config, runtime_paths=runtime_paths, target=target)
+
+    async def resolve_knowledge(*_args: object, **_kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(knowledge=None, unavailable={})
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.resolve_agent_knowledge_access_async", resolve_knowledge)
+    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.create_agent", blocked_create_agent)
+    building = asyncio.create_task(
+        build_call_tools(
+            agent_name=AGENT,
+            config=config,
+            runtime_paths=runtime_paths,
+            tool_support=ToolSupport(),  # type: ignore[arg-type]
+            room_id="!room:example.org",
+            requester_id=REQUESTER,
+            authorize_operation=_authorized_call_operation,
+        ),
+    )
+    try:
+        assert await asyncio.to_thread(started.wait, 5)
+        building.cancel()
+        for _ in range(20):
+            await asyncio.sleep(0)
+        assert not building.done()
+    finally:
+        release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await asyncio.wait_for(building, timeout=5)
+
+
+@pytest.mark.asyncio
+async def test_cascaded_responder_uses_the_fallback_for_an_over_budget_caller(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A voice call must not keep an over-budget requester on a priced model."""
+    config = Config(
+        agents={AGENT: AgentConfig(display_name="Helper", model="large")},
+        models={
+            "large": ModelConfig(provider="openai", id="large-model", pricing=ModelPricing(input=5, output=30)),
+            "cheap": ModelConfig(provider="openai", id="cheap-model"),
+        },
+        budgets=BudgetsConfig(fallback_model="cheap", monthly_limit_usd=0),
+    )
+    runtime_paths = test_runtime_paths(tmp_path)
+    ai_calls: list[ResponseTurnContext] = []
+
+    class ToolSupport:
+        def build_context(self, target: MessageTarget, **kwargs: object) -> ToolRuntimeContext:
+            context = _runtime_context(config=config, runtime_paths=runtime_paths, target=target)
+            return replace(context, active_model_name=cast("str | None", kwargs.get("active_model_name")))
+
+    async def resolve_knowledge(*_args: object, **_kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(knowledge=None, unavailable={})
+
+    async def fake_ai_response(turn: ResponseTurnContext, *_args: object, **_kwargs: object) -> TurnResult:
+        assert _bound_tool_context().active_model_name == "cheap"
+        ai_calls.append(turn)
+        return TurnResult("answer")
+
+    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.resolve_agent_knowledge_access_async", resolve_knowledge)
+    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.create_agent", MagicMock(return_value=_build()))
+    monkeypatch.setattr("mindroom.ai.ai_response", fake_ai_response)
+    tooling = await build_call_tools(
+        agent_name=AGENT,
+        config=config,
+        runtime_paths=runtime_paths,
+        tool_support=ToolSupport(),  # type: ignore[arg-type]
+        room_id="!room:example.org",
+        requester_id=REQUESTER,
+        authorize_operation=_authorized_call_operation,
+        enable_responder=True,
+    )
+    assert tooling.responder is not None
+
+    await tooling.responder("hello", None)
+
+    assert [turn.active_model_name for turn in ai_calls] == ["cheap"]
+    assert tooling.close is not None
+    await tooling.close()
+
+
+@pytest.mark.asyncio
+async def test_cascaded_responder_switches_to_the_fallback_when_the_caller_crosses_the_cap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each new voice reply must check the budget again, not keep the model from call setup."""
+    config = Config(
+        agents={AGENT: AgentConfig(display_name="Helper", model="large")},
+        models={
+            "large": ModelConfig(provider="openai", id="large-model", pricing=ModelPricing(input=5, output=30)),
+            "cheap": ModelConfig(provider="openai", id="cheap-model"),
+        },
+        budgets=BudgetsConfig(fallback_model="cheap", monthly_limit_usd=10),
+    )
+    runtime_paths = test_runtime_paths(tmp_path)
+    monitor = budget_monitor_with_spend(runtime_paths, {})
+    orchestrator = SimpleNamespace(knowledge_refresh_scheduler=None, budgets=monitor)
+    turn_models: list[str | None] = []
+
+    class ToolSupport:
+        def build_context(self, target: MessageTarget, **kwargs: object) -> ToolRuntimeContext:
+            context = _runtime_context(
+                config=config,
+                runtime_paths=runtime_paths,
+                target=target,
+                orchestrator=orchestrator,
+            )
+            return replace(context, active_model_name=cast("str | None", kwargs.get("active_model_name")))
+
+    async def resolve_knowledge(*_args: object, **_kwargs: object) -> SimpleNamespace:
+        return SimpleNamespace(knowledge=None, unavailable={})
+
+    ai_models: list[str | None] = []
+
+    async def fake_ai_response(turn: ResponseTurnContext, *_args: object, **_kwargs: object) -> TurnResult:
+        turn_models.append(_bound_tool_context().active_model_name)
+        ai_models.append(turn.active_model_name)
+        return TurnResult("answer")
+
+    create_agent_mock = MagicMock(side_effect=lambda *_args, **_kwargs: _build())
+    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.resolve_agent_knowledge_access_async", resolve_knowledge)
+    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.create_agent", create_agent_mock)
+    monkeypatch.setattr("mindroom.ai.ai_response", fake_ai_response)
+    tooling = await build_call_tools(
+        agent_name=AGENT,
+        config=config,
+        runtime_paths=runtime_paths,
+        tool_support=ToolSupport(),  # type: ignore[arg-type]
+        room_id="!room:example.org",
+        requester_id=REQUESTER,
+        authorize_operation=_authorized_call_operation,
+        enable_responder=True,
+    )
+    assert tooling.responder is not None
+
+    first = await tooling.responder("first", None)
+    assert tooling.finalize_spoken_response is not None
+    assert tooling.finalize_spoken_response(first.turn_id, first.text, False) is None
+    set_month_spend(monitor, {REQUESTER: 12.0})
+    await tooling.responder("second", None)
+
+    assert ai_models == ["large", "cheap"]
+    assert turn_models == ["large", "cheap"]
+    assert [call.kwargs["model"].model_name for call in create_agent_mock.call_args_list] == ["large", "cheap"]
+    assert tooling.close is not None
+    await tooling.close()
+
+
+def _connected_build(log: list[str], **entrypoints: tuple[str, Callable[..., Awaitable[str]]]) -> AgentBuild:
+    """Return a build offering one toolkit per name, each holding a connection whose connect and close ``log`` records.
+
+    Each keyword names a toolkit and gives the name and entrypoint of its one function, which takes ``value``.
+    """
+
+    def connecting(toolkit: AdaptedToolkit) -> AdaptedToolkit:
+        async def close() -> None:
+            log.append(f"{toolkit.name} close")
+
+        async def connect() -> Callable[[], Awaitable[None]]:
+            log.append(f"{toolkit.name} connect")
+            return close
+
+        return replace(toolkit, connect=connect)
+
+    schema = {"type": "object", "properties": {"value": {"type": "string"}}}
+    toolkits = []
+    for toolkit_name, (function_name, entrypoint) in entrypoints.items():
+        toolkit = Toolkit(name=toolkit_name)
+        toolkit.functions = {function_name: _function(entrypoint, schema, name=function_name)}
+        toolkits.append(toolkit)
+    build = _build(*toolkits)
+    connected = tuple(connecting(adapted) for adapted in build.spec.toolkits)
+    return replace(build, spec=replace(build.spec, toolkits=connected))
+
+
+async def _call_tools_over(build: AgentBuild, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> CallAgentTooling:
+    """Build a realtime call's tools for an agent whose ``create_agent`` returns ``build``."""
+    config = _config()
+    runtime_paths = test_runtime_paths(tmp_path)
+    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.create_agent", MagicMock(return_value=build))
+    monkeypatch.setattr(
+        "mindroom.matrix_rtc.call_tools.resolve_agent_knowledge_access_async",
+        AsyncMock(return_value=SimpleNamespace(knowledge=None)),
+    )
+    tool_support = _tool_support(config, runtime_paths)
+    return await build_call_tools(
+        agent_name=AGENT,
+        config=config,
+        runtime_paths=runtime_paths,
+        tool_support=tool_support,  # type: ignore[arg-type]
+        room_id="!room:example.org",
+        requester_id=REQUESTER,
+        authorize_operation=_authorized_call_operation,
+    )
+
+
+@pytest.mark.asyncio
+async def test_realtime_call_tools_connect_their_toolkit_when_first_used_and_close_it_with_the_call(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A toolkit that holds a connection for one run is connected once for the call and closed when the call ends."""
+    log: list[str] = []
+
+    async def lookup(value: str) -> str:
+        return f"found {value}"
+
+    async def query(value: str) -> str:
+        return f"rows for {value}"
+
+    build = _connected_build(log, server=("lookup", lookup), database=("query", query))
+    tooling = await _call_tools_over(build, tmp_path, monkeypatch)
+    tools = dict(zip(_tool_names(tooling.tools), tooling.tools, strict=True))
+
+    assert log == []
+    assert [await tools["lookup"]({"value": value}) for value in ("a", "b")] == ["found a", "found b"]
+    assert log == ["server connect"]
+    assert tooling.close is not None
+    await tooling.close()
+    # A call the provider sends after the call ended connects nothing, even to a toolkit no call has used yet.
+    assert await tools["query"]({"value": "x"}) == "rows for x"
+    assert log == ["server connect", "server close"]
+
+
+@pytest.mark.asyncio
+async def test_a_realtime_tool_whose_toolkit_fails_to_connect_answers_with_its_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed connect is the call's own failure, answered as any failed tool call is, and the next call retries."""
+    log: list[str] = []
+
+    async def lookup(value: str) -> str:
+        return f"found {value}"
+
+    build = _connected_build(log, server=("lookup", lookup))
+    [toolkit] = build.spec.toolkits
+    connect = toolkit.connect
+    assert connect is not None
+    attempts: list[str] = []
+
+    async def failing_twice() -> Callable[[], Awaitable[None]] | None:
+        attempts.append("connect")
+        if len(attempts) == 1:
+            msg = "server unreachable"
+            raise ConnectionError(msg)
+        if len(attempts) == 2:
+            raise TimeoutError
+        return await connect()
+
+    build = replace(build, spec=replace(build.spec, toolkits=(replace(toolkit, connect=failing_twice),)))
+    tooling = await _call_tools_over(build, tmp_path, monkeypatch)
+    [tool] = tooling.tools
+
+    assert await tool({"value": "a"}) == "Tool lookup failed: server unreachable"
+    # An exception without text still tells the voice model what failed.
+    assert await tool({"value": "a"}) == "Tool lookup failed: TimeoutError"
+    assert await tool({"value": "b"}) == "found b"
+    assert log == ["server connect"]
+    assert tooling.close is not None
+    await tooling.close()
+
+
+@pytest.mark.asyncio
+async def test_a_realtime_call_connects_the_toolkit_of_the_function_it_offers_under_a_shared_name(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When two toolkits offer a function of one name, the call offers the first and connects only its toolkit."""
+    log: list[str] = []
+
+    async def lookup(value: str) -> str:
+        return f"found {value}"
+
+    async def shadowed_lookup(value: str) -> str:
+        return f"shadowed {value}"
+
+    build = _connected_build(log, server=("lookup", lookup), shadowed=("lookup", shadowed_lookup))
+    tooling = await _call_tools_over(build, tmp_path, monkeypatch)
+    tools = dict(zip(_tool_names(tooling.tools), tooling.tools, strict=True))
+
+    assert await tools["lookup"]({"value": "a"}) == "found a"
+    assert log == ["server connect"]
+    assert tooling.close is not None
+    await tooling.close()
+    assert log == ["server connect", "server close"]
+
+
+@pytest.mark.asyncio
+async def test_a_realtime_tool_call_cancelled_while_connecting_leaves_the_connect_to_the_next_call(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A call interrupted during its toolkit's connect does not count as connecting it for the rest of the call."""
+    log: list[str] = []
+
+    async def lookup(value: str) -> str:
+        return f"found {value}"
+
+    build = _connected_build(log, server=("lookup", lookup))
+    server = build.spec.toolkits[0]
+    assert server.connect is not None
+    connecting = asyncio.Event()
+
+    async def interrupted() -> None:
+        connecting.set()
+        await asyncio.Event().wait()
+
+    attempts = iter([interrupted, server.connect])
+
+    async def connect() -> Callable[[], Awaitable[None]] | None:
+        return await next(attempts)()
+
+    build = replace(build, spec=replace(build.spec, toolkits=(replace(server, connect=connect),)))
+    tooling = await _call_tools_over(build, tmp_path, monkeypatch)
+    (tool,) = tooling.tools
+    first = asyncio.create_task(tool({"value": "a"}))
+    await asyncio.wait_for(connecting.wait(), timeout=5)
+    first.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await first
+
+    assert await tool({"value": "b"}) == "found b"
+    assert log == ["server connect"]
+    assert tooling.close is not None
+    await tooling.close()
+    assert log == ["server connect", "server close"]
+
+
+@pytest.mark.asyncio
+async def test_realtime_call_tools_use_the_callers_budget_and_count_helper_usage(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Realtime tools such as claude_agent start on an over-budget caller's fallback and count toward the caller."""
+    config = Config(
+        agents={AGENT: AgentConfig(display_name="Helper", model="large")},
+        models={
+            "large": ModelConfig(provider="anthropic", id="claude-opus-5-5", pricing=ModelPricing(input=5, output=25)),
+            "cheap": ModelConfig(provider="anthropic", id="claude-haiku-5-5"),
+        },
+        budgets=BudgetsConfig(fallback_model="cheap", monthly_limit_usd=0),
+    )
+    runtime_paths = test_runtime_paths(tmp_path)
+
+    async def claude_send(prompt: str) -> str:
+        # Like claude_agent, a paid helper tool records its usage under the bound owner.
+        owner = get_helper_usage_owner()
+        assert owner is not None
+        model = ModelMetrics(
+            tokens=TokenCounts(input_tokens=100, total_tokens=100),
+            id="claude-haiku-5-5",
+            provider="Anthropic",
+        )
+        await record_helper_usage(
+            HelperUsage(
+                run_id="turn",
+                model=None,
+                provider=None,
+                metrics=RunMetrics(tokens=TokenCounts(input_tokens=100, total_tokens=100), details={"model": [model]}),
+            ),
+            owner=owner,
+            kind="claude_agent",
+            requester_id=REQUESTER,
+        )
+        return f"done: {prompt}"
+
+    create_agent_mock = MagicMock(
+        return_value=_build(_toolkit(_function(claude_send, {"type": "object"}, name="claude_send"))),
+    )
+    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.create_agent", create_agent_mock)
+    monkeypatch.setattr(
+        "mindroom.matrix_rtc.call_tools.resolve_agent_knowledge_access_async",
+        AsyncMock(return_value=SimpleNamespace(knowledge=None)),
+    )
+    tool_support = _tool_support(config, runtime_paths)
+
+    tooling = await build_call_tools(
+        agent_name=AGENT,
+        config=config,
+        runtime_paths=runtime_paths,
+        tool_support=tool_support,  # type: ignore[arg-type]
+        room_id="!room:example.org",
+        requester_id=REQUESTER,
+        authorize_operation=_authorized_call_operation,
+    )
+
+    assert create_agent_mock.call_args.kwargs["model"].model_name == "cheap"
+    assert await tooling.tools[0]({"prompt": "fix it"}) == "done: fix it"
+    report = collect_admin_usage(config=config, runtime_paths=runtime_paths)
+    assert [(user.user_id, user.totals.input_tokens) for user in report.user_breakdown] == [(REQUESTER, 100)]
+
+
+@pytest.mark.asyncio
 async def test_cascaded_responder_refreshes_knowledge_and_availability_each_turn(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -1558,11 +1973,11 @@ async def test_cascaded_responder_refreshes_knowledge_and_availability_each_turn
     runtime_paths = test_runtime_paths(tmp_path)
     first_scheduler = object()
     second_scheduler = object()
-    orchestrator = SimpleNamespace(knowledge_refresh_scheduler=first_scheduler)
-    execution_identity = SimpleNamespace()
-    ready_knowledge = SimpleNamespace(vector_db=None)
+    orchestrator = SimpleNamespace(knowledge_refresh_scheduler=first_scheduler, budgets=None)
+    execution_identity = _identity(runtime_paths)
+    ready_knowledge = _ready_knowledge()
     resolver_calls: list[dict[str, object]] = []
-    ai_calls: list[tuple[ResponseTurnContext, dict[str, object]]] = []
+    ai_calls: list[ResponseTurnContext] = []
     resolutions = iter(
         (
             SimpleNamespace(
@@ -1587,36 +2002,23 @@ async def test_cascaded_responder_refreshes_knowledge_and_availability_each_turn
                 orchestrator=orchestrator,
             )
 
-        def build_execution_identity(self, **_kwargs: object) -> SimpleNamespace:
-            return execution_identity
-
-        async def run_in_context(
-            self,
-            *,
-            tool_context: ToolRuntimeContext,
-            operation: Callable[[], Awaitable[str]],
-        ) -> str:
-            assert tool_context.tool_function_filter is not None
-            return await operation()
-
     async def resolve_knowledge(*_args: object, **kwargs: object) -> SimpleNamespace:
         resolver_calls.append(kwargs)
         return next(resolutions)
 
-    async def fake_ai_response(turn: ResponseTurnContext, **kwargs: object) -> str:
-        ai_calls.append((turn, kwargs))
-        return f"answer-{len(ai_calls)}"
+    async def fake_ai_response(turn: ResponseTurnContext, *_args: object, **_kwargs: object) -> TurnResult:
+        assert _bound_tool_context().tool_function_filter is not None
+        ai_calls.append(turn)
+        return TurnResult(f"answer-{len(ai_calls)}")
 
-    first_agent = SimpleNamespace(additional_context="first base", model=None)
-    second_agent = SimpleNamespace(additional_context="second base", model=None)
-    create_agent_mock = MagicMock(side_effect=(first_agent, second_agent))
-    close_agent_mock = MagicMock()
+    first_build = _build(role="first base")
+    second_build = _build(role="second base")
+    create_agent_mock = MagicMock(side_effect=(first_build, second_build))
     monkeypatch.setattr(
         "mindroom.matrix_rtc.call_tools.resolve_agent_knowledge_access_async",
         resolve_knowledge,
     )
     monkeypatch.setattr("mindroom.matrix_rtc.call_tools.create_agent", create_agent_mock)
-    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.close_agent_runtime_state_dbs", close_agent_mock)
     monkeypatch.setattr("mindroom.ai.ai_response", fake_ai_response)
     tooling = await build_call_tools(
         agent_name=AGENT,
@@ -1640,20 +2042,21 @@ async def test_cascaded_responder_refreshes_knowledge_and_availability_each_turn
     assert tooling.finalize_spoken_response(second.turn_id, second.text, False) is None
 
     assert [call["refresh_scheduler"] for call in resolver_calls] == [first_scheduler, second_scheduler]
-    assert all(call["execution_identity"] is execution_identity for call in resolver_calls)
-    assert ai_calls[0][1]["knowledge"] is None
-    assert ai_calls[1][1]["knowledge"] is ready_knowledge
-    assert ai_calls[0][1]["reusable_agent"] is first_agent
-    assert ai_calls[1][1]["reusable_agent"] is second_agent
+    assert all(call["execution_identity"] == execution_identity for call in resolver_calls)
+    assert ai_calls[0].knowledge is None
+    assert ai_calls[1].knowledge is ready_knowledge
+    first_used, second_used = ai_calls[0].reusable_build, ai_calls[1].reusable_build
+    assert first_used is not None
+    assert first_used.prompt == first_build.prompt
+    assert second_used is not None
+    assert second_used.prompt == second_build.prompt
     assert create_agent_mock.call_count == 2
-    close_agent_mock.assert_called_once_with(first_agent)
-    assert [item.key for item in ai_calls[0][0].system_enrichment_items] == ["voice_call"]
-    assert [item.key for item in ai_calls[0][0].transient_enrichment_items] == ["knowledge_availability"]
-    assert [item.key for item in ai_calls[1][0].system_enrichment_items] == ["voice_call"]
-    assert ai_calls[1][0].transient_enrichment_items == ()
+    assert [item.key for item in ai_calls[0].system_enrichment_items] == ["voice_call"]
+    assert [item.key for item in ai_calls[0].transient_enrichment_items] == ["knowledge_availability"]
+    assert [item.key for item in ai_calls[1].system_enrichment_items] == ["voice_call"]
+    assert ai_calls[1].transient_enrichment_items == ()
     assert tooling.close is not None
     await tooling.close()
-    assert close_agent_mock.call_args_list[-1].args == (second_agent,)
 
 
 @pytest.mark.asyncio
@@ -1675,38 +2078,28 @@ async def test_call_responder_adds_origin_brief_enrichment(
     runtime_paths = test_runtime_paths(tmp_path)
     turns: list[ResponseTurnContext] = []
 
-    async def fake_ai_response(turn: ResponseTurnContext, **_kwargs: object) -> str:
+    async def fake_ai_response(turn: ResponseTurnContext, *_args: object, **_kwargs: object) -> TurnResult:
         turns.append(turn)
-        return "answer"
+        return TurnResult("answer")
 
     monkeypatch.setattr(
         "mindroom.matrix_rtc.call_tools.resolve_agent_knowledge_access_async",
         AsyncMock(return_value=SimpleNamespace(knowledge=None, unavailable={})),
     )
-    monkeypatch.setattr(
-        "mindroom.matrix_rtc.call_tools.create_agent",
-        MagicMock(return_value=SimpleNamespace(additional_context="base", model=None)),
-    )
+    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.create_agent", MagicMock(return_value=_build()))
     monkeypatch.setattr("mindroom.ai.ai_response", fake_ai_response)
+    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.model_token_counter", lambda *_a, **_k: fake_token_counter())
     tooling = await build_call_tools(
         agent_name=AGENT,
         config=config,
         runtime_paths=runtime_paths,
-        tool_support=SimpleNamespace(
-            build_context=lambda target, **_kwargs: _runtime_context(
-                config=config,
-                runtime_paths=runtime_paths,
-                target=target,
-            ),
-            build_execution_identity=lambda **_kwargs: SimpleNamespace(),
-            run_in_context=lambda **kwargs: kwargs["operation"](),
-        ),  # type: ignore[arg-type]
+        tool_support=_tool_support(config, runtime_paths),  # type: ignore[arg-type]
         room_id="!room:example.org",
         requester_id=REQUESTER,
         authorize_operation=_authorized_call_operation,
         enable_responder=True,
         voice_instructions="Speak briefly.",
-        origin_brief=origin_brief,
+        origin_brief=None if origin_brief is None else lambda _counter: origin_brief,
     )
     assert tooling.responder is not None
 
@@ -1719,11 +2112,63 @@ async def test_call_responder_adds_origin_brief_enrichment(
 
 
 @pytest.mark.asyncio
+async def test_call_responder_sizes_the_origin_brief_with_its_own_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The brief goes to the responder's model, so that model's counter fits it, not the default model's."""
+    config = Config(
+        agents={AGENT: AgentConfig(display_name="Helper", model="thinker")},
+        models={"thinker": ModelConfig(provider="openai", id="gpt-4o")},
+    )
+    runtime_paths = test_runtime_paths(tmp_path)
+    counters: dict[str, TokenCounter] = {}
+    brief_counters: list[TokenCounter] = []
+
+    def brief(counter: TokenCounter) -> str:
+        brief_counters.append(counter)
+        return "brief text"
+
+    async def fake_ai_response(_turn: ResponseTurnContext, *_args: object, **_kwargs: object) -> TurnResult:
+        return TurnResult("answer")
+
+    monkeypatch.setattr(
+        "mindroom.matrix_rtc.call_tools.resolve_agent_knowledge_access_async",
+        AsyncMock(return_value=SimpleNamespace(knowledge=None, unavailable={})),
+    )
+    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.create_agent", MagicMock(return_value=_build()))
+    monkeypatch.setattr("mindroom.ai.ai_response", fake_ai_response)
+    monkeypatch.setattr(
+        "mindroom.matrix_rtc.call_tools.model_token_counter",
+        lambda _config, _paths, model_name, **_kwargs: counters.setdefault(model_name, fake_token_counter()),
+    )
+    tooling = await build_call_tools(
+        agent_name=AGENT,
+        config=config,
+        runtime_paths=runtime_paths,
+        tool_support=_tool_support(config, runtime_paths),  # type: ignore[arg-type]
+        room_id="!room:example.org",
+        requester_id=REQUESTER,
+        authorize_operation=_authorized_call_operation,
+        enable_responder=True,
+        voice_instructions="Speak briefly.",
+        origin_brief=brief,
+    )
+    assert tooling.responder is not None
+
+    await tooling.responder("What did we decide?", None)
+
+    assert list(counters) == ["thinker"]
+    assert len(brief_counters) == 1
+    assert brief_counters[0] is counters["thinker"]
+
+
+@pytest.mark.asyncio
 async def test_cascaded_responder_waits_for_interrupted_playout_settlement(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The next Agno run cannot race a whole-session interrupted-history rewrite."""
+    """The next agent run cannot race a whole-session interrupted-history rewrite."""
     config = _config()
     runtime_paths = test_runtime_paths(tmp_path)
     started = Event()
@@ -1735,28 +2180,19 @@ async def test_cascaded_responder_waits_for_interrupted_playout_settlement(
         def build_context(self, target: MessageTarget, **_kwargs: object) -> ToolRuntimeContext:
             return _runtime_context(config=config, runtime_paths=runtime_paths, target=target)
 
-        def build_execution_identity(self, **_kwargs: object) -> SimpleNamespace:
-            return SimpleNamespace()
-
-        async def run_in_context(
-            self,
-            *,
-            tool_context: ToolRuntimeContext,
-            operation: Callable[[], Awaitable[str]],
-        ) -> str:
-            assert tool_context.tool_function_filter is not None
-            return await operation()
-
-    async def fake_ai_response(_turn: ResponseTurnContext, **kwargs: object) -> str:
-        prompt = cast("str", kwargs["prompt"])
+    async def fake_ai_response(turn: ResponseTurnContext, *_args: object, sinks: TurnSinks) -> TurnResult:
+        assert _bound_tool_context().tool_function_filter is not None
+        prompt = turn.prompt
         ai_prompts.append(prompt)
-        recorder = kwargs["turn_recorder"]
-        recorder.record_completed(  # type: ignore[union-attr]
+        recorder = sinks.turn_recorder
+        assert recorder is not None
+        recorder.record_completed(
+            run_id=None,
             run_metadata={},
             assistant_text=f"answer to {prompt}",
             completed_tools=(),
         )
-        return f"answer to {prompt}"
+        return TurnResult(f"answer to {prompt}")
 
     def persist_interrupted(**kwargs: object) -> None:
         started.set()
@@ -1767,16 +2203,9 @@ async def test_cascaded_responder_waits_for_interrupted_playout_settlement(
         "mindroom.matrix_rtc.call_tools.resolve_agent_knowledge_access_async",
         AsyncMock(return_value=SimpleNamespace(knowledge=None, unavailable={})),
     )
-    monkeypatch.setattr(
-        "mindroom.matrix_rtc.call_tools.create_agent",
-        MagicMock(return_value=SimpleNamespace(additional_context="base context", model=None)),
-    )
+    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.create_agent", MagicMock(return_value=_build()))
     monkeypatch.setattr("mindroom.ai.ai_response", fake_ai_response)
-    monkeypatch.setattr(
-        "mindroom.matrix_rtc.call_tools.open_resolved_scope_session_context",
-        lambda **_kwargs: nullcontext(SimpleNamespace()),
-    )
-    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.persist_interrupted_replay", persist_interrupted)
+    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.persist_interrupted_replay_snapshot", persist_interrupted)
     tooling = await build_call_tools(
         agent_name=AGENT,
         config=config,
@@ -1809,246 +2238,137 @@ async def test_cascaded_responder_waits_for_interrupted_playout_settlement(
 
 
 @pytest.mark.asyncio
-async def test_build_call_tools_includes_async_only_toolkit_functions(
+async def test_build_call_tools_offers_every_function_of_the_build_in_offer_order(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Async-only Agno toolkit registrations are exposed to the realtime model."""
+    """Every function the build offers reaches realtime, async-only and generated ones included, in offer order."""
 
     async def async_add(a: int, b: int) -> int:
         return a + b
 
-    function = _function(async_add)
-
+    async_only = Toolkit(name="async_tools")
+    async_only.async_functions = {"async_add": _function(async_add, name="async_add")}
+    generated = _toolkit(
+        _function(lambda: "knowledge", _EMPTY_SCHEMA, name="search_knowledge_base"),
+        _function(lambda: "skill", _EMPTY_SCHEMA, name="get_skill_instructions"),
+    )
     monkeypatch.setattr(
         "mindroom.matrix_rtc.call_tools.create_agent",
-        lambda *_args, **_kwargs: FakeAgnoAgent([function]),
-    )
-    config = _config()
-    runtime_paths = test_runtime_paths(tmp_path)
-    tool_support = SimpleNamespace(
-        build_context=lambda target, **_kwargs: _runtime_context(
-            config=config,
-            runtime_paths=runtime_paths,
-            target=target,
-        ),
-        build_execution_identity=lambda **_k: SimpleNamespace(),
-    )
-
-    tooling = await build_call_tools(
-        agent_name=AGENT,
-        config=config,
-        runtime_paths=runtime_paths,
-        tool_support=tool_support,  # type: ignore[arg-type]
-        room_id="!room:example.org",
-        requester_id=REQUESTER,
-        authorize_operation=_authorized_call_operation,
-    )
-
-    assert len(tooling.tools) == 1
-
-
-@pytest.mark.asyncio
-async def test_build_call_tools_includes_agno_added_knowledge_and_skill_functions(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Knowledge and skill tools from Agno's effective surface reach realtime."""
-    functions = [
-        _function(lambda: "knowledge", name="search_knowledge_base"),
-        _function(lambda: "skill", name="get_skill_instructions"),
-    ]
-    monkeypatch.setattr(
-        "mindroom.matrix_rtc.call_tools.create_agent",
-        lambda *_args, **_kwargs: FakeAgnoAgent(functions),
+        lambda *_args, **_kwargs: _build(async_only, generated),
     )
     monkeypatch.setattr(
         "mindroom.matrix_rtc.call_tools.resolve_agent_knowledge_access_async",
         AsyncMock(return_value=SimpleNamespace(knowledge=None)),
     )
-    monkeypatch.setattr(
-        "mindroom.matrix_rtc.call_tools._wrap_agno_function",
-        lambda function, **_kwargs: function.name,
-    )
     config = _config()
     runtime_paths = test_runtime_paths(tmp_path)
-    tool_support = SimpleNamespace(
-        build_context=lambda target, **_kwargs: _runtime_context(
-            config=config,
-            runtime_paths=runtime_paths,
-            target=target,
-        ),
-        build_execution_identity=lambda **_kwargs: SimpleNamespace(),
-    )
 
     tooling = await build_call_tools(
         agent_name=AGENT,
         config=config,
         runtime_paths=runtime_paths,
-        tool_support=tool_support,  # type: ignore[arg-type]
+        tool_support=_tool_support(config, runtime_paths),  # type: ignore[arg-type]
         room_id="!room:example.org",
         requester_id=REQUESTER,
         authorize_operation=_authorized_call_operation,
     )
 
-    assert tooling.tools == ("search_knowledge_base", "get_skill_instructions")
+    assert _tool_names(tooling.tools) == ["async_add", "search_knowledge_base", "get_skill_instructions"]
+    assert await tooling.tools[0]({"a": 1, "b": 2}) == "3"
 
 
 @pytest.mark.asyncio
-async def test_build_call_tools_hides_agno_added_knowledge_function_needing_approval(
+@pytest.mark.parametrize("gated", [False, True], ids=["ungated", "gated"])
+async def test_build_call_tools_hides_the_knowledge_search_when_it_needs_approval(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    *,
+    gated: bool,
 ) -> None:
-    """Call approval policy reaches knowledge functions Agno adds after agent construction."""
-    knowledge = Knowledge(name="docs")
-
-    def create_knowledge_agent(*_args: object, **kwargs: object) -> KnowledgeToolDescribingAgent:
-        agent = KnowledgeToolDescribingAgent(
-            name="Helper",
-            id=AGENT,
-            model=Claude(id="claude-sonnet-5"),
-            knowledge=knowledge,
-            search_knowledge=True,
+    """Call approval policy reaches the knowledge search the build adds beside the configured toolkits."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = _ollama_config(runtime_paths)
+    if gated:
+        config.tool_approval = ToolApprovalConfig(
+            rules=[ApprovalRuleConfig(match="search_knowledge_base", action="require_approval")],
         )
-        agent.tool_function_filter = cast("Callable[[Function], bool]", kwargs["tool_function_filter"])
-        monkeypatch.setattr(
-            agent,
-            "aget_system_message",
-            AsyncMock(return_value=SimpleNamespace(content="THE CHAT SYSTEM PROMPT")),
-        )
-        return agent
-
-    monkeypatch.setattr("mindroom.matrix_rtc.call_tools.create_agent", create_knowledge_agent)
     monkeypatch.setattr(
         "mindroom.matrix_rtc.call_tools.resolve_agent_knowledge_access_async",
-        AsyncMock(return_value=SimpleNamespace(knowledge=knowledge)),
-    )
-    monkeypatch.setattr(
-        "mindroom.matrix_rtc.call_tools._wrap_agno_function",
-        lambda function, **_kwargs: function.name,
-    )
-    config = _config()
-    config.tool_approval = ToolApprovalConfig(
-        rules=[ApprovalRuleConfig(match="search_knowledge_base", action="require_approval")],
-    )
-    runtime_paths = test_runtime_paths(tmp_path)
-    tool_support = SimpleNamespace(
-        build_context=lambda target, **_kwargs: _runtime_context(
-            config=config,
-            runtime_paths=runtime_paths,
-            target=target,
-        ),
-        build_execution_identity=lambda **_kwargs: SimpleNamespace(),
+        AsyncMock(return_value=SimpleNamespace(knowledge=_ready_knowledge())),
     )
 
     tooling = await build_call_tools(
         agent_name=AGENT,
         config=config,
         runtime_paths=runtime_paths,
-        tool_support=tool_support,  # type: ignore[arg-type]
+        tool_support=_tool_support(config, runtime_paths),  # type: ignore[arg-type]
         room_id="!room:example.org",
         requester_id=REQUESTER,
         authorize_operation=_authorized_call_operation,
     )
 
-    assert tooling.tools == ()
+    assert ("search_knowledge_base" in _tool_names(tooling.tools)) is not gated
 
 
 @pytest.mark.asyncio
-async def test_build_call_tools_hides_functions_needing_text_chat(
+async def test_build_call_tools_hides_functions_needing_text_chat(tmp_path: Path) -> None:
+    """A function an approval rule may gate never enters the voice schema; its toolkit's other functions do."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = _ollama_config(runtime_paths, tools=["calculator"])
+    config.tool_approval = ToolApprovalConfig(rules=[ApprovalRuleConfig(match="add", action="require_approval")])
+
+    tooling = await build_call_tools(
+        agent_name=AGENT,
+        config=config,
+        runtime_paths=runtime_paths,
+        tool_support=_tool_support(config, runtime_paths),  # type: ignore[arg-type]
+        room_id="!room:example.org",
+        requester_id=REQUESTER,
+        authorize_operation=_authorized_call_operation,
+    )
+
+    names = _tool_names(tooling.tools)
+    assert "add" not in names
+    assert "subtract" in names
+
+
+@pytest.mark.asyncio
+async def test_build_call_tools_hides_offered_functions_needing_text_chat(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Unsupported approval and interaction flows never enter the voice schema."""
+    """Functions a build offers beside its filtered toolkits never enter the voice schema when they need text chat."""
     functions = {
-        name: _function(lambda name=name: name, {"type": "object", "properties": {}}, name=name)
-        for name in ("safe", "confirm", "user_input", "external", "agno_approval", "policy_approval")
+        name: _function(lambda name=name: name, _EMPTY_SCHEMA, name=name)
+        for name in ("safe", "confirm", "policy_approval", "run_workflow")
     }
     functions["confirm"].requires_confirmation = True
-    functions["user_input"].requires_user_input = True
-    functions["external"].external_execution = True
-    functions["agno_approval"].approval_type = "required"
     config = _config()
     config.tool_approval = ToolApprovalConfig(
         rules=[ApprovalRuleConfig(match="policy_approval", action="require_approval")],
     )
     monkeypatch.setattr(
         "mindroom.matrix_rtc.call_tools.create_agent",
-        lambda *_a, **_k: FakeAgnoAgent(list(functions.values())),
+        lambda *_args, **_kwargs: _build(_toolkit(*functions.values())),
     )
     monkeypatch.setattr(
         "mindroom.matrix_rtc.call_tools.resolve_agent_knowledge_access_async",
         AsyncMock(return_value=SimpleNamespace(knowledge=None)),
     )
-    monkeypatch.setattr(
-        "mindroom.matrix_rtc.call_tools._wrap_agno_function",
-        lambda function, **_kwargs: function.name,
-    )
     runtime_paths = test_runtime_paths(tmp_path)
-    tool_support = SimpleNamespace(
-        build_context=lambda target, **_kwargs: _runtime_context(
-            config=config,
-            runtime_paths=runtime_paths,
-            target=target,
-        ),
-        build_execution_identity=lambda **_k: SimpleNamespace(),
-    )
 
     tooling = await build_call_tools(
         agent_name=AGENT,
         config=config,
         runtime_paths=runtime_paths,
-        tool_support=tool_support,  # type: ignore[arg-type]
+        tool_support=_tool_support(config, runtime_paths),  # type: ignore[arg-type]
         room_id="!room:example.org",
         requester_id=REQUESTER,
         authorize_operation=_authorized_call_operation,
     )
 
-    assert tooling.tools == ("safe",)
-
-
-@pytest.mark.asyncio
-async def test_build_call_tools_keeps_builtin_invite_router_under_approval_policy(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Voice recovery must stay callable when global policy requires approval."""
-    invite_router = InviteRouterTools().get_async_functions()["invite_router"]
-    config = _config()
-    config.tool_approval = ToolApprovalConfig(default="require_approval")
-    monkeypatch.setattr(
-        "mindroom.matrix_rtc.call_tools.create_agent",
-        lambda *_a, **_k: FakeAgnoAgent([invite_router]),
-    )
-    monkeypatch.setattr(
-        "mindroom.matrix_rtc.call_tools.resolve_agent_knowledge_access_async",
-        AsyncMock(return_value=SimpleNamespace(knowledge=None)),
-    )
-    monkeypatch.setattr(
-        "mindroom.matrix_rtc.call_tools._wrap_agno_function",
-        lambda function, **_kwargs: function.name,
-    )
-    runtime_paths = test_runtime_paths(tmp_path)
-    tool_support = SimpleNamespace(
-        build_context=lambda target, **_kwargs: _runtime_context(
-            config=config,
-            runtime_paths=runtime_paths,
-            target=target,
-        ),
-        build_execution_identity=lambda **_kwargs: SimpleNamespace(),
-    )
-
-    tooling = await build_call_tools(
-        agent_name=AGENT,
-        config=config,
-        runtime_paths=runtime_paths,
-        tool_support=tool_support,  # type: ignore[arg-type]
-        room_id="!room:example.org",
-        requester_id=REQUESTER,
-        authorize_operation=_authorized_call_operation,
-    )
-
-    assert tooling.tools == ("invite_router",)
+    assert _tool_names(tooling.tools) == ["safe"]
 
 
 @pytest.mark.asyncio
@@ -2078,3 +2398,93 @@ def test_matrix_message_available_during_call_needs_the_tool_without_approval() 
         rules=[ApprovalRuleConfig(match="matrix_message", action="require_approval")],
     )
     assert not matrix_message_available_during_call(config, AGENT)
+
+
+def test_an_interrupted_voice_reply_drops_the_tools_its_fold_summarized() -> None:
+    """A voice reply that compacted mid-turn is saved without the calls the summary holds."""
+    recorder = TurnRecorder()
+    recorder.start(user_message="question", user_message_is_structured=False, run_metadata={"source": "voice"})
+    recorder.record_folded_tool_calls({"folded"})
+    recorder.record_interrupted(
+        run_id=None,
+        run_metadata=None,
+        assistant_text="",
+        completed_tools=[
+            ToolTraceEntry(type="tool_call_completed", tool_name="search", tool_call_id="folded"),
+            ToolTraceEntry(type="tool_call_completed", tool_name="search", tool_call_id="after"),
+        ],
+        interrupted_tools=(),
+        original_status=RunStatus.cancelled,
+    )
+
+    state = _call_agent_run_state(recorder, {}, session_id="session", fallback_run_id="run")
+
+    assert state.run_metadata["source"] == "voice"
+    assert [tool.tool_call_id for tool in state.completed_tools] == ["after"]
+
+
+@pytest.mark.asyncio
+async def test_realtime_call_tools_bind_shell_background_scope_and_close_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Realtime call tools run inside a ShellBackgroundScope that tooling.close() stops alongside toolkits."""
+    from mindroom.shell.background_scope import (  # noqa: PLC0415
+        BackgroundLogPolicy,
+        ShellBackgroundScope,
+        current_shell_background_scope,
+    )
+    from mindroom.shell.execution import run_command  # noqa: PLC0415
+
+    log: list[str] = []
+    observed: dict[str, Any] = {}
+
+    async def run_bg() -> str:
+        scope = current_shell_background_scope()
+        assert isinstance(scope, ShellBackgroundScope)
+        result = await run_command(
+            scope.records,
+            namespace=f"shell-scope:{scope.scope_id}",
+            argv=["bash", "-c", "echo voice-start; sleep 30"],
+            env=dict(os.environ),
+            cwd=str(tmp_path),
+            tail=10,
+            timeout=0.15,
+            on_timeout="background",
+            background_log=BackgroundLogPolicy(log_dir=str(tmp_path / "logs")),
+        )
+        assert result.handle is not None
+        record = scope.records[result.handle]
+        observed["scope"] = scope
+        observed["pid"] = record.pid
+        observed["log_path"] = record._log_path
+        return result.message
+
+    build = _connected_build(log, runner=("run_bg", run_bg))
+    tooling = await _call_tools_over(build, tmp_path, monkeypatch)
+    tools = dict(zip(_tool_names(tooling.tools), tooling.tools, strict=True))
+
+    output = await tools["run_bg"]({})
+    assert "Still running" in output
+    scope = observed["scope"]
+    pid = observed["pid"]
+    os.kill(pid, 0)
+    assert not scope.closed
+    assert len(scope.records) == 1
+
+    assert tooling.close is not None
+    await tooling.close()
+
+    assert scope.closed
+    assert scope.records == {}
+    assert log == ["runner connect", "runner close"]
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            break
+        await asyncio.sleep(0.02)
+    else:
+        pytest.fail(f"Process {pid} remained alive after tooling.close()")
+    assert "[MindRoom: stopped when turn ended]" in Path(observed["log_path"]).read_text(encoding="utf-8")

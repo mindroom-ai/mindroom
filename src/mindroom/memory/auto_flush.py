@@ -1,330 +1,177 @@
-"""Background auto-flush for file-backed memory."""
+"""Background auto-flush for file-backed memory: the new finished turns of conversations become daily notes.
+
+Stored sessions are the source of truth; one progress file below `tracking/` records how far each conversation's log
+has been flushed, so a restart resumes where the last pass stopped, and each note names its last turn's place, so a
+retry never writes it twice.
+"""
 
 from __future__ import annotations
 
 import asyncio
 import json
 import re
-import threading
+import sys
+import time
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
 from functools import partial
-from typing import TYPE_CHECKING, TypedDict, cast
+from typing import TYPE_CHECKING, TypedDict
 from uuid import uuid4
 
-from agno.agent import Agent
-
-from mindroom.agent_storage import create_session_storage, load_agent_session
+from mindroom.agent_loop.helper import complete_prompt
+from mindroom.background_tasks import SupervisedLoop
+from mindroom.config.resolution import entity_model_name, memory_backend
+from mindroom.constants import tracking_dir
+from mindroom.contacts.turns import contact_session_check
+from mindroom.durable_write import write_json_file_durable
 from mindroom.helper_usage import HelperUsageOwner, record_helper_usage
-from mindroom.logging_config import get_logger
-from mindroom.memory.functions import append_agent_daily_memory, list_all_agent_memories
-from mindroom.providers import model_loading
-from mindroom.runtime_resolution import resolve_agent_execution
-from mindroom.tool_system.worker_routing import (
-    SerializedToolExecutionIdentity,
-    ToolExecutionIdentity,
-    parse_tool_execution_identity_payload,
-    serialize_tool_execution_identity,
+from mindroom.history.conversation_text import one_line, utterances
+from mindroom.history.session_runs import (
+    DELEGATION_SESSION_PREFIX,
+    Cursor,
+    back_off,
+    caught_up,
+    due_conversations,
+    start_seq,
+    unredacted,
 )
+from mindroom.llm.errors import ModelSafeguardRefusal
+from mindroom.logging_config import get_logger
+from mindroom.memory._prompting import redact_memory_text
+from mindroom.memory.functions import append_agent_daily_memory, list_all_agent_memories
+from mindroom.memory.legacy_auto_flush import (
+    released_flush_start,
+    released_note_covers,
+    released_note_turns,
+    remove_legacy_flush_queue,
+)
+from mindroom.providers import registry as provider_registry
+from mindroom.requester_identity import agent_instances
+from mindroom.runtime_resolution import resolve_agent_storage
+from mindroom.session_storage.agent_storage import create_session_storage
+from mindroom.tool_system.worker_routing import build_requester_execution_identity
 
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
-    from agno.session.agent import AgentSession
-
     from mindroom.config.main import Config
     from mindroom.config.memory import MemoryAutoFlushConfig
     from mindroom.constants import RuntimePaths
+    from mindroom.history.session_runs import DueConversation, RedactedEventIds
+    from mindroom.llm.runs import AnyRunRecord
+    from mindroom.memory._shared import MemoryResult
+    from mindroom.session_storage.store import LoggedRun
+    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+
 logger = get_logger(__name__)
 
-_FLUSH_STATE_FILENAME = "memory_flush_state.json"
-_STATE_LOCK = threading.Lock()
-_WAKE_EVENTS: set[asyncio.Event] = set()
+_STATE_FILENAME = "memory_auto_flush.json"
+_DISABLED_POLL_SECONDS = 30
+_MAX_LINE_CHARS = 500
+_TAG_PREFIX = "[auto_flush:"
 
 
-class _FlushSessionEntry(TypedDict, total=False):
-    """Persistent flush metadata per (agent, session)."""
+@dataclass(frozen=True)
+class _FlushScope:
+    """One file-memory agent, or one requester's private instance of it, and its key in the progress file."""
 
     agent_name: str
-    session_id: str
-    worker_key: str | None
-    execution_identity: SerializedToolExecutionIdentity | None
-    dirty: bool
-    in_flight: bool
-    first_dirty_at: int
-    last_seen_at: int
-    last_session_updated_at: int | None
-    last_flushed_session_updated_at: int | None
-    next_attempt_at: int | None
-    consecutive_failures: int
-    priority_boost_at: int | None
-    dirty_revision: int
-    flush_started_dirty_revision: int | None
+    execution_identity: ToolExecutionIdentity | None
+    key: str
+
+
+class _ConversationState(Cursor):
+    # The log place of the last turn flushed or given up; None until the conversation is first read, when its turns from
+    # before auto-flush started are skipped.
+    seq: int | None
 
 
 class _FlushState(TypedDict):
-    """On-disk auto-flush state payload."""
-
-    version: int
-    sessions: dict[str, _FlushSessionEntry]
-
-
-def _state_path(storage_path: Path) -> Path:
-    root = storage_path.expanduser().resolve()
-    root.mkdir(parents=True, exist_ok=True)
-    return root / _FLUSH_STATE_FILENAME
+    started_at: int
+    # Each file-memory agent's start; in any of the agent's scopes, turns created before it that had finished when their
+    # conversation was first read are never flushed.
+    agents: dict[str, int]
+    # Each scope's conversations by session ID.
+    scopes: dict[str, dict[str, _ConversationState]]
 
 
-def _now_ts() -> int:
-    return int(datetime.now(UTC).timestamp())
-
-
-def _empty_state() -> _FlushState:
-    return {"version": 1, "sessions": {}}
-
-
-def _session_key(agent_name: str, session_id: str, worker_key: str | None = None) -> str:
-    if worker_key is None:
-        return f"{agent_name}:{session_id}"
-    return f"{agent_name}:{worker_key}:{session_id}"
-
-
-def _resolve_flush_scope(
-    config: Config,
-    agent_name: str,
-    execution_identity: ToolExecutionIdentity | None,
-) -> tuple[str | None, SerializedToolExecutionIdentity | None]:
-    resolved_execution = resolve_agent_execution(
-        agent_name,
-        config,
-        execution_identity=execution_identity,
-    )
-    if not resolved_execution.is_private:
-        return None, None
-    resolved_identity = resolved_execution.execution_identity
-    if resolved_identity is None:
-        msg = f"Private agent '{agent_name}' requires an execution identity for memory auto-flush"
-        raise ValueError(msg)
-    return resolved_execution.worker_key, serialize_tool_execution_identity(
-        resolved_identity,
-        include_transport_agent_name=False,
-    )
-
-
-# LEGACY_COMPAT: File-memory flush state retaining room and thread locations.
-# Legacy format: File-memory auto-flush session entries persisted room_id and thread_id location fields.
-# Last legacy release: v2026.3.93; replacement: v2026.3.94 stopped writing both fields.
-# Handling: Drop only the retired locations when reading state; the next public mutation rewrites it durably.
-# Coverage: tests/test_memory_auto_flush.py::test_reprioritize_rewrites_legacy_location_fields_only.
-def _sanitize_session_entry(raw_entry: object) -> _FlushSessionEntry | None:
-    if not isinstance(raw_entry, dict):
-        return None
-    entry = dict(cast("dict[str, object]", raw_entry))
-    entry.pop("room_id", None)
-    entry.pop("thread_id", None)
-    worker_key = entry.get("worker_key")
-    if worker_key is not None and not isinstance(worker_key, str):
-        entry.pop("worker_key", None)
-    execution_identity = entry.get("execution_identity")
-    if (
-        execution_identity is not None
-        and parse_tool_execution_identity_payload(execution_identity, strict=False) is None
-    ):
-        entry.pop("execution_identity", None)
-    return cast("_FlushSessionEntry", entry)
-
-
-def _stale_private_session_entry(
-    config: Config,
-    agent_name: str,
-    entry: _FlushSessionEntry,
-) -> bool:
-    agent_config = config.agents.get(agent_name)
-    worker_key = entry.get("worker_key")
-    execution_identity = parse_tool_execution_identity_payload(entry.get("execution_identity"), strict=False)
-    if agent_config is None or agent_config.private is None:
-        return worker_key is not None or execution_identity is not None
-    if not isinstance(worker_key, str) or execution_identity is None:
-        return True
-    try:
-        resolved_worker_key, _ = _resolve_flush_scope(config, agent_name, execution_identity)
-    except ValueError:
-        return True
-    return resolved_worker_key != worker_key
-
-
-def _read_state_unlocked(storage_path: Path) -> _FlushState:
-    path = _state_path(storage_path)
-    if not path.exists():
-        return _empty_state()
-
-    payload = path.read_text(encoding="utf-8").strip()
-    if not payload:
-        return _empty_state()
-
-    try:
-        data = json.loads(payload)
-    except json.JSONDecodeError:
-        logger.warning("Invalid memory auto-flush state JSON; resetting state")
-        return _empty_state()
-    if not isinstance(data, dict):
-        return _empty_state()
-    sessions_raw = data.get("sessions")
-    sessions: dict[str, _FlushSessionEntry] = {}
-    if isinstance(sessions_raw, dict):
-        for key, raw_entry in sessions_raw.items():
-            if not isinstance(key, str):
-                continue
-            entry = _sanitize_session_entry(raw_entry)
-            if entry is not None:
-                sessions[key] = entry
-    return {"version": 1, "sessions": sessions}
-
-
-def _write_state_unlocked(storage_path: Path, state: _FlushState) -> None:
-    path = _state_path(storage_path)
-    tmp_path = path.with_name(f"{path.name}.tmp")
-    tmp_path.write_text(f"{json.dumps(state, ensure_ascii=True, indent=2)}\n", encoding="utf-8")
-    tmp_path.replace(path)
-
-
-def _notify_workers() -> None:
-    for wake_event in tuple(_WAKE_EVENTS):
-        wake_event.set()
-
-
-def auto_flush_enabled(config: Config) -> bool:
+def _auto_flush_enabled(config: Config) -> bool:
     """Return whether file-memory auto-flush is enabled."""
     return config.memory.auto_flush.enabled and config.uses_file_memory()
 
 
-def _agent_uses_file_memory(config: Config, agent_name: str) -> bool:
-    if agent_name not in config.agents:
-        return False
-    return config.resolve_entity(agent_name).memory_backend == "file"
+def _file_memory_agents(config: Config) -> list[str]:
+    return [name for name in config.agents if memory_backend(config, name) == "file"]
 
 
-def mark_auto_flush_dirty_session(
-    storage_path: Path,
-    config: Config,
-    *,
-    agent_name: str,
+def _flush_scopes(config: Config, runtime_paths: RuntimePaths, agent_names: list[str]) -> list[_FlushScope]:
+    """Return each shared agent and each private instance of a private one."""
+    storage_root = runtime_paths.storage_root.expanduser().resolve()
+    scopes: list[_FlushScope] = []
+    for agent_name, requester_id in agent_instances(config, runtime_paths, agent_names):
+        identity = (
+            None
+            if requester_id is None
+            else build_requester_execution_identity(
+                agent_name=agent_name,
+                runtime_paths=runtime_paths,
+                requester_id=requester_id,
+            )
+        )
+        # The state root is unique per agent and per private instance, and stable across restarts.
+        state_root = resolve_agent_storage(agent_name, config, runtime_paths, identity).state_root
+        scopes.append(_FlushScope(agent_name, identity, state_root.relative_to(storage_root).as_posix()))
+    return scopes
+
+
+def _new_conversation() -> _ConversationState:
+    return {"updated_at": 0, "seq": None, "failures": 0, "failing_since": 0, "retry_at": 0}
+
+
+def _progress(
+    conversations: dict[str, _ConversationState],
     session_id: str,
-    execution_identity: ToolExecutionIdentity | None = None,
-) -> None:
-    """Mark one agent session as dirty for background auto-flush."""
-    if not auto_flush_enabled(config) or not _agent_uses_file_memory(config, agent_name):
-        return
-
-    now = _now_ts()
-    worker_key, serialized_identity = _resolve_flush_scope(config, agent_name, execution_identity)
-    key = _session_key(agent_name, session_id, worker_key)
-
-    with _STATE_LOCK:
-        state = _read_state_unlocked(storage_path)
-        sessions = state["sessions"]
-        existing = sessions.get(key, {})
-        first_dirty_at = existing.get("first_dirty_at", now)
-        dirty_revision = existing.get("dirty_revision", 0)
-        if not isinstance(dirty_revision, int):
-            dirty_revision = 0
-        if not existing.get("dirty", False):
-            first_dirty_at = now
-
-        sessions[key] = {
-            **existing,
-            "agent_name": agent_name,
-            "session_id": session_id,
-            "worker_key": worker_key,
-            "execution_identity": serialized_identity,
-            "dirty": True,
-            "dirty_revision": dirty_revision + 1,
-            # Keep in-flight status if a flush is already running for this key.
-            "in_flight": bool(existing.get("in_flight", False)),
-            "first_dirty_at": first_dirty_at,
-            "last_seen_at": now,
-            "next_attempt_at": None,
-        }
-        _write_state_unlocked(storage_path, state)
-
-    _notify_workers()
+    turns: list[LoggedRun],
+    started_at: int,
+) -> tuple[_ConversationState, int]:
+    """Return the conversation's progress and the place its unflushed turns follow, fixed when it is first read."""
+    entry = conversations.setdefault(session_id, _new_conversation())
+    if (seq := entry.get("seq")) is not None:
+        return entry, seq
+    seq = released_flush_start(entry, turns)
+    if seq is None:
+        # A conversation first seen now starts with the turns after auto-flush started, so history is never flushed.
+        seq = start_seq(turns, older=lambda run: run.created_at < started_at)
+    # Rebuilt rather than updated, so a released entry's `marker` and `recheck_at` leave the file.
+    current: _ConversationState = {
+        "updated_at": entry["updated_at"],
+        "seq": seq,
+        "failures": entry["failures"],
+        "failing_since": entry["failing_since"],
+        "retry_at": entry["retry_at"],
+    }
+    conversations[session_id] = current
+    return current, seq
 
 
-def reprioritize_auto_flush_sessions(
-    storage_path: Path,
-    config: Config,
-    *,
-    agent_name: str,
-    active_session_id: str,
-    execution_identity: ToolExecutionIdentity | None = None,
-) -> None:
-    """Raise priority of other dirty sessions for the same agent."""
-    if not auto_flush_enabled(config) or not _agent_uses_file_memory(config, agent_name):
-        return
-
-    max_reprioritize = config.memory.auto_flush.max_cross_session_reprioritize
-    if max_reprioritize <= 0:
-        return
-
-    now = _now_ts()
-    worker_key, _serialized_identity = _resolve_flush_scope(config, agent_name, execution_identity)
-    with _STATE_LOCK:
-        state = _read_state_unlocked(storage_path)
-        sessions = state["sessions"]
-        candidates = [
-            (key, entry)
-            for key, entry in sessions.items()
-            if entry.get("agent_name") == agent_name
-            and entry.get("session_id") != active_session_id
-            and entry.get("worker_key") == worker_key
-            and entry.get("dirty", False)
-        ]
-        candidates.sort(key=lambda item: item[1].get("first_dirty_at", now))
-        for key, entry in candidates[:max_reprioritize]:
-            entry["priority_boost_at"] = now
-            sessions[key] = entry
-        _write_state_unlocked(storage_path, state)
-
-    _notify_workers()
-
-
-def _entry_priority_key(entry: _FlushSessionEntry, now: int) -> tuple[int, int]:
-    boosted = entry.get("priority_boost_at")
-    priority_rank = 0 if isinstance(boosted, int) and boosted > 0 else 1
-    return (priority_rank, entry.get("first_dirty_at", now))
-
-
-def _flush_batch_key(config: Config, agent_name: str, entry: _FlushSessionEntry) -> str:
-    agent_config = config.agents.get(agent_name)
-    worker_key = entry.get("worker_key")
-    if agent_config is not None and agent_config.private is not None and isinstance(worker_key, str):
-        return f"{agent_name}:{worker_key}"
-    return agent_name
-
-
-def _select_recent_chat_lines(
-    session: AgentSession,
-    *,
-    max_messages: int,
-    max_chars: int,
-) -> list[str]:
-    messages = session.get_chat_history()
-    selected: list[str] = []
-    char_count = 0
-    for message in reversed(messages):
-        role = message.role
-        if role not in {"user", "assistant"}:
-            continue
-        content = message.content
-        if not isinstance(content, str):
-            continue
-        cleaned = " ".join(content.split())
+def _run_lines(run: AnyRunRecord) -> list[str]:
+    """Return what was said in one turn as the ``speaker: text`` lines auto-flush extracts memories from."""
+    lines: list[str] = []
+    for said in utterances(run):
+        cleaned = one_line(redact_memory_text(said.unredacted))
         if not cleaned:
             continue
-        if len(cleaned) > 500:
-            cleaned = f"{cleaned[:497]}..."
-        line = f"{role}: {cleaned}"
+        if len(cleaned) > _MAX_LINE_CHARS:
+            cleaned = f"{cleaned[: _MAX_LINE_CHARS - 3]}..."
+        lines.append(f"{said.sender or 'assistant'}: {cleaned}")
+    return lines
+
+
+def _newest_lines(lines: list[str], *, max_messages: int, max_chars: int) -> list[str]:
+    """Return the newest lines within one extraction's limits, oldest first."""
+    selected: list[str] = []
+    char_count = 0
+    for line in reversed(lines):
         next_count = char_count + len(line) + 1
         if selected and next_count > max_chars:
             break
@@ -334,6 +181,88 @@ def _select_recent_chat_lines(
             break
     selected.reverse()
     return selected
+
+
+def _next_batch(turns: list[LoggedRun], settings: MemoryAutoFlushConfig) -> tuple[list[LoggedRun], list[str]]:
+    """Return the oldest turns whose lines fit one extraction, and those lines; a turn too long alone keeps its newest."""
+    limits = {
+        "max_messages": settings.extractor.max_messages_per_flush,
+        "max_chars": settings.extractor.max_chars_per_flush,
+    }
+    batch: list[LoggedRun] = []
+    lines: list[str] = []
+    for turn in turns:
+        candidate = [*lines, *_run_lines(turn.run)]
+        # Turns with no lines at the start of a batch, such as an automation's, ride along with the turn after them.
+        if lines and len(_newest_lines(candidate, **limits)) < len(candidate):
+            break
+        batch.append(turn)
+        lines = candidate
+    return batch, _newest_lines(lines, **limits)
+
+
+def _flush_tag(session_id: str, seq: int) -> str:
+    return f"{_TAG_PREFIX}{session_id}@{seq}]"
+
+
+def _unflushed_turns(
+    pending: list[LoggedRun],
+    turns: list[LoggedRun],
+    session_id: str,
+    memories: list[MemoryResult],
+) -> list[LoggedRun]:
+    """Return the pending turns no note written before its progress was saved already covers.
+
+    A note covers the turns placed at or before the turn it names, its batch's last.
+    """
+    notes = [memory.get("memory", "") for memory in memories]
+    prefix = f"{_TAG_PREFIX}{session_id}@"
+    places = [note[len(prefix) :].partition("]")[0] for note in notes if note.startswith(prefix)]
+    through = max((int(place) for place in places if place.isdigit()), default=0)
+    named = released_note_turns(notes, session_id, turns)
+    return [turn for turn in pending if turn.seq > through and not released_note_covers(named, turn)]
+
+
+def _record_failure(entry: _ConversationState, settings: MemoryAutoFlushConfig, failed_at: float) -> bool:
+    """Count one failed attempt, back off from when it failed, and return whether to give up on the failing turns."""
+    back_off(
+        entry,
+        failed_at,
+        first_seconds=settings.retry_cooldown_seconds,
+        max_seconds=settings.max_retry_cooldown_seconds,
+    )
+    return failed_at - entry["failing_since"] >= settings.stale_ttl_seconds
+
+
+def _record_unreadable(
+    entry: _ConversationState,
+    settings: MemoryAutoFlushConfig,
+    updated_at: int,
+    failed_at: float,
+) -> None:
+    """Back off a conversation that could not be read, and once that has failed for long enough, wait until it changes."""
+    if _record_failure(entry, settings, failed_at):
+        caught_up(entry, updated_at)
+
+
+def _record_progress(
+    entry: _ConversationState,
+    pending: list[LoggedRun],
+    fresh: list[LoggedRun],
+    done: list[LoggedRun],
+    updated_at: int,
+) -> None:
+    """Move past the turns flushed or given up, and mark the conversation caught up when none of ``fresh`` is left.
+
+    ``fresh`` are the pending turns no note covers yet and ``done`` the first of them, flushed or given up.
+    """
+    if len(done) < len(fresh):
+        # A long backlog spreads over passes; the conversation stays due because its recorded update time is unchanged.
+        entry.update(seq=done[-1].seq, failures=0, failing_since=0, retry_at=0)
+        return
+    if pending:
+        entry["seq"] = pending[-1].seq
+    caught_up(entry, updated_at)
 
 
 def _normalize_extractor_line(line: str, no_reply_token: str) -> str | None:
@@ -349,60 +278,21 @@ def _normalize_extractor_line(line: str, no_reply_token: str) -> str | None:
 
 
 def _sanitize_extractor_output(raw_output: str, no_reply_token: str) -> str | None:
-    cleaned = raw_output.strip()
-    if not cleaned:
-        return None
-    if cleaned.upper() == no_reply_token.upper():
-        return None
-
-    normalized_lines = [
-        normalized
-        for line in cleaned.splitlines()
-        if (normalized := _normalize_extractor_line(line, no_reply_token)) is not None
-    ]
-
-    if not normalized_lines:
-        return None
-
-    deduped: list[str] = []
-    seen: set[str] = set()
-    for line in normalized_lines:
-        key = line.lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        deduped.append(line)
-    return " | ".join(deduped[:10])
+    unique: dict[str, str] = {}
+    for line in raw_output.splitlines():
+        if (normalized := _normalize_extractor_line(line, no_reply_token)) is not None:
+            unique.setdefault(normalized.lower(), normalized)
+    return " | ".join(list(unique.values())[:10]) or None
 
 
-async def _build_existing_memory_context(
-    *,
-    agent_name: str,
-    storage_path: Path,
-    config: Config,
-    runtime_paths: RuntimePaths,
-    execution_identity: ToolExecutionIdentity | None = None,
-    preserve_resolved_storage_path: bool = False,
-) -> str:
+def _existing_memory_context(memories: list[MemoryResult], config: Config) -> str:
+    """Return a few of the agent's memories for the extractor to avoid repeating."""
     context_config = config.memory.auto_flush.extractor.include_memory_context
     if context_config.memory_snippets <= 0:
         return ""
 
-    max_memories = max(context_config.memory_snippets * 8, context_config.memory_snippets)
-    memories = await list_all_agent_memories(
-        agent_name,
-        storage_path,
-        config,
-        runtime_paths,
-        limit=max_memories,
-        execution_identity=execution_identity,
-        preserve_resolved_storage_path=preserve_resolved_storage_path,
-    )
-    if not memories:
-        return ""
-
     snippets: list[str] = []
-    for memory in reversed(memories):
+    for memory in reversed(memories[: context_config.memory_snippets * 8]):
         text = memory.get("memory", "").strip()
         if not text:
             continue
@@ -420,25 +310,13 @@ async def _extract_memory_summary(
     *,
     config: Config,
     runtime_paths: RuntimePaths,
-    storage_path: Path,
     agent_name: str,
     session_id: str,
     lines: list[str],
-    execution_identity: ToolExecutionIdentity | None = None,
-    preserve_resolved_storage_path: bool = False,
+    existing_context: str,
+    execution_identity: ToolExecutionIdentity | None,
 ) -> str | None:
     extractor = config.memory.auto_flush.extractor
-    if not lines:
-        return None
-
-    existing_context = await _build_existing_memory_context(
-        agent_name=agent_name,
-        storage_path=storage_path,
-        config=config,
-        runtime_paths=runtime_paths,
-        execution_identity=execution_identity,
-        preserve_resolved_storage_path=preserve_resolved_storage_path,
-    )
     existing_block = (
         config.render_prompt("MEMORY_EXISTING_SNIPPETS_TEMPLATE", existing_context=existing_context)
         if existing_context
@@ -452,22 +330,15 @@ async def _extract_memory_summary(
         excerpt=excerpt,
     )
 
-    model_name = config.resolve_entity(agent_name).model_name
-    model = model_loading.get_model_instance(config, runtime_paths, model_name)
-    extractor_agent = Agent(
-        name="MemoryAutoFlushExtractor",
-        role="Extract durable memory statements for long-term memory storage.",
-        model=model,
-        telemetry=False,
-    )
-    invocation_id = uuid4().hex
-    response = await extractor_agent.arun(
+    model_name = extractor.model or entity_model_name(config, agent_name)
+    response = await complete_prompt(
+        provider_registry.build_model_provider(config, runtime_paths, model_name),
         prompt,
-        run_id=invocation_id,
-        session_id=f"memory_auto_flush_extract:{agent_name}:{session_id}",
+        instructions=["Extract durable memory statements for long-term memory storage."],
+        run_id=uuid4().hex,
     )
     await record_helper_usage(
-        response,
+        response.usage,
         owner=HelperUsageOwner(
             storage_factory=partial(
                 create_session_storage,
@@ -478,330 +349,274 @@ async def _extract_memory_summary(
             ),
             session_id=session_id,
         ),
-        invocation_id=invocation_id,
         kind="memory_auto_flush",
         requester_id=execution_identity.requester_id if execution_identity is not None else None,
     )
-    content = response.content
-    raw_output = content if isinstance(content, str) else str(content or "")
-    return _sanitize_extractor_output(raw_output, extractor.no_reply_token)
-
-
-def _retry_cooldown_seconds(settings: MemoryAutoFlushConfig, failures: int) -> int:
-    if failures <= 0:
-        return settings.retry_cooldown_seconds
-    multiplier = 2 ** max(0, failures - 1)
-    return min(
-        settings.max_retry_cooldown_seconds,
-        settings.retry_cooldown_seconds * multiplier,
-    )
+    return _sanitize_extractor_output(response.content, extractor.no_reply_token)
 
 
 @dataclass
-class MemoryAutoFlushWorker:
-    """Background worker that flushes dirty sessions to file memory."""
+class _MemoryAutoFlushWorker:
+    """Periodically flush the new finished turns of every file-memory agent and private instance into daily notes."""
 
-    storage_path: Path
     runtime_paths: RuntimePaths
     config_provider: Callable[[], Config | None]
-    _stop_event: asyncio.Event = field(default_factory=asyncio.Event, init=False)
-    _wake_event: asyncio.Event = field(default_factory=asyncio.Event, init=False)
-
-    def stop(self) -> None:
-        """Request graceful shutdown of the worker loop."""
-        self._stop_event.set()
-        self._wake_event.set()
+    redacted_event_ids: RedactedEventIds
+    clock: Callable[[], float] = time.time
+    _passes: int = field(default=0, init=False)
 
     async def run(self) -> None:
-        """Run periodic auto-flush cycles until stopped."""
-        _WAKE_EVENTS.add(self._wake_event)
-        try:
-            while not self._stop_event.is_set():
-                config = self.config_provider()
-                interval = 30
-                if config is not None and auto_flush_enabled(config):
-                    await self._run_cycle(config)
-                    interval = config.memory.auto_flush.flush_interval_seconds
-                self._wake_event.clear()
+        """Run flush passes until cancelled."""
+        while True:
+            config = self.config_provider()
+            interval = _DISABLED_POLL_SECONDS
+            if config is not None and _auto_flush_enabled(config):
                 try:
-                    await asyncio.wait_for(self._wake_event.wait(), timeout=interval)
-                except TimeoutError:
-                    continue
-        finally:
-            _WAKE_EVENTS.discard(self._wake_event)
+                    await self._run_cycle(config)
+                except Exception:
+                    # A failed pass, such as an unwritable progress file, must not end flushing until a restart.
+                    logger.exception("Memory auto-flush pass failed")
+                interval = config.memory.auto_flush.flush_interval_seconds
+            await asyncio.sleep(interval)
 
-    async def _run_cycle(self, config: Config) -> None:  # noqa: C901, PLR0912, PLR0915
-        now = _now_ts()
+    async def _run_cycle(self, config: Config) -> None:
+        """Flush up to ``max_sessions_per_cycle`` quiet conversations with new turns."""
         settings = config.memory.auto_flush
-
-        with _STATE_LOCK:
-            state = _read_state_unlocked(self.storage_path)
-            sessions = state["sessions"]
-            stale_keys = [
-                key
-                for key, entry in sessions.items()
-                if now - entry.get("last_seen_at", now) > settings.stale_ttl_seconds
-            ]
-            for key in stale_keys:
-                del sessions[key]
-            non_file_agent_keys = [
-                key
-                for key, entry in sessions.items()
-                if isinstance(entry.get("agent_name"), str) and not _agent_uses_file_memory(config, entry["agent_name"])
-            ]
-            for key in non_file_agent_keys:
-                del sessions[key]
-            stale_private_entry_keys = [
-                key
-                for key, entry in sessions.items()
-                if isinstance(entry.get("agent_name"), str)
-                and _stale_private_session_entry(config, entry["agent_name"], entry)
-            ]
-            for key in stale_private_entry_keys:
-                del sessions[key]
-            _write_state_unlocked(self.storage_path, state)
-
-        with _STATE_LOCK:
-            state = _read_state_unlocked(self.storage_path)
-            sessions = state["sessions"]
-            dirty_items = [(key, entry) for key, entry in sessions.items() if entry.get("dirty", False)]
-            dirty_items.sort(key=lambda item: _entry_priority_key(item[1], now))
-
-        selected_keys: list[str] = []
-        per_agent_count: dict[str, int] = {}
-        max_total = settings.batch.max_sessions_per_cycle
-        max_per_agent = settings.batch.max_sessions_per_agent_per_cycle
-
-        for key, entry in dirty_items:
-            if len(selected_keys) >= max_total:
+        now = self.clock()
+        state = await asyncio.to_thread(self._load_state, now)
+        agent_names = _file_memory_agents(config)
+        # An agent first seen after the start, such as one switched to file memory, starts one pass interval before it
+        # was seen, so its older history is never flushed. Its private instances share that start, so an instance keeps
+        # all its turns however late it is first listed.
+        new_agents = [name for name in agent_names if name not in state["agents"]]
+        for name in new_agents:
+            state["agents"][name] = max(state["started_at"], int(now) - settings.flush_interval_seconds)
+        if new_agents:
+            await self._persist(state)
+        scopes = await asyncio.to_thread(_flush_scopes, config, self.runtime_paths, agent_names)
+        budget = settings.batch.max_sessions_per_cycle
+        # Each pass starts with the next scope, so one with a long backlog cannot take every pass's budget.
+        start = self._passes % len(scopes) if scopes else 0
+        self._passes += 1
+        for scope in [*scopes[start:], *scopes[:start]]:
+            if budget <= 0:
                 break
-            if entry.get("in_flight", False):
-                continue
-            next_attempt_at = entry.get("next_attempt_at")
-            if isinstance(next_attempt_at, int) and next_attempt_at > now:
-                continue
+            # One agent or private instance whose conversations cannot be listed must not stop the others.
+            try:
+                limit = min(budget, settings.batch.max_sessions_per_agent_per_cycle)
+                due, changed = await asyncio.to_thread(self._due, config, scope, state, now, limit)
+                if changed:
+                    await self._persist(state)
+                for conversation in due:
+                    budget -= await self._flush(config, scope, state, conversation)
+            except Exception:
+                logger.exception("Memory auto-flush failed for an agent", agent=scope.agent_name)
 
-            agent_name = entry.get("agent_name")
-            session_id = entry.get("session_id")
-            if not isinstance(agent_name, str) or not isinstance(session_id, str):
-                continue
-
-            batch_key = _flush_batch_key(config, agent_name, entry)
-            if per_agent_count.get(batch_key, 0) >= max_per_agent:
-                continue
-            entry_execution_identity = parse_tool_execution_identity_payload(
-                entry.get("execution_identity"),
-                strict=False,
-            )
-
-            session = await asyncio.to_thread(
-                load_agent_session,
-                agent_name,
-                config,
-                self.runtime_paths,
-                session_id,
-                execution_identity=entry_execution_identity,
-            )
-            if session is None:
-                continue
-            session_updated_at = session.updated_at
-            entry["last_session_updated_at"] = session_updated_at
-            last_flushed = entry.get("last_flushed_session_updated_at")
-            if (
-                isinstance(last_flushed, int)
-                and isinstance(session_updated_at, int)
-                and session_updated_at <= last_flushed
-            ):
-                entry["dirty"] = False
-                with _STATE_LOCK:
-                    latest_state = _read_state_unlocked(self.storage_path)
-                    latest_state["sessions"][key] = entry
-                    _write_state_unlocked(self.storage_path, latest_state)
-                continue
-
-            idle_ready = now - entry.get("last_seen_at", now) >= settings.idle_seconds
-            age_ready = now - entry.get("first_dirty_at", now) >= settings.max_dirty_age_seconds
-            if not (idle_ready or age_ready):
-                continue
-
-            selected_keys.append(key)
-            per_agent_count[batch_key] = per_agent_count.get(batch_key, 0) + 1
-            with _STATE_LOCK:
-                latest_state = _read_state_unlocked(self.storage_path)
-                latest_entry = latest_state["sessions"].get(key, entry)
-                latest_entry["in_flight"] = True
-                latest_entry["last_session_updated_at"] = session_updated_at
-                flush_started_dirty_revision = latest_entry.get("dirty_revision", 0)
-                if not isinstance(flush_started_dirty_revision, int):
-                    flush_started_dirty_revision = 0
-                latest_entry["flush_started_dirty_revision"] = flush_started_dirty_revision
-                latest_state["sessions"][key] = latest_entry
-                _write_state_unlocked(self.storage_path, latest_state)
-
-        for key in selected_keys:
-            await self._process_session_key(config, key)
-
-    async def _process_session_key(self, config: Config, key: str) -> None:  # noqa: PLR0915
-        now = _now_ts()
-        settings = config.memory.auto_flush
-        with _STATE_LOCK:
-            state = _read_state_unlocked(self.storage_path)
-            entry = state["sessions"].get(key)
-        if entry is None:
-            return
-
-        agent_name = entry.get("agent_name")
-        session_id = entry.get("session_id")
-        session_updated_at = entry.get("last_session_updated_at")
-        if not isinstance(agent_name, str) or not isinstance(session_id, str):
-            return
-        entry_execution_identity = parse_tool_execution_identity_payload(entry.get("execution_identity"), strict=False)
-
-        wrote_memory = False
-        try:
-            wrote_memory = await asyncio.wait_for(
-                self._flush_session(
-                    config,
-                    agent_name=agent_name,
-                    session_id=session_id,
-                    execution_identity=entry_execution_identity,
-                ),
-                timeout=settings.extractor.max_extraction_seconds,
-            )
-        except TimeoutError:
-            with _STATE_LOCK:
-                latest_state = _read_state_unlocked(self.storage_path)
-                latest_entry = latest_state["sessions"].get(key, entry)
-                failures = latest_entry.get("consecutive_failures", 0) + 1
-                cooldown = _retry_cooldown_seconds(settings, failures)
-                latest_entry["consecutive_failures"] = failures
-                latest_entry["next_attempt_at"] = now + cooldown
-                latest_entry["in_flight"] = False
-                latest_entry.pop("flush_started_dirty_revision", None)
-                latest_state["sessions"][key] = latest_entry
-                _write_state_unlocked(self.storage_path, latest_state)
-            logger.warning(
-                "Memory auto-flush timed out",
-                agent=agent_name,
-                session_id=session_id,
-                timeout_seconds=settings.extractor.max_extraction_seconds,
-            )
-            return
-        except Exception:
-            with _STATE_LOCK:
-                latest_state = _read_state_unlocked(self.storage_path)
-                latest_entry = latest_state["sessions"].get(key, entry)
-                failures = latest_entry.get("consecutive_failures", 0) + 1
-                cooldown = _retry_cooldown_seconds(settings, failures)
-                latest_entry["consecutive_failures"] = failures
-                latest_entry["next_attempt_at"] = now + cooldown
-                latest_entry["in_flight"] = False
-                latest_entry.pop("flush_started_dirty_revision", None)
-                latest_state["sessions"][key] = latest_entry
-                _write_state_unlocked(self.storage_path, latest_state)
-            logger.exception("Memory auto-flush failed", agent=agent_name, session_id=session_id)
-            return
-
-        latest_session_updated_at: int | None = None
-        latest_session = await asyncio.to_thread(
-            load_agent_session,
-            agent_name,
-            config,
-            self.runtime_paths,
-            session_id,
-            execution_identity=entry_execution_identity,
-        )
-        if latest_session is not None and isinstance(latest_session.updated_at, int):
-            latest_session_updated_at = latest_session.updated_at
-
-        with _STATE_LOCK:
-            latest_state = _read_state_unlocked(self.storage_path)
-            latest_entry = latest_state["sessions"].get(key, entry)
-            flush_started_dirty_revision = entry.get("flush_started_dirty_revision")
-            has_newer_dirty_marks = (
-                isinstance(flush_started_dirty_revision, int)
-                and isinstance(latest_entry.get("dirty_revision"), int)
-                and latest_entry["dirty_revision"] > flush_started_dirty_revision
-            )
-            has_newer_updates = (
-                isinstance(latest_session_updated_at, int)
-                and isinstance(session_updated_at, int)
-                and latest_session_updated_at > session_updated_at
-            )
-            # Only requeue if the session was explicitly marked dirty again during this flush.
-            latest_entry["dirty"] = (
-                has_newer_dirty_marks if isinstance(flush_started_dirty_revision, int) else has_newer_updates
-            )
-            latest_entry["in_flight"] = False
-            if isinstance(latest_session_updated_at, int):
-                latest_entry["last_session_updated_at"] = latest_session_updated_at
-            if isinstance(session_updated_at, int):
-                latest_entry["last_flushed_session_updated_at"] = session_updated_at
-            latest_entry["next_attempt_at"] = None
-            latest_entry["consecutive_failures"] = 0
-            latest_entry.pop("flush_started_dirty_revision", None)
-            if not latest_entry["dirty"]:
-                latest_entry["priority_boost_at"] = None
-            latest_state["sessions"][key] = latest_entry
-            _write_state_unlocked(self.storage_path, latest_state)
-
-        logger.debug(
-            "Memory auto-flush completed",
-            agent=agent_name,
-            session_id=session_id,
-            wrote_memory=wrote_memory,
-        )
-
-    async def _flush_session(
+    def _due(
         self,
         config: Config,
-        *,
-        agent_name: str,
-        session_id: str,
-        execution_identity: ToolExecutionIdentity | None = None,
-    ) -> bool:
-        effective_storage_path = self.storage_path
-        session = await asyncio.to_thread(
-            load_agent_session,
-            agent_name,
+        scope: _FlushScope,
+        state: _FlushState,
+        now: float,
+        limit: int,
+    ) -> tuple[list[DueConversation], bool]:
+        """Return up to ``limit`` quiet conversations with news, and whether listing them changed the progress."""
+        settings = config.memory.auto_flush
+        storage = create_session_storage(
+            scope.agent_name,
             config,
             self.runtime_paths,
-            session_id,
-            execution_identity=execution_identity,
+            execution_identity=scope.execution_identity,
         )
-        if session is None:
-            return False
+        conversations = state["scopes"].setdefault(scope.key, {})
+        in_contact_room = contact_session_check(config, self.runtime_paths, scope.agent_name)
+        scan = due_conversations(
+            storage,
+            conversations,
+            agent_name=scope.agent_name,
+            # Update times are whole seconds, so one in the start's own second is listed too.
+            since=state["agents"][scope.agent_name] - 1,
+            now=now,
+            idle_seconds=settings.idle_seconds,
+            limit=limit,
+            # A delegated task's prompt comes from another agent, so it is not the delegate's conversation.
+            skip=lambda session_id: session_id.startswith(DELEGATION_SESSION_PREFIX) or in_contact_room(session_id),
+        )
+        for session_id, updated_at in scan.empty:
+            caught_up(conversations.setdefault(session_id, _new_conversation()), updated_at)
+        for unreadable in scan.unreadable:
+            # One conversation that cannot be read backs off instead of blocking the agent's others.
+            logger.error(
+                "Memory auto-flush could not read a conversation",
+                agent=scope.agent_name,
+                session_id=unreadable.session_id,
+                exc_info=unreadable.error,
+            )
+            entry = conversations.setdefault(unreadable.session_id, _new_conversation())
+            _record_unreadable(entry, settings, unreadable.updated_at, self.clock())
+        return scan.due, bool(scan.empty or scan.unreadable)
 
-        extractor = config.memory.auto_flush.extractor
-        lines = _select_recent_chat_lines(
-            session,
-            max_messages=extractor.max_messages_per_flush,
-            max_chars=extractor.max_chars_per_flush,
+    async def _flush(
+        self,
+        config: Config,
+        scope: _FlushScope,
+        state: _FlushState,
+        conversation: DueConversation,
+    ) -> int:
+        """Flush the oldest new turns of one conversation and return how much of the pass budget that spent."""
+        settings = config.memory.auto_flush
+        session_id = conversation.session_id
+        conversations = state["scopes"][scope.key]
+        try:
+            kept = await unredacted(conversation, scope.agent_name, self.redacted_event_ids)
+        except Exception:
+            # A conversation whose redactions cannot be checked backs off like one that cannot be read.
+            logger.exception(
+                "Memory auto-flush could not check a conversation for redactions",
+                agent=scope.agent_name,
+                session_id=session_id,
+            )
+            _record_unreadable(
+                conversations.setdefault(session_id, _new_conversation()),
+                settings,
+                conversation.updated_at,
+                self.clock(),
+            )
+            await self._persist(state)
+            return 0
+        if kept is None:
+            # Its agent cannot say yet what was redacted, so the conversation waits for a later pass.
+            return 0
+        entry, start = _progress(conversations, session_id, conversation.turns, state["agents"][scope.agent_name])
+        pending = fresh = [turn for turn in kept if turn.seq > start]
+        batch: list[LoggedRun] = []
+        try:
+            if pending:
+                memories = await list_all_agent_memories(
+                    scope.agent_name,
+                    config,
+                    self.runtime_paths,
+                    limit=sys.maxsize,
+                    execution_identity=scope.execution_identity,
+                )
+                # A note written by an attempt whose progress was not saved already covers its turns.
+                fresh = _unflushed_turns(pending, conversation.turns, session_id, memories)
+                batch, lines = _next_batch(fresh, settings)
+                if lines:
+                    await self._write_note(config, scope, session_id, batch[-1], lines, memories)
+        except ModelSafeguardRefusal:
+            # The model refuses the same turns every time, so they are given up at once instead of retried.
+            logger.warning(
+                "Memory auto-flush gave up on turns the model's safeguards refused",
+                agent=scope.agent_name,
+                session_id=session_id,
+            )
+            batch = _next_batch(fresh, settings)[0]
+        except Exception as exc:
+            if isinstance(exc, TimeoutError):
+                logger.warning(
+                    "Memory auto-flush timed out",
+                    agent=scope.agent_name,
+                    session_id=session_id,
+                    timeout_seconds=settings.extractor.max_extraction_seconds,
+                )
+            else:
+                logger.exception("Memory auto-flush failed", agent=scope.agent_name, session_id=session_id)
+            if not _record_failure(entry, settings, self.clock()):
+                await self._persist(state)
+                return 1
+            logger.warning(
+                "Memory auto-flush gave up on turns it kept failing to flush",
+                agent=scope.agent_name,
+                session_id=session_id,
+            )
+            batch = _next_batch(fresh, settings)[0]
+        _record_progress(entry, pending, fresh, batch, conversation.updated_at)
+        await self._persist(state)
+        return 1
+
+    async def _write_note(
+        self,
+        config: Config,
+        scope: _FlushScope,
+        session_id: str,
+        last_turn: LoggedRun,
+        lines: list[str],
+        memories: list[MemoryResult],
+    ) -> None:
+        """Extract durable memories from the lines and append them to today's daily note, tagged with the last turn."""
+        summary = await asyncio.wait_for(
+            _extract_memory_summary(
+                config=config,
+                runtime_paths=self.runtime_paths,
+                agent_name=scope.agent_name,
+                session_id=session_id,
+                lines=lines,
+                existing_context=_existing_memory_context(memories, config),
+                execution_identity=scope.execution_identity,
+            ),
+            timeout=config.memory.auto_flush.extractor.max_extraction_seconds,
         )
-        memory_summary = await _extract_memory_summary(
-            config=config,
+        if summary is not None:
+            append_agent_daily_memory(
+                f"{_flush_tag(session_id, last_turn.seq)} {summary}",
+                agent_name=scope.agent_name,
+                config=config,
+                runtime_paths=self.runtime_paths,
+                execution_identity=scope.execution_identity,
+            )
+
+    def _state_path(self) -> Path:
+        return tracking_dir(self.runtime_paths) / _STATE_FILENAME
+
+    def _load_state(self, now: float) -> _FlushState:
+        try:
+            return json.loads(self._state_path().read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            remove_legacy_flush_queue(self.runtime_paths.storage_root)
+        except ValueError:
+            # Starting over skips turns not flushed yet but never flushes earlier conversation again.
+            logger.warning("Memory auto-flush progress was unreadable; starting over")
+        # Saved at once, so turns from before this start are never flushed, even for conversations first seen later.
+        state: _FlushState = {"started_at": int(now), "agents": {}, "scopes": {}}
+        write_json_file_durable(self._state_path(), state)
+        return state
+
+    async def _persist(self, state: _FlushState) -> None:
+        await asyncio.to_thread(write_json_file_durable, self._state_path(), state)
+
+
+@dataclass
+class MemoryAutoFlushService:
+    """Run the auto-flush worker while the config enables auto-flush."""
+
+    name = "memory_auto_flush"
+    runtime_paths: RuntimePaths
+    config_provider: Callable[[], Config | None]
+    redacted_event_ids: RedactedEventIds
+    _loop: SupervisedLoop = field(init=False)
+
+    def __post_init__(self) -> None:
+        """Create the supervised worker loop."""
+        self._loop = SupervisedLoop("memory_auto_flush_worker", self._run_worker)
+
+    async def sync(self, config: Config) -> None:
+        """Start the worker when ``config`` enables auto-flush, and stop it otherwise."""
+        if _auto_flush_enabled(config):
+            self._loop.start()
+        else:
+            await self.stop()
+
+    async def stop(self) -> None:
+        """Stop the worker without waiting for its pass."""
+        # A pass saves each conversation's progress and a retried note is never written twice, so cancelling loses
+        # nothing.
+        await self._loop.stop()
+
+    async def _run_worker(self) -> None:
+        worker = _MemoryAutoFlushWorker(
             runtime_paths=self.runtime_paths,
-            storage_path=effective_storage_path,
-            agent_name=agent_name,
-            session_id=session_id,
-            lines=lines,
-            execution_identity=execution_identity,
-            preserve_resolved_storage_path=False,
+            config_provider=self.config_provider,
+            redacted_event_ids=self.redacted_event_ids,
         )
-        if memory_summary is None:
-            return False
-
-        session_updated = session.updated_at if isinstance(session.updated_at, int) else 0
-        flush_marker = f"auto_flush:{session_id}:{session_updated}"
-        memory_content = f"[{flush_marker}] {memory_summary}"
-
-        append_agent_daily_memory(
-            memory_content,
-            agent_name=agent_name,
-            storage_path=effective_storage_path,
-            config=config,
-            runtime_paths=self.runtime_paths,
-            execution_identity=execution_identity,
-            preserve_resolved_storage_path=False,
-        )
-        return True
+        await worker.run()

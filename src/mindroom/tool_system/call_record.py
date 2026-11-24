@@ -7,7 +7,7 @@ from contextvars import ContextVar
 from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Mapping
+    from collections.abc import Awaitable, Callable, Iterator, Mapping
 
 
 class _ToolCallRecorder(Protocol):
@@ -21,7 +21,11 @@ class _ToolCallRecorder(Protocol):
         ...
 
     async def finished(self, call_id: str, tool_name: str, args: Mapping[str, object], result: object) -> None:
-        """Record that a call returned, or raised ``result``; never raises, since the call already ran."""
+        """Record how a call ended; never raises, since the call already ran.
+
+        ``result`` is what the call returned, a failed ``ToolOutcome`` when it answered its own failure, or the
+        exception it raised.
+        """
         ...
 
 
@@ -34,10 +38,26 @@ def tool_call_recorder() -> _ToolCallRecorder | None:
 
 
 @contextmanager
-def recording_tool_calls(recorder: _ToolCallRecorder) -> Iterator[None]:
-    """Record every tool call made in this context, child tasks included."""
+def recording_tool_calls(recorder: _ToolCallRecorder | None) -> Iterator[None]:
+    """Record every tool call made in this context, child tasks included; ``None`` records none of them."""
     token = _recorder.set(recorder)
     try:
         yield
     finally:
         _recorder.reset(token)
+
+
+async def record_call(tool_name: str, args: Mapping[str, object]) -> Callable[[object], Awaitable[None]]:
+    """Record a call whose tool then runs outside this work's recording, as a background job does; return its finish.
+
+    The work's record then names the call, and, as for any recorded call, a Stop committed first raises
+    ``asyncio.CancelledError`` here so the call never starts.
+    """
+    recorder = _recorder.get()
+    record_id = None if recorder is None else await recorder.started(tool_name, args)
+
+    async def finished(result: object) -> None:
+        if recorder is not None and record_id is not None:
+            await recorder.finished(record_id, tool_name, args, result)
+
+    return finished

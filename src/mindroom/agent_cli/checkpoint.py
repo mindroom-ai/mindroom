@@ -1,0 +1,147 @@
+"""Minimal Bash's provider batch, saved before any of its calls takes effect.
+
+The loop hands each tool batch to ``BatchCheckpoint.capture`` before it runs any call, so a Bash call can save the
+run with this turn's part of the exact provider history that requested it, ending in that unanswered call, before its
+shell or any CLI call inside it does anything; the store keeps no replayed history copy. The saved run is a
+checkpoint (``save_run_checkpoint``), which history skips until the run's own terminal record, or recovery, replaces it.
+"""
+
+from __future__ import annotations
+
+import asyncio
+from copy import deepcopy
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+
+from mindroom.agent_loop.tools import tool_result_message
+from mindroom.history.run_checkpoint import save_run_checkpoint
+from mindroom.llm.runs import RunRecord, ToolExecution
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
+
+    from mindroom.agent_loop.model_loop import LoopState
+    from mindroom.agent_loop.tools import PlannedCall
+    from mindroom.llm.messages import Message
+    from mindroom.tool_system.agent_tool_calls import PreparedAgentToolCatalog
+    from mindroom.tool_system.tool_function import ToolOutcome
+
+__all__ = ["BatchCheckpoint"]
+
+
+@dataclass
+class _Batch:
+    """One provider batch: the history up to its assistant message, its Bash calls, and the results seen so far."""
+
+    messages: list[Message]
+    calls: Mapping[str, PlannedCall]
+    # Each finished call's raw outcome, which its result message may word differently (``tool_result_message``).
+    executions: dict[str, ToolExecution] = field(default_factory=dict)
+    persisted: bool = False
+
+
+class BatchCheckpoint:
+    """Own the snapshot of the provider batch whose Bash calls are running, keyed by provider call id."""
+
+    def __init__(self, catalog: PreparedAgentToolCatalog) -> None:
+        self.catalog = catalog
+        self._batch: _Batch | None = None
+        self._lock = asyncio.Lock()
+        self._saved_parent: str | None = None
+
+    async def capture(self, state: LoopState, planned: Sequence[PlannedCall]) -> None:
+        """Snapshot a new batch before any of its calls runs; a new batch means every earlier one finished."""
+        record = state.record
+        assert isinstance(record, RunRecord)
+        self.catalog.record = record
+        self._batch = _Batch(
+            messages=deepcopy(state.messages),
+            calls={call.execution.tool_call_id: call for call in planned},
+        )
+
+    def resume_saved_parent(self, parent_call_id: str) -> None:
+        """Adopt the already-saved provider history of one recovered Bash call."""
+        record = self.catalog.record
+        matches = [
+            call
+            for message in (record.messages if record is not None else ())
+            if message.role == "assistant"
+            for call in message.tool_calls or ()
+            if call.get("id") == parent_call_id
+        ]
+        if len(matches) != 1:
+            msg = "Recovered approval has no exact saved parent Bash call"
+            raise ValueError(msg)
+        self._saved_parent = parent_call_id
+
+    def _batch_of(self, call_id: str, message: str) -> _Batch:
+        if self._batch is None or call_id not in self._batch.calls:
+            raise ValueError(message)
+        return self._batch
+
+    def complete(self, call_id: str, outcome: ToolOutcome) -> None:
+        """Keep a finished Bash call's outcome in its batch, in case a sibling later waits for approval."""
+        batch = self._batch_of(call_id, "Provider Bash result has no captured real batch")
+        call = batch.calls[call_id]
+        execution = ToolExecution(
+            tool_call_id=call_id,
+            tool_name=call.function.name,
+            tool_args=deepcopy(call.execution.tool_args),
+            is_error=outcome.is_error,
+            result=outcome.content,
+        )
+        batch.executions[call_id] = execution
+        batch.messages.append(tool_result_message(execution, media=outcome))
+
+    async def persist_approval(self, parent_call_id: str) -> None:
+        """Refresh the saved batch and session state immediately before an approval wait."""
+        if parent_call_id == self._saved_parent:
+            async with self._lock:
+                record = self.catalog.record
+                assert record is not None
+                await self._save(deepcopy(record))
+            return
+        await self.persist(parent_call_id, refresh=True)
+
+    async def persist(self, call_id: str, *, refresh: bool = False) -> None:
+        """Save the batch of ``call_id`` once, or again with ``refresh``; storage failures propagate unchanged."""
+        batch = self._batch_of(call_id, "Provider Bash call has no captured real batch")
+        async with self._lock:
+            if batch.persisted and not refresh:
+                return
+            record = self.catalog.record
+            assert record is not None
+            run = deepcopy(record)
+            # The batch snapshot is already private; later results only append to it.
+            run.messages = list(batch.messages)
+            # A call this batch has not finished is pending, even when an earlier batch reused its id.
+            observed = {
+                observed_id: deepcopy(batch.executions[observed_id])
+                if observed_id in batch.executions
+                else ToolExecution(
+                    tool_call_id=observed_id,
+                    tool_name=call.function.name,
+                    tool_args=deepcopy(call.execution.tool_args),
+                )
+                for observed_id, call in batch.calls.items()
+            }
+            # Each observed call takes its own entry's place, the latest under its id since a provider may reuse one,
+            # so the record keeps the batch's call order, refused calls included; a call the record does not hold yet
+            # follows.
+            tools = list(run.tools or ())
+            latest = {tool.tool_call_id: index for index, tool in enumerate(tools)}
+            for observed_id, execution in observed.items():
+                if observed_id in latest:
+                    tools[latest[observed_id]] = execution
+                else:
+                    tools.append(execution)
+            run.tools = tools
+            await self._save(run)
+            batch.persisted = True
+
+    async def _save(self, run: RunRecord) -> None:
+        store = self.catalog.store
+        if store is None:
+            msg = "CLI history requires persisted session storage"
+            raise RuntimeError(msg)
+        await save_run_checkpoint(store, self.catalog.session, run)

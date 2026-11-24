@@ -15,19 +15,22 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import nio
 import pytest
-from agno.tools.function import FunctionCall, ToolResult
 
-from mindroom.attachments import load_attachment, register_local_attachment
+from mindroom.attachments.storage import load_attachment, register_local_attachment
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.constants import SKIP_MENTIONS_KEY, resolve_runtime_paths
-from mindroom.custom_tools.attachments import AttachmentTools
+from mindroom.custom_tools.attachments import AttachmentTools, resolve_send_attachment
 from mindroom.custom_tools.matrix_message import MatrixMessageTools
-from mindroom.matrix.client import DeliveredMatrixEvent
+from mindroom.matrix.message_builder import markdown_to_html
 from mindroom.matrix.runtime_media import RuntimeEncryptedMediaAttachment
 from mindroom.message_target import MessageTarget
 from mindroom.session_ids import create_session_id
+from mindroom.tool_system.agent_tools import resolve_agent_tools
+from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
     get_tool_runtime_context,
@@ -35,12 +38,16 @@ from mindroom.tool_system.runtime_context import (
     register_tool_runtime_media_attachment,
     tool_runtime_context,
 )
+from mindroom.tool_system.sandbox_proxy import tool_placement
+from mindroom.tool_system.tool_function import ToolValue
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 from tests.access_schema_support import with_current_room_member_access
+from tests.agent_tool_helpers import toolkit_offers
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )
 from tests.conftest import bind_runtime_paths, make_latest_thread_event_id_mock, make_relation_lookup
+from tests.test_media_delivery import image_bytes
 
 if TYPE_CHECKING:
     from mindroom.config.models import FileAccess
@@ -50,6 +57,7 @@ def _tool_context(
     tmp_path: Path,
     *,
     attachment_ids: tuple[str, ...] = (),
+    fork_parent_scopes: frozenset[tuple[str, str]] = frozenset(),
     process_env: dict[str, str] | None = None,
 ) -> ToolRuntimeContext:
     client = MagicMock()
@@ -85,6 +93,7 @@ def _tool_context(
         conversation_reader=conversation_reader,
         storage_path=tmp_path,
         attachment_ids=attachment_ids,
+        fork_parent_scopes=fork_parent_scopes,
     )
 
 
@@ -124,8 +133,8 @@ def _tool_context_with_thread_scope(
 def test_attachments_tool_hides_send_method_from_exposed_tools() -> None:
     """Attachments tool should expose discovery, registration, and model viewing without send operations."""
     tool = AttachmentTools()
-    exposed = {method.__name__ for method in tool.tools}
-    assert exposed == {"list_attachments", "get_attachment", "register_attachment", "view_file"}
+    exposed = {method.__name__ for method in tool.functions.values()}
+    assert exposed == {"list_attachments", "get_attachment", "register_attachment", "inline_image", "view_file"}
     assert not hasattr(tool, "send_attachments")
 
 
@@ -202,6 +211,35 @@ async def test_attachments_tool_get_attachment_rejects_out_of_context_ids(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_attachments_tool_get_attachment_reports_missing_metadata(tmp_path: Path) -> None:
+    """A context attachment ID without a stored record is reported missing, not returned."""
+    tool = AttachmentTools()
+
+    with tool_runtime_context(_tool_context(tmp_path, attachment_ids=("att_gone",))):
+        payload = json.loads(await tool.get_attachment("att_gone"))
+
+    assert payload == {
+        "attachment_id": "att_gone",
+        "message": "Attachment metadata not found: att_gone",
+        "status": "error",
+        "tool": "attachments",
+    }
+
+
+@pytest.mark.asyncio
+async def test_attachments_tool_rejects_blank_ids_and_paths(tmp_path: Path) -> None:
+    """A blank attachment ID or file path names nothing, so it is refused before any lookup."""
+    tool = AttachmentTools()
+
+    with tool_runtime_context(_tool_context(tmp_path, attachment_ids=())):
+        fetched = json.loads(await tool.get_attachment("  "))
+        registered = json.loads(await tool.register_attachment("  "))
+
+    assert (fetched["status"], fetched["message"]) == ("error", "attachment_id must be a non-empty string.")
+    assert (registered["status"], registered["message"]) == ("error", "file_path must be a non-empty string.")
+
+
+@pytest.mark.asyncio
 async def test_get_attachment_view_returns_image_media(tmp_path: Path) -> None:
     """Registered images reach the model as media, not just a path in JSON."""
     image_bytes = base64.b64decode(
@@ -214,21 +252,79 @@ async def test_get_attachment_view_returns_image_media(tmp_path: Path) -> None:
         registered = json.loads(await tool.register_attachment("plot.jpg"))
         attachment_id = registered["attachment_id"]
         metadata = await tool.get_attachment(attachment_id)
-        execution = await FunctionCall(
-            function=tool.async_functions["get_attachment"],
-            arguments={"attachment_id": attachment_id, "view": True},
-        ).aexecute()
+        result = await toolkit_offers(tool, "get_attachment").entrypoint(attachment_id=attachment_id, view=True)
 
-    assert execution.status == "success"
-    result = execution.result
-    assert isinstance(result, ToolResult)
+    assert isinstance(result, ToolValue)
     receipt = json.loads(result.content)
     assert receipt.items() >= json.loads(metadata).items()
     assert receipt["view_status"] == "ready"
-    assert result.images is not None
+    assert result.images
     assert len(result.images) == 1
     assert result.images[0].content == image_bytes
     assert result.images[0].mime_type == "image/png"
+    assert result.images[0].id.startswith("mindroom_viewed_")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("room_id", "in_turn_ids", "parent_scopes", "viewable"),
+    [
+        ("!room:localhost", True, frozenset(), True),
+        ("!other:localhost", True, frozenset({("!other:localhost", "$parent:localhost")}), True),
+        ("!other:localhost", True, frozenset(), False),
+        ("!other:localhost", True, frozenset({("!other:localhost", "$different_parent:localhost")}), False),
+        ("!other:localhost", False, frozenset({("!other:localhost", "$parent:localhost")}), False),
+    ],
+    ids=[
+        "same-room-fork",
+        "cross-room-fork-in-parent-scopes",
+        "other-room-listed-without-parent-scope",
+        "other-room-listed-wrong-parent-thread",
+        "other-room-runtime-id-only",
+    ],
+)
+async def test_get_attachment_view_shows_an_image_the_turn_was_given_from_another_thread_of_its_room(
+    tmp_path: Path,
+    room_id: str,
+    in_turn_ids: bool,
+    parent_scopes: frozenset[tuple[str, str]],
+    viewable: bool,
+) -> None:
+    """Vetted fork attachments (same- or cross-room) are viewable; arbitrary other-room IDs stay out."""
+    image_bytes = base64.b64decode(
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aX1cAAAAASUVORK5CYII=",
+    )
+    image_path = tmp_path / "parent.png"
+    image_path.write_bytes(image_bytes)
+    attachment = register_local_attachment(
+        tmp_path,
+        image_path,
+        kind="image",
+        attachment_id="att_parent",
+        mime_type="image/png",
+        room_id=room_id,
+        thread_id="$parent:localhost",
+    )
+    assert attachment is not None
+    context = _tool_context(
+        tmp_path,
+        attachment_ids=("att_parent",) if in_turn_ids else (),
+        fork_parent_scopes=parent_scopes,
+    )
+    if not in_turn_ids:
+        context.runtime_attachment_ids.append("att_parent")
+
+    with tool_runtime_context(context):
+        result = await toolkit_offers(AttachmentTools(), "get_attachment").entrypoint(
+            attachment_id="att_parent",
+            view=True,
+        )
+
+    if viewable:
+        assert isinstance(result, ToolValue)
+        assert result.images
+    else:
+        assert "outside the authorized conversation context" in str(result)
 
 
 @pytest.mark.asyncio
@@ -250,16 +346,17 @@ async def test_get_attachment_view_returns_other_media(
     media_field: str,
     mime_type: str,
 ) -> None:
-    """Audio, documents, and video use their native model media fields."""
+    """The model, offered ``view``, gets audio, documents, and video in their native model media fields."""
     (tmp_path / filename).write_bytes(payload_bytes)
     tool = AttachmentTools(tool_output_workspace_root=tmp_path)
+    get_attachment = toolkit_offers(tool, "get_attachment")
+    assert "view" in get_attachment.parameters["properties"]
     with tool_runtime_context(_tool_context(tmp_path)):
         registered = json.loads(await tool.register_attachment(filename))
-        result = await tool.get_attachment(registered["attachment_id"], view=True)
+        result = await get_attachment.entrypoint(attachment_id=registered["attachment_id"], view=True)
 
-    assert isinstance(result, ToolResult)
+    assert isinstance(result, ToolValue)
     media = {"audios": result.audios, "files": result.files, "videos": result.videos}[media_field]
-    assert media is not None
     assert len(media) == 1
     assert media[0].content == payload_bytes
     assert media[0].mime_type == mime_type
@@ -270,9 +367,15 @@ async def test_get_attachment_view_returns_other_media(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize(("filename", "data"), [("empty.pdf", b""), ("archive.tar", b"tar archive bytes")])
+@pytest.mark.parametrize(
+    ("filename", "data"),
+    [("empty.pdf", b""), ("archive.tar", b"tar archive bytes"), ("rows.csv.gz", b"\x1f\x8b\x08\x00gzip")],
+)
 async def test_get_attachment_view_rejects_unusable_documents(tmp_path: Path, filename: str, data: bytes) -> None:
-    """Empty and unsupported documents give a recoverable tool error, not an exception."""
+    """Empty and unsupported documents give a recoverable tool error, not an exception.
+
+    A compressed name such as ``rows.csv.gz`` names no type: its bytes are not CSV.
+    """
     (tmp_path / filename).write_bytes(data)
     tool = AttachmentTools(tool_output_workspace_root=tmp_path)
     with tool_runtime_context(_tool_context(tmp_path)):
@@ -284,26 +387,42 @@ async def test_get_attachment_view_rejects_unusable_documents(tmp_path: Path, fi
 
 
 @pytest.mark.asyncio
-async def test_get_attachment_view_uses_source_filename_when_none_is_given(tmp_path: Path) -> None:
-    """Registration keeps the source name because the retained copy has an opaque name."""
-    local_path = tmp_path / "document.pdf"
-    local_path.write_bytes(b"%PDF-1.4 document bytes")
-    attachment = register_local_attachment(tmp_path, local_path, kind="file", mime_type="application/pdf")
+@pytest.mark.parametrize(
+    ("filename", "mime_type", "data"),
+    [
+        ("document.pdf", "application/pdf", b"%PDF-1.4 document bytes"),
+        ("config.yaml", "application/x-yaml", b"replicas: 3\n"),
+        ("rows.tsv", "text/tab-separated-values", b"a\tb\n"),
+        ("server.log", "text/x-log", b"12:00 ERROR crashed\n"),
+        ("feed.xml", "application/xml", b"<feed/>"),
+    ],
+)
+async def test_get_attachment_view_reopens_a_document_under_its_source_name(
+    tmp_path: Path,
+    filename: str,
+    mime_type: str,
+    data: bytes,
+) -> None:
+    """An earlier message's PDF or text file of any text type reopens as a file the model reads.
+
+    Registration keeps the source name because the retained copy has an opaque name.
+    """
+    local_path = tmp_path / filename
+    local_path.write_bytes(data)
+    attachment = register_local_attachment(tmp_path, local_path, kind="file", mime_type=mime_type)
     assert attachment is not None
-    assert attachment.filename == "document.pdf"
-    assert attachment.local_path.name != "document.pdf"
+    assert attachment.local_path.name != filename
     with tool_runtime_context(_tool_context(tmp_path, attachment_ids=(attachment.attachment_id,))):
         result = await AttachmentTools().get_attachment(attachment.attachment_id, view=True)
 
-    assert isinstance(result, ToolResult)
-    assert result.files is not None
-    assert result.files[0].filename == "document.pdf"
+    assert isinstance(result, ToolValue)
+    assert [(file.content, file.mime_type, file.filename) for file in result.files] == [(data, mime_type, filename)]
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("case", ["non_image", "oversized", "missing", "save_and_view"])
+@pytest.mark.parametrize("case", ["non_image", "oversized", "missing", "missing_save", "save_and_view"])
 async def test_get_attachment_view_rejects_unusable_images(tmp_path: Path, case: str) -> None:
-    """Viewing must fail explicitly rather than forward unusable media or silently save."""
+    """Viewing or saving must fail explicitly rather than forward unusable media or silently save."""
     image_path = tmp_path / "plot.png"
     image_path.write_bytes(b"not an image")
     tool = AttachmentTools(tool_output_workspace_root=tmp_path)
@@ -312,12 +431,12 @@ async def test_get_attachment_view_rejects_unusable_images(tmp_path: Path, case:
         retained_path = Path(registered["attachment"]["local_path"])
         if case == "oversized":
             os.truncate(retained_path, 20 * 1024 * 1024 + 1)
-        elif case == "missing":
+        elif case in {"missing", "missing_save"}:
             retained_path.unlink()
         result = await tool.get_attachment(
             registered["attachment_id"],
-            view=True,
-            mindroom_output_path="copy.png" if case == "save_and_view" else None,
+            view=case != "missing_save",
+            mindroom_output_path="copy.png" if case in {"missing_save", "save_and_view"} else None,
         )
 
     assert isinstance(result, str)
@@ -327,6 +446,7 @@ async def test_get_attachment_view_rejects_unusable_images(tmp_path: Path, case:
         "non_image": "PNG, JPEG, GIF or WebP",
         "oversized": "size limit",
         "missing": "missing on disk",
+        "missing_save": "missing on disk",
         "save_and_view": "cannot be combined",
     }
     assert expected[case] in payload["message"]
@@ -369,9 +489,6 @@ async def test_attachments_tool_get_attachment_mindroom_output_path_writes_prima
     assert payload["attachment"]["size_bytes"] == 5
     assert "sha256" in payload["attachment"]
     assert "local_path" not in payload["attachment"]
-    assert payload["mindroom_tool_output"]["status"] == "saved_to_file"
-    assert payload["mindroom_tool_output"]["path"] == "inputs/sample.txt"
-    assert payload["mindroom_tool_output"]["format"] == "binary"
     assert payload["mindroom_tool_output"] == {
         "status": "saved_to_file",
         "path": "inputs/sample.txt",
@@ -382,35 +499,43 @@ async def test_attachments_tool_get_attachment_mindroom_output_path_writes_prima
     }
 
 
-@pytest.mark.asyncio
-async def test_attachments_tool_get_attachment_schema_describes_output_path(
-    tmp_path: Path,
-) -> None:
+def test_attachments_tool_get_attachment_schema_describes_output_path() -> None:
     """The bespoke attachment save arg should still carry the canonical output-path description."""
-    del tmp_path
     tool = AttachmentTools()
 
-    parameters = tool.async_functions["get_attachment"].parameters
+    parameters = toolkit_offers(tool, "get_attachment").parameters
     schema = parameters["properties"]
 
-    assert schema["attachment_id"]["description"] == "Context-scoped attachment ID returned by list_attachments."
+    assert schema["attachment_id"] == {
+        "type": "string",
+        "description": "Context-scoped attachment ID returned by list_attachments.",
+    }
+    assert schema["view"]["type"] == "boolean"
+    assert "view" not in parameters["required"]
     assert schema["mindroom_output_path"]["anyOf"] == [{"type": "string"}, {"type": "null"}]
     assert schema["mindroom_output_path"]["default"] is None
-    assert "Use this for large output" in schema["mindroom_output_path"]["description"]
+    assert "save the full supported output" in schema["mindroom_output_path"]["description"]
     assert "mindroom_output_path" not in parameters["required"]
     assert "save_to_disk" not in schema
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("save_target", ["local", "worker", "no_workspace"])
 @pytest.mark.parametrize("unsafe_path", ["", "  ", "..", "../escape.txt", "/abs/path", "foo\x00bar", "$HOME/x", "~/x"])
 async def test_attachments_tool_get_attachment_mindroom_output_path_rejects_unsafe_paths(
     tmp_path: Path,
     unsafe_path: str,
+    save_target: str,
 ) -> None:
-    """Attachment save paths should reuse the normal workspace output path policy."""
+    """Attachment save paths should be rejected by the output path policy before any attachment bytes are read."""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
-    tool = AttachmentTools(tool_output_workspace_root=workspace)
+    if save_target == "local":
+        tool = AttachmentTools(tool_output_workspace_root=workspace)
+    elif save_target == "worker":
+        tool = _worker_attachment_tool(tmp_path, runtime_env=_WORKER_RUNTIME_ENV, workspace_in_worker=True)
+    else:
+        tool = AttachmentTools()
     sample_file = tmp_path / "sample.txt"
     sample_file.write_bytes(b"hello")
     attachment = register_local_attachment(
@@ -423,7 +548,10 @@ async def test_attachments_tool_get_attachment_mindroom_output_path_rejects_unsa
 
     with (
         tool_runtime_context(_tool_context(tmp_path, attachment_ids=(attachment.attachment_id,))),
-        patch.object(type(sample_file), "read_bytes", side_effect=AssertionError("attachment bytes were read")),
+        patch(
+            "mindroom.custom_tools.attachments._read_attachment_bytes",
+            side_effect=AssertionError("attachment bytes were read"),
+        ),
         patch("mindroom.custom_tools.attachments.save_attachment_to_worker") as mocked_save,
     ):
         payload = json.loads(await tool.get_attachment("att_sample", mindroom_output_path=unsafe_path))
@@ -503,9 +631,40 @@ async def test_attachments_tool_get_attachment_execution_mode_off_saves_primary_
     mocked_save.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    ("proxy_tools", "uses_worker"),
+    [pytest.param("shell", True, id="workspace-tool-routes"), pytest.param("calculator", False, id="none-routes")],
+)
+def test_attachments_a_tool_builds_save_where_the_sandbox_settings_route_workspace_tools(
+    tmp_path: Path,
+    proxy_tools: str,
+    uses_worker: bool,
+) -> None:
+    """Attachments a plugin builds without the agent's placement save where the sandbox routes workspace tools."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env={
+            "MINDROOM_SANDBOX_EXECUTION_MODE": "selective",
+            "MINDROOM_SANDBOX_PROXY_TOOLS": proxy_tools,
+            "MINDROOM_SANDBOX_PROXY_URL": "http://sandbox.invalid",
+            "MINDROOM_SANDBOX_PROXY_TOKEN": "test-token",
+        },
+    )
+
+    attachments = get_tool_by_name(
+        "attachments",
+        runtime_paths,
+        worker_target=_shared_worker_target(),
+        tools=builtin_tool_registry(),
+    )
+
+    assert attachments._workspace_in_worker is uses_worker
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    "worker_tools_override",
+    "worker_tools",
     [
         ["coding"],
         ["python"],
@@ -514,14 +673,14 @@ async def test_attachments_tool_get_attachment_execution_mode_off_saves_primary_
 )
 async def test_attachments_tool_get_attachment_selective_proxy_uses_worker_for_workspace_consumers(
     tmp_path: Path,
-    worker_tools_override: list[str],
+    worker_tools: list[str],
 ) -> None:
-    """Attachment saves should land on the worker when workspace tools can consume the workspace."""
+    """Attachment saves should land on the worker when the agent's workspace tools run there."""
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     runtime_env = {
         "MINDROOM_SANDBOX_EXECUTION_MODE": "selective",
-        "MINDROOM_SANDBOX_PROXY_TOOLS": ",".join(worker_tools_override),
+        "MINDROOM_SANDBOX_PROXY_TOOLS": ",".join(worker_tools),
         "MINDROOM_WORKER_BACKEND": "kubernetes",
         "MINDROOM_SANDBOX_PROXY_TOKEN": "test-token",
     }
@@ -530,10 +689,17 @@ async def test_attachments_tool_get_attachment_selective_proxy_uses_worker_for_w
         storage_path=tmp_path,
         process_env=runtime_env,
     )
+    placement = tool_placement(runtime_paths, builtin_tool_registry())
+    config = Config(
+        agents={"openclaw": AgentConfig(display_name="OpenClaw", tools=worker_tools, worker_tools=worker_tools)},
+    )
+    agent_tools = resolve_agent_tools(config, "openclaw", builtin_tool_registry())
+    workspace_in_worker = agent_tools.workspace_in_worker(agent_tools.tool_names, placement)
+    assert workspace_in_worker is True
     tool = AttachmentTools(
         runtime_paths=runtime_paths,
         worker_target=_shared_worker_target(),
-        worker_tools_override=worker_tools_override,
+        workspace_in_worker=workspace_in_worker,
         tool_output_workspace_root=workspace,
     )
     sample_file = tmp_path / "sample.txt"
@@ -567,7 +733,35 @@ async def test_attachments_tool_get_attachment_selective_proxy_uses_worker_for_w
     }
     assert not any(workspace.rglob("*"))
     mocked_save.assert_called_once()
-    assert mocked_save.call_args.kwargs["worker_tools_override"] == worker_tools_override
+
+
+_WORKER_RUNTIME_ENV = {
+    "MINDROOM_SANDBOX_EXECUTION_MODE": "selective",
+    "MINDROOM_SANDBOX_PROXY_TOOLS": "file",
+    "MINDROOM_WORKER_BACKEND": "kubernetes",
+    "MINDROOM_SANDBOX_PROXY_TOKEN": "test-token",
+}
+
+
+def _worker_attachment_tool(
+    tmp_path: Path,
+    *,
+    runtime_env: dict[str, str],
+    workspace_in_worker: bool,
+) -> AttachmentTools:
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path,
+        process_env=runtime_env,
+    )
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(exist_ok=True)
+    return AttachmentTools(
+        runtime_paths=runtime_paths,
+        worker_target=_shared_worker_target(),
+        workspace_in_worker=workspace_in_worker,
+        tool_output_workspace_root=workspace,
+    )
 
 
 @pytest.mark.asyncio
@@ -578,23 +772,7 @@ async def test_attachments_tool_get_attachment_worker_save_ignores_primary_works
     workspace = tmp_path / "workspace"
     workspace.mkdir()
     (workspace / "inputs").write_text("local conflict", encoding="utf-8")
-    runtime_env = {
-        "MINDROOM_SANDBOX_EXECUTION_MODE": "selective",
-        "MINDROOM_SANDBOX_PROXY_TOOLS": "file",
-        "MINDROOM_WORKER_BACKEND": "kubernetes",
-        "MINDROOM_SANDBOX_PROXY_TOKEN": "test-token",
-    }
-    runtime_paths = resolve_runtime_paths(
-        config_path=tmp_path / "config.yaml",
-        storage_path=tmp_path,
-        process_env=runtime_env,
-    )
-    tool = AttachmentTools(
-        runtime_paths=runtime_paths,
-        worker_target=_shared_worker_target(),
-        worker_tools_override=["file"],
-        tool_output_workspace_root=workspace,
-    )
+    tool = _worker_attachment_tool(tmp_path, runtime_env=_WORKER_RUNTIME_ENV, workspace_in_worker=True)
     sample_file = tmp_path / "sample.txt"
     sample_file.write_bytes(b"hello")
     attachment = register_local_attachment(tmp_path, sample_file, kind="file", attachment_id="att_sample")
@@ -602,7 +780,7 @@ async def test_attachments_tool_get_attachment_worker_save_ignores_primary_works
 
     with (
         tool_runtime_context(
-            _tool_context(tmp_path, attachment_ids=(attachment.attachment_id,), process_env=runtime_env),
+            _tool_context(tmp_path, attachment_ids=(attachment.attachment_id,), process_env=_WORKER_RUNTIME_ENV),
         ),
         patch(
             "mindroom.custom_tools.attachments.save_attachment_to_worker",
@@ -625,25 +803,7 @@ async def test_attachments_tool_get_attachment_worker_save_does_not_block_event_
     tmp_path: Path,
 ) -> None:
     """The async attachment tool should not run the blocking worker upload on the event loop."""
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    runtime_env = {
-        "MINDROOM_SANDBOX_EXECUTION_MODE": "selective",
-        "MINDROOM_SANDBOX_PROXY_TOOLS": "file",
-        "MINDROOM_WORKER_BACKEND": "kubernetes",
-        "MINDROOM_SANDBOX_PROXY_TOKEN": "test-token",
-    }
-    runtime_paths = resolve_runtime_paths(
-        config_path=tmp_path / "config.yaml",
-        storage_path=tmp_path,
-        process_env=runtime_env,
-    )
-    tool = AttachmentTools(
-        runtime_paths=runtime_paths,
-        worker_target=_shared_worker_target(),
-        worker_tools_override=["file"],
-        tool_output_workspace_root=workspace,
-    )
+    tool = _worker_attachment_tool(tmp_path, runtime_env=_WORKER_RUNTIME_ENV, workspace_in_worker=True)
     sample_file = tmp_path / "sample.txt"
     sample_file.write_bytes(b"hello")
     attachment = register_local_attachment(tmp_path, sample_file, kind="file", attachment_id="att_sample")
@@ -668,7 +828,7 @@ async def test_attachments_tool_get_attachment_worker_save_does_not_block_event_
 
     with (
         tool_runtime_context(
-            _tool_context(tmp_path, attachment_ids=(attachment.attachment_id,), process_env=runtime_env),
+            _tool_context(tmp_path, attachment_ids=(attachment.attachment_id,), process_env=_WORKER_RUNTIME_ENV),
         ),
         patch("mindroom.custom_tools.attachments.save_attachment_to_worker", side_effect=blocking_save),
     ):
@@ -688,25 +848,7 @@ async def test_attachments_tool_get_attachment_worker_save_protocol_error_return
     tmp_path: Path,
 ) -> None:
     """Worker-save transport/protocol exceptions should be normal attachment tool errors."""
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    runtime_env = {
-        "MINDROOM_SANDBOX_EXECUTION_MODE": "selective",
-        "MINDROOM_SANDBOX_PROXY_TOOLS": "file",
-        "MINDROOM_WORKER_BACKEND": "kubernetes",
-        "MINDROOM_SANDBOX_PROXY_TOKEN": "test-token",
-    }
-    runtime_paths = resolve_runtime_paths(
-        config_path=tmp_path / "config.yaml",
-        storage_path=tmp_path,
-        process_env=runtime_env,
-    )
-    tool = AttachmentTools(
-        runtime_paths=runtime_paths,
-        worker_target=_shared_worker_target(),
-        worker_tools_override=["file"],
-        tool_output_workspace_root=workspace,
-    )
+    tool = _worker_attachment_tool(tmp_path, runtime_env=_WORKER_RUNTIME_ENV, workspace_in_worker=True)
     sample_file = tmp_path / "sample.txt"
     sample_file.write_bytes(b"hello")
     attachment = register_local_attachment(tmp_path, sample_file, kind="file", attachment_id="att_sample")
@@ -714,7 +856,7 @@ async def test_attachments_tool_get_attachment_worker_save_protocol_error_return
 
     with (
         tool_runtime_context(
-            _tool_context(tmp_path, attachment_ids=(attachment.attachment_id,), process_env=runtime_env),
+            _tool_context(tmp_path, attachment_ids=(attachment.attachment_id,), process_env=_WORKER_RUNTIME_ENV),
         ),
         patch("mindroom.custom_tools.attachments.save_attachment_to_worker", side_effect=TypeError("bad receipt")),
     ):
@@ -723,36 +865,71 @@ async def test_attachments_tool_get_attachment_worker_save_protocol_error_return
     assert payload["status"] == "error"
     assert payload["tool"] == "attachments"
     assert "bad receipt" in payload["message"]
-    assert not any(workspace.rglob("*"))
+    assert not any((tmp_path / "workspace").rglob("*"))
 
 
-_WORKER_RUNTIME_ENV = {
-    "MINDROOM_SANDBOX_EXECUTION_MODE": "selective",
-    "MINDROOM_SANDBOX_PROXY_TOOLS": "file",
-    "MINDROOM_WORKER_BACKEND": "kubernetes",
-    "MINDROOM_SANDBOX_PROXY_TOKEN": "test-token",
-}
-
-
-def _worker_attachment_tool(
-    tmp_path: Path,
-    *,
-    runtime_env: dict[str, str],
-    worker_tools_override: list[str],
-) -> AttachmentTools:
-    runtime_paths = resolve_runtime_paths(
-        config_path=tmp_path / "config.yaml",
-        storage_path=tmp_path,
-        process_env=runtime_env,
-    )
+def test_view_file_finds_only_files_it_may_read(tmp_path: Path) -> None:
+    """A path view_file finds lies inside the workspace under workspace access, a worker's included."""
     workspace = tmp_path / "workspace"
-    workspace.mkdir(exist_ok=True)
-    return AttachmentTools(
-        runtime_paths=runtime_paths,
-        worker_target=_shared_worker_target(),
-        worker_tools_override=worker_tools_override,
+    workspace.mkdir()
+    (workspace / "plot.png").write_bytes(b"png")
+    outside = tmp_path / "outside.png"
+    outside.write_bytes(b"png")
+    tool = AttachmentTools(tool_output_workspace_root=workspace)
+
+    assert tool.views("plot.png")
+    assert tool.views(str(workspace / "plot.png"))
+    assert not tool.views(str(outside))
+    assert not tool.views("missing.png")
+    in_worker = AttachmentTools(tool_output_workspace_root=workspace, workspace_in_worker=True)
+    assert in_worker.views("only-in-the-worker.png")
+    assert in_worker.views(str(workspace / "plot.png"))
+    assert not in_worker.views(str(outside))
+    unrestricted = AttachmentTools(
         tool_output_workspace_root=workspace,
+        workspace_in_worker=True,
+        file_access="unrestricted",
     )
+    assert unrestricted.views(str(outside))
+
+
+@pytest.mark.asyncio
+async def test_view_file_in_a_worker_needs_no_tool_runtime_context(tmp_path: Path) -> None:
+    """A turn without a room sets no tool runtime context; the worker view sends the config the toolkit was built with."""
+    config = Config(agents={"openclaw": AgentConfig(display_name="OpenClaw")})
+    tool = get_tool_by_name(
+        "attachments",
+        resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path),
+        runtime_config=config,
+        worker_target=_shared_worker_target(),
+        workspace_in_worker=True,
+        tool_output_workspace_root=tmp_path / "workspace",
+        tools=builtin_tool_registry(),
+    )
+    assert isinstance(tool, AttachmentTools)
+    viewed = ToolValue(content=json.dumps({"path": "plot.png", "view_status": "ready"}))
+
+    with patch("mindroom.custom_tools.attachments.view_file_from_worker", return_value=viewed) as view:
+        result = await tool.view_file("plot.png")
+
+    assert result == viewed
+    assert view.call_args.kwargs["runtime_config"] is config
+
+
+@pytest.mark.asyncio
+async def test_view_file_worker_failure_returns_view_error(tmp_path: Path) -> None:
+    """A worker view that fails reports the failure in the view receipt instead of raising."""
+    tool = _worker_attachment_tool(tmp_path, runtime_env=_WORKER_RUNTIME_ENV, workspace_in_worker=True)
+
+    with patch("mindroom.custom_tools.attachments.view_file_from_worker", side_effect=RuntimeError("worker down")):
+        result = await tool.view_file("plot.png")
+
+    assert json.loads(result.content) == {
+        "message": "worker down",
+        "path": "plot.png",
+        "tool": "view_file",
+        "view_status": "error",
+    }
 
 
 @pytest.mark.asyncio
@@ -768,14 +945,12 @@ def _worker_attachment_tool(
 )
 async def test_get_attachment_worker_save_accepts_attachments_over_16_mib_unless_lowered(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     inline_limit_env: dict[str, str],
     expected_error: str | None,
 ) -> None:
     """A received file above 16 MiB reaches the worker unless an operator lowers the inline cap."""
-    monkeypatch.delenv("MINDROOM_ATTACHMENT_INLINE_SAVE_MAX_BYTES", raising=False)
     runtime_env = {**_WORKER_RUNTIME_ENV, **inline_limit_env}
-    tool = _worker_attachment_tool(tmp_path, runtime_env=runtime_env, worker_tools_override=["file"])
+    tool = _worker_attachment_tool(tmp_path, runtime_env=runtime_env, workspace_in_worker=True)
     size_bytes = 16 * 1024 * 1024 + 1
     sample_file = tmp_path / "archive.zip"
     sample_file.write_bytes(b"PK")
@@ -814,7 +989,7 @@ async def test_attachment_metadata_shows_local_path_only_where_agent_tools_can_o
     tool = _worker_attachment_tool(
         tmp_path,
         runtime_env=_WORKER_RUNTIME_ENV,
-        worker_tools_override=["file"] if uses_worker else [],
+        workspace_in_worker=uses_worker,
     )
     (tmp_path / "workspace" / "notes.txt").write_text("notes", encoding="utf-8")
     sample_file = tmp_path / "archive.zip"
@@ -854,15 +1029,15 @@ async def test_matrix_message_attachments_sends_attachment_ids(tmp_path: Path) -
     assert attachment is not None
 
     context = _tool_context(tmp_path, attachment_ids=("att_upload",))
-    with patch(
-        "mindroom.custom_tools.attachments.send_file_message",
-        new=AsyncMock(return_value="$file_evt"),
-    ) as mocked:
-        with tool_runtime_context(context):
-            result = json.loads(await MatrixMessageTools().matrix_message(attachments=["att_upload"]))
-        send_error = result.get("message") if result["status"] == "error" else None
+    with (
+        patch(
+            "mindroom.custom_tools.attachments.send_file_message",
+            new=AsyncMock(return_value="$file_evt"),
+        ) as mocked,
+        tool_runtime_context(context),
+    ):
+        result = json.loads(await MatrixMessageTools().matrix_message(attachments=["att_upload"]))
 
-    assert send_error is None
     assert result["status"] == "ok"
     assert result["attachment_event_ids"] == ["$file_evt"]
     assert result["resolved_attachment_ids"] == ["att_upload"]
@@ -891,16 +1066,16 @@ async def test_matrix_message_attachments_tell_receivers_to_ignore_mentions_in_f
     register_tool_runtime_media_attachment(context, media)
     sent_contents: list[dict[str, object]] = []
 
-    async def capture_send(_client: object, _room_id: str, content: dict[str, object], **_kwargs: object) -> object:
+    async def capture_send(*, room_id: str, content: dict[str, object], **_kwargs: object) -> nio.RoomSendResponse:
         sent_contents.append(content)
-        return DeliveredMatrixEvent(event_id=f"$sent{len(sent_contents)}", content_sent=content)
+        return nio.RoomSendResponse(f"$sent{len(sent_contents)}", room_id)
 
+    context.client.room_send = AsyncMock(side_effect=capture_send)
     with (
         patch(
             "mindroom.matrix.client_delivery._upload_file_as_mxc",
             new=AsyncMock(return_value=("mxc://localhost/file", {"info": {"size": 7, "mimetype": "text/plain"}})),
         ),
-        patch("mindroom.matrix.client_delivery.send_message_result", side_effect=capture_send),
         tool_runtime_context(context),
     ):
         result = json.loads(await MatrixMessageTools().matrix_message(attachments=["att_named", "att_media"]))
@@ -932,12 +1107,10 @@ async def test_matrix_message_attachments_reuses_ephemeral_encrypted_media(tmp_p
             new=AsyncMock(return_value="$image_evt"),
         ) as send_runtime_media,
         patch("mindroom.custom_tools.attachments.send_file_message", new=AsyncMock()) as send_file,
+        tool_runtime_context(context),
     ):
-        with tool_runtime_context(context):
-            result = json.loads(await MatrixMessageTools().matrix_message(attachments=[attachment.attachment_id]))
-        send_error = result.get("message") if result["status"] == "error" else None
+        result = json.loads(await MatrixMessageTools().matrix_message(attachments=[attachment.attachment_id]))
 
-    assert send_error is None
     assert result["status"] == "ok"
     assert result["attachment_event_ids"] == ["$image_evt"]
     assert result["resolved_attachment_ids"] == [attachment.attachment_id]
@@ -1034,15 +1207,15 @@ async def test_matrix_message_attachments_reuses_latest_thread_event_id_for_mult
     context = _tool_context(tmp_path, attachment_ids=("att_one", "att_two"))
     context.conversation_reader.latest_thread_event_id = AsyncMock(return_value="$latest:localhost")
 
-    with patch(
-        "mindroom.custom_tools.attachments.send_file_message",
-        new=AsyncMock(side_effect=["$file_evt_1", "$file_evt_2"]),
-    ) as mock_send:
-        with tool_runtime_context(context):
-            result = json.loads(await MatrixMessageTools().matrix_message(attachments=["att_one", "att_two"]))
-        send_error = result.get("message") if result["status"] == "error" else None
+    with (
+        patch(
+            "mindroom.custom_tools.attachments.send_file_message",
+            new=AsyncMock(side_effect=["$file_evt_1", "$file_evt_2"]),
+        ) as mock_send,
+        tool_runtime_context(context),
+    ):
+        result = json.loads(await MatrixMessageTools().matrix_message(attachments=["att_one", "att_two"]))
 
-    assert send_error is None
     assert result["status"] == "ok"
     assert result["attachment_event_ids"] == ["$file_evt_1", "$file_evt_2"]
     context.conversation_reader.latest_thread_event_id.assert_awaited_once_with(
@@ -1086,17 +1259,17 @@ async def test_matrix_message_attachments_cross_room_send_does_not_inherit_sourc
     # Add the target room so the join check passes
     ctx.client.rooms["!other:localhost"] = MagicMock()
 
-    with patch(
-        "mindroom.custom_tools.attachments.send_file_message",
-        new=AsyncMock(return_value="$file_evt"),
-    ) as mocked:
-        with tool_runtime_context(ctx):
-            result = json.loads(
-                await MatrixMessageTools().matrix_message(attachments=["att_cross"], room_id="!other:localhost"),
-            )
-        send_error = result.get("message") if result["status"] == "error" else None
+    with (
+        patch(
+            "mindroom.custom_tools.attachments.send_file_message",
+            new=AsyncMock(return_value="$file_evt"),
+        ) as mocked,
+        tool_runtime_context(ctx),
+    ):
+        result = json.loads(
+            await MatrixMessageTools().matrix_message(attachments=["att_cross"], room_id="!other:localhost"),
+        )
 
-    assert send_error is None
     assert result["status"] == "ok"
     mocked.assert_awaited_once()
     call_kwargs = mocked.await_args.kwargs
@@ -1206,8 +1379,8 @@ async def test_registered_workspace_file_swapped_for_link_never_reads_link_targe
         notes.symlink_to(secret)
         if use == "view":
             result = await tool.get_attachment(attachment_id, view=True)
-            assert isinstance(result, ToolResult)
-            assert result.files is not None
+            assert isinstance(result, ToolValue)
+            assert result.files
             assert result.files[0].content == b"public notes"
         elif use == "save":
             payload = json.loads(await tool.get_attachment(attachment_id, mindroom_output_path="copy.txt"))
@@ -1451,15 +1624,15 @@ async def test_matrix_message_attachments_inherits_resolved_thread_scope(tmp_pat
         attachment_ids=("att_threaded",),
     )
 
-    with patch(
-        "mindroom.custom_tools.attachments.send_file_message",
-        new=AsyncMock(return_value="$file_evt"),
-    ) as mocked:
-        with tool_runtime_context(ctx):
-            result = json.loads(await MatrixMessageTools().matrix_message(attachments=["att_threaded"]))
-        send_error = result.get("message") if result["status"] == "error" else None
+    with (
+        patch(
+            "mindroom.custom_tools.attachments.send_file_message",
+            new=AsyncMock(return_value="$file_evt"),
+        ) as mocked,
+        tool_runtime_context(ctx),
+    ):
+        result = json.loads(await MatrixMessageTools().matrix_message(attachments=["att_threaded"]))
 
-    assert send_error is None
     assert result["status"] == "ok"
     assert result["thread_id"] == "$thread-root:localhost"
     ctx.conversation_reader.latest_thread_event_id.assert_awaited_once_with(
@@ -1486,16 +1659,13 @@ async def test_attachments_tool_registers_file_and_updates_runtime_context(tmp_p
         current_context = get_tool_runtime_context()
         assert current_context is not None
         attachment_id = register_payload["attachment_id"]
-        with tool_runtime_context(current_context):
-            send_result = json.loads(await MatrixMessageTools().matrix_message(attachments=[attachment_id]))
-        send_error = send_result.get("message") if send_result["status"] == "error" else None
+        send_result = json.loads(await MatrixMessageTools().matrix_message(attachments=[attachment_id]))
 
     assert register_payload["status"] == "ok"
     assert register_payload["tool"] == "attachments"
     assert register_payload["attachment_id"].startswith("att_")
     assert Path(register_payload["attachment"]["local_path"]).read_text(encoding="utf-8") == "artifact"
     assert attachment_id in list_tool_runtime_attachment_ids(current_context)
-    assert send_error is None
     assert send_result["status"] == "ok"
     assert send_result["resolved_attachment_ids"] == [attachment_id]
     mocked.assert_awaited_once()
@@ -1503,10 +1673,19 @@ async def test_attachments_tool_registers_file_and_updates_runtime_context(tmp_p
 
 
 @pytest.mark.asyncio
-async def test_attachments_tool_register_attachment_infers_file_metadata(tmp_path: Path) -> None:
+@pytest.mark.parametrize(
+    ("filename", "kind", "mime_prefix"),
+    [("clip.wav", "audio", "audio/"), ("README", "file", None)],
+)
+async def test_attachments_tool_register_attachment_infers_file_metadata(
+    tmp_path: Path,
+    filename: str,
+    kind: str,
+    mime_prefix: str | None,
+) -> None:
     """Registering a local path should preserve filename, MIME type, and media kind."""
     tool = AttachmentTools(tool_output_workspace_root=tmp_path)
-    generated_file = tmp_path / "clip.wav"
+    generated_file = tmp_path / filename
     generated_file.write_bytes(b"RIFF\x00\x00\x00\x00WAVEfmt ")
     ctx = _tool_context(tmp_path)
 
@@ -1514,16 +1693,18 @@ async def test_attachments_tool_register_attachment_infers_file_metadata(tmp_pat
         payload = json.loads(await tool.register_attachment(str(generated_file)))
 
     assert payload["status"] == "ok"
-    assert payload["attachment"]["filename"] == "clip.wav"
-    assert payload["attachment"]["mime_type"].startswith("audio/")
-    assert payload["attachment"]["kind"] == "audio"
+    assert payload["attachment"]["filename"] == filename
+    assert payload["attachment"]["kind"] == kind
 
     attachment = load_attachment(tmp_path, payload["attachment_id"])
     assert attachment is not None
-    assert attachment.filename == "clip.wav"
-    assert attachment.mime_type is not None
-    assert attachment.mime_type.startswith("audio/")
-    assert attachment.kind == "audio"
+    assert attachment.filename == filename
+    assert attachment.kind == kind
+    if mime_prefix is None:
+        assert attachment.mime_type is None
+    else:
+        assert attachment.mime_type is not None
+        assert attachment.mime_type.startswith(mime_prefix)
 
 
 @pytest.mark.asyncio
@@ -1542,12 +1723,9 @@ async def test_attachments_tool_register_attachment_available_after_task_boundar
         current_context = get_tool_runtime_context()
         assert current_context is not None
         attachment_id = register_payload["attachment_id"]
-        with tool_runtime_context(current_context):
-            send_result = json.loads(await MatrixMessageTools().matrix_message(attachments=[attachment_id]))
-        send_error = send_result.get("message") if send_result["status"] == "error" else None
+        send_result = json.loads(await MatrixMessageTools().matrix_message(attachments=[attachment_id]))
 
     assert register_payload["status"] == "ok"
-    assert send_error is None
     assert send_result["status"] == "ok"
     assert send_result["resolved_attachment_ids"] == [attachment_id]
     assert attachment_id in list_tool_runtime_attachment_ids(current_context)
@@ -1573,16 +1751,14 @@ async def test_matrix_message_attachments_cross_room_send_requires_authorization
     with (
         patch("mindroom.custom_tools.attachment_helpers.is_sender_allowed_for_responder", return_value=False),
         patch("mindroom.custom_tools.attachments.send_file_message", new=AsyncMock(return_value="$file_evt")) as mocked,
+        tool_runtime_context(ctx),
     ):
-        with tool_runtime_context(ctx):
-            result = json.loads(
-                await MatrixMessageTools().matrix_message(attachments=["att_authz"], room_id="!other:localhost"),
-            )
-        send_error = result.get("message") if result["status"] == "error" else None
+        result = json.loads(
+            await MatrixMessageTools().matrix_message(attachments=["att_authz"], room_id="!other:localhost"),
+        )
 
     assert result["status"] == "error"
-    assert send_error is not None
-    assert "Not authorized" in send_error
+    assert "Not authorized" in result["message"]
     mocked.assert_not_awaited()
 
 
@@ -1597,17 +1773,14 @@ async def test_matrix_message_attachments_sends_local_file_paths_by_auto_registe
         tool_runtime_context(ctx),
         patch("mindroom.custom_tools.attachments.send_file_message", new=AsyncMock(return_value="$file_evt")) as mocked,
     ):
-        with tool_runtime_context(ctx):
-            result = json.loads(
-                await MatrixMessageTools(tool_output_workspace_root=tmp_path).matrix_message(
-                    attachments=[str(generated_file)],
-                ),
-            )
-        send_error = result.get("message") if result["status"] == "error" else None
+        result = json.loads(
+            await MatrixMessageTools(tool_output_workspace_root=tmp_path).matrix_message(
+                attachments=[str(generated_file)],
+            ),
+        )
         current_context = get_tool_runtime_context()
         assert current_context is not None
 
-    assert send_error is None
     assert result["status"] == "ok"
     assert result["resolved_attachment_ids"][0].startswith("att_")
     assert result["newly_registered_attachment_ids"] == result["resolved_attachment_ids"]
@@ -1628,3 +1801,177 @@ def test_tool_runtime_context_none_temporarily_clears_nested_scope(tmp_path: Pat
 @pytest.fixture(autouse=True)
 def _reset_matrix_message_rate_limit() -> None:
     MatrixMessageTools._recent_actions.clear()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("by_path", [False, True], ids=["attachment-id", "workspace-path"])
+@pytest.mark.parametrize("alt", [None, "a [cat]", r"a \[cat]", "one\ntwo"])
+@pytest.mark.parametrize("filename", ["cat.png", "cat.jpg"])
+async def test_inline_image_returns_embeddable_markdown(
+    tmp_path: Path,
+    by_path: bool,
+    alt: str | None,
+    filename: str,
+) -> None:
+    """Both send reference forms upload images and return markdown usable in a reply."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    source = workspace / filename
+    source.write_bytes(image_bytes())
+    record = register_local_attachment(
+        tmp_path,
+        source,
+        kind="image",
+        mime_type="image/png" if filename.endswith(".png") else "image/jpeg",
+    )
+    assert record is not None
+    context = _tool_context(tmp_path, attachment_ids=(record.attachment_id,))
+    context.client.rooms[context.room_id].encrypted = False
+    tool = AttachmentTools(tool_output_workspace_root=workspace)
+    reference = filename if by_path else record.attachment_id
+    with (
+        patch(
+            "mindroom.matrix.client_delivery.upload_media_bytes",
+            new=AsyncMock(return_value=(nio.UploadResponse("mxc://hs/abc"), None)),
+        ) as upload,
+        tool_runtime_context(context),
+    ):
+        payload = json.loads(await tool.inline_image(reference, alt=alt))
+    assert payload["status"] == "ok"
+    assert upload.await_args.kwargs["content_type"] == "image/png"
+    assert payload["attachment_id"].startswith("att_")
+    assert payload["mxc_uri"] == "mxc://hs/abc"
+    html = markdown_to_html(payload["markdown"])
+    assert '<img src="mxc://hs/abc"' in html
+    expected_alt = (alt or filename).replace("\n", " ")
+    escaped_alt = expected_alt.replace("\\", "\\\\").replace("[", "\\[").replace("]", "\\]")
+    assert payload["markdown"] == f"![{escaped_alt}](mxc://hs/abc)"
+    assert load_attachment(tmp_path, payload["attachment_id"]) is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "case",
+    ["non-image", "encrypted-room", "upload-failure", "encrypted-upload", "read-limit", "out-of-context"],
+)
+async def test_inline_image_rejects_unusable_media(tmp_path: Path, case: str) -> None:
+    """Invalid images and unsafe uploads produce errors, never an embeddable URL."""
+    source = tmp_path / ("notes.txt" if case == "non-image" else "cat.png")
+    source.write_bytes(b"notes" if case == "non-image" else image_bytes())
+    record = register_local_attachment(
+        tmp_path,
+        source,
+        kind="file" if case == "non-image" else "image",
+        mime_type="text/plain" if case == "non-image" else "image/png",
+    )
+    assert record is not None
+    context = _tool_context(tmp_path, attachment_ids=() if case == "out-of-context" else (record.attachment_id,))
+    context.client.rooms[context.room_id].encrypted = case == "encrypted-room"
+    upload_result = (None, None) if case == "upload-failure" else ("mxc://hs/abc", {"file": {"key": "secret"}})
+    with (
+        patch(
+            "mindroom.custom_tools.attachments.upload_media_bytes_as_mxc",
+            new=AsyncMock(return_value=upload_result),
+        ) as upload,
+        patch("mindroom.custom_tools.attachments.MAX_SOURCE_BYTES", 1 if case == "read-limit" else 20 * 1024 * 1024),
+        tool_runtime_context(context),
+    ):
+        payload = json.loads(await AttachmentTools().inline_image(record.attachment_id))
+    assert payload["status"] == "error"
+    assert "markdown" not in payload
+    if case not in {"upload-failure", "encrypted-upload"}:
+        upload.assert_not_awaited()
+    if case in {"encrypted-room", "encrypted-upload"}:
+        assert "matrix_message" in payload["message"]
+
+
+@pytest.mark.asyncio
+async def test_inline_image_rejects_non_image_bytes(tmp_path: Path) -> None:
+    """An image filename does not make arbitrary bytes safe to upload as an image."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "fake.png").write_bytes(b"not an image")
+    context = _tool_context(tmp_path)
+    context.client.rooms[context.room_id].encrypted = False
+    with (
+        patch(
+            "mindroom.custom_tools.attachments.upload_media_bytes_as_mxc",
+            new=AsyncMock(return_value=("mxc://hs/abc", {"url": "mxc://hs/abc"})),
+        ) as upload,
+        tool_runtime_context(context),
+    ):
+        payload = json.loads(await AttachmentTools(tool_output_workspace_root=workspace).inline_image("fake.png"))
+    assert payload["status"] == "error"
+    assert "image" in payload["message"]
+    assert "markdown" not in payload
+    upload.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_inline_image_checks_encryption_before_resolving(tmp_path: Path) -> None:
+    """Encrypted rooms must not resolve or retain a workspace file."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    (workspace / "cat.png").write_bytes(image_bytes())
+    context = _tool_context(tmp_path)
+    context.client.rooms[context.room_id].encrypted = True
+    with (
+        patch("mindroom.custom_tools.attachments.resolve_send_attachment", wraps=resolve_send_attachment) as resolve,
+        tool_runtime_context(context),
+    ):
+        payload = json.loads(await AttachmentTools(tool_output_workspace_root=workspace).inline_image("cat.png"))
+    assert payload["status"] == "error"
+    assert "matrix_message" in payload["message"]
+    resolve.assert_not_called()
+    assert not list_tool_runtime_attachment_ids(context)
+    assert not (tmp_path / "incoming_media").exists()
+    assert not (tmp_path / "attachments").exists()
+
+
+@pytest.mark.asyncio
+async def test_inline_image_resolves_in_worker_thread(tmp_path: Path) -> None:
+    """File registration must not copy and hash bytes on the event loop."""
+    context = _tool_context(tmp_path)
+    context.client.rooms[context.room_id].encrypted = False
+
+    def resolve_off_loop(*_args: object, **_kwargs: object) -> str:
+        with pytest.raises(RuntimeError, match="no running event loop"):
+            asyncio.get_running_loop()
+        return "test resolution error"
+
+    with (
+        patch("mindroom.custom_tools.attachments.resolve_send_attachment", side_effect=resolve_off_loop),
+        tool_runtime_context(context),
+    ):
+        payload = json.loads(await AttachmentTools().inline_image("cat.png"))
+    assert payload["status"] == "error"
+    assert payload["message"] == "test resolution error"
+
+
+@pytest.mark.asyncio
+async def test_inline_image_rejects_already_encrypted_media(tmp_path: Path) -> None:
+    """Runtime-only ciphertext cannot be used in a markdown image."""
+    context = _tool_context(tmp_path)
+    context.client.rooms[context.room_id].encrypted = False
+    media = RuntimeEncryptedMediaAttachment(
+        attachment_id="att_media",
+        filename="cat.png",
+        url="mxc://hs/abc",
+        key="key",
+        iv="iv",
+        sha256="hash",
+        mime_type="image/png",
+        size=1,
+    )
+    register_tool_runtime_media_attachment(context, media)
+    with tool_runtime_context(context):
+        payload = json.loads(await AttachmentTools().inline_image("att_media"))
+    assert payload["status"] == "error"
+    assert "plaintext" in payload["message"]
+
+
+@pytest.mark.asyncio
+async def test_inline_image_requires_context() -> None:
+    """Roomless tool calls fail without uploading."""
+    payload = json.loads(await AttachmentTools().inline_image("cat.png"))
+    assert payload["status"] == "error"

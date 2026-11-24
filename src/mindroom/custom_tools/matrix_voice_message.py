@@ -6,26 +6,35 @@ import asyncio
 from collections import defaultdict, deque
 from dataclasses import dataclass
 from threading import Lock
-from typing import ClassVar, Literal, cast, get_args
+from typing import TYPE_CHECKING, ClassVar, Literal, cast, get_args
 from urllib.parse import urlparse
 
-from agno.tools import Toolkit
 from openai import APIStatusError, OpenAI
 
-from mindroom.credentials.sync import get_secret_from_env
+from mindroom.credentials.environment import get_secret_from_env
 from mindroom.custom_tools.attachment_helpers import (
+    explicit_thread_root,
     resolve_context_thread_id,
-    resolve_optional_room_id,
+    resolve_requested_room_id,
     room_access_allowed,
 )
 from mindroom.custom_tools.matrix_conversation_operations import MatrixMessageOperationResult, MatrixMessageOperations
 from mindroom.custom_tools.matrix_helpers import check_rate_limit
-from mindroom.custom_tools.tool_payloads import custom_tool_payload
+from mindroom.custom_tools.tool_payloads import custom_tool_payload, tool_context_or_error
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import send_audio_message
-from mindroom.matrix.voice_message import prepare_voice_audio_bytes
+from mindroom.matrix.voice_message import can_prepare_voice_audio, prepare_voice_audio_bytes
 from mindroom.model_defaults import LOCAL_OPENAI_API_KEY_DEFAULT, OPENAI_TTS, OPENROUTER_BASE_URL_DEFAULT
-from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
+from mindroom.tool_system.authoring import Toolkit
+from mindroom.voice.openai_realtime_speech import (
+    RealtimeSpeechError,
+    is_realtime_speech_model,
+    pcm_to_wav,
+    synthesize_realtime_speech,
+)
+
+if TYPE_CHECKING:
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 _OPUS_FILENAME = "voice-message.opus"
 _DEFAULT_RESPONSE_FORMAT = "opus"
@@ -33,6 +42,8 @@ _SpeechResponseFormat = Literal["aac", "flac", "mp3", "opus", "wav"]
 _ALLOWED_RESPONSE_FORMATS = frozenset(get_args(_SpeechResponseFormat))
 # OpenRouter's /audio/speech endpoint only returns mp3 or pcm; mp3 is the one we can turn into a Matrix voice message.
 _OPENROUTER_RESPONSE_FORMAT = "mp3"
+# A Realtime model speaks PCM, which the tool wraps as WAV for transcoding into the voice note.
+_REALTIME_RESPONSE_FORMAT = "wav"
 logger = get_logger(__name__)
 
 
@@ -69,26 +80,6 @@ def _is_openrouter_model(model: str) -> bool:
     return "/" in model
 
 
-def _input_validation_error(
-    text: object,
-    room_id: object,
-    thread_id: object,
-    caption: object,
-    companion_message: object,
-) -> str | None:
-    if not isinstance(text, str):
-        return "text must be a string."
-    if room_id is not None and not isinstance(room_id, str):
-        return "room_id must be a string."
-    if thread_id is not None and not isinstance(thread_id, str):
-        return "thread_id must be a string."
-    if caption is not None and not isinstance(caption, str):
-        return "caption must be a string."
-    if companion_message is not None and not isinstance(companion_message, str):
-        return "companion_message must be a string."
-    return None
-
-
 class MatrixVoiceMessageTools(Toolkit):
     """Native Matrix voice-message action for general agents."""
 
@@ -121,13 +112,6 @@ class MatrixVoiceMessageTools(Toolkit):
     @staticmethod
     def _payload(status: str, **kwargs: object) -> str:
         return custom_tool_payload("matrix_voice_message", status, **kwargs)
-
-    @classmethod
-    def _context_error(cls) -> str:
-        return cls._payload(
-            "error",
-            message="Matrix voice message tool context is unavailable in this runtime path.",
-        )
 
     @classmethod
     def _check_rate_limit(cls, context: ToolRuntimeContext, room_id: str) -> str | None:
@@ -164,6 +148,8 @@ class MatrixVoiceMessageTools(Toolkit):
         return get_secret_from_env("OPENAI_API_KEY", context.runtime_paths)
 
     def _response_format_for_target(self, base_url: str | None) -> str:
+        if is_realtime_speech_model(self._model):
+            return _REALTIME_RESPONSE_FORMAT
         if _is_openrouter_base_url(base_url) and self._response_format != _OPENROUTER_RESPONSE_FORMAT:
             logger.info(
                 "matrix_voice_response_format_coerced",
@@ -189,6 +175,24 @@ class MatrixVoiceMessageTools(Toolkit):
             raise TypeError(msg)
         return audio_content
 
+    async def _speech_audio(self, preflight: _VoiceMessagePreflight) -> bytes:
+        if is_realtime_speech_model(self._model):
+            pcm = await synthesize_realtime_speech(
+                preflight.text,
+                model=self._model,
+                voice=self._voice,
+                api_key=preflight.api_key,
+                base_url=preflight.base_url,
+            )
+            return pcm_to_wav(pcm)
+        return await asyncio.to_thread(
+            self._generate_speech_bytes,
+            api_key=preflight.api_key,
+            base_url=preflight.base_url,
+            text=preflight.text,
+            response_format=preflight.response_format,
+        )
+
     async def _send_companion_message(
         self,
         context: ToolRuntimeContext,
@@ -197,7 +201,7 @@ class MatrixVoiceMessageTools(Toolkit):
         thread_id: str | None,
         companion_message: str | None,
     ) -> MatrixMessageOperationResult | None:
-        companion_text = companion_message.strip() if isinstance(companion_message, str) else ""
+        companion_text = (companion_message or "").strip()
         if not companion_text:
             return None
 
@@ -237,36 +241,44 @@ class MatrixVoiceMessageTools(Toolkit):
             message="Failed to send companion message to Matrix.",
         )
 
-    async def _preflight(
+    async def _preflight(  # noqa: PLR0911
         self,
         context: ToolRuntimeContext,
         *,
         text: str,
         room_id: str | None,
-    ) -> tuple[_VoiceMessagePreflight | None, str | None]:
+    ) -> _VoiceMessagePreflight | str:
         normalized_text = text.strip()
         if not normalized_text:
-            return None, self._payload("error", message="text is required and must be non-empty.")
+            return self._payload("error", message="text is required and must be non-empty.")
 
         if self._response_format not in _ALLOWED_RESPONSE_FORMATS:
-            return None, self._payload(
+            return self._payload(
                 "error",
                 message=f"response_format must be one of: {', '.join(sorted(_ALLOWED_RESPONSE_FORMATS))}.",
             )
 
         base_url = self._base_url_for_context(context)
         response_format = self._response_format_for_target(base_url)
+        if not can_prepare_voice_audio(response_format):
+            return self._payload(
+                "error",
+                message="Voice messages from gpt-realtime models and non-opus formats need ffmpeg and ffprobe on the backend host.",
+            )
 
-        resolved_room_id = resolve_optional_room_id(context, room_id)
+        # A blank room_id means the current room, as omitting it does.
+        resolved_room_id, room_error = await resolve_requested_room_id(context, (room_id or "").strip() or None)
+        if room_error is not None or resolved_room_id is None:
+            return self._payload("error", message=room_error)
         if not await room_access_allowed(context, resolved_room_id):
-            return None, self._payload(
+            return self._payload(
                 "error",
                 room_id=resolved_room_id,
                 message="Not authorized to access the target room.",
             )
 
         if (limit_error := self._check_rate_limit(context, resolved_room_id)) is not None:
-            return None, self._payload(
+            return self._payload(
                 "error",
                 room_id=resolved_room_id,
                 message=limit_error,
@@ -279,7 +291,7 @@ class MatrixVoiceMessageTools(Toolkit):
                 if _is_openrouter_base_url(base_url)
                 else "OPENAI_API_KEY or a local TTS base_url/TTS_URL is required for matrix_voice_message."
             )
-            return None, self._payload(
+            return self._payload(
                 "error",
                 room_id=resolved_room_id,
                 message=missing_key_message,
@@ -291,7 +303,7 @@ class MatrixVoiceMessageTools(Toolkit):
             api_key=api_key,
             base_url=base_url,
             response_format=response_format,
-        ), None
+        )
 
     async def _latest_thread_event_id_or_error(
         self,
@@ -347,18 +359,15 @@ class MatrixVoiceMessageTools(Toolkit):
             companion_message (str | None): Normal text message sent first, with mentions suppressed.
 
         """
-        context = get_tool_runtime_context()
-        if context is None:
-            return self._context_error()
+        if isinstance(context := tool_context_or_error(self._payload, "Matrix voice message"), str):
+            return context
 
-        validation_error = _input_validation_error(text, room_id, thread_id, caption, companion_message)
-        if validation_error is not None:
-            return self._payload("error", message=validation_error)
+        preflight = await self._preflight(context, text=text, room_id=room_id)
+        if isinstance(preflight, str):
+            return preflight
 
-        preflight, preflight_error = await self._preflight(context, text=text, room_id=room_id)
-        if preflight_error is not None or preflight is None:
-            return preflight_error or self._context_error()
-
+        if thread_id is not None and thread_id != self._ROOM_TIMELINE_SENTINEL:
+            thread_id = await explicit_thread_root(context, room_id=preflight.room_id, thread_id=thread_id)
         effective_thread_id = resolve_context_thread_id(
             context,
             room_id=preflight.room_id,
@@ -389,21 +398,20 @@ class MatrixVoiceMessageTools(Toolkit):
             return thread_error
 
         try:
-            audio_bytes = await asyncio.to_thread(
-                self._generate_speech_bytes,
-                api_key=preflight.api_key,
-                base_url=preflight.base_url,
-                text=preflight.text,
-                response_format=preflight.response_format,
-            )
+            audio_bytes = await self._speech_audio(preflight)
         except Exception as error:
-            status_code = error.status_code if isinstance(error, APIStatusError) else None
+            status_code = error.status_code if isinstance(error, (APIStatusError, RealtimeSpeechError)) else None
+            error_code, error_param = (
+                (error.code, error.param) if isinstance(error, RealtimeSpeechError) else (None, None)
+            )
             logger.error(  # noqa: TRY400 - avoid traceback logging for provider errors that may include secrets.
                 "matrix_voice_tts_generation_failed",
                 room_id=preflight.room_id,
                 thread_id=effective_thread_id,
                 error_type=error.__class__.__name__,
                 status_code=status_code,
+                error_code=error_code,
+                error_param=error_param,
             )
             return self._payload(
                 "error",
@@ -426,7 +434,7 @@ class MatrixVoiceMessageTools(Toolkit):
                 room_id=preflight.room_id,
                 thread_id=effective_thread_id,
                 companion_event_id=companion_event_id,
-                message="Failed to prepare generated audio as a Matrix voice message; non-opus response formats require ffmpeg and ffprobe.",
+                message="Failed to prepare generated audio as a Matrix voice message.",
             )
         event_id = await send_audio_message(
             context.client,
@@ -434,7 +442,7 @@ class MatrixVoiceMessageTools(Toolkit):
             prepared_audio.audio_bytes,
             mimetype=prepared_audio.mimetype,
             filename=_OPUS_FILENAME,
-            caption=caption.strip() if isinstance(caption, str) and caption.strip() else None,
+            caption=(caption or "").strip() or None,
             duration_ms=prepared_audio.duration_ms,
             waveform=prepared_audio.waveform,
             thread_id=effective_thread_id,

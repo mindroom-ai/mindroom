@@ -15,7 +15,7 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
-from mindroom.knowledge.github_app_auth import GitHubAppTokenProvider
+from mindroom.github_app_auth import GitHubAppTokenProvider
 
 
 def _private_key(path: Path) -> rsa.RSAPrivateKey:
@@ -368,3 +368,54 @@ async def test_github_app_invalid_expiry_traceback_does_not_include_response_val
     rendered = "".join(traceback.format_exception(exc_info.value))
     assert canary not in rendered
     assert "secret-token" not in rendered
+
+
+@pytest.mark.asyncio
+async def test_installation_token_scope_is_sent_and_each_scope_is_cached_once(tmp_path: Path) -> None:
+    """Repositories and permissions reach GitHub as given; one token per scope, reused until near its expiry."""
+    key_path = tmp_path / "private-key.pem"
+    _private_key(key_path)
+    current_time = datetime(2026, 8, 21, 12, 0, tzinfo=UTC)
+    payloads: list[bytes] = []
+
+    async def _handler(request: httpx.Request) -> httpx.Response:
+        payloads.append(request.read())
+        return httpx.Response(
+            201,
+            json={
+                "token": f"installation-token-{len(payloads)}",
+                "expires_at": (current_time + timedelta(hours=1)).isoformat().replace("+00:00", "Z"),
+            },
+        )
+
+    write = {"contents": "write", "pull_requests": "write"}
+    read = {"contents": "read", "pull_requests": "read"}
+    async with httpx.AsyncClient(transport=httpx.MockTransport(_handler)) as client:
+        provider = GitHubAppTokenProvider(client=client, now=lambda: current_time)
+
+        async def resolve(repositories: list[str], permissions: dict[str, str]) -> str:
+            token = await provider.resolve_installation_token(
+                _credentials(key_path),
+                owner="acme",
+                repositories=repositories,
+                permissions=permissions,
+            )
+            return token.token
+
+        first = await resolve(["api", "docs"], write)
+        same_scope = await resolve(["Docs", "API"], write)
+        read_scope = await resolve(["api", "docs"], read)
+        fewer_repositories = await resolve(["api"], write)
+        current_time += timedelta(minutes=56)
+        refreshed = await resolve(["api", "docs"], write)
+
+    assert [first, same_scope, read_scope, fewer_repositories, refreshed] == [
+        "installation-token-1",
+        "installation-token-1",
+        "installation-token-2",
+        "installation-token-3",
+        "installation-token-4",
+    ]
+    assert payloads[0] == b'{"repositories":["api","docs"],"permissions":{"contents":"write","pull_requests":"write"}}'
+    assert payloads[1] == b'{"repositories":["api","docs"],"permissions":{"contents":"read","pull_requests":"read"}}'
+    assert payloads[2] == b'{"repositories":["api"],"permissions":{"contents":"write","pull_requests":"write"}}'

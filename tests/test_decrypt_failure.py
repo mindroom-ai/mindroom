@@ -34,7 +34,17 @@ def _megolm_event(
     *,
     event_id: str | None = None,
     server_timestamp: int = 1700000000000,
+    relates_to: dict[str, object] | None = None,
 ) -> nio.MegolmEvent:
+    content: dict[str, object] = {
+        "algorithm": "m.megolm.v1.aes-sha2",
+        "ciphertext": "cipher",
+        "sender_key": "sender_key",
+        "session_id": session_id,
+        "device_id": "DEVICE1",
+    }
+    if relates_to is not None:
+        content["m.relates_to"] = relates_to
     event = nio.MegolmEvent.from_dict(
         {
             "event_id": event_id or f"$undecryptable{uuid4().hex}:localhost",
@@ -42,13 +52,7 @@ def _megolm_event(
             "origin_server_ts": server_timestamp,
             "type": "m.room.encrypted",
             "room_id": "!room:localhost",
-            "content": {
-                "algorithm": "m.megolm.v1.aes-sha2",
-                "ciphertext": "cipher",
-                "sender_key": "sender_key",
-                "session_id": session_id,
-                "device_id": "DEVICE1",
-            },
+            "content": content,
         },
     )
     assert isinstance(event, nio.MegolmEvent)
@@ -307,6 +311,48 @@ async def test_notice_payload_is_a_matrix_notice(tmp_path: Path) -> None:
     assert args[2]["msgtype"] == "m.notice"
     assert "couldn't decrypt" in args[2]["body"]
     assert kwargs["operation"] == "decrypt_failure_notice"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("relates_to", "expected_relation"),
+    [
+        (
+            None,
+            {"rel_type": "m.thread", "event_id": "$failed:localhost", "is_falling_back": False},
+        ),
+        (
+            {"rel_type": "m.thread", "event_id": "$root:localhost"},
+            {"rel_type": "m.thread", "event_id": "$root:localhost", "is_falling_back": False},
+        ),
+        (
+            {"rel_type": "m.replace", "event_id": "$original:localhost"},
+            {},
+        ),
+    ],
+    ids=["room-message", "thread-message", "edit"],
+)
+async def test_notice_answers_the_failed_event_where_agent_replies_go(
+    tmp_path: Path,
+    relates_to: dict[str, object] | None,
+    expected_relation: dict[str, object],
+) -> None:
+    """The notice replies to the failed event in its thread, or starts that event's thread like an agent reply."""
+    send = AsyncMock(return_value=MagicMock())
+
+    with patch("mindroom.matrix.client_delivery.send_message_result", new=send):
+        await handle_decrypt_failure(
+            _mock_client(),
+            _mock_room(),
+            _megolm_event(event_id="$failed:localhost", relates_to=relates_to),
+            agent_name="assistant",
+            runtime_paths=_runtime_paths(tmp_path),
+        )
+
+    content = send.await_args.args[2]
+    reply_key = "m.in_reply_to" if expected_relation else "io.mindroom.in_reply_to"
+    assert content["msgtype"] == "m.notice"
+    assert content["m.relates_to"] == {**expected_relation, reply_key: {"event_id": "$failed:localhost"}}
 
 
 @pytest.mark.asyncio

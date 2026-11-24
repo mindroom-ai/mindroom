@@ -8,7 +8,6 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
-from unittest.mock import AsyncMock
 
 import pytest
 import yaml
@@ -19,12 +18,12 @@ from yaml.scanner import Scanner
 
 from mindroom import file_watcher
 from mindroom.cli.main import app
-from mindroom.config.main import Config, load_config
+from mindroom.config.main import iter_config_validation_messages, load_config
 from mindroom.config.yaml_includes import ConfigIncludeError, load_yaml_config_source, partial_source_files
 from mindroom.constants import resolve_runtime_paths
-from mindroom.orchestration.config_lifecycle import ConfigReloadLifecycle
 from mindroom.orchestrator import _watch_config_task
-from mindroom.response_admission import ResponseAdmissionGate
+from tests.conftest import make_config_reload_lifecycle
+from tests.file_watcher_helpers import record_watcher_scans
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -377,7 +376,7 @@ class TestListExpansion:
         config = load_config(resolve_runtime_paths(config_path=config_path))
         result = runner.invoke(app, ["config", "resolve", "--path", str(config_path)])
 
-        assert [tool.name for tool in config.agents["code"].tools] == ["calculator", "file"]
+        assert [tool.name for tool in config.agents["code"].tools] == ["calculator", "filesystem"]
         assert [tool.name for tool in config.agents["research"].tools] == ["calculator"]
         assert (tmp_path / "agents/_shared/tools.yaml").resolve() in config.source_files
         assert result.exit_code == 0, result.output
@@ -393,6 +392,14 @@ class TestIncludeErrors:
 
         with pytest.raises(ConfigIncludeError, match=r"missing\.yaml' does not exist \(in .*config\.yaml, line 2\)"):
             load_yaml_config_source(tmp_path / "config.yaml")
+
+    def test_include_errors_reach_users_as_written(self, tmp_path: Path) -> None:
+        """Config error surfaces show an include error's own text, not the generic YAML parse prefix."""
+        _write(tmp_path / "config.yaml", "top: value\nbroken: !include missing.yaml\n")
+        with pytest.raises(ConfigIncludeError) as info:
+            load_yaml_config_source(tmp_path / "config.yaml")
+
+        assert iter_config_validation_messages(info.value) == [("config", str(info.value))]
 
     def test_missing_directory_error_names_including_file(self, tmp_path: Path) -> None:
         """A missing include directory reports the including file and tag line."""
@@ -663,7 +670,7 @@ class TestWatchPaths:
         await asyncio.wait_for(watch_task, timeout=2)
 
         assert offloaded
-        assert set(offloaded) == {"paths_mtime_snapshot"}
+        assert set(offloaded) == {"_paths_mtime_snapshot"}
 
     @pytest.mark.asyncio
     async def test_change_to_any_watched_file_triggers_callback(
@@ -681,10 +688,11 @@ class TestWatchPaths:
         async def on_change() -> None:
             changed.set()
 
+        scans = record_watcher_scans(monkeypatch)
         watch_task = asyncio.create_task(
             file_watcher.watch_paths(lambda: (top, included), on_change, stop_event),
         )
-        await asyncio.sleep(0.05)
+        await scans.wait_for_scan_of(top, included)
         future_time = time.time() + 5
         included.write_text("b: 3\n", encoding="utf-8")
         os.utime(included, (future_time, future_time))
@@ -703,18 +711,22 @@ class TestWatchPaths:
         monkeypatch.setattr(file_watcher, "_WATCH_SCAN_INTERVAL_SECONDS", 0.01)
         files = [_write(tmp_path / name, "a: 1\n") for name in ("config.yaml", "b.yaml", "c.yaml")]
         callbacks: list[bool] = []
+        changed = asyncio.Event()
         stop_event = asyncio.Event()
 
         async def on_change() -> None:
             callbacks.append(True)
+            changed.set()
 
+        scans = record_watcher_scans(monkeypatch)
         watch_task = asyncio.create_task(file_watcher.watch_paths(lambda: tuple(files), on_change, stop_event))
-        await asyncio.sleep(0.05)
+        await scans.wait_for_scan_of(*files)
         future_time = time.time() + 5
         for path in files:
             path.write_text("a: 2\n", encoding="utf-8")
             os.utime(path, (future_time, future_time))
-        await asyncio.sleep(0.2)
+        await asyncio.wait_for(changed.wait(), timeout=2)
+        await scans.wait_for_next_scan()
 
         stop_event.set()
         await watch_task
@@ -745,7 +757,7 @@ class TestWatchPaths:
             fired_at_scan.append(scans["count"])
             stop_event.set()
 
-        monkeypatch.setattr(file_watcher, "paths_mtime_snapshot", scripted_snapshot)
+        monkeypatch.setattr(file_watcher, "_paths_mtime_snapshot", scripted_snapshot)
         await asyncio.wait_for(file_watcher.watch_paths(lambda: (path,), on_change, stop_event), timeout=2)
 
         # Baseline consumed scan 1; scans 2-5 each saw a change; scan 6 was the
@@ -782,7 +794,7 @@ class TestWatchPaths:
             fired_at_scan.append(scans["count"])
             stop_event.set()
 
-        monkeypatch.setattr(file_watcher, "paths_mtime_snapshot", scripted_snapshot)
+        monkeypatch.setattr(file_watcher, "_paths_mtime_snapshot", scripted_snapshot)
         await asyncio.wait_for(file_watcher.watch_paths(lambda: (top, included), on_change, stop_event), timeout=2)
 
         assert fired_at_scan == [4]
@@ -798,13 +810,16 @@ class TestWatchPaths:
         top = _write(tmp_path / "config.yaml", "a: 1\n")
         included = _write(tmp_path / "agents.yaml", "b: 2\n")
         callbacks: list[bool] = []
+        changed = asyncio.Event()
         stop_event = asyncio.Event()
 
         async def on_change() -> None:
             callbacks.append(True)
+            changed.set()
 
+        scans = record_watcher_scans(monkeypatch)
         watch_task = asyncio.create_task(file_watcher.watch_paths(lambda: (top, included), on_change, stop_event))
-        await asyncio.sleep(0.05)
+        await scans.wait_for_scan_of(top, included)
         included.unlink()
         await asyncio.sleep(0.1)
         assert callbacks == []
@@ -812,7 +827,8 @@ class TestWatchPaths:
         future_time = time.time() + 5
         _write(included, "b: 3\n")
         os.utime(included, (future_time, future_time))
-        await asyncio.sleep(0.1)
+        await asyncio.wait_for(changed.wait(), timeout=2)
+        await scans.wait_for_next_scan()
 
         stop_event.set()
         await watch_task
@@ -845,29 +861,6 @@ class TestWatchPaths:
         assert callbacks == []
 
 
-def _reload_lifecycle(config_path: Path) -> ConfigReloadLifecycle:
-    """Build one reload lifecycle that loads fresh configs and never applies plans."""
-
-    async def _load_initial(config: Config) -> bool:
-        del config
-        return True
-
-    async def _apply_plan(config: Config, plan: object, plugin_changes: tuple[str, ...]) -> bool:
-        del config, plan, plugin_changes
-        raise AssertionError
-
-    return ConfigReloadLifecycle(
-        runtime_paths=resolve_runtime_paths(config_path=config_path),
-        is_running=lambda: True,
-        current_config=lambda: None,
-        agent_bots=dict,
-        load_initial_config=_load_initial,
-        apply_update_plan=_apply_plan,
-        response_admission_gate=ResponseAdmissionGate(),
-        before_runtime_replacement=AsyncMock(),
-    )
-
-
 class TestFailedReloadWatchSet:
     """A failed orchestrator reload keeps its own include files reachable by the watcher."""
 
@@ -879,35 +872,28 @@ class TestFailedReloadWatchSet:
             "agents: !include agents.yaml\nmodels:\n  default:\n    provider: ollama\n    id: test-model\n",
         )
         agents_path = _write(tmp_path / "agents.yaml", "broken: [not, a, mapping]\n")
-        lifecycle = _reload_lifecycle(config_path)
+        lifecycle = make_config_reload_lifecycle(resolve_runtime_paths(config_path=config_path))
 
         await lifecycle._apply_queued_config_reload()
 
-        assert lifecycle.failed_reload_source_files == frozenset(
-            {config_path.resolve(), agents_path.resolve()},
-        )
+        assert {config_path.resolve(), agents_path.resolve()} <= lifecycle.watched_source_files
 
         _write(tmp_path / "agents.yaml", "code:\n  display_name: Code\n  role: Writes code\n")
         await lifecycle._apply_queued_config_reload()
 
-        assert lifecycle.failed_reload_source_files is None
+        assert lifecycle.watched_source_files == frozenset({config_path.resolve(), agents_path.resolve()})
 
     @pytest.mark.asyncio
-    async def test_config_watcher_uses_sources_from_a_successful_noop_reload(
+    async def test_config_watcher_watches_the_files_the_reload_owner_recorded(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """The dynamic watcher should replace stale include topology after an equal reload."""
+        """The dynamic watcher covers config.yaml and every file the last loads recorded."""
         config_path = (tmp_path / "config.yaml").resolve()
-        old_include = (tmp_path / "old.yaml").resolve()
         new_include = (tmp_path / "new.yaml").resolve()
         orchestrator = SimpleNamespace(
-            config=SimpleNamespace(source_files=frozenset({config_path, old_include})),
-            config_reload=SimpleNamespace(
-                loaded_source_files=frozenset({config_path, new_include}),
-                failed_reload_source_files=None,
-            ),
+            config_reload=SimpleNamespace(watched_source_files=frozenset({config_path, new_include})),
         )
         watched: set[Path] = set()
 
@@ -927,9 +913,9 @@ class TestFailedReloadWatchSet:
             tmp_path / "config.yaml",
             "models:\n  default:\n    provider: ollama\n    id: test-model\n",
         )
-        lifecycle = _reload_lifecycle(config_path)
+        lifecycle = make_config_reload_lifecycle(resolve_runtime_paths(config_path=config_path))
         await lifecycle._apply_queued_config_reload()
-        assert lifecycle.failed_reload_source_files is None
+        assert lifecycle.watched_source_files == frozenset({config_path.resolve()})
 
         # Reference a NEW include file whose content is a syntax error, so the
         # reload fails while parsing and the last good config never saw the file.
@@ -940,14 +926,14 @@ class TestFailedReloadWatchSet:
         new_file = _write(tmp_path / "agents" / "new.yaml", "code: [unclosed\n")
         await lifecycle._apply_queued_config_reload()
 
-        assert lifecycle.failed_reload_source_files is not None
-        assert new_file.resolve() in lifecycle.failed_reload_source_files
+        assert new_file.resolve() in lifecycle.watched_source_files
 
         # Fixing ONLY the new include file makes the retry reload succeed.
         _write(new_file, "code:\n  display_name: Code\n  role: Writes code\n")
         await lifecycle._apply_queued_config_reload()
 
-        assert lifecycle.failed_reload_source_files is None
+        assert lifecycle.status.status == "applied"
+        assert lifecycle.watched_source_files == frozenset({config_path.resolve(), new_file.resolve()})
 
     @pytest.mark.asyncio
     async def test_watch_paths_picks_up_a_fix_to_a_failed_reloads_new_include(
@@ -961,25 +947,22 @@ class TestFailedReloadWatchSet:
             tmp_path / "config.yaml",
             "models:\n  default:\n    provider: ollama\n    id: test-model\n",
         )
-        lifecycle = _reload_lifecycle(config_path)
+        lifecycle = make_config_reload_lifecycle(resolve_runtime_paths(config_path=config_path))
         await lifecycle._apply_queued_config_reload()
         reloads = asyncio.Event()
         stop_event = asyncio.Event()
 
         def provider() -> set[Path]:
-            # Mirrors orchestrator._watch_config_task: the top-level file plus
-            # whatever a failed reload attempt read.
-            watched = {config_path}
-            if lifecycle.failed_reload_source_files:
-                watched.update(lifecycle.failed_reload_source_files)
-            return watched
+            # Mirrors orchestrator._watch_config_task.
+            return {config_path, *lifecycle.watched_source_files}
 
         async def on_change() -> None:
             await lifecycle._apply_queued_config_reload()
             reloads.set()
 
+        scans = record_watcher_scans(monkeypatch)
         watch_task = asyncio.create_task(file_watcher.watch_paths(provider, on_change, stop_event))
-        await asyncio.sleep(0.05)
+        await scans.wait_for_scan_of(config_path)
 
         future_time = time.time() + 5
         new_file = _write(tmp_path / "agents" / "new.yaml", "code: [unclosed\n")
@@ -990,11 +973,10 @@ class TestFailedReloadWatchSet:
         os.utime(new_file, (future_time, future_time))
         os.utime(config_path, (future_time, future_time))
         await asyncio.wait_for(reloads.wait(), timeout=2)
-        assert lifecycle.failed_reload_source_files is not None
-        assert new_file.resolve() in lifecycle.failed_reload_source_files
+        assert new_file.resolve() in lifecycle.watched_source_files
 
         # Let the watcher baseline the newly watched file, then fix ONLY it.
-        await asyncio.sleep(0.05)
+        await scans.wait_for_scan_of(new_file)
         reloads.clear()
         future_time += 5
         _write(new_file, "code:\n  display_name: Code\n  role: Writes code\n")
@@ -1003,4 +985,4 @@ class TestFailedReloadWatchSet:
 
         stop_event.set()
         await watch_task
-        assert lifecycle.failed_reload_source_files is None
+        assert lifecycle.status.status == "applied"

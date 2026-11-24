@@ -2,51 +2,71 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
+from ast import literal_eval
 from typing import TYPE_CHECKING
 
 import pytest
-from agno.agent import Agent
-from agno.models.response import ModelResponse
-from agno.run.agent import RunOutput
-from agno.run.base import RunStatus
 
-from mindroom.agent_storage import create_session_storage
-from mindroom.agents import apply_tool_approval_capability, build_agent_toolkit
-from mindroom.ai import run_delegated_child_response
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
-from mindroom.config.models import DefaultsConfig
-from mindroom.delegation.execution import drive_delegations
+from mindroom.config.models import BackgroundToolJobsConfig, DefaultsConfig
 from mindroom.delegation.state import DelegationState
+from mindroom.llm.runs import RunStatus
+from mindroom.response_turn import CompletedApprovalRun, PausedAttempt
 from mindroom.runtime_resolution import resolve_agent_runtime
-from mindroom.tool_system.runtime_context import tool_runtime_context
+from mindroom.tool_jobs.control import pending_human_messages_context
+from mindroom.tool_jobs.instances import pin_background_tool_jobs
+from mindroom.tool_jobs.runtime import register_background_runtime
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+from tests.delegation_helpers import (
+    ScriptedAgents,
+    _runtime_paths,
+    _saved_approval_calls,
+    approval_executor,
+    respond,
+    resume,
+    stored_run,
+)
+from tests.fakes.scripted_model import Await, ScriptedModel, answer, calls, tool_call
 from tests.identity_helpers import entity_ids
-from tests.test_delegate_tools import _delegate_runtime_context, _runtime_paths
-from tests.test_delegation_execution import DelegationModel, _call, _saved_approval_calls
+from tests.tool_job_helpers import JOB_TEST_TIMEOUT, tool_job_runtime
 
 if TYPE_CHECKING:
     from pathlib import Path
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mode", ["explicit", "automatic", "invalid", "resumed", "resumed_invalid"])
-async def test_native_delegation_obeys_output_file_policy(
+@pytest.mark.parametrize(
+    ("mode", "execution"),
+    [
+        (mode, execution)
+        for mode in ("explicit", "automatic", "invalid", "resumed", "resumed_invalid")
+        for execution in ("inline", "foreground", "detached", "excluded")
+        # A managed child asks for its own approvals through job cards, so only unmanaged children resume a parent.
+        if not (mode.startswith("resumed") and execution in {"foreground", "detached"})
+    ],
+)
+async def test_native_delegation_obeys_output_file_policy(  # noqa: C901, PLR0912, PLR0915
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     mode: str,
+    execution: str,
 ) -> None:
     """Persisted child approvals must not bypass path validation, redirection, or automatic saving."""
     paths = _runtime_paths(tmp_path)
     config = Config(
+        background_tool_jobs=BackgroundToolJobsConfig(
+            enabled=execution != "inline",
+            exclude_toolkits=["shell", "delegate"] if execution == "excluded" else ["shell"],
+        ),
         agents={
             "leader": AgentConfig(display_name="Leader", delegate_to=["child"], private=AgentPrivateConfig(per="user")),
             "child": AgentConfig(display_name="Child", tools=["calculator"]),
         },
         defaults=DefaultsConfig(
             tools=[],
-            learning=False,
             tool_output_auto_save_threshold_bytes=16 if mode == "automatic" else 100_000,
         ),
         memory={"backend": "none"},
@@ -62,79 +82,113 @@ async def test_native_delegation_obeys_output_file_policy(
         None,
         "parent",
     )
-    child_model = DelegationModel(
-        id="child",
-        responses=[ModelResponse(tool_calls=[_call("add", "sum", a=1, b=2)]), ModelResponse(content="Child report")],
-    )
-    monkeypatch.setattr("mindroom.agents._load_agent_model_instance", lambda *_args: child_model)
-    toolkit = build_agent_toolkit(
-        "delegate",
-        agent_name="leader",
-        config=config,
-        runtime_paths=paths,
-        worker_tools=[],
-        runtime_overrides=None,
-        execution_identity=identity,
-    )
-    assert toolkit is not None
-    apply_tool_approval_capability(toolkit, config, supports_native_tool_approval=True, registered_tool_name="delegate")
-    output_args = (
+    runtime = await tool_job_runtime(tmp_path) if execution != "inline" else None
+    pin_background_tool_jobs(config, paths)
+    if runtime is not None:
+        register_background_runtime(paths, runtime)
+    release = asyncio.Event()
+    signal = asyncio.Event()
+    if execution != "detached":
+        release.set()
+
+    async def start_child() -> None:
+        # A human message while an excluded child runs must not move its wait into a job.
+        if execution == "excluded":
+            signal.set()
+        await release.wait()
+
+    child = ScriptedModel([[Await(start_child), *calls(tool_call("add", "sum", a=1, b=2))], answer("Child report")])
+    output_args: dict[str, object] = (
         {} if mode == "automatic" else {"mindroom_output_path": "../escape.txt" if mode == "invalid" else "report.txt"}
     )
-    model = DelegationModel(
-        id="parent",
-        responses=[
-            ModelResponse(
-                tool_calls=[_call("run_subagent", "delegate", agent_name="child", task="Write report", **output_args)],
-            ),
-            ModelResponse(content="Parent done"),
+    if execution == "detached":
+        output_args["background_after"] = 0
+    parent = ScriptedModel(
+        [
+            calls(tool_call("run_subagent", "delegate", agent_name="child", task="Write report", **output_args)),
+            answer("Parent done"),
         ],
     )
-    storage = create_session_storage("leader", config, paths, identity)
-    parent = Agent(id="leader", name="leader", db=storage, tools=[toolkit], model=model)
-    workspace = resolve_agent_runtime("leader", config, paths, identity).tool_base_dir
-    assert workspace is not None
-    options = {"agent_name": "leader", "config": config, "runtime_paths": paths, "execution_identity": identity}
+    ScriptedAgents({"child": child}, by_session={"parent": parent}).install(monkeypatch)
+    workspace = resolve_agent_runtime("leader", config, paths, identity).workspace.root
+    options = {"config": config, "runtime_paths": paths, "identity": identity}
+    result_tool_name = "run_subagent"
+    run_id = "parent-run"
+    relocated_output = None
     try:
-        with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=identity)):
-            response = await parent.arun("Delegate", session_id=identity.session_id, user_id=identity.requester_id)
-            result = await drive_delegations(parent, response, run_child=run_delegated_child_response, **options)
-            if mode.startswith("resumed"):
-                assert result.status == RunStatus.paused
+        with pending_human_messages_context(signal):
+            reply = await respond("leader", "Delegate", **options, run_id=run_id)
+            if execution == "detached" and mode != "invalid":
+                assert runtime is not None
+                first = next(
+                    tool
+                    for tool in stored_run("leader", run_id, **options).tools or []
+                    if tool.tool_name == "run_subagent"
+                )
+                handle = json.loads(str(first.result))
+                assert "job_id" in handle, "A released wait returns its handle without redirecting it to a file"
                 assert not (workspace / "report.txt").exists()
-                stored = storage.get_run(result.run_id)
-                assert isinstance(stored, RunOutput)
-                state = DelegationState.from_metadata(stored.metadata)
+                release.set()
+                waited = await asyncio.wait_for(
+                    runtime.wait(handle["job_id"], owner=identity, depth=0),
+                    JOB_TEST_TIMEOUT,
+                )
+                await runtime.release_wait(handle["job_id"], waited.claim)
+                if mode == "explicit":
+                    relocated_output = workspace / "completed_report.txt"
+                    (workspace / "report.txt").rename(relocated_output)
+                    (workspace / "report.txt").mkdir()
+                parent.turns = [
+                    calls(tool_call("job", "retrieve", action="wait", job_id=handle["job_id"])),
+                    answer("Parent done"),
+                ]
+                run_id = "retrieve-run"
+                reply = await respond("leader", "Retrieve", **options, run_id=run_id)
+                result_tool_name = "job"
+            if mode.startswith("resumed"):
+                assert isinstance(reply, PausedAttempt)
+                assert stored_run("leader", run_id, **options).status is RunStatus.paused
+                assert not (workspace / "report.txt").exists()
+                state = DelegationState.from_metadata(stored_run("leader", run_id, **options).metadata)
                 if mode == "resumed_invalid":
                     (workspace / "report.txt").symlink_to(tmp_path / "escape.txt")
-                result = await drive_delegations(
-                    Agent(
-                        id="leader",
-                        name="leader",
-                        db=storage,
-                        tools=[toolkit],
-                        model=DelegationModel(id="parent", responses=[ModelResponse(content="Parent done")]),
-                    ),
-                    stored,
-                    run_child=run_delegated_child_response,
+                if execution == "excluded" and mode == "resumed":
+                    config.background_tool_jobs.exclude_toolkits.remove("delegate")
+                approvals = _saved_approval_calls(state)
+                resumed = await resume(
+                    approval_executor(config, paths),
+                    reply,
+                    approvals,
+                    agent_name="leader",
                     **options,
-                    decisions={str(tool["tool_call_id"]): True for tool in state.pending_tools},
-                    approval_calls=_saved_approval_calls(state),
-                    denial_reasons={str(tool["tool_call_id"]): None for tool in state.pending_tools},
+                    decisions={call.tool_call_id: True for call in approvals},
                 )
-        assert result.status == RunStatus.completed
-        delegation = next(tool for tool in result.tools or [] if tool.tool_name == "run_subagent")
-        receipt = json.loads(delegation.result)["mindroom_tool_output"]
+                assert isinstance(resumed, CompletedApprovalRun)
+        result = stored_run("leader", run_id, **options)
+        assert result.status is RunStatus.completed
+        if execution == "excluded":
+            assert runtime is not None
+            assert await runtime.list_jobs(owner=identity, depth=0) == []
+        delegation = next(tool for tool in result.tools or [] if tool.tool_name == result_tool_name)
+        recorded = str(delegation.result)
+        if result_tool_name == "job" and mode == "automatic":
+            # The job call's own output policy saves the retrieved receipt again, and its receipt reaches the record
+            # as the dict's text, as Agno recorded every tool's dict result.
+            saved_again = literal_eval(recorded)["mindroom_tool_output"]
+            assert saved_again["auto_saved"] is True
+            assert saved_again["path"].startswith("mindroom_tool_outputs/job-")
+            recorded = (workspace / saved_again["path"]).read_text()
+        receipt = json.loads(recorded)["mindroom_tool_output"]
         if mode in {"invalid", "resumed_invalid"}:
             assert receipt["status"] == "error"
             assert not (tmp_path / "escape.txt").exists()
-            if mode == "invalid":
-                assert len(child_model.responses) == 2
-            else:
-                assert len(child_model.responses) == 1
+            # An invalid path never starts the child; a resumed one is refused before the child continues.
+            assert len(child.requests) == (0 if mode == "invalid" else 1)
         else:
             assert receipt["status"] == "saved_to_file"
-            assert "Child report" in (workspace / receipt["path"]).read_text()
+            assert "Child report" in (relocated_output or workspace / receipt["path"]).read_text()
             assert receipt.get("auto_saved", False) == (mode == "automatic")
     finally:
-        storage.close()
+        release.set()
+        if runtime is not None:
+            await runtime.shutdown()

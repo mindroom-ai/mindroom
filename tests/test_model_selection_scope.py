@@ -14,7 +14,7 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.entity_resolution import entity_identity_registry
-from mindroom.model_selection_scope import validate_model_picker_scope
+from mindroom.model_selection_scope import ModelPickerScope, validate_model_picker_scope
 from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
 from tests.test_conversation_hydration import encrypted
 
@@ -44,9 +44,9 @@ def picker_setup(tmp_path: Path) -> tuple:
     return client, config, paths, AgentReplyMembershipIndex(), client.user_id, agent
 
 
-def picker_client(config: Config, paths: RuntimePaths, *members: str) -> AsyncMock:
-    """Return the router's client in a room where the router and *members* are joined and ``$root`` is readable."""
-    router = entity_identity_registry(config, paths).current_id("router").full_id
+def picker_client(config: Config, paths: RuntimePaths, *members: str, account: str = "router") -> AsyncMock:
+    """Return ``account``'s client in a room where it and *members* are joined and ``$root`` is readable."""
+    router = entity_identity_registry(config, paths).current_id(account).full_id
     client = AsyncMock(spec=nio.AsyncClient)
     client.user_id = router
     client.device_id = "DEVICE"
@@ -94,7 +94,7 @@ async def test_scope_requires_actual_joined_authorized_agent(tmp_path: Path) -> 
         requester_user_id=USER,
         thread_id="$root",
     )
-    assert scope is not None
+    assert isinstance(scope, ModelPickerScope)
     assert scope.agent_user_ids == (agent,)
     assert scope.entity_names == ("helper",)
     client.joined_members.return_value = joined_response(USER, router)
@@ -108,34 +108,103 @@ async def test_scope_requires_actual_joined_authorized_agent(tmp_path: Path) -> 
             requester_user_id=USER,
             thread_id="$root",
         )
-        is None
+        == "no_addressable_agent"
     )
 
 
+@pytest.mark.asyncio
+async def test_room_only_scope_does_not_reread_membership(tmp_path: Path) -> None:
+    """A room-only validation needs no second read because it does not await a root."""
+    client, config, paths, index, _, _ = picker_setup(tmp_path)
+    scope = await validate_model_picker_scope(
+        client=client,
+        config=config,
+        runtime_paths=paths,
+        membership_index=index,
+        room_id=ROOM,
+        requester_user_id=USER,
+        thread_id=None,
+    )
+    assert isinstance(scope, ModelPickerScope)
+    client.joined_members.assert_awaited_once_with(ROOM)
+    client.room_get_event.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_agent_device_answers_discovery_in_room_without_owner(tmp_path: Path) -> None:
+    """The answering account is the one that must be joined: an agent validates a room the owner is not in."""
+    _, config, paths, index, router, agent = picker_setup(tmp_path)
+    client = picker_client(config, paths, USER, account="helper")
+    scope = await validate_model_picker_scope(
+        client=client,
+        config=config,
+        runtime_paths=paths,
+        membership_index=index,
+        room_id=ROOM,
+        requester_user_id=USER,
+        thread_id="$root",
+    )
+    assert router not in client.rooms[ROOM].users
+    assert scope is not None
+    assert scope.agent_user_ids == (agent,)
+
+
+@pytest.mark.asyncio
+async def test_scope_reads_a_member_list_refused_for_a_membership_change_again(tmp_path: Path) -> None:
+    """A member list the client refused for a membership change during the read is read again."""
+    client, config, paths, index, _router, agent = picker_setup(tmp_path)
+    answer = client.joined_members.return_value
+    client.joined_members.side_effect = [
+        nio.LocalProtocolError("room membership changed during lookup"),
+        answer,
+        nio.LocalProtocolError("room membership changed during lookup"),
+        answer,
+    ]
+
+    scope = await validate_model_picker_scope(
+        client=client,
+        config=config,
+        runtime_paths=paths,
+        membership_index=index,
+        room_id=ROOM,
+        requester_user_id=USER,
+        thread_id="$root",
+    )
+
+    assert isinstance(scope, ModelPickerScope)
+    assert scope.agent_user_ids == (agent,)
+
+
 @pytest.mark.parametrize(
-    "root",
+    ("root", "reason"),
     [
-        root_event(room_id="!foreign:localhost"),
-        root_event(event_id="$wrong"),
-        root_event(
-            content={
-                "msgtype": "m.text",
-                "body": "Child",
-                "m.relates_to": {"rel_type": "m.thread", "event_id": "$parent"},
-            },
+        (root_event(room_id="!foreign:localhost"), "thread_root_unreadable"),
+        (root_event(event_id="$wrong"), "thread_root_unreadable"),
+        (
+            root_event(
+                content={
+                    "msgtype": "m.text",
+                    "body": "Child",
+                    "m.relates_to": {"rel_type": "m.thread", "event_id": "$parent"},
+                },
+            ),
+            "not_thread_root",
         ),
-        root_event(
-            content={
-                "msgtype": "m.text",
-                "body": "Edit",
-                "m.relates_to": {"rel_type": "m.replace", "event_id": "$parent"},
-            },
+        (
+            root_event(
+                content={
+                    "msgtype": "m.text",
+                    "body": "Edit",
+                    "m.relates_to": {"rel_type": "m.replace", "event_id": "$parent"},
+                },
+            ),
+            "not_thread_root",
         ),
-        root_event(content={}, unsigned={"redacted_because": {}}),
+        (root_event(content={}, unsigned={"redacted_because": {}}), "thread_root_unreadable"),
     ],
 )
 @pytest.mark.asyncio
-async def test_invalid_root_cannot_grant_scope(tmp_path: Path, root: nio.Event) -> None:
+async def test_invalid_root_cannot_grant_scope(tmp_path: Path, root: nio.Event, reason: str) -> None:
     """A native thread relation shortcut cannot prove the referenced root."""
     client, config, paths, index, _, _ = picker_setup(tmp_path)
     client.room_get_event.return_value = nio.RoomGetEventResponse.from_dict(root.source)
@@ -149,7 +218,7 @@ async def test_invalid_root_cannot_grant_scope(tmp_path: Path, root: nio.Event) 
             requester_user_id=USER,
             thread_id="$root",
         )
-        is None
+        == reason
     )
 
 
@@ -173,8 +242,10 @@ async def test_membership_loss_during_root_fetch_denies_scope(tmp_path: Path) ->
             requester_user_id=USER,
             thread_id="$root",
         )
-        is None
+        == "not_joined"
     )
+    reads = [call[0] for call in client.mock_calls if call[0] in {"joined_members", "room_get_event"}]
+    assert reads == ["joined_members", "room_get_event", "joined_members"]
 
 
 @pytest.mark.parametrize("absent", ["requester", "router"])
@@ -194,7 +265,7 @@ async def test_missing_joined_member_denies_scope(tmp_path: Path, absent: str) -
             requester_user_id=USER,
             thread_id=None,
         )
-        is None
+        == "not_joined"
     )
 
 
@@ -213,7 +284,7 @@ async def test_joined_but_unauthorized_agent_does_not_grant_scope(tmp_path: Path
             requester_user_id=USER,
             thread_id="$root",
         )
-        is None
+        == "no_addressable_agent"
     )
 
 
@@ -251,4 +322,8 @@ async def test_encrypted_root_proof_uses_only_readable_content(tmp_path: Path, d
         requester_user_id=USER,
         thread_id="$root",
     )
-    assert (scope is not None) == (decrypted == "root")
+    expected = {"child": "not_thread_root", "foreign": "thread_root_unreadable", "unreadable": "thread_root_unreadable"}
+    if decrypted == "root":
+        assert isinstance(scope, ModelPickerScope)
+    else:
+        assert scope == expected[decrypted]

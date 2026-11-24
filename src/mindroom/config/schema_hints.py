@@ -12,12 +12,12 @@ from mindroom.redaction import REDACTED, redact_config_text, redact_sensitive_da
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-# Display redaction shows a URL password as ``user:***@host`` instead of the marker.
-# The username may itself contain ``@``, so match anywhere in the authority.
+# Display redaction shows URL credentials as ``***@host`` instead of the marker.
+# Match a mask anywhere in the authority, so a masked password after a username (``user:***@host``) is refused too.
 _MASKED_URL_USERINFO = re.compile(r"://[^/?#\s]*\*\*\*@")
 
 # The dashboard's configSchema.ts mirrors these kinds and the hint key.
-type _ReferenceKind = Literal["model", "agent", "room", "tool"]
+type _ReferenceKind = Literal["model", "agent", "personal_room_agent", "room", "tool"]
 _HINT_KEY = "x-mindroom"
 
 
@@ -25,6 +25,7 @@ def dashboard_hint(
     *,
     reference: _ReferenceKind | None = None,
     key_reference: _ReferenceKind | None = None,
+    key_placeholder: str | None = None,
     secret: bool = False,
     multiline: bool = False,
 ) -> JsonDict:
@@ -32,13 +33,16 @@ def dashboard_hint(
 
     ``reference`` names the configured entity a string (or each list item or
     mapping value) refers to, and ``key_reference`` does the same for mapping
-    keys.
+    keys. ``key_placeholder`` is an example key the dashboard shows in a
+    mapping's new-key input while that input is empty.
     """
     hint: JsonDict = {}
     if reference is not None:
         hint["reference"] = reference
     if key_reference is not None:
         hint["key_reference"] = key_reference
+    if key_placeholder is not None:
+        hint["key_placeholder"] = key_placeholder
     if secret:
         hint["secret"] = True
     if multiline:
@@ -52,7 +56,7 @@ def _is_secret_schema(schema: Mapping[str, Any]) -> bool:
 
 
 # An environment reference names where a secret lives, so it is shown rather than masked.
-_ENV_PLACEHOLDER_PATTERN = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*\}")
+ENV_PLACEHOLDER_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
 
 
 def _mask_secret_value(value: object) -> object:
@@ -61,7 +65,7 @@ def _mask_secret_value(value: object) -> object:
         return {key: _mask_secret_value(item) for key, item in value.items()}
     if isinstance(value, list):
         return [_mask_secret_value(item) for item in value]
-    if value is None or (isinstance(value, str) and _ENV_PLACEHOLDER_PATTERN.fullmatch(value)):
+    if value is None or (isinstance(value, str) and ENV_PLACEHOLDER_PATTERN.fullmatch(value)):
         return value
     return REDACTED
 

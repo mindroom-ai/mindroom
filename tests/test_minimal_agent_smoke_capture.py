@@ -1,5 +1,6 @@
 """Canaries for every normal-output sink used by the Docker release smoke."""
 
+import logging
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -37,6 +38,8 @@ def test_smoke_capture_detects_canary_in_previously_missed_sink(tmp_path: Path, 
         )
         setup_logging(runtime_paths=paths)
         get_logger("mindroom.ai").info("runtime output synthetic-secret-canary")
+        # Like the smoke run, stop logging first, so the log file holds every queued record.
+        logging.shutdown()
         audit.capture_primary(paths.storage_root / "logs")
     elif sink == "primary-console":
         audit.capture("primary-console", "primary-process-stdout-stderr", "synthetic-secret-canary")

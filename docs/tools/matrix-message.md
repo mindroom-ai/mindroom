@@ -47,9 +47,9 @@ matrix_message(action="react", event_id="$message", message="✅")
 
 ## Agent conversations
 
-<video controls playsinline preload="metadata" aria-label="One agent rolls back a broken deploy and hands the customer update to another" style="width: 100%" poster="https://github.com/user-attachments/assets/a5eb5a08-bd1e-4533-a8ec-71bd462d072c" data-poster-light="https://github.com/user-attachments/assets/a5eb5a08-bd1e-4533-a8ec-71bd462d072c" data-poster-dark="https://github.com/user-attachments/assets/dcd0bb4a-c51b-420f-8e32-f8ce140b1037">
-  <source src="https://github.com/user-attachments/assets/2dce4510-bb8a-440b-9bb3-0bcb0d324955" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/c4093417-247c-4961-b6bc-85f73f2e9b55" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="One agent rolls back a broken deploy and hands the customer update to another" style="width: 100%" poster="https://github.com/user-attachments/assets/f0841f4c-b329-4f6e-beb8-db97385ca747" data-poster-light="https://github.com/user-attachments/assets/f0841f4c-b329-4f6e-beb8-db97385ca747" data-poster-dark="https://github.com/user-attachments/assets/4f646502-aa3d-45e0-9252-caeb82cff64b">
+  <source src="https://github.com/user-attachments/assets/f52dc877-6750-41a7-b7df-682a28cbdbfc" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/dfae0111-bd08-465d-a316-b37fc3b8324f" type="video/mp4">
 </video>
 
 List possible recipients with `matrix_room(action="agents")` and pass a result's `name` as `recipient`; no Matrix mention is needed.
@@ -57,12 +57,23 @@ Only the chosen recipient responds, even if the text or a sent file's name menti
 An unknown or unavailable name returns `Recipient '<name>' is not available in this room. Available recipients: ...`.
 Recipients can be agents or teams.
 An agent can address itself only when a human requested the current turn; otherwise use `run_subagent` for a fresh self-run.
+[Contact Turns](../agent-contacts.md#contact-turns) describes what `matrix_message` may send into and from an agent's contact room.
 
 Sending returns immediately with the delivered event IDs; read the conversation later to see the response.
+The recipient's reply wakes the sender only when it mentions the sender.
 
 Thread-mode recipients accept `new_thread=True` or an explicit `thread_id`.
 A task sent to a thread-mode recipient on the room timeline starts the response thread at the task message, and the returned `thread_id` identifies it.
 Room-mode recipients share the room timeline: omit thread options or pass `thread_id="room"`; asking for a separate thread returns an error before anything is sent.
+
+Add the bundled `agent-conversations` skill to agents that talk to each other, so they wake only the agent that should act, say who receives each answer, and finish without extra replies:
+
+```yaml
+agents:
+  lead:
+    tools: [matrix_message]
+    skills: [agent-conversations]
+```
 
 ## Choosing the conversation
 
@@ -83,7 +94,7 @@ A new thread may not appear in `matrix_room(action="threads")` until it has a re
 | `action` | `"send" \| "read" \| "edit" \| "react"` | `"send"` | Message operation. |
 | `message` | `str \| None` | `None` | Text for send/edit; emoji for react, defaulting to 👍. |
 | `recipient` | `str \| None` | `None` | Available agent or team name to request a response from; send only. |
-| `room_id` | `str \| None` | `None` | Matrix room ID or configured room name; current room by default. |
+| `room_id` | `str \| None` | `None` | Matrix room ID, alias, or configured room name; current room by default. |
 | `thread_id` | `str \| None` | `None` | Thread root ID, or `"room"` for the room timeline; current conversation by default. |
 | `new_thread` | `bool` | `False` | Start a separate thread; send only, cannot be combined with `thread_id`. |
 | `event_id` | `str \| None` | `None` | Target message ID; required for edit and react. |
@@ -92,7 +103,7 @@ A new thread may not appear in `matrix_room(action="threads")` until it has a re
 | `idempotency_key` | `str \| None` | `None` | Nonblank key of at most 256 characters for [safe send retries](#safe-send-retries); text-only sends. |
 | `limit` | `int \| None` | `None` | Messages to read, clamped to 1–50; default 20. |
 
-Agents with a workspace also see the standard [`mindroom_output_path`](execution-and-coding.md#workspace-and-tool-output-files) argument, which saves the tool result to a file; it does not change where the message goes.
+The tool also takes the standard [`mindroom_output_path`](execution-and-coding.md#workspace-and-tool-output-files) argument, which saves the tool result to a file; it does not change where the message goes.
 
 `send` requires text, attachments, or both.
 `edit` requires non-empty text and can only edit messages the agent's own account sent.

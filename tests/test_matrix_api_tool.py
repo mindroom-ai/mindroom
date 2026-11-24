@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 import tempfile
 from collections import defaultdict, deque
 from dataclasses import replace
@@ -12,6 +13,7 @@ from unittest.mock import AsyncMock, patch
 
 import nio
 import pytest
+from pydantic import ValidationError
 
 import mindroom.tools  # noqa: F401
 from mindroom.config.agent import AgentConfig
@@ -27,10 +29,11 @@ from mindroom.custom_tools.matrix_api import MatrixApiTools, _MatrixSearchRespon
 from mindroom.custom_tools.matrix_helpers import check_rate_limit
 from mindroom.dispatch_source import TRUSTED_INTERNAL_RELAY_SOURCE_KIND
 from mindroom.entity_resolution import entity_identity_registry
-from mindroom.matrix.thread_mutation_impact import MutationThreadImpactState
 from mindroom.message_target import MessageTarget
-from mindroom.tool_system.metadata import TOOL_METADATA, get_tool_by_name
+from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, tool_runtime_context
+from tests.agent_tool_helpers import toolkit_offers
 from tests.authorization_helpers import (
     make_test_tool_runtime_context,
 )
@@ -42,6 +45,7 @@ from tests.conftest import (
     runtime_paths_for,
     test_runtime_paths,
 )
+from tests.tool_position_helpers import reply_with_calls
 
 
 @pytest.fixture(autouse=True)
@@ -135,14 +139,14 @@ def _event_response(
     content: dict[str, object] | None = None,
 ) -> nio.RoomGetEventResponse:
     return nio.RoomGetEventResponse.from_dict(
-        {
-            "content": content or {"body": "hello", "msgtype": "m.text"},
-            "event_id": event_id,
-            "sender": sender,
-            "origin_server_ts": origin_server_ts,
-            "room_id": room_id,
-            "type": event_type,
-        },
+        _raw_event(
+            event_id=event_id,
+            event_type=event_type,
+            room_id=room_id,
+            sender=sender,
+            origin_server_ts=origin_server_ts,
+            content=content,
+        ),
     )
 
 
@@ -185,9 +189,9 @@ def test_matrix_api_tool_registered_and_instantiates() -> None:
         test_runtime_paths(runtime_root),
     )
 
-    assert "matrix_api" in TOOL_METADATA
+    assert "matrix_api" in builtin_tool_registry()
     assert isinstance(
-        get_tool_by_name("matrix_api", runtime_paths_for(config), worker_target=None),
+        get_tool_by_name("matrix_api", runtime_paths_for(config), worker_target=None, tools=builtin_tool_registry()),
         MatrixApiTools,
     )
 
@@ -280,6 +284,10 @@ async def test_matrix_api_send_event_happy_path() -> None:
             id="nested-edit",
         ),
         pytest.param({"body": "hello", STREAM_STATUS_KEY: "completed"}, id="io-namespace"),
+        pytest.param(
+            {"body": "* Call failed", "m.new_content": {"body": "Call failed", "chat.mindroom.call_failure": {}}},
+            id="chat-client-namespace",
+        ),
     ],
 )
 async def test_matrix_api_rejects_model_authored_reserved_metadata(
@@ -309,7 +317,13 @@ async def test_matrix_api_rejects_model_authored_reserved_metadata(
 @pytest.mark.parametrize("action", ["send_event", "put_state"])
 @pytest.mark.parametrize(
     "event_type",
-    ["com.mindroom.scheduled.task", "com.mindroom.pending.config", "io.mindroom.scheduled.trigger"],
+    [
+        "com.mindroom.scheduled.task",
+        "com.mindroom.pending.config",
+        "io.mindroom.scheduled.trigger",
+        "io.mindroom.route",
+        "chat.mindroom.call_failure",
+    ],
 )
 async def test_matrix_api_rejects_runtime_owned_event_types(action: str, event_type: str) -> None:
     """A runtime-owned event is an instruction the runtime reads back; a tool may not author one.
@@ -365,8 +379,8 @@ async def test_matrix_api_rejects_deeply_nested_content_without_exhausting_the_s
 
 
 @pytest.mark.asyncio
-async def test_matrix_api_send_event_records_threaded_room_message() -> None:
-    """send_event should send successful threaded room messages with their thread relation."""
+async def test_matrix_api_send_event_reports_a_sent_threaded_message() -> None:
+    """A successful threaded send_event reports the event the homeserver accepted."""
     tool = MatrixApiTools()
     ctx = _make_context()
     content = {
@@ -474,40 +488,7 @@ async def test_matrix_api_send_event_room_message_names_the_human_requester(
 
 
 @pytest.mark.asyncio
-async def test_matrix_api_send_event_reports_the_event_it_sent() -> None:
-    """A successful send_event reports the event the homeserver accepted."""
-    tool = MatrixApiTools()
-    ctx = _make_context()
-    content = {
-        "msgtype": "m.notice",
-        "body": "threaded",
-        "m.relates_to": {
-            "rel_type": "m.thread",
-            "event_id": "$thread:localhost",
-            "is_falling_back": True,
-            "m.in_reply_to": {"event_id": "$latest:localhost"},
-        },
-    }
-    ctx.client.room_send.return_value = nio.RoomSendResponse(
-        event_id="$send:localhost",
-        room_id=ctx.room_id,
-    )
-
-    with tool_runtime_context(ctx):
-        payload = json.loads(
-            await tool.matrix_api(
-                action="send_event",
-                event_type="m.room.message",
-                content=content,
-            ),
-        )
-
-    assert payload["status"] == "ok"
-    assert payload["event_id"] == "$send:localhost"
-
-
-@pytest.mark.asyncio
-async def test_matrix_api_send_event_plain_reply_to_threaded_target_records_thread_bookkeeping() -> None:
+async def test_matrix_api_send_event_sends_a_plain_reply_to_a_threaded_target() -> None:
     """Plain replies to threaded targets should reuse the shared inherited-thread rule."""
     tool = MatrixApiTools()
     ctx = _make_context(threads={"$thread-reply": "$thread:localhost"})
@@ -531,35 +512,6 @@ async def test_matrix_api_send_event_plain_reply_to_threaded_target_records_thre
         )
 
     assert payload["status"] == "ok"
-
-
-@pytest.mark.asyncio
-async def test_matrix_api_send_event_delegates_thread_classification_to_shared_helper() -> None:
-    """send_event should call the shared thread-membership helper instead of inlining thread policy."""
-    tool = MatrixApiTools()
-    ctx = _make_context()
-    ctx.client.room_send.return_value = nio.RoomSendResponse(
-        event_id="$send:localhost",
-        room_id=ctx.room_id,
-    )
-
-    with (
-        patch(
-            "mindroom.custom_tools.matrix_api.resolve_event_thread_impact_for_client",
-            new=AsyncMock(return_value=MutationThreadImpactState.THREADED),
-        ) as mock_resolve_thread_impact,
-        tool_runtime_context(ctx),
-    ):
-        payload = json.loads(
-            await tool.matrix_api(
-                action="send_event",
-                event_type="m.room.message",
-                content={"body": "hello", "msgtype": "m.text"},
-            ),
-        )
-
-    assert payload["status"] == "ok"
-    mock_resolve_thread_impact.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -589,30 +541,13 @@ async def test_matrix_api_send_event_room_message_preserves_matrix_error_details
 
 @pytest.mark.asyncio
 async def test_matrix_api_send_event_room_mode_edit_stays_room_level() -> None:
-    """Room-mode edits should be visible locally before the Matrix sync echo arrives."""
+    """An edit of a room-level message has known membership, so it is sent."""
     tool = MatrixApiTools()
     ctx = _make_context()
     ctx.client.room_get_event.return_value = _event_response(
         event_id="$room-message",
         room_id="!room:localhost",
         content={"body": "room message", "msgtype": "m.text"},
-    )
-    ctx.client.room_messages.return_value = nio.RoomMessagesResponse(
-        room_id=ctx.room_id,
-        chunk=[
-            nio.RoomMessageText.from_dict(
-                {
-                    "content": {"body": "room message", "msgtype": "m.text"},
-                    "event_id": "$room-message",
-                    "sender": "@alice:localhost",
-                    "origin_server_ts": 123,
-                    "room_id": ctx.room_id,
-                    "type": "m.room.message",
-                },
-            ),
-        ],
-        start="",
-        end=None,
     )
     content = {
         "body": "* updated",
@@ -741,6 +676,32 @@ async def test_matrix_api_get_state_happy_path() -> None:
 
 
 @pytest.mark.asyncio
+async def test_matrix_api_accepts_a_room_version_12_room_id() -> None:
+    """Room version 12 room IDs have no server name, and an explicit one still reaches its room."""
+    room_id = "!nZYmvV0rQMLKHh5sSEhvOzXFF3rOsPDxzWkbWBAdZDM"
+    tool = MatrixApiTools()
+    ctx = _make_context(room_id=room_id)
+    ctx.client.room_get_state_event.return_value = _state_response(
+        content={"enabled": True},
+        event_type="com.example.state",
+        room_id=room_id,
+    )
+
+    with tool_runtime_context(ctx):
+        payload = json.loads(
+            await tool.matrix_api(action="get_state", room_id=room_id, event_type="com.example.state"),
+        )
+
+    assert payload["status"] == "ok"
+    assert payload["room_id"] == room_id
+    ctx.client.room_get_state_event.assert_awaited_once_with(
+        room_id=room_id,
+        event_type="com.example.state",
+        state_key="",
+    )
+
+
+@pytest.mark.asyncio
 async def test_matrix_api_put_state_happy_path() -> None:
     """put_state should write state and return the resulting event id."""
     tool = MatrixApiTools()
@@ -780,8 +741,12 @@ async def test_matrix_api_put_state_happy_path() -> None:
 
 
 @pytest.mark.asyncio
-async def test_matrix_api_redact_happy_path() -> None:
-    """Threaded redactions should call room_redact after proving the target's thread."""
+@pytest.mark.parametrize(
+    ("reason", "expected_reason"),
+    [("cleanup", "cleanup"), ("  cleanup  ", "cleanup"), ("   ", None)],
+)
+async def test_matrix_api_redact_happy_path(reason: str, expected_reason: str | None) -> None:
+    """Threaded redactions call room_redact after proving the target's thread, with a stripped reason, for two units."""
     tool = MatrixApiTools()
     ctx = _make_context(threads={"$target:localhost": "$thread:localhost"})
     ctx.client.room_get_event.return_value = _event_response(
@@ -802,13 +767,13 @@ async def test_matrix_api_redact_happy_path() -> None:
             await tool.matrix_api(
                 action="redact",
                 event_id="$target:localhost",
-                reason="cleanup",
+                reason=reason,
             ),
         )
 
     assert payload == {
         "action": "redact",
-        "reason": "cleanup",
+        "reason": expected_reason,
         "redaction_event_id": "$redaction:localhost",
         "room_id": ctx.room_id,
         "status": "ok",
@@ -818,89 +783,14 @@ async def test_matrix_api_redact_happy_path() -> None:
     ctx.client.room_redact.assert_awaited_once_with(
         room_id=ctx.room_id,
         event_id="$target:localhost",
-        reason="cleanup",
+        reason=expected_reason,
     )
-
-
-@pytest.mark.asyncio
-async def test_matrix_api_redact_delegates_thread_classification_to_shared_helper() -> None:
-    """Redact should call the shared thread-membership helper instead of inlining thread policy."""
-    tool = MatrixApiTools()
-    ctx = _make_context()
-    ctx.client.room_redact.return_value = nio.RoomRedactResponse(
-        event_id="$redaction:localhost",
-        room_id=ctx.room_id,
-    )
-
-    with (
-        patch(
-            "mindroom.custom_tools.matrix_api.resolve_redaction_thread_impact_for_client",
-            new=AsyncMock(return_value=MutationThreadImpactState.THREADED),
-        ) as mock_resolve_thread_impact,
-        tool_runtime_context(ctx),
-    ):
-        payload = json.loads(
-            await tool.matrix_api(
-                action="redact",
-                event_id="$target:localhost",
-                reason="cleanup",
-            ),
-        )
-
-    assert payload["status"] == "ok"
-    mock_resolve_thread_impact.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_matrix_api_redact_room_level_target_records_point_cache_bookkeeping() -> None:
-    """Room-level redactions should delete local point-cache rows before the sync echo."""
-    tool = MatrixApiTools()
-    ctx = _make_context()
-    ctx.client.room_get_event.return_value = _event_response(
-        event_id="$target:localhost",
-        room_id="!room:localhost",
-        content={"body": "room message", "msgtype": "m.text"},
-    )
-    ctx.client.room_messages.return_value = nio.RoomMessagesResponse(
-        room_id=ctx.room_id,
-        chunk=[
-            nio.RoomMessageText.from_dict(
-                {
-                    "content": {"body": "room message", "msgtype": "m.text"},
-                    "event_id": "$target:localhost",
-                    "sender": "@alice:localhost",
-                    "origin_server_ts": 123,
-                    "room_id": ctx.room_id,
-                    "type": "m.room.message",
-                },
-            ),
-        ],
-        start="",
-        end=None,
-    )
-    ctx.client.room_redact.return_value = nio.RoomRedactResponse(
-        event_id="$redaction:localhost",
-        room_id=ctx.room_id,
-    )
-
-    with (
-        patch("mindroom.custom_tools.matrix_api.logger.warning"),
-        tool_runtime_context(ctx),
-    ):
-        payload = json.loads(
-            await tool.matrix_api(
-                action="redact",
-                event_id="$target:localhost",
-                reason="cleanup",
-            ),
-        )
-
-    assert payload["status"] == "ok"
+    assert sum(map(len, MatrixApiTools._recent_write_units.values())) == 2
 
 
 @pytest.mark.asyncio
 async def test_matrix_api_redact_errors_when_thread_classification_fails() -> None:
-    """Redact should fail closed when thread classification cannot be resolved."""
+    """Redact should fail closed when thread classification cannot be resolved, without spending write budget."""
     tool = MatrixApiTools()
     ctx = _make_context()
     ctx.client.room_get_event.side_effect = RuntimeError("lookup boom")
@@ -923,11 +813,12 @@ async def test_matrix_api_redact_errors_when_thread_classification_fails() -> No
         "tool": "matrix_api",
     }
     ctx.client.room_redact.assert_not_awaited()
+    assert not any(MatrixApiTools._recent_write_units.values())
 
 
 @pytest.mark.asyncio
 async def test_matrix_api_redact_thread_lookup_uses_the_journal_relation_view() -> None:
-    """Threaded redaction detection resolves the thread through the journal, not a cache index."""
+    """Threaded redaction detection resolves the thread through the journal."""
     tool = MatrixApiTools()
     ctx = _make_context(threads={"$target:localhost": "$thread:localhost"})
     ctx.client.room_get_event.return_value = _event_response(
@@ -953,7 +844,7 @@ async def test_matrix_api_redact_thread_lookup_uses_the_journal_relation_view() 
 
 @pytest.mark.asyncio
 async def test_matrix_api_redact_dry_run_reaction_target_stays_room_level() -> None:
-    """Reaction redactions should not require thread bookkeeping just because the reaction targets a thread."""
+    """Reaction redactions should not require thread classification just because the reaction targets a thread."""
     tool = MatrixApiTools()
     ctx = _make_context()
 
@@ -972,8 +863,8 @@ async def test_matrix_api_redact_dry_run_reaction_target_stays_room_level() -> N
 
 
 @pytest.mark.asyncio
-async def test_matrix_api_redact_transitive_plain_reply_target_records_thread_bookkeeping() -> None:
-    """Transitive-threaded redactions should reuse the shared resolver instead of cache-only lookup rows."""
+async def test_matrix_api_redact_resolves_a_transitive_plain_reply_target() -> None:
+    """A redaction target whose plain-reply chain reaches a thread inherits that thread through the shared walk."""
     tool = MatrixApiTools()
     ctx = _make_context(threads={"$thread-reply": "$thread:localhost"})
     ctx.client.room_get_event.side_effect = lambda room_id, event_id: _event_response(
@@ -1011,7 +902,7 @@ async def test_matrix_api_redact_transitive_plain_reply_target_records_thread_bo
 
 @pytest.mark.asyncio
 async def test_matrix_api_redact_reports_the_redaction_it_sent() -> None:
-    """A successful threaded redact reports the redaction event the homeserver accepted."""
+    """A successful redact of a room-level target reports the redaction event the homeserver accepted."""
     tool = MatrixApiTools()
     ctx = _make_context()
     ctx.client.room_redact.return_value = nio.RoomRedactResponse(
@@ -1126,22 +1017,8 @@ async def test_matrix_api_search_happy_path() -> None:
 
 
 @pytest.mark.asyncio
-async def test_matrix_api_search_omits_keys_when_not_supplied() -> None:
-    """Search should let the homeserver default keys apply when caller omits keys."""
-    tool = MatrixApiTools()
-    ctx = _make_context()
-    ctx.client._send.return_value = _MatrixSearchResponse(count=0, next_batch=None, results=[])
-
-    with tool_runtime_context(ctx):
-        await tool.matrix_api(action="search", search_term="needle")
-
-    request_body = json.loads(ctx.client._send.await_args.args[3])
-    assert "keys" not in request_body["search_categories"]["room_events"]
-
-
-@pytest.mark.asyncio
 async def test_matrix_api_search_explicit_keys_pass_through() -> None:
-    """Search should pass through validated explicit keys when caller narrows them."""
+    """Search should pass through stripped explicit keys and normalized order_by when caller narrows them."""
     tool = MatrixApiTools()
     ctx = _make_context()
     ctx.client._send.return_value = _MatrixSearchResponse(count=0, next_batch=None, results=[])
@@ -1150,11 +1027,13 @@ async def test_matrix_api_search_explicit_keys_pass_through() -> None:
         await tool.matrix_api(
             action="search",
             search_term="meeting",
-            keys=["content.name"],
+            keys=[" content.name "],
+            order_by=" Recent ",
         )
 
     request_body = json.loads(ctx.client._send.await_args.args[3])
     assert request_body["search_categories"]["room_events"]["keys"] == ["content.name"]
+    assert request_body["search_categories"]["room_events"]["order_by"] == "recent"
 
 
 @pytest.mark.asyncio
@@ -1246,7 +1125,7 @@ async def test_matrix_api_search_pagination_round_trips_next_batch() -> None:
                 action="search",
                 search_term="needle",
                 limit=1,
-                next_batch=first_payload["next_batch"],
+                next_batch=f" {first_payload['next_batch']} ",
             ),
         )
 
@@ -1322,6 +1201,51 @@ async def test_matrix_api_search_event_context_preserves_profile_info() -> None:
 
 
 @pytest.mark.asyncio
+async def test_matrix_api_search_finds_a_reply_by_its_prose_and_shows_it_with_its_tool_calls() -> None:
+    """The homeserver picks the hits from the body it holds, and a found reply is shown as its agent built it.
+
+    Matrix holds a reply without its tool marker lines, so a tool's name finds a reply from before they left the
+    text and none that named the tool in a marker line alone. A homeserver may answer with a sender that is no ID.
+    """
+    tool = MatrixApiTools()
+    ctx = _make_context()
+    agent = entity_identity_registry(ctx.config, ctx.runtime_paths).current_ids["general"].full_id
+
+    async def found(
+        term: str,
+        content: dict[str, object],
+        neighbour: dict[str, object],
+        sender: object,
+    ) -> list[object]:
+        """Return the snippets, of each hit and of the message before it, that a search of one stored reply shows."""
+        context = {"events_before": [{**_raw_event(content=neighbour), "sender": sender}], "events_after": []}
+
+        async def search(_response: object, _method: str, _path: str, data: str) -> _MatrixSearchResponse:
+            asked = json.loads(data)["search_categories"]["room_events"]["search_term"]
+            # As a homeserver searches: for a word of the body it holds.
+            hit = asked in re.findall(r"\w+", str(content["body"]))
+            results = [_search_result(result={**_raw_event(content=content), "sender": sender}, context=context)]
+            return _MatrixSearchResponse(count=int(hit), next_batch=None, results=results if hit else [])
+
+        ctx.client._send.side_effect = search
+        with tool_runtime_context(ctx):
+            payload = json.loads(await tool.matrix_api(action="search", search_term=term, event_context={}))
+        return [[result["snippet"], result["context"]["events_before"][0]["snippet"]] for result in payload["results"]]
+
+    built, held = reply_with_calls("The needle.\n\n🔧 `shell` [1]", 1)
+    neighbour, held_neighbour = reply_with_calls("Before.\n\n🔧 `shell` [1]", 1)
+    assert (held["body"], held_neighbour["body"]) == ("The needle.", "Before.")
+    with_calls = [["The needle. 🔧 `shell` [1]", "Before. 🔧 `shell` [1]"]]
+
+    assert await found("needle", held, held_neighbour, agent) == with_calls
+    assert await found("needle", built, neighbour, agent) == with_calls
+    assert await found("shell", built, neighbour, agent) == with_calls
+    assert await found("shell", held, held_neighbour, agent) == []
+    for sender in ("@alice:localhost", [agent], {"id": agent}):
+        assert await found("needle", held, held_neighbour, sender) == [["The needle.", "Before."]]
+
+
+@pytest.mark.asyncio
 async def test_matrix_api_search_room_scoping_uses_target_room_id() -> None:
     """Search should scope the Matrix request body to the explicitly requested room."""
     tool = MatrixApiTools()
@@ -1367,6 +1291,15 @@ async def test_matrix_api_search_room_scoping_uses_target_room_id() -> None:
         ({"action": "search", "search_term": "needle", "limit": 0}, "limit must be an integer between"),
         ({"action": "search", "search_term": "needle", "limit": 51}, "limit must be an integer between"),
         ({"action": "search"}, "search_term is required"),
+        ({"action": "search", "search_term": "needle", "keys": ["  "]}, "keys must be a list of non-empty strings"),
+        (
+            {"action": "search", "search_term": "needle", "next_batch": "  "},
+            "next_batch must be omitted or a non-empty",
+        ),
+        (
+            {"action": "search", "search_term": "needle", "next_batch": ""},
+            "next_batch must be omitted or a non-empty",
+        ),
     ],
 )
 async def test_matrix_api_search_validation_errors(kwargs: dict[str, object], expected_message: str) -> None:
@@ -1900,7 +1833,7 @@ async def test_matrix_api_redact_state_event_follows_put_state_policy(
 
 @pytest.mark.asyncio
 async def test_matrix_api_redact_dry_run() -> None:
-    """Redact dry runs should not call Matrix."""
+    """Redact dry runs should neither call Matrix nor spend rate-limit budget."""
     tool = MatrixApiTools()
     ctx = _make_context()
 
@@ -1928,6 +1861,7 @@ async def test_matrix_api_redact_dry_run() -> None:
         },
     }
     ctx.client.room_redact.assert_not_awaited()
+    assert not any(MatrixApiTools._recent_write_units.values())
 
 
 @pytest.mark.asyncio
@@ -2133,14 +2067,12 @@ def test_matrix_rate_limit_helper_preserves_matrix_api_budget_message() -> None:
 @pytest.mark.parametrize(
     ("room_id", "expected_message"),
     [
-        (123, "non-empty Matrix room ID string"),
-        (False, "non-empty Matrix room ID string"),
         ("   ", "non-empty Matrix room ID string"),
-        ("#lobby:localhost", "!room:server form"),
-        ("lobby", "!room:server form"),
+        ("#lobby:localhost", "starting with !"),
+        ("lobby", "starting with !"),
     ],
 )
-async def test_matrix_api_rejects_invalid_room_id(room_id: object, expected_message: str) -> None:
+async def test_matrix_api_rejects_invalid_room_id(room_id: str, expected_message: str) -> None:
     """Explicit room_id values must be canonical Matrix room IDs."""
     tool = MatrixApiTools()
     ctx = _make_context()
@@ -2157,47 +2089,43 @@ async def test_matrix_api_rejects_invalid_room_id(room_id: object, expected_mess
 
     assert payload["status"] == "error"
     assert payload["action"] == "send_event"
+    assert payload["room_id"] == room_id.strip()
     assert expected_message in payload["message"]
     ctx.client.room_send.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("kwargs", "field_name"),
+    "kwargs",
     [
-        (
-            {
-                "action": "send_event",
-                "event_type": "com.example.event",
-                "content": {"body": "preview"},
-                "dry_run": "false",
-            },
-            "dry_run",
-        ),
-        (
-            {
-                "action": "put_state",
-                "event_type": "m.room.power_levels",
-                "content": {"users": {"@user:localhost": 100}},
-                "allow_dangerous": "false",
-            },
-            "allow_dangerous",
-        ),
+        {"action": 123},
+        {"action": "send_event", "room_id": 123},
+        {"action": "send_event", "event_type": "com.example.event", "content": "hello"},
+        {"action": "send_event", "event_type": "com.example.event", "content": {"body": "x"}, "dry_run": "maybe"},
+        {
+            "action": "put_state",
+            "event_type": "m.room.power_levels",
+            "content": {"users": {"@user:localhost": 100}},
+            "allow_dangerous": "maybe",
+        },
+        {"action": "get_state", "event_type": "com.example.state", "state_key": 123},
+        {"action": "search", "search_term": "needle", "limit": "many"},
+        {"action": "search", "search_term": "needle", "keys": "content.body"},
+        {"action": "search", "search_term": "needle", "filter": ["!room:localhost"]},
     ],
 )
-async def test_matrix_api_rejects_non_bool_flags(kwargs: dict[str, object], field_name: str) -> None:
-    """Boolean flags must reject stringified truthy values instead of using Python truthiness."""
-    tool = MatrixApiTools()
+async def test_matrix_api_rejects_malformed_arguments(kwargs: dict[str, object]) -> None:
+    """Arguments that disagree with the signature fail call validation before the tool body runs."""
+    entrypoint = toolkit_offers(MatrixApiTools(), "matrix_api").entrypoint
     ctx = _make_context()
 
-    with tool_runtime_context(ctx):
-        payload = json.loads(await tool.matrix_api(**kwargs))
+    with tool_runtime_context(ctx), pytest.raises(ValidationError):
+        await entrypoint(**kwargs)
 
-    assert payload["status"] == "error"
-    assert payload["action"] == kwargs["action"]
-    assert field_name in payload["message"]
     ctx.client.room_send.assert_not_awaited()
     ctx.client.room_put_state.assert_not_awaited()
+    ctx.client.room_get_state_event.assert_not_awaited()
+    ctx.client._send.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -2343,97 +2271,52 @@ async def test_matrix_api_cross_room_get_event_uses_target_room_id() -> None:
 
 
 @pytest.mark.asyncio
-async def test_matrix_api_rejects_invalid_action() -> None:
+@pytest.mark.parametrize(
+    ("action", "expected_action"),
+    [("delete_room", "delete_room"), (" Delete_Room ", "delete_room"), ("   ", "   ")],
+)
+async def test_matrix_api_rejects_invalid_action(action: str, expected_action: str) -> None:
     """Unsupported actions should return a clear error listing valid options."""
     tool = MatrixApiTools()
     ctx = _make_context()
 
     with tool_runtime_context(ctx):
-        payload = json.loads(await tool.matrix_api(action="delete_room"))
+        payload = json.loads(await tool.matrix_api(action=action))
 
     assert payload["status"] == "error"
-    assert payload["action"] == "delete_room"
+    assert payload["action"] == expected_action
     assert "send_event" in payload["message"]
     assert "get_event" in payload["message"]
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("action", ["send_event", "put_state"])
-async def test_matrix_api_rejects_non_dict_content(action: str) -> None:
-    """Write actions should require dict content payloads."""
+@pytest.mark.parametrize(
+    ("action", "kwargs", "expected_message"),
+    [
+        ("send_event", {"event_type": "com.example.event"}, "dict"),
+        ("put_state", {"event_type": "com.example.event"}, "dict"),
+        ("send_event", {"event_type": "   ", "content": {"body": "x"}}, "event_type"),
+        ("get_state", {"event_type": "   ", "content": {"body": "x"}}, "event_type"),
+        ("put_state", {"event_type": "   ", "content": {"body": "x"}}, "event_type"),
+        ("redact", {"event_id": "   "}, "event_id"),
+        ("get_event", {"event_id": "   "}, "event_id"),
+    ],
+)
+async def test_matrix_api_rejects_missing_required_arguments(
+    action: str,
+    kwargs: dict[str, object],
+    expected_message: str,
+) -> None:
+    """Write actions should require a content payload, and actions should reject a blank event_type or event_id."""
     tool = MatrixApiTools()
     ctx = _make_context()
 
     with tool_runtime_context(ctx):
-        payload = json.loads(
-            await tool.matrix_api(
-                action=action,
-                event_type="com.example.event",
-                content="hello",
-            ),
-        )
+        payload = json.loads(await tool.matrix_api(action=action, **kwargs))
 
     assert payload["status"] == "error"
     assert payload["action"] == action
-    assert "dict" in payload["message"]
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("action", ["send_event", "get_state", "put_state"])
-async def test_matrix_api_rejects_empty_event_type(action: str) -> None:
-    """Actions that require event_type should reject blank values."""
-    tool = MatrixApiTools()
-    ctx = _make_context()
-
-    with tool_runtime_context(ctx):
-        payload = json.loads(
-            await tool.matrix_api(
-                action=action,
-                event_type="   ",
-                content={"body": "x"},
-            ),
-        )
-
-    assert payload["status"] == "error"
-    assert payload["action"] == action
-    assert "event_type" in payload["message"]
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("action", ["redact", "get_event"])
-async def test_matrix_api_rejects_empty_event_id(action: str) -> None:
-    """Actions that require event_id should reject blank values."""
-    tool = MatrixApiTools()
-    ctx = _make_context()
-
-    with tool_runtime_context(ctx):
-        payload = json.loads(await tool.matrix_api(action=action, event_id="   "))
-
-    assert payload["status"] == "error"
-    assert payload["action"] == action
-    assert "event_id" in payload["message"]
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize("action", ["get_state", "put_state"])
-async def test_matrix_api_rejects_non_string_state_key(action: str) -> None:
-    """State actions should require string state keys."""
-    tool = MatrixApiTools()
-    ctx = _make_context()
-
-    with tool_runtime_context(ctx):
-        payload = json.loads(
-            await tool.matrix_api(
-                action=action,
-                event_type="com.example.state",
-                state_key=123,
-                content={"enabled": True},
-            ),
-        )
-
-    assert payload["status"] == "error"
-    assert payload["action"] == action
-    assert "state_key" in payload["message"]
+    assert expected_message in payload["message"]
 
 
 @pytest.mark.asyncio
@@ -2528,6 +2411,80 @@ async def test_matrix_api_audit_logs_real_writes(
     assert audit_payload["user_id"] == ctx.requester_id
     assert audit_payload["room_id"] == ctx.room_id
     assert audit_payload["status"] == "ok"
-    assert set(audit_payload).issuperset({"action", "agent", "user_id", "room_id", "status"})
     assert set(audit_payload).issuperset(expected_summary)
     assert "dont-log-me" not in repr(audit_payload)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("action", "kwargs", "expected"),
+    [
+        (
+            "send_event",
+            {"event_type": "com.example.event", "content": {"safe": "value"}},
+            {"event_type": "com.example.event", "message": "Failed to send Matrix event."},
+        ),
+        (
+            "get_state",
+            {"event_type": "com.example.state"},
+            {"event_type": "com.example.state", "state_key": "", "message": "Failed to fetch Matrix state event."},
+        ),
+        (
+            "put_state",
+            {"event_type": "com.example.state", "content": {"enabled": True}},
+            {"event_type": "com.example.state", "state_key": "", "message": "Failed to write Matrix state event."},
+        ),
+        (
+            "redact",
+            {"event_id": "$target:localhost"},
+            {"target_event_id": "$target:localhost", "message": "Failed to redact Matrix event."},
+        ),
+        (
+            "get_event",
+            {"event_id": "$evt:localhost"},
+            {"event_id": "$evt:localhost", "message": "Failed to fetch Matrix event."},
+        ),
+        (
+            "search",
+            {"search_term": "hello"},
+            {"message": "Failed to search Matrix room events."},
+        ),
+    ],
+)
+async def test_matrix_api_reports_raising_client_call(
+    action: str,
+    kwargs: dict[str, object],
+    expected: dict[str, object],
+) -> None:
+    """A Matrix call that raises should yield the action's failure payload and, for a write, an error audit."""
+    tool = MatrixApiTools()
+    ctx = _make_context()
+    failure = RuntimeError("boom")
+    ctx.client.room_get_state_event.side_effect = failure
+    ctx.client.room_put_state.side_effect = failure
+    ctx.client.room_redact.side_effect = failure
+    ctx.client._send.side_effect = failure
+    if action == "get_event":
+        ctx.client.room_get_event.side_effect = failure
+
+    with (
+        patch("mindroom.custom_tools.matrix_api.send_room_event_result", AsyncMock(side_effect=failure)),
+        patch("mindroom.custom_tools.matrix_api.logger.warning") as mock_warning,
+        tool_runtime_context(ctx),
+    ):
+        payload = json.loads(await tool.matrix_api(action=action, **kwargs))
+
+    assert payload == {
+        "action": action,
+        "room_id": ctx.room_id,
+        "response": "RuntimeError: boom",
+        "status": "error",
+        "tool": "matrix_api",
+        **expected,
+    }
+    if action in {"send_event", "put_state", "redact"}:
+        mock_warning.assert_called_once()
+        assert mock_warning.call_args.kwargs["status"] == "error"
+        assert mock_warning.call_args.kwargs["response"] == "RuntimeError: boom"
+    else:
+        mock_warning.assert_not_called()

@@ -134,7 +134,6 @@ async def restore_credentials(
         user_id,
         http_headers=http_headers,
     )
-    temporary.user_id = user_id
     temporary.device_id = device_id
     temporary.access_token = access_token
     try:

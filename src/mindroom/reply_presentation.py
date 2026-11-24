@@ -22,6 +22,7 @@ from typing import TYPE_CHECKING, Literal, cast
 from mindroom.reply_lifecycle import NoteKind
 from mindroom.streaming import (
     CANCELLED_RESPONSE_NOTE,
+    CONFIG_CHANGE_INTERRUPTED_RESPONSE_NOTE,
     INTERRUPTED_RESPONSE_NOTE,
     PROGRESS_PLACEHOLDER,
     RESTART_INTERRUPTED_RESPONSE_NOTE,
@@ -31,6 +32,7 @@ from mindroom.streaming import (
 )
 from mindroom.tool_system.events import (
     ToolTraceEntry,
+    complete_pending_tool_block,
     deserialize_tool_trace,
     remap_visible_tool_marker_indices,
     serialize_tool_trace,
@@ -44,6 +46,8 @@ AGENT_PLACEHOLDER = PROGRESS_PLACEHOLDER
 TEAM_PLACEHOLDER = TEAM_PROGRESS_PLACEHOLDER
 _DELIVERY_FAILED_NOTE = "Response delivery failed. Please retry."
 _APPROVAL_START_FAILED_NOTE = "Tool approval could not be started. Please try again."
+# A tool may have posted the answer already, so the note says only that the turn ended.
+_NOTHING_TO_SHOW_NOTE = "Done."
 
 
 def format_error_note(error: object) -> str:
@@ -57,6 +61,7 @@ _FIXED_NOTE_TEXTS = {
     NoteKind.INTERRUPTED: INTERRUPTED_RESPONSE_NOTE,
     NoteKind.DELIVERY_FAILED: _DELIVERY_FAILED_NOTE,
     NoteKind.APPROVAL_FAILED: _APPROVAL_START_FAILED_NOTE,
+    NoteKind.NOTHING_TO_SHOW: _NOTHING_TO_SHOW_NOTE,
 }
 
 
@@ -87,6 +92,11 @@ def note_segment(kind: NoteKind, text: str | None = None) -> Segment:
         msg = f"Note kind {kind.value!r} needs explicit text"
         raise ValueError(msg)
     return Segment(kind="note", text=resolved, note=kind)
+
+
+def restart_note(*, config_change: bool = False) -> Segment:
+    """Return the note of a reply a restart cut short, which names a config reload that replaced only its agent."""
+    return note_segment(NoteKind.RESTART, CONFIG_CHANGE_INTERRUPTED_RESPONSE_NOTE if config_change else None)
 
 
 @dataclass(frozen=True, slots=True)
@@ -168,9 +178,27 @@ def render(presentation: Presentation, *, state: str) -> RenderedReply:
     )
 
 
-def with_trailing_note(presentation: Presentation, note: Segment | None) -> Presentation:
-    """Return the presentation with its trailing note replaced."""
+def with_trailing_note(presentation: Presentation, note: Segment) -> Presentation:
+    """Return the presentation with its trailing note replaced.
+
+    A note other than the approval wait ends the reply's work, so its running calls stop showing as running.
+    """
+    if note.note is not NoteKind.APPROVAL_WAIT:
+        presentation = replace(presentation, segments=tuple(_cut_short(segment) for segment in presentation.segments))
     return replace(presentation, trailing_note=note)
+
+
+def _cut_short(work: Segment) -> Segment:
+    """Return a segment whose running calls no longer show as running, since the span that ran them ended.
+
+    A later attempt is told about them only from the reply's tool-call records, which keep a recorded call as started.
+    """
+    text = work.text
+    for index, entry in enumerate(work.tool_trace, start=1):
+        if entry.type == "tool_call_started":
+            text = complete_pending_tool_block(text, entry.tool_name, index)
+    trace = tuple(replace(entry, type="tool_call_completed") for entry in work.tool_trace)
+    return replace(work, text=text, tool_trace=trace)
 
 
 def _shown_work(possibly_shown: Presentation) -> Segment | None:
@@ -188,10 +216,10 @@ def _shown_work(possibly_shown: Presentation) -> Segment | None:
     text = clean_partial_reply_text("" if body == possibly_shown.placeholder else body)
     if not text and not trace:
         return None
-    return Segment(kind="answer", text=text, tool_trace=trace)
+    return _cut_short(Segment(kind="answer", text=text, tool_trace=trace))
 
 
-def after_restart(possibly_shown: Presentation) -> Presentation:
+def after_restart(possibly_shown: Presentation, *, config_change: bool = False) -> Presentation:
     """Return what a replay continues below: the shown work and the restart note, or nothing.
 
     A reply that showed only its placeholder is replaced rather than
@@ -200,7 +228,7 @@ def after_restart(possibly_shown: Presentation) -> Presentation:
     work = _shown_work(possibly_shown)
     if work is None:
         return replace(possibly_shown, segments=(), trailing_note=None)
-    return replace(possibly_shown, segments=(work, note_segment(NoteKind.RESTART)), trailing_note=None)
+    return replace(possibly_shown, segments=(work, restart_note(config_change=config_change)), trailing_note=None)
 
 
 def with_answer(presentation: Presentation, answer: Segment) -> Presentation:

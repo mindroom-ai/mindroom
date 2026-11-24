@@ -4,6 +4,7 @@ from mindroom.oauth.discovery import OAuthDiscoveryConfig, oauth_runtime_bootstr
 from mindroom.oauth.providers import (
     OAuthClaimValidationError,
     OAuthClientConfigResolution,
+    OAuthConsentGroup,
     OAuthProvider,
     OAuthProviderError,
     OAuthRefreshRejectedError,
@@ -15,6 +16,7 @@ from mindroom.oauth.providers import (
 __all__ = [
     "OAuthClaimValidationError",
     "OAuthClientConfigResolution",
+    "OAuthConsentGroup",
     "OAuthDiscoveryConfig",
     "OAuthProvider",
     "OAuthProviderError",

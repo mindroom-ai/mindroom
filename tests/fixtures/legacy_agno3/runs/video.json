@@ -1,0 +1,14 @@
+{
+  "agent_code:run-media.messages[0].videos[0]": {
+    "id": "00000000-0000-4000-8000-00000000000d",
+    "format": "mp4",
+    "mime_type": "video/mp4",
+    "content": "AAAAGGZ0eXBtcDQy"
+  },
+  "agent_code:run-media.input.input_content[0].videos[0]": {
+    "id": "00000000-0000-4000-8000-00000000000d",
+    "format": "mp4",
+    "mime_type": "video/mp4",
+    "content": "AAAAGGZ0eXBtcDQy"
+  }
+}

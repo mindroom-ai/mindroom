@@ -19,11 +19,12 @@ if TYPE_CHECKING:
     category=ToolCategory.COMMUNICATION,
     status=ToolStatus.REQUIRES_CONFIG,
     setup_type=SetupType.API_KEY,
-    icon="SiTwilio",
+    icon="TbBrandTwilio",
     icon_color="text-red-600",  # Twilio red
     config_fields=[
         ConfigField(
             name="account_sid",
+            env=("TWILIO_ACCOUNT_SID",),
             label="Account Sid",
             type="text",
             required=False,
@@ -31,6 +32,7 @@ if TYPE_CHECKING:
         ),
         ConfigField(
             name="auth_token",
+            env=("TWILIO_AUTH_TOKEN",),
             label="Auth Token",
             type="password",
             required=False,
@@ -38,6 +40,7 @@ if TYPE_CHECKING:
         ),
         ConfigField(
             name="api_key",
+            env=("TWILIO_API_KEY",),
             label="API Key",
             type="password",
             required=False,
@@ -45,6 +48,7 @@ if TYPE_CHECKING:
         ),
         ConfigField(
             name="api_secret",
+            env=("TWILIO_API_SECRET",),
             label="API Secret",
             type="password",
             required=False,
@@ -52,6 +56,7 @@ if TYPE_CHECKING:
         ),
         ConfigField(
             name="region",
+            env=("TWILIO_REGION",),
             label="Region",
             type="text",
             required=False,
@@ -59,6 +64,7 @@ if TYPE_CHECKING:
         ),
         ConfigField(
             name="edge",
+            env=("TWILIO_EDGE",),
             label="Edge",
             type="text",
             required=False,
@@ -101,7 +107,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["twilio"],
-    docs_url="https://docs.agno.com/tools/toolkits/social/twilio",
+    docs_url="https://docs.mindroom.chat/tools/messaging-and-social/#twilio",
     function_names=("get_call_details", "list_messages", "send_sms"),
 )
 def twilio_tools() -> type[TwilioTools]:

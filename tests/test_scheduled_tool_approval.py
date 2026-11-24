@@ -4,33 +4,37 @@ from __future__ import annotations
 
 import asyncio
 import threading
-from dataclasses import replace
+import weakref
+from collections.abc import AsyncIterator, Iterator, Sequence  # noqa: TC003 - Agno reads tool annotations at runtime
+from contextlib import nullcontext
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime, timedelta, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 from unittest.mock import AsyncMock, patch
 
 import nio
 import pytest
-from agno.agent import Agent
-from agno.agent._tools import parse_tools
-from agno.models.openai import OpenAIChat
-from agno.run import RunContext
+from agno.media import Image  # noqa: TC002 - Agno reads tool annotations at runtime
 from agno.tools import Toolkit
 
-from mindroom.agents import apply_tool_approval_capability
+from mindroom.agent_loop.tools import offered_toolkits
+from mindroom.agents import create_agent
+from mindroom.approval import manager as approval_manager
 from mindroom.approval.inbound import parse_approval_response_event
-from mindroom.approval.manager import ApprovalManager
 from mindroom.approval.tool_approval import ToolApprovalTransportError, scheduled_call_offers_any_arguments
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.main import Config
+from mindroom.config.models import BackgroundToolJobsConfig, ModelConfig
 from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.scheduler import SchedulerTools
+from mindroom.custom_tools.thread_model import ThreadModelTools
 from mindroom.entity_resolution import entity_identity_registry
 from mindroom.event_journal import (
     ApprovalCall,
     ApprovalContinuation,
+    CallKey,
     DeliveryStage,
     EventClass,
     EventJournalStore,
@@ -41,46 +45,91 @@ from mindroom.event_journal import (
     approval_arguments_digest,
     scheduled_call_run_id,
 )
+from mindroom.event_journal.identity import journal_principal_id
+from mindroom.hooks import (
+    EVENT_TOOL_AFTER_CALL,
+    EVENT_TOOL_BEFORE_CALL,
+    HookBindings,
+    HookRegistry,
+    ToolAfterCallContext,
+    ToolBeforeCallContext,
+    hook,
+)
 from mindroom.mcp.config import MCPServerConfig
 from mindroom.message_target import MessageTarget
 from mindroom.response_sources import ResponseSources
+from mindroom.scheduling.errors import SchedulingError
 from mindroom.scheduling.executor import ScheduledWorkflowOutcome
-from mindroom.scheduling.scheduled_tool_calls import prepare_scheduled_call
+from mindroom.scheduling.scheduled_tool_calls import bind_live_tools, prepare_scheduled_call
 from mindroom.scheduling.tasks import (
     ScheduledTaskRecord,
     ScheduledWorkflow,
     _parse_scheduled_task_record,
-    _run_once_task,
-    _scheduled_call_workflow_digest,
     cancel_scheduled_task,
     save_edited_scheduled_task,
+    scheduled_call_workflow_digest,
 )
 from mindroom.tool_approval_grants import ScheduledCallBinding, canonical_arguments
-from mindroom.tool_system.output_files import ToolOutputFilePolicy, wrap_toolkit_for_output_files
+from mindroom.tool_jobs.execution import agent_tool_middleware
+from mindroom.tool_system.agno_toolkits import adapt_toolkit, configure_toolkit_functions
+from mindroom.tool_system.invocation import CallResult, ToolCallContext, run_tool_call
+from mindroom.tool_system.output_files import ToolOutputFilePolicy
+from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import (
     ToolRuntimeContext,
     build_scheduling_runtime_from_tool_runtime_context,
     tool_runtime_context,
 )
+from mindroom.tool_system.tool_function import ToolGate, ToolOutcome
+from tests.agent_tool_helpers import detached_policy
+from tests.approval_card_helpers import card_is_terminal, pending_card
 from tests.approval_continuation_helpers import approval_continuation
-from tests.conftest import runtime_paths_for, test_runtime_paths
+from tests.conftest import (
+    approval_manager_for_test,
+    gc_paused,
+    handle_card_response_for_test,
+    initialize_approval_store_for_test,
+    install_model_providers,
+    make_matrix_client_mock,
+    runtime_paths_for,
+    test_runtime_paths,
+)
+from tests.fakes.scripted_model import ScriptedModel
 from tests.journal_membership_helpers import admit_room_membership
 from tests.reply_span_helpers import paused_for_approval
-from tests.scheduling_helpers import joined_member_state
+from tests.scheduling_helpers import (
+    joined_member_state,
+    run_once_task,
+    scheduled_task_runtime,
+    scheduling_bot,
+)
+from tests.scripted_agent_helpers import registered_toolkit
 from tests.test_scheduler_tool import _bind_runtime_paths, _make_context
+from tests.test_tool_hooks import _plugin
+from tests.tool_approval_helpers import (
+    gated_functions,
+    judge_test_tool_function_as_shell,
+    scheduled_call_approvals,
+    timed_out_judge,
+)
+from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Callable
     from contextlib import AbstractContextManager
 
-    from mindroom.approval.manager import ApprovalActionResult
+    from mindroom.agent_loop.build import AgentBuild
+    from mindroom.approval.manager import ApprovalActionResult, ApprovalManager
     from mindroom.event_journal import ScheduledCallRefusal
+    from mindroom.scheduling.runtime import ScheduledTaskRuntime
+    from mindroom.tool_system.invocation import ToolCall, ToolMiddleware, ToolNext
 
 _ROOM = "!room:test"
 _THREAD = "$thread"
 _REQUESTER = "@human:test"
 _AGENT = "code"
 _TOOLKIT = "slack"
+_MIRRORED_TOOLKIT = "slack_mirror"
 _TASK = "task-1"
 _SCHEDULED_CARD = "$scheduled-approval:" + _TASK
 _RECEIPT = "scheduled-receipt:" + _TASK
@@ -89,23 +138,23 @@ _OTHER_ARGUMENTS: dict[str, object] = {"channel": "U999", "text": "Other"}
 
 
 def _manager(journal: EventJournalStore, tmp_path: Path, sent: list[MatrixDelivery]) -> ApprovalManager:
-    async def prepare(_room: str, _thread: str | None, content: dict) -> dict:
+    async def prepare(_room: str, _thread: str | None, content: dict, _sender_entity: str) -> dict:
         return content
 
     async def send(delivery: MatrixDelivery) -> str:
         sent.append(delivery)
         return "$" + delivery.delivery_id + ("-edit" if delivery.stage is DeliveryStage.FINAL else "")
 
-    return ApprovalManager(
+    return approval_manager_for_test(
         test_runtime_paths(tmp_path),
         cards=journal.principal("router@shared"),
-        prepare_event=prepare,
-        send_delivery=send,
-        transport_sender=lambda: "@router:test",
+        prepare_approval_event=prepare,
+        send_approval_delivery=send,
+        sender_bot=lambda _entity_name, _room_id: object(),
     )
 
 
-def _binding(*, execute_at: datetime | None = None, workflow_digest: str = "workflow") -> ScheduledCallBinding:
+def _binding(*, execute_at: datetime | None = None) -> ScheduledCallBinding:
     return ScheduledCallBinding(
         task_id=_TASK,
         room_id=_ROOM,
@@ -115,7 +164,7 @@ def _binding(*, execute_at: datetime | None = None, workflow_digest: str = "work
         toolkit_name=_TOOLKIT,
         tool_name="post_slack_message",
         arguments_json=canonical_arguments(_ARGUMENTS),
-        workflow_digest=workflow_digest,
+        workflow_digest="workflow",
         execute_at_ns=int((execute_at or datetime.now(UTC) + timedelta(minutes=1)).timestamp() * 1_000_000_000),
     )
 
@@ -124,12 +173,11 @@ async def _schedule(
     manager: ApprovalManager,
     *,
     execute_at: datetime | None = None,
-    workflow_digest: str = "workflow",
     any_arguments_offered: bool = False,
     approver: str = _REQUESTER,
 ) -> bool:
     return await manager.request_scheduled_call_approval(
-        _binding(execute_at=execute_at, workflow_digest=workflow_digest),
+        _binding(execute_at=execute_at),
         approver_user_id=approver,
         scheduled_for_text="9:00 AM EDT",
         any_arguments_offered=any_arguments_offered,
@@ -156,12 +204,12 @@ async def _decide(
     scheduled_scope: str | None = None,
     sender: str = _REQUESTER,
 ) -> ApprovalActionResult:
-    return await manager.handle_card_response(
+    return await handle_card_response_for_test(
+        manager,
         room_id=_ROOM,
         sender_id=sender,
         card_event_id=_SCHEDULED_CARD,
         status=status,
-        reason=None,
         authorize_responder=lambda _agent: True,
         scheduled_scope=scheduled_scope,
     )
@@ -192,7 +240,7 @@ async def _armed(manager: ApprovalManager, *, scope: str | None = None) -> None:
 
 async def _ordinary_card(journal: EventJournalStore, manager: ApprovalManager, name: str) -> ApprovalContinuation:
     """Pause one agent run on a gated call made directly, which asks for approval the ordinary way."""
-    responder = journal.principal("agent@" + _AGENT)
+    responder = journal.principal(journal_principal_id("agent", _AGENT))
     await responder.admit(
         InboundEvent(
             event_id="$source-" + name,
@@ -228,7 +276,7 @@ async def _ordinary_card(journal: EventJournalStore, manager: ApprovalManager, n
         runtime_generation="runtime",
     )
     assert await paused_for_approval(responder, continuation) is not None
-    card = await manager.prepare_detached_approval(
+    card = await manager.prepare_reply_card(
         approval_id="card-" + name,
         continuation_id=name,
         continuation_generation=0,
@@ -243,6 +291,7 @@ async def _ordinary_card(journal: EventJournalStore, manager: ApprovalManager, n
         expires_at_ns=9_000_000_000_000_000_000,
         agent_name=_AGENT,
         thread_id=_THREAD,
+        grant_operation=None,
     )
     assert card is not None
     assert await manager.reserve_and_publish(
@@ -251,7 +300,7 @@ async def _ordinary_card(journal: EventJournalStore, manager: ApprovalManager, n
         continuation_generation=0,
         cards=(card,),
     )
-    stored = await responder.approval_continuation(name)
+    stored = await responder.approvals.approval_continuation(name)
     assert stored is not None
     return stored
 
@@ -289,12 +338,13 @@ async def test_scheduling_card_shows_the_stored_call_and_send_time(
         assert card.payload["expires_at"] == "2030-01-02T14:00:00+00:00"
         assert card.payload["body"] == "🔒 Approval required: post_slack_message (scheduled for 9:00 AM EDT)"
         assert "auto_approve_options" not in card.payload
-        stored = await journal.principal("router@shared").pending_approval_card(
+        stored = await pending_card(
+            journal.principal("router@shared").approvals,
             room_id=_ROOM,
             card_event_id=_SCHEDULED_CARD,
         )
         assert stored is not None
-        assert stored.target_kind == "scheduled_call"
+        assert stored.owner_kind == "scheduled"
         call = await manager.scheduled_call(_TASK)
         assert call is not None
         assert call.toolkit_name == _TOOLKIT
@@ -341,7 +391,7 @@ async def test_armed_approval_is_spent_once_with_its_receipt(
         assert provenance["scope"] == "exact_arguments"
         assert provenance["arguments_digest"] == approval_arguments_digest(_ARGUMENTS)
         cards = journal.principal("router@shared")
-        assert await cards.is_terminal_approval_card(room_id=_ROOM, card_event_id="$" + _RECEIPT)
+        assert await card_is_terminal(cards.approvals, room_id=_ROOM, card_event_id="$" + _RECEIPT)
 
         assert await _claim(manager) == "used"
     finally:
@@ -403,7 +453,7 @@ async def test_consumed_receipt_retires_into_a_terminal_tombstone(
         assert isinstance(await _claim(manager), ScheduledCallClaim)
         cards = journal.principal("router@shared")
 
-        await cards.maintain_automatic_approvals()
+        await cards.approvals.maintain_automatic_approvals()
 
         remaining = await journal.backend.read(
             lambda transaction: transaction.fetchone(
@@ -412,7 +462,7 @@ async def test_consumed_receipt_retires_into_a_terminal_tombstone(
             ),
         )
         assert remaining is None
-        assert await cards.is_terminal_approval_card(room_id=_ROOM, card_event_id="$" + _RECEIPT)
+        assert await card_is_terminal(cards.approvals, room_id=_ROOM, card_event_id="$" + _RECEIPT)
     finally:
         await manager.shutdown()
 
@@ -524,7 +574,7 @@ async def test_arming_requires_an_approved_unchanged_task_firing_on_time(
     journal_database: Callable[[], EventJournalStore],
     tmp_path: Path,
 ) -> None:
-    """Only the approved, unchanged task within its window arms; a denial skips the send."""
+    """A task without a card reports none; an undecided card or an edited task stays unarmed, and only approval arms."""
     journal = journal_database()
     manager = _manager(journal, tmp_path, [])
     try:
@@ -587,7 +637,7 @@ async def test_cancelling_the_task_denies_its_pending_card(
         await manager.withdraw_scheduled_call_approval(_TASK, reason="Schedule cancelled.")
 
         cards = journal.principal("router@shared")
-        decision = await cards.background_approval_decision(run_id=scheduled_call_run_id(_TASK), call_id=_TASK)
+        decision = await cards.approvals.detached_decision(CallKey.detached(scheduled_call_run_id(_TASK), _TASK))
         assert decision is not None
         assert decision.status == "denied"
         assert decision.reason == "Schedule cancelled."
@@ -599,20 +649,65 @@ async def test_cancelling_the_task_denies_its_pending_card(
 
 
 @pytest.mark.asyncio
-async def test_new_room_tenure_does_not_inherit_the_approval(
+@pytest.mark.parametrize("returns", [False, True], ids=["left", "left-and-rejoined"])
+async def test_approval_is_not_spent_once_the_asking_agent_left_the_room(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+    returns: bool,
+) -> None:
+    """An approval the agent asked for in one membership of the room is not spent after that membership ended."""
+    journal = journal_database()
+    manager = _manager(journal, tmp_path, [])
+    manager.transport.responder_principal_id = lambda entity_name: entity_name + "@shared"
+    asker = journal.principal(_AGENT + "@shared")
+    await admit_room_membership(asker, _ROOM, "join")
+    try:
+        await _armed(manager)
+
+        await admit_room_membership(asker, _ROOM, "leave")
+        if returns:
+            await admit_room_membership(asker, _ROOM, "join")
+
+        assert await _claim(manager) == "left_room"
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_approval_asked_for_after_the_agent_rejoined_is_spent_in_that_membership(
     journal_database: Callable[[], EventJournalStore],
     tmp_path: Path,
 ) -> None:
-    """Leaving and rejoining the room voids an approval given under the old membership."""
+    """An agent that left and rejoined before it asked spends the approval in the membership it asked in."""
     journal = journal_database()
     manager = _manager(journal, tmp_path, [])
+    asker = journal.principal(_AGENT + "@shared")
+    for membership in ("join", "leave", "join"):
+        await admit_room_membership(asker, _ROOM, membership)
     try:
         await _armed(manager)
-        cards = journal.principal("router@shared")
-        await admit_room_membership(cards, _ROOM, "leave")
-        await admit_room_membership(cards, _ROOM, "join")
 
-        assert await _claim(manager) == "left_room"
+        assert isinstance(await _claim(manager), ScheduledCallClaim)
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_approval_is_spent_while_the_asking_agent_stays_after_the_owner_account_left(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+) -> None:
+    """The owner account leaving the room does not void an approval an agent that stays there asked for."""
+    journal = journal_database()
+    manager = _manager(journal, tmp_path, [])
+    manager.transport.responder_principal_id = lambda entity_name: entity_name + "@shared"
+    await admit_room_membership(journal.principal(_AGENT + "@shared"), _ROOM, "join")
+    try:
+        await _armed(manager)
+
+        await admit_room_membership(journal.principal("router@shared"), _ROOM, "leave")
+
+        assert isinstance(await _claim(manager), ScheduledCallClaim)
     finally:
         await manager.shutdown()
 
@@ -632,7 +727,11 @@ async def test_direct_call_to_the_tool_still_asks_for_approval(
 
         assert direct.calls[0].decision is None
         assert (
-            await journal.principal("router@shared").pending_approval_card(room_id=_ROOM, card_event_id="$card-direct")
+            await pending_card(
+                journal.principal("router@shared").approvals,
+                room_id=_ROOM,
+                card_event_id="$card-direct",
+            )
             is not None
         )
         assert isinstance(await _claim(manager), ScheduledCallClaim)
@@ -774,12 +873,12 @@ async def test_scope_is_ignored_on_an_ordinary_approval_card(
     try:
         await _ordinary_card(journal, manager, "plain")
 
-        result = await manager.handle_card_response(
+        result = await handle_card_response_for_test(
+            manager,
             room_id=_ROOM,
             sender_id=_REQUESTER,
             card_event_id="$card-plain",
             status="approved",
-            reason=None,
             authorize_responder=lambda _agent: True,
             scheduled_scope="any_arguments",
         )
@@ -853,7 +952,7 @@ async def test_approval_maintenance_prunes_old_bindings_after_their_receipts_ret
             ),
         )
 
-        await cards.maintain_automatic_approvals()
+        await cards.approvals.maintain_automatic_approvals()
         assert await _binding_column(journal, "task_id") == _TASK
 
         await journal.backend.write(
@@ -865,7 +964,7 @@ async def test_approval_maintenance_prunes_old_bindings_after_their_receipts_ret
         await manager.recover_cards_on_startup()
 
         assert await _binding_column(journal, "task_id") is None
-        assert await cards.is_terminal_approval_card(room_id=_ROOM, card_event_id="$" + _RECEIPT)
+        assert await card_is_terminal(cards.approvals, room_id=_ROOM, card_event_id="$" + _RECEIPT)
     finally:
         await manager.shutdown()
 
@@ -979,23 +1078,24 @@ async def test_republished_scheduled_receipt_alias_stays_terminal(
         assert isinstance(await _claim(manager), ScheduledCallClaim)
         cards = journal.principal("router@shared")
 
-        await cards.remember_terminal_approval_alias(
+        await cards.approvals.remember_terminal_approval_alias(
             room_id=_ROOM,
             card_event_id="$receipt-copy",
             delivery_id=_RECEIPT,
         )
 
-        assert await cards.is_terminal_approval_card(room_id=_ROOM, card_event_id="$receipt-copy")
+        assert await card_is_terminal(cards.approvals, room_id=_ROOM, card_event_id="$receipt-copy")
     finally:
         await manager.shutdown()
 
 
-def _gated_config() -> Config:
+def _gated_config(match: str = "post_slack_message") -> Config:
     return _bind_runtime_paths(
         Config(
             agents={"general": AgentConfig(display_name="General Agent")},
+            models={"default": ModelConfig(provider="openai", id="test-model")},
             tool_approval=ToolApprovalConfig(
-                rules=[ApprovalRuleConfig(match="post_slack_message", action="require_approval")],
+                rules=[ApprovalRuleConfig(match=match, action="require_approval")],
             ),
         ),
     )
@@ -1013,8 +1113,12 @@ def _tool_context(config: Config, *, thread_id: str | None = "$thread") -> ToolR
     )
 
 
-def _responders(config: Config, *entity_names: str) -> AbstractContextManager[object]:
-    """Let only these agents or teams reply to the requester in the scheduling room."""
+def _responders(
+    config: Config,
+    *entity_names: str,
+    task_runtime: ScheduledTaskRuntime | None = None,
+) -> AbstractContextManager[object]:
+    """Let only these agents or teams reply to the requester in the scheduling room, and run saved tasks on ``task_runtime``."""
     registry = entity_identity_registry(config, runtime_paths_for(config))
     responder_ids = [registry.current_id(name) for name in entity_names]
     build_runtime = build_scheduling_runtime_from_tool_runtime_context
@@ -1023,17 +1127,17 @@ def _responders(config: Config, *entity_names: str) -> AbstractContextManager[ob
         side_effect=lambda context: replace(
             build_runtime(context),
             responder_candidates_for_room=AsyncMock(return_value=responder_ids),
+            task_runtime=task_runtime,
         ),
     )
 
 
-def _persisted_workflows(context: ToolRuntimeContext) -> list[tuple[str, ScheduledTaskRecord]]:
+def _persisted_workflows(context: ToolRuntimeContext) -> list[ScheduledTaskRecord]:
     records = []
     for put in context.client.room_put_state.await_args_list:
-        content = put.kwargs["content"]
-        record = _parse_scheduled_task_record(put.kwargs["room_id"], put.kwargs["state_key"], content)
+        record = _parse_scheduled_task_record(put.kwargs["room_id"], put.kwargs["state_key"], put.kwargs["content"])
         assert record is not None
-        records.append((str(content["status"]), record))
+        records.append(record)
     return records
 
 
@@ -1059,35 +1163,88 @@ class _SlackTools(Toolkit):
         return self.outcome
 
 
+def _answer(result: CallResult) -> object:
+    """Return what a call answered with, raising the exception it raised, as these tests read a call's result."""
+    if result.error is not None:
+        raise result.error
+    return result.value
+
+
+@dataclass(frozen=True)
+class _LiveRun:
+    """One agent run's tools as its build offers them, beside the scheduler, under the run's tool-call policy.
+
+    ``toolkits`` pairs each toolkit with the authored toolkit the run offers its functions from, or None for a toolkit
+    generated for the agent. ``gate``, when set, is the gate agent assembly gives every function of ``toolkits``.
+    """
+
+    toolkits: tuple[tuple[Toolkit, str | None], ...]
+    middleware: tuple[ToolMiddleware, ...] = ()
+    gate: ToolGate | None = None
+
+    async def call(self, function_name: str, /, **arguments: object) -> object:
+        """Run one of the run's functions as the loop does, with the live tools bound as an agent build binds them."""
+        adapted = [adapt_toolkit(toolkit, key=name) for toolkit, name in self.toolkits]
+        if self.gate is not None:
+            adapted = [
+                replace(toolkit, functions=tuple(replace(function, gate=self.gate) for function in toolkit.functions))
+                for toolkit in adapted
+            ]
+        adapted.append(adapt_toolkit(SchedulerTools(), key="scheduler"))
+        functions = {
+            function.name: function
+            for toolkit in offered_toolkits(adapted, agent="helper")
+            for function in toolkit.functions
+        }
+        policy = bind_live_tools(functions, self.middleware)
+        context = ToolCallContext(run_id="run", session_id="session", call_id="call-1", user_id=None)
+        return _answer(await run_tool_call(functions[function_name], arguments, context, middleware=policy))
+
+
+_DEFAULT_OUTCOME = object()
+
+
 def _live_agent(
     runs: list[dict[str, object]] | None = None,
     *,
-    outcome: object = "sent",
+    outcome: object = _DEFAULT_OUTCOME,
+    toolkit: Toolkit | None = None,
     toolkit_name: str = _TOOLKIT,
     authored_confirmation: bool = False,
-    extra_toolkits: tuple[Toolkit, ...] = (),
-) -> Agent:
-    """Build a live agent whose toolkit carries its configured identity, as agent assembly sets it."""
-    toolkit = _SlackTools([] if runs is None else runs, outcome=outcome)
+    stop_after_tool_call: bool = False,
+    gate: ToolGate | None = None,
+    middleware: tuple[ToolMiddleware, ...] = (),
+) -> _LiveRun:
+    """Build a live agent run whose toolkit carries its configured identity and flags, as agent assembly sets them.
+
+    The toolkit is a recording ``_SlackTools`` of ``runs`` and ``outcome`` (``"sent"`` unless given) unless
+    ``toolkit`` is given, which they would not reach, so passing them with ``toolkit`` is refused.
+    """
+    if toolkit is None:
+        toolkit = _SlackTools([] if runs is None else runs, outcome="sent" if outcome is _DEFAULT_OUTCOME else outcome)
+    else:
+        assert runs is None, "runs records only the default toolkit's calls"
+        assert outcome is _DEFAULT_OUTCOME, "outcome configures only the default toolkit"
     for function in toolkit.get_async_functions().values():
-        function.owning_toolkit = toolkit_name
         if authored_confirmation:
             function.requires_confirmation = True
-    return Agent(id="general", model=OpenAIChat(), tools=[toolkit, *extra_toolkits])
+        if stop_after_tool_call:
+            function.stop_after_tool_call = True
+    return _LiveRun(((toolkit, toolkit_name),), middleware, gate)
 
 
 async def _schedule_from_tool(
     *,
     arguments_json: str = '{"text": "Good morning!", "channel": "U123"}',
     execute_at: str = "2030-01-02T09:00:00-05:00",
-    agent: Agent | None = None,
-) -> str:
-    return await SchedulerTools().schedule_tool_call(
+    agent: _LiveRun | None = None,
+) -> object:
+    return await (agent or _live_agent()).call(
+        "schedule_tool_call",
         tool_name="post_slack_message",
         arguments_json=arguments_json,
         execute_at=execute_at,
         description="Morning DM",
-        agent=agent or _live_agent(),
     )
 
 
@@ -1095,20 +1252,24 @@ async def _schedule_from_tool(
 async def test_schedule_tool_call_stores_the_call_and_keeps_its_arguments_out_of_matrix() -> None:
     """The card binds the stored call, while the saved task and trigger name only the task to run."""
     config = _gated_config()
-    context = _tool_context(config)
+    context = replace(
+        _tool_context(config),
+        target=MessageTarget.resolve(room_id="!room:localhost", thread_id="$thread", reply_to_event_id="$answered"),
+    )
     request = AsyncMock(return_value=True)
+    task_runtime = scheduled_task_runtime(runtime_paths_for(config), scheduling_bot(context.client), config=config)
 
     with (
-        patch("mindroom.scheduling.tasks.request_scheduled_call_approval", new=request),
-        patch("mindroom.scheduling.tasks._start_new_scheduled_task") as start,
+        scheduled_call_approvals(request_scheduled_call_approval=request),
+        patch.object(task_runtime, "start_new_task") as start,
         tool_runtime_context(context),
-        _responders(context.config, "general"),
+        _responders(context.config, "general", task_runtime=task_runtime),
     ):
         result = await _schedule_from_tool()
 
-    [(status, record)] = _persisted_workflows(context)
+    [record] = _persisted_workflows(context)
     workflow = record.workflow
-    assert status == "pending"
+    assert record.status == "pending"
     assert workflow.schedule_type == "once"
     assert workflow.execute_at == datetime(2030, 1, 2, 14, 0, tzinfo=UTC)
     assert workflow.room_id == "!room:localhost"
@@ -1118,6 +1279,7 @@ async def test_schedule_tool_call_stores_the_call_and_keeps_its_arguments_out_of
     assert workflow.created_by == "@user:localhost"
     assert workflow.description == "Morning DM"
     assert workflow.pre_approved_call is True
+    assert workflow.source_event_id == "$answered"
     assert workflow.message.startswith("@general ")
     assert f'run_scheduled_call` with task_id "{record.task_id}"' in workflow.message
     assert "`post_slack_message`" in workflow.message
@@ -1134,7 +1296,7 @@ async def test_schedule_tool_call_stores_the_call_and_keeps_its_arguments_out_of
         toolkit_name=_TOOLKIT,
         tool_name="post_slack_message",
         arguments_json=canonical_arguments({"channel": "U123", "text": "Good morning!"}),
-        workflow_digest=_scheduled_call_workflow_digest(record.task_id, workflow),
+        workflow_digest=scheduled_call_workflow_digest(record.task_id, workflow),
         execute_at_ns=int(workflow.execute_at.timestamp() * 1_000_000_000),
     )
     kwargs = request.await_args.kwargs
@@ -1142,8 +1304,32 @@ async def test_schedule_tool_call_stores_the_call_and_keeps_its_arguments_out_of
     assert kwargs["scheduled_for_text"] == "2030-01-02 14:00 UTC"
     assert kwargs["any_arguments_offered"] is True
     start.assert_called_once()
+    assert record.owner_id == context.client.user_id
+    assert start.call_args.kwargs["owner_id"] == context.client.user_id
     assert record.task_id in result
     assert "approve" in result.lower()
+
+
+@pytest.mark.asyncio
+async def test_schedule_tool_call_stores_and_shows_the_agents_timezone() -> None:
+    """A call an agent with its own timezone schedules keeps that zone, and its card and reply show its wall time."""
+    config = _gated_config()
+    config.agents["general"].timezone = "Asia/Tokyo"
+    context = _tool_context(config)
+    request = AsyncMock(return_value=True)
+
+    with (
+        scheduled_call_approvals(request_scheduled_call_approval=request),
+        tool_runtime_context(context),
+        _responders(context.config, "general"),
+    ):
+        result = await _schedule_from_tool()
+
+    [record] = _persisted_workflows(context)
+    assert record.workflow.timezone == "Asia/Tokyo"
+    # 14:00 UTC is 23:00 in Tokyo.
+    assert request.await_args.kwargs["scheduled_for_text"] == "2030-01-02 23:00 JST"
+    assert "2030-01-02 23:00 JST" in str(result)
 
 
 @pytest.mark.asyncio
@@ -1162,15 +1348,14 @@ async def test_schedule_tool_call_offers_only_exact_approval_where_any_arguments
     request = AsyncMock(return_value=True)
 
     with (
-        patch("mindroom.scheduling.tasks.request_scheduled_call_approval", new=request),
+        scheduled_call_approvals(request_scheduled_call_approval=request),
         patch("mindroom.scheduling.tasks.resolve_tool_approval_approver", return_value=approver),
-        patch("mindroom.scheduling.tasks._start_new_scheduled_task"),
         tool_runtime_context(context),
         _responders(context.config, "general"),
     ):
         await _schedule_from_tool(agent=_live_agent(authored_confirmation=authored_confirmation))
 
-    [(_status, record)] = _persisted_workflows(context)
+    [record] = _persisted_workflows(context)
     assert request.await_args.kwargs["any_arguments_offered"] is False
     assert "arguments_json" not in record.workflow.message
 
@@ -1182,6 +1367,7 @@ async def test_schedule_tool_call_refuses_a_team() -> None:
         Config(
             agents={"general": AgentConfig(display_name="General Agent")},
             teams={"crew": TeamConfig(display_name="Crew", role="Ship things", agents=["general"])},
+            models={"default": ModelConfig(provider="openai", id="test-model")},
             tool_approval=ToolApprovalConfig(
                 rules=[ApprovalRuleConfig(match="post_slack_message", action="require_approval")],
             ),
@@ -1191,10 +1377,10 @@ async def test_schedule_tool_call_refuses_a_team() -> None:
     request = AsyncMock(return_value=True)
 
     with (
-        patch("mindroom.scheduling.tasks.request_scheduled_call_approval", new=request),
+        scheduled_call_approvals(request_scheduled_call_approval=request),
         tool_runtime_context(context),
         _responders(context.config, "crew"),
-        pytest.raises(RuntimeError, match="Only an agent"),
+        pytest.raises(SchedulingError, match="Only an agent"),
     ):
         await _schedule_from_tool()
 
@@ -1208,10 +1394,10 @@ async def test_schedule_tool_call_requires_the_agent_to_be_able_to_reply_in_the_
     request = AsyncMock(return_value=True)
 
     with (
-        patch("mindroom.scheduling.tasks.request_scheduled_call_approval", new=request),
+        scheduled_call_approvals(request_scheduled_call_approval=request),
         tool_runtime_context(context),
         _responders(context.config),
-        pytest.raises(RuntimeError, match="cannot receive"),
+        pytest.raises(SchedulingError, match="cannot receive"),
     ):
         await _schedule_from_tool()
 
@@ -1226,8 +1412,7 @@ async def test_schedule_tool_call_stores_arguments_exactly_as_given() -> None:
     request = AsyncMock(return_value=True)
 
     with (
-        patch("mindroom.scheduling.tasks.request_scheduled_call_approval", new=request),
-        patch("mindroom.scheduling.tasks._start_new_scheduled_task"),
+        scheduled_call_approvals(request_scheduled_call_approval=request),
         tool_runtime_context(context),
         _responders(context.config, "general"),
     ):
@@ -1248,7 +1433,6 @@ async def test_schedule_tool_call_stores_arguments_exactly_as_given() -> None:
         ('{"channel": "U1", "text": 1e999}', "2030-01-02T09:00:00-05:00", "$thread", True, None, "non-finite"),
         ('{"text": "no channel"}', "2030-01-02T09:00:00-05:00", "$thread", True, None, "current parameters"),
         ('{"channel": "U1"}', "2030-01-02T09:00:00-05:00", "$thread", True, "elsewhere", "not one of this agent"),
-        ('{"channel": "U1"}', "2030-01-02T09:00:00-05:00", "$thread", True, "twice", "more than one"),
         ('{"channel": "U1"}', "tomorrow at nine", "$thread", True, None, "ISO 8601"),
         ('{"channel": "U1"}', "2030-01-02T09:00:00", "$thread", True, None, "UTC offset"),
         ('{"channel": "U1"}', "2020-01-02T09:00:00+00:00", "$thread", True, None, "future"),
@@ -1263,7 +1447,6 @@ async def test_schedule_tool_call_stores_arguments_exactly_as_given() -> None:
         "overflow",
         "schema",
         "unknown-tool",
-        "ambiguous-tool",
         "not-iso",
         "naive",
         "past",
@@ -1283,21 +1466,22 @@ async def test_schedule_tool_call_rejects_what_it_cannot_store(
     config = (
         _gated_config()
         if gated
-        else _bind_runtime_paths(Config(agents={"general": AgentConfig(display_name="General Agent")}))
+        else _bind_runtime_paths(
+            Config(
+                agents={"general": AgentConfig(display_name="General Agent")},
+                models={"default": ModelConfig(provider="openai", id="test-model")},
+            ),
+        )
     )
     context = _tool_context(config, thread_id=thread_id)
     request = AsyncMock(return_value=True)
-    live_agent = {
-        None: _live_agent(),
-        "elsewhere": Agent(id="general", model=OpenAIChat(), tools=[]),
-        "twice": _live_agent(extra_toolkits=(_named_slack_tools("other_slack"),)),
-    }[agent]
+    live_agent = {None: _live_agent(), "elsewhere": _LiveRun(())}[agent]
 
     with (
-        patch("mindroom.scheduling.tasks.request_scheduled_call_approval", new=request),
+        scheduled_call_approvals(request_scheduled_call_approval=request),
         tool_runtime_context(context),
         _responders(context.config, "general"),
-        pytest.raises(RuntimeError, match=error),
+        pytest.raises(SchedulingError, match=error),
     ):
         await _schedule_from_tool(arguments_json=arguments_json, execute_at=execute_at, agent=live_agent)
 
@@ -1305,18 +1489,56 @@ async def test_schedule_tool_call_rejects_what_it_cannot_store(
     request.assert_not_awaited()
 
 
-def _named_slack_tools(owner: str) -> Toolkit:
-    toolkit = _SlackTools([])
-    for function in toolkit.get_async_functions().values():
-        function.owning_toolkit = owner
-    return toolkit
+@pytest.mark.asyncio
+async def test_a_call_judged_as_a_gated_function_can_be_scheduled_pre_approved(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No rule gates ``post_slack_message``, but its toolkit says its calls are shell commands, which a rule gates."""
+    judge_test_tool_function_as_shell(monkeypatch, _TOOLKIT, "post_slack_message")
+    config = _gated_config("run_shell_command")
+    context = _tool_context(config)
+    request = AsyncMock(return_value=True)
+
+    with (
+        scheduled_call_approvals(request_scheduled_call_approval=request),
+        tool_runtime_context(context),
+        _responders(context.config, "general"),
+    ):
+        await _schedule_from_tool()
+
+    request.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_a_judge_that_fails_refuses_the_schedule_as_a_failing_approval_script_does(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A judge that times out leaves the call unscheduled with the approval-policy error and posts no card."""
+    judge_test_tool_function_as_shell(monkeypatch, _TOOLKIT, "post_slack_message", timed_out_judge)
+    config = _gated_config("run_shell_command")
+    context = _tool_context(config)
+    request = AsyncMock(return_value=True)
+
+    with (
+        scheduled_call_approvals(request_scheduled_call_approval=request),
+        tool_runtime_context(context),
+        _responders(context.config, "general"),
+        pytest.raises(
+            SchedulingError,
+            match=r"Could not evaluate the approval policy for `post_slack_message`: .*failed with TimeoutError",
+        ),
+    ):
+        await _schedule_from_tool()
+
+    request.assert_not_awaited()
+
+
+_CARD_REFUSED = "Could not post an approvable approval card for this call; nothing was scheduled."
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
     ("request_outcome", "raised"),
     [
-        (False, RuntimeError),
+        (False, SchedulingError),
         (ToolApprovalTransportError("router missing"), ToolApprovalTransportError),
         (asyncio.CancelledError(), asyncio.CancelledError),
     ],
@@ -1334,24 +1556,42 @@ async def test_no_task_is_published_when_its_card_cannot_be_posted(
         else AsyncMock(return_value=request_outcome)
     )
     withdraw = AsyncMock()
+    task_runtime = scheduled_task_runtime(context.runtime_paths, scheduling_bot(context.client), config=context.config)
 
     with (
-        patch("mindroom.scheduling.tasks.request_scheduled_call_approval", new=request),
-        patch("mindroom.scheduling.tasks.withdraw_scheduled_call_approval", new=withdraw),
-        patch("mindroom.scheduling.tasks._start_new_scheduled_task") as start,
+        scheduled_call_approvals(request_scheduled_call_approval=request, withdraw_scheduled_call_approval=withdraw),
+        patch.object(task_runtime, "start_new_task") as start,
         tool_runtime_context(context),
-        _responders(context.config, "general"),
-        pytest.raises(raised),
+        _responders(context.config, "general", task_runtime=task_runtime),
+        pytest.raises(raised) as exc_info,
     ):
         await _schedule_from_tool()
 
     context.client.room_put_state.assert_not_awaited()
     if request_outcome is False:
+        assert str(exc_info.value) == _CARD_REFUSED
         # No card was reserved, so an existing approval under the same task ID is left alone.
         withdraw.assert_not_awaited()
     else:
         withdraw.assert_awaited_once_with(request.await_args.args[0].task_id, reason="Schedule cancelled.")
     start.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_no_call_is_scheduled_without_an_approval_runtime() -> None:
+    """A call whose card cannot be posted because approvals are not running fails with the card refusal alone."""
+    context = _tool_context(_gated_config())
+
+    with (
+        patch.object(approval_manager, "get_approval_store", return_value=None),
+        tool_runtime_context(context),
+        _responders(context.config, "general"),
+        pytest.raises(SchedulingError) as exc_info,
+    ):
+        await _schedule_from_tool()
+
+    assert str(exc_info.value) == _CARD_REFUSED
+    context.client.room_put_state.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1361,19 +1601,40 @@ async def test_card_is_withdrawn_when_its_task_cannot_be_published() -> None:
     context.client.room_put_state.return_value = nio.RoomPutStateError("forbidden", "M_FORBIDDEN")
     request = AsyncMock(return_value=True)
     withdraw = AsyncMock()
+    task_runtime = scheduled_task_runtime(context.runtime_paths, scheduling_bot(context.client), config=context.config)
 
     with (
-        patch("mindroom.scheduling.tasks.request_scheduled_call_approval", new=request),
-        patch("mindroom.scheduling.tasks.withdraw_scheduled_call_approval", new=withdraw),
-        patch("mindroom.scheduling.tasks._start_new_scheduled_task") as start,
+        scheduled_call_approvals(request_scheduled_call_approval=request, withdraw_scheduled_call_approval=withdraw),
+        patch.object(task_runtime, "start_new_task") as start,
         tool_runtime_context(context),
-        _responders(context.config, "general"),
-        pytest.raises(RuntimeError, match="Failed to schedule"),
+        _responders(context.config, "general", task_runtime=task_runtime),
+        pytest.raises(SchedulingError, match="Failed to schedule"),
     ):
         await _schedule_from_tool()
 
     withdraw.assert_awaited_once_with(request.await_args.args[0].task_id, reason="Schedule cancelled.")
     start.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_a_published_call_keeps_its_approval_when_its_runner_cannot_start() -> None:
+    """Once its task is stored, a call keeps the approval its card collects, whatever happens to the runner."""
+    context = _tool_context(_gated_config())
+    request = AsyncMock(return_value=True)
+    withdraw = AsyncMock()
+    task_runtime = scheduled_task_runtime(context.runtime_paths, scheduling_bot(context.client), config=context.config)
+
+    with (
+        scheduled_call_approvals(request_scheduled_call_approval=request, withdraw_scheduled_call_approval=withdraw),
+        patch.object(task_runtime, "start_new_task", side_effect=RuntimeError("runner start failed")),
+        tool_runtime_context(context),
+        _responders(context.config, "general", task_runtime=task_runtime),
+        pytest.raises(RuntimeError, match="runner start failed"),
+    ):
+        await _schedule_from_tool()
+
+    assert context.client.room_put_state.await_args.kwargs["content"]["status"] == "pending"
+    withdraw.assert_not_awaited()
 
 
 def test_workflow_digest_survives_matrix_state_round_trip() -> None:
@@ -1393,22 +1654,80 @@ def test_workflow_digest_survives_matrix_state_round_trip() -> None:
     record = _parse_scheduled_task_record("!room:localhost", "task1234", stored)
 
     assert record is not None
-    assert _scheduled_call_workflow_digest("task1234", record.workflow) == _scheduled_call_workflow_digest(
+    assert scheduled_call_workflow_digest("task1234", record.workflow) == scheduled_call_workflow_digest(
         "task1234",
         workflow,
     )
-    original = _scheduled_call_workflow_digest("task1234", workflow)
+    original = scheduled_call_workflow_digest("task1234", workflow)
     for change in (
         {"message": workflow.message.replace("Grüße", "Hi")},
         {"execute_at": workflow.execute_at + timedelta(minutes=1)},
         {"thread_id": "$other"},
         {"created_by": "@other:localhost"},
     ):
-        assert _scheduled_call_workflow_digest("task1234", workflow.model_copy(update=change)) != original
+        assert scheduled_call_workflow_digest("task1234", workflow.model_copy(update=change)) != original
     # Fields that do not define the call, including ones a later release may add, leave the binding intact.
     assert (
-        _scheduled_call_workflow_digest("task1234", workflow.model_copy(update={"description": "Renamed"})) == original
+        scheduled_call_workflow_digest("task1234", workflow.model_copy(update={"description": "Renamed"})) == original
     )
+
+
+@dataclass(frozen=True)
+class _FiredTask:
+    """What one due one-time task left behind: its workflow, how often it was sent, and the status last saved."""
+
+    workflow: ScheduledWorkflow
+    executions: int
+    status: str
+
+
+async def _fire_once(
+    *,
+    outcome: str = "delivered",
+    pre_approved_call: bool = True,
+    **approvals: AsyncMock,
+) -> _FiredTask:
+    """Run one due one-time task to its end, its send ending as ``outcome`` and the named approval methods faked."""
+    client = make_matrix_client_mock()
+    client.room_get_state_event.side_effect = joined_member_state
+    client.room_put_state.return_value = nio.RoomPutStateResponse("$state", "!test:server")
+    workflow = ScheduledWorkflow(
+        created_by="@user:server",
+        schedule_type="once",
+        execute_at=datetime.now(UTC) - timedelta(seconds=1),
+        message="@general call it",
+        description="Morning DM",
+        room_id="!test:server",
+        thread_id="$thread123",
+        pre_approved_call=pre_approved_call,
+    )
+    record = ScheduledTaskRecord(
+        task_id="task1234",
+        room_id="!test:server",
+        status="pending",
+        created_at=datetime.now(UTC),
+        workflow=workflow,
+    )
+    failure_reason = None if outcome == "delivered" else "no"
+
+    with (
+        patch("mindroom.scheduling.runtime.get_scheduled_task", new=AsyncMock(side_effect=[record, record])),
+        scheduled_call_approvals(**approvals),
+        patch(
+            "mindroom.scheduling.executor.execute_scheduled_workflow",
+            new=AsyncMock(return_value=ScheduledWorkflowOutcome(status=outcome, failure_reason=failure_reason)),
+        ) as execute,
+    ):
+        await run_once_task(
+            client,
+            "task1234",
+            workflow,
+            Config(),
+            resolve_runtime_paths(config_path=Path("config.yaml"), process_env={}),
+            AsyncMock(),
+        )
+
+    return _FiredTask(workflow, execute.await_count, client.room_put_state.await_args.kwargs["content"]["status"])
 
 
 @pytest.mark.asyncio
@@ -1427,139 +1746,100 @@ async def test_firing_task_arms_its_approval_and_skips_a_denied_send(
     final_status: str,
 ) -> None:
     """The runner arms the exact unchanged task; a send the requester denied never fires."""
-    client = AsyncMock()
-    client.room_get_state_event.side_effect = joined_member_state
-    client.room_put_state = AsyncMock()
-    workflow = ScheduledWorkflow(
-        created_by="@user:server",
-        schedule_type="once",
-        execute_at=datetime.now(UTC) - timedelta(seconds=1),
-        message="@general call it",
-        description="Morning DM",
-        room_id="!test:server",
-        thread_id="$thread123",
-        pre_approved_call=True,
-    )
-    record = ScheduledTaskRecord(
-        task_id="task1234",
-        room_id="!test:server",
-        status="pending",
-        created_at=datetime.now(UTC),
-        workflow=workflow,
-    )
     arm = AsyncMock(return_value=approval_state)
 
-    with (
-        patch("mindroom.scheduling.tasks.get_scheduled_task", new=AsyncMock(side_effect=[record, record])),
-        patch("mindroom.scheduling.tasks.arm_scheduled_call_approval", new=arm),
-        patch(
-            "mindroom.scheduling.executor.execute_scheduled_workflow",
-            new=AsyncMock(return_value=ScheduledWorkflowOutcome(status="delivered")),
-        ) as execute,
-    ):
-        await _run_once_task(
-            client,
-            "task1234",
-            workflow,
-            Config(),
-            resolve_runtime_paths(config_path=Path("config.yaml"), process_env={}),
-            AsyncMock(),
-        )
+    fired = await _fire_once(arm_scheduled_call_approval=arm)
 
     arm.assert_awaited_once_with(
         "task1234",
-        _scheduled_call_workflow_digest("task1234", workflow),
+        scheduled_call_workflow_digest("task1234", fired.workflow),
         any_arguments_allowed=True,
     )
-    assert execute.await_count == int(fires)
-    assert client.room_put_state.await_args.kwargs["content"]["status"] == final_status
+    assert fired.executions == int(fires)
+    assert fired.status == final_status
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("approval_state", "outcome", "withdraws"),
+    ("approval_state", "outcome", "withdraw_error", "withdraws"),
     [
-        ("armed", "suppressed", True),
-        ("armed", "failed", True),
-        ("armed", "delivered", False),
-        ("unarmed", "failed", False),
+        ("armed", "suppressed", None, True),
+        ("armed", "failed", None, True),
+        ("armed", "delivered", None, False),
+        ("unarmed", "failed", None, False),
+        ("armed", "failed", RuntimeError("journal unavailable"), True),
     ],
+    ids=["suppressed", "failed", "delivered", "unarmed", "withdrawal-fails"],
 )
 async def test_a_trigger_that_never_went_out_leaves_no_armed_approval(
     approval_state: str,
     outcome: str,
+    withdraw_error: Exception | None,
     withdraws: bool,
 ) -> None:
-    """A suppressed or failed fire withdraws its armed approval, so no other call can use it."""
-    client = AsyncMock()
-    client.room_get_state_event.side_effect = joined_member_state
-    client.room_put_state = AsyncMock()
-    workflow = ScheduledWorkflow(
-        created_by="@user:server",
-        schedule_type="once",
-        execute_at=datetime.now(UTC) - timedelta(seconds=1),
-        message="@general call it",
-        description="Morning DM",
-        room_id="!test:server",
-        thread_id="$thread123",
-        pre_approved_call=True,
-    )
-    record = ScheduledTaskRecord(
-        task_id="task1234",
-        room_id="!test:server",
-        status="pending",
-        created_at=datetime.now(UTC),
-        workflow=workflow,
-    )
-    withdraw = AsyncMock()
+    """A suppressed or failed fire withdraws its armed approval, and a withdrawal that fails still records the fire."""
+    withdraw = AsyncMock(side_effect=withdraw_error)
 
-    with (
-        patch("mindroom.scheduling.tasks.get_scheduled_task", new=AsyncMock(side_effect=[record, record])),
-        patch("mindroom.scheduling.tasks.arm_scheduled_call_approval", new=AsyncMock(return_value=approval_state)),
-        patch("mindroom.scheduling.tasks.withdraw_scheduled_call_approval", new=withdraw),
-        patch(
-            "mindroom.scheduling.executor.execute_scheduled_workflow",
-            new=AsyncMock(return_value=ScheduledWorkflowOutcome(status=outcome, failure_reason="no")),
-        ),
-    ):
-        await _run_once_task(
-            client,
-            "task1234",
-            workflow,
-            Config(),
-            resolve_runtime_paths(config_path=Path("config.yaml"), process_env={}),
-            AsyncMock(),
-        )
+    fired = await _fire_once(
+        outcome=outcome,
+        arm_scheduled_call_approval=AsyncMock(return_value=approval_state),
+        withdraw_scheduled_call_approval=withdraw,
+    )
 
     assert withdraw.await_count == int(withdraws)
-    expected = "completed" if outcome == "delivered" else "failed"
-    assert client.room_put_state.await_args.kwargs["content"]["status"] == expected
+    assert fired.status == ("completed" if outcome == "delivered" else "failed")
+
+
+async def _cancel(client: AsyncMock) -> str:
+    return await cancel_scheduled_task(
+        client=client,
+        room_id="!test:server",
+        task_id="task1234",
+        runtime_paths=resolve_runtime_paths(config_path=Path("config.yaml"), process_env={}),
+    )
 
 
 @pytest.mark.asyncio
-async def test_failed_withdrawal_reports_a_failed_cancel_without_publishing_it() -> None:
-    """Cancelling keeps its error result when the approval cannot be withdrawn, and publishes nothing."""
+@pytest.mark.parametrize(
+    ("runtime", "reason"),
+    [
+        ("failing", "journal unavailable"),
+        ("missing", approval_manager.RUNTIME_NOT_READY_REASON),
+        ("unbound", approval_manager.RUNTIME_NOT_READY_REASON),
+    ],
+    ids=["failing", "missing", "unbound"],
+)
+async def test_cancelling_fails_closed_while_the_approval_cannot_be_withdrawn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    runtime: str,
+    reason: str,
+) -> None:
+    """A task whose approval cannot be withdrawn stays uncancelled, publishing nothing, rather than keeping a usable approval."""
     client = AsyncMock()
+    approvals: AbstractContextManager[object] = nullcontext()
+    if runtime == "failing":
+        approvals = scheduled_call_approvals(
+            withdraw_scheduled_call_approval=AsyncMock(side_effect=RuntimeError("journal unavailable")),
+        )
+    elif runtime == "missing":
+        monkeypatch.setattr(approval_manager, "get_approval_store", lambda: None)
+    else:
+        initialize_approval_store_for_test(test_runtime_paths(tmp_path))
 
     with (
+        approvals,
         patch(
             "mindroom.scheduling.tasks._read_scheduled_task_state",
             new=AsyncMock(return_value={"status": "pending", "workflow": "{}"}),
         ),
-        patch(
-            "mindroom.scheduling.tasks.withdraw_scheduled_call_approval",
-            new=AsyncMock(side_effect=RuntimeError("journal unavailable")),
-        ),
+        pytest.raises(SchedulingError) as exc_info,
     ):
-        result = await cancel_scheduled_task(
-            client=client,
-            room_id="!test:server",
-            task_id="task1234",
-            runtime_paths=resolve_runtime_paths(config_path=Path("config.yaml"), process_env={}),
-        )
+        await _cancel(client)
 
-    assert result.startswith("❌ Failed to cancel task `task1234`: ")
-    assert "journal unavailable" in result
+    assert str(exc_info.value) == (
+        f"Failed to cancel task `task1234`: could not withdraw the approval for its scheduled call ({reason})"
+    )
     client.room_put_state.assert_not_awaited()
 
 
@@ -1586,17 +1866,15 @@ async def test_pre_approved_task_cannot_be_edited() -> None:
     withdraw = AsyncMock()
 
     with (
-        patch("mindroom.scheduling.tasks.withdraw_scheduled_call_approval", new=withdraw),
-        pytest.raises(ValueError, match="cannot be edited; cancel it and schedule the call again"),
+        scheduled_call_approvals(withdraw_scheduled_call_approval=withdraw),
+        pytest.raises(SchedulingError, match="cannot be edited; cancel it and schedule the call again"),
     ):
         await save_edited_scheduled_task(
             client=client,
-            room_id="!test:server",
-            task_id="task1234",
             workflow=workflow.model_copy(update={"execute_at": datetime.now(UTC) + timedelta(hours=2)}),
             existing_task=existing,
             runtime_paths=resolve_runtime_paths(config_path=Path("config.yaml"), process_env={}),
-            timezone="UTC",
+            config=Config(),
         )
 
     withdraw.assert_not_awaited()
@@ -1615,57 +1893,19 @@ async def test_tasks_fire_without_an_armed_approval(
     armed: bool,
 ) -> None:
     """Plain reminders never touch call approvals, and a failed arming still fires a scheduled call."""
-    client = AsyncMock()
-    client.room_get_state_event.side_effect = joined_member_state
-    client.room_put_state = AsyncMock()
-    workflow = ScheduledWorkflow(
-        created_by="@user:server",
-        schedule_type="once",
-        execute_at=datetime.now(UTC) - timedelta(seconds=1),
-        message="Remind me",
-        description="Reminder",
-        room_id="!test:server",
-        thread_id="$thread123",
-        pre_approved_call=pre_approved_call,
-    )
-    record = ScheduledTaskRecord(
-        task_id="task1234",
-        room_id="!test:server",
-        status="pending",
-        created_at=datetime.now(UTC),
-        workflow=workflow,
-    )
     arm = AsyncMock(side_effect=arm_error)
 
-    with (
-        patch("mindroom.scheduling.tasks.get_scheduled_task", new=AsyncMock(side_effect=[record, record])),
-        patch("mindroom.scheduling.tasks.arm_scheduled_call_approval", new=arm),
-        patch(
-            "mindroom.scheduling.executor.execute_scheduled_workflow",
-            new=AsyncMock(return_value=ScheduledWorkflowOutcome(status="delivered")),
-        ) as execute,
-    ):
-        await _run_once_task(
-            client,
-            "task1234",
-            workflow,
-            Config(),
-            resolve_runtime_paths(config_path=Path("config.yaml"), process_env={}),
-            AsyncMock(),
-        )
+    fired = await _fire_once(pre_approved_call=pre_approved_call, arm_scheduled_call_approval=arm)
 
     assert arm.await_count == int(armed)
-    execute.assert_awaited_once()
-    assert client.room_put_state.await_args.kwargs["content"]["status"] == "completed"
+    assert fired.executions == 1
+    assert fired.status == "completed"
 
 
 @pytest.mark.asyncio
 async def test_cancelling_a_task_settles_its_scheduled_call_card() -> None:
     """Cancelling withdraws the approval before the cancellation is published, so a crash between them fails closed."""
     client = AsyncMock()
-    client.room_put_state = AsyncMock(
-        return_value=nio.RoomPutStateResponse.from_dict({"event_id": "$state"}, room_id="!test:server"),
-    )
     existing = {"status": "pending", "workflow": "{}"}
     order: list[str] = []
     cancel = AsyncMock(side_effect=lambda *_args, **_kwargs: order.append("withdraw"))
@@ -1675,14 +1915,9 @@ async def test_cancelling_a_task_settles_its_scheduled_call_card() -> None:
 
     with (
         patch("mindroom.scheduling.tasks._read_scheduled_task_state", new=AsyncMock(return_value=existing)),
-        patch("mindroom.scheduling.tasks.withdraw_scheduled_call_approval", new=cancel),
+        scheduled_call_approvals(withdraw_scheduled_call_approval=cancel),
     ):
-        result = await cancel_scheduled_task(
-            client=client,
-            room_id="!test:server",
-            task_id="task1234",
-            runtime_paths=resolve_runtime_paths(config_path=Path("config.yaml"), process_env={}),
-        )
+        result = await _cancel(client)
 
     assert result == "✅ Cancelled task `task1234`"
     cancel.assert_awaited_once_with("task1234", reason="Schedule cancelled.")
@@ -1710,14 +1945,9 @@ async def test_cancelling_a_pre_approved_task_says_its_approval_is_withdrawn() -
 
     with (
         patch("mindroom.scheduling.tasks._read_scheduled_task_state", new=AsyncMock(return_value=existing)),
-        patch("mindroom.scheduling.tasks.withdraw_scheduled_call_approval", new=AsyncMock()),
+        scheduled_call_approvals(withdraw_scheduled_call_approval=AsyncMock()),
     ):
-        result = await cancel_scheduled_task(
-            client=client,
-            room_id="!test:server",
-            task_id="task1234",
-            runtime_paths=resolve_runtime_paths(config_path=Path("config.yaml"), process_env={}),
-        )
+        result = await _cancel(client)
 
     assert result == "✅ Cancelled task `task1234`; any approval given for its scheduled call is withdrawn."
 
@@ -1857,14 +2087,9 @@ async def test_cancelling_a_plain_reminder_leaves_call_approvals_alone() -> None
             "mindroom.scheduling.tasks._read_scheduled_task_state",
             new=AsyncMock(return_value={"status": "pending", "workflow": plain.model_dump_json()}),
         ),
-        patch("mindroom.scheduling.tasks.withdraw_scheduled_call_approval", new=withdraw),
+        scheduled_call_approvals(withdraw_scheduled_call_approval=withdraw),
     ):
-        result = await cancel_scheduled_task(
-            client=client,
-            room_id="!test:server",
-            task_id="task1234",
-            runtime_paths=resolve_runtime_paths(config_path=Path("config.yaml"), process_env={}),
-        )
+        result = await _cancel(client)
 
     assert result == "✅ Cancelled task `task1234`"
     withdraw.assert_not_awaited()
@@ -1874,9 +2099,12 @@ def _code_config() -> Config:
     return _bind_runtime_paths(
         Config(
             agents={_AGENT: AgentConfig(display_name="Code Agent")},
+            models={"default": ModelConfig(provider="openai", id="test-model")},
             tool_approval=ToolApprovalConfig(
                 rules=[ApprovalRuleConfig(match="post_slack_message", action="require_approval")],
             ),
+            # The build's gated calls run under the approval policy gate, not as background jobs.
+            background_tool_jobs=BackgroundToolJobsConfig(enabled=False),
         ),
     )
 
@@ -1893,45 +2121,55 @@ def _turn_context(config: Config, *, thread_id: str = _THREAD) -> ToolRuntimeCon
 
 async def _run(
     manager: ApprovalManager,
-    agent: Agent | None,
+    agent: _LiveRun | None,
     *,
     arguments_json: str | None = None,
     context: ToolRuntimeContext | None = None,
 ) -> object:
+    """Run the scheduler's runner inside ``agent``'s run, or, without one, outside any agent run."""
     with (
         patch("mindroom.approval.manager.get_approval_store", return_value=manager),
         tool_runtime_context(context or _turn_context(_code_config())),
     ):
-        return await SchedulerTools().run_scheduled_call(
-            task_id=_TASK,
-            arguments_json=arguments_json,
-            agent=agent,
-            run_context=RunContext(run_id="run", session_id="session", session_state={}),
-        )
+        if agent is None:
+            return await SchedulerTools().run_scheduled_call(task_id=_TASK, arguments_json=arguments_json)
+        return await agent.call("run_scheduled_call", task_id=_TASK, arguments_json=arguments_json)
+
+
+def _failed_answer(result: object) -> str:
+    """Return the text of a runner's answer that fails its call, which Claude and Gemini read as a failure."""
+    assert isinstance(result, ToolOutcome)
+    assert result.is_error
+    return result.content
 
 
 @pytest.mark.asyncio
-async def test_live_function_runs_with_its_hooks_and_keeps_tool_instructions(
+async def test_a_stored_call_runs_nothing_before_the_approval_runtime_is_ready() -> None:
+    """Without an approval runtime the stored call is refused as not ready, not as missing, and nothing runs."""
+    runs: list[dict[str, object]] = []
+
+    result = await _run(None, _live_agent(runs))
+
+    assert "the approval runtime is not ready" in _failed_answer(result)
+    assert runs == []
+
+
+@pytest.mark.asyncio
+async def test_live_function_runs_once_under_the_runs_tool_call_policy(
     journal_database: Callable[[], EventJournalStore],
     tmp_path: Path,
 ) -> None:
-    """The stored call runs once through the live function and its hooks, off the event loop, in this turn."""
+    """The stored call runs once through the live function and the run's policy, off the event loop, in this turn."""
     journal = journal_database()
     manager = _manager(journal, tmp_path, [])
     runs: list[dict[str, object]] = []
-    hooked: list[str] = []
-    agent = _live_agent(runs)
+    hooked: list[tuple[str, str | None]] = []
 
-    def hook(function_name: str, function_call: Callable[..., object], arguments: dict[str, object]) -> object:
-        hooked.append(function_name)
-        return function_call(**arguments)
+    async def policy(call: ToolCall, call_next: ToolNext) -> object:
+        hooked.append((call.function.name, call.context.call_id))
+        return await call_next(call.arguments)
 
-    for toolkit in agent.tools or ():
-        assert isinstance(toolkit, Toolkit)
-        for function in toolkit.get_async_functions().values():
-            function.tool_hooks = [hook]
-    instructions = ["keep me"]
-    agent._tool_instructions = instructions
+    agent = _live_agent(runs, middleware=(policy,))
     try:
         await _armed(manager)
 
@@ -1940,37 +2178,368 @@ async def test_live_function_runs_with_its_hooks_and_keeps_tool_instructions(
         assert result == "sent"
         assert [{key: run[key] for key in ("channel", "text")} for run in runs] == [_ARGUMENTS]
         assert runs[0]["thread"] != threading.get_ident()
-        assert hooked == ["post_slack_message"]
-        assert agent._tool_instructions is instructions
+        assert hooked == [("run_scheduled_call", "call-1"), ("post_slack_message", f"scheduled-{_TASK}")]
         assert await _binding_column(journal, "outcome") == "completed"
 
         repeat = await _run(manager, agent)
 
-        assert isinstance(repeat, str)
-        assert "already used" in repeat
+        assert "already used" in _failed_answer(repeat)
         assert len(runs) == 1
     finally:
         await manager.shutdown()
 
 
 @pytest.mark.asyncio
+async def test_a_stored_call_a_plugin_hook_declines_answers_the_runner_with_the_decline_text(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+) -> None:
+    """The runner answers with the policy's failed outcome, while its after-call hooks receive the decline's text.
+
+    The call never ran, so it is journaled failed, as a call that raised is.
+    """
+    journal = journal_database()
+    manager = _manager(journal, tmp_path, [])
+    runs: list[dict[str, object]] = []
+    observed: list[tuple[str, object, bool]] = []
+
+    @hook(EVENT_TOOL_BEFORE_CALL)
+    async def decline(ctx: ToolBeforeCallContext) -> None:
+        if ctx.tool_name == "post_slack_message":
+            ctx.decline("Slack is paused")
+
+    @hook(EVENT_TOOL_AFTER_CALL)
+    async def observe(ctx: ToolAfterCallContext) -> None:
+        observed.append((ctx.tool_name, ctx.result, ctx.blocked))
+
+    registry = HookRegistry.from_plugins([_plugin("policy", [decline, observe])])
+    agent = _live_agent(runs, middleware=(detached_policy(registry),))
+    try:
+        await _armed(manager)
+
+        result = await _run(
+            manager,
+            agent,
+            context=replace(_turn_context(_code_config()), hooks=HookBindings(registry=registry)),
+        )
+
+        declined = (
+            "[TOOL CALL DECLINED]\n"
+            "Tool: post_slack_message\n"
+            "Reason: Slack is paused\n\n"
+            "Adjust your approach — try a different tool or different arguments."
+        )
+        assert _failed_answer(result) == declined
+        assert runs == []
+        assert observed == [("post_slack_message", declined, True), ("run_scheduled_call", declined, False)]
+        assert await _binding_column(journal, "outcome") == "failed"
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+async def test_a_stored_call_reads_as_hidden_while_the_runner_that_runs_it_reads_as_shown(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+) -> None:
+    """A reply that shows tool calls shows the runner's call; the stored call's arguments stay out of Matrix."""
+    journal = journal_database()
+    manager = _manager(journal, tmp_path, [])
+    seen: list[tuple[str, bool, str | None]] = []
+
+    @hook(EVENT_TOOL_BEFORE_CALL)
+    async def mirror(ctx: ToolBeforeCallContext) -> None:
+        seen.append((ctx.tool_name, ctx.shown, ctx.chat_preview()))
+
+    registry = HookRegistry.from_plugins([_plugin("mirror", [mirror])])
+    agent = _live_agent(middleware=(detached_policy(registry),))
+    try:
+        await _armed(manager)
+
+        context = replace(_turn_context(_code_config()), hooks=HookBindings(registry=registry), tool_calls_shown=True)
+        await _run(manager, agent, context=context)
+
+        assert seen == [
+            ("run_scheduled_call", True, f"task_id={_TASK}, arguments_json=null"),
+            ("post_slack_message", False, None),
+        ]
+    finally:
+        await manager.shutdown()
+
+
+class _ConfiguredSlackTools(Toolkit):
+    """The Slack toolkit as the tool registry builds it for an agent, recording each real run."""
+
+    runs: ClassVar[list[dict[str, object]]] = []
+
+    def __init__(self) -> None:
+        super().__init__(name="slack", tools=[self.post_slack_message])
+
+    def post_slack_message(self, channel: str, text: str = "") -> str:
+        """Post a Slack message.
+
+        Args:
+            channel: Channel or user ID.
+            text: Message text.
+
+        """
+        type(self).runs.append({"channel": channel, "text": text})
+        return "sent"
+
+
+class _MirroredSlackTools(_ConfiguredSlackTools):
+    """A second configured toolkit offering a function of the same name, recording its own runs."""
+
+    runs: ClassVar[list[dict[str, object]]] = []
+
+
+@pytest.fixture
+def configured_slack() -> Iterator[list[dict[str, object]]]:
+    """Register the recording Slack toolkit under the stored call's toolkit name, then restore the built-in tools.
+
+    The name is a built-in's, so the built-in tool it overwrites is restored too.
+    """
+    with registered_toolkit(_TOOLKIT, _ConfiguredSlackTools):
+        _ConfiguredSlackTools.runs.clear()
+        yield _ConfiguredSlackTools.runs
+
+
+@pytest.fixture
+def configured_slack_pair(configured_slack: list[dict[str, object]]) -> Iterator[dict[str, list[dict[str, object]]]]:
+    """Also register a second toolkit whose function has the stored call's name; return each toolkit's runs."""
+    with registered_toolkit(_MIRRORED_TOOLKIT, _MirroredSlackTools):
+        _MirroredSlackTools.runs.clear()
+        yield {_TOOLKIT: configured_slack, _MIRRORED_TOOLKIT: _MirroredSlackTools.runs}
+
+
+def _agent_build(config: Config, monkeypatch: pytest.MonkeyPatch, agent_name: str = _AGENT) -> AgentBuild:
+    """Build the configured agent as a turn does, on a model that is never called."""
+    install_model_providers(monkeypatch, {"default": ScriptedModel([])})
+    return create_agent(
+        agent_name,
+        config,
+        runtime_paths_for(config),
+        None,
+        supports_native_tool_approval=True,
+        knowledge=None,
+        model=turn_model(config, runtime_paths_for(config), agent_name),
+        plugins=config_plugins(config, runtime_paths_for(config)),
+    )
+
+
+async def _run_in_build(manager: ApprovalManager, build: AgentBuild, config: Config) -> object:
+    """Run the scheduler's runner as the build's run calls it, in the scheduling agent's own turn."""
+    with (
+        patch("mindroom.approval.manager.get_approval_store", return_value=manager),
+        tool_runtime_context(_turn_context(config)),
+    ):
+        return _answer(
+            await run_tool_call(
+                build.spec.functions["run_scheduled_call"],
+                {"task_id": _TASK},
+                ToolCallContext(run_id="run", session_id="session", call_id="call-1", user_id=None),
+                middleware=agent_tool_middleware(build),
+            ),
+        )
+
+
 @pytest.mark.parametrize(
-    ("scope", "authored_confirmation", "runs_replacement"),
-    [(None, False, False), ("any_arguments", False, True), ("any_arguments", True, False)],
+    "offered",
+    ["schedule_tool_call", "run_scheduled_call", None],
+    ids=["scheduling-only", "running-only", "no-scheduler"],
+)
+def test_only_a_build_offering_the_scheduler_binds_its_live_functions(
+    monkeypatch: pytest.MonkeyPatch,
+    offered: str | None,
+) -> None:
+    """Each scheduler function reading the run's live functions binds them; a build offering neither has no such step.
+
+    The build offers the scheduler with only the named function, so each name is checked against the scheduler's own.
+    """
+    config = _code_config()
+    config.defaults.tools = []
+    if offered is not None:
+        config.agents[_AGENT].tools = [{"scheduler": {"include_tools": [offered]}}]
+
+    build = _agent_build(config, monkeypatch)
+
+    functions = build.spec.functions
+    assert {"schedule_tool_call", "run_scheduled_call"} & set(functions) == ({offered} if offered else set())
+    names = [middleware.__name__ for middleware in build.tool_policy]
+    assert names.count("bind_live_functions") == int(offered is not None)
+    assert (names[0] == "bind_live_functions") is (offered is not None)
+
+
+def test_the_live_functions_binding_is_freed_without_a_garbage_collection() -> None:
+    """The step binding a run's functions holds no reference cycle, so dropping the run's policy frees it at once."""
+    functions = {function.name: function for function in adapt_toolkit(SchedulerTools(), key="scheduler").functions}
+    with gc_paused():
+        policy = bind_live_tools(functions, ())
+        released = weakref.ref(policy[0])
+        del policy
+        assert released() is None
+
+
+@pytest.mark.asyncio
+async def test_an_agent_build_runs_a_stored_call_through_its_own_function_and_policy(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    configured_slack: list[dict[str, object]],
+) -> None:
+    """The runner the agent's build offers finds the stored call among the build's functions and runs it once."""
+    journal = journal_database()
+    manager = _manager(journal, tmp_path, [])
+    config = _code_config()
+    config.agents[_AGENT].tools = [_TOOLKIT]
+    build = _agent_build(config, monkeypatch)
+    assert build.spec.functions["post_slack_message"].gate is ToolGate.POLICY
+    try:
+        await _armed(manager)
+
+        result = await _run_in_build(manager, build, config)
+
+        assert result == "sent"
+        assert configured_slack == [_ARGUMENTS]
+        assert await _binding_column(journal, "outcome") == "completed"
+    finally:
+        await manager.shutdown()
+
+
+_SHARED_NAME_ORDERS = pytest.mark.parametrize(
+    "configured",
+    [(_TOOLKIT, _MIRRORED_TOOLKIT), (_MIRRORED_TOOLKIT, _TOOLKIT)],
+    ids=["stored-toolkit-first", "stored-toolkit-shadowed"],
+)
+
+
+@pytest.mark.asyncio
+@_SHARED_NAME_ORDERS
+async def test_scheduling_a_name_two_toolkits_share_stores_the_toolkit_the_run_offers(
+    monkeypatch: pytest.MonkeyPatch,
+    configured_slack_pair: dict[str, list[dict[str, object]]],
+    configured: tuple[str, str],
+) -> None:
+    """The build offers one function per name, the first configured toolkit's, and the stored call names that toolkit."""
+    config = _gated_config()
+    config.agents["general"].tools = list(configured)
+    build = _agent_build(config, monkeypatch, "general")
+    context = _tool_context(config)
+    request = AsyncMock(return_value=True)
+
+    with (
+        scheduled_call_approvals(request_scheduled_call_approval=request),
+        tool_runtime_context(context),
+        _responders(config, "general"),
+    ):
+        _answer(
+            await run_tool_call(
+                build.spec.functions["schedule_tool_call"],
+                {
+                    "tool_name": "post_slack_message",
+                    "arguments_json": canonical_arguments(_ARGUMENTS),
+                    "execute_at": "2030-01-02T09:00:00-05:00",
+                    "description": "Morning DM",
+                },
+                ToolCallContext(run_id="run", session_id="session", call_id="call-1", user_id=None),
+                middleware=agent_tool_middleware(build),
+            ),
+        )
+
+    [binding] = request.await_args.args
+    assert binding.toolkit_name == configured[0]
+    assert configured_slack_pair == {_TOOLKIT: [], _MIRRORED_TOOLKIT: []}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("configured", "expected", "stored_toolkit_runs", "outcome"),
+    [
+        ((_TOOLKIT, _MIRRORED_TOOLKIT), "sent", [_ARGUMENTS], "completed"),
+        (
+            (_MIRRORED_TOOLKIT, _TOOLKIT),
+            ToolOutcome(
+                content=f"❌ Scheduled call `{_TASK}` did not run: "
+                "`post_slack_message` now comes from another toolkit than the one the call was stored for.",
+                is_error=True,
+            ),
+            [],
+            None,
+        ),
+    ],
+    ids=["stored-toolkit-first", "stored-toolkit-shadowed"],
+)
+async def test_a_stored_call_runs_only_the_function_the_run_offers_under_its_name(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    configured_slack_pair: dict[str, list[dict[str, object]]],
+    configured: tuple[str, str],
+    expected: object,
+    stored_toolkit_runs: list[dict[str, object]],
+    outcome: str | None,
+) -> None:
+    """A stored call runs the function the model's own call of its name runs, and only when its toolkit offers it.
+
+    When another toolkit configured earlier shadows the stored toolkit's function, the call is refused unspent.
+    """
+    journal = journal_database()
+    manager = _manager(journal, tmp_path, [])
+    config = _code_config()
+    config.agents[_AGENT].tools = list(configured)
+    build = _agent_build(config, monkeypatch)
+    try:
+        await _armed(manager)
+
+        result = await _run_in_build(manager, build, config)
+
+        assert result == expected
+        assert configured_slack_pair == {_TOOLKIT: stored_toolkit_runs, _MIRRORED_TOOLKIT: []}
+        assert await _binding_column(journal, "outcome") == outcome
+        assert (await _binding_column(journal, "consumed_at_ns") is None) == (outcome is None)
+
+        # The model's own call of the name runs the first configured toolkit's function.
+        with tool_runtime_context(_turn_context(config)):
+            _answer(
+                await run_tool_call(
+                    build.spec.functions["post_slack_message"],
+                    _OTHER_ARGUMENTS,
+                    ToolCallContext(run_id="run", session_id="session", call_id="call-2", user_id=None),
+                    middleware=agent_tool_middleware(build),
+                ),
+            )
+
+        assert configured_slack_pair[configured[0]][-1] == _OTHER_ARGUMENTS
+        assert _OTHER_ARGUMENTS not in configured_slack_pair[configured[1]]
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("scope", "gate", "runs_replacement"),
+    [
+        (None, ToolGate.POLICY, False),
+        ("any_arguments", ToolGate.POLICY, True),
+        ("any_arguments", ToolGate.CONFIRM, False),
+    ],
     ids=["exact", "any-arguments", "self-confirming-tool"],
 )
 async def test_replacement_arguments_run_only_under_an_any_arguments_approval(
     journal_database: Callable[[], EventJournalStore],
     tmp_path: Path,
     scope: str | None,
-    authored_confirmation: bool,
+    gate: ToolGate,
     runs_replacement: bool,
 ) -> None:
-    """The agent's own arguments replace the stored ones only when any arguments were approved for that tool."""
+    """The agent's own arguments replace the stored ones only when any arguments were approved for that tool.
+
+    The rule that gates the tool lets an approval cover other arguments; a tool's own confirmation covers only its own.
+    """
     journal = journal_database()
     manager = _manager(journal, tmp_path, [])
     runs: list[dict[str, object]] = []
-    agent = _live_agent(runs, authored_confirmation=authored_confirmation)
+    agent = _live_agent(runs, gate=gate)
     try:
         await _armed(manager, scope=scope)
 
@@ -1980,8 +2549,7 @@ async def test_replacement_arguments_run_only_under_an_any_arguments_approval(
             assert result == "sent"
             assert [{key: run[key] for key in ("channel", "text")} for run in runs] == [_OTHER_ARGUMENTS]
         else:
-            assert isinstance(result, str)
-            assert "only the stored arguments" in result
+            assert "only the stored arguments" in _failed_answer(result)
             assert runs == []
             assert await _binding_column(journal, "consumed_at_ns") is None
     finally:
@@ -2003,9 +2571,8 @@ async def test_unapproved_call_offers_the_ordinary_way_only_once_its_time_has_co
     try:
         assert await _schedule(manager, execute_at=datetime.now(UTC) + offset)
 
-        result = await _run(manager, _live_agent(runs))
+        result = _failed_answer(await _run(manager, _live_agent(runs)))
 
-        assert isinstance(result, str)
         assert "has not approved it" in result
         assert ("call `post_slack_message` with these arguments" in result) is fired
         assert (canonical_arguments(_ARGUMENTS) in result) is fired
@@ -2022,7 +2589,7 @@ async def test_unapproved_call_offers_the_ordinary_way_only_once_its_time_has_co
         ("none", _THREAD, "own conversation turn"),
         ("live", "$other-thread", "another agent, conversation, or requester"),
         ("without-tool", _THREAD, "not one of this agent's tools"),
-        ("other-toolkit", _THREAD, "not one of this agent's tools"),
+        ("other-toolkit", _THREAD, "now comes from another toolkit than the one the call was stored for"),
     ],
     ids=["no-live-agent", "other-thread", "tool-gone", "same-name-other-toolkit"],
 )
@@ -2039,7 +2606,7 @@ async def test_call_that_cannot_run_here_spends_nothing(
     agent = {
         "none": None,
         "live": _live_agent(),
-        "without-tool": Agent(id="general", model=OpenAIChat(), tools=[]),
+        "without-tool": _LiveRun(()),
         "other-toolkit": _live_agent(toolkit_name="other_slack"),
     }[agent_kind]
     try:
@@ -2047,35 +2614,106 @@ async def test_call_that_cannot_run_here_spends_nothing(
 
         result = await _run(manager, agent, context=_turn_context(_code_config(), thread_id=thread_id))
 
-        assert isinstance(result, str)
-        assert reason in result
+        assert reason in _failed_answer(result)
+        assert await _binding_column(journal, "consumed_at_ns") is None
+    finally:
+        await manager.shutdown()
+
+
+class _MediaSlackTools(_SlackTools):
+    """The recording Slack toolkit whose one function also takes the run's images, and records the images it got."""
+
+    def post_slack_message(self, channel: str, text: str = "", images: Sequence[Image] | None = None) -> object:
+        """Post a Slack message with the run's images.
+
+        Args:
+            channel: Channel or user ID.
+            text: Message text.
+            images: The run's images, which the model never supplies.
+
+        """
+        outcome = super().post_slack_message(channel, text)
+        self.runs[-1]["images"] = images
+        return outcome
+
+
+@pytest.mark.asyncio
+async def test_call_that_needs_live_input_is_refused_before_spending_its_approval(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+) -> None:
+    """A stored call whose function now ends the turn runs nothing, unspent."""
+    journal = journal_database()
+    manager = _manager(journal, tmp_path, [])
+    runs: list[dict[str, object]] = []
+    agent = _live_agent(runs, stop_after_tool_call=True)
+    try:
+        await _armed(manager)
+
+        result = await _run(manager, agent)
+
+        assert "needs live input or conversation control" in _failed_answer(result)
+        assert runs == []
         assert await _binding_column(journal, "consumed_at_ns") is None
     finally:
         await manager.shutdown()
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("wrapped", [False, True], ids=["plain", "behind-output-files"])
+async def test_a_stored_call_of_a_tool_that_takes_the_runs_media_runs_without_media_as_its_live_calls_do(
+    journal_database: Callable[[], EventJournalStore],
+    tmp_path: Path,
+    wrapped: bool,
+) -> None:
+    """A tool's live calls get no run media, so its stored call runs, getting none either.
+
+    The output-file wrapper gives the function a signature of its own, and the media parameter still shows through it.
+    """
+    journal = journal_database()
+    manager = _manager(journal, tmp_path, [])
+    runs: list[dict[str, object]] = []
+    toolkit = _MediaSlackTools(runs)
+    if wrapped:
+        configure_toolkit_functions(toolkit, output_files=ToolOutputFilePolicy(workspace_root=tmp_path))
+    agent = _live_agent(toolkit=toolkit)
+    try:
+        await _armed(manager)
+
+        result = await _run(manager, agent)
+        await agent.call("post_slack_message", **_ARGUMENTS)
+
+        assert result == "sent"
+        assert [{key: run[key] for key in ("channel", "text", "images")} for run in runs] == [
+            {**_ARGUMENTS, "images": None},
+            {**_ARGUMENTS, "images": None},
+        ]
+        assert await _binding_column(journal, "outcome") == "completed"
+    finally:
+        await manager.shutdown()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("outcome", "message"),
-    [(RuntimeError("slack is down"), "slack is down"), (iter(["streamed"]), "streams its result")],
-    ids=["tool-error", "streaming-result"],
+    ("error", "text"),
+    [(RuntimeError("slack is down"), "slack is down"), (TimeoutError(), "TimeoutError")],
+    ids=["with_text", "without_text"],
 )
 async def test_failed_call_spends_its_approval_and_records_the_failure(
     journal_database: Callable[[], EventJournalStore],
     tmp_path: Path,
-    outcome: object,
-    message: str,
+    error: Exception,
+    text: str,
 ) -> None:
-    """A claimed call that fails is never retried; its outcome and reason are reported."""
+    """A claimed call that fails is never retried; its outcome and reason, or its type name, are reported."""
     journal = journal_database()
     manager = _manager(journal, tmp_path, [])
     try:
         await _armed(manager)
 
-        result = await _run(manager, _live_agent(outcome=outcome))
+        result = await _run(manager, _live_agent(outcome=error))
 
-        assert isinstance(result, str)
-        assert message in result
+        assert _failed_answer(result).endswith(f"failed: {text}")
         assert await _binding_column(journal, "outcome") == "failed"
         assert await _claim(manager) == "used"
     finally:
@@ -2090,33 +2728,17 @@ def test_only_the_built_in_scheduled_call_runner_skips_approval_gating() -> None
         """Plugin function that shares the runner's name."""
         return "plugin"
 
-    scheduler = apply_tool_approval_capability(
-        SchedulerTools(),
-        config,
-        supports_native_tool_approval=True,
-        registered_tool_name="scheduler",
-    )
-    plugin = apply_tool_approval_capability(
-        Toolkit(name="plugin", tools=[run_scheduled_call]),
-        config,
-        supports_native_tool_approval=True,
-        registered_tool_name="plugin",
-    )
+    scheduler = gated_functions(SchedulerTools(), config, registered_tool_name="scheduler")
+    plugin = gated_functions(Toolkit(name="plugin", tools=[run_scheduled_call]), config, registered_tool_name="plugin")
 
-    assert scheduler is not None
-    assert plugin is not None
-    assert scheduler.async_functions["run_scheduled_call"].requires_confirmation is not True
-    assert scheduler.async_functions["schedule_tool_call"].requires_confirmation is True
-    assert plugin.functions["run_scheduled_call"].requires_confirmation is True
+    assert scheduler["run_scheduled_call"].gate is None
+    assert scheduler["schedule_tool_call"].gate is ToolGate.POLICY
+    assert plugin["run_scheduled_call"].gate is ToolGate.POLICY
 
 
 def test_scheduler_tools_expose_their_arguments_to_the_model() -> None:
-    """The model sees each tool's real parameters, never the runtime-supplied agent or run context."""
-    agent = Agent(id="general", model=OpenAIChat(), tools=[SchedulerTools()])
-    prepared = {
-        function.name: function
-        for function in parse_tools(agent, tools=[SchedulerTools()], model=agent.model, async_mode=True)
-    }
+    """The model sees each tool's real parameters and nothing else."""
+    prepared = {function.name: function for function in adapt_toolkit(SchedulerTools()).functions}
 
     schedule = prepared["schedule_tool_call"].parameters
     run = prepared["run_scheduled_call"].parameters
@@ -2139,9 +2761,8 @@ async def test_cancelled_task_runs_nothing_and_offers_no_other_way(
         await _armed(manager)
         await manager.withdraw_scheduled_call_approval(_TASK, reason="Schedule cancelled.")
 
-        result = await _run(manager, _live_agent(runs))
+        result = _failed_answer(await _run(manager, _live_agent(runs)))
 
-        assert isinstance(result, str)
         assert "withdrawn when the task was cancelled" in result
         assert "with these arguments" not in result
         assert runs == []
@@ -2156,10 +2777,10 @@ async def test_misspelled_argument_is_refused_when_scheduling() -> None:
     request = AsyncMock(return_value=True)
 
     with (
-        patch("mindroom.scheduling.tasks.request_scheduled_call_approval", new=request),
+        scheduled_call_approvals(request_scheduled_call_approval=request),
         tool_runtime_context(context),
         _responders(context.config, "general"),
-        pytest.raises(RuntimeError, match="current parameters"),
+        pytest.raises(SchedulingError, match="current parameters"),
     ):
         await _schedule_from_tool(arguments_json='{"channel": "U1", "txet": "typo"}')
 
@@ -2193,8 +2814,8 @@ async def test_reused_task_id_never_borrows_or_withdraws_another_tasks_approval(
 
 
 @pytest.mark.asyncio
-async def test_editing_a_pre_approved_task_through_chat_is_refused_before_parsing() -> None:
-    """The edit command says to cancel and schedule again, without spending a model call on the new text."""
+async def test_editing_a_pre_approved_task_through_tool_is_refused_before_parsing() -> None:
+    """The edit tool says to cancel and schedule again, without spending a model call on the new text."""
     context = _tool_context(_gated_config())
     workflow = ScheduledWorkflow(
         created_by="@user:localhost",
@@ -2219,7 +2840,7 @@ async def test_editing_a_pre_approved_task_through_chat_is_refused_before_parsin
         patch("mindroom.scheduling.tasks.get_scheduled_task", new=AsyncMock(return_value=record)),
         patch("mindroom.scheduling.tasks._parse_workflow_schedule", new=parse),
         tool_runtime_context(context),
-        pytest.raises(RuntimeError, match="cannot be edited; cancel it and schedule the call again"),
+        pytest.raises(SchedulingError, match="cannot be edited; cancel it and schedule the call again"),
     ):
         await SchedulerTools().edit_schedule(task_id="task1234", request="move it to 10am")
 
@@ -2227,7 +2848,9 @@ async def test_editing_a_pre_approved_task_through_chat_is_refused_before_parsin
     context.client.room_put_state.assert_not_awaited()
 
 
-class _StreamingTools(Toolkit):
+class _StreamingSlackTools(Toolkit):
+    """A configured Slack toolkit whose function streams its result in two parts."""
+
     def __init__(self) -> None:
         super().__init__(name="slack", tools=[self.post_slack_message])
 
@@ -2239,60 +2862,142 @@ class _StreamingTools(Toolkit):
             text: Message text.
 
         """
-        yield f"{channel}: {text}"
+        yield f"{channel}: "
+        yield text
+
+
+class _AsyncStreamingSlackTools(Toolkit):
+    """The streaming Slack toolkit with an asynchronous generator for its function."""
+
+    def __init__(self) -> None:
+        super().__init__(name="slack", tools=[self.post_slack_message])
+
+    async def post_slack_message(self, channel: str, text: str = "") -> AsyncIterator[str]:
+        """Stream a Slack message.
+
+        Args:
+            channel: Channel or user ID.
+            text: Message text.
+
+        """
+        yield f"{channel}: "
+        await asyncio.sleep(0)
+        yield text
 
 
 @pytest.mark.asyncio
-async def test_streaming_tool_is_refused_before_its_approval_is_spent(
+@pytest.mark.parametrize(
+    "toolkit_class",
+    [_StreamingSlackTools, _AsyncStreamingSlackTools],
+    ids=["generator", "async-generator"],
+)
+async def test_a_streaming_tool_runs_to_the_end_of_its_stream(
     journal_database: Callable[[], EventJournalStore],
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    toolkit_class: type[Toolkit],
 ) -> None:
-    """A tool whose body only runs when its stream is read cannot run as a scheduled call, and spends nothing."""
+    """A tool that streams its result runs as a scheduled call through the agent's build and returns the whole stream.
+
+    The agent runs it behind the output-file wrapper, which hands the stream on undrained.
+    """
     journal = journal_database()
     manager = _manager(journal, tmp_path, [])
-    toolkit = _StreamingTools()
-    for function in toolkit.get_async_functions().values():
-        function.owning_toolkit = _TOOLKIT
-    try:
-        await _armed(manager)
+    config = _code_config()
+    config.agents[_AGENT].tools = [_TOOLKIT]
+    with registered_toolkit(_TOOLKIT, toolkit_class):
+        build = _agent_build(config, monkeypatch)
+        parameters = build.spec.functions["post_slack_message"].parameters
+        assert "mindroom_output_path" in parameters["properties"]
+        try:
+            await _armed(manager)
 
-        result = await _run(manager, Agent(id="general", model=OpenAIChat(), tools=[toolkit]))
+            result = await _run_in_build(manager, build, config)
 
-        assert isinstance(result, str)
-        assert "streams its result" in result
-        assert await _binding_column(journal, "consumed_at_ns") is None
-    finally:
-        await manager.shutdown()
+            assert result == "U123: Good morning!"
+            assert await _binding_column(journal, "outcome") == "completed"
+        finally:
+            await manager.shutdown()
 
 
 @pytest.mark.asyncio
-async def test_streaming_tool_behind_its_output_wrapper_is_refused_before_spending(
-    journal_database: Callable[[], EventJournalStore],
-    tmp_path: Path,
-) -> None:
-    """The output-file wrapper every workspace toolkit gets does not hide a streaming body."""
-    journal = journal_database()
-    manager = _manager(journal, tmp_path, [])
-    toolkit = wrap_toolkit_for_output_files(_StreamingTools(), ToolOutputFilePolicy(workspace_root=tmp_path))
-    for function in toolkit.get_async_functions().values():
-        function.owning_toolkit = _TOOLKIT
-    try:
-        await _armed(manager)
-
-        result = await _run(manager, Agent(id="general", model=OpenAIChat(), tools=[toolkit]))
-
-        assert isinstance(result, str)
-        assert "streams its result" in result
-        assert await _binding_column(journal, "consumed_at_ns") is None
-    finally:
-        await manager.shutdown()
-
-
-def test_scheduler_functions_are_never_scheduled_calls() -> None:
+async def test_scheduler_functions_are_never_scheduled_calls() -> None:
     """The runner and the scheduler cannot be stored as the call a schedule runs later."""
-    agent = Agent(id="general", model=OpenAIChat(), tools=[SchedulerTools(), _SlackTools([])])
+    context = _tool_context(_gated_config())
 
-    for tool_name in ("run_scheduled_call", "schedule_tool_call"):
-        result = prepare_scheduled_call(agent, tool_name, '{"task_id": "abc"}')
-        assert isinstance(result, str)
-        assert "not one of this agent's tools" in result
+    with tool_runtime_context(context), _responders(context.config, "general"):
+        for tool_name in ("run_scheduled_call", "schedule_tool_call"):
+            with pytest.raises(SchedulingError, match="not one of this agent's tools"):
+                await _live_agent().call(
+                    "schedule_tool_call",
+                    tool_name=tool_name,
+                    arguments_json='{"task_id": "abc"}',
+                    execute_at="2030-01-02T09:00:00-05:00",
+                    description="Run the runner",
+                )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("tool_name", "arguments_json"),
+    [("switch_thread_model", '{"model_name": "default"}'), ("run_subagent", '{"task": "Research"}')],
+)
+async def test_a_model_switch_or_subagent_call_is_never_a_scheduled_call(tool_name: str, arguments_json: str) -> None:
+    """A stored call can neither exercise conversation control nor run a child turn in its conversation later.
+
+    A switch may stop the run that makes it, so it is conversation control; a subagent call runs a child turn.
+    """
+    context = _tool_context(_gated_config())
+
+    def run_subagent(task: str) -> str:
+        """Run a subagent."""
+        return task
+
+    toolkit = {
+        "switch_thread_model": (ThreadModelTools(), "thread_model"),
+        "run_subagent": (Toolkit(name="delegate", tools=[run_subagent]), "delegate"),
+    }[tool_name]
+    with (
+        tool_runtime_context(context),
+        _responders(context.config, "general"),
+        pytest.raises(SchedulingError, match="needs live input or conversation control"),
+    ):
+        await _LiveRun((toolkit,)).call(
+            "schedule_tool_call",
+            tool_name=tool_name,
+            arguments_json=arguments_json,
+            execute_at="2030-01-02T09:00:00-05:00",
+            description="Run later",
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_function_generated_for_the_agent_is_never_a_scheduled_call() -> None:
+    """A function no configured toolkit offers, such as the knowledge search, names no toolkit a stored call could."""
+    context = _tool_context(_gated_config())
+
+    def search_knowledge_base(query: str) -> str:
+        """Search the knowledge base."""
+        return query
+
+    run = _LiveRun(((Toolkit(name="search_knowledge_base", tools=[search_knowledge_base]), None),))
+    with (
+        tool_runtime_context(context),
+        _responders(context.config, "general"),
+        pytest.raises(SchedulingError, match="not one of this agent's tools"),
+    ):
+        await run.call(
+            "schedule_tool_call",
+            tool_name="search_knowledge_base",
+            arguments_json='{"query": "handbook"}',
+            execute_at="2030-01-02T09:00:00-05:00",
+            description="Search later",
+        )
+
+
+def test_outside_an_agent_run_no_call_can_be_stored() -> None:
+    """Without an agent run's functions bound, scheduling finds no tool to store."""
+    with pytest.raises(SchedulingError) as exc_info:
+        prepare_scheduled_call("post_slack_message", '{"channel": "U1"}')
+
+    assert str(exc_info.value) == "`post_slack_message` is not one of this agent's tools in this conversation."

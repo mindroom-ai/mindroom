@@ -46,7 +46,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["pandas"],
-    docs_url="https://docs.agno.com/tools/toolkits/database/pandas",
+    docs_url="https://docs.mindroom.chat/tools/data-and-databases/#pandas",
     function_names=("create_pandas_dataframe", "run_dataframe_operation"),
 )
 def pandas_tools() -> type[PandasTools]:

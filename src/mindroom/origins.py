@@ -1,0 +1,183 @@
+"""Browser origin normalization and strict allowlist validation."""
+
+from __future__ import annotations
+
+import ipaddress
+import json
+from contextlib import suppress
+from dataclasses import replace
+from types import MappingProxyType
+from typing import TYPE_CHECKING
+from urllib.parse import urlsplit
+
+from mindroom.runtime_env_policy import CONNECTIONS_ALLOWED_ORIGINS_ENV
+
+if TYPE_CHECKING:
+    from mindroom.constants import RuntimePaths
+
+_DEFAULT_PORTS = {"http": 80, "https": 443}
+# The private networks MindRoom Chat also accepts over plain HTTP: RFC 1918 and IPv6 unique-local addresses.
+_PRIVATE_NETWORKS = tuple(
+    ipaddress.ip_network(network) for network in ("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "fc00::/7")
+)
+_HOSTED_CHAT_ORIGIN = "https://chat.mindroom.chat"
+_PUBLISHED_REPORTS_ACCESS_ENV = "MINDROOM_PUBLISHED_REPORTS_ACCESS"
+
+
+def normalized_origin(url: str | None) -> str | None:
+    """Return the origin a browser would send for one URL, or None when it has none."""
+    try:
+        parsed = urlsplit((url or "").strip())
+        scheme, host, port = parsed.scheme, parsed.hostname, parsed.port
+    except ValueError:
+        return None
+    if scheme not in _DEFAULT_PORTS or not host or parsed.netloc.endswith(":"):
+        return None
+    if parsed.username is not None or parsed.password is not None:
+        return None
+    if ":" in host:
+        try:
+            host = f"[{ipaddress.ip_address(host.split('%')[0])}]"
+        except ValueError:
+            return None
+    elif not host.isascii():
+        # Python's idna codec is IDNA2003, browsers use UTS 46; require the explicit xn-- form.
+        return None
+    return f"{scheme}://{host}" + ("" if port in {None, _DEFAULT_PORTS[scheme]} else f":{port}")
+
+
+def _is_local_host(host: str) -> bool:
+    """Return whether a URL host is `localhost` or a loopback or private-network IP literal, where plain HTTP is accepted.
+
+    DNS names other than `localhost` need HTTPS even when they resolve to a private address, as in MindRoom Chat.
+    """
+    if host == "localhost":
+        return True
+    with suppress(ValueError):
+        address = ipaddress.ip_address(host)
+        return address.is_loopback or any(address in network for network in _PRIVATE_NETWORKS)
+    return False
+
+
+def is_local_origin(origin: str | None) -> bool:
+    """Return whether `origin` is a normalized browser origin on a local address."""
+    return (
+        origin is not None and normalized_origin(origin) == origin and _is_local_host(urlsplit(origin).hostname or "")
+    )
+
+
+def local_api_origin(paths: RuntimePaths) -> str:
+    """Return MindRoom's own API origin on this machine, which links, callbacks, and token audiences use by default."""
+    return f"http://localhost:{paths.env_value('MINDROOM_PORT', default='8765')}"
+
+
+def configured_public_url(paths: RuntimePaths) -> str | None:
+    """Return `MINDROOM_PUBLIC_URL` trimmed and without its trailing slash, the base of MindRoom's links, or None when unset."""
+    return (paths.env_value("MINDROOM_PUBLIC_URL") or "").strip().rstrip("/") or None
+
+
+def with_api_port(paths: RuntimePaths, api_port: int) -> RuntimePaths:
+    """Return paths whose `MINDROOM_PORT` is the port the API serves on, unless the operator set one."""
+    if paths.env_value("MINDROOM_PORT") is not None:
+        return paths
+    return replace(paths, process_env=MappingProxyType({**paths.process_env, "MINDROOM_PORT": str(api_port)}))
+
+
+def deployment_origin(public_url: str | None, fallback_url: str) -> str | None:
+    """Return the browser origin of this deployment: the configured `MINDROOM_PUBLIC_URL` when set, else the fallback's."""
+    return normalized_origin((public_url or "").strip() or fallback_url)
+
+
+def parse_browser_origin(value: str) -> str:
+    """Validate one explicit HTTPS origin, or HTTP origin on a local address, and return it normalized."""
+    origin = normalized_origin(value)
+    parsed = urlsplit(value)
+    if (
+        origin is None
+        or parsed.path not in {"", "/"}
+        or not (origin.startswith("https://") or _is_local_host(parsed.hostname or ""))
+        or any(c in "*?#" or c.isspace() or ord(c) < 32 for c in value)
+    ):
+        msg = f"Browser origin must be explicit HTTPS, or HTTP on a local address: {value!r}"
+        raise ValueError(msg)
+    return origin
+
+
+def dashboard_origin(paths: RuntimePaths) -> str | None:
+    """Return the origin `MINDROOM_DASHBOARD_URL` names, where the dashboard is served when not at the public origin."""
+    value = (paths.env_value("MINDROOM_DASHBOARD_URL") or "").strip()
+    return parse_browser_origin(value) if value else None
+
+
+def allowed_client_origins(paths: RuntimePaths, env_name: str) -> tuple[str, ...]:
+    """Read a JSON list of exact web and bundled iOS app origins from `env_name`; invalid configuration fails closed."""
+    try:
+        origins = json.loads(paths.env_value(env_name, default="[]"))
+        if not isinstance(origins, list) or not all(isinstance(origin, str) for origin in origins):
+            return ()
+        # The bundled iOS app has a fixed custom-scheme origin. Accept only
+        # this literal, never arbitrary capacitor origins or opaque "null".
+        return tuple(
+            origin if origin == "capacitor://localhost" else parse_browser_origin(origin) for origin in origins
+        )
+    except ValueError:
+        return ()
+
+
+def connections_origins_configured(paths: RuntimePaths) -> bool:
+    """Return whether the operator lists Connections Chat origins, which replaces the defaults."""
+    return paths.env_value(CONNECTIONS_ALLOWED_ORIGINS_ENV) is not None
+
+
+def connections_client_origin_allowed(paths: RuntimePaths, client_origin: str, server_origin: str | None) -> bool:
+    """Return whether MindRoom Chat at `client_origin` may sign users in to the Connections portal at `server_origin`.
+
+    Without a configured list, MindRoom's hosted Chat may, and so may any Chat on a local address when the portal
+    is on one too, as in a Docker stack on a home network.
+    """
+    if connections_origins_configured(paths):
+        return client_origin in allowed_client_origins(paths, CONNECTIONS_ALLOWED_ORIGINS_ENV)
+    return client_origin == _HOSTED_CHAT_ORIGIN or (is_local_origin(server_origin) and is_local_origin(client_origin))
+
+
+def connections_chat_origin(paths: RuntimePaths, signed_in_from: str | None = None) -> str | None:
+    """Return a web MindRoom Chat origin the operator lists for Connections, or `None` without one.
+
+    That is `signed_in_from` while the list still names it, else the first listed one.
+    """
+    web_origins = [
+        origin
+        for origin in allowed_client_origins(paths, CONNECTIONS_ALLOWED_ORIGINS_ENV)
+        if origin != "capacitor://localhost"
+    ]
+    if signed_in_from in web_origins:
+        return signed_in_from
+    return web_origins[0] if web_origins else None
+
+
+def connections_sign_in_page(paths: RuntimePaths) -> str | None:
+    """Return MindRoom Chat's Connections page on the first web origin the operator lists, or `None` without one.
+
+    That page signs the browser in to the portal, so the portal sends signed-out visitors there.
+    """
+    chat_origin = connections_chat_origin(paths)
+    return f"{chat_origin}/connections" if chat_origin else None
+
+
+def connections_sign_in_enabled(paths: RuntimePaths) -> bool:
+    """Return whether some MindRoom Chat may sign users in: the list is unset, or lists at least one valid origin."""
+    return not connections_origins_configured(paths) or bool(
+        allowed_client_origins(paths, CONNECTIONS_ALLOWED_ORIGINS_ENV),
+    )
+
+
+def published_reports_require_sign_in(paths: RuntimePaths) -> bool:
+    """Return whether `MINDROOM_PUBLISHED_REPORTS_ACCESS` opens published reports only to signed-in people.
+
+    The default, `anyone_with_link`, opens them to anyone who holds the link; any other value raises, never opening them.
+    """
+    value = (paths.env_value(_PUBLISHED_REPORTS_ACCESS_ENV) or "").strip()
+    if value not in {"", "anyone_with_link", "signed_in"}:
+        msg = f"{_PUBLISHED_REPORTS_ACCESS_ENV} must be anyone_with_link or signed_in, not {value!r}"
+        raise ValueError(msg)
+    return value == "signed_in"

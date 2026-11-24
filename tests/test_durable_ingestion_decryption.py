@@ -6,7 +6,6 @@ import asyncio
 import json
 from dataclasses import replace
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock
 from urllib.parse import parse_qs, urlparse
 from uuid import uuid4
 
@@ -18,6 +17,8 @@ from nio.durable.model import CryptoEvidence
 
 from mindroom.event_journal import EventKind, IngestionBatchIntegrityError
 from mindroom.matrix.durable_ingestion import consume_one_ingestion_batch
+from mindroom.matrix.journal_ingress import ingestion_timeline_views
+from tests.durable_sync_helpers import skip_crypto_maintenance
 from tests.journal_membership_helpers import admit_room_membership
 from tests.test_durable_ingestion_admission import Session, principal_for
 
@@ -60,7 +61,7 @@ async def test_real_nio_late_decryption_preserves_work_and_history_silence(
         return await frames.get()
 
     session._transport.request = request
-    session._maintain_crypto = AsyncMock()
+    skip_crypto_maintenance(session)
     runner = asyncio.create_task(session.run())
 
     async def send_frame(position: str, room: dict[str, object]) -> None:
@@ -220,6 +221,32 @@ def _decrypted(record: SyncRecord) -> SyncRecord:
         },
         crypto=CryptoEvidence(False, "sender-key", "session"),
     )
+
+
+@pytest.mark.parametrize(
+    "plaintext",
+    [
+        {"type": "m.room.redaction", "redacts": "$victim", "content": {}},
+        {"type": "m.room.member", "state_key": "@bob:example.org", "content": {"membership": "leave"}},
+    ],
+    ids=["redaction", "membership"],
+)
+def test_decrypted_redaction_or_state_is_not_admitted(plaintext: dict[str, object]) -> None:
+    """Redactions and state are never encrypted, so Megolm plaintext cannot claim one the homeserver never checked."""
+    source = {**plaintext, "event_id": "$forged", "sender": SENDER, "origin_server_ts": 10}
+    decrypted = {"decrypted": True, "verified": False, "sender_key": "sender-key", "session_id": "session"}
+
+    def views(security_metadata: dict[str, object] | None) -> object:
+        return ingestion_timeline_views(
+            room_id=ROOM,
+            source=source,
+            self_sender=ACCOUNT,
+            provenance=nio.TimelineEventProvenance.LIVE,
+            security_metadata=security_metadata,
+        )
+
+    assert views(None) is not None
+    assert views(decrypted) is None
 
 
 @pytest.mark.asyncio

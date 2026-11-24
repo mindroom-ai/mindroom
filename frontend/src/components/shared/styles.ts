@@ -29,20 +29,9 @@ export const sharedStyles = {
 
   // Item components
   item: {
-    container:
-      "w-full text-left px-3 py-3 sm:py-2 rounded-md transition-colors duration-150 min-h-[44px] sm:min-h-0",
-    containerHover: "hover:bg-foreground/[0.045]",
     containerCard:
-      "cursor-pointer rounded-lg outline-none transition-colors hover:bg-foreground/[0.045] focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
-    selected: "bg-primary/[0.10] text-foreground hover:bg-primary/[0.14]",
-    selectedCard: "bg-primary/[0.10]",
-    iconContainer: "flex items-center gap-2 transition-colors duration-150",
-    icon: "h-4 w-4 transition-colors duration-150",
-    iconSelected: "text-primary dark:text-primary",
-    iconDefault: "text-muted-foreground",
-    content: "flex-1 min-w-0",
-    title: "font-medium text-sm",
-    subtitle: "text-xs text-muted-foreground truncate",
+      "cursor-pointer rounded-lg outline-none transition-colors duration-150 hover:bg-secondary focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-ring",
+    selectedCard: "bg-active hover:bg-active",
     cardContent: "p-3",
     cardTitle: "font-medium text-sm",
     cardDescription: "text-xs text-muted-foreground mt-1",
@@ -51,8 +40,7 @@ export const sharedStyles = {
 
   // Creation forms
   creation: {
-    container: "border-2 border-blue-500",
-    containerTeam: "border-2 border-orange-500",
+    container: "border-input",
     inputContainer: "flex items-center gap-2",
     input: "flex-1",
     content: "p-3",
@@ -79,25 +67,3 @@ export const sharedStyles = {
     withIcon: "h-3 w-3 mr-1",
   },
 } as const;
-
-/**
- * Utility function to get consistent selection styles
- */
-export function getSelectionStyles(
-  isSelected: boolean,
-  variant: "button" | "card" = "button",
-) {
-  if (variant === "card") {
-    return isSelected ? sharedStyles.item.selectedCard : "";
-  }
-  return isSelected ? sharedStyles.item.selected : "";
-}
-
-/**
- * Utility function to get consistent icon styles
- */
-export function getIconStyles(isSelected: boolean) {
-  return isSelected
-    ? `${sharedStyles.item.icon} ${sharedStyles.item.iconSelected}`
-    : `${sharedStyles.item.icon} ${sharedStyles.item.iconDefault}`;
-}

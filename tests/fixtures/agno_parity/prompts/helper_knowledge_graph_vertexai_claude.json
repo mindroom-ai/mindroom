@@ -1,0 +1,120 @@
+{
+  "description": "Helper agent run by mindroom.knowledge_graph.clients.MindRoomLLMClient.generate_response on vertexai_claude claude-sonnet-5-5.",
+  "input": {
+    "config": {
+      "agents": {
+        "assistant": {
+          "display_name": "Assistant",
+          "role": "Answer questions about the team handbook."
+        },
+        "researcher": {
+          "display_name": "Researcher",
+          "role": "Research topics in depth."
+        }
+      },
+      "knowledge_graph": {
+        "model": "default"
+      },
+      "memory": {
+        "backend": "file"
+      },
+      "models": {
+        "default": {
+          "extra_kwargs": {
+            "project_id": "test-project",
+            "region": "us-east5"
+          },
+          "id": "claude-sonnet-5-5",
+          "provider": "vertexai_claude"
+        }
+      },
+      "router": {
+        "model": "default"
+      },
+      "teams": {
+        "launch": {
+          "agents": [
+            "assistant",
+            "researcher"
+          ],
+          "display_name": "Launch Team",
+          "role": "Plan and announce product launches."
+        }
+      },
+      "timezone": "UTC"
+    },
+    "entry_point": "mindroom.knowledge_graph.clients.MindRoomLLMClient.generate_response"
+  },
+  "requests": [
+    {
+      "model": {
+        "id": "claude-sonnet-5-5",
+        "provider": "VertexAI"
+      },
+      "messages": [
+        {
+          "content": "You extract entities from conversations.\n\nAny extracted information should be returned in the same language as it was written in. Only output non-English text when the user has written full sentences or phrases in that non-English language. Otherwise, output English.\n\nAnswer with one JSON object that matches this JSON schema, and nothing else: no code fence, no text around it.\n<json_schema>\n{\n  \"$defs\": {\n    \"ExtractedEntity\": {\n      \"properties\": {\n        \"name\": {\n          \"description\": \"Name of the extracted entity\",\n          \"title\": \"Name\",\n          \"type\": \"string\"\n        },\n        \"entity_type_id\": {\n          \"description\": \"ID of the classified entity type. Must be one of the provided entity_type_id integers.\",\n          \"title\": \"Entity Type Id\",\n          \"type\": \"integer\"\n        },\n        \"episode_indices\": {\n          \"description\": \"List of episode numbers (0-indexed) this entity was extracted from. When processing a single episode, this should be [0].\",\n          \"items\": {\n            \"type\": \"integer\"\n          },\n          \"title\": \"Episode Indices\",\n          \"type\": \"array\"\n        }\n      },\n      \"required\": [\n        \"name\",\n        \"entity_type_id\"\n      ],\n      \"title\": \"ExtractedEntity\",\n      \"type\": \"object\"\n    }\n  },\n  \"properties\": {\n    \"extracted_entities\": {\n      \"description\": \"List of extracted entities\",\n      \"items\": {\n        \"$ref\": \"#/$defs/ExtractedEntity\"\n      },\n      \"title\": \"Extracted Entities\",\n      \"type\": \"array\"\n    }\n  },\n  \"required\": [\n    \"extracted_entities\"\n  ],\n  \"title\": \"ExtractedEntities\",\n  \"type\": \"object\"\n}\n</json_schema>",
+          "role": "system"
+        },
+        {
+          "content": "<CURRENT MESSAGE>\nAlice booked the Berlin offsite.\n</CURRENT MESSAGE>\n\nRespond with a JSON object in the following format:\n\n{\"$defs\": {\"ExtractedEntity\": {\"properties\": {\"name\": {\"description\": \"Name of the extracted entity\", \"title\": \"Name\", \"type\": \"string\"}, \"entity_type_id\": {\"description\": \"ID of the classified entity type. Must be one of the provided entity_type_id integers.\", \"title\": \"Entity Type Id\", \"type\": \"integer\"}, \"episode_indices\": {\"description\": \"List of episode numbers (0-indexed) this entity was extracted from. When processing a single episode, this should be [0].\", \"items\": {\"type\": \"integer\"}, \"title\": \"Episode Indices\", \"type\": \"array\"}}, \"required\": [\"name\", \"entity_type_id\"], \"title\": \"ExtractedEntity\", \"type\": \"object\"}}, \"properties\": {\"extracted_entities\": {\"description\": \"List of extracted entities\", \"items\": {\"$ref\": \"#/$defs/ExtractedEntity\"}, \"title\": \"Extracted Entities\", \"type\": \"array\"}}, \"required\": [\"extracted_entities\"], \"title\": \"ExtractedEntities\", \"type\": \"object\"}",
+          "role": "user"
+        }
+      ],
+      "tools": [],
+      "tool_choice": null,
+      "output_schema": {
+        "json_schema": {
+          "$defs": {
+            "ExtractedEntity": {
+              "properties": {
+                "name": {
+                  "description": "Name of the extracted entity",
+                  "title": "Name",
+                  "type": "string"
+                },
+                "entity_type_id": {
+                  "description": "ID of the classified entity type. Must be one of the provided entity_type_id integers.",
+                  "title": "Entity Type Id",
+                  "type": "integer"
+                },
+                "episode_indices": {
+                  "description": "List of episode numbers (0-indexed) this entity was extracted from. When processing a single episode, this should be [0].",
+                  "items": {
+                    "type": "integer"
+                  },
+                  "title": "Episode Indices",
+                  "type": "array"
+                }
+              },
+              "required": [
+                "name",
+                "entity_type_id"
+              ],
+              "title": "ExtractedEntity",
+              "type": "object"
+            }
+          },
+          "properties": {
+            "extracted_entities": {
+              "description": "List of extracted entities",
+              "items": {
+                "$ref": "#/$defs/ExtractedEntity"
+              },
+              "title": "Extracted Entities",
+              "type": "array"
+            }
+          },
+          "required": [
+            "extracted_entities"
+          ],
+          "title": "ExtractedEntities",
+          "type": "object"
+        },
+        "model": "graphiti_core.prompts.extract_nodes:ExtractedEntities"
+      },
+      "deferred_tool_names": []
+    }
+  ],
+  "scenario": "helper_knowledge_graph_vertexai_claude"
+}

@@ -3,19 +3,18 @@
 from __future__ import annotations
 
 import importlib.util
-import json
 import os
 import sys
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from agno.models.message import Message
+import pytest
+
+from mindroom.llm.messages import Message
 
 if TYPE_CHECKING:
     from types import ModuleType
-
-    import pytest
 
 
 def _load_prompt_cache_review_module() -> ModuleType:
@@ -34,8 +33,8 @@ def test_load_request_rows_handles_concatenated_json_objects(tmp_path: Path) -> 
     module = _load_prompt_cache_review_module()
     jsonl_path = tmp_path / "requests.jsonl"
     jsonl_path.write_text(
-        '{"timestamp":"2026-04-11T11:00:00-07:00","agent_name":"opus","model_id":"claude-opus-5","system_prompt":"S","messages":[{"role":"user","content":"a"}],"message_count":1}'
-        '{"timestamp":"2026-04-11T11:00:01-07:00","agent_name":"opus","model_id":"claude-opus-5","system_prompt":"S","messages":[{"role":"user","content":"b"}],"message_count":1}\n',
+        '{"timestamp":"2026-04-11T11:00:00-07:00","agent_id":"opus","model_id":"claude-opus-5","body":{"system":"S","messages":[{"role":"user","content":"a"}]}}'
+        '{"timestamp":"2026-04-11T11:00:01-07:00","agent_id":"opus","model_id":"claude-opus-5","body":{"system":"S","messages":[{"role":"user","content":"b"}]}}\n',
         encoding="utf-8",
     )
 
@@ -47,45 +46,64 @@ def test_load_request_rows_handles_concatenated_json_objects(tmp_path: Path) -> 
     assert stats.decode_error_count == 0
 
 
-def test_load_request_rows_skips_rows_with_corrupt_tool_call_arguments(tmp_path: Path) -> None:
-    """One logged row with invalid tool_call arguments must not kill the review."""
+def _claude_row(second: int, messages: list[dict[str, object]]) -> dict[str, object]:
+    return {
+        "timestamp": f"2026-04-11T11:00:0{second}-07:00",
+        "agent_id": "opus",
+        "model_id": "claude-opus-5",
+        "body": {"model": "claude-opus-5", "system": [{"type": "text", "text": "S"}], "messages": messages},
+    }
+
+
+_CACHE_MARKER = {"type": "ephemeral", "ttl": "1h"}
+_TOOLS = [{"name": "lookup_order"}]
+_SENT_BODIES = {
+    "claude": {
+        "system": [{"type": "text", "text": "S", "cache_control": _CACHE_MARKER}],
+        "messages": [{"role": "user", "content": [{"type": "text", "text": "hi", "cache_control": _CACHE_MARKER}]}],
+        "tools": _TOOLS,
+    },
+    "chat": {"messages": [{"role": "system", "content": "S"}, {"role": "user", "content": "hi"}], "tools": _TOOLS},
+    "responses": {"input": [{"role": "developer", "content": "S"}, {"role": "user", "content": "hi"}], "tools": _TOOLS},
+    "codex": {"instructions": "S", "input": [{"role": "user", "content": "hi"}], "tools": _TOOLS},
+    "gemini": {
+        "contents": [{"role": "user", "parts": [{"text": "hi"}]}],
+        "config": {"system_instruction": "S", "tools": [{"function_declarations": _TOOLS}]},
+    },
+}
+
+
+@pytest.mark.parametrize("route", sorted(_SENT_BODIES))
+def test_request_rows_read_the_conversation_and_system_text_where_each_route_sends_them(route: str) -> None:
+    """The system text joins the prompt family, the rest of the conversation the comparison blobs."""
     module = _load_prompt_cache_review_module()
-    jsonl_path = tmp_path / "requests.jsonl"
-    corrupt_arguments = '{"args": "curl \\\\"https://example.test?x=1%5C" | head"}'
-    corrupt_row = {
+    payload = {"timestamp": "2026-04-11T11:00:00-07:00", "model_id": "m", "body": _SENT_BODIES[route]}
+
+    row = module.parse_request_row(payload)
+
+    assert (row.system_prompt, row.preview, row.message_count) == ("S", "hi", 1)
+    assert "cache_control" not in row.normalized_message_blobs[0]
+    assert "lookup_order" in row.tools_blob
+
+
+def test_request_rows_keep_the_cache_markers_the_body_sent() -> None:
+    """The simulated cache reads its message rungs from the markers the logged request carried."""
+    module = _load_prompt_cache_review_module()
+    payload = {"timestamp": "2026-04-11T11:00:00-07:00", "model_id": "claude-opus-5", "body": _SENT_BODIES["claude"]}
+
+    assert module.message_rung_indexes(module.parse_request_row(payload)) == (0,)
+
+
+def test_records_without_a_body_are_not_request_rows() -> None:
+    """A record without the sent body, such as one an earlier release wrote, yields no row."""
+    module = _load_prompt_cache_review_module()
+    payload = {
         "timestamp": "2026-04-11T11:00:00-07:00",
-        "agent_name": "opus",
-        "model_id": "claude-opus-5",
-        "system_prompt": "S",
-        "messages": [
-            {
-                "role": "assistant",
-                "tool_calls": [{"id": "t1", "function": {"name": "run_shell_command", "arguments": corrupt_arguments}}],
-            },
-        ],
-        "message_count": 1,
+        "model_id": "m",
+        "messages": [{"role": "user", "content": "a"}],
     }
-    healthy_row = {
-        "timestamp": "2026-04-11T11:00:01-07:00",
-        "agent_name": "opus",
-        "model_id": "claude-opus-5",
-        "system_prompt": "S",
-        "messages": [{"role": "user", "content": "hello"}],
-        "message_count": 1,
-    }
-    jsonl_path.write_text(
-        json.dumps(corrupt_row) + "\n" + json.dumps(healthy_row) + "\n",
-        encoding="utf-8",
-    )
 
-    rows, stats = module.load_request_rows(jsonl_path)
-
-    assert len(rows) == 1
-    assert rows[0].preview == "hello"
-    assert stats.unparseable_row_count == 1
-    assert stats.decode_error_count == 0
-    assert len(stats.unparseable_row_errors) == 1
-    assert "JSONDecodeError" in stats.unparseable_row_errors[0]
+    assert module.parse_request_row(payload) is None
 
 
 def test_build_session_reviews_detects_prefix_extension_with_two_appended_messages() -> None:
@@ -399,21 +417,29 @@ def test_load_request_rows_joins_response_usage_records(tmp_path: Path) -> None:
     jsonl_path = tmp_path / "requests.jsonl"
     jsonl_path.write_text(
         '{"timestamp":"2026-04-11T11:00:00-07:00","request_log_id":"req-1","agent_id":"opus",'
-        '"model_id":"claude-opus-5","system_prompt":"S","messages":[{"role":"user","content":"a"}]}\n'
+        '"model_id":"claude-opus-5","body":{"system":"S","messages":[{"role":"user","content":"a"}]}}\n'
         '{"timestamp":"2026-04-11T11:00:02-07:00","record":"response","request_log_id":"req-1",'
         '"agent_id":"opus","model_id":"claude-opus-5","usage":{"input_tokens":10,"output_tokens":4,'
         '"cache_read_tokens":900,"cache_write_tokens":25}}\n'
         '{"timestamp":"2026-04-11T11:00:03-07:00","request_log_id":"req-2","agent_id":"opus",'
-        '"model_id":"claude-opus-5","system_prompt":"S","messages":[{"role":"user","content":"b"}]}\n',
+        '"model_id":"claude-opus-5","body":{"system":"S","messages":[{"role":"user","content":"b"}]}}\n',
         encoding="utf-8",
     )
 
-    rows, stats = module.load_request_rows(jsonl_path)
+    rows, _stats = module.load_request_rows(jsonl_path)
 
-    assert stats.unparseable_row_count == 0
     assert [row.request_log_id for row in rows] == ["req-1", "req-2"]
     assert rows[0].usage == {"input_tokens": 10, "output_tokens": 4, "cache_read_tokens": 900, "cache_write_tokens": 25}
     assert rows[1].usage is None
+
+
+def test_request_rows_name_the_agent_only_from_agent_id() -> None:
+    """A request without an agent leaves its agent blank instead of taking the model config name."""
+    module = _load_prompt_cache_review_module()
+    agent_row = {**_claude_row(0, [{"role": "user", "content": "a"}]), "agent_id": "code", "model_name": "sonnet"}
+    model_only_row = {key: value for key, value in agent_row.items() if key != "agent_id"}
+
+    assert [module.parse_request_row(row).agent_name for row in (agent_row, model_only_row)] == ["code", ""]
 
 
 def test_response_records_are_not_parsed_as_request_rows() -> None:

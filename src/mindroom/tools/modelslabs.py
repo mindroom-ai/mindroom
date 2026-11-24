@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from mindroom.tool_system.declarations import ConfigField, SetupType, ToolCategory, ToolFileAccess, ToolStatus
 from mindroom.tool_system.registration import register_tool_with_metadata
@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     file_access=ToolFileAccess.NONE,
     display_name="ModelsLabs",
     description="AI model marketplace for generating images, videos, audio, and GIFs from text prompts",
-    category=ToolCategory.DEVELOPMENT,  # From docs URL: /tools/toolkits/others/
+    category=ToolCategory.DEVELOPMENT,
     status=ToolStatus.REQUIRES_CONFIG,  # Requires API key
     setup_type=SetupType.API_KEY,  # Uses api_key parameter
     icon="Video",  # React icon for video generation
@@ -25,6 +25,7 @@ if TYPE_CHECKING:
         # Authentication parameter
         ConfigField(
             name="api_key",
+            env=("MODELS_LAB_API_KEY",),
             label="API Key",
             type="password",
             required=False,
@@ -99,7 +100,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["requests"],  # Already in pyproject.toml
-    docs_url="https://docs.agno.com/tools/toolkits/others/models_labs",
+    docs_url="https://docs.mindroom.chat/tools/ai-and-generation/#modelslabs",
     function_names=("generate_media",),
 )
 def modelslabs_tools() -> type[ModelsLabTools]:
@@ -121,7 +122,7 @@ def modelslabs_tools() -> type[ModelsLabTools]:
             model_id: str | None = None,
             width: int = 512,
             height: int = 512,
-            **kwargs: object,
+            **kwargs: Any,  # noqa: ANN401 - forwarded to ModelsLabTools, whose options have several types
         ) -> None:
             if isinstance(file_type, str):
                 normalized_file_type = file_type.strip().lower()

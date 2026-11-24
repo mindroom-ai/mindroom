@@ -1,0 +1,255 @@
+# Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
+"""Assemble model requests from a scope's stored runs, its compaction summary, and the current turn.
+
+The replay limits keep the newest runs, messages, and tool results of a scope's stored history.
+"""
+
+from __future__ import annotations
+
+from copy import deepcopy
+from dataclasses import dataclass, replace
+from itertools import dropwhile, islice
+from typing import TYPE_CHECKING
+
+from mindroom.history.message_content import project_history_media_for_replay, with_tool_calls
+from mindroom.history.run_visibility import replays_in_scope
+from mindroom.history.summary_message import compaction_summary_message, is_scope_summary, summary_follows
+from mindroom.llm.messages import is_queued_notice_message
+
+if TYPE_CHECKING:
+    from collections.abc import Iterable, Sequence
+
+    from mindroom.history.types import HistoryScope, ResolvedHistorySettings, ResolvedReplayPlan, ScopeSummary
+    from mindroom.llm.messages import Message
+    from mindroom.llm.runs import AnyRunRecord
+    from mindroom.media_inputs import MediaInputs
+    from mindroom.session_storage.types import ConversationSession
+
+
+@dataclass(frozen=True, kw_only=True)
+class TurnMessages:
+    """A new turn's input around its prompt.
+
+    ``context`` holds the Matrix messages the scope has not stored yet, sent before the prompt and stored with the run.
+    ``transient`` holds turn context (``add_to_agent_memory=False``), such as memory results, that follows the prompt
+    and is stored with the run where it was sent, unless the run stopped after a call. Later turns replay it there
+    outside a message limit, so each request extends the previous one whole: Codex's prompt cache reuses only a prompt
+    an earlier request sent whole, so a turn context left out of later requests would cap their cache hits at the first
+    message it followed.
+    """
+
+    prompt: Message
+    context: tuple[Message, ...] = ()
+    transient: tuple[Message, ...] = ()
+
+    def in_request_order(self) -> tuple[Message, ...]:
+        """Return the turn's messages as a request sends them: the context, the prompt, then the transient context."""
+        return (*self.context, self.prompt, *self.transient)
+
+
+def scope_history_messages(
+    runs: Sequence[AnyRunRecord],
+    *,
+    scope: HistoryScope,
+    num_history_runs: int | None,
+    num_history_messages: int | None,
+    max_tool_calls_from_history: int | None,
+) -> list[Message]:
+    """Return the stored history one request of ``scope`` replays, oldest first.
+
+    ``runs`` are the session's runs in stored order. The two limits are the request's own, which a replay plan may
+    narrow from the configured policy. The run limit applies before the message limit, which counts only messages that
+    replay; a tool result whose call the message limit cut off is dropped, since it cannot replay without that call.
+    Turn context (``add_to_agent_memory=False``) replays where it was sent, except under a message limit, which counts
+    conversation only, so turn context neither takes a slot in its window nor opens it without its prompt.
+    Each message is a copy marked ``from_history``, so a request never changes a stored run and is never stored again.
+    Prompt messages never replay. Tool calls beyond ``max_tool_calls_from_history`` are left out, as is every media
+    item except the newest viewed images.
+    """
+    replayed = [run for run in runs if replays_in_scope(run, scope)]
+    if num_history_runs is not None:
+        if num_history_runs <= 0:
+            return []
+        replayed = replayed[-num_history_runs:]
+    selected = replayable_messages(replayed)
+    if num_history_messages is not None:
+        conversation = [message for message in selected if message.add_to_agent_memory]
+        newest = conversation[-num_history_messages:] if num_history_messages > 0 else []
+        selected = list(dropwhile(lambda message: message.role == "tool", newest))
+    history = [_history_copy(message) for message in selected]
+    if max_tool_calls_from_history is not None:
+        history = filter_tool_calls(history, max_tool_calls_from_history)
+    return project_history_media_for_replay(history)
+
+
+def replayed_history(
+    session: ConversationSession | None,
+    scope: HistoryScope | None,
+    settings: ResolvedHistorySettings,
+    plan: ResolvedReplayPlan | None,
+) -> tuple[list[Message], ScopeSummary | None]:
+    """Return the stored history a request of ``scope`` replays under ``plan``, and the scope summary it follows.
+
+    A request without a scope or session, or whose plan replays nothing, sends its own messages only.
+    """
+    if session is None or scope is None or plan is None or not plan.add_history_to_context:
+        return [], None
+    history = scope_history_messages(
+        session.runs,
+        scope=scope,
+        num_history_runs=plan.num_history_runs,
+        num_history_messages=plan.num_history_messages,
+        max_tool_calls_from_history=settings.max_tool_calls_from_history,
+    )
+    return history, session.summary
+
+
+def replayable_messages(runs: Iterable[AnyRunRecord]) -> list[Message]:
+    """Return the stored messages of ``runs``, oldest first; a visible stored run holds no prompt message to leave out.
+
+    The messages are the stored ones, never copies. A request's history and a compaction's input both select their
+    messages here, so each counts the same messages against its limits.
+    """
+    return [message for run in runs for message in run.messages]
+
+
+def _history_copy(message: Message) -> Message:
+    """Return a copy of a stored message marked as replayed history.
+
+    Stored runs are shared by every reader of a session, so the copy shares nothing a request edits in place:
+    block-list content is copied deeply because provider formatting may edit those blocks, and every other field is
+    only ever replaced.
+    """
+    if isinstance(message.content, list):
+        copied = deepcopy(message)
+        copied.from_history = True
+        return copied
+    return replace(message, from_history=True)
+
+
+def filter_tool_calls(messages: Sequence[Message], max_tool_calls: int) -> list[Message]:
+    """Return ``messages`` keeping only the newest ``max_tool_calls`` tool results and the calls they answer.
+
+    Only results that carry a call id count toward the window. An assistant message keeps only its calls in the window,
+    as a copy, and is dropped when it has neither a call nor content left. Messages holding at most ``max_tool_calls``
+    results are returned unchanged.
+    """
+    results = [message for message in messages if message.role == "tool"]
+    if len(results) <= max_tool_calls:
+        return list(messages)
+    kept_ids = set(islice((result.tool_call_id for result in reversed(results) if result.tool_call_id), max_tool_calls))
+    filtered: list[Message] = []
+    for message in messages:
+        if message.role == "tool":
+            if message.tool_call_id in kept_ids:
+                filtered.append(message)
+        elif message.role == "assistant" and message.tool_calls:
+            kept = with_tool_calls(message, [call for call in message.tool_calls if call.get("id") in kept_ids])
+            if kept is not None:
+                filtered.append(kept)
+        else:
+            filtered.append(message)
+    return filtered
+
+
+def build_request(
+    *,
+    summary: ScopeSummary | None,
+    history: Sequence[Message],
+    turn: TurnMessages,
+    media: MediaInputs,
+) -> list[Message]:
+    """Return one attempt's request after its system messages: the scope summary, the replayed history, then the turn.
+
+    ``media`` goes on the turn's prompt. The request holds copies of ``history`` and ``turn``, so provider formatting
+    never edits the prepared input a retried attempt reuses. Pass ``summary=None`` when the run replays no stored
+    history; a run that replays the summary but no runs passes it with empty ``history``.
+    """
+    return request_layout(summary=summary, history=deepcopy(history), turn=with_media(deepcopy(turn), media))
+
+
+def with_media(turn: TurnMessages, media: MediaInputs) -> TurnMessages:
+    """Return ``turn`` with ``media`` on a copy of its prompt, as every request of the turn sends it."""
+    prompt = replace(
+        turn.prompt,
+        audio=media.audio or None,
+        images=media.images or None,
+        files=media.files or None,
+        videos=media.videos or None,
+    )
+    return replace(turn, prompt=prompt)
+
+
+def request_layout(
+    *,
+    summary: ScopeSummary | None,
+    history: Sequence[Message],
+    turn: TurnMessages | None = None,
+) -> list[Message]:
+    """Return the messages after a request's system messages, sharing them: the scope summary, history, then the turn.
+
+    It is the layout a request is sized by, which leaves the messages unchanged; a request that is sent takes the
+    copies ``build_request`` makes.
+    """
+    return _with_scope_summary([*history, *(turn.in_request_order() if turn is not None else ())], summary)
+
+
+def build_resume_request(
+    *,
+    paused: Sequence[Message],
+    summary: ScopeSummary | None,
+    history: Sequence[Message],
+) -> list[Message]:
+    """Return the request that resumes a paused run: its stored system messages, the summary, history, then the rest.
+
+    ``paused`` holds the paused run's stored messages, which never include history copies. Its stored system messages
+    are reused, and the turn context the paused request sent (``add_to_agent_memory=False``), such as memory results,
+    stays where it was. So when the summary and history replay as they did for the paused request, this request repeats
+    that one up to its last assistant turn: a signed reasoning block there stays valid against an unchanged prefix, and
+    the provider's prompt cache still matches. A queued-message notice the paused run holds is left out: it told the
+    reply that paused about a newer message, and the resume's own hooks decide again whether one waits.
+    """
+    # LEGACY_COMPAT: Paused runs stored without the context their paused request sent.
+    # Legacy format: a paused run whose stored messages, an Agno-layout ``run_data`` row the storage v2 conversion
+    # copied or its storage v2 message rows, hold no ``add_to_agent_memory: false`` message, because the run ended
+    # without storing its memory results, transient enrichment, job notes, and approval receipt.
+    # Last legacy release: v2026.10.611, whose runs stored no such message; replacement: v2026.10.612, whose paused
+    # runs store them in place.
+    # Handling: such a run resumes from the messages it stored, without that context, as it did before, since nothing
+    # stored it to restore; the run it resumes into stores the current shape when it pauses again.
+    # Coverage: tests/test_history_request_messages.py::test_a_run_paused_without_its_turn_context_resumes_without_it,
+    #   tests/test_approval_resume.py::test_a_paused_approval_resumes_into_a_completed_run
+    messages = [
+        *(message for message in paused if message.role == "system"),
+        *history,
+        *(message for message in paused if message.role != "system" and not is_queued_notice_message(message)),
+    ]
+    return _with_scope_summary(messages, summary)
+
+
+def _with_scope_summary(messages: list[Message], summary: ScopeSummary | None) -> list[Message]:
+    """Insert the scope summary once, as the first message after the prompt messages.
+
+    When that first message is a prompt a mid-turn compaction placed the summary after, the summary stays after it; a
+    turn that replays ahead of that run, such as an approval completed after it, was built on the summary instead.
+    """
+    text = summary.text.strip() if summary is not None else ""
+    if not text or any(is_scope_summary(message) for message in messages):
+        return messages
+    index = next((i for i, message in enumerate(messages) if message.role != "system"), len(messages))
+    if index < len(messages) and summary_follows(messages[index]):
+        index += 1
+    return [*messages[:index], compaction_summary_message(text, run_local=False), *messages[index:]]
+
+
+__all__ = [
+    "TurnMessages",
+    "build_request",
+    "build_resume_request",
+    "filter_tool_calls",
+    "replayable_messages",
+    "replayed_history",
+    "request_layout",
+    "scope_history_messages",
+    "with_media",
+]

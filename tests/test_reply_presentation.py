@@ -9,6 +9,7 @@ from mindroom.constants import (
     STREAM_STATUS_COMPLETED,
     STREAM_STATUS_ERROR,
 )
+from mindroom.delivery_gateway import _with_note
 from mindroom.reply_presentation import (
     AGENT_PLACEHOLDER,
     TEAM_PLACEHOLDER,
@@ -27,8 +28,9 @@ from mindroom.reply_presentation import (
     with_trailing_note,
 )
 from mindroom.streaming import (
+    CANCELLED_RESPONSE_NOTE,
+    INTERRUPTED_RESPONSE_NOTE,
     RESTART_INTERRUPTED_RESPONSE_NOTE,
-    build_cancelled_response_update,
     build_restart_interrupted_body,
     format_stream_error_note,
 )
@@ -42,7 +44,7 @@ def _trace(name: str, *, call_id: str | None = None) -> ToolTraceEntry:
         args_preview="{}",
         result_preview="ok",
         tool_call_id=call_id,
-        scope_key="scope" if call_id else None,
+        member_id="member" if call_id else None,
     )
 
 
@@ -60,7 +62,7 @@ def test_codec_round_trips_every_field() -> None:
                 kind="answer",
                 text="team body",
                 span_id="span-2",
-                team_state={"kind": "team_stream", "version": 2, "members": ["a"]},
+                team_state={"kind": "team_stream", "version": 3, "members": ["a"]},
             ),
         ),
         trailing_note=note_segment(NoteKind.ERROR, format_error_note("boom")),
@@ -72,7 +74,7 @@ def test_codec_round_trips_every_field() -> None:
 
     assert restored == presentation
     assert restored.segments[0].tool_trace[0].tool_call_id == "call-1"
-    assert restored.segments[0].tool_trace[0].scope_key == "scope"
+    assert restored.segments[0].tool_trace[0].member_id == "member"
 
 
 def test_codec_rejects_unknown_versions_and_malformed_segments() -> None:
@@ -91,11 +93,13 @@ def test_codec_rejects_unknown_versions_and_malformed_segments() -> None:
 )
 def test_cancel_and_interruption_bodies_match_main(visible: str) -> None:
     """A trailing cancel or interruption note renders exactly main's terminal text."""
-    for kind, cancel_source in ((NoteKind.CANCELLED, "user_stop"), (NoteKind.INTERRUPTED, "interrupted")):
+    for kind, note in (
+        (NoteKind.CANCELLED, CANCELLED_RESPONSE_NOTE),
+        (NoteKind.INTERRUPTED, INTERRUPTED_RESPONSE_NOTE),
+    ):
         presentation = Presentation(segments=(_answer(visible),) if visible else ())
         body, _trace_entries = render_body(with_trailing_note(presentation, note_segment(kind)))
-        expected, _status = build_cancelled_response_update(visible, cancel_source=cancel_source)
-        assert body == expected
+        assert body == (f"{visible}\n\n{note}" if visible else note)
 
 
 def test_error_note_matches_main() -> None:
@@ -187,3 +191,46 @@ def test_restart_after_a_noted_interruption_carries_one_note() -> None:
     assert render_body(once)[0] == "partial\n\n**[Response interrupted by service restart]**"
     twice = after_restart(once)
     assert render_body(twice)[0] == render_body(once)[0]
+
+
+_RUNNING = ToolTraceEntry(type="tool_call_started", tool_name="counter", tool_call_id="call-1")
+
+
+def test_a_restart_no_longer_shows_the_stopped_attempts_running_call_as_running() -> None:
+    """Nothing completes a stopped attempt's running call, so the work a replay continues below drops its hourglass."""
+    stopped = _answer("before\n\n🔧 `search` [1]\n\n🔧 `counter` [2] ⏳", _trace("search"), _RUNNING)
+    shown = Presentation(segments=(stopped,))
+
+    body, trace = render_body(with_answer(after_restart(shown), _answer("after", span_id="span-2")))
+
+    assert body == f"before\n\n🔧 `search` [1]\n\n🔧 `counter` [2]\n\n{RESTART_INTERRUPTED_RESPONSE_NOTE}\n\nafter"
+    assert [(entry.type, entry.tool_call_id) for entry in trace] == [
+        ("tool_call_completed", None),
+        ("tool_call_completed", "call-1"),
+    ]
+
+
+@pytest.mark.parametrize("kind", [NoteKind.CANCELLED, NoteKind.INTERRUPTED])
+def test_an_ending_note_no_longer_shows_a_running_call_as_running(kind: NoteKind) -> None:
+    """A note that ends the reply's work settles its running calls; the approval wait keeps them pending."""
+    paused = Presentation(segments=(_answer("🔧 `counter` [1] ⏳", _RUNNING),))
+
+    ended = render(with_trailing_note(paused, note_segment(kind)), state="cancelled")
+    waiting = render_body(with_trailing_note(paused, note_segment(NoteKind.APPROVAL_WAIT, "Waiting")))
+
+    assert ended.body == f"🔧 `counter` [1]\n\n{note_segment(kind).text}"
+    assert [entry.type for entry in ended.tool_trace] == ["tool_call_completed"]
+    assert waiting[0] == "🔧 `counter` [1] ⏳"
+    assert [entry.type for entry in waiting[1]] == ["tool_call_started"]
+
+
+@pytest.mark.parametrize("kind", [NoteKind.DELIVERY_FAILED, NoteKind.CANCELLED])
+def test_a_delivery_failed_note_shows_alone_where_a_cancellation_keeps_the_answer(kind: NoteKind) -> None:
+    """Matrix refused the answer, so its delivery-failed note replaces it; a cancellation keeps the answer above it.
+
+    So what live frames showed past the last saved edit never reaches a delivery-failed note.
+    """
+    body, _trace = render_body(_with_note(Presentation(segments=(_answer("Partial answer"),)), note_segment(kind)))
+
+    assert body.endswith(str(note_segment(kind).text))
+    assert ("Partial answer" in body) is (kind is NoteKind.CANCELLED)

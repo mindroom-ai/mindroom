@@ -6,8 +6,14 @@ import asyncio
 import inspect
 from typing import TYPE_CHECKING
 
+from mindroom.custom_tools.browser import _LaunchSettings
+from mindroom.worker_computer.browser_proxy import BrowserEgress
+
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+# The launch settings of a profile state a test builds by hand and never starts through _ensure_profile.
+UNCOMPARED_LAUNCH_SETTINGS = _LaunchSettings(options={}, egress=BrowserEgress(), allow_private_networks=False)
 
 
 class LifecyclePage:
@@ -45,6 +51,11 @@ class LifecyclePage:
     async def goto(self, url: str, **_kwargs: object) -> None:
         """Navigate without performing external network I/O."""
         self.url = url
+
+    async def close(self) -> None:
+        """Close the page and deliver its native close event."""
+        self.closed = True
+        await self.emit("close", self)
 
 
 class LifecycleBrowser:

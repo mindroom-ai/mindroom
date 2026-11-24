@@ -7,15 +7,19 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.agents import resolve_runtime_worker_tools
+from mindroom.egress_broker.env import egress_broker_enabled, egress_tool_with_only_primary_python
 from mindroom.logging_config import get_logger
 from mindroom.orchestration.rooms import warn_about_foreign_homeserver_authorities
-from mindroom.tool_system.catalog import TOOL_METADATA, ensure_tool_registry_loaded
-from mindroom.tool_system.declarations import ToolFileAccess
+from mindroom.script_runs.manager import script_execution_uses_worker
+from mindroom.tool_system.agent_tools import AgentTools
+from mindroom.tool_system.declarations import unconfined_by_file_access
+from mindroom.tool_system.plugins import config_plugins
+from mindroom.tool_system.sandbox_proxy import tool_placement
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.tool_system.declarations import ToolMetadata
 
 logger = get_logger(__name__)
 
@@ -24,40 +28,47 @@ def warn_about_config_risks(config: Config, runtime_paths: RuntimePaths) -> None
     """Log every risky-but-allowed choice in one loaded config."""
     warn_about_foreign_homeserver_authorities(config, runtime_paths)
     _warn_about_unconfined_primary_tools_next_to_worker_code_tools(config, runtime_paths)
+    _warn_about_agent_keys_with_only_primary_python(config, runtime_paths)
+    if "accept_invites" in config.router.model_fields_set:
+        logger.warning("router.accept_invites is deprecated and ignored: the MindRoom owner account accepts no invites")
 
 
-def _primary_tool_is_unconfined(tool_name: str, file_access: str) -> bool:
+def _primary_tool_is_unconfined(
+    name: str,
+    metadata: ToolMetadata,
+    file_access: str,
+    *,
+    scripts_run_in_primary: bool,
+) -> bool:
     """Return whether a primary-process tool can reach files beyond the agent workspace."""
-    metadata = TOOL_METADATA[tool_name]
-    if metadata.file_access is ToolFileAccess.UNCONFINED:
+    if unconfined_by_file_access(metadata, file_access):
         return True
-    return metadata.file_access is ToolFileAccess.AGENT and file_access == "unrestricted"
+    # `script` itself reads only its workspace source, but the scripts it launches run here under local execution.
+    return name == "script" and scripts_run_in_primary
 
 
 def _warn_about_unconfined_primary_tools_next_to_worker_code_tools(config: Config, runtime_paths: RuntimePaths) -> None:
     """Log one warning per agent that isolates code tools in a worker while primary-process tools stay unconfined."""
-    # Code-execution tools are built in; loading plugins here would re-import plugin modules mid-reload.
-    ensure_tool_registry_loaded(runtime_paths)
+    tools = config_plugins(config, runtime_paths).tools
+    placement = tool_placement(runtime_paths, tools)
+    # Only the explicit local execution modes run background scripts in the primary process.
+    scripts_run_in_primary = not script_execution_uses_worker(runtime_paths, worker_backend_configured=True)
     for agent_name in config.agents:
-        entity = config.resolve_entity(agent_name)
-        tool_names = [entry.name for entry in entity.tool_configs if entry.name in TOOL_METADATA]
-        routed = set(
-            resolve_runtime_worker_tools(
-                agent_name,
-                config,
-                runtime_paths,
-                tool_names,
-                tool_registry_preloaded=True,
-            ),
-        )
-        worker_tools = {
-            name for name in tool_names if name in routed and not TOOL_METADATA[name].requires_primary_runtime
-        }
-        worker_code_tools = sorted(name for name in worker_tools if TOOL_METADATA[name].executes_code)
+        agent = config.resolve_agent(agent_name)
+        agent_tools = AgentTools(config=config, facts=agent.tools, tools=tools)
+        tool_names = agent_tools.tool_names
+        worker_tools = {name for name in tool_names if agent_tools.runs_in_worker(name, placement)}
+        worker_code_tools = sorted(name for name in worker_tools if tools.entries[name].executes_code)
         unconfined_primary_tools = sorted(
             name
             for name in tool_names
-            if name not in worker_tools and _primary_tool_is_unconfined(name, entity.file_access)
+            if name not in worker_tools
+            and _primary_tool_is_unconfined(
+                name,
+                tools.entries[name],
+                agent.file_access,
+                scripts_run_in_primary=scripts_run_in_primary,
+            )
         )
         if worker_code_tools and unconfined_primary_tools:
             logger.warning(
@@ -66,4 +77,21 @@ def _warn_about_unconfined_primary_tools_next_to_worker_code_tools(config: Confi
                 agent=agent_name,
                 worker_code_tools=worker_code_tools,
                 unconfined_primary_tools=unconfined_primary_tools,
+            )
+
+
+def _warn_about_agent_keys_with_only_primary_python(config: Config, runtime_paths: RuntimePaths) -> None:
+    """Warn about each agent that lists `egress_credentials`, but whose only command tool is a `python` in the primary.
+
+    A primary `python` runs in-process, where the broker env cannot reach it, so such an agent is left off the Agent
+    Keys pages.
+    """
+    if not egress_broker_enabled(runtime_paths):
+        return
+    for agent_name in config.agents:
+        if egress_tool_with_only_primary_python(config, agent_name, runtime_paths):
+            logger.warning(
+                "Agent lists the egress_credentials tool, but its only command tool is python in the primary "
+                "process, so Agent Keys never applies to it",
+                agent=agent_name,
             )

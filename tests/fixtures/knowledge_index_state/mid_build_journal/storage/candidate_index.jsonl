@@ -1,0 +1,2 @@
+{"failure": {"attempts": 1, "last_attempt_at": "2026-10-29T23:22:07.011074+00:00", "last_error": "knowledge indexing failed (RuntimeError)"}, "path": "d.md"}
+{"path": "b.md", "signature": [0, 9, "41cb7d52e6361507c185a44ef79dd09f5c589e4ffea9fa634c1133a1df56f8cc"]}

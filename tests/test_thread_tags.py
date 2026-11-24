@@ -5,64 +5,48 @@ from __future__ import annotations
 import asyncio
 import json
 import math
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, Mock, patch
+from urllib.parse import parse_qs, urlparse
 
 import nio
 import pytest
+from aiohttp import web
+from aiohttp.test_utils import TestServer
+from structlog.testing import capture_logs
 
-from mindroom.matrix.room_history_reads import RoomThreadsPageError, enumerate_room_thread_root_ids
-from mindroom.matrix.thread_room_scan import resolve_thread_root_event_id_for_client
+from mindroom.matrix.client_session import MindRoomAsyncClient
+from mindroom.matrix.room_history_reads import (
+    _MAX_THREAD_ENUMERATION_PAGES,
+    RoomThreadsPageError,
+    enumerate_room_thread_root_ids,
+    get_room_threads_page,
+)
 from mindroom.thread_tags import (
     COERCED_TAG_MAX_LENGTH,
     THREAD_TAGS_EVENT_TYPE,
     SetThreadTagsIfEmptyResult,
+    ThreadTagRecord,
     ThreadTagsError,
     ThreadTagsListing,
+    ThreadTagsPermissionError,
     ThreadTagsState,
     coerce_tag_name,
+    get_thread_tag_content,
     get_thread_tags,
     list_tagged_threads,
     remove_thread_tag,
     set_thread_tag,
     set_thread_tags_if_empty,
+    snooze_until,
 )
-from tests.conftest import make_relation_lookup
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable
 
 
-def _message_event_response(
-    event_id: str,
-    *,
-    content: dict[str, object],
-    room_id: str = "!room:localhost",
-    event_type: str = "m.room.message",
-) -> nio.RoomGetEventResponse:
-    return nio.RoomGetEventResponse.from_dict(
-        {
-            "content": content,
-            "event_id": event_id,
-            "sender": "@user:localhost",
-            "origin_server_ts": 1,
-            "room_id": room_id,
-            "type": event_type,
-        },
-    )
-
-
-def _thread_root_event(event_id: str) -> nio.RoomMessageText:
-    return nio.RoomMessageText.from_dict(
-        {
-            "event_id": event_id,
-            "sender": "@user:localhost",
-            "origin_server_ts": 1,
-            "room_id": "!room:localhost",
-            "type": "m.room.message",
-            "content": {"body": "Root", "msgtype": "m.text"},
-        },
-    )
+_ROOT_IDS_PAGE = "mindroom.matrix.room_history_reads._thread_root_ids_page"
 
 
 def _tag_record_content(
@@ -403,7 +387,6 @@ async def test_manual_tag_started_first_prevents_automatic_tag_batch() -> None:
     assert result == SetThreadTagsIfEmptyResult(
         had_existing_tags=True,
         applied_tags=(),
-        failed_tags=(),
     )
     assert set(current_events) == {_thread_tag_state_key("$manual-first-root:localhost", "manual")}
 
@@ -473,7 +456,6 @@ async def test_manual_remove_started_first_prevents_automatic_tag_batch() -> Non
     assert automatic_task.result() == SetThreadTagsIfEmptyResult(
         had_existing_tags=False,
         applied_tags=(),
-        failed_tags=(),
         skipped_due_to_prior_mutation=True,
     )
     automatic_client.room_get_state.assert_awaited_once_with("!room:localhost")
@@ -511,7 +493,6 @@ async def test_completed_manual_removal_survives_the_model_inference_gap() -> No
     assert result == SetThreadTagsIfEmptyResult(
         had_existing_tags=False,
         applied_tags=(),
-        failed_tags=(),
         skipped_due_to_prior_mutation=True,
     )
     automatic_client.room_put_state.assert_not_awaited()
@@ -597,7 +578,6 @@ async def test_automatic_batch_serializes_manual_write_until_all_tags_finish() -
     assert result == SetThreadTagsIfEmptyResult(
         had_existing_tags=False,
         applied_tags=("auto-one", "auto-two"),
-        failed_tags=(),
     )
     assert write_order == ["auto-one", "auto-two", "manual"]
 
@@ -700,35 +680,62 @@ async def test_automatic_batch_does_not_block_mutations_for_another_thread() -> 
 
 @pytest.mark.asyncio
 async def test_automatic_batch_continues_after_one_tag_write_fails() -> None:
-    """One failed automatic tag should not prevent later tags from being attempted."""
+    """A failed automatic tag does not prevent later tags from being attempted, and the batch logs one error."""
     client = AsyncMock()
     client.room_get_state.return_value = _thread_tags_room_state_response()
-    write_tag = AsyncMock(side_effect=[TimeoutError("timed out"), None])
+    write_tag = AsyncMock(side_effect=[TimeoutError("timed out"), None, TimeoutError("timed out")])
 
     with (
         patch("mindroom.thread_tags._set_thread_tag_under_lock", new=write_tag),
-        patch("mindroom.thread_tags.logger.exception") as log_exception,
+        capture_logs() as logs,
     ):
         result = await set_thread_tags_if_empty(
             client,
             "!room:localhost",
             "$partial-auto-root:localhost",
-            ["first", "second"],
+            ["first", "second", "third"],
+            set_by="@automatic:localhost",
+        )
+
+    assert [call.args[3] for call in write_tag.await_args_list] == ["first", "second", "third"]
+    errors = [log for log in logs if log["log_level"] == "error"]
+    assert [(log["event"], log["thread_root_id"], log["tags"]) for log in errors] == [
+        ("Failed to write automatic thread tags", "$partial-auto-root:localhost", ["first", "third"]),
+    ]
+    assert result == SetThreadTagsIfEmptyResult(
+        had_existing_tags=False,
+        applied_tags=("second",),
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("earlier", ["written", "failed"])
+async def test_automatic_batch_hands_a_power_level_refusal_to_its_caller(earlier: str) -> None:
+    """Power levels that refuse a tag, also partway through the batch, stop it without an error of their own.
+
+    A different failure of an earlier tag is still logged once.
+    """
+    client = AsyncMock()
+    client.room_get_state.return_value = _thread_tags_room_state_response()
+    first = None if earlier == "written" else TimeoutError("timed out")
+    write_tag = AsyncMock(side_effect=[first, ThreadTagsPermissionError("refused"), None])
+
+    with (
+        patch("mindroom.thread_tags._set_thread_tag_under_lock", new=write_tag),
+        capture_logs() as logs,
+        pytest.raises(ThreadTagsPermissionError),
+    ):
+        await set_thread_tags_if_empty(
+            client,
+            "!room:localhost",
+            "$refused-root:localhost",
+            ["first", "second", "third"],
             set_by="@automatic:localhost",
         )
 
     assert [call.args[3] for call in write_tag.await_args_list] == ["first", "second"]
-    log_exception.assert_called_once_with(
-        "Failed to write conditional thread tag",
-        room_id="!room:localhost",
-        thread_root_id="$partial-auto-root:localhost",
-        tag="first",
-    )
-    assert result == SetThreadTagsIfEmptyResult(
-        had_existing_tags=False,
-        applied_tags=("second",),
-        failed_tags=("first",),
-    )
+    errors = [(log["event"], log["tags"]) for log in logs if log["log_level"] == "error"]
+    assert errors == ([] if earlier == "written" else [("Failed to write automatic thread tags", ["first"])])
 
 
 @pytest.mark.asyncio
@@ -831,7 +838,7 @@ async def test_set_thread_tag_raises_on_write_error() -> None:
 
 
 @pytest.mark.asyncio
-async def test_set_thread_tag_retries_when_verification_detects_concurrent_overwrite() -> None:
+async def test_set_thread_tag_keeps_a_concurrently_added_sibling_without_retrying() -> None:
     """A concurrently added sibling tag should survive without forcing a retry."""
     client = AsyncMock()
     client.user_id = "@mindroom_general:localhost"
@@ -1148,7 +1155,7 @@ async def test_remove_thread_tag_retries_when_verification_detects_concurrent_re
 
 
 @pytest.mark.asyncio
-async def test_remove_thread_tag_retries_when_verification_detects_sibling_payload_change() -> None:
+async def test_remove_thread_tag_keeps_a_concurrently_added_sibling_without_retrying() -> None:
     """A concurrently added sibling tag should survive one remove write without a retry."""
     client = AsyncMock()
     client.user_id = "@mindroom_general:localhost"
@@ -1558,17 +1565,58 @@ async def test_list_tagged_threads_include_untagged_filters_tagged_state_only_th
 
 
 @pytest.mark.asyncio
+async def test_enumerate_room_thread_root_ids_reads_ids_without_building_events() -> None:
+    """Enumeration takes each /threads page's root IDs without parsing a root, and fails on a page nio's schema refuses.
+
+    A full page read still parses its roots into events.
+    """
+    roots = [
+        {
+            "event_id": f"$thread-{index}:localhost",
+            "sender": "@user:localhost",
+            "origin_server_ts": 1,
+            "room_id": "!room:localhost",
+            "type": "m.room.message",
+            "content": {"body": "Root", "msgtype": "m.text"},
+        }
+        for index in range(3)
+    ]
+    pages: dict[str | None, dict[str, object]] = {
+        None: {"chunk": roots[:2], "next_batch": "A"},
+        "A": {"chunk": roots[2:]},
+    }
+
+    async def send(response_class: type, _method: str, path: str, response_data: tuple[str]) -> object:
+        page_token = parse_qs(urlparse(path).query).get("from", [None])[0]
+        return response_class.from_dict(pages[page_token], *response_data)
+
+    client = Mock(access_token="token", _send=send)  # noqa: S106
+
+    with patch.object(nio.Event, "parse_event", side_effect=AssertionError("a root was parsed")):
+        thread_root_ids, truncated = await enumerate_room_thread_root_ids(client, "!room:localhost")
+
+    assert thread_root_ids == [root["event_id"] for root in roots]
+    assert truncated is False
+    events, page_token = await get_room_threads_page(client, "!room:localhost", limit=100)
+    assert [event.event_id for event in events] == thread_root_ids[:2]
+    assert page_token == "A"  # noqa: S105
+    pages["A"] = {"chunk": [{**roots[2], "origin_server_ts": "yesterday"}]}
+    with pytest.raises(RoomThreadsPageError):
+        await enumerate_room_thread_root_ids(client, "!room:localhost")
+
+
+@pytest.mark.asyncio
 async def test_enumerate_room_thread_root_ids_fetches_all_pages() -> None:
     """Room thread enumeration should follow pagination to completion."""
     client = AsyncMock()
 
     with patch(
-        "mindroom.matrix.room_history_reads.get_room_threads_page",
+        _ROOT_IDS_PAGE,
         new=AsyncMock(
             side_effect=[
-                ([_thread_root_event("$thread-one:localhost")], "A"),
-                ([_thread_root_event("$thread-two:localhost")], "B"),
-                ([_thread_root_event("$thread-three:localhost")], None),
+                (["$thread-one:localhost"], "A"),
+                (["$thread-two:localhost"], "B"),
+                (["$thread-three:localhost"], None),
             ],
         ),
     ) as mock_get_page:
@@ -1587,10 +1635,10 @@ async def test_enumerate_room_thread_root_ids_skips_blank_event_ids() -> None:
     client = AsyncMock()
 
     with patch(
-        "mindroom.matrix.room_history_reads.get_room_threads_page",
+        _ROOT_IDS_PAGE,
         new=AsyncMock(
             return_value=(
-                [_thread_root_event(""), _thread_root_event("$root:localhost")],
+                ["", "$root:localhost"],
                 None,
             ),
         ),
@@ -1607,11 +1655,11 @@ async def test_enumerate_room_thread_root_ids_truncates_empty_page_with_next_tok
     client = AsyncMock()
 
     with patch(
-        "mindroom.matrix.room_history_reads.get_room_threads_page",
+        _ROOT_IDS_PAGE,
         new=AsyncMock(
             side_effect=[
                 ([], "next_token_1"),
-                ([_thread_root_event("$root_A"), _thread_root_event("$root_B")], None),
+                (["$root_A", "$root_B"], None),
             ],
         ),
     ) as mock_get_page:
@@ -1621,50 +1669,6 @@ async def test_enumerate_room_thread_root_ids_truncates_empty_page_with_next_tok
     assert truncated is True
     assert mock_get_page.await_args_list[0].kwargs["page_token"] is None
     assert mock_get_page.await_count == 1
-
-
-@pytest.mark.asyncio
-async def test_enumerate_room_thread_root_ids_does_not_follow_consecutive_empty_pages() -> None:
-    """Empty continuation pages should not burn requests until the hard page cap."""
-    client = AsyncMock()
-
-    with patch(
-        "mindroom.matrix.room_history_reads.get_room_threads_page",
-        new=AsyncMock(
-            side_effect=[
-                ([], "empty-1"),
-                ([], "empty-2"),
-                ([], "empty-3"),
-                ([_thread_root_event("$root_A"), _thread_root_event("$root_B")], None),
-            ],
-        ),
-    ) as mock_get_page:
-        thread_root_ids, truncated = await enumerate_room_thread_root_ids(client, "!room:localhost")
-
-    assert thread_root_ids == []
-    assert truncated is True
-    assert mock_get_page.await_args_list[0].kwargs["page_token"] is None
-    assert mock_get_page.await_count == 1
-
-
-@pytest.mark.asyncio
-async def test_enumerate_room_thread_root_ids_truncates_fresh_empty_token_loop() -> None:
-    """Room thread enumeration should bound fresh-token empty-page loops."""
-    client = AsyncMock()
-    page_count = 0
-
-    async def get_empty_page(*_args: object, **_kwargs: object) -> tuple[list[object], str]:
-        nonlocal page_count
-        page_count += 1
-        assert page_count <= 110
-        return [], f"token-{page_count}"
-
-    with patch("mindroom.matrix.room_history_reads.get_room_threads_page", new=get_empty_page):
-        thread_root_ids, truncated = await enumerate_room_thread_root_ids(client, "!room:localhost")
-
-    assert thread_root_ids == []
-    assert truncated is True
-    assert page_count == 1
 
 
 @pytest.mark.asyncio
@@ -1673,11 +1677,11 @@ async def test_enumerate_room_thread_root_ids_exact_cap_on_final_page_is_not_tru
     client = AsyncMock()
 
     with patch(
-        "mindroom.matrix.room_history_reads.get_room_threads_page",
+        _ROOT_IDS_PAGE,
         new=AsyncMock(
             side_effect=[
-                ([_thread_root_event("$thread-one:localhost"), _thread_root_event("$thread-two:localhost")], "A"),
-                ([_thread_root_event("$thread-three:localhost"), _thread_root_event("$thread-four:localhost")], None),
+                (["$thread-one:localhost", "$thread-two:localhost"], "A"),
+                (["$thread-three:localhost", "$thread-four:localhost"], None),
             ],
         ),
     ):
@@ -1703,11 +1707,11 @@ async def test_enumerate_room_thread_root_ids_truncates_at_cap() -> None:
     client = AsyncMock()
     pages = []
     for page_index in range(25):
-        roots = [_thread_root_event(f"$thread-{page_index * 100 + root_index}:localhost") for root_index in range(100)]
+        roots = [f"$thread-{page_index * 100 + root_index}:localhost" for root_index in range(100)]
         pages.append((roots, f"token-{page_index}"))
 
     with patch(
-        "mindroom.matrix.room_history_reads.get_room_threads_page",
+        _ROOT_IDS_PAGE,
         new=AsyncMock(side_effect=pages),
     ) as mock_get_page:
         thread_root_ids, truncated = await enumerate_room_thread_root_ids(client, "!room:localhost")
@@ -1725,11 +1729,11 @@ async def test_enumerate_room_thread_root_ids_repeated_token_guard_truncates() -
     client = AsyncMock()
 
     with patch(
-        "mindroom.matrix.room_history_reads.get_room_threads_page",
+        _ROOT_IDS_PAGE,
         new=AsyncMock(
             side_effect=[
-                ([_thread_root_event("$thread-one:localhost")], "A"),
-                ([_thread_root_event("$thread-two:localhost")], "A"),
+                (["$thread-one:localhost"], "A"),
+                (["$thread-two:localhost"], "A"),
             ],
         ),
     ):
@@ -1745,11 +1749,11 @@ async def test_enumerate_room_thread_root_ids_zero_new_roots_guard_truncates() -
     client = AsyncMock()
 
     with patch(
-        "mindroom.matrix.room_history_reads.get_room_threads_page",
+        _ROOT_IDS_PAGE,
         new=AsyncMock(
             side_effect=[
-                ([_thread_root_event("$thread-one:localhost")], "A"),
-                ([_thread_root_event("$thread-one:localhost")], "B"),
+                (["$thread-one:localhost"], "A"),
+                (["$thread-one:localhost"], "B"),
             ],
         ),
     ):
@@ -1765,11 +1769,11 @@ async def test_enumerate_room_thread_root_ids_duplicate_final_page_completes() -
     client = AsyncMock()
 
     with patch(
-        "mindroom.matrix.room_history_reads.get_room_threads_page",
+        _ROOT_IDS_PAGE,
         new=AsyncMock(
             side_effect=[
-                ([_thread_root_event("$thread-one:localhost"), _thread_root_event("$thread-two:localhost")], "A"),
-                ([_thread_root_event("$thread-one:localhost"), _thread_root_event("$thread-two:localhost")], None),
+                (["$thread-one:localhost", "$thread-two:localhost"], "A"),
+                (["$thread-one:localhost", "$thread-two:localhost"], None),
             ],
         ),
     ):
@@ -1777,6 +1781,36 @@ async def test_enumerate_room_thread_root_ids_duplicate_final_page_completes() -
 
     assert thread_root_ids == ["$thread-one:localhost", "$thread-two:localhost"]
     assert truncated is False
+
+
+@pytest.mark.asyncio
+async def test_enumerate_room_thread_root_ids_cap_below_one_truncates_without_fetching() -> None:
+    """A thread-root cap below one reports truncation without asking the homeserver."""
+    client = AsyncMock()
+
+    with patch(_ROOT_IDS_PAGE, new=AsyncMock()) as mock_get_page:
+        thread_root_ids, truncated = await enumerate_room_thread_root_ids(client, "!room:localhost", max_thread_roots=0)
+
+    assert thread_root_ids == []
+    assert truncated is True
+    mock_get_page.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_enumerate_room_thread_root_ids_truncates_at_page_cap() -> None:
+    """Room thread enumeration should stop at the page cap while more pages remain."""
+    client = AsyncMock()
+    pages = [([f"$thread-{index}:localhost"], f"token-{index}") for index in range(_MAX_THREAD_ENUMERATION_PAGES + 1)]
+
+    with patch(
+        _ROOT_IDS_PAGE,
+        new=AsyncMock(side_effect=pages),
+    ) as mock_get_page:
+        thread_root_ids, truncated = await enumerate_room_thread_root_ids(client, "!room:localhost")
+
+    assert len(thread_root_ids) == _MAX_THREAD_ENUMERATION_PAGES
+    assert truncated is True
+    assert mock_get_page.await_count == _MAX_THREAD_ENUMERATION_PAGES
 
 
 @pytest.mark.asyncio
@@ -1788,7 +1822,7 @@ async def test_list_tagged_threads_include_untagged_propagates_room_threads_page
 
     with (
         patch(
-            "mindroom.matrix.room_history_reads.get_room_threads_page",
+            _ROOT_IDS_PAGE,
             new=AsyncMock(side_effect=error),
         ),
         pytest.raises(RoomThreadsPageError) as exc_info,
@@ -2092,6 +2126,34 @@ async def test_thread_tags_write_rejects_non_member_requester_even_with_pl0_even
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("refusals", [1, 3])
+async def test_requester_membership_read_refused_for_a_membership_change(refusals: int) -> None:
+    """A member read refused for a membership change is read again, and a refusal that lasts is a ThreadTagsError."""
+    client = _tag_writer_client("@mindroom_general:localhost", {})
+    client.room_get_state_event.return_value = _power_levels_response(
+        users={"@mindroom_general:localhost": 50, "@alice:localhost": 50},
+    )
+    client.joined_members.side_effect = [
+        *(nio.LocalProtocolError("room membership changed during lookup") for _ in range(refusals)),
+        _joined_members_response("@mindroom_general:localhost", "@alice:localhost"),
+    ]
+
+    if refusals < 3:
+        state = await _write_operation(client, "set")
+        assert state.tags["resolved"].set_by == "@alice:localhost"
+    else:
+        with pytest.raises(
+            ThreadTagsError,
+            match=(
+                r"^Failed to verify requester membership for @alice:localhost in !room:localhost: "
+                r"room membership changed during lookup$"
+            ),
+        ):
+            await _write_operation(client, "set")
+        client.room_put_state.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("action", ["set", "remove"])
 async def test_thread_tags_write_rejects_missing_client_user_id(action: str) -> None:
     """State writes should fail closed when the Matrix client identity is unavailable."""
@@ -2134,744 +2196,353 @@ async def test_get_thread_tags_raises_for_non_missing_state_fetch_error() -> Non
 
 
 @pytest.mark.asyncio
-async def test_resolve_thread_root_event_id_for_client_returns_root_for_root_event() -> None:
-    """A proven thread root should normalize to itself."""
+async def test_enumerate_room_thread_root_ids_roots_past_the_cap_on_the_final_page_truncate() -> None:
+    """Roots dropped at the cap are truncation even on a page with no continuation token."""
     client = AsyncMock()
-    client.room_get_event.return_value = _message_event_response(
-        "$thread-root:localhost",
-        content={"body": "Root", "msgtype": "m.text"},
-    )
-    thread_reply = nio.RoomMessageText.from_dict(
-        {
-            "event_id": "$thread-reply:localhost",
-            "sender": "@user:localhost",
-            "origin_server_ts": 2,
-            "room_id": "!room:localhost",
-            "type": "m.room.message",
-            "content": {
-                "body": "Reply",
-                "msgtype": "m.text",
-                "m.relates_to": {
-                    "rel_type": "m.thread",
-                    "event_id": "$thread-root:localhost",
-                },
-            },
-        },
-    )
-    thread_root = nio.RoomMessageText.from_dict(
-        {
-            "event_id": "$thread-root:localhost",
-            "sender": "@user:localhost",
-            "origin_server_ts": 1,
-            "room_id": "!room:localhost",
-            "type": "m.room.message",
-            "content": {
-                "body": "Root",
-                "msgtype": "m.text",
-            },
-        },
-    )
-    room_messages_response = MagicMock(spec=nio.RoomMessagesResponse)
-    room_messages_response.chunk = [thread_reply, thread_root]
-    room_messages_response.end = None
-    client.room_messages = AsyncMock(return_value=room_messages_response)
 
-    normalized = await resolve_thread_root_event_id_for_client(
-        client,
-        "!room:localhost",
-        "$thread-root:localhost",
-        relations=make_relation_lookup(client=client),
-    )
-
-    assert normalized == "$thread-root:localhost"
-    client.room_messages.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_resolve_thread_root_event_id_for_client_returns_none_for_unproven_root_event() -> None:
-    """Unproven room-level roots should not normalize as canonical thread IDs."""
-    client = AsyncMock()
-    client.room_get_event.return_value = _message_event_response(
-        "$thread-root:localhost",
-        content={"body": "Root", "msgtype": "m.text"},
-    )
-    room_messages_response = MagicMock(spec=nio.RoomMessagesResponse)
-    room_messages_response.chunk = [
-        nio.RoomMessageText.from_dict(
-            {
-                "event_id": "$thread-root:localhost",
-                "sender": "@user:localhost",
-                "origin_server_ts": 1,
-                "room_id": "!room:localhost",
-                "type": "m.room.message",
-                "content": {
-                    "body": "Root",
-                    "msgtype": "m.text",
-                },
-            },
+    with patch(
+        _ROOT_IDS_PAGE,
+        new=AsyncMock(
+            return_value=([f"$thread-{index}:localhost" for index in range(3)], None),
         ),
-    ]
-    room_messages_response.end = None
-    client.room_messages = AsyncMock(return_value=room_messages_response)
+    ):
+        thread_root_ids, truncated = await enumerate_room_thread_root_ids(
+            client,
+            "!room:localhost",
+            max_thread_roots=2,
+        )
 
-    normalized = await resolve_thread_root_event_id_for_client(
+    assert thread_root_ids == ["$thread-0:localhost", "$thread-1:localhost"]
+    assert truncated is True
+
+
+@pytest.mark.asyncio
+async def test_snoozed_tag_stores_until_in_utc() -> None:
+    """The snoozed tag stores its wake time normalized to UTC."""
+    current_events: dict[str, dict[str, object]] = {}
+    client = _tag_writer_client("@alice:localhost", current_events)
+    client.joined_members.return_value = _joined_members_response("@alice:localhost")
+
+    state = await set_thread_tag(
         client,
         "!room:localhost",
         "$thread-root:localhost",
-        relations=make_relation_lookup(client=client),
+        "snoozed",
+        set_by="@alice:localhost",
+        data={"until": "2026-11-14T09:00:00+01:00"},
     )
 
-    assert normalized is None
+    assert state.tags["snoozed"].data == {"until": "2026-11-14T08:00:00+00:00"}
 
 
 @pytest.mark.asyncio
-async def test_resolve_thread_root_event_id_for_client_returns_thread_root_for_thread_reply() -> None:
-    """Native thread replies should normalize to their thread root."""
+@pytest.mark.parametrize("data", [None, {}, {"until": "tomorrow"}, {"until": 5}])
+async def test_snoozed_tag_requires_a_timestamp(data: dict[str, object] | None) -> None:
+    """The snoozed tag fails without a valid until timestamp, before any Matrix I/O."""
     client = AsyncMock()
-    client.room_get_event = AsyncMock(
-        side_effect=[
-            _message_event_response(
-                "$thread-reply:localhost",
-                content={
-                    "body": "Reply",
-                    "msgtype": "m.text",
-                    "m.relates_to": {
-                        "rel_type": "m.thread",
-                        "event_id": "$thread-root:localhost",
-                    },
-                },
-            ),
-        ],
+
+    with pytest.raises(ThreadTagsError, match=r"snoozed\.data\.until must be an ISO-8601 timestamp\."):
+        await set_thread_tag(
+            client,
+            "!room:localhost",
+            "$thread-root:localhost",
+            "snoozed",
+            set_by="@alice:localhost",
+            data=data,
+        )
+
+    client.room_get_state_event.assert_not_awaited()
+
+
+def test_snooze_until_reads_naive_values_as_utc() -> None:
+    """Naive stored values are read as UTC; absent records give None."""
+    record = ThreadTagRecord(
+        set_by="@alice:localhost",
+        set_at=datetime(2026, 11, 13, tzinfo=UTC),
+        data={"until": "2026-11-14T08:00:00"},
+    )
+    assert snooze_until(record) == datetime(2026, 11, 14, 8, tzinfo=UTC)
+    assert snooze_until(None) is None
+    assert snooze_until(record.model_copy(update={"data": {}})) is None
+    assert snooze_until(record.model_copy(update={"data": {"until": "soon"}})) is None
+
+
+@pytest.mark.asyncio
+async def test_insufficient_power_is_a_permission_error() -> None:
+    """Insufficient power raises the dedicated subclass of ThreadTagsError."""
+    client = AsyncMock()
+    client.user_id = "@mindroom_general:localhost"
+    client.room_get_state_event.return_value = _power_levels_response(
+        users={"@mindroom_general:localhost": 0},
     )
 
-    normalized = await resolve_thread_root_event_id_for_client(
-        client,
+    with pytest.raises(ThreadTagsPermissionError):
+        await _write_operation(client, "set")
+
+
+@pytest.mark.asyncio
+async def test_get_thread_tag_content_reads_one_state_event() -> None:
+    """One tag is read with a single state-event request."""
+    content = _tag_record_content(data={"until": "2026-11-14T08:00:00+00:00"})
+    client = AsyncMock()
+    client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
+        content=content,
+        event_type=THREAD_TAGS_EVENT_TYPE,
+        state_key='["$root","snoozed"]',
+        room_id="!room:localhost",
+    )
+
+    result = await get_thread_tag_content(client, "!room:localhost", "$root", "snoozed")
+
+    assert result == content
+    client.room_get_state_event.assert_awaited_once_with(
         "!room:localhost",
-        "$thread-reply:localhost",
-        relations=make_relation_lookup(client=client),
+        THREAD_TAGS_EVENT_TYPE,
+        '["$root","snoozed"]',
     )
-
-    assert normalized == "$thread-root:localhost"
-    client.room_get_event.assert_awaited_once_with("!room:localhost", "$thread-reply:localhost")
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("event_id", ["", "   "])
-async def test_resolve_thread_root_event_id_for_client_returns_none_for_blank_input(event_id: str) -> None:
-    """Blank event IDs should be rejected before any event lookup."""
+async def test_get_thread_tag_content_returns_none_when_absent() -> None:
+    """M_NOT_FOUND and empty content both mean no tag."""
     client = AsyncMock()
+    client.room_get_state_event.return_value = _thread_tags_state_error(message="nope", status_code="M_NOT_FOUND")
+    assert await get_thread_tag_content(client, "!room:localhost", "$root", "snoozed") is None
 
-    normalized = await resolve_thread_root_event_id_for_client(
-        client,
-        "!room:localhost",
-        event_id,
-        relations=make_relation_lookup(client=client),
+    client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
+        content={},
+        event_type=THREAD_TAGS_EVENT_TYPE,
+        state_key='["$root","snoozed"]',
+        room_id="!room:localhost",
     )
-
-    assert normalized is None
-    client.room_get_event.assert_not_awaited()
+    assert await get_thread_tag_content(client, "!room:localhost", "$root", "snoozed") is None
 
 
 @pytest.mark.asyncio
-async def test_resolve_thread_root_event_id_for_client_returns_thread_root_for_plain_reply_to_thread_reply() -> None:
-    """Plain replies to explicit thread messages should normalize to the existing thread root."""
+async def test_get_thread_tag_content_raises_on_other_errors() -> None:
+    """Any other error response is a ThreadTagsError."""
     client = AsyncMock()
-    client.room_get_event = AsyncMock(
-        side_effect=[
-            _message_event_response(
-                "$plain-reply:localhost",
-                content={
-                    "body": "Bridge reply",
-                    "msgtype": "m.text",
-                    "m.relates_to": {"m.in_reply_to": {"event_id": "$thread-reply:localhost"}},
-                },
-            ),
-            _message_event_response(
-                "$thread-reply:localhost",
-                content={
-                    "body": "Reply",
-                    "msgtype": "m.text",
-                    "m.relates_to": {
-                        "rel_type": "m.thread",
-                        "event_id": "$thread-root:localhost",
-                    },
-                },
-            ),
-        ],
-    )
+    client.room_get_state_event.return_value = _thread_tags_state_error(message="boom", status_code="M_UNKNOWN")
 
-    normalized = await resolve_thread_root_event_id_for_client(
-        client,
-        "!room:localhost",
-        "$plain-reply:localhost",
-        relations=make_relation_lookup(client=client),
-    )
-
-    assert normalized == "$thread-root:localhost"
-    assert client.room_get_event.await_args_list[0].args == ("!room:localhost", "$plain-reply:localhost")
-    assert client.room_get_event.await_args_list[1].args == ("!room:localhost", "$thread-reply:localhost")
+    with pytest.raises(ThreadTagsError, match="boom"):
+        await get_thread_tag_content(client, "!room:localhost", "$root", "snoozed")
 
 
 @pytest.mark.asyncio
-async def test_resolve_thread_root_event_id_for_client_returns_none_for_missing_plain_reply_target() -> None:
-    """Plain replies to missing/redacted targets should remain best-effort room-level."""
-    client = AsyncMock()
-    client.room_get_event = AsyncMock(
-        side_effect=[
-            _message_event_response(
-                "$plain-reply:localhost",
-                content={
-                    "body": "Bridge reply",
-                    "msgtype": "m.text",
-                    "m.relates_to": {"m.in_reply_to": {"event_id": "$redacted-root:localhost"}},
-                },
-            ),
-            nio.RoomGetEventError("missing", status_code="M_NOT_FOUND"),
-        ],
-    )
+async def test_get_thread_tag_content_raises_on_a_server_error_body() -> None:
+    """A non-404 answer fails the read, even one whose body says M_NOT_FOUND; only a 404 M_NOT_FOUND means unset."""
+    answers = {
+        '["$root","snoozed"]': (500, {"errcode": "M_UNKNOWN", "error": "boom"}),
+        '["$proxy","snoozed"]': (503, {"errcode": "M_NOT_FOUND", "error": "upstream down"}),
+        '["$gone","snoozed"]': (404, {"errcode": "M_NOT_FOUND", "error": "Event not found."}),
+        '["$set","snoozed"]': (200, _tag_record_content()),
+    }
 
-    normalized = await resolve_thread_root_event_id_for_client(
-        client,
-        "!room:localhost",
-        "$plain-reply:localhost",
-        relations=make_relation_lookup(client=client),
-    )
+    async def state_event(request: web.Request) -> web.Response:
+        status, body = answers[request.match_info["state_key"]]
+        return web.json_response(body, status=status)
 
-    assert normalized is None
-    assert client.room_get_event.await_args_list[0].args == ("!room:localhost", "$plain-reply:localhost")
-    assert client.room_get_event.await_args_list[1].args == ("!room:localhost", "$redacted-root:localhost")
+    app = web.Application()
+    app.router.add_get("/_matrix/client/{version}/rooms/{room_id}/state/{event_type}/{state_key}", state_event)
+    async with TestServer(app) as server:
+        client = MindRoomAsyncClient(str(server.make_url("")), "@bot:localhost")
+        client.access_token = "token"  # noqa: S105
+        try:
+            with pytest.raises(ThreadTagsError, match="M_UNKNOWN boom"):
+                await get_thread_tag_content(client, "!room:localhost", "$root", "snoozed")
+            with pytest.raises(ThreadTagsError, match="upstream down"):
+                await get_thread_tag_content(client, "!room:localhost", "$proxy", "snoozed")
+            assert await get_thread_tag_content(client, "!room:localhost", "$gone", "snoozed") is None
+            assert await get_thread_tag_content(client, "!room:localhost", "$set", "snoozed") == _tag_record_content()
+        finally:
+            await client.close()
 
 
-@pytest.mark.asyncio
-async def test_resolve_thread_root_event_id_for_client_walks_transitively_to_threaded_ancestor() -> None:
-    """Plain replies should normalize transitively when the reply chain eventually reaches a threaded ancestor."""
-    client = AsyncMock()
-    client.room_get_event = AsyncMock(
-        side_effect=[
-            _message_event_response(
-                "$plain-reply-2:localhost",
-                content={
-                    "body": "Second bridge reply",
-                    "msgtype": "m.text",
-                    "m.relates_to": {"m.in_reply_to": {"event_id": "$plain-reply-1:localhost"}},
-                },
-            ),
-            _message_event_response(
-                "$plain-reply-1:localhost",
-                content={
-                    "body": "First bridge reply",
-                    "msgtype": "m.text",
-                    "m.relates_to": {"m.in_reply_to": {"event_id": "$thread-reply:localhost"}},
-                },
-            ),
-            _message_event_response(
-                "$thread-reply:localhost",
-                content={
-                    "body": "Thread reply",
-                    "msgtype": "m.text",
-                    "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread-root:localhost"},
-                },
-            ),
-        ],
-    )
-
-    normalized = await resolve_thread_root_event_id_for_client(
-        client,
-        "!room:localhost",
-        "$plain-reply-2:localhost",
-        relations=make_relation_lookup(client=client),
-    )
-
-    assert normalized == "$thread-root:localhost"
-    assert client.room_get_event.await_args_list[0].args == ("!room:localhost", "$plain-reply-2:localhost")
-    assert client.room_get_event.await_args_list[1].args == ("!room:localhost", "$plain-reply-1:localhost")
-    assert client.room_get_event.await_args_list[2].args == ("!room:localhost", "$thread-reply:localhost")
-    client.room_messages.assert_not_awaited()
+_OVERFLOWING_UNTILS = ["9999-12-31T23:59:59-01:00", "0001-01-01T00:00:00+01:00"]
 
 
 @pytest.mark.asyncio
-async def test_resolve_thread_root_event_id_for_client_returns_thread_root_for_plain_reply_to_thread_root() -> None:
-    """Plain replies to the actual thread root should normalize back to that root."""
+@pytest.mark.parametrize("until", _OVERFLOWING_UNTILS)
+async def test_snoozed_tag_whose_until_overflows_utc_is_dropped(until: str) -> None:
+    """A wake time that cannot be expressed in UTC drops that tag, not the room's other tags."""
     client = AsyncMock()
-    client.room_get_event = AsyncMock(
-        side_effect=[
-            _message_event_response(
-                "$plain-reply:localhost",
-                content={
-                    "body": "Bridge reply",
-                    "msgtype": "m.text",
-                    "m.relates_to": {"m.in_reply_to": {"event_id": "$thread-root:localhost"}},
-                },
-            ),
-            _message_event_response(
-                "$thread-root:localhost",
-                content={
-                    "body": "Root",
-                    "msgtype": "m.text",
-                },
-            ),
-        ],
-    )
-    thread_reply = nio.RoomMessageText.from_dict(
-        {
-            "event_id": "$thread-reply:localhost",
-            "sender": "@user:localhost",
-            "origin_server_ts": 2,
-            "room_id": "!room:localhost",
-            "type": "m.room.message",
-            "content": {
-                "body": "Reply",
-                "msgtype": "m.text",
-                "m.relates_to": {
-                    "rel_type": "m.thread",
-                    "event_id": "$thread-root:localhost",
-                },
-            },
-        },
-    )
-    thread_root = nio.RoomMessageText.from_dict(
-        {
-            "event_id": "$thread-root:localhost",
-            "sender": "@user:localhost",
-            "origin_server_ts": 1,
-            "room_id": "!room:localhost",
-            "type": "m.room.message",
-            "content": {
-                "body": "Root",
-                "msgtype": "m.text",
-            },
-        },
-    )
-    room_messages_response = MagicMock(spec=nio.RoomMessagesResponse)
-    room_messages_response.chunk = [thread_reply, thread_root]
-    room_messages_response.end = None
-    client.room_messages = AsyncMock(return_value=room_messages_response)
-
-    normalized = await resolve_thread_root_event_id_for_client(
-        client,
-        "!room:localhost",
-        "$plain-reply:localhost",
-        relations=make_relation_lookup(client=client),
-    )
-
-    assert normalized == "$thread-root:localhost"
-    client.room_messages.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_resolve_thread_root_event_id_for_client_returns_none_for_plain_reply_to_plain_root_message() -> None:
-    """Plain replies to unrelated room roots should not normalize as threads."""
-    client = AsyncMock()
-    client.room_get_event = AsyncMock(
-        side_effect=[
-            _message_event_response(
-                "$plain-reply:localhost",
-                content={
-                    "body": "Plain reply",
-                    "msgtype": "m.text",
-                    "m.relates_to": {"m.in_reply_to": {"event_id": "$plain-root:localhost"}},
-                },
-            ),
-            _message_event_response(
-                "$plain-root:localhost",
-                content={
-                    "body": "Root",
-                    "msgtype": "m.text",
-                },
-            ),
-        ],
-    )
-    plain_root = nio.RoomMessageText.from_dict(
-        {
-            "event_id": "$plain-root:localhost",
-            "sender": "@user:localhost",
-            "origin_server_ts": 1,
-            "room_id": "!room:localhost",
-            "type": "m.room.message",
-            "content": {
-                "body": "Root",
-                "msgtype": "m.text",
-            },
-        },
-    )
-    room_messages_response = MagicMock(spec=nio.RoomMessagesResponse)
-    room_messages_response.chunk = [plain_root]
-    room_messages_response.end = None
-    client.room_messages = AsyncMock(return_value=room_messages_response)
-
-    normalized = await resolve_thread_root_event_id_for_client(
-        client,
-        "!room:localhost",
-        "$plain-reply:localhost",
-        relations=make_relation_lookup(client=client),
-    )
-
-    assert normalized is None
-    assert client.room_get_event.await_args_list[0].args == ("!room:localhost", "$plain-reply:localhost")
-    assert client.room_get_event.await_args_list[1].args == ("!room:localhost", "$plain-root:localhost")
-    client.room_messages.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_resolve_thread_root_event_id_for_client_returns_none_for_plain_reply() -> None:
-    """Plain replies should no longer be promoted into synthetic thread roots."""
-    client = AsyncMock()
-    client.room_get_event = AsyncMock(
-        side_effect=[
-            _message_event_response(
-                "$reply-two:localhost",
-                content={
-                    "body": "Reply two",
-                    "msgtype": "m.text",
-                    "m.relates_to": {"m.in_reply_to": {"event_id": "$reply-one:localhost"}},
-                },
-            ),
-            _message_event_response(
-                "$reply-one:localhost",
-                content={"body": "Reply one", "msgtype": "m.text"},
-            ),
-        ],
-    )
-    room_messages_response = MagicMock(spec=nio.RoomMessagesResponse)
-    room_messages_response.chunk = [
-        nio.RoomMessageText.from_dict(
-            {
-                "event_id": "$reply-one:localhost",
-                "sender": "@user:localhost",
-                "origin_server_ts": 1,
-                "room_id": "!room:localhost",
-                "type": "m.room.message",
-                "content": {
-                    "body": "Reply one",
-                    "msgtype": "m.text",
-                },
-            },
+    client.room_get_state.return_value = _thread_tags_room_state_response(
+        _thread_tag_state_event("$thread-root:localhost", "resolved"),
+        _thread_tag_state_event(
+            "$thread-root:localhost",
+            "snoozed",
+            content=_tag_record_content(data={"until": until}),
         ),
-    ]
-    room_messages_response.end = None
-    client.room_messages = AsyncMock(return_value=room_messages_response)
-
-    normalized = await resolve_thread_root_event_id_for_client(
-        client,
-        "!room:localhost",
-        "$reply-two:localhost",
-        relations=make_relation_lookup(client=client),
     )
 
-    assert normalized is None
-    assert client.room_get_event.await_args_list[0].args == ("!room:localhost", "$reply-two:localhost")
-    assert client.room_get_event.await_args_list[1].args == ("!room:localhost", "$reply-one:localhost")
-    client.room_messages.assert_awaited_once()
+    state = await get_thread_tags(client, "!room:localhost", "$thread-root:localhost")
+    listing = await list_tagged_threads(client, "!room:localhost")
+
+    assert state is not None
+    assert list(state.tags) == ["resolved"]
+    assert list(listing.tag_state["$thread-root:localhost"].tags) == ["resolved"]
 
 
-@pytest.mark.asyncio
-async def test_resolve_thread_root_event_id_for_client_returns_none_when_lookup_fails() -> None:
-    """Missing or unreadable events should not guess a thread root."""
-    client = AsyncMock()
-    client.room_get_event = AsyncMock(return_value=object())
-
-    normalized = await resolve_thread_root_event_id_for_client(
-        client,
-        "!room:localhost",
-        "$reply-one:localhost",
-        relations=make_relation_lookup(client=client),
+@pytest.mark.parametrize("until", _OVERFLOWING_UNTILS)
+def test_snooze_until_is_none_when_until_overflows_utc(until: str) -> None:
+    """The latest and earliest representable UTC times still parse; one step beyond them is invalid."""
+    record = ThreadTagRecord(set_by="@alice:localhost", set_at=datetime(2026, 11, 13, tzinfo=UTC), data={})
+    assert snooze_until(record.model_copy(update={"data": {"until": until}})) is None
+    assert snooze_until(record.model_copy(update={"data": {"until": "9999-12-31T22:59:59-01:00"}})) == datetime(
+        9999,
+        12,
+        31,
+        23,
+        59,
+        59,
+        tzinfo=UTC,
     )
-    assert normalized is None
-    client.room_get_event.assert_awaited_once_with("!room:localhost", "$reply-one:localhost")
-
-
-@pytest.mark.asyncio
-async def test_resolve_thread_root_event_id_for_client_uses_the_journal_when_the_lookup_misses() -> None:
-    """A homeserver that cannot parse the event falls back to what the journal admitted."""
-    client = AsyncMock()
-    client.room_get_event = AsyncMock(return_value=object())
-    relations = make_relation_lookup(
-        threads={"$fresh-local-reply:localhost": "$thread-root:localhost"},
-        client=client,
+    assert snooze_until(record.model_copy(update={"data": {"until": "0001-01-01T01:00:00+01:00"}})) == datetime(
+        1,
+        1,
+        1,
+        tzinfo=UTC,
     )
 
-    normalized = await resolve_thread_root_event_id_for_client(
-        client,
-        "!room:localhost",
-        "$fresh-local-reply:localhost",
-        relations=relations,
-    )
 
-    assert normalized == "$thread-root:localhost"
-
-
-@pytest.mark.asyncio
-async def test_resolve_thread_root_event_id_for_client_ignores_the_thread_an_edit_names() -> None:
-    """Thread edits normalize through the message they edit, not the thread they name.
-
-    Matrix applies ``m.new_content`` by keeping the original event's relation and ignoring every
-    ``m.relates_to`` written there, so a thread named inside an edit is whatever its author typed.
-    Normalizing from it would let an edit retag a message into a thread of the editor's choosing,
-    so the extra point lookup for the original is the price of getting the right answer.
-    """
-    client = AsyncMock()
-    client.room_get_event = AsyncMock(
-        side_effect=[
-            _message_event_response(
-                "$edit:localhost",
-                content={
-                    "body": "* edited",
-                    "msgtype": "m.text",
-                    "m.new_content": {
-                        "body": "edited",
-                        "msgtype": "m.text",
-                        "m.relates_to": {
-                            "rel_type": "m.thread",
-                            "event_id": "$claimed-root:localhost",
-                        },
-                    },
-                    "m.relates_to": {
-                        "rel_type": "m.replace",
-                        "event_id": "$thread-reply:localhost",
-                    },
-                },
-            ),
-            _message_event_response(
-                "$thread-reply:localhost",
-                content={
-                    "body": "Reply",
-                    "msgtype": "m.text",
-                    "m.relates_to": {
-                        "rel_type": "m.thread",
-                        "event_id": "$thread-root:localhost",
-                    },
-                },
-            ),
-        ],
-    )
-
-    normalized = await resolve_thread_root_event_id_for_client(
-        client,
-        "!room:localhost",
-        "$edit:localhost",
-        relations=make_relation_lookup(client=client),
-    )
-
-    assert normalized == "$thread-root:localhost"
-    assert client.room_get_event.await_args_list[0].args == ("!room:localhost", "$edit:localhost")
-    assert client.room_get_event.await_args_list[1].args == ("!room:localhost", "$thread-reply:localhost")
-
-
-@pytest.mark.asyncio
-async def test_resolve_thread_root_event_id_for_client_resolves_thread_reply_edit_via_original_event_without_nested_thread_metadata() -> (
-    None
-):
-    """Edits of thread replies should fall back through the original event when nested thread metadata is absent."""
-    client = AsyncMock()
-    client.room_get_event = AsyncMock(
-        side_effect=[
-            _message_event_response(
-                "$edit:localhost",
-                content={
-                    "body": "* edited",
-                    "msgtype": "m.text",
-                    "m.new_content": {
-                        "body": "edited",
-                        "msgtype": "m.text",
-                    },
-                    "m.relates_to": {
-                        "rel_type": "m.replace",
-                        "event_id": "$thread-reply:localhost",
-                    },
-                },
-            ),
-            _message_event_response(
-                "$thread-reply:localhost",
-                content={
-                    "body": "Reply",
-                    "msgtype": "m.text",
-                    "m.relates_to": {
-                        "rel_type": "m.thread",
-                        "event_id": "$thread-root:localhost",
-                    },
-                },
-            ),
-        ],
-    )
-
-    normalized = await resolve_thread_root_event_id_for_client(
-        client,
-        "!room:localhost",
-        "$edit:localhost",
-        relations=make_relation_lookup(client=client),
-    )
-
-    assert normalized == "$thread-root:localhost"
-    assert client.room_get_event.await_args_list[0].args == ("!room:localhost", "$edit:localhost")
-    assert client.room_get_event.await_args_list[1].args == ("!room:localhost", "$thread-reply:localhost")
-
-
-@pytest.mark.asyncio
-async def test_resolve_thread_root_event_id_for_client_resolves_edit_of_promoted_plain_reply_via_original_reply_target() -> (
-    None
-):
-    """Edits of promoted plain replies should reuse the same transitive thread inheritance."""
-    client = AsyncMock()
-    client.room_get_event = AsyncMock(
-        side_effect=[
-            _message_event_response(
-                "$edit:localhost",
-                content={
-                    "body": "* edited",
-                    "msgtype": "m.text",
-                    "m.new_content": {
-                        "body": "edited",
-                        "msgtype": "m.text",
-                    },
-                    "m.relates_to": {
-                        "rel_type": "m.replace",
-                        "event_id": "$plain-reply:localhost",
-                    },
-                },
-            ),
-            _message_event_response(
-                "$plain-reply:localhost",
-                content={
-                    "body": "Bridge reply",
-                    "msgtype": "m.text",
-                    "m.relates_to": {"m.in_reply_to": {"event_id": "$thread-reply:localhost"}},
-                },
-            ),
-            _message_event_response(
-                "$thread-reply:localhost",
-                content={
-                    "body": "Reply",
-                    "msgtype": "m.text",
-                    "m.relates_to": {
-                        "rel_type": "m.thread",
-                        "event_id": "$thread-root:localhost",
-                    },
-                },
-            ),
-        ],
-    )
-
-    normalized = await resolve_thread_root_event_id_for_client(
-        client,
-        "!room:localhost",
-        "$edit:localhost",
-        relations=make_relation_lookup(client=client),
-    )
-
-    assert normalized == "$thread-root:localhost"
-    fetched_event_ids = [call.args[1] for call in client.room_get_event.await_args_list]
-    assert fetched_event_ids[0] == "$edit:localhost"
-    assert "$plain-reply:localhost" in fetched_event_ids
-
-
-@pytest.mark.asyncio
-async def test_resolve_thread_root_event_id_for_client_resolves_thread_root_edit_via_original_event() -> None:
-    """Edits of thread-root messages should normalize back to the original root event."""
-    client = AsyncMock()
-    client.room_get_event = AsyncMock(
-        side_effect=[
-            _message_event_response(
-                "$edit:localhost",
-                content={
-                    "body": "* edited root",
-                    "msgtype": "m.text",
-                    "m.new_content": {
-                        "body": "edited root",
-                        "msgtype": "m.text",
-                    },
-                    "m.relates_to": {
-                        "rel_type": "m.replace",
-                        "event_id": "$thread-root:localhost",
-                    },
-                },
-            ),
-            _message_event_response(
-                "$thread-root:localhost",
-                content={"body": "Root", "msgtype": "m.text"},
-            ),
-        ],
-    )
-    thread_reply = nio.RoomMessageText.from_dict(
-        {
-            "event_id": "$thread-reply:localhost",
-            "sender": "@user:localhost",
-            "origin_server_ts": 2,
-            "room_id": "!room:localhost",
-            "type": "m.room.message",
-            "content": {
-                "body": "Reply",
-                "msgtype": "m.text",
-                "m.relates_to": {
-                    "rel_type": "m.thread",
-                    "event_id": "$thread-root:localhost",
-                },
-            },
-        },
-    )
-    thread_root = nio.RoomMessageText.from_dict(
-        {
-            "event_id": "$thread-root:localhost",
-            "sender": "@user:localhost",
-            "origin_server_ts": 1,
-            "room_id": "!room:localhost",
-            "type": "m.room.message",
-            "content": {
-                "body": "Root",
-                "msgtype": "m.text",
-            },
-        },
-    )
-    room_messages_response = MagicMock(spec=nio.RoomMessagesResponse)
-    room_messages_response.chunk = [thread_reply, thread_root]
-    room_messages_response.end = None
-    client.room_messages = AsyncMock(return_value=room_messages_response)
-
-    normalized = await resolve_thread_root_event_id_for_client(
-        client,
-        "!room:localhost",
-        "$edit:localhost",
-        relations=make_relation_lookup(client=client),
-    )
-
-    assert normalized == "$thread-root:localhost"
-    assert client.room_get_event.await_args_list[0].args == ("!room:localhost", "$edit:localhost")
-    assert client.room_get_event.await_args_list[1].args == ("!room:localhost", "$thread-root:localhost")
-    client.room_messages.assert_awaited_once()
-
-
-@pytest.mark.asyncio
-async def test_resolve_thread_root_event_id_for_client_returns_none_for_cyclic_edit_chain() -> None:
-    """Cyclic edit chains should fail closed instead of recursing until crash."""
-    client = AsyncMock()
-    responses = {
-        "$edit-a:localhost": _message_event_response(
-            "$edit-a:localhost",
-            content={
-                "body": "* a",
-                "msgtype": "m.text",
-                "m.new_content": {"body": "a", "msgtype": "m.text"},
-                "m.relates_to": {"rel_type": "m.replace", "event_id": "$edit-b:localhost"},
-            },
-        ),
-        "$edit-b:localhost": _message_event_response(
-            "$edit-b:localhost",
-            content={
-                "body": "* b",
-                "msgtype": "m.text",
-                "m.new_content": {"body": "b", "msgtype": "m.text"},
-                "m.relates_to": {"rel_type": "m.replace", "event_id": "$edit-a:localhost"},
-            },
+def _snoozed_events(until: str = "2026-11-14T08:00:00+00:00", note: str = "first") -> dict[str, dict[str, object]]:
+    return {
+        _thread_tag_state_key("$thread-root:localhost", "snoozed"): _tag_record_content(
+            note=note,
+            data={"until": until},
         ),
     }
-    client.room_get_event = AsyncMock(
-        side_effect=lambda _room_id, event_id: responses[event_id],
-    )
 
-    normalized = await resolve_thread_root_event_id_for_client(
+
+def _snoozed_record(until: str = "2026-11-14T08:00:00+00:00", note: str = "first") -> ThreadTagRecord:
+    return ThreadTagRecord.model_validate(_tag_record_content(note=note, data={"until": until}))
+
+
+@pytest.mark.asyncio
+async def test_remove_thread_tag_retry_keeps_a_different_record_written_after_the_removal() -> None:
+    """A verification read that finds a new value for the tag keeps it instead of removing it again."""
+    current_events = _snoozed_events()
+    client = _tag_writer_client("@mindroom_general:localhost", current_events)
+    put_state = client.room_put_state.side_effect
+
+    async def put_then_replaced(**kwargs: object) -> object:
+        response = await put_state(**kwargs)
+        current_events.update(_snoozed_events(until="2026-11-15T08:00:00+00:00", note="second"))
+        return response
+
+    client.room_put_state.side_effect = put_then_replaced
+
+    state = await remove_thread_tag(client, "!room:localhost", "$thread-root:localhost", "snoozed")
+
+    assert client.room_put_state.await_count == 1
+    assert state.tags["snoozed"].note == "second"
+    assert current_events[_thread_tag_state_key("$thread-root:localhost", "snoozed")]["note"] == "second"
+
+
+@pytest.mark.asyncio
+async def test_remove_thread_tag_with_an_expected_record_leaves_a_different_one() -> None:
+    """A conditional remove writes nothing when room state holds a different value for the tag."""
+    current_events = _snoozed_events(until="2026-11-15T08:00:00+00:00", note="second")
+    client = _tag_writer_client("@mindroom_general:localhost", current_events)
+
+    state = await remove_thread_tag(
         client,
         "!room:localhost",
-        "$edit-a:localhost",
-        relations=make_relation_lookup(client=client),
+        "$thread-root:localhost",
+        "snoozed",
+        expected_record=_snoozed_record(),
     )
 
-    assert normalized is None
+    client.room_put_state.assert_not_awaited()
+    assert state.tags["snoozed"].note == "second"
+
+    current_events.update(_snoozed_events())
+    state = await remove_thread_tag(
+        client,
+        "!room:localhost",
+        "$thread-root:localhost",
+        "snoozed",
+        expected_record=_snoozed_record(),
+    )
+
+    client.room_put_state.assert_awaited_once()
+    assert "snoozed" not in state.tags
+
+
+@pytest.mark.asyncio
+async def test_remove_thread_tag_counts_an_accepted_removal_when_the_verification_read_fails() -> None:
+    """Once Matrix accepted the removal, a failed verification read does not turn it into an error."""
+    current_events = _snoozed_events()
+    current_events[_thread_tag_state_key("$thread-root:localhost", "resolved")] = _tag_record_content()
+    client = _tag_writer_client("@mindroom_general:localhost", current_events)
+    get_state = client.room_get_state.side_effect
+    reads = 0
+
+    async def second_read_fails(room_id: str) -> object:
+        nonlocal reads
+        reads += 1
+        if reads > 1:
+            return nio.RoomGetStateError("boom")
+        return await get_state(room_id)
+
+    client.room_get_state.side_effect = second_read_fails
+
+    state = await remove_thread_tag(client, "!room:localhost", "$thread-root:localhost", "snoozed")
+
+    client.room_put_state.assert_awaited_once()
+    assert list(state.tags) == ["resolved"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("error", [TimeoutError("slow"), OSError("connection reset")])
+async def test_remove_thread_tag_counts_an_accepted_removal_whatever_the_verification_read_raises(
+    error: Exception,
+) -> None:
+    """A transport exception from the verification read after an accepted removal still counts as removed."""
+    current_events = _snoozed_events()
+    client = _tag_writer_client("@mindroom_general:localhost", current_events)
+    get_state = client.room_get_state.side_effect
+    reads = 0
+
+    async def second_read_raises(room_id: str) -> object:
+        nonlocal reads
+        reads += 1
+        if reads > 1:
+            raise error
+        return await get_state(room_id)
+
+    client.room_get_state.side_effect = second_read_raises
+
+    state = await remove_thread_tag(client, "!room:localhost", "$thread-root:localhost", "snoozed")
+
+    client.room_put_state.assert_awaited_once()
+    assert state.tags == {}
+
+
+@pytest.mark.asyncio
+async def test_remove_thread_tag_with_an_expected_record_returns_when_the_tag_is_already_gone() -> None:
+    """A conditional remove of a tag someone already removed writes nothing and raises nothing."""
+    current_events = {
+        _thread_tag_state_key("$thread-root:localhost", "resolved"): _tag_record_content(),
+    }
+    client = _tag_writer_client("@mindroom_general:localhost", current_events)
+
+    state = await remove_thread_tag(
+        client,
+        "!room:localhost",
+        "$thread-root:localhost",
+        "snoozed",
+        expected_record=_snoozed_record(),
+    )
+    assert list(state.tags) == ["resolved"]
+
+    current_events.clear()
+    state = await remove_thread_tag(
+        client,
+        "!room:localhost",
+        "$thread-root:localhost",
+        "snoozed",
+        expected_record=_snoozed_record(),
+    )
+    assert state.tags == {}
+    client.room_put_state.assert_not_awaited()

@@ -1,4 +1,4 @@
-"""Real Docker/CLI release workflow using fake credentials and a scripted SDK.
+"""Real Docker/CLI release workflow using fake credentials and a scripted model provider.
 
 Run from the repository root with ``just test-minimal-agent-worker-smoke IMAGE DIR``
 or ``uv run python -m tests.manual.minimal_agent_worker_smoke --image IMAGE --evidence-dir DIR``.
@@ -33,24 +33,26 @@ import yaml
 from mindroom import ai
 from mindroom.agent_cli.session import TurnToolRegistry
 from mindroom.agent_modes import resolve_agent_mode
-from mindroom.agent_storage import create_session_storage
 from mindroom.api.agent_cli import bind_agent_cli_registry
 from mindroom.commands import mode_commands
 from mindroom.config.agent import AgentConfig
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.constants import resolve_primary_runtime_paths
 from mindroom.credentials.manager import get_runtime_credentials_manager
+from mindroom.history.turn_recorder import TurnRecorder
 from mindroom.logging_config import setup_logging
 from mindroom.message_target import MessageTarget
-from mindroom.response_turn import apply_exact_approval_decisions
+from mindroom.response_turn import TurnSinks, apply_exact_approval_decisions
 from mindroom.runtime_resolution import resolve_agent_storage
 from mindroom.runtime_state import clear_api_server_address, set_api_server_address
-from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
+from mindroom.session_storage.agent_storage import create_session_storage
+from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.workers.backends.docker import DockerWorkerBackend
-from mindroom.workers.runtime import shutdown_primary_worker_manager
+from mindroom.workers.runtime import bind_worker_launch_config_source, shutdown_primary_worker_manager
+from tests.approval_continuation_helpers import answered_calls
 from tests.conftest import bind_runtime_paths
 from tests.identity_helpers import persist_entity_accounts
-from tests.minimal_agent_fixtures import PLUGIN, ScriptedProvider
+from tests.minimal_agent_fixtures import PLUGIN, ScriptedProvider, offered_tools
 from tests.test_agent_cli_authority import _runtime_context, _turn_context
 
 
@@ -219,6 +221,8 @@ async def smoke(image, evidence_dir) -> None:  # noqa: C901, PLR0912, PLR0915 - 
             original_remove(backend, container)
 
     patch.setattr(DockerWorkerBackend, "_remove_container", remove_with_capture)
+    # This run owns the applied config its workers launch from, until the worker manager has shut down.
+    worker_launch_binding = ExitStack()
     try:
         primary_dir = data / "primary"
         primary_dir.mkdir()
@@ -278,6 +282,7 @@ async def smoke(image, evidence_dir) -> None:  # noqa: C901, PLR0912, PLR0915 - 
         setup_logging(runtime_paths=paths)
         runtime_logs = paths.storage_root / "logs"
         config = runtime.config
+        worker_launch_binding.enter_context(bind_worker_launch_config_source(lambda: config))
 
         config.plugins = [PluginEntryConfig(path=str(plugin_dir))]
         config.administrators = [runtime.requester_id]
@@ -285,10 +290,9 @@ async def smoke(image, evidence_dir) -> None:  # noqa: C901, PLR0912, PLR0915 - 
             display_name="Helper",
             tools=["shell", "file", "parity"],
             delegate_to=["code", "helper"],
-            learning=False,
             memory_backend="file",
         )
-        config.agents["code"] = AgentConfig(display_name="Code", tools=[], learning=False, memory_backend="file")
+        config.agents["code"] = AgentConfig(display_name="Code", tools=[], memory_backend="file")
         bind_runtime_paths(config, paths)
         paths.config_path.write_text(yaml.safe_dump(config.model_dump(mode="json")))
         persist_entity_accounts(config, paths)
@@ -340,8 +344,7 @@ async def smoke(image, evidence_dir) -> None:  # noqa: C901, PLR0912, PLR0915 - 
             return tuple(
                 apply_exact_approval_decisions(
                     paused.requirements,
-                    decisions={str(tool.tool_call_id): True for tool in paused.tools},
-                    denial_reasons={str(tool.tool_call_id): None for tool in paused.tools},
+                    answered_calls((str(tool.tool_call_id) for tool in paused.tools), approved=True),
                 ),
             )
 
@@ -349,7 +352,7 @@ async def smoke(image, evidence_dir) -> None:  # noqa: C901, PLR0912, PLR0915 - 
             runtime,
             runtime_paths=paths,
             config=config,
-            orchestrator=SimpleNamespace(agent_cli_registry=registry),
+            orchestrator=SimpleNamespace(agent_cli_registry=registry, budgets=None),
             cli_approval_handler=approve,
         )
         from mindroom.api.main import app, initialize_api_app  # noqa: PLC0415 - resolve runtime before app setup
@@ -366,20 +369,22 @@ async def smoke(image, evidence_dir) -> None:  # noqa: C901, PLR0912, PLR0915 - 
         provider.install(patch)
         original_response = ai.ai_response
 
-        async def response_with_capture(ctx, *args, **kwargs):  # noqa: ANN002, ANN003
-            trace = kwargs.setdefault("tool_trace_collector", [])
-            presentation = await original_response(ctx, *args, **kwargs)
+        async def response_with_capture(ctx, runtime_paths, config, *, sinks=None):
+            # The turn's recorder holds the tool calls it completed, which the trace keeps.
+            sinks = sinks or TurnSinks()
+            recorder = sinks.turn_recorder or TurnRecorder(user_message=ctx.prompt)
+            result = await original_response(ctx, runtime_paths, config, sinks=replace(sinks, turn_recorder=recorder))
             audit.capture_response(
                 ctx.agent_mode,
-                presentation,
-                [asdict(entry) for entry in trace],
+                result.text,
+                [asdict(entry) for entry in recorder.completed_tools],
                 entity_name=ctx.entity_label,
                 child=ctx.session_id.startswith("delegate:"),
             )
-            return presentation
+            return result
 
         patch.setattr(ai, "ai_response", response_with_capture)
-        identity = build_execution_identity_from_runtime_context(runtime)
+        identity = runtime.execution_identity
         storage = create_session_storage("helper", config, paths, identity)
 
         state_root = resolve_agent_storage("helper", config, paths, identity).state_root
@@ -394,15 +399,21 @@ async def smoke(image, evidence_dir) -> None:  # noqa: C901, PLR0912, PLR0915 - 
         async def respond(prompt):
             mode = resolve_agent_mode(paths, state_root, "helper", runtime.session_id)
             with tool_runtime_context(runtime):
-                return await ai.ai_response(
-                    replace(_turn_context(), session_id=runtime.session_id, agent_mode=mode, run_id=None),
-                    prompt=prompt,
-                    runtime_paths=paths,
-                    config=config,
-                    execution_identity=identity,
-                    supports_native_tool_approval=True,
-                    show_tool_calls=True,
+                result = await ai.ai_response(
+                    replace(
+                        _turn_context(),
+                        session_id=runtime.session_id,
+                        agent_mode=mode,
+                        run_id=None,
+                        prompt=prompt,
+                        execution_identity=identity,
+                        supports_native_tool_approval=True,
+                        show_tool_calls=True,
+                    ),
+                    paths,
+                    config,
                 )
+            return result.text
 
         provider.steps = ["standard history sentinel"]
         initial = await respond("Remember this same-conversation history sentinel")
@@ -439,16 +450,17 @@ async def smoke(image, evidence_dir) -> None:  # noqa: C901, PLR0912, PLR0915 - 
         results["steps"].append("retired response grant rejected by actual API")
         assert len(provider.requests) == 4, len(provider.requests)
         minimal_requests = [provider.requests[1], provider.requests[3]]
-        assert all([tool["function"]["name"] for tool in request["tools"]] == ["bash"] for request in minimal_requests)
-        projection = str(provider.requests[3]["messages"])
+        assert all(offered_tools(request) == ["bash"] for request in minimal_requests)
+        projection = str(provider.requests[3].messages)
         for expected in (
             "primary credential accepted",
             "approved:exact value",
             "child done",
             "same-agent persistent note",
-            "image_url",
         ):
             assert expected in projection, expected
+        # The provider layer, not the loop, serializes images, so the loop's request carries them as `Message.images`.
+        assert any(message.images and message.files for message in provider.requests[3].messages)
         results["steps"].extend(
             [
                 "minimal Bash-only requests",
@@ -465,10 +477,10 @@ async def smoke(image, evidence_dir) -> None:  # noqa: C901, PLR0912, PLR0915 - 
         result = await respond("Read the same note and keep earlier history")
         assert "standard done" in str(result)
         final_request = provider.requests[-1]
-        assert "same-agent persistent note" in str(final_request["messages"])
-        assert "standard history sentinel" in str(final_request["messages"])
-        assert any(tool["function"]["name"] == "read_file" for tool in final_request["tools"])
-        assert len(storage.get_session(runtime.session_id).runs) == 3
+        assert "same-agent persistent note" in str(final_request.messages)
+        assert "standard history sentinel" in str(final_request.messages)
+        assert "read_file" in offered_tools(final_request)
+        assert len(storage.load_session(runtime.session_id).runs) == 3
         results["steps"].append("standard mode reads identical workspace note and prior history")
         # The standard parent runs a minimal copy of itself, which uses the real CLI in the same ordinary worker.
         provider.steps = [
@@ -480,35 +492,30 @@ async def smoke(image, evidence_dir) -> None:  # noqa: C901, PLR0912, PLR0915 - 
         result = await respond("Delegate a minimal copy of yourself")
         assert "parent after minimal child" in str(result), result
         parent_request, child_first, child_second, parent_final = provider.requests[-4:]
-        run_subagent = next(
-            tool["function"] for tool in parent_request["tools"] if tool["function"]["name"] == "run_subagent"
-        )
-        assert "Subagents that support minimal mode: helper." in run_subagent["description"]
-        assert "minimal" in run_subagent["parameters"]["properties"]
-        assert all(
-            [tool["function"]["name"] for tool in request["tools"]] == ["bash"]
-            for request in (child_first, child_second)
-        )
-        listing = next(str(message["content"]) for message in child_second["messages"] if message["role"] == "tool")
+        run_subagent = next(tool for tool in parent_request.tools if tool.name == "run_subagent")
+        assert "Subagents that support minimal mode: helper." in str(run_subagent.description)
+        assert "minimal" in run_subagent.parameters["properties"]
+        assert all(offered_tools(request) == ["bash"] for request in (child_first, child_second))
+        listing = next(message.get_content_string() for message in child_second.messages if message.role == "tool")
         assert "integration" in listing, listing
         assert "approved" not in listing, listing
-        assert "minimal child done" in str(parent_final["messages"])
+        assert "minimal child done" in str(parent_final.messages)
         results["steps"].append(
             "minimal subagent: Bash-only child lists tools through the agent's worker without gated ones",
         )
-        audit.capture("provider", "all-sdk-requests", json.dumps(provider.requests, indent=2, default=str))
+        audit.capture("provider", "all-model-requests", json.dumps(provider.requests, indent=2, default=str))
         audit.capture(
             "history",
             runtime.session_id,
-            json.dumps(storage.get_session(runtime.session_id).to_dict(), default=str),
+            json.dumps([run.to_dict() for run in storage.load_session(runtime.session_id).runs], default=str),
         )
         results["requests"] = len(provider.requests)
     except BaseException as exc:
         failures.append(exc)
     finally:
         for operation in (
-            storage.close if "storage" in locals() else lambda: None,
             shutdown_primary_worker_manager,
+            worker_launch_binding.close,
             patch.undo,
             clear_api_server_address,
         ):
@@ -529,6 +536,10 @@ async def smoke(image, evidence_dir) -> None:  # noqa: C901, PLR0912, PLR0915 - 
             failures.append(exc)
         results["cleanup"] = cleanup_containers(client, prefix, audit)
         try:
+            # uvicorn's `dictConfig` took the root handlers off the list `logging.shutdown` closes; closing the
+            # log file handler writes its queued records before the file is read.
+            for handler in logging.getLogger().handlers:
+                handler.close()
             logging.shutdown()
         except Exception as exc:
             failures.append(exc)
@@ -550,7 +561,7 @@ async def smoke(image, evidence_dir) -> None:  # noqa: C901, PLR0912, PLR0915 - 
         if not failures:
             results["status"] = "passed"
             results["steps"].append(
-                "all worker/runtime logs, presentations, traces, SDK requests and history secret-checked",
+                "all worker/runtime logs, presentations, traces, model requests and history secret-checked",
             )
         (data / "result.json").write_text(json.dumps(results, indent=2))
         print(json.dumps(results, indent=2))

@@ -10,42 +10,43 @@ from mindroom.background_tasks import create_background_task
 from mindroom.interactive_models import InteractivePrompt
 from mindroom.matrix.conversation_reads import DeliveredResponse
 from mindroom.runtime_protocols import SupportsClientConfigMemberships  # noqa: TC001
-from mindroom.thread_summary import maybe_generate_thread_summary
-from mindroom.thread_summary import should_queue_thread_summary as should_queue_thread_summary_check
+from mindroom.thread_summary import schedule
+from mindroom.thread_summary.automatic import maybe_generate_thread_summary
+from mindroom.thread_summary.schedule import should_queue_thread_summary as should_queue_thread_summary_check
 from mindroom.timing import timed
+from mindroom.tool_system.events import strip_visible_tool_markers
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Sequence
+    from collections.abc import Awaitable, Callable
 
     import nio
     import structlog
-    from agno.db.base import SessionType
 
     from mindroom.constants import RuntimePaths
     from mindroom.event_journal.store import PrincipalStore
     from mindroom.final_delivery import FinalDeliveryOutcome
-    from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.matrix.conversation_reads import ConversationReader
     from mindroom.message_target import MessageTarget
-    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
 @dataclass(frozen=True)
 class ResponseOutcome:
-    """Terminal response facts needed for post-delivery side effects."""
+    """Terminal response facts needed for post-delivery side effects.
+
+    ``response_target`` names the conversation the response went to: its session, and the thread a thread summary
+    is queued for.
+    """
 
     response_run_id: str | None = None
-    session_id: str | None = None
-    session_type: SessionType | None = None
-    execution_identity: ToolExecutionIdentity | None = None
     run_succeeded: bool = True
     response_target: MessageTarget | None = None
-    thread_summary_room_id: str | None = None
-    thread_summary_thread_id: str | None = None
     thread_summary_message_count_hint: int | None = None
     thread_summary_entity_name: str | None = None
-    memory_prompt: str | None = None
-    memory_thread_history: Sequence[ResolvedVisibleMessage] | None = None
+
+    @property
+    def session_id(self) -> str | None:
+        """Return the session of the conversation the response went to."""
+        return self.response_target.session_id if self.response_target is not None else None
 
 
 @dataclass(frozen=True)
@@ -56,7 +57,8 @@ class PostResponseEffectsDeps:
     add_interactive_buttons: Callable[[str, interactive.InteractiveMetadata], Awaitable[None]] | None = None
     queue_memory_persistence: Callable[[], None] | None = None
     queue_skill_review: Callable[[str], Awaitable[None]] | None = None
-    notify_response_finished: Callable[[], None] | None = None
+    # Receives the reply's cost: zero when it used no priced model, None when the cost is unknown.
+    notify_response_finished: Callable[[float | None], None] | None = None
     persist_response_event_id: Callable[[str, str], Awaitable[None]] | None = None
     should_queue_thread_summary: Callable[[str, str, int | None], bool] | None = None
     queue_thread_summary: Callable[[str, str, str | None, DeliveredResponse], None] | None = None
@@ -111,8 +113,10 @@ class PostResponseEffectsSupport:
         thread_id: str,
         entity_name: str | None,
         delivered_response: DeliveredResponse,
+        *,
+        retitle: bool = False,
     ) -> None:
-        """Queue background thread summarization with timing instrumentation."""
+        """Queue background thread summarization with timing instrumentation; ``retitle`` summarizes whatever the count."""
         summary_coro = maybe_generate_thread_summary(
             client=self._client(),
             room_id=room_id,
@@ -123,6 +127,7 @@ class PostResponseEffectsSupport:
             delivered_response=delivered_response,
             entity_name=entity_name or self.agent_name,
             membership_index=self.runtime.agent_reply_memberships,
+            retitle=retitle,
         )
         create_background_task(
             self._timed_thread_summary(
@@ -132,6 +137,16 @@ class PostResponseEffectsSupport:
             owner=self.runtime,
         )
 
+    def retitle_thread(self, room_id: str, thread_id: str, *, event_id: str, body: str) -> None:
+        """Queue a summary of the thread now, whatever its count, counting the message this bot just posted there."""
+        self._queue_thread_summary(
+            room_id,
+            thread_id,
+            None,
+            DeliveredResponse(event_id=event_id, body=body),
+            retitle=True,
+        )
+
     def build_deps(
         self,
         *,
@@ -139,7 +154,7 @@ class PostResponseEffectsSupport:
         membership_turn_id: str,
         queue_memory_persistence: Callable[[], None] | None = None,
         queue_skill_review: Callable[[str], Awaitable[None]] | None = None,
-        notify_response_finished: Callable[[], None] | None = None,
+        notify_response_finished: Callable[[float | None], None] | None = None,
         persist_response_event_id: Callable[[str, str], Awaitable[None]] | None = None,
     ) -> PostResponseEffectsDeps:
         """Build the per-response post-effect dependency surface."""
@@ -180,14 +195,45 @@ class PostResponseEffectsSupport:
         )
 
 
-def _notify_response_finished(outcome: ResponseOutcome, deps: PostResponseEffectsDeps) -> None:
-    """Tell automations a response is final, successful or not, so one waiting on it can verify its files."""
+def _notify_response_finished(
+    final_delivery_outcome: FinalDeliveryOutcome,
+    outcome: ResponseOutcome,
+    deps: PostResponseEffectsDeps,
+) -> None:
+    """Tell automations a response is final, successful or not, so one waiting on it can verify its files.
+
+    Budgets learn what the reply cost from the same notice.
+    """
     if deps.notify_response_finished is None:
         return
     try:
-        deps.notify_response_finished()
+        deps.notify_response_finished(final_delivery_outcome.response_cost_usd)
     except Exception:
         deps.logger.exception("Failed to notify automations of a finished response", session_id=outcome.session_id)
+
+
+def _delivered_body(final_delivery_outcome: FinalDeliveryOutcome) -> str:
+    """Return the delivered text; only a reply with a tool trace has display markers to drop."""
+    body = final_delivery_outcome.final_visible_body or ""
+    return strip_visible_tool_markers(body) if final_delivery_outcome.tool_trace else body
+
+
+def _mark_delivered_thread(
+    final_delivery_outcome: FinalDeliveryOutcome,
+    outcome: ResponseOutcome,
+) -> tuple[str, str] | None:
+    """Return the room and thread a completed answer was delivered to, marking its prompt-only title stale."""
+    target = outcome.response_target
+    if (
+        not outcome.run_succeeded
+        or not final_delivery_outcome.completed
+        or final_delivery_outcome.final_visible_event_id is None
+        or target is None
+        or target.resolved_thread_id is None
+    ):
+        return None
+    schedule.THREAD_SUMMARY_BASELINES.supersede_provisional_title(target.room_id, target.resolved_thread_id)
+    return target.room_id, target.resolved_thread_id
 
 
 async def apply_post_response_effects(
@@ -197,34 +243,32 @@ async def apply_post_response_effects(
 ) -> None:
     """Apply the shared side effects that happen after response delivery is known."""
     response_event_id = final_delivery_outcome.final_visible_event_id
-    _notify_response_finished(outcome, deps)
+    # Before any await, so a prompt title still generating sees the answer is out.
+    delivered_thread = _mark_delivered_thread(final_delivery_outcome, outcome)
+    _notify_response_finished(final_delivery_outcome, outcome, deps)
     if (
         response_event_id is not None
         and deps.add_interactive_buttons is not None
-        and final_delivery_outcome.terminal_status == "completed"
+        and final_delivery_outcome.completed
         and final_delivery_outcome.final_visible_body is not None
-        and not final_delivery_outcome.suppressed
         and final_delivery_outcome.interactive_metadata is not None
     ):
         await deps.add_interactive_buttons(
             response_event_id,
             final_delivery_outcome.interactive_metadata,
         )
-    else:  # noqa: PLR5501, RUF100
-        if response_event_id is not None and (
-            "React with an emoji or type the number to respond." in (final_delivery_outcome.final_visible_body or "")
-            or final_delivery_outcome.interactive_metadata is not None
-        ):
-            deps.logger.warning(
-                "Interactive question buttons skipped",
-                response_event_id=response_event_id,
-                add_interactive_buttons_is_none=deps.add_interactive_buttons is None,
-                terminal_status=final_delivery_outcome.terminal_status,
-                final_visible_body_is_none=final_delivery_outcome.final_visible_body is None,
-                suppressed=final_delivery_outcome.suppressed,
-                option_map_empty=not bool(final_delivery_outcome.interactive_metadata),
-                options_list_empty=not bool(final_delivery_outcome.interactive_metadata),
-            )
+    elif response_event_id is not None and (
+        "React with an emoji or type the number to respond." in (final_delivery_outcome.final_visible_body or "")
+        or final_delivery_outcome.interactive_metadata is not None
+    ):
+        deps.logger.warning(
+            "Interactive question buttons skipped",
+            response_event_id=response_event_id,
+            add_interactive_buttons_is_none=deps.add_interactive_buttons is None,
+            ending=type(final_delivery_outcome.ending).__name__,
+            final_visible_body_is_none=final_delivery_outcome.final_visible_body is None,
+            interactive_metadata_is_none=final_delivery_outcome.interactive_metadata is None,
+        )
 
     if (
         outcome.response_run_id is not None
@@ -263,25 +307,16 @@ async def apply_post_response_effects(
             )
 
     if (
-        outcome.run_succeeded
-        and final_delivery_outcome.terminal_status == "completed"
+        delivered_thread is not None
         and response_event_id is not None
-        and not final_delivery_outcome.suppressed
-        and outcome.thread_summary_room_id is not None
-        and outcome.thread_summary_thread_id is not None
         and (
             deps.should_queue_thread_summary is None
-            or deps.should_queue_thread_summary(
-                outcome.thread_summary_room_id,
-                outcome.thread_summary_thread_id,
-                outcome.thread_summary_message_count_hint,
-            )
+            or deps.should_queue_thread_summary(*delivered_thread, outcome.thread_summary_message_count_hint)
         )
         and deps.queue_thread_summary is not None
     ):
         deps.queue_thread_summary(
-            outcome.thread_summary_room_id,
-            outcome.thread_summary_thread_id,
+            *delivered_thread,
             outcome.thread_summary_entity_name,
             # Nothing has echoed this event back yet, so the projection the
             # summary reads stops one message before the answer it is being
@@ -289,6 +324,6 @@ async def apply_post_response_effects(
             # handing the fact over is what makes the pass agree with it.
             DeliveredResponse(
                 event_id=response_event_id,
-                body=final_delivery_outcome.final_visible_body or "",
+                body=_delivered_body(final_delivery_outcome),
             ),
         )

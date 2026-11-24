@@ -132,7 +132,6 @@ class MCPServerState:
     oauth_lease_version: MCPOAuthLeaseVersion | None = None
     oauth_session_lease_version: MCPOAuthLeaseVersion | None = None
     oauth_transport_authorization_rejected: Callable[[], bool] | None = None
-    function_validation_error: bool = False
     retired: bool = False
 
     def __post_init__(self) -> None:

@@ -15,7 +15,7 @@ from uuid import uuid4
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 from mindroom.api.openai_streaming_protocol import error_response
-from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.config.resolution import agent_policy
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 
 if TYPE_CHECKING:
@@ -140,8 +140,6 @@ def convert_messages(
             text = _extract_content_text(msg.content)
             if text:
                 system_parts.append(text)
-        elif msg.role == "tool":
-            continue
         elif msg.role in ("user", "assistant"):
             text = _extract_content_text(msg.content)
             if text:
@@ -155,11 +153,7 @@ def convert_messages(
                     ),
                 )
 
-    system_prompt = "\n\n".join(system_parts) if system_parts else ""
-
-    if not conversation:
-        return system_prompt, None
-
+    system_prompt = "\n\n".join(system_parts)
     result = _find_last_user_message(conversation)
     if result is None:
         return system_prompt, None
@@ -213,8 +207,7 @@ def openai_compatible_agent_names(config: Config) -> list[str]:
     return [
         agent_name
         for agent_name in config.agents
-        if agent_name != ROUTER_AGENT_NAME
-        and not _openai_incompatible_agent_closure(agent_name, config, delegation_closures=delegation_closures)
+        if not _openai_incompatible_agent_closure(agent_name, config, delegation_closures=delegation_closures)
     ]
 
 
@@ -243,7 +236,7 @@ def _openai_incompatible_agent_closure(
             closures=delegation_closures,
         )
         if target_name in config.agents
-        and config.resolve_entity(target_name).execution_scope not in _OPENAI_COMPAT_SUPPORTED_WORKER_SCOPES
+        and agent_policy(config, target_name).effective_execution_scope not in _OPENAI_COMPAT_SUPPORTED_WORKER_SCOPES
     )
 
 
@@ -260,7 +253,7 @@ def _unsupported_worker_scope_error(agent_names: list[str], config: Config) -> J
         )
     }
     invalid_execution_scopes = {
-        config.resolve_entity(agent_name).execution_scope
+        agent_policy(config, agent_name).effective_execution_scope
         for agent_name in invalid_scope_agents
         if agent_name in config.agents
     }
@@ -303,7 +296,7 @@ def _validate_team_model_request(team_name: str, config: Config) -> JSONResponse
 
 
 def _validate_agent_model_request(agent_name: str, config: Config) -> JSONResponse | None:
-    if agent_name not in config.agents or agent_name == ROUTER_AGENT_NAME or agent_name in RESERVED_MODEL_NAMES:
+    if agent_name not in config.agents or agent_name in RESERVED_MODEL_NAMES:
         return error_response(
             404,
             f"Model '{agent_name}' not found",

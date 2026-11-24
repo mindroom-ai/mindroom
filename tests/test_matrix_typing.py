@@ -13,7 +13,7 @@ import pytest_asyncio
 from mindroom.matrix import typing as typing_module
 from mindroom.matrix.client_session import MindRoomAsyncClient
 from mindroom.matrix.typing import typing_indicator
-from mindroom.response_runner import ResponseRunner
+from mindroom.reply_turn.inbox import InboxResponses
 from mindroom.runtime_shutdown import ORDERLY_SHUTDOWN
 from tests.conftest import TEST_ACCESS_TOKEN
 
@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 
 
 @pytest_asyncio.fixture(autouse=True)
-async def _clean_typing_states() -> AsyncGenerator[None, None]:
+async def _clean_typing_states() -> AsyncGenerator[None]:
     """Keep failed tests from leaking refresh tasks and client references."""
     assert not typing_module._ACTIVE_TYPING
     yield
@@ -54,7 +54,7 @@ async def test_concurrent_typing_indicators_share_one_matrix_lease(turn_count: i
             await release_turns.wait()
 
     tasks = [asyncio.create_task(turn()) for _ in range(turn_count)]
-    await asyncio.wait_for(all_entered.wait(), timeout=1)
+    await all_entered.wait()
 
     assert client.room_typing.await_count == 1
     client.room_typing.assert_awaited_once_with(room_id, True, 30_000)
@@ -106,8 +106,13 @@ async def test_process_shutdown_releases_typing_without_new_matrix_request() -> 
             entered.set()
             await asyncio.Event().wait()
 
-    runner = ResponseRunner(deps=AsyncMock())
-    task = runner.track_inbox_response(
+    inbox = InboxResponses(
+        logger=MagicMock(),
+        replies=MagicMock(),
+        retry_approval_sources=MagicMock(),
+        runtime=MagicMock(),
+    )
+    task = inbox.track_inbox_response(
         hold_typing(),
         name="test_process_shutdown_typing",
         recovery_proof_ready=lambda: False,
@@ -115,7 +120,7 @@ async def test_process_shutdown_releases_typing_without_new_matrix_request() -> 
     )
     await asyncio.wait_for(entered.wait(), timeout=1.0)
 
-    completed = await runner.drain_inbox_responses(
+    completed = await inbox.drain_inbox_responses(
         cancel_after_seconds=0.1,
         shutdown_intent=ORDERLY_SHUTDOWN,
     )

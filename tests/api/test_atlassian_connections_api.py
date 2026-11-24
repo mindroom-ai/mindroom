@@ -6,7 +6,7 @@ import json
 from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qs, urlparse
 
-import httpx
+import httpx2
 import jwt
 import pytest
 from authlib.integrations import httpx_client as authlib_httpx_client
@@ -14,20 +14,21 @@ from fastapi.testclient import TestClient
 
 from mindroom.api import main
 from mindroom.credentials.manager import get_runtime_credentials_manager
-from mindroom.oauth.registry import load_oauth_providers
-from tests.api.test_api import (
-    _trusted_upstream_jwks,
-    _trusted_upstream_jwt,
-    _trusted_upstream_jwt_key,
-    _trusted_upstream_strict_jwt_env,
+from mindroom.oauth.registry import oauth_provider_registry
+from tests.api.conftest import (
+    publish_api_payload,
+    trusted_upstream_env,
+    trusted_upstream_jwks,
+    trusted_upstream_jwt,
+    trusted_upstream_jwt_key,
 )
 from tests.api.test_oauth_api import (
-    _publish_config,
     _publish_stored_oauth_credentials,
     _runtime_paths,
     _stored_oauth_credentials,
-    _use_runtime_auth_settings,
 )
+from tests.conftest import publish_test_plugins
+from tests.runtime_fakes import bind_test_embedded_runtime
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -71,14 +72,14 @@ def atlassian_portal(
     enforce_turn_authorization: None,  # noqa: ARG001
 ) -> dict[str, Any]:
     """Serve the real signed Connections API with both Atlassian connections."""
-    key = _trusted_upstream_jwt_key()
-    monkeypatch.setattr(jwt.PyJWKClient, "fetch_data", lambda _client: _trusted_upstream_jwks(key))
+    key = trusted_upstream_jwt_key()
+    monkeypatch.setattr(jwt.PyJWKClient, "fetch_data", lambda _client: trusted_upstream_jwks(key))
     monkeypatch.setattr(
         "mindroom.server_fetch_url.socket.getaddrinfo",
         lambda *_args, **_kwargs: [(0, 0, 0, "", ("93.184.216.34", 0))],
     )
     env = {
-        **_trusted_upstream_strict_jwt_env(tmp_path, matrix_user_id_claim="matrix_user_id"),
+        **trusted_upstream_env(),
         "MINDROOM_CONNECTIONS_AGENT": "personal",
         "MINDROOM_PUBLIC_URL": "https://chat.example.com",
     }
@@ -102,14 +103,13 @@ def atlassian_portal(
         },
     }
     main.initialize_api_app(main.app, paths)
-    _publish_config(main.app, paths, payload)
-    _use_runtime_auth_settings(main.app)
+    bind_test_embedded_runtime(main.app)
+    publish_api_payload(main.app, payload)
     config = main._app_context(main.app).runtime_config
     assert config is not None
     headers = {
         name: {
-            "X-Trusted-User": name,
-            "X-Trusted-Jwt": _trusted_upstream_jwt(
+            "X-Trusted-Jwt": trusted_upstream_jwt(
                 key,
                 user_id=name,
                 email=f"{name}@example.org",
@@ -123,7 +123,7 @@ def atlassian_portal(
         "client": TestClient(main.app, base_url="https://chat.example.com"),
         "headers": headers,
         "paths": paths,
-        "providers": load_oauth_providers(config, paths, skip_broken_plugins=False),
+        "providers": oauth_provider_registry(publish_test_plugins(config, paths), skip_broken_plugins=False),
     }
 
 
@@ -199,9 +199,9 @@ def test_callback_stores_only_that_connection_for_that_requester(
     )
     token_requests: list[dict[str, list[str]]] = []
 
-    def token_endpoint(request: httpx.Request) -> httpx.Response:
+    def token_endpoint(request: httpx2.Request) -> httpx2.Response:
         token_requests.append(parse_qs(request.content.decode()))
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json={
                 "access_token": "partner-access",
@@ -216,7 +216,7 @@ def test_callback_stores_only_that_connection_for_that_requester(
     monkeypatch.setattr(
         authlib_httpx_client,
         "AsyncOAuth2Client",
-        lambda **kwargs: real_client(transport=httpx.MockTransport(token_endpoint), **kwargs),
+        lambda **kwargs: real_client(transport=httpx2.MockTransport(token_endpoint), **kwargs),
     )
 
     connect = client.post(

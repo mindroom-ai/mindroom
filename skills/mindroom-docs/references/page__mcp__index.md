@@ -49,6 +49,9 @@ mcp_servers:
 ```
 
 Remote transports refuse loopback and private-network addresses; run local servers with `stdio` instead.
+A remote server on a private network, such as a cluster-internal service, needs `allow_private_network: true`; loopback, link-local and cloud metadata addresses stay refused.
+The opt-in opens every RFC 1918 and unique-local address to that server's URL and redirects, including MindRoom's own pods and Services, so set it only for a server you trust.
+`localhost` and `*.local` names stay refused, including Kubernetes `*.svc.cluster.local`; use the short Service name or `<service>.<namespace>.svc`.
 
 ### Credentials in Server Config
 
@@ -68,7 +71,9 @@ There are two names to keep apart:
 
 With `tool_prefix: chrome`, a remote tool named `navigate_page` becomes `chrome_navigate_page`.
 A final function name must be 64 characters or fewer.
-MindRoom rejects duplicate function names within one server and across the tools and servers visible to the same agent; agents that do not share the colliding surfaces may use identical names.
+A server whose tools repeat a function name, or take a name its OAuth connection functions use (`<prefix>_connection_status`, `<prefix>_list_tools`, `<prefix>_call_tool`), fails to list valid tools.
+When an MCP function has the same name as another of an agent's tools or another server's function, that agent is not offered the MCP function, and MindRoom logs a warning naming both; the server and its other functions stay available, and agents without both keep every function.
+Rename such a function with `tool_prefix`, or drop it with `exclude_tools`.
 
 ## Choose Which Tools an Agent Sees
 
@@ -119,6 +124,7 @@ Without a usable icon, Connections picks one matching the server's name, or a pl
 | `env` | map[string,string] | `{}` | `stdio` environment variables; supports `${ENV_VAR}` |
 | `url` | string | `null` | Required for `sse` and `streamable-http` |
 | `headers` | map[string,string] | `{}` | Remote request headers; supports `${ENV_VAR}` |
+| `allow_private_network` | bool | `false` | Let a remote server's URL reach private-network addresses (RFC 1918 or IPv6 unique-local), such as a cluster-internal service; loopback, link-local and cloud metadata addresses stay refused |
 | `auth` | object | `null` | OAuth settings for remote servers; see [OAuth Settings](#oauth-settings) |
 | `tool_prefix` | string | server ID | Prefix for model-visible function names; letters, numbers, and underscores |
 | `include_tools` | list[string] | `[]` | Allowlist of remote tool names |
@@ -208,9 +214,13 @@ These variables do not relax the address rules for the MCP connection itself.
 ### OAuth Client Registration
 
 With `dynamic_client_registration: true` and no stored client, MindRoom registers a client when the first user connects and reuses it for later users.
+With `discovery: auto`, when the authorization server offers no registration endpoint but advertises `client_id_metadata_document_supported`, the client is public (`token_endpoint_auth_method: none`), and `MINDROOM_PUBLIC_URL` is an HTTPS URL on a public DNS hostname, MindRoom uses `<MINDROOM_PUBLIC_URL>/api/oauth/<provider_id>/client-metadata.json` as its client ID instead.
+The authorization server fetches that client ID metadata document when a user connects, so it must be able to reach that URL without signing in.
 See [Built-In Providers](https://docs.mindroom.chat/oauth-framework/#built-in-providers) for when a dynamically registered client works from a hosted address.
-If discovery later resolves a different token endpoint, MindRoom registers a new client there and logs `oauth_dynamic_client_reregistered`, and users connected through the old client must reconnect.
-With dynamic registration disabled, or when the new server offers no registration endpoint, connecting fails instead.
+If discovery later resolves a different token endpoint, or `MINDROOM_PUBLIC_URL` or `MINDROOM_PORT` moves the callback to another `localhost` port or to an HTTPS address a dynamically registered client can serve, MindRoom registers a new client and logs `oauth_dynamic_client_reregistered`, and users connected through the old client must reconnect.
+With dynamic registration disabled, or when the new server offers no registration endpoint and MindRoom cannot use a client ID metadata document, connecting fails instead.
+If the authorization server refuses the new callback, MindRoom keeps the old client, existing connections keep working, and status and connect name the refused callback.
+A `MINDROOM_PUBLIC_URL` such as an `http://` LAN address, which a dynamically registered client cannot serve, also keeps the old client, which then works only when MindRoom is opened on `localhost`, and a client ID metadata document client stops working.
 
 To use your own OAuth app, store its client config in the credential service `<provider_id>_oauth_client`, or list other services in `client_config_services`.
 Tokens are stored in `<provider_id>_oauth`; when `provider_id` does not start with `mcp_`, both service names get an `mcp_` prefix.
@@ -231,7 +241,7 @@ See [Provider And Credential Service Rules](https://docs.mindroom.chat/oauth-fra
 | `authorization_url` | string | `null` | Authorization endpoint; required for `manual` |
 | `token_url` | string | `null` | Token endpoint; required for `manual` |
 | `registration_url` | string | `null` | Dynamic client registration endpoint |
-| `dynamic_client_registration` | bool | `true` | Allow registering a client automatically |
+| `dynamic_client_registration` | bool | `true` | Obtain a client automatically, by dynamic registration or client ID metadata document |
 | `token_endpoint_auth_method` | string | `none` | `none`, `client_secret_post`, or `client_secret_basic` |
 | `pkce_code_challenge_method` | string | `S256` | `S256`, or `null` to disable PKCE |
 | `scopes` | list[string] | `[]` | Requested OAuth scopes |
@@ -347,9 +357,6 @@ By default a failed server does not block anything: agents and teams that use it
 MindRoom keeps retrying a failed server without OAuth in the background and restarts the affected agents and teams once it recovers.
 An OAuth-backed server is retried on its next tool call.
 Set `required: true` to keep dependent agents and teams from starting until the server is available.
-
-A function-name collision is not retried, and the colliding servers' tools stay unavailable.
-Fix the remote tool names or `tool_prefix` values, then reload `config.yaml` or restart MindRoom.
 
 Errors that the MCP server reports for a tool call return to the agent as tool errors and are not retried.
 If the connection drops or times out during a call, the call fails even when `auto_reconnect` restores the connection, and the action is never replayed.

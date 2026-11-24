@@ -139,12 +139,9 @@ describe("WorkspaceDirectory", () => {
       teams: {},
     };
 
-    (global.fetch as ReturnType<typeof vi.fn>)
-      .mockResolvedValueOnce({ ok: true, json: async () => rawConfig })
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ agent_policies: {} }),
-      });
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(Response.json(rawConfig))
+      .mockResolvedValueOnce(Response.json({ agent_policies: {} }));
 
     await useConfigStore.getState().loadConfig();
     renderWorkspaceDirectory();
@@ -157,6 +154,29 @@ describe("WorkspaceDirectory", () => {
       screen.getByRole("button", { name: /Code Agent/ }),
     ).toBeInTheDocument();
     expect(screen.queryByText("[object Object]")).not.toBeInTheDocument();
+  });
+
+  it("exports tool names, not tool settings", async () => {
+    seedWorkspaceDirectory({
+      agents: [
+        { ...agents[0], tools: ["browser", { shell: { sandbox: "tight" } }] },
+      ],
+    });
+    let exported: Blob | undefined;
+    vi.stubGlobal("URL", {
+      ...URL,
+      createObjectURL: (blob: Blob) => {
+        exported = blob;
+        return "blob:export";
+      },
+      revokeObjectURL: () => {},
+    });
+    renderWorkspaceDirectory();
+
+    fireEvent.click(screen.getByRole("button", { name: /Export/ }));
+
+    const exportData = JSON.parse(await exported!.text());
+    expect(exportData.agents[0].tools).toEqual(["browser", "shell"]);
   });
 
   it("shows and searches the inherited scheduler tool", () => {
@@ -216,12 +236,9 @@ describe("WorkspaceDirectory", () => {
       },
       teams: {},
     };
-    (global.fetch as ReturnType<typeof vi.fn>)
-      .mockResolvedValueOnce({ ok: true, json: async () => rawConfig })
-      .mockResolvedValueOnce({
-        ok: true,
-        json: async () => ({ agent_policies: {} }),
-      });
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(Response.json(rawConfig))
+      .mockResolvedValueOnce(Response.json({ agent_policies: {} }));
 
     await useConfigStore.getState().loadConfig();
     renderWorkspaceDirectory();
@@ -371,46 +388,6 @@ describe("WorkspaceDirectory", () => {
     ).toBeVisible();
   });
 
-  it("shows an explicit null team model without indexing default metadata", () => {
-    seedWorkspaceDirectory({
-      config: {
-        ...config,
-        models: {
-          ...config.models,
-          default: {
-            provider: "ollama",
-            id: "qwen-reasoner",
-            display_name: "Local Reasoner",
-          },
-        },
-      },
-      teams: [{ ...teams[0], model: null }],
-    });
-    renderWorkspaceDirectory();
-
-    for (const term of [
-      "default",
-      "ollama",
-      "qwen-reasoner",
-      "LOCAL REASONER",
-    ]) {
-      fireEvent.change(screen.getByRole("searchbox"), {
-        target: { value: term },
-      });
-      expect(
-        screen.queryByRole("button", { name: /Builder Team/ }),
-      ).not.toBeInTheDocument();
-    }
-
-    fireEvent.change(screen.getByRole("searchbox"), { target: { value: "" } });
-    const teamRow = screen.getByRole("button", { name: /Builder Team/ });
-    expect(within(teamRow).getByText(/No model set/i)).toBeVisible();
-    fireEvent.click(teamRow);
-    expect(
-      within(screen.getByRole("complementary")).getByText("No model set"),
-    ).toBeVisible();
-  });
-
   it("searches explicit team model alias, provider, ID, and display name", () => {
     seedWorkspaceDirectory({
       config: {
@@ -442,6 +419,22 @@ describe("WorkspaceDirectory", () => {
       within(screen.getByRole("complementary")).getByText(
         "fast · openai/gpt-fast",
       ),
+    ).toBeVisible();
+  });
+
+  it("shows the default mode for a team that omits it", async () => {
+    const { mode: _mode, ...teamWithoutMode } = config.teams!.builders;
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(
+        Response.json({ ...config, teams: { builders: teamWithoutMode } }),
+      )
+      .mockResolvedValueOnce(Response.json({ agent_policies: {} }));
+    await useConfigStore.getState().loadConfig();
+    renderWorkspaceDirectory();
+
+    fireEvent.click(screen.getByRole("button", { name: /Builder Team/ }));
+    expect(
+      within(screen.getByRole("complementary")).getByText("coordinate"),
     ).toBeVisible();
   });
 

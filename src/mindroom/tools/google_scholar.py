@@ -31,7 +31,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["scholarly"],
-    docs_url="https://github.com/scholarly-python-package/scholarly",
+    docs_url="https://docs.mindroom.chat/tools/research-sources/#google_scholar",
     function_names=("search_google_scholar",),
 )
 def google_scholar_tools() -> type[GoogleScholarTools]:

@@ -47,7 +47,7 @@ def upsert_env_values(env_path: Path, values: Mapping[str, str]) -> Path:
     """Upsert KEY=value entries while preserving unrelated lines."""
     assignments = {key: _env_assignment(key, value) for key, value in values.items()}
     env_path.parent.mkdir(parents=True, exist_ok=True)
-    lines = env_path.read_text(encoding="utf-8").splitlines() if env_path.exists() else []
+    lines = env_path.read_text(encoding="utf-8-sig").splitlines() if env_path.exists() else []
 
     for key, assignment in assignments.items():
         _upsert_env_value(lines, key, assignment)

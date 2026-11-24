@@ -1,0 +1,63 @@
+"""Immutable evidence of the factory selected for one concrete toolkit."""
+
+from __future__ import annotations
+
+import hashlib
+import inspect
+import json
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
+from weakref import WeakKeyDictionary
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Mapping
+
+    from mindroom.tool_system.agno_toolkits import AnyToolkit
+
+
+def tool_config_signature(overrides: Mapping[str, object] | None) -> str:
+    """Digest constructor options without retaining secrets; function filters use current grants."""
+    # YAML overrides may hold values JSON cannot encode natively, such as an unquoted date.
+    serialized = json.dumps(
+        {key: value for key, value in (overrides or {}).items() if key not in {"include_tools", "exclude_tools"}},
+        sort_keys=True,
+        default=str,
+    )
+    return hashlib.sha256(serialized.encode()).hexdigest()
+
+
+@dataclass(frozen=True)
+class ToolConstruction:
+    """Concrete registry name and selected factory origin, or an explicit direct constructor."""
+
+    name: str
+    factory_origin: tuple[str, str] | None
+    config_signature: str = tool_config_signature(None)
+    # The constructor got instructions from its settings, from config.yaml or saved tool settings, not its defaults.
+    authored_instructions: bool = False
+
+    @classmethod
+    def from_factory(
+        cls,
+        name: str,
+        factory: Callable[[], type[AnyToolkit]],
+        *,
+        tool_config_overrides: Mapping[str, object] | None = None,
+    ) -> ToolConstruction:
+        """Snapshot the selected callable before any factory or constructor can run."""
+        origin = (factory.__module__, factory.__qualname__) if inspect.isfunction(factory) else None
+        return cls(name, origin, tool_config_signature(tool_config_overrides))
+
+
+_CONSTRUCTIONS: WeakKeyDictionary[AnyToolkit, ToolConstruction] = WeakKeyDictionary()
+
+
+def bind_toolkit_construction[T: AnyToolkit](toolkit: T, construction: ToolConstruction) -> T:
+    """Retain selected construction evidence on the final returned wrapper's lifetime."""
+    _CONSTRUCTIONS[toolkit] = construction
+    return toolkit
+
+
+def get_toolkit_construction(toolkit: AnyToolkit) -> ToolConstruction | None:
+    """Read evidence captured by construction without looking at the current registry."""
+    return _CONSTRUCTIONS.get(toolkit)

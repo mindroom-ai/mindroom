@@ -70,7 +70,7 @@ class _Continuation:
     generation: int = 0
     claim_span_id: str | None = None
     state: str = "waiting"  # waiting, ready, failing
-    disposition: rl.FailureDisposition | None = None
+    failure_kind: rl.ApprovalFailureKind | None = None
 
 
 @dataclass
@@ -102,7 +102,7 @@ class _Model:
     removed: bool = False
     # Logical sources the user deleted: no settlement answers their turn.
     deleted: set[str] = field(default_factory=set)
-    # The turn ledger recorded the turn answered, which suppresses a later replay of its original source.
+    # The turn rows recorded the turn answered, which suppresses a later replay of its original source.
     turn_answered: bool = False
     # Pending sources a settlement answered.
     answered: set[str] = field(default_factory=set)
@@ -229,20 +229,20 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
                 self._settle(span_id)
             case CancelSpan(span_id=span_id):
                 self.model.cancel_requested.add(span_id)
-            case FenceApproval(approval_id=approval_id, disposition=disposition):
-                self._fence(approval_id, disposition)
+            case FenceApproval(approval_id=approval_id, kind=kind):
+                self._fence(approval_id, kind)
             case _:
                 msg = f"unmodelled effect {effect!r}"
                 raise AssertionError(msg)
 
-    def _fence(self, approval_id: str, disposition: rl.FailureDisposition) -> None:
+    def _fence(self, approval_id: str, kind: rl.ApprovalFailureKind) -> None:
         """Fence a continuation as the store does: a FINAL still delivered wins."""
         continuation = self.model.continuations.get(approval_id)
         if continuation is None or self.model.finals.get(continuation.delivery_id) in {"pending", "acknowledged"}:
             return
         if continuation.state in {"waiting", "ready"}:
             continuation.state = "failing"
-            continuation.disposition = disposition
+            continuation.failure_kind = kind
 
     def _claim(
         self,
@@ -335,7 +335,7 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
             and self.model.reply.state is ReplyState.ACTIVE
             and self.model.reply.current_span_id is None
             and self.model.reply.approval_id is None
-            and self.model.spans[self.model.reply.last_span_id].outcome in rl._SOURCES_PENDING_OUTCOMES
+            and self.model.spans[self.model.reply.last_span_id].outcome in rl.SOURCES_PENDING_OUTCOMES
             and not self._is_settled(self.model.reply.last_span_id)
         ),
     )
@@ -358,8 +358,8 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
         lambda self: (
             self._bot()
             and self.model.reply is not None
-            # The regenerator regenerates only an answer with an event.
-            and self.model.reply.event_id is not None
+            # The regenerator regenerates only an answer that may show, counting a create not acknowledged yet.
+            and (self.model.reply.event_id is not None or self.model.reply.possibly_shown is not None)
             and "$source" not in self.model.deleted
         ),
     )
@@ -425,9 +425,9 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
             self._live() is not None and self.model.reply is not None and self.model.reply.event_id is not None
         ),
     )
-    @rule(previous_ok=st.booleans())
-    def write_ahead(self, previous_ok: bool) -> None:
-        """A direct progress edit of the event the reply's create bound; the create is always a durable row."""
+    @rule(previous_ok=st.booleans(), shown_live=st.booleans())
+    def write_ahead(self, previous_ok: bool, shown_live: bool) -> None:
+        """A direct progress edit of the event the reply's create bound, or what live frames showed of it."""
         span = self._live()
         assert span is not None
         self._apply(
@@ -439,6 +439,7 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
                 active_generation=self.generation,
                 durable_write_debt=self._unresolved_rows(),
                 now_ns=self._now(),
+                shown_live=shown_live,
             ),
         )
 
@@ -675,7 +676,11 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
         ended = self.model.spans[span.span_id]
         if ended.outcome in _UNANSWERED_OUTCOMES and self.model.finals.get(continuation.delivery_id) is None:
             continuation.state = "failing"
-            continuation.disposition = "cancelled_by_user" if ended.outcome is SpanOutcome.CANCELLED else "failed"
+            continuation.failure_kind = (
+                rl.ApprovalFailureKind.USER_STOP
+                if ended.outcome is SpanOutcome.CANCELLED
+                else rl.ApprovalFailureKind.ERROR
+            )
 
     # --- approvals ----------------------------------------------------------
 
@@ -804,7 +809,7 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
             if continuation.state == "ready" and self.model.finals.get(continuation.delivery_id) == "refused":
                 # Matrix refused the answer for good: the runtime settles the run as a failure.
                 continuation.state = "failing"
-                continuation.disposition = "failed"
+                continuation.failure_kind = rl.ApprovalFailureKind.ERROR
             if continuation.state == "failing" and not self._may_finish(continuation):
                 self._write_failure_note(continuation)
             if self._may_finish(continuation):
@@ -833,7 +838,7 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
         if last.delivery_id in self.model.finals:
             # The gateway resends the note a FINAL already holds instead of writing another.
             return
-        cancelled = continuation.disposition == "cancelled_by_user" or reply.unapplied_stop
+        cancelled = continuation.failure_kind is rl.ApprovalFailureKind.USER_STOP or reply.unapplied_stop
         requested = ReplyState.CANCELLED if cancelled else ReplyState.FAILED
         self._apply(
             rl.approval_failure_note(
@@ -866,7 +871,7 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
                 self._last(),
                 approval_id=continuation.approval_id,
                 paused_span_id=continuation.paused_span_id,
-                disposition=continuation.disposition,
+                failure_kind=continuation.failure_kind,
                 answers_turn=answers_turn,
                 now_ns=self._now(),
             ),
@@ -921,12 +926,12 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
                 if final == "refused":
                     # Recovery settles a refused answer as a failure.
                     continuation.state = "failing"
-                    continuation.disposition = "failed"
+                    continuation.failure_kind = rl.ApprovalFailureKind.ERROR
                 if final in {"acknowledged", "refused"}:
                     self._finish_approval(continuation, owner_available=True)
             elif span is not None and span.outcome in _UNANSWERED_OUTCOMES - {SpanOutcome.RELEASED}:
                 continuation.state = "failing"
-                continuation.disposition = "failed"
+                continuation.failure_kind = rl.ApprovalFailureKind.ERROR
             else:
                 self._release_approval(continuation)
 
@@ -1004,7 +1009,7 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
             and self.model.reply.state is ReplyState.ACTIVE
             and self.model.reply.current_span_id is None
             and not self.model.reply.unapplied_stop
-            and self.model.spans[self.model.reply.last_span_id].outcome in rl._SOURCES_PENDING_OUTCOMES
+            and self.model.spans[self.model.reply.last_span_id].outcome in rl.SOURCES_PENDING_OUTCOMES
             and not self._is_settled(self.model.reply.last_span_id)
             # The dispatcher hands a continuation's sources to the approval runtime instead.
             and self._held_by() is None
@@ -1035,7 +1040,14 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
         assert reply is not None
         last = self.model.spans[reply.last_span_id]
         transition = self._apply(
-            rl.replay_superseded(reply, last, durable_write_debt=self._unresolved_rows(), now_ns=self._now()),
+            rl.replay_superseded(
+                reply,
+                last,
+                durable_write_debt=self._unresolved_rows(),
+                # The modeled replay supersedes every message the last span pends, an edit included.
+                sources_pending=False,
+                now_ns=self._now(),
+            ),
         )
         assert all(not e.answered for e in transition.effects if isinstance(e, SettleSources)), transition
         if transition.outcome is rl.Outcome.DUPLICATE and self._held_by() is None:
@@ -1049,7 +1061,7 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
             and not self.model.continuations
             and self.model.reply.current_span_id is None
             and not self._is_settled(self.model.reply.last_span_id)
-            and self.model.spans[self.model.reply.last_span_id].outcome in rl._SOURCES_PENDING_OUTCOMES
+            and self.model.spans[self.model.reply.last_span_id].outcome in rl.SOURCES_PENDING_OUTCOMES
         ),
     )
     @rule()
@@ -1104,7 +1116,7 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
         for continuation in tuple(self.model.continuations.values()):
             if continuation.state != "failing":
                 continuation.state = "failing"
-                continuation.disposition = "failed"
+                continuation.failure_kind = rl.ApprovalFailureKind.ERROR
             self._finish_approval(continuation, owner_available=False)
 
     @precondition(
@@ -1143,7 +1155,7 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
         last = self._last()
         assert last is not None
         if (
-            last.outcome in rl._SOURCES_PENDING_OUTCOMES
+            last.outcome in rl.SOURCES_PENDING_OUTCOMES
             and "$source" in last.sources.pending_event_ids
             and not self._is_settled(last.span_id)
         ):
@@ -1243,7 +1255,7 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
         assert not reply.redaction_pending, reply
         assert reply.terminal, (reply, self._last())
         for span in self.model.spans.values():
-            if span.outcome in rl._SOURCES_PENDING_OUTCOMES:
+            if span.outcome in rl.SOURCES_PENDING_OUTCOMES:
                 continue
             assert self._is_settled(span.span_id), span
 
@@ -1310,7 +1322,7 @@ class ReplyLifecycleMachine(RuleBasedStateMachine):
                 # A span an older instance left: the restart that follows ends it.
                 self.restart()
                 return True
-            if self.model.spans[reply.last_span_id].outcome in rl._SOURCES_PENDING_OUTCOMES:
+            if self.model.spans[reply.last_span_id].outcome in rl.SOURCES_PENDING_OUTCOMES:
                 self.replay()
                 return True
             self.restart()

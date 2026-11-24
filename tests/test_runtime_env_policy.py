@@ -11,12 +11,13 @@ import pytest
 
 from mindroom import constants, runtime_env_policy
 from mindroom.api import sandbox_exec
-from mindroom.workers.backends._dedicated_worker_common import build_dedicated_worker_runtime_paths
-from mindroom.workers.backends.docker_config import docker_backend_config_signature
-from mindroom.workers.backends.kubernetes_config import kubernetes_backend_config_signature
+from mindroom.workers.backends.dedicated_launch import DedicatedWorkerLayout, dedicated_worker_startup_runtime_paths
+from mindroom.workers.backends.docker import configure_docker_worker_backend
+from mindroom.workers.backends.kubernetes import configure_kubernetes_worker_backend
 
 _POLICY_OWNED_ENV_PREFIXES = (
     "MINDROOM_CREDENTIAL_SEEDS_",
+    "MINDROOM_DOCKER_WORKER_",
     "MINDROOM_KUBERNETES_WORKER_",
     "MINDROOM_SANDBOX_",
     "MINDROOM_SHARED_CREDENTIALS_",
@@ -24,29 +25,12 @@ _POLICY_OWNED_ENV_PREFIXES = (
 )
 _POLICY_OWNED_ENV_EXTRA_NAMES = frozenset(
     {
-        *runtime_env_policy.AWS_BEDROCK_CLAUDE_ENV_BY_KEY.values(),
+        *runtime_env_policy.AWS_ENV_BY_KEY.values(),
         *runtime_env_policy.VERTEXAI_CLAUDE_ENV_BY_KEY.values(),
     },
 )
 _PYTHON_STRING_LITERAL_RE = re.compile(
     r"""(?P<prefix>[rubfRUBF]*)?(?P<quote>["'])(?P<value>[A-Z][A-Z0-9_]+)(?P=quote)""",
-)
-_PROJECTION_MATRIX_ENV_NAMES = (
-    runtime_env_policy.CONTROL_STATE_PATH_ENV,
-    runtime_env_policy.SESSION_STORAGE_PATH_ENV,
-    runtime_env_policy.CREDENTIALS_ENCRYPTION_KEY_ENV,
-    *runtime_env_policy.AWS_BEDROCK_CLAUDE_ENV_BY_KEY.values(),
-    "GOOGLE_APPLICATION_CREDENTIALS",
-    "GOOGLE_SERVICE_ACCOUNT_FILE",
-    "GOOGLE_DELEGATED_USER",
-    runtime_env_policy.KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["extra_env_json"],
-    runtime_env_policy.KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["storage_subpath_prefix"],
-    runtime_env_policy.MATRIX_APPSERVICE_TOKEN_ENV,
-    runtime_env_policy.MATRIX_APPSERVICE_TOKEN_FILE_ENV,
-    runtime_env_policy.MATRIX_MANAGED_ACCOUNT_AUTH_ENV,
-    runtime_env_policy.SANDBOX_RUNTIME_ENV_BY_KEY["proxy_token"],
-    runtime_env_policy.SHARED_CREDENTIALS_PATH_ENV,
-    "OPENAI_API_KEY",
 )
 _PROJECTION_MATRIX_EXPECTATIONS = {
     runtime_env_policy.MATRIX_APPSERVICE_TOKEN_ENV: {
@@ -91,42 +75,42 @@ _PROJECTION_MATRIX_EXPECTATIONS = {
         "execution_tool_runtime_paths": False,
         "shell_passthrough_env": False,
     },
-    runtime_env_policy.AWS_BEDROCK_CLAUDE_ENV_BY_KEY["access_key"]: {
+    runtime_env_policy.AWS_ENV_BY_KEY["access_key"]: {
         "public_worker_startup_env": False,
         "isolated_worker_runtime_env": False,
         "trusted_tool_runtime_paths": True,
         "execution_tool_runtime_paths": False,
         "shell_passthrough_env": True,
     },
-    runtime_env_policy.AWS_BEDROCK_CLAUDE_ENV_BY_KEY["secret_key"]: {
+    runtime_env_policy.AWS_ENV_BY_KEY["secret_key"]: {
         "public_worker_startup_env": False,
         "isolated_worker_runtime_env": False,
         "trusted_tool_runtime_paths": True,
         "execution_tool_runtime_paths": False,
         "shell_passthrough_env": True,
     },
-    runtime_env_policy.AWS_BEDROCK_CLAUDE_ENV_BY_KEY["session_token"]: {
+    runtime_env_policy.AWS_ENV_BY_KEY["session_token"]: {
         "public_worker_startup_env": False,
         "isolated_worker_runtime_env": False,
         "trusted_tool_runtime_paths": True,
         "execution_tool_runtime_paths": False,
         "shell_passthrough_env": True,
     },
-    runtime_env_policy.AWS_BEDROCK_CLAUDE_ENV_BY_KEY["region"]: {
+    runtime_env_policy.AWS_ENV_BY_KEY["region"]: {
         "public_worker_startup_env": True,
         "isolated_worker_runtime_env": False,
         "trusted_tool_runtime_paths": True,
         "execution_tool_runtime_paths": False,
         "shell_passthrough_env": True,
     },
-    runtime_env_policy.AWS_BEDROCK_CLAUDE_ENV_BY_KEY["default_region"]: {
+    runtime_env_policy.AWS_ENV_BY_KEY["default_region"]: {
         "public_worker_startup_env": True,
         "isolated_worker_runtime_env": False,
         "trusted_tool_runtime_paths": True,
         "execution_tool_runtime_paths": False,
         "shell_passthrough_env": True,
     },
-    runtime_env_policy.AWS_BEDROCK_CLAUDE_ENV_BY_KEY["profile"]: {
+    runtime_env_policy.AWS_ENV_BY_KEY["profile"]: {
         "public_worker_startup_env": True,
         "isolated_worker_runtime_env": False,
         "trusted_tool_runtime_paths": True,
@@ -249,7 +233,7 @@ def test_public_worker_startup_env_excludes_control_and_secret_values() -> None:
         "MINDROOM_KUBERNETES_WORKER_ANNOTATIONS_JSON": "{}",
         "MATRIX_HOMESERVER": "https://matrix.example.invalid",
         "OPENAI_BASE_URL": "https://models.example.invalid/v1",
-        "AGNO_TELEMETRY": "false",
+        "DO_NOT_TRACK": "1",
         "POD_NAMESPACE": "mindroom",
         "CUSTOMER_ID": "customer-123",
         "AWS_ACCESS_KEY_ID": "aws-access-id",
@@ -267,7 +251,7 @@ def test_public_worker_startup_env_excludes_control_and_secret_values() -> None:
         "MINDROOM_STORAGE_PATH": "/app/storage",
         "MATRIX_HOMESERVER": "https://matrix.example.invalid",
         "OPENAI_BASE_URL": "https://models.example.invalid/v1",
-        "AGNO_TELEMETRY": "false",
+        "DO_NOT_TRACK": "1",
         "POD_NAMESPACE": "mindroom",
         "CUSTOMER_ID": "customer-123",
         "AWS_REGION": "us-east-1",
@@ -336,8 +320,8 @@ def test_shell_passthrough_globs_do_not_expose_runtime_control_env() -> None:
 
 def test_env_projection_matrix_documents_sensitive_runtime_boundaries(tmp_path: Path) -> None:
     """Sensitive and credential-adjacent env names should have one documented projection policy."""
-    process_env = {name: f"process:{name}" for name in _PROJECTION_MATRIX_ENV_NAMES}
-    env_file_values = {name: f"envfile:{name}" for name in _PROJECTION_MATRIX_ENV_NAMES}
+    process_env = {name: f"process:{name}" for name in _PROJECTION_MATRIX_EXPECTATIONS}
+    env_file_values = {name: f"envfile:{name}" for name in _PROJECTION_MATRIX_EXPECTATIONS}
     config_path = tmp_path / "config.yaml"
     runtime_paths = constants.RuntimePaths(
         config_path=config_path,
@@ -369,10 +353,37 @@ def test_env_projection_matrix_documents_sensitive_runtime_boundaries(tmp_path: 
             "execution_tool_runtime_paths": execution_tool_runtime_paths.env_value(name) is not None,
             "shell_passthrough_env": name in shell_passthrough_env,
         }
-        for name in _PROJECTION_MATRIX_ENV_NAMES
+        for name in _PROJECTION_MATRIX_EXPECTATIONS
     }
 
     assert actual == _PROJECTION_MATRIX_EXPECTATIONS
+
+
+def test_the_user_appservice_token_never_reaches_a_worker(tmp_path: Path) -> None:
+    """The token that lets an agent act as a person stays in the primary, out of every worker and tool env."""
+    names = {
+        runtime_env_policy.MATRIX_USER_APPSERVICE_TOKEN_ENV,
+        runtime_env_policy.MATRIX_USER_APPSERVICE_TOKEN_FILE_ENV,
+    }
+    env = {name: f"value:{name}" for name in names}
+    runtime_paths = constants.RuntimePaths(
+        config_path=tmp_path / "config.yaml",
+        config_dir=tmp_path,
+        env_path=tmp_path / ".env",
+        storage_root=tmp_path / "storage",
+        process_env=env,
+        env_file_values=env,
+    )
+    tool_runtime_paths = [
+        sandbox_exec.tool_runtime_paths_with_request_env(runtime_paths, {}, include_base_execution_env=include_base)
+        for include_base in (True, False)
+    ]
+
+    assert runtime_env_policy.public_worker_startup_env(env) == {}
+    assert runtime_env_policy.isolated_worker_runtime_env(env) == {}
+    assert runtime_env_policy.worker_extra_env(env) == {}
+    assert runtime_env_policy.shell_passthrough_env(env, patterns=("*",)) == {}
+    assert {name for paths in tool_runtime_paths for name in names if paths.env_value(name) is not None} == set()
 
 
 def test_execution_runtime_env_keeps_safe_runtime_values_and_drops_runner_control() -> None:
@@ -454,7 +465,11 @@ def test_sandbox_runner_runtime_state_keeps_dedicated_storage_subpath_prefix() -
 
 def test_worker_backend_config_names_are_classified_and_filter_public_startup() -> None:
     """Only worker runtime state survives public startup filtering for backend config env names."""
-    backend_names = runtime_env_policy.KUBERNETES_WORKER_BACKEND_CONFIG_ENV_NAMES
+    backend_names = {
+        runtime_env_policy.WORKER_BACKEND_ENV,
+        *runtime_env_policy.KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY.values(),
+        *runtime_env_policy.DOCKER_WORKER_BACKEND_CONFIG_ENV_BY_KEY.values(),
+    }
     env = dict.fromkeys(backend_names, "value")
 
     assert all(runtime_env_policy.is_worker_backend_config_env_name(name) for name in backend_names)
@@ -482,6 +497,46 @@ def test_sandbox_subprocess_system_env_uses_policy_allowlist() -> None:
         "PYTHONPATH": "/app/src",
         "HTTP_PROXY": "http://proxy.example.invalid",
     }
+
+
+def test_sandbox_subprocess_system_env_excludes_host_cpu_thread_hints() -> None:
+    """Host CPU/memory hint vars do not bypass Kubernetes worker gating through the subprocess system allowlist."""
+    limit_env = {
+        "MINDROOM_WORKER_CPUS": "4",
+        "MINDROOM_WORKER_MEMORY_BYTES": "8589934592",
+        "OMP_NUM_THREADS": "1",
+        "PYTHON_CPU_COUNT": "1",
+        "PYTEST_XDIST_AUTO_NUM_WORKERS": "1",
+    }
+
+    assert runtime_env_policy.sandbox_subprocess_system_env(limit_env) == {}
+    assert runtime_env_policy.sandbox_shell_system_env(limit_env) == {}
+    assert runtime_env_policy.isolated_worker_runtime_env(limit_env) == {
+        "MINDROOM_WORKER_CPUS": "4",
+        "MINDROOM_WORKER_MEMORY_BYTES": "8589934592",
+    }
+    assert runtime_env_policy.public_worker_startup_env(limit_env) == {
+        "MINDROOM_WORKER_CPUS": "4",
+        "MINDROOM_WORKER_MEMORY_BYTES": "8589934592",
+    }
+    assert runtime_env_policy.worker_extra_env(limit_env) == limit_env
+
+
+def test_kubernetes_pod_limit_markers_never_leak_from_primary() -> None:
+    """Kubernetes pod downward-API markers stay excluded from startup manifests, isolated env, passthrough, and extraEnv."""
+    markers = {
+        runtime_env_policy.KUBERNETES_POD_CPU_LIMIT_ENV: "4",
+        runtime_env_policy.KUBERNETES_POD_MEMORY_LIMIT_BYTES_ENV: "8589934592",
+    }
+
+    assert runtime_env_policy.public_worker_startup_env(markers) == {}
+    assert runtime_env_policy.isolated_worker_runtime_env(markers) == {}
+    assert runtime_env_policy.sandbox_subprocess_system_env(markers) == {}
+    assert runtime_env_policy.sandbox_shell_system_env(markers) == {}
+    assert runtime_env_policy.shell_passthrough_env(markers, patterns=("*",)) == {}
+    assert runtime_env_policy.worker_extra_env(markers) == {}
+    assert not any(runtime_env_policy.is_trusted_tool_runtime_env_file_name(name) for name in markers)
+    assert not any(runtime_env_policy.is_trusted_tool_runtime_process_env_name(name) for name in markers)
 
 
 def test_worker_runtime_state_can_reintroduce_storage_subpath_after_backend_filtering() -> None:
@@ -516,7 +571,7 @@ def test_worker_extra_env_drops_protected_controls_but_keeps_runner_timeout() ->
         "MINDROOM_SANDBOX_STARTUP_MANIFEST_PATH": "/unsafe/startup.json",
         "MINDROOM_KUBERNETES_WORKER_ENV_JSON": json.dumps({"MINDROOM_SANDBOX_PROXY_TOKEN": "nested-token"}),
         "MINDROOM_KUBERNETES_WORKER_AUTH_SECRET_NAME": "primary-auth-secret",
-        "AGNO_TELEMETRY": "true",
+        "DO_NOT_TRACK": "0",
         "PATH": "/unsafe/bin",
         "VIRTUAL_ENV": "/unsafe/venv",
         "MINDROOM_WORKER_TOOL_VALUE": "visible",
@@ -575,26 +630,84 @@ def test_worker_computer_flag_survives_dedicated_startup_and_changes_backend_ide
         storage_path=tmp_path,
         process_env={**env, flag: "true"},
     )
-    for backend in ("docker", "kubernetes"):
-        worker = build_dedicated_worker_runtime_paths(
-            runtime_paths=enabled,
-            backend_name=backend,
-            worker_key="worker",
-            config_path=tmp_path / "worker-config.yaml",
-            dedicated_root=tmp_path / "worker",
+    worker = dedicated_worker_startup_runtime_paths(
+        DedicatedWorkerLayout(
+            dedicated_root=str(tmp_path / "worker"),
+            config_path=str(tmp_path / "worker-config.yaml"),
             worker_port=8766,
-            shared_storage_root=str(tmp_path / "shared"),
-            extra_env={},
+        ),
+        worker_key="worker",
+        process_env=enabled.process_env,
+        env_file_values=enabled.env_file_values,
+    )
+    assert worker.env_flag(flag)
+    assert runtime_env_policy.sandbox_runner_runtime_state_env(dict(worker.process_env))[flag] == "true"
+    for configure in (configure_docker_worker_backend, configure_kubernetes_worker_backend):
+        assert (
+            configure(disabled, auth_token=None, storage_root=tmp_path).signature
+            != configure(enabled, auth_token=None, storage_root=tmp_path).signature
         )
-        assert worker.env_flag(flag)
-        assert runtime_env_policy.sandbox_runner_runtime_state_env(dict(worker.process_env))[flag] == "true"
-    for signature in (docker_backend_config_signature, kubernetes_backend_config_signature):
-        assert signature(disabled, auth_token=None) != signature(enabled, auth_token=None)
 
 
 def test_computer_origins_remain_primary_runtime_configuration() -> None:
     """Browser origin policy must not enter worker startup or execution env."""
-    env = {"MINDROOM_COMPUTER_ALLOWED_ORIGINS": '["https://chat.example.org"]'}
+    env = {
+        "MINDROOM_COMPUTER_ALLOWED_ORIGINS": '["https://chat.example.org"]',
+        "MINDROOM_CONNECTIONS_ALLOWED_ORIGINS": '["https://chat.example.org"]',
+    }
     assert runtime_env_policy.public_worker_startup_env(env) == {}
     assert runtime_env_policy.isolated_worker_runtime_env(env) == {}
     assert runtime_env_policy.worker_extra_env(env) == {}
+
+
+def test_smtp_url_is_secret_env() -> None:
+    """The SMTP URL carries a password, so no worker inherits it."""
+    assert runtime_env_policy.public_worker_startup_env({"MINDROOM_SMTP_URL": "x"}) == {}
+    assert runtime_env_policy.isolated_worker_runtime_env({"MINDROOM_SMTP_URL": "x"}) == {}
+    assert not runtime_env_policy.is_shell_passthrough_allowed_env_name("MINDROOM_SMTP_URL")
+    assert not runtime_env_policy.is_worker_extra_env_name("MINDROOM_SMTP_URL")
+
+
+@pytest.mark.parametrize(
+    ("url", "expected"),
+    [
+        ("http://proxy.example:3128", True),
+        ("http://proxy.example:3128/", True),
+        ("https://proxy.example:8443", True),
+        ("socks5://proxy.example:1080", True),
+        ("socks5h://proxy.example:1080", True),
+        ("proxy.example:3128", True),
+        ("https://proxy.example/?access_token=secret", False),
+        ("http://proxy.example/token", False),
+        ("http://proxy.example/#frag", False),
+        ("http://proxy.example/;param=secret", False),
+        ("ftp://proxy.example:21", False),
+        ("http://user:pass@proxy.example:3128", False),
+        ("socks5h://proxy.example:1080/?access_token=secret", False),
+        ("http://proxy.example:badport", False),
+        ("", False),
+    ],
+)
+def test_is_credential_free_proxy_url(url: str, expected: bool) -> None:
+    """Proxy URL allowlist accepts only credential-free http/https/socks5/socks5h origin URLs."""
+    assert runtime_env_policy.is_credential_free_proxy_url(url) is expected
+
+
+def test_sandbox_proxy_env_filters_reject_query_path_fragment_and_unsupported_schemes() -> None:
+    """Sandbox proxy filters drop URLs carrying query strings, paths, fragments, or unsupported schemes."""
+    env = {
+        "HTTP_PROXY": "http://proxy.example:3128/",
+        "HTTPS_PROXY": "https://proxy.example/?access_token=secret",
+        "http_proxy": "http://proxy.example/token",
+        "https_proxy": "http://proxy.example/#frag",
+        "ALL_PROXY": "ftp://proxy.example:21",
+        "all_proxy": "socks5h://proxy.example:1080",
+        "NO_PROXY": "localhost,.svc",
+    }
+    expected = {
+        "HTTP_PROXY": "http://proxy.example:3128/",
+        "all_proxy": "socks5h://proxy.example:1080",
+        "NO_PROXY": "localhost,.svc",
+    }
+    assert runtime_env_policy.strip_authenticated_proxy_env(env) == expected
+    assert runtime_env_policy.sandbox_worker_extra_env(env) == expected

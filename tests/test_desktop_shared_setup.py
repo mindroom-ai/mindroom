@@ -15,6 +15,7 @@ from mindroom.desktop import native_config
 from mindroom.desktop.native_config import (
     NativeBrowserConfig,
     NativeCaptureConfig,
+    NativeControllerEntry,
     NativeDesktopConfig,
     NativeFilesConfig,
     NativeShellConfig,
@@ -42,6 +43,14 @@ def shared_setup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> SimpleNames
     monkeypatch.setattr(desktop_cli, "_ensure_desktop_dependencies", lambda *_: None)
     monkeypatch.setattr("mindroom.logging_config.setup_logging", lambda **_: None)
     return paths
+
+
+@pytest.fixture
+def run_bridge(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
+    """Replace the bridge run so `desktop run` returns after resolving its settings."""
+    bridge = AsyncMock()
+    monkeypatch.setattr(desktop_cli, "_run_bridge", bridge)
+    return bridge
 
 
 def _config() -> NativeDesktopConfig:
@@ -94,6 +103,23 @@ def test_cli_setup_is_visible_to_an_already_open_app(
     assert host.status()["config"]["controller_device_id"] == "CLOUD"
     assert "short-lived-code" not in repr(saved.to_payload())
     assert "private-token" not in repr(host.status())
+
+
+def test_setup_allows_the_chat_requester_when_the_bridge_uses_a_dedicated_account(
+    shared_setup: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The requester who ran `!desktop setup` is allowed, not the bridge's own Matrix account."""
+    monkeypatch.setattr(desktop_cli, "_pair_desktop", AsyncMock(return_value="verification"))
+
+    result = CliRunner().invoke(
+        desktop_cli.desktop_app,
+        [*_setup_args(), "--allow-requester", "@alice:example.org"],
+    )
+
+    assert result.exit_code == 0, result.output
+    saved = load_native_config(native_config_path(shared_setup.storage_root))
+    assert saved.allowed_requester_ids == ("@alice:example.org",)
 
 
 def test_repairing_preserves_saved_app_choices(shared_setup: SimpleNamespace, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -158,7 +184,7 @@ def test_setup_remembers_cloudflare_access_after_a_successful_claim(
     """An older login upgraded through terminal setup also authenticates later app starts."""
     pair = AsyncMock(return_value="verification", side_effect=None if succeeds else ValueError("expired code"))
     monkeypatch.setattr(desktop_cli, "_pair_desktop", pair)
-    monkeypatch.setattr("mindroom.desktop.cloudflare_access.cloudflare_access_headers", lambda *_: {})
+    monkeypatch.setattr("mindroom.desktop.session.desktop_http_headers", lambda *_args, **_kwargs: {})
 
     result = CliRunner().invoke(desktop_cli.desktop_app, [*_setup_args(), "--cloudflare-access"])
 
@@ -180,7 +206,7 @@ def test_setup_does_not_overwrite_a_login_replaced_during_pairing(
         return "verification"
 
     monkeypatch.setattr(desktop_cli, "_pair_desktop", replace_login)
-    monkeypatch.setattr("mindroom.desktop.cloudflare_access.cloudflare_access_headers", lambda *_: {})
+    monkeypatch.setattr("mindroom.desktop.session.desktop_http_headers", lambda *_args, **_kwargs: {})
 
     result = CliRunner().invoke(desktop_cli.desktop_app, [*_setup_args(), "--cloudflare-access"])
 
@@ -191,18 +217,16 @@ def test_setup_does_not_overwrite_a_login_replaced_during_pairing(
 
 def test_cli_run_uses_app_settings_and_remains_observe_only(
     shared_setup: SimpleNamespace,
-    monkeypatch: pytest.MonkeyPatch,
+    run_bridge: AsyncMock,
 ) -> None:
     """An app-configured bridge runs with no repeated controller or application flags."""
     path = native_config_path(shared_setup.storage_root)
     saved = save_native_config(path, _config(), expected_revision=0)
-    bridge = AsyncMock()
-    monkeypatch.setattr(desktop_cli, "_run_bridge", bridge)
 
     result = CliRunner().invoke(desktop_cli.desktop_app, ["run"])
 
     assert result.exit_code == 0, result.output
-    args = bridge.await_args.kwargs
+    args = run_bridge.await_args.kwargs
     assert args["config"] == saved
     assert args["allow_control"] is False
     assert args["shell_auto_approve_minutes"] is None
@@ -211,24 +235,22 @@ def test_cli_run_uses_app_settings_and_remains_observe_only(
 
 def test_cli_run_does_not_mix_different_controller_with_saved_authority(
     shared_setup: SimpleNamespace,
-    monkeypatch: pytest.MonkeyPatch,
+    run_bridge: AsyncMock,
 ) -> None:
     """A partial pin override never inherits a different controller's local authorization."""
     save_native_config(native_config_path(shared_setup.storage_root), _config(), expected_revision=0)
-    bridge = AsyncMock()
-    monkeypatch.setattr(desktop_cli, "_run_bridge", bridge)
 
     result = CliRunner().invoke(desktop_cli.desktop_app, ["run", "--controller-device-id", "OTHER"])
 
     assert result.exit_code != 0
     assert "controller" in result.output.lower()
-    bridge.assert_not_called()
+    run_bridge.assert_not_called()
 
 
 @pytest.mark.parametrize("state", ["missing", "disabled", "malformed"])
 def test_cli_run_reports_unusable_saved_setup(
     shared_setup: SimpleNamespace,
-    monkeypatch: pytest.MonkeyPatch,
+    run_bridge: AsyncMock,
     state: str,
 ) -> None:
     """Expected saved-configuration failures stay in the CLI error boundary."""
@@ -237,15 +259,13 @@ def test_cli_run_reports_unusable_saved_setup(
         save_native_config(path, replace(_config(), enabled=False), expected_revision=0)
     if state == "malformed":
         path.write_text("not JSON")
-    bridge = AsyncMock()
-    monkeypatch.setattr(desktop_cli, "_run_bridge", bridge)
 
     result = CliRunner().invoke(desktop_cli.desktop_app, ["run"])
 
     assert result.exit_code == 1
     assert isinstance(result.exception, SystemExit)
     assert "Desktop bridge failed:" in result.output
-    bridge.assert_not_called()
+    run_bridge.assert_not_called()
 
 
 def test_setup_reports_a_concurrent_app_save_without_overwriting_it(
@@ -273,14 +293,13 @@ def test_setup_reports_a_concurrent_app_save_without_overwriting_it(
 def test_cli_run_keeps_relative_browser_path_support(
     shared_setup: SimpleNamespace,
     monkeypatch: pytest.MonkeyPatch,
+    run_bridge: AsyncMock,
 ) -> None:
     """Explicit CLI paths resolve before entering the app's absolute-path configuration schema."""
     root = shared_setup.storage_root
     (root / "browser").touch()
     monkeypatch.chdir(root)
     save_native_config(native_config_path(root), _config(), expected_revision=0)
-    bridge = AsyncMock()
-    monkeypatch.setattr(desktop_cli, "_run_bridge", bridge)
 
     result = CliRunner().invoke(
         desktop_cli.desktop_app,
@@ -288,7 +307,7 @@ def test_cli_run_keeps_relative_browser_path_support(
     )
 
     assert result.exit_code == 0, result.output
-    browser = bridge.await_args.kwargs["config"].browser
+    browser = run_bridge.await_args.kwargs["config"].browser
     assert browser.enabled is True
     assert browser.executable_path == (root / "browser").resolve()
     assert browser.user_data_dir == root.resolve()
@@ -309,13 +328,12 @@ def test_idle_host_refreshes_external_changes_and_removal(shared_setup: SimpleNa
 def test_invalid_controller_has_a_cli_error_before_network_activity(
     shared_setup: SimpleNamespace,
     monkeypatch: pytest.MonkeyPatch,
+    run_bridge: AsyncMock,
     command: str,
 ) -> None:
     """Malformed pasted identities fail clearly instead of escaping as a traceback."""
     pair = AsyncMock()
-    bridge = AsyncMock()
     monkeypatch.setattr(desktop_cli, "_pair_desktop", pair)
-    monkeypatch.setattr(desktop_cli, "_run_bridge", bridge)
     args = _setup_args()
     args[args.index("--controller-user-id") + 1] = "invalid-controller"
     if command == "run":
@@ -325,7 +343,7 @@ def test_invalid_controller_has_a_cli_error_before_network_activity(
     assert "@user:server" in result.output
     assert not native_config_path(shared_setup.storage_root).exists()
     pair.assert_not_called()
-    bridge.assert_not_called()
+    run_bridge.assert_not_called()
 
 
 def _shown(output: str) -> str:
@@ -339,13 +357,13 @@ def _folder(shared_setup: SimpleNamespace, name: str = "selected") -> Path:
     return folder.resolve()
 
 
-def _with_local_access(config: NativeDesktopConfig, *roots: Path, shell_enabled: bool) -> NativeDesktopConfig:
-    return replace(config, files=NativeFilesConfig(roots), shell=NativeShellConfig(enabled=shell_enabled))
+def _with_local_access(config: NativeDesktopConfig, root: Path) -> NativeDesktopConfig:
+    return replace(config, files=NativeFilesConfig((root,)), shell=NativeShellConfig(enabled=True))
 
 
 def test_access_saves_folders_and_shell_for_the_native_loader_and_run(
     shared_setup: SimpleNamespace,
-    monkeypatch: pytest.MonkeyPatch,
+    run_bridge: AsyncMock,
 ) -> None:
     """Terminal access edits reach the app's loader and the next run, and leave every other setting alone."""
     path = native_config_path(shared_setup.storage_root)
@@ -367,13 +385,11 @@ def test_access_saves_folders_and_shell_for_the_native_loader_and_run(
     host_config = NativeDesktopHost(shared_setup, helper_version="test").status()["config"]
     assert host_config["file_roots"] == [str(folder)]
     assert host_config["shell_enabled"] is True
-    bridge = AsyncMock()
-    monkeypatch.setattr(desktop_cli, "_run_bridge", bridge)
 
     run = CliRunner().invoke(desktop_cli.desktop_app, ["run"])
 
     assert run.exit_code == 0, run.output
-    kwargs = bridge.await_args.kwargs
+    kwargs = run_bridge.await_args.kwargs
     assert kwargs["config"] == saved
     assert kwargs["shell_auto_approve_minutes"] is None
     assert load_native_config(path) == saved
@@ -383,7 +399,7 @@ def test_access_changes_only_the_named_setting(shared_setup: SimpleNamespace) ->
     """Omitted options keep saved values, and a bare access command only reports them."""
     path = native_config_path(shared_setup.storage_root)
     first, second = _folder(shared_setup, "first"), _folder(shared_setup, "second")
-    saved = save_native_config(path, _with_local_access(_config(), first, shell_enabled=True), expected_revision=0)
+    saved = save_native_config(path, _with_local_access(_config(), first), expected_revision=0)
     runner = CliRunner()
 
     report = runner.invoke(desktop_cli.desktop_app, ["access"])
@@ -462,7 +478,7 @@ def test_access_without_posix_still_turns_folders_and_shell_off(
 ) -> None:
     """The command the refusal names clears setup saved elsewhere."""
     path = native_config_path(shared_setup.storage_root)
-    local_access = _with_local_access(_config(), _folder(shared_setup), shell_enabled=True)
+    local_access = _with_local_access(_config(), _folder(shared_setup))
     save_native_config(path, local_access, expected_revision=0)
     monkeypatch.setattr(native_config, "_LOCAL_ACCESS_SUPPORTED", False)
 
@@ -519,14 +535,15 @@ def test_access_edit_loses_to_a_concurrent_app_save(
     assert saved.shell.enabled is False
 
 
-def test_setup_keeps_folder_and_shell_access_only_for_the_same_controller(
+def test_setup_preserves_folder_shell_and_apps_when_repairing_or_rotating_controller(
     shared_setup: SimpleNamespace,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Re-pairing the same controller keeps local access; a different controller starts without it."""
+    """Re-pairing or rotating a controller via CLI setup preserves saved apps, folders, and shell access."""
     path = native_config_path(shared_setup.storage_root)
     folder = _folder(shared_setup)
-    save_native_config(path, _with_local_access(_config(), folder, shell_enabled=True), expected_revision=0)
+    initial = _with_local_access(_config(), folder)
+    save_native_config(path, initial, expected_revision=0)
     monkeypatch.setattr(desktop_cli, "_pair_desktop", AsyncMock(return_value="verification"))
 
     same = CliRunner().invoke(desktop_cli.desktop_app, _setup_args())
@@ -541,32 +558,42 @@ def test_setup_keeps_folder_and_shell_access_only_for_the_same_controller(
 
     assert other.exit_code == 0, other.output
     saved = load_native_config(path)
-    assert saved.controller.device_id == "OTHER"
-    assert saved.files.roots == ()
-    assert saved.shell.enabled is False
-    assert saved.allowed_app_ids == ()
+    assert [entry.controller.device_id for entry in saved.controllers] == ["OTHER"]
+    assert saved.files.roots == (folder,)
+    assert saved.shell.enabled is True
+    assert saved.allowed_app_ids == initial.allowed_app_ids
+
+    different_user_args = _setup_args()
+    different_user_args[different_user_args.index("--controller-user-id") + 1] = "@other-agent:example.org"
+    different_user_args[different_user_args.index("--controller-device-id") + 1] = "OTHER_AGENT"
+    switched = CliRunner().invoke(desktop_cli.desktop_app, different_user_args)
+    assert switched.exit_code == 0, switched.output
+    after_switch = load_native_config(path)
+    assert [entry.controller.user_id for entry in after_switch.controllers] == ["@other-agent:example.org"]
+    assert after_switch.files.roots == ()
+    assert after_switch.shell.enabled is False
+    assert after_switch.allowed_app_ids == ()
 
 
 def test_folder_and_shell_run_skips_gui_dependencies(
     shared_setup: SimpleNamespace,
     monkeypatch: pytest.MonkeyPatch,
+    run_bridge: AsyncMock,
 ) -> None:
     """A run without applications starts without installing or importing the GUI runtime."""
     folder = _folder(shared_setup)
-    config = _with_local_access(replace(_config(), allowed_app_ids=()), folder, shell_enabled=True)
+    config = _with_local_access(replace(_config(), allowed_app_ids=()), folder)
     save_native_config(native_config_path(shared_setup.storage_root), config, expected_revision=0)
 
     def forbidden_dependencies(*_args: object) -> None:
         pytest.fail("GUI dependencies installed for a run without applications")
 
     monkeypatch.setattr(desktop_cli, "_ensure_desktop_dependencies", forbidden_dependencies)
-    bridge = AsyncMock()
-    monkeypatch.setattr(desktop_cli, "_run_bridge", bridge)
 
     result = CliRunner().invoke(desktop_cli.desktop_app, ["run", "--shell-auto-approve-minutes", "5"])
 
     assert result.exit_code == 0, result.output
-    kwargs = bridge.await_args.kwargs
+    kwargs = run_bridge.await_args.kwargs
     assert kwargs["config"].allowed_app_ids == ()
     assert kwargs["config"].files.roots == (folder,)
     assert kwargs["config"].shell.enabled is True
@@ -576,18 +603,129 @@ def test_folder_and_shell_run_skips_gui_dependencies(
 @pytest.mark.parametrize(("minutes", "exit_code"), [("5", 1), ("0", 2), ("61", 2)])
 def test_shell_auto_approval_flag_needs_saved_shell_access_and_a_bounded_duration(
     shared_setup: SimpleNamespace,
-    monkeypatch: pytest.MonkeyPatch,
+    run_bridge: AsyncMock,
     minutes: str,
     exit_code: int,
 ) -> None:
     """The transient grant is refused without saved shell access and outside 1 to 60 minutes."""
     save_native_config(native_config_path(shared_setup.storage_root), _config(), expected_revision=0)
-    bridge = AsyncMock()
-    monkeypatch.setattr(desktop_cli, "_run_bridge", bridge)
 
     result = CliRunner().invoke(desktop_cli.desktop_app, ["run", "--shell-auto-approve-minutes", minutes])
 
     assert result.exit_code == exit_code
     if exit_code == 1:
         assert "mindroom desktop access --shell" in _shown(result.output)
-    bridge.assert_not_called()
+    run_bridge.assert_not_called()
+
+
+def test_cli_run_with_explicit_controller_pin_narrows_and_unpinned_announces_all(
+    shared_setup: SimpleNamespace,
+    run_bridge: AsyncMock,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Explicit --controller-* flags narrow the run to only that controller; unpinned runs display all controllers."""
+    ctrl_a = PinnedMatrixDevice("@controller:example.org", "CLOUD_A", "fp-a")
+    ctrl_b = PinnedMatrixDevice("@controller2:example.org", "CLOUD_B", "fp-b")
+    two_ctrl = NativeDesktopConfig(
+        revision=0,
+        enabled=True,
+        controllers=(
+            NativeControllerEntry(ctrl_a, ("@alice:example.org",), ("agent_a",)),
+            NativeControllerEntry(ctrl_b, ("@bob:example.org",), ("agent_b",)),
+        ),
+        allowed_app_ids=("com.apple.TextEdit",),
+        capture=NativeCaptureConfig(),
+        browser=NativeBrowserConfig(),
+        shell=NativeShellConfig(enabled=True),
+    )
+    save_native_config(native_config_path(shared_setup.storage_root), two_ctrl, expected_revision=0)
+
+    pinned = CliRunner().invoke(
+        desktop_cli.desktop_app,
+        [
+            "run",
+            "--controller-user-id",
+            ctrl_b.user_id,
+            "--controller-device-id",
+            ctrl_b.device_id,
+            "--controller-ed25519",
+            ctrl_b.ed25519,
+            "--allow-agent",
+            "custom_b",
+            "--allow-control",
+            "--shell-auto-approve-minutes",
+            "5",
+        ],
+    )
+    assert pinned.exit_code == 0, pinned.output
+    pinned_cfg = run_bridge.await_args.kwargs["config"]
+    assert [entry.controller for entry in pinned_cfg.controllers] == [ctrl_b]
+    assert pinned_cfg.controllers[0].allowed_agent_names == ("custom_b",)
+    assert pinned_cfg.controllers[0].allowed_requester_ids == ("@bob:example.org",)
+    assert run_bridge.await_args.kwargs["allow_control"] is True
+    assert run_bridge.await_args.kwargs["shell_auto_approve_minutes"] == 5
+
+    unpinned = CliRunner().invoke(desktop_cli.desktop_app, ["run"])
+    assert unpinned.exit_code == 0, unpinned.output
+    unpinned_cfg = run_bridge.await_args.kwargs["config"]
+    assert [entry.controller for entry in unpinned_cfg.controllers] == [ctrl_a, ctrl_b]
+
+    desktop_cli._announce_bridge(
+        unpinned_cfg,
+        allow_control=False,
+        lease_minutes=15,
+        shell_auto_approve_minutes=None,
+    )
+    announced = capsys.readouterr().out
+    assert ctrl_a.user_id in announced
+    assert ctrl_a.device_id in announced
+    assert ctrl_b.user_id in announced
+    assert ctrl_b.device_id in announced
+
+
+def test_cli_setup_handles_empty_controllers_and_preserves_unrelated_controllers(
+    shared_setup: SimpleNamespace,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Desktop setup handles empty previous.controllers and preserves unrelated controllers on update/rotation."""
+    path = native_config_path(shared_setup.storage_root)
+    monkeypatch.setattr(desktop_cli, "_pair_desktop", AsyncMock(return_value="VERIFY-99"))
+
+    # Empty v2 config (0 controllers, disabled) must be treated as fresh setup without crashing.
+    empty_v2 = NativeDesktopConfig(
+        revision=0,
+        enabled=False,
+        controllers=(),
+        allowed_app_ids=(),
+        capture=NativeCaptureConfig(),
+        browser=NativeBrowserConfig(),
+    )
+    save_native_config(path, empty_v2, expected_revision=0)
+
+    first = CliRunner().invoke(desktop_cli.desktop_app, [*_setup_args(), "--allow-app", "com.apple.TextEdit"])
+    assert first.exit_code == 0, first.output
+    assert "!desktop confirm short-lived-code VERIFY-99" in first.output
+    saved_first = load_native_config(path)
+    assert saved_first.revision == 2
+    assert len(saved_first.controllers) == 1
+
+    # Add a second unrelated controller B, then re-pair A -> B must be preserved!
+    ctrl_b = PinnedMatrixDevice("@controller2:example.org", "CLOUD_B", "fp-b")
+    with_b = saved_first.with_upserted_controller(
+        NativeControllerEntry(ctrl_b, ("@bob:example.org",), ("helper",)),
+    )
+    save_native_config(path, with_b, expected_revision=saved_first.revision)
+
+    repair_a = CliRunner().invoke(desktop_cli.desktop_app, _setup_args())
+    assert repair_a.exit_code == 0, repair_a.output
+    after_repair = load_native_config(path)
+    assert [e.controller.device_id for e in after_repair.controllers] == ["CLOUD", "CLOUD_B"]
+    assert after_repair.allowed_app_ids == ("com.apple.TextEdit",)
+
+    # Rotate A's device ID -> replaces A with A_ROTATED while preserving unrelated B!
+    rotate_args = _setup_args()
+    rotate_args[rotate_args.index("--controller-device-id") + 1] = "CLOUD_ROTATED"
+    rotated = CliRunner().invoke(desktop_cli.desktop_app, rotate_args)
+    assert rotated.exit_code == 0, rotated.output
+    after_rotate = load_native_config(path)
+    assert [e.controller.device_id for e in after_rotate.controllers] == ["CLOUD_ROTATED", "CLOUD_B"]

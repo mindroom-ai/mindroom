@@ -12,7 +12,6 @@ from uuid import uuid4
 import httpx
 import pytest
 import pytest_asyncio
-from agno.tools.function import ToolResult
 from fastapi import FastAPI
 
 from mindroom.api import sandbox_runner, sandbox_runner_app, sandbox_worker_prep
@@ -21,10 +20,13 @@ from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools import browser as browser_module
 from mindroom.tool_system.media_transport import decode_media_result
+from mindroom.tool_system.tool_function import ToolValue
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_key
 from mindroom.workers.backends.local import local_worker_state_paths_for_root
 from mindroom.workers.models import WorkerHandle
+from mindroom.workers.protocol import WORKER_PROTOCOL_VERSION, ExecuteResponse
 from tests.browser_lifecycle_helpers import LifecycleBrowser
+from tests.conftest import SETTLE_TIMEOUT_SECONDS
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -94,15 +96,16 @@ async def headless_client(
     prepared = sandbox_worker_prep.PreparedWorkerRequest(
         handle=WorkerHandle("test", key, "http://worker/execute", "test", "ready", "docker", 0, 0),
         paths=local_worker_state_paths_for_root(root),
-        runtime_overrides={"base_dir": root / "workspace"},
+        base_dir=root / "workspace",
     )
     monkeypatch.setattr(sandbox_worker_prep, "prepare_worker_request", lambda **_kwargs: prepared)
 
-    async def subprocess(*_args: object, **_kwargs: object) -> sandbox_runner.SandboxRunnerExecuteResponse:
-        return sandbox_runner.SandboxRunnerExecuteResponse(ok=False, error="per-call subprocess loses browser state")
+    async def subprocess(*_args: object, **_kwargs: object) -> ExecuteResponse:
+        return ExecuteResponse(ok=False, error="per-call subprocess loses browser state")
 
     monkeypatch.setattr(sandbox_runner, "_execute_request_subprocess", subprocess)
     payload = {
+        "protocol": WORKER_PROTOCOL_VERSION,
         "tool_name": "browser",
         "function_name": "browser_control",
         "worker_key": key,
@@ -175,7 +178,10 @@ async def test_stopped_browser_action_finishes_and_keeps_the_shared_browser(
     running = asyncio.create_task(client.post("/api/sandbox-runner/execute", json=request))
     async with asyncio.timeout(10):
         await entered.wait()
-        cancel = await client.post("/api/sandbox-runner/execute/cancel", json={"request_id": request_id})
+        cancel = await client.post(
+            "/api/sandbox-runner/execute/cancel",
+            json={"protocol": WORKER_PROTOCOL_VERSION, "request_id": request_id},
+        )
         release.set()
         response = await running
 
@@ -210,6 +216,7 @@ async def test_headless_screenshot_preserves_inline_media_and_save_only(
     response = await client.post(
         "/api/sandbox-runner/execute",
         json={
+            "protocol": WORKER_PROTOCOL_VERSION,
             **payload,
             "kwargs": {"action": "screenshot", "targetId": opened["targetId"], "saveOnly": save_only},
         },
@@ -223,7 +230,7 @@ async def test_headless_screenshot_preserves_inline_media_and_save_only(
         assert "view_status" not in receipt
     else:
         result = decode_media_result(body["result"])
-        assert isinstance(result, ToolResult)
+        assert isinstance(result, ToolValue)
         assert result.images
         assert result.images[0].content == image_bytes
         receipt = json.loads(result.content)
@@ -299,7 +306,8 @@ async def test_headless_request_scope_mismatch_is_rejected(
         "/api/sandbox-runner/execute",
         json={**payload, "worker_scope": None, "kwargs": {"action": "start"}},
     )
-    assert response.status_code == 400
+    assert response.status_code == 200
+    assert response.json()["failure_kind"] == "tool"
     assert not browser_processes
 
 
@@ -359,11 +367,11 @@ async def test_headless_cancellation_drains_profile_before_reuse(
     first = browser_processes[0]
     first.pause_at = "new_page"
     active = asyncio.create_task(_call(client, payload, action="open", targetUrl="https://1.1.1.1/blocked"))
-    await asyncio.wait_for(first.reached.wait(), timeout=2)
+    await asyncio.wait_for(first.reached.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
     first.pause_at = "context_close"
     first.reached.clear()
     active.cancel()
-    await asyncio.wait_for(first.reached.wait(), timeout=2)
+    await asyncio.wait_for(first.reached.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
     active.cancel()
     first.proceed.set()
     with pytest.raises(asyncio.CancelledError):
@@ -386,7 +394,10 @@ async def test_headless_worker_rejects_configured_desktop_target(
         "device_id": "DEVICE",
         "device_ed25519": "fingerprint",
     }
-    response = await client.post("/api/sandbox-runner/execute", json={**payload, "kwargs": {"action": "tabs"}})
+    response = await client.post(
+        "/api/sandbox-runner/execute",
+        json={**payload, "kwargs": {"action": "tabs"}},
+    )
     assert response.status_code == 200, response.text
     body = response.json()
     assert body["ok"] is False
@@ -416,12 +427,12 @@ async def test_generic_and_unscoped_runners_keep_subprocess_isolation(
     prepared = sandbox_worker_prep.PreparedWorkerRequest(
         handle=WorkerHandle("test", worker_key or "generic", "http://worker/execute", "test", "ready", "docker", 0, 0),
         paths=local_worker_state_paths_for_root(tmp_path),
-        runtime_overrides={"base_dir": tmp_path / "workspace"},
+        base_dir=tmp_path / "workspace",
     )
     monkeypatch.setattr(sandbox_worker_prep, "prepare_worker_request", lambda **_kwargs: prepared)
 
-    async def subprocess(*_args: object, **_kwargs: object) -> sandbox_runner.SandboxRunnerExecuteResponse:
-        return sandbox_runner.SandboxRunnerExecuteResponse(ok=True, result="isolated")
+    async def subprocess(*_args: object, **_kwargs: object) -> ExecuteResponse:
+        return ExecuteResponse(ok=True, result="isolated")
 
     monkeypatch.setattr(sandbox_runner, "_execute_request_subprocess", subprocess)
     async with (
@@ -434,7 +445,12 @@ async def test_generic_and_unscoped_runners_keep_subprocess_isolation(
     ):
         response = await client.post(
             "/api/sandbox-runner/execute",
-            json={"tool_name": "browser", "function_name": "browser_control", "kwargs": {"action": "start"}},
+            json={
+                "protocol": WORKER_PROTOCOL_VERSION,
+                "tool_name": "browser",
+                "function_name": "browser_control",
+                "kwargs": {"action": "start"},
+            },
         )
         assert response.status_code == 200, response.text
         assert response.json()["result"] == "isolated"

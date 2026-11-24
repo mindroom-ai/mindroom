@@ -20,9 +20,9 @@ from livekit.agents.voice import io as agents_io
 from openai import AsyncOpenAI
 from structlog.testing import capture_logs
 
-from mindroom.matrix_rtc.call_tools import CallAgentResponse
 from mindroom.matrix_rtc.focus import SfuGrant
 from mindroom.matrix_rtc.voice_agent import (
+    CallAgentResponse,
     CascadedVoiceAgentOptions,
     CascadedVoiceBridge,
     RealtimeCallUsage,
@@ -74,6 +74,9 @@ async def test_bridge_e2ee_uses_matrix_compatible_hkdf(monkeypatch: pytest.Monke
         async def connect(self, _url: str, _jwt: str, options: object) -> None:
             self.options = options
 
+        def on(self, _event: str, callback: object) -> object:
+            return callback
+
     room = FakeRoom()
     monkeypatch.setattr("livekit.rtc.Room", lambda: room)
     bridge = RealtimeVoiceBridge(local_identity="@bot:example.org:BOTDEV", e2ee_enabled=True)
@@ -91,6 +94,195 @@ async def test_bridge_e2ee_uses_matrix_compatible_hkdf(monkeypatch: pytest.Monke
     ).derive(bytes(range(16)))
     # Captured from the Web Crypto HKDF derivation used by LiveKit JS.
     assert derived.hex() == "4086b4641064e1ae8b63d4eb83ad3e7e"
+
+
+_OWN = "@bot:example.org:BOTDEV"
+_ALICE = "@alice:example.org:ALICEDEV"
+
+
+class _FakeCryptor:
+    def __init__(self, participant_identity: str, track_sid: str, log: list[tuple[object, ...]]) -> None:
+        self.participant_identity = participant_identity
+        self.track_sid = track_sid
+        # LiveKit creates every sender cryptor on key index 0.
+        self.key_index = 0
+        self.key_indices: list[int] = []
+        self._log = log
+
+    def set_key_index(self, key_index: int) -> None:
+        self.key_index = key_index
+        self.key_indices.append(key_index)
+        self._log.append(("index", self.track_sid, key_index))
+
+
+class _FakeE2EERoom:
+    """A LiveKit room whose E2EE manager keeps per-identity key slots and sender key indices."""
+
+    def __init__(self) -> None:
+        self.local_participant = MagicMock()
+        self.cryptors: list[_FakeCryptor] = []
+        self.slots: dict[tuple[str, int], bytes] = {}
+        self.log: list[tuple[object, ...]] = []
+        self.listeners: dict[str, list[Callable[..., object]]] = {}
+        self.e2ee_manager = SimpleNamespace(
+            key_provider=SimpleNamespace(set_key=self._set_key),
+            frame_cryptors=lambda: list(self.cryptors),
+        )
+
+    def _set_key(self, identity: str, key: bytes, key_index: int) -> None:
+        self.slots[identity, key_index] = key
+        self.log.append(("key", identity, key_index))
+
+    def new_cryptor(self, identity: str, track_sid: str) -> _FakeCryptor:
+        cryptor = _FakeCryptor(identity, track_sid, self.log)
+        self.cryptors.append(cryptor)
+        return cryptor
+
+    def key_used_by(self, cryptor: _FakeCryptor) -> bytes | None:
+        """The secret the native sender encrypts its next frame with."""
+        return self.slots.get((cryptor.participant_identity, cryptor.key_index))
+
+    def on(self, event: str, callback: Callable[..., object]) -> Callable[..., object]:
+        self.listeners.setdefault(event, []).append(callback)
+        return callback
+
+    def emit(self, event: str, *args: object) -> None:
+        for callback in self.listeners.get(event, []):
+            callback(*args)
+
+    async def connect(self, _url: str, _jwt: str, _options: object) -> None:
+        return
+
+
+async def _connected_e2ee_bridge(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    e2ee_enabled: bool = True,
+) -> tuple[RealtimeVoiceBridge, _FakeE2EERoom]:
+    room = _FakeE2EERoom()
+    monkeypatch.setattr("livekit.rtc.Room", lambda: room)
+    bridge = RealtimeVoiceBridge(local_identity=_OWN, e2ee_enabled=e2ee_enabled)
+    await bridge.connect(SfuGrant(url="wss://sfu.example.org", jwt="jwt"))
+    return bridge, room
+
+
+@pytest.mark.asyncio
+async def test_own_frame_key_switches_only_our_outgoing_cryptors(monkeypatch: pytest.MonkeyPatch) -> None:
+    """LiveKit keeps a sender on its old key index until told, so our own key must move it."""
+    bridge, room = await _connected_e2ee_bridge(monkeypatch)
+    ours = room.new_cryptor(_OWN, "TR_AUDIO")
+    alices = room.new_cryptor(_ALICE, "TR_ALICE")
+
+    bridge.set_frame_key(_ALICE, b"A" * 16, 3)
+    assert ours.key_indices == []
+    assert alices.key_indices == []
+    assert room.slots == {(_ALICE, 3): b"A" * 16}
+
+    bridge.set_frame_key(_OWN, b"B" * 16, 1)
+
+    assert ours.key_indices == [1]
+    assert alices.key_indices == []
+    assert room.key_used_by(ours) == b"B" * 16
+
+
+@pytest.mark.asyncio
+async def test_own_key_is_stored_before_every_own_sender_moves(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No sender switches to an index whose slot does not hold the key yet."""
+    bridge, room = await _connected_e2ee_bridge(monkeypatch)
+    room.new_cryptor(_OWN, "TR_AUDIO")
+    room.new_cryptor(_OWN, "TR_SECOND")
+    room.new_cryptor(_ALICE, "TR_ALICE")
+
+    bridge.set_frame_key(_OWN, b"B" * 16, 2)
+
+    assert room.log == [
+        ("key", _OWN, 0),
+        ("key", _OWN, 2),
+        ("index", "TR_AUDIO", 2),
+        ("index", "TR_SECOND", 2),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_own_rotations_move_a_published_track_each_time(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every activated own key moves the senders again, including a wrap back to index 0."""
+    bridge, room = await _connected_e2ee_bridge(monkeypatch)
+    ours = room.new_cryptor(_OWN, "TR_AUDIO")
+
+    bridge.set_frame_key(_OWN, b"1" * 16, 1)
+    bridge.set_frame_key(_OWN, b"2" * 16, 2)
+    bridge.set_frame_key(_OWN, b"0" * 16, 0)
+
+    assert ours.key_indices == [1, 2, 0]
+    assert room.key_used_by(ours) == b"0" * 16
+    later = room.new_cryptor(_OWN, "TR_LATER")
+    room.emit("local_track_published", MagicMock(), MagicMock())
+    assert later.key_indices == [0]
+    assert room.key_used_by(later) == b"0" * 16
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("event", ["local_track_published", "local_track_republished"])
+async def test_new_sender_never_encrypts_with_a_retired_own_key(
+    monkeypatch: pytest.MonkeyPatch,
+    event: str,
+) -> None:
+    """A sender LiveKit creates on index 0 after a rotation cannot use the key a departed device knows.
+
+    LiveKit enables a (re)published track before its event reaches Python, so frames sent in
+    that window use slot 0. That slot must already hold the active key, not the retired one.
+    """
+    bridge, room = await _connected_e2ee_bridge(monkeypatch)
+    alices = room.new_cryptor(_ALICE, "TR_ALICE")
+    bridge.set_frame_key(_OWN, b"0" * 16, 0)
+    bridge.set_frame_key(_OWN, b"2" * 16, 2)
+
+    later = room.new_cryptor(_OWN, "TR_LATER")
+    # Before the event is delivered: still on index 0, which must not hold the retired key.
+    assert later.key_index == 0
+    assert room.key_used_by(later) == b"2" * 16
+
+    room.emit(event, MagicMock(), MagicMock())
+
+    assert later.key_indices == [2]
+    assert room.key_used_by(later) == b"2" * 16
+    assert alices.key_indices == []
+
+
+@pytest.mark.asyncio
+async def test_reconnect_moves_a_sender_whose_publish_event_was_suppressed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A track first published during a full reconnect gets no publish event, only ``reconnected``."""
+    bridge, room = await _connected_e2ee_bridge(monkeypatch)
+    bridge.set_frame_key(_OWN, b"2" * 16, 2)
+    during_reconnect = room.new_cryptor(_OWN, "TR_DURING_RECONNECT")
+
+    room.emit("reconnected")
+
+    assert during_reconnect.key_indices == [2]
+
+
+@pytest.mark.asyncio
+async def test_track_published_before_own_key_keeps_livekit_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With no own key installed yet there is no index to apply."""
+    _bridge, room = await _connected_e2ee_bridge(monkeypatch)
+    ours = room.new_cryptor(_OWN, "TR_AUDIO")
+
+    room.emit("local_track_published", MagicMock(), MagicMock())
+
+    assert ours.key_indices == []
+
+
+@pytest.mark.asyncio
+async def test_unencrypted_call_registers_no_key_listeners(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Without E2EE the bridge neither listens for publishes nor touches keys or cryptors."""
+    bridge, room = await _connected_e2ee_bridge(monkeypatch, e2ee_enabled=False)
+    ours = room.new_cryptor(_OWN, "TR_AUDIO")
+
+    bridge.set_frame_key(_OWN, b"B" * 16, 1)
+
+    assert room.listeners == {}
+    assert room.slots == {}
+    assert ours.key_indices == []
 
 
 @pytest.mark.asyncio
@@ -205,7 +397,10 @@ async def test_agent_session_uses_group_safe_room_options(monkeypatch: pytest.Mo
     bridge._room = MagicMock()
     bridge._room.disconnect = AsyncMock()
 
-    await bridge.start_agent(VoiceAgentOptions(instructions="Be concise.", model="gpt-realtime-2.1", api_key="sk"))
+    close_tools = AsyncMock()
+    await bridge.start_agent(
+        VoiceAgentOptions(instructions="Be concise.", model="gpt-realtime-2.1", api_key="sk", close_tools=close_tools),
+    )
 
     assert fake_session.input.audio is fake_audio_input
     assert fake_session.room_options.audio_input is False
@@ -216,6 +411,326 @@ async def test_agent_session_uses_group_safe_room_options(monkeypatch: pytest.Mo
     await bridge.aclose()
 
     fake_model.aclose.assert_awaited_once()
+    # What the call's tools connected closes with the session.
+    close_tools.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_bridge_reports_only_caller_audio_that_stays_undecryptable(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A late key, a non-member, or a departed caller posts nothing; lasting undecryptable audio does, also after a rejoin."""
+    monkeypatch.setattr("mindroom.matrix_rtc.voice_agent._INBOUND_KEY_TIMEOUT_S", 0)
+
+    class FakeSession:
+        def __init__(self) -> None:
+            self.input = SimpleNamespace(audio=None)
+
+        async def start(self, _agent: object, **_kwargs: object) -> None:
+            return
+
+        def generate_reply(self, **_kwargs: object) -> None:
+            return
+
+        def on(self, _event: str, _callback: object) -> None:
+            return
+
+        async def aclose(self) -> None:
+            return
+
+    fake_audio_input = MagicMock()
+    fake_audio_input.aclose = AsyncMock()
+    monkeypatch.setattr("livekit.agents.AgentSession", lambda **_kwargs: FakeSession())
+    monkeypatch.setattr("livekit.agents.Agent", lambda **_kwargs: object())
+    monkeypatch.setattr(
+        "livekit.plugins.openai.realtime.RealtimeModel",
+        lambda **_kwargs: SimpleNamespace(aclose=AsyncMock()),
+    )
+    monkeypatch.setattr(
+        "mindroom.matrix_rtc.voice_agent._AuthorizedParticipantAudioInput",
+        lambda *_args, **_kwargs: fake_audio_input,
+    )
+    bridge = RealtimeVoiceBridge(local_identity="@bot:example.org:BOTDEV", e2ee_enabled=True)
+    room = MagicMock()
+    room.disconnect = AsyncMock()
+    bridge._room = room
+    bridge.set_participant_identities(frozenset({"@alice:example.org:ALICEDEV"}))
+    errors: list[str] = []
+
+    await bridge.start_agent(
+        VoiceAgentOptions(
+            instructions="Be concise.",
+            model="gpt-realtime-2.1",
+            api_key="sk",
+            on_session_error=errors.append,
+        ),
+    )
+    on_state_changed = next(call.args[1] for call in room.on.call_args_list if call.args[0] == "e2ee_state_changed")
+    alice = SimpleNamespace(identity="@alice:example.org:ALICEDEV")
+
+    on_state_changed(SimpleNamespace(identity="@mallory:example.org:EVILDEV"), rtc.EncryptionState.MISSING_KEY)
+    on_state_changed(alice, rtc.EncryptionState.MISSING_KEY)
+    on_state_changed(alice, rtc.EncryptionState.OK)
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert errors == []
+
+    # Left and rejoined before the timeout: the old timer cannot report on the new participation.
+    on_state_changed(alice, rtc.EncryptionState.MISSING_KEY)
+    bridge.set_participant_identities(frozenset())
+    bridge.set_participant_identities(frozenset({alice.identity}))
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert errors == []
+
+    # Still away when the timeout passes: the expired timer cannot block the rejoined caller's next one.
+    on_state_changed(alice, rtc.EncryptionState.MISSING_KEY)
+    bridge.set_participant_identities(frozenset())
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert errors == []
+    bridge.set_participant_identities(frozenset({alice.identity}))
+
+    on_state_changed(alice, rtc.EncryptionState.DECRYPTION_FAILED)
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert len(errors) == 1
+    assert "cannot hear you" in errors[0]
+    assert "ALICEDEV" in errors[0]
+
+    await bridge.aclose()
+
+
+_ALICE = "@alice:example.org:ALICEDEV"
+
+
+class _PresenceRoom:
+    """An SFU room whose remote participants a test connects and disconnects."""
+
+    def __init__(self, *identities: str) -> None:
+        self.local_participant = MagicMock()
+        self.remote_participants = {identity: self._participant(identity) for identity in identities}
+        self.handlers: dict[str, list[Callable[[object], None]]] = {}
+        self.disconnect = AsyncMock()
+        self.connected = True
+
+    def isconnected(self) -> bool:
+        """Report whether the agent's own SFU connection is up."""
+        return self.connected
+
+    @staticmethod
+    def _participant(identity: str) -> SimpleNamespace:
+        return SimpleNamespace(identity=identity, track_publications={})
+
+    def on(self, event: str, callback: Callable[[object], None]) -> None:
+        """Register a room event handler."""
+        self.handlers.setdefault(event, []).append(callback)
+
+    def off(self, event: str, callback: Callable[[object], None]) -> None:
+        """Remove a room event handler."""
+        self.handlers[event].remove(callback)
+
+    def connect_participant(self, identity: str) -> None:
+        """Add a remote participant and emit ``participant_connected``."""
+        participant = self._participant(identity)
+        self.remote_participants[identity] = participant
+        for callback in self.handlers.get("participant_connected", []):
+            callback(participant)
+
+    def disconnect_participant(self, identity: str) -> None:
+        """Remove a remote participant and emit ``participant_disconnected``."""
+        participant = self.remote_participants.pop(identity)
+        for callback in self.handlers.get("participant_disconnected", []):
+            callback(participant)
+
+
+async def _start_presence_bridge(
+    monkeypatch: pytest.MonkeyPatch,
+    room: _PresenceRoom,
+    *,
+    absent_timeout_s: float = 0,
+) -> tuple[RealtimeVoiceBridge, list[bool]]:
+    """Start a realtime bridge on ``room`` with Alice in the roster, by default with no absence grace."""
+    monkeypatch.setattr("mindroom.matrix_rtc.voice_agent._CALLER_ABSENT_TIMEOUT_S", absent_timeout_s)
+
+    class FakeSession:
+        def __init__(self) -> None:
+            self.input = SimpleNamespace(audio=None)
+
+        async def start(self, _agent: object, **_kwargs: object) -> None:
+            """Start without media."""
+            return
+
+        def on(self, _event: str, _callback: object) -> None:
+            """Ignore session events."""
+            return
+
+        async def aclose(self) -> None:
+            """Close without media."""
+            return
+
+    fake_audio_input = MagicMock()
+    fake_audio_input.aclose = AsyncMock()
+    monkeypatch.setattr("livekit.agents.AgentSession", lambda **_kwargs: FakeSession())
+    monkeypatch.setattr("livekit.agents.Agent", lambda **_kwargs: object())
+    monkeypatch.setattr(
+        "livekit.plugins.openai.realtime.RealtimeModel",
+        lambda **_kwargs: SimpleNamespace(aclose=AsyncMock()),
+    )
+    monkeypatch.setattr(
+        "mindroom.matrix_rtc.voice_agent._AuthorizedParticipantAudioInput",
+        lambda *_args, **_kwargs: fake_audio_input,
+    )
+    bridge = RealtimeVoiceBridge(local_identity="@bot:example.org:BOTDEV", e2ee_enabled=False)
+    bridge._room = room
+    bridge.set_participant_identities(frozenset({_ALICE}))
+    terminations: list[bool] = []
+    await bridge.start_agent(
+        VoiceAgentOptions(
+            instructions="Be concise.",
+            model="gpt-realtime-2.1",
+            api_key="sk",
+            on_session_terminated=terminations.append,
+        ),
+    )
+    return bridge, terminations
+
+
+async def _settle() -> None:
+    """Let timers due now and the callbacks they schedule run."""
+    for _ in range(3):
+        await asyncio.sleep(0)
+
+
+@pytest.mark.asyncio
+async def test_bridge_ends_call_whose_caller_never_reaches_the_sfu(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A membership left behind by a closed client cannot keep the agent waiting in an empty SFU room."""
+    room = _PresenceRoom()
+    with capture_logs() as logs:
+        bridge, terminations = await _start_presence_bridge(monkeypatch, room)
+        await _settle()
+
+    assert terminations == [False]
+    absent = [log for log in logs if log["event"] == "call_roster_absent_from_sfu"]
+    assert [log["roster"] for log in absent] == [[_ALICE]]
+    await bridge.aclose()
+
+
+@pytest.mark.asyncio
+async def test_bridge_keeps_call_while_a_roster_device_is_in_the_sfu(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only a caller who stays away ends the call; a reconnect or another roster device keeps it."""
+    room = _PresenceRoom(_ALICE, "@mallory:example.org:EVILDEV")
+    bridge, terminations = await _start_presence_bridge(monkeypatch, room)
+    await _settle()
+    assert terminations == []
+
+    # Reconnecting before the grace passes keeps the call.
+    room.disconnect_participant(_ALICE)
+    room.connect_participant(_ALICE)
+    await _settle()
+    assert terminations == []
+
+    # The caller's second device keeps the call while the first one is away.
+    bridge.set_participant_identities(frozenset({_ALICE, "@alice:example.org:ALICESECOND"}))
+    room.connect_participant("@alice:example.org:ALICESECOND")
+    room.disconnect_participant(_ALICE)
+    await _settle()
+    assert terminations == []
+
+    # A participant outside the roster does not count as the caller.
+    room.disconnect_participant("@alice:example.org:ALICESECOND")
+    await _settle()
+    assert terminations == [False]
+    await bridge.aclose()
+
+
+@pytest.mark.asyncio
+async def test_vacated_roster_ends_the_call_once_its_devices_leave_the_sfu(monkeypatch: pytest.MonkeyPatch) -> None:
+    """After the Matrix roster empties, the caller's media decides: still connected keeps it, gone ends it now."""
+    room = _PresenceRoom(_ALICE)
+    bridge, terminations = await _start_presence_bridge(monkeypatch, room, absent_timeout_s=3600)
+    monkeypatch.setattr("mindroom.matrix_rtc.voice_agent._VACATED_ROSTER_ABSENT_TIMEOUT_S", 0)
+
+    bridge.vacate_roster()
+    await _settle()
+    assert terminations == []
+
+    # The lapsed membership returns, which restores the long grace for an SFU reconnect.
+    bridge.set_participant_identities(frozenset({_ALICE}))
+    room.disconnect_participant(_ALICE)
+    await _settle()
+    assert terminations == []
+
+    room.connect_participant(_ALICE)
+    bridge.vacate_roster()
+    room.disconnect_participant(_ALICE)
+    await _settle()
+    assert terminations == [False]
+    await bridge.aclose()
+
+
+@pytest.mark.asyncio
+async def test_bridge_reports_an_empty_room_after_its_own_sfu_loss_as_retryable(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The caller may still be in the call when the agent's own SFU connection is what emptied the room."""
+    room = _PresenceRoom(_ALICE)
+    bridge, terminations = await _start_presence_bridge(monkeypatch, room)
+
+    room.connected = False
+    room.disconnect_participant(_ALICE)
+    await _settle()
+
+    assert terminations == [True]
+    await bridge.aclose()
+
+
+@pytest.mark.asyncio
+async def test_bridge_absence_watch_follows_roster_changes(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A caller who moves the call to a device that never connects media is absent."""
+    room = _PresenceRoom(_ALICE)
+    bridge, terminations = await _start_presence_bridge(monkeypatch, room)
+
+    bridge.set_participant_identities(frozenset({"@alice:example.org:ALICESECOND"}))
+    await _settle()
+
+    assert terminations == [False]
+    await bridge.aclose()
+
+
+@pytest.mark.asyncio
+async def test_bridge_roster_update_restarts_the_absence_grace(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A membership the caller just published, even from a device already in the roster, gets the full grace."""
+    room = _PresenceRoom()
+    bridge, terminations = await _start_presence_bridge(monkeypatch, room, absent_timeout_s=60)
+    first_grace = bridge._caller_absent_timer
+    assert first_grace is not None
+
+    bridge.set_participant_identities(frozenset({_ALICE}))
+
+    renewed_grace = bridge._caller_absent_timer
+    assert first_grace.cancelled()
+    assert renewed_grace is not None
+    assert renewed_grace.when() >= first_grace.when()
+    await bridge.aclose()
+    assert renewed_grace.cancelled()
+    assert terminations == []
+
+
+@pytest.mark.asyncio
+async def test_bridge_close_cancels_the_absence_watch(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Leaving the call cannot report the session as terminated afterwards."""
+    room = _PresenceRoom()
+    bridge, terminations = await _start_presence_bridge(monkeypatch, room)
+
+    await bridge.aclose()
+    await _settle()
+
+    assert terminations == []
+    assert room.handlers["participant_connected"] == []
+    assert room.handlers["participant_disconnected"] == []
+    room.connect_participant(_ALICE)
+    room.disconnect_participant(_ALICE)
+    await _settle()
+    assert terminations == []
 
 
 def _llm_usage(inputs: int, outputs: int = 10, **counters: int) -> LLMModelUsage:
@@ -300,7 +815,13 @@ async def test_realtime_session_records_each_responses_token_usage(monkeypatch: 
     latest = recorded[-1]
     assert latest.model == "gpt-realtime-2.1"
     assert [
-        (r.input_tokens, r.output_tokens, r.cache_read_tokens, r.audio_input_tokens, r.audio_output_tokens)
+        (
+            r.tokens.input_tokens,
+            r.tokens.output_tokens,
+            r.tokens.cache_read_tokens,
+            r.tokens.audio_input_tokens,
+            r.tokens.audio_output_tokens,
+        )
         for r in latest.responses
     ] == [(900, 300, 400, 800, 250), (1100, 400, 800, 1000, 350)]
 
@@ -317,7 +838,7 @@ async def test_realtime_usage_reported_while_the_call_closes_is_saved(monkeypatc
     report(_llm_usage(900))
     await bridge.aclose()
 
-    assert [response.input_tokens for response in recorded[-1].responses] == [900, 1100]
+    assert [response.tokens.input_tokens for response in recorded[-1].responses] == [900, 1100]
 
 
 @pytest.mark.asyncio
@@ -375,7 +896,7 @@ async def test_cascaded_session_wires_stt_normal_agent_and_tts(  # noqa: C901, P
 ) -> None:
     """The cascaded bridge gives LiveKit speech legs and the MindRoom LLM adapter."""
     built: dict[str, object] = {}
-    turns: list[tuple[str, str]] = []
+    turns: list[tuple[str, str, float]] = []
     tool_uses: list[list[str]] = []
     finalized: list[tuple[str | None, str, bool]] = []
     responder_inputs: list[str] = []
@@ -501,7 +1022,7 @@ async def test_cascaded_session_wires_stt_normal_agent_and_tts(  # noqa: C901, P
         finalize_spoken_response=finalize_spoken_response,
         close_responder=close_responder,
         greeting_text="Hello.",
-        on_conversation_turn=lambda role, text: turns.append((role, text)),
+        on_conversation_turn=lambda role, text, spoken_at: turns.append((role, text, spoken_at)),
         on_tools_executed=tool_uses.append,
     )
 
@@ -540,10 +1061,16 @@ async def test_cascaded_session_wires_stt_normal_agent_and_tts(  # noqa: C901, P
     assert fake_session.output.audio is transcript_synchronizer.audio_output
     assert fake_session.output.transcription is transcript_synchronizer.text_output
 
-    user_message = llm.ChatContext.empty().add_message(role="user", content="hello")
+    # A turn's time is when its speech started, not when LiveKit finished the item.
+    user_message = llm.ChatContext.empty().add_message(
+        role="user",
+        content="hello",
+        created_at=1050.0,
+        metrics={"started_speaking_at": 1042.0},
+    )
     callback = cast("Callable[[object], None]", fake_session.handlers["conversation_item_added"])
     callback(SimpleNamespace(item=user_message))
-    assert turns == [("user", "hello")]
+    assert turns == [("user", "hello", 1042.0)]
 
     # An interrupted response can leave consecutive user items in LiveKit's
     # context; replaying the first one could repeat side effects or tools.
@@ -562,11 +1089,14 @@ async def test_cascaded_session_wires_stt_normal_agent_and_tts(  # noqa: C901, P
         role="assistant",
         content="heard sta",
         interrupted=True,
+        created_at=1060.0,
         extra={"mindroom_call_turn_id": "turn-1"},
     )
     callback(SimpleNamespace(item=assistant_message))
     await asyncio.sleep(0)
     assert finalized == [("turn-1", "heard sta", True)]
+    # Without speaking metrics, the item's own time (LiveKit's speech start for replies) stands in.
+    assert turns[-1] == ("assistant", "heard sta", 1060.0)
 
     class UnforwardedSpeech:
         def __init__(self) -> None:
@@ -757,7 +1287,7 @@ def test_terminal_session_close_reports_api_retryability(api_error: object, retr
     assert callbacks == [retryable]
 
 
-def test_realtime_auth_error_reports_actionable_notice_once_without_secret() -> None:
+def test_realtime_auth_error_reports_actionable_notice_without_secret() -> None:
     """Provider auth failures explain the operator fix without echoing credentials."""
     notices: list[str] = []
     handlers: dict[str, object] = {}
@@ -779,7 +1309,6 @@ def test_realtime_auth_error_reports_actionable_notice_once_without_secret() -> 
     event = SimpleNamespace(
         error=SimpleNamespace(type="realtime_model_error", error=error),
     )
-    handler(event)
     handler(event)
 
     assert len(notices) == 1
@@ -819,7 +1348,7 @@ def test_realtime_tls_error_reports_ca_bundle_remediation() -> None:
     assert "Restart MindRoom" in notices[0]
 
 
-def test_stale_session_error_does_not_report_or_consume_dedupe() -> None:
+def test_stale_session_error_does_not_report() -> None:
     """An error from a replaced SDK session cannot affect the active call."""
     notices: list[str] = []
     handlers: dict[str, object] = {}
@@ -848,7 +1377,6 @@ def test_stale_session_error_does_not_report_or_consume_dedupe() -> None:
     )
 
     assert notices == []
-    assert bridge._reported_error_notices == set()
 
 
 @pytest.mark.parametrize(

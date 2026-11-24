@@ -1,0 +1,538 @@
+BEGIN TRANSACTION;
+CREATE TABLE approval_action_tombstones (
+        principal_id TEXT NOT NULL,
+        room_id TEXT NOT NULL,
+        card_event_id TEXT NOT NULL,
+        PRIMARY KEY (principal_id, card_event_id)
+    );
+CREATE TABLE approval_cards (
+        principal_id TEXT NOT NULL,
+        delivery_id TEXT NOT NULL,
+        continuation_id TEXT NOT NULL,
+        continuation_generation BIGINT NOT NULL,
+        tool_call_id TEXT NOT NULL,
+        membership_epoch BIGINT NOT NULL,
+        PRIMARY KEY (principal_id, delivery_id)
+    );
+CREATE TABLE approval_continuation_calls (
+        principal_id TEXT NOT NULL,
+        approval_id TEXT NOT NULL,
+        generation BIGINT NOT NULL,
+        tool_call_id TEXT NOT NULL,
+        call_ordinal BIGINT NOT NULL,
+        tool_name TEXT NOT NULL,
+        invoking_agent TEXT NOT NULL,
+        expires_at_ns BIGINT NOT NULL,
+        decision TEXT CHECK (decision IS NULL OR decision IN ('approved', 'denied', 'expired')),
+        reason TEXT,
+        human_approval_required BOOLEAN,
+        toolkit_name TEXT,
+        arguments_digest TEXT,
+        PRIMARY KEY (principal_id, approval_id, generation, tool_call_id),
+        UNIQUE (principal_id, approval_id, generation, call_ordinal),
+        FOREIGN KEY (principal_id, approval_id)
+            REFERENCES approval_continuations (principal_id, approval_id) ON DELETE CASCADE
+    );
+CREATE TABLE approval_continuations (
+        principal_id TEXT NOT NULL,
+        approval_id TEXT NOT NULL UNIQUE,
+        -- The span whose pause created the continuation. The upgrade that
+        -- added it cancelled every continuation an earlier release left.
+        span_id TEXT,
+        -- The span that runs a ready continuation once claimed; its records own
+        -- the claim's bot instance and outcome.
+        claim_span_id TEXT,
+        state TEXT NOT NULL CHECK (state IN ('waiting', 'ready', 'failing')),
+        generation BIGINT NOT NULL DEFAULT 0,
+        runtime_generation TEXT,
+        failure_reason TEXT,
+        context_json TEXT NOT NULL,
+        created_at_ns BIGINT NOT NULL,
+        PRIMARY KEY (principal_id, approval_id)
+    );
+CREATE TABLE approval_grant_cards (
+        principal_id TEXT NOT NULL,
+        continuation_id TEXT NOT NULL,
+        continuation_generation BIGINT NOT NULL,
+        tool_call_id TEXT NOT NULL,
+        delivery_id TEXT NOT NULL,
+        scope_key TEXT NOT NULL,
+        room_id TEXT NOT NULL,
+        thread_id TEXT NOT NULL,
+        requester_id TEXT NOT NULL,
+        entity_name TEXT NOT NULL,
+        invoking_agent TEXT NOT NULL,
+        operation TEXT NOT NULL,
+        responder_principal_id TEXT NOT NULL,
+        responder_epoch BIGINT NOT NULL,
+        membership_epoch BIGINT NOT NULL,
+        grant_id TEXT,
+        PRIMARY KEY (principal_id, delivery_id)
+    );
+CREATE TABLE approval_grant_locks (
+        principal_id TEXT PRIMARY KEY
+    );
+CREATE TABLE approval_grants (
+        principal_id TEXT NOT NULL,
+        grant_id TEXT NOT NULL,
+        scope_key TEXT NOT NULL,
+        room_id TEXT NOT NULL,
+        thread_id TEXT NOT NULL,
+        card_event_id TEXT NOT NULL,
+        requester_id TEXT NOT NULL,
+        entity_name TEXT NOT NULL,
+        invoking_agent TEXT NOT NULL,
+        operation TEXT NOT NULL,
+        responder_principal_id TEXT NOT NULL,
+        responder_epoch BIGINT NOT NULL,
+        membership_epoch BIGINT NOT NULL,
+        expires_at_ns BIGINT NOT NULL,
+        revoked_at_ns BIGINT,
+        resolution_json TEXT NOT NULL,
+        original_delivery_id TEXT NOT NULL,
+        PRIMARY KEY (principal_id, grant_id),
+        UNIQUE (principal_id, card_event_id)
+    );
+CREATE TABLE background_approval_calls (
+        principal_id TEXT NOT NULL,
+        delivery_id TEXT NOT NULL,
+        run_id TEXT NOT NULL,
+        call_id TEXT NOT NULL,
+        expires_at_ns BIGINT NOT NULL,
+        decision TEXT CHECK (decision IS NULL OR decision IN ('approved', 'denied', 'expired')),
+        reason TEXT,
+        PRIMARY KEY (principal_id, delivery_id),
+        UNIQUE (principal_id, run_id, call_id)
+    );
+CREATE TABLE conversation_hydration (
+        principal_id TEXT NOT NULL,
+        room_id TEXT NOT NULL,
+        thread_id TEXT NOT NULL,
+        membership_epoch BIGINT NOT NULL,
+        -- Whether the walk that filled this conversation ran out of
+        -- conversation rather than out of allowance. Being hydrated and being
+        -- complete are different facts: a walk that stopped at the prompt
+        -- window is hydrated, and a reader whose correctness is completeness
+        -- has to be able to tell that from a whole conversation. It is the
+        -- best answer any walk gave under this membership rather than the
+        -- newest one: walks of different widths run concurrently over this
+        -- row, and the narrower finishing last must not un-say the wider.
+        complete INTEGER NOT NULL DEFAULT 0,
+        -- The rank of the widest-ranked `HydrationPolicy` any walk here has run
+        -- under this membership, whether or not it got anywhere. Completeness
+        -- alone cannot distinguish a conversation nobody walked deeply from one
+        -- where the deepest available walk has already been spent and failed,
+        -- and a caller that cannot tell those apart repeats its whole walk on
+        -- every read of a conversation that will never satisfy it. A policy
+        -- rank rather than one of its ceilings, because a caller is defined by
+        -- all three of them together and two policies can differ on any one.
+        -- Also the best answer rather than the newest, for the reason above.
+        attempted_policy_rank BIGINT NOT NULL DEFAULT 0,
+        -- The version of the walk that earned this marker, which it stands for
+        -- and no other. A walk that learns to fetch what it used to miss bumps
+        -- it, so a conversation an older walk marked is walked again on its
+        -- next read instead of being trusted for the rest of the membership.
+        -- The two facts above belong to that walk and reset with it.
+        walk_version BIGINT NOT NULL DEFAULT 0,
+        PRIMARY KEY (principal_id, room_id, thread_id)
+    );
+CREATE TABLE interactive_questions (
+        principal_id TEXT NOT NULL,
+        -- One logical Matrix target can expose several revisions over time.
+        -- Keeping each prompt revision immutable lets refetch restore an old
+        -- visible revision without losing whether that exact prompt was used.
+        question_event_id TEXT NOT NULL,
+        revision_event_id TEXT NOT NULL,
+        room_id TEXT NOT NULL,
+        question_json TEXT NOT NULL,
+        -- Null means this revision remains selectable whenever it is the
+        -- visible projection revision. The durable source ID is its one-shot
+        -- tombstone and survives source settlement.
+        consumed_by_source_event_id TEXT,
+        PRIMARY KEY (principal_id, question_event_id, revision_event_id),
+        UNIQUE (principal_id, consumed_by_source_event_id),
+        FOREIGN KEY (principal_id, consumed_by_source_event_id)
+            REFERENCES journal_events (principal_id, event_id),
+        FOREIGN KEY (principal_id, room_id, question_event_id)
+            REFERENCES visible_messages (principal_id, room_id, logical_event_id)
+            ON DELETE CASCADE
+    );
+CREATE TABLE interactive_selections (
+        principal_id TEXT NOT NULL,
+        source_event_id TEXT NOT NULL,
+        question_event_id TEXT NOT NULL,
+        revision_event_id TEXT NOT NULL,
+        selection_key TEXT NOT NULL,
+        PRIMARY KEY (principal_id, source_event_id),
+        FOREIGN KEY (principal_id, source_event_id)
+            REFERENCES journal_events (principal_id, event_id),
+        FOREIGN KEY (principal_id, question_event_id, revision_event_id)
+            REFERENCES interactive_questions (principal_id, question_event_id, revision_event_id)
+            ON DELETE CASCADE
+    );
+CREATE TABLE journal_events (
+        receipt_order INTEGER PRIMARY KEY AUTOINCREMENT,
+        principal_id TEXT NOT NULL,
+        event_id TEXT NOT NULL,
+        room_id TEXT NOT NULL,
+        thread_id TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        sender TEXT NOT NULL,
+        origin_server_ts BIGINT NOT NULL,
+        source_json TEXT NOT NULL,
+        semantic_consumer TEXT,
+        -- The membership this event was admitted under, which is what refuses
+        -- an answer written for a conversation the bot has since left. The
+        -- delivery enqueue transaction derives its immutable owner here.
+        membership_epoch BIGINT NOT NULL,
+        state TEXT NOT NULL CHECK (state IN ('pending', 'settled')),
+        UNIQUE (principal_id, event_id)
+    );
+CREATE TABLE journal_identity (
+        -- Stable database identity checked against the install's journal
+        -- binding before opening its turn, delivery, and recovery state.
+        singleton BOOLEAN NOT NULL PRIMARY KEY,
+        generation TEXT NOT NULL
+    );
+CREATE TABLE matrix_delivery_outbox (
+        principal_id TEXT NOT NULL,
+        delivery_id TEXT NOT NULL,
+        stage TEXT NOT NULL CHECK (stage IN ('initial', 'final', 'edit')),
+        event_type TEXT NOT NULL,
+        room_id TEXT NOT NULL,
+        membership_epoch BIGINT NOT NULL,
+        thread_id TEXT NOT NULL,
+        transaction_id TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        -- Local semantic facts needed after acknowledgement. These are not
+        -- Matrix event content and are never sent by the delivery worker.
+        result_json TEXT,
+        edits_event_id TEXT,
+        -- A durable edit can be reserved before the INITIAL event ID exists.
+        -- Its claim waits until INITIAL acknowledgement fills the target.
+        edit_target_pending INTEGER NOT NULL DEFAULT 0,
+        attempted INTEGER NOT NULL DEFAULT 0,
+        retired INTEGER NOT NULL DEFAULT 0,
+        permanent_failure_reason TEXT,
+        -- The device whose transaction ID the homeserver may already hold. A
+        -- transaction ID deduplicates within one device, so a row attempted by
+        -- a device this process is no longer logged in as carries an ID that
+        -- would be accepted as new -- and post the answer twice.
+        sending_device_id TEXT,
+        acknowledged_event_id TEXT,
+        created_at_ns BIGINT NOT NULL,
+        -- Rows that write an agent or team reply carry its identity and its
+        -- place in the reply's one write sequence, so every row of one reply,
+        -- across all of its spans and delivery ids, is sent in order.
+        reply_id TEXT,
+        span_id TEXT,
+        reply_sequence BIGINT,
+        -- What a reply row's acknowledgement and late edit target need, kept
+        -- apart from result_json, which the outbox's other readers treat as an answer.
+        reply_row_json TEXT,
+        PRIMARY KEY (principal_id, delivery_id, stage)
+    );
+CREATE TABLE matrix_ingestion_membership (
+        principal_id TEXT NOT NULL,
+        room_id TEXT NOT NULL,
+        membership TEXT NOT NULL CHECK (membership IN ('join', 'leave')),
+        membership_epoch BIGINT NOT NULL CHECK (membership_epoch >= 0),
+        PRIMARY KEY (principal_id, room_id)
+    );
+CREATE TABLE matrix_sync_consumers (
+        principal_id TEXT NOT NULL PRIMARY KEY,
+        consumer_generation TEXT NOT NULL,
+        stream_id TEXT UNIQUE,
+        next_sequence BIGINT NOT NULL DEFAULT 1
+            CHECK (next_sequence >= 0 AND next_sequence <= 9223372036854775807)
+    );
+CREATE TABLE pending_reply_stops (
+        -- A Stop on an event no reply is bound to yet; the create
+        -- acknowledgement that binds the event in the same room applies it.
+        principal_id TEXT NOT NULL,
+        target_event_id TEXT NOT NULL,
+        receipt_order BIGINT NOT NULL,
+        room_id TEXT NOT NULL,
+        created_at_ns BIGINT NOT NULL,
+        PRIMARY KEY (principal_id, room_id, target_event_id)
+    );
+CREATE TABLE redaction_tombstones (
+        principal_id TEXT NOT NULL,
+        room_id TEXT NOT NULL,
+        redacted_event_id TEXT NOT NULL,
+        PRIMARY KEY (principal_id, room_id, redacted_event_id)
+    );
+CREATE TABLE reply_deletion_endings (
+        -- A reply a source deletion ended in the tombstone's commit, and the
+        -- span that deletion cancelled, until the bot stops that span and
+        -- settles what the reply owes Matrix.
+        principal_id TEXT NOT NULL,
+        reply_id TEXT NOT NULL,
+        span_id TEXT,
+        PRIMARY KEY (principal_id, reply_id)
+    );
+CREATE TABLE reply_messages (
+        -- One agent or team reply: the single owner of what it shows, which
+        -- span may change it, and the Stop facts that reach it. Presentations
+        -- are opaque JSON written by the reply layer.
+        principal_id TEXT NOT NULL,
+        reply_id TEXT NOT NULL,
+        entity_name TEXT NOT NULL,
+        room_id TEXT NOT NULL,
+        thread_id TEXT,
+        membership_epoch BIGINT NOT NULL,
+        -- Bound by the first acknowledged create, in any state.
+        event_id TEXT,
+        state TEXT NOT NULL CHECK (state IN ('active', 'paused', 'completed', 'cancelled', 'failed', 'gone')),
+        current_span_id TEXT,
+        last_span_id TEXT NOT NULL,
+        presentation_json TEXT NOT NULL,
+        -- What the latest write, durable or direct, may have shown. Matrix
+        -- acknowledged it when confirmed_seq has reached reply_sequence.
+        possibly_shown_json TEXT,
+        confirmed_seq BIGINT,
+        -- Bumped by every transition that changes what a payload would hold.
+        revision BIGINT NOT NULL,
+        placeholder_only BOOLEAN NOT NULL,
+        stop_receipt_order BIGINT,
+        stop_applied_receipt_order BIGINT,
+        stop_button_event_id TEXT,
+        redaction_pending_json TEXT,
+        -- A durable write a transition decided without a payload; rendered
+        -- and enqueued by a follow-up under the reply's sending lock.
+        owed_write_json TEXT,
+        -- The last allocated value of the reply's one write sequence.
+        reply_sequence BIGINT NOT NULL,
+        created_at_ns BIGINT NOT NULL,
+        updated_at_ns BIGINT NOT NULL,
+        PRIMARY KEY (principal_id, reply_id),
+        UNIQUE (principal_id, event_id)
+    );
+CREATE TABLE reply_principal_generations (
+        -- The bot instance that owns this principal's replies now. Spans of
+        -- any other generation can no longer write.
+        principal_id TEXT NOT NULL PRIMARY KEY,
+        generation TEXT NOT NULL
+    );
+CREATE TABLE reply_span_sources (
+        principal_id TEXT NOT NULL,
+        span_id TEXT NOT NULL,
+        event_id TEXT NOT NULL,
+        role TEXT NOT NULL CHECK (role IN ('pending', 'logical', 'discovery')),
+        ordinal BIGINT NOT NULL,
+        PRIMARY KEY (principal_id, span_id, role, ordinal),
+        UNIQUE (principal_id, span_id, role, event_id)
+    );
+CREATE TABLE reply_spans (
+        -- One claim on a reply by one executor, with a write-once outcome.
+        principal_id TEXT NOT NULL,
+        span_id TEXT NOT NULL,
+        reply_id TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK (kind IN ('turn', 'replay', 'approval_resume', 'regeneration')),
+        -- The driving event: it keys the span's outbox rows, and spans of
+        -- one reply can share it.
+        delivery_id TEXT NOT NULL,
+        approval_id TEXT,
+        bot_generation TEXT NOT NULL,
+        base_sequence BIGINT NOT NULL,
+        rollback_json TEXT,
+        outcome TEXT CHECK (outcome IN (
+            'completed', 'paused', 'cancelled', 'failed',
+            'suppressed', 'restored', 'released', 'superseded', 'lost')),
+        claimed_at_ns BIGINT NOT NULL,
+        PRIMARY KEY (principal_id, span_id)
+    );
+CREATE TABLE reply_tool_calls (
+        principal_id TEXT NOT NULL,
+        span_id TEXT NOT NULL,
+        call_id TEXT NOT NULL,
+        -- The call as a tool trace entry, recorded started before the tool
+        -- runs and replaced by its completed entry once the tool returns.
+        entry_json TEXT NOT NULL,
+        recorded_at_ns BIGINT NOT NULL,
+        PRIMARY KEY (principal_id, span_id, call_id)
+    );
+CREATE TABLE room_history_recovery (
+        principal_id TEXT NOT NULL,
+        room_id TEXT NOT NULL,
+        state TEXT NOT NULL CHECK (state IN ('repairable', 'truncated', 'repaired')),
+        revision BIGINT NOT NULL DEFAULT 0,
+        -- The widest bounded walk spent on this exact missing interval. A new
+        -- revision resets it because an older gap says nothing about the new
+        -- one; a wider caller may then make exactly one sequential attempt.
+        attempted_policy_rank BIGINT NOT NULL DEFAULT 0,
+        PRIMARY KEY (principal_id, room_id)
+    );
+CREATE TABLE room_member_joins (
+        principal_id TEXT NOT NULL,
+        room_id TEXT NOT NULL,
+        user_id TEXT NOT NULL,
+        baseline_receipt_order BIGINT,
+        completed INTEGER NOT NULL DEFAULT 0 CHECK (completed IN (0, 1)),
+        PRIMARY KEY (principal_id, room_id, user_id)
+    );
+CREATE TABLE room_membership (
+        principal_id TEXT NOT NULL,
+        room_id TEXT NOT NULL,
+        membership_epoch BIGINT NOT NULL,
+        -- Application work may run only within an active membership tenure.
+        departure_fenced INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY (principal_id, room_id)
+    );
+CREATE TABLE scheduled_call_approvals (
+        -- One tool call a requester approved while scheduling it. The
+        -- decision lives on the shared detached-card row; this row holds the
+        -- stored call, its one-shot claim and outcome, and the receipt
+        -- maintenance looks up by its delivery.
+        principal_id TEXT NOT NULL,
+        task_id TEXT NOT NULL,
+        delivery_id TEXT NOT NULL,
+        room_id TEXT NOT NULL,
+        thread_id TEXT NOT NULL,
+        requester_id TEXT NOT NULL,
+        agent_name TEXT NOT NULL,
+        toolkit_name TEXT NOT NULL,
+        tool_name TEXT NOT NULL,
+        arguments_json TEXT NOT NULL,
+        workflow_digest TEXT NOT NULL,
+        execute_at_ns BIGINT NOT NULL,
+        membership_epoch BIGINT NOT NULL,
+        card_event_id TEXT,
+        decided_at_ns BIGINT,
+        decided_by TEXT,
+        approved_scope TEXT,
+        armed_at_ns BIGINT,
+        revoked_at_ns BIGINT,
+        consumed_at_ns BIGINT,
+        consumed_delivery_id TEXT,
+        outcome TEXT,
+        PRIMARY KEY (principal_id, task_id),
+        UNIQUE (principal_id, delivery_id),
+        UNIQUE (principal_id, consumed_delivery_id)
+    );
+CREATE TABLE tool_job_owner (
+        -- The runtime generation that owns every tool job; a newer runtime
+        -- takes over, and writes from an older one are refused.
+        singleton BOOLEAN NOT NULL PRIMARY KEY,
+        runtime_generation TEXT NOT NULL
+    );
+CREATE TABLE tool_jobs (
+        -- One accepted background tool job: its JSON snapshot, and the full
+        -- result payload of its outcome once it settled with one.
+        job_id TEXT NOT NULL PRIMARY KEY,
+        job_json TEXT NOT NULL,
+        result_payload_json TEXT
+    );
+CREATE TABLE turn_records (
+        -- Scoped to the agent, not to a journal principal. Every other table
+        -- here is per (agent, Matrix identity), because what it holds is only
+        -- meaningful next to the sync that produced it. A turn record is not:
+        -- it is the proof that a message was already answered, and a bot that
+        -- re-logs in under a new Matrix ID must not answer everything twice.
+        -- Sharing the database is what makes this transactional with a
+        -- settlement; sharing the scope key is not required and would be wrong.
+        agent_name TEXT NOT NULL,
+        -- A coalesced turn answers several sources at once and is reachable by
+        -- any of them, so one record is stored once per event that indexes it.
+        index_event_id TEXT NOT NULL,
+        anchor_event_id TEXT NOT NULL,
+        record_json TEXT NOT NULL,
+        PRIMARY KEY (agent_name, index_event_id)
+    );
+INSERT INTO "turn_records" VALUES('agent','$m2','$m3','{"anchor_event_id": "$m3", "completed": true, "conversation_target": {"reply_to_event_id": null, "resolved_thread_id": "$thread-a", "room_id": "!a:example.org", "session_id": "!a:example.org:$thread-a", "source_thread_id": "$thread-a"}, "history_scope": {"kind": "agent", "scope_id": "agent"}, "pending_redaction_cleanup_event_ids": ["$m2"], "redacted_source_event_ids": ["$m2"], "requester_id": "@alice:example.org", "response_event_id": "$r2", "response_owner": "agent", "revision_replay": {"$e2": {"cleanup_pending": true, "legacy_summary_provenance": false, "redacted": true, "response_event_id": null, "source_event_id": "$m2", "timestamp_ms": 20}, "$e3": {"cleanup_pending": true, "legacy_summary_provenance": false, "redacted": false, "response_event_id": "$r2", "source_event_id": "$m3", "timestamp_ms": 30}}, "source_event_ids": ["$m2", "$m3"], "source_event_prompts": {"$m3": "kept"}, "source_event_revisions": {"$m3": [30, "$e3"]}, "timestamp": 1799913600.0}');
+INSERT INTO "turn_records" VALUES('agent','$m3','$m3','{"anchor_event_id": "$m3", "completed": true, "conversation_target": {"reply_to_event_id": null, "resolved_thread_id": "$thread-a", "room_id": "!a:example.org", "session_id": "!a:example.org:$thread-a", "source_thread_id": "$thread-a"}, "history_scope": {"kind": "agent", "scope_id": "agent"}, "pending_redaction_cleanup_event_ids": ["$m2"], "redacted_source_event_ids": ["$m2"], "requester_id": "@alice:example.org", "response_event_id": "$r2", "response_owner": "agent", "revision_replay": {"$e2": {"cleanup_pending": true, "legacy_summary_provenance": false, "redacted": true, "response_event_id": null, "source_event_id": "$m2", "timestamp_ms": 20}, "$e3": {"cleanup_pending": true, "legacy_summary_provenance": false, "redacted": false, "response_event_id": "$r2", "source_event_id": "$m3", "timestamp_ms": 30}}, "source_event_ids": ["$m2", "$m3"], "source_event_prompts": {"$m3": "kept"}, "source_event_revisions": {"$m3": [30, "$e3"]}, "timestamp": 1799913600.0}');
+CREATE TABLE unresolved_edits (
+        principal_id TEXT NOT NULL,
+        room_id TEXT NOT NULL,
+        target_event_id TEXT NOT NULL,
+        sender TEXT NOT NULL,
+        edit_event_id TEXT NOT NULL,
+        edit_ts BIGINT NOT NULL,
+        content_json TEXT NOT NULL,
+        PRIMARY KEY (principal_id, room_id, target_event_id, sender)
+    );
+CREATE TABLE visible_messages (
+        principal_id TEXT NOT NULL,
+        room_id TEXT NOT NULL,
+        logical_event_id TEXT NOT NULL,
+        thread_id TEXT NOT NULL,
+        sender TEXT NOT NULL,
+        created_ts BIGINT NOT NULL,
+        revision_event_id TEXT NOT NULL,
+        revision_ts BIGINT NOT NULL,
+        content_json TEXT,
+        refresh_token BIGINT,
+        membership_epoch BIGINT NOT NULL,
+        PRIMARY KEY (principal_id, room_id, logical_event_id)
+    );
+CREATE INDEX approval_grants_scope ON approval_grants (principal_id, scope_key, expires_at_ns)
+    ;
+CREATE INDEX approval_grant_cards_scope ON approval_grant_cards (principal_id, scope_key)
+    ;
+CREATE INDEX interactive_selections_revision
+    ON interactive_selections (principal_id, question_event_id, revision_event_id)
+    ;
+CREATE INDEX journal_events_pending
+    ON journal_events (principal_id, receipt_order)
+    WHERE state = 'pending'
+    ;
+CREATE INDEX journal_events_pending_room
+    ON journal_events (principal_id, room_id, receipt_order)
+    WHERE state = 'pending'
+    ;
+CREATE INDEX journal_events_pending_thread
+    ON journal_events (principal_id, room_id, thread_id, origin_server_ts)
+    WHERE state = 'pending'
+    ;
+CREATE INDEX visible_messages_page
+    ON visible_messages (principal_id, room_id, thread_id, created_ts, logical_event_id)
+    ;
+CREATE INDEX visible_messages_revision
+    ON visible_messages (principal_id, room_id, revision_event_id)
+    ;
+CREATE INDEX unresolved_edits_edit_event
+    ON unresolved_edits (principal_id, room_id, edit_event_id)
+    ;
+CREATE INDEX visible_messages_refresh
+    ON visible_messages (principal_id, room_id, thread_id)
+    WHERE refresh_token IS NOT NULL
+    ;
+CREATE INDEX matrix_delivery_outbox_unacknowledged_scan
+    ON matrix_delivery_outbox (
+        principal_id, event_type, created_at_ns, delivery_id, stage
+    )
+    WHERE acknowledged_event_id IS NULL AND retired = 0
+    ;
+CREATE INDEX matrix_delivery_outbox_room_scan
+    ON matrix_delivery_outbox (
+        principal_id, room_id, stage, created_at_ns, delivery_id
+    )
+    ;
+CREATE INDEX approval_cards_continuation
+    ON approval_cards (continuation_id, continuation_generation, tool_call_id)
+    ;
+CREATE UNIQUE INDEX approval_continuations_span ON approval_continuations (principal_id, span_id)
+    ;
+CREATE INDEX reply_spans_reply ON reply_spans (principal_id, reply_id, claimed_at_ns)
+    ;
+CREATE INDEX reply_spans_delivery ON reply_spans (principal_id, delivery_id, claimed_at_ns)
+    ;
+CREATE INDEX reply_span_sources_event ON reply_span_sources (principal_id, event_id)
+    ;
+CREATE INDEX reply_messages_room ON reply_messages (principal_id, room_id, state)
+    ;
+CREATE INDEX reply_messages_state ON reply_messages (principal_id, state, created_at_ns)
+    ;
+CREATE INDEX reply_messages_pending_work
+    ON reply_messages (principal_id, created_at_ns, reply_id)
+    WHERE redaction_pending_json IS NOT NULL OR owed_write_json IS NOT NULL
+    ;
+CREATE INDEX matrix_delivery_outbox_reply
+    ON matrix_delivery_outbox (principal_id, reply_id, reply_sequence)
+    WHERE reply_id IS NOT NULL
+    ;
+CREATE INDEX turn_records_anchor
+    ON turn_records (agent_name, anchor_event_id)
+    ;
+DELETE FROM "sqlite_sequence";
+COMMIT;

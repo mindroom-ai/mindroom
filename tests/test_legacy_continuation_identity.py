@@ -105,16 +105,17 @@ async def test_an_approval_an_earlier_release_left_pending_is_cancelled(
         store = legacy_database.open()
         try:
             principal = store.principal("@bot:example.org")
-            assert await principal.approval_continuation("approval") is None
+            assert await principal.approvals.approval_continuation("approval") is None
             assert not await principal.is_pending(source)
             # Nothing edits the answer the approval paused: it keeps what it showed.
             assert await principal.replies.for_event("$answer") is None
         finally:
             await store.close()
         assert legacy_database.query("SELECT * FROM approval_cards") == []
-        assert legacy_database.query("SELECT * FROM approval_continuation_calls") == []
-        # The emptied call table comes back with the columns the earlier release lacked.
-        assert {"toolkit_name", "arguments_digest"} <= _columns(legacy_database, "approval_continuation_calls")
+        assert legacy_database.query("SELECT * FROM approval_calls") == []
+        # The emptied call table is replaced by one with the columns the earlier release lacked.
+        assert _columns(legacy_database, "approval_continuation_calls") == set()
+        assert {"toolkit_name", "arguments_digest"} <= _columns(legacy_database, "approval_calls")
 
 
 @pytest.mark.asyncio

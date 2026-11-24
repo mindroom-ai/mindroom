@@ -19,6 +19,7 @@ const EXPECTED_ROUTES = [
   ["External", "/unconfigured-rooms"],
   ["Models", "/models"],
   ["Usage", "/usage"],
+  ["Budgets", "/budgets"],
   ["Memory", "/memory"],
   ["Knowledge", "/knowledge"],
   ["Credentials", "/credentials"],
@@ -82,6 +83,16 @@ describe("Navigation", () => {
     expect(
       within(navigation).getByRole("link", { name: "Models" }),
     ).toHaveAttribute("aria-current", "page");
+  });
+
+  it("shows the MindRoom brand in the desktop sidebar as a home link", () => {
+    renderNavigation("/agents");
+
+    const sidebar = screen.getByRole("complementary", { name: "MindRoom" });
+    const home = within(sidebar).getByRole("link", { name: "MindRoom home" });
+
+    expect(home).toHaveAttribute("href", "/dashboard");
+    expect(home.querySelector('img[src="/logo.svg"]')).not.toBeNull();
   });
 
   it("keeps every application route reachable", () => {

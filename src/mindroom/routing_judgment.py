@@ -6,8 +6,10 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from mindroom.agent_descriptions import describe_agent
+from mindroom.judgment.conversation import message_judgment_text
 from mindroom.judgment.evaluator import create_choice_evaluator
-from mindroom.judgment.state import ChoiceQuestion, JudgmentMessage, build_judgment_request
+from mindroom.judgment.state import ChoiceQuestion, JudgmentMessage, fit_judgment_request
+from mindroom.tool_system.plugins import config_plugins
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -36,6 +38,7 @@ async def judge_responder(
     if settings is None or not 2 <= len(candidates) <= 253:
         return None
     choices = {f"candidate_{index}": name for index, name in enumerate(candidates)}
+    tools = config_plugins(config, runtime_paths).tools
     question = ChoiceQuestion(
         id="responder_selection",
         instructions=(
@@ -44,18 +47,28 @@ async def judge_responder(
             "Prefer one responder capable of handling the whole request, including its delegation capabilities."
         ),
         options=(
-            *((key, describe_agent(name, config)) for key, name in choices.items()),
+            *((key, describe_agent(name, config, tools)) for key, name in choices.items()),
             ("no_fit", "None of the eligible responders can usefully handle this request."),
             ("multiple", "The request needs multiple independent responders; no single candidate can handle it."),
         ),
     )
     aliases: dict[str, str] = {}
-    messages: list[JudgmentMessage] = []
+    history: list[JudgmentMessage] = []
     for item in (thread_context or ())[-3:]:
+        text = message_judgment_text(item)
+        if text is None:
+            continue
         sender = aliases.setdefault(item.sender, f"speaker_{len(aliases) + 1}")
-        messages.append(JudgmentMessage("user", f"Recent conversation ({sender}):\n{item.body}"))
-    messages.append(JudgmentMessage("user", f"Current request:\n{message}"))
-    request = build_judgment_request(question, tuple(messages), instructions="Select only a supplied option.")
+        history.append(JudgmentMessage("user", f"Recent conversation ({sender}):\n{text}"))
+    request = fit_judgment_request(
+        question,
+        tuple(history),
+        JudgmentMessage("user", f"Current request:\n{message}"),
+        instructions="Select only a supplied option.",
+        max_context_messages=3,
+    )
+    if request is None:
+        return None
     evaluate = create_choice_evaluator(
         settings,
         runtime_paths,

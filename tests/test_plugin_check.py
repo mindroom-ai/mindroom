@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 from pathlib import Path
 
@@ -12,9 +13,8 @@ from typer.testing import CliRunner
 from mindroom.cli.main import app
 from mindroom.plugin_check import check_plugin
 from mindroom.tool_system import plugin_imports
-from mindroom.tool_system.catalog import TOOL_METADATA
-from mindroom.tool_system.registry_state import TOOL_REGISTRY
-from mindroom.tool_system.skills import get_plugin_skill_roots
+from mindroom.tool_system import plugins as plugins_module
+from mindroom.tool_system.registry import builtin_tool_registry
 
 runner = CliRunner()
 
@@ -93,8 +93,8 @@ def _valid_plugin(root: Path) -> Path:
 def test_check_plugin_validates_all_registration_surfaces_and_restores_state(tmp_path: Path) -> None:
     """One check should exercise tools, hooks, OAuth, and skills without leaking state."""
     plugin_root = _valid_plugin(tmp_path / "plugin")
-    original_tool_metadata = TOOL_METADATA.copy()
-    original_skill_roots = tuple(get_plugin_skill_roots())
+    original_tool_metadata = dict(builtin_tool_registry().entries)
+    published = plugins_module._PUBLISHED
     original_module_import_cache = plugin_imports._MODULE_IMPORT_CACHE.copy()
     original_synthetic_modules = {name for name in sys.modules if name.startswith("mindroom_plugin_")}
 
@@ -104,8 +104,8 @@ def test_check_plugin_validates_all_registration_surfaces_and_restores_state(tmp
     assert result.tool_names == ("compat_demo_tool",)
     assert result.hook_names == ("compat-demo-hook",)
     assert result.skill_directories == ("skills",)
-    assert original_tool_metadata == TOOL_METADATA
-    assert tuple(get_plugin_skill_roots()) == original_skill_roots
+    assert original_tool_metadata == dict(builtin_tool_registry().entries)
+    assert plugins_module._PUBLISHED is published
     assert original_module_import_cache == plugin_imports._MODULE_IMPORT_CACHE
     assert {name for name in sys.modules if name.startswith("mindroom_plugin_")} == original_synthetic_modules
 
@@ -117,15 +117,15 @@ def test_check_plugin_rejects_invalid_oauth_registration_and_restores_state(tmp_
         manifest={"name": "broken-oauth", "oauth_module": "oauth.py"},
         modules={"oauth.py": "def register_oauth_providers(settings, runtime_paths):\n    return ['invalid']\n"},
     )
-    original_tool_metadata = TOOL_METADATA.copy()
-    original_skill_roots = tuple(get_plugin_skill_roots())
+    original_tool_metadata = dict(builtin_tool_registry().entries)
+    published = plugins_module._PUBLISHED
     original_synthetic_modules = {name for name in sys.modules if name.startswith("mindroom_plugin_")}
 
     with pytest.raises(ValueError, match="non-OAuthProvider"):
         check_plugin(plugin_root)
 
-    assert original_tool_metadata == TOOL_METADATA
-    assert tuple(get_plugin_skill_roots()) == original_skill_roots
+    assert original_tool_metadata == dict(builtin_tool_registry().entries)
+    assert plugins_module._PUBLISHED is published
     assert {name for name in sys.modules if name.startswith("mindroom_plugin_")} == original_synthetic_modules
 
 
@@ -179,8 +179,182 @@ def test_check_plugin_accepts_skill_only_plugin_and_keeps_builtin_tools(tmp_path
     assert result.tool_names == ()
     assert result.hook_names == ()
     assert result.skill_directories == ("skills",)
-    assert "calculator" in TOOL_METADATA
-    assert "calculator" in TOOL_REGISTRY
+    assert "calculator" in builtin_tool_registry()
+
+
+def _tool_plugin(root: Path, factory: str) -> Path:
+    """Write a plugin whose tools module registers ``factory`` as the tool ``wrapper``."""
+    return _write_plugin(
+        root,
+        manifest={"name": "wrapper", "tools_module": "tools.py"},
+        modules={
+            "tools.py": (
+                "from mindroom.plugin_api import ToolCategory, ToolFileAccess, register_tool_with_metadata\n"
+                "@register_tool_with_metadata(\n"
+                "    name='wrapper',\n"
+                "    file_access=ToolFileAccess.UNCONFINED,\n"
+                "    display_name='Wrapper',\n"
+                "    description='Wrapper test tool',\n"
+                "    category=ToolCategory.DEVELOPMENT,\n"
+                ")\n"
+                f"{factory}"
+            ),
+        },
+    )
+
+
+def test_check_plugin_rejects_an_agno_mcp_toolkit_and_names_mcp_servers(tmp_path: Path) -> None:
+    """MindRoom runs MCP servers only from ``mcp_servers:``, so a plugin toolkit wrapping Agno ``MCPTools`` fails."""
+    plugin_root = _tool_plugin(
+        tmp_path / "plugin",
+        "def wrapper_tools():\n"
+        "    from agno.tools.mcp import MCPTools\n"
+        "    class FilesystemMCPTools(MCPTools):\n"
+        "        pass\n"
+        "    return FilesystemMCPTools\n",
+    )
+    original_tool_metadata = dict(builtin_tool_registry().entries)
+    published = plugins_module._PUBLISHED
+
+    with pytest.raises(ValueError, match=r"'wrapper' subclasses Agno MCPTools.*mcp_servers:"):
+        check_plugin(plugin_root)
+
+    assert original_tool_metadata == dict(builtin_tool_registry().entries)
+    assert plugins_module._PUBLISHED is published
+
+
+def test_check_plugin_checks_a_toolkit_its_factory_imports_from_the_plugin_lazily(tmp_path: Path) -> None:
+    """A factory's lazy relative import finds the plugin's own module during the check, as after publication."""
+    plugin_root = _tool_plugin(
+        tmp_path / "plugin",
+        "def wrapper_tools():\n    from .impl import Tools\n    return Tools\n",
+    )
+    (plugin_root / "impl.py").write_text(
+        "from agno.tools.mcp import MCPTools\nclass Tools(MCPTools):\n    pass\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match=r"'wrapper' subclasses Agno MCPTools"):
+        check_plugin(plugin_root)
+
+
+def test_check_plugin_runs_an_oauth_callback_that_imports_from_the_plugin_lazily(tmp_path: Path) -> None:
+    """An OAuth registration callback's lazy relative import finds the plugin's own module during the check."""
+    plugin_root = _valid_plugin(tmp_path / "plugin")
+    oauth_path = plugin_root / "oauth.py"
+    (plugin_root / "providers.py").write_text(oauth_path.read_text(encoding="utf-8"), encoding="utf-8")
+    oauth_path.write_text(
+        "def register_oauth_providers(settings, runtime_paths):\n"
+        "    from .providers import register_oauth_providers as providers\n"
+        "    return providers(settings, runtime_paths)\n",
+        encoding="utf-8",
+    )
+    published = plugins_module._PUBLISHED
+
+    assert check_plugin(plugin_root).name == "compat-demo"
+    assert plugins_module._PUBLISHED is published
+    assert not {name for name in sys.modules if name.startswith("mindroom_plugin_compat")}
+
+
+def test_check_plugin_accepts_a_tool_whose_factory_imports_a_package_installed_later(tmp_path: Path) -> None:
+    """A factory may import a dependency the user installs after the plugin, so the check cannot inspect its class."""
+    plugin_root = _tool_plugin(
+        tmp_path / "plugin",
+        "def wrapper_tools():\n    import package_that_does_not_exist\n    return package_that_does_not_exist.Tools\n",
+    )
+
+    assert check_plugin(plugin_root).tool_names == ("wrapper",)
+
+
+def _owned_toolkit_plugin(root: Path, imports: str, parameters: str = "day: date") -> Path:
+    """Write a plugin whose owned toolkit's ``schedule`` takes ``parameters``, with ``imports`` at its module's top.
+
+    ``schedule`` takes ``self`` only by position, which only its bound method, as an agent build derives it, accepts.
+    """
+    return _write_plugin(
+        root,
+        manifest={"name": "calendar", "tools_module": "tools.py"},
+        modules={
+            "tools.py": (
+                "from __future__ import annotations\n"
+                "from typing import TYPE_CHECKING\n"
+                "from mindroom.plugin_api import (\n"
+                "    ToolCategory, ToolFileAccess, Toolkit, register_tool_with_metadata, tool,\n"
+                ")\n"
+                f"{imports}\n"
+                "class CalendarTools(Toolkit):\n"
+                "    name = 'calendar'\n"
+                "    def __init__(self, api_key: str) -> None:\n"
+                "        raise AssertionError('The check must not construct the toolkit')\n"
+                "    @tool\n"
+                f"    def schedule(self, /, {parameters}) -> str:\n"
+                "        '''Schedule a meeting on a day.'''\n"
+                "        return 'scheduled'\n"
+                "    @tool\n"
+                "    @staticmethod\n"
+                "    def timezone() -> str:\n"
+                "        '''Return the calendar's timezone.'''\n"
+                "        return 'UTC'\n"
+                "@register_tool_with_metadata(\n"
+                "    name='calendar',\n"
+                "    file_access=ToolFileAccess.NONE,\n"
+                "    display_name='Calendar',\n"
+                "    description='Calendar test tool',\n"
+                "    category=ToolCategory.DEVELOPMENT,\n"
+                ")\n"
+                "def calendar_tools():\n"
+                "    return CalendarTools\n"
+            ),
+        },
+    )
+
+
+def test_check_plugin_derives_owned_tool_functions_without_constructing_the_toolkit(tmp_path: Path) -> None:
+    """The check derives each ``@tool`` function as an agent build does, from the class, without its constructor."""
+    plugin_root = _owned_toolkit_plugin(tmp_path / "plugin", "from datetime import date")
+
+    assert check_plugin(plugin_root).tool_names == ("calendar",)
+
+
+def test_check_plugin_rejects_a_tool_function_annotated_with_a_type_imported_only_for_type_checking(
+    tmp_path: Path,
+) -> None:
+    """An annotation that does not resolve drops the toolkit from every agent, so the check names it and fails."""
+    plugin_root = _owned_toolkit_plugin(tmp_path / "plugin", "if TYPE_CHECKING:\n    from datetime import date")
+
+    with pytest.raises(ValueError, match=r"^Tool 'calendar' cannot offer its function 'schedule': name 'date' is not"):
+        check_plugin(plugin_root)
+
+
+@pytest.mark.parametrize(
+    ("imports", "parameter"),
+    [
+        ("", "agent"),
+        ("", "team"),
+        ("", "run_context"),
+        ("from agno.agent import Agent", "owner: Agent"),
+        ("from agno.team import Team", "owner: Team"),
+        ("from agno.run import RunContext", "context: RunContext"),
+    ],
+)
+def test_check_plugin_rejects_a_tool_function_taking_what_only_agno_toolkits_are_handed(
+    tmp_path: Path,
+    imports: str,
+    parameter: str,
+) -> None:
+    """A parameter Agno would hand its agent, team, or run context drops the toolkit, so the check names it and fails."""
+    plugin_root = _owned_toolkit_plugin(
+        tmp_path / "plugin",
+        f"from datetime import date\n{imports}",
+        f"day: date, {parameter}",
+    )
+    name = parameter.partition(":")[0]
+
+    with pytest.raises(
+        ValueError,
+        match=rf"^Tool 'calendar' cannot offer its function 'schedule': .* takes {name}, which only Agno toolkits",
+    ):
+        check_plugin(plugin_root)
 
 
 def test_plugin_fleet_registry_is_sorted_and_unique() -> None:
@@ -207,32 +381,144 @@ def test_plugins_check_cli_reports_compatibility(tmp_path: Path) -> None:
     assert "Automations: none" in result.stdout
 
 
-def test_plugins_check_cli_reports_failure_without_traceback(tmp_path: Path) -> None:
-    """CI output should preserve the plugin error without a Typer traceback."""
+def test_plugins_check_cli_prints_markup_in_names_literally(tmp_path: Path) -> None:
+    """Markup and emoji codes in tool, hook, and skill names should print as is in the summary."""
     plugin_root = _write_plugin(
         tmp_path / "plugin",
-        manifest={"name": "broken-import", "hooks_module": "hooks.py"},
-        modules={"hooks.py": "raise RuntimeError('plugin exploded')\n"},
+        manifest={
+            "name": "compat-demo",
+            "tools_module": "tools.py",
+            "hooks_module": "hooks.py",
+            "skills": ["skills:100: [/x]"],
+        },
+        modules={
+            "tools.py": (
+                "from mindroom.plugin_api import ToolCategory, ToolFileAccess, Toolkit, register_tool_with_metadata\n"
+                "@register_tool_with_metadata(\n"
+                "    name='demo:100: [/x]',\n"
+                "    file_access=ToolFileAccess.NONE,\n"
+                "    display_name='Demo',\n"
+                "    description='Demo tool',\n"
+                "    category=ToolCategory.DEVELOPMENT,\n"
+                ")\n"
+                "def demo_tools():\n"
+                "    return Toolkit\n"
+            ),
+            "hooks.py": (
+                "from mindroom.plugin_api import hook\n"
+                "@hook(event='message:received', name='audit:100: [/x]')\n"
+                "async def audit_hook(ctx):\n"
+                "    del ctx\n"
+            ),
+        },
     )
+    (plugin_root / "skills:100: [/x]").mkdir(parents=True)
 
     result = runner.invoke(app, ["plugins", "check", str(plugin_root)])
 
+    assert result.exit_code == 0
+    assert "Tools:       demo:100: [/x]" in result.stdout
+    assert "Hooks:       audit:100: [/x]" in result.stdout
+    assert "Skills:      skills:100: [/x]" in result.stdout
+
+
+def test_plugins_check_cli_reports_failure_without_traceback(tmp_path: Path) -> None:
+    """CI output keeps the plugin error on one line, even with a path longer than the terminal, and has no traceback."""
+    plugin_root = _write_plugin(
+        tmp_path / ("long-directory-name-" * 5) / "plugin",
+        manifest={"name": "broken-import", "hooks_module": "hooks.py"},
+        modules={"hooks.py": "raise RuntimeError('plugin exploded: list[str]')\n"},
+    )
+
+    result = runner.invoke(app, ["plugins", "check", str(plugin_root)], env={"COLUMNS": "80"})
+
     assert result.exit_code == 1
-    assert "Plugin check failed:" in result.stdout
-    assert "plugin exploded" in result.stdout
+    assert (
+        f"Plugin check failed: Plugin hooks module execution failed for {plugin_root / 'hooks.py'}: "
+        "plugin exploded: list[str]\n"
+    ) in result.stdout
     assert "Traceback (most recent call last)" not in result.output
     assert result.exception is not None
 
 
 def test_plugins_check_cli_rejects_nonexistent_directory(tmp_path: Path) -> None:
-    """Typer should reject a missing plugin path before runtime loading."""
+    """A missing plugin path fails the check, naming the path, without a traceback."""
     missing_plugin = tmp_path / "missing-plugin"
 
     result = runner.invoke(app, ["plugins", "check", str(missing_plugin)])
 
-    assert result.exit_code == 2
-    assert "does not exist" in result.output
+    assert result.exit_code == 1
+    assert f"Configured plugin path does not exist: {missing_plugin.resolve()}" in result.stdout
     assert "Traceback (most recent call last)" not in result.output
+
+
+def test_plugins_check_cli_prints_compatibility_as_json(tmp_path: Path) -> None:
+    """`--json` prints what the text output lists as one JSON document for CI to parse."""
+    plugin_root = _valid_plugin(tmp_path / "plugin")
+
+    result = runner.invoke(app, ["plugins", "check", "--json", str(plugin_root)])
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout) == {
+        "status": "compatible",
+        "name": "compat-demo",
+        "tools": ["compat_demo_tool"],
+        "hooks": ["compat-demo-hook"],
+        "automations": [],
+        "skills": ["skills"],
+        "internal_imports": [
+            {"path": "hooks.py", "line": 1, "name": "mindroom.hooks.hook"},
+            {"path": "oauth.py", "line": 1, "name": "mindroom.oauth.OAuthProvider"},
+            {"path": "tools.py", "line": 2, "name": "mindroom.tool_system.declarations.ToolCategory"},
+            {"path": "tools.py", "line": 2, "name": "mindroom.tool_system.declarations.ToolFileAccess"},
+            {"path": "tools.py", "line": 3, "name": "mindroom.tool_system.registration.register_tool_with_metadata"},
+        ],
+    }
+
+
+def test_plugins_check_cli_prints_failure_as_json(tmp_path: Path) -> None:
+    """A failed `--json` check prints the error verbatim as JSON and exits 1, as the text mode does."""
+    plugin_root = _write_plugin(
+        tmp_path / "plugin",
+        manifest={"name": "broken-import", "hooks_module": "hooks.py"},
+        modules={"hooks.py": "raise RuntimeError('plugin exploded: list[str]')\n"},
+    )
+
+    result = runner.invoke(app, ["plugins", "check", "--json", str(plugin_root)])
+
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert set(payload) == {"status", "detail", "internal_imports"}
+    assert payload["status"] == "failed"
+    assert payload["detail"].endswith("plugin exploded: list[str]")
+
+
+def test_plugins_check_cli_json_stdout_holds_only_the_document(tmp_path: Path) -> None:
+    """Logs and what a plugin prints go to stderr, so a process piping stdout to a JSON parser reads only the result."""
+    plugin_root = _write_plugin(
+        tmp_path / "plugin",
+        manifest={"name": "chatty", "hooks_module": "hooks.py"},
+        modules={"hooks.py": "print('chatty plugin imported')\n"},
+    )
+
+    completed = subprocess.run(
+        [sys.executable, "-c", "from mindroom.cli.main import app; app()", "plugins", "check", "--json", plugin_root],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout) == {
+        "status": "compatible",
+        "name": "chatty",
+        "tools": [],
+        "hooks": [],
+        "automations": [],
+        "skills": [],
+        "internal_imports": [],
+    }
+    assert "chatty plugin imported" in completed.stderr
 
 
 def test_check_plugin_lists_automations(tmp_path: Path) -> None:

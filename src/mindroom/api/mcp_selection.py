@@ -17,10 +17,12 @@ from mindroom.api.connection_agents import (
     resolve_connection_user,
 )
 from mindroom.api.mcp_identity import resolve_gateway_connections_owner
+from mindroom.config.tool_aliases import canonical_tool_name
 from mindroom.mcp_gateway.selection import SelectionAccessDeniedError
 from mindroom.mcp_gateway.server import read_gateway_body
 from mindroom.mcp_gateway.store import GatewayOAuthCapacityError
-from mindroom.tool_system.catalog import resolved_tool_metadata_for_runtime
+from mindroom.tool_system.agent_tools import resolve_agent_tools
+from mindroom.tool_system.plugins import config_plugins
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -71,11 +73,7 @@ def _available_choices(
     previous: AgentSelections | None = None,
 ) -> AgentSelections:
     """Hide stale choices and discard them on save without accepting new unavailable tools."""
-    metadata = (
-        resolved_tool_metadata_for_runtime(context.runtime_paths, context.config, tolerate_plugin_load_errors=True)
-        if any(choices.values())
-        else {}
-    )
+    registry = config_plugins(context.config, context.runtime_paths).tools
     result: AgentSelections = {}
     for name, tools in choices.items():
         if name not in context.gateway_agent_names:
@@ -85,13 +83,19 @@ def _available_choices(
             continue
         available = {
             tool
-            for tool in context.config.resolve_entity(name).available_tools
-            if tool in metadata and not metadata[tool].requires_room_context
+            for tool in resolve_agent_tools(context.config, name, registry).tool_names
+            if registry.entries[tool].mcp_available
         }
+        if previous is not None:
+            # A newly chosen name may be a toolkit's other name; one echoed from the saved selection stays as saved.
+            saved = previous.get(name) or ()
+            chosen = tuple(tool if tool in saved else canonical_tool_name(tool) for tool in tools)
+        else:
+            chosen = tools
         previous_tools = previous.get(name, ()) if previous is not None else None
-        if previous_tools is not None and set(tools) - available - set(previous_tools):
+        if previous_tools is not None and set(chosen) - available - set(previous_tools):
             raise HTTPException(400, "Tool is not available for MCP")
-        selected = tuple(tool for tool in tools if tool in available)
+        selected = tuple(tool for tool in chosen if tool in available)
         if selected:
             result[name] = selected
     return result
@@ -121,7 +125,7 @@ async def _handle_selection(
         rebind_current_request_snapshot(request),
         owner.authenticated_user_id,
         account_id=owner.account_id,
-        membership_index=app_state(request.app).agent_reply_memberships,
+        membership_index=app_state(request.app).runtime.agent_reply_memberships,
     )
     runtime_for_request(request)
     defaults = (context.personal_agent_name,) if context.personal_agent_name is not None else ()

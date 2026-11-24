@@ -23,14 +23,6 @@ if TYPE_CHECKING:
     icon_color="text-blue-700",
     config_fields=[
         ConfigField(
-            name="connection",
-            label="Connection",
-            type="text",
-            required=False,
-            default=None,
-            description="Programmatic only: pass an existing psycopg connection object (not usable from UI).",
-        ),
-        ConfigField(
             name="host",
             label="Host",
             type="url",
@@ -74,7 +66,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["psycopg"],
-    docs_url="https://docs.agno.com/tools/toolkits/others/postgres",
+    docs_url="https://docs.mindroom.chat/tools/data-and-databases/#postgres",
     function_names=(
         "describe_table",
         "export_table_to_path",

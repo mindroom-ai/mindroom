@@ -2,6 +2,12 @@
 
 from __future__ import annotations
 
+import re
+from typing import Annotated
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+from pydantic import AfterValidator
+
 
 def duplicate_items(values: list[str]) -> list[str]:
     """Return duplicate items while preserving first duplicate order."""
@@ -12,6 +18,15 @@ def duplicate_items(values: list[str]) -> list[str]:
             duplicates.append(value)
         seen.add(value)
     return duplicates
+
+
+def validate_unique_entries(values: list[str], *, field_name: str) -> list[str]:
+    """Return ``values``, rejecting duplicates with a field-specific message."""
+    duplicates = duplicate_items(values)
+    if duplicates:
+        msg = f"Duplicate {field_name} are not allowed: {', '.join(duplicates)}"
+        raise ValueError(msg)
+    return values
 
 
 def validate_history_limit_choice(
@@ -32,3 +47,45 @@ def non_empty_stripped(value: str, *, field_name: str) -> str:
         msg = f"{field_name} must not be empty"
         raise ValueError(msg)
     return stripped
+
+
+_MATRIX_LOCALPART_PATTERN = re.compile(r"[a-z0-9._=/-]+")
+
+
+def validate_matrix_localpart(value: str, *, field_name: str) -> str:
+    """Return ``value`` when it is a localpart MindRoom may request for a Matrix account it creates."""
+    if not _MATRIX_LOCALPART_PATTERN.fullmatch(value):
+        msg = f"{field_name} must be a Matrix localpart of lowercase letters, digits, and ._=/-"
+        raise ValueError(msg)
+    return value
+
+
+def _blank_as_none(value: str | None) -> str | None:
+    """Trim an optional string and treat blank input as unset."""
+    return None if value is None else value.strip() or None
+
+
+OptionalNonBlankStr = Annotated[str | None, AfterValidator(_blank_as_none)]
+
+
+def _validate_credential_service_name(value: str) -> str:
+    # why-lazy: credentials.manager loads cryptography, which slim entry points that import this module must not.
+    from mindroom.credentials.manager import validate_service_name  # noqa: PLC0415
+
+    return validate_service_name(value)
+
+
+CredentialServiceName = Annotated[str, AfterValidator(_validate_credential_service_name)]
+
+
+def _validate_timezone_name(value: str) -> str:
+    """Return ``value`` when it names an IANA timezone, such as ``Europe/Amsterdam``."""
+    try:
+        ZoneInfo(value)
+    except (ZoneInfoNotFoundError, ValueError):
+        msg = f"Unknown timezone {value!r}; use an IANA name such as 'America/New_York'"
+        raise ValueError(msg) from None
+    return value
+
+
+TimezoneName = Annotated[str, AfterValidator(_validate_timezone_name)]

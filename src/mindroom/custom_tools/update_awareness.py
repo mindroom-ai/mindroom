@@ -12,11 +12,11 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 import httpx
-from agno.tools import Toolkit
 from packaging.version import InvalidVersion, Version
 
 from mindroom.durable_write import write_json_file_durable
 from mindroom.logging_config import get_logger
+from mindroom.tool_system.authoring import Toolkit
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -265,7 +265,6 @@ class UpdateAwarenessTools(Toolkit):
             name="update_awareness",
             tools=[self.get_mindroom_update_status],
             instructions=_release_awareness_instructions(self.status),
-            add_instructions=True,
         )
 
     def get_mindroom_update_status(self) -> str:

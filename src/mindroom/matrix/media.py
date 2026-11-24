@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import io
 from collections.abc import Mapping
 from dataclasses import dataclass
@@ -9,14 +10,17 @@ from typing import Any, TypeGuard
 from urllib.parse import urlsplit
 
 import nio
-from aiohttp import ClientResponse
+from aiohttp import ClientConnectionError, ClientResponse
 from nio import crypto
 from nio.durable.transport import HttpError, ResponseTooLarge, Transport
 from nio.http import TransportResponse
 
-from mindroom.constants import RETAINED_MEDIA_MAX_BYTES
+from mindroom.constants import MID_TURN_MODE_KEY, RETAINED_MEDIA_MAX_BYTES, SUBMISSION_CONTENT_KEY
+from mindroom.llm.media import canonical_mime_type
 from mindroom.logging_config import get_logger
 from mindroom.matrix.encrypted_file import encrypted_file_content
+from mindroom.matrix.event_info import EventInfo
+from mindroom.model_selection import THREAD_MODEL_CONTENT_KEY
 
 logger = get_logger(__name__)
 
@@ -36,7 +40,10 @@ _FILE_OR_VIDEO_MESSAGE_EVENT_TYPES = (*_FILE_MESSAGE_EVENT_TYPES, *_VIDEO_MESSAG
 _AUDIO_MESSAGE_EVENT_TYPES = (nio.RoomMessageAudio, nio.RoomEncryptedAudio)
 _MATRIX_MEDIA_DISPATCH_EVENT_TYPES = (*_IMAGE_MESSAGE_EVENT_TYPES, *_FILE_OR_VIDEO_MESSAGE_EVENT_TYPES)
 MATRIX_MEDIA_EVENT_TYPES = (*_MATRIX_MEDIA_DISPATCH_EVENT_TYPES, *_AUDIO_MESSAGE_EVENT_TYPES)
-MATRIX_MEDIA_MSGTYPES = frozenset({"m.image", "m.audio", "m.video", "m.file"})
+_MATRIX_MEDIA_MSGTYPES = frozenset({"m.image", "m.audio", "m.video", "m.file"})
+_DURABLE_UPLOAD_RETRY_SECONDS = 10.0
+# A rate limit, or a gateway that cannot reach the homeserver while it restarts.
+_DURABLE_UPLOAD_RETRY_STATUSES = frozenset({429, 502, 503, 504})
 _AVATAR_MAX_BYTES = 1024 * 1024
 _AVATAR_MIME_TYPES = frozenset({"image/png", "image/jpeg", "image/gif", "image/webp"})
 _EXIF_ORIENTATION_TAG = 274
@@ -87,13 +94,21 @@ def is_matrix_media_dispatch_event(event: object) -> TypeGuard[MatrixMediaDispat
     return is_image_message_event(event) or is_file_or_video_message_event(event)
 
 
+def is_matrix_media_msgtype(msgtype: object) -> bool:
+    """Return whether one msgtype names standard Matrix media.
+
+    Senders write msgtype, and edits install it unvalidated, so a value that is not text is never media.
+    """
+    return isinstance(msgtype, str) and msgtype in _MATRIX_MEDIA_MSGTYPES
+
+
 def is_encrypted_media_event_source(event_source: Mapping[str, Any]) -> bool:
     """Return whether one event source contains standard encrypted media."""
     content = event_source.get("content")
     return (
         event_source.get("type") == "m.room.message"
         and isinstance(content, Mapping)
-        and content.get("msgtype") in MATRIX_MEDIA_MSGTYPES
+        and is_matrix_media_msgtype(content.get("msgtype"))
         and "file" in content
     )
 
@@ -273,24 +288,59 @@ def prepare_media_upload(
     )
 
 
+def durable_session_closed(client: nio.AsyncClient) -> bool:
+    """Return whether ``client``'s durable sync session was closed, as a stopping bot's ingestion session is.
+
+    nio then refuses every request on it, so such a failure is its bot stopping. A session a failure poisoned is not
+    closed, so that failure still counts as one.
+    """
+    session = getattr(client, "_durable_session", None)
+    return session is not None and getattr(session, "_closed", False) is True
+
+
 async def upload_media_bytes(
     client: nio.AsyncClient,
     upload_bytes: bytes,
     *,
     content_type: str,
     filename: str,
+    durable: bool = False,
+    room_id: str | None = None,
 ) -> tuple[nio.UploadResponse | nio.UploadError, dict[str, object] | None]:
-    """Upload an in-memory byte payload through nio's callback-based upload API."""
+    """Upload an in-memory byte payload through nio's callback-based upload API.
+
+    A ``durable`` caller freezes what the upload produced, so a homeserver that stays unreachable or rate limiting
+    past nio's retry bound is waited out instead of failing the upload. ``room_id`` names the room in its log.
+    """
 
     def data_provider(_monitor: object, _data: object) -> io.BytesIO:
         return io.BytesIO(upload_bytes)
 
-    return await client.upload(
-        data_provider=data_provider,
-        content_type=content_type,
-        filename=filename,
-        filesize=len(upload_bytes),
-    )
+    while True:
+        try:
+            result = await client.upload(
+                data_provider=data_provider,
+                content_type=content_type,
+                filename=filename,
+                filesize=len(upload_bytes),
+            )
+        except (ClientConnectionError, TimeoutError) as error:
+            if not durable:
+                raise
+            error_type = type(error).__name__
+        else:
+            if not durable:
+                return result
+            response = result[0]
+            status = getattr(response.transport_response, "status", None)
+            if not (
+                isinstance(response, nio.UploadError)
+                and (response.status_code == "M_LIMIT_EXCEEDED" or status in _DURABLE_UPLOAD_RETRY_STATUSES)
+            ):
+                return result
+            error_type = response.status_code or f"HTTP {status}"
+        logger.warning("matrix_upload_waiting_for_homeserver", room_id=room_id, error_type=error_type)
+        await asyncio.sleep(_DURABLE_UPLOAD_RETRY_SECONDS)
 
 
 def _event_id_for_log(event: nio.RoomMessageMedia | nio.RoomEncryptedMedia) -> str | None:
@@ -332,16 +382,9 @@ def _sniff_image_mime_type(media_bytes: bytes | None) -> str | None:
     return mime_type
 
 
-def _normalize_mime_type(mime_type: str | None) -> str | None:
-    if not isinstance(mime_type, str):
-        return None
-    normalized = mime_type.split(";", 1)[0].strip().lower()
-    return normalized or None
-
-
 def resolve_image_mime_type(media_bytes: bytes | None, declared_mime_type: str | None) -> _ImageMimeResolution:
     """Resolve effective image MIME type with byte-signature fallback."""
-    normalized_declared = _normalize_mime_type(declared_mime_type)
+    normalized_declared = canonical_mime_type(declared_mime_type)
     detected_mime_type = _sniff_image_mime_type(media_bytes)
     is_mismatch = (
         detected_mime_type is not None and normalized_declared is not None and detected_mime_type != normalized_declared
@@ -367,6 +410,26 @@ def extract_media_caption(
     if isinstance(filename, str) and filename and isinstance(body, str) and body and filename != body:
         return body
     return default
+
+
+def carried_media_content(event: nio.RoomMessageMedia | nio.RoomEncryptedMedia) -> dict[str, Any]:
+    """Return what a text event rebuilt from this media event keeps of its content.
+
+    Mentions, relation, and composer metadata are carried unchanged; consumers validate them.
+    """
+    source = event.source
+    content = source.get("content") if isinstance(source, dict) else None
+    if not isinstance(content, dict):
+        return {}
+    carried = {key: content[key] for key in ("m.mentions", "m.relates_to") if isinstance(content.get(key), dict)}
+    if SUBMISSION_CONTENT_KEY in content:
+        carried[SUBMISSION_CONTENT_KEY] = content[SUBMISSION_CONTENT_KEY]
+    if MID_TURN_MODE_KEY in content:
+        carried[MID_TURN_MODE_KEY] = content[MID_TURN_MODE_KEY]
+    # A voice event rebuilt for dispatch can get a new relation; check the original.
+    if THREAD_MODEL_CONTENT_KEY in content and not EventInfo.from_event(source).is_edit:
+        carried[THREAD_MODEL_CONTENT_KEY] = content[THREAD_MODEL_CONTENT_KEY]
+    return carried
 
 
 def decrypt_media_bytes(encrypted_bytes: bytes, *, key: str, sha256: str, iv: str) -> bytes:

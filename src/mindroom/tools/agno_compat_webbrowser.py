@@ -11,7 +11,7 @@ class MindRoomWebBrowserTools(WebBrowserTools):
     """Open only http(s) URLs, so the host never hands local files or other URI schemes to their OS handlers."""
 
     # AGNO_COMPAT: WebBrowserTools hands any URI scheme to the host's URL handlers.
-    # Reason: Agno 3.0.9 passes the model's URL straight to webbrowser, which opens file: paths and
+    # Reason: Agno 3.2.1 passes the model's URL straight to webbrowser, which opens file: paths and
     # custom application schemes through xdg-open, open, or os.startfile, not only web pages.
     # Upstream issue: Tracking gap; upstream tracking has not been verified.
     # Upstream PR: None identified.

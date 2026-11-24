@@ -115,7 +115,11 @@ def for_reply(transaction: Transaction, principal_id: str, reply_id: str) -> tup
 
 
 def newest_reply_id_for_sources(transaction: Transaction, principal_id: str, event_ids: tuple[str, ...]) -> str | None:
-    """Return the newest reply with a span answering any of these pending or logical sources."""
+    """Return the newest reply whose last span answers any of these pending or logical sources.
+
+    A reply's endings settle its last span's sources, so a source only an earlier span pinned, as when a
+    retry continued the reply for part of a coalesced turn, belongs to no reply and gets its own answer.
+    """
     if not event_ids:
         return None
     placeholders = ", ".join("?" for _ in event_ids)
@@ -127,6 +131,7 @@ def newest_reply_id_for_sources(transaction: Transaction, principal_id: str, eve
           ON span.principal_id = source.principal_id AND span.span_id = source.span_id
         JOIN reply_messages AS reply
           ON reply.principal_id = span.principal_id AND reply.reply_id = span.reply_id
+          AND reply.last_span_id = span.span_id
         WHERE source.principal_id = ? AND source.role IN ('pending', 'logical')
           AND source.event_id IN ({placeholders})
         GROUP BY span.reply_id

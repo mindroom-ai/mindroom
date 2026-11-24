@@ -13,8 +13,9 @@ from googleapiclient.discovery import build
 
 from mindroom.custom_tools.google_service import ThreadLocalGoogleServiceMixin
 from mindroom.logging_config import get_logger
+from mindroom.oauth.agno_compat_google_auth import AgnoGoogleAuthBindingMixin
 from mindroom.oauth.client import ScopedOAuthClientMixin
-from mindroom.oauth.google_calendar import google_calendar_oauth_provider
+from mindroom.oauth.google import google_oauth_provider
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
@@ -25,10 +26,15 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 
-class GoogleCalendarTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin, AgnoGoogleCalendarTools):
+class GoogleCalendarTools(
+    ScopedOAuthClientMixin,
+    AgnoGoogleAuthBindingMixin,
+    ThreadLocalGoogleServiceMixin,
+    AgnoGoogleCalendarTools,
+):
     """Google Calendar tools wrapper that uses MindRoom's credential management."""
 
-    _oauth_provider = google_calendar_oauth_provider()
+    _oauth_provider = google_oauth_provider("google_calendar")
     _oauth_tool_name = "google_calendar"
 
     def __init__(
@@ -80,7 +86,7 @@ class GoogleCalendarTools(ScopedOAuthClientMixin, ThreadLocalGoogleServiceMixin,
         # Remove when: Agno accepts sufficient granular scopes during construction;
         # retain MindRoom's scope selection, credential ownership, and tool permissions.
         # Coverage: tests/test_google_calendar_oauth_tool.py::test_google_calendar_default_config_enables_write_methods;
-        # tests/test_google_calendar_oauth_tool.py::test_google_calendar_provider_uses_narrow_scopes_for_every_tool_operation.
+        # tests/test_google_oauth_providers.py::test_each_google_provider_declares_its_service_on_the_shared_google_contract.
         super().__init__(**kwargs)
         self.creds = creds
 

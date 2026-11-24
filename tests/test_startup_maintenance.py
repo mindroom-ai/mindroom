@@ -43,8 +43,8 @@ async def test_startup_maintenance_continues_after_failed_room_setup() -> None:
 
 
 @pytest.mark.asyncio
-async def test_startup_maintenance_cancel_reports_unfinished_and_replays_with_running_bots() -> None:
-    """Canceling unfinished maintenance reports replay and reuses fresh running bots."""
+async def test_paused_startup_maintenance_replays_interrupted_work_with_running_bots() -> None:
+    """A replacement that interrupts maintenance replays it with the bots running afterwards."""
     started = asyncio.Event()
     release = asyncio.Event()
 
@@ -57,48 +57,35 @@ async def test_startup_maintenance_cancel_reports_unfinished_and_replays_with_ru
         sync_runtime_support=AsyncMock(),
         mark_runtime_support_ready=AsyncMock(),
     )
-
     controller.start([MagicMock()], MagicMock())
     await asyncio.wait_for(started.wait(), timeout=1.0)
-
-    should_replay = await controller.cancel()
-
-    assert should_replay is True
-
     running_bot = MagicMock()
-
-    def running_bots() -> list[object]:
-        return [running_bot]
-
     replay_config = MagicMock()
+
     with patch.object(controller, "start") as start:
-        controller.restart_after_runtime_replacement(
-            config=replay_config,
-            running_bots=running_bots,
-        )
+        async with controller.paused(config_provider=lambda: replay_config, running_bots=lambda: [running_bot]):
+            assert controller.task is None
+            start.assert_not_called()
 
     start.assert_called_once_with([running_bot], replay_config)
     release.set()
 
 
 @pytest.mark.asyncio
-async def test_startup_maintenance_cancel_completed_task_returns_false() -> None:
-    """Canceling completed maintenance does not request replay."""
+async def test_paused_startup_maintenance_does_not_replay_finished_work() -> None:
+    """Pausing finished maintenance starts nothing afterwards."""
     controller = StartupMaintenanceController(
         setup_rooms_and_memberships=AsyncMock(),
         sync_runtime_support=AsyncMock(),
         mark_runtime_support_ready=AsyncMock(),
     )
-
     controller.start([MagicMock()], MagicMock())
     await _wait_for_controller(controller)
 
-    should_replay = await controller.cancel()
-
-    assert should_replay is False
     with patch.object(controller, "start") as start:
-        if should_replay:
-            controller.restart_after_runtime_replacement(config=MagicMock(), running_bots=lambda: [MagicMock()])
+        async with controller.paused(config_provider=MagicMock, running_bots=lambda: [MagicMock()]):
+            pass
+
     start.assert_not_called()
 
 

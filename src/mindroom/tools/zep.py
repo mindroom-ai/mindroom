@@ -39,6 +39,7 @@ if TYPE_CHECKING:
         ),
         ConfigField(
             name="api_key",
+            env=("ZEP_API_KEY",),
             label="API Key",
             type="password",
             required=False,
@@ -80,13 +81,6 @@ if TYPE_CHECKING:
             default=None,
         ),
         ConfigField(
-            name="add_instructions",
-            label="Add Instructions",
-            type="boolean",
-            required=False,
-            default=False,
-        ),
-        ConfigField(
             name="all",
             label="All",
             type="boolean",
@@ -95,7 +89,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["zep-cloud"],
-    docs_url="https://docs.agno.com/tools/toolkits/database/zep",
+    docs_url="https://docs.mindroom.chat/tools/memory-and-storage/#zep",
     function_names=("add_zep_message", "get_zep_memory", "search_zep_memory"),
 )
 def zep_tools() -> type[ZepTools]:

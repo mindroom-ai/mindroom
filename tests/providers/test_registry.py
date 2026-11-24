@@ -1,0 +1,1243 @@
+"""The provider registry: the adapter, identity, and credentials each configured model gets, inside the pipeline.
+
+Requests go through the provider ``build_model_provider`` returns, as production sends them: OpenAI-family and
+Claude routes over the shared model HTTP client, which a mock transport answers here, and Gemini and Ollama over
+the client their config injects.
+"""
+# ruff: noqa: D103
+
+from __future__ import annotations
+
+import ast
+import json
+import os
+from copy import deepcopy
+from pathlib import Path
+from typing import TYPE_CHECKING, Any, get_args
+
+import anthropic
+import httpx
+import pytest
+from anthropic.lib.credentials import StaticToken
+from google.oauth2.credentials import Credentials
+from pydantic import ValidationError
+from structlog.testing import capture_logs
+
+from mindroom.config.main import Config, iter_config_validation_messages
+from mindroom.config.models import DebugConfig, ModelConfig
+from mindroom.constants import resolve_runtime_paths
+from mindroom.credentials.manager import get_runtime_shared_credentials_manager
+from mindroom.llm.errors import MALFORMED_TOOL_CALL, MISSING_API_KEY, ModelSafeguardRefusal, ProviderError
+from mindroom.llm.media import Image
+from mindroom.llm.messages import AGGREGATE_USAGE_KEY, Message
+from mindroom.llm.provider import ModelRequest, ToolSpec, TurnCompleted, UsageReported, complete
+from mindroom.llm.request_context import bind_request_headers
+from mindroom.providers import names
+from mindroom.providers.anthropic.messages import ClaudeProvider
+from mindroom.providers.anthropic.settings import ClaudeRouteKind
+from mindroom.providers.claude_code.adapter import ClaudeCodeProvider
+from mindroom.providers.gemini.adapter import GeminiProvider
+from mindroom.providers.identity import model_identity
+from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
+from mindroom.providers.names import PROVIDER_ROUTES
+from mindroom.providers.ollama.adapter import OllamaProvider
+from mindroom.providers.openai.build import OPENAI_FAMILY_PROVIDERS
+from mindroom.providers.openai.chat import ChatAdapter
+from mindroom.providers.openai.responses import ResponsesAdapter
+from mindroom.providers.pipeline.guidance_retry import MALFORMED_FUNCTION_CALL_GUIDANCE
+from mindroom.providers.registry import build_model_provider, stream_idle_timeout_seconds
+from mindroom.providers.synthetic_adapter import SyntheticProvider
+from tests.agno_parity.golden_files import render
+from tests.providers.bare_adapter import bare_adapter, drain_into
+from tests.providers.golden_support import (
+    FIXTURE_ROOT,
+    Wire,
+    encoded_response,
+    golden_request,
+    hide_provider_environment,
+    load_golden,
+    normalized_request,
+    parsed_turn,
+    sse_response,
+)
+from tests.providers.openai_family_support import write_cli_logins
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from mindroom.constants import RuntimePaths
+    from mindroom.llm.provider import StreamEvent
+
+_GOOGLE_TOKEN = "parity-google-token"  # noqa: S105 - synthetic SDK credential
+_BAD_REQUEST = {"type": "error", "error": {"type": "invalid_request_error", "message": "bad", "code": 400}}
+_SCHEMA = {"type": "object", "properties": {"city": {"type": "string"}}}
+
+
+@pytest.fixture(autouse=True)
+def _isolated(monkeypatch: pytest.MonkeyPatch) -> None:
+    hide_provider_environment(monkeypatch)
+
+
+@pytest.fixture
+def wire(monkeypatch: pytest.MonkeyPatch) -> Wire:
+    """Answer requests sent through the shared model HTTP client, as the OpenAI-family and Claude routes send."""
+    recorder = Wire()
+    monkeypatch.setattr(MODEL_HTTP_CLIENT, "send", recorder.client.send)
+    return recorder
+
+
+@pytest.fixture
+def runtime_paths(tmp_path: Path) -> RuntimePaths:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("router:\n  model: default\n", encoding="utf-8")
+    return resolve_runtime_paths(config_path=config_path, storage_path=tmp_path / "data", process_env={})
+
+
+def _user(text: str = "Hi", **media: Any) -> Message:  # noqa: ANN401 - media fields
+    return Message(role="user", content=text, **media)
+
+
+def _texts(gemini_body: dict[str, Any]) -> list[str]:
+    return [part["text"] for content in gemini_body["contents"] for part in content["parts"] if "text" in part]
+
+
+# --- Dispatch and identity ----------------------------------------------------------------------------------
+
+
+_BEDROCK_KEYS = {"aws_region": "us-east-1", "aws_access_key": "access", "aws_secret_key": "secret"}
+# Every documented ``provider`` value, with its adapter and the provider name its runs and usage record.
+_ROUTES: dict[str, tuple[dict[str, Any], type, str]] = {
+    "anthropic": ({"provider": "anthropic", "id": "claude-sonnet-5-5"}, ClaudeProvider, "Anthropic"),
+    "bedrock_claude": (
+        {"provider": "bedrock_claude", "id": "anthropic.claude-sonnet-5-5", "extra_kwargs": _BEDROCK_KEYS},
+        ClaudeProvider,
+        "AwsBedrock",
+    ),
+    "vertexai_claude": (
+        {"provider": "vertexai_claude", "id": "claude-sonnet-5-5", "extra_kwargs": {"project_id": "p", "region": "r"}},
+        ClaudeProvider,
+        "VertexAI",
+    ),
+    "azure": ({"provider": "azure", "id": "gpt-6-astra"}, ChatAdapter, "Azure"),
+    "openai-chat-completions": (
+        {"provider": "openai", "id": "gpt-6-astra", "api": "chat_completions"},
+        ChatAdapter,
+        "OpenAI",
+    ),
+    "openai-responses": (
+        {"provider": "openai", "id": "gpt-6-astra", "api": "responses"},
+        ResponsesAdapter,
+        "OpenAI",
+    ),
+    "openai-unset-searchable": (
+        {"provider": "openai", "id": "gpt-6-astra"},
+        ResponsesAdapter,
+        "OpenAI",
+    ),
+    "openai-unset-custom-endpoint": (
+        {"provider": "openai", "id": "qwen", "extra_kwargs": {"base_url": "http://localhost:4000/v1"}},
+        ChatAdapter,
+        "OpenAI",
+    ),
+    "openai-unset-older-model": (
+        {"provider": "openai", "id": "gpt-4o"},
+        ChatAdapter,
+        "OpenAI",
+    ),
+    "openai-responses-custom-endpoint": (
+        {
+            "provider": "openai",
+            "id": "reasoning-alias",
+            "api": "responses",
+            "extra_kwargs": {"base_url": "http://x/v1"},
+        },
+        ResponsesAdapter,
+        "OpenAI",
+    ),
+    "codex": ({"provider": "codex", "id": "gpt-6.1-sol"}, ResponsesAdapter, "OpenAI Codex"),
+    "openai_codex": (
+        {"provider": "openai_codex", "id": "gpt-6.1-sol"},
+        ResponsesAdapter,
+        "OpenAI Codex",
+    ),
+    "kimi": ({"provider": "kimi", "id": "k3"}, ChatAdapter, "Kimi"),
+    "kimi_code": ({"provider": "kimi_code", "id": "k3"}, ChatAdapter, "Kimi"),
+    "google": ({"provider": "google", "id": "gemini-3.8-flash"}, GeminiProvider, "Google"),
+    "gemini": ({"provider": "gemini", "id": "gemini-3.8-flash"}, GeminiProvider, "Google"),
+    "google-vertexai": (
+        {"provider": "google", "id": "gemini-3.8-flash", "extra_kwargs": {"vertexai": True, "project_id": "p"}},
+        GeminiProvider,
+        "Google",
+    ),
+    "ollama": ({"provider": "ollama", "id": "qwen3.8:27b"}, OllamaProvider, "Ollama"),
+    "llama_cpp": ({"provider": "llama_cpp", "id": "qwen"}, ChatAdapter, "LlamaCpp"),
+    "llama_cpp-spelled-loosely": ({"provider": " Llama-CPP ", "id": "qwen"}, ChatAdapter, "LlamaCpp"),
+    "groq": ({"provider": "groq", "id": "openai/gpt-oss-120b"}, ChatAdapter, "Groq"),
+    "openrouter": ({"provider": "openrouter", "id": "z-ai/glm-5.3"}, ChatAdapter, "OpenRouter"),
+    "cerebras": ({"provider": "cerebras", "id": "gpt-oss-120b"}, ChatAdapter, "Cerebras"),
+    "deepseek": ({"provider": "deepseek", "id": "deepseek-flash"}, ChatAdapter, "DeepSeek"),
+    "zai": ({"provider": "zai", "id": "glm-5.3"}, ChatAdapter, "ZAI"),
+    "synthetic": ({"provider": "synthetic", "id": "lorem-ipsum"}, SyntheticProvider, "Synthetic"),
+    "claude_code": (
+        {"provider": "claude_code", "id": "claude-sonnet-5-5", "extra_kwargs": {"effort": "low"}},
+        ClaudeCodeProvider,
+        "Anthropic (Claude Code)",
+    ),
+}
+
+
+@pytest.mark.parametrize("route", sorted(_ROUTES))
+def test_every_documented_provider_value_gets_its_adapter_and_identity(route: str, runtime_paths: RuntimePaths) -> None:
+    """Dispatch picks the family adapter, and the identity keeps the provider strings stored runs and usage carry.
+
+    The pipeline hands callers the adapter as its own native-history route (Responses and Claude) and recorded
+    settings, and sizes a request through the adapter that renders it, so nothing has to unwrap it.
+    """
+    fields, adapter_type, provider_label = _ROUTES[route]
+    config = Config(models={"target": ModelConfig(**fields)})
+
+    provider = build_model_provider(config, runtime_paths, "target")
+
+    adapter = bare_adapter(provider)
+    assert type(adapter) is adapter_type
+    assert provider.identity.provider == provider_label
+    # Pricing reads the same identity from the config alone.
+    assert provider.identity == model_identity(config.models["target"], endpoint=provider.identity.endpoint)
+    assert (provider.identity, provider.capabilities) == (adapter.identity, adapter.capabilities)
+    native_history = adapter if adapter_type in {ResponsesAdapter, ClaudeProvider} else None
+    assert provider.native_history_route is native_history
+    request = ModelRequest(messages=(Message(role="user", content="How large is this request?"),))
+    assert provider.request_tokens(request) == adapter.request_tokens(request) > 0
+    assert provider.request_tokens(request, start=1) == adapter.request_tokens(request, start=1)
+    assert provider.model_params == adapter.model_params
+
+
+@pytest.mark.parametrize(
+    ("fields", "expected"),
+    [
+        ({"provider": "ollama", "id": "llava", "host": "http://gpu.local:11434/"}, "http://gpu.local:11434"),
+        (
+            {
+                "provider": "ollama",
+                "id": "llava",
+                "host": "http://gpu.local:11434",
+                "extra_kwargs": {"client_params": {"host": "http://cpu.local:11434"}},
+            },
+            "http://cpu.local:11434",
+        ),
+        (
+            {
+                "provider": "anthropic",
+                "id": "claude-sonnet-5-5",
+                "extra_kwargs": {"client_params": {"base_url": "https://claude-proxy.example/"}},
+            },
+            "https://claude-proxy.example",
+        ),
+    ],
+)
+def test_the_identity_names_the_server_a_route_reaches(
+    fields: dict[str, Any],
+    expected: str,
+    runtime_paths: RuntimePaths,
+) -> None:
+    """Media limits learned from one server's rejections stay with that server, as main kept them per endpoint."""
+    provider = build_model_provider(Config(models={"target": ModelConfig(**fields)}), runtime_paths, "target")
+
+    assert provider.identity.endpoint == expected
+
+
+def test_model_params_record_the_route_settings_without_credentials_or_clients(runtime_paths: RuntimePaths) -> None:
+    """Run metadata and the request log get copies of a route's request settings, never its keys, headers, or clients."""
+    extra_kwargs = {
+        "api_key": "test-key",
+        "default_headers": {"x-team": "a"},
+        "client_params": {"http_client": Wire().client},
+        "metadata": {"team": "a"},
+        "temperature": 0.3,
+    }
+    model = ModelConfig(provider="openai", id="gpt-6-astra", api="chat_completions", extra_kwargs=extra_kwargs)
+
+    provider = build_model_provider(Config(models={"target": model}), runtime_paths, "target")
+
+    params = provider.model_params
+    assert params == {
+        "metadata": {"team": "a"},
+        "temperature": 0.3,
+        "strict_output": True,
+        "cache_system_prompt": True,
+        "extended_cache_time": True,
+        "use_thinking": True,
+    }
+    params["metadata"]["team"] = "b"
+    assert provider.model_params["metadata"] == {"team": "a"}
+
+
+def test_unknown_models_are_rejected(runtime_paths: RuntimePaths) -> None:
+    config = Config(models={"b": ModelConfig(provider="openai", id="m"), "a": ModelConfig(provider="openai", id="m")})
+
+    with pytest.raises(ValueError, match=r"^Unknown model: missing\. Available models: a, b$"):
+        build_model_provider(config, runtime_paths, "missing")
+
+
+def test_config_load_rejects_an_unknown_provider_at_its_model() -> None:
+    """A misspelled provider fails config load, naming the model and the providers to choose from."""
+    with pytest.raises(ValidationError) as info:
+        Config.model_validate({"models": {"default": {"provider": "opneai", "id": "gpt-6-astra"}}})
+
+    assert iter_config_validation_messages(info.value) == [
+        (
+            "models → default → provider",
+            "Unknown provider 'opneai': use one of anthropic, azure, bedrock_claude, cerebras, claude_code, codex, "
+            "deepseek, google, groq, kimi, llama_cpp, ollama, openai, openrouter, synthetic, vertexai_claude, zai",
+        ),
+    ]
+
+
+@pytest.mark.parametrize("name", ["gpt-6.1", "my model", "team/sol", ""])
+def test_config_load_rejects_an_empty_model_name_or_one_its_dashboard_key_cannot_carry(name: str) -> None:
+    """A model's name names its dashboard key, so config load rejects an empty name or a character it cannot carry."""
+    synthetic = {"provider": "synthetic", "id": "lorem-ipsum"}
+
+    with pytest.raises(ValidationError) as info:
+        Config.model_validate({"models": {"default": synthetic, name: synthetic}})
+
+    assert iter_config_validation_messages(info.value) == [
+        (
+            "models",
+            "Model names can only include letters, numbers, colon, underscore, and hyphen; "
+            f"rename models.{name} and update every reference",
+        ),
+    ]
+
+
+@pytest.mark.parametrize("name", ["gpt-6-1", "Sol_2", "openrouter:sol"])
+def test_every_model_name_config_load_accepts_builds(name: str, runtime_paths: RuntimePaths) -> None:
+    config = Config.model_validate({"models": {name: {"provider": "synthetic", "id": "lorem-ipsum"}}})
+
+    assert build_model_provider(config, runtime_paths, name).identity.id == "lorem-ipsum"
+
+
+def test_config_accepts_exactly_the_providers_the_registry_builds() -> None:
+    claude_routes = frozenset(get_args(ClaudeRouteKind.__value__))
+
+    assert OPENAI_FAMILY_PROVIDERS | claude_routes | {"claude_code", "google", "ollama", "synthetic"} == PROVIDER_ROUTES
+
+
+def test_the_dashboard_provider_fixture_lists_exactly_the_values_config_load_accepts() -> None:
+    """The dashboard tests pin its provider list to this fixture, so the dashboard offers no provider config rejects."""
+    fixture_path = (
+        Path(__file__).resolve().parents[2] / "frontend" / "src" / "test" / "fixtures" / "modelProviders.json"
+    )
+
+    assert json.loads(fixture_path.read_text(encoding="utf-8")) == sorted(
+        PROVIDER_ROUTES | set(names._PROVIDER_ALIASES),
+    )
+
+
+@pytest.mark.parametrize(
+    ("configured_id", "endpoint_id"),
+    [
+        ("gpt-6-astra", "gpt-6-astra"),
+        ("openai-codex/gpt-6-astra", "gpt-6-astra"),
+        ("gpt-5.6", "gpt-5.6-sol"),
+        ("openai-codex/gpt-5.6", "gpt-5.6-sol"),
+        ("gpt-5.6-sol", "gpt-5.6-sol"),
+        ("openai-codex/gpt-5.6-terra", "gpt-5.6-terra"),
+        ("gpt-5.4", "gpt-5.4"),
+    ],
+)
+def test_codex_model_ids_resolve_to_the_endpoint_slug(configured_id: str, endpoint_id: str) -> None:
+    """The plugin-style prefix is dropped and the public GPT-5.6 alias resolves to the slug Codex accepts."""
+    assert model_identity(ModelConfig(provider="codex", id=configured_id)).id == endpoint_id
+
+
+@pytest.mark.parametrize(
+    ("configured_id", "endpoint_id"),
+    [("k3", "k3"), ("kimi-code/k3", "k3"), ("k3-256k", "k3-256k"), ("kimi-code/kimi-for-coding", "kimi-for-coding")],
+)
+def test_kimi_model_ids_drop_the_cli_prefix(configured_id: str, endpoint_id: str) -> None:
+    """The kimi-code/ prefix from CLI config model names resolves to the bare slug."""
+    assert model_identity(ModelConfig(provider="kimi", id=configured_id)).id == endpoint_id
+
+
+@pytest.mark.parametrize(
+    ("provider", "configured_id", "endpoint_id"),
+    [("codex", "openai-codex/gpt-6.1-sol", "gpt-6.1-sol"), ("kimi", "kimi-code/k3", "k3")],
+)
+def test_a_cli_style_model_id_gets_the_capabilities_of_the_model_it_names(
+    runtime_paths: RuntimePaths,
+    provider: str,
+    configured_id: str,
+    endpoint_id: str,
+) -> None:
+    """Capabilities follow the id the route sends, so a CLI-config prefix changes none of them."""
+    config = Config(
+        models={
+            "prefixed": ModelConfig(provider=provider, id=configured_id),
+            "bare": ModelConfig(provider=provider, id=endpoint_id),
+        },
+    )
+
+    prefixed = build_model_provider(config, runtime_paths, "prefixed").capabilities
+    assert prefixed == build_model_provider(config, runtime_paths, "bare").capabilities
+
+
+def test_the_model_in_use_is_logged_with_its_effective_id(runtime_paths: RuntimePaths) -> None:
+    config = Config(models={"default": ModelConfig(provider="codex", id="openai-codex/gpt-6.1-sol")})
+
+    with capture_logs() as logs:
+        provider = build_model_provider(config, runtime_paths)
+
+    assert [entry for entry in logs if entry["event"] == "Using AI model"] == [
+        {
+            "event": "Using AI model",
+            "log_level": "info",
+            "model": "default",
+            "provider": "codex",
+            "configured_id": "openai-codex/gpt-6.1-sol",
+            "effective_id": "gpt-6.1-sol",
+        },
+    ]
+    assert provider.identity.id == "gpt-6.1-sol"
+
+
+# --- Stream idle limit -----------------------------------------------------------------------------------
+
+
+def test_stream_idle_limit_policy(tmp_path: Path) -> None:
+    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "data", process_env={})
+    with_base_url = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "data",
+        process_env={"OPENAI_BASE_URL": "http://localhost:4000/v1"},
+    )
+    with_vertex_base_url = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "data",
+        process_env={"ANTHROPIC_VERTEX_BASE_URL": "https://vertex.proxy.example/v1"},
+    )
+    hosted = ModelConfig(provider="openai", id="gpt-6-astra")
+    assert stream_idle_timeout_seconds(hosted, with_vertex_base_url) == 300.0
+    vertex = ModelConfig(provider="vertexai_claude", id="claude-sonnet-5-5")
+    assert stream_idle_timeout_seconds(vertex, with_base_url) == 300.0
+    assert stream_idle_timeout_seconds(ModelConfig(provider="llama_cpp", id="m"), paths) is None
+    assert (
+        stream_idle_timeout_seconds(ModelConfig(provider="zai", id="m", extra_kwargs={"base_url": "http://x"}), paths)
+        is None
+    )
+    assert (
+        stream_idle_timeout_seconds(ModelConfig(provider="openai", id="m", stream_idle_timeout_seconds=0), paths)
+        is None
+    )
+    assert (
+        stream_idle_timeout_seconds(ModelConfig(provider="groq", id="m", stream_idle_timeout_seconds=12), paths) == 12
+    )
+
+
+_VERTEX_CREDENTIALS = {"credentials": Credentials(token="registry-google-token")}  # noqa: S106 - synthetic credential
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("fields", "variable", "endpoint"),
+    [
+        (
+            {"provider": "openai", "api": "chat_completions", "id": "gpt-6-astra"},
+            "OPENAI_BASE_URL",
+            "https://proxy.test/v1",
+        ),
+        ({"provider": "openai", "api": "responses", "id": "gpt-6-astra"}, "OPENAI_BASE_URL", "https://proxy.test/v1"),
+        ({"provider": "groq", "id": "openai/gpt-oss-120b"}, "GROQ_BASE_URL", "https://proxy.test"),
+        ({"provider": "cerebras", "id": "gpt-oss-120b"}, "CEREBRAS_BASE_URL", "https://proxy.test"),
+        ({"provider": "anthropic", "id": "claude-sonnet-5-5"}, "ANTHROPIC_BASE_URL", "https://proxy.test"),
+        (
+            {
+                "provider": "vertexai_claude",
+                "id": "claude-sonnet-5-5",
+                "extra_kwargs": {"project_id": "p", "region": "us-east5", "client_params": _VERTEX_CREDENTIALS},
+            },
+            "ANTHROPIC_VERTEX_BASE_URL",
+            "https://proxy.test/v1",
+        ),
+    ],
+    ids=["openai-chat", "openai-responses", "groq", "cerebras", "anthropic", "vertexai_claude"],
+)
+@pytest.mark.parametrize("source", ["process", "env-file-under-blank-export"])
+async def test_an_endpoint_the_runtime_env_sets_has_no_idle_limit_by_default(
+    fields: dict[str, Any],
+    variable: str,
+    endpoint: str,
+    source: str,
+    tmp_path: Path,
+    wire: Wire,
+) -> None:
+    """The endpoint variable a route sends its requests to lifts the hosted idle limit, as a ``base_url`` does.
+
+    A blank export of the variable is unset, so the ``.env`` value under it is the endpoint for both.
+    """
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("router:\n  model: default\n", encoding="utf-8")
+    hosted = resolve_runtime_paths(config_path=config_path, storage_path=tmp_path / "data", process_env={})
+    if source == "process":
+        process_env = {variable: endpoint}
+    else:
+        (tmp_path / ".env").write_text(f"{variable}={endpoint}\n", encoding="utf-8")
+        process_env = {variable: ""}
+    proxied = resolve_runtime_paths(config_path=config_path, storage_path=tmp_path / "data", process_env=process_env)
+    model_config = ModelConfig(**fields, api_key=None if fields["provider"] == "vertexai_claude" else "k")
+    wire.replies.append(httpx.Response(400, json=_BAD_REQUEST))
+
+    provider = build_model_provider(Config(models={"default": model_config}), proxied)
+
+    with pytest.raises(ProviderError):
+        await complete(provider, ModelRequest(messages=[_user()]))
+
+    assert str(wire.requests[0].url).startswith(endpoint)
+    assert stream_idle_timeout_seconds(model_config, hosted) == 300.0
+    assert stream_idle_timeout_seconds(model_config, proxied) is None
+
+
+# --- Credentials --------------------------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("model_fields", "dashboard_key", "expected_key"),
+    [
+        ({}, None, "sk-shared"),
+        ({"api_key": " sk-config "}, None, "sk-config"),
+        ({"extra_kwargs": {"api_key": " sk-config "}}, None, "sk-config"),
+        ({"api_key": "  ", "extra_kwargs": {"api_key": ""}}, None, "sk-shared"),
+        ({"api_key": "sk-config"}, "sk-dashboard", "sk-dashboard"),
+        ({"extra_kwargs": {"api_key": "sk-config"}}, "sk-dashboard", "sk-dashboard"),
+    ],
+    ids=[
+        "shared",
+        "api-key",
+        "extra-kwargs-api-key",
+        "blank-is-unset",
+        "dashboard-beats-api-key",
+        "dashboard-beats-extra",
+    ],
+)
+async def test_api_key_precedence(
+    model_fields: dict[str, Any],
+    dashboard_key: str | None,
+    expected_key: str,
+    runtime_paths: RuntimePaths,
+    wire: Wire,
+) -> None:
+    """The key the dashboard saved for the model beats a configured key, which beats the provider's shared key."""
+    credentials = get_runtime_shared_credentials_manager(runtime_paths)
+    credentials.save_credentials("openai", {"api_key": "sk-shared"})
+    if dashboard_key is not None:
+        credentials.save_credentials("model:target", {"api_key": dashboard_key})
+    config = Config(models={"target": ModelConfig(provider="openai", api="chat_completions", id="m", **model_fields)})
+    wire.replies.append(httpx.Response(400, json=_BAD_REQUEST))
+
+    with pytest.raises(ProviderError):
+        await complete(build_model_provider(config, runtime_paths, "target"), ModelRequest(messages=[_user()]))
+
+    assert wire.requests[0].headers["authorization"] == f"Bearer {expected_key}"
+
+
+# The header each keyed family sends its key in, and how it formats it.
+_KEY_HEADERS: dict[str, tuple[dict[str, Any], str, str]] = {
+    "anthropic": ({"provider": "anthropic", "id": "claude-sonnet-5-5"}, "x-api-key", "{key}"),
+    "azure": (
+        {"provider": "azure", "id": "gpt-6-astra", "extra_kwargs": {"azure_endpoint": "https://r.openai.azure.com"}},
+        "api-key",
+        "{key}",
+    ),
+    "google": ({"provider": "google", "id": "gemini-3.8-flash"}, "x-goog-api-key", "{key}"),
+    "ollama": (
+        {"provider": "ollama", "id": "qwen3.8:27b", "host": "http://ollama.test:11434"},
+        "authorization",
+        "Bearer {key}",
+    ),
+    "openai-responses": (
+        {"provider": "openai", "api": "responses", "id": "gpt-6-astra"},
+        "authorization",
+        "Bearer {key}",
+    ),
+    "openrouter": ({"provider": "openrouter", "id": "z-ai/glm-5.3"}, "authorization", "Bearer {key}"),
+}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("family", sorted(_KEY_HEADERS))
+async def test_the_dashboard_key_reaches_every_keyed_family(
+    family: str,
+    runtime_paths: RuntimePaths,
+    wire: Wire,
+) -> None:
+    """A key the dashboard saved for the model reaches the wire on every family that sends one."""
+    fields, header, template = _KEY_HEADERS[family]
+    fields = deepcopy(fields)
+    extra_kwargs = fields.setdefault("extra_kwargs", {})
+    if family == "google":
+        extra_kwargs["client_params"] = {
+            "http_options": {"httpx_async_client": httpx.AsyncClient(transport=wire.transport)},
+        }
+    if family == "ollama":
+        extra_kwargs["client_params"] = {"transport": wire.transport}
+    credentials = get_runtime_shared_credentials_manager(runtime_paths)
+    credentials.save_credentials(family.split("-", maxsplit=1)[0], {"api_key": "sk-shared"})
+    credentials.save_credentials("model:target", {"api_key": "sk-dashboard"})
+    config = Config(models={"target": ModelConfig(api_key="sk-config", **fields)})
+    wire.replies.append(httpx.Response(400, json=_BAD_REQUEST))
+
+    with pytest.raises(ProviderError):
+        await complete(build_model_provider(config, runtime_paths, "target"), ModelRequest(messages=[_user()]))
+
+    assert wire.requests[0].headers[header] == template.format(key="sk-dashboard")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"provider": "openrouter", "id": "z-ai/glm-5.3"},
+        {"provider": "zai", "id": "glm-5.3"},
+        {"provider": "llama_cpp", "id": "qwen"},
+        {"provider": "ollama", "id": "qwen3.8:27b", "host": "http://ollama.test:11434"},
+    ],
+    ids=lambda fields: fields["provider"],
+)
+async def test_a_configured_key_beats_the_shared_key_on_routes_with_their_own_key_rules(
+    fields: dict[str, Any],
+    runtime_paths: RuntimePaths,
+    wire: Wire,
+) -> None:
+    get_runtime_shared_credentials_manager(runtime_paths).save_credentials(fields["provider"], {"api_key": "sk-shared"})
+    extra_kwargs = {"client_params": {"transport": wire.transport}} if fields["provider"] == "ollama" else {}
+    config = Config(models={"target": ModelConfig(api_key="sk-config", extra_kwargs=extra_kwargs, **fields)})
+    wire.replies.append(httpx.Response(400, json=_BAD_REQUEST))
+
+    with pytest.raises(ProviderError):
+        await complete(build_model_provider(config, runtime_paths, "target"), ModelRequest(messages=[_user()]))
+
+    assert wire.requests[0].headers["authorization"] == "Bearer sk-config"
+
+
+@pytest.mark.asyncio
+async def test_a_llama_cpp_model_without_its_own_key_never_sends_a_shared_one(
+    runtime_paths: RuntimePaths,
+    wire: Wire,
+) -> None:
+    """A local llama.cpp server gets the keyless placeholder, even with a key saved under its provider name."""
+    get_runtime_shared_credentials_manager(runtime_paths).save_credentials("llama_cpp", {"api_key": "sk-shared"})
+    config = Config(models={"target": ModelConfig(provider="llama_cpp", id="qwen")})
+    wire.replies.append(httpx.Response(400, json=_BAD_REQUEST))
+
+    with pytest.raises(ProviderError):
+        await complete(build_model_provider(config, runtime_paths, "target"), ModelRequest(messages=[_user()]))
+
+    assert wire.requests[0].headers["authorization"] == "Bearer not-provided"
+
+
+@pytest.mark.asyncio
+async def test_a_model_with_an_auth_token_never_sends_the_shared_key(runtime_paths: RuntimePaths, wire: Wire) -> None:
+    get_runtime_shared_credentials_manager(runtime_paths).save_credentials("anthropic", {"api_key": "sk-shared"})
+    model_config = ModelConfig(provider="anthropic", id="claude-sonnet-5-5", extra_kwargs={"auth_token": "tok"})
+    wire.replies.append(httpx.Response(400, json=_BAD_REQUEST))
+
+    with pytest.raises(ProviderError):
+        await complete(
+            build_model_provider(Config(models={"target": model_config}), runtime_paths, "target"),
+            ModelRequest(messages=[_user()]),
+        )
+
+    assert wire.requests[0].headers["authorization"] == "Bearer tok"
+    assert "x-api-key" not in wire.requests[0].headers
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("extra_kwargs", "custom_headers", "bound", "sent"),
+    [
+        ({}, None, {}, {"x-api-key": "sk-shared"}),
+        ({"default_headers": {"X-Api-Key": "gw"}}, None, {}, {"x-api-key": "gw"}),
+        ({}, "X-Api-Key: gw", {}, {"x-api-key": "gw"}),
+        ({}, None, {"x-api-key": "gw"}, {"x-api-key": "gw"}),
+        ({"auth_token": "tok"}, None, {"X-Api-Key": "gw"}, {"authorization": "Bearer tok", "x-api-key": "gw"}),
+        (
+            {"api_key": "sk-own", "default_headers": {"Authorization": "Bearer gwt"}},
+            None,
+            {},
+            {"authorization": "Bearer gwt", "x-api-key": "sk-own"},
+        ),
+        (
+            {"auth_token": "tok", "client_params": {"api_key": "sk-own"}},
+            None,
+            {},
+            {"authorization": "Bearer tok", "x-api-key": "sk-own"},
+        ),
+    ],
+    ids=[
+        "shared-key",
+        "config-gateway",
+        "env-gateway",
+        "callback-gateway",
+        "token-and-callback",
+        "key-and-header",
+        "both",
+    ],
+)
+async def test_a_claude_key_goes_out_as_x_api_key_which_a_gateway_key_replaces(
+    runtime_paths: RuntimePaths,
+    wire: Wire,
+    monkeypatch: pytest.MonkeyPatch,
+    extra_kwargs: dict[str, Any],
+    custom_headers: str | None,
+    bound: dict[str, str],
+    sent: dict[str, str],
+) -> None:
+    """The direct route sends its key in ``X-Api-Key``, as SDK 1 did, and never the process env's credentials."""
+    get_runtime_shared_credentials_manager(runtime_paths).save_credentials("anthropic", {"api_key": "sk-shared"})
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-process")
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "tok-process")
+    _forbid_client_copies(monkeypatch, anthropic.AsyncAnthropic)
+    if custom_headers is not None:
+        monkeypatch.setenv("ANTHROPIC_CUSTOM_HEADERS", custom_headers)
+    model_config = ModelConfig(provider="anthropic", id="claude-sonnet-5-5", extra_kwargs=extra_kwargs)
+    wire.replies.append(httpx.Response(400, json=_BAD_REQUEST))
+
+    with bind_request_headers(lambda: bound), pytest.raises(ProviderError):
+        await complete(
+            build_model_provider(Config(models={"target": model_config}), runtime_paths, "target"),
+            ModelRequest(messages=[_user()]),
+        )
+
+    headers = wire.requests[0].headers
+    assert {name: headers[name] for name in ("authorization", "x-api-key") if name in headers} == sent
+
+
+def _forbid_client_copies(monkeypatch: pytest.MonkeyPatch, client_class: type) -> None:
+    """Fail a copy of the client, which would rediscover the SDK's own credential beside the moved key."""
+
+    def copy(*_args: object, **_kwargs: object) -> None:
+        msg = "an adapted Claude client must not be copied"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(client_class, "copy", copy)
+    monkeypatch.setattr(client_class, "with_options", copy)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("environment", "client_params", "sent"),
+    [
+        ({"ANTHROPIC_AUTH_TOKEN": "tok-env"}, {}, {"authorization": "Bearer tok-env"}),
+        ({"ANTHROPIC_API_KEY": "sk-env"}, {}, {"x-api-key": "sk-env"}),
+        (
+            {"ANTHROPIC_API_KEY": "sk-env", "ANTHROPIC_AUTH_TOKEN": "tok-env"},
+            {},
+            {"authorization": "Bearer tok-env", "x-api-key": "sk-env"},
+        ),
+        ({}, {}, None),
+        ({}, {"auth_token": "tok", "credentials": StaticToken("tok-provider")}, {"authorization": "Bearer tok"}),
+    ],
+    ids=["env-token", "env-key", "env-key-and-token", "no-credential", "token-beside-provider"],
+)
+async def test_a_claude_model_without_a_resolved_key_authenticates_as_its_sdk_would(
+    runtime_paths: RuntimePaths,
+    wire: Wire,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    environment: dict[str, str],
+    client_params: dict[str, Any],
+    sent: dict[str, str] | None,
+) -> None:
+    """The SDK finds an ambient credential itself, an env key goes out as ``X-Api-Key``, and a token beats a provider."""
+    for name in [name for name in os.environ if name.startswith("ANTHROPIC_")]:
+        monkeypatch.delenv(name)
+    monkeypatch.setenv("HOME", str(tmp_path / "home"))  # no SDK profile to discover
+    for name, value in environment.items():
+        monkeypatch.setenv(name, value)
+    extra_kwargs = {"client_params": client_params}
+    model_config = ModelConfig(provider="anthropic", id="claude-sonnet-5-5", extra_kwargs=extra_kwargs)
+    wire.replies.append(httpx.Response(400, json=_BAD_REQUEST))
+
+    with pytest.raises(ProviderError) as raised:
+        await complete(
+            build_model_provider(Config(models={"target": model_config}), runtime_paths, "target"),
+            ModelRequest(messages=[_user()]),
+        )
+
+    if sent is None:
+        assert (raised.value.code, wire.requests) == (MISSING_API_KEY, [])
+        return
+    headers = wire.requests[0].headers
+    assert {name: headers[name] for name in ("authorization", "x-api-key") if name in headers} == sent
+
+
+@pytest.mark.asyncio
+async def test_a_blank_openai_compatible_key_never_falls_back_to_the_shared_one(
+    runtime_paths: RuntimePaths,
+    wire: Wire,
+) -> None:
+    """A custom endpoint's explicitly empty ``client_params.api_key`` keeps the shared OpenAI key local."""
+    get_runtime_shared_credentials_manager(runtime_paths).save_credentials("openai", {"api_key": "sk-shared"})
+    extra_kwargs = {"base_url": "https://llm.example/v1", "client_params": {"api_key": ""}}
+    model_config = ModelConfig(provider="openai", id="gpt-6-luna", extra_kwargs=extra_kwargs)
+    wire.replies.append(httpx.Response(400, json=_BAD_REQUEST))
+
+    with pytest.raises(ProviderError):
+        await complete(
+            build_model_provider(Config(models={"target": model_config}), runtime_paths, "target"),
+            ModelRequest(messages=[_user()]),
+        )
+
+    assert wire.requests == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("shared_key_in", ["credentials", "environment"])
+async def test_an_azure_model_with_an_ad_token_never_sends_the_shared_key(
+    runtime_paths: RuntimePaths,
+    wire: Wire,
+    tmp_path: Path,
+    shared_key_in: str,
+) -> None:
+    """An Azure model that authenticates with an Entra ID token needs no key, so the shared one stays local."""
+    if shared_key_in == "credentials":
+        get_runtime_shared_credentials_manager(runtime_paths).save_credentials("azure", {"api_key": "sk-shared"})
+    else:
+        runtime_paths = resolve_runtime_paths(
+            config_path=runtime_paths.config_path,
+            storage_path=tmp_path / "data",
+            process_env={"AZURE_OPENAI_API_KEY": "sk-shared"},
+        )
+    extra_kwargs = {"azure_ad_token": "entra-token", "azure_endpoint": "https://test.openai.azure.com"}
+    model_config = ModelConfig(
+        provider="azure",
+        id="gpt-6-astra",
+        extra_kwargs={**extra_kwargs, "azure_deployment": "d"},
+    )
+    wire.replies.append(httpx.Response(400, json={"error": {"message": "bad", "type": "invalid_request_error"}}))
+
+    with pytest.raises(ProviderError):
+        await complete(
+            build_model_provider(Config(models={"target": model_config}), runtime_paths, "target"),
+            ModelRequest(messages=[_user()]),
+        )
+
+    assert wire.requests[0].headers["authorization"] == "Bearer entra-token"
+    assert "api-key" not in wire.requests[0].headers
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("provider", ["codex", "kimi", "vertexai_claude", "bedrock_claude"])
+async def test_routes_without_api_keys_never_send_a_configured_one(
+    provider: str,
+    runtime_paths: RuntimePaths,
+    wire: Wire,
+    tmp_path: Path,
+) -> None:
+    """CLI-login, Google Cloud, and AWS routes authenticate their own way, so a stray configured key stays local."""
+    logins = write_cli_logins(tmp_path)
+    fields: dict[str, dict[str, Any]] = {
+        "codex": {"id": "gpt-6.1-sol", "extra_kwargs": {"codex_home": logins["<codex_home>"]}},
+        "kimi": {"id": "k3", "extra_kwargs": {"kimi_home": logins["<kimi_home>"]}},
+        "vertexai_claude": {
+            "id": "claude-sonnet-5-5",
+            "extra_kwargs": {
+                "project_id": "p",
+                "region": "us-east5",
+                "client_params": {"credentials": Credentials(token=_GOOGLE_TOKEN)},
+            },
+        },
+        "bedrock_claude": {"id": "anthropic.claude-sonnet-5-5", "extra_kwargs": _BEDROCK_KEYS},
+    }
+    model_config = ModelConfig(provider=provider, api_key="sk-config", **fields[provider])
+    wire.replies.append(httpx.Response(400, json=_BAD_REQUEST))
+
+    with pytest.raises(ProviderError):
+        await complete(
+            build_model_provider(Config(models={"target": model_config}), runtime_paths, "target"),
+            ModelRequest(messages=[_user()]),
+        )
+
+    assert all("sk-config" not in value for value in wire.requests[0].headers.values())
+
+
+# --- Reasoning levels on the wire ---------------------------------------------------------------------------
+
+
+_LEVELS = {"levels": ["low", "high"], "default": "low"}
+
+
+@pytest.mark.parametrize(("reference", "level"), [("target", "low"), ("target@high", "high")])
+def test_claude_code_reasoning_level_overrides_authored_effort(
+    runtime_paths: RuntimePaths,
+    reference: str,
+    level: str,
+) -> None:
+    """Claude Code uses the selected reasoning level, not an authored effort for the same model."""
+    model = ModelConfig(provider="claude_code", id="m", reasoning=_LEVELS, extra_kwargs={"effort": "max"})
+    provider = build_model_provider(Config(models={"target": model}), runtime_paths, reference)
+
+    assert provider.model_params["effort"] == level
+
+
+@pytest.mark.parametrize("level", ["off", "minimal"])
+def test_claude_code_rejects_unavailable_reasoning_levels(runtime_paths: RuntimePaths, level: str) -> None:
+    """A configured level Claude Code cannot represent fails instead of silently choosing another effort."""
+    model = ModelConfig(provider="claude_code", id="m", reasoning={"levels": [level], "default": level})
+
+    with pytest.raises(ValueError, match=rf"provider claude_code has no {level} level"):
+        build_model_provider(Config(models={"target": model}), runtime_paths, "target")
+
+
+def _sends(body: Any, expected: Any) -> bool:  # noqa: ANN401 - JSON values
+    """Return whether ``body`` carries every value of ``expected``, recursing into objects."""
+    if isinstance(expected, dict):
+        return isinstance(body, dict) and all(
+            key in body and _sends(body[key], value) for key, value in expected.items()
+        )
+    return body == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("provider", "expected"),
+    [
+        ("codex", lambda level: {"reasoning": {"effort": level, "summary": "auto"}}),
+        ("openrouter", lambda level: {"reasoning_effort": level}),
+        ("anthropic", lambda level: {"output_config": {"effort": level}}),
+        ("google", lambda level: {"generationConfig": {"thinkingConfig": {"thinking_level": level.upper()}}}),
+    ],
+    ids=["codex", "openrouter", "anthropic", "google"],
+)
+async def test_a_model_reference_at_a_level_sends_that_level(
+    provider: str,
+    expected: Callable[[str], dict[str, Any]],
+    runtime_paths: RuntimePaths,
+    wire: Wire,
+    tmp_path: Path,
+) -> None:
+    """``name@level`` sends the level the route reads, where plain ``name`` sends the default."""
+    extra_kwargs: dict[str, Any] = {
+        "codex": {"codex_home": write_cli_logins(tmp_path)["<codex_home>"]},
+        "google": {
+            "client_params": {"http_options": {"httpx_async_client": httpx.AsyncClient(transport=wire.transport)}},
+        },
+    }.get(provider, {})
+    model = ModelConfig(provider=provider, id="m", api_key="sk-config", reasoning=_LEVELS, extra_kwargs=extra_kwargs)
+    config = Config(models={"target": model})
+    wire.replies.append(httpx.Response(400, json=_BAD_REQUEST))
+
+    for reference in ("target", "target@high"):
+        with pytest.raises(ProviderError):
+            await complete(build_model_provider(config, runtime_paths, reference), ModelRequest(messages=[_user()]))
+
+    assert _sends(wire.body(0), expected("low")), wire.body(0)
+    assert _sends(wire.body(1), expected("high")), wire.body(1)
+
+
+@pytest.mark.asyncio
+async def test_claude_off_sends_disabled_thinking_without_an_effort(runtime_paths: RuntimePaths, wire: Wire) -> None:
+    levels = {"levels": ["off", "high"], "default": "high"}
+    authored = {"output_config": {"effort": "xhigh"}}
+    model = ModelConfig(provider="anthropic", id="m", api_key="sk-config", reasoning=levels, extra_kwargs=authored)
+    wire.replies.append(httpx.Response(400, json=_BAD_REQUEST))
+
+    with pytest.raises(ProviderError):
+        await complete(
+            build_model_provider(Config(models={"target": model}), runtime_paths, "target@off"),
+            ModelRequest(messages=[_user()]),
+        )
+
+    assert _sends(wire.body(), {"thinking": {"type": "disabled"}}), wire.body()
+    assert "output_config" not in wire.body()
+
+
+@pytest.mark.asyncio
+async def test_a_model_reference_at_a_level_uses_the_dashboard_key_of_its_model(
+    runtime_paths: RuntimePaths,
+    wire: Wire,
+) -> None:
+    get_runtime_shared_credentials_manager(runtime_paths).save_credentials("model:target", {"api_key": "sk-dashboard"})
+    model = ModelConfig(provider="openai", api="chat_completions", id="m", api_key="sk-config", reasoning=_LEVELS)
+    wire.replies.append(httpx.Response(400, json=_BAD_REQUEST))
+
+    with pytest.raises(ProviderError):
+        await complete(
+            build_model_provider(Config(models={"target": model}), runtime_paths, "target@high"),
+            ModelRequest(messages=[_user()]),
+        )
+
+    assert wire.requests[0].headers["authorization"] == "Bearer sk-dashboard"
+    assert wire.body()["reasoning_effort"] == "high"
+
+
+# --- One golden per family, through the registry ------------------------------------------------------------
+
+
+_GOLDEN_FAMILIES = sorted(path.name for path in FIXTURE_ROOT.iterdir() if path.is_dir())
+
+
+def _golden_model_config(golden: dict[str, Any], root: Path, wire: Wire) -> ModelConfig:
+    """Return the golden's model config with what JSON cannot carry: CLI logins, Google credentials, transports."""
+    fields = deepcopy(golden["input"]["model_config"])
+    extra_kwargs = fields.setdefault("extra_kwargs", {})
+    placeholders = write_cli_logins(root)
+    for key, value in list(extra_kwargs.items()):
+        if isinstance(value, str) and value in placeholders:
+            extra_kwargs[key] = placeholders[value]
+    if fields["provider"] == "vertexai_claude":
+        extra_kwargs["client_params"] = {"credentials": Credentials(token=_GOOGLE_TOKEN)}
+    if fields["provider"] == "google":
+        extra_kwargs["client_params"] = {
+            "http_options": {"httpx_async_client": httpx.AsyncClient(transport=wire.transport)},
+        }
+        if extra_kwargs.get("vertexai"):
+            extra_kwargs["client_params"]["credentials"] = Credentials(token=_GOOGLE_TOKEN)
+    if fields["provider"] == "ollama":
+        extra_kwargs["client_params"] = {"transport": wire.transport}
+    return ModelConfig(**fields)
+
+
+async def _replay(
+    golden: dict[str, Any],
+    config: Config,
+    runtime_paths: RuntimePaths,
+    wire: Wire,
+) -> list[StreamEvent]:
+    wire.replies.append(lambda _request: encoded_response(golden["response_raw"]))
+    provider = build_model_provider(config, runtime_paths)
+    return [event async for event in provider.stream(golden_request(golden["input"]))]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("family", _GOLDEN_FAMILIES)
+async def test_a_golden_of_every_family_replays_through_the_registry(
+    family: str,
+    tmp_path: Path,
+    runtime_paths: RuntimePaths,
+    wire: Wire,
+) -> None:
+    """The registry-built provider sends each family's plain turn byte for byte and parses its reply as recorded."""
+    golden = load_golden(FIXTURE_ROOT / family / "plain_turn.json")
+    config = Config(models={"default": _golden_model_config(golden, tmp_path, wire)})
+
+    events = await _replay(golden, config, runtime_paths, wire)
+
+    assert len(wire.requests) == 1
+    await wire.requests[0].aread()
+    request = normalized_request(wire.requests[0])
+    assert request == golden["request"]
+    assert render(request["body"]) == render(golden["request"]["body"])
+    completed = events[-1]
+    assert isinstance(completed, TurnCompleted)
+    assert parsed_turn(completed) == golden["parsed"]
+
+
+@pytest.mark.asyncio
+async def test_codex_requests_carry_the_configured_default_instructions(
+    tmp_path: Path,
+    runtime_paths: RuntimePaths,
+    wire: Wire,
+) -> None:
+    golden = load_golden(FIXTURE_ROOT / "codex" / "plain_turn.json")
+    model = _golden_model_config(golden, tmp_path, wire)
+    config = Config(models={"default": model}, prompts={"CODEX_DEFAULT_INSTRUCTIONS": "Answer like a travel agent."})
+
+    await _replay(golden, config, runtime_paths, wire)
+
+    expected = deepcopy(golden["request"]["body"])
+    expected["instructions"] = "Answer like a travel agent."
+    assert wire.body() == expected
+
+
+@pytest.mark.asyncio
+async def test_requests_are_logged_under_the_storage_root_with_the_model_settings(
+    runtime_paths: RuntimePaths,
+    wire: Wire,
+) -> None:
+    """With ``debug.log_llm_requests``, each request and its usage land in the day's log, keyed by the model name."""
+    golden = load_golden(FIXTURE_ROOT / "openai_chat" / "plain_turn.json")
+    model = ModelConfig(
+        provider="openai",
+        api="chat_completions",
+        id="gpt-6-astra",
+        api_key="sk-test",
+        extra_kwargs={"temperature": 0.3},
+    )
+    config = Config(models={"default": model}, debug=DebugConfig(log_llm_requests=True))
+
+    await _replay(golden, config, runtime_paths, wire)
+
+    (log_file,) = (runtime_paths.storage_root / "logs" / "llm_requests").glob("llm-requests-*.jsonl")
+    request_record, response_record = (json.loads(line) for line in log_file.read_text().splitlines())
+    assert set(request_record) == {
+        "timestamp",
+        "request_log_id",
+        "model_name",
+        "model_id",
+        "body",
+        "deferred_tool_names",
+        "model_params",
+    }
+    assert (request_record["model_name"], request_record["model_id"]) == ("default", "gpt-6-astra")
+    assert request_record["body"] == wire.body()
+    assert request_record["model_params"]["temperature"] == 0.3
+    assert "api_key" not in request_record["model_params"]
+    assert (response_record["record"], response_record["model_name"]) == ("response", "default")
+
+
+# --- The refusal and malformed tool-call policies, on real routes -------------------------------------------
+
+
+def _claude_refusal(_request: httpx.Request) -> httpx.Response:
+    message = {
+        "id": "msg_1",
+        "type": "message",
+        "role": "assistant",
+        "model": "claude-sonnet-5-5",
+        "content": [],
+        "stop_reason": None,
+        "stop_sequence": None,
+        "usage": {"input_tokens": 40, "output_tokens": 1},
+    }
+    events = [
+        {"type": "message_start", "message": message},
+        {
+            "type": "message_delta",
+            "delta": {"stop_reason": "refusal", "stop_sequence": None},
+            "usage": {"output_tokens": 9},
+        },
+        {"type": "message_stop"},
+    ]
+    return sse_response(events, named=True)
+
+
+@pytest.mark.asyncio
+async def test_a_refusal_fails_the_request_once_and_its_usage_is_counted(
+    runtime_paths: RuntimePaths,
+    wire: Wire,
+) -> None:
+    """A refused Claude turn raises the typed refusal after its usage; neither a retry nor a media-free resend follows."""
+    config = Config(models={"claude": ModelConfig(provider="anthropic", id="claude-sonnet-5-5", api_key="sk-test")})
+    wire.replies.append(_claude_refusal)
+    image = Image(content=b"\x89PNG\r\n\x1a\n0000", mime_type="image/png")
+    provider = build_model_provider(config, runtime_paths, "claude")
+    request = ModelRequest(messages=[_user("Describe this", images=[image])])
+    events: list[StreamEvent] = []
+
+    with capture_logs() as logs, pytest.raises(ModelSafeguardRefusal) as raised:
+        await drain_into(events, provider, request)
+
+    assert len(wire.requests) == 1
+    assert (raised.value.provider, raised.value.retryable) == ("Anthropic", False)
+    assert not any(isinstance(event, TurnCompleted) for event in events)
+    final_usage = [event.usage for event in events if isinstance(event, UsageReported) and event.final]
+    assert [(usage.tokens.input_tokens, usage.tokens.output_tokens) for usage in final_usage] == [(40, 9)]
+    (usage_line,) = [entry for entry in logs if entry["event"] == "LLM usage"]
+    assert (usage_line["input_tokens"], usage_line["output_tokens"]) == (40, 9)
+
+
+def _gemini_malformed(_request: httpx.Request) -> httpx.Response:
+    candidate = {"content": {"role": "model", "parts": []}, "finishReason": "MALFORMED_FUNCTION_CALL"}
+    return sse_response([{"candidates": [candidate]}])
+
+
+def _gemini_text(_request: httpx.Request) -> httpx.Response:
+    candidate = {"content": {"role": "model", "parts": [{"text": "Sunny."}]}, "finishReason": "STOP", "index": 0}
+    return sse_response(
+        [{"candidates": [candidate], "usageMetadata": {"promptTokenCount": 40, "candidatesTokenCount": 9}}],
+    )
+
+
+def _gemini_config(wire: Wire) -> Config:
+    client = httpx.AsyncClient(transport=wire.transport)
+    extra_kwargs = {"client_params": {"http_options": {"httpx_async_client": client}}}
+    model = ModelConfig(provider="google", id="gemini-3.8-flash", api_key="sk-test", extra_kwargs=extra_kwargs)
+    return Config(models={"gemini": model})
+
+
+@pytest.mark.asyncio
+async def test_a_malformed_tool_call_is_answered_once_with_guidance_that_is_not_stored(
+    runtime_paths: RuntimePaths,
+) -> None:
+    wire = Wire()
+    wire.replies.extend([_gemini_malformed, _gemini_text])
+    provider = build_model_provider(_gemini_config(wire), runtime_paths, "gemini")
+    messages = [_user("Weather in Paris?")]
+    tools = [
+        ToolSpec(
+            name="get_weather",
+            description="Weather.",
+            parameters=_SCHEMA,
+            strict=None,
+        ),
+    ]
+
+    turn = await complete(provider, ModelRequest(messages=messages, tools=tools))
+
+    assert turn.content == "Sunny."
+    assert len(wire.requests) == 2
+    assert MALFORMED_FUNCTION_CALL_GUIDANCE not in _texts(wire.body(0))
+    assert _texts(wire.body(1)) == [*_texts(wire.body(0)), MALFORMED_FUNCTION_CALL_GUIDANCE]
+    assert [message.content for message in messages] == ["Weather in Paris?"]
+
+
+@pytest.mark.asyncio
+async def test_the_usage_of_a_malformed_tool_call_counts_toward_the_retried_turn(runtime_paths: RuntimePaths) -> None:
+    """The provider bills the attempt that wrote the malformed call, so its usage joins the guidance retry's turn."""
+    candidate = {"content": {"role": "model", "parts": []}, "finishReason": "MALFORMED_FUNCTION_CALL"}
+    malformed = {"candidates": [candidate], "usageMetadata": {"promptTokenCount": 30, "candidatesTokenCount": 5}}
+    answered = {
+        "candidates": [{"content": {"role": "model", "parts": [{"text": "Sunny."}]}, "finishReason": "STOP"}],
+        "usageMetadata": {"promptTokenCount": 40, "candidatesTokenCount": 9},
+    }
+    wire = Wire(sse_response([malformed]), sse_response([answered]))
+    provider = build_model_provider(_gemini_config(wire), runtime_paths, "gemini")
+    request = ModelRequest(messages=[_user("Weather in Paris?")])
+
+    events = [event async for event in provider.stream(request)]
+
+    reports = [
+        (event.usage.tokens.input_tokens, event.usage.tokens.output_tokens, event.final)
+        for event in events
+        if isinstance(event, UsageReported)
+    ]
+    turn = events[-1]
+    assert isinstance(turn, TurnCompleted)
+    # Each attempt reports its usage as it arrives; the guidance retry settles the malformed attempt's report first.
+    assert reports == [(30, 5, False), (30, 5, True), (40, 9, False), (40, 9, True)]
+    assert (turn.message.metrics.tokens.input_tokens, turn.message.metrics.tokens.output_tokens) == (70, 14)
+    assert (turn.message.provider_data or {})[AGGREGATE_USAGE_KEY] is True
+    assert len(wire.requests) == 2
+
+
+@pytest.mark.asyncio
+async def test_a_second_malformed_tool_call_fails_the_request(runtime_paths: RuntimePaths) -> None:
+    wire = Wire()
+    wire.replies.append(_gemini_malformed)
+    provider = build_model_provider(_gemini_config(wire), runtime_paths, "gemini")
+
+    with pytest.raises(ProviderError) as raised:
+        await complete(provider, ModelRequest(messages=[_user("Weather in Paris?")]))
+
+    assert raised.value.code == MALFORMED_TOOL_CALL
+    assert [_texts(wire.body(index)).count(MALFORMED_FUNCTION_CALL_GUIDANCE) for index in range(2)] == [0, 1]
+    assert len(wire.requests) == 2
+
+
+def test_source_modules_build_models_through_the_registry_module() -> None:
+    """``src`` calls ``build_model_provider`` on its module, the one attribute tests install their models at.
+
+    ``plugin_api`` only re-exports it for plugins, and Tach keeps every MindRoom module from importing ``plugin_api``.
+    """
+    source_root = Path(__file__).resolve().parents[2] / "src" / "mindroom"
+    bindings = [
+        f"{path.relative_to(source_root)}:{node.lineno}"
+        for path in sorted(source_root.rglob("*.py"))
+        if path != source_root / "plugin_api.py"
+        for node in ast.walk(ast.parse(path.read_text(encoding="utf-8")))
+        if isinstance(node, ast.ImportFrom) and any(alias.name == "build_model_provider" for alias in node.names)
+    ]
+
+    assert bindings == []

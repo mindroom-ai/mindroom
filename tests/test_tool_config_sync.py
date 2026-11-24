@@ -1,23 +1,40 @@
 """Test that ConfigField definitions match actual tool parameters from agno."""
 
 import inspect
+import json
+import sqlite3
+from collections.abc import Callable, Iterable, Sequence
+from contextlib import closing
 from pathlib import Path
-from types import SimpleNamespace, UnionType
-from typing import Any, Union, cast, get_args, get_origin, get_type_hints
+from types import UnionType
+from typing import Any, Literal, Union, cast, get_args, get_origin, get_type_hints
 
 import pytest
 from agno.tools import Toolkit
+from agno.tools.function import Function
 
-# Import tools to ensure they're registered
+# Import tools to ensure they're registered, and the tool hook bridge, which installs the
+# tool-argument repair as it does for every agent MindRoom builds.
+import mindroom.tool_system.tool_hooks
 import mindroom.tools  # noqa: F401
+from mindroom.config.main import Config, ConfigRuntimeValidationError
 from mindroom.config.models import FileAccess
-from mindroom.constants import RuntimePaths
+from mindroom.constants import RuntimePaths, resolve_runtime_paths
+from mindroom.credentials.manager import get_runtime_credentials_manager
+from mindroom.shared_directories.tool_roots import SharedDirectoryRoot
+from mindroom.tool_system.agno_toolkits import adapt_callable
+from mindroom.tool_system.authoring import Toolkit as OwnedToolkit
 from mindroom.tool_system.declarations import ToolManagedInitArg, ToolStatus
-from mindroom.tool_system.metadata import TOOL_METADATA, TOOL_REGISTRY, validate_authored_tool_entry_overrides
+from mindroom.tool_system.invocation import parse_tool_arguments
+from mindroom.tool_system.metadata import get_tool_by_name, validate_authored_tool_entry_overrides
+from mindroom.tool_system.registry import builtin_tool_registry
+from mindroom.tool_system.tool_function import ToolFunction
 from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
+from tests.agent_tool_helpers import blocking_entrypoint, offered_agno_function
+
+_BUILTINS = builtin_tool_registry()
 
 SKIP_CONFIG_FIELD_VALIDATION = {
-    "agent_vault_access",
     "homeassistant",
     "gmail",
     "google_calendar",
@@ -26,25 +43,39 @@ SKIP_CONFIG_FIELD_VALIDATION = {
     "openclaw_compat",
 }
 # Tools whose backing package may legitimately be absent, so a missing import is
-# not a contract failure. `apify` is here because `pyproject.toml` declares
-# `apify-client` for `platform_machine != 'aarch64'`, which means every arm64
-# host runs this suite without it.
-OPTIONAL_TOOL_IMPORTS = frozenset({"apify", "scrapegraph"})
+# not a contract failure.
+OPTIONAL_TOOL_IMPORTS = frozenset({"scrapegraph"})
 IGNORED_AGNO_PARAMS = {
-    # Mapping-only inputs have no safe authored ConfigField representation.
+    # Mappings, sessions, clients, and connections, which no text, number, boolean, or string-list setting can supply.
     "firecrawl": {"search_params"},
     "spider": {"optional_params"},
     "mem0": {"config"},
     "scrapegraph": {"headers"},
     "tavily": {"search_params"},
-    # Agno accepts an SSLContext for Slack, but MindRoom has no safe serialized UI/config path for it.
-    "slack": {"ssl"},
     "youtube": {"proxies"},
-    # Agno accepts a live HTTP session object, which MindRoom cannot serialize safely in UI/YAML config.
     "yfinance": {"session"},
+    "csv": {"duckdb_connection", "duckdb_kwargs"},
+    "duckdb": {"config", "connection"},
+    "openbb": {"obb"},
+    "postgres": {"connection"},
+    "reddit": {"reddit_instance"},
+    "sql": {"db_engine", "tables"},
+    "wikipedia": {"knowledge"},
     # Agno never runs newspaper4k's nlp(), the only step that fills an article summary, so this flag has no effect.
     "newspaper": {"include_summary"},
+    # The prompt shows every toolkit's instructions, so Agno's switch for showing them has no effect.
+    "reasoning": {"add_instructions"},
+    "zep": {"add_instructions"},
+    # MindRoom sets them from `defaults.allow_shell_without_worker` and the agent's `named_workers`, never from the
+    # tool's own settings.
+    "shell": {"allow_without_worker", "named_workers"},
+    # Exa crawls the subpages, but Agno's result parser drops them, so the setting would only add crawl cost.
+    "exa": {"subpages"},
 }
+# Words tool-call parsing reads as None or a boolean; a string parameter keeps them, except that one with a default
+# reads the null words as left out.
+BOOLEAN_WORDS = ("true", "False")
+NULL_WORDS = ("None", "null", " NULL ")
 IGNORED_EXTRA_CONFIG_FIELDS = {
     # DockerTools accepts toolkit options through **kwargs, so inspect.signature cannot see include_tools.
     "docker": {"include_tools"},
@@ -53,7 +84,11 @@ IGNORED_EXTRA_CONFIG_FIELDS = {
 
 def test_youtube_languages_accepts_authored_string_list() -> None:
     """YouTube language preferences should preserve the list expected by Agno."""
-    overrides = validate_authored_tool_entry_overrides("youtube", {"languages": ["en", "nl"]})
+    overrides = validate_authored_tool_entry_overrides(
+        "youtube",
+        {"languages": ["en", "nl"]},
+        tool_metadata=builtin_tool_registry().entries,
+    )
 
     assert overrides == {"languages": ["en", "nl"]}
 
@@ -71,14 +106,90 @@ def test_youtube_languages_accepts_authored_string_list() -> None:
 )
 def test_mapping_only_upstream_fields_are_not_authored(tool_name: str, mapping_field: str) -> None:
     """Mapping-only upstream inputs should not be exposed as misleading text fields."""
-    authored_names = {field.name for field in TOOL_METADATA[tool_name].config_fields or []}
+    authored_names = {field.name for field in _BUILTINS.entries[tool_name].config_fields or []}
 
     assert mapping_field not in authored_names
 
 
+def test_config_load_fails_on_an_object_valued_setting_and_says_to_remove_it(tmp_path: Path) -> None:
+    """An old ``config.yaml`` that still sets ``sql.tables`` fails to load, naming the key and saying to remove it."""
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
+
+    with pytest.raises(ConfigRuntimeValidationError) as exc_info:
+        Config.validate_with_runtime(
+            {
+                "models": {"default": {"provider": "openai", "id": "test-model"}},
+                "agents": {"analyst": {"display_name": "Analyst", "tools": [{"sql": {"tables": "orders"}}]}},
+            },
+            runtime_paths,
+        )
+
+    expected = "agents.analyst.tools[0].sql.tables: unknown authored override field(s): tables; remove or correct them."
+    assert expected in str(exc_info.value)
+
+
+def test_a_saved_value_for_an_object_valued_setting_is_ignored(tmp_path: Path) -> None:
+    """A dashboard save that still holds ``db_engine`` no longer replaces the engine ``db_url`` opens."""
+    database = tmp_path / "shop.sqlite"
+    with closing(sqlite3.connect(database)) as connection:
+        connection.execute("CREATE TABLE orders (id INTEGER)")
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
+    get_runtime_credentials_manager(runtime_paths).save_credentials(
+        "sql",
+        {"db_url": f"sqlite:///{database}", "db_engine": f"sqlite:///{tmp_path / 'elsewhere.sqlite'}"},
+    )
+
+    tool = get_tool_by_name(
+        "sql",
+        runtime_paths,
+        tools=builtin_tool_registry(),
+        runs_in_worker=False,
+        worker_target=None,
+    )
+
+    assert json.loads(blocking_entrypoint(tool, "list_tables")()) == ["orders"]
+    tool.db_engine.dispose()
+
+
+def test_authored_csv_paths_register_each_file(tmp_path: Path) -> None:
+    """A list of CSV paths in a tool entry gives the toolkit those files, each named by its filename stem."""
+    orders = tmp_path / "orders.csv"
+    orders.write_text("id,total\n1,9\n", encoding="utf-8")
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
+
+    tool = get_tool_by_name(
+        "csv",
+        runtime_paths,
+        tools=builtin_tool_registry(),
+        tool_config_overrides={"csvs": [str(orders)]},
+        runs_in_worker=False,
+        worker_target=None,
+    )
+
+    assert json.loads(blocking_entrypoint(tool, "list_csv_files")()) == ["orders"]
+
+
+def test_authored_duckdb_init_commands_run_when_the_connection_opens(tmp_path: Path) -> None:
+    """Each authored startup statement runs, whole and in order, when the toolkit opens its database."""
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
+
+    tool = get_tool_by_name(
+        "duckdb",
+        runtime_paths,
+        tools=builtin_tool_registry(),
+        tool_config_overrides={
+            "init_commands": ["CREATE TABLE orders (id INTEGER, total INTEGER)", "INSERT INTO orders VALUES (1, 9)"],
+        },
+        runs_in_worker=False,
+        worker_target=None,
+    )
+
+    assert blocking_entrypoint(tool, "run_query")("SELECT total FROM orders") == "total\n9"
+
+
 def test_arxiv_download_directory_is_converted_to_path(tmp_path: Path) -> None:
     """Authored ArXiv download paths should reach Agno as Path objects."""
-    tool_class = cast("Any", TOOL_REGISTRY["arxiv"]())
+    tool_class = cast("Any", _BUILTINS.factory("arxiv")())
 
     tool = tool_class(download_dir=str(tmp_path / "papers"))
 
@@ -87,7 +198,7 @@ def test_arxiv_download_directory_is_converted_to_path(tmp_path: Path) -> None:
 
 def test_arxiv_blank_download_directory_preserves_upstream_default() -> None:
     """A blank optional path should retain Agno's default download directory."""
-    tool_class = cast("Any", TOOL_REGISTRY["arxiv"]())
+    tool_class = cast("Any", _BUILTINS.factory("arxiv")())
 
     default_tool = tool_class()
     blank_tool = tool_class(download_dir="")
@@ -97,8 +208,10 @@ def test_arxiv_blank_download_directory_preserves_upstream_default() -> None:
 
 def test_arxiv_string_union_config_type_is_validated(monkeypatch: pytest.MonkeyPatch) -> None:
     """Path-or-string authored fields must not escape config type validation."""
-    tool_class = cast("Any", TOOL_REGISTRY["arxiv"]())
-    download_field = next(field for field in TOOL_METADATA["arxiv"].config_fields or [] if field.name == "download_dir")
+    tool_class = cast("Any", _BUILTINS.factory("arxiv")())
+    download_field = next(
+        field for field in _BUILTINS.entries["arxiv"].config_fields or [] if field.name == "download_dir"
+    )
     monkeypatch.setattr(download_field, "type", "number")
 
     with pytest.raises(pytest.fail.Exception, match="download_dir: expected type 'text'"):
@@ -107,7 +220,7 @@ def test_arxiv_string_union_config_type_is_validated(monkeypatch: pytest.MonkeyP
 
 def test_pubmed_configured_max_results_applies_when_call_omits_limit(monkeypatch: pytest.MonkeyPatch) -> None:
     """Configured PubMed result limits should be the default for model calls."""
-    tool_class = cast("Any", TOOL_REGISTRY["pubmed"]())
+    tool_class = cast("Any", _BUILTINS.factory("pubmed")())
     tool = tool_class(max_results=5)
     captured: dict[str, int] = {}
 
@@ -126,7 +239,7 @@ def test_pubmed_configured_max_results_applies_when_call_omits_limit(monkeypatch
 
 def test_pubmed_explicit_zero_max_results_is_preserved(monkeypatch: pytest.MonkeyPatch) -> None:
     """An explicit PubMed result limit must not fall back to the configured default."""
-    tool_class = cast("Any", TOOL_REGISTRY["pubmed"]())
+    tool_class = cast("Any", _BUILTINS.factory("pubmed")())
     tool = tool_class(max_results=5)
     captured: dict[str, int] = {}
 
@@ -146,7 +259,7 @@ def test_pubmed_explicit_zero_max_results_is_preserved(monkeypatch: pytest.Monke
 
 def test_pubmed_model_description_explains_configured_default() -> None:
     """The model-facing PubMed method description should explain omitted limits."""
-    tool_class = cast("Any", TOOL_REGISTRY["pubmed"]())
+    tool_class = cast("Any", _BUILTINS.factory("pubmed")())
 
     assert "configured max_results" in inspect.getdoc(tool_class.search_pubmed)
 
@@ -161,7 +274,7 @@ def test_modelslabs_converts_authored_file_type(monkeypatch: pytest.MonkeyPatch)
         captured.update(kwargs)
 
     monkeypatch.setattr(ModelsLabTools, "__init__", capture_init)
-    tool_class = cast("Any", TOOL_REGISTRY["modelslabs"]())
+    tool_class = cast("Any", _BUILTINS.factory("modelslabs")())
 
     tool_class(file_type="gif")
 
@@ -182,8 +295,12 @@ def test_modelslabs_blank_file_type_uses_mp4_default(
         captured.update(kwargs)
 
     monkeypatch.setattr(ModelsLabTools, "__init__", capture_init)
-    overrides = validate_authored_tool_entry_overrides("modelslabs", {"file_type": authored_file_type})
-    tool_class = cast("Any", TOOL_REGISTRY["modelslabs"]())
+    overrides = validate_authored_tool_entry_overrides(
+        "modelslabs",
+        {"file_type": authored_file_type},
+        tool_metadata=builtin_tool_registry().entries,
+    )
+    tool_class = cast("Any", _BUILTINS.factory("modelslabs")())
 
     tool_class(**overrides)
 
@@ -200,7 +317,7 @@ def test_daytona_converts_authored_sandbox_values(monkeypatch: pytest.MonkeyPatc
         captured.update(kwargs)
 
     monkeypatch.setattr(DaytonaTools, "__init__", capture_init)
-    tool_class = cast("Any", TOOL_REGISTRY["daytona"]())
+    tool_class = cast("Any", _BUILTINS.factory("daytona")())
 
     tool_class(
         sandbox_language="PYTHON",
@@ -223,7 +340,7 @@ def test_daytona_blank_optional_sandbox_values_become_none(monkeypatch: pytest.M
         captured.update(kwargs)
 
     monkeypatch.setattr(DaytonaTools, "__init__", capture_init)
-    tool_class = cast("Any", TOOL_REGISTRY["daytona"]())
+    tool_class = cast("Any", _BUILTINS.factory("daytona")())
 
     tool_class(sandbox_language="", sandbox_env_vars="", sandbox_labels="")
 
@@ -251,25 +368,33 @@ def test_daytona_verifies_tls_certificates_unless_explicitly_disabled(
         captured.update(kwargs)
 
     monkeypatch.setattr(DaytonaTools, "__init__", capture_init)
-    tool_class = cast("Any", TOOL_REGISTRY["daytona"]())
+    tool_class = cast("Any", _BUILTINS.factory("daytona")())
 
     tool_class(api_key="dt-test", **overrides)
 
     assert captured["verify_ssl"] is expected
-    fields = {field.name: field for field in TOOL_METADATA["daytona"].config_fields or []}
+    fields = {field.name: field for field in _BUILTINS.entries["daytona"].config_fields or []}
     assert fields["verify_ssl"].default is True
+
+
+def test_zoom_never_offers_its_access_token_to_the_model() -> None:
+    """The account-wide Zoom bearer token stays inside the toolkit, while the meeting tools remain."""
+    toolkit = cast("Any", _BUILTINS.factory("zoom")())()
+
+    assert "get_access_token" not in toolkit.functions
+    assert "schedule_meeting" in toolkit.functions
 
 
 def test_tool_metadata_lists_only_model_callable_functions() -> None:
     """Tool metadata must not advertise internal toolkit helpers."""
-    assert TOOL_METADATA["pubmed"].function_names == ("search_pubmed",)
-    assert TOOL_METADATA["youtube"].function_names == (
+    assert _BUILTINS.entries["pubmed"].function_names == ("search_pubmed",)
+    assert _BUILTINS.entries["youtube"].function_names == (
         "get_video_timestamps",
         "get_youtube_video_captions",
         "get_youtube_video_data",
     )
-    assert TOOL_METADATA["twilio"].function_names == ("get_call_details", "list_messages", "send_sms")
-    assert TOOL_METADATA["x"].function_names == (
+    assert _BUILTINS.entries["twilio"].function_names == ("get_call_details", "list_messages", "send_sms")
+    assert _BUILTINS.entries["x"].function_names == (
         "create_post",
         "get_home_timeline",
         "get_user_info",
@@ -277,59 +402,25 @@ def test_tool_metadata_lists_only_model_callable_functions() -> None:
         "search_posts",
         "send_dm",
     )
-    assert TOOL_METADATA["slack"].function_names == (
-        "download_file",
-        "get_channel_history",
-        "get_channel_info",
-        "get_thread",
-        "get_user_info",
-        "list_channels",
-        "list_users",
-        "search_messages",
-        "search_workspace",
-        "send_message",
-        "send_message_thread",
-        "upload_file",
-    )
-
-
-def test_slack_upload_file_sends_model_content_without_opening_local_paths(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Slack runs in the primary runtime, so a path-like upload argument must never read that file."""
-    secret_path = tmp_path / ".env"
-    secret_path.write_text("MINDROOM_API_KEY=secret\n")
-    tool = cast("Any", TOOL_REGISTRY["slack"]())(token="xoxb-test")  # noqa: S106
-    captured: dict[str, object] = {}
-
-    def files_upload_v2(**kwargs: object) -> SimpleNamespace:
-        captured.update(kwargs)
-        return SimpleNamespace(data={"ok": True})
-
-    monkeypatch.setattr(tool.client, "files_upload_v2", files_upload_v2)
-
-    tool.upload_file(channel="C0123", content=str(secret_path), filename=str(secret_path))
-
-    assert "file" not in captured
-    assert captured["content"] == str(secret_path).encode()
-    assert captured["filename"] == ".env"
 
 
 def test_zep_metadata_lists_only_model_callable_functions() -> None:
     """Internal Zep initialization must not be advertised as a model-callable function."""
-    assert TOOL_METADATA["zep"].function_names == (
+    assert _BUILTINS.entries["zep"].function_names == (
         "add_zep_message",
         "get_zep_memory",
         "search_zep_memory",
     )
 
 
-@pytest.mark.parametrize("tool_name", list(TOOL_REGISTRY.keys()))
+@pytest.mark.parametrize(
+    "tool_name",
+    sorted(name for name, metadata in _BUILTINS.entries.items() if metadata.factory is not None),
+)
 def test_registered_tool_contract(tool_name: str) -> None:
-    """Validate one registered tool's import, managed inputs, and authored config fields."""
-    metadata = TOOL_METADATA[tool_name]
-    tool_factory = TOOL_REGISTRY[tool_name]
+    """Validate one registered tool's import, managed inputs, string arguments, and authored config fields."""
+    metadata = _BUILTINS.entries[tool_name]
+    tool_factory = _BUILTINS.factory(tool_name)
     try:
         tool_class = tool_factory()
     except Exception as exc:
@@ -345,17 +436,68 @@ def test_registered_tool_contract(tool_name: str) -> None:
 
     assert isinstance(tool_class, type)
     if metadata.status != ToolStatus.REQUIRES_CONFIG:
-        assert issubclass(tool_class, Toolkit)
+        assert issubclass(tool_class, (Toolkit, OwnedToolkit))
 
     init_signature = inspect.signature(tool_class.__init__)
     verify_managed_init_args(tool_name, init_signature)
+    verify_string_arguments_reach_the_tool(tool_name, tool_class)
     if tool_name not in SKIP_CONFIG_FIELD_VALIDATION:
         verify_tool_configfields(tool_name, tool_class, init_signature)
 
 
+def _string_choices(schema: dict[str, Any]) -> list[str] | None:
+    """Return a string parameter's choices, an empty list for free text, or None when it takes no string."""
+    strings = [option for option in (schema, *schema.get("anyOf", ())) if option.get("type") == "string"]
+    if not strings:
+        return None
+    return [value for option in strings for value in option.get("enum", ())]
+
+
+def _parsed_arguments(function: ToolFunction, arguments: dict[str, str]) -> object:
+    """Parse one model tool call the way an agent's response loop does."""
+    return parse_tool_arguments(json.dumps(arguments), function)
+
+
+def _derived_without_an_instance(tool_class: type, function_name: str) -> ToolFunction:
+    """Return a function as its toolkit offers it, derived from the class through its kind of toolkit's adapter."""
+    # Bound as an instance binds it, to a stand-in no derivation reads, so a method's schema leaves out ``self``.
+    entrypoint = inspect.getattr_static(tool_class, function_name).__get__(object(), tool_class)
+    if issubclass(tool_class, OwnedToolkit):
+        return adapt_callable(entrypoint)
+    return offered_agno_function(Function(name=function_name, entrypoint=entrypoint))
+
+
+def verify_string_arguments_reach_the_tool(tool_name: str, tool_class: type) -> None:
+    """Verify every string parameter receives each of its choices, and free text the literal words, as intended."""
+    for function_name in _BUILTINS.entries[tool_name].function_names:
+        method = getattr(tool_class, function_name, None)
+        if method is None:
+            # The toolkit builds this function per instance, for example from an MCP server's tool list.
+            continue
+        function = _derived_without_an_instance(tool_class, function_name)
+        signature = inspect.signature(method).parameters
+        choices = {
+            name: string_choices
+            for name, schema in function.parameters["properties"].items()
+            if (string_choices := _string_choices(schema)) is not None
+        }
+        # A parameter with a default can be left out, so its null words keep meaning "not given".
+        free_text = {
+            name: signature[name].default is not inspect.Parameter.empty
+            for name, values in choices.items()
+            if not values
+        }
+        for word in (*BOOLEAN_WORDS, *NULL_WORDS) if free_text else ():
+            expected = {name: None if optional and word in NULL_WORDS else word for name, optional in free_text.items()}
+            assert _parsed_arguments(function, dict.fromkeys(free_text, word)) == expected, (tool_name, function_name)
+        for name, values in choices.items():
+            for value in values:
+                assert _parsed_arguments(function, {name: value}) == {name: value}, (tool_name, function_name)
+
+
 def verify_managed_init_args(tool_name: str, init_signature: inspect.Signature) -> None:
     """Verify one tool explicitly declares every MindRoom-managed constructor input."""
-    metadata = TOOL_METADATA[tool_name]
+    metadata = _BUILTINS.entries[tool_name]
     managed_arg_names = {managed_arg.value for managed_arg in ToolManagedInitArg}
     constructor_param_names = {name for name in init_signature.parameters if name != "self"}
     expected_managed_args = tuple(
@@ -367,6 +509,23 @@ def verify_managed_init_args(tool_name: str, init_signature: inspect.Signature) 
         f"{sorted(constructor_param_names & managed_arg_names)} but metadata lists "
         f"{[managed_arg.value for managed_arg in metadata.managed_init_args]}"
     )
+
+
+def _setting_can_supply(param_type: object, field_type: str) -> bool:
+    """Return whether a ``field_type`` setting, which gives text, a number, a boolean, or a string list, fits ``param_type``.
+
+    An unannotated or ``Any`` parameter cannot tell, so it passes.
+    """
+    if param_type in (None, Any, object):
+        return True
+    origin = get_origin(param_type)
+    if origin in {Union, UnionType}:
+        return any(_setting_can_supply(arg, field_type) for arg in get_args(param_type) if arg is not type(None))
+    if origin is Literal:
+        return all(isinstance(value, str) for value in get_args(param_type))
+    if (origin or param_type) in {list, tuple, set, frozenset, Sequence, Iterable}:
+        return field_type == "string[]"
+    return isinstance(param_type, type) and issubclass(param_type, (str, int, float, Path))
 
 
 def verify_tool_configfields(  # noqa: C901, PLR0912, PLR0915
@@ -387,10 +546,12 @@ def verify_tool_configfields(  # noqa: C901, PLR0912, PLR0915
         tool_class.__init__,
         globalns=tool_class.__init__.__globals__
         | {
+            "Callable": Callable,
             "FileAccess": FileAccess,
             "Path": Path,
             "ResolvedWorkerTarget": ResolvedWorkerTarget,
             "RuntimePaths": RuntimePaths,
+            "SharedDirectoryRoot": SharedDirectoryRoot,
         },
     )
     agno_params = {}
@@ -412,7 +573,7 @@ def verify_tool_configfields(  # noqa: C901, PLR0912, PLR0915
     agno_params = {name: param_info for name, param_info in agno_params.items() if name not in ignored_param_names}
 
     # Get every declared constructor field, including agent-only overrides.
-    tool_metadata = TOOL_METADATA[tool_name]
+    tool_metadata = _BUILTINS.entries[tool_name]
 
     config_fields = list(tool_metadata.config_fields or [])
     config_field_names = {field.name for field in config_fields}
@@ -443,6 +604,12 @@ def verify_tool_configfields(  # noqa: C901, PLR0912, PLR0915
 
         field = config_field_map[param_name]
         param_type = param_info["type"]
+        if not _setting_can_supply(param_type, field.type):
+            type_mismatches.append(
+                f"{param_name}: takes {param_type}, which a '{field.type}' setting cannot supply; "
+                "drop the ConfigField and list the parameter in IGNORED_AGNO_PARAMS",
+            )
+            continue
 
         # Handle Optional types
         actual_type = param_type

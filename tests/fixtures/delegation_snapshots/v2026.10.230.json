@@ -1,0 +1,514 @@
+{
+ "conversation_database": [
+  "BEGIN TRANSACTION;",
+  "CREATE TABLE agno_schema_versions (\n\ttable_name VARCHAR NOT NULL, \n\tversion VARCHAR NOT NULL, \n\tcreated_at VARCHAR NOT NULL, \n\tupdated_at VARCHAR, \n\tPRIMARY KEY (table_name)\n);",
+  "INSERT INTO \"agno_schema_versions\" VALUES('leader_sessions','3.0.0','2026-10-29T11:44:55.844403','2026-10-29T11:44:55.844403');",
+  "INSERT INTO \"agno_schema_versions\" VALUES('leader_sessions_runs','3.0.0','2026-10-29T11:44:55.894129','2026-10-29T11:44:55.894129');",
+  "CREATE TABLE leader_sessions (\n\tsession_id VARCHAR NOT NULL, \n\tsession_type VARCHAR NOT NULL, \n\tagent_id VARCHAR, \n\tteam_id VARCHAR, \n\tworkflow_id VARCHAR, \n\tuser_id VARCHAR, \n\tsession_data JSON, \n\tagent_data JSON, \n\tteam_data JSON, \n\tworkflow_data JSON, \n\tmetadata JSON, \n\tsummary JSON, \n\tcreated_at BIGINT NOT NULL, \n\tupdated_at BIGINT, \n\tPRIMARY KEY (session_id)\n);",
+  "INSERT INTO \"leader_sessions\" VALUES('parent-session','agent','leader',NULL,NULL,'@alice:example.org','null','null',NULL,NULL,'null','null',1760000000,1760000000);",
+  "CREATE TABLE leader_sessions_runs (\n\trun_id VARCHAR NOT NULL, \n\tsession_id VARCHAR NOT NULL, \n\trun_type VARCHAR NOT NULL, \n\tagent_id VARCHAR, \n\tteam_id VARCHAR, \n\tworkflow_id VARCHAR, \n\tuser_id VARCHAR, \n\tparent_run_id VARCHAR, \n\tstatus VARCHAR, \n\trun_index BIGINT, \n\trun_data JSON NOT NULL, \n\tcreated_at BIGINT NOT NULL, \n\tupdated_at BIGINT, \n\tPRIMARY KEY (run_id), \n\tFOREIGN KEY(session_id) REFERENCES leader_sessions (session_id) ON DELETE CASCADE\n);",
+  "INSERT INTO \"leader_sessions_runs\" VALUES('parent-run','parent-session','agent','leader',NULL,NULL,'@alice:example.org',NULL,'PAUSED',0,'{\"run_id\": \"parent-run\", \"agent_id\": \"leader\", \"session_id\": \"parent-session\", \"user_id\": \"@alice:example.org\", \"content\": \"\", \"content_type\": \"str\", \"created_at\": 1760000001, \"status\": \"PAUSED\", \"metadata\": {\"mindroom_delegation\": {\"children\": [{\"delegation_id\": \"0960f0f626ca4b118944a9a30d7f0db3\", \"parent_tool_call_id\": \"call-a\", \"caller_agent_name\": \"leader\", \"child_agent_name\": \"helper\", \"task\": \"Review with tools\", \"session_id\": \"delegate:leader:helper:0960f0f626ca4b118944a9a30d7f0db3\", \"run_id\": \"f26723ecf7e74e93b4b3ccf33137e53b\", \"model_name\": \"default\", \"depth\": 1, \"execution_identity\": {\"channel\": \"matrix\", \"agent_name\": \"helper\", \"requester_id\": \"@alice:example.org\", \"room_id\": \"!room:example.org\", \"thread_id\": \"$thread\", \"resolved_thread_id\": \"$thread\", \"session_id\": \"delegate:leader:helper:0960f0f626ca4b118944a9a30d7f0db3\", \"tenant_id\": null, \"account_id\": null, \"transport_agent_name\": null}, \"subagent_id\": \"0960f0f626ca4b118944a9a30d7f0db3\", \"previous_delegation_id\": null, \"parent_requirement_id\": \"req-call-a\", \"storage_bindings\": {\"leader\": {\"display_name\": \"leader\", \"private\": null, \"worker_scope\": null}, \"helper\": {\"display_name\": \"helper\", \"private\": null, \"worker_scope\": null}}, \"record_locator\": {}, \"status\": \"paused\", \"result\": null, \"agent_mode\": \"standard\"}, {\"delegation_id\": \"563174ebeb47497894f0dcd0ccba3751\", \"parent_tool_call_id\": \"call-b\", \"caller_agent_name\": \"leader\", \"child_agent_name\": \"helper\", \"task\": \"Review with everything\", \"session_id\": \"delegate:leader:helper:563174ebeb47497894f0dcd0ccba3751\", \"run_id\": \"123faf7a858247cd8f7a5d2bb0f800c2\", \"model_name\": \"alternate\", \"depth\": 1, \"execution_identity\": {\"channel\": \"matrix\", \"agent_name\": \"helper\", \"requester_id\": \"@alice:example.org\", \"room_id\": \"!room:example.org\", \"thread_id\": \"$thread\", \"resolved_thread_id\": \"$thread\", \"session_id\": \"delegate:leader:helper:563174ebeb47497894f0dcd0ccba3751\", \"tenant_id\": null, \"account_id\": null, \"transport_agent_name\": null}, \"subagent_id\": \"563174ebeb47497894f0dcd0ccba3751\", \"previous_delegation_id\": null, \"parent_requirement_id\": \"req-call-b\", \"storage_bindings\": {\"leader\": {\"display_name\": \"leader\", \"private\": null, \"worker_scope\": null}, \"helper\": {\"display_name\": \"helper\", \"private\": null, \"worker_scope\": null}}, \"record_locator\": {}, \"status\": \"completed\", \"result\": \"Answer to Review with everything\", \"agent_mode\": \"standard\"}, {\"delegation_id\": \"57a1640673524f94a38f53cd94510fa7\", \"parent_tool_call_id\": \"call-c\", \"caller_agent_name\": \"leader\", \"child_agent_name\": \"helper\", \"task\": \"Plain task\", \"session_id\": \"delegate:leader:helper:57a1640673524f94a38f53cd94510fa7\", \"run_id\": \"c8df57c4d6d3463fa6a647736b5c9917\", \"model_name\": \"default\", \"depth\": 1, \"execution_identity\": {\"channel\": \"matrix\", \"agent_name\": \"helper\", \"requester_id\": \"@alice:example.org\", \"room_id\": \"!room:example.org\", \"thread_id\": \"$thread\", \"resolved_thread_id\": \"$thread\", \"session_id\": \"delegate:leader:helper:57a1640673524f94a38f53cd94510fa7\", \"tenant_id\": null, \"account_id\": null, \"transport_agent_name\": null}, \"subagent_id\": \"57a1640673524f94a38f53cd94510fa7\", \"previous_delegation_id\": null, \"parent_requirement_id\": \"req-call-c\", \"storage_bindings\": {\"leader\": {\"display_name\": \"leader\", \"private\": null, \"worker_scope\": null}, \"helper\": {\"display_name\": \"helper\", \"private\": null, \"worker_scope\": null}}, \"record_locator\": {}, \"status\": \"completed\", \"result\": \"Answer to Plain task\", \"agent_mode\": \"standard\"}], \"gates\": {}, \"hooks\": {}, \"pending_tools\": [], \"pending_tool_sources\": {\"0960f0f626ca4b118944a9a30d7f0db3:child-call\": {\"child\": {\"delegation_id\": \"0960f0f626ca4b118944a9a30d7f0db3\", \"parent_tool_call_id\": \"call-a\", \"caller_agent_name\": \"leader\", \"child_agent_name\": \"helper\", \"task\": \"Review with tools\", \"session_id\": \"delegate:leader:helper:0960f0f626ca4b118944a9a30d7f0db3\", \"run_id\": \"f26723ecf7e74e93b4b3ccf33137e53b\", \"model_name\": \"default\", \"depth\": 1, \"execution_identity\": {\"channel\": \"matrix\", \"agent_name\": \"helper\", \"requester_id\": \"@alice:example.org\", \"room_id\": \"!room:example.org\", \"thread_id\": \"$thread\", \"resolved_thread_id\": \"$thread\", \"session_id\": \"delegate:leader:helper:0960f0f626ca4b118944a9a30d7f0db3\", \"tenant_id\": null, \"account_id\": null, \"transport_agent_name\": null}, \"subagent_id\": \"0960f0f626ca4b118944a9a30d7f0db3\", \"previous_delegation_id\": null, \"parent_requirement_id\": \"req-call-a\", \"storage_bindings\": {\"leader\": {\"display_name\": \"leader\", \"private\": null, \"worker_scope\": null}, \"helper\": {\"display_name\": \"helper\", \"private\": null, \"worker_scope\": null}}, \"record_locator\": {}, \"status\": \"paused\", \"result\": null, \"agent_mode\": \"standard\"}, \"tool_call_id\": \"child-call\", \"toolkit_name\": \"file\"}}, \"pending_requirements\": [], \"pending_agent_name\": \"helper\", \"pending_child_id\": \"0960f0f626ca4b118944a9a30d7f0db3\", \"storage_bindings\": {}}}}',1760000001,1793299495);",
+  "CREATE TABLE \"leader_sessions_usage\" (id INTEGER PRIMARY KEY, session_id TEXT NOT NULL REFERENCES \"leader_sessions\"(session_id) ON DELETE CASCADE, run_id TEXT, usage_data TEXT, UNIQUE(session_id, run_id));",
+  "INSERT INTO \"leader_sessions_usage\" VALUES(1,'parent-session','parent-run','{\"run_id\": \"parent-run\", \"user_id\": \"@alice:example.org\", \"created_at\": 1760000001, \"metrics\": {}}');",
+  "CREATE INDEX idx_leader_sessions_session_type ON leader_sessions (session_type);",
+  "CREATE INDEX idx_leader_sessions_created_at ON leader_sessions (created_at);",
+  "CREATE INDEX idx_agno_schema_versions_created_at ON agno_schema_versions (created_at);",
+  "CREATE INDEX idx_leader_sessions_runs_session_id ON leader_sessions_runs (session_id);",
+  "CREATE INDEX idx_leader_sessions_runs_team_id ON leader_sessions_runs (team_id);",
+  "CREATE INDEX idx_leader_sessions_runs_run_type ON leader_sessions_runs (run_type);",
+  "CREATE INDEX idx_leader_sessions_runs_created_at ON leader_sessions_runs (created_at);",
+  "CREATE INDEX idx_leader_sessions_runs_agent_id ON leader_sessions_runs (agent_id);",
+  "CREATE INDEX idx_leader_sessions_runs_workflow_id ON leader_sessions_runs (workflow_id);",
+  "CREATE INDEX idx_leader_sessions_runs_session_id_run_index ON leader_sessions_runs (session_id, run_index);",
+  "CREATE INDEX idx_leader_sessions_runs_user_id ON leader_sessions_runs (user_id);",
+  "CREATE INDEX idx_leader_sessions_runs_status ON leader_sessions_runs (status);",
+  "COMMIT;"
+ ],
+ "release": "v2026.10.230",
+ "subagent_sessions": {
+  "0960f0f626ca4b118944a9a30d7f0db3.json": {
+   "child": {
+    "agent_mode": "standard",
+    "caller_agent_name": "leader",
+    "child_agent_name": "helper",
+    "delegation_id": "0960f0f626ca4b118944a9a30d7f0db3",
+    "depth": 1,
+    "execution_identity": {
+     "account_id": null,
+     "agent_name": "helper",
+     "channel": "matrix",
+     "requester_id": "@alice:example.org",
+     "resolved_thread_id": "$thread",
+     "room_id": "!room:example.org",
+     "session_id": "delegate:leader:helper:0960f0f626ca4b118944a9a30d7f0db3",
+     "tenant_id": null,
+     "thread_id": "$thread",
+     "transport_agent_name": null
+    },
+    "model_name": "default",
+    "parent_requirement_id": "req-call-a",
+    "parent_tool_call_id": "call-a",
+    "previous_delegation_id": null,
+    "record_locator": {},
+    "result": null,
+    "run_id": "f26723ecf7e74e93b4b3ccf33137e53b",
+    "session_id": "delegate:leader:helper:0960f0f626ca4b118944a9a30d7f0db3",
+    "status": "paused",
+    "storage_bindings": {
+     "helper": {
+      "display_name": "helper",
+      "private": null,
+      "worker_scope": null
+     },
+     "leader": {
+      "display_name": "leader",
+      "private": null,
+      "worker_scope": null
+     }
+    },
+    "subagent_id": "0960f0f626ca4b118944a9a30d7f0db3",
+    "task": "Review with tools"
+   },
+   "owner": {
+    "account_id": null,
+    "agent_name": "leader",
+    "channel": "matrix",
+    "requester_id": "@alice:example.org",
+    "resolved_thread_id": "$thread",
+    "room_id": "!room:example.org",
+    "session_id": "parent-session",
+    "tenant_id": null,
+    "thread_id": "$thread",
+    "transport_agent_name": null
+   }
+  },
+  "563174ebeb47497894f0dcd0ccba3751.json": {
+   "child": {
+    "agent_mode": "standard",
+    "caller_agent_name": "leader",
+    "child_agent_name": "helper",
+    "delegation_id": "563174ebeb47497894f0dcd0ccba3751",
+    "depth": 1,
+    "execution_identity": {
+     "account_id": null,
+     "agent_name": "helper",
+     "channel": "matrix",
+     "requester_id": "@alice:example.org",
+     "resolved_thread_id": "$thread",
+     "room_id": "!room:example.org",
+     "session_id": "delegate:leader:helper:563174ebeb47497894f0dcd0ccba3751",
+     "tenant_id": null,
+     "thread_id": "$thread",
+     "transport_agent_name": null
+    },
+    "model_name": "alternate",
+    "parent_requirement_id": "req-call-b",
+    "parent_tool_call_id": "call-b",
+    "previous_delegation_id": null,
+    "record_locator": {},
+    "result": "Answer to Review with everything",
+    "run_id": "123faf7a858247cd8f7a5d2bb0f800c2",
+    "session_id": "delegate:leader:helper:563174ebeb47497894f0dcd0ccba3751",
+    "status": "completed",
+    "storage_bindings": {
+     "helper": {
+      "display_name": "helper",
+      "private": null,
+      "worker_scope": null
+     },
+     "leader": {
+      "display_name": "leader",
+      "private": null,
+      "worker_scope": null
+     }
+    },
+    "subagent_id": "563174ebeb47497894f0dcd0ccba3751",
+    "task": "Review with everything"
+   },
+   "owner": {
+    "account_id": null,
+    "agent_name": "leader",
+    "channel": "matrix",
+    "requester_id": "@alice:example.org",
+    "resolved_thread_id": "$thread",
+    "room_id": "!room:example.org",
+    "session_id": "parent-session",
+    "tenant_id": null,
+    "thread_id": "$thread",
+    "transport_agent_name": null
+   }
+  },
+  "57a1640673524f94a38f53cd94510fa7.json": {
+   "child": {
+    "agent_mode": "standard",
+    "caller_agent_name": "leader",
+    "child_agent_name": "helper",
+    "delegation_id": "57a1640673524f94a38f53cd94510fa7",
+    "depth": 1,
+    "execution_identity": {
+     "account_id": null,
+     "agent_name": "helper",
+     "channel": "matrix",
+     "requester_id": "@alice:example.org",
+     "resolved_thread_id": "$thread",
+     "room_id": "!room:example.org",
+     "session_id": "delegate:leader:helper:57a1640673524f94a38f53cd94510fa7",
+     "tenant_id": null,
+     "thread_id": "$thread",
+     "transport_agent_name": null
+    },
+    "model_name": "default",
+    "parent_requirement_id": "req-call-c",
+    "parent_tool_call_id": "call-c",
+    "previous_delegation_id": null,
+    "record_locator": {},
+    "result": "Answer to Plain task",
+    "run_id": "c8df57c4d6d3463fa6a647736b5c9917",
+    "session_id": "delegate:leader:helper:57a1640673524f94a38f53cd94510fa7",
+    "status": "completed",
+    "storage_bindings": {
+     "helper": {
+      "display_name": "helper",
+      "private": null,
+      "worker_scope": null
+     },
+     "leader": {
+      "display_name": "leader",
+      "private": null,
+      "worker_scope": null
+     }
+    },
+    "subagent_id": "57a1640673524f94a38f53cd94510fa7",
+    "task": "Plain task"
+   },
+   "owner": {
+    "account_id": null,
+    "agent_name": "leader",
+    "channel": "matrix",
+    "requester_id": "@alice:example.org",
+    "resolved_thread_id": "$thread",
+    "room_id": "!room:example.org",
+    "session_id": "parent-session",
+    "tenant_id": null,
+    "thread_id": "$thread",
+    "transport_agent_name": null
+   }
+  }
+ },
+ "views": {
+  "run_children": [
+   {
+    "agent_mode": "standard",
+    "caller_agent_name": "leader",
+    "child_agent_name": "helper",
+    "delegation_id": "0960f0f626ca4b118944a9a30d7f0db3",
+    "depth": 1,
+    "execution_identity": {
+     "account_id": null,
+     "agent_name": "helper",
+     "channel": "matrix",
+     "requester_id": "@alice:example.org",
+     "resolved_thread_id": "$thread",
+     "room_id": "!room:example.org",
+     "session_id": "delegate:leader:helper:0960f0f626ca4b118944a9a30d7f0db3",
+     "tenant_id": null,
+     "thread_id": "$thread",
+     "transport_agent_name": null
+    },
+    "model_name": "default",
+    "parent_requirement_id": "req-call-a",
+    "parent_tool_call_id": "call-a",
+    "persona": null,
+    "previous_delegation_id": null,
+    "record_locator": {},
+    "requested_model_name": "default",
+    "result": null,
+    "run_id": "f26723ecf7e74e93b4b3ccf33137e53b",
+    "session_id": "delegate:leader:helper:0960f0f626ca4b118944a9a30d7f0db3",
+    "status": "paused",
+    "storage_bindings": {
+     "helper": {
+      "display_name": "helper",
+      "private": null,
+      "worker_scope": null
+     },
+     "leader": {
+      "display_name": "leader",
+      "private": null,
+      "worker_scope": null
+     }
+    },
+    "subagent_id": "0960f0f626ca4b118944a9a30d7f0db3",
+    "task": "Review with tools"
+   },
+   {
+    "agent_mode": "standard",
+    "caller_agent_name": "leader",
+    "child_agent_name": "helper",
+    "delegation_id": "563174ebeb47497894f0dcd0ccba3751",
+    "depth": 1,
+    "execution_identity": {
+     "account_id": null,
+     "agent_name": "helper",
+     "channel": "matrix",
+     "requester_id": "@alice:example.org",
+     "resolved_thread_id": "$thread",
+     "room_id": "!room:example.org",
+     "session_id": "delegate:leader:helper:563174ebeb47497894f0dcd0ccba3751",
+     "tenant_id": null,
+     "thread_id": "$thread",
+     "transport_agent_name": null
+    },
+    "model_name": "alternate",
+    "parent_requirement_id": "req-call-b",
+    "parent_tool_call_id": "call-b",
+    "persona": null,
+    "previous_delegation_id": null,
+    "record_locator": {},
+    "requested_model_name": "alternate",
+    "result": "Answer to Review with everything",
+    "run_id": "123faf7a858247cd8f7a5d2bb0f800c2",
+    "session_id": "delegate:leader:helper:563174ebeb47497894f0dcd0ccba3751",
+    "status": "completed",
+    "storage_bindings": {
+     "helper": {
+      "display_name": "helper",
+      "private": null,
+      "worker_scope": null
+     },
+     "leader": {
+      "display_name": "leader",
+      "private": null,
+      "worker_scope": null
+     }
+    },
+    "subagent_id": "563174ebeb47497894f0dcd0ccba3751",
+    "task": "Review with everything"
+   },
+   {
+    "agent_mode": "standard",
+    "caller_agent_name": "leader",
+    "child_agent_name": "helper",
+    "delegation_id": "57a1640673524f94a38f53cd94510fa7",
+    "depth": 1,
+    "execution_identity": {
+     "account_id": null,
+     "agent_name": "helper",
+     "channel": "matrix",
+     "requester_id": "@alice:example.org",
+     "resolved_thread_id": "$thread",
+     "room_id": "!room:example.org",
+     "session_id": "delegate:leader:helper:57a1640673524f94a38f53cd94510fa7",
+     "tenant_id": null,
+     "thread_id": "$thread",
+     "transport_agent_name": null
+    },
+    "model_name": "default",
+    "parent_requirement_id": "req-call-c",
+    "parent_tool_call_id": "call-c",
+    "persona": null,
+    "previous_delegation_id": null,
+    "record_locator": {},
+    "requested_model_name": "default",
+    "result": "Answer to Plain task",
+    "run_id": "c8df57c4d6d3463fa6a647736b5c9917",
+    "session_id": "delegate:leader:helper:57a1640673524f94a38f53cd94510fa7",
+    "status": "completed",
+    "storage_bindings": {
+     "helper": {
+      "display_name": "helper",
+      "private": null,
+      "worker_scope": null
+     },
+     "leader": {
+      "display_name": "leader",
+      "private": null,
+      "worker_scope": null
+     }
+    },
+    "subagent_id": "57a1640673524f94a38f53cd94510fa7",
+    "task": "Plain task"
+   }
+  ],
+  "run_pending_sources": {
+   "0960f0f626ca4b118944a9a30d7f0db3:child-call": {
+    "agent_mode": "standard",
+    "caller_agent_name": "leader",
+    "child_agent_name": "helper",
+    "delegation_id": "0960f0f626ca4b118944a9a30d7f0db3",
+    "depth": 1,
+    "execution_identity": {
+     "account_id": null,
+     "agent_name": "helper",
+     "channel": "matrix",
+     "requester_id": "@alice:example.org",
+     "resolved_thread_id": "$thread",
+     "room_id": "!room:example.org",
+     "session_id": "delegate:leader:helper:0960f0f626ca4b118944a9a30d7f0db3",
+     "tenant_id": null,
+     "thread_id": "$thread",
+     "transport_agent_name": null
+    },
+    "model_name": "default",
+    "parent_requirement_id": "req-call-a",
+    "parent_tool_call_id": "call-a",
+    "persona": null,
+    "previous_delegation_id": null,
+    "record_locator": {},
+    "requested_model_name": "default",
+    "result": null,
+    "run_id": "f26723ecf7e74e93b4b3ccf33137e53b",
+    "session_id": "delegate:leader:helper:0960f0f626ca4b118944a9a30d7f0db3",
+    "status": "paused",
+    "storage_bindings": {
+     "helper": {
+      "display_name": "helper",
+      "private": null,
+      "worker_scope": null
+     },
+     "leader": {
+      "display_name": "leader",
+      "private": null,
+      "worker_scope": null
+     }
+    },
+    "subagent_id": "0960f0f626ca4b118944a9a30d7f0db3",
+    "task": "Review with tools"
+   }
+  },
+  "subagent_sessions": {
+   "0960f0f626ca4b118944a9a30d7f0db3.json": {
+    "agent_mode": "standard",
+    "caller_agent_name": "leader",
+    "child_agent_name": "helper",
+    "delegation_id": "0960f0f626ca4b118944a9a30d7f0db3",
+    "depth": 1,
+    "execution_identity": {
+     "account_id": null,
+     "agent_name": "helper",
+     "channel": "matrix",
+     "requester_id": "@alice:example.org",
+     "resolved_thread_id": "$thread",
+     "room_id": "!room:example.org",
+     "session_id": "delegate:leader:helper:0960f0f626ca4b118944a9a30d7f0db3",
+     "tenant_id": null,
+     "thread_id": "$thread",
+     "transport_agent_name": null
+    },
+    "model_name": "default",
+    "parent_requirement_id": "req-call-a",
+    "parent_tool_call_id": "call-a",
+    "persona": null,
+    "previous_delegation_id": null,
+    "record_locator": {},
+    "requested_model_name": "default",
+    "result": null,
+    "run_id": "f26723ecf7e74e93b4b3ccf33137e53b",
+    "session_id": "delegate:leader:helper:0960f0f626ca4b118944a9a30d7f0db3",
+    "status": "paused",
+    "storage_bindings": {
+     "helper": {
+      "display_name": "helper",
+      "private": null,
+      "worker_scope": null
+     },
+     "leader": {
+      "display_name": "leader",
+      "private": null,
+      "worker_scope": null
+     }
+    },
+    "subagent_id": "0960f0f626ca4b118944a9a30d7f0db3",
+    "task": "Review with tools"
+   },
+   "563174ebeb47497894f0dcd0ccba3751.json": {
+    "agent_mode": "standard",
+    "caller_agent_name": "leader",
+    "child_agent_name": "helper",
+    "delegation_id": "563174ebeb47497894f0dcd0ccba3751",
+    "depth": 1,
+    "execution_identity": {
+     "account_id": null,
+     "agent_name": "helper",
+     "channel": "matrix",
+     "requester_id": "@alice:example.org",
+     "resolved_thread_id": "$thread",
+     "room_id": "!room:example.org",
+     "session_id": "delegate:leader:helper:563174ebeb47497894f0dcd0ccba3751",
+     "tenant_id": null,
+     "thread_id": "$thread",
+     "transport_agent_name": null
+    },
+    "model_name": "alternate",
+    "parent_requirement_id": "req-call-b",
+    "parent_tool_call_id": "call-b",
+    "persona": null,
+    "previous_delegation_id": null,
+    "record_locator": {},
+    "requested_model_name": "alternate",
+    "result": "Answer to Review with everything",
+    "run_id": "123faf7a858247cd8f7a5d2bb0f800c2",
+    "session_id": "delegate:leader:helper:563174ebeb47497894f0dcd0ccba3751",
+    "status": "completed",
+    "storage_bindings": {
+     "helper": {
+      "display_name": "helper",
+      "private": null,
+      "worker_scope": null
+     },
+     "leader": {
+      "display_name": "leader",
+      "private": null,
+      "worker_scope": null
+     }
+    },
+    "subagent_id": "563174ebeb47497894f0dcd0ccba3751",
+    "task": "Review with everything"
+   },
+   "57a1640673524f94a38f53cd94510fa7.json": {
+    "agent_mode": "standard",
+    "caller_agent_name": "leader",
+    "child_agent_name": "helper",
+    "delegation_id": "57a1640673524f94a38f53cd94510fa7",
+    "depth": 1,
+    "execution_identity": {
+     "account_id": null,
+     "agent_name": "helper",
+     "channel": "matrix",
+     "requester_id": "@alice:example.org",
+     "resolved_thread_id": "$thread",
+     "room_id": "!room:example.org",
+     "session_id": "delegate:leader:helper:57a1640673524f94a38f53cd94510fa7",
+     "tenant_id": null,
+     "thread_id": "$thread",
+     "transport_agent_name": null
+    },
+    "model_name": "default",
+    "parent_requirement_id": "req-call-c",
+    "parent_tool_call_id": "call-c",
+    "persona": null,
+    "previous_delegation_id": null,
+    "record_locator": {},
+    "requested_model_name": "default",
+    "result": "Answer to Plain task",
+    "run_id": "c8df57c4d6d3463fa6a647736b5c9917",
+    "session_id": "delegate:leader:helper:57a1640673524f94a38f53cd94510fa7",
+    "status": "completed",
+    "storage_bindings": {
+     "helper": {
+      "display_name": "helper",
+      "private": null,
+      "worker_scope": null
+     },
+     "leader": {
+      "display_name": "leader",
+      "private": null,
+      "worker_scope": null
+     }
+    },
+    "subagent_id": "57a1640673524f94a38f53cd94510fa7",
+    "task": "Plain task"
+   }
+  }
+ }
+}

@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, cast
+from dataclasses import replace
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -10,6 +11,7 @@ import pytest
 from mindroom.bot import AgentBot
 from mindroom.constants import STREAM_STATUS_KEY, STREAM_STATUS_PENDING
 from mindroom.delivery_gateway import DeliveryGateway
+from mindroom.final_delivery import Failed, FailureCause, FinalDeliveryOutcome, TurnProgress
 from mindroom.matrix.client_delivery import (
     DeliveredMatrixEvent,
     MatrixDeliveryFailure,
@@ -19,8 +21,8 @@ from mindroom.matrix.client_delivery import (
 from mindroom.message_target import MessageTarget
 from mindroom.reply_lifecycle import ReplyState, SpanOutcome
 from mindroom.reply_presentation import decode_presentation, render_body
-from mindroom.response_runner import ResponseRunner, _DeliveryProgress, _ResponseGenerationOutcome
-from mindroom.response_sources import ResponseSources
+from mindroom.reply_turn.locked_turn import LockedTurns
+from mindroom.response_sources import Owned, ResponseSources
 from tests.ai_user_id_helpers import (
     _build_response_runner,
     _config_with_team,
@@ -28,7 +30,6 @@ from tests.ai_user_id_helpers import (
     _response_request,
     _runtime_paths,
     _set_gateway_method,
-    _team_orchestrator,
 )
 from tests.bot_helpers import unique_room_send_responses
 from tests.conftest import (
@@ -37,15 +38,41 @@ from tests.conftest import (
     patch_response_runner_module,
     unwrap_extracted_collaborator,
 )
-from tests.identity_helpers import fixture_entity_matrix_id
 from tests.reply_span_helpers import seed_finished_reply
-from tests.response_runner_helpers import _bot, _noop_typing, _plain_request, _target
+from tests.response_runner_helpers import _bot, _noop_typing, _plain_request, _target, attempt_in_place
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import AsyncIterator, Callable
     from pathlib import Path
 
-    from mindroom.response_runner import ResponseRequest
+    from mindroom.response_turn import TurnSinks
+
+
+def _turn_stream(
+    *chunks: str,
+    error: Exception | None = None,
+    run_id: str | None = None,
+) -> Callable[..., AsyncIterator[str]]:
+    """Return a turn stream that yields ``chunks``, recording a completed turn under ``run_id`` when given, or raises."""
+
+    def stream(*_args: object, sinks: TurnSinks, **_kwargs: object) -> AsyncIterator[str]:
+        async def chunks_then_end() -> AsyncIterator[str]:
+            for chunk in chunks:
+                yield chunk
+            if error is not None:
+                raise error
+            if run_id is not None:
+                assert sinks.turn_recorder is not None
+                sinks.turn_recorder.record_completed(
+                    run_id=run_id,
+                    run_metadata=None,
+                    assistant_text="".join(chunks),
+                    completed_tools=(),
+                )
+
+        return chunks_then_end()
+
+    return stream
 
 
 class _FakeHomeserver:
@@ -71,12 +98,12 @@ class _FakeHomeserver:
         content: dict[str, object],
         *,
         operation: str = "send_message",
-        retry_sync_recovery: bool = False,
         transaction_id: str | None = None,
         content_is_prepared: bool = False,
+        transient_failure_recoverable: bool = False,
     ) -> MatrixSendOutcome:
         """Accept one send, deduplicating on transaction ID like a homeserver."""
-        del operation, retry_sync_recovery, content_is_prepared
+        del operation, content_is_prepared, transient_failure_recoverable
         if content.get("body") == "Thinking...":
             self.placeholder_sends.append((transaction_id, content.get(STREAM_STATUS_KEY)))
         if transaction_id is not None and transaction_id in self._event_id_by_transaction:
@@ -132,21 +159,16 @@ async def test_one_turn_never_shows_two_placeholders(
     coordinator = unwrap_extracted_collaborator(bot._response_runner)
     homeserver = _FakeHomeserver(accepts_first=server_kept_the_placeholder)
 
-    async def die_before_answering(_request: object, **_kwargs: object) -> _ResponseGenerationOutcome:
-        msg = "process died before the answer"
-        raise RuntimeError(msg)
-
     with (
         patch("mindroom.delivery_gateway.send_message_outcome", new=homeserver.send),
-        patch.object(coordinator, "_process_and_respond", new=AsyncMock(side_effect=die_before_answering)),
         patch_response_runner_module(
+            stream_agent_response=_turn_stream(error=RuntimeError("process died before the answer")),
             should_use_streaming=AsyncMock(return_value=False),
             typing_indicator=_noop_typing,
             apply_post_response_effects=AsyncMock(),
         ),
     ):
-        with pytest.raises(RuntimeError, match="process died before the answer"):
-            await coordinator.generate_response(_plain_request(_target()))
+        await coordinator.generate_response(_plain_request(_target()))
         assert len(homeserver.placeholders()) <= 1, "the turn itself put two placeholders in the room"
 
         # The turn died before enqueueing FINAL, so nothing supersedes the
@@ -165,25 +187,21 @@ async def test_one_turn_never_shows_two_placeholders(
     assert {status for _, status in homeserver.placeholder_sends} == {STREAM_STATUS_PENDING}
 
 
-def test_delivery_progress_transitions() -> None:
-    """The delivery-progress state machine tracks delivery start and terminal reasons."""
-    progress = _DeliveryProgress()
+def test_turn_progress_transitions() -> None:
+    """The turn progress tracks delivery start and leaves the ending to the turn's settlement."""
+    progress = TurnProgress()
 
     progress.note_delivery_started(None)
-    assert progress.stage_started is True
-
-    progress.note_task_cancelled("cancelled_by_user")
-    assert progress.cancelled is True
-    assert progress.failure_reason == "cancelled_by_user"
+    assert progress.delivery_started is True
+    assert progress.ending is None
 
 
 @pytest.mark.asyncio
 async def test_agent_post_delivery_failure_settles_error_outcome(tmp_path: Path) -> None:
     """A failure after delivery started settles a terminal error instead of asserting.
 
-    The reply ends failed with its error note below what it recorded, rather
-    than the streamer's finalize, whose placeholder-only cleanup could redact
-    an adopted thinking message that already carries the full streamed reply.
+    The reply ends failed with its error note below what it recorded: a delivery that already started may have
+    written the answer, so its event is noted, never finalized as if the answer landed.
     """
     bot = _bot(tmp_path)
     unique_room_send_responses(bot.client)
@@ -195,18 +213,11 @@ async def test_agent_post_delivery_failure_settles_error_outcome(tmp_path: Path)
         effect_outcomes.append(final_outcome)
         effect_response_outcomes.append(response_outcome)
 
-    async def failing_process(_request: object, **kwargs: object) -> _ResponseGenerationOutcome:
-        on_delivery_started = cast("Callable[[str | None], None]", kwargs["on_delivery_started"])
-        collector = cast("list[str]", kwargs["attempt_run_id_collector"])
-        collector.append("run-attempt-1")
-        on_delivery_started("$stream-event")
-        msg = "delivery pipe burst"
-        raise RuntimeError(msg)
-
     with (
         patch.object(DeliveryGateway, "finalize_streamed_response", new=AsyncMock()) as mock_finalize,
-        patch.object(coordinator, "_process_and_respond", new=AsyncMock(side_effect=failing_process)),
+        patch.object(DeliveryGateway, "deliver_final", new=AsyncMock(side_effect=RuntimeError("delivery pipe burst"))),
         patch_response_runner_module(
+            stream_agent_response=_turn_stream("The answer", run_id="run-attempt-1"),
             should_use_streaming=AsyncMock(return_value=False),
             typing_indicator=_noop_typing,
             apply_post_response_effects=AsyncMock(side_effect=fake_post_effects),
@@ -214,18 +225,17 @@ async def test_agent_post_delivery_failure_settles_error_outcome(tmp_path: Path)
     ):
         result = await coordinator.generate_response(_plain_request(_target()))
 
-    # Previously this path tripped `assert final_delivery_outcome is not None`.
     reply = await bot._reply_runtime.store.replies.for_sources(("$event",))
     assert reply is not None
     assert reply.state is ReplyState.FAILED
-    assert result == reply.event_id == "$sent1"
+    assert result == Owned()
+    assert reply.event_id == "$sent1"
     final = bot.client.room_send.await_args_list[-1].kwargs["content"]["m.new_content"]["body"]
     assert final == "**[Response interrupted by an error: delivery pipe burst]**"
     mock_finalize.assert_not_awaited()
     assert len(effect_outcomes) == 1
-    assert effect_outcomes[0].terminal_status == "error"
-    assert effect_outcomes[0].failure_reason == "delivery pipe burst"
-    # The caller-owned collector keeps the real attempt id on raising paths.
+    assert effect_outcomes[0].ending == Failed(FailureCause.ERROR, "delivery pipe burst")
+    # The turn's record keeps the real attempt id on raising paths.
     assert effect_response_outcomes[0].response_run_id == "run-attempt-1"
 
 
@@ -245,18 +255,8 @@ async def test_agent_regeneration_pre_delivery_failure_leaves_prior_answer_intac
     async def fake_post_effects(final_outcome: object, *_args: object) -> None:
         effect_outcomes.append(final_outcome)
 
-    async def failing_process(_request: object, **_kwargs: object) -> _ResponseGenerationOutcome:
-        msg = "regen prep exploded"
-        raise RuntimeError(msg)
-
     request = _plain_request(_target())
-    regen_request: ResponseRequest = request.__class__(
-        **{
-            **request.__dict__,
-            "existing_event_id": "$prior_answer",
-            "edit_regeneration": True,
-        },
-    )
+    regen_request = replace(request, existing_event_id="$prior_answer", edit_regeneration=True)
 
     await seed_finished_reply(
         bot.journal_principal(),
@@ -268,20 +268,19 @@ async def test_agent_regeneration_pre_delivery_failure_leaves_prior_answer_intac
     )
     with (
         patch.object(DeliveryGateway, "send_text", new=AsyncMock(return_value="$thinking")),
-        patch.object(coordinator, "_process_and_respond", new=AsyncMock(side_effect=failing_process)),
         patch_response_runner_module(
+            stream_agent_response=_turn_stream(error=RuntimeError("regen prep exploded")),
             should_use_streaming=AsyncMock(return_value=False),
             typing_indicator=_noop_typing,
             apply_post_response_effects=AsyncMock(side_effect=fake_post_effects),
         ),
-        pytest.raises(RuntimeError, match="regen prep exploded"),
     ):
         await coordinator.generate_response(regen_request)
 
     # The regeneration ended before its first write, so the old answer stays
     # shown and the edit is done: nothing is redacted or edited.
     assert len(effect_outcomes) == 1
-    assert effect_outcomes[0].terminal_status == "error"
+    assert effect_outcomes[0].ending == Failed(FailureCause.ERROR, "regen prep exploded")
     reply = await bot._reply_runtime.store.replies.for_event("$prior_answer")
     assert reply is not None
     assert reply.state is ReplyState.COMPLETED
@@ -326,17 +325,15 @@ async def test_team_post_delivery_failure_settles_error_outcome_without_finalize
             "mindroom.response_lifecycle.apply_post_response_effects",
             new=AsyncMock(side_effect=fake_post_effects),
         ),
-        patch("mindroom.response_runner.team_response", new=AsyncMock(return_value="Team answer")),
-        patch("mindroom.response_runner.typing_indicator", _noop_typing),
+        patch("mindroom.response_runner.team_response_stream", new=_turn_stream("Team answer")),
+        patch("mindroom.reply_turn.request.typing_indicator", _noop_typing),
     ):
         coordinator = _build_response_runner(
             bot,
             config=config,
             runtime_paths=runtime_paths,
             storage_path=tmp_path,
-            requester_id="@alice:localhost",
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
-            orchestrator=_team_orchestrator(config, runtime_paths),
         )
         _set_gateway_method(
             coordinator.deps.delivery_gateway,
@@ -349,27 +346,22 @@ async def test_team_post_delivery_failure_settles_error_outcome_without_finalize
             AsyncMock(side_effect=lambda req: finalize_requests.append(req)),
         )
         _set_gateway_method(coordinator.deps.delivery_gateway, "send_text", AsyncMock(return_value="$thinking"))
-        with patch.object(
-            ResponseRunner,
-            "_run_cancellable_response",
-            new=AsyncMock(side_effect=_run_response_function_directly),
-        ):
+        with patch.object(LockedTurns, "_run_cancellable_response", new=attempt_in_place()):
             await coordinator.generate_team_response_helper(
                 _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
-                team_agents=[fixture_entity_matrix_id("general", "localhost", runtime_paths)],
+                member_names=["general"],
                 team_mode="coordinate",
             )
 
     # Post-start failures settle bare: no finalize call, terminal error effects.
     assert finalize_requests == []
     assert len(effect_outcomes) == 1
-    assert effect_outcomes[0].terminal_status == "error"
-    assert "delivery pipe burst" in str(effect_outcomes[0].failure_reason)
+    assert effect_outcomes[0].ending == Failed(FailureCause.ERROR, "delivery pipe burst")
 
 
 @pytest.mark.asyncio
-async def test_team_pre_delivery_failure_ends_the_reply_failed_and_reraises(tmp_path: Path) -> None:
-    """A team failure before delivery shows its error on the placeholder, settles the turn, and re-raises."""
+async def test_team_pre_delivery_failure_ends_the_reply_failed(tmp_path: Path) -> None:
+    """A team failure before delivery shows its error on the placeholder and settles the turn without raising."""
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(_config_with_team(), runtime_paths)
     bot = MagicMock(spec=AgentBot)
@@ -385,29 +377,23 @@ async def test_team_pre_delivery_failure_ends_the_reply_failed_and_reraises(tmp_
 
     async def fake_finalize(finalize_request: object) -> object:
         finalize_requests.append(finalize_request)
-        outcome = MagicMock()
-        outcome.terminal_status = "error"
-        outcome.final_visible_event_id = "$thinking"
-        outcome.mark_handled = True
-        return outcome
+        return FinalDeliveryOutcome(ending=Failed(FailureCause.ERROR), event_id="$thinking", is_visible_response=True)
 
     with (
         patch("mindroom.response_runner.should_use_streaming", new=AsyncMock(return_value=False)),
         patch("mindroom.response_lifecycle.apply_post_response_effects", new=AsyncMock(return_value=None)),
         patch(
-            "mindroom.response_runner.team_response",
-            new=AsyncMock(side_effect=RuntimeError("team prep exploded")),
+            "mindroom.response_runner.team_response_stream",
+            new=_turn_stream(error=RuntimeError("team prep exploded")),
         ),
-        patch("mindroom.response_runner.typing_indicator", _noop_typing),
+        patch("mindroom.reply_turn.request.typing_indicator", _noop_typing),
     ):
         coordinator = _build_response_runner(
             bot,
             config=config,
             runtime_paths=runtime_paths,
             storage_path=tmp_path,
-            requester_id="@alice:localhost",
             message_target=MessageTarget.resolve("!test:localhost", "$thread-root", "$user_msg"),
-            orchestrator=_team_orchestrator(config, runtime_paths),
         )
         _set_gateway_method(
             coordinator.deps.delivery_gateway,
@@ -421,17 +407,10 @@ async def test_team_pre_delivery_failure_ends_the_reply_failed_and_reraises(tmp_
         bot.client.room_get_event = AsyncMock(
             side_effect=lambda _room_id, event_id: _make_room_get_event_response(event_id, sender=bot.client.user_id),
         )
-        with (
-            patch.object(
-                ResponseRunner,
-                "_run_cancellable_response",
-                new=AsyncMock(side_effect=_run_response_function_directly),
-            ),
-            pytest.raises(RuntimeError, match="team prep exploded"),
-        ):
+        with patch.object(LockedTurns, "_run_cancellable_response", new=attempt_in_place()):
             await coordinator.generate_team_response_helper(
                 _response_request(prompt="Hello", user_id="@alice:localhost", thread_id="$thread-root"),
-                team_agents=[fixture_entity_matrix_id("general", "localhost", runtime_paths)],
+                member_names=["general"],
                 team_mode="coordinate",
             )
 
@@ -445,10 +424,3 @@ async def test_team_pre_delivery_failure_ends_the_reply_failed_and_reraises(tmp_
     assert "team prep exploded" in render_body(decode_presentation(reply.presentation))[0]
     spans = await coordinator.deps.replies.store.replies.spans(reply.reply_id)
     assert spans[-1].outcome is SpanOutcome.FAILED
-
-
-async def _run_response_function_directly(**kwargs: object) -> str:
-    """Drive the locked closure like the attempt runner would, without swallowing."""
-    response_function = cast("Callable[[str | None], Awaitable[None]]", kwargs["response_function"])
-    await response_function("$thinking")
-    return "$thinking"

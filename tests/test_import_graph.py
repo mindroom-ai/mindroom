@@ -32,7 +32,6 @@ if TYPE_CHECKING:
 _PROVIDER_SDK_ROOTS = (
     "anthropic",
     "boto3",
-    "cerebras",
     "google.genai",
     "groq",
     "ollama",
@@ -41,12 +40,12 @@ _PROVIDER_SDK_ROOTS = (
 _HEAVY_OPTIONAL_RUNTIME_ROOTS = (
     # Provider-specific clients and authentication.
     *_PROVIDER_SDK_ROOTS,
-    "agno.models.vertexai.claude",
     "google.auth",
     "google.oauth2",
     # Storage engines.
-    "agno.vectordb.chroma",
     "chromadb",
+    "falkordb",
+    "graphiti_core",
     "mem0",
     # ML and data stacks.
     "numpy",
@@ -84,33 +83,26 @@ _CONFIG_LAYER_ROOTS = frozenset(
 # The registry additionally carries httpx (sandbox proxy transport) and click
 # (tool CLI plumbing).
 _REGISTRY_ROOTS = _CONFIG_LAYER_ROOTS | frozenset({"brotli", "click", "httpx", "idna", "zstandard"})
-# The full tool-module sweep adds the agno toolkit runtime (redis-backed run
-# cancellation, opentelemetry via redis) and the httpx dependency tree.
-_TOOLS_ROOTS = _REGISTRY_ROOTS | frozenset(
+# The httpx transport tree, which the tool-module sweep and the plugin API both load.
+_HTTPX_TRANSPORT_ROOTS = frozenset(
     {
-        "agno",
         "anyio",
         "attrs",
         "certifi",
-        "docstring_parser",
         "h11",
         "h2",
         "hpack",
         "httpcore",
         "hyperframe",
-        "importlib_metadata",
-        "opentelemetry",
         "outcome",
-        "packaging",
-        "psutil",
-        "redis",
         "sniffio",
         "sortedcontainers",
         "trio",
-        "xxhash",
-        "zipp",
     },
 )
+# The full tool-module sweep adds Agno's tool layer (packaging), the docstring
+# parser tool schemas read, and the httpx transport tree.
+_TOOLS_ROOTS = _REGISTRY_ROOTS | _HTTPX_TRANSPORT_ROOTS | frozenset({"agno", "docstring_parser", "packaging"})
 # Top-level CLI help only needs command metadata and presentation libraries.
 # Command implementations must defer networking, crypto, config validation,
 # and provider imports until the selected command runs.
@@ -135,11 +127,37 @@ _ALLOWED_THIRD_PARTY_ROOTS: dict[str, frozenset[str]] = {
     # provider, storage, or other feature-specific dependency.
     "mindroom.cli.doctor": _CLI_ROOTS | _REGISTRY_ROOTS,
     "mindroom.config.main": _CONFIG_LAYER_ROOTS,
-    "mindroom.providers.model_loading": _CONFIG_LAYER_ROOTS | frozenset({"agno"}),
+    "mindroom.slack.integration": _CONFIG_LAYER_ROOTS,
+    "mindroom.providers.credentials": _CONFIG_LAYER_ROOTS,
     "mindroom.tool_system.declarations": frozenset({"dotenv"}),
+    # The owned tool values import no Agno module; agno_toolkits builds them from Agno's tool objects.
+    "mindroom.tool_system.tool_function": frozenset({"dotenv"}),
+    # Plugin code authors tools through the owned API without loading Agno: the runtime context's config footprint.
+    "mindroom.tool_system.authoring": _CONFIG_LAYER_ROOTS - {"cryptography"},
+    # The owned schema generator reads annotations and docstrings and coerces arguments with pydantic.
+    "mindroom.tool_system.tool_schema": frozenset(
+        {"docstring_parser", "dotenv", "pydantic", "pydantic_core", "typing_extensions", "typing_inspection"},
+    ),
     "mindroom.tool_system.metadata": _REGISTRY_ROOTS,
     "mindroom.tool_system.catalog": _REGISTRY_ROOTS,
     "mindroom.tool_system.registration": _CONFIG_LAYER_ROOTS,
+    # Plugins import their entry points without Agno: the registry footprint plus the OAuth helpers' clients
+    # (authlib, requests, and the httpx transport tree) and the provider registry's httpx2 client and tiktoken.
+    "mindroom.plugin_api": _REGISTRY_ROOTS
+    | _HTTPX_TRANSPORT_ROOTS
+    | frozenset(
+        {
+            "authlib",
+            "chardet",
+            "charset_normalizer",
+            "httpx2",
+            "requests",
+            "socks",
+            "tiktoken",
+            "tiktoken_ext",
+            "urllib3",
+        },
+    ),
     "mindroom.tools": _TOOLS_ROOTS,
     # The sandbox runner is the API server for worker tool execution: fastapi
     # and its dependency tree on top of the full registry footprint.
@@ -177,6 +195,7 @@ import importlib, json, sys
 stdlib = set(sys.stdlib_module_names)
 baseline = {{name.split(".")[0] for name in sys.modules}}
 importlib.import_module({module!r})
+{build_config}
 banned_roots = {banned_roots!r}
 banned = sorted(
     name
@@ -213,6 +232,10 @@ def _run_slim_probe(module: str) -> tuple[list[str], frozenset[str]]:
             "-c",
             _SLIM_PROBE_TEMPLATE.format(
                 module=module,
+                # Building a config runs every integration's validation hook, so its footprint is measured after one.
+                build_config="importlib.import_module('mindroom.config.main').Config(agents={})"
+                if module == "mindroom.config.main"
+                else "",
                 banned_roots=_PROVIDER_SDK_ROOTS + _SLIM_ONLY_ROOTS,
             ),
         ],
@@ -290,7 +313,7 @@ def test_desktop_app_observation_imports_without_posix_only_modules() -> None:
         "mindroom.cli.config",
         "mindroom.desktop.native_entry",
         "mindroom.desktop.native_host",
-        "mindroom.desktop.bridge_components",
+        "mindroom.desktop.bridge_session",
         "mindroom.desktop.session",
         "mindroom.desktop.transport",
         "mindroom.desktop.startup_errors",
@@ -371,71 +394,18 @@ print(json.dumps({"exports": module.__all__, "loaded": loaded}))
 
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout) == {
-        "exports": ["open_worker_state_root", "read_worker_identity", "remove_directory_tree_at"],
+        "exports": [
+            "open_worker_state_root",
+            "open_workers_root",
+            "read_worker_identity",
+            "read_worker_marker",
+            "remove_directory_tree_at",
+            "require_worker_identity",
+            "worker_state_directories",
+            "write_worker_marker",
+        ],
         "loaded": ["mindroom.workers.worker_retirement"],
     }
-
-
-def test_background_approval_transactions_have_a_focused_module_boundary() -> None:
-    """Background rows depend on shared card state without owning its lifecycle."""
-    probe = """
-import importlib
-import json
-
-card_state = importlib.import_module("mindroom.event_journal.approval_card_state")
-background = importlib.import_module("mindroom.event_journal.background_approvals")
-dispatcher = importlib.import_module("mindroom.event_journal.approvals")
-print(json.dumps({
-    "background_exports": background.__all__,
-    "background_resolve_owner": background.resolve.__module__,
-    "card_state_exports": card_state.__all__,
-    "card_reserve_owner": card_state.reserve_delivery.__module__,
-    "dispatcher_owner": dispatcher.resolve_card.__module__,
-}))
-"""
-    result = subprocess.run(
-        [sys.executable, "-c", probe],
-        capture_output=True,
-        check=False,
-        text=True,
-        timeout=120,
-    )
-
-    assert result.returncode == 0, result.stderr
-    assert json.loads(result.stdout) == {
-        "background_exports": [
-            "BackgroundApprovalDecision",
-            "background_identity",
-            "decision",
-            "prune_calls",
-            "reserve_delivery",
-            "reserve_script_delivery",
-            "resolve",
-            "resolve_call",
-            "resolve_pending_calls",
-        ],
-        "background_resolve_owner": "mindroom.event_journal.background_approvals",
-        "card_state_exports": [
-            "TIMEOUT_REASON",
-            "ApprovalCardReservation",
-            "ApprovalDecisionMetadata",
-            "RecordedApprovalDecision",
-            "decode_object_payload",
-            "decode_resolution",
-            "enqueue_resolution",
-            "reserve_delivery",
-            "stored_resolution",
-            "terminal_content",
-        ],
-        "card_reserve_owner": "mindroom.event_journal.approval_card_state",
-        "dispatcher_owner": "mindroom.event_journal.approvals",
-    }
-
-
-def test_openai_wire_models_import_only_the_openai_sdk() -> None:
-    """Agno's azure package init pulls the anthropic SDK; only the azure branch should pay that."""
-    non_openai_roots = tuple(root for root in _PROVIDER_SDK_ROOTS if root != "openai")
-    _assert_probe_clean("mindroom.providers.openai_models", non_openai_roots)
 
 
 def test_builtin_tool_manifest_does_not_import_runtime_catalog() -> None:
@@ -451,20 +421,6 @@ def test_atlassian_connection_plugins_do_not_load_the_toolkit() -> None:
     _assert_probe_clean(
         "mindroom.tool_system.atlassian_connections",
         ("mindroom.custom_tools.atlassian", "mindroom.custom_tools.atlassian_client"),
-    )
-
-
-def test_knowledge_read_worker_does_not_boot_application_services() -> None:
-    """A short-lived read must not pay for refresh scheduling or agent configuration."""
-    _assert_probe_clean(
-        "mindroom.knowledge.read_worker",
-        (
-            "mindroom.knowledge.registry",
-            "mindroom.knowledge.refresh_scheduler",
-            "mindroom.knowledge.utils",
-            "mindroom.config.main",
-            "mindroom.runtime_resolution",
-        ),
     )
 
 

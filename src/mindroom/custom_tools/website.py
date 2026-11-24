@@ -3,26 +3,20 @@
 from __future__ import annotations
 
 import json
+import random
 import re
-from typing import Any
+import time
+from dataclasses import dataclass, field
 from urllib.parse import urljoin, urlparse, urlsplit, urlunsplit
 
 import httpx
+from agno.knowledge.chunking.fixed import FixedSizeChunking
 from agno.knowledge.document import Document
-from agno.knowledge.knowledge import Knowledge  # noqa: TC002 - metadata sync resolves runtime type hints.
-from agno.knowledge.reader.website_reader import WebsiteReader
-from agno.tools import Toolkit
 from agno.utils.log import log_debug, log_error, log_warning
 from bs4 import BeautifulSoup, Tag
 
-from mindroom.bounded_bytes import ByteLimitExceededError, collect_bounded_bytes_sync
-from mindroom.custom_tools.agno_compat_website_reader import crawl_with_callbacks, queue_crawl_url
-from mindroom.server_fetch_url import (
-    ServerFetchHTTPTransport,
-    ServerFetchUrlError,
-    validate_server_fetch_redirect_url,
-    validate_server_fetch_url,
-)
+from mindroom.public_fetch import PublicFetchError, PublicFetchResult, fetch_public_url_sync
+from mindroom.tool_system.authoring import Toolkit
 
 _PREFERRED_CONTENT_SELECTORS = (
     "main",
@@ -56,11 +50,7 @@ _UNWANTED_SELECTORS = (
 _LOW_VALUE_NAME_PATTERN = re.compile(r"(?:^|[-_])(nav|navbar|menu|search|modal|header|footer|sidebar)(?:$|[-_])")
 _FAILED_CRAWL_CONTENT = "Failed to extract any content"
 _FAILED_STARTING_URL = "Failed to crawl starting URL"
-_TOO_MANY_REDIRECTS = "Too many redirects while crawling website"
 _MAX_PAGE_BYTES = 2 * 1024 * 1024
-# The codings httpx decodes, plus the legacy `x-gzip` alias; any of them lets a small body stand for a huge one.
-_COMPRESSED_CONTENT_CODINGS = frozenset({"gzip", "x-gzip", "deflate", "br", "zstd"})
-_MAX_REDIRECTS = 10
 
 
 def _normalize_text(text: str) -> str:
@@ -144,41 +134,11 @@ def _safe_malformed_url_for_log(url: str) -> str:
 
 
 def _normalized_hostname(url: str) -> str:
-    """Return the normalized hostname component for crawl domain checks."""
+    """Return a URL's hostname for crawl host checks, IDNA-encoded and lowercase as the fetch reports page URLs."""
     try:
-        return (urlparse(url).hostname or "").rstrip(".").lower()
-    except ValueError:
+        return httpx.URL(url).raw_host.decode("ascii").rstrip(".")
+    except httpx.InvalidURL:
         return ""
-
-
-def _server_fetch_get(
-    url: str,
-    *,
-    timeout: int,
-    follow_redirects: bool,
-    proxy: str | None = None,
-) -> httpx.Response:
-    """Fetch a URL through the server-fetch transport when no proxy is configured.
-
-    The body is requested uncompressed and read raw up to a limit, so no page is inflated or buffered whole.
-    """
-    # With a configured proxy, URL and redirect validation happen before this handoff.
-    # The proxy owns target DNS resolution and egress policy from here.
-    route: dict[str, Any] = {"proxy": proxy} if proxy else {"transport": ServerFetchHTTPTransport()}
-    with (
-        httpx.Client(follow_redirects=follow_redirects, headers={"Accept-Encoding": "identity"}, **route) as client,
-        client.stream("GET", url, timeout=timeout) as response,
-    ):
-        codings = {value.strip().lower() for value in response.headers.get_list("content-encoding", split_commas=True)}
-        if not codings.isdisjoint(_COMPRESSED_CONTENT_CODINGS):
-            msg = "The page must use identity content encoding."
-            raise httpx.DecodingError(msg, request=response.request)
-        try:
-            body = collect_bounded_bytes_sync(response.iter_raw(), max_bytes=_MAX_PAGE_BYTES)
-        except ByteLimitExceededError as error:
-            msg = f"The page exceeds {_MAX_PAGE_BYTES} bytes."
-            raise httpx.DecodingError(msg, request=response.request) from error
-    return httpx.Response(response.status_code, headers=response.headers, content=body, request=response.request)
 
 
 def _url_matches_crawl_host(url: str, crawl_host: str) -> bool:
@@ -189,8 +149,25 @@ def _url_matches_crawl_host(url: str, crawl_host: str) -> bool:
     return host == crawl_host
 
 
-class _MindRoomWebsiteReader(WebsiteReader):
-    """WebsiteReader variant that avoids selecting early search/navigation sections."""
+# Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
+# The crawl budget, the breadth-first queue, the 1-3 second pause between fetches, and the 5000-character page
+# documents come from Agno's WebsiteReader: they bound how hard one crawl loads its host and how much text each
+# returned document carries.
+_MAX_DEPTH = 3
+_MAX_LINKS = 10
+_PAGE_CHUNKING = FixedSizeChunking(chunk_size=5000)
+
+
+@dataclass
+class _MindRoomWebsiteReader:
+    """Crawls one host through the guarded public fetch and extracts each page's main text, skipping page chrome."""
+
+    _visited: set[str] = field(default_factory=set, init=False, repr=False)
+    _urls_to_crawl: list[tuple[str, int]] = field(default_factory=list, init=False, repr=False)
+
+    def delay(self) -> None:
+        """Pause a random 1-3 seconds between a crawl's fetches so it does not hammer one host."""
+        time.sleep(random.uniform(1, 3))  # noqa: S311 - pacing, not security.
 
     def _queue_links(self, soup: BeautifulSoup, current_url: str, current_depth: int, crawl_host: str) -> None:
         """Queue same-host crawl links from the unmodified page soup."""
@@ -209,7 +186,9 @@ class _MindRoomWebsiteReader(WebsiteReader):
             ):
                 continue
 
-            queue_crawl_url(self, str(full_url), current_depth + 1)
+            queued = (str(full_url), current_depth + 1)
+            if queued[0] not in self._visited and queued not in self._urls_to_crawl:
+                self._urls_to_crawl.append(queued)
 
     def _should_skip_crawl_url(
         self,
@@ -218,40 +197,9 @@ class _MindRoomWebsiteReader(WebsiteReader):
         starting_url: str,
         current_depth: int,
         num_links: int,
-        crawl_host: str,
     ) -> bool:
         """Return whether a queued crawl URL is outside the current crawl budget."""
-        return (
-            not _url_matches_crawl_host(current_url, crawl_host)
-            or (current_depth > self.max_depth and current_url != starting_url)
-            or num_links >= self.max_links
-        )
-
-    def _log_http_status_error(self, *, safe_current_url: str, error: httpx.HTTPStatusError) -> None:
-        """Log HTTP crawl failures without including provider exception text."""
-        if 300 <= error.response.status_code < 400:
-            log_debug(f"Redirect encountered for {safe_current_url}, skipping")
-            return
-
-        log_warning(f"HTTP status error while crawling {safe_current_url}: {error.response.status_code}")
-
-    def _get_validated_response(self, current_url: str) -> tuple[httpx.Response, str]:
-        """Fetch a URL while validating every redirect hop before following it."""
-        request_url = validate_server_fetch_url(current_url)
-        fetch_kwargs = {"proxy": self.proxy} if self.proxy else {}
-        for _redirect_count in range(_MAX_REDIRECTS + 1):
-            response = _server_fetch_get(
-                request_url,
-                timeout=self.timeout,
-                follow_redirects=False,
-                **fetch_kwargs,
-            )
-            if not response.is_redirect:
-                return response, request_url
-            request_url = validate_server_fetch_redirect_url(request_url, response.headers.get("location"))
-
-        request = httpx.Request("GET", current_url)
-        raise httpx.TooManyRedirects(_TOO_MANY_REDIRECTS, request=request)
+        return (current_depth > _MAX_DEPTH and current_url != starting_url) or num_links >= _MAX_LINKS
 
     def _record_current_url(
         self,
@@ -266,28 +214,20 @@ class _MindRoomWebsiteReader(WebsiteReader):
         safe_current_url = _safe_url_for_log(current_url)
         try:
             log_debug(f"Crawling: {safe_current_url}")
-            response, fetched_url = self._get_validated_response(current_url)
-            if current_url != starting_url and not _url_matches_crawl_host(fetched_url, crawl_host):
-                log_debug(f"Skipping redirected URL outside crawl host: {_safe_url_for_log(fetched_url)}")
+            page = fetch_public_url_sync(current_url, max_bytes=_MAX_PAGE_BYTES)
+            # Links resolve against the page's own URL, which can name the requested one differently.
+            self._visited.add(page.url)
+            if current_url != starting_url and not _url_matches_crawl_host(page.url, crawl_host):
+                log_debug(f"Skipping redirected URL outside crawl host: {_safe_url_for_log(page.url)}")
                 return 0
-            response.raise_for_status()
             return self._record_response_content(
-                response,
-                current_url=fetched_url,
+                page,
                 current_depth=current_depth,
                 crawl_host=crawl_host,
                 crawler_result=crawler_result,
             )
-        except ServerFetchUrlError:
-            log_warning(f"Rejected server-side fetch URL while crawling {_safe_url_for_log(current_url)}")
-            if current_url == starting_url and not crawler_result:
-                raise
-        except httpx.HTTPStatusError as e:
-            self._log_http_status_error(safe_current_url=safe_current_url, error=e)
-            if current_url == starting_url and not crawler_result and not (300 <= e.response.status_code < 400):
-                raise
-        except httpx.RequestError as e:
-            log_warning(f"Request error while crawling {safe_current_url}: {e.__class__.__name__}")
+        except PublicFetchError as e:
+            log_warning(f"Failed to fetch {safe_current_url} while crawling: {e}")
             if current_url == starting_url and not crawler_result:
                 raise
         except Exception as e:
@@ -297,81 +237,75 @@ class _MindRoomWebsiteReader(WebsiteReader):
 
         return 0
 
-    def _documents_from_crawl(
-        self,
-        crawler_result: dict[str, str],
-        *,
-        url: str,
-        name: str | None,
-    ) -> list[Document]:
-        """Build Agno documents from crawled page content."""
+    def _documents_from_crawl(self, crawler_result: dict[str, str], *, url: str) -> list[Document]:
+        """Build one document per crawled page, named by the URL the crawl started from."""
         documents: list[Document] = []
         for crawled_url, crawled_content in crawler_result.items():
             document = Document(
-                name=name or url,
+                name=url,
                 id=str(crawled_url),
                 meta_data={"url": str(crawled_url)},
                 content=crawled_content,
             )
-            if self.chunk:
-                documents.extend(self.chunk_document(document))
-            else:
-                documents.append(document)
+            documents.extend(_PAGE_CHUNKING.chunk(document))
         return documents
 
     def _record_response_content(
         self,
-        response: httpx.Response,
+        page: PublicFetchResult,
         *,
-        current_url: str,
         current_depth: int,
         crawl_host: str,
         crawler_result: dict[str, str],
     ) -> bool:
         """Extract content from a response and queue crawl links from the original soup."""
-        soup = BeautifulSoup(response.content, "html.parser")
+        soup = BeautifulSoup(page.content, "html.parser")
         main_content = self._extract_main_content(soup)
         if main_content:
-            crawler_result[current_url] = main_content
+            crawler_result[page.url] = main_content
 
-        self._queue_links(soup, current_url, current_depth, crawl_host)
+        self._queue_links(soup, page.url, current_depth, crawl_host)
         return bool(main_content)
 
-    def crawl(self, url: str, starting_depth: int = 1) -> dict[str, str]:
+    def crawl(self, url: str) -> dict[str, str]:
         """Crawl a website while logging only sanitized URL forms."""
-        starting_url = validate_server_fetch_url(url)
+        starting_url = url.strip()
         crawl_host = _normalized_hostname(starting_url)
-        crawler_result = crawl_with_callbacks(
-            self,
-            starting_url,
-            starting_depth,
-            should_skip=lambda current_url, current_depth, num_links: self._should_skip_crawl_url(
+        num_links = 0
+        crawler_result: dict[str, str] = {}
+        self._visited = set()
+        self._urls_to_crawl = [(starting_url, 1)]
+        while self._urls_to_crawl:
+            current_url, current_depth = self._urls_to_crawl.pop(0)
+            if current_url in self._visited or self._should_skip_crawl_url(
                 current_url=current_url,
                 starting_url=starting_url,
                 current_depth=current_depth,
                 num_links=num_links,
-                crawl_host=crawl_host,
-            ),
-            record=lambda current_url, current_depth, crawler_result: self._record_current_url(
+            ):
+                continue
+            if self._visited:
+                self.delay()
+            self._visited.add(current_url)
+            num_links += self._record_current_url(
                 current_url=current_url,
                 current_depth=current_depth,
                 starting_url=starting_url,
                 crawler_result=crawler_result,
                 crawl_host=crawl_host,
-            ),
-        )
+            )
 
         if not crawler_result:
             raise httpx.RequestError(_FAILED_CRAWL_CONTENT, request=None)
 
         return crawler_result
 
-    def read(self, url: str, name: str | None = None) -> list[Document]:
+    def read(self, url: str) -> list[Document]:
         """Read a website while logging only sanitized URL forms."""
         log_debug(f"Reading: {_safe_url_for_log(url)}")
         try:
-            return self._documents_from_crawl(self.crawl(url), url=url, name=name)
-        except (httpx.HTTPStatusError, httpx.RequestError) as e:
+            return self._documents_from_crawl(self.crawl(url), url=url)
+        except (PublicFetchError, httpx.RequestError) as e:
             log_error(f"Error reading website {_safe_url_for_log(url)}: {e.__class__.__name__}")
             raise
 
@@ -396,31 +330,10 @@ class _MindRoomWebsiteReader(WebsiteReader):
 
 
 class WebsiteTools(Toolkit):
-    """Agno-compatible website toolkit using MindRoom's fixed extractor."""
+    """Website toolkit using MindRoom's fixed extractor."""
 
-    def __init__(
-        self,
-        knowledge: Knowledge | None = None,
-        **kwargs: Any,  # noqa: ANN401 - mirrors Agno Toolkit passthrough kwargs.
-    ) -> None:
-        self.knowledge = knowledge
-
-        tools: list[Any] = []
-        if self.knowledge is not None:
-            tools.append(self.add_website_to_knowledge)
-        else:
-            tools.append(self.read_url)
-
-        super().__init__(name="website_tools", tools=tools, **kwargs)
-
-    def add_website_to_knowledge(self, url: str) -> str:
-        """Add a website's content to the configured knowledge base."""
-        if self.knowledge is None:
-            return "Knowledge base not provided"
-
-        log_debug(f"Adding to knowledge base: {_safe_url_for_log(url)}")
-        self.knowledge.insert(url=url, reader=_MindRoomWebsiteReader())
-        return "Success"
+    def __init__(self) -> None:
+        super().__init__(name="website_tools", tools=[self.read_url])
 
     def read_url(self, url: str) -> str:
         """Read a URL and return relevant documents from the website."""

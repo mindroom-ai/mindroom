@@ -10,12 +10,14 @@ from unittest.mock import AsyncMock, Mock, patch
 import pytest
 from structlog.testing import capture_logs
 
+from mindroom import background_tasks
 from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, AgentThreadExportConfig
 from mindroom.config.main import Config
 from mindroom.event_journal import EventJournalStore
 from mindroom.matrix.identity import MatrixID
 from mindroom.orchestrator import _MultiAgentOrchestrator
+from mindroom.private_storage.private_instance_identity_store import ensure_private_instance_identity
 from mindroom.response_admission import ResponseAdmissionGate
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.thread_export.models import ThreadExportAccumulator, ThreadExportRoom, ThreadExportTarget
@@ -26,8 +28,13 @@ from mindroom.thread_export.workspace_sync import (
     WorkspaceThreadExportRunner,
     _ThreadExportBot,
 )
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity
-from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from mindroom.tool_system.worker_routing import (
+    ToolExecutionIdentity,
+    build_requester_execution_identity,
+    private_instance_scope_root_path,
+    resolve_worker_key,
+)
+from tests.conftest import bind_runtime_paths, runtime_paths_for, swap_fleet_bot, test_runtime_paths
 from tests.thread_export_helpers import write_thread_export_matrix_state
 
 if TYPE_CHECKING:
@@ -62,6 +69,10 @@ class _FakeBot:
         return MatrixID.parse(self.user_id)
 
     @property
+    def agent_name(self) -> str:
+        return self.matrix_id.username.removeprefix("mindroom_")
+
+    @property
     def approval_room_ids(self) -> frozenset[str]:
         return frozenset(self.rooms) | self.invited_room_ids
 
@@ -93,6 +104,7 @@ def _runner(config: Config, bots: dict[str, _ThreadExportBot]) -> WorkspaceThrea
             runtime_paths=runtime_paths_for(config),
             config_provider=lambda: config,
             bot_provider=bots.get,
+            steward_provider=lambda room_id: next((bot for bot in bots.values() if room_id in bot.rooms), None),
             response_admission_gate=ResponseAdmissionGate(),
             agent_reply_memberships=AgentReplyMembershipIndex(),
             debounce_seconds=0,
@@ -171,6 +183,23 @@ async def test_activity_marks_coalesce_into_one_exact_room_pass(tmp_path: Path) 
     ]
 
 
+async def test_an_agent_keeps_what_its_passes_wrote_for_the_next_pass(tmp_path: Path) -> None:
+    """Every pass hands an agent's source the same record of what that agent's earlier passes wrote."""
+    config = _config(tmp_path, {"code": AgentConfig(display_name="Code", thread_exports=AgentThreadExportConfig())})
+    write_thread_export_matrix_state(tmp_path)
+    runner = _runner(config, _bots(_FakeBot("@mindroom_router:localhost"), _FakeBot("@mindroom_code:localhost")))
+    export = _export_mock()
+
+    with patch(EXPORT_PATH, new=export):
+        for _ in range(2):
+            runner.mark_room_activity("!lobby:localhost")
+            await runner._run_pass_once()
+
+    (first,), (second,) = (call.kwargs["sources"] for call in export.await_args_list)
+    assert first.exported is not None
+    assert second.exported is first.exported
+
+
 async def test_partial_pass_queries_only_agents_related_to_dirty_rooms(tmp_path: Path) -> None:
     """A partial pass avoids joined-room lookups for unrelated agents."""
     config = _config(
@@ -237,17 +266,52 @@ async def test_started_runner_exports_on_activity_and_stops_cleanly(tmp_path: Pa
         return _stats_for_targets(**kwargs)
 
     with patch(EXPORT_PATH, new=AsyncMock(side_effect=_export)) as export:
-        runner.start()
-        runner.start()
+        await runner.sync(config)
         runner.mark_room_activity("!lobby:localhost")
         await asyncio.wait_for(exported.wait(), timeout=5)
-        task = runner._task
-        assert task is not None
         await asyncio.wait_for(runner.stop(), timeout=5)
 
     export.assert_awaited_once()
-    assert task.cancelled()
-    assert runner._task is None
+    assert not runner._loop.running
+
+
+async def test_only_a_sync_of_the_running_runner_queues_a_full_pass(tmp_path: Path) -> None:
+    """The startup sync leaves its pass to the bots' start; a reload's sync reconciles every workspace at once."""
+    config = _config(tmp_path, {})
+    runner = _runner(config, {})
+
+    with patch.object(runner, "_run_pass_once", new=AsyncMock()):
+        await runner.sync(config)
+        assert not runner._full_pass_pending
+        await runner.sync(config)
+        assert runner._full_pass_pending
+        await runner.stop()
+
+
+async def test_loop_that_crashes_runs_again(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A crash outside a pass restarts the loop instead of ending exports until the process restarts."""
+    monkeypatch.setattr(background_tasks, "retry_delay_seconds", lambda *_args, **_kwargs: 0.0)
+    config = _config(tmp_path, {})
+    runner = _runner(config, {})
+    crashed = asyncio.Event()
+    ran_again = asyncio.Event()
+
+    async def run_pass_once() -> None:
+        if not crashed.is_set():
+            crashed.set()
+            msg = "pass bookkeeping failed"
+            raise RuntimeError(msg)
+        ran_again.set()
+
+    with patch.object(runner, "_run_pass_once", new=run_pass_once):
+        await runner.sync(config)
+        try:
+            runner.queue_full_pass()
+            await asyncio.wait_for(crashed.wait(), timeout=5)
+            runner.queue_full_pass()
+            await asyncio.wait_for(ran_again.wait(), timeout=5)
+        finally:
+            await runner.stop()
 
 
 async def test_pass_failure_keeps_the_work_for_the_next_trigger(tmp_path: Path) -> None:
@@ -577,6 +641,38 @@ async def test_private_agent_gets_one_owner_scoped_target_per_validated_instance
     assert (ghost_root / "secret_data" / _WORKSPACE_EXPORT_DIRNAME / _ROOT_MARKER_FILENAME).exists()
 
 
+async def test_private_instance_an_agent_account_owns_is_cleared_like_one_without_an_owner(tmp_path: Path) -> None:
+    """An instance the agent's own account came to own gets no target, so it never holds every room the agent serves."""
+    config = _private_config(tmp_path)
+    runtime_paths = runtime_paths_for(config)
+    write_thread_export_matrix_state(tmp_path)
+    alice_root = _materialize_private_instance(config, runtime_paths, "@alice:localhost")
+    agent_id = "@mindroom_secret:localhost"
+    identity = build_requester_execution_identity(
+        agent_name="secret",
+        runtime_paths=runtime_paths,
+        requester_id=agent_id,
+    )
+    worker_key = resolve_worker_key("user", identity, agent_name="secret")
+    assert worker_key is not None
+    ensure_private_instance_identity(runtime_paths.storage_root, worker_key=worker_key, requester_id=agent_id)
+    agent_root = private_instance_scope_root_path(runtime_paths.storage_root, worker_key) / "secret"
+    agent_thread = _write_owned_export(agent_root / "secret_data" / _WORKSPACE_EXPORT_DIRNAME)
+    runner = _runner(config, _bots(_FakeBot("@mindroom_router:localhost"), _FakeBot(agent_id)))
+    export = _export_mock()
+
+    with patch(EXPORT_PATH, new=export):
+        runner.queue_full_pass()
+        await runner._run_pass_once()
+
+    call = export.await_args
+    assert call is not None
+    assert [target.output_dir for target in call.kwargs["targets"] if target.required_member_user_ids] == [
+        alice_root / "secret_data" / _WORKSPACE_EXPORT_DIRNAME,
+    ]
+    assert not agent_thread.exists()
+
+
 async def test_private_owner_scope_requires_only_the_owner(tmp_path: Path) -> None:
     """Private owner scope requires only the owner."""
     config = _private_config(tmp_path, scope="owner")
@@ -683,11 +779,11 @@ async def test_manual_export_borrows_live_owner_and_reserves_reload_admission(tm
         assert reader.reader.hydrator.self_sender == bot.user_id
         return tuple(ThreadExportAccumulator(target=target, rooms_exported=1) for target in kwargs["targets"])
 
-    runner.start()
+    await runner.sync(config)
     try:
         with patch("mindroom.thread_export.service.export_threads_for_targets_for_client", side_effect=export_source):
             stats = await runner.export_once()
-        assert stats.rooms_exported == 1
+        assert stats.rooms_exported == 2
         assert gate.in_flight_response_count == 0
         client.close.assert_not_awaited()
         assert await principal.load_event("$missing") is None
@@ -709,11 +805,11 @@ async def test_manual_export_preserves_previous_files_when_owner_is_unavailable(
     output = tmp_path / "manual-exports"
     prior = _write_owned_export(output)
     runner = _runner(config, {})
-    runner.start()
+    await runner.sync(config)
     try:
         stats = await runner.export_once(output_dir=output)
         assert stats.failures == 2
-        assert all("No running Matrix owner for router" in item.error for item in stats.failed_items)
+        assert all("No running Matrix owner for !" in item.error for item in stats.failed_items)
         assert prior.exists()
         assert runner._deps.response_admission_gate.in_flight_response_count == 0
     finally:
@@ -736,7 +832,7 @@ async def test_stopping_runner_waits_for_manual_export_cleanup(tmp_path: Path) -
             cleaning_up.set()
             await allow_cleanup.wait()
 
-    runner.start()
+    await runner.sync(config)
     with patch("mindroom.thread_export.workspace_sync.export_threads_once", side_effect=blocked_export):
         export = asyncio.create_task(runner.export_once())
         await started.wait()
@@ -758,6 +854,27 @@ async def test_stopping_runner_waits_for_manual_export_cleanup(tmp_path: Path) -
             await asyncio.gather(export, stop, cleanup_started, return_exceptions=True)
 
 
+async def test_manual_export_starting_while_the_runner_stops_is_drained(tmp_path: Path) -> None:
+    """An administrative export that begins once stopping has begun is drained with the rest, never left running."""
+    config = _config(tmp_path, {})
+    runner = _runner(config, {})
+
+    async def blocked_export(**_kwargs: object) -> None:
+        await asyncio.Event().wait()
+
+    await runner.sync(config)
+    with patch("mindroom.thread_export.workspace_sync.export_threads_once", side_effect=blocked_export):
+        stop = asyncio.create_task(runner.stop())
+        export = asyncio.create_task(runner.export_once())
+        try:
+            await asyncio.wait_for(stop, timeout=5)
+            assert export.done()
+        finally:
+            export.cancel()
+            await asyncio.gather(export, return_exceptions=True)
+    assert runner._deps.response_admission_gate.in_flight_response_count == 0
+
+
 async def test_forced_replacement_waits_for_manual_export_cleanup(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -765,8 +882,8 @@ async def test_forced_replacement_waits_for_manual_export_cleanup(
     """Even a forced replacement cannot close an owner's resources under an export."""
     monkeypatch.setattr("mindroom.orchestration.config_lifecycle._REPLACEMENT_DRAIN_FORCE_AFTER_SECONDS", 0)
     monkeypatch.setattr("mindroom.orchestration.config_lifecycle._REPLACEMENT_DRAIN_IDLE_POLL_SECONDS", 0)
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=test_runtime_paths(tmp_path))
-    orchestrator.config = _config(tmp_path, {})
+    config = _config(tmp_path, {})
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=test_runtime_paths(tmp_path), config=config)
     runner = orchestrator._thread_export_runner
     started = asyncio.Event()
     cleaning_up = asyncio.Event()
@@ -783,10 +900,10 @@ async def test_forced_replacement_waits_for_manual_export_cleanup(
 
     async def replace_owner() -> None:
         assert export.cancelled()
-        assert orchestrator._response_admission_gate.in_flight_response_count == 0
+        assert orchestrator.response_admission_gate.in_flight_response_count == 0
         replaced.set()
 
-    runner.start()
+    await runner.sync(config)
     with patch("mindroom.thread_export.workspace_sync.export_threads_once", side_effect=blocked_export):
         export = asyncio.create_task(runner.export_once())
         await started.wait()
@@ -803,7 +920,7 @@ async def test_forced_replacement_waits_for_manual_export_cleanup(
             allow_cleanup.set()
             await replacement
             assert replaced.is_set()
-            assert not orchestrator._response_admission_gate.closed
+            assert not orchestrator.response_admission_gate.closed
         finally:
             allow_cleanup.set()
             export.cancel()
@@ -817,15 +934,15 @@ async def test_replacement_drains_automatic_exports_and_resumes_current_owners( 
     outcome: str,
 ) -> None:
     """Borrowed clients survive automatic cleanup; interrupted work resumes after publication."""
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=test_runtime_paths(tmp_path))
-    orchestrator.config = _config(
+    config = _config(
         tmp_path,
         {"code": AgentConfig(display_name="Code", thread_exports=AgentThreadExportConfig())},
     )
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=test_runtime_paths(tmp_path), config=config)
     write_thread_export_matrix_state(tmp_path)
     original = _FakeBot("@mindroom_code:localhost")
     current = _FakeBot("@mindroom_code:localhost")
-    orchestrator.agent_bots["code"] = cast("AgentBot", original)
+    orchestrator.fleet.add("code", cast("AgentBot", original))
     runner = orchestrator._thread_export_runner
     runner._deps = replace(runner._deps, debounce_seconds=0)
     started, cleaning, allow_cleanup, cleaned = (asyncio.Event() for _ in range(4))
@@ -844,15 +961,15 @@ async def test_replacement_drains_automatic_exports_and_resumes_current_owners( 
                 cleaned.set()
         assert sources[0].client is current.client
         assert {room.room_id for source in sources for room in source.rooms} == {"!lobby:localhost", "!dev:localhost"}
-        assert not orchestrator._response_admission_gate.closed
+        assert not orchestrator.response_admission_gate.closed
         output.write_text("exported using the replacement owner")
         resumed.set()
         return _stats_for_targets(**kwargs)
 
     async def publish() -> None:
         assert cleaned.is_set(), "replacement closed a client still borrowed by an automatic export"
-        orchestrator.agent_bots["code"] = cast("AgentBot", current)
-        runner.start()  # Runtime worker synchronization also calls start during publication.
+        swap_fleet_bot(orchestrator, "code", current)
+        await runner.sync(config)  # Runtime support synchronization also syncs the runner during publication.
         if outcome != "success":
             runner.mark_room_activity("!lobby:localhost")
         publishing.set()
@@ -862,7 +979,7 @@ async def test_replacement_drains_automatic_exports_and_resumes_current_owners( 
             raise RuntimeError(msg)
 
     with patch(EXPORT_PATH, side_effect=export_sources):
-        runner.start()
+        await runner.sync(config)
         runner.mark_room_activity("!lobby:localhost")
         await asyncio.wait_for(started.wait(), timeout=5)
         replacement = asyncio.create_task(

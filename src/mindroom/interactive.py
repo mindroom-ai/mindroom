@@ -15,7 +15,7 @@ from mindroom.interactive_models import (
     interactive_prompt_content,
 )
 from mindroom.logging_config import get_logger
-from mindroom.matrix.client import send_room_event_result
+from mindroom.matrix.client_delivery import send_room_event_result
 from mindroom.matrix.message_builder import build_reaction_content
 
 if TYPE_CHECKING:
@@ -163,6 +163,8 @@ _INTERACTIVE_PATTERN = re.compile(
 )
 _INLINE_INTERACTIVE_JSON_FENCE_PATTERN = r"```[ \t]*interactive(?:[ \t]+json)?[ \t]+(?:\{|\[)[^\r\n`]*```"
 _MAX_OPTIONS = 5
+_KEYCAP_EMOJIS = tuple(f"{digit}\ufe0f\u20e3" for digit in "12345")
+_SPARE_EMOJIS = ("🔹", "🔸", "🟢", "🟣", "🟠", "🟤", "⚪", "⚫", "🔺")
 _DEFAULT_QUESTION = "Please choose an option:"
 _INSTRUCTION_TEXT = "React with an emoji or type the number to respond."
 
@@ -255,7 +257,7 @@ def _coerce_interactive_option(raw_option: object) -> dict[str, str] | None:
     label = str(option_data.get("label") or "Option")
     value = str(option_data.get("value") or label.lower())
     return {
-        "emoji": str(option_data.get("emoji") or "❓"),
+        "emoji": str(option_data.get("emoji") or "").strip() or "❓",
         "label": label,
         "value": value,
     }
@@ -301,7 +303,32 @@ def _coerce_interactive_payload(raw_json: str) -> tuple[str, list[dict[str, str]
             break
     if not options:
         return None
-    return question, options
+    return question, _with_distinct_emojis(options)
+
+
+def _with_distinct_emojis(options: list[dict[str, str]]) -> list[dict[str, str]]:
+    """Give each option its own emoji, since the emoji is the option's reaction key.
+
+    A repeat gets the keycap of its own number, or a spare emoji when that keycap is taken, so a keycap never
+    names another option's number. Emojis that differ only by a variation selector look the same, and bare digits
+    collide with the numbered replies, so both count as taken.
+    """
+
+    def look(emoji: str) -> str:
+        return emoji.replace("\ufe0f", "").replace("\ufe0e", "").strip()
+
+    def is_number(emoji: str) -> bool:
+        return look(emoji).isascii() and look(emoji).isdigit()
+
+    used = {look(opt["emoji"]) for opt in options if not is_number(opt["emoji"])}
+    seen: set[str] = set()
+    for position, opt in enumerate(options):
+        if look(opt["emoji"]) in seen or is_number(opt["emoji"]):
+            candidates = (_KEYCAP_EMOJIS[position], *_SPARE_EMOJIS)
+            opt["emoji"] = next(key for key in candidates if look(key) not in used)
+            used.add(look(opt["emoji"]))
+        seen.add(look(opt["emoji"]))
+    return options
 
 
 def _render_question_text(question: str, options: list[dict[str, str]], *, include_instruction: bool) -> str:
@@ -313,7 +340,7 @@ def _render_question_text(question: str, options: list[dict[str, str]], *, inclu
     return "\n".join(parts)
 
 
-def _remove_inline_unparsed_interactive_fences(text: str) -> str:
+def _remove_inline_unparsed_interactive_fences(text: str, *, warn_unparsed: bool) -> str:
     """Remove inline interactive JSON fences that the block parser cannot render."""
     cleaned_text, count = re.subn(
         _INLINE_INTERACTIVE_JSON_FENCE_PATTERN,
@@ -324,10 +351,11 @@ def _remove_inline_unparsed_interactive_fences(text: str) -> str:
     if count == 0:
         return text
 
-    logger.warning(
-        "Interactive block not parsed",
-        preview=_preview_text(text),
-    )
+    if warn_unparsed:
+        logger.warning(
+            "Interactive block not parsed",
+            preview=_preview_text(text),
+        )
     return cleaned_text.strip()
 
 
@@ -390,7 +418,12 @@ def hide_unfinished_interactive(formatted_text: str) -> str:
     return "\n".join(lines[:index]).rstrip()
 
 
-def parse_and_format_interactive(response_text: str, extract_mapping: bool = False) -> _InteractiveResponse:
+def parse_and_format_interactive(
+    response_text: str,
+    extract_mapping: bool = False,
+    *,
+    warn_unparsed: bool = True,
+) -> _InteractiveResponse:
     """Parse and format interactive content from response text.
 
     Each interactive block is replaced in place with its formatted question so
@@ -401,6 +434,8 @@ def parse_and_format_interactive(response_text: str, extract_mapping: bool = Fal
     Args:
         response_text: The response text containing interactive JSON
         extract_mapping: Whether to extract option mapping and return options list
+        warn_unparsed: Whether to log interactive-looking blocks the parser could not use.
+            Pass False for text that is still streaming, where a block that has not closed yet is not malformed.
 
     Returns:
         The formatted response and any prompt metadata extracted from it.
@@ -409,7 +444,7 @@ def parse_and_format_interactive(response_text: str, extract_mapping: bool = Fal
     matches = _interactive_block_matches(response_text)
 
     if not matches:
-        if _should_warn_unparsed_interactive(response_text):
+        if warn_unparsed and _should_warn_unparsed_interactive(response_text):
             logger.warning(
                 "Interactive block not parsed",
                 preview=_preview_text(response_text),
@@ -470,7 +505,7 @@ def parse_and_format_interactive(response_text: str, extract_mapping: bool = Fal
         parts.append(replacement)
         last_end = match.end()
     parts.append(response_text[last_end:])
-    final_text = _remove_inline_unparsed_interactive_fences("".join(parts).strip())
+    final_text = _remove_inline_unparsed_interactive_fences("".join(parts).strip(), warn_unparsed=warn_unparsed)
 
     return _InteractiveResponse(final_text, interactive_metadata)
 

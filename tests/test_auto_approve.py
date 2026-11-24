@@ -1,0 +1,617 @@
+"""Behavioral coverage for per-thread auto-approve windows that skip tool approval."""
+
+from __future__ import annotations
+
+import asyncio
+import gc
+from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
+from functools import partial
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, Any
+from unittest.mock import AsyncMock, MagicMock
+from zoneinfo import ZoneInfo
+
+import nio
+import pytest
+
+from mindroom.approval import auto_approve_windows
+from mindroom.approval.auto_approve_windows import (
+    auto_approve_expires_at,
+    end_auto_approve,
+    room_auto_approve_windows,
+    start_auto_approve,
+)
+from mindroom.approval.manager import ApprovalManager
+from mindroom.approval.response import plan_approval_calls
+from mindroom.approval.tool_approval import human_gate
+from mindroom.commands import auto_approve_commands
+from mindroom.commands.handler import handle_command
+from mindroom.commands.parsing import CommandType, command_parser, get_command_help
+from mindroom.config.approval import ToolApprovalConfig
+from mindroom.config.main import Config
+from mindroom.event_journal import ApprovalCardView, ApprovalDecision, CallKey
+from mindroom.llm.runs import ToolExecution
+from mindroom.message_target import MessageTarget
+from mindroom.steward_duties import put_room_state_as_steward
+from mindroom.tool_system.tool_function import POLICY_CONFIRMATION_APPROVAL_TYPE
+from tests.approval_card_helpers import card_view
+from tests.authorization_helpers import make_test_command_handler_context
+from tests.conftest import approval_manager_for_test, make_conversation_reader_mock, test_runtime_paths
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+    from pathlib import Path
+
+    from mindroom.constants import RuntimePaths
+
+ROOM_ID = "!room:localhost"
+THREAD_ID = "$thread"
+HUMAN = "@human:localhost"
+
+
+def _start(runtime_paths: RuntimePaths, **overrides: object) -> datetime:
+    scope = {"room_id": ROOM_ID, "thread_id": THREAD_ID, "requester_id": HUMAN, "duration": timedelta(minutes=30)}
+    return start_auto_approve(runtime_paths, **{**scope, **overrides})  # type: ignore[arg-type]
+
+
+def test_auto_approve_window_is_scoped_to_room_thread_and_requester(tmp_path: Path) -> None:
+    """A window covers only the conversation and the person that started it, until it ends."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    expires_at = _start(runtime_paths)
+
+    assert timedelta(minutes=29) < expires_at - datetime.now(UTC) <= timedelta(minutes=30)
+    assert (
+        auto_approve_expires_at(runtime_paths, room_id=ROOM_ID, thread_id=THREAD_ID, requester_id=HUMAN) == expires_at
+    )
+    for room_id, thread_id, requester_id in (
+        ("!other:localhost", THREAD_ID, HUMAN),
+        (ROOM_ID, "$other", HUMAN),
+        (ROOM_ID, None, HUMAN),
+        (ROOM_ID, THREAD_ID, "@other:localhost"),
+        (None, THREAD_ID, HUMAN),
+        (ROOM_ID, THREAD_ID, None),
+    ):
+        assert (
+            auto_approve_expires_at(runtime_paths, room_id=room_id, thread_id=thread_id, requester_id=requester_id)
+            is None
+        )
+
+    other_thread = _start(runtime_paths, thread_id="$other")
+    _start(runtime_paths, room_id="!elsewhere:localhost")
+    assert [
+        (window.thread_id, window.requester_id, window.expires_at)
+        for window in room_auto_approve_windows(runtime_paths, ROOM_ID)
+    ] == [
+        ("$other", HUMAN, other_thread),
+        (THREAD_ID, HUMAN, expires_at),
+    ]
+    assert end_auto_approve(runtime_paths, room_id=ROOM_ID, thread_id=THREAD_ID, requester_id=HUMAN) is True
+    assert auto_approve_expires_at(runtime_paths, room_id=ROOM_ID, thread_id=THREAD_ID, requester_id=HUMAN) is None
+    assert end_auto_approve(runtime_paths, room_id=ROOM_ID, thread_id=THREAD_ID, requester_id=HUMAN) is False
+
+
+def test_auto_approve_window_expires_and_survives_unreadable_records(tmp_path: Path) -> None:
+    """An elapsed window no longer applies, and corrupt records never read as active."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    _start(runtime_paths, duration=timedelta(seconds=-1))
+    assert auto_approve_expires_at(runtime_paths, room_id=ROOM_ID, thread_id=THREAD_ID, requester_id=HUMAN) is None
+
+    path = auto_approve_windows._store_path(runtime_paths)
+    path.write_text('{"x": {"expires_at": "soon", "set_at": "now"}, "y": {"expires_at": "2999-01-01T00:00:00"}}')
+    assert auto_approve_expires_at(runtime_paths, room_id=ROOM_ID, thread_id=THREAD_ID, requester_id=HUMAN) is None
+    path.write_text("not json")
+    assert auto_approve_expires_at(runtime_paths, room_id=ROOM_ID, thread_id=THREAD_ID, requester_id=HUMAN) is None
+    path.write_text('{"not a scope": {"expires_at": "2999-01-01T00:00:00+00:00", "set_at": "now"}}')
+    assert room_auto_approve_windows(runtime_paths, ROOM_ID) == []
+    _start(runtime_paths)
+    assert auto_approve_expires_at(runtime_paths, room_id=ROOM_ID, thread_id=THREAD_ID, requester_id=HUMAN) is not None
+
+
+async def _plan(runtime_paths: RuntimePaths, tool: ToolExecution, *, requester_id: str, thread_id: str) -> object:
+    plan = await plan_approval_calls(
+        ((tool, "code"),),
+        config=Config(tool_approval=ToolApprovalConfig(default="require_approval")),
+        runtime_paths=runtime_paths,
+        requester_id=requester_id,
+        toolkit_owners={("code", tool.tool_name): "test_toolkit"},
+        room_id=ROOM_ID,
+        thread_id=thread_id,
+    )
+    [call] = plan.calls
+    return call
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("approval_type", [POLICY_CONFIRMATION_APPROVAL_TYPE, None])
+async def test_auto_approve_window_approves_every_gated_call_of_its_requester(
+    tmp_path: Path,
+    approval_type: str | None,
+) -> None:
+    """Policy gates and a tool's own confirmation both run unasked inside the requester's window."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    tool = ToolExecution(
+        tool_call_id="call-1",
+        tool_name="shell",
+        tool_args={"command": "true"},
+        requires_confirmation=True,
+        approval_type=approval_type,
+    )
+    assert (await _plan(runtime_paths, tool, requester_id=HUMAN, thread_id=THREAD_ID)).decision is None
+
+    _start(runtime_paths)
+    call = await _plan(runtime_paths, tool, requester_id=HUMAN, thread_id=THREAD_ID)
+    assert call.decision is ApprovalDecision.APPROVED
+    assert call.human_approval_required is True
+    assert (await _plan(runtime_paths, tool, requester_id="@other:localhost", thread_id=THREAD_ID)).decision is None
+    assert (await _plan(runtime_paths, tool, requester_id=HUMAN, thread_id="$other")).decision is None
+
+
+@pytest.mark.asyncio
+async def test_auto_approve_window_that_ends_during_the_policy_check_approves_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A window turned off while an approval script runs leaves that call asking."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    _start(runtime_paths)
+
+    async def evaluate(*_args: object) -> tuple[bool, float]:
+        end_auto_approve(runtime_paths, room_id=ROOM_ID, thread_id=THREAD_ID, requester_id=HUMAN)
+        return True, 60.0
+
+    monkeypatch.setattr("mindroom.approval.response.evaluate_tool_approval", evaluate)
+    tool = ToolExecution(
+        tool_call_id="call-1",
+        tool_name="shell",
+        tool_args={},
+        approval_type=POLICY_CONFIRMATION_APPROVAL_TYPE,
+    )
+
+    assert (await _plan(runtime_paths, tool, requester_id=HUMAN, thread_id=THREAD_ID)).decision is None
+
+
+@pytest.mark.asyncio
+async def test_auto_approve_window_never_approves_for_a_requester_who_cannot_approve(tmp_path: Path) -> None:
+    """A call whose requester is no person stays denied even when a window names that ID."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    _start(runtime_paths, requester_id="not-a-matrix-id")
+    tool = ToolExecution(tool_call_id="call-1", tool_name="shell", tool_args={}, requires_confirmation=True)
+
+    call = await _plan(runtime_paths, tool, requester_id="not-a-matrix-id", thread_id=THREAD_ID)
+
+    assert call.decision is ApprovalDecision.DENIED
+
+
+def test_auto_approve_command_parsing_and_help() -> None:
+    """`!auto_approve` parses with and without arguments, and help explains it."""
+    for message, args_text in (
+        ("!auto_approve", ""),
+        ("!Auto-Approve 30m", "30m"),
+        ("!auto_approve 45", "45"),
+        ("!auto_approve  off ", "off"),
+    ):
+        command = command_parser.parse(message)
+        assert command is not None
+        assert command.type is CommandType.AUTO_APPROVE
+        assert command.args == {"args_text": args_text}
+    assert "**Auto-Approve Command**" in get_command_help("auto_approve")
+    assert "/auto_approve" in get_command_help()
+
+
+@dataclass(frozen=True)
+class _Event:
+    sender: str
+    body: str
+    event_id: str = "$event"
+
+    @property
+    def source(self) -> dict[str, object]:
+        return {"content": {"body": self.body}}
+
+
+async def _send(
+    tmp_path: Path,
+    body: str,
+    *,
+    requester_user_id: str = HUMAN,
+    acts_for_requester: bool = False,
+    config: Config | None = None,
+    room_mode: bool = False,
+    put_room_state: Callable[..., Awaitable[bool]] | None = None,
+) -> tuple[str, RuntimePaths]:
+    runtime_paths = test_runtime_paths(tmp_path)
+    context = make_test_command_handler_context(
+        client=AsyncMock(),
+        put_room_state=put_room_state or AsyncMock(return_value=True),
+        config=config or Config(),
+        runtime_paths=runtime_paths,
+        logger=MagicMock(),
+        conversation_reader=make_conversation_reader_mock(),
+        stable_target=MessageTarget.resolve(ROOM_ID, THREAD_ID, "$event", room_mode=room_mode),
+        record_handled_turn=AsyncMock(),
+        record_command_result=AsyncMock(),
+        send_response=AsyncMock(return_value="$reply"),
+    )
+    command = command_parser.parse(body)
+    assert command is not None
+    await handle_command(
+        context=context,
+        room=SimpleNamespace(room_id=ROOM_ID),
+        event=_Event(requester_user_id, body),
+        command=command,
+        requester_user_id=requester_user_id,
+        acts_for_requester=acts_for_requester,
+    )
+    return context.send_response.await_args.args[0], runtime_paths
+
+
+@pytest.mark.asyncio
+async def test_auto_approve_command_starts_shows_and_ends_the_thread_window(tmp_path: Path) -> None:
+    """The command starts a window for its sender's thread, reports it, and ends it."""
+    reply, runtime_paths = await _send(tmp_path, "!auto_approve 2h")
+    expires_at = auto_approve_expires_at(runtime_paths, room_id=ROOM_ID, thread_id=THREAD_ID, requester_id=HUMAN)
+    assert expires_at is not None
+    assert timedelta(minutes=119) < expires_at - datetime.now(UTC) <= timedelta(hours=2)
+    assert reply.startswith(
+        f"⚠️ Auto-approve for all your tool calls is on in this thread until {expires_at:%Y-%m-%d %H:%M} UTC",
+    )
+
+    reply, _ = await _send(tmp_path, "!auto_approve")
+    assert reply.startswith("⚠️ Auto-approve for all your tool calls is on in this thread until")
+
+    reply, _ = await _send(tmp_path, "!auto_approve off")
+    assert reply.startswith(
+        "✅ Auto-approve for all your tool calls is off in this thread; they follow the usual approval rules again.",
+    )
+    assert "stays approved until you stop it on that card" in reply
+    assert auto_approve_expires_at(runtime_paths, room_id=ROOM_ID, thread_id=THREAD_ID, requester_id=HUMAN) is None
+
+    reply, _ = await _send(tmp_path, "!auto_approve")
+    assert reply.startswith("Auto-approve for all your tool calls is off in this thread.")
+    reply, _ = await _send(tmp_path, "!auto_approve off")
+    assert reply == "Auto-approve for all your tool calls is not on in this thread."
+
+
+@pytest.mark.asyncio
+async def test_auto_approve_command_publishes_the_rooms_open_windows_for_clients(tmp_path: Path) -> None:
+    """Starting and ending a window rewrite the room steward's own state from the stored windows."""
+    client = AsyncMock(user_id="@mindroom_router:localhost")
+    client.room_put_state.return_value = nio.RoomPutStateResponse(event_id="$state", room_id=ROOM_ID)
+    runtime = SimpleNamespace(room_steward=lambda _room_id: SimpleNamespace(client=client))
+    put_room_state = partial(put_room_state_as_steward, runtime.room_steward)
+
+    await _send(tmp_path, "!auto_approve 30", put_room_state=put_room_state)
+
+    runtime_paths = test_runtime_paths(tmp_path)
+    expires_at = auto_approve_expires_at(runtime_paths, room_id=ROOM_ID, thread_id=THREAD_ID, requester_id=HUMAN)
+    assert expires_at is not None
+    client.room_put_state.assert_awaited_once_with(
+        ROOM_ID,
+        "io.mindroom.auto_approve",
+        {"windows": [{"thread_id": THREAD_ID, "requester_id": HUMAN, "expires_at": expires_at.isoformat()}]},
+        state_key="@mindroom_router:localhost",
+    )
+    client.room_put_state.reset_mock()
+    await _send(tmp_path, "!auto_approve off", put_room_state=put_room_state)
+    assert client.room_put_state.await_args.args[2] == {"windows": []}
+
+
+def _window(runtime_paths: RuntimePaths) -> datetime | None:
+    return auto_approve_expires_at(runtime_paths, room_id=ROOM_ID, thread_id=THREAD_ID, requester_id=HUMAN)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failure", "reply_start"),
+    [
+        # None is a refusal: no steward, or one without the power.
+        ({"return_value": None}, "I need moderator rights in this room to turn on auto-approve."),
+        ({"return_value": False}, "⚠️ Auto-approve was not turned on"),
+        ({"side_effect": OSError("connection reset")}, "⚠️ Auto-approve was not turned on"),
+    ],
+)
+async def test_auto_approve_window_opens_only_after_the_room_shows_it(
+    tmp_path: Path,
+    failure: dict[str, Any],
+    reply_start: str,
+) -> None:
+    """A window the room's clients cannot show is not opened, and only a refusal asks for moderator rights."""
+    await _send(tmp_path, "!auto_approve 30")
+    opened = _window(test_runtime_paths(tmp_path))
+
+    reply, runtime_paths = await _send(tmp_path, "!auto_approve 2h", put_room_state=AsyncMock(**failure))
+
+    assert reply.startswith(reply_start)
+    # The window that was open stays as it was.
+    assert _window(runtime_paths) == opened
+
+
+@pytest.mark.asyncio
+async def test_tool_call_needs_approval_while_the_window_is_being_published(tmp_path: Path) -> None:
+    """Until the room's state shows the window, a tool call still asks its approver."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    publishing, published = asyncio.Event(), asyncio.Event()
+
+    async def put_room_state(*_args: object, **_kwargs: object) -> None:
+        publishing.set()
+        await published.wait()
+
+    command = asyncio.create_task(_send(tmp_path, "!auto_approve 30", put_room_state=put_room_state))
+    await publishing.wait()
+    gate = human_gate(runtime_paths, approver_id=HUMAN, room_id=ROOM_ID, thread_id=THREAD_ID)
+    published.set()
+    reply, _ = await command
+
+    assert gate is None
+    assert reply == "I need moderator rights in this room to turn on auto-approve."
+    assert _window(runtime_paths) is None
+
+
+@pytest.mark.asyncio
+async def test_windows_opened_at_once_are_both_published(tmp_path: Path) -> None:
+    """Two people who open a window in one room at once both end up in what the room shows."""
+    published: list[dict[str, Any]] = []
+
+    async def put_room_state(_room_id: str, _event_type: str, content: dict[str, Any], **_kwargs: object) -> bool:
+        await asyncio.sleep(0)
+        published.append(content)
+        return True
+
+    await asyncio.gather(
+        _send(tmp_path, "!auto_approve 30", put_room_state=put_room_state),
+        _send(tmp_path, "!auto_approve 30", requester_user_id="@other:localhost", put_room_state=put_room_state),
+    )
+
+    assert {window["requester_id"] for window in published[-1]["windows"]} == {HUMAN, "@other:localhost"}
+
+
+@pytest.mark.asyncio
+async def test_a_rooms_change_lock_lives_only_while_a_command_changes_its_windows(tmp_path: Path) -> None:
+    """The lock ordering one room's changes is dropped once no command holds or waits for it."""
+    await _send(tmp_path, "!auto_approve 30")
+    await _send(tmp_path, "!auto_approve off")
+    gc.collect()
+
+    assert not auto_approve_commands._CHANGES
+
+
+@pytest.mark.asyncio
+async def test_auto_approve_off_ends_a_window_that_is_still_being_published(tmp_path: Path) -> None:
+    """`off` sent while the same window is opening waits for it and ends it, so no window opens after `off` answers."""
+    publishing, published = asyncio.Event(), asyncio.Event()
+
+    async def put_room_state(*_args: object, **_kwargs: object) -> bool:
+        publishing.set()
+        await published.wait()
+        return True
+
+    opening = asyncio.create_task(_send(tmp_path, "!auto_approve 30", put_room_state=put_room_state))
+    await publishing.wait()
+    closing = asyncio.create_task(_send(tmp_path, "!auto_approve off"))
+    await asyncio.wait([closing], timeout=0.2)
+    published.set()
+    await opening
+    reply, runtime_paths = await closing
+
+    assert reply.startswith("✅ Auto-approve for all your tool calls is off")
+    assert _window(runtime_paths) is None
+
+
+@pytest.mark.asyncio
+async def test_auto_approve_off_says_when_the_room_refuses_to_show_it(tmp_path: Path) -> None:
+    """Ending a window always ends it here, and a refused state write asks for moderator rights."""
+    await _send(tmp_path, "!auto_approve 30")
+
+    reply, runtime_paths = await _send(tmp_path, "!auto_approve off", put_room_state=AsyncMock(return_value=None))
+    again, _ = await _send(tmp_path, "!auto_approve off", put_room_state=AsyncMock(return_value=None))
+
+    assert reply == "I need moderator rights in this room to show that auto-approve is off."
+    assert _window(runtime_paths) is None
+    # The room still shows the window, so a repeat that is refused says so too.
+    assert again == reply
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [{"return_value": False}, {"side_effect": OSError("connection reset")}])
+async def test_auto_approve_off_says_when_clearing_fails_and_a_repeat_retries(
+    tmp_path: Path,
+    failure: dict[str, Any],
+) -> None:
+    """A window ends here though the room still shows it, the answer says so, and another `off` clears it."""
+    await _send(tmp_path, "!auto_approve 30")
+
+    reply, runtime_paths = await _send(tmp_path, "!auto_approve off", put_room_state=AsyncMock(**failure))
+    retried = AsyncMock(return_value=True)
+    again, _ = await _send(tmp_path, "!auto_approve off", put_room_state=retried)
+
+    assert reply.startswith("⚠️ Auto-approve for all your tool calls is off in this thread, but")
+    assert _window(runtime_paths) is None
+    assert again == "Auto-approve for all your tool calls is not on in this thread."
+    assert retried.await_args.args[2] == {"windows": []}
+
+
+@pytest.mark.asyncio
+async def test_auto_approve_command_names_the_whole_room_in_a_room_without_threads_and_uses_local_time(
+    tmp_path: Path,
+) -> None:
+    """A room-mode window covers the room, and its end shows in the configured timezone."""
+    reply, runtime_paths = await _send(
+        tmp_path,
+        "!auto_approve 30",
+        config=Config(timezone="Europe/Amsterdam"),
+        room_mode=True,
+    )
+
+    expires_at = auto_approve_expires_at(runtime_paths, room_id=ROOM_ID, thread_id=None, requester_id=HUMAN)
+    assert expires_at is not None
+    local = expires_at.astimezone(ZoneInfo("Europe/Amsterdam"))
+    assert reply.startswith(
+        f"⚠️ Auto-approve for all your tool calls is on in this room until {local:%Y-%m-%d %H:%M %Z}: ",
+    )
+    reply, _ = await _send(tmp_path, "!auto_approve off", room_mode=True)
+    assert reply.startswith(
+        "✅ Auto-approve for all your tool calls is off in this room; they follow the usual approval rules again.",
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("duration", "expected"), [("45", timedelta(minutes=45)), ("1440", timedelta(hours=24))])
+async def test_auto_approve_command_reads_a_bare_number_as_minutes(
+    tmp_path: Path,
+    duration: str,
+    expected: timedelta,
+) -> None:
+    """`!auto_approve 45` starts a 45-minute window."""
+    _reply, runtime_paths = await _send(tmp_path, f"!auto_approve {duration}")
+
+    expires_at = auto_approve_expires_at(runtime_paths, room_id=ROOM_ID, thread_id=THREAD_ID, requester_id=HUMAN)
+    assert expires_at is not None
+    assert expected - timedelta(minutes=1) < expires_at - datetime.now(UTC) <= expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("duration", ["0", "0m", "1441", "25h", "99999999999999999999h", "forever", "30s"])
+async def test_auto_approve_command_rejects_durations_outside_one_minute_to_a_day(
+    tmp_path: Path,
+    duration: str,
+) -> None:
+    """Durations must name minutes or hours between one minute and 24 hours."""
+    reply, runtime_paths = await _send(tmp_path, f"!auto_approve {duration}")
+
+    assert reply.startswith("❌ Choose a duration from 1 minute to 24 hours")
+    assert auto_approve_expires_at(runtime_paths, room_id=ROOM_ID, thread_id=THREAD_ID, requester_id=HUMAN) is None
+
+
+@pytest.mark.asyncio
+async def test_auto_approve_command_needs_the_person_in_person(tmp_path: Path) -> None:
+    """An agent cannot start a window for its human, and non-person requesters cannot start one."""
+    reply, runtime_paths = await _send(tmp_path, "!auto_approve 30m", acts_for_requester=True)
+    assert reply == "❌ Agents cannot run this command for you. Send it yourself."
+    assert auto_approve_expires_at(runtime_paths, room_id=ROOM_ID, thread_id=THREAD_ID, requester_id=HUMAN) is None
+
+    reply, _ = await _send(tmp_path, "!auto_approve 30m", requester_user_id="not-a-matrix-id")
+    assert reply == "❌ Only a person can turn on auto-approve."
+
+
+@pytest.mark.asyncio
+async def test_auto_approve_command_approves_cards_already_waiting_in_the_thread(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Turning the window on approves the sender's pending cards in that thread through the normal action path."""
+    manager = MagicMock(spec=ApprovalManager)
+    manager.pending_card_event_ids = AsyncMock(return_value=("$card-1", "$card-2"))
+    approve = AsyncMock(side_effect=[True, False])
+    monkeypatch.setattr(auto_approve_commands, "get_approval_store", lambda: manager)
+    monkeypatch.setattr(auto_approve_commands, "handle_tool_approval_action", approve)
+
+    reply, _ = await _send(tmp_path, "!auto_approve 30m")
+
+    assert "Approved 1 waiting tool call." in reply
+    manager.pending_card_event_ids.assert_awaited_once_with(
+        room_id=ROOM_ID,
+        thread_id=THREAD_ID,
+        approver_user_id=HUMAN,
+    )
+    assert [call.kwargs["approval_event_id"] for call in approve.await_args_list] == ["$card-1", "$card-2"]
+    assert {(call.kwargs["sender_id"], call.kwargs["status"]) for call in approve.await_args_list} == {
+        (HUMAN, "approved"),
+    }
+
+
+def _stored(
+    card_event_id: str | None,
+    *,
+    created_at_ns: int,
+    thread_id: str = THREAD_ID,
+    approver: str = HUMAN,
+    decided: bool = False,
+    owner_kind: str | None = "reply",
+    approvable: bool = True,
+    expires_in: timedelta = timedelta(hours=1),
+) -> ApprovalCardView:
+    return card_view(
+        delivery_id=f"delivery-{created_at_ns}",
+        call=CallKey("continuation", 1, f"call-{created_at_ns}"),
+        room_id=ROOM_ID,
+        thread_id=thread_id,
+        card_event_id=card_event_id,
+        created_at_ns=created_at_ns,
+        approvable=approvable,
+        owner_kind=owner_kind,
+        approver_user_id=approver,
+        expires_at_ns=int((datetime.now(UTC) + expires_in).timestamp() * 1_000_000_000),
+        decided=decided,
+    )
+
+
+@pytest.mark.asyncio
+async def test_pending_card_listing_keeps_only_the_approvers_open_cards_in_one_thread(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Only unexpired, unanswered, approvable, published cards of the approver in the thread are listed, across pages."""
+    monkeypatch.setattr("mindroom.approval.manager._STARTUP_RECOVERY_SCAN_PAGE", 3)
+    pages = [
+        (
+            _stored("$reply-card", created_at_ns=1),
+            _stored("$other-thread", created_at_ns=2, thread_id="$other"),
+            _stored("$other-approver", created_at_ns=3, approver="@other:localhost"),
+        ),
+        (
+            _stored("$answered", created_at_ns=4, decided=True),
+            _stored(None, created_at_ns=5),
+            _stored("$scheduled", created_at_ns=6, owner_kind="scheduled"),
+        ),
+        (
+            _stored("$too-large", created_at_ns=7, approvable=False),
+            _stored("$call-gone", created_at_ns=8, owner_kind=None),
+            _stored("$job-card", created_at_ns=9, owner_kind="job"),
+        ),
+        (_stored("$past-deadline", created_at_ns=10, expires_in=timedelta(seconds=-1)),),
+    ]
+    cards = MagicMock()
+    cards.approvals.pending_approval_cards = AsyncMock(side_effect=pages)
+    manager = approval_manager_for_test(test_runtime_paths(tmp_path), send_approval_delivery=AsyncMock(), cards=cards)
+
+    try:
+        event_ids = await manager.pending_card_event_ids(room_id=ROOM_ID, thread_id=THREAD_ID, approver_user_id=HUMAN)
+    finally:
+        await manager.shutdown()
+
+    assert event_ids == ("$reply-card", "$job-card")
+    assert [call.kwargs["after"] for call in cards.approvals.pending_approval_cards.await_args_list] == [
+        None,
+        (3, "delivery-3"),
+        (6, "delivery-6"),
+        (9, "delivery-9"),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_pending_approval_threads_maps_each_conversation_to_its_newest_waiting_card(tmp_path: Path) -> None:
+    """Each conversation maps to its newest open card for the approvers, scheduled and deny-only cards included."""
+    page = (
+        _stored("$a1", created_at_ns=5_000_000),
+        _stored("$a2", created_at_ns=7_000_000),
+        _stored("$b", created_at_ns=6_000_000, thread_id="$other"),
+        _stored("$scheduled", created_at_ns=8_000_000, thread_id="$sched", owner_kind="scheduled"),
+        _stored("$deny-only", created_at_ns=9_000_000, thread_id="$large", approvable=False),
+        _stored("$alias", created_at_ns=10_000_000, thread_id="$alias-thread", approver="@alias:localhost"),
+        _stored("$other-approver", created_at_ns=11_000_000, thread_id="$x1", approver="@other:localhost"),
+        _stored("$answered", created_at_ns=12_000_000, thread_id="$x2", decided=True),
+        _stored(None, created_at_ns=13_000_000, thread_id="$x3"),
+        _stored("$call-gone", created_at_ns=14_000_000, thread_id="$x4", owner_kind=None),
+        _stored("$past-deadline", created_at_ns=15_000_000, thread_id="$x5", expires_in=timedelta(seconds=-1)),
+    )
+    cards = MagicMock()
+    cards.approvals.pending_approval_cards = AsyncMock(side_effect=[page])
+    manager = approval_manager_for_test(test_runtime_paths(tmp_path), send_approval_delivery=AsyncMock(), cards=cards)
+
+    try:
+        threads = await manager.pending_approval_threads(room_id=ROOM_ID, approver_user_ids={HUMAN, "@alias:localhost"})
+    finally:
+        await manager.shutdown()
+
+    assert threads == {THREAD_ID: 7, "$other": 6, "$sched": 8, "$large": 9, "$alias-thread": 10}

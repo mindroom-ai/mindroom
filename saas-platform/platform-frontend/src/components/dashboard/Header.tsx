@@ -1,6 +1,6 @@
 'use client'
 
-import { Bell, Menu } from 'lucide-react'
+import { Menu } from 'lucide-react'
 import { useAuth } from '@/hooks/useAuth'
 import { DarkModeToggle } from '@/components/DarkModeToggle'
 
@@ -28,21 +28,13 @@ export function Header({ sidebarOpen, setSidebarOpen }: HeaderProps) {
         <div className="flex items-center gap-x-2 sm:gap-x-4 lg:gap-x-6">
           <DarkModeToggle />
 
-          <button
-            type="button"
-            className="p-2 text-gray-400 hover:text-gray-500 dark:text-gray-500 dark:hover:text-gray-400 hover:bg-gray-100 dark:hover:bg-gray-800 rounded-lg transition-colors"
-          >
-            <span className="sr-only">View notifications</span>
-            <Bell className="h-5 w-5" />
-          </button>
-
           <div className="hidden lg:block lg:h-6 lg:w-px lg:bg-gray-200 dark:bg-gray-700" />
 
           <div className="flex items-center gap-x-4">
             <p className="hidden sm:block text-sm font-semibold leading-6 text-gray-900 dark:text-gray-100">
               {user?.email ?? 'Account'}
             </p>
-            <div className="h-8 w-8 rounded-full bg-orange-500 flex items-center justify-center text-white font-semibold">
+            <div className="h-8 w-8 rounded-full bg-brand-600 flex items-center justify-center text-white font-semibold">
               {(user?.email?.[0]?.toUpperCase() ?? '?')}
             </div>
           </div>

@@ -203,10 +203,35 @@ const drilldownReport = {
   ],
 };
 
+const emptyProviderLimits = {
+  version: 1,
+  checked_at: "2026-09-19T12:00:00Z",
+  partial: false,
+  accounts: [],
+  daily_7d: [],
+  unattributed_tokens_7d: 0,
+  unattributed_cost_usd_7d: null,
+};
+
 function respond(payload: unknown = report, status = 200, headers = {}) {
   return new Response(JSON.stringify(payload), {
     status,
     headers: { "Content-Type": "application/json", ...headers },
+  });
+}
+
+function mockUsageFetch(
+  ...usageResponses: Array<() => Response | Promise<Response>>
+) {
+  let index = 0;
+  vi.mocked(fetch).mockImplementation((input) => {
+    const url = typeof input === "string" ? input : String(input);
+    if (url.startsWith("/api/usage/provider-limits")) {
+      return Promise.resolve(respond(emptyProviderLimits));
+    }
+    const next = usageResponses[Math.min(index, usageResponses.length - 1)];
+    index += 1;
+    return Promise.resolve(next());
   });
 }
 function renderUsage() {
@@ -231,7 +256,7 @@ afterEach(() => {
 
 describe("Usage", () => {
   it("keeps cumulative totals separate from retained requester detail", async () => {
-    vi.mocked(fetch).mockResolvedValue(respond());
+    mockUsageFetch(() => respond());
     renderUsage();
     const agent = await screen.findByRole("button", { name: "research" });
     expect(
@@ -256,7 +281,7 @@ describe("Usage", () => {
   });
 
   it("shows an agent's cumulative models and combines requester days without inventing undated activity", async () => {
-    vi.mocked(fetch).mockResolvedValue(respond(drilldownReport));
+    mockUsageFetch(() => respond(drilldownReport));
     renderUsage();
     await userEvent.click(
       await screen.findByRole("button", { name: "research" }),
@@ -291,7 +316,7 @@ describe("Usage", () => {
   });
 
   it("drills into a requester across agents, models, and dated runs", async () => {
-    vi.mocked(fetch).mockResolvedValue(respond(drilldownReport));
+    mockUsageFetch(() => respond(drilldownReport));
     renderUsage();
     await screen.findByRole("button", { name: "research" });
     await userEvent.click(screen.getByRole("tab", { name: "Requesters" }));
@@ -345,7 +370,7 @@ describe("Usage", () => {
   });
 
   it("keeps model providers distinct and uses model-specific daily run counts", async () => {
-    vi.mocked(fetch).mockResolvedValue(respond(drilldownReport));
+    mockUsageFetch(() => respond(drilldownReport));
     renderUsage();
     await screen.findByRole("button", { name: "research" });
     await userEvent.click(screen.getByRole("tab", { name: "Models" }));
@@ -385,7 +410,7 @@ describe("Usage", () => {
   });
 
   it("filters only daily activity by UTC date and keeps model totals cumulative", async () => {
-    vi.mocked(fetch).mockResolvedValue(respond());
+    mockUsageFetch(() => respond());
     renderUsage();
     await screen.findByRole("button", { name: "research" });
     const activity = screen.getByRole("region", { name: "Daily activity" });
@@ -413,14 +438,14 @@ describe("Usage", () => {
 
   it("returns focus to search when an in-flight refresh removes the open row", async () => {
     let finishRefresh!: (response: Response) => void;
-    vi.mocked(fetch)
-      .mockResolvedValueOnce(respond())
-      .mockReturnValueOnce(
+    mockUsageFetch(
+      () => respond(),
+      () =>
         new Promise((resolve) => {
           finishRefresh = resolve;
         }),
-      )
-      .mockResolvedValue(respond());
+      () => respond(),
+    );
     renderUsage();
     await screen.findByRole("button", { name: "research" });
     await userEvent.click(screen.getByRole("button", { name: "Refresh" }));
@@ -444,11 +469,10 @@ describe("Usage", () => {
 
   it("polls preparation then renders the ready report", async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
-    vi.mocked(fetch)
-      .mockResolvedValueOnce(
-        respond({ status: "pending" }, 202, { "Retry-After": "1" }),
-      )
-      .mockResolvedValue(respond());
+    mockUsageFetch(
+      () => respond({ status: "pending" }, 202, { "Retry-After": "1" }),
+      () => respond(),
+    );
     renderUsage();
     expect(await screen.findByRole("status")).toHaveTextContent(
       /Preparing usage/,
@@ -462,7 +486,10 @@ describe("Usage", () => {
     await act(async () => {
       await vi.advanceTimersByTimeAsync(5000);
     });
-    expect(fetch).toHaveBeenCalledTimes(2);
+    const usageCalls = vi
+      .mocked(fetch)
+      .mock.calls.filter(([url]) => String(url).startsWith("/api/usage?"));
+    expect(usageCalls).toHaveLength(2);
   });
 
   it("stops polling and discards reports when leaving the page", async () => {
@@ -481,10 +508,11 @@ describe("Usage", () => {
   });
 
   it("hides a previous report when refreshing loses access and allows retry", async () => {
-    vi.mocked(fetch)
-      .mockResolvedValueOnce(respond())
-      .mockResolvedValueOnce(respond({}, 403))
-      .mockResolvedValue(respond());
+    mockUsageFetch(
+      () => respond(),
+      () => respond({}, 403),
+      () => respond(),
+    );
     renderUsage();
     await screen.findByRole("button", { name: "research" });
     await userEvent.click(screen.getByRole("button", { name: "Refresh" }));
@@ -501,7 +529,7 @@ describe("Usage", () => {
   });
 
   it("distinguishes an empty report from unreadable usage sources", async () => {
-    vi.mocked(fetch).mockResolvedValue(
+    mockUsageFetch(() =>
       respond({
         ...report,
         totals: totals(0),

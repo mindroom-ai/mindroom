@@ -171,6 +171,7 @@ const ROOT: JsonSchema = {
         aliases: {
           type: "object",
           additionalProperties: { type: "array", items: { type: "string" } },
+          "x-mindroom": { key_placeholder: "@alice:example.org" },
         },
         participation: {
           anyOf: [{ $ref: "#/$defs/ParticipationConfig" }, { type: "null" }],
@@ -299,7 +300,9 @@ describe("SchemaFields", () => {
     const { lastValue } = renderFixture();
     fireEvent.change(
       screen.getByRole("combobox", { name: "Large message strategy" }),
-      { target: { value: "split" } },
+      {
+        target: { value: "split" },
+      },
     );
     expect(lastValue()).toEqual({ large_message_strategy: "split" });
 
@@ -414,6 +417,17 @@ describe("SchemaFields", () => {
     expect(lastValue()).toEqual({ tools: [] });
   });
 
+  it("edits tool entries by name and keeps the entries of listed tools", () => {
+    const { lastValue } = renderFixture({
+      tools: ["browser", { shell: { sandbox: "tight" } }],
+    });
+    expect(screen.getByText("shell")).toBeInTheDocument();
+    expect(screen.queryByText("[object Object]")).not.toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Remove browser" }));
+    expect(lastValue()).toEqual({ tools: [{ shell: { sandbox: "tight" } }] });
+  });
+
   it("edits string maps with referenced values", () => {
     const { lastValue } = renderFixture();
     fireEvent.change(
@@ -431,6 +445,16 @@ describe("SchemaFields", () => {
       target: { value: "sonnet" },
     });
     expect(lastValue()).toEqual({ room_models: { lobby: "sonnet" } });
+  });
+
+  it("shows a map's example key in its new-key input", () => {
+    renderFixture();
+    expect(
+      screen.getByRole("textbox", { name: "New aliases key" }),
+    ).toHaveAttribute("placeholder", "Key, such as @alice:example.org");
+    expect(
+      screen.getByRole("combobox", { name: "New room models key" }),
+    ).toHaveAttribute("placeholder", "Key");
   });
 
   it("enables optional objects with their defaults and disables them by removing the key", () => {
@@ -482,7 +506,9 @@ describe("SchemaFields", () => {
     expect(lastValue()).toEqual({ accept_invites: [] });
     fireEvent.change(
       screen.getByRole("textbox", { name: "New accept invites entry" }),
-      { target: { value: "@alice:example.org" } },
+      {
+        target: { value: "@alice:example.org" },
+      },
     );
     fireEvent.click(
       screen.getByRole("button", { name: "Add accept invites entry" }),
@@ -518,11 +544,49 @@ describe("SchemaFields", () => {
     fireEvent.blur(editor);
     expect(lastValue()).toEqual({ settings: { retries: 3 } });
 
+    fireEvent.change(editor, { target: { value: "# nothing yet\n" } });
+    fireEvent.blur(editor);
+    expect(lastValue()).toEqual({});
+
     fireEvent.change(editor, { target: { value: "retries: [" } });
     fireEvent.blur(editor);
     expect(
       screen.getByText(/unexpected end of the stream/i),
     ).toBeInTheDocument();
+  });
+
+  it("reads freeform YAML to the values js-yaml 4 gave", () => {
+    const { lastValue } = renderFixture();
+    const editor = screen.getByRole("textbox", { name: "Settings YAML" });
+    const settingsAfter = (draft: string) => {
+      fireEvent.change(editor, { target: { value: draft } });
+      fireEvent.blur(editor);
+      return lastValue().settings;
+    };
+
+    expect(
+      settingsAfter(
+        "defaults: &d {timeout: 30}\nclient: {<<: *d, retries: 2}\n",
+      ),
+    ).toEqual({
+      defaults: { timeout: 30 },
+      client: { timeout: 30, retries: 2 },
+    });
+    // js-yaml 4.3 kept underscore digits and integers too large for a number as strings and read signed hex, octal
+    // and binary integers as numbers. It made dates Date objects; dates now stay the strings that were typed.
+    const tooLarge = `0b${"1".repeat(1100)}`;
+    expect(
+      settingsAfter(
+        `big: 1_000\nmask: 0b101\nneg: -0x10\npos: +0o20\nhuge: ${tooLarge}\nday: 2026-01-01\n`,
+      ),
+    ).toEqual({
+      big: "1_000",
+      mask: 5,
+      neg: -16,
+      pos: 16,
+      huge: tooLarge,
+      day: "2026-01-01",
+    });
   });
 
   it("stores an explicit empty string when the default is not empty", () => {
@@ -567,7 +631,9 @@ describe("SchemaFields", () => {
     });
     fireEvent.change(
       screen.getByRole("combobox", { name: "Call profile type" }),
-      { target: { value: "1" } },
+      {
+        target: { value: "1" },
+      },
     );
     // A realtime model ID is not a configured model name.
     expect(lastValue()).toEqual({ call_profile: { backend: "cascaded" } });

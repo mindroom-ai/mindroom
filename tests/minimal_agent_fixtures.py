@@ -1,25 +1,39 @@
-"""Shared scripted provider, shell, and fake integration for minimal-agent tests."""
+"""Shared scripted model, shell, provider batch, and fake integration for minimal-agent tests."""
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
-from types import SimpleNamespace
-from typing import TYPE_CHECKING
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, Any
 
 import pytest
-from agno.models.openai import OpenAIChat
-from openai.types.chat import ChatCompletion, ChatCompletionChunk
 
 from mindroom import agents
+from mindroom.agent_cli.bash import minimal_bash_toolkit
 from mindroom.agent_cli.shell_contract import current_agent_cli_shell_env
 from mindroom.agent_cli.turn import LiveTurnTools
+from mindroom.agent_loop.model_loop import EMPTY_REQUEST, LoopHooks, LoopState
+from mindroom.agent_loop.run import run_agent
+from mindroom.agent_loop.spec import AgentSpec
+from mindroom.agent_loop.tools import PlannedCall, PreparedTools
+from mindroom.llm.events import RunFinished
+from mindroom.llm.messages import Message
+from mindroom.llm.provider import Capabilities, ModelRequest
+from mindroom.llm.runs import RunRecord, ToolExecution
 from mindroom.runtime_state import clear_api_server_address, set_api_server_address
+from tests.conftest import SETTLE_TIMEOUT_SECONDS, install_model_providers
+from tests.fakes.request_sizing import PlainRequestSizing
+from tests.fakes.scripted_model import SYNTHETIC, ScriptedModel, answer, calls, tool_call
+from tests.fakes.token_counter import fake_token_counter
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Iterator
+    from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Sequence
 
     from mindroom.agent_cli.session import TurnToolRegistry
+    from mindroom.agent_loop.spec import RunContext
+    from mindroom.llm.provider import ModelIdentity, NativeHistoryRoute, StreamEvent, TokenCounter
 
 
 def cli_window() -> str | None:
@@ -41,9 +55,12 @@ def install_scripted_shell(monkeypatch: pytest.MonkeyPatch, run_shell_command: C
     original = agents.get_tool_by_name
 
     def build(name: str, *args: object, **kwargs: object) -> object:
-        toolkit = original(name, *args, **kwargs)
-        if name == "shell" and "run_shell_command" in toolkit.async_functions:
-            toolkit.async_functions["run_shell_command"].entrypoint = run_shell_command
+        if name != "shell":
+            return original(name, *args, **kwargs)
+        # The scripted body runs here, so no call of it is sent to a worker.
+        toolkit = original(name, *args, **{**kwargs, "runs_in_worker": False})
+        if "run_shell_command" in toolkit.functions:
+            toolkit.functions["run_shell_command"] = run_shell_command
         return toolkit
 
     monkeypatch.setattr(agents, "get_tool_by_name", build)
@@ -58,12 +75,28 @@ def shell_cli_owner(registry: TurnToolRegistry) -> LiveTurnTools:
     return owner
 
 
+async def settled_receipt(owner: LiveTurnTools, call_id: str) -> dict[str, object]:
+    """Poll the call's receipt until it is no longer queued, running, or waiting, as `mindroom-agent` waits for it.
+
+    A call that never settles fails the test after ``SETTLE_TIMEOUT_SECONDS`` with its last receipt.
+    """
+    receipt: dict[str, object] = {}
+    try:
+        async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+            while (receipt := await owner.get_call(call_id))["status"] in {"queued", "running", "waiting"}:  # noqa: ASYNC110
+                await asyncio.sleep(0.001)
+    except TimeoutError:
+        pytest.fail(f"Call {call_id} did not settle within {SETTLE_TIMEOUT_SECONDS} s; last receipt: {receipt}")
+    return receipt
+
+
 PLUGIN = """from hashlib import sha256
 from agno.tools import Toolkit
 from agno.tools.function import ToolResult
 from agno.media import Image, File
 from mindroom.tool_system.declarations import ConfigField, ToolCategory, ToolExecutionTarget, ToolFileAccess
 from mindroom.tool_system.registration import register_tool_with_metadata
+from tests.fakes.token_counter import fake_token_counter
 
 class ParityTools(Toolkit):
     def __init__(self, api_key: str):
@@ -93,77 +126,128 @@ def parity():
 """
 
 
-class ScriptedProvider:
-    """Capture actual SDK requests while returning deterministic tool choices."""
+def checkpoint_loop_state(messages: list[Message], run: RunContext, record: RunRecord) -> LoopState:
+    """Return the loop state of a run whose last message requests a tool batch, as a batch checkpoint captures it."""
+    return LoopState(
+        messages=messages,
+        offered=PreparedTools(functions={}),
+        tools=(),
+        run=run,
+        record=record,
+        request_index=1,
+        request_template=EMPTY_REQUEST,
+    )
 
-    def __init__(self) -> None:
-        self.requests = []
-        self.steps = []
 
-    async def send(self, **request: object) -> object:
-        """Return an SDK-shaped response and retain the exact submitted request."""
+async def capture_bash_batch(
+    owner: LiveTurnTools,
+    *bash_calls: tuple[str, dict[str, object]],
+    history: Sequence[Message] = (),
+) -> None:
+    """Hand the owner's checkpoint one provider batch of Bash calls, as the loop does before it runs any of them."""
+    bash = minimal_bash_toolkit().functions[0]
+    assistant = Message(
+        role="assistant",
+        tool_calls=[
+            {"id": call_id, "type": "function", "function": {"name": "bash", "arguments": json.dumps(arguments)}}
+            for call_id, arguments in bash_calls
+        ],
+    )
+    catalog = owner.catalog
+    record = catalog.record or RunRecord(
+        run_id=catalog.run.run_id,
+        session_id=catalog.run.session_id,
+        agent_id=catalog.runtime_context.agent_name,
+    )
+    planned = [
+        PlannedCall(
+            function=bash,
+            execution=ToolExecution(tool_call_id=call_id, tool_name="bash", tool_args=arguments),
+        )
+        for call_id, arguments in bash_calls
+    ]
+    state = checkpoint_loop_state([*history, assistant], catalog.run, record)
+    await owner.checkpoint.capture(state, planned)
+
+
+async def run_bash_batch(owner: LiveTurnTools, *commands: str) -> RunRecord:
+    """Run one provider batch of Bash calls ``bash-0``, ``bash-1``, ... through the loop, as a minimal attempt does.
+
+    The batch is checkpointed before its calls run; the run answers "done" unless a call stops it.
+    """
+    catalog = owner.catalog
+    model = ScriptedModel(
+        [
+            calls(*(tool_call("bash", f"bash-{index}", command=command) for index, command in enumerate(commands))),
+            answer("done"),
+        ],
+    )
+    spec = AgentSpec(
+        id=catalog.runtime_context.agent_name,
+        name=catalog.runtime_context.agent_name,
+        model=model,
+        system_messages=(),
+        toolkits=(minimal_bash_toolkit(execute=owner.execute_bash),),
+    )
+    record: RunRecord | None = None
+    events = run_agent(
+        spec,
+        [Message(role="user", content="run")],
+        ctx=catalog.run,
+        hooks=LoopHooks(before_dispatch=owner.checkpoint.capture),
+        persist=None,
+        request_template=EMPTY_REQUEST,
+    )
+    async for event in events:
+        if isinstance(event, RunFinished):
+            assert isinstance(event.record, RunRecord)
+            record = event.record
+    assert record is not None
+    return record
+
+
+type Step = str | list[tuple[str, dict[str, object]]]
+
+
+@dataclass
+class ScriptedProvider(PlainRequestSizing):
+    """Answer each request with the next scripted step, recording every request as the loop sent it.
+
+    A step is the reply text, or the ``(function, arguments)`` tool calls of one assistant message; once the script
+    runs out, every request is answered with "done".
+    """
+
+    steps: list[Step] = field(default_factory=list)
+    requests: list[ModelRequest] = field(default_factory=list)
+    identity: ModelIdentity = SYNTHETIC
+    capabilities: Capabilities = field(default_factory=Capabilities)
+    # A scripted route keeps no provider-side history and records no settings.
+    native_history_route: NativeHistoryRoute | None = None
+    token_counter: TokenCounter = field(default_factory=fake_token_counter)
+    model_params: dict[str, Any] = field(default_factory=dict)
+
+    async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
+        """Yield the next step as a streamed turn."""
         self.requests.append(request)
         step = self.steps.pop(0) if self.steps else "done"
-
-        async def chunks() -> AsyncIterator[ChatCompletionChunk]:
-            delta = {"role": "assistant"}
-            if isinstance(step, str):
-                delta["content"] = step
-            else:
-                delta["tool_calls"] = [
-                    {
-                        "index": index,
-                        "id": f"provider-{len(self.requests)}-{index}",
-                        "type": "function",
-                        "function": {"name": name, "arguments": json.dumps(arguments)},
-                    }
+        turn = (
+            answer(step)
+            if isinstance(step, str)
+            else calls(
+                *(
+                    tool_call(name, f"provider-{len(self.requests)}-{index}", **arguments)
                     for index, (name, arguments) in enumerate(step)
-                ]
-            yield ChatCompletionChunk(
-                id="completion",
-                model=request["model"],
-                created=0,
-                object="chat.completion.chunk",
-                choices=[{"index": 0, "delta": delta, "finish_reason": None}],
+                ),
             )
-            yield ChatCompletionChunk(
-                id="completion",
-                model=request["model"],
-                created=0,
-                object="chat.completion.chunk",
-                choices=[{"index": 0, "delta": {}, "finish_reason": "stop" if isinstance(step, str) else "tool_calls"}],
-            )
-
-        if not request.get("stream"):
-            message = {"role": "assistant", "content": step if isinstance(step, str) else None}
-            if not isinstance(step, str):
-                message["tool_calls"] = [
-                    {
-                        "id": f"provider-{len(self.requests)}-{index}",
-                        "type": "function",
-                        "function": {"name": name, "arguments": json.dumps(arguments)},
-                    }
-                    for index, (name, arguments) in enumerate(step)
-                ]
-            return ChatCompletion(
-                id="completion",
-                model=request["model"],
-                created=0,
-                object="chat.completion",
-                choices=[
-                    {
-                        "index": 0,
-                        "message": message,
-                        "finish_reason": "stop" if isinstance(step, str) else "tool_calls",
-                    },
-                ],
-            )
-        return chunks()
+        )
+        async for event in ScriptedModel(turns=[turn]).stream(request):
+            yield event
 
     def install(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Replace only the provider network client."""
-        monkeypatch.setattr(
-            OpenAIChat,
-            "get_async_client",
-            lambda _self: SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=self.send))),
-        )
+        """Serve this model as the configured ``default`` model."""
+        install_model_providers(monkeypatch, {"default": self})
+
+
+def offered_tools(request: ModelRequest) -> list[str]:
+    """Return the names of the tools one request offered."""
+    return [tool.name for tool in request.tools]

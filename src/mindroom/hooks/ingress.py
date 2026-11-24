@@ -1,16 +1,35 @@
-"""Pure helpers for hook-originated ingress behavior."""
+"""Ingress hooks for inbound turns: hook-message policy, message:received, and message or system enrichment."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
+from mindroom.constants import MATRIX_MESSAGE_TARGET_ENRICHMENT_KEY
+from mindroom.timing import emit_elapsed_timing
 from mindroom.turn_origin import TurnIntent
 
-from .types import EVENT_MESSAGE_RECEIVED, split_hook_source
+from .context import (
+    HookContextSupport,
+    MessageEnrichContext,
+    MessageEnvelope,
+    MessageReceivedContext,
+    SystemEnrichContext,
+)
+from .enrichment import render_enrichment_block
+from .execution import emit, emit_collect
+from .types import (
+    EVENT_MESSAGE_ENRICH,
+    EVENT_MESSAGE_RECEIVED,
+    EVENT_SYSTEM_ENRICH,
+    EnrichmentItem,
+    split_hook_source,
+)
 
 if TYPE_CHECKING:
-    from .context import MessageEnvelope
+    from mindroom.inbound_turn_normalizer import DispatchPayload
+    from mindroom.turn_policy import PreparedDispatch
 
 
 @dataclass(frozen=True, slots=True)
@@ -42,3 +61,142 @@ def hook_ingress_policy(envelope: MessageEnvelope) -> HookIngressPolicy:
         rerun_message_received=False,
         allow_full_dispatch=False,
     )
+
+
+def _without_runtime_owned_enrichment(items: list[EnrichmentItem]) -> list[EnrichmentItem]:
+    return [item for item in items if item.key != MATRIX_MESSAGE_TARGET_ENRICHMENT_KEY]
+
+
+@dataclass(frozen=True)
+class _PreparedHookedPayload:
+    """Concrete payload returned after ingress enrichment hooks run."""
+
+    payload: DispatchPayload
+    envelope: MessageEnvelope
+    transient_enrichment_items: tuple[EnrichmentItem, ...]
+
+
+@dataclass
+class IngressHookRunner:
+    """Own ingress hook emission and message or system enrichment updates."""
+
+    hook_context: HookContextSupport
+
+    async def emit_message_received_hooks(
+        self,
+        *,
+        envelope: MessageEnvelope,
+        correlation_id: str,
+        policy: HookIngressPolicy,
+        routed: bool = False,
+    ) -> bool:
+        """Emit message:received and return whether hooks suppressed processing.
+
+        A ``routed`` envelope is a hidden route of a person's message: the room's hooks ran once when that message
+        arrived, so only the responder's own hooks run for its route.
+        """
+        if not self.hook_context.registry.has_hooks(EVENT_MESSAGE_RECEIVED):
+            return False
+        if not policy.rerun_message_received:
+            return False
+
+        context = MessageReceivedContext(
+            **self.hook_context.base_kwargs(EVENT_MESSAGE_RECEIVED, correlation_id),
+            envelope=envelope,
+            skip_plugin_names=policy.skip_message_received_plugin_names,
+            _routed=routed,
+        )
+        await emit(self.hook_context.registry, EVENT_MESSAGE_RECEIVED, context)
+        return context.suppress
+
+    async def apply_message_enrichment(
+        self,
+        dispatch: PreparedDispatch,
+        payload: DispatchPayload,
+        *,
+        target_entity_name: str,
+        target_member_names: tuple[str, ...] | None,
+        turn_id: str,
+    ) -> _PreparedHookedPayload:
+        """Run message:enrich for turn ``turn_id`` and return the model-facing payload."""
+        started = time.monotonic()
+        hook_registered = self.hook_context.registry.has_hooks(EVENT_MESSAGE_ENRICH)
+        item_count = 0
+        transient_enrichment_items: tuple[EnrichmentItem, ...] = ()
+
+        envelope = replace(
+            dispatch.envelope,
+            attachment_ids=(
+                tuple(payload.attachment_ids)
+                if payload.attachment_ids is not None
+                else dispatch.envelope.attachment_ids
+            ),
+            agent_name=target_entity_name,
+        )
+        model_prompt = payload.model_prompt
+        if hook_registered:
+            context = MessageEnrichContext(
+                **self.hook_context.base_kwargs(EVENT_MESSAGE_ENRICH, dispatch.correlation_id),
+                turn_id=turn_id,
+                envelope=envelope,
+                target_entity_name=target_entity_name,
+                target_member_names=target_member_names,
+            )
+            items = _without_runtime_owned_enrichment(
+                await emit_collect(self.hook_context.registry, EVENT_MESSAGE_ENRICH, context),
+            )
+            item_count = len(items)
+            persisted_items = [item for item in items if item.persist]
+            transient_enrichment_items = tuple(item for item in items if not item.persist)
+            if persisted_items:
+                enrichment_block = render_enrichment_block(persisted_items)
+                base_model_prompt = payload.model_prompt if payload.model_prompt is not None else payload.prompt
+                model_prompt = f"{base_model_prompt.rstrip()}\n\n{enrichment_block}"
+
+        emit_elapsed_timing(
+            "response_payload.apply_message_enrichment",
+            started,
+            room_id=dispatch.envelope.room_id,
+            target_entity_name=target_entity_name,
+            hook_registered=hook_registered,
+            enrichment_item_count=item_count,
+        )
+        return _PreparedHookedPayload(
+            payload=replace(payload, model_prompt=model_prompt),
+            envelope=envelope,
+            transient_enrichment_items=transient_enrichment_items,
+        )
+
+    async def apply_system_enrichment(
+        self,
+        envelope: MessageEnvelope,
+        *,
+        correlation_id: str,
+        target_entity_name: str,
+        target_member_names: tuple[str, ...] | None,
+        turn_id: str,
+    ) -> list[EnrichmentItem]:
+        """Run system:enrich for turn ``turn_id`` and return system-prompt enrichment items."""
+        started = time.monotonic()
+        hook_registered = self.hook_context.registry.has_hooks(EVENT_SYSTEM_ENRICH)
+        items: list[EnrichmentItem] = []
+        if hook_registered:
+            context = SystemEnrichContext(
+                **self.hook_context.base_kwargs(EVENT_SYSTEM_ENRICH, correlation_id),
+                turn_id=turn_id,
+                envelope=envelope,
+                target_entity_name=target_entity_name,
+                target_member_names=target_member_names,
+            )
+            items = _without_runtime_owned_enrichment(
+                await emit_collect(self.hook_context.registry, EVENT_SYSTEM_ENRICH, context),
+            )
+        emit_elapsed_timing(
+            "response_payload.apply_system_enrichment",
+            started,
+            room_id=envelope.room_id,
+            target_entity_name=target_entity_name,
+            hook_registered=hook_registered,
+            enrichment_item_count=len(items),
+        )
+        return items

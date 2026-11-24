@@ -2,6 +2,7 @@
 
 import asyncio
 import contextlib
+import contextvars
 import json
 import os
 import shutil
@@ -17,6 +18,9 @@ from mcp.types import CallToolResult, ListToolsResult, TextContent
 
 from mindroom.browser import playwright_mcp_session
 from mindroom.browser.playwright_mcp_session import PlaywrightMCPSession
+from tests.conftest import SETTLE_TIMEOUT_SECONDS
+
+_TURN_OWNER: contextvars.ContextVar[object] = contextvars.ContextVar("turn_owner")
 
 
 @pytest.fixture
@@ -71,6 +75,35 @@ async def test_shared_actor_serializes_calls_and_closes(transport: list[str]) ->
     await asyncio.gather(actor.call_tool("one", {}), actor.call_tool("two", {}))
     await actor.close()
     assert transport == ["session", "initialize", "one", "one:done", "two", "two:done", "closed", "reaped"]
+
+
+@pytest.mark.asyncio
+async def test_actor_does_not_keep_the_context_of_the_call_that_opened_it(
+    transport: list[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The long-lived actor serves later calls, so it must not hold the opening turn's contextvars."""
+    contexts: list[contextvars.Context] = []
+    session_type = playwright_mcp_session.ClientSession
+    original_call_tool = session_type.call_tool
+
+    async def recording_call_tool(self: object, name: str, arguments: dict[str, object], **kwargs: object) -> object:
+        contexts.append(contextvars.copy_context())
+        return await original_call_tool(self, name, arguments, **kwargs)
+
+    monkeypatch.setattr(session_type, "call_tool", recording_call_tool)
+    actor = PlaywrightMCPSession(StdioServerParameters(command="unused"), call_timeout_seconds=1)
+
+    async def turn() -> None:
+        _TURN_OWNER.set(object())
+        await actor.call_tool("one", {})
+
+    await asyncio.create_task(turn())
+    await actor.call_tool("two", {})
+    await actor.close()
+    assert transport[-2:] == ["closed", "reaped"]
+    assert len(contexts) == 2
+    assert all(_TURN_OWNER not in context for context in contexts)
 
 
 @pytest.mark.asyncio
@@ -311,7 +344,8 @@ setInterval(()=>{},1000);
             command=node,
             args=[str(script), str(pidfile), str(detached).lower(), operation, str(birth_delay_ms)],
         ),
-        call_timeout_seconds=0.3,
+        # Only the timeout cases may expire the call; elsewhere a slow server must still receive it.
+        call_timeout_seconds=0.3 if operation in {"timeout", "startup"} else SETTLE_TIMEOUT_SECONDS,
     )
     call: asyncio.Task[CallToolResult] | None = None
     pid: int | None = None
@@ -321,33 +355,33 @@ setInterval(()=>{},1000);
     try:
         # Birth spans the Python supervisor, Node, and its grandchild. Loaded CI
         # runners have stalled it past 5 seconds, so only a hang should fail here.
-        async with asyncio.timeout(30):
-            while not pidfile.exists():
+        async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+            while not (pidfile.exists() and pidfile.read_text()):
                 assert not session._actor_task.done(), "Fixture actor exited before child readiness"
                 await asyncio.sleep(0.01)
         pid = int(pidfile.read_text())
         call = asyncio.create_task(session.call_tool("crash" if operation == "crash" else "stuck", {}))
-        if operation in {"timeout", "cancel", "crash"}:
-            async with asyncio.timeout(2):
+        if operation in {"cancel", "crash"}:
+            async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
                 while not pidfile.with_suffix(".pid.called").exists():  # noqa: ASYNC110 - real tool dispatch
                     await asyncio.sleep(0.01)
         if operation == "cancel":
             call.cancel()
         elif operation == "close":
-            await asyncio.wait_for(session.close(), 6)
+            await asyncio.wait_for(session.close(), SETTLE_TIMEOUT_SECONDS)
         expected_error = (
             TimeoutError
             if operation in {"timeout", "startup"}
             else (asyncio.CancelledError, ExceptionGroup, RuntimeError)
         )
         with pytest.raises(expected_error):
-            await asyncio.wait_for(call, 6)
-        await asyncio.wait_for(session.close(), 6)
+            await asyncio.wait_for(call, SETTLE_TIMEOUT_SECONDS)
+        await asyncio.wait_for(session.close(), SETTLE_TIMEOUT_SECONDS)
         stat = Path(f"/proc/{pid}/stat")
         assert not stat.exists() or stat.read_text().split()[2] == "Z"
     finally:
         try:
-            await asyncio.wait_for(session.close(), 6)
+            await asyncio.wait_for(session.close(), SETTLE_TIMEOUT_SECONDS)
         finally:
             if call is not None:
                 call.cancel()

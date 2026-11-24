@@ -1,0 +1,163 @@
+"""Side-effect-free current local grants for saved and live tool work."""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, Any
+
+from mindroom.config.knowledge_graph import KNOWLEDGE_GRAPH_EDIT_FUNCTIONS
+from mindroom.config.models import EffectiveToolConfig
+from mindroom.config.resolution import edits_knowledge_graph
+from mindroom.desktop.credentials import has_ready_self_service_desktop
+from mindroom.tool_system.agent_tools import resolve_agent_tools, turn_keeps_room_tools
+from mindroom.tool_system.construction import get_toolkit_construction, tool_config_signature
+from mindroom.tool_system.filters import tool_name_allowed
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+    from mindroom.config.main import Config
+    from mindroom.constants import RuntimePaths
+    from mindroom.tool_system.agno_toolkits import AnyToolkit
+    from mindroom.tool_system.registry import ToolRegistry
+    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+
+
+def authority_snapshot(config: Config, agent_name: str) -> dict[str, Any]:
+    """Freeze the actor's execution scope and file access without constructing tools."""
+    agent = config.resolve_agent(agent_name)
+    return {"scope": agent.policy.effective_execution_scope, "file_access": agent.file_access}
+
+
+def toolkit_authority(snapshot: Mapping[str, Any], toolkit: AnyToolkit) -> dict[str, Any]:
+    """Return the evidence a toolkit's calls are granted by: the actor's snapshot and the toolkit's construction."""
+    construction = get_toolkit_construction(toolkit)
+    return {
+        **snapshot,
+        "construction": (
+            {
+                "name": construction.name,
+                "config_signature": construction.config_signature,
+                "factory_origin": list(construction.factory_origin)
+                if construction.factory_origin is not None
+                else None,
+            }
+            if construction is not None
+            else None
+        ),
+    }
+
+
+def toolkit_offered(
+    config: Config,
+    owner: ToolExecutionIdentity,
+    *,
+    tools: ToolRegistry,
+    name: str,
+    depth: int,
+) -> bool:
+    """Whether the owner's agent is still offered the registered toolkit ``name``, which a job of that toolkit's own needs."""
+    if owner.agent_name not in config.agents:
+        return False
+    candidates = resolve_agent_tools(config, owner.agent_name, tools).candidates(
+        depth=depth,
+        room_tools=turn_keeps_room_tools(owner),
+        portable_search=True,
+    )
+    return any(item.name == name for item in candidates)
+
+
+def locally_allowed(
+    config: Config,
+    owner: ToolExecutionIdentity,
+    *,
+    tools: ToolRegistry,
+    tool_name: str,
+    toolkit_name: str | None,
+    origin: dict[str, Any],
+    depth: int,
+    authority: dict[str, Any],
+    runtime_paths: RuntimePaths | None = None,
+) -> bool:
+    """Check current authored ownership and filters without remote availability probes.
+
+    ``tools`` is the registry of the current config, whose factories the job's construction must still match.
+    """
+    if owner.agent_name not in config.agents:
+        return False
+    # The execution scope and file access recorded when the toolkit was built must still be the actor's current ones.
+    current = authority_snapshot(config, owner.agent_name)
+    if any(key not in authority or authority[key] != value for key, value in current.items()):
+        return False
+    construction = authority.get("construction")
+    if not isinstance(construction, dict):
+        return False
+    agent_tools = resolve_agent_tools(config, owner.agent_name, tools)
+    candidates = agent_tools.candidates(
+        depth=depth,
+        room_tools=turn_keeps_room_tools(owner),
+        portable_search=True,
+    )
+    entry = next(
+        (
+            item
+            for item in candidates
+            if (item.authored_name or item.name) == toolkit_name and item.name == construction.get("name")
+        ),
+        None,
+    )
+    if (
+        entry is None
+        and toolkit_name == "desktop"
+        and construction.get("name") == "desktop"
+        and "desktop" not in agent_tools.facts.disabled
+        and config.defaults.desktop_pairing == "self_service"
+        and turn_keeps_room_tools(owner)
+        and tools.available("desktop")
+        and bool(owner.requester_id)
+        and runtime_paths is not None
+        and has_ready_self_service_desktop(config, runtime_paths, owner.agent_name, owner.requester_id)
+    ):
+        entry = EffectiveToolConfig(name="desktop", tool_config_overrides={}, authored_name="desktop")
+    if entry is None:
+        return False
+    # Graph edits are functions of the knowledge_graph toolkit that only an agent allowed to edit its graph gets.
+    edits_graph = entry.name == "knowledge_graph" and tool_name in KNOWLEDGE_GRAPH_EDIT_FUNCTIONS
+    if edits_graph and not edits_knowledge_graph(config, owner.agent_name):
+        return False
+    return _configured_tool_allowed(config, tools, entry, tool_name, origin, construction)
+
+
+def _configured_tool_allowed(
+    config: Config,
+    tools: ToolRegistry,
+    entry: EffectiveToolConfig,
+    tool_name: str,
+    origin: dict[str, Any],
+    construction: dict[str, Any],
+) -> bool:
+    if tools.origin(entry.name) != construction.get("factory_origin"):
+        return False
+    server_id = tools.mcp_server_id(entry.name)
+    authored_filter: dict[str, Any] = dict(entry.tool_config_overrides)
+    if server_id is None:
+        return construction.get("config_signature") == tool_config_signature(authored_filter) and tool_name_allowed(
+            tool_name,
+            include=authored_filter.get("include_tools"),
+            exclude=authored_filter.get("exclude_tools"),
+        )
+    filters: list[dict[str, Any]] = [authored_filter]
+    server = config.mcp_servers.get(server_id)
+    if server is None or not server.enabled or origin.get("mcp_server_id") != server_id:
+        return False
+    filtered_name = origin.get("mcp_tool_name")
+    if filtered_name is None:
+        return True  # OAuth status/list operations do not invoke a remote tool.
+    filters.append({"include_tools": server.include_tools, "exclude_tools": server.exclude_tools})
+    return all(
+        tool_name_allowed(
+            filtered_name,
+            include=item.get("include_tools") or None,
+            exclude=item.get("exclude_tools"),
+        )
+        for item in filters
+    )

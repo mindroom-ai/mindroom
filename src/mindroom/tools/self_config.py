@@ -1,9 +1,9 @@
 """Self-config tool metadata registration.
 
-Registers the ``self_config`` tool in the metadata registry for UI display.
+Registers the ``self_config`` tool in the metadata registry.
 The actual toolkit (``mindroom.custom_tools.self_config.SelfConfigTools``)
-requires ``agent_name`` at instantiation and is injected directly in
-``create_agent()``, so it is NOT added to ``TOOL_REGISTRY``.
+requires ``agent_name`` at instantiation and is built in
+``build_agent_toolkit()``, so its metadata has no generic factory.
 """
 
 from mindroom.tool_system.declarations import (
@@ -21,6 +21,7 @@ register_builtin_tool_metadata(
         file_access=ToolFileAccess.NONE,
         display_name="Self Config",
         description="Allow an agent to read and modify its own configuration",
+        docs_url="https://docs.mindroom.chat/tools/agent-orchestration/#self_config",
         category=ToolCategory.DEVELOPMENT,
         status=ToolStatus.AVAILABLE,
         setup_type=SetupType.NONE,

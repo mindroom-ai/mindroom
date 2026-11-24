@@ -7,7 +7,7 @@ import pytest
 import mindroom.tools  # noqa: F401  # register the built-in factories
 from mindroom.constants import resolve_runtime_paths
 from mindroom.tool_system.metadata import _AUTHORED_OVERRIDE_INHERIT, get_tool_by_name
-from mindroom.tool_system.registry_state import TOOL_METADATA
+from mindroom.tool_system.registry import builtin_tool_registry
 
 
 @pytest.mark.parametrize(
@@ -48,13 +48,14 @@ def test_media_model_defaults_reach_real_tool_instances(
         tool_name,
         runtime_paths,
         credential_overrides={"api_key": "test-key"},
-        disable_sandbox_proxy=True,
+        runs_in_worker=False,
         worker_target=None,
+        tools=builtin_tool_registry(),
     )
 
     expected = {
         field.name: field.default
-        for field in TOOL_METADATA[tool_name].config_fields or ()
+        for field in builtin_tool_registry().entries[tool_name].config_fields or ()
         if field.name in model_fields
     }
     assert set(expected) == set(model_fields)
@@ -73,8 +74,9 @@ def test_media_model_defaults_preserve_configured_override_precedence(
         runtime_paths,
         credential_overrides={"api_key": "test-key", "model": "saved-custom-model"},
         tool_config_overrides={"model": authored_model} if authored_model else None,
-        disable_sandbox_proxy=True,
+        runs_in_worker=False,
         worker_target=None,
+        tools=builtin_tool_registry(),
     )
 
     assert vars(tool)["model"] == (authored_model or "saved-custom-model")
@@ -95,9 +97,12 @@ def test_media_model_inherit_preserves_saved_or_current_default(
         runtime_paths,
         credential_overrides=credentials,
         tool_config_overrides={"model": _AUTHORED_OVERRIDE_INHERIT},
-        disable_sandbox_proxy=True,
+        runs_in_worker=False,
         worker_target=None,
+        tools=builtin_tool_registry(),
     )
 
-    default_model = next(field.default for field in TOOL_METADATA["fal"].config_fields or () if field.name == "model")
+    default_model = next(
+        field.default for field in builtin_tool_registry().entries["fal"].config_fields or () if field.name == "model"
+    )
     assert vars(tool)["model"] == (saved_model or default_model)

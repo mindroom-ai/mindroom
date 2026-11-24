@@ -23,6 +23,11 @@ import {
   type JsonSchema,
   type SchemaNode,
 } from "@/lib/configSchema";
+import {
+  toolEntriesForNames,
+  toolNames,
+  type ToolEntry,
+} from "@/lib/toolEntry";
 import { cn } from "@/lib/utils";
 
 import {
@@ -521,8 +526,7 @@ function NestedValue({
   );
 }
 
-// Reference-hinted lists hold names; the store normalizes structured tool
-// entries in defaults.tools to names before they reach the form.
+// Reference-hinted lists hold names.
 function isStringItems(
   node: SchemaNode,
   root: JsonSchema,
@@ -569,6 +573,19 @@ function ListEditor({
 }) {
   const references = useReferenceOptions();
   const [itemKeys, setItemKeys] = useItemKeys(value.length);
+  if (node.hint.reference === "tool") {
+    // Tool lists hold complete entries; the list edits their names and keeps
+    // the entry of every tool it still lists.
+    const entries = value as ToolEntry[];
+    return (
+      <StringListEditor
+        label={label}
+        values={toolNames(entries)}
+        suggestions={references.tool}
+        onChange={(names) => onChange(toolEntriesForNames(names, entries))}
+      />
+    );
+  }
   if (isStringItems(node, root, value)) {
     return (
       <StringListEditor
@@ -692,8 +709,12 @@ function MapEditor({
   const references = useReferenceOptions();
   const [draftKey, setDraftKey] = useState("");
   const keyListId = useId();
-  // Hints on a map describe its values, except the one for its keys.
-  const { key_reference: keyReference, ...valueHint } = node.hint;
+  // Hints on a map describe its values, except the ones for its keys.
+  const {
+    key_reference: keyReference,
+    key_placeholder: keyPlaceholder,
+    ...valueHint
+  } = node.hint;
   const valueSchema: JsonSchema = { ...node.values!, "x-mindroom": valueHint };
   const valueNode = classifySchemaNode(valueSchema, root);
   const scalarValues =
@@ -761,7 +782,9 @@ function MapEditor({
       <div className="flex items-center gap-2">
         <Input
           aria-label={`New ${inlineLabel(label)} key`}
-          placeholder="Key"
+          placeholder={
+            keyPlaceholder ? `Key, such as ${keyPlaceholder}` : "Key"
+          }
           value={draftKey}
           list={keySuggestions ? keyListId : undefined}
           onChange={(event) => setDraftKey(event.target.value)}
@@ -870,8 +893,13 @@ function UnionEditor({
             schema={selected.schema}
             root={root}
             value={effective}
-            // Pydantic reports discriminated-union errors under the tag value.
-            path={[...path, selected.errorTag ?? ""]}
+            // Pydantic reports discriminated-union errors under the tag value,
+            // which a variant with a free tag takes from the entry itself.
+            path={[
+              ...path,
+              selected.errorTag ??
+                String((effective as Record<string, unknown>)[discriminator]),
+            ]}
             // A variant with a fixed tag sets it itself; the fallback variant lets the user type it.
             exclude={
               selected.discriminatorValue === undefined ? [] : [discriminator]

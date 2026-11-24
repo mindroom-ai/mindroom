@@ -1,0 +1,598 @@
+"""Plugins serve HTTP routes under /api/plugins/<plugin>/, from whichever plugins are published now."""
+
+from __future__ import annotations
+
+import json
+import os
+import threading
+from typing import TYPE_CHECKING
+from urllib.parse import quote
+
+import aiohttp
+import pytest
+from fastapi import FastAPI
+from fastapi.exceptions import RequestValidationError
+from fastapi.testclient import TestClient
+from starlette.testclient import WebSocketDenialResponse
+
+from mindroom.api import config_lifecycle, main
+from mindroom.api.app_state import ensure_app_state
+from mindroom.api.client_sessions import ClientSessionStore, client_session_store
+from mindroom.api.plugin_routes import FramedWebsocketDenials, mount_plugin_routes
+from mindroom.api.script_gateway import serve_listener
+from mindroom.api.validation_errors import validation_error_response
+from mindroom.config.main import Config
+from mindroom.constants import RuntimePaths, resolve_runtime_paths
+from mindroom.plugin_check import check_plugin
+from mindroom.tool_system.plugin_imports import PLUGIN_API_VERSION, PluginValidationError
+from mindroom.tool_system.plugins import dispose_plugins, prepare_plugins, publish_plugins, refresh_plugins
+from tests.conftest import bind_runtime_paths, publish_test_plugins
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+ROOM = "!room:example.org"
+ALICE = "@alice:example.org"
+
+ROUTES = """
+from typing import Annotated
+
+from fastapi import APIRouter, Depends, Request
+from pydantic import BaseModel
+
+from mindroom.plugin_http import ClientUser, require_platform_administrator, require_room_member
+
+router = APIRouter()
+
+
+class Echo(BaseModel):
+    text: str
+
+
+@router.get("/ping")
+async def ping() -> dict:
+    return {"pong": True}
+
+
+@router.post("/echo")
+async def echo(body: Echo) -> dict:
+    return {"echo": body.text}
+
+
+@router.get("/boom")
+async def boom() -> dict:
+    raise RuntimeError("plugin secret in a traceback")
+
+
+@router.get("/where")
+async def where(request: Request) -> dict:
+    return {"url_path": request.url.path, "root_path": request.scope["root_path"]}
+
+
+@router.get("/items/{item_id}", name="plugin_item")
+async def item(item_id: str) -> dict:
+    return {"item": item_id}
+
+
+@router.get("/link")
+async def link(request: Request) -> dict:
+    return {"url": str(request.url_for("plugin_item", item_id="123"))}
+
+
+@router.get("/rooms/{room_id}/me")
+async def me(user: Annotated[ClientUser, Depends(require_room_member)]) -> dict:
+    return {"user_id": user.user_id}
+
+
+@router.get("/rooms/{room_id}/topic")
+async def topic(room_id: str, request: Request) -> dict:
+    user = await require_room_member(request, room_id)
+    return {"user_id": user.user_id, "room_id": room_id}
+
+
+@router.get("/rooms/{room_id}/secret", dependencies=[Depends(require_room_member)])
+async def secret(room_id: str) -> dict:
+    return {"secret": room_id}
+
+
+@router.get("/me")
+async def me_without_room(user: Annotated[ClientUser, Depends(require_room_member)]) -> dict:
+    return {"user_id": user.user_id}
+
+
+@router.get("/admin")
+async def admin(user: Annotated[ClientUser, Depends(require_platform_administrator)]) -> dict:
+    return {"user_id": user.user_id}
+"""
+
+# FastAPI refuses a route at "" only as a router is included in an app, which MindRoom does as the plugin loads.
+EMPTY_PATH_ROUTES = f"""{ROUTES}
+
+@router.get("")
+async def root() -> dict:
+    return {{"root": True}}
+"""
+
+STREAM_ROUTES = """
+from fastapi import APIRouter, WebSocket
+
+from mindroom.plugin_http import client_stream
+
+router = APIRouter()
+
+
+@router.websocket("/stream")
+async def stream(websocket: WebSocket) -> None:
+    async with client_stream(websocket):
+        await websocket.send_text("hello")
+"""
+
+
+TOOLS = """
+from agno.tools import Toolkit
+
+from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess
+from mindroom.tool_system.registration import register_tool_with_metadata
+
+
+class DemoTool(Toolkit):
+    def __init__(self) -> None:
+        super().__init__(name="demo", tools=[])
+
+
+@register_tool_with_metadata(
+    name="demo_routes_tool",
+    display_name="Demo",
+    description="A tool beside the plugin's routes",
+    file_access=ToolFileAccess.NONE,
+    category=ToolCategory.DEVELOPMENT,
+)
+def demo_tools():
+    return DemoTool
+"""
+
+
+def _write_plugin(
+    tmp_path: Path,
+    routes_source: str | None,
+    *,
+    name: str = "demo",
+    tools_source: str | None = None,
+    **manifest_fields: str,
+) -> Path:
+    """Write plugin ``name`` under ``tmp_path/plugins`` with the modules and manifest fields given; return its root."""
+    root = tmp_path / "plugins" / name
+    root.mkdir(parents=True, exist_ok=True)
+    manifest: dict[str, str] = {"name": name, **manifest_fields}
+    for kind, source in (("routes", routes_source), ("tools", tools_source)):
+        if source is not None:
+            manifest[f"{kind}_module"] = f"{kind}.py"
+            (root / f"{kind}.py").write_text(source, encoding="utf-8")
+    (root / "mindroom.plugin.json").write_text(json.dumps(manifest), encoding="utf-8")
+    return root
+
+
+def _config(tmp_path: Path, *names: str) -> tuple[Config, RuntimePaths]:
+    """Return a config naming the plugins ``names`` under ``tmp_path/plugins``, bound to its runtime paths."""
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("agents: {}", encoding="utf-8")
+    runtime_paths = resolve_runtime_paths(
+        config_path=config_path,
+        storage_path=tmp_path / "mindroom_data",
+        process_env={"MATRIX_HOMESERVER": "http://localhost:8008", "MINDROOM_NAMESPACE": ""},
+    )
+    config = bind_runtime_paths(Config(plugins=[f"./plugins/{name}" for name in names or ("demo",)]), runtime_paths)
+    return config, runtime_paths
+
+
+def _api_state(config: Config | None, runtime_paths: RuntimePaths) -> config_lifecycle.ApiState:
+    return config_lifecycle.ApiState(
+        threading.Lock(),
+        config_lifecycle.ApiSnapshot(1, runtime_paths, runtime_config=config),
+    )
+
+
+def _app(config: Config | None, runtime_paths: RuntimePaths) -> FastAPI:
+    """Return an API app serving ``config`` with the plugin routes mounted, answering errors as the main app does."""
+    app = FastAPI(exception_handlers={RequestValidationError: validation_error_response})
+    app.add_middleware(FramedWebsocketDenials)
+    ensure_app_state(app).api_state = _api_state(config, runtime_paths)
+    mount_plugin_routes(app)
+    return app
+
+
+def _published_client(tmp_path: Path, routes_source: str = ROUTES) -> tuple[FastAPI, TestClient]:
+    _write_plugin(tmp_path, routes_source)
+    config, runtime_paths = _config(tmp_path)
+    publish_test_plugins(config, runtime_paths)
+    app = _app(config, runtime_paths)
+    return app, TestClient(app)
+
+
+def test_plugin_get_route_served(tmp_path: Path) -> None:
+    """A GET route of the plugin's router answers under the plugin's name."""
+    _, client = _published_client(tmp_path)
+
+    response = client.get("/api/plugins/demo/ping")
+
+    assert response.status_code == 200
+    assert response.json() == {"pong": True}
+
+
+def test_plugin_post_route_served(tmp_path: Path) -> None:
+    """A POST route gets its JSON body."""
+    _, client = _published_client(tmp_path)
+
+    response = client.post("/api/plugins/demo/echo", json={"text": "hi"})
+
+    assert response.status_code == 200
+    assert response.json() == {"echo": "hi"}
+
+
+def test_plugin_validation_errors_leave_out_input(tmp_path: Path) -> None:
+    """A rejected body is answered like the main API's, without echoing the rejected value."""
+    _, client = _published_client(tmp_path)
+
+    response = client.post("/api/plugins/demo/echo", json={"text": ["secret"]})
+
+    assert response.status_code == 422
+    assert "secret" not in response.text
+    assert all("input" not in error for error in response.json()["detail"])
+
+
+def test_plugin_route_sees_its_mount_path(tmp_path: Path) -> None:
+    """Inside a plugin route the URL is the full one and the root path ends at the plugin's name."""
+    _, client = _published_client(tmp_path)
+
+    response = client.get("/api/plugins/demo/where")
+
+    assert response.json() == {"url_path": "/api/plugins/demo/where", "root_path": "/api/plugins/demo"}
+
+
+def test_unknown_plugin_404(tmp_path: Path) -> None:
+    """A plugin that is not loaded, that has no routes, or a path its router lacks answers 404, to a websocket too."""
+    _write_plugin(tmp_path, ROUTES)
+    _write_plugin(tmp_path, None, name="plain")
+    config, runtime_paths = _config(tmp_path, "demo", "plain")
+    publish_test_plugins(config, runtime_paths)
+    client = TestClient(_app(config, runtime_paths))
+
+    for path in ("/api/plugins/nope/ping", "/api/plugins/plain/ping", "/api/plugins/", "/api/plugins/demo/nope"):
+        response = client.get(path)
+        assert response.status_code == 404, path
+        assert response.json() == {"detail": "Not Found"}, path
+    with pytest.raises(WebSocketDenialResponse) as denied, client.websocket_connect("/api/plugins/nope/ws"):
+        pass
+    assert denied.value.status_code == 404
+    assert denied.value.json() == {"detail": "Not Found"}
+
+
+def _signed_in(app: FastAPI, user_id: str = ALICE) -> dict[str, str]:
+    return {"Authorization": f"Bearer {client_session_store(app).create(user_id).token}"}
+
+
+def _server_plugin_api() -> str:
+    major, minor = PLUGIN_API_VERSION
+    return f"{major}.{minor}"
+
+
+def test_plugin_list_names_each_enabled_plugin_that_loaded_with_the_api_it_needs(tmp_path: Path) -> None:
+    """A signed-in client gets the enabled plugins that loaded, in config order, with the plugin API each needs only.
+
+    A disabled plugin and one that failed to load are left out, and nothing names a path, a setting, or an error.
+    """
+    _write_plugin(tmp_path, ROUTES, mindroom_plugin_api="1.0")
+    _write_plugin(tmp_path, None, name="plain")
+    _write_plugin(tmp_path, None, name="off", mindroom_plugin_api="1.0")
+    _write_plugin(tmp_path, None, name="broken", tools_source="raise RuntimeError('broken secret')\n")
+    _, runtime_paths = _config(tmp_path)
+    entries = [
+        {"path": "./plugins/broken", "settings": {"api_key": "setting secret"}},
+        "./plugins/plain",
+        {"path": "./plugins/off", "enabled": False},
+        {"path": "./plugins/demo", "settings": {"api_key": "setting secret"}},
+    ]
+    config = Config.validate_with_runtime({"plugins": entries}, runtime_paths, tolerate_plugin_load_errors=True)
+    generation = prepare_plugins(config, runtime_paths)
+    assert [skipped.path for skipped in generation.skipped] == ["./plugins/broken"]
+    publish_plugins(generation)
+    app = _app(config, runtime_paths)
+
+    response = TestClient(app).get("/api/plugins", headers=_signed_in(app))
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "plugin_api_version": _server_plugin_api(),
+        "plugins": [
+            {"name": "plain", "mindroom_plugin_api": None},
+            {"name": "demo", "mindroom_plugin_api": "1.0"},
+        ],
+    }
+
+
+def test_plugin_list_needs_a_client_session(tmp_path: Path) -> None:
+    """Without a live client session the list answers 401 and names no plugin."""
+    _, client = _published_client(tmp_path)
+
+    for headers in ({}, {"Authorization": "Bearer nope"}, {"Authorization": "Basic abc"}):
+        response = client.get("/api/plugins", headers=headers)
+        assert (response.status_code, response.json()) == (
+            401,
+            {"detail": "Missing, invalid or expired client session."},
+        ), headers
+
+
+def test_plugin_list_is_empty_before_a_config_loads(tmp_path: Path) -> None:
+    """Before any config has loaded, the list names no plugin and no plugin route answers."""
+    _write_plugin(tmp_path, ROUTES)
+    config, runtime_paths = _config(tmp_path)
+    publish_test_plugins(config, runtime_paths)
+    app = _app(None, runtime_paths)
+    client = TestClient(app)
+
+    assert client.get("/api/plugins", headers=_signed_in(app)).json() == {
+        "plugin_api_version": _server_plugin_api(),
+        "plugins": [],
+    }
+    assert client.get("/api/plugins/demo/ping").status_code == 404
+
+
+def test_plugin_list_follows_a_reload(tmp_path: Path) -> None:
+    """After a reload the list names the plugins published now, with the plugin API their manifests need now."""
+    _write_plugin(tmp_path, ROUTES)
+    config, runtime_paths = _config(tmp_path)
+    publish_test_plugins(config, runtime_paths)
+    app = _app(config, runtime_paths)
+    client = TestClient(app)
+    headers = _signed_in(app)
+    assert client.get("/api/plugins", headers=headers).json()["plugins"] == [
+        {"name": "demo", "mindroom_plugin_api": None},
+    ]
+
+    _write_plugin(tmp_path, ROUTES, mindroom_plugin_api="1.0")
+    publish_test_plugins(config, runtime_paths)
+
+    assert client.get("/api/plugins", headers=headers).json()["plugins"] == [
+        {"name": "demo", "mindroom_plugin_api": "1.0"},
+    ]
+
+
+def test_raising_route_answers_an_opaque_500_and_the_app_keeps_serving(tmp_path: Path) -> None:
+    """A plugin route that raises gives a 500 that names nothing of the error, and the next request is served."""
+    app, _ = _published_client(tmp_path)
+    client = TestClient(app, raise_server_exceptions=False)
+
+    response = client.get("/api/plugins/demo/boom")
+
+    assert response.status_code == 500
+    assert response.text == "Internal Server Error"
+    assert client.get("/api/plugins/demo/ping").json() == {"pong": True}
+
+
+@pytest.mark.parametrize(
+    ("routes_source", "error"),
+    [
+        ("ROUTER = None\n", r"Plugin routes module must define router: APIRouter"),
+        (EMPTY_PATH_ROUTES, r"Plugin router cannot be served: Prefix and path cannot be both empty"),
+    ],
+    ids=["no-router", "empty-path"],
+)
+def test_unservable_routes_module_costs_only_the_routes(tmp_path: Path, routes_source: str, error: str) -> None:
+    """A router that can't be served costs a reload only the plugin's routes, and the plugin check fails it."""
+    root = _write_plugin(tmp_path, ROUTES, tools_source=TOOLS)
+    config, runtime_paths = _config(tmp_path)
+    publish_test_plugins(config, runtime_paths)
+    client = TestClient(_app(config, runtime_paths))
+    assert client.get("/api/plugins/demo/ping").status_code == 200
+
+    _write_plugin(tmp_path, routes_source, tools_source=TOOLS)
+    [plugin] = publish_test_plugins(config, runtime_paths).loaded_plugins
+
+    assert (set(plugin.tools), plugin.routes_app) == ({"demo_routes_tool"}, None)
+    assert client.get("/api/plugins/demo/ping").status_code == 404
+    with pytest.raises(PluginValidationError, match=error):
+        check_plugin(root)
+
+
+def test_reload_serves_new_router(tmp_path: Path) -> None:
+    """After the plugin is published again, the same app serves the new router's code."""
+    _write_plugin(tmp_path, ROUTES)
+    config, runtime_paths = _config(tmp_path)
+    publish_test_plugins(config, runtime_paths)
+    client = TestClient(_app(config, runtime_paths))
+    assert client.get("/api/plugins/demo/ping").json() == {"pong": True}
+
+    _write_plugin(tmp_path, ROUTES.replace('{"pong": True}', '{"pong": 2}'))
+    publish_test_plugins(config, runtime_paths)
+
+    assert client.get("/api/plugins/demo/ping").json() == {"pong": 2}
+
+
+def test_plugin_route_generates_urls_to_its_own_routes(tmp_path: Path) -> None:
+    """``request.url_for`` in a plugin route finds the plugin's own routes under its mount path, after a reload too.
+
+    Behind a proxy that serves MindRoom under a root path, the URL keeps that path.
+    """
+    _write_plugin(tmp_path, ROUTES)
+    config, runtime_paths = _config(tmp_path)
+    publish_test_plugins(config, runtime_paths)
+    app = _app(config, runtime_paths)
+    client = TestClient(app)
+    assert client.get("/api/plugins/demo/link").json() == {"url": "http://testserver/api/plugins/demo/items/123"}
+
+    _write_plugin(tmp_path, ROUTES.replace('"/items/{item_id}"', '"/things/{item_id}"'))
+    publish_test_plugins(config, runtime_paths)
+
+    assert client.get("/api/plugins/demo/link").json() == {"url": "http://testserver/api/plugins/demo/things/123"}
+    proxied = TestClient(app, root_path="/mindroom").get("/mindroom/api/plugins/demo/link")
+    assert proxied.json() == {"url": "http://testserver/mindroom/api/plugins/demo/things/123"}
+
+
+def test_worker_load_skips_routes_module(tmp_path: Path) -> None:
+    """A worker's load never imports the routes module, which the primary's load does."""
+    _write_plugin(tmp_path, "raise RuntimeError('routes module imported')\n")
+    config, runtime_paths = _config(tmp_path)
+
+    [plugin] = refresh_plugins(config, runtime_paths).loaded_plugins
+
+    assert (plugin.name, plugin.routes_app) == ("demo", None)
+    generation = prepare_plugins(config, runtime_paths)
+    dispose_plugins(generation)
+    [plugin] = generation.plugins.values()
+    assert "routes module imported" in str(plugin.routes_error)
+
+
+def test_worker_refresh_reads_a_changed_plugin_api_need(tmp_path: Path) -> None:
+    """A worker's refresh keeps a plugin's unchanged modules but takes the plugin API its manifest needs now."""
+    root = _write_plugin(tmp_path, None, tools_source=TOOLS)
+    config, runtime_paths = _config(tmp_path)
+    before = dict(refresh_plugins(config, runtime_paths).generation.modules)
+
+    manifest_path = root / "mindroom.plugin.json"
+    manifest = {"name": "demo", "tools_module": "tools.py", "mindroom_plugin_api": "1.0"}
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    # A refresh rereads a manifest only when its mtime moved, which two quick writes may not do.
+    mtime = manifest_path.stat().st_mtime + 5
+    os.utime(manifest_path, (mtime, mtime))
+    refreshed = refresh_plugins(config, runtime_paths)
+
+    assert refreshed.generation.modules == before
+    assert refreshed.loaded_plugins[0].mindroom_plugin_api == "1.0"
+
+
+def test_plugin_route_reads_the_main_apps_sessions_and_membership(tmp_path: Path) -> None:
+    """Plugin routes see the main app's client sessions and room membership, so their checks pass and refuse."""
+    app, client = _published_client(tmp_path)
+    bearer = _signed_in(app)
+
+    async def room_members(room_id: str) -> frozenset[str]:
+        return frozenset({ALICE}) if room_id == ROOM else frozenset()
+
+    ensure_app_state(app).room_members = room_members
+
+    def me(room_id: str, headers: dict[str, str]) -> tuple[int, object]:
+        response = client.get(f"/api/plugins/demo/rooms/{quote(room_id, safe='')}/me", headers=headers)
+        return response.status_code, response.json()
+
+    assert me(ROOM, bearer) == (200, {"user_id": ALICE})
+    assert me(ROOM, {})[0] == 401
+    assert me("!other:example.org", bearer) == (403, {"detail": "Not a member of this room."})
+    topic = client.get(f"/api/plugins/demo/rooms/{quote(ROOM, safe='')}/topic", headers=bearer)
+    assert (topic.status_code, topic.json()) == (200, {"user_id": ALICE, "room_id": ROOM})
+
+
+def test_room_member_dependency_cannot_be_told_whose_membership_to_check(tmp_path: Path) -> None:
+    """The query string never picks the user nor the room: the user is the session's own, the room the path's."""
+    app, client = _published_client(tmp_path)
+    bob = _signed_in(app, "@bob:example.org")
+
+    async def room_members(room_id: str) -> frozenset[str]:
+        return frozenset({ALICE}) if room_id == ROOM else frozenset()
+
+    ensure_app_state(app).room_members = room_members
+    room = quote(ROOM, safe="")
+    for path in ("me", "topic", "secret"):
+        url = f"/api/plugins/demo/rooms/{room}/{path}?user_id={quote(ALICE)}"
+        assert client.get(url).status_code == 401, path
+        assert client.get(url, headers=bob).status_code == 403, path
+    # A route without ``{room_id}`` never checks a room the query string names, even one the caller is in.
+    alice = _signed_in(app)
+    assert client.get(f"/api/plugins/demo/me?room_id={quote(ROOM)}", headers=alice).status_code == 422
+
+
+def test_administrator_route_admits_only_an_administrator_of_the_config_served_now(tmp_path: Path) -> None:
+    """Only a signed-in administrator passes, and a reload that removes them from ``administrators`` refuses them."""
+    _write_plugin(tmp_path, ROUTES)
+    without_alice, runtime_paths = _config(tmp_path)
+    config = bind_runtime_paths(Config(plugins=["./plugins/demo"], administrators=[ALICE]), runtime_paths)
+    publish_test_plugins(config, runtime_paths)
+    app = _app(config, runtime_paths)
+    client = TestClient(app)
+    alice = _signed_in(app)
+
+    def admin(headers: dict[str, str]) -> tuple[int, object]:
+        response = client.get("/api/plugins/demo/admin", headers=headers)
+        return response.status_code, response.json()
+
+    assert admin(alice) == (200, {"user_id": ALICE})
+    assert admin({})[0] == 401
+    assert admin(_signed_in(app, "@bob:example.org")) == (403, {"detail": "Not a platform administrator."})
+
+    state = config_lifecycle.require_api_state(app)
+    state.snapshot = config_lifecycle.ApiSnapshot(2, runtime_paths, runtime_config=without_alice)
+
+    assert admin(alice) == (403, {"detail": "Not a platform administrator."})
+
+
+def test_frontend_catch_all_does_not_shadow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """On the real API app, a plugin's GET route and the plugin list win over the frontend's catch-all.
+
+    A route that raises answers its opaque 500 from inside the main app's middleware, so it keeps the forced headers.
+    """
+    _write_plugin(tmp_path, ROUTES)
+    config, runtime_paths = _config(tmp_path)
+    publish_test_plugins(config, runtime_paths)
+    monkeypatch.setattr(ensure_app_state(main.app), "api_state", _api_state(config, runtime_paths))
+    monkeypatch.setattr(ensure_app_state(main.app), "client_sessions", ClientSessionStore())
+    client = TestClient(main.app, raise_server_exceptions=False)
+
+    response = client.get("/api/plugins/demo/ping")
+
+    assert response.status_code == 200
+    assert response.json() == {"pong": True}
+    boom = client.get("/api/plugins/demo/boom")
+    assert (boom.status_code, boom.text) == (500, "Internal Server Error")
+    assert (boom.headers["cache-control"], boom.headers["x-content-type-options"]) == ("no-store", "nosniff")
+    listed = client.get("/api/plugins", headers=_signed_in(main.app))
+    assert listed.json()["plugins"] == [{"name": "demo", "mindroom_plugin_api": None}]
+    assert (listed.headers["cache-control"], listed.headers["x-content-type-options"]) == ("no-store", "nosniff")
+
+
+@pytest.mark.asyncio
+async def test_a_real_client_reads_a_websocket_refused_before_accept(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    unused_tcp_port: int,
+) -> None:
+    """Served as ``mindroom run`` serves it, the API's refusal of a websocket handshake reaches an aiohttp client intact.
+
+    A core stream, a plugin's stream, and a plugin that does not exist each answer with a readable status and reason.
+    """
+    _write_plugin(tmp_path, STREAM_ROUTES)
+    config, runtime_paths = _config(tmp_path)
+    publish_test_plugins(config, runtime_paths)
+    monkeypatch.setattr(ensure_app_state(main.app), "api_state", _api_state(config, runtime_paths))
+    base = f"127.0.0.1:{unused_tcp_port}"
+    origin = "https://elsewhere.example"
+    # aiohttp's websocket error carries the status only, so a plain request with the same handshake reads the body.
+    handshake = {
+        "Origin": origin,
+        "Connection": "Upgrade",
+        "Upgrade": "websocket",
+        "Sec-WebSocket-Version": "13",
+        "Sec-WebSocket-Key": "dGhlIHNhbXBsZSBub25jZQ==",
+    }
+    refusals = {
+        f"/api/rooms/{quote(ROOM)}/agents/{quote(ALICE)}/terminals/t1": (403, "Origin is not allowed."),
+        "/api/plugins/demo/stream": (403, "Origin is not allowed."),
+        "/api/plugins/nope/stream": (404, "Not Found"),
+    }
+
+    async with (
+        serve_listener(
+            main.app,
+            name="api",
+            host="127.0.0.1",
+            port=unused_tcp_port,
+            log_level="WARNING",
+            ws="websockets-sansio",
+            access_log=False,
+        ),
+        aiohttp.ClientSession() as client,
+    ):
+        for path, (status, detail) in refusals.items():
+            with pytest.raises(aiohttp.WSServerHandshakeError) as refused:
+                await client.ws_connect(f"ws://{base}{path}", origin=origin)
+            assert refused.value.status == status, path
+            async with client.get(f"http://{base}{path}", headers=handshake) as response:
+                assert (response.status, json.loads(await response.text())) == (status, {"detail": detail}), path

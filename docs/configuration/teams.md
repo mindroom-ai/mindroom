@@ -6,9 +6,9 @@ icon: lucide/users
 
 A team lets several agents answer one request together, either as a named team under `teams:` that has its own Matrix account, or as an ad hoc team formed when a message involves several agents.
 
-<video controls playsinline preload="metadata" aria-label="Mentioning two agents forms a team that answers together" style="width: 100%" poster="https://github.com/user-attachments/assets/dfdbd003-6c31-49e0-8183-445ff0a8a271" data-poster-light="https://github.com/user-attachments/assets/dfdbd003-6c31-49e0-8183-445ff0a8a271" data-poster-dark="https://github.com/user-attachments/assets/41849fb8-3dd1-4b9c-8eff-33bb10803f48">
-  <source src="https://github.com/user-attachments/assets/cb657cd9-3114-442f-a4fa-d8e6a96b6425" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/9ee83e64-1425-4165-b1f5-5d4aa978b46e" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="Mentioning two agents forms a team that answers together" style="width: 100%" poster="https://github.com/user-attachments/assets/a892a233-6585-4156-932f-8addb1409879" data-poster-light="https://github.com/user-attachments/assets/a892a233-6585-4156-932f-8addb1409879" data-poster-dark="https://github.com/user-attachments/assets/613f4f1e-cae4-4e82-a082-282fbbf2d73b">
+  <source src="https://github.com/user-attachments/assets/fc66ec35-de5f-4a4e-9494-5bb1f361973a" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/0fc87c04-06ed-4508-bc4f-f461720218dc" type="video/mp4">
 </video>
 
 ## Team Modes
@@ -19,6 +19,7 @@ A team lets several agents answer one request together, either as a named team u
 | `collaborate` | Every member works on the same task independently, and the team model synthesizes their answers | You want several perspectives on one question | "What do you think about X?": every agent answers, then the views are combined |
 
 A team reply opens with a `🤝 Team Response (<members>)` header, shows each member's contribution under its name, and ends with a **Team Consensus** section; without a consensus it notes that only the individual responses are shown.
+A member that fails, including one that cannot start because of a configuration error such as invalid model settings, fails only the work handed to it: the team model reads why and still answers, and the reply shows the reason under the member's name.
 
 ## Named Teams
 
@@ -46,10 +47,10 @@ teams:
 | Field | Type | Default | Description |
 |-------|------|---------|-------------|
 | `display_name` | string | *required* | Name shown in Matrix |
-| `role` | string | *required* | Description of the team's purpose |
+| `role` | string | *required* | Description of the team's purpose, which the team model reads beside each member agent's own `role` when it chooses whom to delegate to |
 | `agents` | list | *required* | Names of agents under `agents:` that form the team; at least one, no duplicates |
-| `mode` | string | `coordinate` | `coordinate` or `collaborate` |
-| `rooms` | list | `[]` | Room keys, aliases, or Matrix room IDs the team joins and responds in |
+| `mode` | string | `coordinate` | `coordinate` or `collaborate`; any other value fails config validation |
+| `rooms` | list | `[]` | Room keys or Matrix room IDs the team joins and responds in (see [Rooms](../rooms.md#configuration)) |
 | `accept_invites` | bool or list | `true` | `true` accepts every room invitation, `false` or `[]` accepts none, and a list accepts only inviters matching an exact or wildcard Matrix user ID; this is separate from the members' own settings. Joining a room never grants its members access; see [Invitations](../authorization.md#invitations) |
 | `access` | object | `null` | Who may converse with the team: `current_room_members`, `members_of_rooms`, and `users`. When omitted, members of the team's own managed `rooms` have access. See [Responder access](../authorization.md#responder-access) |
 | `model` | string | `"default"` | Key under `models:` used for coordination and synthesis |
@@ -57,6 +58,7 @@ teams:
 | `num_history_runs`, `num_history_messages`, `max_tool_calls_from_history`, `compaction` | | | History replay and compaction for the team's shared history; see [Team History and Compaction](history.md#team-history-and-compaction) |
 
 Team keys follow the agent [naming rules](agents.md#naming-rules), and a key cannot be used under both `agents:` and `teams:`.
+A field a team entry does not have, such as an agent-only field placed under a team, fails config validation with an error that names it; move it to the right entry or remove it.
 Private agents, and agents that can reach a private agent through `delegate_to`, cannot be team members; see [Private Instances](agents.md#private-instances).
 
 ## Ad Hoc Teams
@@ -70,7 +72,7 @@ MindRoom forms a team without any `teams:` entry when:
 Tagging exactly one agent gets a reply from that agent alone.
 Threads where two or more people have posted never form a team from earlier thread context; tag the agents again in the current message (see [Multi-Human Thread Protection](threads.md#multi-human-thread-protection)).
 
-If any tagged agent cannot take part, for example because it is not in the room or not available to you, MindRoom replies with the reason instead of forming a partial team, such as `Team request includes agent 'code' that is not available in this room.`
+If any tagged agent cannot take part, for example because it is not in the room or not available to you, MindRoom replies with the reason instead of forming a partial team, such as `Team request includes agent 'code' that is not available to you in this room.`
 For teams formed from thread context or a DM room, unavailable agents are left out, and if only one remains it answers alone.
 
 The `default` model picks the mode for each ad hoc team from the request: `coordinate` when the agents have different subtasks, `collaborate` for opinions or brainstorming, and `collaborate` when the choice fails.

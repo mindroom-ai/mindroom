@@ -24,14 +24,22 @@ if TYPE_CHECKING:
     config_fields=[
         ConfigField(
             name="api_key",
+            env=("LINEAR_API_KEY",),
             label="API Key",
             type="password",
             required=False,
             default=None,
         ),
+        ConfigField(
+            name="timeout",
+            label="Timeout",
+            type="number",
+            required=False,
+            default=30,
+        ),
     ],
     dependencies=["requests"],
-    docs_url="https://docs.agno.com/tools/toolkits/others/linear",
+    docs_url="https://docs.mindroom.chat/tools/project-management/#linear",
     function_names=(
         "create_issue",
         "get_high_priority_issues",

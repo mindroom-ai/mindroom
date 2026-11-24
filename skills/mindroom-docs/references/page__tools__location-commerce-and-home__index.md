@@ -23,7 +23,7 @@ Missing Python dependencies install automatically on first use (see [Automatic D
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
-| `key` | `password` | `null` | Google Maps API key; falls back to the `GOOGLE_MAPS_API_KEY` process environment variable. |
+| `key` | `password` | `null` | Google Maps API key; falls back to `GOOGLE_MAPS_API_KEY`. |
 | `search_places` | `boolean` | `true` | Enable `search_places()`. |
 | `get_directions` | `boolean` | `true` | Enable `get_directions()`. |
 | `validate_address` | `boolean` | `true` | Enable `validate_address()`. |
@@ -58,7 +58,7 @@ Weather lookups use the first geocoding match for the location name, so ambiguou
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
-| `api_key` | `password` | `null` | OpenWeather API key; falls back to the `OPENWEATHER_API_KEY` process environment variable. A key is required for every call. |
+| `api_key` | `password` | `null` | OpenWeather API key; falls back to `OPENWEATHER_API_KEY`. A key is required for every call. |
 | `units` | `text` | `metric` | `standard`, `metric`, or `imperial`. |
 | `enable_current_weather` | `boolean` | `true` | Enable `get_current_weather()`. |
 | `enable_forecast` | `boolean` | `true` | Enable `get_forecast()`. |
@@ -124,9 +124,9 @@ get_average_order_value(group_by="day", created_after="2026-03-01", created_befo
 
 ## `homeassistant`
 
-<video controls playsinline preload="metadata" aria-label="A voice note from a phone locks up, turns off the lights, and lowers the heating" style="width: 100%" poster="https://github.com/user-attachments/assets/e7b9f61d-45c0-4e64-81d5-2a68141de523" data-poster-light="https://github.com/user-attachments/assets/e7b9f61d-45c0-4e64-81d5-2a68141de523" data-poster-dark="https://github.com/user-attachments/assets/aac77c0a-6c51-4e8b-aaa6-e682ca08f228">
-  <source src="https://github.com/user-attachments/assets/51d85cfc-79de-4666-a3e2-aa2356f1c5ed" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/b5d7a6f2-11bb-45a5-b92e-03ab0d9c5ba0" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="A voice note from a phone locks up, turns off the lights, and lowers the heating" style="width: 100%" poster="https://github.com/user-attachments/assets/534252f8-c599-4a1c-9aef-f1131ef9dfaf" data-poster-light="https://github.com/user-attachments/assets/534252f8-c599-4a1c-9aef-f1131ef9dfaf" data-poster-dark="https://github.com/user-attachments/assets/6729cad6-62ae-4ea4-92f4-6a3e422e7c36">
+  <source src="https://github.com/user-attachments/assets/bf32f178-1c18-4643-a2d6-1450e306cbe0" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/30f0c744-ecaf-4fbe-9c95-08576425ab3f" type="video/mp4">
 </video>
 
 `homeassistant` provides `get_entity_state()`, `list_entities()`, `turn_on()`, `turn_off()`, `toggle()`, `set_brightness()`, `set_color()`, `set_temperature()`, `activate_scene()`, `trigger_automation()`, and `call_service()`.
@@ -155,7 +155,8 @@ call_service("notify", "send_message", data='{"message": "Dinner is ready"}')
 
 Connect Home Assistant in the dashboard's **Tools** tab, using either method:
 
-- **OAuth**: enter the Home Assistant URL and, as the Client ID, the MindRoom dashboard URL, such as `https://mindroom.example.com`; Home Assistant needs no application registration, but the Client ID must use the same host and port as the dashboard you connect from.
+- **OAuth**: enter the Home Assistant URL; Home Assistant needs no application registration, and after sign-in it returns you to `MINDROOM_DASHBOARD_URL` when you connect from that host, else to `MINDROOM_PUBLIC_URL`, or to the address MindRoom received the request on when that is unset, so set `MINDROOM_PUBLIC_URL` when a proxy in front of MindRoom terminates HTTPS.
+  Home Assistant refuses that address with `Invalid client id` when it is an IP address other than a loopback, private, or link-local one, such as a public or Tailscale `100.x` address, so set `MINDROOM_PUBLIC_URL`, or `MINDROOM_DASHBOARD_URL` when you connect from that host, to a URL with a DNS name, such as `https://mindroom.example.org`, or use the access-token method.
 - **Access token**: in your Home Assistant profile, create a long-lived access token under **Long-Lived Access Tokens**, then enter the Home Assistant URL and the token.
 
 Expired OAuth access tokens renew automatically.
@@ -167,6 +168,7 @@ A Home Assistant URL on a private, local, or loopback network, such as `http://h
 | `Invalid authentication token. Please reconnect Home Assistant.` | The token was revoked or OAuth renewal failed; reconnect. |
 | `Private Home Assistant URLs require explicit opt-in. ...` | Enable **Allow private or local URL** and reconnect. |
 | `Connection timeout - check if Home Assistant is accessible` | Make sure the MindRoom server can reach the Home Assistant URL. |
+| `Invalid client id` on Home Assistant's sign-in page | Give MindRoom's address a DNS name, as the **OAuth** method above describes, or connect with an access token. |
 
 ## Related Docs
 

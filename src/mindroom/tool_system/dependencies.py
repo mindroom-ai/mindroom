@@ -2,33 +2,107 @@
 
 from __future__ import annotations
 
+import hashlib
 import importlib
 import importlib.metadata as importlib_metadata
 import importlib.util
 import os
 import shutil
+import stat
 import subprocess
 import sys
+import tempfile
+import threading
 import tomllib
+from contextlib import contextmanager, suppress
 from functools import cache
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from mindroom.file_locks import advisory_file_lock
 from mindroom.vendor_telemetry import vendor_telemetry_env_values
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
+
+    from packaging.requirements import Requirement
+
     from mindroom.constants import RuntimePaths
 
 _PACKAGE_NAME = "mindroom"
 _RECEIPT_NAME = "uv-receipt.toml"
 _PROJECT_ROOT = Path(__file__).resolve().parents[3]
+# Found at import, as `mindroom/__init__.py` reads its version, so an install that replaces
+# MindRoom's own metadata later cannot move the dependency lock or hide it.
+_INSTALLATION_SITE_PACKAGES = Path(str(importlib_metadata.distribution(_PACKAGE_NAME).locate_file("")))
+
+
+class _EnvironmentLockState(threading.local):
+    held: bool = False
+    exclusive: bool = False
+
+
+_ENVIRONMENT_LOCK_STATE = _EnvironmentLockState()
+
+
+def _environment_lock_path() -> Path:
+    """Return the lock that every process running this MindRoom installation takes.
+
+    The lock lives in the site-packages directory MindRoom is installed in: installs into MindRoom's
+    own environment write there, and every process running it imports from there, including local
+    worker tool subprocesses with their own TMPDIR and venv. The file is private to the account that
+    creates it, so other local users can hold it only if they can already change those packages.
+    When this user cannot open it, as in a read-only installation or one where another account
+    created it, a private per-user directory in the OS temporary directory keeps other local users
+    from creating or holding the lock.
+    """
+    lock_path = _INSTALLATION_SITE_PACKAGES / ".mindroom-optional-dependencies.lock"
+    with suppress(OSError):
+        os.close(os.open(lock_path, os.O_WRONLY | os.O_CREAT, 0o600))
+        return lock_path
+    key = hashlib.sha256(str(Path(sys.prefix).resolve()).encode()).hexdigest()
+    if sys.platform == "win32":
+        # Windows temporary directories are already per user.
+        return Path(tempfile.gettempdir()) / "mindroom-optional-dependencies" / f"{key}.lock"
+    uid = os.geteuid()
+    lock_dir = Path(tempfile.gettempdir()) / f"mindroom-optional-dependencies-{uid}"
+    lock_dir.mkdir(mode=0o700, exist_ok=True)
+    status = lock_dir.lstat()
+    if not stat.S_ISDIR(status.st_mode) or status.st_uid != uid or status.st_mode & 0o077:
+        msg = f"{lock_dir} must be a directory that only the current user can access."
+        raise PermissionError(msg)
+    return lock_dir / f"{key}.lock"
+
+
+@contextmanager
+def optional_dependency_environment(*, exclusive: bool = False) -> Iterator[None]:
+    """Coordinate optional imports and installs for one MindRoom installation.
+
+    Imports share the lock; installers own it exclusively. Install before entering
+    an import scope, so no reader attempts a non-atomic upgrade to a write lock.
+    """
+    state = _ENVIRONMENT_LOCK_STATE
+    if state.held:
+        if exclusive and not state.exclusive:
+            msg = "Release the optional dependency import scope before installing dependencies."
+            raise RuntimeError(msg)
+        yield
+        return
+    with advisory_file_lock(_environment_lock_path(), exclusive=exclusive):
+        state.held = True
+        state.exclusive = exclusive
+        try:
+            yield
+        finally:
+            state.held = False
+            state.exclusive = False
+
 
 # Packages where the pip install name differs from the Python import name.
 # Only includes cases where replacing dashes with underscores is insufficient.
 _PIP_TO_IMPORT: dict[str, str] = {
     "atlassian-python-api": "atlassian",
     "beautifulsoup4": "bs4",
-    "e2b-code-interpreter": "e2b",
     "firecrawl-py": "firecrawl",
     "linkup-sdk": "linkup",
     "mem0ai": "mem0",
@@ -39,10 +113,10 @@ _PIP_TO_IMPORT: dict[str, str] = {
     "google-genai": "google.genai",
     "google-maps-places": "google.maps",
     "google-search-results": "serpapi",
-    "psycopg-binary": "psycopg",
     "pyobjc-framework-applicationservices": "ApplicationServices",
     "pyobjc-framework-cocoa": "AppKit",
     "py-trello": "trello",
+    "pytelegrambotapi": "telebot",
     "pygithub": "github",
     "python-docx": "docx",
     "pyyaml": "yaml",
@@ -73,14 +147,18 @@ def check_deps_installed(dependencies: list[str]) -> bool:
     """Check if all dependencies are importable using find_spec (no side effects)."""
     for dep in dependencies:
         module_name = _pip_name_to_import(dep)
-        if importlib.util.find_spec(module_name) is None:
+        try:
+            if importlib.util.find_spec(module_name) is None:
+                return False
+        except ModuleNotFoundError:
+            # find_spec raises instead of returning None when a dotted name's parent package is missing.
             return False
     return True
 
 
 def auto_install_enabled(runtime_paths: RuntimePaths) -> bool:
     """Return whether automatic tool dependency installation is enabled."""
-    raw = runtime_paths.env_value("MINDROOM_NO_AUTO_INSTALL_TOOLS", default="") or ""
+    raw = runtime_paths.env_value("MINDROOM_NO_AUTO_INSTALL_TOOLS", default="")
     return raw.lower() not in {"1", "true", "yes"}
 
 
@@ -90,19 +168,68 @@ def _has_lockfile() -> bool:
 
 
 @cache
+def _pyproject_optional_dependencies() -> dict[str, list[str]] | None:
+    """Return the source checkout's optional extras and their requirements, or None for an installed package."""
+    pyproject_path = _PROJECT_ROOT / "pyproject.toml"
+    if not pyproject_path.exists():
+        return None
+    data = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
+    return data.get("project", {}).get("optional-dependencies", {})
+
+
+@cache
 def _available_optional_extras() -> set[str]:
     """Discover available optional extras from pyproject or installed metadata."""
-    pyproject_path = _PROJECT_ROOT / "pyproject.toml"
-    if pyproject_path.exists():
-        data = tomllib.loads(pyproject_path.read_text(encoding="utf-8"))
-        optional = data.get("project", {}).get("optional-dependencies", {})
-        return set(optional.keys())
+    if (optional := _pyproject_optional_dependencies()) is not None:
+        return set(optional)
 
     try:
         metadata = importlib_metadata.metadata(_PACKAGE_NAME)
     except importlib_metadata.PackageNotFoundError:
         return set()
     return set(metadata.get_all("Provides-Extra") or [])
+
+
+@cache
+def _extra_requirements(extra_name: str) -> tuple[Requirement, ...]:
+    """Return the requirements an optional extra adds on this platform, from pyproject or installed metadata."""
+    # Imported at first use: the tool registry imports this module, and packaging is not part of its import surface.
+    from packaging.requirements import Requirement  # noqa: PLC0415
+
+    if (optional := _pyproject_optional_dependencies()) is not None:
+        requirements = [Requirement(line) for line in optional.get(extra_name, [])]
+    else:
+        # Installed metadata lists every requirement once, marking the extras that add it.
+        requirements = [
+            requirement
+            for requirement in map(Requirement, importlib_metadata.requires(_PACKAGE_NAME) or [])
+            if requirement.marker is not None and not requirement.marker.evaluate({"extra": ""})
+        ]
+    return tuple(
+        requirement
+        for requirement in requirements
+        if requirement.marker is None or requirement.marker.evaluate({"extra": extra_name})
+    )
+
+
+def _unsupported_extra_requirements(extra_name: str) -> list[str]:
+    """Describe each installed requirement of an optional extra whose version the extra does not allow.
+
+    A requirement that is not installed is left to the import check; an installed one outside the extra's range counts
+    even when the caller does not import it, since installing the extra replaces it.
+    """
+    resolved_extra_name = _resolve_optional_extra_name(extra_name)
+    if resolved_extra_name is None:
+        return []
+    unsupported: list[str] = []
+    for requirement in _extra_requirements(resolved_extra_name):
+        try:
+            installed_version = importlib_metadata.version(requirement.name)
+        except importlib_metadata.PackageNotFoundError:
+            continue
+        if not requirement.specifier.contains(installed_version, prereleases=True):
+            unsupported.append(f"{requirement.name} {installed_version} (needs {requirement.specifier})")
+    return unsupported
 
 
 def _resolve_optional_extra_name(extra_name: str) -> str | None:
@@ -139,7 +266,7 @@ def _get_current_uv_tool_extras() -> list[str]:
     return []
 
 
-def _install_via_uv_tool(extras: list[str], *, quiet: bool) -> bool:
+def _install_via_uv_tool(extras: list[str]) -> bool:
     extras_str = ",".join(extras)
     package_spec = f"{_PACKAGE_NAME}[{extras_str}]"
     # Pin the exact interpreter this environment was created from (what stdlib `venv` uses) and skip
@@ -147,13 +274,9 @@ def _install_via_uv_tool(extras: list[str], *, quiet: bool) -> bool:
     # the live environment before building, so a failed build would leave nothing behind. Without them
     # uv updates the environment in place, syncing it exactly to `extras`; callers pass the receipt's
     # extras merged with the new ones so installed extras are kept.
-    base_python = sys._base_executable  # ty: ignore[unresolved-attribute]  # typeshed omits it
-    cmd = ["uv", "tool", "install", package_spec, "--python", base_python]
-    if quiet:
-        cmd.append("-q")
-    env = os.environ.copy()
-    env.update(vendor_telemetry_env_values())
-    result = subprocess.run(cmd, check=False, env=env)
+    base_python = sys._base_executable  # ty: ignore[missing-attribute]  # typeshed omits it
+    cmd = ["uv", "tool", "install", package_spec, "--python", base_python, "-q"]
+    result = subprocess.run(cmd, check=False, env={**os.environ, **vendor_telemetry_env_values()})
     return result.returncode == 0
 
 
@@ -180,60 +303,56 @@ def install_command_for_current_python() -> list[str]:
     return cmd
 
 
-def _install_via_uv_sync(extras: list[str], *, quiet: bool) -> bool:
+def _install_via_uv_sync(extras: list[str]) -> bool:
     """Install extras using ``uv sync --locked --inexact`` for pinned versions from uv.lock."""
     cmd = ["uv", "sync", "--locked", "--inexact", "--no-dev"]
-    env = os.environ.copy()
-    env.update(vendor_telemetry_env_values())
+    env = {**os.environ, **vendor_telemetry_env_values()}
     if _in_virtualenv():
         # Ensure uv targets the interpreter that is currently running MindRoom.
         cmd.extend(["--active", "--python", sys.executable])
         env["VIRTUAL_ENV"] = sys.prefix
     for extra in extras:
         cmd.extend(["--extra", extra])
-    if quiet:
-        cmd.append("-q")
-    result = subprocess.run(cmd, check=False, capture_output=quiet, cwd=_PROJECT_ROOT, env=env)
+    cmd.append("-q")
+    result = subprocess.run(cmd, check=False, capture_output=True, cwd=_PROJECT_ROOT, env=env)
     return result.returncode == 0
 
 
-def _install_in_environment(extras: list[str], *, quiet: bool) -> bool:
+def _install_in_environment(extras: list[str]) -> bool:
     extras_str = ",".join(extras)
     package_spec = f"{_PACKAGE_NAME}[{extras_str}]"
     cmd = [*install_command_for_current_python(), package_spec]
-    env = os.environ.copy()
-    env.update(vendor_telemetry_env_values())
-    result = subprocess.run(cmd, check=False, capture_output=quiet, env=env)
+    result = subprocess.run(cmd, check=False, capture_output=True, env={**os.environ, **vendor_telemetry_env_values()})
     return result.returncode == 0
 
 
-def _install_optional_extras(extras: list[str], *, quiet: bool = False) -> bool:
+def _install_optional_extras(extras: list[str]) -> bool:
     """Install one or more optional extras into the current environment.
 
     Prefers ``uv sync --locked`` when uv.lock is available (exact pinned versions).
     Falls back to ``uv pip install`` or ``pip install`` otherwise.
     """
-    if not extras:
-        return False
-    if _is_uv_tool_install():
-        current_extras = _get_current_uv_tool_extras()
-        merged_by_name = {_normalize_extra_name(extra): extra for extra in current_extras}
-        merged_by_name.update({_normalize_extra_name(extra): extra for extra in extras})
-        merged = sorted(merged_by_name.values())
-        return _install_via_uv_tool(merged, quiet=quiet)
-    if _has_lockfile() and shutil.which("uv") and _in_virtualenv():
-        return _install_via_uv_sync(extras, quiet=quiet)
-    return _install_in_environment(extras, quiet=quiet)
+    with optional_dependency_environment(exclusive=True):
+        if _is_uv_tool_install():
+            current_extras = _get_current_uv_tool_extras()
+            merged_by_name = {_normalize_extra_name(extra): extra for extra in current_extras}
+            merged_by_name.update({_normalize_extra_name(extra): extra for extra in extras})
+            merged = sorted(merged_by_name.values())
+            return _install_via_uv_tool(merged)
+        if _has_lockfile() and shutil.which("uv") and _in_virtualenv():
+            return _install_via_uv_sync(extras)
+        return _install_in_environment(extras)
 
 
 def _auto_install_optional_extra(extra_name: str, runtime_paths: RuntimePaths) -> bool:
     """Auto-install an optional extra when supported and enabled."""
     if not auto_install_enabled(runtime_paths):
         return False
-    resolved_extra_name = _resolve_optional_extra_name(extra_name)
+    with optional_dependency_environment():
+        resolved_extra_name = _resolve_optional_extra_name(extra_name)
     if resolved_extra_name is None:
         return False
-    return _install_optional_extras([resolved_extra_name], quiet=True)
+    return _install_optional_extras([resolved_extra_name])
 
 
 def auto_install_optional_extra_for_import_retry(extra_name: str, runtime_paths: RuntimePaths) -> bool:
@@ -250,14 +369,25 @@ def ensure_optional_deps(
     runtime_paths: RuntimePaths,
     *,
     missing_message: str | None = None,
+    auto_install: bool = True,
 ) -> bool:
-    """Ensure dependencies are installed, auto-installing via optional extra if needed."""
-    if check_deps_installed(dependencies):
+    """Check dependency versions and install the extra if needed, unless ``auto_install`` is false.
+
+    Import the package inside ``optional_dependency_environment()`` afterwards,
+    so the import cannot overlap another thread's install.
+    """
+    with optional_dependency_environment():
+        installed = check_deps_installed(dependencies)
+        # An installed version the extra does not allow counts as missing, so the extra installs again.
+        unsupported = _unsupported_extra_requirements(extra_name) if installed else []
+    if installed and not unsupported:
         return False
-    if not auto_install_optional_extra_for_import_retry(extra_name, runtime_paths):
-        missing = ", ".join(dependencies)
-        if missing_message is None:
-            missing_message = f"Missing dependencies: {missing}. Install with: pip install 'mindroom[{extra_name}]'"
+    if not auto_install or not auto_install_optional_extra_for_import_retry(extra_name, runtime_paths):
+        install_hint = f"Install with: pip install 'mindroom[{extra_name}]'"
+        if unsupported:
+            missing_message = f"Unsupported dependency versions: {', '.join(unsupported)}. {install_hint}"
+        elif missing_message is None:
+            missing_message = f"Missing dependencies: {', '.join(dependencies)}. {install_hint}"
         raise ImportError(missing_message)
     return True
 

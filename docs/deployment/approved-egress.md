@@ -52,6 +52,7 @@ MindRoom keeps the allowlist it started with until its own pod restarts, so a re
 
 Agents call `request_network_access(hostnames, ttl_minutes, reason)` with every blocked external hostname the task needs, up to 20 per call, and one Matrix approval covers the whole batch.
 Hostnames must be exact external DNS names; schemes, ports, paths, wildcards, IP literals, single-label names, `localhost`, cluster-local names, and cloud metadata hostnames are rejected, and one invalid hostname rejects the whole request.
+Internationalized hostnames must be written in their `xn--` form, so the approval card shows the name the grant covers.
 Hostnames already on the static allowlist are skipped, and when every requested hostname is allowlisted the tool replies that no grant is needed without asking for approval.
 The granted TTL is the requested `ttl_minutes`, capped at the deployment maximum, and the reply says when the cap applied.
 
@@ -61,7 +62,10 @@ Who a grant covers depends on the agent's effective [worker scope](sandbox-proxy
 |---|---|
 | `user_agent` | The requester's own worker for that agent |
 | `shared` or unset | That agent's worker |
-| `user` | Not supported; the request fails with `approved egress is not supported for worker_scope=user` |
+| `user` | Not supported, except from a subagent's dedicated worker; the request fails with `approved egress is not supported for worker_scope=user` |
+
+A grant that a subagent running in a [dedicated worker](../tools/agent-orchestration.md#dedicated-workers) requests applies to that dedicated worker alone, whatever its agent's scope, and grants made for the agent or its normal worker do not apply there, so the subagent requests its own.
+No grant applies to a [named worker](../tools/execution-and-coding.md#named-workers), which reaches only the hostnames the static allowlist allows.
 
 ### Temporary Full Access
 
@@ -110,19 +114,16 @@ The toolkit reads these environment variables, which the runtime chart sets for 
 | `MINDROOM_APPROVED_EGRESS_ALLOWLIST_PATH` | Static allowlist file with one entry per line and `#` comments | `/etc/mindroom-egress/allowed-domains.txt` |
 | `MINDROOM_APPROVED_EGRESS_MAX_TTL_SECONDS` | Maximum grant TTL | `21600` |
 
-## Agent Vault Chaining
+## Egress Broker Chaining
 
-When approved egress and [Agent Vault](sandbox-proxy.md) are used together, the chain must be:
+When approved egress and the native [egress broker](egress-broker.md) are used together, the chain is:
 
 ```text
-worker -> approved egress (Squid) -> Agent Vault MITM parent -> internet
+worker -> approved egress (Squid) -> egress broker in the primary -> internet
 ```
 
-Squid must be first because temporary grants are matched to the worker by its source IP.
-If traffic goes through Agent Vault first, Squid sees only the vault's IP, so temporary grants never match while static allowlist entries still work.
-
-Before enabling the Agent Vault server and bootstrap job, create the Secret named by `workers.kubernetes.agentVault.bootstrapSecretName` (default `agent-vault-bootstrap`) with both `AGENT_VAULT_MASTER_PASSWORD` and `AGENT_VAULT_OWNER_PASSWORD`.
-Create it in the worker namespace too when that differs from the release namespace.
+Squid stays first because temporary grants are matched to the worker by its source IP, so grants and the static allowlist keep working unchanged.
+The broker verifies the worker's token and injects credentials, and it dials the internet directly from the primary pod, so there is nothing else to deploy.
 
 ```yaml
 workers:
@@ -131,37 +132,24 @@ workers:
     proxyToken:
       existingSecret: mindroom-sandbox-proxy
       key: MINDROOM_SANDBOX_PROXY_TOKEN
-  kubernetes:
-    agentVault:
-      enabled: true
-      cliImage: infisical/agent-vault:<pinned>
-      ownerEmail: owner@example.test
-      server:
-        enabled: true
-      bootstrap:
-        enabled: true
-        kubectlImage: bitnami/kubectl:<pinned>
-      workerCaConfigMapName: agent-vault-ca
+
+egressBroker:
+  enabled: true
 
 approvedEgress:
   enabled: true
   image:
     tag: v0.1.10
-  parentProxy:
-    enabled: true
-    host: agent-vault
-    port: 14322
 ```
 
-With `approvedEgress.parentProxy.enabled: true`, workers send Agent Vault traffic to approved egress first.
-After the allowlist and grant check, requests carrying the worker's Agent Vault token go on to the vault, which still validates the token and injects credentials, while requests without a token go directly to the internet.
+With both enabled, the chart renders Squid's parent as the broker itself; the runtime chart's [Egress Broker](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/runtime/README.md#egress-broker) section has what it renders in this mode and the values it refuses.
+After the allowlist and grant check, requests carrying a broker token go on to the broker, which injects the credential, while requests without a token go directly to the internet.
 
-Use `approvedEgress.parentProxy.bypassDomains` (default empty) for destinations such as signed URLs that must skip credential injection:
+Use `approvedEgress.parentProxy.bypassDomains` (default empty) for destinations such as signed URLs that must skip the broker:
 
 ```yaml
 approvedEgress:
   parentProxy:
-    enabled: true
     bypassDomains:
       - downloads.example.test
       - .objects.example.test
@@ -171,9 +159,9 @@ Entries match like allowlist entries: exact hostnames, or a leading dot for a do
 Use ASCII domain names without schemes, ports, paths, `*` wildcards, or whitespace.
 Bypassed destinations still need an allowlist match or grant, and changing `bypassDomains` restarts the proxy automatically.
 
-Do not point Agent Vault tool traffic directly at the chart-managed Agent Vault proxy while approved egress is enabled.
-The chart refuses that combination with `approvedEgress with Agent Vault must be squid-first: enable approvedEgress.parentProxy so Squid sees worker source IPs for dynamic grants, or set workers.kubernetes.agentVault.proxyUrl to an external/custom proxy URL explicitly`.
-An external or custom `workers.kubernetes.agentVault.proxyUrl` remains allowed.
+Squid denies a brokered host such as `api.github.com` before a grant, unless the host is in the static allowlist, so `curl https://api.github.com/user` fails.
+After `request_network_access` for that host is approved, the same request is meant to succeed with the credential injected.
+Chain mode has not yet been run end to end on a live cluster.
 
 ## Secure Minimum
 

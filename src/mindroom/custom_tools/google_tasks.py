@@ -12,7 +12,7 @@ from googleapiclient.errors import HttpError
 from mindroom.config.main import Config  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.credentials.manager import CredentialsManager  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.custom_tools.google_service import GoogleApiToolkit, google_http_error_result
-from mindroom.oauth.google_tasks import google_tasks_oauth_provider
+from mindroom.oauth.google import google_oauth_provider
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
@@ -80,7 +80,7 @@ def _task_patch_body(
 class GoogleTasksTools(GoogleApiToolkit):
     """List, create, update, complete, and delete Google Tasks with scoped Google credentials."""
 
-    _oauth_provider = google_tasks_oauth_provider()
+    _oauth_provider = google_oauth_provider("google_tasks")
     _oauth_tool_name = "google_tasks"
     _google_api_name = "tasks"
     _google_api_version = "v1"

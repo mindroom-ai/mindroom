@@ -12,39 +12,44 @@ import sys
 from contextlib import nullcontext
 from pathlib import Path
 from types import SimpleNamespace
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, cast, get_args
 from unittest.mock import DEFAULT, AsyncMock, Mock, patch
 
-import agno.models.vertexai.claude as vertexai_claude_module
 import httpx
+import httpx2
 import pytest
 import structlog
 import typer
 import yaml
-from anthropic import PermissionDeniedError
 from google.auth.exceptions import DefaultCredentialsError
+from google.oauth2.credentials import Credentials as GoogleCredentials
 from typer.testing import CliRunner
 
 import mindroom.cli.connect as cli_connect
 import mindroom.constants as constants_module
-import mindroom.providers.google_adc as google_adc_module
 import mindroom.workspaces as workspaces_module
 from mindroom.agents import ensure_default_agent_workspaces
 from mindroom.cli import config as config_cli
 from mindroom.cli.agent_docs import ensure_config_agent_docs
-from mindroom.cli.config import _format_config_search_locations, activate_cli_runtime
+from mindroom.cli.config import activate_cli_runtime
+from mindroom.cli.doctor import _validate_vertexai_claude_connection
 from mindroom.cli.main import (
     _CONNECT_ALREADY_CONNECTED_EXIT_CODE,
     _load_active_config_or_exit,
-    _terminal_is_interactive,
     _threads_export,
     app,
 )
-from mindroom.constants import OWNER_MATRIX_USER_ID_ENV, OWNER_MATRIX_USER_ID_PLACEHOLDER
+from mindroom.cli.main import main as cli_main
+from mindroom.cli.service import _shell_service_keys
+from mindroom.config.main import Config
+from mindroom.config.models import ModelConfig, RouterConfig
+from mindroom.constants import OWNER_MATRIX_USER_ID_ENV, OWNER_MATRIX_USER_ID_PLACEHOLDER, resolve_runtime_paths
+from mindroom.credentials.environment import get_secret_from_env
 from mindroom.credentials.manager import get_runtime_shared_credentials_manager
-from mindroom.credentials.sync import get_secret_from_env, sync_env_to_credentials
 from mindroom.error_handling import AvatarGenerationError, AvatarSyncError
+from mindroom.event_journal.opening import EventJournalBindingError
 from mindroom.logging_config import configure_default_logging, uses_default_logging
+from mindroom.matrix.health import MSC4186_UNSTABLE_FEATURE
 from mindroom.matrix.state import MatrixAccount, MatrixState
 from mindroom.model_defaults import (
     CONFIG_INIT_MODEL_PRESETS,
@@ -58,18 +63,23 @@ from mindroom.model_defaults import (
     OPENAI_GPT_SOL,
     llama_cpp_server_command,
 )
-from mindroom.providers.model_loading import missing_model_api_key_provider
+from mindroom.providers import credentials as provider_credentials
+from mindroom.providers.credentials import missing_model_api_key_provider
+from mindroom.providers.model_http_client import MODEL_HTTP_CLIENT
+from mindroom.providers.ollama.adapter import build_provider as build_ollama_provider
 from mindroom.services.config import InstallResult, ServiceManager, ServiceStatus
 from mindroom.startup_errors import PermanentStartupError
 from mindroom.thread_export import ThreadExportStats
 from mindroom.thread_export.models import ThreadExportRoom, failure_for_room, failure_for_target
 from mindroom.tool_system.worker_routing import agent_workspace_root_path
 from tests.conftest import load_config_yaml, normalize_console_output
+from tests.matrix_state_helpers import save_matrix_state
+from tests.providers.golden_support import httpx2_transport, streamed_reply
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
-    from mindroom.config.main import Config
+pytestmark = pytest.mark.usefixtures("wide_cli_consoles")
 
 runner = CliRunner()
 
@@ -107,8 +117,7 @@ def _write_minimal_runtime_config(path: Path) -> None:
         "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-5\n"
         "agents:\n  general:\n    display_name: General Agent\n    model: default\n"
         "router:\n  model: default\n"
-        "matrix_space:\n  enabled: false\n"
-        "authorization:\n  global_users: []\n",
+        "matrix_space:\n  enabled: false\n",
         encoding="utf-8",
     )
 
@@ -128,7 +137,7 @@ def test_cli_import_keeps_help_path_runtime_modules_lazy() -> None:
         "mindroom.config.main",
         "mindroom.history",
         "mindroom.history.runtime",
-        "mindroom.agent_storage",
+        "mindroom.session_storage.agent_storage",
         "agno",
         "sqlalchemy",
         "agno.db.sqlite.async_sqlite",
@@ -159,20 +168,360 @@ def test_cli_import_keeps_help_path_runtime_modules_lazy() -> None:
     assert json.loads(result.stdout) == []
 
 
-def test_format_config_search_locations_numbers_paths_and_statuses(
-    tmp_path: Path,
+def test_config_search_locations_print_numbers_paths_and_statuses(
+    narrow_markup_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Each search location prints its number, its whole path, and whether it exists, on one line."""
+    monkeypatch.chdir(narrow_markup_dir)
+    existing = narrow_markup_dir / "config.yaml"
+    existing.write_text("agents: {}\n", encoding="utf-8")
+    missing = narrow_markup_dir / "missing.yaml"
+
+    config_cli.print_config_search_locations({"MINDROOM_CONFIG_PATH": str(missing)}, title="Search locations:")
+
+    lines = capsys.readouterr().out.splitlines()
+    assert lines[1] == f"  1. {missing.resolve()} (not found)"
+    assert lines[2] == f"  2. {existing.resolve()} (exists)"
+
+
+def test_config_init_prints_env_and_config_paths_whole_on_one_line(
+    narrow_markup_dir: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Config search-location rendering should include numbers and existence status."""
-    monkeypatch.chdir(tmp_path)
-    existing = tmp_path / "config.yaml"
-    existing.write_text("agents: {}\n", encoding="utf-8")
-    missing = tmp_path / "missing.yaml"
+    """A path with a bracketed folder, longer than the terminal is wide, prints whole on each `config init` line."""
+    # An owner exported in the shell would win over the one this test saves in `.env`.
+    monkeypatch.delenv(OWNER_MATRIX_USER_ID_ENV, raising=False)
+    target = narrow_markup_dir / "config.yaml"
+    env_path = narrow_markup_dir / ".env"
+    init = ["config", "init", "--path", str(target), "--matrix-server", "mindroom.chat", "--no-input"]
 
-    lines = _format_config_search_locations({"MINDROOM_CONFIG_PATH": str(missing)})
+    created = runner.invoke(app, init).output.splitlines()
+    env_path.write_text(f"{OWNER_MATRIX_USER_ID_ENV}=@Alice:fire:\n", encoding="utf-8")
+    kept = runner.invoke(app, init).output.splitlines()
+    overwritten = runner.invoke(app, [*init, "--force"]).output.splitlines()
 
-    assert lines[0] == f"  1. {missing.resolve()} ([dim]not found[/dim])"
-    assert lines[1] == f"  2. {existing.resolve()} ([green]exists[/green])"
+    assert f"Env file created: {env_path}" in created
+    assert f"Config created: {target}" in created
+    assert f"  Edit {env_path}  Set your API keys (Matrix homeserver is prefilled)" in created
+    assert f"Config file already exists: {target}" in kept
+    assert f"Config unchanged: {target}" in kept
+    assert f"Env file updated: {env_path}" in kept
+    assert f"Generated MINDROOM_API_KEY in {env_path}; restart MindRoom if it is already running to apply it." in kept
+    assert (
+        f"Warning: {OWNER_MATRIX_USER_ID_ENV} in {env_path} is not a valid Matrix user ID "
+        "('@Alice:fire:'), so the owner placeholders in config.yaml were left for you to replace."
+    ) in kept
+    assert f"Env file overwritten: {env_path}" in overwritten
+
+
+def test_config_inspect_commands_print_the_config_path_whole_on_one_line(narrow_markup_dir: Path) -> None:
+    """`config show`, `path`, `validate`, `resolve`, and `edit` print a markup-like, long config path whole."""
+    target = narrow_markup_dir / "config.yaml"
+
+    def lines(*args: str, env: dict[str, str] | None = None) -> list[str]:
+        return runner.invoke(app, ["config", *args, "--path", str(target)], env=env).output.splitlines()
+
+    assert f"No config file found at: {target}" in lines("show")
+    assert f"Validating configuration: {target}" in (validate := lines("validate"))
+    assert f"Error: Configuration file not found: {target}" in validate
+    assert f"Error: Configuration file not found: {target}" in lines("resolve")
+    target.write_text("agents: !include missing.yaml\n", encoding="utf-8")
+    assert f"Config file: {target}" in lines("show")
+    assert f"Resolved config path: {target} (exists)" in lines("path")
+    assert f"Error: Invalid configuration in {target}" in (invalid := lines("validate"))
+    assert f"  * config: !include: included file 'missing.yaml' does not exist (in {target}, line 1)" in invalid
+    edit = lines("edit", env={"EDITOR": "[missing]-editor"})
+    assert f"Opening {target} with [missing]-editor..." in edit
+    assert "Editor '[missing]-editor' not found." in edit
+
+
+def test_config_validate_prints_configured_names_whole_on_one_line(
+    narrow_markup_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The validate summary, missing-key warning, and automation issue keep long names and emoji codes as written."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.delenv("ANTHROPIC_API_KEY_FILE", raising=False)
+    agent = "an_agent_name_long_enough_to_push_each_summary_line_past_eighty_columns"
+    team = "a_team_name_long_enough_to_push_each_summary_line_past_eighty_columns"
+    model = "a:fire:model_name_long_enough_to_push_each_summary_line_past_eighty_columns"
+    target = narrow_markup_dir / "config.yaml"
+    config_text = (
+        f'models:\n  "{model}":\n    provider: anthropic\n    id: claude-sonnet-5-5\n'
+        f'agents:\n  {agent}:\n    display_name: Assistant\n    model: "{model}"\n'
+        f"teams:\n  {team}:\n    display_name: Team\n    role: Helps\n    agents: [{agent}]\n"
+        f'    model: "{model}"\n'
+        f'router:\n  model: "{model}"\n'
+    )
+    target.write_text(config_text, encoding="utf-8")
+
+    valid = runner.invoke(app, ["config", "validate", "--path", str(target)]).output.splitlines()
+    target.write_text(
+        config_text.replace(
+            "    display_name: Assistant\n",
+            "    display_name: Assistant\n    automations:\n      - {name: weekly_digest, cron: '0 9 * * 1'}\n",
+        ),
+        encoding="utf-8",
+    )
+    rejected = runner.invoke(app, ["config", "validate", "--path", str(target)]).output.splitlines()
+
+    assert f"  Agents: 1 ({agent})" in valid
+    assert f"  Teams:  1 ({team})" in valid
+    assert f"  Models: 1 ({model})" in valid
+    assert f"  * anthropic: Set ANTHROPIC_API_KEY (models: {model})" in valid
+    assert f"  agents.{agent}.automations: 'weekly_digest' is not provided by any loaded plugin" in rejected
+
+
+def test_first_run_setup_prints_the_env_and_config_paths_whole_on_one_line(
+    narrow_markup_dir: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The first-run welcome, skipped key, typed key, and provider setup lines keep a markup-like, long path whole."""
+    runtime_paths = constants_module.resolve_primary_runtime_paths(
+        config_path=narrow_markup_dir / "config.yaml",
+        process_env={},
+    )
+    env_path = runtime_paths.env_path
+
+    from mindroom.cli.setup_detection import KeyCheckResult  # noqa: PLC0415
+
+    config_cli.create_first_run_config(runtime_paths, provider="openai", interactive=False)
+    with (
+        patch.object(config_cli, "secret", return_value="sk-typed"),
+        patch("mindroom.cli.setup_detection.detect_single_provider", return_value=None),
+        patch(
+            "mindroom.cli.setup_detection.verify_provider_api_key",
+            return_value=KeyCheckResult(status="valid"),
+        ),
+    ):
+        config_cli.create_first_run_config(runtime_paths, provider="openai", interactive=True)
+    config_cli.create_first_run_config(runtime_paths, provider="bedrock_claude", interactive=False)
+
+    lines = capsys.readouterr().out.splitlines()
+    assert (
+        f"Welcome to MindRoom! Let's create your config at {runtime_paths.config_path} for MindRoom Chat (mindroom.chat)."
+    ) in lines
+    assert (
+        "Skipped. Connect your provider in the dashboard once MindRoom is running, "
+        f"or add OPENAI_API_KEY to {env_path} and restart `mindroom run`."
+    ) in lines
+    assert f"Env file updated: {env_path} (OPENAI_API_KEY)" in lines
+    assert f"  Set your AWS Bedrock region and credentials in {env_path} and restart `mindroom run`" in lines
+
+
+def test_dashboard_key_warnings_print_the_address_and_env_path_whole_on_one_line(
+    narrow_markup_dir: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The open-dashboard warning keeps an IPv6 address Rich would read as markup, and the key lines a long path."""
+    runtime_paths = constants_module.resolve_runtime_paths(
+        config_path=narrow_markup_dir / "config.yaml",
+        process_env={"MINDROOM_WORKER_BACKEND": "docker"},
+    )
+    env_path = runtime_paths.env_path
+
+    config_cli.warn_dashboard_without_key("[fe80::1]:8765", env_path, ", or pass --api-host 127.0.0.1.")
+    with patch.object(config_cli, "write_private_env_text", side_effect=OSError("read-only [mount]")):
+        config_cli.ensure_worker_dashboard_api_key(runtime_paths, dashboard_has_credential=False)
+    config_cli.ensure_worker_dashboard_api_key(runtime_paths, dashboard_has_credential=False)
+
+    lines = capsys.readouterr().out.splitlines()
+    assert (
+        "Warning: The dashboard API listens on [fe80::1]:8765 without MINDROOM_API_KEY, "
+        "so anyone who can reach that address can administer MindRoom."
+    ) in lines
+    assert f"  Set MINDROOM_API_KEY in {env_path}, or pass --api-host 127.0.0.1." in lines
+    assert (
+        "Warning: Dedicated workers can reach the dashboard API without MINDROOM_API_KEY, "
+        f"and {env_path} could not be updated: read-only [mount]"
+    ) in lines
+    assert (
+        f"Generated MINDROOM_API_KEY in {env_path} because dedicated workers can reach the dashboard API; "
+        "the dashboard login page asks for this key."
+    ) in lines
+
+
+def test_run_prints_the_dashboard_key_remedy_with_the_env_path_whole_on_one_line(
+    narrow_markup_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`mindroom run` on an open dashboard names the `.env` to set the key in, whole, even under a bracketed folder."""
+    for name in ("MINDROOM_API_KEY", "SUPABASE_URL", "SUPABASE_ANON_KEY", "MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED"):
+        monkeypatch.delenv(name, raising=False)
+    cfg = narrow_markup_dir / "config.yaml"
+    _write_minimal_runtime_config(cfg)
+
+    with patch("mindroom.orchestrator.main", AsyncMock()):
+        result = _invoke_with_runtime(["run"], cfg)
+
+    assert result.exit_code == 0, result.output
+    env_path = (narrow_markup_dir / ".env").resolve()
+    assert f"  Set MINDROOM_API_KEY in {env_path}, or pass --api-host 127.0.0.1." in result.output.splitlines()
+
+
+def test_run_prints_errors_and_the_homeserver_whole_on_one_line(
+    narrow_markup_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`mindroom run` prints each error and the homeserver it names as written, whole on one line, without raising."""
+    for name in ("SUPABASE_URL", "SUPABASE_ANON_KEY", "MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED"):
+        monkeypatch.delenv(name, raising=False)
+    cfg = narrow_markup_dir / "config.yaml"
+    text = str(narrow_markup_dir)
+    homeserver = f"https://matrix.example.test{text}"
+    dashboard_url = f"http://admin.example.org{text}"
+
+    def run(*args: str, error: Exception | None = None, env: dict[str, str] | None = None) -> list[str]:
+        with (
+            patch("mindroom.orchestrator.main", AsyncMock(side_effect=error)),
+            patch("mindroom.cli.main.create_first_run_config", side_effect=OSError(f"Permission denied: '{cfg}'")),
+            patch("mindroom.cli.connect.pair_local_install", side_effect=ValueError(f"Approval for {text} failed")),
+        ):
+            return _invoke_with_runtime(["run", "--no-api", *args], cfg, env=env).output.splitlines()
+
+    first_run = run("--provider", "openai")
+    _write_minimal_runtime_config(cfg)
+    pairing = run(env={"MINDROOM_PROVISIONING_URL": "https://mindroom.chat"})
+    refused = run(env={"MINDROOM_DASHBOARD_URL": dashboard_url})
+    failed = run(error=PermanentStartupError(f"Cannot read {text}"))
+    unreachable = run(
+        error=ConnectionRefusedError(f"Connection to {homeserver} refused"),
+        env={"MATRIX_HOMESERVER": homeserver},
+    )
+
+    assert f"Error: Permission denied: '{cfg}'" in first_run
+    assert f"Error: Approval for {text} failed" in pairing
+    assert any(line.startswith("Error: ") and f"'{dashboard_url}'" in line for line in refused)
+    assert f"Error: Cannot read {text}" in failed
+    assert f"  Details: Connection to {homeserver} refused" in unreachable
+    assert f"  2. MATRIX_HOMESERVER is set correctly (current: {homeserver})" in unreachable
+
+
+def test_run_prints_a_long_dashboard_address_whole_on_one_line(narrow_markup_dir: Path) -> None:
+    """The Dashboard and API URLs for a host name longer than the terminal is wide print whole on one line."""
+    cfg = narrow_markup_dir / "config.yaml"
+    _write_minimal_runtime_config(cfg)
+    host = f"mindroom.{'a-long-subdomain-label-' * 3}example.org"
+
+    with (
+        patch("mindroom.orchestrator.main", AsyncMock()),
+        patch("mindroom.frontend_assets.ensure_frontend_dist_dir", return_value=narrow_markup_dir),
+    ):
+        result = _invoke_with_runtime(["run", "--api-host", host], cfg)
+
+    assert result.exit_code == 0, result.output
+    lines = result.output.splitlines()
+    assert f"Dashboard: http://{host}:8765" in lines
+    assert f"API: http://{host}:8765/api" in lines
+
+
+def test_avatar_commands_print_their_errors_whole_on_one_line(narrow_markup_dir: Path) -> None:
+    """`avatars generate` and `avatars sync` print a failure that names a markup-like, long path as written."""
+    cfg = narrow_markup_dir / "config.yaml"
+    _write_minimal_runtime_config(cfg)
+    text = str(narrow_markup_dir)
+
+    with patch(
+        "mindroom.avatar_generation.run_avatar_generation",
+        AsyncMock(side_effect=AvatarGenerationError(f"Cannot write {text}")),
+    ):
+        generated = _invoke_with_runtime(["avatars", "generate"], cfg).output.splitlines()
+    with patch(
+        "mindroom.avatar_generation.set_room_avatars_in_matrix",
+        AsyncMock(side_effect=AvatarSyncError(f"Cannot read {text}")),
+    ):
+        synced = _invoke_with_runtime(["avatars", "sync"], cfg).output.splitlines()
+
+    assert f"Error: Cannot write {text}" in generated
+    assert f"Error: Cannot read {text}" in synced
+
+
+def test_journal_adopt_prints_the_journals_and_a_refusal_whole_on_one_line(narrow_markup_dir: Path) -> None:
+    """`journal adopt` prints the bound journal, the configured one, and a refusal as written, each on one line."""
+    cfg = narrow_markup_dir / "config.yaml"
+    _write_minimal_runtime_config(cfg)
+    text = str(narrow_markup_dir)
+    previous = f"postgres {text}/old"
+    description = f"postgres {text}/new"
+    opening = "mindroom.event_journal.opening"
+
+    with (
+        patch(f"{opening}.describe_event_journal", return_value=description),
+        patch(f"{opening}.current_binding_description", return_value=previous),
+        patch(f"{opening}.adopt_event_journal", AsyncMock(return_value=2)),
+    ):
+        bound = _invoke_with_runtime(["journal", "adopt"], cfg, input="y\n").output.splitlines()
+    with (
+        patch(f"{opening}.describe_event_journal", return_value=description),
+        patch(f"{opening}.current_binding_description", return_value=None),
+        patch(f"{opening}.adopt_event_journal", AsyncMock(side_effect=EventJournalBindingError(f"{text} is in use"))),
+    ):
+        refused = _invoke_with_runtime(["journal", "adopt"], cfg).output.splitlines()
+
+    assert f"This install is bound to {previous}." in bound
+    assert (
+        f"Adopting {description} gives up the deduplication, delivery, and recovery history held in the bound journal."
+    ) in bound
+    assert f"Bound this install to {description} (generation 2)." in bound
+    assert f"Not adopted: {text} is in use" in refused
+
+
+def test_threads_export_prints_the_output_folder_and_errors_whole_on_one_line(narrow_markup_dir: Path) -> None:
+    """`threads export` prints its output folder, each failure, and an export error as written, each on one line."""
+    cfg = narrow_markup_dir / "config.yaml"
+    text = str(narrow_markup_dir)
+    output_dir = narrow_markup_dir / "exports"
+    room = ThreadExportRoom(key="lobby", room_id="!lobby:localhost", alias="#lobby:localhost", name="Lobby")
+    stats = ThreadExportStats(
+        output_dir=output_dir,
+        threads_unchanged=1,
+        failed_items=(
+            failure_for_target(f"cannot write {text}"),
+            failure_for_room(room, f"cannot read {text}", thread_id="$thread:localhost"),
+        ),
+    )
+    export = "mindroom.cli.thread_export.request_thread_export"
+
+    with patch(export, new=AsyncMock(return_value=stats)):
+        exported = _invoke_with_runtime(["threads", "export"], cfg).output.splitlines()
+    with patch(export, new=AsyncMock(side_effect=ValueError(f"Refused {text}"))):
+        refused = _invoke_with_runtime(["threads", "export"], cfg).output.splitlines()
+    with patch(export, new=AsyncMock(side_effect=OSError(f"Cannot reach {text}"))):
+        unreachable = _invoke_with_runtime(["threads", "export"], cfg).output.splitlines()
+
+    assert f"Exported 0/0 threads from 0 room(s) to {output_dir} (1 unchanged)" in exported
+    assert f"Failed target: cannot write {text}" in exported
+    assert f"Failed: lobby $thread:localhost: cannot read {text}" in exported
+    assert f"Error: Refused {text}" in refused
+    assert f"Error: Cannot reach {text}" in unreachable
+
+
+def test_connect_prints_its_errors_whole_on_one_line(narrow_markup_dir: Path) -> None:
+    """`mindroom connect` prints a self-hosted refusal and a pairing error as written, each on one line."""
+    cfg = narrow_markup_dir / "config.yaml"
+    text = str(narrow_markup_dir)
+    connect = ["connect", "--path", str(cfg)]
+
+    with patch("mindroom.cli.connect.self_hosted_pairing_error", return_value=f"{text} is self-hosted"):
+        refused = runner.invoke(app, connect).output.splitlines()
+    with patch("mindroom.cli.connect.pair_local_install", side_effect=ValueError(f"Cannot save {text}")):
+        failed = runner.invoke(app, [*connect, "--provisioning-url", "https://mindroom.chat"]).output.splitlines()
+
+    assert f"Error: {text} is self-hosted" in refused
+    assert f"Error: Cannot save {text}" in failed
+
+
+def test_config_init_prints_the_llama_cpp_commands_whole_on_one_line(narrow_markup_dir: Path) -> None:
+    """The llama.cpp server commands, longer than the terminal is wide, print unwrapped so they copy whole."""
+    target = narrow_markup_dir / "config.yaml"
+
+    result = runner.invoke(app, ["config", "init", "--path", str(target), "--provider", "llama_cpp", "--no-input"])
+
+    lines = result.output.splitlines()
+    assert f"  {llama_cpp_server_command(LLAMA_CPP_GEMMA)}  Start the default local model server" in lines
+    assert f"  {llama_cpp_server_command(LLAMA_CPP_QWEN)}  Start the larger local model option" in lines
 
 
 def test_load_config_quiet_restores_unconfigured_structlog(tmp_path: Path) -> None:
@@ -259,6 +608,43 @@ class TestConfigInit:
         assert config["room_defaults"]["invite_users"] == [OWNER_MATRIX_USER_ID_PLACEHOLDER]
         assert config["room_defaults"]["admins"] == [OWNER_MATRIX_USER_ID_PLACEHOLDER]
 
+    @pytest.mark.parametrize(
+        ("provider", "matrix_server", "hint"),
+        [
+            ("codex", "mindroom.chat", "Run `codex login` before starting MindRoom (Matrix homeserver is prefilled)"),
+            ("codex", "self-hosted", "Set your Matrix homeserver and run `codex login` before starting MindRoom"),
+            (
+                "claude_code",
+                "mindroom.chat",
+                "Run `claude auth login` before starting MindRoom (Matrix homeserver is prefilled)",
+            ),
+            (
+                "claude_code",
+                "self-hosted",
+                "Set your Matrix homeserver and run `claude auth login` before starting MindRoom",
+            ),
+            ("openai", "mindroom.chat", "Set your API keys (Matrix homeserver is prefilled)"),
+            ("openai", "self-hosted", "Set your API keys and Matrix homeserver"),
+        ],
+    )
+    def test_init_next_steps_name_the_setup_for_the_preset_and_matrix_server(
+        self,
+        tmp_path: Path,
+        provider: str,
+        matrix_server: str,
+        hint: str,
+    ) -> None:
+        """The `.env` next step says what the chosen preset needs, worded for the Matrix server choice."""
+        target = tmp_path / "config.yaml"
+        result = runner.invoke(
+            app,
+            ["config", "init", "--path", str(target), "--provider", provider, "--matrix-server", matrix_server],
+            terminal_width=200,
+        )
+
+        assert result.exit_code == 0, result.output
+        assert f"Edit {tmp_path.resolve() / '.env'} {hint}" in normalize_console_output(result.output)
+
     def test_init_defaults_to_openai_for_mindroom_chat(self, tmp_path: Path) -> None:
         """mindroom.chat should default to OpenAI without prompting for a provider."""
         target = tmp_path / "config.yaml"
@@ -280,9 +666,10 @@ class TestConfigInit:
 
         assert mind["display_name"] == "Mind"
         assert mind["include_default_tools"] is False
-        assert mind["learning"] is False
+        assert "learning" not in mind
         assert mind["memory_backend"] == "file"
         assert mind["rooms"] == ["personal"]
+        assert config["rooms"]["personal"]["description"]  # becomes the topic, so no model call writes one
         assert mind["access"] == {
             "current_room_members": False,
             "members_of_rooms": ["personal"],
@@ -301,18 +688,45 @@ class TestConfigInit:
             "shell",
             "coding",
             "memory",
-            {"name": "config_manager", "defer": True},
-            "duckduckgo",
-            "website",
-            "browser",
             "scheduler",
             "update_awareness",
-            "todo",
             "matrix_message",
+            {"name": "todo", "defer": True},
+            {"name": "temporary_secrets", "defer": True},
+            {"name": "egress_credentials", "defer": True},
+            {"name": "config_manager", "defer": True},
+            {"name": "duckduckgo", "defer": True},
+            {"name": "website", "defer": True},
+            {"name": "browser", "defer": True},
+            {"name": "matrix_room", "defer": True},
             {"name": "thread_model", "defer": True},
-            "thread_tags",
-            "thread_summary",
+            {"name": "thread_tags", "defer": True},
+            {"name": "thread_summary", "defer": True},
+            {"name": "thread_resolution", "defer": True},
+            {"name": "thread_snooze", "defer": True},
+            {"name": "compact_context", "defer": True},
+            {"name": "callback_manager", "defer": True},
+            {"name": "chat_ui", "defer": True, "overrides": {"enable_show_canvas": True}},
+            {"name": "usage_stats", "defer": True},
+            {"name": "script", "defer": True},
+            {"name": "mcp_matrix_mcp", "defer": True},
         ]
+        # Mind's shell runs in MindRoom's process until a worker is set up, so the starter allows it there.
+        assert config["defaults"]["worker_tools"] == []
+        assert config["defaults"]["allow_shell_without_worker"] is True
+        assert mind["delegate_to"] == ["mind"]
+        assert mind["skill_learning"] == {"enabled": True}
+        assert mind["automations"] == ["prompt_curation", "dreaming"]
+        assert config["mcp_servers"]["matrix_mcp"]["args"] == ["matrix-mcp", "serve"]
+        assert config["tool_approval"]["rules"] == [
+            {"match": "resolve_thread", "action": "require_approval"},
+            {"match": "manage_config", "action": "require_approval"},
+            {"match": "manage_agent", "action": "require_approval"},
+            {"match": "manage_team", "action": "require_approval"},
+            {"match": "matrix_user_write", "action": "require_approval"},
+        ]
+        # Background tool jobs are on by default, so the starter leaves the setting out.
+        assert "background_tool_jobs" not in config
         config_manager_entry = next(
             entry for entry in load_config_yaml(target).agents["mind"].tools if entry.name == "config_manager"
         )
@@ -321,7 +735,6 @@ class TestConfigInit:
             entry for entry in load_config_yaml(target).agents["mind"].tools if entry.name == "thread_model"
         )
         assert thread_model_entry.defer is True
-        assert "thread_resolution" not in mind["tools"]
         assert mind["skills"] == ["mindroom-docs"]
         assert (
             "When helping with MindRoom setup, follow AGENTS.md and check the live state — don't guess."
@@ -335,7 +748,7 @@ class TestConfigInit:
         assert config["memory"]["backend"] == "file"
         assert config["memory"]["embedder"]["provider"] == "sentence_transformers"
         assert config["memory"]["embedder"]["config"]["model"] == "sentence-transformers/all-MiniLM-L6-v2"
-        assert config["memory"]["file"]["max_entrypoint_lines"] == 200
+        assert "file" not in config["memory"]
         assert config["memory"]["search"] == {
             "mode": "semantic",
             "include": ["memory/**/*.md"],
@@ -512,7 +925,7 @@ class TestConfigInit:
         config = load_config_yaml(target)
         assert "mind_memory" not in config.knowledge_bases
 
-        ensure_default_agent_workspaces(config, runtime_storage)
+        ensure_default_agent_workspaces(config, resolve_runtime_paths(config_path=target))
         runtime_workspace = runtime_storage / "agents" / "mind" / "workspace"
         assert (runtime_workspace / "SOUL.md").exists()
         assert (runtime_workspace / "AGENTS.md").exists()
@@ -750,10 +1163,12 @@ class TestConfigInit:
     def test_init_mindroom_chat_warns_about_a_saved_owner_it_cannot_use(
         self,
         tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """A saved owner outside the current Matrix grammar is reported, not silently dropped."""
+        """A saved owner outside the current Matrix grammar is reported, under a blank export too, not dropped."""
         target = tmp_path / "config.yaml"
         (tmp_path / ".env").write_text(f"{OWNER_MATRIX_USER_ID_ENV}=@Alice:selfhosted.example\n", encoding="utf-8")
+        monkeypatch.setenv(OWNER_MATRIX_USER_ID_ENV, "")
 
         result = runner.invoke(
             app,
@@ -771,10 +1186,8 @@ class TestConfigInit:
         )
 
         assert result.exit_code == 0
-        # Rich folds long paths mid-token, so compare without any whitespace.
-        output = "".join(result.output.split())
         expected = f"{OWNER_MATRIX_USER_ID_ENV} in {tmp_path / '.env'} is not a valid Matrix user ID ('@Alice:selfhosted.example')"
-        assert "".join(expected.split()) in output
+        assert expected in result.output
         assert OWNER_MATRIX_USER_ID_PLACEHOLDER in target.read_text(encoding="utf-8")
 
     def test_init_names_the_environment_as_the_source_of_an_unusable_owner(
@@ -880,14 +1293,23 @@ class TestConfigInit:
 
         config = yaml.safe_load(target.read_text())
         assert "mindroom_user" not in config
-        assert config["models"]["default"]["provider"] == "ollama"
-        assert config["models"]["default"]["id"] == OLLAMA_GEMMA
-        assert config["models"]["default"]["host"] == "http://localhost:11434"
-        assert config["models"]["default"]["context_window"] == 128_000
-        assert config["models"][LOCAL_QWEN_PRESET_NAME]["provider"] == "ollama"
-        assert config["models"][LOCAL_QWEN_PRESET_NAME]["id"] == OLLAMA_QWEN
-        assert config["models"][LOCAL_QWEN_PRESET_NAME]["host"] == "http://localhost:11434"
-        assert config["models"][LOCAL_QWEN_PRESET_NAME]["context_window"] == LOCAL_QWEN_CONTEXT_WINDOW
+        # Ollama runs each model at the context size the request asks for, so history fits what Ollama loads, and the
+        # models set no host, so the `.env` OLLAMA_HOST names their server as it does memory's.
+        assert config["models"] == {
+            "default": {
+                "provider": "ollama",
+                "id": OLLAMA_GEMMA,
+                "context_window": 32_768,
+                "extra_kwargs": {"options": {"num_ctx": 32_768}},
+            },
+            LOCAL_QWEN_PRESET_NAME: {
+                "provider": "ollama",
+                "id": OLLAMA_QWEN,
+                "context_window": 32_768,
+                "extra_kwargs": {"options": {"num_ctx": 32_768}},
+            },
+        }
+        assert load_config_yaml(target).models["default"].extra_kwargs == {"options": {"num_ctx": 32_768}}
 
         env_content = (tmp_path / ".env").read_text()
         assert "MATRIX_HOMESERVER=https://mindroom.chat" in env_content
@@ -904,6 +1326,26 @@ class TestConfigInit:
         assert f"ollama pull {OLLAMA_GEMMA}" in output
         assert f"ollama pull {OLLAMA_QWEN}" in output
         assert "Ollama" in output
+
+    def test_init_ollama_models_reach_the_server_the_env_file_names(self, tmp_path: Path) -> None:
+        """Pointing the generated `.env` OLLAMA_HOST at another server moves every generated Ollama model to it."""
+        target = tmp_path / "config.yaml"
+        result = runner.invoke(app, ["config", "init", "--path", str(target), "--provider", "ollama"])
+        assert result.exit_code == 0
+        env_path = tmp_path / ".env"
+        env_text = env_path.read_text()
+        assert "OLLAMA_HOST=http://localhost:11434\n" in env_text
+        env_path.write_text(
+            env_text.replace("OLLAMA_HOST=http://localhost:11434\n", "OLLAMA_HOST=http://gpu.example:11434\n"),
+        )
+        runtime_paths = constants_module.resolve_primary_runtime_paths(config_path=target, process_env={})
+
+        config = config_cli.load_config_quiet(runtime_paths)
+
+        endpoints = {
+            name: build_ollama_provider(model, runtime_paths).identity.endpoint for name, model in config.models.items()
+        }
+        assert endpoints == {"default": "http://gpu.example:11434", LOCAL_QWEN_PRESET_NAME: "http://gpu.example:11434"}
 
     @pytest.mark.parametrize("provider_name", ["llama.cpp", "llama-cpp", "llama_cpp"])
     def test_init_mindroom_chat_llama_cpp_writes_hosted_openai_compatible_defaults(
@@ -951,6 +1393,10 @@ class TestConfigInit:
         assert llama_cpp_server_command(LLAMA_CPP_GEMMA) in output
         assert llama_cpp_server_command(LLAMA_CPP_QWEN) in output
         assert "llama.cpp" in output
+
+    def test_provider_menu_lists_every_preset_once(self) -> None:
+        """Every preset `--provider` accepts can also be picked from the setup menu."""
+        assert set(config_cli._PROVIDER_PRESETS) == set(get_args(config_cli._ProviderPreset))
 
     def test_init_help_separates_matrix_server_from_provider_presets(self) -> None:
         """Config init help should present Matrix server and model provider as separate choices."""
@@ -1012,7 +1458,7 @@ class TestConfigInit:
 
         config = yaml.safe_load(result.output)
         assert config["models"]["default"]["provider"] == "openai"
-        assert "Choose provider preset" not in normalize_console_output(result.output)
+        assert "Which model provider should your agents use?" not in normalize_console_output(result.output)
         assert not target.exists()
 
     def test_init_print_ignores_existing_config_without_prompting(self, tmp_path: Path) -> None:
@@ -1318,13 +1764,16 @@ class TestConfigInit:
         assert env_path.read_text(encoding="utf-8") == "OPENAI_API_KEY=sk-existing\nMINDROOM_API_KEY=\n"
         assert "Generated MINDROOM_API_KEY" not in normalize_console_output(result.output)
 
+    @pytest.mark.parametrize(("exported", "generated"), [("exported-key", False), ("", True)], ids=["key", "blank"])
     def test_init_keeping_existing_env_leaves_exported_dashboard_key_alone(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
+        exported: str,
+        generated: bool,
     ) -> None:
-        """An exported MINDROOM_API_KEY wins over `.env`, so setup writes no second key that a restart would ignore."""
-        monkeypatch.setenv("MINDROOM_API_KEY", "exported-key")
+        """An exported key wins over `.env`, so setup writes no second key; an exported blank does not, so it does."""
+        monkeypatch.setenv("MINDROOM_API_KEY", exported)
         target = tmp_path / "config.yaml"
         env_path = tmp_path / ".env"
         env_path.write_text("OPENAI_API_KEY=sk-existing\n", encoding="utf-8")
@@ -1335,8 +1784,8 @@ class TestConfigInit:
         )
 
         assert result.exit_code == 0, result.output
-        assert env_path.read_text(encoding="utf-8") == "OPENAI_API_KEY=sk-existing\n"
-        assert "Generated MINDROOM_API_KEY" not in normalize_console_output(result.output)
+        assert ("MINDROOM_API_KEY=" in env_path.read_text(encoding="utf-8")) is generated
+        assert ("Generated MINDROOM_API_KEY" in normalize_console_output(result.output)) is generated
 
     @pytest.mark.parametrize(
         ("env_text", "process_env", "has_credential", "generated"),
@@ -1344,10 +1793,16 @@ class TestConfigInit:
             ("OPENAI_API_KEY=sk-existing\n", {"MINDROOM_WORKER_BACKEND": "docker"}, False, True),
             (None, {"MINDROOM_WORKER_BACKEND": "docker"}, False, True),
             ("MINDROOM_API_KEY=\n", {"MINDROOM_WORKER_BACKEND": "docker"}, False, False),
+            (
+                "OPENAI_API_KEY=sk-existing\n",
+                {"MINDROOM_WORKER_BACKEND": "docker", "MINDROOM_API_KEY": ""},
+                False,
+                True,
+            ),
             ("OPENAI_API_KEY=sk-existing\n", {}, False, False),
             ("OPENAI_API_KEY=sk-existing\n", {"MINDROOM_WORKER_BACKEND": "docker"}, True, False),
         ],
-        ids=["docker", "docker-without-env-file", "explicit-open", "local-tools", "platform-auth"],
+        ids=["docker", "docker-without-env-file", "explicit-open", "exported-blank", "local-tools", "platform-auth"],
     )
     def test_run_protects_the_dashboard_api_from_dedicated_workers(
         self,
@@ -1458,7 +1913,10 @@ class TestConfigInit:
         env_content = (tmp_path / ".env").read_text()
         assert "AZURE_OPENAI_API_KEY=your-azure-openai-key-here" in env_content
         assert "AZURE_OPENAI_ENDPOINT=https://your-resource.openai.azure.com" in env_content
-        assert "# AZURE_OPENAI_API_VERSION=2024-10-21" in env_content
+        assert (
+            "# Optional: override the default Azure OpenAI API version.\n# AZURE_OPENAI_API_VERSION=2024-10-21"
+            in env_content
+        )
         assert "\nAZURE_OPENAI_API_VERSION=" not in env_content
         assert "\nOPENAI_API_KEY=" not in env_content
         assert "\nANTHROPIC_API_KEY=" not in env_content
@@ -1513,10 +1971,47 @@ class TestConfigInit:
             lambda provider: "OPENAI_API_KEY" if provider == "openrouter" else None,
         )
 
-        env_content = config_cli._provider_env_template("openrouter")
+        env_content = config_cli._provider_env_template("openrouter", None)
 
         assert "\nOPENAI_API_KEY=your-openai-key-here" in f"\n{env_content}"
         assert "\n# OPENROUTER_API_KEY=your-openrouter-key-here" in f"\n{env_content}"
+
+    def test_config_init_claude_code_preset_runs_on_the_claude_subscription(self, tmp_path: Path) -> None:
+        """Config init --provider claude_code writes Claude Code models and no API key."""
+        target = tmp_path / "config.yaml"
+        result = runner.invoke(app, ["config", "init", "--path", str(target), "--provider", "claude_code"])
+        assert result.exit_code == 0
+
+        config = yaml.safe_load(target.read_text())
+        assert config["models"] == {
+            "default": {
+                "provider": "claude_code",
+                "id": "claude-sonnet-5-5",
+                "display_name": "Claude Sonnet 5.5",
+                "context_window": 200_000,
+            },
+            "opus": {
+                "provider": "claude_code",
+                "id": "claude-opus-5-5",
+                "display_name": "Claude Opus 5.5",
+                "context_window": 200_000,
+            },
+            "haiku": {
+                "provider": "claude_code",
+                "id": "claude-haiku-5-5",
+                "display_name": "Claude Haiku 5.5",
+                "context_window": 200_000,
+            },
+        }
+        loaded_config = load_config_yaml(target)
+        assert loaded_config.router.model == "haiku"
+        assert loaded_config.defaults.thread_summary_model == "haiku"
+        assert loaded_config.agents["mind"].model == "default"
+
+        env_content = (tmp_path / ".env").read_text()
+        assert "Run `claude auth login` as the user that runs MindRoom" in env_content
+        assert "\nANTHROPIC_API_KEY=" not in env_content
+        assert "claude auth login" in normalize_console_output(result.output)
 
     def test_init_codex_preset_uses_codex_models(self, tmp_path: Path) -> None:
         """Config init --provider codex uses Codex ChatGPT-login defaults."""
@@ -1528,14 +2023,14 @@ class TestConfigInit:
         assert config["models"] == {
             "default": {
                 "provider": "codex",
-                "id": "gpt-6.1-sol",
+                "id": "gpt-6.2-sol",
                 "display_name": "Sol",
                 "context_window": 258_000,
                 "extra_kwargs": {"reasoning_effort": "medium"},
             },
             "astra": {
                 "provider": "codex",
-                "id": "gpt-6-astra",
+                "id": "gpt-6.2-astra",
                 "display_name": "Astra",
                 "context_window": 258_000,
                 "extra_kwargs": {"reasoning_effort": "medium"},
@@ -1655,7 +2150,6 @@ agents:
     role: Personal assistant with persistent file-based identity and memory
     model: default
     include_default_tools: false
-    learning: false
     memory_backend: file
     rooms:
       - personal
@@ -1768,14 +2262,18 @@ class TestConfigMigrate:
         assert authorization.read_text(encoding="utf-8") == authorization_text
         assert not cfg.with_name(f"{cfg.name}.pre-membership-access").exists()
 
-    def test_migrate_missing_config_exits_with_error(self, tmp_path: Path) -> None:
-        """Config migrate should fail cleanly when no config exists."""
-        missing = tmp_path / "config.yaml"
+    def test_migrate_prints_the_config_path_whole_on_one_line(self, narrow_markup_dir: Path) -> None:
+        """A missing config fails, and the missing-config and updated-config lines print a markup-like, long path whole."""
+        cfg = narrow_markup_dir / "config.yaml"
+        migrate = ["config", "migrate", "--path", str(cfg)]
 
-        result = runner.invoke(app, ["config", "migrate", "--path", str(missing)])
+        missing = runner.invoke(app, migrate)
+        cfg.write_text("authorization:\n  global_users:\n    - '@owner:example.com'\n", encoding="utf-8")
+        migrated = runner.invoke(app, migrate).output.splitlines()
 
-        assert result.exit_code == 1
-        assert "No config file found" in normalize_console_output(result.output)
+        assert missing.exit_code == 1
+        assert f"No config file found at: {cfg}" in missing.output.splitlines()
+        assert f"Config updated: {cfg}" in migrated
 
 
 # ---------------------------------------------------------------------------
@@ -1793,6 +2291,29 @@ class TestConfigShow:
         result = runner.invoke(app, ["config", "show", "--path", str(cfg), "--raw"])
         assert result.exit_code == 0
         assert "agents:" in result.output
+
+    @pytest.mark.parametrize("found_by", ["path", "environment"])
+    def test_show_and_path_never_read_the_env_file_beside_the_config(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        found_by: str,
+    ) -> None:
+        """An unreadable `.env` must not block inspecting the config it sits beside, however it was found."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text("agents: {}\n")
+        (tmp_path / ".env").write_bytes(b"\xff\xfe broken\n")
+        if found_by == "environment":
+            monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(cfg))
+        path_args = ["--path", str(cfg)] if found_by == "path" else []
+
+        shown = runner.invoke(app, ["config", "show", *path_args, "--raw"])
+        resolved = runner.invoke(app, ["config", "path", *path_args], terminal_width=200)
+
+        assert shown.exit_code == 0, shown.output
+        assert shown.output == "agents: {}\n"
+        assert resolved.exit_code == 0, resolved.output
+        assert f"Resolved config path: {cfg.resolve()} (exists)" in normalize_console_output(resolved.output)
 
     def test_show_missing_config(self, tmp_path: Path) -> None:
         """Config show exits 1 when config is missing."""
@@ -1886,6 +2407,37 @@ class TestConfigValidate:
         result = runner.invoke(app, ["config", "validate", "--path", str(cfg)])
         assert result.exit_code == 0
         assert "valid" in result.output.lower()
+
+    def test_validate_prints_room_names_as_written(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """The summary prints configured room names verbatim on one line, even ones that look like Rich markup."""
+        monkeypatch.setattr(config_cli.console, "_width", 80)
+        long_room = "a-room-name-long-enough-to-push-the-summary-line-past-eighty-columns"
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "models:\n  default:\n    provider: ollama\n    id: gemma4\n"
+            "agents:\n  assistant:\n    display_name: Assistant\n    model: default\n"
+            f'    rooms: ["[/fast]", "[bold]lobby", ":fire:", "{long_room}"]\n'
+            "router:\n  model: default\n",
+        )
+
+        result = runner.invoke(app, ["config", "validate", "--path", str(cfg)])
+
+        assert result.exit_code == 0, result.output
+        assert f"  Rooms:  4 (:fire:, [/fast], [bold]lobby, {long_room})" in result.output.splitlines()
+
+    def test_validate_prints_a_rejected_key_that_looks_like_markup_as_written(self, tmp_path: Path) -> None:
+        """A validation error quotes the config key it rejects verbatim, even one that looks like Rich markup."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            "models:\n  default:\n    provider: ollama\n    id: gemma4\n"
+            '  "[/fast]":\n    provider: ollama\n    id: gemma4\n'
+            "router:\n  model: default\n",
+        )
+
+        result = runner.invoke(app, ["config", "validate", "--path", str(cfg)])
+
+        assert result.exit_code == 1, result.output
+        assert "rename models.[/fast] and update every reference" in normalize_console_output(result.output)
 
     def test_validate_fails_on_an_automation_no_plugin_provides(self, tmp_path: Path) -> None:
         """A plugin automation name that no loaded plugin registers fails validation with its location."""
@@ -2035,7 +2587,7 @@ class TestConfigValidate:
         result = _invoke_with_runtime(["config", "validate", "--path", str(cfg)], cfg, storage_path=storage)
         output = normalize_console_output(result.output)
 
-        assert "azure: Set AZURE_OPENAI_ENDPOINT" in output
+        assert "azure: Set AZURE_OPENAI_ENDPOINT (models: azure)" in output
         assert "Set AZURE_OPENAI_API_KEY" not in output
         assert "Set OPENAI_API_KEY" not in output
 
@@ -2062,6 +2614,232 @@ class TestConfigValidate:
         assert "Missing environment variables" in result.output
         assert "ANTHROPIC_VERTEX_PROJECT_ID" in result.output
         assert "CLOUD_ML_REGION" in result.output
+
+    @pytest.mark.parametrize(
+        ("models", "missing"),
+        [
+            # Any provider spelling config load accepts gets its route's checks, under the route's name.
+            (
+                {"default": ModelConfig(provider="VertexAI-Claude", id="claude-sonnet-5-5")},
+                [
+                    ("vertexai_claude", "ANTHROPIC_VERTEX_PROJECT_ID", ("default",)),
+                    ("vertexai_claude", "CLOUD_ML_REGION", ("default",)),
+                ],
+            ),
+            (
+                {"default": ModelConfig(provider="Azure", id="deployment")},
+                [("azure", "AZURE_OPENAI_API_KEY", ("default",)), ("azure", "AZURE_OPENAI_ENDPOINT", ("default",))],
+            ),
+            (
+                {
+                    "default": ModelConfig(provider="azure", id="deployment", api_key="sk-own"),
+                    "shared": ModelConfig(provider=" AZURE ", id="deployment"),
+                },
+                [
+                    ("azure", "AZURE_OPENAI_API_KEY", ("shared",)),
+                    ("azure", "AZURE_OPENAI_ENDPOINT", ("default", "shared")),
+                ],
+            ),
+            (
+                {"default": ModelConfig(provider="Bedrock-Claude", id="claude")},
+                [("bedrock_claude", "AWS_REGION", ("default",))],
+            ),
+            (
+                {"default": ModelConfig(provider="Gemini", id="gemini-3.8-flash")},
+                [("google", "GOOGLE_API_KEY", ("default",))],
+            ),
+            # One model's own region or profile does not supply another model's.
+            (
+                {
+                    "default": ModelConfig(provider="bedrock_claude", id="claude"),
+                    "regional": ModelConfig(provider="Bedrock-Claude", id="claude", extra_kwargs={"aws_region": "eu"}),
+                },
+                [("bedrock_claude", "AWS_REGION", ("default",))],
+            ),
+            (
+                {
+                    "default": ModelConfig(provider="bedrock_claude", id="claude"),
+                    "profiled": ModelConfig(provider="BEDROCK_CLAUDE", id="claude", extra_kwargs={"aws_profile": "p"}),
+                },
+                [("bedrock_claude", "AWS_REGION", ("default",))],
+            ),
+            # A model's own endpoint or project and region need no variable, at either level of its settings.
+            (
+                {
+                    "default": ModelConfig(
+                        provider="Azure",
+                        id="deployment",
+                        api_key="sk-own",
+                        extra_kwargs={"azure_endpoint": "https://own.openai.azure.com"},
+                    ),
+                },
+                [],
+            ),
+            (
+                {
+                    "default": ModelConfig(
+                        provider="VertexAI-Claude",
+                        id="claude-sonnet-5-5",
+                        extra_kwargs={"project_id": "own-project", "region": "us-east5"},
+                    ),
+                },
+                [],
+            ),
+            (
+                {
+                    "default": ModelConfig(
+                        provider="AZURE",
+                        id="deployment",
+                        api_key="sk-own",
+                        extra_kwargs={"client_params": {"base_url": "https://gateway.example/openai"}},
+                    ),
+                },
+                [],
+            ),
+            # An Ollama model that names no server reaches the local default one, so it needs no OLLAMA_HOST.
+            ({"default": ModelConfig(provider="Ollama", id="gemma4")}, []),
+            (
+                {
+                    "default": ModelConfig(
+                        provider="Azure",
+                        id="deployment",
+                        api_key="sk-own",
+                        extra_kwargs={"azure_endpoint": "https://own.openai.azure.com"},
+                    ),
+                    "endpointless": ModelConfig(provider="azure", id="deployment", api_key="sk-own"),
+                },
+                [("azure", "AZURE_OPENAI_ENDPOINT", ("endpointless",))],
+            ),
+            (
+                {
+                    "default": ModelConfig(
+                        provider="VertexAI-Claude",
+                        id="claude-sonnet-5-5",
+                        extra_kwargs={"project_id": "own-project", "region": "us-east5"},
+                    ),
+                    "client": ModelConfig(
+                        provider="vertexai-claude",
+                        id="claude-sonnet-5-5",
+                        extra_kwargs={"client_params": {"project_id": "own-project", "region": "us-east5"}},
+                    ),
+                    "regional": ModelConfig(
+                        provider="vertexai_claude",
+                        id="claude-sonnet-5-5",
+                        extra_kwargs={"region": "us-east5"},
+                    ),
+                },
+                [("vertexai_claude", "ANTHROPIC_VERTEX_PROJECT_ID", ("regional",))],
+            ),
+        ],
+        ids=[
+            "vertex-spelling",
+            "azure-spelling",
+            "azure-spellings-with-own-key",
+            "bedrock-spelling",
+            "gemini-spelling",
+            "bedrock-region",
+            "bedrock-profile",
+            "azure-endpoint",
+            "vertex-project-and-region",
+            "azure-base-url",
+            "ollama-default-server",
+            "mixed-azure-endpoints",
+            "mixed-vertex-settings",
+        ],
+    )
+    def test_validate_names_each_model_s_missing_route_variables(
+        self,
+        tmp_path: Path,
+        models: dict[str, ModelConfig],
+        missing: list[tuple[str, str, tuple[str, ...]]],
+    ) -> None:
+        """A route's variable is missing for each model that sets no value of its own, in any provider spelling."""
+        runtime_paths = constants_module.resolve_primary_runtime_paths(
+            config_path=tmp_path / "config.yaml",
+            process_env={},
+        )
+        config = Config(models=models, router=RouterConfig(model="default"))
+
+        assert config_cli.find_missing_env_variables(config, runtime_paths) == missing
+
+    def test_validate_asks_for_the_shared_key_of_a_model_whose_dashboard_key_cannot_be_read(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A model whose credential lookup fails needs its shared key; a model with a key in config still does not."""
+        model_uses_own_credential = provider_credentials.model_uses_own_credential
+
+        def unreadable_store(name: str, model: ModelConfig, runtime_paths: constants_module.RuntimePaths) -> bool:
+            if name == "dashboard":
+                raise OSError
+            return model_uses_own_credential(name, model, runtime_paths)
+
+        monkeypatch.setattr(provider_credentials, "model_uses_own_credential", unreadable_store)
+        runtime_paths = constants_module.resolve_primary_runtime_paths(
+            config_path=tmp_path / "config.yaml",
+            process_env={},
+        )
+        endpoint = {"azure_endpoint": "https://own.openai.azure.com"}
+        config = Config(
+            models={
+                "default": ModelConfig(provider="Azure", id="deployment", api_key="sk-own", extra_kwargs=endpoint),
+                "dashboard": ModelConfig(provider="azure", id="deployment", extra_kwargs=endpoint),
+            },
+            router=RouterConfig(model="default"),
+        )
+
+        assert config_cli.find_missing_env_variables(config, runtime_paths) == [
+            ("azure", "AZURE_OPENAI_API_KEY", ("dashboard",)),
+        ]
+
+    @pytest.mark.parametrize("service", ["openai", "OPENAI_API_KEY"])
+    def test_validate_takes_a_shared_key_saved_in_the_dashboard(self, tmp_path: Path, service: str) -> None:
+        """A shared key the dashboard saved, under the provider's name or its variable's, supplies that route only."""
+        runtime_paths = constants_module.resolve_primary_runtime_paths(
+            config_path=tmp_path / "config.yaml",
+            storage_path=tmp_path / "mindroom_data",
+            process_env={},
+        )
+        get_runtime_shared_credentials_manager(runtime_paths).save_credentials(
+            service,
+            {"api_key": "sk-dashboard", "_source": "ui"},
+        )
+        endpoint = {"azure_endpoint": "https://own.openai.azure.com"}
+        config = Config(
+            models={
+                "default": ModelConfig(provider="openai", id="gpt-6-astra"),
+                "azure": ModelConfig(provider="azure", id="deployment", extra_kwargs=endpoint),
+            },
+            router=RouterConfig(model="default"),
+        )
+
+        assert config_cli.find_missing_env_variables(config, runtime_paths) == [
+            ("azure", "AZURE_OPENAI_API_KEY", ("azure",)),
+        ]
+        assert missing_model_api_key_provider(config, runtime_paths, "default") is None
+
+    @pytest.mark.parametrize("provider", ["gemini", "Gemini"])
+    def test_validate_names_the_google_key_for_a_gemini_model(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        provider: str,
+    ) -> None:
+        """Config validate asks for GOOGLE_API_KEY, under the route's name, for a ``gemini`` model in any letter case."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(
+            f"models:\n  default:\n    provider: {provider}\n    id: gemini-3.8-flash\n"
+            "agents:\n  assistant:\n    display_name: Assistant\n    model: default\n"
+            "router:\n  model: default\n",
+        )
+        monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+        monkeypatch.delenv("GOOGLE_API_KEY_FILE", raising=False)
+
+        result = runner.invoke(app, ["config", "validate", "--path", str(cfg)])
+
+        assert result.exit_code == 0
+        assert "google: Set GOOGLE_API_KEY (models: default)" in normalize_console_output(result.output)
 
     def test_validate_warns_for_missing_bedrock_claude_region(
         self,
@@ -2186,6 +2964,57 @@ class TestConfigValidate:
         assert "Missing environment variables" not in result.output
 
 
+@pytest.mark.parametrize(
+    "command",
+    [["config", "init", "--no-input"], ["config", "migrate"], ["config", "validate"]],
+    ids=["init", "migrate", "validate"],
+)
+def test_a_non_utf8_env_file_names_itself_and_the_fix(
+    narrow_markup_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    command: list[str],
+) -> None:
+    """A `.env` saved in another encoding stops the command with an error naming the file whole, not a traceback."""
+    env_path = narrow_markup_dir / ".env"
+    env_path.write_text("OPENAI_API_KEY=sk-test\n", encoding="utf-16")
+    monkeypatch.setattr(sys, "argv", ["mindroom", *command, "--path", str(narrow_markup_dir / "config.yaml")])
+
+    with pytest.raises(SystemExit) as exited:
+        cli_main()
+
+    assert exited.value.code == 1
+    lines = capsys.readouterr().out.splitlines()
+    assert any(
+        line.startswith(f"Error: {env_path.resolve()} is not UTF-8 text") and "save it as UTF-8" in line
+        for line in lines
+    ), lines
+
+
+def test_a_utf8_bom_env_file_keeps_its_first_variable(tmp_path: Path) -> None:
+    """A `.env` saved as UTF-8 with a byte order mark reads its first variable, and setup never adds a second one."""
+    target = tmp_path / "config.yaml"
+    env_path = tmp_path / ".env"
+    env_path.write_text("MINDROOM_API_KEY=dashboard-existing\nOPENAI_API_KEY=sk-existing\n", encoding="utf-8-sig")
+    original = env_path.read_bytes()
+
+    result = runner.invoke(
+        app,
+        ["config", "init", "--path", str(target), "--matrix-server", "self-hosted", "--no-input"],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert env_path.read_bytes() == original
+    assert "Generated MINDROOM_API_KEY" not in normalize_console_output(result.output)
+    runtime_paths = constants_module.resolve_runtime_paths(
+        config_path=target,
+        process_env={"MINDROOM_API_KEY": "dashboard-existing", "OPENAI_API_KEY": "sk-existing"},
+    )
+    assert runtime_paths.env_file_values["MINDROOM_API_KEY"] == "dashboard-existing"
+    # The service reads `.env`, which already holds both keys this shell exports, so it saves neither.
+    assert _shell_service_keys(runtime_paths) == {}
+
+
 # ---------------------------------------------------------------------------
 # mindroom config path
 # ---------------------------------------------------------------------------
@@ -2221,7 +3050,22 @@ class TestRunFirstRunSetup:
 
     @pytest.fixture(autouse=True)
     def _interactive_terminal(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        monkeypatch.setattr("mindroom.cli.main._terminal_is_interactive", lambda: True)
+        from mindroom.cli.setup_detection import DetectionSnapshot, KeyCheckResult  # noqa: PLC0415
+
+        monkeypatch.setattr("mindroom.cli.main.terminal_is_interactive", lambda: True)
+        # Isolate first-run tests from the developer machine's CLIs, local Ollama, and live API key checks.
+        monkeypatch.setattr(
+            "mindroom.cli.setup_detection.detect_available_providers",
+            lambda _runtime_paths, **_kwargs: DetectionSnapshot(),
+        )
+        monkeypatch.setattr(
+            "mindroom.cli.setup_detection.detect_single_provider",
+            lambda _preset, _runtime_paths, **_kwargs: None,
+        )
+        monkeypatch.setattr(
+            "mindroom.cli.setup_detection.verify_provider_api_key",
+            lambda _preset, _api_key, **_kwargs: KeyCheckResult(status="valid"),
+        )
         # On a platform without a service manager, first-run setup starts MindRoom in the terminal without asking.
         monkeypatch.setattr(
             "mindroom.cli.service._get_service_manager",
@@ -2260,7 +3104,7 @@ class TestRunFirstRunSetup:
 
         with (
             patch("mindroom.cli.connect.pair_local_install", side_effect=fake_pair),
-            patch("mindroom.cli.pairing_probes.serve_pairing_probes", return_value=nullcontext()),
+            patch("mindroom.api.startup_probes.serve_startup_probes", return_value=nullcontext()),
             patch("mindroom.cli.main._run", side_effect=fake_run),
         ):
             result = _invoke_with_runtime(["run", *args], config_path, input=answers, env=env)
@@ -2275,8 +3119,8 @@ class TestRunFirstRunSetup:
         result, paired, started = self._invoke_run(config_path, f"openai\n{typed_key}\n")
 
         assert result.exit_code == 0, result.output
-        assert "No MindRoom config found" in result.output
-        assert "Choose provider preset" in result.output
+        assert "Welcome to MindRoom" in result.output
+        assert "Which model provider should your agents use?" in result.output
         assert "API key" in result.output
         assert typed_key not in result.output
         assert config_path.is_file()
@@ -2314,11 +3158,14 @@ class TestRunFirstRunSetup:
 
     def test_first_run_installs_the_login_service_by_default_instead_of_running_here(
         self,
-        tmp_path: Path,
+        narrow_markup_dir: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """A bare Enter after pairing hands the new setup to a started login service and returns to the shell."""
-        config_path = tmp_path / "config.yaml"
+        """A bare Enter after pairing hands the new setup to a started login service and returns to the shell.
+
+        The hint after it names a markup-like, long `.env` path whole, without raising.
+        """
+        config_path = narrow_markup_dir / "config.yaml"
         manager = self._service_manager(monkeypatch)
 
         result, paired, started = self._invoke_run(config_path, "codex\n\n", args=())
@@ -2328,7 +3175,8 @@ class TestRunFirstRunSetup:
         assert "Run MindRoom in the background and start it at login (systemd user service)? [Y/n]" in output
         assert "Service Installed" in output
         assert "Dashboard: http://localhost:8765" in output
-        assert "mindroom service restart" in output
+        env_path = (narrow_markup_dir / ".env").resolve()
+        assert f"After editing {env_path}, run mindroom service restart." in result.output.splitlines()
         assert len(paired) == 1
         assert started == []
         manager.install_service.assert_called_once_with()
@@ -2415,7 +3263,7 @@ class TestRunFirstRunSetup:
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """An agent sets up, pairs, and installs the login service in one command, with the key from its environment."""
-        monkeypatch.setattr("mindroom.cli.main._terminal_is_interactive", lambda: False)
+        monkeypatch.setattr("mindroom.cli.main.terminal_is_interactive", lambda: False)
         config_path = tmp_path / "config.yaml"
         env_path = tmp_path / ".env"
         manager = self._service_manager(monkeypatch)
@@ -2429,7 +3277,7 @@ class TestRunFirstRunSetup:
 
         assert result.exit_code == 0, result.output
         output = normalize_console_output(result.output)
-        assert "Choose provider preset" not in output
+        assert "Which model provider should your agents use?" not in output
         assert "[Y/n]" not in output
         assert "provider: openai" in config_path.read_text(encoding="utf-8")
         assert "OPENAI_API_KEY=sk-agent\n" in env_path.read_text(encoding="utf-8")
@@ -2446,14 +3294,14 @@ class TestRunFirstRunSetup:
     ) -> None:
         """Without a terminal, `--provider` creates the config with no prompts, and a missing key is skipped."""
         config_path = tmp_path / "config.yaml"
-        monkeypatch.setattr("mindroom.cli.main._terminal_is_interactive", lambda: False)
+        monkeypatch.setattr("mindroom.cli.main.terminal_is_interactive", lambda: False)
         manager = self._service_manager(monkeypatch)
 
         result, paired, started = self._invoke_run(config_path, "", args=("--provider", preset))
 
         assert result.exit_code == 0, result.output
         output = normalize_console_output(result.output)
-        assert "Choose provider preset" not in output
+        assert "Which model provider should your agents use?" not in output
         assert "API key (" not in output
         assert "start it at login" not in output
         assert f"provider: {preset}" in config_path.read_text(encoding="utf-8")
@@ -2665,8 +3513,8 @@ class TestRunFirstRunSetup:
         result, _paired, started = self._invoke_run(config_path, "")
 
         assert result.exit_code == 0, result.output
-        assert "Choose provider preset" not in result.output
-        assert "No MindRoom config found" not in result.output
+        assert "Which model provider should your agents use?" not in result.output
+        assert "Welcome to MindRoom" not in result.output
         assert config_path.read_text(encoding="utf-8") == original
         assert len(started) == 1
 
@@ -2735,7 +3583,7 @@ class TestRunFirstRunSetup:
         assert result.exit_code == 0, result.output
         assert "OpenAI API key" in result.output
         assert "OPENAI_API_KEY=sk-typed\n" in (tmp_path / ".env").read_text(encoding="utf-8")
-        assert started[0].env_value("OPENAI_API_KEY") == "sk-typed"
+        assert get_secret_from_env("OPENAI_API_KEY", started[0]) == "sk-typed"
 
     def test_skipped_key_leaves_template_placeholder_unset(self, tmp_path: Path) -> None:
         """A skipped key leaves a leftover placeholder in `.env`, and it still never counts as a configured key."""
@@ -2749,8 +3597,7 @@ class TestRunFirstRunSetup:
         assert "OpenAI API key" in result.output
         assert "Skipped" in result.output
         assert "OPENAI_API_KEY=your-openai-key-here # replace this\n" in env_path.read_text(encoding="utf-8")
-        # Startup credential sync stores nothing, so the dashboard still offers to connect the provider.
-        sync_env_to_credentials(started[0])
+        # The placeholder supplies no key, so the dashboard still offers to connect the provider.
         config = load_config_yaml(config_path)
         assert missing_model_api_key_provider(config, started[0], "default") == "openai"
 
@@ -2797,14 +3644,6 @@ class TestRunFirstRunSetup:
         assert len(started) == 1
 
 
-def test_terminal_is_interactive_requires_stdin_and_stdout_ttys(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Services and piped runs never prompt, even when only one stream is a terminal."""
-    for stdin_tty, stdout_tty, expected in ((True, True, True), (True, False, False), (False, True, False)):
-        monkeypatch.setattr(sys, "stdin", SimpleNamespace(isatty=lambda value=stdin_tty: value))
-        monkeypatch.setattr(sys, "stdout", SimpleNamespace(isatty=lambda value=stdout_tty: value))
-        assert _terminal_is_interactive() is expected
-
-
 # ---------------------------------------------------------------------------
 # run command error handling
 # ---------------------------------------------------------------------------
@@ -2831,7 +3670,8 @@ class TestRunErrorHandling:
             )
         )
         provider_guidance = (
-            "mindroom config init --provider {openrouter,ollama,openai,azure,bedrock_claude,codex,kimi,claude"
+            "mindroom config init --provider "
+            "{anthropic,azure,bedrock_claude,claude_code,codex,kimi,llama.cpp,ollama,openai,openrouter,vertexai_claude}"
         )
         assert provider_guidance in result.output
         assert "mindroom run --provider" in result.output
@@ -2920,6 +3760,26 @@ class TestRunErrorHandling:
         assert "Invalid configuration" in result.output
         assert "Could not read configuration text" in result.output
 
+    def test_run_explains_a_refused_connection_and_reraises_other_os_errors(self, tmp_path: Path) -> None:
+        """A connection-looking OS error gets the homeserver checklist; any other one is not hidden behind it."""
+        cfg = tmp_path / "config.yaml"
+        _write_minimal_runtime_config(cfg)
+
+        with patch("mindroom.orchestrator.main", AsyncMock(side_effect=OSError("Connection refused"))):
+            refused = _invoke_with_runtime(["run"], cfg, env={"MATRIX_HOMESERVER": "https://matrix.example.test"})
+        with patch("mindroom.orchestrator.main", AsyncMock(side_effect=ConnectionResetError("peer hung up"))):
+            reset = _invoke_with_runtime(["run"], cfg)
+        with patch("mindroom.orchestrator.main", AsyncMock(side_effect=OSError("No space left on device"))):
+            other = _invoke_with_runtime(["run"], cfg)
+
+        for explained in (refused, reset):
+            assert explained.exit_code == 1
+            assert isinstance(explained.exception, SystemExit)
+            assert "Could not connect to the Matrix homeserver" in explained.output
+        assert "MATRIX_HOMESERVER is set correctly (current: https://matrix.example.test)" in refused.output
+        assert isinstance(other.exception, OSError)
+        assert "Could not connect to the Matrix homeserver" not in other.output
+
     def test_run_permanent_startup_error_prints_message_without_traceback(self, tmp_path: Path) -> None:
         """Permanent startup failures should not dump an implementation traceback."""
         cfg = tmp_path / "config.yaml"
@@ -2938,19 +3798,27 @@ class TestRunErrorHandling:
         assert "GOOGLE_APPLICATION_CREDENTIALS is invalid" in result.output
         assert "Traceback" not in result.output
 
+    def test_run_refuses_dashboard_auth_settings_it_cannot_serve(self, tmp_path: Path) -> None:
+        """Dashboard auth settings MindRoom cannot serve stop startup with their message, before anything runs."""
+        cfg = tmp_path / "config.yaml"
+        _write_minimal_runtime_config(cfg)
+        mock_main = AsyncMock()
+
+        with patch("mindroom.orchestrator.main", mock_main):
+            result = _invoke_with_runtime(["run"], cfg, env={"MINDROOM_DASHBOARD_URL": "https://admin.example.org"})
+
+        assert result.exit_code == 1
+        assert "Error: MINDROOM_DASHBOARD_URL requires trusted upstream auth" in result.output
+        assert isinstance(result.exception, SystemExit)
+        mock_main.assert_not_called()
+
     def test_avatars_generate_reports_avatar_generation_failure(
         self,
         tmp_path: Path,
     ) -> None:
         """Avatar generation should exit cleanly when generation fails."""
         cfg = tmp_path / "config.yaml"
-        cfg.write_text(
-            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-5\n"
-            "agents:\n  a:\n    display_name: A\n    model: default\n"
-            "router:\n  model: default\n"
-            "matrix_space:\n  enabled: false\n"
-            "authorization:\n  global_users: []\n",
-        )
+        _write_minimal_runtime_config(cfg)
 
         with patch(
             "mindroom.avatar_generation.run_avatar_generation",
@@ -2974,7 +3842,7 @@ class TestVersionAndHelp:
         """Version command prints the version string."""
         result = runner.invoke(app, ["version"])
         assert result.exit_code == 0
-        assert "Mindroom version" in result.output
+        assert "MindRoom version" in result.output
 
     def test_help_mentions_config(self) -> None:
         """Top-level help includes key subcommands."""
@@ -3069,6 +3937,21 @@ class TestVersionAndHelp:
         assert "Failed: lobby $thread:localhost: history fetch failed" in output
         assert "None" not in output
 
+    def test_threads_export_prints_an_export_failure_without_matrix_hints(self, tmp_path: Path) -> None:
+        """Export talks to the MindRoom API, so even a connection-looking failure is shown as it is."""
+        config_path = tmp_path / "config.yaml"
+
+        with patch(
+            "mindroom.cli.thread_export.request_thread_export",
+            new=AsyncMock(side_effect=OSError("Connection refused")),
+        ):
+            result = _invoke_with_runtime(["threads", "export"], config_path)
+
+        output = normalize_console_output(result.output)
+        assert result.exit_code == 1
+        assert "Error: Connection refused" in output
+        assert "Matrix" not in output
+
     def test_threads_export_forwards_no_invited_rooms_flag(self, tmp_path: Path) -> None:
         """The --no-invited-rooms flag should reach the exporter."""
         config_path = tmp_path / "config.yaml"
@@ -3140,16 +4023,6 @@ class TestVersionAndHelp:
 class TestRunApiFlags:
     """Tests for --api/--no-api, --api-port, --api-host flags."""
 
-    @staticmethod
-    def _write_minimal_config(path: Path) -> None:
-        path.write_text(
-            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-5\n"
-            "agents:\n  a:\n    display_name: A\n    model: default\n"
-            "router:\n  model: default\n"
-            "matrix_space:\n  enabled: false\n",
-            encoding="utf-8",
-        )
-
     def test_run_help_shows_api_flags(self) -> None:
         """Run --help lists the new API server flags."""
         result = runner.invoke(app, ["run", "--help"])
@@ -3165,12 +4038,7 @@ class TestRunApiFlags:
     def test_run_passes_api_defaults(self, tmp_path: Path) -> None:
         """Run passes api=True, port=8765, host=0.0.0.0 by default."""
         cfg = tmp_path / "config.yaml"
-        cfg.write_text(
-            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-5\n"
-            "agents:\n  a:\n    display_name: A\n    model: default\n"
-            "router:\n  model: default\n"
-            "matrix_space:\n  enabled: false\n",
-        )
+        _write_minimal_runtime_config(cfg)
         mock_main = AsyncMock()
         with patch("mindroom.orchestrator.main", mock_main):
             result = _invoke_with_runtime(["run"], cfg)
@@ -3191,10 +4059,7 @@ class TestRunApiFlags:
             ((), {"SUPABASE_URL": "https://supabase.example.test", "SUPABASE_ANON_KEY": "anon-key"}, None),
             (
                 (),
-                {
-                    "MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "true",
-                    "MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER": "X-User",
-                },
+                {"MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "true"},
                 None,
             ),
             (("--api-host", "127.0.0.1"), {}, None),
@@ -3215,7 +4080,7 @@ class TestRunApiFlags:
         for name in ("MINDROOM_API_KEY", "SUPABASE_URL", "SUPABASE_ANON_KEY", "MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED"):
             monkeypatch.delenv(name, raising=False)
         cfg = tmp_path / "config.yaml"
-        self._write_minimal_config(cfg)
+        _write_minimal_runtime_config(cfg)
 
         with patch("mindroom.orchestrator.main", AsyncMock()):
             result = _invoke_with_runtime(["run", *args], cfg, env=env)
@@ -3230,33 +4095,38 @@ class TestRunApiFlags:
     def test_run_no_api_flag(self, tmp_path: Path) -> None:
         """Run --no-api passes api=False to bot main."""
         cfg = tmp_path / "config.yaml"
-        cfg.write_text(
-            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-5\n"
-            "agents:\n  a:\n    display_name: A\n    model: default\n"
-            "router:\n  model: default\n"
-            "matrix_space:\n  enabled: false\n",
-        )
+        _write_minimal_runtime_config(cfg)
         mock_main = AsyncMock()
         with patch("mindroom.orchestrator.main", mock_main):
             result = _invoke_with_runtime(["run", "--no-api"], cfg)
         assert result.exit_code == 0
         assert mock_main.call_args.kwargs["api"] is False
 
-    def test_run_custom_port_and_host(self, tmp_path: Path) -> None:
-        """Run --api-port and --api-host are forwarded to bot main."""
+    @pytest.mark.parametrize(("operator_port", "port"), [(None, "9000"), ("8800", "8800")])
+    def test_run_custom_port_and_host(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        operator_port: str | None,
+        port: str,
+    ) -> None:
+        """Run --api-port and --api-host reach bot main, and the port is MINDROOM_PORT unless the operator set one.
+
+        The default OpenID audience, OAuth callbacks, and the server Chat finds then name the port the API serves on.
+        """
         cfg = tmp_path / "config.yaml"
-        cfg.write_text(
-            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-5\n"
-            "agents:\n  a:\n    display_name: A\n    model: default\n"
-            "router:\n  model: default\n"
-            "matrix_space:\n  enabled: false\n",
-        )
+        _write_minimal_runtime_config(cfg)
+        if operator_port is None:
+            monkeypatch.delenv("MINDROOM_PORT", raising=False)
+        else:
+            monkeypatch.setenv("MINDROOM_PORT", operator_port)
         mock_main = AsyncMock()
         with patch("mindroom.orchestrator.main", mock_main):
             result = _invoke_with_runtime(["run", "--api-port", "9000", "--api-host", "127.0.0.1"], cfg)
         assert result.exit_code == 0
         assert mock_main.call_args.kwargs["api_port"] == 9000
         assert mock_main.call_args.kwargs["api_host"] == "127.0.0.1"
+        assert mock_main.call_args.kwargs["runtime_paths"].env_value("MINDROOM_PORT") == port
 
     def test_run_config_path_updates_runtime_paths(
         self,
@@ -3270,7 +4140,7 @@ class TestRunApiFlags:
         config_dir = tmp_path / "selected"
         cfg = config_dir / "config.yaml"
         config_dir.mkdir()
-        self._write_minimal_config(cfg)
+        _write_minimal_runtime_config(cfg)
         monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(ambient_config))
         monkeypatch.delenv("MINDROOM_STORAGE_PATH", raising=False)
 
@@ -3298,7 +4168,7 @@ class TestRunApiFlags:
         config_dir = tmp_path / "selected"
         cfg = config_dir / "config.yaml"
         config_dir.mkdir()
-        self._write_minimal_config(cfg)
+        _write_minimal_runtime_config(cfg)
 
         async def _fake_main(**kwargs: object) -> None:
             runtime_paths = kwargs["runtime_paths"]
@@ -3319,12 +4189,7 @@ class TestRunApiFlags:
     ) -> None:
         """Run should thread `--storage-path` through the explicit runtime context."""
         cfg = tmp_path / "config.yaml"
-        cfg.write_text(
-            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-5\n"
-            "agents:\n  a:\n    display_name: A\n    model: default\n"
-            "router:\n  model: default\n"
-            "matrix_space:\n  enabled: false\n",
-        )
+        _write_minimal_runtime_config(cfg)
         runtime_storage = tmp_path / "runtime-storage"
         monkeypatch.delenv("MINDROOM_STORAGE_PATH", raising=False)
 
@@ -3335,7 +4200,7 @@ class TestRunApiFlags:
             assert runtime_paths.storage_root == runtime_storage.resolve()
             assert constants_module.tracking_dir(runtime_paths) == runtime_storage.resolve() / "tracking"
             assert constants_module.matrix_state_file(runtime_paths) == runtime_storage.resolve() / "matrix_state.yaml"
-            MatrixState().save(runtime_paths=runtime_paths)
+            save_matrix_state(MatrixState(), runtime_paths)
             assert (runtime_storage.resolve() / "matrix_state.yaml").exists()
 
         with patch("mindroom.orchestrator.main", AsyncMock(side_effect=_fake_main)) as mock_main:
@@ -3349,7 +4214,7 @@ class TestRunApiFlags:
         config_dir = tmp_path / "profile"
         config_dir.mkdir()
         cfg = config_dir / "config.yaml"
-        self._write_minimal_config(cfg)
+        _write_minimal_runtime_config(cfg)
         storage_root = tmp_path / "explicit-storage"
 
         async def _fake_main(**kwargs: object) -> None:
@@ -3379,12 +4244,7 @@ class TestAvatarsCommands:
     def test_avatars_generate_runs_generation(self, tmp_path: Path) -> None:
         """Avatar generation command should invoke the generation workflow."""
         cfg = tmp_path / "config.yaml"
-        cfg.write_text(
-            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-5\n"
-            "agents:\n  a:\n    display_name: A\n    model: default\n"
-            "router:\n  model: default\n"
-            "matrix_space:\n  enabled: false\n",
-        )
+        _write_minimal_runtime_config(cfg)
         run_avatar_generation = AsyncMock()
         with patch("mindroom.avatar_generation.run_avatar_generation", run_avatar_generation):
             result = _invoke_with_runtime(["avatars", "generate"], cfg)
@@ -3395,12 +4255,7 @@ class TestAvatarsCommands:
     def test_avatars_generate_force_passes_force_true(self, tmp_path: Path) -> None:
         """Avatar generation command should expose an explicit force flag."""
         cfg = tmp_path / "config.yaml"
-        cfg.write_text(
-            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-5\n"
-            "agents:\n  a:\n    display_name: A\n    model: default\n"
-            "router:\n  model: default\n"
-            "matrix_space:\n  enabled: false\n",
-        )
+        _write_minimal_runtime_config(cfg)
         run_avatar_generation = AsyncMock()
 
         with patch("mindroom.avatar_generation.run_avatar_generation", run_avatar_generation):
@@ -3413,12 +4268,7 @@ class TestAvatarsCommands:
     def test_avatars_sync_runs_matrix_sync(self, tmp_path: Path) -> None:
         """Avatar sync command should invoke the Matrix sync workflow."""
         cfg = tmp_path / "config.yaml"
-        cfg.write_text(
-            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-5\n"
-            "agents:\n  a:\n    display_name: A\n    model: default\n"
-            "router:\n  model: default\n"
-            "matrix_space:\n  enabled: false\n",
-        )
+        _write_minimal_runtime_config(cfg)
         set_room_avatars_in_matrix = AsyncMock()
 
         with patch("mindroom.avatar_generation.set_room_avatars_in_matrix", set_room_avatars_in_matrix):
@@ -3431,12 +4281,7 @@ class TestAvatarsCommands:
     def test_avatars_sync_force_passes_force_true(self, tmp_path: Path) -> None:
         """Avatar sync command should expose an explicit force flag."""
         cfg = tmp_path / "config.yaml"
-        cfg.write_text(
-            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-5\n"
-            "agents:\n  a:\n    display_name: A\n    model: default\n"
-            "router:\n  model: default\n"
-            "matrix_space:\n  enabled: false\n",
-        )
+        _write_minimal_runtime_config(cfg)
         set_room_avatars_in_matrix = AsyncMock()
 
         with patch("mindroom.avatar_generation.set_room_avatars_in_matrix", set_room_avatars_in_matrix):
@@ -3449,12 +4294,7 @@ class TestAvatarsCommands:
     def test_avatars_sync_reports_sync_failure(self, tmp_path: Path) -> None:
         """Unexpected avatar sync failures should propagate for debugging."""
         cfg = tmp_path / "config.yaml"
-        cfg.write_text(
-            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-5\n"
-            "agents:\n  a:\n    display_name: A\n    model: default\n"
-            "router:\n  model: default\n"
-            "matrix_space:\n  enabled: false\n",
-        )
+        _write_minimal_runtime_config(cfg)
         with patch(
             "mindroom.avatar_generation.set_room_avatars_in_matrix",
             AsyncMock(side_effect=RuntimeError("boom")),
@@ -3471,12 +4311,7 @@ class TestAvatarsCommands:
     ) -> None:
         """Avatar sync should fail when the router account has not been initialized yet."""
         cfg = tmp_path / "config.yaml"
-        cfg.write_text(
-            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-5\n"
-            "agents:\n  a:\n    display_name: A\n    model: default\n"
-            "router:\n  model: default\n"
-            "matrix_space:\n  enabled: false\n",
-        )
+        _write_minimal_runtime_config(cfg)
         with patch(
             "mindroom.avatar_generation.set_room_avatars_in_matrix",
             AsyncMock(side_effect=AvatarSyncError("No router account found in Matrix state.")),
@@ -3533,6 +4368,47 @@ def _record_doctor_requests(monkeypatch: pytest.MonkeyPatch) -> list[tuple[str, 
     return requests
 
 
+def _vertex_ok(_request: httpx2.Request) -> httpx.Response:
+    message = {
+        "id": "msg_1",
+        "type": "message",
+        "role": "assistant",
+        "model": "claude-sonnet-5",
+        "content": [{"type": "text", "text": "OK"}],
+        "stop_reason": "max_tokens",
+        "stop_sequence": None,
+        "usage": {"input_tokens": 5, "output_tokens": 1},
+    }
+    return streamed_reply(message)
+
+
+def _vertex_wire(
+    monkeypatch: pytest.MonkeyPatch,
+    respond: Callable[[httpx2.Request], httpx.Response],
+) -> list[httpx2.Request]:
+    """Answer the model requests doctor sends through the shared model HTTP client, recording each one."""
+    requests: list[httpx2.Request] = []
+
+    def record(request: httpx2.Request) -> httpx.Response:
+        requests.append(request)
+        return respond(request)
+
+    client = httpx2.AsyncClient(transport=httpx2_transport(record))
+    monkeypatch.setattr(MODEL_HTTP_CLIENT, "send", client.send)
+    return requests
+
+
+def _ambient_google_credentials(monkeypatch: pytest.MonkeyPatch, failure: Exception | None = None) -> None:
+    """Stand in for the host's Application Default Credentials, so no check reaches Google."""
+
+    def default(*_args: object, **_kwargs: object) -> tuple[GoogleCredentials, str]:
+        if failure is not None:
+            raise failure
+        return GoogleCredentials(token="ambient-token"), "ambient-project"  # noqa: S106 - synthetic credential
+
+    monkeypatch.setattr("google.auth.default", default)
+
+
 def _patch_homeserver_ok(monkeypatch: pytest.MonkeyPatch) -> None:
     """Patch httpx.get to simulate a reachable homeserver."""
     resp = httpx.Response(200, json={"versions": ["v1.1"]})
@@ -3561,9 +4437,20 @@ class TestDoctor:
     """Tests for `mindroom doctor`."""
 
     @pytest.fixture(autouse=True)
+    def _no_exported_anthropic_route(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Clear an Anthropic endpoint, token, or key exported in the shell; an endpoint makes doctor skip the key check."""
+        for name in ("ANTHROPIC_BASE_URL", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_API_KEY"):
+            monkeypatch.delenv(name, raising=False)
+
+    @pytest.fixture(autouse=True)
     def _healthy_embedder_probe(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Keep the real-embedding probe off the network; specific tests override it."""
         monkeypatch.setattr("mindroom.cli.doctor.probe_embedder", lambda *_args: None)
+
+    @pytest.fixture(autouse=True)
+    def _reachable_ollama(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Answer every Ollama server check, such as the default memory LLM's, as a running server would."""
+        monkeypatch.setattr("mindroom.cli.doctor._ollama_reachable", lambda _options: (True, ""))
 
     def test_all_checks_pass(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Doctor reports all green when everything is fine."""
@@ -3583,14 +4470,14 @@ class TestDoctor:
         assert "1 warning" in result.output  # memory LLM not configured
         assert "Providers:" in result.output
         assert "anthropic (1 model)" in result.output
-        assert "API key valid" in result.output
+        assert "anthropic: ANTHROPIC_API_KEY valid" in result.output
 
     def test_warns_when_encryption_store_missing(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Doctor warns when a persisted device has no encryption store on disk."""
+        """Doctor warns when a bot's persisted device has no encryption store; the internal user never has one."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(_VALID_CONFIG)
         storage = tmp_path / "storage"
@@ -3599,21 +4486,32 @@ class TestDoctor:
         _patch_homeserver_ok(monkeypatch)
 
         runtime_paths = constants_module.resolve_runtime_paths(config_path=cfg, storage_path=storage)
-        MatrixState(
-            accounts={
-                "agent_general": MatrixAccount(
-                    username="mindroom_general",
-                    password="pw",  # noqa: S106
-                    domain="localhost",
-                    device_id="LOSTDEVICE",
-                ),
-            },
-        ).save(runtime_paths=runtime_paths)
+        save_matrix_state(
+            MatrixState(
+                accounts={
+                    "agent_general": MatrixAccount(
+                        username="mindroom_general",
+                        password="pw",  # noqa: S106
+                        domain="localhost",
+                        device_id="LOSTDEVICE",
+                    ),
+                    "agent_user": MatrixAccount(
+                        username="mindroom_user",
+                        password="pw",  # noqa: S106
+                        domain="localhost",
+                        device_id="HTTPONLY",
+                    ),
+                },
+            ),
+            runtime_paths,
+        )
 
         result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
 
         assert result.exit_code == 0
         assert "Encryption store missing for agent_general" in result.output
+        assert "does not start until" in result.output
+        assert "agent_user" not in result.output
         assert "1 warning" not in result.output  # memory warning plus this one
         assert "2 warnings" in result.output
 
@@ -3652,8 +4550,8 @@ class TestDoctor:
         result = runner.invoke(app, ["doctor"], env={"MINDROOM_CONFIG_PATH": str(cfg)})
 
         assert result.exit_code == 0
-        assert "ANTHROPIC_API_KEY not set" not in result.output
-        assert "OPENAI_API_KEY not set" not in result.output
+        assert "Set ANTHROPIC_API_KEY" not in result.output
+        assert "OPENAI_API_KEY" not in result.output
 
     def test_uses_status_for_steps(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Doctor wraps checks in status contexts for interactive progress feedback."""
@@ -3730,8 +4628,29 @@ class TestDoctor:
 
         result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
         assert result.exit_code == 0
-        assert "ANTHROPIC_API_KEY not set" in result.output
+        assert "anthropic: Set ANTHROPIC_API_KEY (models: default)" in result.output
         assert "2 warnings" in result.output
+
+    def test_an_automation_no_plugin_provides_fails_the_config_check(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Doctor rejects a config that `config validate` rejects, and still checks the providers it names."""
+        cfg = tmp_path / "config.yaml"
+        cfg.write_text(_VALID_CONFIG + "defaults:\n  automations:\n    - {name: missing_check, cron: '0 * * * *'}\n")
+        storage = tmp_path / "storage"
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+        _patch_homeserver_ok(monkeypatch)
+
+        result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
+
+        output = normalize_console_output(result.output)
+        assert result.exit_code == 1, output
+        assert "✗ Config invalid: defaults.automations: 'missing_check' is not provided by any loaded plugin" in output
+        assert "anthropic: ANTHROPIC_API_KEY valid" in output
+        assert "1 failed" in output
 
     @pytest.mark.parametrize("key_source", ["config", "dashboard"])
     def test_model_with_own_api_key_does_not_need_provider_key(
@@ -3755,7 +4674,7 @@ class TestDoctor:
 
         result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
         assert result.exit_code == 0
-        assert "ANTHROPIC_API_KEY not set" not in result.output
+        assert "ANTHROPIC_API_KEY" not in result.output
 
     @pytest.mark.parametrize("key_source", ["config", "dashboard", "unreadable-store"])
     def test_shared_key_is_never_sent_to_endpoint_of_model_with_own_key(
@@ -3784,7 +4703,7 @@ class TestDoctor:
                 raise OSError(msg)
 
             monkeypatch.setattr(
-                "mindroom.providers.model_loading.get_runtime_shared_credentials_manager",
+                "mindroom.providers.credentials.get_runtime_shared_credentials_manager",
                 _unreadable_store,
             )
         monkeypatch.setenv("OPENAI_API_KEY", "sk-shared")
@@ -3818,6 +4737,155 @@ class TestDoctor:
         assert result.exit_code == 1
         assert "Storage not writable" in result.output
 
+    def test_doctor_prints_config_and_storage_paths_whole_on_one_line(
+        self,
+        narrow_markup_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """The config folder, config file, storage, and a credential-store error print as written, each on one line."""
+        cfg = narrow_markup_dir / "config.yaml"
+        storage = narrow_markup_dir / "storage"
+        text = str(narrow_markup_dir)
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+        _patch_homeserver_ok(monkeypatch)
+
+        missing = _invoke_with_runtime(["doctor"], cfg, storage_path=storage).output.splitlines()
+        cfg.mkdir()
+        directory = _invoke_with_runtime(["doctor"], cfg, storage_path=storage).output.splitlines()
+        cfg.rmdir()
+        cfg.write_text(_VALID_CONFIG)
+        (narrow_markup_dir / "a-file").write_text("")
+        unwritable_storage = narrow_markup_dir / "a-file" / "storage"
+        with patch("mindroom.cli.doctor.get_runtime_credentials_manager", side_effect=OSError(f"Cannot open {text}")):
+            unwritable = _invoke_with_runtime(["doctor"], cfg, storage_path=unwritable_storage).output.splitlines()
+
+        assert f"Config directory: {narrow_markup_dir}" in missing
+        assert f"✗ Config file not found: {cfg}" in missing
+        assert f"✓ Storage writable: {storage}/" in missing
+        assert f"✗ Config path is not a file: {cfg}" in directory
+        assert f"✓ Config file: {cfg}" in unwritable
+        assert f"! Could not open the credential store (Cannot open {text})" in unwritable
+        assert any(line.startswith(f"✗ Storage not writable: {unwritable_storage} (") for line in unwritable), (
+            unwritable
+        )
+
+    def test_doctor_prints_the_homeserver_whole_on_one_line(
+        self,
+        narrow_markup_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Each homeserver result prints a homeserver Rich would read as markup, and its error, whole on one line."""
+        cfg = narrow_markup_dir / "config.yaml"
+        storage = narrow_markup_dir / "storage"
+        text = str(narrow_markup_dir)
+        homeserver = f"http://localhost:8008{text}"
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+        monkeypatch.setattr(
+            "mindroom.cli.doctor.constants.runtime_matrix_homeserver",
+            lambda *_args, **_kwargs: homeserver,
+        )
+
+        def doctor(response: httpx.Response | httpx.HTTPError, config: str = _VALID_CONFIG) -> list[str]:
+            def get(*_args: object, **_kwargs: object) -> httpx.Response:
+                if isinstance(response, httpx.HTTPError):
+                    raise response
+                return response
+
+            cfg.write_text(config)
+            monkeypatch.setattr("mindroom.cli.doctor.httpx.get", get)
+            return _invoke_with_runtime(["doctor"], cfg, storage_path=storage).output.splitlines()
+
+        versions = httpx.Response(200, json={"versions": ["v1.1"]})
+        reachable = doctor(versions)
+        unreachable = doctor(httpx.ConnectError(f"Cannot connect to {text}"))
+        failing = doctor(httpx.Response(502))
+        without_sliding_sync = doctor(versions, f"{_VALID_CONFIG}matrix_sync:\n  mode: sliding\n")
+
+        assert f"✓ Matrix homeserver: {homeserver}" in reachable
+        assert f"✗ Matrix homeserver unreachable: {homeserver} (Cannot connect to {text})" in unreachable
+        assert f"✗ Matrix homeserver HTTP 502: {homeserver}" in failing
+        assert (
+            f"✗ Matrix homeserver does not advertise MSC4186 Simplified Sliding Sync ({MSC4186_UNSTABLE_FEATURE}): "
+            f"{homeserver}. Set matrix_sync.mode: classic or upgrade the homeserver."
+        ) in without_sliding_sync
+
+    def test_doctor_prints_config_issues_whole_on_one_line(
+        self,
+        narrow_markup_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A config error and an automation issue that name long, markup-like keys print whole on one line."""
+        cfg = narrow_markup_dir / "config.yaml"
+        storage = narrow_markup_dir / "storage"
+        model = "[/x]-" + "a-model-name-long-enough-to-pass-eighty-columns-" * 2
+        agent = "an_agent_name_long_enough_to_push_the_config_issue_past_eighty_columns"
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+        _patch_homeserver_ok(monkeypatch)
+
+        cfg.write_text(
+            _VALID_CONFIG.replace("agents:\n", f'  "{model}":\n    provider: anthropic\n    id: c\nagents:\n'),
+        )
+        rejected = _invoke_with_runtime(["doctor"], cfg, storage_path=storage).output.splitlines()
+        cfg.write_text(
+            _VALID_CONFIG.replace("  assistant:\n", f"  {agent}:\n").replace(
+                "    model: default\n",
+                "    model: default\n    automations:\n      - {name: weekly_digest, cron: '0 9 * * 1'}\n",
+            ),
+        )
+        unprovided = _invoke_with_runtime(["doctor"], cfg, storage_path=storage).output.splitlines()
+
+        assert any(
+            line.startswith("✗ Config invalid: ") and f"rename models.{model} and update every reference" in line
+            for line in rejected
+        ), rejected
+        assert (
+            f"✗ Config invalid: agents.{agent}.automations: 'weekly_digest' is not provided by any loaded plugin"
+        ) in unprovided
+
+    def test_doctor_prints_a_pairing_error_and_a_missing_store_whole_on_one_line(
+        self,
+        narrow_markup_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A pairing error naming a markup-like path, and a missing store of a long-named bot, print on one line."""
+        cfg = narrow_markup_dir / "config.yaml"
+        cfg.write_text(_VALID_CONFIG)
+        storage = narrow_markup_dir / "storage"
+        text = str(narrow_markup_dir)
+        account = "agent_" + "a_long_agent_name_" * 5
+        monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+        _patch_homeserver_ok(monkeypatch)
+        monkeypatch.setattr(
+            "mindroom.cli.doctor.local_pairing_required",
+            Mock(side_effect=ValueError(f"Unreadable credentials in {text}")),
+        )
+        save_matrix_state(
+            MatrixState(
+                accounts={
+                    account: MatrixAccount(
+                        username="mindroom_general",
+                        password="pw",  # noqa: S106
+                        domain="localhost",
+                        device_id="LOSTDEVICE",
+                    ),
+                },
+            ),
+            constants_module.resolve_runtime_paths(config_path=cfg, storage_path=storage),
+        )
+
+        lines = _invoke_with_runtime(
+            ["doctor"],
+            cfg,
+            storage_path=storage,
+            env={"MINDROOM_PROVISIONING_URL": "https://mindroom.chat"},
+        ).output.splitlines()
+
+        assert f"✗ Pairing: Unreadable credentials in {text}" in lines
+        assert (
+            f"⚠ Encryption store missing for {account} (@mindroom_general:localhost, device LOSTDEVICE); "
+            "that bot does not start until its store is restored from a backup"
+        ) in lines
+
     def test_skips_config_checks_when_missing(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Doctor skips config-validation and provider checks when config is missing."""
         _patch_homeserver_ok(monkeypatch)
@@ -3847,7 +4915,7 @@ class TestDoctor:
 
         result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
         assert result.exit_code == 1
-        assert "API key invalid" in result.output
+        assert "anthropic: ANTHROPIC_API_KEY invalid (HTTP 401)" in result.output
 
     def test_provider_summary_multiple_providers(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Doctor shows provider summary with correct model counts."""
@@ -3875,7 +4943,7 @@ class TestDoctor:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Doctor validates Vertex AI Claude with a tiny messages smoke test."""
+        """Doctor validates Vertex AI Claude with one tiny Messages request through the runtime's Claude adapter."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(_VALID_VERTEXAI_CLAUDE_CONFIG)
         storage = tmp_path / "storage"
@@ -3884,98 +4952,83 @@ class TestDoctor:
         monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
         monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
         _patch_homeserver_ok(monkeypatch)
-
-        called: dict[str, object] = {}
-
-        class _FakeMessages:
-            def create(self, **kwargs: object) -> SimpleNamespace:
-                called["kwargs"] = kwargs
-                return SimpleNamespace(content=[{"type": "text", "text": "OK"}])
-
-        class _FakeVertexModel:
-            def __init__(self, **kwargs: object) -> None:
-                called["model_id"] = kwargs["id"]
-                called["client_kwargs"] = kwargs
-                self.id = str(kwargs["id"])
-
-            def get_request_params(self) -> dict[str, object]:
-                return {"timeout": called["client_kwargs"]["timeout"]}
-
-            def get_client(self) -> SimpleNamespace:
-                return SimpleNamespace(messages=_FakeMessages())
-
-        monkeypatch.setattr(vertexai_claude_module, "Claude", _FakeVertexModel)
+        _ambient_google_credentials(monkeypatch)
+        requests = _vertex_wire(monkeypatch, _vertex_ok)
 
         result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
+
         assert result.exit_code == 0
         assert "vertexai_claude connection valid for claude-sonnet-5" in result.output
-        assert called["model_id"] == "claude-sonnet-5"
-        assert called["client_kwargs"] == {
-            "id": "claude-sonnet-5",
-            "project_id": "mindroom-test",
-            "region": "us-central1",
-            "timeout": 10,
-        }
-        assert called["kwargs"] == {
-            "model": "claude-sonnet-5",
-            "max_tokens": 1,
-            "messages": [{"role": "user", "content": "Reply with OK."}],
-            "timeout": 10,
-        }
+        [request] = requests
+        assert request.url.path == (
+            "/v1/projects/mindroom-test/locations/us-central1/publishers/anthropic/models/claude-sonnet-5:streamRawPredict"
+        )
+        assert request.headers["authorization"] == "Bearer ambient-token"
+        assert request.extensions["timeout"]["read"] == 10
+        body = json.loads(request.content)
+        assert (body["max_tokens"], body["messages"]) == (
+            1,
+            [{"role": "user", "content": [{"type": "text", "text": "Reply with OK."}]}],
+        )
+
+    @pytest.mark.parametrize(
+        "extra_kwargs",
+        [
+            {"client_params": {"project_id": "own-project", "region": "us-east5"}},
+            {"project_id": "own-project", "client_params": {"region": "us-east5"}},
+        ],
+        ids=["client-params", "mixed-levels"],
+    )
+    def test_vertexai_claude_connection_check_uses_the_model_s_own_project_and_region(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        extra_kwargs: dict[str, object],
+    ) -> None:
+        """A model that sets its project and region, at either level of its settings, is checked where it sends."""
+        _ambient_google_credentials(monkeypatch)
+        requests = _vertex_wire(monkeypatch, _vertex_ok)
+        runtime_paths = constants_module.resolve_primary_runtime_paths(
+            config_path=tmp_path / "config.yaml",
+            storage_path=tmp_path / "mindroom_data",
+            process_env={},
+        )
+        model = ModelConfig(provider="vertexai_claude", id="claude-sonnet-5", extra_kwargs=extra_kwargs)
+
+        assert _validate_vertexai_claude_connection(model, runtime_paths) == (True, "")
+        assert [request.url.path for request in requests] == [
+            "/v1/projects/own-project/locations/us-east5/publishers/anthropic/models/claude-sonnet-5:streamRawPredict",
+        ]
 
     def test_vertexai_claude_connection_uses_runtime_adc_credentials(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Doctor should pass resolved runtime ADC credentials to the Vertex client."""
+        """Doctor should authenticate with the credentials the runtime env names."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(_VALID_VERTEXAI_CLAUDE_CONFIG)
         (tmp_path / ".env").write_text("GOOGLE_APPLICATION_CREDENTIALS=adc.json\n", encoding="utf-8")
         storage = tmp_path / "storage"
-        fake_credentials = object()
         monkeypatch.setenv("ANTHROPIC_VERTEX_PROJECT_ID", "mindroom-test")
         monkeypatch.setenv("CLOUD_ML_REGION", "us-central1")
         monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
         monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
         _patch_homeserver_ok(monkeypatch)
+        loaded: list[str] = []
 
-        called: dict[str, object] = {}
+        def _load_adc(path: str) -> GoogleCredentials:
+            loaded.append(path)
+            return GoogleCredentials(token="file-token")  # noqa: S106 - synthetic credential
 
-        def _load_adc(path: str) -> object:
-            called["adc_path"] = path
-            return fake_credentials
-
-        class _FakeMessages:
-            def create(self, **kwargs: object) -> SimpleNamespace:
-                called["kwargs"] = kwargs
-                return SimpleNamespace(content=[{"type": "text", "text": "OK"}])
-
-        class _FakeVertexModel:
-            def __init__(self, **kwargs: object) -> None:
-                called["client_kwargs"] = kwargs
-                self.id = str(kwargs["id"])
-
-            def get_request_params(self) -> dict[str, object]:
-                return {"timeout": called["client_kwargs"]["timeout"]}
-
-            def get_client(self) -> SimpleNamespace:
-                return SimpleNamespace(messages=_FakeMessages())
-
-        monkeypatch.setattr(google_adc_module, "load_google_application_credentials", _load_adc)
-        monkeypatch.setattr(vertexai_claude_module, "Claude", _FakeVertexModel)
+        monkeypatch.setattr("mindroom.providers.google_adc.load_google_application_credentials", _load_adc)
+        requests = _vertex_wire(monkeypatch, _vertex_ok)
 
         result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
 
         assert result.exit_code == 0
-        assert called["adc_path"] == str((tmp_path / "adc.json").resolve())
-        assert called["client_kwargs"] == {
-            "id": "claude-sonnet-5",
-            "project_id": "mindroom-test",
-            "region": "us-central1",
-            "timeout": 10,
-            "client_params": {"credentials": fake_credentials},
-        }
+        assert loaded == [str((tmp_path / "adc.json").resolve())]
+        assert [request.headers["authorization"] for request in requests] == ["Bearer file-token"]
 
     def test_vertexai_claude_connection_checks_each_configured_model(
         self,
@@ -3991,33 +5044,18 @@ class TestDoctor:
         monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
         monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
         _patch_homeserver_ok(monkeypatch)
-
-        created_models: list[str] = []
-        requested_models: list[str] = []
-
-        class _FakeMessages:
-            def create(self, **kwargs: object) -> SimpleNamespace:
-                requested_models.append(str(kwargs["model"]))
-                return SimpleNamespace(content=[{"type": "text", "text": "OK"}])
-
-        class _FakeVertexModel:
-            def __init__(self, **kwargs: object) -> None:
-                created_models.append(str(kwargs["id"]))
-
-            def get_request_params(self) -> dict[str, object]:
-                return {"timeout": 10}
-
-            def get_client(self) -> SimpleNamespace:
-                return SimpleNamespace(messages=_FakeMessages())
-
-        monkeypatch.setattr(vertexai_claude_module, "Claude", _FakeVertexModel)
+        _ambient_google_credentials(monkeypatch)
+        requests = _vertex_wire(monkeypatch, _vertex_ok)
 
         result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
+
         assert result.exit_code == 0
         assert "vertexai_claude connection valid for claude-sonnet-5" in result.output
         assert "vertexai_claude connection valid for claude-haiku-4-5" in result.output
-        assert created_models == ["claude-sonnet-5", "claude-haiku-4-5"]
-        assert requested_models == ["claude-sonnet-5", "claude-haiku-4-5"]
+        assert [request.url.path.rsplit("/", 1)[-1] for request in requests] == [
+            "claude-sonnet-5:streamRawPredict",
+            "claude-haiku-4-5:streamRawPredict",
+        ]
 
     def test_vertexai_claude_missing_env_is_warning(
         self,
@@ -4046,7 +5084,7 @@ class TestDoctor:
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Doctor warns when Vertex AI Claude cannot load Google credentials."""
+        """Doctor warns when Vertex AI Claude cannot find Google credentials."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(_VALID_VERTEXAI_CLAUDE_CONFIG)
         storage = tmp_path / "storage"
@@ -4055,29 +5093,16 @@ class TestDoctor:
         monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
         monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
         _patch_homeserver_ok(monkeypatch)
-
-        class _MissingCredentialsMessages:
-            def create(self, **_kwargs: object) -> None:
-                message = "ADC unavailable"
-                raise DefaultCredentialsError(message)
-
-        class _MissingCredentialsModel:
-            def __init__(self, **kwargs: object) -> None:
-                self.id = str(kwargs["id"])
-
-            def get_request_params(self) -> dict[str, object]:
-                return {"timeout": 10}
-
-            def get_client(self) -> SimpleNamespace:
-                return SimpleNamespace(messages=_MissingCredentialsMessages())
-
-        monkeypatch.setattr(vertexai_claude_module, "Claude", _MissingCredentialsModel)
+        _ambient_google_credentials(monkeypatch, DefaultCredentialsError("ADC unavailable"))
+        requests = _vertex_wire(monkeypatch, _vertex_ok)
 
         result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
+
         assert result.exit_code == 0
-        assert "vertexai_claude: could not validate connection" in result.output
-        assert "ADC" in result.output
-        assert "unavailable" in result.output
+        output = normalize_console_output(result.output)
+        assert "vertexai_claude: could not validate connection" in output
+        assert "ADC unavailable" in output
+        assert requests == []
 
     def test_vertexai_claude_missing_adc_file_is_failure(
         self,
@@ -4125,12 +5150,22 @@ class TestDoctor:
         assert "vertexai_claude connection failed for claude-sonnet-5" in output
         assert "Failed to load GOOGLE_APPLICATION_CREDENTIALS" in output
 
-    def test_vertexai_claude_api_rejection_is_failure(
+    @pytest.mark.parametrize(
+        ("failure", "exit_code", "message"),
+        [
+            ("rejected", 1, "HTTP 403"),
+            ("offline", 0, "could not validate connection"),
+        ],
+    )
+    def test_vertexai_claude_api_failures(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
+        failure: str,
+        exit_code: int,
+        message: str,
     ) -> None:
-        """Doctor fails when Vertex AI rejects the configured Claude request."""
+        """A rejected request fails the check; an unreachable endpoint only leaves it unverified."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(_VALID_VERTEXAI_CLAUDE_CONFIG)
         storage = tmp_path / "storage"
@@ -4139,32 +5174,24 @@ class TestDoctor:
         monkeypatch.delenv("GOOGLE_APPLICATION_CREDENTIALS", raising=False)
         monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
         _patch_homeserver_ok(monkeypatch)
+        _ambient_google_credentials(monkeypatch)
 
-        class _RejectedMessages:
-            def create(self, **_kwargs: object) -> None:
-                response = httpx.Response(403, request=httpx.Request("POST", "https://vertex.test"))
-                message = "denied"
-                raise PermissionDeniedError(message, response=response, body={"error": "denied"})
+        def respond(request: httpx2.Request) -> httpx.Response:
+            if failure == "offline":
+                message = "unreachable"
+                raise httpx2.ConnectError(message, request=request)
+            error = {"type": "error", "error": {"type": "permission_error", "message": "denied"}}
+            return httpx.Response(403, json=error)
 
-        class _RejectedModel:
-            def __init__(self, **kwargs: object) -> None:
-                self.id = str(kwargs["id"])
-
-            def get_request_params(self) -> dict[str, object]:
-                return {"timeout": 10}
-
-            def get_client(self) -> SimpleNamespace:
-                return SimpleNamespace(messages=_RejectedMessages())
-
-        monkeypatch.setattr(vertexai_claude_module, "Claude", _RejectedModel)
+        _vertex_wire(monkeypatch, respond)
 
         result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
-        assert result.exit_code == 1
-        assert "vertexai_claude connection failed for claude-sonnet-5" in result.output
-        assert "HTTP 403" in result.output
 
-    def test_custom_base_url_validation(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        """Doctor validates against custom base_url when configured."""
+        assert result.exit_code == exit_code
+        assert message in normalize_console_output(result.output)
+
+    def test_custom_base_url_is_not_sent_the_shared_key(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A model with a custom base_url gets no shared-key check, at that endpoint or at the provider's API."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
             "models:\n"
@@ -4195,9 +5222,12 @@ class TestDoctor:
 
         result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
         assert result.exit_code == 0
-        assert "API key valid" in result.output
-        # Should validate against the custom base_url, not api.openai.com
-        assert any("localhost:9292" in u for u in called_urls)
+        output = " ".join(result.output.split())
+        assert (
+            "OPENAI_API_KEY not checked: models.default.extra_kwargs.base_url may send it elsewhere or send another key in its place"
+            in output
+        )
+        assert not any("localhost:9292" in u or "api.openai.com" in u for u in called_urls)
 
     def test_memory_ollama_embedder_checks_reachability(
         self,
@@ -4249,7 +5279,7 @@ class TestDoctor:
 
         result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
         assert result.exit_code == 0
-        assert "Memory LLM: openai/gpt-5.6-luna API key valid" in result.output
+        assert "Memory LLM (openai/gpt-5.6-luna): OPENAI_API_KEY valid" in result.output
         assert "Memory embedder:" in result.output
 
     def test_memory_llm_missing_key_is_warning(
@@ -4276,7 +5306,7 @@ class TestDoctor:
 
         result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
         assert result.exit_code == 0
-        assert "Memory LLM (openai): OPENAI_API_KEY not set" in result.output
+        assert "Memory LLM (openai/gpt-5.6-luna): OPENAI_API_KEY not set" in result.output
 
     def test_memory_llm_explicit_key_is_validated_without_env_key(
         self,
@@ -4295,15 +5325,15 @@ class TestDoctor:
 
         result = _invoke_with_runtime(["doctor"], cfg, storage_path=tmp_path / "storage")
         assert "OPENAI_API_KEY not set" not in result.output
-        assert "Memory LLM: openai/m API key valid" in result.output
+        assert "Memory LLM (openai/m): memory.llm.config.api_key valid" in result.output
         assert ("https://api.openai.com/v1/models", {"Authorization": "Bearer sk-mem"}) in requests
 
-    def test_memory_llm_host_is_not_the_endpoint_for_non_ollama_providers(
+    def test_memory_llm_host_keeps_the_shared_key_from_every_server(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """The runtime drops host for non-Ollama memory LLMs, so doctor validates their default endpoint."""
+        """A memory LLM ``host`` counts as an endpoint setting, so the shared key is not checked, though Mem0 drops it."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
             _VALID_CONFIG
@@ -4316,48 +5346,27 @@ class TestDoctor:
         _invoke_with_runtime(["doctor"], cfg, storage_path=tmp_path / "storage")
 
         shared_key_urls = [url for url, headers in requests if headers.get("Authorization") == "Bearer sk-shared"]
-        assert shared_key_urls == ["https://api.openai.com/v1/models"]
+        assert shared_key_urls == []
 
-    def test_memory_llm_openai_base_url_used_when_host_absent(
+    def test_memory_llm_explicit_key_at_an_openai_base_url_is_not_checked(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
     ) -> None:
-        """Doctor uses openai_base_url from mem0 LLM config when host is absent."""
+        """An ``openai_base_url`` skips the memory LLM key check, even for ``memory.llm.config.api_key``."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
-            "models:\n  default:\n    provider: anthropic\n    id: claude-sonnet-5\n"
-            "agents:\n  a:\n    display_name: A\n    model: default\n"
-            "router:\n  model: default\n"
-            "memory:\n"
-            "  llm:\n"
-            "    provider: openai\n"
-            "    config:\n"
-            "      model: gpt-oss-low\n"
-            "      openai_base_url: http://localllm:9292/v1\n",
+            _VALID_CONFIG + "memory:\n  llm:\n    provider: openai\n    config:\n      model: gpt-oss-low\n"
+            "      openai_base_url: http://localllm:9292/v1\n      api_key: sk-mem\n",
         )
-        storage = tmp_path / "storage"
         monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
-        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
-        _patch_homeserver_ok(monkeypatch)
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-shared")
+        requests = _record_doctor_requests(monkeypatch)
 
-        called_urls: list[str] = []
-
-        def _mock_check(url: str, _headers: dict[str, str] | None = None) -> tuple[bool, str]:
-            called_urls.append(url)
-            return True, ""
-
-        monkeypatch.setattr("mindroom.cli.doctor._http_check", _mock_check)
-        monkeypatch.setattr(
-            "mindroom.cli.doctor._validate_provider_key",
-            lambda _prov, _key, base_url=None: called_urls.append(base_url or "NO_BASE_URL") or (True, ""),
-        )
-
-        result = _invoke_with_runtime(["doctor"], cfg, storage_path=storage)
-        assert result.exit_code == 0
-        assert "http://localllm:9292/v1" in called_urls, (
-            f"Expected openai_base_url to be passed as base_url, got: {called_urls}"
-        )
+        result = _invoke_with_runtime(["doctor"], cfg, storage_path=tmp_path / "storage")
+        output = " ".join(result.output.split())
+        assert "memory.llm.config.api_key not checked: memory.llm.config.openai_base_url may send it" in output
+        assert not any(headers.get("Authorization") == "Bearer sk-mem" for _url, headers in requests)
 
     def test_memory_openai_embedder_host_runs_embeddings_smoke_test(
         self,
@@ -4451,9 +5460,10 @@ class TestDoctor:
         _patch_homeserver_ok(monkeypatch)
 
         class _FakeEmbedder:
-            def get_embedding(self, text: str) -> list[float]:
-                assert text == "mindroom doctor embedder check"
-                return [0.1, 0.2, 0.3]
+            def embed(self, texts: list[str], *, purpose: str) -> list[list[float]]:
+                assert texts == ["mindroom doctor embedder check"]
+                assert purpose == "query"
+                return [[0.1, 0.2, 0.3]]
 
         monkeypatch.setattr(
             "mindroom.cli.doctor.create_sentence_transformers_embedder",
@@ -4469,6 +5479,12 @@ class TestDoctor:
 # ---------------------------------------------------------------------------
 # mindroom connect
 # ---------------------------------------------------------------------------
+
+
+# A config whose only owner placeholder is in administrators, which pairing replaces.
+_OWNER_PLACEHOLDER_CONFIG = (
+    f"models: {{}}\nagents: {{}}\nrouter:\n  model: default\nadministrators:\n  - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n"
+)
 
 
 class TestConnect:
@@ -4637,16 +5653,13 @@ app(["connect", "--path", sys.argv[1], "--force", "--graceful-cancel",
         cfg = tmp_path / "config.yaml"
         cfg.write_text(
             "models: {}\nagents: {}\nrouter:\n  model: default\n"
-            "matrix_room_access:\n"
-            "  room_admins:\n"
+            "administrators:\n"
+            f"  - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n"
+            "room_defaults:\n"
+            "  invite_users:\n"
             f"    - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n"
-            "authorization:\n"
-            "  default_room_access: false\n"
-            "  global_users:\n"
-            f"    - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n"
-            "  agent_reply_permissions:\n"
-            '    "*":\n'
-            f"      - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n",
+            "  admins:\n"
+            f"    - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n",
         )
         monkeypatch.setattr("mindroom.cli.connect.socket.gethostname", lambda: "devbox")
         responses = self._device_flow_responses()
@@ -4669,11 +5682,12 @@ app(["connect", "--path", sys.argv[1], "--force", "--graceful-cancel",
         assert "MINDROOM_LOCAL_CLIENT_SECRET=secret-123" in env_content
         assert "MINDROOM_NAMESPACE=a1b2c3d4" in env_content
         assert f"{OWNER_MATRIX_USER_ID_ENV}=@alice:mindroom.chat" in env_content
-        updated_config = cfg.read_text()
-        assert OWNER_MATRIX_USER_ID_PLACEHOLDER not in updated_config
-        assert "@alice:mindroom.chat" in updated_config
-        parsed_config = yaml.safe_load(updated_config)
-        assert parsed_config["matrix_room_access"]["room_admins"] == ["@alice:mindroom.chat"]
+        parsed_config = yaml.safe_load(cfg.read_text())
+        assert parsed_config["administrators"] == ["@alice:mindroom.chat"]
+        assert parsed_config["room_defaults"] == {
+            "invite_users": ["@alice:mindroom.chat"],
+            "admins": ["@alice:mindroom.chat"],
+        }
 
     def test_connect_path_overrides_env_and_config_target(
         self,
@@ -4683,22 +5697,10 @@ app(["connect", "--path", sys.argv[1], "--force", "--graceful-cancel",
         """--path should control where .env is written and which config gets placeholder updates."""
         default_cfg = tmp_path / "default" / "config.yaml"
         default_cfg.parent.mkdir(parents=True, exist_ok=True)
-        default_cfg.write_text(
-            "models: {}\nagents: {}\nrouter:\n  model: default\n"
-            "authorization:\n"
-            "  default_room_access: false\n"
-            "  global_users:\n"
-            f"    - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n",
-        )
+        default_cfg.write_text(_OWNER_PLACEHOLDER_CONFIG)
         target_cfg = tmp_path / "custom" / "config.yaml"
         target_cfg.parent.mkdir(parents=True, exist_ok=True)
-        target_cfg.write_text(
-            "models: {}\nagents: {}\nrouter:\n  model: default\n"
-            "authorization:\n"
-            "  default_room_access: false\n"
-            "  global_users:\n"
-            f"    - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n",
-        )
+        target_cfg.write_text(_OWNER_PLACEHOLDER_CONFIG)
         responses = self._device_flow_responses()
         monkeypatch.setattr("mindroom.cli.connect._httpx_post", lambda *_a, **_kw: responses.pop(0))
         monkeypatch.setattr("mindroom.cli.connect.time.sleep", lambda _seconds: None)
@@ -4860,13 +5862,7 @@ app(["connect", "--path", sys.argv[1], "--force", "--graceful-cancel",
     ) -> None:
         """Malformed owner_user_id should warn and skip placeholder replacement."""
         cfg = tmp_path / "config.yaml"
-        cfg.write_text(
-            "models: {}\nagents: {}\nrouter:\n  model: default\n"
-            "authorization:\n"
-            "  default_room_access: false\n"
-            "  global_users:\n"
-            f"    - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n",
-        )
+        cfg.write_text(_OWNER_PLACEHOLDER_CONFIG)
         responses = [
             httpx.Response(
                 200,
@@ -5168,10 +6164,7 @@ app(["connect", "--path", sys.argv[1], "--force", "--graceful-cancel",
     ) -> None:
         """A terminal saves the approving account on yes or a bare Enter; no saves nothing and fails."""
         cfg = tmp_path / "config.yaml"
-        cfg.write_text(
-            "agents: {}\nmodels: {}\nrouter:\n  model: default\n"
-            f"authorization:\n  global_users:\n    - {OWNER_MATRIX_USER_ID_PLACEHOLDER}\n",
-        )
+        cfg.write_text(_OWNER_PLACEHOLDER_CONFIG)
         responses = self._device_flow_responses()
         monkeypatch.setattr("mindroom.cli.main._stdin_is_interactive", lambda: True)
         monkeypatch.setattr("mindroom.cli.connect._httpx_post", lambda *_a, **_kw: responses.pop(0))
@@ -5291,7 +6284,96 @@ app(["connect", "--path", sys.argv[1], "--force", "--graceful-cancel",
 class TestLocalStackSetup:
     """Tests for `mindroom local-stack-setup`."""
 
-    def test_starts_synapse_and_cinny_containers(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    @staticmethod
+    def _fake_docker(
+        monkeypatch: pytest.MonkeyPatch,
+        *,
+        returncode: int = 0,
+        stderr: str = "",
+        status: int = 200,
+    ) -> None:
+        """Answer every docker command with ``returncode`` and every health probe with ``status``, without waiting."""
+        monkeypatch.setattr("mindroom.cli.local_stack.sys.platform", "linux")
+        monkeypatch.setattr("mindroom.cli.local_stack.shutil.which", lambda _name: "/usr/bin/docker")
+        monkeypatch.setattr(
+            "mindroom.cli.local_stack._httpx_get",
+            lambda *_a, **_kw: httpx.Response(status, json={"versions": ["v1.1"]}),
+        )
+        # Each clock read moves 30 seconds, so the 60 second health wait probes once before it gives up.
+        clock = iter(range(0, 10_000, 30))
+        monkeypatch.setattr(
+            "mindroom.cli.local_stack.time",
+            SimpleNamespace(monotonic=lambda: next(clock), sleep=lambda _seconds: None),
+        )
+        monkeypatch.setattr(
+            "mindroom.cli.local_stack.subprocess.run",
+            lambda cmd, **_kw: subprocess.CompletedProcess(cmd, returncode, stdout="", stderr=stderr),
+        )
+
+    def test_prints_paths_urls_and_commands_whole_on_one_line(
+        self,
+        narrow_markup_dir: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Each path, homeserver, server name, and command to copy prints as written, whole on one line."""
+        synapse_dir = narrow_markup_dir / "matrix"
+        synapse_dir.mkdir()
+        (synapse_dir / "docker-compose.yml").write_text("services: {}\n")
+        cfg = narrow_markup_dir / "config.yaml"
+        storage_path = narrow_markup_dir / "mindroom_data"
+        homeserver = f"http://localhost:8008{narrow_markup_dir}"
+        server_name = f"[work].{'a-server-name-label-' * 4}example"
+        container = f"mindroom-chat-{'a-long-container-name-' * 3}"
+        self._fake_docker(monkeypatch)
+        setup = ["local-stack-setup", "--synapse-dir", str(synapse_dir), "--homeserver-url", homeserver]
+
+        persisted = _invoke_with_runtime(
+            [*setup, "--server-name", server_name, "--chat-container-name", container],
+            cfg,
+            storage_path=storage_path,
+        )
+        printed = _invoke_with_runtime([*setup, "--no-persist-env"], cfg, storage_path=storage_path)
+
+        assert persisted.exit_code == 0, persisted.output
+        lines = persisted.output.splitlines()
+        assert f"Starting Synapse stack from {synapse_dir}..." in lines
+        assert any(line.startswith(f"Waiting for Synapse: {homeserver}/") for line in lines), lines
+        assert f"MindRoom Chat config written: {storage_path / 'local' / 'chat-config.json'}" in lines
+        assert f"  Synapse: {homeserver}" in lines
+        assert f"  Server:  {server_name}" in lines
+        assert f"  Env:     {narrow_markup_dir / '.env'}" in lines
+        assert f"  docker rm -f {container}" in lines
+        assert f"  cd {synapse_dir} && docker compose down" in lines
+        assert (
+            f"  MATRIX_HOMESERVER={homeserver} MATRIX_SERVER_NAME=localhost uv run mindroom run"
+            in printed.output.splitlines()
+        )
+
+    def test_prints_failures_whole_on_one_line(self, narrow_markup_dir: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A bad homeserver URL, a missing compose file, a failed command, and an unhealthy service print whole."""
+        synapse_dir = narrow_markup_dir / "matrix"
+        synapse_dir.mkdir()
+        cfg = narrow_markup_dir / "config.yaml"
+        text = str(narrow_markup_dir)
+        homeserver = f"http://localhost:8008{text}"
+        setup = ["local-stack-setup", "--synapse-dir", str(synapse_dir)]
+
+        def lines(*args: str) -> list[str]:
+            return _invoke_with_runtime([*setup, *args], cfg).output.splitlines()
+
+        self._fake_docker(monkeypatch, returncode=1, stderr=f"Cannot start {text}", status=503)
+        invalid = lines("--homeserver-url", text)
+        missing = lines()
+        (synapse_dir / "docker-compose.yml").write_text("services: {}\n")
+        failed = lines()
+        unhealthy = lines("--skip-synapse", "--homeserver-url", homeserver)
+
+        assert f"Error: Invalid homeserver URL: {text}" in invalid
+        assert f"Error: Synapse compose file not found: {synapse_dir / 'docker-compose.yml'}" in missing
+        assert f"Error: Failed to start Synapse stack: Cannot start {text}" in failed
+        assert any(line.startswith(f"Error: Synapse did not become healthy at {homeserver}/") for line in unhealthy)
+
+    def test_starts_synapse_and_chat_containers(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         """Command starts Synapse compose and the MindRoom Chat container."""
         synapse_dir = tmp_path / "matrix"
         synapse_dir.mkdir()
@@ -5320,10 +6402,10 @@ class TestLocalStackSetup:
                 "local-stack-setup",
                 "--synapse-dir",
                 str(synapse_dir),
-                "--cinny-port",
+                "--chat-port",
                 "18080",
-                "--cinny-container-name",
-                "mindroom-cinny-test",
+                "--chat-container-name",
+                "mindroom-chat-test",
             ],
             cfg,
             storage_path=storage_path,
@@ -5335,9 +6417,9 @@ class TestLocalStackSetup:
         assert any(cmd[:3] == ["docker", "run", "-d"] for cmd in commands)
         assert any(cmd[-1] == "ghcr.io/mindroom-ai/mindroom-chat:latest" for cmd in commands)
 
-        cinny_config = storage_path / "local" / "cinny-config.json"
-        assert cinny_config.exists()
-        config = json.loads(cinny_config.read_text())
+        chat_config = storage_path / "local" / "chat-config.json"
+        assert chat_config.exists()
+        config = json.loads(chat_config.read_text())
         assert config["homeserverList"] == ["http://localhost:8008"]
         assert config["featuredCommunities"]["rooms"] == ["#lobby:localhost"]
 
@@ -5375,73 +6457,65 @@ class TestLocalStackSetup:
 
         assert result.exit_code == 0
         assert ["docker", "compose", "up", "-d"] not in commands
+        assert ["docker", "rm", "-f", "mindroom-chat-local"] in commands
         assert any(cmd[:3] == ["docker", "run", "-d"] for cmd in commands)
 
-    @staticmethod
-    def _stub_local_stack(monkeypatch: pytest.MonkeyPatch) -> None:
-        """Stand in for Docker and a healthy homeserver."""
-        monkeypatch.setattr("mindroom.cli.local_stack.sys.platform", "linux")
-        monkeypatch.setattr("mindroom.cli.local_stack.shutil.which", lambda _name: "/usr/bin/docker")
-        monkeypatch.setattr(
-            "mindroom.cli.local_stack._httpx_get",
-            lambda *_a, **_kw: httpx.Response(200, json={"versions": ["v1.1"]}),
-        )
-        monkeypatch.setattr("mindroom.cli.local_stack.time.sleep", lambda *_a, **_kw: None)
-        monkeypatch.setattr(
-            "mindroom.cli.local_stack.subprocess.run",
-            lambda cmd, **_kwargs: subprocess.CompletedProcess(cmd, 0, stdout="", stderr=""),
-        )
-
     @pytest.mark.parametrize(
-        ("homeserver_url", "env_prefix"),
+        ("homeserver_url", "expected_env"),
         [
-            ("http://localhost:8008", "MATRIX_HOMESERVER=http://localhost:8008 uv run"),
-            ("https://localhost:8448", "MATRIX_HOMESERVER=https://localhost:8448 MATRIX_SSL_VERIFY=false uv run"),
+            (
+                "http://localhost:8008",
+                {"MATRIX_HOMESERVER": "http://localhost:8008", "MATRIX_SERVER_NAME": "example.org"},
+            ),
+            (
+                "https://localhost:8448",
+                {
+                    "MATRIX_HOMESERVER": "https://localhost:8448",
+                    "MATRIX_SERVER_NAME": "example.org",
+                    "MATRIX_SSL_VERIFY": "false",
+                },
+            ),
         ],
     )
-    def test_no_persist_env_prints_inline_command(
+    def test_no_persist_env_prints_command_that_runs_with_the_settings_it_would_persist(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
         homeserver_url: str,
-        env_prefix: str,
+        expected_env: dict[str, str],
     ) -> None:
-        """--no-persist-env writes no .env and prints the same settings it would persist."""
+        """--no-persist-env writes no .env, and its printed command, run as printed, sets what the .env would hold."""
         cfg = tmp_path / "config.yaml"
         cfg.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n")
-        self._stub_local_stack(monkeypatch)
+        run = subprocess.run  # The Docker stub replaces subprocess.run for every caller.
+        self._fake_docker(monkeypatch)
+        setup = [
+            "local-stack-setup",
+            "--skip-synapse",
+            "--homeserver-url",
+            homeserver_url,
+            "--server-name",
+            "example.org",
+        ]
 
-        result = _invoke_with_runtime(
-            ["local-stack-setup", "--skip-synapse", "--no-persist-env", "--homeserver-url", homeserver_url],
-            cfg,
-            storage_path=tmp_path / "mindroom_data",
-        )
+        result = _invoke_with_runtime([*setup, "--no-persist-env"], cfg, storage_path=tmp_path / "mindroom_data")
 
         assert result.exit_code == 0, result.output
         assert not (tmp_path / ".env").exists()
-        output = normalize_console_output(result.output)
-        assert f"{env_prefix} mindroom run" in output
-
-    def test_https_homeserver_persists_ssl_verify_override(
-        self,
-        tmp_path: Path,
-        monkeypatch: pytest.MonkeyPatch,
-    ) -> None:
-        """An https:// local homeserver still gets MATRIX_SSL_VERIFY=false for its local certificate."""
-        cfg = tmp_path / "config.yaml"
-        cfg.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n")
-        self._stub_local_stack(monkeypatch)
-
-        result = _invoke_with_runtime(
-            ["local-stack-setup", "--skip-synapse", "--homeserver-url", "https://localhost:8448"],
-            cfg,
-            storage_path=tmp_path / "mindroom_data",
+        command = next(line.strip() for line in result.output.splitlines() if line.endswith(" uv run mindroom run"))
+        ran = run(
+            ["sh", "-c", command.replace(" uv run mindroom run", " env")],
+            env={"PATH": os.environ["PATH"]},
+            capture_output=True,
+            text=True,
+            check=True,
         )
-
-        assert result.exit_code == 0, result.output
-        env_content = (tmp_path / ".env").read_text()
-        assert "MATRIX_HOMESERVER=https://localhost:8448" in env_content
-        assert "MATRIX_SSL_VERIFY=false" in env_content
+        ran_env = dict(line.split("=", 1) for line in ran.stdout.splitlines())
+        assert {name: value for name, value in ran_env.items() if name.startswith("MATRIX_")} == expected_env
+        persisted = _invoke_with_runtime(setup, cfg, storage_path=tmp_path / "mindroom_data")
+        assert persisted.exit_code == 0, persisted.output
+        persisted_lines = (tmp_path / ".env").read_text().splitlines()
+        assert sorted(persisted_lines) == sorted(f"{name}={value}" for name, value in expected_env.items())
 
     def test_rejects_unsupported_platform(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Command fails on unsupported operating systems."""

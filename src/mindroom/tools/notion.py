@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     config_fields=[
         ConfigField(
             name="api_key",
+            env=("NOTION_API_KEY",),
             label="API Key",
             type="password",
             required=True,
@@ -32,6 +33,7 @@ if TYPE_CHECKING:
         ),
         ConfigField(
             name="database_id",
+            env=("NOTION_DATABASE_ID",),
             label="Database ID",
             type="text",
             required=True,
@@ -68,7 +70,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["notion-client"],
-    docs_url="https://docs.agno.com/tools/toolkits/others/notion",
+    docs_url="https://docs.mindroom.chat/tools/project-management/#notion",
     helper_text="Create an integration at [Notion Developers](https://www.notion.so/my-integrations) and share the database with it",
     function_names=("create_page", "search_pages", "update_page"),
 )

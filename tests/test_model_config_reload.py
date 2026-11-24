@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from contextlib import contextmanager
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock
 
@@ -14,27 +13,37 @@ from mindroom.bot import AgentBot
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import CompactionConfig, CompactionOverrideConfig, DefaultsConfig, ModelConfig
+from mindroom.config.resolution import entity_model_name
 from mindroom.constants import ROUTER_AGENT_NAME
-from mindroom.history.policy import resolve_history_execution_plan
-from mindroom.history.runtime import resolve_agent_preparation_inputs
-from mindroom.history.session_context import close_team_runtime_state_dbs
+from mindroom.history.policy import _compaction_input_budget, resolve_history_execution_plan
+from mindroom.history.runtime import resolve_entity_preparation_inputs
 from mindroom.matrix.users import AgentMatrixUser
 from mindroom.orchestrator import _MultiAgentOrchestrator
-from mindroom.providers.model_loading import get_model_instance
-from mindroom.teams import TeamMode, build_materialized_team_instance, materialize_exact_team_members
-from tests.bot_helpers import make_test_agent_bot, make_test_team_bot
-from tests.conftest import TEST_PASSWORD, bind_runtime_paths, orchestrator_runtime_paths, write_config_yaml
+from mindroom.providers.openai.chat import ChatAdapter
+from mindroom.providers.registry import build_model_provider
+from mindroom.teams.members import BuiltTeam, build_team_spec, resolve_exact_team_members
+from mindroom.teams.spec import TeamMode
+from mindroom.tool_system.plugins import config_plugins
+from mindroom.turn_model import ModelScope, resolve_turn_model
+from tests.conftest import (
+    TEST_PASSWORD,
+    bind_runtime_paths,
+    orchestrator_runtime_paths,
+    unstored_team_scope_context,
+    write_config_yaml,
+)
 from tests.identity_helpers import entity_ids
+from tests.providers.bare_adapter import bare_adapter
+from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Iterator
+    from collections.abc import AsyncIterator
     from pathlib import Path
 
-    from agno.agent import Agent
-    from agno.models.base import Model
-    from agno.team import Team
-
+    from mindroom.agent_loop.build import AgentBuild
+    from mindroom.constants import RuntimePaths
     from mindroom.history.types import ResolvedHistoryExecutionPlan
+    from mindroom.llm.provider import ModelProvider
 
 
 @pytest_asyncio.fixture
@@ -44,6 +53,7 @@ async def runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncItera
     config = bind_runtime_paths(
         Config(
             agents={"general": AgentConfig(display_name="General", tools=[])},
+            server_emoji={"enabled": True},
             teams={"team": TeamConfig(display_name="Team", role="Coordinate", agents=["general"], model="other")},
             defaults=DefaultsConfig(tools=[], compaction=CompactionConfig()),
             models={
@@ -59,8 +69,8 @@ async def runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncItera
         ),
         runtime_paths,
     )
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
-    orchestrator.config = config
+    # Without the embedded API, reloads read the YAML through the plain loader.
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths, config=config, api_enabled=False)
     matrix_ids = entity_ids(config, runtime_paths)
     for name in ("general", "team", ROUTER_AGENT_NAME):
         user = AgentMatrixUser(
@@ -69,22 +79,10 @@ async def runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> AsyncItera
             display_name=name,
             password=TEST_PASSWORD,
         )
-        kwargs = {
-            "agent_user": user,
-            "storage_path": runtime_paths.storage_root,
-            "config": config,
-            "runtime_paths": runtime_paths,
-        }
-        bot = make_test_team_bot(**kwargs) if name == "team" else make_test_agent_bot(**kwargs)
-        bot.orchestrator = orchestrator
+        bot = AgentBot(user, rooms=[], orchestrator=orchestrator)
         bot.running = True
-        orchestrator.agent_bots[name] = bot
-    monkeypatch.setattr(AgentBot, "_set_presence_with_model_info", AsyncMock())
-    monkeypatch.setattr(
-        orchestrator,
-        "_restart_changed_entities",
-        AsyncMock(side_effect=AssertionError("Model-only reload must preserve Matrix bots")),
-    )
+        orchestrator.fleet.add(name, bot)
+    monkeypatch.setattr(AgentBot, "refresh_presence", AsyncMock())
     try:
         yield orchestrator
     finally:
@@ -104,50 +102,57 @@ async def _reload(runtime: _MultiAgentOrchestrator, config: Config) -> None:
         assert bot.config is runtime.config
 
 
-@contextmanager
-def _materialize(runtime: _MultiAgentOrchestrator) -> Iterator[tuple[Agent, Agent, Team, Model]]:
-    """Build the next standalone, member, coordinator, and routing models."""
+def _materialize(runtime: _MultiAgentOrchestrator) -> tuple[AgentBuild, AgentBuild, BuiltTeam, ModelProvider]:
+    """Build the next standalone agent, team member, team, and router model."""
     config = runtime.config
     assert config is not None
-    agent = create_agent("general", config, runtime.runtime_paths, execution_identity=None)
-    agents = [agent]
-    try:
-        members = materialize_exact_team_members(
-            ["general"],
-            config=config,
-            runtime_paths=runtime.runtime_paths,
-            execution_identity=None,
-        )
-        agents.extend(members.agents)
-        member = members.agents[0]
-        team = build_materialized_team_instance(
-            requested_agent_names=["general"],
-            agents=members.agents,
-            mode=TeamMode.COORDINATE,
-            config=config,
-            runtime_paths=runtime.runtime_paths,
-            scope_context=None,
-            model_name=config.resolve_entity("team").model_name,
-            configured_team_name="team",
-            execution_identity=None,
-        )
-        router_model = get_model_instance(config, runtime.runtime_paths, config.router.model)
-        yield agent, member, team, router_model
-    finally:
-        close_team_runtime_state_dbs(agents=agents, team_db=None)
+    agent = create_agent(
+        "general",
+        config,
+        runtime.runtime_paths,
+        execution_identity=None,
+        knowledge=None,
+        model=turn_model(config, runtime.runtime_paths, "general"),
+        plugins=config_plugins(config, runtime.runtime_paths),
+    )
+    members = resolve_exact_team_members(
+        ["general"],
+        config=config,
+        runtime_paths=runtime.runtime_paths,
+        execution_identity=None,
+        refresh_scheduler=None,
+        active_model_names={"general": turn_model(config, runtime.runtime_paths, "general").model_name},
+    )
+    team = build_team_spec(
+        members=members,
+        mode=TeamMode.COORDINATE,
+        config=config,
+        runtime_paths=runtime.runtime_paths,
+        scope_context=unstored_team_scope_context(config, ["general"], team_name="team"),
+        execution_identity=None,
+        model_name=entity_model_name(config, "team"),
+        configured_team_name="team",
+        timezone="UTC",
+    )
+    router = build_model_provider(config, runtime.runtime_paths, config.router.model)
+    return agent, members.build("general", members.model_names["general"]), team, router
 
 
-def _history_plan(config: Config, entity_name: str) -> ResolvedHistoryExecutionPlan:
+def _temperature(model: ModelProvider) -> float | None:
+    """Return the temperature the model's requests send, from its OpenAI Chat Completions route."""
+    adapter = bare_adapter(model)
+    assert isinstance(adapter, ChatAdapter)
+    return adapter.settings.temperature
+
+
+def _history_plan(config: Config, runtime_paths: RuntimePaths, entity_name: str) -> ResolvedHistoryExecutionPlan:
     """Resolve effective model and compaction budgets for one response scope."""
-    entity = config.resolve_entity(entity_name)
-    model = config.resolve_runtime_model(entity_name=entity_name)
+    model = resolve_turn_model(config, runtime_paths, ModelScope(entity=entity_name), None)
     return resolve_history_execution_plan(
         config=config,
-        compaction_config=entity.compaction_config,
-        has_authored_compaction_config=entity.has_authored_compaction_config,
+        history_settings=config.resolve_scope(entity_name).history_settings,
         active_model_name=model.model_name,
         active_context_window=model.context_window,
-        static_prompt_tokens=0,
     )
 
 
@@ -161,50 +166,50 @@ async def test_model_reload_updates_next_response_without_restarting_bots(
     """Model fields and replay budgets propagate through real YAML reloads and model factories."""
     old = runtime.config
     assert old is not None
-    with _materialize(runtime) as (old_agent, old_member, old_team, old_router):
-        assert old_agent.model is not None
-        assert old_agent.model.id == "default-model"
-        before = resolve_agent_preparation_inputs(
-            agent=old_agent,
-            agent_name="general",
-            full_prompt="",
-            config=old,
-            static_prompt_tokens=0,
-        ).execution_plan
-        assert before.replay_window_tokens == 4000
-        assert not before.text_compaction_available
+    old_agent, old_member, old_team, old_router = _materialize(runtime)
+    assert old_agent.spec.model.identity.id == "default-model"
+    before = resolve_entity_preparation_inputs(
+        history_settings=old_agent.history_settings,
+        config=old,
+        runtime_paths=runtime.runtime_paths,
+        active_model_name=entity_model_name(old, "general"),
+        active_context_window=None,
+    ).execution_plan
+    assert before.replay_window_tokens == 4000
+    assert not before.text_compaction_available
 
-        new = old.model_copy(deep=True)
-        new.models["default"].context_window = 64000
-        if not context_only:
-            new.models["default"].id = "updated-model"
-            new.models["default"].extra_kwargs = {"api_key": "test-placeholder", "temperature": 0.7}
-            new.models["other"].id = "updated-team-model"
-        await _reload(runtime, new)
+    new = old.model_copy(deep=True)
+    new.models["default"].context_window = 64000
+    if not context_only:
+        new.models["default"].id = "updated-model"
+        new.models["default"].extra_kwargs = {"api_key": "test-placeholder", "temperature": 0.7}
+        new.models["other"].id = "updated-team-model"
+    await _reload(runtime, new)
 
-        assert runtime.config is not None
-        with _materialize(runtime) as (agent, member, team, router):
-            assert agent is not old_agent
-            assert member is not old_member
-            assert team is not old_team
-            assert router is not old_router
-            expected_id = "default-model" if context_only else "updated-model"
-            for model in (agent.model, member.model, router):
-                assert model is not None
-                assert model.id == expected_id
-                assert model.temperature == (0.1 if context_only else 0.7)
-            assert team.model is not None
-            assert team.model.id == ("other-model" if context_only else "updated-team-model")
-            after = resolve_agent_preparation_inputs(
-                agent=agent,
-                agent_name="general",
-                full_prompt="",
-                config=runtime.config,
-                static_prompt_tokens=0,
-            ).execution_plan
-            assert after.replay_window_tokens == 64000
-            assert after.compaction_context_window == 64000
-            assert after.text_compaction_available
+    assert runtime.config is not None
+    agent, member, team, router = _materialize(runtime)
+    assert agent is not old_agent
+    assert member is not old_member
+    assert team is not old_team
+    assert router is not old_router
+    expected_id = "default-model" if context_only else "updated-model"
+    for model in (agent.spec.model, member.spec.model, router):
+        assert model.identity.id == expected_id
+        assert _temperature(model) == (0.1 if context_only else 0.7)
+    assert team.spec.leader.model.identity.id == ("other-model" if context_only else "updated-team-model")
+    after = resolve_entity_preparation_inputs(
+        history_settings=agent.history_settings,
+        config=runtime.config,
+        runtime_paths=runtime.runtime_paths,
+        active_model_name=entity_model_name(runtime.config, "general"),
+        active_context_window=None,
+    ).execution_plan
+    assert after.replay_window_tokens == 64000
+    assert after.summary_input_budget_tokens == _compaction_input_budget(
+        64000,
+        reserve_tokens=after.reserve_tokens,
+    )
+    assert after.text_compaction_available
 
 
 @pytest.mark.asyncio
@@ -225,7 +230,7 @@ async def test_compaction_model_reload_updates_effective_budgets(
     else:
         old.agents["general"].compaction = CompactionOverrideConfig.model_validate(compaction)
         old.teams["team"].compaction = CompactionOverrideConfig.model_validate(compaction)
-    before = {name: _history_plan(old, name) for name in ("general", "team")}
+    before = {name: _history_plan(old, runtime.runtime_paths, name) for name in ("general", "team")}
     model_name = compaction[model_field]
     new = old.model_copy(deep=True)
     new.models[model_name].context_window = 96000
@@ -233,17 +238,22 @@ async def test_compaction_model_reload_updates_effective_budgets(
     await _reload(runtime, new)
 
     assert runtime.config is not None
-    assert get_model_instance(runtime.config, runtime.runtime_paths, model_name).id == "updated-summary-model"
+    assert (
+        build_model_provider(runtime.config, runtime.runtime_paths, model_name).identity.id == "updated-summary-model"
+    )
     for name in ("general", "team"):
-        after = _history_plan(runtime.config, name)
+        after = _history_plan(runtime.config, runtime.runtime_paths, name)
         assert after.replay_window_tokens == before[name].replay_window_tokens
         if model_field == "model":
-            assert after.compaction_context_window == 96000
+            assert after.summary_input_budget_tokens == _compaction_input_budget(
+                96000,
+                reserve_tokens=after.reserve_tokens,
+            )
             assert after.summary_input_budget_tokens is not None
             assert before[name].summary_input_budget_tokens is not None
             assert after.summary_input_budget_tokens > before[name].summary_input_budget_tokens
         else:
-            assert after.compaction_context_window == before[name].compaction_context_window
+            assert after.summary_input_budget_tokens == before[name].summary_input_budget_tokens
             assert after.compaction_fallback_summary_input_budget_tokens is not None
             assert before[name].compaction_fallback_summary_input_budget_tokens is not None
             assert (
@@ -263,9 +273,12 @@ async def test_context_window_reload_preserves_explicit_replay_cap(runtime: _Mul
     await _reload(runtime, new)
 
     assert runtime.config is not None
-    plan = _history_plan(runtime.config, "general")
+    plan = _history_plan(runtime.config, runtime.runtime_paths, "general")
     assert plan.replay_window_tokens == 3000
-    assert plan.compaction_context_window == 64000
+    assert plan.summary_input_budget_tokens == _compaction_input_budget(
+        64000,
+        reserve_tokens=plan.reserve_tokens,
+    )
     assert plan.text_compaction_available
 
 
@@ -286,10 +299,9 @@ async def test_agent_and_team_edits_reach_the_next_response_without_restarting_b
     new.teams["team"].mode = "collaborate"
     await _reload(runtime, new)
 
-    with _materialize(runtime) as (agent, _member, _team, _router):
-        assert agent.model is not None
-        assert agent.model.id == "other-model"
-        assert "Answer in one sentence." in agent.instructions
-        assert "calculator" in {tool.name for tool in agent.tools}
+    agent, _member, _team, _router = _materialize(runtime)
+    assert agent.spec.model.identity.id == "other-model"
+    assert "Answer in one sentence." in agent.prompt.instructions
+    assert "calculator" in {toolkit.name for toolkit in agent.spec.toolkits}
     assert runtime.agent_bots["team"].config.teams["team"].mode == "collaborate"
-    assert emit_config_reloaded.await_args.kwargs["changed_entities"] == {"general", "team"}
+    assert emit_config_reloaded.await_args.args[1] == {"general", "team"}

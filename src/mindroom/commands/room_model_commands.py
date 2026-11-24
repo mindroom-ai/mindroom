@@ -4,14 +4,15 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from mindroom.commands.model_commands import available_models_text
+from mindroom.config.models import unsupported_level_message
 from mindroom.matrix.client_room_admin import room_admin_power_user
-from mindroom.room_model_overrides import (
-    clear_room_model_override,
-    resolve_room_model_override,
-    set_room_model_override,
-)
+from mindroom.room_settings import MODEL, classify_room_model, refresh_room_setting, write_room_setting
+from mindroom.steward_duties import setting_write_failure_message
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
+
     import nio
 
     from mindroom.config.main import Config
@@ -21,12 +22,8 @@ _RESET_ARGUMENTS = frozenset({"reset", "clear"})
 _LIST_ARGUMENTS = frozenset({"list", "show", "status"})
 
 
-def _available_models_text(config: Config) -> str:
-    return "\n".join(f"- `{name}` ({model.provider} {model.id})" for name, model in config.models.items())
-
-
-def _show_room_model(config: Config, runtime_paths: RuntimePaths, room_id: str) -> str:
-    state = resolve_room_model_override(runtime_paths, room_id, configured_models=config.models)
+def _show_room_model(config: Config, setting: str | None) -> str:
+    state = classify_room_model(setting, config.models)
     if state.active is not None:
         model = config.models[state.active]
         current = f"This room uses the `{state.active}` override ({model.provider} {model.id})."
@@ -38,12 +35,13 @@ def _show_room_model(config: Config, runtime_paths: RuntimePaths, room_id: str) 
             "Thread model overrides still take precedence."
         )
     return (
-        f"{current}\n\n**Available models:**\n{_available_models_text(config)}\n\n"
-        "Use `!room_model <name>` to switch this room, or `!room_model reset` to remove the override."
+        f"{current}\n\n**Available models:**\n{available_models_text(config)}\n\n"
+        "Use `/room_model <name>` or `/room_model <name>@<level>` to switch this room, "
+        "or `/room_model reset` to remove the override."
     )
 
 
-async def handle_room_model_command(
+async def handle_room_model_command(  # noqa: PLR0911 - one answer per outcome
     args_text: str,
     *,
     client: nio.AsyncClient,
@@ -52,35 +50,37 @@ async def handle_room_model_command(
     room_id: str,
     requester_user_id: str,
     sender_user_id: str,
+    put_state: Callable[..., Awaitable[nio.RoomPutStateResponse | nio.RoomPutStateError | None]],
 ) -> str:
-    """Set or clear one room's runtime model override."""
+    """Show, set, or clear the room's `model` setting, written through ``put_state``, the room steward's."""
     requested = args_text.strip()
+    # A command reads the room's state itself, so it never trusts a copy that missed a change.
+    read = await refresh_room_setting(MODEL, client, runtime_paths, room_id, force=True, put_state=put_state)
     if requested not in config.models:
         if not requested or requested.lower() in _LIST_ARGUMENTS:
-            return _show_room_model(config, runtime_paths, room_id)
+            if not read.ok:
+                return "❌ Could not read this room's model setting. Try again."
+            return _show_room_model(config, read.value)
         if requested.lower() not in _RESET_ARGUMENTS:
-            return f"❌ Unknown model `{requested}`. Available models:\n{_available_models_text(config)}"
+            reason = unsupported_level_message(config.models, requested) or f"Unknown model `{requested}`"
+            return f"❌ {reason}. Available models:\n{available_models_text(config)}"
 
-    admin_user_id = await room_admin_power_user(client, room_id, (requester_user_id, sender_user_id))
-    if admin_user_id is None:
+    if await room_admin_power_user(client, room_id, (requester_user_id, sender_user_id)) is None:
         return "❌ Room admin only."
 
-    if requested not in config.models:
-        if clear_room_model_override(runtime_paths, room_id):
-            return (
-                "✅ Room model override removed. Room default returns to configured room or entity models. "
-                "Thread model overrides still take precedence."
-            )
+    model_name = requested if requested in config.models else None
+    if model_name is None and read.ok and read.value is None:
         return "This room has no model override."
-
-    set_room_model_override(
-        runtime_paths,
-        room_id=room_id,
-        model_name=requested,
-        set_by=admin_user_id,
-    )
-    model = config.models[requested]
+    taken = await write_room_setting(MODEL, client, runtime_paths, room_id, model_name, put_state=put_state)
+    if not taken:
+        return setting_write_failure_message(taken, "change the room model")
+    if model_name is None:
+        return (
+            "✅ Room model override removed. Room default returns to configured room or entity models. "
+            "Thread model overrides still take precedence."
+        )
+    model = config.models[model_name]
     return (
-        f"✅ This room now uses `{requested}` ({model.provider} {model.id}) as its model default.\n"
+        f"✅ This room now uses `{model_name}` ({model.provider} {model.id}) as its model default.\n"
         "Thread model overrides still take precedence."
     )

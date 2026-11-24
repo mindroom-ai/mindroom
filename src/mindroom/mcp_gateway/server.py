@@ -332,7 +332,7 @@ def replay_gateway_body(body: bytes, receive: Receive) -> Receive:
     """Replay consumed input once, retaining the original disconnect channel."""
     sent = False
 
-    async def replay() -> dict[str, Any]:
+    async def replay() -> Message:
         nonlocal sent
         if not sent:
             sent = True
@@ -381,8 +381,12 @@ class GatewayServer:
         # The default tracing middleware parses client `_meta` trace fields and logs malformed ones verbatim.
         self._server.middleware.clear()
         origin = urlsplit(public_url)
+        allowed_hosts = [origin.netloc]
+        if origin.port is None:
+            default_port = 443 if origin.scheme == "https" else 80
+            allowed_hosts.append(f"{origin.netloc}:{default_port}")
         security = TransportSecuritySettings(
-            allowed_hosts=[origin.netloc],
+            allowed_hosts=allowed_hosts,
             allowed_origins=list(allowed_origins)
             if allowed_origins is not None
             else [f"{origin.scheme}://{origin.netloc}"],
@@ -450,9 +454,9 @@ class GatewayServer:
         name: str,
         arguments: dict[str, Any],
     ) -> types.CallToolResult:
-        if name not in _OPERATION_NAMES:
+        schema = _input_schema(name) if name in _OPERATION_NAMES else None
+        if schema is None:
             return _result(_error(GatewayErrorCode.TOOL_NOT_FOUND, "Unknown gateway operation."))
-        schema = _input_schema(name)
         if not Draft202012Validator(schema).is_valid(arguments):
             return _result(_error(GatewayErrorCode.INVALID_ARGUMENTS, "Gateway operation arguments are invalid."))
         identity = _request_identity(ctx)

@@ -61,9 +61,11 @@ def test_config_without_settings_renders_only_chart_options() -> None:
         "port",
         "database_path",
         "log",
+        "grant_admin_to_first_user",
         "mindroom_compact_edits_enabled",
         "well_known",
     }
+    assert config["grant_admin_to_first_user"] is False
 
 
 def test_settings_merge_across_values_files_into_valid_toml(tmp_path: Path) -> None:
@@ -177,3 +179,21 @@ def test_registration_option_is_free_without_a_registration_token() -> None:
     )
 
     assert config["allow_registration"] is False
+
+
+@pytest.mark.parametrize(
+    ("setting", "expected"),
+    [
+        ("tuwunel.settings.grant_admin_to_first_user=true", True),
+        ("tuwunel.settings.grant_admin_to_first_user=false", False),
+        ("tuwunel.settings.grant_admin_to_first_user=null", False),
+        ("tuwunel.settings=null", False),
+    ],
+)
+def test_first_user_admin_grant_stays_settable(setting: str, expected: bool) -> None:
+    """An explicit first-user admin setting replaces the chart's default; a null one or no settings keep it off."""
+    config = _tuwunel_config(
+        _render_chart(TUWUNEL_CHART, "tuwunel.serverName=example.com", setting, release_name="matrix"),
+    )
+
+    assert config["grant_admin_to_first_user"] is expected

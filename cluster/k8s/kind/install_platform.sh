@@ -12,8 +12,8 @@ INSTANCE_BASE_DOMAIN="${INSTANCE_BASE_DOMAIN:-local}"
 INSTANCE_STORAGE_CLASS_NAME="${INSTANCE_STORAGE_CLASS_NAME:-standard}"
 INSTANCE_MINDROOM_IMAGE="${INSTANCE_MINDROOM_IMAGE:-ghcr.io/mindroom-ai/mindroom:latest}"
 INSTANCE_MINDROOM_IMAGE_PULL_POLICY="${INSTANCE_MINDROOM_IMAGE_PULL_POLICY:-IfNotPresent}"
-INSTANCE_SYNAPSE_IMAGE="${INSTANCE_SYNAPSE_IMAGE:-matrixdotorg/synapse:latest}"
-INSTANCE_SYNAPSE_IMAGE_PULL_POLICY="${INSTANCE_SYNAPSE_IMAGE_PULL_POLICY:-IfNotPresent}"
+INSTANCE_TUWUNEL_IMAGE="${INSTANCE_TUWUNEL_IMAGE:-ghcr.io/mindroom-ai/mindroom-tuwunel:latest}"
+INSTANCE_TUWUNEL_IMAGE_PULL_POLICY="${INSTANCE_TUWUNEL_IMAGE_PULL_POLICY:-IfNotPresent}"
 
 if ! command -v helm >/dev/null 2>&1; then
   echo "[error] 'helm' not found in PATH." >&2
@@ -43,8 +43,8 @@ helm_args=(
   --set "provisioner.instanceStorageClassName=${INSTANCE_STORAGE_CLASS_NAME}"
   --set "provisioner.instanceMindroomImage=${INSTANCE_MINDROOM_IMAGE}"
   --set "provisioner.instanceMindroomImagePullPolicy=${INSTANCE_MINDROOM_IMAGE_PULL_POLICY}"
-  --set "provisioner.instanceSynapseImage=${INSTANCE_SYNAPSE_IMAGE}"
-  --set "provisioner.instanceSynapseImagePullPolicy=${INSTANCE_SYNAPSE_IMAGE_PULL_POLICY}"
+  --set "provisioner.instanceTuwunelImage=${INSTANCE_TUWUNEL_IMAGE}"
+  --set "provisioner.instanceTuwunelImagePullPolicy=${INSTANCE_TUWUNEL_IMAGE_PULL_POLICY}"
 )
 
 if [ -n "${SUPABASE_URL:-}" ]; then

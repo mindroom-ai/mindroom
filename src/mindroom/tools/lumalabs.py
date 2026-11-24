@@ -18,7 +18,7 @@ if TYPE_CHECKING:
     worker_inert_agent_functions=("image_to_video", "generate_video"),
     display_name="Luma Labs",
     description="3D content creation and video generation using Luma AI Dream Machine",
-    category=ToolCategory.DEVELOPMENT,  # others/ category maps to DEVELOPMENT
+    category=ToolCategory.DEVELOPMENT,
     status=ToolStatus.REQUIRES_CONFIG,  # Requires LUMAAI_API_KEY
     setup_type=SetupType.API_KEY,  # API key authentication
     icon="FaVideo",  # Video-related icon
@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     config_fields=[
         ConfigField(
             name="api_key",
+            env=("LUMAAI_API_KEY",),
             label="API Key",
             type="password",
             required=False,
@@ -87,7 +88,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["lumaai"],
-    docs_url="https://docs.agno.com/tools/toolkits/others/lumalabs",
+    docs_url="https://docs.mindroom.chat/tools/ai-and-generation/#lumalabs",
     function_names=("generate_video", "image_to_video"),
 )
 def lumalabs_tools() -> type[LumaLabTools]:
@@ -122,14 +123,14 @@ def lumalabs_tools() -> type[LumaLabTools]:
             if model is None:
                 model = "ray-2"
             # AGNO_COMPAT: Luma video creation omits the SDK's required model.
-            # Reason: Agno 3.0.9 omits model in both creation methods; lumaai 1.21.0 requires it.
+            # Reason: Agno 3.2.1 omits model in both creation methods; lumaai 1.21.0 requires it.
             # Upstream issue: Tracking gap; no matching issue has been verified for this omission.
             # Upstream PR: No matching fix has been verified.
             # Remove when: Agno forwards a configurable model to both creation paths;
             # retain MindRoom's configured default, polling, media, and error behavior.
             # Coverage: tests/test_lumalabs_tool.py::test_lumalabs_generation_sends_model_and_returns_video;
             # tests/test_lumalabs_tool.py preserves completion controls, HTTP errors, and registration flags.
-            # Intentional instance-local SDK method binding; its declared method type cannot express this repair.
-            self.client.generations.create = partial(self.client.generations.create, model=model)  # ty: ignore[invalid-assignment]
+            # Intentional instance-local SDK method binding.
+            self.client.generations.create = partial(self.client.generations.create, model=model)
 
     return MindRoomLumaLabTools

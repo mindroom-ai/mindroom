@@ -7,13 +7,16 @@ import enum
 import time
 from collections import deque
 from dataclasses import dataclass, field, replace
+from functools import partial
 from itertools import islice
 from typing import TYPE_CHECKING, Any
 
 from mindroom.cancellation import request_task_cancel
+from mindroom.constants import MID_TURN_MODE_KEY, SUBMISSION_CONTENT_KEY
 from mindroom.dispatch_recovery_context import turn_dispatch_recovery_scope
-from mindroom.dispatch_source import ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND, VOICE_SOURCE_KIND
+from mindroom.dispatch_source import VOICE_SOURCE_KIND, source_kind_bypasses_coalescing
 from mindroom.logging_config import get_logger
+from mindroom.model_selection import THREAD_MODEL_CONTENT_KEY
 from mindroom.response_admission import ResponseAdmissionRefusedError
 from mindroom.runtime_shutdown import (
     GENERIC_SHUTDOWN,
@@ -33,26 +36,30 @@ from .batch import (
     coalescing_owner_log_label,
     is_active_follow_up_coalescing_key,
     pending_event_addressing,
-    pending_event_run_identity,
+    split_reply_segment,
 )
 from .cleanup import (
     ClaimedSegmentOwner,
     ReadyPendingEvent,
-    close_pending_event_metadata_once,
-    close_ready_task_result_metadata,
+    close_pending_events,
+    close_ready_result,
 )
 from .ingress_lanes import IngressAdmissionClosedError, IngressLanes, LaneSlot, ReceiptLaneKey
 from .policy import (
     QueueKind,
-    is_coalescing_exempt_source_kind,
+    SubmissionMarker,
     pending_event_is_text,
     pending_events_sent_together,
     queue_kind,
     source_or_event_allows_room_scope_batching,
+    submission_marker,
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Mapping
+    from collections.abc import Awaitable, Callable, Collection, Mapping
+
+    from mindroom.turn_store import TurnClaim
+    from mindroom.turns.facts import RunIdentity
 
     from .ingress_lanes import LaneDelivery
 
@@ -62,22 +69,22 @@ __all__ = [
     "IngressAdmissionClosedError",
     "LaneSlot",
     "ReadyPendingEvent",
-    "close_ready_task_result_metadata",
-    "is_coalescing_exempt_source_kind",
+    "close_ready_result",
 ]
 
 _COALESCING_FLUSH_WARNING_SECONDS = 5.0
 _MAX_ROOT_PREPARATIONS = 8
+# A split reply's first segment waits at most this long for its continuations, so a lost one cannot hold the sender.
+_SPLIT_REPLY_WAIT_SECONDS = 10.0
+# A composer submission whose latest event says more is coming waits at most this long after it for the next one, in
+# place of the debounce window, so a lost final event cannot hold the sender.
+_SUBMISSION_WAIT_SECONDS = 10.0
 # How long a flush may wait on the rest of a sender's burst before the wait is
 # reported. Voice readiness legitimately takes seconds, so this is set well
 # past any real burst: reaching it means the lane is not going to settle, and
 # the batch would otherwise sit admitted and undispatched with nothing logged.
 _LANE_WAIT_STALL_SECONDS = 60.0
 logger = get_logger(__name__)
-
-
-async def _allow_dispatch(_key: CoalescingKey) -> None:
-    return
 
 
 class _GatePhase(enum.Enum):
@@ -92,7 +99,6 @@ class _QueuedEvent:
     received_at: float
     receipt_time: float
     source_event_id: str | None
-    source_kind: str
     ready_result: ReadyPendingEvent
     lane_slot: LaneSlot | None = None
 
@@ -187,10 +193,21 @@ class _FlushDiagnostics:
 
 
 @dataclass(frozen=True)
+class _FrontSplitReply:
+    """A split reply led by the queue's front: its queued segments, whether it still waits, and until when."""
+
+    length: int
+    waits: bool
+    until: float
+
+
+@dataclass(frozen=True)
 class _DebounceWaitResult:
     """Boundary discovered during one debounce wait."""
 
     quiet_deadline: float
+    # The wait ended at the submission bound with the front turn still saying more is coming.
+    timed_out_submission_id: str | None = None
 
 
 class CoalescingGate:
@@ -204,7 +221,9 @@ class CoalescingGate:
     and flushes immediately; adaptive text waits its configured quiet period.
     A live batch ending in media waits the debounce window for more attachments or a trailing
     caption (a continuous attachment stream extends the window without
-    bound). Follow-up backlogs queued behind an active response are exempt:
+    bound). A composer submission marks its events instead: one that says
+    more is coming holds the batch up to a bound in place of the debounce
+    window, and the submission's last event completes it. Follow-up backlogs queued behind an active response are exempt:
     they flush as soon as the conversation idles, since later ingress is
     admitted under the conversation's live key and could never join the held
     backlog. Each consecutive same-requester run flushes as its own turn, so
@@ -221,24 +240,31 @@ class CoalescingGate:
         dispatch_turn: Callable[[PreparedTurn], Awaitable[None]],
         debounce_seconds: Callable[[], float],
         is_shutting_down: Callable[[], bool],
-        wait_until_dispatch_allowed: Callable[[CoalescingKey], Awaitable[None]] | None = None,
+        wait_for_thread_response_idle: Callable[[str, str | None], Awaitable[None]] | None = None,
         room_scope_is_single_conversation: Callable[[str], bool] | None = None,
-        dispatch_allowed_now: Callable[[CoalescingKey], bool] | None = None,
+        active_thread_ids_for_room: Callable[[str], Collection[str | None]] | None = None,
         timestamp_formatter: TimestampFormatter | None = None,
-        on_dispatch_failure: Callable[[tuple[PendingEvent, ...]], None] | None = None,
+        on_dispatch_failure: Callable[[str, tuple[str, ...]], None] | None = None,
         on_undelivered_source: Callable[[str, str], None] | None = None,
-        on_intentionally_ignored_source: Callable[[str], Awaitable[None]] | None = None,
+        on_intentionally_ignored_sources: Callable[[tuple[str, ...]], Awaitable[None]] | None = None,
     ) -> None:
+        """Build the gate on the response owner's conversation state and the journal's source handoffs.
+
+        ``wait_for_thread_response_idle`` and ``active_thread_ids_for_room`` read
+        which conversations have a response running; ``on_dispatch_failure``,
+        ``on_undelivered_source``, and ``on_intentionally_ignored_sources`` hand
+        sources the gate no longer owns back to the journal.
+        """
         self._dispatch_turn = dispatch_turn
         self._debounce_seconds = debounce_seconds
         self._is_shutting_down = is_shutting_down
-        self._wait_until_dispatch_allowed = wait_until_dispatch_allowed or _allow_dispatch
+        self._wait_for_thread_response_idle = wait_for_thread_response_idle
         self._room_scope_is_single_conversation = room_scope_is_single_conversation
-        self._dispatch_allowed_now = dispatch_allowed_now
+        self._active_thread_ids_for_room = active_thread_ids_for_room
         self._timestamp_formatter = timestamp_formatter
         self._on_dispatch_failure = on_dispatch_failure
         self._on_undelivered_source = on_undelivered_source
-        self._on_intentionally_ignored_source = on_intentionally_ignored_source
+        self._on_intentionally_ignored_sources = on_intentionally_ignored_sources
         self._gates: dict[CoalescingKey, _GateEntry] = {}
         self._root_dispatches: dict[asyncio.Task[None], tuple[CoalescingKey, _GateEntry]] = {}
         self._lanes = IngressLanes(
@@ -266,12 +292,12 @@ class CoalescingGate:
         body: str,
         new_content: Mapping[str, Any],
         for_another_participant: bool | None,
-    ) -> bool:
-        """Give a text message still waiting in a queue the text its sender edited it to; return whether one did.
+    ) -> tuple[CoalescingKey, PendingEvent] | None:
+        """Give a text message still waiting in a queue the text its sender edited it to; return it and its queue's key.
 
         A message a flush already claimed answers the text it had then.
         """
-        for gate in self._gates.values():
+        for key, gate in self._gates.items():
             for queued in gate.queue:
                 pending_event = queued.pending_event
                 event = pending_event.event
@@ -283,33 +309,30 @@ class CoalescingGate:
                 ):
                     continue
                 content = dict(new_content)
-                # The edit's new content carries no relation; the message stays where it was posted.
-                relation = event.source.get("content", {}).get("m.relates_to")
-                if relation is not None:
-                    content["m.relates_to"] = relation
+                # An edit cannot move the original message or change the composer's send choices.
+                original_content = event.source.get("content", {})
+                for kept_key in ("m.relates_to", MID_TURN_MODE_KEY, SUBMISSION_CONTENT_KEY, THREAD_MODEL_CONTENT_KEY):
+                    content.pop(kept_key, None)
+                    if kept_key in original_content:
+                        content[kept_key] = original_content[kept_key]
                 pending_event.event = replace(
                     event,
                     body=body,
                     source={**event.source, "content": content},
                     for_another_participant=for_another_participant,
                 )
-                return True
-        return False
+                return key, pending_event
+        return None
 
     def queued_pending_events(self, key: CoalescingKey) -> tuple[PendingEvent, ...]:
         """Return the unclaimed events still queued under one coalescing key."""
         gate = self._gates.get(key)
         return tuple(queued.pending_event for queued in gate.queue) if gate is not None else ()
 
-    def has_pending_work(self, key: CoalescingKey) -> bool:
-        """Return whether a lane or queue still holds unclaimed work for one coalescing key."""
-        return bool(self.queued_pending_events(key)) or self._lanes.has_pending_delivery(key)
-
-    def queues_other_run(self, key: CoalescingKey, requester_user_id: str) -> bool:
-        """Return whether a queue still holds a run other than this requester's own messages for this agent."""
+    def queues_other_run(self, key: CoalescingKey, run_identity: RunIdentity) -> bool:
+        """Return whether a queue still holds a run other than this run identity's own messages for this agent."""
         return any(
-            pending_event_run_identity(key, pending_event) != (requester_user_id, None)
-            or pending_event.event.for_another_participant
+            pending_event.facts.run_identity != run_identity or pending_event.event.for_another_participant
             for pending_event in self.queued_pending_events(key)
         )
 
@@ -344,21 +367,24 @@ class CoalescingGate:
         *,
         key: CoalescingKey,
         source_event_id: str | None,
-        source_kind: str,
         ready_result: ReadyPendingEvent | None = None,
         ready_task: asyncio.Task[ReadyPendingEvent | None] | None = None,
-        received_at: float | None = None,
+        claim: TurnClaim | None = None,
+        submission_id: str | None = None,
     ) -> None:
         """Load one lane slot with its resolved conversation key and ready payload."""
+        if submission_id is None and ready_result is not None:
+            marker = submission_marker(ready_result.pending_event)
+            submission_id = marker.submission_id if marker is not None else None
         self._lanes.submit(
             slot,
             key=key,
             source_event_id=source_event_id,
-            source_kind=source_kind,
             ready_result=ready_result,
             ready_task=ready_task,
-            received_at=received_at,
+            claim=claim,
             busy_at_submit=self._conversation_is_busy(key),
+            submission_id=submission_id,
         )
 
     def release_lane_slot(self, slot: LaneSlot) -> None:
@@ -376,11 +402,14 @@ class CoalescingGate:
         """Settle a source whose asynchronous readiness completed with no payload."""
         if self._gate_owns_source_event(source_event_id):
             return
-        if self._on_intentionally_ignored_source is not None:
-            await self._on_intentionally_ignored_source(source_event_id)
+        if self._on_intentionally_ignored_sources is not None:
+            await self._on_intentionally_ignored_sources((source_event_id,))
 
     def _conversation_is_busy(self, key: CoalescingKey) -> bool:
-        return self._dispatch_allowed_now is not None and not self._dispatch_allowed_now(key)
+        """Return whether a response is running in this key's conversation right now."""
+        return self._active_thread_ids_for_room is not None and key.thread_id in self._active_thread_ids_for_room(
+            key.room_id,
+        )
 
     async def _admit_from_lane(
         self,
@@ -401,7 +430,6 @@ class CoalescingGate:
             received_at=delivery.received_at,
             receipt_time=slot.receipt_time,
             source_event_id=delivery.source_event_id,
-            source_kind=delivery.source_kind,
             lane_slot=slot,
         )
 
@@ -419,15 +447,13 @@ class CoalescingGate:
     @staticmethod
     def _queued_event_allows_room_scope_batching(queued: _QueuedEvent) -> bool:
         return source_or_event_allows_room_scope_batching(
-            queued.source_kind,
-        ) or source_or_event_allows_room_scope_batching(
-            queued.pending_event.event.source_kind,
+            queued.pending_event.facts.source_kind,
             queued.pending_event.event,
         )
 
     @staticmethod
     def _queued_event_is_voice(queued: _QueuedEvent) -> bool:
-        return VOICE_SOURCE_KIND in {queued.source_kind, queued.pending_event.event.source_kind}
+        return queued.pending_event.facts.source_kind == VOICE_SOURCE_KIND
 
     @staticmethod
     def _queued_event_is_thread_root_media(queued: _QueuedEvent, thread_id: str) -> bool:
@@ -637,9 +663,23 @@ class CoalescingGate:
         normal_count = CoalescingGate._front_live_run_length(gate, run_limit=run_limit)
         return normal_count < len(gate.queue)
 
-    def _front_normal_run_ends_with_text(self, gate: _GateEntry, *, run_limit: int | None) -> bool:
-        """Return whether the claimable front run is terminated by a text-like utterance."""
+    def _front_turn_length(self, gate: _GateEntry, *, run_limit: int | None) -> int:
+        """Return how many front events the next claim takes: the live run up to its first run or addressing change."""
         count = self._front_live_run_length(gate, run_limit=run_limit)
+        return self._front_same_run_identity_length(gate, count) if count else 0
+
+    def _front_submission(self, gate: _GateEntry, *, run_limit: int | None) -> SubmissionMarker | None:
+        """Return the composer submission marker on the front turn's last event, if it carries one."""
+        count = self._front_turn_length(gate, run_limit=run_limit)
+        return submission_marker(gate.queue[count - 1].pending_event) if count else None
+
+    def _front_turn_complete(self, gate: _GateEntry, *, run_limit: int | None) -> bool:
+        """Return whether the front turn is complete: another turn's event follows it, or it ends a submission or text."""
+        count = self._front_live_run_length(gate, run_limit=run_limit)
+        if self._front_turn_length(gate, run_limit=run_limit) < count:
+            return True
+        if (submission := self._front_submission(gate, run_limit=run_limit)) is not None:
+            return not submission.more
         return (
             count > 0
             and pending_event_is_text(gate.queue[count - 1].pending_event)
@@ -647,6 +687,8 @@ class CoalescingGate:
         )
 
     def _front_debounce_seconds(self, gate: _GateEntry, *, run_limit: int | None) -> float:
+        if (submission := self._front_submission(gate, run_limit=run_limit)) is not None and submission.more:
+            return _SUBMISSION_WAIT_SECONDS
         count = self._front_live_run_length(gate, run_limit=run_limit)
         if count and pending_event_is_text(gate.queue[count - 1].pending_event):
             return max(gate.queue[count - 1].pending_event.text_debounce_seconds, 0.0)
@@ -673,6 +715,8 @@ class CoalescingGate:
     def _enqueue_path(self, kind: QueueKind, pending_event: PendingEvent) -> str:
         if kind is QueueKind.BYPASS:
             return "bypass"
+        if (submission := submission_marker(pending_event)) is not None:
+            return "submission_hold" if submission.more else "submission_complete"
         if self._debounce_seconds() <= 0:
             return "zero_debounce"
         if pending_event_is_text(pending_event):
@@ -714,7 +758,7 @@ class CoalescingGate:
             requester_user_id=coalescing_owner_log_label(key.owner),
             event_id=pending_event.event.event_id,
             pending_count=pending_count,
-            source_kind=pending_event.event.source_kind,
+            source_kind=pending_event.facts.source_kind,
             timing_scope=event_timing_scope(pending_event.event.event_id),
         )
 
@@ -723,7 +767,24 @@ class CoalescingGate:
         key: CoalescingKey,
         pending_events: list[PendingEvent],
     ) -> _FlushDiagnostics:
-        turn = build_prepared_turn(key, pending_events, timestamp_formatter=self._timestamp_formatter)
+        turn = build_prepared_turn(
+            key,
+            pending_events,
+            queues_other_run=partial(self.queues_other_run, key),
+            # Follow-ups held back by a requester split waited on the response that just
+            # finished; left pending, their notices would cut this turn short and hand its
+            # unfinished work to the next requester's turn.
+            queued_follow_up_notices=(
+                tuple(
+                    pending_event.notice
+                    for pending_event in self.queued_pending_events(key)
+                    if pending_event.notice is not None
+                )
+                if is_active_follow_up_coalescing_key(key)
+                else ()
+            ),
+            timestamp_formatter=self._timestamp_formatter,
+        )
         pending_count = len(pending_events)
         timing_scope = event_timing_scope(turn.event.event_id)
         return _FlushDiagnostics(
@@ -796,13 +857,13 @@ class CoalescingGate:
             gate,
             enqueue_start=enqueue_start,
             path=path,
-            source_kind=pending_event.event.source_kind,
+            source_kind=pending_event.facts.source_kind,
         )
         emit_elapsed_timing(
             "coalescing_gate.enqueue",
             enqueue_start,
             path=path,
-            source_kind=pending_event.event.source_kind,
+            source_kind=pending_event.facts.source_kind,
             pending_count=self._gate_work_count(gate),
             flush_outcome=flush_outcome,
             oldest_pending_age_ms=self._oldest_pending_age_ms(gate),
@@ -814,15 +875,21 @@ class CoalescingGate:
         if is_active_follow_up_coalescing_key(key) or not self._conversation_is_busy(key):
             return key
         pending_event = ready_result.pending_event
-        if pending_event.event.dispatch_policy_source_kind is None and not is_coalescing_exempt_source_kind(
-            pending_event.event,
-            pending_event.event.source_kind,
+        event = pending_event.event
+        follow_up_key = active_follow_up_coalescing_key(key.room_id, key.thread_id)
+        if (
+            pending_event.facts.origin.blocks_unmentioned_managed_sender
+            and event.raw_event is None
+            and event.for_another_participant is not False
+            and not any(queued.event.sender == event.sender for queued in self.queued_pending_events(follow_up_key))
         ):
-            pending_event.event = replace(
-                pending_event.event,
-                dispatch_policy_source_kind=ACTIVE_THREAD_FOLLOW_UP_SOURCE_KIND,
-            )
-        return active_follow_up_coalescing_key(key.room_id, key.thread_id)
+            # An agent's text that does not mention this agent is settled as chatter when dispatched, so it does not
+            # wait for the response. An upload still waits, since a caption that mentions this agent may follow, and so
+            # does a message from a sender already waiting here, such as the next segment of a split reply.
+            return key
+        if not source_kind_bypasses_coalescing(pending_event.facts.source_kind):
+            pending_event.event = replace(pending_event.event, active_follow_up=True)
+        return follow_up_key
 
     async def admit(
         self,
@@ -832,7 +899,6 @@ class CoalescingGate:
         received_at: float | None = None,
         receipt_time: float | None = None,
         source_event_id: str | None = None,
-        source_kind: str = "pending",
         lane_slot: LaneSlot | None = None,
     ) -> None:
         """Admit one ready, conversation-assigned event under its coalescing key.
@@ -847,7 +913,6 @@ class CoalescingGate:
             received_at=received_at if received_at is not None else time.time(),
             receipt_time=receipt_time if receipt_time is not None else time.monotonic(),
             source_event_id=source_event_id,
-            source_kind=source_kind,
             ready_result=ready_result,
             lane_slot=lane_slot,
         )
@@ -909,21 +974,25 @@ class CoalescingGate:
     ) -> _DebounceWaitResult:
         """Wait for the live quiet window, returning early when the batch completes.
 
-        Ordinary text completes an utterance and skips the wait. Adaptive text
-        and media keep their configured quiet windows until an immediate text
-        message completes the utterance or a barrier appears.
+        Ordinary text and the last event of a composer submission complete an
+        utterance and skip the wait. Adaptive text and media keep their
+        configured quiet windows, and an event that says its submission has more
+        to come waits the submission bound, until an immediate text message or
+        a submission's last event completes the utterance or a barrier appears.
         """
         gate.phase = _GatePhase.DEBOUNCE
         if not gate.queue:
             gate.deadline = time.monotonic()
             return _DebounceWaitResult(quiet_deadline=gate.deadline)
+        split_reply_led = await self._wait_for_front_split_reply(gate)
         limit = run_limit()
         debounce_seconds = self._front_debounce_seconds(gate, run_limit=limit)
         if (
-            debounce_seconds <= 0
+            split_reply_led
+            or debounce_seconds <= 0
             or self._is_shutting_down()
             or gate.drain_all_requested
-            or self._front_normal_run_ends_with_text(gate, run_limit=limit)
+            or self._front_turn_complete(gate, run_limit=limit)
         ):
             gate.deadline = time.monotonic()
             return _DebounceWaitResult(quiet_deadline=gate.deadline)
@@ -942,10 +1011,16 @@ class CoalescingGate:
         while True:
             deadline = gate.deadline or time.monotonic()
             if not await self._wait_for_deadline(gate, deadline):
-                return _DebounceWaitResult(quiet_deadline=quiet_deadline)
+                submission = self._front_submission(gate, run_limit=run_limit())
+                return _DebounceWaitResult(
+                    quiet_deadline=quiet_deadline,
+                    timed_out_submission_id=(
+                        submission.submission_id if submission is not None and submission.more else None
+                    ),
+                )
             limit = run_limit()
             debounce_seconds = self._front_debounce_seconds(gate, run_limit=limit)
-            if not gate.queue or self._front_normal_run_ends_with_text(gate, run_limit=limit):
+            if not gate.queue or self._front_turn_complete(gate, run_limit=limit):
                 gate.deadline = time.monotonic()
                 return _DebounceWaitResult(quiet_deadline=gate.deadline)
             if (
@@ -964,14 +1039,61 @@ class CoalescingGate:
             )
             gate.deadline = quiet_deadline
 
+    def _report_submission_timeout(self, key: CoalescingKey, gate: _GateEntry, *, run_limit: int | None) -> None:
+        """Report that a hold reached its bound with the front turn still saying more is coming."""
+        submission = self._front_submission(gate, run_limit=run_limit)
+        if submission is None or not submission.more:
+            return
+        logger.warning(
+            "coalescing_gate_submission_timed_out",
+            room_id=key.room_id,
+            thread_id=key.thread_id,
+            requester_user_id=coalescing_owner_log_label(key.owner),
+            submission_id=submission.submission_id,
+            pending_count=self._front_turn_length(gate, run_limit=run_limit),
+            wait_seconds=_SUBMISSION_WAIT_SECONDS,
+        )
+
+    async def _wait_for_front_split_reply(self, gate: _GateEntry) -> bool:
+        """Wait while the split reply leading the queue misses segments, and return whether one leads it."""
+        split = self._front_split_reply(gate)
+        if split is None:
+            return False
+        while split is not None and split.waits and not (self._is_shutting_down() or gate.drain_all_requested):
+            gate.deadline = split.until
+            await self._wait_for_deadline(gate, split.until)
+            split = self._front_split_reply(gate)
+        return True
+
+    def _front_split_reply(self, gate: _GateEntry) -> _FrontSplitReply | None:
+        """Return the split reply whose first segment leads the queue, with the continuations queued behind it."""
+        first = split_reply_segment(gate.queue[0].pending_event) if gate.queue else None
+        if first is None or first.count is None:
+            return None
+        continuations = [
+            (segment := split_reply_segment(queued.pending_event)) is not None
+            and segment.count is None
+            and segment.delivery == first.delivery
+            for queued in gate.queue
+        ]
+        # The turn takes the segments right behind the first; one whose segments interleave with another reply's waits
+        # no longer once all have arrived, and its segments then answer as they come.
+        length = 1 + next((index for index, joins in enumerate(continuations[1:]) if not joins), len(continuations) - 1)
+        until = gate.queue[0].receipt_time + _SPLIT_REPLY_WAIT_SECONDS
+        arrived = 1 + sum(continuations[1:])
+        return _FrontSplitReply(length=length, waits=arrived < first.count and time.monotonic() < until, until=until)
+
     def _front_run_limit(self, key: CoalescingKey, gate: _GateEntry) -> int | None:
         """Return how many front admissions may share one turn, or None for the whole front run.
 
+        A split reply's segments share one turn, wherever it was sent.
         A thread, or a room treated as one conversation, batches its whole front run.
         Otherwise each room-level message starts its own conversation, so only a
         burst whose messages were each sent within the debounce window of the
         previous one, and that holds voice or media, shares a turn.
         """
+        if (split := self._front_split_reply(gate)) is not None:
+            return split.length
         if key.thread_id is not None or (
             self._room_scope_is_single_conversation is not None and self._room_scope_is_single_conversation(key.room_id)
         ):
@@ -1076,13 +1198,13 @@ class CoalescingGate:
             ):
                 await self._dispatch_events(key, gate, segment_owner.pending_events)
         except asyncio.CancelledError:
-            segment_owner.close_metadata_once()
+            segment_owner.close_once()
             # Bounded abandonment clears drain_task after accounting for cancellation.
             if gate.drain_task is not None and (drain_context := self._current_drain_context(gate)) is not None:
                 drain_context.result.dispatch_cancelled_count += 1
             raise
         except Exception as error:
-            segment_owner.close_metadata_once()
+            segment_owner.close_once()
             drain_context = self._current_drain_context(gate)
             if type(error) is ResponseAdmissionRefusedError and (
                 self._is_shutting_down()
@@ -1113,15 +1235,15 @@ class CoalescingGate:
             dispatched = await self._dispatch_claimed_events(key, gate, segment_owner)
         except BaseException:
             if segment_owner is not None:
-                closed_before = segment_owner.metadata_closed
-                segment_owner.close_metadata_once()
+                closed_before = segment_owner.closed
+                segment_owner.close_once()
                 if not closed_before and (drain_context := self._current_drain_context(gate)) is not None:
                     drain_context.result.dropped_ready_count += len(segment_owner.pending_events)
             raise
         finally:
             self._clear_claimed_admissions(gate, admissions)
         if not dispatched and self._on_dispatch_failure is not None:
-            self._on_dispatch_failure(tuple(pending_events))
+            self._on_dispatch_failure(key.room_id, tuple(pending.event.event_id for pending in pending_events))
 
     async def _dispatch_front_barrier(
         self,
@@ -1154,7 +1276,7 @@ class CoalescingGate:
         key, gate = self._root_dispatches.pop(task)
         # A task cancelled before its first step never enters _dispatch_claim.
         if gate.claimed_admissions:
-            close_pending_event_metadata_once([queued.pending_event for queued in gate.claimed_admissions])
+            close_pending_events([queued.pending_event for queued in gate.claimed_admissions])
         if not task.cancelled() and (error := task.exception()) is not None:
             if (context := self._current_drain_context(gate)) is not None:
                 context.result.dispatch_failure_count += 1
@@ -1188,17 +1310,27 @@ class CoalescingGate:
     ) -> None:
         # Follow-up owners have no receipt lane; only requester-owned bursts
         # wait for same-sender lane work still resolving inside the window.
+        # A completed marked submission already received its final event in lane
+        # FIFO order, so any remaining lane work belongs to a later turn.
+        # An open submission that reached its bound still waits for matching
+        # in-flight lane work from the same submission, not unrelated later work.
+        run_limit = self._front_run_limit(key, gate)
+        front_submission = self._front_submission(gate, run_limit=run_limit)
         lane_key = ReceiptLaneKey.for_coalescing_owner(key.room_id, key.owner)
-        if lane_key is not None:
+        if lane_key is not None and not (front_submission is not None and not front_submission.more):
             admitted_lane_slot_ids = {id(queued.lane_slot) for queued in gate.queue if queued.lane_slot is not None}
             window_slots = self._lanes.undelivered_in_window(
                 lane_key,
                 before_or_at_receipt_time=debounce_result.quiet_deadline,
                 exclude_slot_ids=admitted_lane_slot_ids,
+                submission_id=debounce_result.timed_out_submission_id,
             )
             if window_slots:
                 await self._wait_for_lane_slots(gate, window_slots)
                 return
+
+        if debounce_result.timed_out_submission_id is not None:
+            self._report_submission_timeout(key, gate, run_limit=run_limit)
 
         parallel_root = self._allows_parallel_root_preparation(key)
         if parallel_root:
@@ -1212,7 +1344,7 @@ class CoalescingGate:
         )
         if candidate_count == 0:
             return
-        candidate_count = self._front_same_run_identity_length(key, gate, candidate_count)
+        candidate_count = self._front_same_run_identity_length(gate, candidate_count)
 
         claimed_admissions = self._claim_front_events(gate, candidate_count)
         if parallel_root:
@@ -1223,16 +1355,16 @@ class CoalescingGate:
             gate.drain_all_requested = False
 
     @staticmethod
-    def _front_same_run_identity_length(key: CoalescingKey, gate: _GateEntry, count: int) -> int:
+    def _front_same_run_identity_length(gate: _GateEntry, count: int) -> int:
         """Cap a front run at its first change of run identity or addressing, so each turn runs as its own sender.
 
         Uploads that mention nobody just before an addressing change stay with the message after them, their caption.
         """
-        front_identity = pending_event_run_identity(key, gate.queue[0].pending_event)
+        front_identity = gate.queue[0].pending_event.facts.run_identity
         addressing: bool | None = None
         uploads_start: int | None = None
         for index, queued in enumerate(islice(gate.queue, count)):
-            if pending_event_run_identity(key, queued.pending_event) != front_identity:
+            if queued.pending_event.facts.run_identity != front_identity:
                 return index
             event_addressing = pending_event_addressing(queued.pending_event)
             if event_addressing is None:
@@ -1253,7 +1385,6 @@ class CoalescingGate:
             return False
 
         candidate_count = self._front_same_run_identity_length(
-            key,
             gate,
             self._front_normal_run_length(gate, run_limit=None),
         )
@@ -1266,8 +1397,13 @@ class CoalescingGate:
 
     async def _drain_gate_iteration(self, key: CoalescingKey, gate: _GateEntry) -> None:
         drain_context = self._current_drain_context(gate)
-        if not (self._is_shutting_down() or self._is_bounded_drain(drain_context)):
-            await self._wait_until_dispatch_allowed(key)
+        if (
+            self._wait_for_thread_response_idle is not None
+            # Only a follow-up backlog waits: it was queued behind the response that holds its conversation.
+            and is_active_follow_up_coalescing_key(key)
+            and not (self._is_shutting_down() or self._is_bounded_drain(drain_context))
+        ):
+            await self._wait_for_thread_response_idle(key.room_id, key.thread_id)
         if not gate.queue:
             return
 
@@ -1394,7 +1530,7 @@ class _CoalescingDrainCoordinator:
                 gate.drain_task = None
             admissions = [*gate.claimed_admissions, *gate.queue]
             for queued in admissions:
-                close_pending_event_metadata_once([queued.pending_event])
+                queued.pending_event.close()
                 dropped_ready_count += 1
             gate.claimed_admissions = []
             gate.queue.clear()

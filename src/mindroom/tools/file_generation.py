@@ -102,7 +102,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["python-docx", "reportlab"],
-    docs_url="https://docs.agno.com/tools/toolkits/others/file_generation",
+    docs_url="https://docs.mindroom.chat/tools/execution-and-coding/#file_generation",
     managed_init_args=(ToolManagedInitArg.TOOL_OUTPUT_WORKSPACE_ROOT,),
     function_names=(
         "generate_code_file",

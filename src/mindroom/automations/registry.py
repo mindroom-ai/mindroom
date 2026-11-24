@@ -71,9 +71,14 @@ def iter_module_automations(module: ModuleType) -> list[CheckFn]:
 class _AutomationPlugin(Protocol):
     """The loaded-plugin fields compilation reads."""
 
-    name: str
-    entry_config: PluginEntryConfig
-    discovered_automations: tuple[CheckFn, ...]
+    @property
+    def name(self) -> str: ...
+
+    @property
+    def entry_config(self) -> PluginEntryConfig: ...
+
+    @property
+    def discovered_automations(self) -> tuple[CheckFn, ...]: ...
 
 
 @dataclass(frozen=True)
@@ -96,9 +101,10 @@ def _definition(check: CheckFn, settings: Mapping[str, Any]) -> AutomationDefini
 def _builtin_definitions() -> dict[str, AutomationDefinition]:
     # why-lazy: the built-ins import memory and runtime modules, and plugin snapshots are built at import time.
     from mindroom.automations.dreaming import check_dreaming  # noqa: PLC0415
+    from mindroom.automations.exploration import check_exploration  # noqa: PLC0415
     from mindroom.automations.prompt_curation import check_curation  # noqa: PLC0415
 
-    definitions = [_definition(check, {}) for check in (check_curation, check_dreaming)]
+    definitions = [_definition(check, {}) for check in (check_curation, check_dreaming, check_exploration)]
     return {definition.name: definition for definition in definitions}
 
 

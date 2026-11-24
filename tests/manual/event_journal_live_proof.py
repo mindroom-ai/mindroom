@@ -272,19 +272,19 @@ async def prove_recursion_depth(
         isinstance(reported, int),
         f"recursion_depth={reported!r}",
     )
-    # Measured, not asserted, because the two servers mean different things by
-    # it. Tuwunel reports the depth of the deepest event it actually returned,
-    # so this two-level tree reports 1. Synapse reports the constant 3, the
-    # depth it is willing to traverse, whatever the tree looks like. Both are
-    # defensible readings of the same field name, so no numeric floor above
-    # zero is correct on both -- which is exactly why
+    # Measured, not asserted, because servers mean different things by it.
+    # Older and upstream Tuwunel report the depth of the deepest event on the
+    # page, so this two-level tree reports 1. The Tuwunel fork from
+    # v1.9.4-mindroom.17 reports the depth its walk reached, and Synapse the
+    # depth it recurses to, 3 on both. No numeric floor above zero holds on
+    # every page of every server -- which is exactly why
     # `_REQUIRED_RECURSION_DEPTH` is 0 and the requirement MindRoom actually
     # enforces is the next check: the server reported a depth at all, meaning
     # it honoured `recurse` rather than silently returning direct children.
     findings.note(
         "what the reported depth means on this server",
         f"a two-level tree reported recursion_depth={reported!r}"
-        f" ({'the tree it returned' if isinstance(reported, int) and reported < 3 else 'a fixed capability'})",
+        f" ({'the deepest event it returned' if isinstance(reported, int) and reported < 3 else 'the depth it recursed to'})",
     )
     findings.record(
         "recursive traversal returns the indirectly related edit",

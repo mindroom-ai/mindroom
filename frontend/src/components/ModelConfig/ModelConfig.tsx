@@ -11,9 +11,13 @@ import {
   type Column,
   type ColumnDef,
   type SortingState,
-  getCoreRowModel,
-  getSortedRowModel,
-  useReactTable,
+  createSortedRowModel,
+  rowSortingFeature,
+  sortFn_alphanumeric,
+  sortFn_basic,
+  sortFn_text,
+  tableFeatures,
+  useTable,
 } from "@tanstack/react-table";
 import { useConfigStore } from "@/store/configStore";
 import { SchemaSection } from "@/components/SchemaForm";
@@ -40,7 +44,18 @@ import {
 } from "lucide-react";
 import { toast } from "@/components/ui/toaster";
 import { Badge } from "@/components/ui/badge";
+import {
+  SERVICE_NAME_CHARACTERS,
+  SERVICE_NAME_PATTERN,
+} from "@/lib/serviceNames";
+import {
+  getPathValue,
+  isPlainObject,
+  setPathValue,
+  type ConfigPath,
+} from "@/lib/configSchema";
 import { cn } from "@/lib/utils";
+import { useUnsavedDraft } from "@/hooks/useUnsavedDraft";
 import { ProviderLogo } from "./ProviderLogos";
 import { getProviderInfo, getProviderList } from "@/lib/providers";
 import type {
@@ -142,9 +157,6 @@ function providerToService(provider: string): string {
 }
 
 function sourceToLabel(source: string | null): string {
-  if (source === "env") {
-    return ".env";
-  }
   if (source === "ui") {
     return "UI";
   }
@@ -179,6 +191,36 @@ function getOpenAIBaseUrl(modelConfig: {
   return trimmed || null;
 }
 
+/** The paths of the leaf values that differ between two `extra_kwargs` maps. */
+function changedPaths(
+  previous: Record<string, unknown>,
+  next: Record<string, unknown>,
+): ConfigPath[] {
+  return Object.keys({ ...previous, ...next }).flatMap((key): ConfigPath[] => {
+    const [before, after] = [previous[key], next[key]];
+    if (isPlainObject(before) && isPlainObject(after)) {
+      return changedPaths(before, after).map((path) => [key, ...path]);
+    }
+    return JSON.stringify(before) === JSON.stringify(after) ? [] : [[key]];
+  });
+}
+
+/** The model a provider change saves: no config.yaml key, and only the `extra_kwargs` More settings set at `paths` during the row edit. */
+function keptOnProviderChange(
+  modelConfig: ModelConfigType,
+  paths: ConfigPath[],
+): ModelConfigType {
+  const { api_key: _apiKey, ...kept } = modelConfig;
+  const extraKwargs = modelConfig.extra_kwargs;
+  if (extraKwargs) {
+    kept.extra_kwargs = paths.reduce<Record<string, unknown>>((next, path) => {
+      const value = getPathValue(extraKwargs, path);
+      return value === undefined ? next : setPathValue(next, path, value);
+    }, {});
+  }
+  return kept;
+}
+
 function isValidHttpUrl(value: string): boolean {
   try {
     const parsed = new URL(value);
@@ -186,6 +228,18 @@ function isValidHttpUrl(value: string): boolean {
   } catch {
     return false;
   }
+}
+
+function validateModelName(modelName: string): boolean {
+  if (SERVICE_NAME_PATTERN.test(modelName)) {
+    return true;
+  }
+  toast({
+    title: "Error",
+    description: `Model name can only include ${SERVICE_NAME_CHARACTERS}`,
+    variant: "destructive",
+  });
+  return false;
 }
 
 function parseOptionalPositiveInteger(value: string): number | null {
@@ -366,12 +420,44 @@ function getKeyStatusDisplay(
   };
 }
 
+const modelTableFeatures = tableFeatures({
+  rowSortingFeature,
+  sortedRowModel: createSortedRowModel(),
+  sortFns: {
+    alphanumeric: sortFn_alphanumeric,
+    basic: sortFn_basic,
+    text: sortFn_text,
+  },
+});
+
+const SPLIT_DIGITS = /([0-9]+)/;
+
+/**
+ * Pick the sort function TanStack Table 8 picked on its own, so the models keep their order.
+ * It sampled only the rows after the tenth, so with ten models or fewer it compared the raw values (case-sensitive,
+ * `model-10` before `model-2`); past that, values with digits sort naturally and the rest ignore case.
+ */
+function sortFnFor<TValue>(
+  rows: readonly ModelRowData[],
+  value: (row: ModelRowData) => TValue,
+): "alphanumeric" | "basic" | "text" {
+  const sampled = rows.slice(10).map(value);
+  if (
+    sampled.some(
+      (item) => typeof item === "string" && item.split(SPLIT_DIGITS).length > 1,
+    )
+  ) {
+    return "alphanumeric";
+  }
+  return sampled.some((item) => typeof item === "string") ? "text" : "basic";
+}
+
 function SortableHeader({
   label,
   column,
 }: {
   label: string;
-  column: Column<ModelRowData, unknown>;
+  column: Column<typeof modelTableFeatures, ModelRowData, unknown>;
 }) {
   return (
     <Button
@@ -436,21 +522,31 @@ export function ModelConfig() {
     { id: "modelName", desc: false },
   ]);
 
-  const [editingRowId, setEditingRowId] = useState<string | null>(null);
   const [rowDraft, setRowDraft] = useState<RowDraft | null>(null);
-  // The model and loaded config as they were when row editing began, so
-  // Cancel can also undo More settings edits and Save only writes a Base URL
-  // the row changed.
+  // The model, row draft, and loaded config as they were when row editing
+  // began, so Cancel can also undo More settings edits, Save only writes a
+  // Base URL the row changed, and leaving the page asks only after a change.
   const [editingStart, setEditingStart] = useState<{
     config: ModelConfigType;
-    baseUrl: string;
+    draft: RowDraft;
     loadedConfig: typeof loadedConfig;
   } | null>(null);
+  const editingRowId = editingStart?.draft.modelName ?? null;
+  // The extra_kwargs paths More settings changed during this row edit; a
+  // provider change drops the rest, which belong to the old provider.
+  const [pathsSetInEdit, setPathsSetInEdit] = useState<ConfigPath[]>([]);
   const [isSavingRow, setIsSavingRow] = useState(false);
 
   const [isAddingRow, setIsAddingRow] = useState(false);
   const [newRowDraft, setNewRowDraft] = useState<RowDraft>(EMPTY_DRAFT);
   const [isSavingNewRow, setIsSavingNewRow] = useState(false);
+
+  useUnsavedDraft(
+    (rowDraft != null &&
+      JSON.stringify(rowDraft) !== JSON.stringify(editingStart?.draft)) ||
+      (isAddingRow &&
+        JSON.stringify(newRowDraft) !== JSON.stringify(EMPTY_DRAFT)),
+  );
 
   const models = useMemo(() => config?.models ?? {}, [config?.models]);
 
@@ -634,13 +730,7 @@ export function ModelConfig() {
       }
       return;
     }
-    setEditingRowId(row.modelName);
-    setEditingStart({
-      config: models[row.modelName],
-      baseUrl: row.openAIBaseUrl || "",
-      loadedConfig,
-    });
-    setRowDraft({
+    const draft: RowDraft = {
       modelName: row.modelName,
       provider: row.provider,
       modelId: row.modelId,
@@ -651,13 +741,15 @@ export function ModelConfig() {
       apiKey: "",
       selectedKeySourceModel: "",
       clearCustomKey: false,
-    });
+    };
+    setEditingStart({ config: models[row.modelName], draft, loadedConfig });
+    setRowDraft(draft);
   };
 
   const finishEditingRow = () => {
-    setEditingRowId(null);
     setRowDraft(null);
     setEditingStart(null);
+    setPathsSetInEdit([]);
   };
 
   const cancelEditingRow = () => {
@@ -755,6 +847,10 @@ export function ModelConfig() {
       return;
     }
 
+    if (!validateModelName(targetModelName)) {
+      return;
+    }
+
     if (originalModelName === "default" && targetModelName !== "default") {
       toast({
         title: "Error",
@@ -789,13 +885,12 @@ export function ModelConfig() {
     setIsSavingRow(true);
 
     const renamed = targetModelName !== originalModelName;
+    const providerChanged = rowDraft.provider !== originalModelConfig.provider;
     const hadCustomKey = Boolean(modelKeys[originalModelName]?.hasKey);
     const hasManualApiKey = Boolean(rowDraft.apiKey.trim());
     const hasKeyReuseSource = Boolean(rowDraft.selectedKeySourceModel);
     // A saved key belongs to the provider it was saved for.
-    const clearsCustomKey =
-      rowDraft.clearCustomKey ||
-      rowDraft.provider !== originalModelConfig.provider;
+    const clearsCustomKey = rowDraft.clearCustomKey || providerChanged;
 
     let keyOperationOk = true;
     let deletedOriginalKey = false;
@@ -836,7 +931,9 @@ export function ModelConfig() {
     }
 
     const nextModelConfig = {
-      ...originalModelConfig,
+      ...(providerChanged
+        ? keptOnProviderChange(originalModelConfig, pathsSetInEdit)
+        : originalModelConfig),
       provider: rowDraft.provider as ProviderType,
       id: targetModelId,
     };
@@ -854,11 +951,11 @@ export function ModelConfig() {
       delete nextModelConfig.icon;
     }
 
-    const nextExtraKwargs = { ...(originalModelConfig.extra_kwargs ?? {}) };
+    const nextExtraKwargs = { ...(nextModelConfig.extra_kwargs ?? {}) };
     if (rowDraft.provider === "openai") {
       // More settings may have edited extra_kwargs; keep its base_url unless
       // the row's own Base URL input changed.
-      if (rowDraft.baseUrl !== editingStart?.baseUrl) {
+      if (rowDraft.baseUrl !== editingStart?.draft.baseUrl) {
         if (normalizedBaseUrl) {
           nextExtraKwargs.base_url = normalizedBaseUrl;
         } else {
@@ -866,13 +963,7 @@ export function ModelConfig() {
         }
       }
     } else {
-      delete nextExtraKwargs.base_url;
       delete nextModelConfig.api;
-    }
-    if (rowDraft.provider !== originalModelConfig.provider) {
-      // A config.yaml key belongs to the old provider; never send it to the new one.
-      delete nextModelConfig.api_key;
-      delete nextExtraKwargs.api_key;
     }
     if (Object.keys(nextExtraKwargs).length > 0) {
       nextModelConfig.extra_kwargs = nextExtraKwargs;
@@ -917,6 +1008,10 @@ export function ModelConfig() {
         description: "Model name and model ID are required",
         variant: "destructive",
       });
+      return;
+    }
+
+    if (!validateModelName(modelName)) {
       return;
     }
 
@@ -1077,9 +1172,7 @@ export function ModelConfig() {
           >
             {keyDisplay.label}
             {keyDisplay.maskedKey && (
-              <span className="ml-1 font-mono opacity-80">
-                {keyDisplay.maskedKey}
-              </span>
+              <span className="ml-1 font-mono">{keyDisplay.maskedKey}</span>
             )}
           </Badge>
           {keyDisplay.copyable && modelName && provider && (
@@ -1137,7 +1230,8 @@ export function ModelConfig() {
     const currentModelConfig = currentModelName
       ? models[currentModelName]
       : undefined;
-    // Saving under another provider drops the saved key and the config.yaml key.
+    // Saving under another provider drops the saved key and saves the model
+    // keptOnProviderChange keeps.
     const providerChanged =
       currentModelConfig !== undefined &&
       currentModelConfig.provider !== draft.provider;
@@ -1147,8 +1241,11 @@ export function ModelConfig() {
       !hasManualApiKey &&
       !hasReuseSource;
     const providerFallbackKey = providerKeys[draft.provider];
-    const usesConfigKey =
-      !providerChanged && hasConfigApiKey(currentModelConfig);
+    const usesConfigKey = hasConfigApiKey(
+      providerChanged
+        ? keptOnProviderChange(currentModelConfig, pathsSetInEdit)
+        : currentModelConfig,
+    );
     const currentStatus = currentModelName
       ? getKeyStatusDisplay(
           currentModelName,
@@ -1301,7 +1398,11 @@ export function ModelConfig() {
           className="h-8 text-xs"
         />
         <p className="text-xs text-muted-foreground">
-          Leave empty to use{" "}
+          Empty uses{" "}
+          <code className="rounded bg-muted px-1 py-0.5 text-[10px]">
+            OPENAI_BASE_URL
+          </code>
+          , else{" "}
           <code className="rounded bg-muted px-1 py-0.5 text-[10px]">
             {DEFAULT_OPENAI_BASE_URL}
           </code>
@@ -1373,9 +1474,10 @@ export function ModelConfig() {
     );
   };
 
-  const columns: ColumnDef<ModelRowData>[] = [
+  const columns: ColumnDef<typeof modelTableFeatures, ModelRowData>[] = [
     {
       accessorKey: "modelName",
+      sortFn: sortFnFor(rows, (row) => row.modelName),
       header: ({ column }) => <SortableHeader label="Name" column={column} />,
       cell: ({ row }) => {
         const isEditing = editingRowId === row.original.modelName && rowDraft;
@@ -1413,6 +1515,7 @@ export function ModelConfig() {
     {
       id: "provider",
       accessorFn: (row) => row.providerName,
+      sortFn: sortFnFor(rows, (row) => row.providerName),
       header: ({ column }) => (
         <SortableHeader label="Provider" column={column} />
       ),
@@ -1440,7 +1543,6 @@ export function ModelConfig() {
                     ? {
                         ...current,
                         provider,
-                        baseUrl: provider === "openai" ? current.baseUrl : "",
                         apiKey: "",
                         selectedKeySourceModel: "",
                       }
@@ -1471,6 +1573,7 @@ export function ModelConfig() {
     },
     {
       accessorKey: "modelId",
+      sortFn: sortFnFor(rows, (row) => row.modelId),
       header: ({ column }) => (
         <SortableHeader label="Model ID" column={column} />
       ),
@@ -1535,6 +1638,7 @@ export function ModelConfig() {
     {
       id: "apiKey",
       accessorFn: (row) => row.keyDisplay?.keyId || "",
+      sortFn: sortFnFor(rows, (row) => row.keyDisplay?.keyId || ""),
       header: ({ column }) => (
         <SortableHeader label="API Key" column={column} />
       ),
@@ -1620,13 +1724,12 @@ export function ModelConfig() {
     },
   ];
 
-  const table = useReactTable({
+  const table = useTable({
+    features: modelTableFeatures,
     data: rows,
     columns,
     state: { sorting },
     onSortingChange: setSorting,
-    getCoreRowModel: getCoreRowModel(),
-    getSortedRowModel: getSortedRowModel(),
   });
 
   if (!config) {
@@ -1814,7 +1917,7 @@ export function ModelConfig() {
                             : "cursor-pointer hover:bg-muted/30",
                         )}
                       >
-                        {row.getVisibleCells().map((cell) => (
+                        {row.getAllCells().map((cell) => (
                           <td
                             key={cell.id}
                             className={cn(
@@ -1846,9 +1949,16 @@ export function ModelConfig() {
               value={models[editingRowId]}
               path={["models", editingRowId]}
               exclude={modelEditorFields(rowDraft.provider)}
-              onFieldChange={(key, next) =>
-                updateConfigValue(["models", editingRowId, key], next)
-              }
+              onFieldChange={(key, next) => {
+                if (key === "extra_kwargs") {
+                  const changed = changedPaths(
+                    models[editingRowId].extra_kwargs ?? {},
+                    isPlainObject(next) ? next : {},
+                  );
+                  setPathsSetInEdit((current) => [...current, ...changed]);
+                }
+                updateConfigValue(["models", editingRowId, key], next);
+              }}
             />
           )}
 

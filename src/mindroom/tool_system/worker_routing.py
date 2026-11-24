@@ -6,38 +6,41 @@ import hashlib
 import re
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal, cast
+from typing import TYPE_CHECKING, Any, Literal, cast, get_args
 from urllib.parse import quote
 
-from mindroom.tool_system.context_bound_streams import context_bound_async_stream
+from mindroom.workers.models import SCRIPT_RESOURCE_PROFILE_NAMES
+from mindroom.workers.placements import DedicatedWorkerPlacement
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Awaitable, Callable, Iterator, Mapping
+    from collections.abc import Iterator, Mapping
 
     from mindroom.agent_policy import ResolvedAgentPolicy
     from mindroom.constants import RuntimePaths
 
 WorkerScope = Literal["shared", "user", "user_agent"]
 ResolvedWorkerKeyScope = Literal["shared", "user", "user_agent", "unscoped"]
-_ExecutionChannel = Literal["matrix", "openai_compat", "mcp"]
+_ExecutionChannel = Literal["matrix", "openai_compat", "headless", "mcp"]
 
 _WORKER_DIRNAME_MAX_PREFIX_LENGTH = 80
 _DEFAULT_WORKER_NAME_PREFIX = "mindroom-worker"
 _DNS_LABEL_MAX_LENGTH = 63
 _WORKER_ID_DIGEST_LENGTH = 24
-_DESCRIPTIVE_WORKER_ID_DIGEST_LENGTH = 10
 _AGENT_WORKSPACE_DIRNAME = "workspace"
 _PRIVATE_INSTANCE_ROOT_DIRNAME = "private_instances"
+SHARED_DIRECTORIES_DIRNAME = "shared_directories"
 WORKER_CREDENTIALS_DIRNAME = "credentials"
 WORKER_SHARED_CREDENTIALS_DIRNAME = ".shared_credentials"
-_SHARED_ONLY_INTEGRATION_NAMES = frozenset(
-    {
-        "spotify",
-        "homeassistant",
-    },
-)
+# Tools and dashboard integrations restricted to shared scope, with `spotify_oauth`, the credential service of the
+# Spotify connection. MCP registry tools are supported on every scope: OAuth-backed servers follow the configured
+# worker scope, and non-OAuth servers always execute through the shared server session without requester credentials.
+_SHARED_ONLY_INTEGRATION_NAMES = frozenset({"spotify", "spotify_oauth", "homeassistant"})
+# What a worker of its own is pinned to: one subagent, or one name a reply's calls address.
+_PinnedWorkerKind = Literal["subagent", "named"]
+_PIN_ID_PATTERN = re.compile(r"[0-9a-f]{32}")
+_PIN_PATTERN = re.compile(rf"(?P<kind>{'|'.join(get_args(_PinnedWorkerKind))})=[0-9a-f]{{32}}")
 
 
 @dataclass(frozen=True)
@@ -55,6 +58,11 @@ class ToolExecutionIdentity:
     account_id: str | None = None
     transport_agent_name: str | None = None
 
+    @property
+    def recipient(self) -> str:
+        """The entity whose Matrix account answers this caller: its team transport, or the agent itself."""
+        return self.transport_agent_name or self.agent_name
+
 
 type SerializedToolExecutionIdentity = dict[str, object]
 
@@ -71,79 +79,41 @@ _TOOL_EXECUTION_IDENTITY_OPTIONAL_PAYLOAD_FIELDS = (
 )
 
 
-def serialize_tool_execution_identity(
-    identity: ToolExecutionIdentity,
-    *,
-    include_transport_agent_name: bool = True,
-) -> SerializedToolExecutionIdentity:
+def serialize_tool_execution_identity(identity: ToolExecutionIdentity) -> SerializedToolExecutionIdentity:
     """Return a JSON-safe payload for one execution identity."""
-    payload = cast("SerializedToolExecutionIdentity", asdict(identity))
-    if not include_transport_agent_name:
-        payload.pop("transport_agent_name", None)
-    return payload
+    return cast("SerializedToolExecutionIdentity", asdict(identity))
 
 
 def parse_tool_execution_identity_payload(
     payload: object,
     *,
-    strict: bool = True,
     error_prefix: str = "Tool execution_identity",
-) -> ToolExecutionIdentity | None:
-    """Parse one JSON execution-identity payload with strict or lenient error handling."""
+) -> ToolExecutionIdentity:
+    """Parse one JSON execution-identity payload, raising ``TypeError`` under ``error_prefix`` when it is unreadable."""
     if not isinstance(payload, dict):
-        return _invalid_tool_execution_identity_payload(strict, f"{error_prefix} must be an object")
+        msg = f"{error_prefix} must be an object"
+        raise TypeError(msg)
 
     raw_payload = cast("dict[str, object]", payload)
     channel = raw_payload.get("channel")
-    if channel not in ("matrix", "openai_compat", "mcp"):
-        return _invalid_tool_execution_identity_payload(
-            strict,
-            f"{error_prefix}.channel must be matrix, openai_compat, or mcp",
-        )
+    if channel not in get_args(_ExecutionChannel):
+        msg = f"{error_prefix}.channel must be matrix, openai_compat, headless, or mcp"
+        raise TypeError(msg)
 
     agent_name = raw_payload.get("agent_name")
     if not isinstance(agent_name, str) or not agent_name.strip():
-        return _invalid_tool_execution_identity_payload(
-            strict,
-            f"{error_prefix}.agent_name must be a non-empty string",
-        )
+        msg = f"{error_prefix}.agent_name must be a non-empty string"
+        raise TypeError(msg)
 
     optional_values: dict[str, str | None] = {}
     for field_name in _TOOL_EXECUTION_IDENTITY_OPTIONAL_PAYLOAD_FIELDS:
         value = raw_payload.get(field_name)
         if value is not None and not isinstance(value, str):
-            return _invalid_tool_execution_identity_payload(
-                strict,
-                f"{error_prefix}.{field_name} must be a string when present",
-            )
+            msg = f"{error_prefix}.{field_name} must be a string when present"
+            raise TypeError(msg)
         optional_values[field_name] = value
 
-    return ToolExecutionIdentity(
-        channel=cast("_ExecutionChannel", channel),
-        agent_name=agent_name,
-        requester_id=optional_values["requester_id"],
-        room_id=optional_values["room_id"],
-        thread_id=optional_values["thread_id"],
-        resolved_thread_id=optional_values["resolved_thread_id"],
-        session_id=optional_values["session_id"],
-        tenant_id=optional_values["tenant_id"],
-        account_id=optional_values["account_id"],
-        transport_agent_name=optional_values["transport_agent_name"],
-    )
-
-
-def _invalid_tool_execution_identity_payload(strict: bool, message: str) -> None:
-    if strict:
-        raise TypeError(message)
-
-
-@dataclass(frozen=True)
-class _ResolvedWorkerExecution:
-    """Resolved worker execution scope from explicit worker-scope policy."""
-
-    worker_scope: WorkerScope | None
-    execution_identity: ToolExecutionIdentity | None
-    worker_key: str | None
+    return ToolExecutionIdentity(channel=cast("_ExecutionChannel", channel), agent_name=agent_name, **optional_values)
 
 
 @dataclass(frozen=True)
@@ -162,58 +132,171 @@ class ResolvedWorkerTarget:
     account_id: str | None
     worker_key: str | None
     private_agent_names: frozenset[str] | None = None
+    # The subagent's own worker the resolving turn ran its calls in, which its calls reach wherever they run later.
+    # Not compared: equality asks whether the agent, requester, and worker key match, not which worker calls run in.
+    placement: DedicatedWorkerPlacement | None = field(default=None, compare=False)
 
 
-_TOOL_EXECUTION_IDENTITY: ContextVar[ToolExecutionIdentity | None] = ContextVar(
-    "tool_execution_identity",
+_STORED_TARGET_VERSION = 2
+# LEGACY_COMPAT: version 1 stored worker targets, which have no placement key.
+# Legacy format: a dump_worker_target object with "version": 1 and no "placement" key.
+# Last legacy release: every release from v2026.11.264 (which added stored targets) through the last one before
+# this change writes version 1, v2026.11.265 included; the release with this change writes version 2, which adds
+# "placement".
+# Handling: load_worker_target reads it with no placement, so it reaches the agent's normal worker as before.
+# Coverage: tests/test_worker_target_storage.py::test_a_version_1_target_loads_without_a_placement
+_LEGACY_STORED_TARGET_VERSION = 1
+# The stored format of each version, spelled out so that a new field of these dataclasses fails the round trip tests
+# instead of changing what plugins have stored.
+_LEGACY_STORED_TARGET_KEYS = frozenset(
+    {
+        "version",
+        "worker_scope",
+        "routing_agent_name",
+        "execution_identity",
+        "tenant_id",
+        "account_id",
+        "worker_key",
+        "private_agent_names",
+    },
+)
+_STORED_TARGET_KEYS = _LEGACY_STORED_TARGET_KEYS | {"placement"}
+_STORED_IDENTITY_KEYS = frozenset(
+    {
+        "channel",
+        "agent_name",
+        "requester_id",
+        "room_id",
+        "thread_id",
+        "resolved_thread_id",
+        "session_id",
+        "tenant_id",
+        "account_id",
+        "transport_agent_name",
+    },
+)
+_STORED_TARGET_STRINGS = ("routing_agent_name", "tenant_id", "account_id", "worker_key")
+
+
+def dump_worker_target(target: ResolvedWorkerTarget) -> dict[str, object]:
+    """Return a JSON-safe copy of ``target`` that ``load_worker_target`` reads back, for a plugin to store."""
+    identity = target.execution_identity
+    names = target.private_agent_names
+    placement = target.placement
+    return {
+        "version": _STORED_TARGET_VERSION,
+        "worker_scope": target.worker_scope,
+        "routing_agent_name": target.routing_agent_name,
+        "execution_identity": serialize_tool_execution_identity(identity) if identity is not None else None,
+        "tenant_id": target.tenant_id,
+        "account_id": target.account_id,
+        "worker_key": target.worker_key,
+        "private_agent_names": sorted(names) if names is not None else None,
+        "placement": asdict(placement) if placement is not None else None,
+    }
+
+
+def load_worker_target(data: object) -> ResolvedWorkerTarget:
+    """Return the target ``dump_worker_target`` stored, else raise ``ValueError``.
+
+    It refuses a target whose worker key or private-agent visibility is not what its own scope, agent, and identity
+    resolve, so stored data never pairs one person's or agent's identity with another's worker.
+    """
+    if not isinstance(data, dict) or "version" not in data:
+        msg = "A stored worker target is an object with a version key."
+        raise ValueError(msg)
+    stored = cast("dict[str, object]", data)
+    version = stored["version"]
+    # ``type`` rather than ``==``, which takes ``true`` and ``1.0`` for ``1``.
+    if type(version) is not int or version not in (_LEGACY_STORED_TARGET_VERSION, _STORED_TARGET_VERSION):
+        msg = f"Unknown stored worker target version: {version!r}."
+        raise ValueError(msg)
+    keys = _STORED_TARGET_KEYS if version == _STORED_TARGET_VERSION else _LEGACY_STORED_TARGET_KEYS
+    if set(stored) != keys:
+        msg = f"A stored worker target of version {version} has exactly the keys {sorted(keys)}."
+        raise ValueError(msg)
+    scope, identity, names = stored["worker_scope"], stored["execution_identity"], stored["private_agent_names"]
+    placement = stored.get("placement")
+    strings = {name: stored[name] for name in _STORED_TARGET_STRINGS}
+    if (
+        scope not in (None, *get_args(WorkerScope))
+        or any(value is not None and not isinstance(value, str) for value in strings.values())
+        or (names is not None and not (isinstance(names, list) and all(isinstance(name, str) for name in names)))
+        or (identity is not None and not (isinstance(identity, dict) and set(identity) == _STORED_IDENTITY_KEYS))
+        or (placement is not None and not _is_stored_placement(placement))
+    ):
+        msg = "A stored worker target holds a value dump_worker_target never writes."
+        raise ValueError(msg)
+    try:
+        identity = parse_tool_execution_identity_payload(identity) if identity is not None else None
+    except TypeError as error:
+        msg = f"A stored worker target holds a value dump_worker_target never writes: {error}."
+        raise ValueError(msg) from None
+    target = ResolvedWorkerTarget(
+        worker_scope=cast("WorkerScope | None", scope),
+        execution_identity=identity,
+        private_agent_names=frozenset(cast("list[str]", names)) if names is not None else None,
+        placement=DedicatedWorkerPlacement(**cast("dict[str, Any]", placement)) if placement is not None else None,
+        **cast("dict[str, str | None]", strings),
+    )
+    agent = target.routing_agent_name
+    visibilities = (
+        {_turn_private_agent_names(target.worker_scope, agent, is_private=private) for private in (False, True)}
+        if agent is not None
+        else {None}
+    )
+    # The target is what a turn of its agent resolves, whether that agent is private or not.
+    if target not in (
+        resolve_worker_target(
+            target.worker_scope,
+            agent,
+            execution_identity=identity,
+            tenant_id=target.tenant_id,
+            account_id=target.account_id,
+            private_agent_names=visibility,
+        )
+        for visibility in visibilities
+    ):
+        msg = "A stored worker target names another worker than its own scope, agent, and identity resolve."
+        raise ValueError(msg)
+    return target
+
+
+def _is_stored_placement(placement: object) -> bool:
+    """Return whether ``placement`` is a placement ``dump_worker_target`` writes."""
+    if not isinstance(placement, dict) or set(placement) != {"subagent_id", "resource_profile"}:
+        return False
+    fields = cast("dict[str, object]", placement)
+    subagent_id, profile = fields["subagent_id"], fields["resource_profile"]
+    return (
+        isinstance(subagent_id, str)
+        and _PIN_ID_PATTERN.fullmatch(subagent_id) is not None
+        and profile in (None, *SCRIPT_RESOURCE_PROFILE_NAMES)
+    )
+
+
+# The identity a runner without a Matrix conversation binds for the calls it runs; a conversation's context names
+# its own. Only ``runtime_context.detached_tool_scope``, ``runtime_context.member_tool_scope``, and the worker's
+# sandbox runner bind it; everything else reads ``runtime_context.current_execution_identity()``.
+_DETACHED_EXECUTION_IDENTITY: ContextVar[ToolExecutionIdentity | None] = ContextVar(
+    "detached_execution_identity",
     default=None,
 )
 
 
-def get_tool_execution_identity() -> ToolExecutionIdentity | None:
-    """Return the current tool execution identity."""
-    return _TOOL_EXECUTION_IDENTITY.get()
-
-
-def active_tool_execution_identity(
-    execution_identity: ToolExecutionIdentity | None,
-) -> ToolExecutionIdentity | None:
-    """Return the explicit execution identity or the active boundary context."""
-    if execution_identity is not None:
-        return execution_identity
-    return get_tool_execution_identity()
+def detached_execution_identity() -> ToolExecutionIdentity | None:
+    """Return the identity the running call's runner bound outside any Matrix conversation."""
+    return _DETACHED_EXECUTION_IDENTITY.get()
 
 
 @contextmanager
-def tool_execution_identity(identity: ToolExecutionIdentity | None) -> Iterator[None]:
-    """Set the current tool execution identity for the active execution scope."""
-    token = _TOOL_EXECUTION_IDENTITY.set(identity)
+def bind_detached_execution_identity(identity: ToolExecutionIdentity | None) -> Iterator[None]:
+    """Bind ``identity`` as the running call's identity where no Matrix conversation names one."""
+    token = _DETACHED_EXECUTION_IDENTITY.set(identity)
     try:
         yield
     finally:
-        _TOOL_EXECUTION_IDENTITY.reset(token)
-
-
-async def run_with_tool_execution_identity[ReturnT](
-    identity: ToolExecutionIdentity | None,
-    *,
-    operation: Callable[[], Awaitable[ReturnT]],
-) -> ReturnT:
-    """Execute one async operation inside one execution-identity boundary."""
-    with tool_execution_identity(identity):
-        return await operation()
-
-
-def stream_with_tool_execution_identity[ChunkT](
-    identity: ToolExecutionIdentity | None,
-    *,
-    stream_factory: Callable[[], AsyncIterator[ChunkT]],
-) -> AsyncIterator[ChunkT]:
-    """Wrap one async iterator without spanning execution-identity tokens across yields."""
-    return context_bound_async_stream(
-        context_factory=lambda: tool_execution_identity(identity),
-        stream_factory=stream_factory,
-    )
+        _DETACHED_EXECUTION_IDENTITY.reset(token)
 
 
 def normalize_worker_key_part(value: str) -> str:
@@ -222,61 +305,12 @@ def normalize_worker_key_part(value: str) -> str:
     return normalized or "default"
 
 
-def _digest_and_safe_prefix(worker_key: str, prefix: str, *, digest_length: int) -> tuple[str, str]:
-    """Return the worker-key digest and a prefix normalized to a DNS-label-safe slug beside it."""
-    digest = hashlib.sha256(worker_key.encode("utf-8")).hexdigest()[:digest_length]
-    normalized_prefix = re.sub(r"[^a-z0-9-]+", "-", prefix.lower()).strip("-") or _DEFAULT_WORKER_NAME_PREFIX
-    max_prefix_length = _DNS_LABEL_MAX_LENGTH - len(digest) - 1
-    safe_prefix = normalized_prefix[:max_prefix_length].rstrip("-")
-    if not safe_prefix:
-        safe_prefix = _DEFAULT_WORKER_NAME_PREFIX[:max_prefix_length].rstrip("-") or "worker"
-    return digest, safe_prefix
-
-
 def worker_id_for_key(worker_key: str, *, prefix: str) -> str:
     """Return a DNS-safe resource name for one worker key (63-char label limit)."""
-    digest, safe_prefix = _digest_and_safe_prefix(worker_key, prefix, digest_length=_WORKER_ID_DIGEST_LENGTH)
-    return f"{safe_prefix}-{digest}"
-
-
-def descriptive_worker_id_for_key(worker_key: str, *, prefix: str) -> str:
-    """Return a DNS-safe resource name that keeps the worker key's scope readable.
-
-    Embeds the key's tenant/scope/requester/agent parts as a lowercase slug
-    (dropping the `v1` version tag and the `default` tenant, and reducing
-    Matrix requesters to their localpart) so listings stay human-readable,
-    with a short digest for uniqueness after truncation.
-    """
-    digest, safe_prefix = _digest_and_safe_prefix(
-        worker_key,
-        prefix,
-        digest_length=_DESCRIPTIVE_WORKER_ID_DIGEST_LENGTH,
-    )
-    max_slug_length = max(0, _DNS_LABEL_MAX_LENGTH - len(safe_prefix) - len(digest) - 2)
-    slug = _worker_key_slug(worker_key, max_length=max_slug_length)
-    if not slug:
-        return f"{safe_prefix}-{digest}"
-    return f"{safe_prefix}-{slug}-{digest}"
-
-
-def _worker_key_slug(worker_key: str, *, max_length: int) -> str:
-    parts = worker_key.split(":")
-    if len(parts) >= 4 and parts[0] == "v1":
-        tenant, scope, rest = parts[1], parts[2], parts[3:]
-        if scope == "user":
-            rest = [_requester_localpart(":".join(rest))]
-        elif scope == "user_agent" and len(rest) >= 2:
-            rest = [_requester_localpart(":".join(rest[:-1])), rest[-1]]
-        parts = ([] if tenant == "default" else [tenant]) + [scope, *rest]
-    slug = re.sub(r"[^a-z0-9]+", "-", ":".join(parts).lower()).strip("-")
-    return slug[:max_length].rstrip("-")
-
-
-def _requester_localpart(requester: str) -> str:
-    """Return the localpart of a Matrix-style requester; other requesters pass through."""
-    if requester.startswith("@"):
-        return requester[1:].split(":", 1)[0]
-    return requester
+    digest = hashlib.sha256(worker_key.encode("utf-8")).hexdigest()[:_WORKER_ID_DIGEST_LENGTH]
+    normalized_prefix = re.sub(r"[^a-z0-9-]+", "-", prefix.lower()).strip("-") or _DEFAULT_WORKER_NAME_PREFIX
+    max_prefix_length = _DNS_LABEL_MAX_LENGTH - len(digest) - 1
+    return f"{normalized_prefix[:max_prefix_length].rstrip('-')}-{digest}"
 
 
 def _encode_worker_requester_part(value: str) -> str:
@@ -286,12 +320,6 @@ def _encode_worker_requester_part(value: str) -> str:
 def _normalize_worker_dir_part(value: str) -> str:
     normalized = re.sub(r"[^a-zA-Z0-9._@+-]+", "_", value.strip()).strip("_")
     return normalized or "worker"
-
-
-def _identity_requester_key(identity: ToolExecutionIdentity) -> str | None:
-    if identity.requester_id:
-        return _encode_worker_requester_part(identity.requester_id)
-    return None
 
 
 def build_tool_execution_identity(
@@ -321,33 +349,25 @@ def build_tool_execution_identity(
     )
 
 
-def resolve_worker_execution_scope(
-    worker_scope: WorkerScope | None,
-    execution_identity: ToolExecutionIdentity | None,
+def build_requester_execution_identity(
     *,
-    agent_name: str | None = None,
-    tenant_id: str | None = None,
-    account_id: str | None = None,
-) -> _ResolvedWorkerExecution:
-    """Resolve worker execution identity and key from explicit scope inputs."""
-    resolved_execution_identity = _resolve_execution_identity_for_worker_scope(
-        worker_scope,
+    agent_name: str,
+    runtime_paths: RuntimePaths,
+    requester_id: str | None,
+) -> ToolExecutionIdentity:
+    """Build the Matrix execution identity that resolves one requester's state outside any conversation.
+
+    Without a requester it resolves only shared and unscoped state.
+    """
+    return build_tool_execution_identity(
+        channel="matrix",
         agent_name=agent_name,
-        execution_identity=execution_identity,
-        tenant_id=tenant_id,
-        account_id=account_id,
-    )
-    worker_key: str | None = None
-    if worker_scope is not None and resolved_execution_identity is not None:
-        worker_key = resolve_worker_key(
-            worker_scope,
-            resolved_execution_identity,
-            agent_name=agent_name,
-        )
-    return _ResolvedWorkerExecution(
-        worker_scope=worker_scope,
-        execution_identity=resolved_execution_identity,
-        worker_key=worker_key,
+        runtime_paths=runtime_paths,
+        requester_id=requester_id,
+        room_id=None,
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id=None,
     )
 
 
@@ -365,35 +385,29 @@ def resolve_worker_target(
     if effective_agent_name is None and execution_identity is not None:
         effective_agent_name = execution_identity.agent_name
 
-    resolved_worker_execution = resolve_worker_execution_scope(
+    resolved_execution_identity = _resolve_execution_identity_for_worker_scope(
         worker_scope,
-        execution_identity=execution_identity,
         agent_name=effective_agent_name,
+        execution_identity=execution_identity,
         tenant_id=tenant_id,
         account_id=account_id,
     )
-    resolved_execution_identity = resolved_worker_execution.execution_identity
+    worker_key = (
+        resolve_worker_key(worker_scope, resolved_execution_identity, agent_name=effective_agent_name)
+        if worker_scope is not None and resolved_execution_identity is not None
+        else None
+    )
     return ResolvedWorkerTarget(
         worker_scope=worker_scope,
         routing_agent_name=effective_agent_name,
         execution_identity=resolved_execution_identity,
         tenant_id=(
-            tenant_id
-            or (
-                resolved_execution_identity.tenant_id
-                if resolved_execution_identity is not None and resolved_execution_identity.tenant_id is not None
-                else None
-            )
+            tenant_id or (resolved_execution_identity.tenant_id if resolved_execution_identity is not None else None)
         ),
         account_id=(
-            account_id
-            or (
-                resolved_execution_identity.account_id
-                if resolved_execution_identity is not None and resolved_execution_identity.account_id is not None
-                else None
-            )
+            account_id or (resolved_execution_identity.account_id if resolved_execution_identity is not None else None)
         ),
-        worker_key=resolved_worker_execution.worker_key,
+        worker_key=worker_key,
         private_agent_names=private_agent_names,
     )
 
@@ -430,17 +444,25 @@ def build_agent_toolkit_worker_target(
     Single source of truth for the `private_agent_names` derivation shared by
     agent toolkit construction and dispatch-time tool composition.
     """
-    if worker_scope == "user_agent":
-        private_agent_names = frozenset({agent_name}) if is_private else frozenset()
-    else:
-        private_agent_names = None
     return build_worker_target_from_runtime_env(
         worker_scope,
         agent_name,
         execution_identity=execution_identity,
         runtime_paths=runtime_paths,
-        private_agent_names=private_agent_names,
+        private_agent_names=_turn_private_agent_names(worker_scope, agent_name, is_private=is_private),
     )
+
+
+def _turn_private_agent_names(
+    worker_scope: WorkerScope | None,
+    agent_name: str,
+    *,
+    is_private: bool,
+) -> frozenset[str] | None:
+    """Return the private agents a turn of ``agent_name`` sees in its worker: itself when private, on user_agent only."""
+    if worker_scope != "user_agent":
+        return None
+    return frozenset({agent_name}) if is_private else frozenset()
 
 
 def worker_scope_allows_shared_only_integrations(worker_scope: WorkerScope | None) -> bool:
@@ -448,21 +470,9 @@ def worker_scope_allows_shared_only_integrations(worker_scope: WorkerScope | Non
     return worker_scope in (None, "shared")
 
 
-def _requires_shared_only_integration_scope(name: str) -> bool:
-    """Return whether a tool or dashboard integration is restricted to shared scope.
-
-    MCP registry tools are supported on every scope: OAuth-backed servers follow
-    the configured worker scope, and non-OAuth servers always execute through
-    the shared server session without requester credentials.
-    """
-    return name in _SHARED_ONLY_INTEGRATION_NAMES
-
-
 def supports_tool_name_for_worker_scope(name: str, worker_scope: WorkerScope | None) -> bool:
     """Return whether one tool/integration name is supported for the effective execution scope."""
-    return not _requires_shared_only_integration_scope(name) or worker_scope_allows_shared_only_integrations(
-        worker_scope,
-    )
+    return name not in _SHARED_ONLY_INTEGRATION_NAMES or worker_scope_allows_shared_only_integrations(worker_scope)
 
 
 def unsupported_shared_only_integration_names(
@@ -472,7 +482,7 @@ def unsupported_shared_only_integration_names(
     """Return shared-only integration names that are invalid for the effective execution scope."""
     if worker_scope_allows_shared_only_integrations(worker_scope):
         return []
-    return [name for name in names if _requires_shared_only_integration_scope(name)]
+    return [name for name in names if name in _SHARED_ONLY_INTEGRATION_NAMES]
 
 
 def unsupported_shared_only_integration_message(
@@ -503,67 +513,95 @@ def resolve_worker_key(
     """Derive a stable worker key from scope and execution identity."""
     tenant_key = normalize_worker_key_part(identity.tenant_id or identity.account_id or "default")
     effective_agent_name = normalize_worker_key_part(agent_name or identity.agent_name)
-    worker_key: str | None
-
     if worker_scope == "shared":
-        worker_key = f"v1:{tenant_key}:shared:{effective_agent_name}"
-    elif worker_scope == "user":
-        requester_key = _identity_requester_key(identity)
-        if requester_key is None:
-            return None
-        worker_key = f"v1:{tenant_key}:user:{requester_key}"
-    elif worker_scope == "user_agent":
-        requester_key = _identity_requester_key(identity)
-        if requester_key is None:
-            return None
-        worker_key = f"v1:{tenant_key}:user_agent:{requester_key}:{effective_agent_name}"
-    else:
+        return f"v1:{tenant_key}:shared:{effective_agent_name}"
+    if worker_scope not in ("user", "user_agent"):
         msg = f"Unknown worker scope: {worker_scope}"
         raise ValueError(msg)
-
-    return worker_key
+    if not identity.requester_id:
+        return None
+    requester_key = _encode_worker_requester_part(identity.requester_id)
+    if worker_scope == "user":
+        return f"v1:{tenant_key}:user:{requester_key}"
+    return f"v1:{tenant_key}:user_agent:{requester_key}:{effective_agent_name}"
 
 
 def resolve_unscoped_worker_key(
     agent_name: str,
-    execution_identity: ToolExecutionIdentity | None = None,
     *,
     tenant_id: str | None = None,
     account_id: str | None = None,
 ) -> str:
-    """Derive a stable backend worker key for unscoped sandbox execution."""
-    identity = execution_identity
-    tenant_key = normalize_worker_key_part(
-        tenant_id
-        or (identity.tenant_id if identity is not None and identity.tenant_id is not None else None)
-        or account_id
-        or (identity.account_id if identity is not None and identity.account_id is not None else None)
-        or "default",
-    )
+    """Derive a stable backend worker key for unscoped sandbox execution.
+
+    Pass the tenant and account of the resolved worker target, which already fall back to its execution identity's.
+    """
+    tenant_key = normalize_worker_key_part(tenant_id or account_id or "default")
     effective_agent_name = normalize_worker_key_part(agent_name)
     return f"v1:{tenant_key}:unscoped:{effective_agent_name}"
 
 
-def require_worker_key_for_scope(
-    worker_scope: WorkerScope,
-    execution_identity: ToolExecutionIdentity | None,
-    *,
-    agent_name: str | None = None,
-    tenant_id: str | None = None,
-    account_id: str | None = None,
-    failure_message: str,
-) -> str:
-    """Resolve one worker key from explicit inputs or raise with a caller-owned message."""
-    worker_key = resolve_worker_execution_scope(
-        worker_scope,
-        execution_identity=execution_identity,
-        agent_name=agent_name,
-        tenant_id=tenant_id,
-        account_id=account_id,
-    ).worker_key
-    if worker_key is None:
-        raise ValueError(failure_message)
-    return worker_key
+def _pinned_worker_key(kind: _PinnedWorkerKind, state_scope_worker_key: str, pin_id: str) -> str:
+    """Pin a worker of its own below the normal worker key whose workspaces and credentials it serves.
+
+    The pin is one ``<kind>=<id>`` part before the normal key's last part, the shape
+    ``resolve_state_scope_worker_key`` validates. No generated tenant, agent, or requester part contains ``=``, so
+    ``pinned_worker_state_scope_key`` can find the pin even though requester parts contain ``:``.
+    """
+    if not _PIN_ID_PATTERN.fullmatch(pin_id):
+        msg = f"A {kind} worker key requires a 32-character lowercase hex ID."
+        raise ValueError(msg)
+    if resolved_worker_key_scope(state_scope_worker_key) is None or "=" in state_scope_worker_key:
+        msg = f"A {kind} worker key requires a resolved, unpinned worker key."
+        raise ValueError(msg)
+    parts = state_scope_worker_key.split(":")
+    return ":".join((*parts[:-1], f"{kind}={pin_id}", parts[-1]))
+
+
+def subagent_worker_key(state_scope_worker_key: str, subagent_id: str) -> str:
+    """Return the key of one subagent's own worker, which serves its normal worker's workspaces and credentials."""
+    return _pinned_worker_key("subagent", state_scope_worker_key, subagent_id)
+
+
+def named_worker_key(state_scope_worker_key: str, pin_id: str) -> str:
+    """Return the key of one worker a reply's calls name, which serves its normal worker's workspaces and credentials.
+
+    ``pin_id`` is the owning reply's digest of the name, so the name itself never reaches a key.
+    """
+    return _pinned_worker_key("named", state_scope_worker_key, pin_id)
+
+
+def pinned_worker_kind(worker_key: str) -> _PinnedWorkerKind | None:
+    """Return what a pinned key's worker is pinned to, or None for a key without a pin."""
+    parts = worker_key.split(":")
+    pin = _PIN_PATTERN.fullmatch(parts[-2]) if len(parts) >= 5 else None
+    if pin is None or resolved_worker_key_scope(":".join((*parts[:-2], parts[-1]))) is None:
+        return None
+    return cast("_PinnedWorkerKind", pin["kind"])
+
+
+def pinned_worker_state_scope_key(worker_key: str) -> str | None:
+    """Return the normal worker key a pinned key serves, or None for a key without a pin."""
+    if pinned_worker_kind(worker_key) is None:
+        return None
+    parts = worker_key.split(":")
+    return ":".join((*parts[:-2], parts[-1]))
+
+
+def normal_worker_key(worker_target: ResolvedWorkerTarget) -> str | None:
+    """Return the key of the worker a target's calls reach on a dedicated backend, or None when none resolves.
+
+    A scoped target names its key; an unscoped one gets its agent's unscoped key.
+    """
+    if worker_target.worker_scope is not None:
+        return worker_target.worker_key
+    if worker_target.routing_agent_name is None:
+        return None
+    return resolve_unscoped_worker_key(
+        agent_name=worker_target.routing_agent_name,
+        tenant_id=worker_target.tenant_id,
+        account_id=worker_target.account_id,
+    )
 
 
 def resolved_worker_key_scope(worker_key: str) -> ResolvedWorkerKeyScope | None:
@@ -574,7 +612,7 @@ def resolved_worker_key_scope(worker_key: str) -> ResolvedWorkerKeyScope | None:
     scope = parts[2]
     if scope not in {"shared", "user", "user_agent", "unscoped"}:
         return None
-    return cast("ResolvedWorkerKeyScope", scope)
+    return scope
 
 
 def requires_explicit_private_agent_visibility(worker_key: str) -> bool:
@@ -587,17 +625,11 @@ def worker_key_agent_name(worker_key: str) -> str | None:
     scope = resolved_worker_key_scope(worker_key)
     if scope is None or scope == "user":
         return None
-
     parts = worker_key.split(":")
-    min_parts_by_scope = {
-        "shared": 4,
-        "unscoped": 4,
-        "user_agent": 5,
-    }
-    min_parts = min_parts_by_scope.get(scope)
-    if min_parts is None or len(parts) < min_parts:
-        return None
-    return parts[3] if scope in {"shared", "unscoped"} else parts[-1]
+    # The agent is a key's last part; a user_agent key also names its requester before it, and a pinned key its pin.
+    if scope == "user_agent":
+        return parts[-1] if len(parts) >= 5 else None
+    return parts[-1]
 
 
 def _resolve_execution_identity_for_worker_scope(
@@ -636,14 +668,21 @@ def _resolve_execution_identity_for_worker_scope(
     )
 
 
+def worker_log_id(worker_key: str) -> str:
+    """Return the digest that names a worker in logs, because worker keys embed requester identifiers.
+
+    `worker_dir_name` ends with it, so a logged worker can be found on disk.
+    """
+    return hashlib.sha256(worker_key.encode("utf-8")).hexdigest()[:16]
+
+
 def worker_dir_name(worker_key: str) -> str:
     """Return a stable filesystem-safe dirname for a worker key."""
     prefix = _normalize_worker_dir_part(worker_key)
     prefix = prefix[:_WORKER_DIRNAME_MAX_PREFIX_LENGTH].rstrip("._-")
     if not prefix:
         prefix = "worker"
-    digest = hashlib.sha256(worker_key.encode("utf-8")).hexdigest()[:16]
-    return f"{prefix}-{digest}"
+    return f"{prefix}-{worker_log_id(worker_key)}"
 
 
 def worker_root_path(base_storage_path: Path, worker_key: str) -> Path:
@@ -711,7 +750,7 @@ def written_by_other_workers(relative_path: Path, worker_roots: Path = Path("wor
     parts = relative_path.parts
     return (
         relative_path.is_relative_to(worker_roots)
-        or parts[:1] == (_PRIVATE_INSTANCE_ROOT_DIRNAME,)
+        or parts[:1] in {(_PRIVATE_INSTANCE_ROOT_DIRNAME,), (SHARED_DIRECTORIES_DIRNAME,)}
         or (parts[:1] == ("agents",) and parts[2:3] == (_AGENT_WORKSPACE_DIRNAME,))
     )
 
@@ -736,6 +775,8 @@ def visible_workspace_roots(
     agent in ``private_agent_names`` sees only that private workspace, so a stale
     policy never widens it to the shared one.
     """
+    # A pinned worker sees what its normal worker sees, from that worker's private scope.
+    worker_key = pinned_worker_state_scope_key(worker_key) or worker_key
     scope = resolved_worker_key_scope(worker_key)
     if scope == "user":
         return tuple(
@@ -825,6 +866,6 @@ def resolve_agent_state_storage_path(
     """Return the canonical durable state root for one agent.
 
     Requester-scoped worker runtimes do not partition file-backed memory, mem0 state,
-    sessions, or learning. All durable agent state lives under one root per agent.
+    or sessions. All durable agent state lives under one root per agent.
     """
     return agent_state_root_path(base_storage_path, agent_name)

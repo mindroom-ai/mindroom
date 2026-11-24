@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -24,27 +25,30 @@ from mindroom.custom_tools.todo_poke import (
     TodoPokeDeps,
     TodoPokePolicy,
     TodoPokeRequesterKind,
+    TodoPokeWorker,
     scan_todo_pokes,
 )
 from mindroom.custom_tools.todo_state import state_root as todo_state_root
 from mindroom.entity_resolution import MissingManagedEntityAccountError, mindroom_user_id
-from mindroom.handled_turns import TurnRecord
-from mindroom.hooks.sender import send_hook_message
+from mindroom.hooks.sender import build_hook_message_sender
 from mindroom.ingress_validation import IngressValidator, IngressValidatorDeps
 from mindroom.logging_config import get_logger
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.orchestration.todo_poke_runtime import TodoPokeRuntimeCoordinator
 from mindroom.orchestrator import _MultiAgentOrchestrator
 from mindroom.turn_policy import TurnPolicy
+from mindroom.turn_record import TurnRecord
 from tests.authorization_helpers import make_test_turn_policy_deps
 from tests.conftest import bind_runtime_paths, make_conversation_reader_mock, runtime_paths_for, test_runtime_paths
 from tests.identity_helpers import entity_ids
+from tests.runtime_fakes import ready_runtime
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator
     from pathlib import Path
     from typing import Any
 
-    from mindroom.bot import AgentBot, TeamBot
+    from mindroom.bot import AgentBot
     from mindroom.constants import RuntimePaths
 
 
@@ -86,8 +90,8 @@ def _restricted_config(tmp_path: Path) -> Config:
 
 def _coordinator(
     runtime_paths: RuntimePaths,
-    config: Config | None,
-    bots: dict[str, AgentBot | TeamBot],
+    config: Config,
+    bots: dict[str, AgentBot],
 ) -> TodoPokeRuntimeCoordinator:
     return TodoPokeRuntimeCoordinator(
         runtime_paths=runtime_paths,
@@ -149,9 +153,9 @@ def test_idle_check_includes_direct_and_running_team_bots(tmp_path: Path) -> Non
 async def test_assigned_agent_query_and_send_wiring(tmp_path: Path) -> None:
     """Todo poke I/O uses the assigned agent that owns membership in the target room."""
     router_bot = _bot()
-    router_bot._hook_send_message = AsyncMock(return_value="$event")
+    router_bot.hook_context.send_message = AsyncMock(return_value="$event")
     agent_bot = _bot()
-    agent_bot._hook_send_message = AsyncMock(return_value="$event")
+    agent_bot.hook_context.send_message = AsyncMock(return_value="$event")
     coordinator = _coordinator(
         test_runtime_paths(tmp_path),
         _config(tmp_path),
@@ -180,7 +184,7 @@ async def test_assigned_agent_query_and_send_wiring(tmp_path: Path) -> None:
     assert pending == frozenset({"$scheduled"})
     schedule_query.assert_awaited_once_with(agent_bot.client, "!room:localhost", coordinator.runtime_paths)
     assert event_id == "$event"
-    agent_bot._hook_send_message.assert_awaited_once_with(
+    agent_bot.hook_context.send_message.assert_awaited_once_with(
         "!room:localhost",
         "@code Todo work is ready.",
         "$thread",
@@ -188,12 +192,12 @@ async def test_assigned_agent_query_and_send_wiring(tmp_path: Path) -> None:
         {ORIGINAL_SENDER_KEY: "@mindroom_user:localhost"},
         trigger_dispatch=True,
     )
-    router_bot._hook_send_message.assert_not_awaited()
+    router_bot.hook_context.send_message.assert_not_awaited()
 
-    agent_bot._hook_send_message.reset_mock()
+    agent_bot.hook_context.send_message.reset_mock()
     await coordinator._send_poke("code", "!room:localhost", "@code Todo work is ready.", "$thread", "@alice:localhost")
 
-    agent_bot._hook_send_message.assert_awaited_once_with(
+    agent_bot.hook_context.send_message.assert_awaited_once_with(
         "!room:localhost",
         "@code Todo work is ready.",
         "$thread",
@@ -205,7 +209,7 @@ async def test_assigned_agent_query_and_send_wiring(tmp_path: Path) -> None:
 
 @pytest.mark.usefixtures("enforce_turn_authorization")
 def test_requester_kind_follows_current_config(tmp_path: Path) -> None:
-    """Allowed humans keep their identity, internal senders run as the assignee, and any other requester is refused."""
+    """Allowed humans keep their identity, admitted MindRoom accounts run as the assignee, and others are refused."""
     config = _restricted_config(tmp_path)
     runtime_paths = runtime_paths_for(config)
     ids = entity_ids(config, runtime_paths)
@@ -219,10 +223,14 @@ def test_requester_kind_follows_current_config(tmp_path: Path) -> None:
     # A human the assignee no longer replies to would only have the poke ignored at ingress.
     assert kind("@mallory:localhost") is TodoPokeRequesterKind.REFUSED
     assert kind("@alice:localhost", "removed") is TodoPokeRequesterKind.REFUSED
-    assert kind(ids["code"].full_id) is TodoPokeRequesterKind.INTERNAL
-    assert kind(ids["router"].full_id) is TodoPokeRequesterKind.INTERNAL
-    assert kind(mindroom_user_id(config, runtime_paths)) is TodoPokeRequesterKind.INTERNAL
+    assert kind(ids["secret"].full_id) is TodoPokeRequesterKind.INTERNAL
+    # Work another agent recorded with no person behind it pokes only an assignee whose access admits that agent.
+    assert kind(ids["code"].full_id) is TodoPokeRequesterKind.REFUSED
+    assert kind(ids["router"].full_id) is TodoPokeRequesterKind.REFUSED
+    assert kind(mindroom_user_id(config, runtime_paths)) is TodoPokeRequesterKind.REFUSED
     assert kind("@bridge:localhost") is TodoPokeRequesterKind.REFUSED
+    config.agents["secret"].access = ResponderAccessConfig(users=["@alice:localhost", ids["code"].full_id])
+    assert kind(ids["code"].full_id) is TodoPokeRequesterKind.INTERNAL
 
     with (
         patch(
@@ -232,8 +240,6 @@ def test_requester_kind_follows_current_config(tmp_path: Path) -> None:
         pytest.raises(TodoPokeDeliveryUnavailableError),
     ):
         kind("@alice:localhost")
-    with pytest.raises(TodoPokeDeliveryUnavailableError):
-        _coordinator(runtime_paths, None, {})._requester_kind("@alice:localhost", "secret", "!room:localhost")
 
 
 @pytest.mark.asyncio
@@ -329,50 +335,28 @@ async def test_poke_applies_assignee_access_policy_to_human_requester(tmp_path: 
         sent_contents.append(content)
         return DeliveredMatrixEvent(event_id=f"$poke-{len(sent_contents)}", content_sent=content)
 
-    async def hook_send_message(
-        room_id: str,
-        body: str,
-        thread_id: str | None,
-        source_hook: str,
-        extra_content: dict[str, Any] | None,
-        *,
-        trigger_dispatch: bool = False,
-    ) -> str | None:
-        return await send_hook_message(
-            MagicMock(),
-            config,
-            runtime_paths,
-            room_id,
-            body,
-            thread_id,
-            source_hook,
-            extra_content,
-            trigger_dispatch=trigger_dispatch,
-            conversation_reader=make_conversation_reader_mock(),
-        )
-
     agent_bot = _bot()
-    agent_bot._hook_send_message = hook_send_message
+    agent_bot.hook_context.send_message = build_hook_message_sender(
+        MagicMock(),
+        config,
+        runtime_paths,
+        conversation_reader=make_conversation_reader_mock(),
+    )
     coordinator = _coordinator(runtime_paths, config, {"secret": agent_bot})
     with patch("mindroom.matrix.client_delivery.send_message_result", new=send_message_result):
         for requester_id in ("@alice:localhost", "@mallory:localhost", None):
             await coordinator._send_poke("secret", "!room:localhost", "@secret Todo work is ready.", None, requester_id)
 
-    runtime = BotRuntimeState(
-        client=None,
-        config=config,
-        runtime_paths=runtime_paths,
-        agent_reply_memberships=AgentReplyMembershipIndex(),
-        enable_streaming=False,
-        orchestrator=None,
-    )
+    config.defaults.enable_streaming = False
+    runtime = BotRuntimeState(orchestrator=ready_runtime(config, runtime_paths))
     turn_store = MagicMock()
-    turn_store.is_handled.return_value = False
+    turn_store.is_handled = AsyncMock(return_value=False)
     turn_store.record_turn = AsyncMock()
     validator = IngressValidator(
         IngressValidatorDeps(
             runtime=runtime,
             runtime_paths=runtime_paths,
+            agent_name="secret",
             matrix_id=ids["secret"],
             turn_store=turn_store,
             turn_policy=TurnPolicy(
@@ -385,6 +369,7 @@ async def test_poke_applies_assignee_access_policy_to_human_requester(tmp_path: 
                     agent_reply_memberships=runtime.agent_reply_memberships,
                 ),
             ),
+            settle_ignored_sources=AsyncMock(),
         ),
     )
     room = nio.MatrixRoom("!room:localhost", secret_id)
@@ -405,11 +390,22 @@ async def test_poke_applies_assignee_access_policy_to_human_requester(tmp_path: 
         "@mallory:localhost",
         mindroom_user_id(config, runtime_paths),
     ]
-    assert await validator.precheck_event(room, authorized_event) == "@alice:localhost"
+    authorized_facts = validator.classify(authorized_event, room_id=room.room_id)
+    assert authorized_facts.lane_requester_id == "@alice:localhost"
+    assert await validator.precheck_event(room, authorized_event, authorized_facts)
     # A human who may not address the assignee gets no turn from the poke.
-    assert await validator.precheck_event(room, unauthorized_event) is None
-    assert await validator.precheck_event(room, internal_event) == secret_id
-    turn_store.record_turn.assert_awaited_once_with(TurnRecord.create([unauthorized_event.event_id]))
+    assert not await validator.precheck_event(
+        room,
+        unauthorized_event,
+        validator.classify(unauthorized_event, room_id=room.room_id),
+    )
+    internal_facts = validator.classify(internal_event, room_id=room.room_id)
+    assert internal_facts.lane_requester_id == secret_id
+    assert await validator.precheck_event(room, internal_event, internal_facts)
+    turn_store.record_turn.assert_awaited_once_with(
+        TurnRecord.create([unauthorized_event.event_id]),
+        room_id=room.room_id,
+    )
 
 
 @pytest.mark.asyncio
@@ -445,9 +441,9 @@ async def test_send_skips_unjoined_todo_owner_without_using_other_candidate(tmp_
     unjoined_client = _client()
     joined_client = _client("!room:localhost")
     unjoined_bot = _bot(client=unjoined_client)
-    unjoined_bot._hook_send_message = AsyncMock(return_value="$wrong")
+    unjoined_bot.hook_context.send_message = AsyncMock(return_value="$wrong")
     joined_bot = _bot(client=joined_client)
-    joined_bot._hook_send_message = AsyncMock(return_value="$event")
+    joined_bot.hook_context.send_message = AsyncMock(return_value="$event")
     coordinator = _coordinator(
         test_runtime_paths(tmp_path),
         _config(tmp_path),
@@ -469,8 +465,8 @@ async def test_send_skips_unjoined_todo_owner_without_using_other_candidate(tmp_
             None,
         )
 
-    unjoined_bot._hook_send_message.assert_not_awaited()
-    joined_bot._hook_send_message.assert_not_awaited()
+    unjoined_bot.hook_context.send_message.assert_not_awaited()
+    joined_bot.hook_context.send_message.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -526,7 +522,7 @@ async def test_send_rejects_stale_joined_room_cache(tmp_path: Path) -> None:
     """Cached room state must not authorize delivery after membership ended."""
     stale_client = _client(cached_room_ids=("!room:localhost",))
     stale_bot = _bot(client=stale_client)
-    stale_bot._hook_send_message = AsyncMock(return_value="$wrong")
+    stale_bot.hook_context.send_message = AsyncMock(return_value="$wrong")
     coordinator = _coordinator(
         test_runtime_paths(tmp_path),
         _config(tmp_path),
@@ -542,7 +538,7 @@ async def test_send_rejects_stale_joined_room_cache(tmp_path: Path) -> None:
             None,
         )
 
-    stale_bot._hook_send_message.assert_not_awaited()
+    stale_bot.hook_context.send_message.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -551,7 +547,7 @@ async def test_send_maps_membership_probe_failure_to_delivery_unavailable(tmp_pa
     failing_client = _client()
     failing_client.joined_rooms = AsyncMock(side_effect=RuntimeError("membership unavailable"))
     failing_bot = _bot(client=failing_client)
-    failing_bot._hook_send_message = AsyncMock(return_value="$wrong")
+    failing_bot.hook_context.send_message = AsyncMock(return_value="$wrong")
     coordinator = _coordinator(
         test_runtime_paths(tmp_path),
         _config(tmp_path),
@@ -567,7 +563,7 @@ async def test_send_maps_membership_probe_failure_to_delivery_unavailable(tmp_pa
             None,
         )
 
-    failing_bot._hook_send_message.assert_not_awaited()
+    failing_bot.hook_context.send_message.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -606,15 +602,41 @@ async def test_schedule_adapter_preserves_read_errors(tmp_path: Path) -> None:
         await coordinator._schedule_query("!room:localhost", ("code",))
 
 
-@pytest.mark.asyncio
-async def test_sync_wires_coordinator_adapters_into_worker(tmp_path: Path) -> None:
-    """The composition seam must install the production idle, schedule, and sender adapters."""
-    coordinator = _coordinator(test_runtime_paths(tmp_path), _config(tmp_path), {})
+@pytest.fixture
+def started_workers() -> Iterator[list[TodoPokeWorker]]:
+    """Record each worker the coordinator runs, idling until it is asked to stop."""
+    workers: list[TodoPokeWorker] = []
 
-    await coordinator.sync()
-    worker = coordinator._worker
-    assert worker is not None
+    async def run(worker: TodoPokeWorker) -> None:
+        workers.append(worker)
+        await worker._stop_event.wait()
+
+    with patch.object(TodoPokeWorker, "run", run):
+        yield workers
+
+
+async def _until_started(workers: list[TodoPokeWorker], count: int = 1) -> None:
+    for _ in range(500):
+        if len(workers) >= count:
+            return
+        await asyncio.sleep(0.01)
+    msg = "worker did not start"
+    raise AssertionError(msg)
+
+
+@pytest.mark.asyncio
+async def test_sync_wires_coordinator_adapters_into_worker(
+    tmp_path: Path,
+    started_workers: list[TodoPokeWorker],
+) -> None:
+    """The composition seam must install the production idle, schedule, and sender adapters."""
+    config = _config(tmp_path)
+    coordinator = _coordinator(test_runtime_paths(tmp_path), config, {})
+
+    await coordinator.sync(config)
     try:
+        await _until_started(started_workers)
+        worker = started_workers[0]
         assert worker.deps.idle_check == coordinator._agent_is_idle
         assert worker.deps.schedule_query == coordinator._schedule_query
         assert worker.deps.sender == coordinator._send_poke
@@ -624,85 +646,88 @@ async def test_sync_wires_coordinator_adapters_into_worker(tmp_path: Path) -> No
 
 
 @pytest.mark.asyncio
-async def test_worker_lifecycle_survives_reload_and_stops(tmp_path: Path) -> None:
-    """Sync starts one worker, reuses it on reload, and stops it promptly."""
-    coordinator = _coordinator(test_runtime_paths(tmp_path), _config(tmp_path), {})
+async def test_worker_lifecycle_survives_reload_and_stops(
+    tmp_path: Path,
+    started_workers: list[TodoPokeWorker],
+) -> None:
+    """Sync starts one worker, keeps it on reload, and stops it."""
+    config = _config(tmp_path)
+    coordinator = _coordinator(test_runtime_paths(tmp_path), config, {})
 
-    await coordinator.sync()
-    first_worker = coordinator._worker
-    first_task = coordinator._task
-
-    assert first_worker is not None
-    assert first_task is not None
-    assert first_task.done() is False
-
-    await coordinator.sync()
-
-    assert coordinator._worker is first_worker
-    assert coordinator._task is first_task
-
+    await coordinator.sync(config)
+    await _until_started(started_workers)
+    await coordinator.sync(config)
     await coordinator.stop()
 
-    assert first_task.done() is True
-    assert coordinator._worker is None
-    assert coordinator._task is None
+    assert len(started_workers) == 1
+    assert started_workers[0]._stop_event.is_set()
+    assert not coordinator._loop.running
 
 
 @pytest.mark.asyncio
-async def test_worker_restarts_after_task_finishes(tmp_path: Path) -> None:
-    """A finished worker task is replaced on the next sync."""
-    coordinator = _coordinator(test_runtime_paths(tmp_path), _config(tmp_path), {})
+async def test_stop_lets_the_scan_in_progress_finish(tmp_path: Path) -> None:
+    """Stopping asks the worker to stop and waits for its current scan, so a poke it sends is recorded."""
+    config = _config(tmp_path)
+    coordinator = _coordinator(test_runtime_paths(tmp_path), config, {})
+    workers: list[TodoPokeWorker] = []
+    release_scan = asyncio.Event()
+    scan_completed = False
 
-    await coordinator.sync()
-    first_worker = coordinator._worker
-    first_task = coordinator._task
-    assert first_worker is not None
-    assert first_task is not None
+    async def run(worker: TodoPokeWorker) -> None:
+        nonlocal scan_completed
+        workers.append(worker)
+        await release_scan.wait()
+        scan_completed = True
 
-    first_worker.stop()
-    await first_task
-    await coordinator.sync()
+    with patch.object(TodoPokeWorker, "run", run):
+        await coordinator.sync(config)
+        await _until_started(workers)
+        stopping = asyncio.create_task(coordinator.stop())
+        await asyncio.wait_for(workers[0]._stop_event.wait(), timeout=5)
+        assert not stopping.done()
 
-    assert coordinator._worker is not first_worker
-    assert coordinator._task is not first_task
-    await coordinator.stop()
+        release_scan.set()
+        await asyncio.wait_for(stopping, timeout=5)
+
+    assert scan_completed
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("disabled_by", ["zero-interval", "missing-config"])
-async def test_sync_leaves_worker_stopped_when_disabled(tmp_path: Path, disabled_by: str) -> None:
-    """A zero runtime interval or missing config leaves no worker or task running."""
-    runtime_paths = test_runtime_paths(tmp_path)
-    config: Config | None = _config(tmp_path)
-    if disabled_by == "zero-interval":
-        runtime_paths = replace(
-            runtime_paths,
-            process_env={"MINDROOM_TODO_POKE_INTERVAL_SECONDS": "0"},
-        )
-    else:
-        config = None
-    coordinator = _coordinator(runtime_paths, config, {})
+async def test_sync_leaves_worker_stopped_when_disabled(
+    tmp_path: Path,
+    started_workers: list[TodoPokeWorker],
+) -> None:
+    """A zero runtime interval stops a running worker and starts none."""
+    config = _config(tmp_path)
+    coordinator = _coordinator(test_runtime_paths(tmp_path), config, {})
+    await coordinator.sync(config)
+    await _until_started(started_workers)
 
-    await coordinator.sync()
+    coordinator.runtime_paths = replace(
+        coordinator.runtime_paths,
+        process_env={"MINDROOM_TODO_POKE_INTERVAL_SECONDS": "0"},
+    )
+    await coordinator.sync(config)
 
-    assert coordinator._worker is None
-    assert coordinator._task is None
+    assert started_workers[0]._stop_event.is_set()
+    assert not coordinator._loop.running
 
 
 def test_orchestrator_composes_live_coordinator_providers(tmp_path: Path) -> None:
     """Orchestrator wiring must expose live config and bot state to the coordinator."""
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=test_runtime_paths(tmp_path))
+    config = _config(tmp_path)
+    orchestrator = _MultiAgentOrchestrator(runtime_paths=test_runtime_paths(tmp_path), config=config)
     coordinator = orchestrator._todo_poke_runtime
 
     assert coordinator.runtime_paths is orchestrator.runtime_paths
-    assert coordinator.config_provider() is None
-
-    config = _config(tmp_path)
-    orchestrator.config = config
     assert coordinator.config_provider() is config
 
+    published = _config(tmp_path)
+    orchestrator.config = published
+    assert coordinator.config_provider() is published
+
     sentinel = _bot()
-    orchestrator.agent_bots["code"] = sentinel
+    orchestrator.fleet.add("code", sentinel)
     assert coordinator.bot_provider("code") is sentinel
     assert coordinator.bot_provider("missing") is None
     assert coordinator.agent_reply_memberships is orchestrator.agent_reply_memberships

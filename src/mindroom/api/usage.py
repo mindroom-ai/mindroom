@@ -1,13 +1,14 @@
 """Dashboard API for content-free retained token usage."""
 
 from datetime import UTC, datetime
-from typing import Annotated, Any
+from typing import Annotated
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response, status
 from fastapi.responses import JSONResponse
 
 from mindroom.api import config_lifecycle
 from mindroom.api.auth import require_personal_user, require_usage_service, verify_user
+from mindroom.api.auth_user import SignedMatrixUser
 from mindroom.api.usage_export import (
     RETRY_AFTER_SECONDS,
     UsageExportContext,
@@ -15,9 +16,10 @@ from mindroom.api.usage_export import (
     context_is_current,
     usage_export_runner,
 )
+from mindroom.usage.provider_limits import get_provider_usage_snapshot
 from mindroom.usage.stats import UsageReport, collect_admin_usage, collect_private_usage
 
-__all__ = ["get_private_usage", "get_usage", "get_usage_export", "router"]
+__all__ = ["get_private_usage", "get_provider_limits", "get_usage", "get_usage_export", "router"]
 
 router = APIRouter(prefix="/api/usage", tags=["usage"])
 
@@ -56,9 +58,6 @@ def _get_organization_usage(
     """Start or poll one application-scoped organization usage report."""
     headers = {"Cache-Control": "no-store"}
     unavailable = Response(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, headers=headers)
-    snapshot = config_lifecycle.request_snapshot(request)
-    if snapshot is None:
-        return unavailable
     try:
         config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
     except HTTPException:
@@ -66,7 +65,7 @@ def _get_organization_usage(
     api_app = request.app
     context = UsageExportContext(
         runtime_paths=runtime_paths,
-        generation=snapshot.generation,
+        generation=config_lifecycle.committed_generation(request),
         include_daily=include_daily,
         include_requests=include_requests,
     )
@@ -94,7 +93,7 @@ def _get_organization_usage(
 def get_private_usage(
     request: Request,
     response: Response,
-    user: Annotated[dict[str, Any], Depends(require_personal_user)],
+    user: Annotated[SignedMatrixUser, Depends(require_personal_user)],
     include_daily: bool = False,
 ) -> dict[str, object]:
     """Return only the signed requester's private-agent usage, without target overrides."""
@@ -102,10 +101,30 @@ def get_private_usage(
         raise HTTPException(status_code=400, detail="Usage target overrides are not accepted")
     config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
     report = collect_private_usage(
-        requester_id=user["matrix_user_id"],
+        requester_id=user.matrix_user_id,
         config=config,
         runtime_paths=runtime_paths,
         include_daily=include_daily,
     )
     response.headers["Cache-Control"] = "no-store"
     return _report_payload(report)
+
+
+@router.get("/provider-limits", dependencies=[Depends(verify_user)], response_model=None)
+async def get_provider_limits(
+    request: Request,
+    response: Response,
+    refresh: bool = False,
+) -> dict[str, object] | Response:
+    """Return per-account provider usage limits and 7-day token/cost aggregates."""
+    try:
+        config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
+    except HTTPException:
+        return Response(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, headers={"Cache-Control": "no-store"})
+    snapshot = await get_provider_usage_snapshot(
+        config=config,
+        runtime_paths=runtime_paths,
+        force_refresh=refresh,
+    )
+    response.headers["Cache-Control"] = "no-store"
+    return snapshot.to_dict()

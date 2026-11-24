@@ -1,0 +1,352 @@
+"""The plain sentence each broker refusal carries, so an agent can tell its user what went wrong and where to fix it."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+__all__ = ["CONNECTIONS_PAGE_NOT_SERVED", "ScopeInfo", "git_error_text", "refusal_body"]
+
+# Texts from the design spec (sections 12.5 and 14). They name only a service, provider, host, path without its
+# query, or manager IDs, never a secret, token, or connect link: the links travel in their own fields, which the texts
+# name. `git_error_text` rewrites those link names for git's ERR line, so it must follow any rewording of them.
+_PATH_OUTSIDE = "{host}{path} is outside the paths {service} allows for this agent. "
+_SHARED_MISSING = "No {service} key is set for this shared agent. "
+_MESSAGES = {
+    "credential_not_configured": "No {service} key is set for this agent. Ask the user to add one at manage_url, then retry.",
+    "oauth_connection_required": (
+        "The {provider} account for {service} must be connected again. "
+        "Ask the user to reconnect at connect_url or manage_url."
+    ),
+    "oauth_refresh_failed": (
+        "{provider} did not refresh the account token. "
+        "Retry in a minute; if it keeps failing, ask the user to reconnect at manage_url."
+    ),
+    "path_not_allowed": _PATH_OUTSIDE + "Ask the user to add it at manage_url if the agent needs it.",
+    "agent_not_allowed": "This agent may not use {service}. Only an administrator can change which agents may use it.",
+    "repository_not_allowed": (
+        "The {service} GitHub App does not cover {repository}. Only an administrator can add repositories to it."
+    ),
+    "github_app_token_failed": (
+        "GitHub did not issue a token for the {service} GitHub App. Retry in a minute; if it keeps failing, tell an "
+        "administrator."
+    ),
+    "service_not_matched": (
+        "The X-Agent-Keys-Service header names {service}, but no service of your own by that name has a rule for "
+        "{host}{path}. Name one of your own services that covers it, or leave the header out."
+    ),
+    "bad_request": (
+        "The request path is ambiguous (dot segments, //, backslashes, or encoded forms of them) and was refused. "
+        "Use a plain path."
+    ),
+    "method_not_allowed": (
+        "TRACE and TRACK requests are refused because the server would echo the request, "
+        "injected credential included, back to the agent."
+    ),
+    "tls_required": "Credentials are only added over HTTPS. Use https:// for {host}.",
+    "host_mismatch": "The Host header does not match the host this connection was opened for.",
+    "host_not_allowed": "{host} is not allowed by the administrator's egress policy.",
+    "destination_blocked": "{host} resolves to a private or internal address that the administrator's egress policy does not let agents reach.",
+    "request_body_too_large": "The request body is larger than the broker accepts.",
+    "upstream_unreachable": "{host} could not be reached.",
+    "upstream_timeout": "{host} did not answer in time.",
+    "broker_error": "The credential broker hit an internal error. Retry; if it keeps failing, tell an administrator.",
+    "proxy_authentication_required": "The sandbox's proxy credentials are missing or expired. Start a new tool call.",
+}
+# A reconnect whose body carries no connect link: a service's own account, a shared connection, or one to reset first.
+# A shared agent's account is its managers' to reconnect, and a requester's own account on a shared agent is theirs.
+_RECONNECT_WITHOUT_LINK = (
+    "The {provider} account for {service} must be connected again. Ask the user to reconnect it at manage_url."
+)
+_RECONNECT_SHARED_ACCOUNT = "This shared agent's {provider} account for {service} must be connected again. "
+_RECONNECT_SHARED = (
+    _RECONNECT_SHARED_ACCOUNT + "Only its credential managers ({managers}) can reconnect it, at manage_url."
+)
+_RECONNECT_SHARED_WITHOUT_MANAGERS = (
+    _RECONNECT_SHARED_ACCOUNT + "Only an administrator can reconnect it, at manage_url."
+)
+# One key an administrator sets for every agent of the service, on the dashboard only, so no scope's page is linked.
+_ADMIN_KEY_MISSING = "No {service} key is set. Only an administrator can set it, on the dashboard."
+# A GitHub App credential, which only an administrator stores, so no scope's page is linked either.
+_GITHUB_APP_MISSING = "The {service} GitHub App credential is not stored. Only an administrator can store it."
+# A service's own account, which only the service's row on the egress page connects, so there is no connect link.
+_OWN_ACCOUNT_MISSING = (
+    "No {service} account is connected for this agent. "
+    "Ask the user to connect the service's own account at manage_url, then retry."
+)
+# The same before anyone allowed Agent Keys to use it, such as right after the service is saved; it takes no key.
+_OWN_ACCOUNT_OFF = (
+    "No {service} account is allowed for this agent. "
+    "Ask the user to connect and allow the service's own account at manage_url, then retry."
+)
+_CONNECTABLE = (
+    "No {service} credential is set for this agent. "
+    "Ask the user to connect it at connect_url or add a key at manage_url, then retry."
+)
+_SHARED = _SHARED_MISSING + "Only its credential managers ({managers}) can add one, at manage_url."
+_SHARED_WITHOUT_MANAGERS = _SHARED_MISSING + "Only an administrator can add one, at manage_url."
+# A connected account nobody allowed Agent Keys to use for the service: a personal scope's user allows their own, a
+# shared agent's account is its managers' to allow, and a requester's own account on a shared agent is theirs.
+_REUSE_OFF = (
+    "No {service} key is set for this agent, and Agent Keys may not use a connected {provider} account. "
+    "Ask the user to add a key or allow that account at manage_url, then retry."
+)
+_REUSE_OFF_SHARED_ACCOUNT = (
+    "No {service} key is set for this shared agent, and Agent Keys may not use its connected {provider} account. "
+)
+_REUSE_OFF_SHARED = (
+    _REUSE_OFF_SHARED_ACCOUNT
+    + "Only its credential managers ({managers}) can add a key or allow that account, at manage_url."
+)
+_REUSE_OFF_SHARED_WITHOUT_MANAGERS = (
+    _REUSE_OFF_SHARED_ACCOUNT + "Only an administrator can add a key or allow that account, at manage_url."
+)
+_REUSE_OFF_OWN_ACCOUNT = (
+    "No {service} key is set for this shared agent, and Agent Keys may not use the user's own {provider} account. "
+    "Ask the user to allow it at manage_url, then retry."
+)
+# A request that an account Agent Keys may use only to read may not serve, said to whoever can allow writes, as above.
+_READ_ONLY = (
+    "Agent Keys may use the {provider} account for {service} only to read, so this request was refused. "
+    "Ask the user to allow read and write at manage_url if the agent needs it, then retry."
+)
+_READ_ONLY_SHARED_ACCOUNT = "Agent Keys may use this shared agent's {provider} account for {service} only to read, so this request was refused. "
+_READ_ONLY_SHARED = (
+    _READ_ONLY_SHARED_ACCOUNT + "Only its credential managers ({managers}) can allow read and write, at manage_url."
+)
+_READ_ONLY_SHARED_WITHOUT_MANAGERS = (
+    _READ_ONLY_SHARED_ACCOUNT + "Only an administrator can allow read and write, at manage_url."
+)
+_PATH_SHARED = _PATH_OUTSIDE + "Only its credential managers ({managers}) can change this, at manage_url."
+_PATH_ADMINISTRATOR = _PATH_OUTSIDE + "Only an administrator can change this, at manage_url."
+# The spec words `bad_request` for the ambiguous-path refusal; a request the broker cannot read at all has no path.
+_MALFORMED = "The request is malformed and was refused."
+_BAD_SERVICE_HEADER = (
+    "The X-Agent-Keys-Service header must be sent at most once, with the name of one of your own services."
+)
+# A personal scope's keys, accounts, and services are set only on the personal page. Where it is not served, its
+# refusals take their texts from `_WITHOUT_PAGE`, which names no page, or `_WITHOUT_PAGE_LINKED` when the body carries
+# a connect link, and `refusal_body` drops `manage_url`, the dashboard. The `egress_credentials` tool ends its note
+# with the same sentences, and the key and reconnect texts stay short enough for the 200-character reason phrase.
+CONNECTIONS_PAGE_NOT_SERVED = (
+    "on the Connections page, which nobody can sign in to here. "
+    "An administrator can enable Connections sign-in or make the agent shared."
+)
+_WITHOUT_PAGE = {
+    **_MESSAGES,
+    "credential_not_configured": "No {service} key: each user sets this agent's keys " + CONNECTIONS_PAGE_NOT_SERVED,
+    "oauth_connection_required": (
+        "Reconnect the {provider} account for {service}: each user does it " + CONNECTIONS_PAGE_NOT_SERVED
+    ),
+    "oauth_refresh_failed": (
+        "{provider} did not refresh the account token. Retry in a minute; if it keeps failing, tell an administrator."
+    ),
+    "path_not_allowed": _PATH_OUTSIDE + "Each user sets this agent's services " + CONNECTIONS_PAGE_NOT_SERVED,
+}
+_REUSE_OFF_WITHOUT_PAGE = (
+    "No {service} key or allowed {provider} account: each user sets these " + CONNECTIONS_PAGE_NOT_SERVED
+)
+_READ_ONLY_WITHOUT_PAGE = (
+    "Agent Keys may use the {provider} account for {service} only to read: each user allows writes "
+    + CONNECTIONS_PAGE_NOT_SERVED
+)
+_WITHOUT_PAGE_LINKED = {
+    **_WITHOUT_PAGE,
+    "credential_not_configured": (
+        "No {service} credential is set for this agent. Ask the user to connect it at connect_url, then retry."
+    ),
+    "oauth_connection_required": (
+        "The {provider} account for {service} must be connected again. Ask the user to reconnect at connect_url."
+    ),
+}
+
+
+@dataclass(frozen=True)
+class ScopeInfo:
+    """Who can fix a missing key for one requester's scope.
+
+    `shared` is true for a `shared` or unscoped agent, whose keys only its credential managers (`managers`, Matrix
+    IDs) and administrators may set; a personal (`user` or `user_agent`) scope's user sets their own, on the personal
+    page. `personal_page` says whether this deployment serves that page; without it nobody can set a personal key.
+    """
+
+    shared: bool
+    managers: tuple[str, ...]
+    personal_page: bool
+
+
+def _template(  # noqa: C901, PLR0911, PLR0912 - one text per case, checked in order
+    code: str,
+    *,
+    path: str | None,
+    managers: Sequence[str],
+    shared: bool,
+    personal_page: bool,
+    connectable: bool,
+    by_operator: bool,
+    reuse_off: bool,
+    requester_owned: bool,
+    own_account: bool,
+    service_header: bool,
+    admin_key: bool,
+    github_app: bool,
+) -> str:
+    if code == "credential_not_configured" and admin_key:
+        return _ADMIN_KEY_MISSING
+    if code == "credential_not_configured" and github_app:
+        return _GITHUB_APP_MISSING
+    without_page = not (shared or personal_page)
+    if code == "credential_not_configured" and own_account and not without_page:
+        return _OWN_ACCOUNT_OFF if reuse_off else _OWN_ACCOUNT_MISSING
+    if code == "credential_not_configured" and reuse_off:
+        return _reuse_off_template(managers, shared=shared, without_page=without_page, requester_owned=requester_owned)
+    if code == "read_only":
+        return _read_only_template(managers, shared=shared, without_page=without_page, requester_owned=requester_owned)
+    if code == "credential_not_configured" and connectable and not without_page:
+        return _CONNECTABLE
+    if code == "credential_not_configured" and shared:
+        return _SHARED if managers else _SHARED_WITHOUT_MANAGERS
+    if code == "path_not_allowed" and (by_operator or (shared and not managers)):
+        return _PATH_ADMINISTRATOR
+    if code == "path_not_allowed" and shared:
+        return _PATH_SHARED
+    if code == "bad_request" and service_header:
+        return _BAD_SERVICE_HEADER
+    if code == "bad_request" and path is None:
+        return _MALFORMED
+    if code == "oauth_connection_required" and not connectable and not without_page:
+        return _reconnect_template(managers, shared=shared, requester_owned=requester_owned)
+    texts = _MESSAGES
+    if without_page:
+        texts = _WITHOUT_PAGE_LINKED if connectable else _WITHOUT_PAGE
+    try:
+        return texts[code]
+    except KeyError:
+        msg = f"No refusal message for {code}."
+        raise ValueError(msg) from None
+
+
+def _reuse_off_template(managers: Sequence[str], *, shared: bool, without_page: bool, requester_owned: bool) -> str:
+    if without_page:
+        return _REUSE_OFF_WITHOUT_PAGE
+    if not shared:
+        return _REUSE_OFF
+    if requester_owned:
+        return _REUSE_OFF_OWN_ACCOUNT
+    return _REUSE_OFF_SHARED if managers else _REUSE_OFF_SHARED_WITHOUT_MANAGERS
+
+
+def _reconnect_template(managers: Sequence[str], *, shared: bool, requester_owned: bool) -> str:
+    if not shared or requester_owned:
+        return _RECONNECT_WITHOUT_LINK
+    return _RECONNECT_SHARED if managers else _RECONNECT_SHARED_WITHOUT_MANAGERS
+
+
+def _read_only_template(managers: Sequence[str], *, shared: bool, without_page: bool, requester_owned: bool) -> str:
+    if without_page:
+        return _READ_ONLY_WITHOUT_PAGE
+    if not shared or requester_owned:
+        return _READ_ONLY
+    return _READ_ONLY_SHARED if managers else _READ_ONLY_SHARED_WITHOUT_MANAGERS
+
+
+def refusal_body(
+    code: str,
+    *,
+    host: str | None = None,
+    path: str | None = None,
+    service: str | None = None,
+    service_label: str | None = None,
+    provider: str | None = None,
+    repository: str | None = None,
+    managers: Sequence[str] | None = None,
+    shared: bool = False,
+    personal_page: bool = True,
+    connectable: bool = False,
+    by_operator: bool = False,
+    reuse_off: bool = False,
+    requester_owned: bool = False,
+    service_header: bool = False,
+    own_account: bool = False,
+    admin_key: bool = False,
+    github_app: bool = False,
+    **extra: object,
+) -> dict[str, object]:
+    """Return a refusal's JSON body: `error`, `message`, `extra`, and `service`, `provider`, `repository` when given.
+
+    `host`, `path`, `service_label`, and `managers` only fill in the message; `path` is cut at its query, which could
+    hold a secret, and `service_label` (a display name) names the service there instead of `service`.
+    For `credential_not_configured`, `connectable` (the body carries a connect link) offers connecting an account as
+    well as adding a key, and otherwise a `shared` scope names its `managers` (or an administrator when there are
+    none); a `shared` `path_not_allowed` names them as the ones who can change the limit. A `path_not_allowed` set by
+    the operator's service (`by_operator`) names an administrator whatever the scope, since only an administrator
+    edits it. A `credential_not_configured` with `reuse_off` (nobody allowed Agent Keys to use the `provider` account)
+    adds `oauth_reuse: "off"` and says who may allow the account: on a shared agent its managers, unless it is the
+    requester's own (`requester_owned`). A `read_only` (the `provider` account may only read) says who may allow
+    writes the same way. `own_account` (the service's own account is not connected, or with `reuse_off` not allowed)
+    asks the user to connect it, or to connect and allow it, at `manage_url`. A `credential_not_configured` for an
+    `admin_key` service names an administrator and the dashboard, whatever the scope, and links no page, and one for a
+    `github_app` service whose App credential is not stored (`github_app`) names an administrator. An
+    `oauth_connection_required` without a connect link names only `manage_url`, and on a `shared` agent its `managers`
+    (or an administrator) as the ones who can reconnect, unless the account is `requester_owned`.
+    A personal scope without the personal page (`personal_page` false) has no page that sets its keys, accounts, or
+    services: its texts say so and offer only a connect link, for `oauth_connection_required` too where `connectable`
+    says the body carries one, and the body leaves out `manage_url`, which would be the dashboard.
+    A `bad_request` with a `path` is the ambiguous-path refusal, with `service_header` an `X-Agent-Keys-Service` header
+    that names no service once; without either, the request itself was malformed.
+    Raises ValueError for a code without a text and KeyError when the text needs a value that was not given.
+    """
+    template = _template(
+        code,
+        path=path,
+        managers=managers or (),
+        shared=shared,
+        personal_page=personal_page,
+        connectable=connectable,
+        by_operator=by_operator,
+        reuse_off=reuse_off,
+        requester_owned=requester_owned,
+        own_account=own_account,
+        service_header=service_header,
+        admin_key=admin_key,
+        github_app=github_app,
+    )
+    if "manage_url" not in template:
+        # A body carries the manage link only where its text names it.
+        extra.pop("manage_url", None)
+    values = {
+        "host": host,
+        "path": None if path is None else path.split("?", 1)[0],
+        "service": service_label or service,
+        "provider": provider,
+        "repository": repository,
+        "managers": ", ".join(managers or ()),
+    }
+    message = template.format_map({name: value for name, value in values.items() if value is not None})
+    body: dict[str, object] = {"error": code}
+    if service is not None:
+        body["service"] = service
+    if provider is not None:
+        body["provider"] = provider
+    if repository is not None:
+        body["repository"] = repository
+    if reuse_off:
+        body["oauth_reuse"] = "off"
+    return {**body, **extra, "message": message}
+
+
+def git_error_text(body: dict[str, object]) -> str:
+    """Return the message for git's ERR line, naming the body's `manage_url` itself, since git shows no other field.
+
+    The connect link is never named: it carries a one-time token. Where the message offers it, the manage link
+    stands in.
+    """
+    message = str(body["message"])
+    link = body.get("manage_url")
+    if not isinstance(link, str) or not link:
+        return message
+    message = message.replace("connect_url or manage_url", "manage_url").replace("connect_url", "manage_url")
+    return message.replace("manage_url", link)

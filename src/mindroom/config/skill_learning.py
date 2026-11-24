@@ -2,6 +2,8 @@
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from mindroom.config.schema_hints import dashboard_hint
+
 
 class SkillLearningConfig(BaseModel):
     """Periodically review standalone agent conversations and maintain learned workspace skills."""
@@ -12,6 +14,7 @@ class SkillLearningConfig(BaseModel):
     model: str | None = Field(
         default=None,
         description="Review model alias; defaults to the model of the reviewed response",
+        json_schema_extra=dashboard_hint(reference="model"),
     )
     review_interval: int = Field(
         default=10,

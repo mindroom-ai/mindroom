@@ -1,9 +1,10 @@
 """Per-sender media frame key management for MatrixRTC calls.
 
 Ports the key policy of matrix-js-sdk's ``RTCEncryptionManager``: every
-participant encrypts their outbound media with their own 16-byte key,
-distributed to the other participants over an encrypted transport. Keys
-rotate when someone leaves (so leavers lose access) and when someone joins
+participant encrypts their outbound media with their own key, distributed to
+the other participants over an encrypted transport. We send 16-byte keys for
+SDK 41 compatibility and accept both 16- and 32-byte keys. Keys rotate when
+someone leaves (so leavers lose access) and when someone joins
 after a grace period (so joiners cannot decrypt earlier media). Indices
 cycle through 0-255.
 """
@@ -25,7 +26,8 @@ _USE_KEY_DELAY_MS = 1000
 #: Skip rotation for joiners when the current key is younger than this.
 _KEY_ROTATION_GRACE_PERIOD_MS = 10_000
 
-_KEY_SIZE_BYTES = 16
+_OUTBOUND_KEY_SIZE_BYTES = 16
+_INBOUND_KEY_SIZES = frozenset({16, 32})
 _KEY_INDEX_MODULUS = 256
 
 
@@ -36,9 +38,8 @@ class _KeyDistribution:
     key: bytes
     key_index: int
     targets: tuple[CallMember, ...]
-    #: Wait this long before encrypting outbound media with the key. Zero for
-    #: keys that are already in use and are only being shared with joiners.
-    apply_after_ms: int
+    #: Counts rotations without wrapping, so a newer key always compares newer than an older one.
+    generation: int
 
     @property
     def key_base64(self) -> str:
@@ -74,7 +75,8 @@ class FrameKeyManager:
     _key: bytes | None = field(default=None, init=False)
     _key_index: int = field(default=0, init=False)
     _key_created_ms: int = field(default=0, init=False)
-    _key_activation_ms: int = field(default=0, init=False)
+    _key_generation: int = field(default=0, init=False)
+    _armed_generation: int = field(default=-1, init=False)
     # Sets keep each distribution linear in the roster, which a caller can inflate with planted devices.
     _shared_with: set[_SharedWith] = field(default_factory=set, init=False)
     _exposed_to: set[_SharedWith] = field(default_factory=set, init=False)
@@ -92,15 +94,14 @@ class FrameKeyManager:
 
         if self._key is None:
             # First key: usable immediately, shared with everyone present.
-            self._key = secrets.token_bytes(_KEY_SIZE_BYTES)
+            self._key = secrets.token_bytes(_OUTBOUND_KEY_SIZE_BYTES)
             self._key_index = 0
             self._key_created_ms = now_ms
-            self._key_activation_ms = now_ms
             return _KeyDistribution(
                 key=self._key,
                 key_index=self._key_index,
                 targets=tuple(members_by_share.values()),
-                apply_after_ms=0,
+                generation=self._key_generation,
             )
 
         # A member that rejoined with a new membership event needs the key again.
@@ -110,21 +111,23 @@ class FrameKeyManager:
         if any_left:
             return self._rotate(members_by_share, now_ms)
         if joined:
-            if now_ms - self._key_created_ms < _KEY_ROTATION_GRACE_PERIOD_MS:
+            # A device this key already targeted but did not reach gets it again, however late.
+            retry_only = all(_share(member) in self._exposed_to for member in joined)
+            if retry_only or now_ms - self._key_created_ms < _KEY_ROTATION_GRACE_PERIOD_MS:
                 return _KeyDistribution(
                     key=self._key,
                     key_index=self._key_index,
                     targets=tuple(joined),
-                    apply_after_ms=max(0, self._key_activation_ms - now_ms),
+                    generation=self._key_generation,
                 )
             return self._rotate(members_by_share, now_ms)
         return None
 
     def _rotate(self, members_by_share: dict[_SharedWith, CallMember], now_ms: int) -> _KeyDistribution:
-        self._key = secrets.token_bytes(_KEY_SIZE_BYTES)
+        self._key = secrets.token_bytes(_OUTBOUND_KEY_SIZE_BYTES)
         self._key_index = (self._key_index + 1) % _KEY_INDEX_MODULUS
         self._key_created_ms = now_ms
-        self._key_activation_ms = now_ms + _USE_KEY_DELAY_MS
+        self._key_generation += 1
         self._shared_with = set()
         self._exposed_to = set()
         # Rotation always re-shares with every current member.
@@ -132,23 +135,27 @@ class FrameKeyManager:
             key=self._key,
             key_index=self._key_index,
             targets=tuple(members_by_share.values()),
-            apply_after_ms=_USE_KEY_DELAY_MS,
+            generation=self._key_generation,
         )
-
-    def is_current_outbound_key(self, key: bytes, key_index: int) -> bool:
-        """Return whether a delayed activation still targets the newest key."""
-        return self._key == key and self._key_index == key_index
 
     def mark_distributed(
         self,
         distribution: _KeyDistribution,
         delivered: tuple[CallMember, ...] | None = None,
-    ) -> None:
-        """Record successful sends so unavailable targets are retried later."""
+    ) -> bool:
+        """Record successful sends so unavailable targets are retried later.
+
+        Returns whether this ended the key generation's first send attempt, which fixes its one
+        activation deadline. Callers report a raised send too, with nothing delivered: like a send
+        that reached nobody, it still retires the old key (callers hear silence until a retry lands).
+        """
+        first_send = distribution.generation > self._armed_generation
+        self._armed_generation = max(self._armed_generation, distribution.generation)
         self.mark_exposed(distribution)
         self._shared_with.update(
             _share(member) for member in (distribution.targets if delivered is None else delivered)
         )
+        return first_send
 
     def mark_exposed(self, distribution: _KeyDistribution) -> None:
         """Record every device that may have received this key before transport returns."""
@@ -171,11 +178,13 @@ class FrameKeyManager:
         newest = self._newest_inbound_ts.get(filter_key)
         if newest is not None and received.received_at_ms < newest:
             return None
+        # MSC4143 specifies unpadded base64; SDK 41 and 45 send it padded. Accept exactly those two spellings.
+        padding = "" if received.key_base64.endswith("=") else "=" * (-len(received.key_base64) % 4)
         try:
-            key = base64.b64decode(received.key_base64, validate=True)
+            key = base64.b64decode(received.key_base64 + padding, validate=True)
         except ValueError:
             return None
-        if len(key) != _KEY_SIZE_BYTES:
+        if len(key) not in _INBOUND_KEY_SIZES:
             return None
         # Record the dedup timestamp only for keys that validate, so a
         # malformed payload cannot poison the filter against a good retry.

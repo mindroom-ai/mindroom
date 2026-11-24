@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from enum import StrEnum
 from typing import Any, Literal, Protocol
 
 EVENT_MESSAGE_RECEIVED = "message:received"
@@ -27,6 +28,13 @@ EVENT_CONFIG_RELOADED = "config:reloaded"
 EVENT_SESSION_STARTED = "session:started"
 EVENT_TOOL_BEFORE_CALL = "tool:before_call"
 EVENT_TOOL_AFTER_CALL = "tool:after_call"
+EVENT_TOOL_RESULT_TRANSFORM = "tool:result_transform"
+EVENT_TOOL_ENVIRONMENT = "tool:environment"
+EVENT_CONTACT_BEFORE_SEND = "contact:before_send"
+EVENT_TURN_STARTED = "turn:started"
+EVENT_TURN_PAUSED = "turn:paused"
+EVENT_TURN_RESUMED = "turn:resumed"
+EVENT_TURN_ENDED = "turn:ended"
 
 BUILTIN_EVENT_NAMES = frozenset(
     {
@@ -50,10 +58,34 @@ BUILTIN_EVENT_NAMES = frozenset(
         EVENT_SESSION_STARTED,
         EVENT_TOOL_BEFORE_CALL,
         EVENT_TOOL_AFTER_CALL,
+        EVENT_TOOL_RESULT_TRANSFORM,
+        EVENT_TOOL_ENVIRONMENT,
+        EVENT_CONTACT_BEFORE_SEND,
+        EVENT_TURN_STARTED,
+        EVENT_TURN_PAUSED,
+        EVENT_TURN_RESUMED,
+        EVENT_TURN_ENDED,
     },
 )
+type HookScope = Literal["agent", "room", "service"]
+# The events one process emits once for itself, where a hook may take the service scope.
+SERVICE_SCOPE_EVENTS = frozenset({EVENT_BOT_READY, EVENT_CONFIG_RELOADED})
 _RESERVED_EVENT_NAMESPACES = frozenset(
-    {"message", "system", "agent", "bot", "compaction", "schedule", "reaction", "room", "config", "session", "tool"},
+    {
+        "message",
+        "system",
+        "agent",
+        "bot",
+        "compaction",
+        "schedule",
+        "reaction",
+        "room",
+        "config",
+        "session",
+        "tool",
+        "contact",
+        "turn",
+    },
 )
 _EVENT_NAME_PATTERN = re.compile(r"^[a-z0-9_.-]+(:[a-z0-9_.-]+)+$")
 _DEFAULT_EVENT_TIMEOUT_MS: dict[str, int] = {
@@ -77,10 +109,25 @@ _DEFAULT_EVENT_TIMEOUT_MS: dict[str, int] = {
     EVENT_SESSION_STARTED: 5000,
     EVENT_TOOL_BEFORE_CALL: 200,
     EVENT_TOOL_AFTER_CALL: 300,
+    EVENT_TOOL_RESULT_TRANSFORM: 30000,
+    EVENT_TOOL_ENVIRONMENT: 200,
+    EVENT_CONTACT_BEFORE_SEND: 10000,
+    EVENT_TURN_STARTED: 2000,
+    EVENT_TURN_PAUSED: 3000,
+    EVENT_TURN_RESUMED: 2000,
+    EVENT_TURN_ENDED: 3000,
 }
 _DEFAULT_CUSTOM_EVENT_TIMEOUT_MS = 1000
 
 EnrichmentCachePolicy = Literal["stable", "volatile"]
+
+
+class TurnOutcome(StrEnum):
+    """How a turn ended, as ``turn:ended`` reports it."""
+
+    COMPLETED = "completed"
+    CANCELLED = "cancelled"
+    FAILED = "failed"
 
 
 def format_hook_source(plugin_name: str, event_name: str) -> str:
@@ -110,8 +157,14 @@ class HookMessageSender(Protocol):
         extra_content: dict[str, Any] | None,
         *,
         trigger_dispatch: bool = False,
+        mentions: list[str] | None = None,
+        wake_mentioned: bool = True,
     ) -> Awaitable[str | None]:
-        """Send one hook-originated Matrix message."""
+        """Send one hook-originated Matrix message.
+
+        ``mentions`` lists every Matrix user ID the message mentions, so names in its text mention nobody else, and
+        ``wake_mentioned=False`` keeps every agent it mentions from being activated by that mention.
+        """
 
 
 class HookMatrixAdmin(Protocol):
@@ -225,6 +278,7 @@ class RegisteredHook:
     agents: tuple[str, ...] | None
     rooms: tuple[str, ...] | None
     required: bool = False
+    scope: HookScope = "agent"
 
 
 def default_timeout_ms_for_event(event_name: str) -> int:

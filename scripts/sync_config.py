@@ -43,6 +43,8 @@ def saas_config() -> dict:
     # An explicit worker_tools list overrides the chart's sandbox routing, and [] would run
     # shell/file/python in the primary pod beside tenant credentials.
     config["defaults"].pop("worker_tools", None)
+    # Hosted shells run only in workers.
+    config["defaults"].pop("allow_shell_without_worker", None)
 
     # Voice messages transcribe through OpenRouter's OpenAI-compatible endpoint with the tenant's OpenRouter key.
     config["voice"] = {
@@ -55,12 +57,19 @@ def saas_config() -> dict:
         },
     }
 
+    # Tenants have no shell to log in to matrix-mcp, and `script` cannot run in a sandbox
+    # worker, so it would run tenant Python in the primary pod beside tenant credentials.
+    config.pop("mcp_servers")
     # The platform upgrades hosted instances, so tenants cannot act on update notices.
     config["defaults"]["tools"].remove("update_awareness")
+    # Hosted tenants get thread_snooze only when someone adds it to an agent.
+    hosted_excluded_tools = {"update_awareness", "script", "mcp_matrix_mcp", "thread_snooze"}
     for agent in config["agents"].values():
-        agent["tools"].remove("update_awareness")
-        # Hosted agents learn workspace skills from their conversations.
-        agent["skill_learning"] = {"enabled": True}
+        agent["tools"] = [
+            tool
+            for tool in agent["tools"]
+            if (tool["name"] if isinstance(tool, dict) else tool) not in hosted_excluded_tools
+        ]
     return config
 
 

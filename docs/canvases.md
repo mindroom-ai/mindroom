@@ -12,54 +12,52 @@ Use a canvas when seeing or clicking beats reading or typing; for a quick choice
 
     A narrated film of all four: a scheduling grid, a data fit, a slide deck, and a trip planner.
 
-    <video class="only-light" controls playsinline preload="none" poster="https://github.com/user-attachments/assets/77e36a87-9fec-41f9-b626-73b950003845" aria-label="Canvas film: four agent canvases beside the conversation" style="width: 100%">
-      <source src="https://github.com/user-attachments/assets/381f7395-4f1b-4167-8749-7f85080da8ce" type="video/mp4">
+    <video class="only-light" controls playsinline preload="none" poster="https://github.com/user-attachments/assets/5941fd9d-90d2-4a52-b0e9-abbff53354b4" aria-label="Canvas film: four agent canvases beside the conversation" style="width: 100%">
+      <source src="https://github.com/user-attachments/assets/3a2e29e3-90a0-4cf7-a3cb-c0e41765695a" type="video/mp4">
     </video>
-    <video class="only-dark" controls playsinline preload="none" poster="https://github.com/user-attachments/assets/d2b7a4a6-0723-4d22-af2a-6b2ee7213602" aria-label="Canvas film: four agent canvases beside the conversation" style="width: 100%">
-      <source src="https://github.com/user-attachments/assets/1a820f71-dd19-415f-9301-611310c3d510" type="video/mp4">
+    <video class="only-dark" controls playsinline preload="none" poster="https://github.com/user-attachments/assets/dc3e3352-7cef-45ce-95be-3edad3bc7fe5" aria-label="Canvas film: four agent canvases beside the conversation" style="width: 100%">
+      <source src="https://github.com/user-attachments/assets/a704564b-be05-45cd-9c74-2b5de4f5c875" type="video/mp4">
     </video>
 
 === "Scheduling"
 
     A week grid of four people's availability; the pick goes back with **Send**, and the agent books the meeting after approval.
 
-    <video controls playsinline preload="metadata" aria-label="An agent shows a week grid; the user picks a slot and sends it, and the agent books it" style="width: 100%" poster="https://github.com/user-attachments/assets/c44fdc29-a35d-45ed-9b67-8a8f2d046bef" data-poster-light="https://github.com/user-attachments/assets/c44fdc29-a35d-45ed-9b67-8a8f2d046bef" data-poster-dark="https://github.com/user-attachments/assets/df646508-7bd3-494f-b560-c49bd5ec0982">
-      <source src="https://github.com/user-attachments/assets/e6698792-c676-4a4f-9824-ae04c1e970da" type="video/mp4" media="(prefers-color-scheme: dark)">
-      <source src="https://github.com/user-attachments/assets/89fb462e-4895-43a0-9cf6-44f91fd7084d" type="video/mp4">
+    <video controls playsinline preload="metadata" aria-label="An agent shows a week grid; the user picks a slot and sends it, and the agent books it" style="width: 100%" poster="https://github.com/user-attachments/assets/21d0d8ad-a7c4-4937-8fac-3d178b047011" data-poster-light="https://github.com/user-attachments/assets/21d0d8ad-a7c4-4937-8fac-3d178b047011" data-poster-dark="https://github.com/user-attachments/assets/1247f0ca-1c73-4759-bfa7-1b06fb8c2635">
+      <source src="https://github.com/user-attachments/assets/2ae227fd-8edb-4aa2-af62-f1ef3c99a530" type="video/mp4" media="(prefers-color-scheme: dark)">
+      <source src="https://github.com/user-attachments/assets/3926d694-04cf-4f17-ae4b-70f00dde705e" type="video/mp4">
     </video>
 
 === "Data"
 
     An interactive fit drawn in inline SVG with the theme variables; leaving out an outlier refits the curve live.
 
-    <video controls playsinline preload="metadata" aria-label="An agent shows a data fit; the user leaves out an outlier and sends back the fit" style="width: 100%" poster="https://github.com/user-attachments/assets/d6a4d93a-2ce0-466a-bca6-8b7b2f84cad3" data-poster-light="https://github.com/user-attachments/assets/d6a4d93a-2ce0-466a-bca6-8b7b2f84cad3" data-poster-dark="https://github.com/user-attachments/assets/f283e9b8-4b9a-40be-a8e9-da758ad163a1">
-      <source src="https://github.com/user-attachments/assets/39a4fa17-51f4-46df-821d-7391c2418071" type="video/mp4" media="(prefers-color-scheme: dark)">
-      <source src="https://github.com/user-attachments/assets/62d2d1d3-5754-4d6a-a5a4-d70b0a354d43" type="video/mp4">
+    <video controls playsinline preload="metadata" aria-label="An agent shows a data fit; the user leaves out an outlier and sends back the fit" style="width: 100%" poster="https://github.com/user-attachments/assets/795ebae7-99dc-4660-bf7c-2754fdc5916d" data-poster-light="https://github.com/user-attachments/assets/795ebae7-99dc-4660-bf7c-2754fdc5916d" data-poster-dark="https://github.com/user-attachments/assets/61718584-7b95-4bac-87f3-2e71b3cb6ab4">
+      <source src="https://github.com/user-attachments/assets/7385503a-982b-4811-9146-0a3a0378084d" type="video/mp4" media="(prefers-color-scheme: dark)">
+      <source src="https://github.com/user-attachments/assets/36d79992-fc82-47e2-a012-6bc2c07b4956" type="video/mp4">
     </video>
 
 === "Slides"
 
     A deck the agent writes to a workspace file and shows by `path`; after a change request it rewrites the file and the open deck updates in place.
 
-    <video controls playsinline preload="metadata" aria-label="An agent shows a slide deck from its workspace and updates it in place after a change request" style="width: 100%" poster="https://github.com/user-attachments/assets/a397afe2-943b-436c-813d-c5a7e03d81cf" data-poster-light="https://github.com/user-attachments/assets/a397afe2-943b-436c-813d-c5a7e03d81cf" data-poster-dark="https://github.com/user-attachments/assets/1517814d-cb7f-47f1-be9f-d2fc52ceffa8">
-      <source src="https://github.com/user-attachments/assets/fa8b1989-9b8c-4dad-b55d-18dd0412013a" type="video/mp4" media="(prefers-color-scheme: dark)">
-      <source src="https://github.com/user-attachments/assets/e215f9e4-ffdb-4e64-9782-e787d3dd464b" type="video/mp4">
+    <video controls playsinline preload="metadata" aria-label="An agent shows a slide deck from its workspace and updates it in place after a change request" style="width: 100%" poster="https://github.com/user-attachments/assets/0a8304cd-77bb-481a-8654-c735d91f5fd4" data-poster-light="https://github.com/user-attachments/assets/0a8304cd-77bb-481a-8654-c735d91f5fd4" data-poster-dark="https://github.com/user-attachments/assets/1e2819a7-8c5a-4095-8749-a7a3610dddc9">
+      <source src="https://github.com/user-attachments/assets/c033ea6b-fc57-4a66-a235-be716d33286c" type="video/mp4" media="(prefers-color-scheme: dark)">
+      <source src="https://github.com/user-attachments/assets/6219e504-dcf2-40a7-a919-fc5b372c13d6" type="video/mp4">
     </video>
 
 === "Trip planner"
 
     One canvas, two steps: pick a stay, then plan the days against a live budget, updated in place with `canvas_event_id`.
 
-    <video controls playsinline preload="metadata" aria-label="One canvas, two steps: pick a stay, then plan the days against a live budget" style="width: 100%" poster="https://github.com/user-attachments/assets/57143ac5-9fb7-400d-8ad4-ccf036f16b5e" data-poster-light="https://github.com/user-attachments/assets/57143ac5-9fb7-400d-8ad4-ccf036f16b5e" data-poster-dark="https://github.com/user-attachments/assets/01cf9610-83fc-4752-ac72-64750807af71">
-      <source src="https://github.com/user-attachments/assets/dd5ab134-eeba-4cd5-93e3-4dd6e8d0a9cd" type="video/mp4" media="(prefers-color-scheme: dark)">
-      <source src="https://github.com/user-attachments/assets/3e772d7a-1acc-44bf-8e6e-f7e3032ee374" type="video/mp4">
+    <video controls playsinline preload="metadata" aria-label="One canvas, two steps: pick a stay, then plan the days against a live budget" style="width: 100%" poster="https://github.com/user-attachments/assets/fbe6bf8f-f1b4-4195-ad37-df3a2dfdbe80" data-poster-light="https://github.com/user-attachments/assets/fbe6bf8f-f1b4-4195-ad37-df3a2dfdbe80" data-poster-dark="https://github.com/user-attachments/assets/c71df2bd-54c9-4946-a8b1-54e191db5c3b">
+      <source src="https://github.com/user-attachments/assets/341cd5bd-7fb1-441f-8a6a-470b701359d6" type="video/mp4" media="(prefers-color-scheme: dark)">
+      <source src="https://github.com/user-attachments/assets/26870d8e-5303-4cfd-bb10-9fa66c1d6632" type="video/mp4">
     </video>
 
 ## Turn canvases on
 
-Canvases need two switches, and both are off by default.
-
-First, give the agent the [`chat_ui`](tools/chat-ui.md) toolkit with `enable_show_canvas: true`:
+MindRoom Chat ships with canvases on, so an agent needs only the [`chat_ui`](tools/chat-ui.md) toolkit with `enable_show_canvas: true`:
 
 ```yaml
 agents:
@@ -74,24 +72,24 @@ agents:
 
 `enable_show_canvas` (boolean, default `false`) adds the `show_canvas` function; the rest of `chat_ui` works without it.
 It can also be set in the `chat_ui` tool's saved settings for every agent that uses `chat_ui`; an agent's own entry wins, as described in [How Settings Combine](tools/index.md#how-settings-combine).
+`mindroom config init` and newly provisioned hosted instances already turn it on for the starter Mind agent, so Mind can show canvases without any setup.
 
-Second, enable canvases in the MindRoom Chat deployment's runtime `config.json`:
+A MindRoom Chat deployment can turn canvases off in its runtime `config.json`:
 
 ```json
 {
   "mindroom": {
     "canvas": {
-      "enabled": true
+      "enabled": false
     }
   }
 }
 ```
 
-The shipped MindRoom Chat configuration sets `enabled` to `false`, so only whoever deploys Chat can turn canvases on.
-
 ### Let pages load libraries
 
-Pages can also load libraries such as Chart.js, D3, Mermaid, or KaTeX from jsDelivr's npm CDN, `https://cdn.jsdelivr.net/npm/`.
+Chart.js, D3, Mermaid, and KaTeX need no switch: MindRoom Chat serves its own copies to pages whose agent names them in `show_canvas`, and no viewer's address reaches a CDN.
+Pages can also load any other npm library from jsDelivr's npm CDN, `https://cdn.jsdelivr.net/npm/`.
 This takes two more switches, both off by default; turn on both, because a page that needs a library breaks where Chat blocks it.
 
 ```yaml
@@ -119,24 +117,76 @@ agents:
 
 `enable_canvas_libraries` (boolean, default `false`) tells the agent it may use the source, and Chat's `libraries` lets pages load from it.
 Pages may then load scripts, styles, and fonts from `/npm/` paths only; fetching data, external images, workers, and every other site stay blocked, and libraries that evaluate strings, such as Alpine or Vue in-page templates, do not run.
-Opening a page that uses a library tells jsDelivr the viewer's IP address and which files they load, which is why Chat keeps libraries off unless its deployment allows them.
+Opening a page that uses a CDN library tells jsDelivr the viewer's IP address and which files they load, which is why Chat keeps libraries off unless its deployment allows them.
+
+### Let pages load remote assets
+
+To preview a website as a browser shows it, with its real images, fonts, and stylesheets, pages can load assets from any `https:` address.
+This also takes two switches, both off by default:
+
+```yaml
+agents:
+  designer:
+    display_name: Designer
+    role: Preview website elements as a browser shows them.
+    model: default
+    tools:
+      - chat_ui:
+          enable_show_canvas: true
+          enable_canvas_remote_assets: true
+```
+
+```json
+{
+  "mindroom": {
+    "canvas": {
+      "enabled": true,
+      "remoteAssets": true
+    }
+  }
+}
+```
+
+`enable_canvas_remote_assets` (boolean, default `false`) tells the agent it may load assets from any `https:` address, and Chat's `remoteAssets` lets pages load scripts, styles, images, fonts, and media from them.
+Fetching data, frames, workers, and form submissions stay blocked.
+Every host a page names then sees the viewer's IP address and when they look, and a page can put data in the addresses it loads, which is why Chat keeps remote assets off unless its deployment allows them.
 
 ## What the user sees
 
-Each canvas appears in the conversation as a notice with an **Open canvas** button.
+Each canvas appears in the conversation as its title with an **Open canvas** button.
 Chat opens the panel by itself under the same conditions as other [Chat UI actions](tools/chat-ui.md#what-the-user-sees); otherwise the user chooses **Open canvas**.
 The panel names the agent that made the page, and the user can resize it or expand it to the full width of the conversation.
 The room header's **Canvas** button lists the conversation's canvases, newest update first, and reopens one after the user closed it.
+
+### Pages in the thread
+
+With `inline=True`, `show_canvas` shows the page in the conversation itself, at the width of a reply, instead of in the panel; its height follows the content.
+Agents prefer it for anything the user should see or answer in the flow: charts, diagrams, mockups, pickers, short forms, and multi-step questions.
+They use the panel for what stays open beside the conversation: dashboards, slides, long documents, and pages the user returns to.
+An inline page sends answers and keeps inputs and saved state like a panel canvas.
+Chat never opens the panel for it; **Open canvas** shows it there, and the thread then shows "Shown in the panel" in its place.
+Updates keep a canvas inline.
+
+Chat rebuilds an inline page each time it scrolls back into view, so agents give form fields an `id` or `name`, or call `saveState`, to keep what the user entered.
+Forms use the themed mode, not `raw` or `width`, because a scaled-down preview shrinks fields and buttons.
+For the next step of a flow, the agent shows a new inline canvas with its reply or updates the same one.
+
+For an accurate preview of a website or app, the agent adds `raw=True`: Chat adds no styles or theme variables of its own, so browser defaults apply as in a normal tab.
+`width` (320 to 2560 pixels) renders the page at the viewport the design targets, such as 1440 for desktop or 390 for a phone, and scales it down to fit the conversation; it never scales up.
+A preview with `raw` or `width` is laid out in a browser window 16:10 of its width (568 to 1080 pixels tall), so `vh` units work as in a browser.
+The thread shows as much of that window as the page fills, and a taller page, such as one with a `100vh` hero section, scrolls inside it.
+Other inline pages grow with their content, so they must not use `vh` units.
+The panel shows raw pages too, at the panel's own width.
+`raw` and `width` belong to each update, so an update without them shows a themed page at reply width.
 
 When the panel cannot open, the **Open canvas** button is disabled and a message below it says why:
 
 | Message | Cause |
 |---|---|
-| Interactive panels are turned off in this app. | The Chat deployment has not enabled canvases. |
-| Interactive panels are not available in the app yet. Open this conversation in a browser. | The native mobile app does not show canvases; Chat in a browser does. |
+| Interactive panels are turned off in this app. | The Chat deployment has turned canvases off. |
 | End the call to open interactive panels. | Chat does not run canvases during a call. |
 
-Other people in the room, and other Matrix clients, see only the notice text, `Interactive panel: <title>. Open it in MindRoom Chat to respond.`
+Other people in the room who use MindRoom Chat on the agent's homeserver see the title and **Open canvas**, not the inline page, and can answer in the panel; everyone else sees only the notice text, `Interactive panel: <title>. Open it in MindRoom Chat to respond.`
 
 ### Find a canvas again
 
@@ -225,7 +275,7 @@ chat_ui.show_canvas(
 )
 ```
 
-- **Self-contained:** write inline CSS and JavaScript. The page cannot fetch data or load external images, and it loads libraries only where [allowed](#let-pages-load-libraries); otherwise draw charts with inline SVG or a `<canvas>` element, and always embed images as `data:` URLs.
+- **Self-contained:** write inline CSS and JavaScript. The page cannot fetch data, and it loads libraries or external assets only where [libraries](#let-pages-load-libraries) or [remote assets](#let-pages-load-remote-assets) are allowed; otherwise draw charts with inline SVG or a `<canvas>` element, and always embed images as `data:` URLs.
 - **Submitting:** call `window.mindroom.submit(data, {label})` with JSON-serializable `data` and a short `label`, or use a `<form>`, whose fields become the data and whose `data-mindroom-label` attribute sets the label.
 - **Responsive:** the panel ranges from narrow to the full conversation width.
 - **Kept inputs:** inputs, selects, and textareas with an `id` or `name` keep their values on their own, across a reload, an update, and a switch to another version, matched by that `id` or `name` (a radio group by its name).
@@ -263,6 +313,6 @@ For choices the variables cannot make, such as a chart palette, `window.mindroom
 - In an encrypted room, the page, the answer, and a shared copy of the page's state are end-to-end encrypted like other messages.
 - A canvas shared with `share_state=True` lets its agent, and anyone else in the room, read what the page saved without asking each time; Chat says so in the panel.
   Passwords and fields with `autocomplete="off"` are never kept automatically, but whatever the page passes to `saveState` is shared, so pages must keep secrets out of it.
-- A canvas is not a safe place for secrets: browsers do not let a page block WebRTC, and a page that loads libraries can put data in the addresses it requests, so a malicious page could leak what the user types into it.
+- A canvas is not a safe place for secrets: browsers do not let a page block WebRTC, and a page that loads libraries or remote assets can put data in the addresses it requests, so a malicious page could leak what the user types into it.
   Chat therefore names the agent that made each canvas and reminds the user that what they enter may leave the panel.
 - Agents should show only pages they wrote, never downloaded or untrusted pages, because every canvas appears as the agent's own.

@@ -29,7 +29,6 @@ class SandboxWorkerResponse(BaseModel):
     last_used_at: float
     created_at: float
     last_started_at: float | None = None
-    expires_at: float | None = None
     startup_count: int = 0
     failure_count: int = 0
     failure_reason: str | None = None
@@ -60,7 +59,6 @@ def serialize_sandbox_worker_response(worker: WorkerHandle) -> SandboxWorkerResp
         last_used_at=worker.last_used_at,
         created_at=worker.created_at,
         last_started_at=worker.last_started_at,
-        expires_at=worker.expires_at,
         startup_count=worker.startup_count,
         failure_count=worker.failure_count,
         failure_reason=worker.failure_reason,

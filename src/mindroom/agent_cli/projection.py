@@ -8,20 +8,20 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 from uuid import uuid4
 
-from agno.media import File
-
-from mindroom.attachments import register_local_attachment
+from mindroom.attachments.storage import register_local_attachment
+from mindroom.llm.media import File
 from mindroom.tool_system.output_files import (
     ToolOutputFileRequest,
     finalize_tool_output_file,
+    saved_output_envelope,
     write_bytes_to_output_path,
 )
+from mindroom.tool_system.tool_function import media_reference
 
 if TYPE_CHECKING:
-    from agno.models.response import ModelResponse
-
     from mindroom.tool_system.output_files import ToolOutputFilePolicy
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
+    from mindroom.tool_system.tool_function import ToolValue
 
 
 # Budget encoded JSON: control characters can expand sixfold on the wire.
@@ -32,30 +32,17 @@ def _encoded_size(value: object) -> int:
     return len(json.dumps(value, ensure_ascii=False).encode())
 
 
-def _shortened_without_workspace(result: object) -> object:
-    """Keep oversized text within its receipt when there is no workspace to save the full output to."""
-    if not isinstance(result, str) or _encoded_size(result) <= _INLINE_BUDGET:
-        return result
-    notice = (
-        "\n[Output shortened for CLI; this agent has no workspace for the full output. "
-        "Call the tool directly for all of it.]"
-    )
-    shortened = result
-    while _encoded_size(shortened + notice) > _INLINE_BUDGET:
-        shortened = shortened[: len(shortened) // 2]
-    return shortened + notice
-
-
-def project_cli_result(result: object, policy: ToolOutputFilePolicy | None, tool_name: str) -> object:
+def project_cli_result(result: object, policy: ToolOutputFilePolicy, tool_name: str) -> object:
     """Save large text through the normal output policy without changing execution status."""
-    if policy is None:
-        return _shortened_without_workspace(result)
-    # ToolExecution already separated media; only project its textual result.
+    # ToolExecution already separated media. Don't save an existing receipt as another output file.
     threshold = min(policy.auto_save_threshold_bytes, _INLINE_BUDGET)
     if isinstance(result, str) and _encoded_size(result) > _INLINE_BUDGET:
         threshold = 0
     bounded = replace(policy, auto_save_threshold_bytes=threshold)
-    projected = finalize_tool_output_file(ToolOutputFileRequest(bounded, tool_name, None), result)
+    projected = saved_output_envelope(result) or finalize_tool_output_file(
+        ToolOutputFileRequest(bounded, tool_name, None),
+        result,
+    )
     if isinstance(projected, dict):
         output = cast("dict[str, object]", projected).get("mindroom_tool_output")
         if isinstance(output, dict):
@@ -71,55 +58,48 @@ def project_cli_result(result: object, policy: ToolOutputFilePolicy | None, tool
 
 
 def register_cli_media(
-    response: ModelResponse,
+    response: ToolValue,
     *,
     context: ToolRuntimeContext,
-    policy: ToolOutputFilePolicy | None,
+    policy: ToolOutputFilePolicy,
     call_id: str,
 ) -> list[dict[str, object]]:
-    """Retain scoped local references while leaving Agno's media objects intact."""
+    """Retain scoped local references while leaving the call's media objects intact."""
     references: list[dict[str, object]] = []
-    for kind, items in (
-        ("image", response.images),
-        ("audio", response.audios),
-        ("video", response.videos),
-        ("file", response.files),
-    ):
-        for item in items or []:
-            reference: dict[str, object] = {"kind": kind, "mime_type": item.mime_type}
-            if item.url:
-                reference["url"] = item.url
-                references.append(reference)
-                continue
-            filepath = item.filepath
-            content = item.content
-            filename = item.filename if isinstance(item, File) else None
-            path = Path(filepath) if filepath else None
-            if path is None and isinstance(content, bytes) and policy is not None:
-                relative = f"mindroom_tool_outputs/media-{uuid4().hex}"
-                saved = write_bytes_to_output_path(policy, relative, content)
-                if not isinstance(saved, str):
-                    path = saved.absolute_path
-                    reference["path"] = relative
-            if path is not None and context.storage_path is not None:
-                record = register_local_attachment(
-                    context.storage_path,
-                    path,
-                    kind=kind,
-                    filename=filename or path.name,
-                    mime_type=item.mime_type,
-                    room_id=context.room_id,
-                    thread_id=context.resolved_thread_id,
-                    source_event_id=call_id,
-                    sender=context.requester_id,
-                )
-                if record is not None:
-                    reference["attachment_id"] = record.attachment_id
-                    if record.attachment_id not in context.runtime_attachment_ids:
-                        context.runtime_attachment_ids.append(record.attachment_id)
-            if "attachment_id" not in reference:
-                reference["error"] = "Attachment reference unavailable; media retained in Bash result"
+    for kind, item in response.media():
+        reference = media_reference(kind, item)
+        if item.url:
             references.append(reference)
+            continue
+        filepath = item.filepath
+        content = item.content
+        filename = item.filename if isinstance(item, File) else None
+        path = Path(filepath) if filepath else None
+        if path is None and isinstance(content, bytes):
+            relative = f"mindroom_tool_outputs/media-{uuid4().hex}"
+            saved = write_bytes_to_output_path(policy, relative, content)
+            if not isinstance(saved, str):
+                path = saved.absolute_path
+                reference["path"] = relative
+        if path is not None and context.storage_path is not None:
+            record = register_local_attachment(
+                context.storage_path,
+                path,
+                kind=kind,
+                filename=filename or path.name,
+                mime_type=item.mime_type,
+                room_id=context.room_id,
+                thread_id=context.resolved_thread_id,
+                source_event_id=call_id,
+                sender=context.requester_id,
+            )
+            if record is not None:
+                reference["attachment_id"] = record.attachment_id
+                if record.attachment_id not in context.runtime_attachment_ids:
+                    context.runtime_attachment_ids.append(record.attachment_id)
+        if "attachment_id" not in reference:
+            reference["error"] = "Attachment reference unavailable; media retained in Bash result"
+        references.append(reference)
     return references
 
 

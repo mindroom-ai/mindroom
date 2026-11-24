@@ -1,0 +1,680 @@
+{
+ "agent_paused": {
+  "run_id": "run-1",
+  "agent_id": "code",
+  "agent_name": "Code",
+  "session_id": "session-1",
+  "user_id": "@alice:example.org",
+  "content": "I have tools to execute, but I need confirmation.",
+  "model": "scripted-model",
+  "model_provider": "Synthetic",
+  "created_at": 1793168445,
+  "status": "PAUSED",
+  "metrics": {
+   "input_tokens": 1,
+   "output_tokens": 1,
+   "total_tokens": 2,
+   "duration": 0.0002067871391773224,
+   "details": {
+    "model": [
+     {
+      "input_tokens": 1,
+      "output_tokens": 1,
+      "total_tokens": 2,
+      "id": "scripted-model",
+      "provider": "Synthetic"
+     }
+    ]
+   }
+  },
+  "messages": [
+   {
+    "id": "55c92204-aeac-4292-a90b-dba55acf59c7",
+    "content": "You are Code.",
+    "from_history": false,
+    "stop_after_tool_call": false,
+    "role": "system",
+    "created_at": 1793168445
+   },
+   {
+    "id": "ec05d8e8-e2c7-4f6f-9f26-620353bc5e8f",
+    "content": "hi",
+    "from_history": false,
+    "stop_after_tool_call": false,
+    "role": "user",
+    "created_at": 1793168445
+   },
+   {
+    "id": "263b9f88-4fae-4755-90fa-c4029c598028",
+    "from_history": false,
+    "stop_after_tool_call": false,
+    "role": "assistant",
+    "tool_calls": [
+     {
+      "id": "c1",
+      "type": "function",
+      "function": {
+       "name": "add",
+       "arguments": "{\"a\": 6, \"b\": 7}"
+      }
+     }
+    ],
+    "provider_data": {
+     "mindroom_model": {
+      "id": "scripted-model",
+      "provider": "Synthetic"
+     }
+    },
+    "metrics": {
+     "input_tokens": 1,
+     "output_tokens": 1,
+     "total_tokens": 2
+    },
+    "created_at": 1793168445
+   }
+  ],
+  "tools": [
+   {
+    "tool_call_id": "c1",
+    "tool_name": "add",
+    "tool_args": {
+     "a": 6,
+     "b": 7
+    },
+    "tool_call_error": null,
+    "result": null,
+    "child_run_id": null,
+    "stop_after_tool_call": false,
+    "requires_confirmation": true,
+    "confirmed": null,
+    "confirmation_note": null,
+    "external_execution_required": null,
+    "external_execution_silent": null,
+    "approval_type": "mindroom_policy"
+   }
+  ],
+  "requirements": [
+   {
+    "id": "eb505e27-bfa4-4716-9857-d93e54ded953",
+    "tool_execution": {
+     "tool_call_id": "c1",
+     "tool_name": "add",
+     "tool_args": {
+      "a": 6,
+      "b": 7
+     },
+     "tool_call_error": null,
+     "result": null,
+     "child_run_id": null,
+     "stop_after_tool_call": false,
+     "requires_confirmation": true,
+     "confirmed": null,
+     "confirmation_note": null,
+     "external_execution_required": null,
+     "external_execution_silent": null,
+     "approval_type": "mindroom_policy"
+    }
+   }
+  ]
+ },
+ "agent_resumed_without_text": {
+  "run_id": "run-1",
+  "agent_id": "code",
+  "agent_name": "Code",
+  "session_id": "session-1",
+  "user_id": "@alice:example.org",
+  "content": "I have tools to execute, but I need confirmation.",
+  "model": "scripted-model",
+  "model_provider": "Synthetic",
+  "created_at": 1793168445,
+  "status": "COMPLETED",
+  "metrics": {
+   "input_tokens": 2,
+   "output_tokens": 2,
+   "total_tokens": 4,
+   "duration": 0.07669721310958266,
+   "details": {
+    "model": [
+     {
+      "input_tokens": 2,
+      "output_tokens": 2,
+      "total_tokens": 4,
+      "id": "scripted-model",
+      "provider": "Synthetic"
+     }
+    ]
+   }
+  },
+  "messages": [
+   {
+    "id": "55c92204-aeac-4292-a90b-dba55acf59c7",
+    "content": "You are Code.",
+    "from_history": false,
+    "stop_after_tool_call": false,
+    "role": "system",
+    "created_at": 1793168445
+   },
+   {
+    "id": "ec05d8e8-e2c7-4f6f-9f26-620353bc5e8f",
+    "content": "hi",
+    "from_history": false,
+    "stop_after_tool_call": false,
+    "role": "user",
+    "created_at": 1793168445
+   },
+   {
+    "id": "263b9f88-4fae-4755-90fa-c4029c598028",
+    "from_history": false,
+    "stop_after_tool_call": false,
+    "role": "assistant",
+    "tool_calls": [
+     {
+      "id": "c1",
+      "type": "function",
+      "function": {
+       "name": "add",
+       "arguments": "{\"a\": 6, \"b\": 7}"
+      }
+     }
+    ],
+    "provider_data": {
+     "mindroom_model": {
+      "id": "scripted-model",
+      "provider": "Synthetic"
+     }
+    },
+    "metrics": {
+     "input_tokens": 1,
+     "output_tokens": 1,
+     "total_tokens": 2
+    },
+    "created_at": 1793168445
+   },
+   {
+    "id": "95513d6b-47b5-4857-9102-6234512003c3",
+    "content": "{\"sum\": 13}",
+    "from_history": false,
+    "stop_after_tool_call": false,
+    "role": "tool",
+    "tool_call_id": "c1",
+    "tool_name": "add",
+    "tool_args": {
+     "a": 6,
+     "b": 7
+    },
+    "tool_call_error": false,
+    "created_at": 1793168445
+   },
+   {
+    "id": "1b7d83b2-bdf7-4332-9aad-802a3b3f4069",
+    "from_history": false,
+    "stop_after_tool_call": false,
+    "role": "assistant",
+    "provider_data": {
+     "mindroom_model": {
+      "id": "scripted-model",
+      "provider": "Synthetic"
+     }
+    },
+    "metrics": {
+     "input_tokens": 1,
+     "output_tokens": 1,
+     "total_tokens": 2
+    },
+    "created_at": 1793168445
+   }
+  ],
+  "tools": [
+   {
+    "tool_call_id": "c1",
+    "tool_name": "add",
+    "tool_args": {
+     "a": 6,
+     "b": 7
+    },
+    "tool_call_error": false,
+    "result": "{\"sum\": 13}",
+    "child_run_id": null,
+    "stop_after_tool_call": false,
+    "requires_confirmation": false,
+    "confirmed": true,
+    "confirmation_note": null,
+    "external_execution_required": null,
+    "external_execution_silent": null,
+    "approval_type": "mindroom_policy"
+   }
+  ],
+  "requirements": [
+   {
+    "id": "eb505e27-bfa4-4716-9857-d93e54ded953",
+    "confirmation": true,
+    "tool_execution": {
+     "tool_call_id": "c1",
+     "tool_name": "add",
+     "tool_args": {
+      "a": 6,
+      "b": 7
+     },
+     "tool_call_error": false,
+     "result": "{\"sum\": 13}",
+     "child_run_id": null,
+     "stop_after_tool_call": false,
+     "requires_confirmation": false,
+     "confirmed": true,
+     "confirmation_note": null,
+     "external_execution_required": null,
+     "external_execution_silent": null,
+     "approval_type": "mindroom_policy"
+    }
+   }
+  ]
+ },
+ "agent_failed": {
+  "run_id": "run-1",
+  "agent_id": "code",
+  "agent_name": "Code",
+  "session_id": "session-1",
+  "user_id": "@alice:example.org",
+  "content": "provider down: api_key=unit-test-secret",
+  "model": "scripted-model",
+  "model_provider": "Synthetic",
+  "created_at": 1793168445,
+  "status": "ERROR",
+  "metrics": {
+   "duration": 4.718918353319168e-05
+  },
+  "messages": [
+   {
+    "id": "14ffccc3-1a41-41eb-aabb-cb121a3252b2",
+    "content": "You are Code.",
+    "from_history": false,
+    "stop_after_tool_call": false,
+    "role": "system",
+    "created_at": 1793168445
+   },
+   {
+    "id": "994a4e18-ad12-43b5-adc1-37409a466d61",
+    "content": "hi",
+    "from_history": false,
+    "stop_after_tool_call": false,
+    "role": "user",
+    "created_at": 1793168445
+   }
+  ]
+ },
+ "member_paused": {
+  "run_id": "1d0b89fb-483d-466e-9d3d-b20c24dae62f",
+  "agent_id": "checker",
+  "agent_name": "Checker",
+  "session_id": "!room:example.org:$squad",
+  "parent_run_id": "team-paused",
+  "user_id": "@alice:example.org",
+  "content": "I have tools to execute, but I need confirmation.",
+  "model": "checker-model",
+  "model_provider": "Synthetic",
+  "created_at": 1793168451,
+  "status": "PAUSED",
+  "metrics": {
+   "input_tokens": 8,
+   "output_tokens": 5,
+   "total_tokens": 13,
+   "duration": 0.00011810893192887306,
+   "details": {
+    "model": [
+     {
+      "input_tokens": 8,
+      "output_tokens": 5,
+      "total_tokens": 13,
+      "id": "checker-model",
+      "provider": "Synthetic"
+     }
+    ]
+   }
+  },
+  "messages": [
+   {
+    "id": "28c1518e-3134-48eb-b980-47a9eef97e21",
+    "content": "You are Checker.",
+    "from_history": false,
+    "stop_after_tool_call": false,
+    "role": "system",
+    "created_at": 1793168451
+   },
+   {
+    "id": "e898d777-1e0c-4a63-87ae-aa37897517b1",
+    "content": "Multiply 6 by 7",
+    "from_history": false,
+    "stop_after_tool_call": false,
+    "role": "user",
+    "created_at": 1793168451
+   },
+   {
+    "id": "5d94f472-79ad-4bdd-8868-6e7dfd2d6bdf",
+    "from_history": false,
+    "stop_after_tool_call": false,
+    "role": "assistant",
+    "tool_calls": [
+     {
+      "id": "call-checker-multiply",
+      "type": "function",
+      "function": {
+       "name": "multiply",
+       "arguments": "{\"a\": 6, \"b\": 7}"
+      }
+     }
+    ],
+    "provider_data": {
+     "mindroom_model": {
+      "id": "checker-model",
+      "provider": "Synthetic"
+     }
+    },
+    "metrics": {
+     "input_tokens": 8,
+     "output_tokens": 5,
+     "total_tokens": 13
+    },
+    "created_at": 1793168451
+   }
+  ],
+  "tools": [
+   {
+    "tool_call_id": "call-checker-multiply",
+    "tool_name": "multiply",
+    "tool_args": {
+     "a": 6,
+     "b": 7
+    },
+    "tool_call_error": null,
+    "result": null,
+    "child_run_id": null,
+    "stop_after_tool_call": false,
+    "requires_confirmation": true,
+    "confirmed": null,
+    "confirmation_note": null,
+    "external_execution_required": null,
+    "external_execution_silent": null,
+    "approval_type": "mindroom_policy"
+   }
+  ],
+  "requirements": [
+   {
+    "id": "af769557-a2cb-4c16-9dba-20eb4c82cd2c",
+    "tool_execution": {
+     "tool_call_id": "call-checker-multiply",
+     "tool_name": "multiply",
+     "tool_args": {
+      "a": 6,
+      "b": 7
+     },
+     "tool_call_error": null,
+     "result": null,
+     "child_run_id": null,
+     "stop_after_tool_call": false,
+     "requires_confirmation": true,
+     "confirmed": null,
+     "confirmation_note": null,
+     "external_execution_required": null,
+     "external_execution_silent": null,
+     "approval_type": "mindroom_policy"
+    }
+   }
+  ]
+ },
+ "team_paused": {
+  "run_id": "team-paused",
+  "team_id": "squad",
+  "session_id": "!room:example.org:$squad",
+  "user_id": "@alice:example.org",
+  "content": "Team run paused. The following require input:\n- Checker: multiply requires confirmation",
+  "model": "leader-model",
+  "model_provider": "Synthetic",
+  "created_at": 1793168451,
+  "metrics": {
+   "input_tokens": 4,
+   "output_tokens": 1,
+   "total_tokens": 5,
+   "duration": 0.004989654989913106,
+   "details": {
+    "model": [
+     {
+      "input_tokens": 4,
+      "output_tokens": 1,
+      "total_tokens": 5,
+      "id": "leader-model",
+      "provider": "Synthetic"
+     }
+    ]
+   }
+  },
+  "status": "PAUSED",
+  "messages": [
+   {
+    "id": "11e43942-21cc-420f-ae4b-9d6b36043683",
+    "content": "You lead the squad.",
+    "from_history": false,
+    "stop_after_tool_call": false,
+    "role": "system",
+    "created_at": 1793168451
+   },
+   {
+    "id": "290466c2-227c-487d-80ae-241322210330",
+    "content": "Current message:\n<msg event_id=\"$team-paused\" from=\"@alice:example.org\"><![CDATA[Multiply 6 by 7.]]></msg>",
+    "from_history": false,
+    "stop_after_tool_call": false,
+    "role": "user",
+    "created_at": 1793168451
+   },
+   {
+    "id": "f7a1d9eb-2a29-4839-959d-53c430c3d1ca",
+    "from_history": false,
+    "stop_after_tool_call": false,
+    "role": "assistant",
+    "tool_calls": [
+     {
+      "id": "call-team-multiply",
+      "type": "function",
+      "function": {
+       "name": "delegate_task_to_member",
+       "arguments": "{\"member_id\": \"checker\", \"task\": \"Multiply 6 by 7\"}"
+      }
+     }
+    ],
+    "provider_data": {
+     "mindroom_model": {
+      "id": "leader-model",
+      "provider": "Synthetic"
+     }
+    },
+    "metrics": {
+     "input_tokens": 4,
+     "output_tokens": 1,
+     "total_tokens": 5
+    },
+    "created_at": 1793168451
+   },
+   {
+    "id": "8740f7ff-fa34-4159-aa3f-2b15498ea016",
+    "content": "Member 'Checker' requires human input before continuing.",
+    "from_history": false,
+    "stop_after_tool_call": false,
+    "role": "tool",
+    "tool_call_id": "call-team-multiply",
+    "tool_name": "delegate_task_to_member",
+    "tool_args": {
+     "member_id": "checker",
+     "task": "Multiply 6 by 7"
+    },
+    "tool_call_error": false,
+    "created_at": 1793168451
+   }
+  ],
+  "member_responses": [
+   {
+    "run_id": "1d0b89fb-483d-466e-9d3d-b20c24dae62f",
+    "agent_id": "checker",
+    "agent_name": "Checker",
+    "session_id": "!room:example.org:$squad",
+    "parent_run_id": "team-paused",
+    "user_id": "@alice:example.org",
+    "content": "I have tools to execute, but I need confirmation.",
+    "model": "checker-model",
+    "model_provider": "Synthetic",
+    "created_at": 1793168451,
+    "status": "PAUSED",
+    "metrics": {
+     "input_tokens": 8,
+     "output_tokens": 5,
+     "total_tokens": 13,
+     "duration": 0.00011810893192887306,
+     "details": {
+      "model": [
+       {
+        "input_tokens": 8,
+        "output_tokens": 5,
+        "total_tokens": 13,
+        "id": "checker-model",
+        "provider": "Synthetic"
+       }
+      ]
+     }
+    },
+    "messages": [
+     {
+      "id": "28c1518e-3134-48eb-b980-47a9eef97e21",
+      "content": "You are Checker.",
+      "from_history": false,
+      "stop_after_tool_call": false,
+      "role": "system",
+      "created_at": 1793168451
+     },
+     {
+      "id": "e898d777-1e0c-4a63-87ae-aa37897517b1",
+      "content": "Multiply 6 by 7",
+      "from_history": false,
+      "stop_after_tool_call": false,
+      "role": "user",
+      "created_at": 1793168451
+     },
+     {
+      "id": "5d94f472-79ad-4bdd-8868-6e7dfd2d6bdf",
+      "from_history": false,
+      "stop_after_tool_call": false,
+      "role": "assistant",
+      "tool_calls": [
+       {
+        "id": "call-checker-multiply",
+        "type": "function",
+        "function": {
+         "name": "multiply",
+         "arguments": "{\"a\": 6, \"b\": 7}"
+        }
+       }
+      ],
+      "provider_data": {
+       "mindroom_model": {
+        "id": "checker-model",
+        "provider": "Synthetic"
+       }
+      },
+      "metrics": {
+       "input_tokens": 8,
+       "output_tokens": 5,
+       "total_tokens": 13
+      },
+      "created_at": 1793168451
+     }
+    ],
+    "tools": [
+     {
+      "tool_call_id": "call-checker-multiply",
+      "tool_name": "multiply",
+      "tool_args": {
+       "a": 6,
+       "b": 7
+      },
+      "tool_call_error": null,
+      "result": null,
+      "child_run_id": null,
+      "stop_after_tool_call": false,
+      "requires_confirmation": true,
+      "confirmed": null,
+      "confirmation_note": null,
+      "external_execution_required": null,
+      "external_execution_silent": null,
+      "approval_type": "mindroom_policy"
+     }
+    ],
+    "requirements": [
+     {
+      "id": "af769557-a2cb-4c16-9dba-20eb4c82cd2c",
+      "tool_execution": {
+       "tool_call_id": "call-checker-multiply",
+       "tool_name": "multiply",
+       "tool_args": {
+        "a": 6,
+        "b": 7
+       },
+       "tool_call_error": null,
+       "result": null,
+       "child_run_id": null,
+       "stop_after_tool_call": false,
+       "requires_confirmation": true,
+       "confirmed": null,
+       "confirmation_note": null,
+       "external_execution_required": null,
+       "external_execution_silent": null,
+       "approval_type": "mindroom_policy"
+      }
+     }
+    ]
+   }
+  ],
+  "requirements": [
+   {
+    "id": "af769557-a2cb-4c16-9dba-20eb4c82cd2c",
+    "member_agent_id": "checker",
+    "member_agent_name": "Checker",
+    "member_run_id": "1d0b89fb-483d-466e-9d3d-b20c24dae62f",
+    "tool_execution": {
+     "tool_call_id": "call-checker-multiply",
+     "tool_name": "multiply",
+     "tool_args": {
+      "a": 6,
+      "b": 7
+     },
+     "tool_call_error": null,
+     "result": null,
+     "child_run_id": null,
+     "stop_after_tool_call": false,
+     "requires_confirmation": true,
+     "confirmed": null,
+     "confirmation_note": null,
+     "external_execution_required": null,
+     "external_execution_silent": null,
+     "approval_type": "mindroom_policy"
+    }
+   }
+  ],
+  "tools": [
+   {
+    "tool_call_id": "call-team-multiply",
+    "tool_name": "delegate_task_to_member",
+    "tool_args": {
+     "member_id": "checker",
+     "task": "Multiply 6 by 7"
+    },
+    "tool_call_error": false,
+    "result": "Member 'Checker' requires human input before continuing.",
+    "child_run_id": "1d0b89fb-483d-466e-9d3d-b20c24dae62f",
+    "stop_after_tool_call": false,
+    "requires_confirmation": null,
+    "confirmed": null,
+    "confirmation_note": null,
+    "external_execution_required": null,
+    "external_execution_silent": null,
+    "approval_type": null
+   }
+  ]
+ }
+}

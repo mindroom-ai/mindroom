@@ -2,23 +2,33 @@
 
 from __future__ import annotations
 
+from contextlib import suppress
 from typing import TYPE_CHECKING, Any
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, MagicMock, patch
 from urllib.parse import parse_qs, unquote, urlsplit
 
 import nio
 
-from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
+from mindroom.bot import AgentBot
+from mindroom.constants import ROUTER_AGENT_NAME, SCHEDULED_TASK_EVENT_TYPE, resolve_runtime_paths
+from mindroom.hooks import HookRegistry, HookRegistryState
 from mindroom.matrix.identity import MatrixID, managed_account_key
 from mindroom.matrix.state import MatrixState
+from mindroom.scheduling import runtime as scheduling_runtime
+from mindroom.scheduling.runtime import ScheduledTaskRuntime, _TaskRunner
+from tests.matrix_state_helpers import save_matrix_state
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
 
+    from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.hooks import HookMatrixAdmin, HookRegistryLifetime
+    from mindroom.matrix.conversation_reads import ConversationReader
+    from mindroom.scheduling.tasks import ScheduledTaskRecord, ScheduledWorkflow
 
 SCHEDULE_WRITER_ID = "@mindroom_router:server"
-SCHEDULED_TASK_EVENT_TYPE = "com.mindroom.scheduled.task"
 _STATE_EVENT_PATH_PREFIX = "/_matrix/client/v3/rooms/"
 
 
@@ -32,7 +42,7 @@ def persist_schedule_writer(
     matrix_id = MatrixID.parse(writer_id)
     state = MatrixState.load(runtime_paths=runtime_paths)
     state.add_account(managed_account_key(entity_name), matrix_id.username, "test-password", domain=matrix_id.domain)
-    state.save(runtime_paths=runtime_paths)
+    save_matrix_state(state, runtime_paths)
 
 
 def schedule_runtime_paths(tmp_path: Path, writer_id: str = SCHEDULE_WRITER_ID) -> RuntimePaths:
@@ -84,17 +94,55 @@ def room_create_state_response(room_id: str, *, full_event: bool) -> nio.RoomGet
     return nio.RoomGetStateEventResponse(body, "m.room.create", "", room_id)
 
 
+def serve_full_room_state(client: Any, room_id: str, events: list[dict[str, Any]] | None = None) -> None:  # noqa: ANN401
+    """Answer the room's full-state read (listing, cancel-all, restore) from ``events``."""
+    client.room_get_state = AsyncMock(return_value=nio.RoomGetStateResponse.from_dict(events or [], room_id=room_id))
+
+
+def serve_room_schedule_state(
+    client: Any,  # noqa: ANN401
+    room_id: str,
+    events: list[dict[str, Any]],
+    *,
+    sender: str = SCHEDULE_WRITER_ID,
+) -> None:
+    """Answer the room-state snapshot and each task's own state read from the same events, as a homeserver would."""
+    serve_full_room_state(client, room_id, events)
+    tasks = {event["state_key"]: event["content"] for event in events if event["type"] == SCHEDULED_TASK_EVENT_TYPE}
+
+    async def get_state_event(room_id: str, event_type: str, state_key: str = "") -> object:
+        assert event_type == SCHEDULED_TASK_EVENT_TYPE
+        return nio.RoomGetStateEventResponse(dict(tasks[state_key]), event_type, state_key, room_id)
+
+    client.room_get_state_event = AsyncMock(side_effect=get_state_event)
+    serve_task_state_events(client, sender=sender)
+
+
+def serve_stored_task(client: Any, room_id: str, task_id: str, content: dict[str, Any] | None) -> None:  # noqa: ANN401
+    """Answer the scheduler's reads of one task with the bot-written ``content``, or report the task missing."""
+    client.room_get_state_event = AsyncMock(
+        return_value=nio.RoomGetStateEventError(message="not found", status_code="M_NOT_FOUND")
+        if content is None
+        else nio.RoomGetStateEventResponse(content, SCHEDULED_TASK_EVENT_TYPE, task_id, room_id),
+    )
+    serve_task_state_events(client)
+
+
 def joined_member_state(room_id: str, event_type: str, state_key: str = "") -> nio.RoomGetStateEventResponse:
     """Report every requested member as joined, for runners that check creator membership."""
     assert event_type == "m.room.member"
     return nio.RoomGetStateEventResponse({"membership": "join"}, event_type, state_key, room_id)
 
 
-def serve_task_state_events(client: Any, *, sender: str = SCHEDULE_WRITER_ID) -> AsyncMock:  # noqa: ANN401
+def serve_task_state_events(
+    client: Any,  # noqa: ANN401
+    *,
+    sender: str | Callable[[str], str] = SCHEDULE_WRITER_ID,
+) -> AsyncMock:
     """Answer the scheduler's ``format=event`` task reads from the client's ``room_get_state_event`` mock.
 
     Homeservers return the whole state event for ``format=event``.
-    This wraps each mocked state content in that envelope with ``sender``, so the existing
+    This wraps each mocked state content in that envelope with ``sender``, or what it returns for the task ID, so the existing
     ``room_get_state_event`` mock stays the single source of room state and its call count
     still measures state-event requests.
     The scheduler's check of the room's create event is answered as a homeserver honouring ``format=event``.
@@ -112,15 +160,160 @@ def serve_task_state_events(client: Any, *, sender: str = SCHEDULE_WRITER_ID) ->
             return await fallback(response_class, method, path, *args, **kwargs)
         assert response_class is nio.RoomGetStateEventResponse
         assert method == "GET"
-        room_id, state, event_type, state_key = (
-            unquote(part) for part in url.path.removeprefix(_STATE_EVENT_PATH_PREFIX).split("/")
-        )
+        room_id, state, event_type, state_key = parts
         assert state == "state"
         response = await client.room_get_state_event(room_id=room_id, event_type=event_type, state_key=state_key)
         if not isinstance(response, nio.RoomGetStateEventResponse):
             return response
-        event = scheduled_task_state_event(state_key, response.content, room_id=room_id, sender=sender)
+        writer = sender if isinstance(sender, str) else sender(state_key)
+        event = scheduled_task_state_event(state_key, response.content, room_id=room_id, sender=writer)
         return nio.RoomGetStateEventResponse(event, event_type, state_key, room_id)
 
     client._send = AsyncMock(side_effect=send)
     return client._send
+
+
+def scheduling_bot(
+    client: Any,  # noqa: ANN401
+    *,
+    agent_name: str = ROUTER_AGENT_NAME,
+    conversation_reader: ConversationReader | None = None,
+    matrix_admin: HookMatrixAdmin | None = None,
+) -> AgentBot:
+    """Return a started, synced bot double whose client, reader, and router-backed admin scheduled-task runners borrow."""
+    bot = MagicMock(spec=AgentBot)
+    bot.agent_name = agent_name
+    bot.client = client
+    bot.running = True
+    bot.first_sync_complete = True
+    bot.conversation_reader = conversation_reader if conversation_reader is not None else AsyncMock()
+    bot.hook_context.matrix_admin.return_value = matrix_admin
+    return bot
+
+
+def scheduled_task_runtime(
+    runtime_paths: RuntimePaths,
+    *bots: AgentBot,
+    config: Config | None = None,
+    config_provider: Callable[[], Config] | None = None,
+    hooks: HookRegistryLifetime | None = None,
+) -> ScheduledTaskRuntime:
+    """Return the scheduled-task owner over these bots, reading ``config`` unless a provider is given."""
+    if config_provider is None:
+        assert config is not None, "A scheduled-task runtime reads a config or a config provider"
+        fixed_config = config
+
+        def config_provider() -> Config:
+            return fixed_config
+
+    bots_by_name = {bot.agent_name: bot for bot in bots}
+    return ScheduledTaskRuntime(
+        runtime_paths=runtime_paths,
+        config_provider=config_provider,
+        bots=lambda: bots_by_name,
+        hooks=hooks if hooks is not None else HookRegistryState(HookRegistry.empty()).lifetime(),
+    )
+
+
+def task_runner(
+    client: Any,  # noqa: ANN401
+    task_id: str,
+    room_id: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    conversation_reader: ConversationReader | None = None,
+    matrix_admin: HookMatrixAdmin | None = None,
+    *,
+    config_provider: Callable[[], Config] | None = None,
+    hooks: HookRegistryLifetime | None = None,
+) -> _TaskRunner:
+    """Return one task's runner owned by a ready router bot on ``client``."""
+    bot = scheduling_bot(client, conversation_reader=conversation_reader, matrix_admin=matrix_admin)
+    runtime = scheduled_task_runtime(
+        runtime_paths,
+        bot,
+        config=config,
+        config_provider=config_provider,
+        hooks=hooks,
+    )
+    return _TaskRunner(runtime, ROUTER_AGENT_NAME, room_id, task_id)
+
+
+async def run_once_task(
+    client: Any,  # noqa: ANN401
+    task_id: str,
+    workflow: ScheduledWorkflow,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    conversation_reader: ConversationReader | None = None,
+    *,
+    config_provider: Callable[[], Config] | None = None,
+) -> None:
+    """Run one one-time task to completion on a ready router bot."""
+    assert workflow.room_id is not None
+    runner = task_runner(
+        client,
+        task_id,
+        workflow.room_id,
+        config,
+        runtime_paths,
+        conversation_reader,
+        config_provider=config_provider,
+    )
+    await runner.run_once(workflow)
+
+
+async def run_cron_task(
+    client: Any,  # noqa: ANN401
+    task_id: str,
+    workflow: ScheduledWorkflow,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    conversation_reader: ConversationReader | None = None,
+    matrix_admin: HookMatrixAdmin | None = None,
+    *,
+    config_provider: Callable[[], Config] | None = None,
+    hooks: HookRegistryLifetime | None = None,
+) -> None:
+    """Run one recurring task on a ready router bot until it ends or completes its first fire."""
+    assert workflow.room_id is not None
+    runner = task_runner(
+        client,
+        task_id,
+        workflow.room_id,
+        config,
+        runtime_paths,
+        conversation_reader,
+        matrix_admin,
+        config_provider=config_provider,
+        hooks=hooks,
+    )
+    complete = scheduling_runtime.complete_recurring_occurrence
+
+    async def complete_then_stop(*args: object, **kwargs: object) -> None:
+        await complete(*args, **kwargs)
+        raise _FiredOnceError
+
+    with (
+        patch.object(scheduling_runtime, "complete_recurring_occurrence", complete_then_stop),
+        suppress(_FiredOnceError),
+    ):
+        await runner.run_cron(workflow)
+
+
+class _FiredOnceError(BaseException):
+    """Ends a test's recurring runner after one completed fire; a BaseException, so the runner reports no failure."""
+
+
+async def runnable_task(
+    client: Any,  # noqa: ANN401
+    room_id: str,
+    task_id: str,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    config_provider: Callable[[], Config] | None = None,
+) -> ScheduledTaskRecord | None:
+    """Return a task's runnable state the way its runner reconciles it before waiting or firing."""
+    runner = task_runner(client, task_id, room_id, config, runtime_paths, config_provider=config_provider)
+    return await runner._runnable_task()

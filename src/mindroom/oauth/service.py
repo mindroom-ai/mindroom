@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from urllib.parse import parse_qs, urlencode, urlparse
 
+from mindroom.constants import runtime_env_path
 from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.oauth.credential_binding import (
     OAuthCredentialBinding,
@@ -14,15 +15,26 @@ from mindroom.oauth.credential_binding import (
     oauth_credential_binding_payload,
     parse_oauth_credential_binding_payload,
 )
-from mindroom.oauth.credential_lifecycle import OAuthCredentialContext, load_oauth_credentials_snapshot_sync
+from mindroom.oauth.credential_lifecycle import (
+    OAuthCredentialContext,
+    OAuthCredentialUnreadableError,
+    load_oauth_credentials_snapshot_sync,
+    oauth_credentials_usable,
+    refresh_oauth_credentials_blocking,
+)
 from mindroom.oauth.providers import (
     OAuthConnectionRequired,
     OAuthProviderError,
+    OAuthRefreshRejectedError,
     oauth_connect_url_requires_host_browser,
 )
 from mindroom.oauth.state import consume_opaque_oauth_state, issue_opaque_oauth_state, read_opaque_oauth_state
+from mindroom.origins import configured_public_url, local_api_origin
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+    from typing import Any
+
     from mindroom.constants import RuntimePaths
     from mindroom.oauth.providers import OAuthProvider
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
@@ -55,6 +67,7 @@ __all__ = [
     "build_oauth_connect_instruction",
     "build_oauth_reconnect_instruction",
     "consume_oauth_connect_token",
+    "current_oauth_access_token",
     "lookup_oauth_connect_token",
     "oauth_connect_url",
     "oauth_connection_required",
@@ -167,9 +180,8 @@ def consume_oauth_connect_token(
 
 def oauth_public_base_url(runtime_paths: RuntimePaths, provider: OAuthProvider | None = None) -> str:
     """Return the public MindRoom origin used for user-facing OAuth links."""
-    configured = runtime_paths.env_value("MINDROOM_PUBLIC_URL") or runtime_paths.env_value("MINDROOM_BASE_URL")
-    if configured:
-        return configured.rstrip("/")
+    if configured := configured_public_url(runtime_paths):
+        return configured
 
     if provider is not None:
         client_config = provider.client_config(runtime_paths)
@@ -178,8 +190,7 @@ def oauth_public_base_url(runtime_paths: RuntimePaths, provider: OAuthProvider |
             if parsed.scheme and parsed.netloc:
                 return f"{parsed.scheme}://{parsed.netloc}"
 
-    port = runtime_paths.env_value("MINDROOM_PORT", default="8765") or "8765"
-    return f"http://localhost:{port}"
+    return local_api_origin(runtime_paths)
 
 
 def oauth_success_redirect_url(provider: OAuthProvider, runtime_paths: RuntimePaths) -> str:
@@ -190,8 +201,9 @@ def oauth_success_redirect_url(provider: OAuthProvider, runtime_paths: RuntimePa
 
 def oauth_provider_service_account_configured(provider: OAuthProvider, runtime_paths: RuntimePaths) -> bool:
     """Return whether one provider can authenticate through a Google service account."""
-    return provider.id in _GOOGLE_SERVICE_ACCOUNT_PROVIDER_IDS and bool(
-        runtime_paths.env_value("GOOGLE_SERVICE_ACCOUNT_FILE"),
+    return (
+        provider.id in _GOOGLE_SERVICE_ACCOUNT_PROVIDER_IDS
+        and runtime_env_path(runtime_paths, "GOOGLE_SERVICE_ACCOUNT_FILE") is not None
     )
 
 
@@ -284,6 +296,34 @@ def build_oauth_reconnect_instruction(
         f"{provider.display_name} session for this agent expired or is no longer valid. "
         f"Reconnect it with this MindRoom link. {retry_guidance} {link_guidance}"
     )
+
+
+def current_oauth_access_token(
+    context: OAuthCredentialContext,
+    refresh_failed: Callable[[OAuthProviderError], Exception],
+) -> tuple[str, dict[str, Any]]:
+    """Return a current access token and its credentials, refreshing one about to expire, or raise the connect prompt.
+
+    A stored grant that cannot be read asks for a reset and one the provider refused asks for a reconnect;
+    `refresh_failed` builds the error for any other provider failure, which a retry may fix.
+    """
+    try:
+        credentials = refresh_oauth_credentials_blocking(context)
+    except OAuthCredentialUnreadableError:
+        raise oauth_connection_required(context, reason=OAUTH_RESET_REQUIRED_REASON) from None
+    except OAuthRefreshRejectedError:
+        raise oauth_connection_required(context, reason=OAUTH_REFRESH_REJECTED_REASON) from None
+    except OAuthProviderError as exc:
+        raise refresh_failed(exc) from None
+    token = (credentials or {}).get("token") or (credentials or {}).get("access_token")
+    if (
+        credentials is None
+        or not oauth_credentials_usable(context.provider, context.runtime_paths, credentials)
+        or not isinstance(token, str)
+        or not token
+    ):
+        raise oauth_connection_required(context)
+    return token, credentials
 
 
 def oauth_connection_required(

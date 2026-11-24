@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import importlib
 import json
 import os
 from typing import TYPE_CHECKING
@@ -25,6 +24,7 @@ from mindroom.matrix.personal_room_store import (
     personal_room_record_path,
     read_personal_room,
 )
+from mindroom.orchestration import storage_preparation
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -113,26 +113,17 @@ async def test_planted_entries_stay_behind_without_stopping_startup(tmp_path: Pa
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("entrypoint", ["api", "orchestrator"])
-async def test_both_entry_points_move_records_before_serving(
+async def test_startup_moves_records_before_serving(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    entrypoint: str,
 ) -> None:
-    """Standalone API and orchestrator startup both move the records before anything reads them."""
+    """Startup moves the records before anything reads them."""
     paths = _runtime(tmp_path)
-    module = importlib.import_module(f"mindroom.{'api.main' if entrypoint == 'api' else 'orchestrator'}")
 
     async def migration(runtime_paths: RuntimePaths) -> None:
         assert runtime_paths == paths
         raise _MigrationRanError
 
-    monkeypatch.setattr(module, "migrate_state_root_records", migration)
-    if entrypoint == "api":
-        monkeypatch.setattr(module, "_app_runtime_paths", lambda _app: paths)
-        with pytest.raises(_MigrationRanError):
-            async with module._lifespan(module.app):
-                pytest.fail("API admitted runtime work")
-    else:
-        with pytest.raises(_MigrationRanError):
-            await module.main("ERROR", paths, api=False)
+    monkeypatch.setattr(storage_preparation, "migrate_state_root_records", migration)
+    with pytest.raises(_MigrationRanError):
+        await storage_preparation.prepare_runtime_storage(paths)

@@ -3,11 +3,10 @@
 from __future__ import annotations
 
 import os
+from dataclasses import replace
 from typing import TYPE_CHECKING
 
-from agno.tools import Toolkit
-from agno.tools.function import Function
-
+from mindroom.tool_system.authoring import Toolkit, passthrough_tool
 from mindroom.worker_computer.browser_proxy import browser_egress
 from mindroom.worker_computer.mcp_catalog import browser_mcp_catalog
 
@@ -16,6 +15,7 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
+    from mindroom.tool_system.tool_function import ToolFunction
     from mindroom.worker_computer.mcp_provider import WorkerBrowserMCP
 
 
@@ -23,23 +23,25 @@ class BrowserMCPTools(Toolkit):
     """Expose immutable native schemas without starting a primary-side process."""
 
     def __init__(self, *, runtime_paths: RuntimePaths | None = None, allow_private_networks: bool = False) -> None:
-        super().__init__(name="browser_mcp", auto_register=False)
         if type(allow_private_networks) is not bool:
             msg = "allow_private_networks must be a boolean."
             raise ValueError(msg)
         self._runtime_paths = runtime_paths
         self._allow_private_networks = allow_private_networks
         self._provider: WorkerBrowserMCP | None = None
-        for name, tool in browser_mcp_catalog().items():
-            self.async_functions[name] = Function(
-                name=name,
-                description=tool["description"],
-                parameters=tool["inputSchema"],
-                # Native optional fields must stay omitted, not become required empty values.
-                strict=False,
-                entrypoint=self._entrypoint(name),
-                skip_entrypoint_processing=True,
-            )
+        super().__init__(
+            name="browser_mcp",
+            tools=[
+                passthrough_tool(name=name, description=tool["description"], parameters=tool["inputSchema"])(
+                    self._entrypoint(name),
+                )
+                for name, tool in browser_mcp_catalog().items()
+            ],
+        )
+
+    def offered_function(self, function: ToolFunction) -> ToolFunction:
+        """Offer each native function non-strict: its optional fields stay omitted, not required empty values."""
+        return replace(function, strict=False)
 
     def _entrypoint(self, name: str) -> Callable[..., Awaitable[object]]:
         async def call(**kwargs: object) -> object:

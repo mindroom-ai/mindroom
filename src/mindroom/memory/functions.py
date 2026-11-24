@@ -3,17 +3,20 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from mindroom.logging_config import get_logger
+from mindroom.preload_cap import cap_preload_text
 from mindroom.prompt_templates import render_prompt_template
 from mindroom.timing import timed
 
 from ._backend import resolve_memory_backend
+from ._entrypoint_snapshots import stable_entrypoint_preamble
 from ._file_backend import append_agent_daily_file_memory
 from ._prompting import format_memories_as_context
-from ._shared import MemoryEntrypointContext, MemorySearchOutcome
+from ._shared import MemorySearchOutcome
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -24,6 +27,8 @@ if TYPE_CHECKING:
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
+    from ._backend import ResolvedMemoryBackend
+    from ._entrypoint_snapshots import ConversationRef
     from ._shared import MemoryResult
 
 logger = get_logger(__name__)
@@ -40,7 +45,6 @@ class MemoryPromptParts:
 async def add_agent_memory(
     content: str,
     agent_name: str,
-    storage_path: Path,
     config: Config,
     runtime_paths: RuntimePaths,
     metadata: dict | None = None,
@@ -52,7 +56,6 @@ async def add_agent_memory(
     await backend.add(
         content,
         agent_name,
-        storage_path,
         config,
         metadata=metadata,
         execution_identity=execution_identity,
@@ -62,21 +65,16 @@ async def add_agent_memory(
 def append_agent_daily_memory(
     content: str,
     agent_name: str,
-    storage_path: Path,
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
-    *,
-    preserve_resolved_storage_path: bool = False,
 ) -> MemoryResult:
     """Append one memory entry to today's per-agent daily memory file."""
     return append_agent_daily_file_memory(
         content,
         agent_name,
-        storage_path,
         config,
         runtime_paths,
-        preserve_resolved_storage_path=preserve_resolved_storage_path,
         execution_identity=execution_identity,
     )
 
@@ -85,63 +83,61 @@ def append_agent_daily_memory(
 async def search_agent_memories(
     query: str,
     agent_name: str,
-    storage_path: Path,
     config: Config,
     runtime_paths: RuntimePaths,
     limit: int = 3,
     execution_identity: ToolExecutionIdentity | None = None,
+    editable: bool = False,
+    recall: bool = False,
 ) -> MemorySearchOutcome:
-    """Search agent memories including team memories."""
+    """Search agent memories including team memories; ``editable`` returns only IDs update and delete accept.
+
+    ``recall`` marks the per-turn recall, which semantic file memory narrows by score gap and token budget.
+    """
     if (backend := resolve_memory_backend(agent_name, config, runtime_paths)) is None:
         return MemorySearchOutcome(results=[])
     return await backend.search(
         query,
         agent_name,
-        storage_path,
         config,
         limit=limit,
         execution_identity=execution_identity,
+        editable=editable,
+        recall=recall,
     )
 
 
 async def list_all_agent_memories(
     agent_name: str,
-    storage_path: Path,
     config: Config,
     runtime_paths: RuntimePaths,
     limit: int = 100,
     execution_identity: ToolExecutionIdentity | None = None,
-    *,
-    preserve_resolved_storage_path: bool = False,
 ) -> list[MemoryResult]:
     """List all memories for an agent."""
     if (backend := resolve_memory_backend(agent_name, config, runtime_paths)) is None:
         return []
     return await backend.list_all(
         agent_name,
-        storage_path,
         config,
         limit=limit,
-        preserve_resolved_storage_path=preserve_resolved_storage_path,
         execution_identity=execution_identity,
     )
 
 
 async def get_agent_memory(
     memory_id: str,
-    caller_context: str | list[str],
-    storage_path: Path,
+    agent_name: str,
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> MemoryResult | None:
-    """Get a single memory by ID."""
-    if (backend := resolve_memory_backend(caller_context, config, runtime_paths)) is None:
+    """Get a single memory of a scope the agent reads by ID."""
+    if (backend := resolve_memory_backend(agent_name, config, runtime_paths)) is None:
         return None
     return await backend.get(
         memory_id,
-        caller_context,
-        storage_path,
+        agent_name,
         config,
         execution_identity=execution_identity,
     )
@@ -150,20 +146,18 @@ async def get_agent_memory(
 async def update_agent_memory(
     memory_id: str,
     content: str,
-    caller_context: str | list[str],
-    storage_path: Path,
+    agent_name: str,
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> None:
-    """Update a single memory by ID."""
-    if (backend := resolve_memory_backend(caller_context, config, runtime_paths)) is None:
+    """Update a single memory of a scope the agent reads by ID."""
+    if (backend := resolve_memory_backend(agent_name, config, runtime_paths)) is None:
         return
     await backend.update(
         memory_id,
         content,
-        caller_context,
-        storage_path,
+        agent_name,
         config,
         execution_identity=execution_identity,
     )
@@ -171,59 +165,118 @@ async def update_agent_memory(
 
 async def delete_agent_memory(
     memory_id: str,
-    caller_context: str | list[str],
-    storage_path: Path,
+    agent_name: str,
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> None:
-    """Delete a single memory by ID."""
-    if (backend := resolve_memory_backend(caller_context, config, runtime_paths)) is None:
+    """Delete a single memory of a scope the agent reads by ID."""
+    if (backend := resolve_memory_backend(agent_name, config, runtime_paths)) is None:
         return
     await backend.delete(
         memory_id,
-        caller_context,
-        storage_path,
+        agent_name,
         config,
         execution_identity=execution_identity,
     )
 
 
-def _render_entrypoint_preamble(entrypoint: MemoryEntrypointContext, config: Config) -> str:
-    """Frame the preloaded memory entrypoint as already-inlined, cap-aware context.
+def _render_entrypoint_body(source_path: Path | None, text: str, config: Config, *, kept_copy: bool) -> str:
+    """Frame the preloaded memory entrypoint ``text`` as already-inlined context, without its cut marker.
 
-    A file whose preloaded head is blank still reports its truncation, so the
-    cap never withholds lines silently.
+    A ``kept_copy`` body, one a conversation may keep while entries are added, says newer entries may be missing.
     """
     header = render_prompt_template(
         config.get_prompt("FILE_MEMORY_ENTRYPOINT_HEADER_TEMPLATE"),
-        memory_path=entrypoint.source_path,
+        memory_path=source_path,
     )
-    truncation_notice = (
-        render_prompt_template(
-            config.get_prompt("FILE_MEMORY_ENTRYPOINT_TRUNCATION_TEMPLATE"),
-            included_lines=entrypoint.included_lines,
-            total_lines=entrypoint.total_lines,
-            max_entrypoint_lines=config.memory.file.max_entrypoint_lines,
-            max_entrypoint_tokens=config.memory.file.max_entrypoint_tokens,
-            memory_path=entrypoint.source_path,
-        )
-        if entrypoint.omitted_lines
+    kept_copy_notice = config.get_prompt("FILE_MEMORY_ENTRYPOINT_KEPT_COPY_NOTICE") if kept_copy else ""
+    return "\n".join(part for part in (header, kept_copy_notice, text) if part)
+
+
+async def _entrypoint_preamble(
+    backend: ResolvedMemoryBackend,
+    agent_name: str,
+    config: Config,
+    execution_identity: ToolExecutionIdentity | None,
+    conversation: ConversationRef | None,
+) -> str:
+    """Render the agent's `MEMORY.md` preamble, cut like every preloaded file, or the copy ``conversation`` keeps."""
+    # The file backend reads the scoped MEMORY.md from disk; keep it off the
+    # event loop (#1260).
+    entrypoint = await asyncio.to_thread(
+        backend.load_entrypoint_context,
+        agent_name,
+        config,
+        execution_identity=execution_identity,
+    )
+    max_chars = config.defaults.max_preload_file_chars
+    kept, cut = cap_preload_text(entrypoint.text, max_chars)
+    text = kept.strip()
+    body = (
+        _render_entrypoint_body(entrypoint.source_path, text, config, kept_copy=conversation is not None)
+        if text or cut
         else ""
     )
-    return "\n".join(part for part in (header, entrypoint.text, truncation_notice) if part)
+    marker_template = config.get_prompt("PRELOAD_FILE_CUT_MARKER_TEMPLATE")
+    preamble = body
+    if body and cut:
+        preamble += "\n" + render_prompt_template(marker_template, path=entrypoint.source_path, max_chars=max_chars)
+    if conversation is None or entrypoint.source_path is None:
+        return preamble
+    return await asyncio.to_thread(
+        stable_entrypoint_preamble,
+        conversation,
+        entrypoint.source_path,
+        body,
+        preamble,
+        # The marker follows the body, so its template, the limit, and whether it is shown frame the copy too.
+        frame=[
+            *(config.get_prompt(f"FILE_MEMORY_ENTRYPOINT_{key}") for key in ("HEADER_TEMPLATE", "KEPT_COPY_NOTICE")),
+            marker_template,
+            str(max_chars),
+            str(cut),
+        ],
+        lines=None if cut else tuple(entrypoint.text.split("\n")),
+        now=time.time(),
+    )
+
+
+async def conversation_entrypoint_preamble(
+    agent_name: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None,
+    *,
+    conversation: ConversationRef,
+) -> str:
+    """Return the `MEMORY.md` preamble for ``conversation``, loading the file again when its history was compacted."""
+    if (backend := resolve_memory_backend(agent_name, config, runtime_paths)) is None:
+        return ""
+    return await _entrypoint_preamble(
+        backend,
+        agent_name,
+        config,
+        execution_identity,
+        conversation,
+    )
 
 
 @timed("system_prompt_assembly.memory_enhancement")
 async def build_memory_prompt_parts(
     prompt: str,
     agent_name: str,
-    storage_path: Path,
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None = None,
+    *,
+    conversation: ConversationRef | None = None,
 ) -> MemoryPromptParts:
-    """Split stable entrypoint context from turn-local searched memories."""
+    """Split stable entrypoint context from turn-local searched memories.
+
+    A turn in ``conversation`` keeps the entrypoint that conversation last sent while its inlined copy only gains lines,
+    anywhere in a file within its preload limit, and its prompt cache may be warm.
+    """
     logger.debug("Building enhanced prompt", agent=agent_name)
     if (backend := resolve_memory_backend(agent_name, config, runtime_paths)) is None:
         return MemoryPromptParts()
@@ -231,27 +284,22 @@ async def build_memory_prompt_parts(
     search_outcome = await search_agent_memories(
         prompt,
         agent_name,
-        storage_path,
         config,
         runtime_paths,
         execution_identity=execution_identity,
+        recall=True,
     )
     agent_memories = search_outcome.results
     if agent_memories:
         logger.debug("Agent memories added", count=len(agent_memories))
 
-    session_preamble = ""
-    # The file backend reads the scoped MEMORY.md from disk; keep it off the
-    # event loop (#1260).
-    agent_entrypoint = await asyncio.to_thread(
-        backend.load_entrypoint_context,
+    session_preamble = await _entrypoint_preamble(
+        backend,
         agent_name,
-        storage_path,
         config,
-        execution_identity=execution_identity,
+        execution_identity,
+        conversation,
     )
-    if agent_entrypoint.text or agent_entrypoint.omitted_lines:
-        session_preamble = _render_entrypoint_preamble(agent_entrypoint, config)
 
     # The automatic per-turn path must not silently drop the degradation
     # signal: a broken embedder would otherwise look like an agent with no
@@ -281,8 +329,7 @@ async def build_memory_prompt_parts(
 
 async def store_conversation_memory(
     prompt: str,
-    agent_name: str | list[str],
-    storage_path: Path,
+    caller: str | Sequence[str],
     session_id: str,
     config: Config,
     runtime_paths: RuntimePaths,
@@ -290,15 +337,14 @@ async def store_conversation_memory(
     user_id: str | None = None,
     execution_identity: ToolExecutionIdentity | None = None,
 ) -> None:
-    """Store conversation in memory for future recall."""
+    """Store one conversation turn of an agent, or of the team the members in ``caller`` form, for future recall."""
     if not prompt:
         return
-    if (backend := resolve_memory_backend(agent_name, config, runtime_paths)) is None:
+    if (backend := resolve_memory_backend(caller, config, runtime_paths)) is None:
         return
     await backend.store_conversation(
         prompt,
-        agent_name,
-        storage_path,
+        caller,
         session_id,
         config,
         thread_history=thread_history,

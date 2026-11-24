@@ -1,9 +1,44 @@
-"""Leaf helpers for normalizing provider usage counters."""
+"""Normalize provider usage counters, and read the context tokens one model request held."""
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from typing import TYPE_CHECKING
 
-def _provider_reports_cache_tokens_outside_input(
+from mindroom.llm.messages import usage_sums_attempts
+
+if TYPE_CHECKING:
+    from mindroom.llm.messages import Message
+    from mindroom.llm.usage import MessageMetrics
+
+
+@dataclass(frozen=True, slots=True)
+class ContextTokens:
+    """A request context's size in tokens and its cache reads and writes: one response's report, or an estimate.
+
+    A cache counter is None when the provider did not report it, and always for an estimate. A zero cache counter
+    among a response's billed counters reads as unreported; a reported ``context`` reports each one, a zero one too.
+    """
+
+    tokens: int
+    cache_read_tokens: int | None = None
+    cache_write_tokens: int | None = None
+
+    @property
+    def cache_read_input_tokens(self) -> int:
+        """Return the context's tokens read from cache, at most its size.
+
+        An OpenAI-compatible server can report more cached tokens than prompt tokens.
+        """
+        return min(self.cache_read_tokens or 0, self.tokens)
+
+    @property
+    def uncached_input_tokens(self) -> int:
+        """Return the context's tokens not read from cache; tokens written to cache were not read from it."""
+        return self.tokens - self.cache_read_input_tokens
+
+
+def provider_reports_cache_tokens_outside_input(
     *,
     provider: str | None,
     configured_provider: str | None,
@@ -13,7 +48,7 @@ def _provider_reports_cache_tokens_outside_input(
     provider_key = (provider or configured_provider or "").lower()
     configured_provider_key = (configured_provider or "").lower()
     model_key = (model_id or "").lower()
-    if "anthropic" in provider_key or "bedrock" in provider_key:
+    if "anthropic" in provider_key or "bedrock" in provider_key or provider_key == "claude_code":
         return True
     if configured_provider_key == "vertexai_claude":
         return True
@@ -32,10 +67,86 @@ def context_input_tokens_from_counts(
     """Return full request-context tokens from provider usage counters."""
     if input_tokens is None:
         return None
-    if not _provider_reports_cache_tokens_outside_input(
+    if not provider_reports_cache_tokens_outside_input(
         provider=provider,
         configured_provider=configured_provider,
         model_id=model_id,
     ):
         return input_tokens
     return input_tokens + (cache_read_tokens or 0) + (cache_write_tokens or 0)
+
+
+def uncached_input_tokens_from_counts(
+    *,
+    input_tokens: int | None,
+    cache_read_tokens: int | None,
+    cache_write_tokens: int | None,
+    provider: str | None,
+    configured_provider: str | None,
+    model_id: str | None,
+) -> int | None:
+    """Return input tokens not read from cache; tokens written to cache are new input."""
+    if input_tokens is None:
+        return None
+    if provider_reports_cache_tokens_outside_input(
+        provider=provider,
+        configured_provider=configured_provider,
+        model_id=model_id,
+    ):
+        return input_tokens + (cache_write_tokens or 0)
+    return max(0, input_tokens - (cache_read_tokens or 0))
+
+
+def message_context_tokens(
+    message: Message,
+    *,
+    provider: str | None,
+    configured_provider: str | None,
+    model_id: str | None,
+) -> ContextTokens | None:
+    """Return the request context one response reported, or None when its usage is absent or sums retried attempts."""
+    if usage_sums_attempts(message.provider_data):
+        # The counters sum several retried attempts, so they describe no single request's context.
+        return None
+    return metrics_context_tokens(
+        message.metrics,
+        provider=provider,
+        configured_provider=configured_provider,
+        model_id=model_id,
+    )
+
+
+def metrics_context_tokens(
+    metrics: MessageMetrics,
+    *,
+    provider: str | None,
+    configured_provider: str | None,
+    model_id: str | None,
+) -> ContextTokens | None:
+    """Return the request context one request's usage reports, or None when it reported no usage.
+
+    A reported ``context`` describes it, such as a Claude response's final iteration: after a native compaction that
+    iteration alone describes the active context, while the billed counters can include the transcript the checkpoint
+    replaced.
+    """
+    if (context := metrics.context) is not None:
+        input_tokens = context.input_tokens
+        cache_read_tokens = context.cache_read_tokens
+        cache_write_tokens = context.cache_write_tokens
+    else:
+        # A counter the provider did not report stays zero, so a zero cache counter counts as unreported.
+        input_tokens = metrics.tokens.input_tokens
+        cache_read_tokens = metrics.tokens.cache_read_tokens or None
+        cache_write_tokens = metrics.tokens.cache_write_tokens or None
+    tokens = context_input_tokens_from_counts(
+        input_tokens=input_tokens,
+        cache_read_tokens=cache_read_tokens,
+        cache_write_tokens=cache_write_tokens,
+        provider=provider,
+        configured_provider=configured_provider,
+        model_id=model_id,
+    )
+    # A zero size means the provider reported nothing.
+    if not tokens:
+        return None
+    return ContextTokens(tokens, cache_read_tokens, cache_write_tokens)

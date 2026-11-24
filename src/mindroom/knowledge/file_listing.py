@@ -15,6 +15,7 @@ import os
 import stat
 import subprocess
 from contextlib import contextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
@@ -31,7 +32,7 @@ from mindroom.path_confinement import (
 from mindroom.path_globs import matches_root_glob
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Iterator
+    from collections.abc import Callable, Iterable, Iterator
 
     from mindroom.config.main import Config
 
@@ -96,6 +97,27 @@ logger = get_logger(__name__)
 
 
 @dataclass(frozen=True)
+class OversizedKnowledgeFile:
+    """A file a listing skipped because it is above the read cap."""
+
+    base_id: str
+    path: str
+    size: int
+
+
+# Every refresh lists the same files again, so each file above the read cap warns once per process for its base.
+# Worker code can create sparse files without limit, so once the set is full, files outside it warn on every listing.
+_MAX_WARNED_OVERSIZED_FILES = 4096
+_WARNED_OVERSIZED_FILES: set[tuple[str, str]] = set()
+# The oversized files a refresh child skipped, which it reports to the runtime that started it. Each refresh runs in a
+# new child, so only the long-lived runtime can warn once. Listings run in worker threads, which inherit this context.
+_collected_oversized_files: ContextVar[dict[tuple[str, str], OversizedKnowledgeFile] | None] = ContextVar(
+    "collected_oversized_knowledge_files",
+    default=None,
+)
+
+
+@dataclass(frozen=True)
 class _ListingTarget:
     path: Path
     mode: Literal["file", "dir", "walk"]
@@ -147,10 +169,22 @@ def _is_hidden_relative_path(relative_path: Path) -> bool:
     return any(part.startswith(".") for part in relative_path.parts)
 
 
+def is_utf8(name: str) -> bool:
+    """Return whether a name read from the filesystem is valid UTF-8; Python escapes the bytes of one that is not."""
+    try:
+        name.encode()
+    except UnicodeEncodeError:
+        return False
+    return True
+
+
 def _include_knowledge_relative_path(config: Config, base_id: str, relative_path: str) -> bool:
-    """Return whether a relative path is managed by the base path filters."""
+    """Return whether a relative path is managed by the base path filters.
+
+    A path that is not valid UTF-8 is never managed: an index, a listing, and a search result all name files as text.
+    """
     path_obj = Path(relative_path)
-    if path_obj.is_absolute() or ".." in path_obj.parts or is_git_metadata_path(path_obj):
+    if path_obj.is_absolute() or ".." in path_obj.parts or is_git_metadata_path(path_obj) or not is_utf8(relative_path):
         return False
 
     base_config = config.get_knowledge_base_config(base_id)
@@ -201,8 +235,12 @@ def include_knowledge_relative_path(config: Config, base_id: str, relative_path:
 
 
 @contextmanager
-def _pinned_directory(path: Path) -> Iterator[int]:
-    """Pin one canonical absolute directory by a no-follow walk from the filesystem root."""
+def pinned_canonical_directory(path: Path) -> Iterator[int]:
+    """Pin one canonical absolute directory by a no-follow walk from the filesystem root.
+
+    Worker code can write bases inside agent workspaces, so a folder checked by name may be swapped for a link before
+    it is used; acting relative to the pinned descriptor refuses the swap instead of reaching the link target.
+    """
     with open_directory_within_root(Path(path.anchor), path.relative_to(path.anchor)) as directory_fd:
         yield directory_fd
 
@@ -218,14 +256,74 @@ def open_knowledge_file(path: Path) -> Iterator[int]:
         yield file_fd
 
 
-def _is_regular_file_at(root_fd: int, relative_path: Path) -> bool:
+@contextmanager
+def pinned_directories(root: Path) -> Iterator[Callable[[Path], int]]:
+    """Yield a function that pins a directory below ``root`` by a no-follow walk, reusing the one it pinned last.
+
+    Files signed in listing order arrive grouped by directory, so each directory costs one walk instead of one per
+    file. The descriptors stay owned here.
+    """
+    last: list[tuple[Path, int]] = []
+
+    def pin(relative_directory: Path) -> int:
+        if last and last[0][0] == relative_directory:
+            return last[0][1]
+        with open_directory_within_root(root, relative_directory) as descriptor:
+            pinned = os.dup(descriptor)
+        if last:
+            os.close(last.pop()[1])
+        last.append((relative_directory, pinned))
+        return pinned
+
+    try:
+        yield pin
+    finally:
+        for _directory, descriptor in last:
+            os.close(descriptor)
+
+
+@contextmanager
+def collected_oversized_files() -> Iterator[dict[tuple[str, str], OversizedKnowledgeFile]]:
+    """Collect the oversized files the listings run inside skip, instead of warning about them here."""
+    collected: dict[tuple[str, str], OversizedKnowledgeFile] = {}
+    token = _collected_oversized_files.set(collected)
+    try:
+        yield collected
+    finally:
+        _collected_oversized_files.reset(token)
+
+
+def _log_oversized_file(file: OversizedKnowledgeFile, *, warn: bool) -> None:
+    log = logger.warning if warn else logger.debug
+    log("Skipping a knowledge file above the read cap", base_id=file.base_id, path=file.path, size=file.size)
+
+
+def warn_oversized_knowledge_file(file: OversizedKnowledgeFile) -> None:
+    """Warn once per process for each base and file above the read cap, and log later sightings at debug level."""
+    key = (file.base_id, file.path)
+    first = key not in _WARNED_OVERSIZED_FILES
+    if first and len(_WARNED_OVERSIZED_FILES) < _MAX_WARNED_OVERSIZED_FILES:
+        _WARNED_OVERSIZED_FILES.add(key)
+    _log_oversized_file(file, warn=first)
+
+
+def _skip_oversized_file(file: OversizedKnowledgeFile) -> None:
+    collected = _collected_oversized_files.get()
+    if collected is None:
+        warn_oversized_knowledge_file(file)
+        return
+    collected[(file.base_id, file.path)] = file
+    _log_oversized_file(file, warn=False)
+
+
+def _is_regular_file_at(root_fd: int, root: Path, relative_path: Path, base_id: str) -> bool:
     try:
         with open_directory_within_root(root_fd, relative_path.parent) as parent_fd:
             status = os.stat(relative_path.name, dir_fd=parent_fd, follow_symlinks=False)
     except (OSError, ValueError):
         return False
     if stat.S_ISREG(status.st_mode) and status.st_size > MAX_READ_BYTES:
-        logger.warning("Skipping a knowledge file above the read cap", path=str(relative_path), size=status.st_size)
+        _skip_oversized_file(OversizedKnowledgeFile(base_id, str(root / relative_path), status.st_size))
         return False
     return stat.S_ISREG(status.st_mode)
 
@@ -277,12 +375,12 @@ def list_knowledge_files(config: Config, base_id: str, knowledge_root: Path) -> 
     include_patterns = config.get_knowledge_base_config(base_id).include_patterns
     files: set[Path] = set()
     try:
-        with _pinned_directory(root) as root_fd:
+        with pinned_canonical_directory(root) as root_fd:
             for target in _listing_targets(root, include_patterns):
                 for relative_path in _iter_target_files(root_fd, target, root):
                     if not include_knowledge_relative_path(config, base_id, relative_path.as_posix()):
                         continue
-                    if _is_regular_file_at(root_fd, relative_path):
+                    if _is_regular_file_at(root_fd, root, relative_path, base_id):
                         files.add(root / relative_path)
     except FileNotFoundError:
         return []
@@ -304,11 +402,11 @@ def knowledge_files_from_relative_paths(
         return []
     files: list[Path] = []
     try:
-        with _pinned_directory(root) as root_fd:
+        with pinned_canonical_directory(root) as root_fd:
             for relative_path in sorted(set(relative_paths)):
                 if not include_knowledge_relative_path(config, base_id, relative_path):
                     continue
-                if _is_regular_file_at(root_fd, Path(relative_path)):
+                if _is_regular_file_at(root_fd, root, Path(relative_path), base_id):
                     files.append(root / relative_path)
     except (OSError, ValueError):
         return []
@@ -346,7 +444,6 @@ def git_tracked_relative_paths_from_checkout(
             env=hardened_git_env(git_dir=git_dir, work_tree=knowledge_root),
             check=False,
             capture_output=True,
-            text=True,
             timeout=effective_timeout_seconds,
         )
     except subprocess.TimeoutExpired as exc:
@@ -357,14 +454,18 @@ def git_tracked_relative_paths_from_checkout(
         raise RuntimeError(msg) from exc
 
     if result.returncode != 0:
-        details = redact_credentials_in_text((result.stderr or result.stdout).strip())
+        details = redact_credentials_in_text(os.fsdecode(result.stderr or result.stdout).strip())
         msg = f"Git command failed with exit code {result.returncode}: git ls-files -z"
         if details:
             msg = f"{msg}\n{details}"
         raise RuntimeError(msg)
 
+    # Decode the bytes as a directory listing does: a carriage return stays in its name, and the bytes of a name that
+    # is not valid UTF-8 are escaped, so the inclusion rule leaves that file out instead of the listing failing.
     return {
-        path for path in result.stdout.split("\x00") if path and include_knowledge_relative_path(config, base_id, path)
+        path
+        for path in os.fsdecode(result.stdout).split("\x00")
+        if path and include_knowledge_relative_path(config, base_id, path)
     }
 
 

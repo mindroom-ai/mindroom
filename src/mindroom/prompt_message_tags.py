@@ -2,12 +2,26 @@
 
 from __future__ import annotations
 
+import html
+import re
 from xml.sax.saxutils import quoteattr as xml_quoteattr
+
+_CDATA_END = "]]>"
+_CDATA_END_ESCAPED = "]]]]><![CDATA[>"
+_MSG_TAG = re.compile(r"<msg\b([^>]*)><!\[CDATA\[(.*?)\]\]></msg>", re.DOTALL)
+_FROM_ATTR = re.compile(r"""\bfrom=(["'])(.*?)\1""")
+_DISPLAY_NAME_ATTR = re.compile(r"""\bdisplay_name=(["'])(.*?)\1""")
+_CONTAINER_TAG = re.compile(r"</?(?:messages|queued_messages|conversation)>")
 
 
 def _cdata_body(body: str) -> str:
     """Render body text inside CDATA without entity-escaping normal message text."""
-    return body.replace("]]>", "]]]]><![CDATA[>")
+    return body.replace(_CDATA_END, _CDATA_END_ESCAPED)
+
+
+def _cdata_body_text(rendered: str) -> str:
+    """Return the message text a rendered CDATA body holds."""
+    return rendered.replace(_CDATA_END_ESCAPED, _CDATA_END)
 
 
 def render_msg_tag(
@@ -17,8 +31,13 @@ def render_msg_tag(
     event_id: str | None = None,
     ts: str | None = None,
     display_name: str | None = None,
+    thread_id: str | None = None,
+    sent_by_you: bool = False,
 ) -> str:
-    """Render one Matrix message as a ``<msg ...><![CDATA[...]]></msg>`` tag."""
+    """Render one Matrix message as a ``<msg ...><![CDATA[...]]></msg>`` tag; ``thread_id`` names its thread's root.
+
+    ``sent_by_you`` tells the reading model the message is its own, which needs no knowledge of its Matrix ID.
+    """
     attrs: list[str] = []
     if event_id is not None:
         attrs.append(f"event_id={xml_quoteattr(event_id)}")
@@ -27,4 +46,24 @@ def render_msg_tag(
         attrs.append(f"display_name={xml_quoteattr(display_name)}")
     if ts is not None:
         attrs.append(f"ts={xml_quoteattr(ts)}")
+    if thread_id is not None:
+        attrs.append(f"thread_id={xml_quoteattr(thread_id)}")
+    if sent_by_you:
+        attrs.append('sent_by_you="true"')
     return f"<msg {' '.join(attrs)}><![CDATA[{_cdata_body(body)}]]></msg>"
+
+
+def parse_msg_tags(content: str, *, default_sender: str) -> list[tuple[str, str | None, str]]:
+    """Return each ``<msg>`` tag's sender, display name, and body.
+
+    Content holding no tag is one body from ``default_sender``, without a display name.
+    """
+    tagged = [
+        (
+            html.unescape(sender.group(2)) if (sender := _FROM_ATTR.search(attrs)) else default_sender,
+            html.unescape(name.group(2)) if (name := _DISPLAY_NAME_ATTR.search(attrs)) else None,
+            _cdata_body_text(body),
+        )
+        for attrs, body in _MSG_TAG.findall(content)
+    ]
+    return tagged or [(default_sender, None, _CONTAINER_TAG.sub("", content))]

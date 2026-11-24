@@ -1,4 +1,4 @@
-"""GPT-Live input stays paced across microphone arrival and stream gaps."""
+"""GPT-Live input stays paced across microphone gaps, and late output yields to the caller."""
 
 from __future__ import annotations
 
@@ -11,7 +11,10 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from livekit import rtc
 from livekit.agents import room_io
+from livekit.agents.voice import io as agents_io
+from livekit.agents.voice.events import UserState, UserStateChangedEvent
 from livekit.rtc._utils import RingQueue
+from structlog.testing import capture_logs
 
 import mindroom.matrix_rtc.voice_agent as voice_agent_module
 from mindroom.matrix_rtc.voice_agent import (
@@ -19,7 +22,9 @@ from mindroom.matrix_rtc.voice_agent import (
     RealtimeVoiceBridge,
     VoiceAgentOptions,
     _AuthorizedParticipantAudioInput,
+    _drop_live_backlog_on_caller_speech,
 )
+from tests.conftest import SETTLE_TIMEOUT_SECONDS
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -52,6 +57,7 @@ async def start_audio(
     *,
     live: bool = True,
     stream_factory: Callable[..., object] | None = None,
+    session: MagicMock | None = None,
 ) -> tuple[_AuthorizedParticipantAudioInput, MagicMock]:
     """Exercise session input wiring with the real RTC mixer and no network."""
     room = MagicMock()
@@ -60,7 +66,8 @@ async def start_audio(
     bridge = RealtimeVoiceBridge(local_identity="bot", e2ee_enabled=False)
     bridge._room = room
     bridge._participant_identities = frozenset({"alice"})
-    session = MagicMock()
+    if session is None:
+        session = MagicMock()
     session.start = AsyncMock()
     options = (
         LiveVoiceAgentOptions(
@@ -119,7 +126,7 @@ async def test_live_input_emits_paced_silence_before_any_participant_joins() -> 
     audio, _room = await start_audio()
     try:
         started = asyncio.get_running_loop().time()
-        frames = [await asyncio.wait_for(anext(audio), timeout=1) for _ in range(4)]
+        frames = [await asyncio.wait_for(anext(audio), timeout=SETTLE_TIMEOUT_SECONDS) for _ in range(4)]
         elapsed = asyncio.get_running_loop().time() - started
         assert elapsed >= 0.15
         assert elapsed < 0.8
@@ -136,27 +143,27 @@ async def test_live_input_resumes_real_frames_after_late_microphone_and_stream_g
     audio, room = await start_audio()
     microphone = Microphone()
     try:
-        assert (await asyncio.wait_for(anext(audio), timeout=1)).data.tobytes() == bytes(2400)
+        assert (await asyncio.wait_for(anext(audio), timeout=SETTLE_TIMEOUT_SECONDS)).data.tobytes() == bytes(2400)
         subscribe(room, "alice", microphone)
-        await asyncio.wait_for(microphone.reading.wait(), timeout=1)
-        assert (await asyncio.wait_for(anext(audio), timeout=1)).data.tobytes() == bytes(2400)
+        await asyncio.wait_for(microphone.reading.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
+        assert (await asyncio.wait_for(anext(audio), timeout=SETTLE_TIMEOUT_SECONDS)).data.tobytes() == bytes(2400)
         for value in (17, 29):
             microphone.frames.put_nowait(frame(value))
         received = []
-        async with asyncio.timeout(2):
+        async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
             while len(received) < 2:
                 item = await anext(audio)
                 if any(item.data):
                     received.append(item.data.tobytes())
         assert received == [frame(17).data.tobytes(), frame(29).data.tobytes()]
         for _ in range(3):
-            assert (await asyncio.wait_for(anext(audio), timeout=1)).data.tobytes() == bytes(2400)
+            assert (await asyncio.wait_for(anext(audio), timeout=SETTLE_TIMEOUT_SECONDS)).data.tobytes() == bytes(2400)
         microphone.frames.put_nowait(frame(43))
-        async with asyncio.timeout(2):
+        async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
             while not any((resumed := await anext(audio)).data):
                 pass
         assert resumed.data.tobytes() == frame(43).data.tobytes()
-        assert (await asyncio.wait_for(anext(audio), timeout=1)).data.tobytes() == bytes(2400)
+        assert (await asyncio.wait_for(anext(audio), timeout=SETTLE_TIMEOUT_SECONDS)).data.tobytes() == bytes(2400)
     finally:
         await audio.aclose()
     assert microphone.closed
@@ -172,7 +179,7 @@ async def test_live_silence_never_admits_an_unauthorized_microphone() -> None:
     subscribe(room, "outsider", microphone)
     try:
         for _ in range(3):
-            assert (await asyncio.wait_for(anext(audio), timeout=1)).data.tobytes() == bytes(2400)
+            assert (await asyncio.wait_for(anext(audio), timeout=SETTLE_TIMEOUT_SECONDS)).data.tobytes() == bytes(2400)
         assert not microphone.reading.is_set()
         assert microphone.frames.qsize() == 1
     finally:
@@ -187,21 +194,25 @@ async def test_live_cancelled_consumer_keeps_real_frame_and_close_ends_pending_r
     subscribe(room, "alice", microphone)
     pending = asyncio.create_task(anext(audio))
     try:
-        await asyncio.wait_for(microphone.reading.wait(), timeout=1)
+        await asyncio.wait_for(microphone.reading.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
+        # The first frame is due at once, so cancel a read that waits for the next frame's deadline.
+        await pending
+        pending = asyncio.create_task(anext(audio))
+        await asyncio.sleep(0)
         pending.cancel()
         with pytest.raises(asyncio.CancelledError):
             await pending
         microphone.frames.put_nowait(frame(89))
-        async with asyncio.timeout(2):
+        async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
             while not any((item := await anext(audio)).data):
                 pass
         assert item.data.tobytes() == frame(89).data.tobytes()
-        assert (await asyncio.wait_for(anext(audio), timeout=1)).data.tobytes() == bytes(2400)
+        assert (await asyncio.wait_for(anext(audio), timeout=SETTLE_TIMEOUT_SECONDS)).data.tobytes() == bytes(2400)
         pending = asyncio.create_task(anext(audio))
         await asyncio.sleep(0)
         await audio.aclose()
         with pytest.raises(StopAsyncIteration):
-            await asyncio.wait_for(pending, timeout=1)
+            await asyncio.wait_for(pending, timeout=SETTLE_TIMEOUT_SECONDS)
         with pytest.raises(StopAsyncIteration):
             await anext(audio)
     finally:
@@ -234,17 +245,24 @@ async def test_live_input_paces_buffered_real_frames_without_duplicates() -> Non
     for value in (11, 22, 33, 44):
         microphone.frames.put_nowait(frame(value))
     subscribe(room, "alice", microphone)
+    loop = asyncio.get_running_loop()
     received = []
+    slots = []
     delivered_at = []
     try:
-        async with asyncio.timeout(2):
+        async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
             while len(received) < 4:
+                slot = audio._next_frame_at
                 item = await anext(audio)
                 if any(item.data):
                     received.append(item.data.tobytes())
-                    delivered_at.append(asyncio.get_running_loop().time())
+                    slots.append(slot)
+                    delivered_at.append(loop.time())
         assert received == [frame(value).data.tobytes() for value in (11, 22, 33, 44)]
-        assert all(after - before >= 0.045 for before, after in pairwise(delivered_at))
+        # A late wakeup only delays its frame, and the next slot stays on the cadence, so the gap between two
+        # deliveries can be shorter than a frame; what the backlog cannot do is leave before its slot.
+        assert all(delivered >= slot for slot, delivered in zip(slots, delivered_at, strict=True))
+        assert all(after >= before + 0.05 for before, after in pairwise(slots))
     finally:
         await audio.aclose()
 
@@ -271,7 +289,7 @@ async def test_live_input_owns_one_stalled_mixer_read_until_close(monkeypatch: p
     audio, _room = await start_audio()
     try:
         for _ in range(3):
-            assert (await asyncio.wait_for(anext(audio), timeout=1)).data.tobytes() == bytes(2400)
+            assert (await asyncio.wait_for(anext(audio), timeout=SETTLE_TIMEOUT_SECONDS)).data.tobytes() == bytes(2400)
         assert pending_reads == 1
         assert read_calls == 1
         assert not read_finished.is_set()
@@ -309,9 +327,9 @@ async def test_live_cancelled_close_drains_mixer_and_can_be_awaited_again(monkey
     closing = None
     retry = None
     try:
-        await asyncio.wait_for(anext(audio), timeout=1)
+        await asyncio.wait_for(anext(audio), timeout=SETTLE_TIMEOUT_SECONDS)
         closing = asyncio.create_task(audio.aclose())
-        await asyncio.wait_for(read_cancelled.wait(), timeout=1)
+        await asyncio.wait_for(read_cancelled.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
         closing.cancel()
         done, _ = await asyncio.wait({closing}, timeout=0.05)
         assert not done, "Cancelled close abandoned mixer teardown"
@@ -408,7 +426,7 @@ async def test_only_live_audio_bounds_upstream_backlog_to_recent_frames(live: bo
     expected_values = list(range(11, 21)) if live else list(range(1, 21))
     received = []
     try:
-        async with asyncio.timeout(2):
+        async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
             while len(received) < len(expected_values):
                 item = await anext(audio)
                 if any(item.data):
@@ -416,3 +434,325 @@ async def test_only_live_audio_bounds_upstream_backlog_to_recent_frames(live: bo
         assert received == [frame(value).data.tobytes() for value in expected_values]
     finally:
         await audio.aclose()
+
+
+class OutputClock:
+    """Stand in for the monotonic clock the output paces against, and for the waits it takes."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def monotonic(self) -> float:
+        """Return the simulated time."""
+        return self.now
+
+    async def sleep(self, delay: float) -> None:
+        """Let the simulated time pass, as the output's playout cushion does."""
+        self.now += delay
+        await asyncio.sleep(0)
+
+
+class ClockedAsyncio:
+    """The voice agent module's asyncio, with its sleeps on the simulated clock."""
+
+    def __init__(self, clock: OutputClock) -> None:
+        self._clock = clock
+
+    async def sleep(self, delay: float) -> None:
+        """Wait on the simulated clock."""
+        await self._clock.sleep(delay)
+
+    def __getattr__(self, name: str) -> object:
+        """Hand out everything else from asyncio itself."""
+        return getattr(asyncio, name)
+
+
+@pytest.fixture
+def output_clock(monkeypatch: pytest.MonkeyPatch) -> OutputClock:
+    """Drive output arrival times and the output's waits without sleeping."""
+    clock = OutputClock()
+    monkeypatch.setattr(voice_agent_module, "time", SimpleNamespace(monotonic=clock.monotonic))
+    monkeypatch.setattr(voice_agent_module, "asyncio", ClockedAsyncio(clock))
+    return clock
+
+
+class PlayoutSink(agents_io.AudioOutput):
+    """Stand in for RoomIO: record deliveries and report each flushed segment as played."""
+
+    def __init__(self) -> None:
+        super().__init__(
+            label="RoomIO",
+            capabilities=agents_io.AudioOutputCapabilities(pause=True),
+            sample_rate=24000,
+        )
+        self.values: list[int] = []
+        self.calls: list[str] = []
+        self.segment_open = False
+
+    async def capture_frame(self, frame: rtc.AudioFrame) -> None:
+        """Record one delivered delta by its sample value."""
+        await super().capture_frame(frame)
+        if not self.segment_open:
+            self.segment_open = True
+            self.on_playback_started(created_at=1.0)
+        self.values.append(frame.data[0])
+
+    def flush(self) -> None:
+        """Finish the open segment as fully played."""
+        super().flush()
+        self.calls.append("flush")
+        if self.segment_open:
+            self.segment_open = False
+            self.on_playback_finished(playback_position=0.1, interrupted=False)
+
+    def clear_buffer(self) -> None:
+        """Record that queued audio was discarded."""
+        self.calls.append("clear")
+
+    def pause(self) -> None:
+        """Record a pause request."""
+        self.calls.append("pause")
+
+    def resume(self) -> None:
+        """Record a resume request."""
+        self.calls.append("resume")
+
+
+class CallSession:
+    """An agent session stub whose RoomIO output is a recording sink and whose events are real."""
+
+    def __init__(self) -> None:
+        self.sink = PlayoutSink()
+        self.session = MagicMock()
+        self.session.output.audio = self.sink
+        self.events: rtc.EventEmitter[str] = rtc.EventEmitter()
+        self.session.on = self.events.on
+
+    @property
+    def output(self) -> agents_io.AudioOutput:
+        """Return the audio output the session speaks through."""
+        return self.session.output.audio
+
+    def caller(self, state: UserState) -> None:
+        """Emit the caller state change LiveKit reports when GPT-Live hears or stops hearing them."""
+        old_state: UserState = "listening" if state == "speaking" else "speaking"
+        self.events.emit("user_state_changed", UserStateChangedEvent(old_state=old_state, new_state=state))
+
+
+@pytest.fixture
+def call() -> CallSession:
+    """Attach the GPT-Live backlog drop to a stub session."""
+    call = CallSession()
+    _drop_live_backlog_on_caller_speech(call.session)
+    return call
+
+
+def delta(value: int) -> rtc.AudioFrame:
+    """Build one 100 ms GPT-Live output delta identified by its sample value."""
+    return rtc.AudioFrame(value.to_bytes(2, "little", signed=True) * 2400, 24000, 1, 2400)
+
+
+async def deliver(output: agents_io.AudioOutput, clock: OutputClock, value: int, *, at: float) -> None:
+    """Hand one delta to the session output once it arrived and the output took the delta before it."""
+    clock.now = max(clock.now, at)
+    await output.capture_frame(delta(value))
+
+
+def drop_logs(logs: list[dict[str, object]]) -> list[dict[str, object]]:
+    """Return the backlog drop warnings among captured logs."""
+    return [log for log in logs if log["event"] == "call_output_backlog_dropped"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("live", [True, False], ids=["live", "other-model"])
+async def test_only_live_calls_drop_backlog_when_the_caller_speaks(output_clock: OutputClock, live: bool) -> None:
+    """GPT-Live speaks through the backlog drop; other models keep RoomIO's output unchanged."""
+    call = CallSession()
+    audio, _room = await start_audio(live=live, session=call.session)
+    await audio.aclose()
+    assert (call.output is call.sink) is not live
+    for value in range(10):
+        await deliver(call.output, output_clock, value, at=0.0)
+    call.caller("speaking")
+    assert ("clear" in call.sink.calls) is live
+
+
+@pytest.mark.asyncio
+async def test_live_output_plays_late_audio_until_the_caller_speaks(
+    output_clock: OutputClock,
+    call: CallSession,
+) -> None:
+    """Audio held back by a stall still plays late when the caller stays quiet."""
+    with capture_logs() as logs:
+        for value in range(10):
+            await deliver(call.output, output_clock, value, at=value * 0.1)
+        # The loop stalls from 1.0 s to 2.5 s; the provider kept streaming in real time.
+        for value in range(10, 25):
+            await deliver(call.output, output_clock, value, at=2.5)
+        call.caller("listening")
+        call.caller("away")
+        for value in range(25, 45):
+            await deliver(call.output, output_clock, value, at=value * 0.1 + 0.04)
+        call.output.flush()
+    assert call.sink.values == list(range(45))
+    assert call.sink.calls == ["flush"]
+    assert drop_logs(logs) == []
+
+
+@pytest.mark.asyncio
+async def test_caller_speech_over_late_audio_clears_it_once(output_clock: OutputClock, call: CallSession) -> None:
+    """The caller talking over stall-delayed speech discards it, and the drop is logged once."""
+    with capture_logs() as logs:
+        for value in range(10):
+            await deliver(call.output, output_clock, value, at=value * 0.1)
+        for value in range(10, 25):
+            await deliver(call.output, output_clock, value, at=2.5)
+        # 1.5 s arrived at 2.5 s after the output ran dry and plays from 2.6 s behind its cushion,
+        # so 1.4 s is still queued.
+        output_clock.now = 2.7
+        call.caller("speaking")
+        call.caller("listening")
+        call.caller("speaking")
+        # The wrapper keeps forwarding; RoomIO decides what of the interrupted segment plays.
+        await deliver(call.output, output_clock, 25, at=2.8)
+    assert call.sink.values == list(range(26))
+    assert call.sink.calls == ["clear"]
+    assert drop_logs(logs) == [
+        {"event": "call_output_backlog_dropped", "log_level": "warning", "dropped_ms": 1400},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_audio_discarded_after_a_clear_does_not_count_as_queued(
+    output_clock: OutputClock,
+    call: CallSession,
+) -> None:
+    """Frames RoomIO drops from a cleared segment cannot make a later short burst look late."""
+    with capture_logs() as logs:
+        for value in range(10):
+            await deliver(call.output, output_clock, value, at=value * 0.1)
+        for value in range(10, 16):
+            await deliver(call.output, output_clock, value, at=2.5)
+        call.caller("speaking")
+        # The rest of the stalled burst still arrives, and RoomIO discards it.
+        for value in range(16, 35):
+            await deliver(call.output, output_clock, value, at=2.5)
+        call.output.flush()
+        call.caller("listening")
+        await deliver(call.output, output_clock, 35, at=3.4)
+        call.caller("speaking")
+    assert call.sink.calls == ["clear", "flush"]
+    assert len(drop_logs(logs)) == 1
+
+
+@pytest.mark.asyncio
+async def test_clearing_a_flushed_segment_keeps_counting_the_next_one(
+    output_clock: OutputClock,
+    call: CallSession,
+) -> None:
+    """A caller talking over the queued tail of a finished utterance must not blind the next one."""
+    with capture_logs() as logs:
+        for value in range(15):
+            await deliver(call.output, output_clock, value, at=0.0)
+        call.output.flush()
+        call.caller("speaking")
+        call.caller("listening")
+        for value in range(15, 30):
+            await deliver(call.output, output_clock, value, at=3.0)
+        call.caller("speaking")
+    assert call.sink.calls == ["flush", "clear", "clear"]
+    assert len(drop_logs(logs)) == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("queued_deltas", "cleared"), [(1, False), (5, False), (6, True)])
+async def test_caller_speech_leaves_up_to_half_a_second_queued(
+    output_clock: OutputClock,
+    call: CallSession,
+    queued_deltas: int,
+    cleared: bool,
+) -> None:
+    """The playout cushion and short backlogs stay for GPT-Live to yield on its own."""
+    with capture_logs() as logs:
+        for value in range(queued_deltas):
+            await deliver(call.output, output_clock, value, at=0.0)
+        call.caller("speaking")
+    assert (call.sink.calls == ["clear"]) is cleared
+    assert len(drop_logs(logs)) == cleared
+
+
+async def cushion_waited(call: CallSession, clock: OutputClock, value: int, *, at: float) -> float:
+    """Deliver one delta and return how long the output held it back before RoomIO got it."""
+    arrived = max(clock.now, at)
+    await deliver(call.output, clock, value, at=at)
+    return round(clock.now - arrived, 3)
+
+
+@pytest.mark.asyncio
+async def test_live_output_keeps_a_cushion_for_late_deltas(output_clock: OutputClock, call: CallSession) -> None:
+    """Playback starts 100 ms after an utterance's first audio and again after running dry, never per late delta."""
+    # The first delta waits for the cushion, so it plays from 0.1 s to 0.2 s.
+    assert await cushion_waited(call, output_clock, 0, at=0.0) == 0.1
+    assert await cushion_waited(call, output_clock, 1, at=0.1) == 0
+    # 80 ms late, but the cushion still had 20 ms to play.
+    assert await cushion_waited(call, output_clock, 2, at=0.28) == 0
+    # The output ran dry at 0.4 s, so playback resumes with a new cushion.
+    assert await cushion_waited(call, output_clock, 3, at=0.55) == 0.1
+    call.output.flush()
+    assert await cushion_waited(call, output_clock, 4, at=2.0) == 0.1
+    assert call.sink.values == [0, 1, 2, 3, 4]
+
+
+@pytest.mark.asyncio
+async def test_speech_interrupted_during_the_cushion_has_no_playout_to_wait_for(
+    output_clock: OutputClock,
+    call: CallSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Speech cut off before its first audio reached RoomIO finishes at once, and the next utterance plays out."""
+    held = asyncio.Event()
+    cushion = output_clock.sleep
+
+    async def hold_the_first_cushion(delay: float) -> None:
+        if not held.is_set():
+            held.set()
+            await asyncio.Event().wait()
+        await cushion(delay)
+
+    monkeypatch.setattr(output_clock, "sleep", hold_the_first_cushion)
+    delivery = asyncio.create_task(deliver(call.output, output_clock, 0, at=0.0))
+    await asyncio.wait_for(held.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
+    # LiveKit cancels the forwarding and then flushes and clears the output.
+    delivery.cancel()
+    await asyncio.gather(delivery, return_exceptions=True)
+    call.output.flush()
+    call.output.clear_buffer()
+    await asyncio.wait_for(call.output.wait_for_playout(), timeout=SETTLE_TIMEOUT_SECONDS)
+    assert call.sink.values == []
+
+    await deliver(call.output, output_clock, 1, at=1.0)
+    call.output.flush()
+    await asyncio.wait_for(call.output.wait_for_playout(), timeout=SETTLE_TIMEOUT_SECONDS)
+    assert call.sink.values == [1]
+
+
+@pytest.mark.asyncio
+async def test_live_output_passes_playout_and_controls_through(output_clock: OutputClock, call: CallSession) -> None:
+    """Segments still report playout, and flush, clear, pause, and resume reach RoomIO."""
+    output = call.output
+    started: list[float] = []
+    output.on("playback_started", lambda event: started.append(event.created_at))
+    assert output.sample_rate == 24000
+    assert output.can_pause
+    for segment in range(2):
+        await deliver(output, output_clock, segment, at=0.0)
+        output.flush()
+        playout = await asyncio.wait_for(output.wait_for_playout(), timeout=SETTLE_TIMEOUT_SECONDS)
+        assert playout.interrupted is False
+    output.clear_buffer()
+    output.pause()
+    output.resume()
+    assert call.sink.values == [0, 1]
+    assert call.sink.calls == ["flush", "flush", "clear", "pause", "resume"]
+    assert started == [1.0, 1.0]
+    assert output.captured_playout_segments == 2

@@ -7,7 +7,7 @@ from typing import TYPE_CHECKING
 from mindroom.config.approval import ApprovalRuleConfig
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Collection, Mapping
 
     from mindroom.config.main import Config
 
@@ -20,8 +20,13 @@ def build_automation_approval_config(
     function_owners: Mapping[str, frozenset[str]],
     preapproved_toolkits: frozenset[str],
     never_preapprove_toolkits: frozenset[str],
+    auto_approved_functions: Collection[str] = (),
 ) -> Config:
-    """Require approval by default and append safe function-level auto-approval rules."""
+    """Require approval by default and append safe function-level auto-approval rules.
+
+    ``auto_approved_functions`` names further functions to auto-approve, such as skill loading the
+    caller may run without approval; live operator rules still match first.
+    """
     allow_all = "*" in preapproved_toolkits
     # A bare function name can belong to multiple toolkits. Auto-approve it only
     # when every owner is eligible; live operator rules remain first-match-wins.
@@ -33,7 +38,7 @@ def build_automation_approval_config(
     }
     preapproved_functions = sorted(
         function_name for function_name, owners in function_owners.items() if owners <= safe_preapproved_toolkits
-    )
+    ) + sorted(auto_approved_functions)
     tool_approval = config.tool_approval.model_copy(
         update={
             "default": "require_approval",

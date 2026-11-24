@@ -22,8 +22,8 @@ from mindroom.event_journal import (
     IngestionBatchAdmission,
     IngestionRecordAdmission,
     IngestionRecordDisposition,
-    postgres_backend,
-    sqlite_backend,
+    turn_rows,
+    upgrades,
 )
 from tests.conftest import postgres_journal_schema_url
 from tests.test_event_journal_store import admit, message
@@ -119,12 +119,13 @@ async def test_released_journal_upgrades_and_preserves_new_work(legacy_database:
         assert await store.existing_generation() == "original-journal-generation"
         principal = store.principal(_ACCOUNT)
         assert not await principal.pending()
-        assert await principal.approval_continuation("old-approval") is None
+        assert await principal.approvals.approval_continuation("old-approval") is None
         assert await store.backend.read(lambda tx: tx.fetchall("SELECT * FROM matrix_delivery_outbox")) == ()
         history = await store.backend.read(lambda tx: tx.fetchone("SELECT content_json FROM visible_messages"))
         assert history is not None
         assert "Old request" in history["content_json"]
-        assert await store.backend.read(lambda tx: tx.fetchone("SELECT record_json FROM turn_records")) is not None
+        # The released turn record survives as the turn rows that prove its source answered.
+        assert await store.turn_records("bot").read(turn_rows.is_answered, "$completed")
         consumer = await principal.load_or_create_ingestion_consumer(new_generation=uuid4())
         stream = uuid4()
         await principal.bind_ingestion_stream(generation=consumer.generation, stream_id=stream)
@@ -248,11 +249,10 @@ async def test_clean_released_journal_needs_no_manual_adoption(legacy_database: 
 async def test_interrupted_upgrade_rolls_back_and_retries(legacy_database: _LegacyDatabase) -> None:
     """Failed DDL cannot publish the new marker while abandoning only part of old work."""
     legacy_database.execute(_OLD_EVENT)
-    module = postgres_backend if legacy_database.postgres else sqlite_backend
-    original = module.schema_statements
+    original = upgrades.schema_statements
     with (
         patch.object(
-            module,
+            upgrades,
             "schema_statements",
             side_effect=lambda dialect: (*original(dialect), "INVALID UPGRADE SQL"),
         ),
@@ -380,3 +380,33 @@ async def test_outbox_upgrade_keeps_rows_and_admits_edit_stage(legacy_database: 
         legacy_database.execute(
             "UPDATE matrix_delivery_outbox SET stage = 'bogus' WHERE stage = 'final'",
         )
+
+
+@pytest.mark.asyncio
+async def test_thread_markers_from_before_walk_versions_are_walked_again(legacy_database: _LegacyDatabase) -> None:
+    """A thread marker without a walk version no longer stands, and a room marker still does."""
+    room_id = "!room:example.org"
+    store = legacy_database.open()
+    try:
+        principal = store.principal("agent@alice")
+        epoch = await principal.membership_epoch(room_id)
+        for thread_id in ("$thread", None):
+            assert await principal.install_hydrated_conversation(
+                room_id=room_id,
+                thread_id=thread_id,
+                events=(),
+                complete=True,
+                expected_membership_epoch=epoch,
+            )
+    finally:
+        await store.close()
+    legacy_database.execute("ALTER TABLE conversation_hydration DROP COLUMN walk_version")
+
+    for _ in range(2):
+        store = legacy_database.open()
+        try:
+            principal = store.principal("agent@alice")
+            assert not await principal.conversation_is_hydrated(room_id=room_id, thread_id="$thread")
+            assert await principal.conversation_is_hydrated(room_id=room_id, thread_id=None)
+        finally:
+            await store.close()

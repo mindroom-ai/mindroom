@@ -3,57 +3,74 @@
 from __future__ import annotations
 
 import re
+import time
 from dataclasses import replace
 from typing import TYPE_CHECKING, Any
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 from urllib.parse import parse_qs, urlparse
 
 import jwt
 import nio
 import pytest
 import yaml
+from aiohttp import ClientConnectionError
 from aioresponses import aioresponses
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
-from mindroom.api import config_lifecycle, main, oauth
+from mindroom.api import config_lifecycle, connections, main, oauth
+from mindroom.credentials.manager import get_runtime_credentials_manager
 from mindroom.matrix.state import MatrixState
+from mindroom.oauth import credential_lifecycle
 from mindroom.oauth import registry as oauth_registry
 from mindroom.oauth import service as oauth_service
+from mindroom.oauth.providers import OAuthConsentGroup, OAuthProviderError
+from mindroom.personal_agents import _append_personal_agent_roster_entry
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
-from tests.api.test_api import (
-    _trusted_upstream_jwks,
-    _trusted_upstream_jwt,
-    _trusted_upstream_jwt_key,
-    _trusted_upstream_strict_jwt_env,
+from tests.api.conftest import (
+    publish_api_payload,
+    trusted_upstream_env,
+    trusted_upstream_jwks,
+    trusted_upstream_jwt,
+    trusted_upstream_jwt_key,
 )
 from tests.api.test_oauth_api import (
+    _fail_connection_status,
     _fake_provider,
-    _publish_config,
     _runtime_paths,
     _stored_oauth_credentials,
-    _use_runtime_auth_settings,
 )
+from tests.matrix_state_helpers import save_matrix_state
+from tests.runtime_fakes import bind_test_embedded_runtime
+from tests.test_personal_agents_config import _entry as personal_agent_entry
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    import httpx
+
+    from mindroom.constants import RuntimePaths
+    from mindroom.oauth.providers import OAuthProvider, OAuthRuntimeEndpoints
 
 
 @pytest.fixture
 def portal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, enforce_turn_authorization: None) -> dict[str, Any]:  # noqa: ARG001
     """Serve the real API with signed users and one private agent."""
-    key = _trusted_upstream_jwt_key()
-    monkeypatch.setattr(jwt.PyJWKClient, "fetch_data", lambda _client: _trusted_upstream_jwks(key))
+    key = trusted_upstream_jwt_key()
+    monkeypatch.setattr(jwt.PyJWKClient, "fetch_data", lambda _client: trusted_upstream_jwks(key))
     monkeypatch.setattr(
         "mindroom.server_fetch_url.socket.getaddrinfo",
         lambda *_args, **_kwargs: [(0, 0, 0, "", ("93.184.216.34", 0))],
     )
     env = {
-        **_trusted_upstream_strict_jwt_env(tmp_path, matrix_user_id_claim="matrix_user_id"),
+        **trusted_upstream_env(),
         "MINDROOM_CONNECTIONS_AGENT": "personal",
         "MINDROOM_PUBLIC_URL": "https://portal.example.org",
+        "MATRIX_HOMESERVER": "http://localhost:8008",
         "TEST_OAUTH_CLIENT_ID": "test-client",
         "TEST_OAUTH_CLIENT_SECRET": "test-secret",
+        # Agent Keys starts off here; `_enable_egress_broker` turns it on.
+        "MINDROOM_EGRESS_BROKER_PORT": "off",
     }
     paths = _runtime_paths(tmp_path, env)
     payload = {
@@ -70,8 +87,8 @@ def portal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, enforce_turn_authori
         },
     }
     main.initialize_api_app(main.app, paths)
-    _publish_config(main.app, paths, payload)
-    _use_runtime_auth_settings(main.app)
+    bind_test_embedded_runtime(main.app)
+    publish_api_payload(main.app, payload)
     provider = _fake_provider(provider_id="google_drive", credential_service="google_drive_oauth")
     monkeypatch.setattr(
         oauth_registry,
@@ -80,8 +97,7 @@ def portal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, enforce_turn_authori
     )
     headers = {
         name: {
-            "X-Trusted-User": name,
-            "X-Trusted-Jwt": _trusted_upstream_jwt(
+            "X-Trusted-Jwt": trusted_upstream_jwt(
                 key,
                 user_id=name,
                 email=f"{name}@example.org",
@@ -100,13 +116,22 @@ def portal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, enforce_turn_authori
     }
 
 
+def _enable_egress_broker(portal: dict[str, Any]) -> None:
+    """Restart the API with an egress broker port, which turns Agent Keys on, and republish the portal's config."""
+    paths = replace(portal["paths"], process_env={**portal["paths"].process_env, "MINDROOM_EGRESS_BROKER_PORT": "8768"})
+    portal["paths"] = paths
+    main.initialize_api_app(main.app, paths)
+    bind_test_embedded_runtime(main.app)
+    publish_api_payload(main.app, portal["payload"])
+
+
 def test_catalog_includes_deferred_oauth_tools_without_status_calls(
     portal: dict[str, Any],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A private agent exposes its allowed OAuth tools without dashboard internals."""
     status = AsyncMock(side_effect=AssertionError("Catalog must not load remote status"))
-    monkeypatch.setattr(oauth, "status", status)
+    monkeypatch.setattr(oauth, "connection_status", status)
     response = portal["client"].get("/api/connections", headers=portal["headers"]["alice"])
     assert response.status_code == 200, response.text
     assert response.json()["agents"][0]["agent_display_name"] == "Personal Mind"
@@ -119,16 +144,16 @@ def test_catalog_includes_deferred_oauth_tools_without_status_calls(
 
 def test_catalog_lists_tools_without_browser_authentication(portal: dict[str, Any]) -> None:
     """Tool visibility does not depend on having an OAuth provider."""
-    portal["payload"]["agents"]["personal"]["tools"].append("matrix_message")
-    _publish_config(main.app, portal["paths"], portal["payload"])
-    _use_runtime_auth_settings(main.app)
+    portal["payload"]["agents"]["personal"]["tools"].extend(["matrix_message", "claude_agent"])
+    publish_api_payload(main.app, portal["payload"])
     response = portal["client"].get("/api/connections", headers=portal["headers"]["alice"])
     assert response.status_code == 200, response.text
     tools = {tool["name"]: tool for tool in response.json()["agents"][0]["tools"]}
     assert tools["calculator"]["provider"] is None
-    assert tools["calculator"]["requires_room_context"] is False
+    assert tools["calculator"]["mcp_available"] is True
     assert tools["google_drive"]["provider"] == "google_drive"
-    assert tools["matrix_message"]["requires_room_context"] is True
+    assert tools["matrix_message"]["mcp_available"] is False
+    assert tools["claude_agent"]["mcp_available"] is False
 
 
 @pytest.mark.parametrize(
@@ -159,8 +184,7 @@ def test_catalog_uses_mcp_display_metadata_without_exposing_model_instructions(
         }
     portal["payload"]["mcp_servers"] = {"wiki": server}
     portal["payload"]["agents"]["personal"]["tools"] = ["mcp_wiki"]
-    _publish_config(main.app, portal["paths"], portal["payload"])
-    _use_runtime_auth_settings(main.app)
+    publish_api_payload(main.app, portal["payload"])
 
     response = portal["client"].get("/api/connections", headers=portal["headers"]["alice"])
 
@@ -181,9 +205,9 @@ def test_catalog_uses_mcp_display_metadata_without_exposing_model_instructions(
     ("content_type", "body", "expected"),
     [
         ("image/png", b"thumbnail", 200),
-        ("image/svg+xml", b"thumbnail", 404),
-        ("image/png", b"", 404),
-        ("image/png", b"x" * (1024 * 1024 + 1), 404),
+        ("image/svg+xml", b"thumbnail", 204),
+        ("image/png", b"", 204),
+        ("image/png", b"x" * (1024 * 1024 + 1), 204),
     ],
     ids=["raster", "svg", "empty", "oversized"],
 )
@@ -197,7 +221,7 @@ def test_avatar_serves_current_matrix_thumbnail(
     """Visible private and management-only shared agents use their saved Matrix identity."""
     state = MatrixState()
     state.add_account(f"agent_{agent_name}", "custom_bot", None, domain="example.org", access_token="avatar-token")  # noqa: S106
-    state.save(runtime_paths=shared_portal["paths"])
+    save_matrix_state(state, shared_portal["paths"])
     with aioresponses() as matrix:
         matrix.get(
             "http://localhost:8008/_matrix/client/v3/profile/@custom_bot:example.org",
@@ -229,18 +253,28 @@ def test_avatar_serves_current_matrix_thumbnail(
 
 
 @pytest.mark.parametrize("avatar_url", [None, "https://example.org/picture.png", "mxc://example.org/"])
-def test_avatar_unavailable_for_missing_or_invalid_profile(portal: dict[str, Any], avatar_url: str | None) -> None:
-    """An absent or non-Matrix picture cannot turn the endpoint into an arbitrary URL proxy."""
+def test_avatar_without_image_is_204(portal: dict[str, Any], avatar_url: str | None) -> None:
+    """An absent or non-Matrix picture is "no avatar", never an arbitrary URL proxy, and never a 404 in the console."""
     state = MatrixState()
     state.add_account("agent_personal", "personal", None, domain="example.org", access_token="avatar-token")  # noqa: S106
-    state.save(runtime_paths=portal["paths"])
+    save_matrix_state(state, portal["paths"])
     with aioresponses() as matrix:
         matrix.get(
             re.compile(r"http://localhost:8008/_matrix/client/v3/profile/.*"),
             payload={"avatar_url": avatar_url},
         )
         response = portal["client"].get("/api/connections/agents/personal/avatar", headers=portal["headers"]["alice"])
-    assert response.status_code == 404
+        assert not any("thumbnail" in str(key) for key in matrix.requests)
+    assert response.status_code == 204
+    assert response.content == b""
+    assert "no-store" in response.headers["cache-control"]
+
+
+def test_avatar_of_an_agent_without_a_matrix_account_is_204(portal: dict[str, Any]) -> None:
+    """An agent that has not logged into Matrix yet has no avatar either."""
+    response = portal["client"].get("/api/connections/agents/personal/avatar", headers=portal["headers"]["alice"])
+    assert response.status_code == 204
+    assert response.content == b""
 
 
 @pytest.mark.parametrize("stage", ["profile", "thumbnail"])
@@ -271,7 +305,7 @@ def test_avatar_maps_matrix_response_errors_to_upstream_failure(portal: dict[str
 
 @pytest.mark.parametrize(
     ("user", "agent_name", "expected"),
-    [("alice", "support", 404), ("admin", "other_private", 404), (None, "personal", 401)],
+    [("alice", "support", 404), ("bob", "other_private", 404), (None, "personal", 401)],
 )
 def test_avatar_requires_visible_agent(
     shared_portal: dict[str, Any],
@@ -279,7 +313,7 @@ def test_avatar_requires_visible_agent(
     agent_name: str,
     expected: int,
 ) -> None:
-    """Signed-in access alone cannot reveal hidden agents, including to administrators."""
+    """Signed-in access alone cannot reveal agents the user may not use, including private ones."""
     with aioresponses() as matrix:
         response = shared_portal["client"].get(
             f"/api/connections/agents/{agent_name}/avatar",
@@ -287,6 +321,118 @@ def test_avatar_requires_visible_agent(
         )
         assert not matrix.requests
     assert response.status_code == expected
+
+
+@pytest.mark.parametrize(
+    ("user", "is_administrator"),
+    [("admin", True), ("bob", False), ("mallory", False)],
+)
+def test_me_returns_identity_and_admin_flag(portal: dict[str, Any], user: str, is_administrator: bool) -> None:
+    """Every signed user, even one with no agents, learns who they are and whether the dashboard is open to them."""
+    response = portal["client"].get("/api/connections/me", headers=portal["headers"][user])
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "matrix_user_id": f"@{user}:example.org",
+        "display_name": user,
+        "email": f"{user}@example.org",
+        "is_administrator": is_administrator,
+        "egress_enabled": False,
+        "contacts_enabled": False,
+        "dashboard_url": "/",
+    }
+    assert "no-store" in response.headers["cache-control"]
+
+
+def test_me_links_the_dashboard_on_its_own_host(portal: dict[str, Any]) -> None:
+    """With `MINDROOM_DASHBOARD_URL` set, the Connections pages send administrators to that host."""
+    snapshot = config_lifecycle.require_api_state(main.app).snapshot
+    snapshot.runtime_paths = replace(
+        snapshot.runtime_paths,
+        process_env={**snapshot.runtime_paths.process_env, "MINDROOM_DASHBOARD_URL": "https://Admin.example.org/"},
+    )
+    response = portal["client"].get("/api/connections/me", headers=portal["headers"]["admin"])
+    assert response.status_code == 200, response.text
+    assert response.json()["dashboard_url"] == "https://admin.example.org/"
+
+
+def _read_profiles_as_running_agent(portal: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+    state = MatrixState()
+    state.add_account("agent_general", "mindroom_general", None, domain="example.org", access_token="agent-token")  # noqa: S106
+    save_matrix_state(state, portal["paths"])
+    monkeypatch.setattr(config_lifecycle.app_state(main.app), "room_bots", {"general": Mock(running=True)})
+
+
+@pytest.mark.parametrize(
+    ("status", "payload", "expected"),
+    [(200, {"displayname": "Bob Builder"}, "Bob Builder"), (200, {}, "bob"), (404, {"errcode": "M_NOT_FOUND"}, "bob")],
+)
+def test_me_names_the_user_by_matrix_display_name(
+    portal: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    status: int,
+    payload: dict[str, str],
+    expected: str,
+) -> None:
+    """The header greets the user by their Matrix display name, and by their localpart when the profile has none.
+
+    With no owner account, the profile is read as a running agent.
+    """
+    _read_profiles_as_running_agent(portal, monkeypatch)
+    with aioresponses() as matrix:
+        matrix.get(
+            "http://localhost:8008/_matrix/client/v3/profile/@bob:example.org/displayname",
+            status=status,
+            payload=payload,
+        )
+        response = portal["client"].get("/api/connections/me", headers=portal["headers"]["bob"])
+        assert len(matrix.requests) == 1, list(matrix.requests)
+        assert next(iter(matrix.requests.values()))[0].kwargs["headers"]["Authorization"] == "Bearer agent-token"
+    assert response.status_code == 200, response.text
+    assert response.json()["display_name"] == expected
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        {"exception": ClientConnectionError("refused")},
+        {"status": 429, "payload": {"errcode": "M_LIMIT_EXCEEDED", "retry_after_ms": 5000}},
+    ],
+    ids=["unreachable", "rate-limited"],
+)
+def test_me_falls_back_at_once_when_the_homeserver_fails(
+    portal: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    failure: dict[str, Any],
+) -> None:
+    """A homeserver that is down or rate limiting gets one try, so the header links are not held up by retries."""
+    _read_profiles_as_running_agent(portal, monkeypatch)
+    with aioresponses() as matrix:
+        matrix.get(re.compile(r"http://localhost:8008/_matrix/client/v3/profile/.*"), repeat=True, **failure)
+        started = time.monotonic()
+        response = portal["client"].get("/api/connections/me", headers=portal["headers"]["bob"])
+        elapsed = time.monotonic() - started
+        assert sum(len(calls) for calls in matrix.requests.values()) == 1, list(matrix.requests)
+    assert response.status_code == 200, response.text
+    assert response.json()["display_name"] == "bob"
+    assert elapsed < 1.5
+
+
+@pytest.mark.parametrize("broker_on", [False, True])
+def test_me_says_whether_agent_keys_are_enabled(portal: dict[str, Any], *, broker_on: bool) -> None:
+    """The Connections header learns whether the egress broker is on, so it links the Agent Keys page only then."""
+    if broker_on:
+        _enable_egress_broker(portal)
+    for user in ("admin", "bob", "mallory"):
+        response = portal["client"].get("/api/connections/me", headers=portal["headers"][user])
+        assert response.status_code == 200, response.text
+        assert response.json()["egress_enabled"] is broker_on
+
+
+def test_me_needs_a_signed_identity_and_takes_no_target(portal: dict[str, Any]) -> None:
+    """The identity route is not an anonymous or target-selecting route."""
+    client = portal["client"]
+    assert client.get("/api/connections/me").status_code == 401
+    assert client.get("/api/connections/me?agent_name=other", headers=portal["headers"]["alice"]).status_code == 400
 
 
 @pytest.mark.parametrize("query", ["agent_name=other", "worker_key=other", "user_id=bob", "execution_scope=user"])
@@ -335,8 +481,8 @@ def test_personal_mutations_reject_cleartext_public_origin(
         env.pop("MINDROOM_PUBLIC_URL")
     paths = replace(portal["paths"], process_env=env)
     main.initialize_api_app(main.app, paths)
-    _publish_config(main.app, paths, portal["payload"])
-    _use_runtime_auth_settings(main.app)
+    bind_test_embedded_runtime(main.app)
+    publish_api_payload(main.app, portal["payload"])
     client = TestClient(main.app, base_url="http://portal.example.org")
     response = client.post(
         f"/api/connections/agents/personal/google_drive/{action}",
@@ -457,7 +603,11 @@ def test_provider_failure_does_not_block_catalog_or_leak_details(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An unavailable backend affects only its status request."""
-    monkeypatch.setattr(oauth, "status", AsyncMock(side_effect=HTTPException(503, "internal-client-secret")))
+    monkeypatch.setattr(
+        oauth,
+        "connection_status",
+        AsyncMock(side_effect=HTTPException(503, "internal-client-secret")),
+    )
     response = portal["client"].get(
         "/api/connections/agents/personal/google_drive/status",
         headers=portal["headers"]["alice"],
@@ -472,7 +622,7 @@ def test_unavailable_optional_plugin_does_not_block_healthy_provider(portal: dic
     """Mirror runtime degraded startup while retaining healthy account connections."""
     portal["payload"]["plugins"] = ["./plugins/missing"]
     portal["paths"].config_path.write_text(yaml.safe_dump(portal["payload"]))
-    assert config_lifecycle.load_config_into_app(portal["paths"], main.app)
+    assert config_lifecycle.load_config_into_app(portal["paths"], main.app).loaded
     client = TestClient(main.app, base_url="https://portal.example.org", raise_server_exceptions=False)
     for url in ("/api/connections", "/api/connections/agents/personal/google_drive/status"):
         assert client.get(url, headers=portal["headers"]["alice"]).status_code == 200
@@ -485,8 +635,8 @@ def test_shared_service_account_is_not_a_personal_connection(portal: dict[str, A
         process_env={**portal["paths"].process_env, "GOOGLE_SERVICE_ACCOUNT_FILE": "service-account.json"},
     )
     main.initialize_api_app(main.app, paths)
-    _publish_config(main.app, paths, portal["payload"])
-    _use_runtime_auth_settings(main.app)
+    bind_test_embedded_runtime(main.app)
+    publish_api_payload(main.app, portal["payload"])
     response = portal["client"].get(
         "/api/connections/agents/personal/google_drive/status",
         headers=portal["headers"]["alice"],
@@ -498,6 +648,7 @@ def test_shared_service_account_is_not_a_personal_connection(portal: dict[str, A
         "can_connect": False,
         "reset_required": False,
         "account_label": None,
+        "service_account": True,
     }
     assert (
         portal["client"]
@@ -507,18 +658,10 @@ def test_shared_service_account_is_not_a_personal_connection(portal: dict[str, A
     )
 
 
-def test_unconfigured_portal_is_unavailable(portal: dict[str, Any]) -> None:
-    """An explicit operator opt-in is required."""
-    paths = replace(portal["paths"], process_env={**portal["paths"].process_env, "MINDROOM_CONNECTIONS_AGENT": ""})
-    main.initialize_api_app(main.app, paths)
-    assert portal["client"].get("/api/connections", headers=portal["headers"]["alice"]).status_code == 404
-
-
 def test_canonical_alias_uses_the_same_private_scope(portal: dict[str, Any]) -> None:
     """An alternate signed Matrix identity resolves to its configured canonical owner."""
     portal["payload"]["authorization"] = {"aliases": {"@alice:example.org": ["@bob:example.org"]}}
-    _publish_config(main.app, portal["paths"], portal["payload"])
-    _use_runtime_auth_settings(main.app)
+    publish_api_payload(main.app, portal["payload"])
     client, headers = portal["client"], portal["headers"]
     connect = client.post("/api/connections/agents/personal/google_drive/connect", headers=headers["bob"], json={})
     assert connect.status_code == 200
@@ -541,8 +684,7 @@ def test_canonical_alias_uses_the_same_private_scope(portal: dict[str, Any]) -> 
 def test_shared_agent_configuration_fails_closed(portal: dict[str, Any]) -> None:
     """Removing private ownership cannot silently turn the portal into shared credentials."""
     portal["payload"]["agents"]["personal"].pop("private")
-    _publish_config(main.app, portal["paths"], portal["payload"])
-    _use_runtime_auth_settings(main.app)
+    publish_api_payload(main.app, portal["payload"])
     assert portal["client"].get("/api/connections", headers=portal["headers"]["alice"]).status_code == 403
 
 
@@ -572,8 +714,7 @@ def shared_portal(portal: dict[str, Any]) -> dict[str, Any]:
             },
         },
     )
-    _publish_config(main.app, portal["paths"], portal["payload"])
-    _use_runtime_auth_settings(main.app)
+    publish_api_payload(main.app, portal["payload"])
     return portal
 
 
@@ -583,7 +724,8 @@ def shared_portal(portal: dict[str, Any]) -> dict[str, Any]:
         ("alice", ["personal", "research"]),
         ("bob", ["personal", "support"]),
         ("mallory", ["research"]),
-        ("admin", ["personal", "research", "support"]),
+        # An administrator may use every agent, so every private agent is theirs to connect too.
+        ("admin", ["personal", "research", "support", "other_private"]),
     ],
 )
 def test_catalog_lists_only_authorized_agents(shared_portal: dict[str, Any], user: str, expected: list[str]) -> None:
@@ -592,16 +734,31 @@ def test_catalog_lists_only_authorized_agents(shared_portal: dict[str, Any], use
     assert response.status_code == 200, response.text
     agents = response.json()["agents"]
     assert [agent["agent_name"] for agent in agents] == expected
-    assert all(agent["is_shared"] == (agent["agent_name"] != "personal") for agent in agents)
-    # These shared agents have no per-user scope or MCP opt-in, so only the personal agent reaches the gateway.
-    assert all(agent["mcp_available"] == (agent["agent_name"] == "personal") for agent in agents)
+    private = {"personal", "other_private"}
+    assert all(agent["is_shared"] == (agent["agent_name"] not in private) for agent in agents)
+    # These shared agents have no per-user scope or MCP opt-in, so only the private agents reach the gateway.
+    assert all(agent["mcp_available"] == (agent["agent_name"] in private) for agent in agents)
+
+
+def test_catalog_lists_generated_personal_agent_as_personal(portal: dict[str, Any]) -> None:
+    """An agent personal_agents generates for one person is personal, though it sets no `private`."""
+    _append_personal_agent_roster_entry(portal["paths"], personal_agent_entry("@alice:example.org"))
+    portal["payload"]["personal_agents"] = {
+        "mind": {"agent": {"display_name": "{user_first_name}'s Mind", "role": "Assistant", "tools": ["google_drive"]}},
+    }
+    publish_api_payload(main.app, portal["payload"])
+    response = portal["client"].get("/api/connections", headers=portal["headers"]["alice"])
+    assert response.status_code == 200, response.text
+    assert {agent["agent_name"]: agent["is_shared"] for agent in response.json()["agents"]} == {
+        "personal": False,
+        "mind_alice": False,
+    }
 
 
 def test_agent_user_sees_shared_connection_without_management(shared_portal: dict[str, Any]) -> None:
-    """Using a shared agent reveals availability without shared-account mutation authority."""
+    """Using a shared agent reveals the connected account without shared-account mutation authority."""
     shared_portal["payload"]["agents"]["research"]["access"] = {"users": ["@bob:example.org"]}
-    _publish_config(main.app, shared_portal["paths"], shared_portal["payload"])
-    _use_runtime_auth_settings(main.app)
+    publish_api_payload(main.app, shared_portal["payload"])
     client, headers = shared_portal["client"], shared_portal["headers"]
     response = client.get("/api/connections", headers=headers["bob"])
     research = next(agent for agent in response.json()["agents"] if agent["agent_name"] == "research")
@@ -623,8 +780,9 @@ def test_agent_user_sees_shared_connection_without_management(shared_portal: dic
     status = client.get(f"{base}/status", headers=headers["bob"])
     assert status.status_code == 200, status.text
     assert status.json()["connected"] is True
-    assert status.json()["account_label"] is None
+    assert status.json()["account_label"] == "alice@example.com"
     assert status.json()["can_connect"] is False
+    assert status.json()["service_account"] is False
     for action in ("connect", "disconnect"):
         assert client.post(f"{base}/{action}", headers=headers["bob"], json={}).status_code == 403
         assert (
@@ -650,8 +808,7 @@ def test_agent_user_can_manage_only_their_personal_connection(
         requester_scoped_credentials=requester_provider,
     )
     monkeypatch.setattr(oauth_registry, "_builtin_oauth_providers", lambda: (provider,))
-    _publish_config(main.app, shared_portal["paths"], shared_portal["payload"])
-    _use_runtime_auth_settings(main.app)
+    publish_api_payload(main.app, shared_portal["payload"])
     client, headers = shared_portal["client"], shared_portal["headers"]
     base = "/api/connections/agents/research/google_drive"
     response = client.get("/api/connections", headers=headers["bob"])
@@ -678,8 +835,7 @@ def test_agent_user_can_manage_only_their_personal_connection(
     connect = client.post(f"{base}/connect", headers=headers["bob"], json={})
     state = parse_qs(urlparse(connect.json()["auth_url"]).query)["state"][0]
     agent["access"]["users"] = ["@alice:example.org"]
-    _publish_config(main.app, shared_portal["paths"], shared_portal["payload"])
-    _use_runtime_auth_settings(main.app)
+    publish_api_payload(main.app, shared_portal["payload"])
     callback = client.get(
         "/api/oauth/google_drive/callback",
         params={"code": "test-code", "state": state},
@@ -688,8 +844,7 @@ def test_agent_user_can_manage_only_their_personal_connection(
     )
     assert callback.status_code == 403
     agent["access"]["users"].append("@bob:example.org")
-    _publish_config(main.app, shared_portal["paths"], shared_portal["payload"])
-    _use_runtime_auth_settings(main.app)
+    publish_api_payload(main.app, shared_portal["payload"])
     assert client.get(f"{base}/status", headers=headers["bob"]).json()["connected"] is False
 
 
@@ -700,7 +855,6 @@ def test_agent_user_can_manage_only_their_personal_connection(
         ("bob", "other_private"),
         ("bob", "missing"),
         ("alice", "other_private"),
-        ("admin", "other_private"),
     ],
 )
 @pytest.mark.parametrize("action", ["status", "connect", "disconnect"])
@@ -710,7 +864,7 @@ def test_unlisted_agent_actions_are_denied(
     agent: str,
     action: str,
 ) -> None:
-    """Direct URLs cannot bypass catalog authorization or choose another private agent."""
+    """Direct URLs cannot bypass catalog authorization or reach a private agent the user may not use."""
     response = shared_portal["client"].request(
         "GET" if action == "status" else "POST",
         f"/api/connections/agents/{agent}/google_drive/{action}",
@@ -730,8 +884,7 @@ def test_shared_connection_lifecycle_and_revoked_manager(
     if worker_scope is not None:
         for agent_name in ("research", "support"):
             shared_portal["payload"]["agents"][agent_name]["worker_scope"] = worker_scope
-        _publish_config(main.app, shared_portal["paths"], shared_portal["payload"])
-        _use_runtime_auth_settings(main.app)
+        publish_api_payload(main.app, shared_portal["payload"])
     client, headers = shared_portal["client"], shared_portal["headers"]
     base = "/api/connections/agents/research/google_drive"
     connect = client.post(f"{base}/connect", headers=headers["alice"], json={})
@@ -757,8 +910,7 @@ def test_shared_connection_lifecycle_and_revoked_manager(
         is False
     )
     shared_portal["payload"]["agents"]["research"]["credential_managers"] = ["@mallory:example.org"]
-    _publish_config(main.app, shared_portal["paths"], shared_portal["payload"])
-    _use_runtime_auth_settings(main.app)
+    publish_api_payload(main.app, shared_portal["payload"])
     for action in ("status", "connect", "disconnect"):
         response = client.request(
             "GET" if action == "status" else "POST",
@@ -778,8 +930,7 @@ def test_shared_connection_lifecycle_and_revoked_manager(
 def test_shared_manager_alias_is_canonicalized(shared_portal: dict[str, Any]) -> None:
     """Catalog and actions use the same canonical identity as credential authorization."""
     shared_portal["payload"]["authorization"] = {"aliases": {"@alice:example.org": ["@bob:example.org"]}}
-    _publish_config(main.app, shared_portal["paths"], shared_portal["payload"])
-    _use_runtime_auth_settings(main.app)
+    publish_api_payload(main.app, shared_portal["payload"])
     response = shared_portal["client"].get("/api/connections", headers=shared_portal["headers"]["bob"])
     assert [agent["agent_name"] for agent in response.json()["agents"]] == ["personal", "research"]
     assert (
@@ -797,8 +948,7 @@ def test_shared_manager_alias_is_canonicalized(shared_portal: dict[str, Any]) ->
 def test_provider_must_belong_to_selected_agent(shared_portal: dict[str, Any], action: str) -> None:
     """A provider available to the personal agent cannot be used for an unrelated shared agent."""
     shared_portal["payload"]["agents"]["research"]["tools"] = ["calculator"]
-    _publish_config(main.app, shared_portal["paths"], shared_portal["payload"])
-    _use_runtime_auth_settings(main.app)
+    publish_api_payload(main.app, shared_portal["payload"])
     response = shared_portal["client"].request(
         "GET" if action == "status" else "POST",
         f"/api/connections/agents/research/google_drive/{action}",
@@ -850,8 +1000,7 @@ def test_invalid_personal_target_disables_shared_connections(
     else:
         shared_portal["payload"]["agents"]["personal"].pop("private")
         shared_portal["payload"]["agents"]["personal"]["credential_managers"] = ["@alice:example.org"]
-    _publish_config(main.app, shared_portal["paths"], shared_portal["payload"])
-    _use_runtime_auth_settings(main.app)
+    publish_api_payload(main.app, shared_portal["payload"])
     client, headers = shared_portal["client"], shared_portal["headers"][user]
     assert client.get("/api/connections", headers=headers).status_code == 403
     for action in ("status", "connect", "disconnect"):
@@ -886,8 +1035,7 @@ def test_catalog_reports_connection_sharing_by_provider_and_scope(
 ) -> None:
     """Disconnect impact follows credential ownership rather than agent privacy."""
     shared_portal["payload"]["agents"]["research"]["worker_scope"] = worker_scope
-    _publish_config(main.app, shared_portal["paths"], shared_portal["payload"])
-    _use_runtime_auth_settings(main.app)
+    publish_api_payload(main.app, shared_portal["payload"])
     provider = _fake_provider(
         provider_id="google_drive",
         credential_service="google_drive_oauth",
@@ -900,3 +1048,530 @@ def test_catalog_reports_connection_sharing_by_provider_and_scope(
     assert personal["services"][0]["is_shared"] is False
     assert research["is_shared"] is True
     assert research["services"][0]["is_shared"] is expected_shared
+
+
+def _connect_account(portal: dict[str, Any], user: str, agent: str) -> None:
+    """Complete the OAuth flow for one user on one agent, as the browser popup does."""
+    client, headers = portal["client"], portal["headers"]
+    connect = client.post(f"/api/connections/agents/{agent}/google_drive/connect", headers=headers[user], json={})
+    assert connect.status_code == 200, connect.text
+    state = parse_qs(urlparse(connect.json()["auth_url"]).query)["state"][0]
+    callback = client.get(
+        "/api/oauth/google_drive/callback",
+        params={"code": "test-code", "state": state},
+        headers=headers[user],
+        follow_redirects=False,
+    )
+    assert callback.status_code in {302, 303, 307}, callback.text
+
+
+def _agent_state(portal: dict[str, Any], user: str, agent: str) -> dict[str, Any]:
+    response = portal["client"].get(f"/api/connections/agents/{agent}/state", headers=portal["headers"][user])
+    assert response.status_code == 200, response.text
+    assert "no-store" in response.headers["cache-control"]
+    return response.json()
+
+
+def _connected(portal: dict[str, Any], user: str, agent: str, provider: str = "google_drive") -> bool:
+    return _agent_state(portal, user, agent)["connected"][provider]
+
+
+def _sqlite_stores(portal: dict[str, Any]) -> list[Path]:
+    """Return the credential stores under the storage root, leaving out the runtime's own control state."""
+    storage_root = portal["paths"].storage_root
+    return sorted(
+        path for path in storage_root.rglob("*.sqlite3") if not path.is_relative_to(storage_root / "control_state")
+    )
+
+
+def test_catalog_reads_no_connection_state(portal: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> None:
+    """The catalog lists agents, services and tools without opening any credential store or Agent Keys state."""
+    _enable_egress_broker(portal)
+    _connect_account(portal, "alice", "personal")
+    store_read = Mock(side_effect=AssertionError("The catalog must not open a credential store"))
+    monkeypatch.setattr(credential_lifecycle, "oauth_credential_reader", store_read)
+    monkeypatch.setattr(credential_lifecycle, "oauth_credential_transaction", store_read)
+    egress_read = AsyncMock(side_effect=AssertionError("The catalog must not read Agent Keys rows"))
+    monkeypatch.setattr(connections, "egress_services_for_agent", egress_read)
+
+    response = portal["client"].get("/api/connections", headers=portal["headers"]["alice"])
+
+    assert response.status_code == 200, response.text
+    agent = response.json()["agents"][0]
+    assert [service["provider"] for service in agent["services"]] == ["google_drive"]
+    assert "connected" not in agent["services"][0]
+    assert "egress_services" not in agent
+    store_read.assert_not_called()
+    egress_read.assert_not_called()
+
+
+def test_state_says_whether_each_service_is_connected_for_the_viewer(portal: dict[str, Any]) -> None:
+    """An agent's state carries the connected flag the expanded row would show, without refreshing any token."""
+    refresh = AsyncMock(side_effect=AssertionError("The state must not refresh tokens"))
+    with patch.object(oauth, "refresh_oauth_credentials", refresh):
+        assert _agent_state(portal, "alice", "personal") == {
+            "connected": {"google_drive": False},
+            "egress_services": None,
+        }
+    _connect_account(portal, "alice", "personal")
+    with patch.object(oauth, "refresh_oauth_credentials", refresh):
+        assert _connected(portal, "alice", "personal") is True
+        # A private agent's account belongs to the user who connected it.
+        assert _connected(portal, "bob", "personal") is False
+    refresh.assert_not_called()
+    status = portal["client"].get(
+        "/api/connections/agents/personal/google_drive/status",
+        headers=portal["headers"]["alice"],
+    )
+    assert status.json()["connected"] is True
+
+
+def test_state_never_bootstraps_an_oauth_client_to_read_connected_state(
+    portal: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reading connected state is a local read: a provider with no stored client reads as not connected, offline."""
+    bootstrapped: list[str] = []
+
+    async def failing_bootstrapper(provider: OAuthProvider, _runtime_paths: RuntimePaths) -> OAuthRuntimeEndpoints:
+        bootstrapped.append(provider.id)
+        msg = "bootstrap unavailable"
+        raise OAuthProviderError(msg)
+
+    provider = replace(portal["provider"], runtime_bootstrapper=failing_bootstrapper)
+    monkeypatch.setattr(oauth_registry, "_builtin_oauth_providers", lambda: (provider,))
+    get_runtime_credentials_manager(portal["paths"]).delete_credentials("test_drive_oauth_client")
+
+    for user in ("alice", "bob"):
+        assert _connected(portal, user, "personal") is False
+
+    assert bootstrapped == []
+
+
+def test_state_shows_a_shared_account_as_connected_to_managers_and_to_users(shared_portal: dict[str, Any]) -> None:
+    """Everyone who uses a shared agent sees its connection, whether or not they may change it."""
+    shared_portal["payload"]["agents"]["research"]["access"] = {"users": ["@bob:example.org"]}
+    publish_api_payload(main.app, shared_portal["payload"])
+    for user in ("alice", "bob"):
+        assert _connected(shared_portal, user, "research") is False
+    _connect_account(shared_portal, "alice", "research")
+    # Bob cannot change the account (the catalog says so), but he sees it connected.
+    assert _connected(shared_portal, "alice", "research") is True
+    assert _connected(shared_portal, "bob", "research") is True
+    # Another shared agent has its own connection.
+    assert _connected(shared_portal, "alice", "personal") is False
+
+
+def test_state_survives_a_service_whose_state_cannot_be_read(
+    portal: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One unreadable connection shows as not connected and fails neither the agent's other services nor its state."""
+    portal["payload"]["mcp_servers"] = {
+        "wiki": {
+            "transport": "streamable-http",
+            "url": "https://mcp.example.test/mcp",
+            "auth": {
+                "type": "oauth",
+                "discovery": "manual",
+                "authorization_url": "https://auth.example.test/authorize",
+                "token_url": "https://auth.example.test/token",
+            },
+        },
+    }
+    portal["payload"]["agents"]["personal"]["tools"].append("mcp_wiki")
+    publish_api_payload(main.app, portal["payload"])
+    _connect_account(portal, "alice", "personal")
+    _fail_connection_status(
+        monkeypatch,
+        HTTPException(503, "internal-client-secret"),
+        lambda provider_id: provider_id != "google_drive",
+    )
+    response = portal["client"].get("/api/connections/agents/personal/state", headers=portal["headers"]["alice"])
+    assert response.status_code == 200, response.text
+    connected = response.json()["connected"]
+    assert connected.pop("google_drive") is True
+    assert list(connected.values()) == [False]
+    assert "internal-client-secret" not in response.text
+
+
+@pytest.mark.parametrize(("user", "agent"), [("bob", "research"), ("bob", "missing"), ("alice", "other_private")])
+def test_state_of_an_unlisted_agent_is_denied(shared_portal: dict[str, Any], user: str, agent: str) -> None:
+    """The state route lists only agents the catalog lists to the same user."""
+    response = shared_portal["client"].get(
+        f"/api/connections/agents/{agent}/state",
+        headers=shared_portal["headers"][user],
+    )
+    assert response.status_code == 404
+
+
+def test_reading_state_creates_no_credential_store(shared_portal: dict[str, Any]) -> None:
+    """Listing a connection that was never made leaves no store behind, and a made one still reads as connected."""
+    for user in ("alice", "bob", "admin"):
+        for agent in ("personal", "research", "support", "other_private"):
+            response = shared_portal["client"].get(
+                f"/api/connections/agents/{agent}/state",
+                headers=shared_portal["headers"][user],
+            )
+            assert response.status_code in {200, 404}, response.text
+    assert _sqlite_stores(shared_portal) == []
+
+    _connect_account(shared_portal, "alice", "research")
+    stores = _sqlite_stores(shared_portal)
+    assert len(stores) == 1
+    assert _connected(shared_portal, "alice", "research") is True
+    assert _connected(shared_portal, "alice", "personal") is False
+    assert _sqlite_stores(shared_portal) == stores
+
+
+def test_status_still_creates_the_store_it_reads(portal: dict[str, Any]) -> None:
+    """A card's own status read keeps preparing the scope's store, as connect and refresh expect."""
+    response = portal["client"].get(
+        "/api/connections/agents/personal/google_drive/status",
+        headers=portal["headers"]["alice"],
+    )
+    assert response.status_code == 200, response.text
+    assert response.json()["connected"] is False
+    assert len(_sqlite_stores(portal)) == 1
+
+
+def _catalog_managers(portal: dict[str, Any], user: str) -> dict[str, list[str]]:
+    response = portal["client"].get("/api/connections", headers=portal["headers"][user])
+    assert response.status_code == 200, response.text
+    return {agent["agent_name"]: agent["managers"] for agent in response.json()["agents"]}
+
+
+def test_catalog_names_the_credential_managers_of_shared_agents(shared_portal: dict[str, Any]) -> None:
+    """Shared and unscoped agents list their credential managers, as the egress listing does; private ones list none."""
+    shared_portal["payload"]["agents"]["support"]["worker_scope"] = "user"
+    # The Agent Keys section names them for every shared agent while the broker is on.
+    _enable_egress_broker(shared_portal)
+    agents = {
+        agent["agent_name"]: agent["managers"]
+        for agent in shared_portal["client"]
+        .get("/api/connections", headers=shared_portal["headers"]["admin"])
+        .json()["agents"]
+    }
+    assert agents == {
+        "personal": [],
+        "research": ["@alice:example.org", "@mallory:example.org"],
+        # A shared agent that runs per user keeps its keys per requester, so nobody manages them together.
+        "support": [],
+        "other_private": [],
+    }
+
+
+def test_catalog_names_credential_managers_only_to_users_they_matter_to_while_the_broker_is_off(
+    shared_portal: dict[str, Any],
+) -> None:
+    """Without Agent Keys, managers are named only to a user with a connection on the agent that only they can change."""
+    research_managers = ["@alice:example.org", "@mallory:example.org"]
+    shared_portal["payload"]["agents"]["research"]["access"] = {"users": ["@bob:example.org"]}
+    publish_api_payload(main.app, shared_portal["payload"])
+    # Bob uses Research and cannot change its shared Drive connection; Alice manages it herself.
+    assert _catalog_managers(shared_portal, "bob")["research"] == research_managers
+    assert _catalog_managers(shared_portal, "alice")["research"] == []
+
+    shared_portal["payload"]["agents"]["research"]["tools"] = ["calculator"]
+    publish_api_payload(main.app, shared_portal["payload"])
+    assert _catalog_managers(shared_portal, "bob")["research"] == []
+
+    _enable_egress_broker(shared_portal)
+    assert _catalog_managers(shared_portal, "bob")["research"] == research_managers
+    assert _catalog_managers(shared_portal, "alice")["research"] == research_managers
+
+
+_GOOGLE_GROUP = OAuthConsentGroup("google", "Google")
+
+
+def _google_member(provider_id: str, display_name: str, scope: str, **kwargs: Any) -> OAuthProvider:  # noqa: ANN401
+    """Build a Google consent group member on the group's endpoints and shared OAuth client."""
+    provider = _fake_provider(
+        provider_id=provider_id,
+        credential_service=f"{provider_id}_oauth",
+        display_name=display_name,
+        scopes=(scope,),
+        consent_group=_GOOGLE_GROUP,
+        client_config_services=(f"{provider_id}_oauth_client",),
+        shared_client_config_services=("test_drive_oauth_client",),
+        **kwargs,
+    )
+    return replace(
+        provider,
+        authorization_url="https://auth.example.test/google/authorize",
+        token_url="https://auth.example.test/google/token",  # noqa: S106
+    )
+
+
+def _use_providers(portal: dict[str, Any], monkeypatch: pytest.MonkeyPatch, *providers: OAuthProvider) -> None:
+    monkeypatch.setattr(oauth_registry, "_builtin_oauth_providers", lambda: providers)
+    publish_api_payload(main.app, portal["payload"])
+
+
+def _drive(**kwargs: Any) -> OAuthProvider:  # noqa: ANN401
+    return _google_member("google_drive", "Test Drive", "drive.scope", **kwargs)
+
+
+def _sheets(**kwargs: Any) -> OAuthProvider:  # noqa: ANN401
+    return _google_member("google_sheets", "Test Sheets", "sheets.scope", **kwargs)
+
+
+@pytest.fixture
+def google_group_portal(portal: dict[str, Any], monkeypatch: pytest.MonkeyPatch) -> dict[str, Any]:
+    """Give the private agent Drive and Sheets, two Google consent group members that share one OAuth client."""
+    portal["payload"]["agents"]["personal"]["tools"] = ["google_drive", "google_sheets"]
+    _use_providers(portal, monkeypatch, _drive(), _sheets())
+    return portal
+
+
+def _group_connect(
+    portal: dict[str, Any],
+    user: str,
+    *,
+    agent: str = "personal",
+    group: str = "google",
+) -> httpx.Response:
+    return portal["client"].post(
+        f"/api/connections/agents/{agent}/consent-groups/{group}/connect",
+        headers=portal["headers"][user],
+        json={},
+    )
+
+
+def _auth_query(response: httpx.Response) -> dict[str, list[str]]:
+    assert response.status_code == 200, response.text
+    return parse_qs(urlparse(response.json()["auth_url"]).query)
+
+
+def _requested_scopes(response: httpx.Response) -> set[str]:
+    return set(_auth_query(response)["scope"][0].split())
+
+
+def _oauth_callback(portal: dict[str, Any], user: str, state: str, provider: str = "google_drive") -> httpx.Response:
+    return portal["client"].get(
+        f"/api/oauth/{provider}/callback",
+        params={"code": "test-code", "state": state},
+        headers=portal["headers"][user],
+        follow_redirects=False,
+    )
+
+
+def _finish_group_connect(portal: dict[str, Any], user: str, *, agent: str = "personal") -> httpx.Response:
+    """Start a group connect and complete its sign-in, as the popup does."""
+    response = _group_connect(portal, user, agent=agent)
+    return _oauth_callback(portal, user, _auth_query(response)["state"][0], response.json()["provider"])
+
+
+# The script with which a popup's last page closes itself after telling its opener.
+_POPUP_SELF_CLOSE = "window.setTimeout(() => window.close(), 1500);"
+
+
+def _connect_one(portal: dict[str, Any], user: str, provider: str) -> None:
+    """Connect one member with its own Connect button."""
+    response = portal["client"].post(
+        f"/api/connections/agents/personal/{provider}/connect",
+        headers=portal["headers"][user],
+        json={},
+    )
+    assert _oauth_callback(portal, user, _auth_query(response)["state"][0], provider).status_code == 307
+
+
+def test_catalog_reports_each_service_consent_group(google_group_portal: dict[str, Any]) -> None:
+    """The portal learns which services one sign-in can connect together."""
+    response = google_group_portal["client"].get("/api/connections", headers=google_group_portal["headers"]["alice"])
+    assert response.status_code == 200, response.text
+    services = response.json()["agents"][0]["services"]
+    assert {service["provider"]: service["consent_group"] for service in services} == {
+        "google_drive": {"key": "google", "display_name": "Google"},
+        "google_sheets": {"key": "google", "display_name": "Google"},
+    }
+
+
+def test_group_connect_asks_for_every_member_scope_in_one_sign_in(google_group_portal: dict[str, Any]) -> None:
+    """The first service leads one authorization request for the union of the members' scopes."""
+    response = _group_connect(google_group_portal, "alice")
+    query = _auth_query(response)
+    assert response.json()["provider"] == "google_drive"
+    assert response.json()["auth_url"].startswith("https://auth.example.test/google/authorize?")
+    assert query["scope"] == ["drive.scope sheets.scope"]
+    assert query["redirect_uri"] == ["https://portal.example.org/api/oauth/google_drive/callback"]
+    assert "no-store" in response.headers["cache-control"]
+
+
+def test_group_connect_requires_same_origin_and_empty_body(google_group_portal: dict[str, Any]) -> None:
+    """Cross-site requests and hidden body selectors cannot start a group connect."""
+    client, headers = google_group_portal["client"], google_group_portal["headers"]["alice"]
+    url = "/api/connections/agents/personal/consent-groups/google/connect"
+    assert client.post(url, headers={**headers, "Origin": "https://evil.example.org"}, json={}).status_code == 403
+    no_origin = {key: value for key, value in headers.items() if key != "Origin"}
+    assert client.post(url, headers=no_origin, json={}).status_code == 403
+    assert client.post(url, headers=headers, json={"provider": "google_sheets"}).status_code == 422
+
+
+def test_group_connect_connects_every_member(google_group_portal: dict[str, Any]) -> None:
+    """One sign-in stores the account for every member, in the requester's own private scope."""
+    page = _finish_group_connect(google_group_portal, "alice")
+    assert page.status_code == 200, page.text
+    assert "<title>Google connected</title>" in page.text
+    assert "Connected Test Drive, Test Sheets. You can close this window." in page.text
+    assert '"status": "connected", "provider": "google_drive"' in page.text
+    assert _POPUP_SELF_CLOSE in page.text
+    for provider in ("google_drive", "google_sheets"):
+        assert _connected(google_group_portal, "alice", "personal", provider) is True
+        assert _connected(google_group_portal, "bob", "personal", provider) is False
+
+
+def test_group_connect_names_a_service_the_user_did_not_grant(
+    google_group_portal: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A member whose scope the user unticked stays unconnected, and the page stays open to say so."""
+    # The lead's exchange answers for the whole sign-in.
+    _use_providers(google_group_portal, monkeypatch, _drive(granted_scopes=("drive.scope",)), _sheets())
+    page = _finish_group_connect(google_group_portal, "alice")
+    assert page.status_code == 200, page.text
+    assert (
+        "Connected Test Drive. Not connected: Test Sheets (access was not granted). You can close this window."
+        in page.text
+    )
+    # The opener still hears that the flow connected, but the page leaves closing to the user.
+    assert '"status": "connected", "provider": "google_drive"' in page.text
+    assert _POPUP_SELF_CLOSE not in page.text
+    assert _connected(google_group_portal, "alice", "personal", "google_drive") is True
+    assert _connected(google_group_portal, "alice", "personal", "google_sheets") is False
+
+
+def test_group_connect_that_connects_nothing_is_an_error_page(
+    google_group_portal: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When every member refuses the account, the page is an error that stays open, and its opener hears so."""
+    refused = {"allowed_email_domains": ("other.example",)}
+    _use_providers(google_group_portal, monkeypatch, _drive(**refused), _sheets(**refused))
+    page = _finish_group_connect(google_group_portal, "alice")
+    assert page.status_code == 400, page.text
+    assert "<title>Google not connected</title>" in page.text
+    assert "Nothing was connected: Test Drive, Test Sheets (this account is not allowed)." in page.text
+    assert '"status": "error", "provider": "google_drive"' in page.text
+    assert _POPUP_SELF_CLOSE not in page.text
+    for provider in ("google_drive", "google_sheets"):
+        assert _connected(google_group_portal, "alice", "personal", provider) is False
+
+
+def test_group_connect_skips_a_member_connected_while_signing_in(google_group_portal: dict[str, Any]) -> None:
+    """A member connected another way during the sign-in keeps that account, and the others still connect."""
+    response = _group_connect(google_group_portal, "alice")
+    state = _auth_query(response)["state"][0]
+    _connect_one(google_group_portal, "alice", "google_drive")
+    page = _oauth_callback(google_group_portal, "alice", state)
+    assert page.status_code == 200, page.text
+    assert "Connected Test Sheets. Not connected: Test Drive (changed while you were signing in)." in page.text
+    assert _connected(google_group_portal, "alice", "personal", "google_sheets") is True
+    # Drive keeps the grant of its own sign-in, not the group's.
+    drive = _stored_oauth_credentials(
+        _drive(),
+        google_group_portal["paths"],
+        requester_id="@alice:example.org",
+        agent_name="personal",
+    )
+    assert drive is not None
+    assert drive["scopes"] == ["drive.scope"]
+
+
+def test_group_callback_refuses_a_member_whose_connection_moved(
+    google_group_portal: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A member whose account would now be stored elsewhere refuses the sign-in, and no member is connected."""
+    state = _auth_query(_group_connect(google_group_portal, "alice"))["state"][0]
+    # Sheets now keeps one account per user instead of one per user and agent.
+    _use_providers(google_group_portal, monkeypatch, _drive(), _sheets(requester_scoped_credentials=True))
+    page = _oauth_callback(google_group_portal, "alice", state)
+    assert page.status_code == 409, page.text
+    assert "<title>OAuth connection changed</title>" in page.text
+    assert '"status": "error", "provider": "google_drive"' in page.text
+    for provider in ("google_drive", "google_sheets"):
+        assert _connected(google_group_portal, "alice", "personal", provider) is False
+    for worker_scope in ("user", "user_agent"):
+        stored = _stored_oauth_credentials(
+            _sheets(),
+            google_group_portal["paths"],
+            worker_scope=worker_scope,
+            agent_name="personal",
+        )
+        assert stored is None
+
+
+def test_group_connect_leaves_a_connected_member_alone(google_group_portal: dict[str, Any]) -> None:
+    """Only members that are not connected join the sign-in, so it never replaces a connected account."""
+    _connect_one(google_group_portal, "alice", "google_drive")
+    response = _group_connect(google_group_portal, "alice")
+    assert response.json()["provider"] == "google_sheets"
+    assert _requested_scopes(response) == {"sheets.scope"}
+
+
+@pytest.mark.parametrize("difference", ["oauth_client", "authorization_url", "token_url"])
+def test_group_connect_skips_a_member_that_signs_in_elsewhere(
+    google_group_portal: dict[str, Any],
+    monkeypatch: pytest.MonkeyPatch,
+    difference: str,
+) -> None:
+    """A member with another OAuth client or endpoint could not use the lead's token, so it is left out."""
+    if difference == "oauth_client":
+        get_runtime_credentials_manager(google_group_portal["paths"]).save_credentials(
+            "google_sheets_oauth_client",
+            {"client_id": "other-client", "client_secret": "other-secret", "_source": "ui"},
+        )
+    else:
+        other = {difference: f"https://other.example.test/{difference}"}
+        _use_providers(google_group_portal, monkeypatch, _drive(), replace(_sheets(), **other))
+    response = _group_connect(google_group_portal, "alice")
+    assert response.json()["provider"] == "google_drive"
+    assert _requested_scopes(response) == {"drive.scope"}
+
+
+def test_group_connect_with_nothing_to_connect_is_409(google_group_portal: dict[str, Any]) -> None:
+    """A group with no member left to connect, or an unknown group, is refused; an unlisted agent is not found."""
+    assert _finish_group_connect(google_group_portal, "alice").status_code == 200
+    for response in (
+        _group_connect(google_group_portal, "alice"),
+        _group_connect(google_group_portal, "alice", group="microsoft"),
+    ):
+        assert response.status_code == 409
+        assert response.json()["detail"] == "Nothing in this group can be connected here"
+        assert "no-store" in response.headers["cache-control"]
+    assert _group_connect(google_group_portal, "alice", agent="missing").status_code == 404
+
+
+def test_group_connect_leaves_out_services_a_service_account_serves(google_group_portal: dict[str, Any]) -> None:
+    """A shared service account is never replaced by a personal account."""
+    paths = google_group_portal["paths"]
+    paths = replace(paths, process_env={**paths.process_env, "GOOGLE_SERVICE_ACCOUNT_FILE": "service-account.json"})
+    main.initialize_api_app(main.app, paths)
+    bind_test_embedded_runtime(main.app)
+    publish_api_payload(main.app, google_group_portal["payload"])
+    assert _group_connect(google_group_portal, "alice").status_code == 409
+
+
+def test_group_connect_on_a_shared_agent_needs_a_credential_manager(google_group_portal: dict[str, Any]) -> None:
+    """A user of a shared agent cannot connect its group; an administrator connects it for everyone who uses it."""
+    google_group_portal["payload"]["agents"]["research"] = {
+        "display_name": "Research Team",
+        "role": "Research assistant",
+        "tools": ["google_drive", "google_sheets"],
+        "access": {"users": ["@bob:example.org"]},
+    }
+    publish_api_payload(main.app, google_group_portal["payload"])
+    assert _group_connect(google_group_portal, "bob", agent="research").status_code == 409
+    assert _finish_group_connect(google_group_portal, "admin", agent="research").status_code == 200
+    for provider in ("google_drive", "google_sheets"):
+        assert _connected(google_group_portal, "bob", "research", provider) is True
+
+
+def test_group_callback_refuses_another_users_state(google_group_portal: dict[str, Any]) -> None:
+    """The group's state finishes only for the user who started it."""
+    state = _auth_query(_group_connect(google_group_portal, "alice"))["state"][0]
+    assert _oauth_callback(google_group_portal, "bob", state).status_code == 403
+    for provider in ("google_drive", "google_sheets"):
+        assert _connected(google_group_portal, "bob", "personal", provider) is False
+    assert _oauth_callback(google_group_portal, "alice", state).status_code == 200

@@ -1,274 +1,232 @@
-"""Tests for prepare_agent_and_prompt integration and native Agno history replay."""
-# ruff: noqa: D103, TC002, TC003
+"""Reply preparation through ``ai._prepare_agent_and_prompt`` and the history its requests replay, on the owned loop."""
+# ruff: noqa: D103, TC003
 
 from __future__ import annotations
 
+import os
 import threading
-from dataclasses import replace
-from datetime import UTC, datetime
+import time
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
+from dataclasses import dataclass, field, replace
 from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from agno.agent import Agent
-from agno.models.message import Message
-from agno.run.agent import RunOutput
-from agno.session.summary import SessionSummary
-from defusedxml.ElementTree import fromstring
 
-from mindroom.agent_storage import create_session_storage, get_agent_session
+from mindroom.agent_loop.model_loop import EMPTY_REQUEST
+from mindroom.agent_loop.run import run_agent
+from mindroom.agent_loop.spec import RunContext, UnstoredSession
+from mindroom.agent_loop.tools import PreparedTools
 from mindroom.agents import create_agent
-from mindroom.ai import _prepare_agent_and_prompt
-from mindroom.config.agent import AgentConfig
+from mindroom.ai import ai_response
+from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.config.models import CompactionConfig, DefaultsConfig, ModelConfig
-from mindroom.execution_preparation import (
-    _build_matrix_prompt_with_history,
-    _PreparedExecutionContext,
-)
-from mindroom.history.prompt_tokens import (
-    estimate_agent_static_tokens,
-)
-from mindroom.history.session_context import open_scope_session_context
+from mindroom.constants import MATRIX_SEEN_EVENT_IDS_METADATA_KEY
+from mindroom.dispatch_source import ScheduledHistoryBudget
+from mindroom.execution_preparation import _PreparedExecutionContext, render_prepared_messages_text
+from mindroom.history.conversation_text import utterances
+from mindroom.history.request_messages import TurnMessages
+from mindroom.history.session_context import ScopeSessionContext, load_scope_session
 from mindroom.history.storage import (
     read_scope_seen_event_ids,
-    update_scope_seen_event_ids,
+    with_force_compaction,
 )
 from mindroom.history.summary_input import build_summary_input
-from mindroom.history.types import HistoryScope, PreparedHistoryState
+from mindroom.history.summary_message import is_compaction_summary
+from mindroom.history.types import HistoryPolicy, HistoryScope, PreparedHistoryState
 from mindroom.hooks import render_transient_context
+from mindroom.llm.events import RunFinished
+from mindroom.llm.media import File
+from mindroom.llm.messages import Message, stable_serialize, system_text
+from mindroom.llm.runs import RunStatus
+from mindroom.media_inputs import MediaInputs
 from mindroom.memory import MemoryPromptParts
 from mindroom.prompt_message_tags import render_msg_tag
-from mindroom.token_budget import estimate_text_tokens, stable_serialize
+from mindroom.runtime_resolution import resolve_agent_runtime
+from mindroom.session_storage.agent_storage import create_session_storage
+from mindroom.token_counting.requests import MEDIA_ALLOWANCE_TOKENS
+from mindroom.tool_system.plugins import config_plugins
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, agent_workspace_root_path
 from tests.conftest import (
-    FakeModel,
     bind_runtime_paths,
     make_turn_context,
     make_visible_message,
+    prepare_agent_and_prompt_for_test,
     seed_session,
 )
-from tests.history_helpers import (  # noqa: F401
+from tests.fakes.scripted_model import ScriptedModel, answer
+from tests.fakes.token_counter import quarter_tokens
+from tests.history_helpers import (
     _ALL_HISTORY_SETTINGS,
-    RecordingModel,
-    _agent,
-    _close_test_storages,
     _completed_run,
     _make_config,
     _runtime_paths,
     _session,
+    blank_pdf,
+    seed_summary,
+    stored_turn,
 )
 from tests.identity_helpers import persist_entity_accounts
+from tests.turn_model_helpers import turn_model
+
+if TYPE_CHECKING:
+    from mindroom.constants import RuntimePaths
+    from mindroom.llm.provider import ModelProvider, ModelRequest
+    from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
+
+_SCOPE = HistoryScope(kind="agent", scope_id="test_agent")
 
 
-def test_create_agent_enables_agno_native_history_replay(tmp_path: Path) -> None:
+@dataclass
+class _Provider:
+    """The test agent's model provider: a scripted model answering ``ok``, and the model names it was built for."""
+
+    model: ScriptedModel = field(default_factory=lambda: ScriptedModel([answer("ok") for _ in range(5)]))
+    model_names: list[str] = field(default_factory=list)
+
+    def build(
+        self,
+        _config: Config,
+        _runtime_paths: object,
+        model_name: str,
+        **_kwargs: object,
+    ) -> ModelProvider:
+        self.model_names.append(model_name)
+        return self.model
+
+
+@pytest.fixture
+def provider(monkeypatch: pytest.MonkeyPatch) -> _Provider:
+    built = _Provider()
+    monkeypatch.setattr("mindroom.providers.registry.build_model_provider", built.build)
+    return built
+
+
+@contextmanager
+def _no_memory() -> Iterator[None]:
+    with patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())):
+        yield
+
+
+@contextmanager
+def _planned(prepared: PreparedHistoryState) -> Iterator[AsyncMock]:
+    """Stand in for history preparation, which these cases do not exercise, with ``prepared`` as its result."""
+    prepare = AsyncMock(return_value=MagicMock())
+    with (
+        patch("mindroom.execution_preparation.prepare_scope_history", new=prepare),
+        patch("mindroom.execution_preparation.finalize_history_preparation", return_value=prepared),
+    ):
+        yield prepare
+
+
+def _scope_context(config: Config, runtime_paths: RuntimePaths) -> ScopeSessionContext:
+    """Load the session context a reply in the test agent's ``session-1`` reads."""
+    return load_scope_session(
+        scope=_SCOPE,
+        session_id="session-1",
+        runtime_paths=runtime_paths,
+        config=config,
+        execution_identity=None,
+    )
+
+
+def _after_prompt(messages: Sequence[Message]) -> list[Message]:
+    """Return a request's messages after its system prompt."""
+    return [message for message in messages if message.role != "system"]
+
+
+def _contents(messages: list[Message] | tuple[Message, ...]) -> list[str]:
+    return [str(message.content) for message in messages]
+
+
+@pytest.mark.usefixtures("provider")
+def test_create_agent_replays_the_configured_number_of_runs(tmp_path: Path) -> None:
     config, runtime_paths = _make_config(tmp_path, num_history_runs=2)
 
-    with patch(
-        "mindroom.providers.model_loading.get_model_instance",
-        return_value=FakeModel(id="fake-model", provider="fake"),
-    ):
-        agent = create_agent(
-            "test_agent",
-            config,
-            runtime_paths,
-            execution_identity=None,
-            include_interactive_questions=False,
-        )
+    build = create_agent(
+        "test_agent",
+        config,
+        runtime_paths,
+        execution_identity=None,
+        include_interactive_questions=False,
+        knowledge=None,
+        model=turn_model(config, runtime_paths, "test_agent"),
+        plugins=config_plugins(config, runtime_paths),
+    )
 
-    assert agent.add_history_to_context is True
-    assert agent.num_history_runs == 2
-    assert agent.num_history_messages is None
-    assert agent.store_history_messages is False
+    assert build.history_settings.policy == HistoryPolicy(mode="runs", limit=2)
 
 
 def test_session_storage_strips_prompt_roles_before_persisting_history(tmp_path: Path) -> None:
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
-    session = _session(
-        "session-1",
-        runs=[
-            _completed_run(
-                "run-1",
-                messages=[
-                    Message(role="system", content="Current system prompt"),
-                    Message(role="developer", content="Current developer prompt"),
-                    Message(role="user", content="user request"),
-                    Message(role="assistant", content="assistant answer"),
-                    Message(role="tool", content="tool result"),
-                ],
-            ),
+    run = _completed_run(
+        "run-1",
+        messages=[
+            Message(role="system", content="Current system prompt"),
+            Message(role="user", content="user request"),
+            Message(role="assistant", content="assistant answer"),
+            Message(role="tool", content="tool result"),
         ],
     )
+    session = _session("session-1", runs=[run])
 
     seed_session(storage, session)
 
-    assert session.runs is not None
-    assert [(message.role, message.content) for message in session.runs[0].messages or []] == [
+    # The record handed to the store keeps its prompts; the row, and the session's copy of it, do not.
+    assert [(message.role, message.content) for message in run.messages] == [
         ("system", "Current system prompt"),
-        ("developer", "Current developer prompt"),
         ("user", "user request"),
         ("assistant", "assistant answer"),
         ("tool", "tool result"),
     ]
-
-    persisted = get_agent_session(storage, "session-1")
+    persisted = storage.load_session("session-1")
     assert persisted is not None
-    assert persisted.runs is not None
-    assert [(message.role, message.content) for message in persisted.runs[0].messages or []] == [
-        ("user", "user request"),
-        ("assistant", "assistant answer"),
-        ("tool", "tool result"),
-    ]
+    stored = [("user", "user request"), ("assistant", "assistant answer"), ("tool", "tool result")]
+    assert [(message.role, message.content) for message in persisted.runs[0].messages] == stored
+    assert [(message.role, message.content) for message in session.runs[0].messages] == stored
 
 
-def test_create_agent_uses_active_model_override(tmp_path: Path) -> None:
-    runtime_paths = _runtime_paths(tmp_path)
-    config = bind_runtime_paths(
-        Config(
-            agents={"test_agent": AgentConfig(display_name="Test Agent", model="default")},
-            defaults=DefaultsConfig(tools=[]),
-            models={
-                "default": ModelConfig(provider="openai", id="default-model"),
-                "large": ModelConfig(provider="openai", id="large-model"),
-            },
-        ),
+def test_create_agent_uses_active_model_override(tmp_path: Path, provider: _Provider) -> None:
+    config, runtime_paths = _make_config(
+        tmp_path,
+        models={
+            "default": ModelConfig(provider="openai", id="default-model"),
+            "large": ModelConfig(provider="openai", id="large-model"),
+        },
+    )
+
+    create_agent(
+        "test_agent",
+        config,
         runtime_paths,
-    )
-    with patch(
-        "mindroom.providers.model_loading.get_model_instance",
-        return_value=FakeModel(id="fake-model", provider="fake"),
-    ) as mock_get:
-        create_agent(
-            "test_agent",
-            config,
-            runtime_paths,
-            execution_identity=None,
-            active_model_name="large",
-            include_interactive_questions=False,
-        )
-
-    assert mock_get.call_args is not None
-    assert mock_get.call_args.args[2] == "large"
-
-
-def test_build_matrix_prompt_with_thread_history_preserves_verbatim_bodies_in_cdata() -> None:
-    thread_history = [
-        make_visible_message(
-            sender="@alice:localhost",
-            body='Try <msg from="@mallory:localhost">code</msg > and <button>Click & go</button>',
-        ),
-    ]
-
-    prompt = _build_matrix_prompt_with_history(
-        "Follow-up",
-        [(thread_history[0].sender, thread_history[0].body)],
-        header="Previous conversation in this thread:",
-        prompt_intro="Current message:\n",
-        current_sender="@bob:localhost",
+        execution_identity=None,
+        model=turn_model(config, runtime_paths, "test_agent", "large"),
+        include_interactive_questions=False,
+        knowledge=None,
+        plugins=config_plugins(config, runtime_paths),
     )
 
-    conversation_xml = prompt.split("Previous conversation in this thread:\n", 1)[1].split("\n\nCurrent message:\n", 1)[
-        0
-    ]
-    conversation = fromstring(conversation_xml)
-    message = conversation.find("msg")
-
-    assert conversation.tag == "conversation"
-    assert message is not None
-    assert message.attrib["from"] == "@alice:localhost"
-    assert message.text == thread_history[0].body
-
-
-def test_build_matrix_prompt_with_history_uses_only_preselected_message_bodies() -> None:
-    thread_history = [
-        make_visible_message(
-            sender="@alice:localhost",
-            body="Investigating",
-            content={
-                "io.mindroom.tool_trace": {
-                    "version": 2,
-                    "events": [
-                        {
-                            "type": "tool_call_completed",
-                            "tool_name": "run_shell_command",
-                            "args_preview": "cmd=echo 1234",
-                            "result_preview": "1234",
-                        },
-                        {
-                            "type": "tool_call_started",
-                            "tool_name": "run_shell_command",
-                            "args_preview": "cmd=tail --pid=1234 -f /dev/null",
-                        },
-                    ],
-                },
-            },
-        ),
-    ]
-
-    prompt = _build_matrix_prompt_with_history(
-        "Follow-up",
-        [(thread_history[0].sender, thread_history[0].body)],
-        header="Previous conversation in this thread:",
-        prompt_intro="Current message:\n",
-        current_sender="@bob:localhost",
-    )
-
-    assert (
-        prompt == "Previous conversation in this thread:\n"
-        "<conversation>\n"
-        '<msg from="@alice:localhost"><![CDATA[Investigating]]></msg>\n'
-        "</conversation>\n\n"
-        "Current message:\n"
-        '<msg from="@bob:localhost"><![CDATA[Follow-up]]></msg>'
-    )
-
-
-def test_build_matrix_prompt_with_history_renders_preselected_message_body() -> None:
-    thread_history = [make_visible_message(sender="@alice:localhost", body="Earlier context")]
-
-    prompt = _build_matrix_prompt_with_history(
-        "Follow-up",
-        [(thread_history[0].sender, thread_history[0].body)],
-        header="Previous conversation in this thread:",
-        prompt_intro="Current message:\n",
-        current_sender="@bob:localhost",
-    )
-
-    assert (
-        prompt == "Previous conversation in this thread:\n"
-        "<conversation>\n"
-        '<msg from="@alice:localhost"><![CDATA[Earlier context]]></msg>\n'
-        "</conversation>\n\n"
-        "Current message:\n"
-        '<msg from="@bob:localhost"><![CDATA[Follow-up]]></msg>'
-    )
+    assert provider.model_names == ["large"]
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("provider")
 async def test_prepare_agent_and_prompt_budgets_persisted_replay_against_primary_prompt(
     tmp_path: Path,
 ) -> None:
     config, runtime_paths = _make_config(tmp_path)
-    live_agent = _agent()
-    live_agent.role = "Verbose role " + ("r" * 200)
+    config.agents["test_agent"].role = "Verbose role " + ("r" * 200)
     thread_history = [
         make_visible_message(sender="alice", body="Earlier context"),
         make_visible_message(sender="bob", body="More context"),
     ]
 
-    with (
-        patch("mindroom.ai.create_agent", return_value=live_agent),
-        patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
-        patch(
-            "mindroom.execution_preparation.prepare_scope_history",
-            new=AsyncMock(return_value=MagicMock()),
-        ) as mock_prepare,
-        patch(
-            "mindroom.execution_preparation.finalize_history_preparation",
-            return_value=PreparedHistoryState(),
-        ),
-    ):
-        await _prepare_agent_and_prompt(
+    with _no_memory(), _planned(PreparedHistoryState(native_history=None)) as prepare:
+        prepared = await prepare_agent_and_prompt_for_test(
             make_turn_context("test_agent"),
             prompt="Current prompt",
             runtime_paths=runtime_paths,
@@ -276,24 +234,30 @@ async def test_prepare_agent_and_prompt_budgets_persisted_replay_against_primary
             thread_history=thread_history,
         )
 
-    assert mock_prepare.await_args is not None
-    assert mock_prepare.await_args.kwargs["resolved_inputs"].static_prompt_tokens == estimate_agent_static_tokens(
-        live_agent,
-        "Current prompt",
-    )
+    assert prepare.await_args is not None
+    build = prepared.build
+    kwargs = prepare.await_args.kwargs
+    assert kwargs["sizer"].model is build.spec.model
+    # The provisional first request holds the agent's system prompt, its tools, and the prompt; persisted replay stands
+    # in for the thread history.
+    frame = kwargs["frame"]
+    assert frame.system_messages == tuple(prepared.spec.system_messages)
+    assert "Verbose role" in system_text(frame.system_messages)
+    assert frame.template.tools == tuple(PreparedTools(functions=build.spec.functions).specs())
+    assert render_prepared_messages_text(frame.turn.in_request_order()) == "Current prompt"
 
 
 @pytest.mark.asyncio
 async def test_prepare_agent_and_prompt_uses_room_resolved_agent_model_for_execution_and_budget(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    provider: _Provider,
 ) -> None:
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(
         Config(
             agents={"test_agent": AgentConfig(display_name="Test Agent", model="default")},
             defaults=DefaultsConfig(tools=[]),
-            room_models={"lobby": "large"},
+            room_models={"!room:localhost": "large"},
             models={
                 "default": ModelConfig(provider="openai", id="default-model", context_window=None),
                 "large": ModelConfig(provider="openai", id="large-model", context_window=48_000),
@@ -301,46 +265,32 @@ async def test_prepare_agent_and_prompt_uses_room_resolved_agent_model_for_execu
         ),
         runtime_paths,
     )
-    monkeypatch.setattr("mindroom.matrix.state.get_room_alias_from_id", lambda *_args: "lobby")
-    live_agent = _agent()
 
-    with (
-        patch("mindroom.ai.create_agent", return_value=live_agent) as mock_create_agent,
-        patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
-        patch(
-            "mindroom.execution_preparation.prepare_scope_history",
-            new=AsyncMock(return_value=MagicMock()),
-        ) as mock_prepare,
-        patch(
-            "mindroom.execution_preparation.finalize_history_preparation",
-            return_value=PreparedHistoryState(),
-        ),
-    ):
-        await _prepare_agent_and_prompt(
+    with _no_memory(), _planned(PreparedHistoryState(native_history=None)) as prepare:
+        await prepare_agent_and_prompt_for_test(
             make_turn_context("test_agent", room_id="!room:localhost"),
             prompt="Current prompt",
             runtime_paths=runtime_paths,
             config=config,
         )
 
-    assert mock_create_agent.call_args is not None
-    assert mock_create_agent.call_args.kwargs["active_model_name"] == "large"
-    assert mock_prepare.await_args is not None
-    assert mock_prepare.await_args.kwargs["resolved_inputs"].active_model_name == "large"
-    assert mock_prepare.await_args.kwargs["resolved_inputs"].active_context_window == 48_000
+    assert provider.model_names == ["large"]
+    assert prepare.await_args is not None
+    plan = prepare.await_args.kwargs["resolved_inputs"].execution_plan
+    assert (plan.compaction_model_name, plan.replay_window_tokens) == ("large", 48_000)
 
 
 @pytest.mark.asyncio
 async def test_prepare_agent_and_prompt_prefers_explicit_turn_model_over_room_model(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    provider: _Provider,
 ) -> None:
     runtime_paths = _runtime_paths(tmp_path)
     config = bind_runtime_paths(
         Config(
             agents={"test_agent": AgentConfig(display_name="Test Agent", model="default")},
             defaults=DefaultsConfig(tools=[]),
-            room_models={"lobby": "large"},
+            room_models={"!room:localhost": "large"},
             models={
                 "default": ModelConfig(provider="openai", id="default-model"),
                 "large": ModelConfig(provider="openai", id="large-model", context_window=48_000),
@@ -349,26 +299,13 @@ async def test_prepare_agent_and_prompt_prefers_explicit_turn_model_over_room_mo
         ),
         runtime_paths,
     )
-    monkeypatch.setattr("mindroom.matrix.state.get_room_alias_from_id", lambda *_args: "lobby")
-    live_agent = _agent()
     turn = replace(
         make_turn_context("test_agent", room_id="!room:localhost"),
         active_model_name="call_fast",
     )
 
-    with (
-        patch("mindroom.ai.create_agent", return_value=live_agent) as mock_create_agent,
-        patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
-        patch(
-            "mindroom.execution_preparation.prepare_scope_history",
-            new=AsyncMock(return_value=MagicMock()),
-        ) as mock_prepare,
-        patch(
-            "mindroom.execution_preparation.finalize_history_preparation",
-            return_value=PreparedHistoryState(),
-        ),
-    ):
-        prepared = await _prepare_agent_and_prompt(
+    with _no_memory(), _planned(PreparedHistoryState(native_history=None)) as prepare:
+        prepared = await prepare_agent_and_prompt_for_test(
             turn,
             prompt="Current prompt",
             runtime_paths=runtime_paths,
@@ -376,43 +313,35 @@ async def test_prepare_agent_and_prompt_prefers_explicit_turn_model_over_room_mo
         )
 
     assert prepared.runtime_model_name == "call_fast"
-    assert mock_create_agent.call_args.kwargs["active_model_name"] == "call_fast"
-    resolved_inputs = mock_prepare.await_args.kwargs["resolved_inputs"]
-    assert resolved_inputs.active_model_name == "call_fast"
-    assert resolved_inputs.active_context_window == 16_000
+    assert provider.model_names == ["call_fast"]
+    assert prepare.await_args is not None
+    resolved_inputs = prepare.await_args.kwargs["resolved_inputs"]
+    assert (
+        resolved_inputs.execution_plan.compaction_model_name,
+        resolved_inputs.execution_plan.replay_window_tokens,
+    ) == (
+        "call_fast",
+        16_000,
+    )
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("provider")
 async def test_prepare_agent_and_prompt_uses_thread_history_and_transient_memory_when_replay_is_disabled(
     tmp_path: Path,
 ) -> None:
     config, runtime_paths = _make_config(tmp_path)
-    live_agent = _agent()
     thread_history = [
         make_visible_message(event_id="$earlier", sender="alice", body="Earlier context"),
         make_visible_message(event_id="$more", sender="bob", body="More context"),
     ]
+    memory = MemoryPromptParts(transient_turn_context="Retrieved memory for this turn")
 
     with (
-        patch("mindroom.ai.create_agent", return_value=live_agent),
-        patch(
-            "mindroom.ai.build_memory_prompt_parts",
-            new=AsyncMock(
-                return_value=MemoryPromptParts(
-                    transient_turn_context="Retrieved memory for this turn",
-                ),
-            ),
-        ),
-        patch(
-            "mindroom.execution_preparation.prepare_scope_history",
-            new=AsyncMock(return_value=MagicMock()),
-        ),
-        patch(
-            "mindroom.execution_preparation.finalize_history_preparation",
-            return_value=PreparedHistoryState(replays_persisted_history=False),
-        ),
+        patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(return_value=memory)),
+        _planned(PreparedHistoryState(replays_persisted_history=False, native_history=None)),
     ):
-        prepared_run = await _prepare_agent_and_prompt(
+        prepared_run = await prepare_agent_and_prompt_for_test(
             make_turn_context("test_agent"),
             prompt="Current prompt",
             runtime_paths=runtime_paths,
@@ -420,62 +349,44 @@ async def test_prepare_agent_and_prompt_uses_thread_history_and_transient_memory
             thread_history=thread_history,
         )
 
-    prepared_agent = prepared_run.agent
-    full_prompt = prepared_run.prompt_text
-    prepared = prepared_run.prepared_history
-    assert prepared_agent is live_agent
-    assert prepared.replays_persisted_history is False
-    assert [message.content for message in prepared_run.messages] == [
+    assert prepared_run.prepared_history.replays_persisted_history is False
+    # Turn context follows the prompt, after the thread context sent before it.
+    expected = [
         render_msg_tag(sender="alice", body="Earlier context", event_id="$earlier"),
         render_msg_tag(sender="bob", body="More context", event_id="$more"),
-        render_transient_context(("Retrieved memory for this turn",)),
         "Current prompt",
+        render_transient_context(("Retrieved memory for this turn",)),
     ]
-    assert [message.add_to_agent_memory for message in prepared_run.messages] == [True, True, False, True]
-    assert full_prompt == "\n\n".join(
-        (
-            render_msg_tag(sender="alice", body="Earlier context", event_id="$earlier"),
-            render_msg_tag(sender="bob", body="More context", event_id="$more"),
-            render_transient_context(("Retrieved memory for this turn",)),
-            "Current prompt",
-        ),
-    )
+    messages = prepared_run.turn.in_request_order()
+    assert _contents(messages) == expected
+    assert [message.add_to_agent_memory for message in messages] == [True, True, True, False]
+    assert prepared_run.prompt_text == "\n\n".join(expected)
+
+
+def _turn_text_tokens(_model: object, _frame: object, turn: TurnMessages) -> int:
+    """Size a turn by its text alone, so the thread fallback must fit the window by itself."""
+    return quarter_tokens(render_prepared_messages_text(turn.in_request_order()))
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("provider")
 async def test_prepare_agent_and_prompt_caps_thread_fallback_to_active_window(tmp_path: Path) -> None:
     config, runtime_paths = _make_config(
         tmp_path,
         defaults_compaction=CompactionConfig(reserve_tokens=0),
         context_window=48,
     )
-    live_agent = _agent()
     thread_history = [
         make_visible_message(event_id="$old", sender="alice", body="Old context " + ("o" * 120)),
         make_visible_message(event_id="$recent", sender="bob", body="Recent context"),
     ]
 
-    class FakeAgentStaticTokenEstimator:
-        def __init__(self, agent: Agent) -> None:
-            assert agent is live_agent
-
-        def estimate(self, full_prompt: str) -> int:
-            return estimate_text_tokens(full_prompt)
-
     with (
-        patch("mindroom.ai.create_agent", return_value=live_agent),
-        patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
-        patch("mindroom.execution_preparation.agent_static_token_estimator", FakeAgentStaticTokenEstimator),
-        patch(
-            "mindroom.execution_preparation.prepare_scope_history",
-            new=AsyncMock(return_value=MagicMock()),
-        ),
-        patch(
-            "mindroom.execution_preparation.finalize_history_preparation",
-            return_value=PreparedHistoryState(replays_persisted_history=False),
-        ),
+        _no_memory(),
+        patch("mindroom.execution_preparation._turn_tokens", _turn_text_tokens),
+        _planned(PreparedHistoryState(replays_persisted_history=False, native_history=None)),
     ):
-        prepared_run = await _prepare_agent_and_prompt(
+        prepared_run = await prepare_agent_and_prompt_for_test(
             make_turn_context("test_agent"),
             prompt="Current prompt",
             runtime_paths=runtime_paths,
@@ -491,16 +402,22 @@ async def test_prepare_agent_and_prompt_caps_thread_fallback_to_active_window(tm
         ),
     )
     assert "Old context" not in prepared_run.prompt_text
-    assert estimate_text_tokens(prepared_run.prompt_text) <= 48
+    assert quarter_tokens(prepared_run.prompt_text) <= 48
+    # The omission note is MindRoom's, so readers of the stored turn never quote it as anyone's words.
+    assert [said.unredacted for said in utterances(stored_turn(prepared_run.turn, requester="carol"))] == [
+        "Recent context",
+        "Current prompt",
+        "Answered.",
+    ]
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("provider")
 async def test_prepare_agent_and_prompt_uses_full_thread_fallback_for_threaded_missing_replay(
     tmp_path: Path,
 ) -> None:
     config, runtime_paths = _make_config(tmp_path)
     persist_entity_accounts(config, runtime_paths, usernames={"test_agent": "bot"})
-    live_agent = _agent()
     thread_history = [
         make_visible_message(sender="@alice:localhost", body="Original question", event_id="$root"),
         make_visible_message(sender="@bot:localhost", body="Prior diagnosis", event_id="$agent-reply"),
@@ -508,19 +425,8 @@ async def test_prepare_agent_and_prompt_uses_full_thread_fallback_for_threaded_m
         make_visible_message(sender="@carol:localhost", body="Later reaction", event_id="$later"),
     ]
 
-    with (
-        patch("mindroom.ai.create_agent", return_value=live_agent),
-        patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
-        patch(
-            "mindroom.execution_preparation.prepare_scope_history",
-            new=AsyncMock(return_value=MagicMock()),
-        ),
-        patch(
-            "mindroom.execution_preparation.finalize_history_preparation",
-            return_value=PreparedHistoryState(replays_persisted_history=False),
-        ),
-    ):
-        prepared_run = await _prepare_agent_and_prompt(
+    with _no_memory(), _planned(PreparedHistoryState(replays_persisted_history=False, native_history=None)):
+        prepared_run = await prepare_agent_and_prompt_for_test(
             make_turn_context(
                 "test_agent",
                 reply_to_event_id="$current",
@@ -537,7 +443,8 @@ async def test_prepare_agent_and_prompt_uses_full_thread_fallback_for_threaded_m
     assert prepared_run.prompt_text == "\n\n".join(
         (
             render_msg_tag(sender="@alice:localhost", body="Original question", event_id="$root"),
-            "\n\nPrior diagnosis",
+            # The agent's own earlier reply is a thread message marked as sent by it, not an assistant turn.
+            render_msg_tag(sender="@bot:localhost", body="Prior diagnosis", event_id="$agent-reply", sent_by_you=True),
             "Current message:\n"
             + render_msg_tag(sender="@alice:localhost", body="What was that?", event_id="$current"),
         ),
@@ -546,11 +453,12 @@ async def test_prepare_agent_and_prompt_uses_full_thread_fallback_for_threaded_m
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("provider")
 async def test_prepare_agent_and_prompt_trims_oversized_full_thread_fallback(
     tmp_path: Path,
 ) -> None:
-    config, runtime_paths = _make_config(tmp_path, context_window=1_000)
-    live_agent = _agent()
+    # Room for the system prompt and the recent message, not for the obsolete one.
+    config, runtime_paths = _make_config(tmp_path, context_window=4_000)
     thread_history = [
         make_visible_message(
             sender="@alice:localhost",
@@ -564,19 +472,8 @@ async def test_prepare_agent_and_prompt_trims_oversized_full_thread_fallback(
         ),
     ]
 
-    with (
-        patch("mindroom.ai.create_agent", return_value=live_agent),
-        patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
-        patch(
-            "mindroom.execution_preparation.prepare_scope_history",
-            new=AsyncMock(return_value=MagicMock()),
-        ),
-        patch(
-            "mindroom.execution_preparation.finalize_history_preparation",
-            return_value=PreparedHistoryState(replays_persisted_history=False),
-        ),
-    ):
-        prepared_run = await _prepare_agent_and_prompt(
+    with _no_memory(), _planned(PreparedHistoryState(replays_persisted_history=False, native_history=None)):
+        prepared_run = await prepare_agent_and_prompt_for_test(
             make_turn_context("test_agent"),
             prompt="Current prompt",
             runtime_paths=runtime_paths,
@@ -590,36 +487,23 @@ async def test_prepare_agent_and_prompt_trims_oversized_full_thread_fallback(
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("provider")
 async def test_prepare_agent_and_prompt_skips_thread_fallback_for_summary_only_replay(
     tmp_path: Path,
 ) -> None:
     config, runtime_paths = _make_config(tmp_path)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
-    session = _session(
-        "session-1",
-        runs=[],
-        summary=SessionSummary(summary="Compacted summary", updated_at=datetime.now(UTC)),
-    )
+    session = _session("session-1")
     seed_session(storage, session)
-    live_agent = _agent()
+    seed_summary(storage, session, _SCOPE, "Compacted summary")
     thread_history = [
         make_visible_message(sender="@alice:localhost", body="Original context", event_id="$root"),
         make_visible_message(sender="@bot:localhost", body="Prior answer", event_id="$agent-reply"),
     ]
 
-    with (
-        open_scope_session_context(
-            agent=live_agent,
-            agent_name="test_agent",
-            session_id="session-1",
-            runtime_paths=runtime_paths,
-            config=config,
-            execution_identity=None,
-        ) as scope_context,
-        patch("mindroom.ai.create_agent", return_value=live_agent),
-        patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
-    ):
-        prepared_run = await _prepare_agent_and_prompt(
+    scope_context = _scope_context(config, runtime_paths)
+    with _no_memory():
+        prepared_run = await prepare_agent_and_prompt_for_test(
             make_turn_context("test_agent", session_id="session-1"),
             prompt="Current prompt",
             runtime_paths=runtime_paths,
@@ -635,126 +519,346 @@ async def test_prepare_agent_and_prompt_skips_thread_fallback_for_summary_only_r
 
 
 @pytest.mark.asyncio
+@pytest.mark.usefixtures("provider")
 async def test_prepare_agent_and_prompt_keeps_matrix_current_sender_when_persisted_replay_is_enabled(
     tmp_path: Path,
 ) -> None:
     config, runtime_paths = _make_config(tmp_path)
-    live_agent = _agent()
 
-    with (
-        patch("mindroom.ai.create_agent", return_value=live_agent),
-        patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
-        patch(
-            "mindroom.execution_preparation.prepare_scope_history",
-            new=AsyncMock(return_value=MagicMock()),
-        ),
-        patch(
-            "mindroom.execution_preparation.finalize_history_preparation",
-            return_value=PreparedHistoryState(replays_persisted_history=True),
-        ),
-    ):
-        prepared_run = await _prepare_agent_and_prompt(
+    with _no_memory(), _planned(PreparedHistoryState(replays_persisted_history=True, native_history=None)):
+        prepared_run = await prepare_agent_and_prompt_for_test(
             make_turn_context("test_agent", requester_id="@alice:localhost"),
             prompt="Current prompt",
             runtime_paths=runtime_paths,
             config=config,
         )
 
-    prepared_agent = prepared_run.agent
-    full_prompt = prepared_run.prompt_text
-    prepared = prepared_run.prepared_history
-    assert prepared_agent is live_agent
-    assert prepared.replays_persisted_history is True
-    assert full_prompt == 'Current message:\n<msg from="@alice:localhost"><![CDATA[Current prompt]]></msg>'
+    assert prepared_run.prepared_history.replays_persisted_history is True
+    assert prepared_run.prompt_text == 'Current message:\n<msg from="@alice:localhost"><![CDATA[Current prompt]]></msg>'
 
 
 @pytest.mark.asyncio
-async def test_prepare_agent_and_prompt_keeps_outcomes_empty_when_no_compaction_occurred(
+@pytest.mark.usefixtures("provider")
+async def test_prepare_agent_and_prompt_reports_no_compaction_when_none_occurred(
     tmp_path: Path,
 ) -> None:
     config, runtime_paths = _make_config(tmp_path)
-    live_agent = _agent()
     prepared_execution = _PreparedExecutionContext(
-        messages=(Message(role="user", content="Current prompt"),),
+        turn=TurnMessages(prompt=Message(role="user", content="Current prompt")),
         unseen_event_ids=[],
-        prepared_history=PreparedHistoryState(),
+        prepared_history=PreparedHistoryState(native_history=None),
     )
 
     with (
-        patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
-        patch("mindroom.ai.create_agent", return_value=live_agent),
-        patch(
-            "mindroom.ai.prepare_agent_execution_context",
-            new=AsyncMock(return_value=prepared_execution),
-        ),
+        _no_memory(),
+        patch("mindroom.ai.prepare_agent_execution_context", new=AsyncMock(return_value=prepared_execution)),
     ):
-        prepared_run = await _prepare_agent_and_prompt(
+        prepared_run = await prepare_agent_and_prompt_for_test(
             make_turn_context("test_agent"),
             prompt="Current prompt",
             runtime_paths=runtime_paths,
             config=config,
         )
 
-    prepared = prepared_run.prepared_history
-    assert prepared.compaction_outcomes == []
+    assert prepared_run.prepared_history.compaction_reply_outcome == "none"
 
 
 @pytest.mark.asyncio
-async def test_native_agno_replays_recent_raw_history_without_persisting_replay(
+async def test_a_reply_replays_recent_stored_history_without_persisting_the_replay(
     tmp_path: Path,
+    provider: _Provider,
 ) -> None:
-    config, runtime_paths = _make_config(tmp_path)
+    config, runtime_paths = _make_config(tmp_path, num_history_runs=1)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session("session-1", runs=[_completed_run("run-1"), _completed_run("run-2")])
+    seed_session(storage, session)
+    seed_summary(storage, session, _SCOPE, "stored summary")
+
+    with _no_memory():
+        response = await ai_response(
+            replace(make_turn_context("test_agent", session_id="session-1"), prompt="Current prompt"),
+            runtime_paths,
+            config,
+        )
+
+    assert response.text == "ok"
+    [request] = provider.model.requests
+    history = _after_prompt(request.messages)
+    assert is_compaction_summary(history[0])
+    assert "stored summary" in str(history[0].content)
+    assert [(message.role, message.content) for message in history[1:3]] == [
+        ("user", "run-2 question"),
+        ("assistant", "run-2 answer"),
+    ]
+    assert [message.from_history for message in history[:3]] == [True, True, True]
+    assert (history[-1].role, history[-1].content) == ("user", "Current prompt")
+
+    persisted = storage.load_session("session-1")
+    assert persisted is not None
+    latest_run = persisted.runs[-1]
+    assert _contents(latest_run.messages) == ["Current prompt", "ok"]
+    assert all(message.from_history is False for message in latest_run.messages)
+
+
+# A file that counts the attachment allowance, 5,000 tokens.
+_ARCHIVE = File(content=b"\x89\xff binary", filename="archive.bin")
+
+
+def _uncompacted_config(tmp_path: Path, context_window: int) -> tuple[Config, RuntimePaths]:
+    """Return the test config with automatic compaction off, a 500-token reserve, and ``context_window``."""
+    return _make_config(
+        tmp_path,
+        defaults_compaction=CompactionConfig(enabled=False, reserve_tokens=500),
+        context_window=context_window,
+    )
+
+
+def _notes(count: int, length: int) -> list[ResolvedVisibleMessage]:
+    """Return ``count`` thread messages ``note-<n>``, each about ``length`` characters long."""
+    return [
+        make_visible_message(sender="@alice:localhost", body=f"note-{index} " + "n" * length, event_id=f"$note-{index}")
+        for index in range(count)
+    ]
+
+
+async def _reply_with(
+    attachment: File,
+    provider: _Provider,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    *,
+    prompt: str,
+    session_id: str = "session-1",
+    thread: Sequence[ResolvedVisibleMessage] | None = None,
+) -> tuple[str, ModelRequest]:
+    """Run one reply to ``prompt`` carrying ``attachment``; return its text and the one request it sent, which carries it.
+
+    With ``thread``, the prompt is the thread's current message ``$current``, after ``thread``.
+    """
+    current = make_visible_message(sender="@alice:localhost", body=prompt, event_id="$current")
+    with _no_memory():
+        response = await ai_response(
+            replace(
+                make_turn_context(
+                    "test_agent",
+                    session_id=session_id,
+                    reply_to_event_id="$current" if thread is not None else None,
+                ),
+                prompt=prompt,
+                thread_history=[*thread, current] if thread is not None else None,
+                media=MediaInputs(files=(attachment,)),
+            ),
+            runtime_paths,
+            config,
+        )
+    [request] = provider.model.requests
+    assert request.messages[-1].files == (attachment,)
+    return response.text, request
+
+
+@pytest.mark.asyncio
+async def test_a_reply_with_attachments_trims_replayed_history_to_fit_them(
+    tmp_path: Path,
+    provider: _Provider,
+) -> None:
+    """Without compaction, the history a reply replays leaves room for the attachments its prompt sends."""
+    config, runtime_paths = _uncompacted_config(tmp_path, 12_000)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    question = "q" * 3_000
     seed_session(
         storage,
         _session(
             "session-1",
             runs=[
-                _completed_run("run-1"),
-                _completed_run("run-2"),
+                _completed_run(
+                    f"run-{index}",
+                    messages=[
+                        Message(role="user", content=f"run-{index} {question}"),
+                        Message(role="assistant", content=f"run-{index} answer"),
+                    ],
+                )
+                for index in range(8)
             ],
-            summary=SessionSummary(summary="stored summary", updated_at=datetime.now(UTC)),
         ),
     )
-    model = RecordingModel(id="recording-model", provider="fake")
-    agent = _agent(
-        model=model,
-        db=storage,
-        num_history_runs=1,
-    )
+    report = File(content=b"%PDF-1.7 report", mime_type="application/pdf", filename="report.pdf")
 
-    response = await agent.arun("Current prompt", session_id="session-1")
+    _, request = await _reply_with(report, provider, config, runtime_paths, prompt="Summarize the report.")
 
-    assert response.content == "ok"
-    assert [message.role for message in model.seen_messages[:2]] == ["user", "assistant"]
-    assert "stored summary" not in str(model.seen_messages)
-    assert [message.content for message in model.seen_messages[:2]] == [
-        "run-2 question",
-        "run-2 answer",
-    ]
-    assert [message.from_history for message in model.seen_messages[:2]] == [True, True]
-    assert model.seen_messages[-1].role == "user"
-    assert model.seen_messages[-1].content == "Current prompt"
-
-    persisted = get_agent_session(storage, "session-1")
-    assert persisted is not None
-    latest_run = persisted.runs[-1]
-    assert isinstance(latest_run, RunOutput)
-    assert [message.content for message in latest_run.messages or []] == [
-        "Current prompt",
-        "ok",
-    ]
-    assert all(message.from_history is False for message in latest_run.messages or [])
-    assert latest_run.additional_input in (None, [])
+    replayed = [str(message.content).split()[0] for message in _after_prompt(request.messages)[:-1]]
+    assert "run-7" in replayed
+    assert "run-0" not in replayed
+    assert provider.model.request_tokens(request) <= 12_000 - 500
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("errored_run", [False, True])
+async def test_a_first_reply_in_a_long_thread_trims_the_thread_to_fit_its_attachments(
+    tmp_path: Path,
+    provider: _Provider,
+    *,
+    errored_run: bool,
+) -> None:
+    """A reply with no history to replay replays the thread instead, as much of it as leaves room for the attachments.
+
+    A scope whose only stored run errored has a session but nothing to replay either.
+    """
+    config, runtime_paths = _uncompacted_config(tmp_path, 12_000)
+    if errored_run:
+        storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+        failed = replace(_completed_run("run-0"), status=RunStatus.error)
+        seed_session(storage, _session("fresh", runs=[failed]))
+
+    _, request = await _reply_with(
+        _ARCHIVE,
+        provider,
+        config,
+        runtime_paths,
+        prompt="Read the archive.",
+        session_id="fresh",
+        thread=_notes(10, 3_000),
+    )
+
+    sent = render_prepared_messages_text(request.messages)
+    assert "note-9" in sent
+    assert "note-0" not in sent
+    assert provider.model.request_tokens(request) <= 12_000 - 500
+
+
+@pytest.mark.asyncio
+async def test_a_first_reply_whose_attachment_cannot_fit_keeps_its_thread(tmp_path: Path, provider: _Provider) -> None:
+    """An attachment estimated past the limit on its own leaves the thread fallback as it was without it."""
+    config, runtime_paths = _uncompacted_config(tmp_path, 12_000)
+    # Three pages count 15,000 tokens, over the 11,500-token limit.
+    report = File(content=blank_pdf(3), mime_type="application/pdf", filename="report.pdf")
+
+    _, request = await _reply_with(
+        report,
+        provider,
+        config,
+        runtime_paths,
+        prompt="Read the report.",
+        session_id="fresh",
+        thread=_notes(5, 400),
+    )
+
+    sent = render_prepared_messages_text(request.messages)
+    assert all(f"note-{index}" in sent for index in range(5))
+
+
+@pytest.mark.asyncio
+async def test_attachments_that_fit_only_without_the_unseen_thread_fail_no_reply(
+    tmp_path: Path,
+    provider: _Provider,
+) -> None:
+    """The thread messages a stored scope has not seen are part of the turn, which no replay trim shortens."""
+    config, runtime_paths = _uncompacted_config(tmp_path, 14_500)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session("session-1", runs=[_completed_run("run-1")])
+    seed_session(storage, session)
+    seed_summary(storage, session, _SCOPE, "stored summary")
+    report = File(content=blank_pdf(2), mime_type="application/pdf", filename="report.pdf")
+
+    # About 5,000 tokens of thread the scope has not seen, which with the report's 10,000 exceed the 14,000-token limit
+    # that the report and the rest of the turn fit.
+    text, request = await _reply_with(
+        report,
+        provider,
+        config,
+        runtime_paths,
+        prompt="Read the report.",
+        thread=_notes(5, 4_000),
+    )
+
+    assert text == "ok"
+    assert all(f"note-{index}" in render_prepared_messages_text(request.messages) for index in range(5))
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("provider")
+async def test_without_a_context_window_the_prepared_size_holds_the_attachments(tmp_path: Path) -> None:
+    config, runtime_paths = _make_config(tmp_path, context_window=None)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    seed_session(storage, _session("session-1", runs=[_completed_run("run-1")]))
+
+    with _no_memory():
+        sizes = [
+            (
+                await prepare_agent_and_prompt_for_test(
+                    make_turn_context("test_agent", session_id="session-1"),
+                    prompt="Read this.",
+                    runtime_paths=runtime_paths,
+                    config=config,
+                    scope_context=_scope_context(config, runtime_paths),
+                    media=MediaInputs(files=files),
+                )
+            ).prepared_history.prepared_context_tokens
+            for files in ((_ARCHIVE,), ())
+        ]
+
+    assert sizes[0] - sizes[1] == MEDIA_ALLOWANCE_TOKENS
+
+
+@pytest.mark.asyncio
+async def test_a_reply_compacts_before_its_first_request_to_make_room_for_its_attachment(
+    tmp_path: Path,
+    provider: _Provider,
+) -> None:
+    """History under the trigger on its own but over it beside the attachment compacts before the reply is sent."""
+    config, runtime_paths = _make_config(
+        tmp_path,
+        defaults_compaction=CompactionConfig(reserve_tokens=500),
+        context_window=12_000,
+    )
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    # Six runs of about 750 tokens each, under the 9,600-token trigger alone and over it beside a 5,000-token file.
+    runs = [
+        _completed_run(
+            f"run-{index}",
+            messages=[
+                Message(role="user", content=f"run-{index} " + "q" * 3_000),
+                Message(role="assistant", content=f"run-{index} answer"),
+            ],
+        )
+        for index in range(6)
+    ]
+    seed_session(storage, _session("session-1", runs=runs))
+
+    with patch("mindroom.history.compaction.generate_compaction_summary", new=AsyncMock(return_value="merged summary")):
+        _, request = await _reply_with(_ARCHIVE, provider, config, runtime_paths, prompt="Read the archive.")
+
+    assert any("merged summary" in str(message.content) for message in request.messages)
+
+
+@pytest.mark.asyncio
+async def test_attachments_estimated_past_the_limit_leave_the_summarized_history_to_the_provider(
+    tmp_path: Path,
+    provider: _Provider,
+) -> None:
+    """Attachments that fit the limit only without the summary fail no reply: it replays as without them."""
+    config, runtime_paths = _uncompacted_config(tmp_path, 12_000)
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = _session("session-1", runs=[_completed_run("run-1")])
+    seed_session(storage, session)
+    # About 5,000 tokens, which the limit holds beside the turn but not beside the turn and the report's 10,000 too.
+    seed_summary(storage, session, _SCOPE, "stored summary " * 1_300)
+    report = File(content=blank_pdf(2), mime_type="application/pdf", filename="report.pdf")
+
+    text, request = await _reply_with(report, provider, config, runtime_paths, prompt="Summarize the report.")
+
+    assert text == "ok"
+    history = _after_prompt(request.messages)
+    assert is_compaction_summary(history[0])
+    assert [message.content for message in history[1:3]] == ["run-1 question", "run-1 answer"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("provider")
 async def test_prepare_agent_and_prompt_reads_seen_ids_off_the_event_loop(tmp_path: Path) -> None:
-    """Seen ids include an archive query, so both unseen-context passes read them in a worker thread."""
+    """Seen ids include a summary-row query, so both unseen-context passes read them in a worker thread."""
     config, runtime_paths = _make_config(tmp_path, num_history_runs=1)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
     seed_session(storage, _session("session-1", runs=[_completed_run("run-1")]))
-    live_agent = _agent(model=RecordingModel(id="recording-model", provider="fake"), db=storage, num_history_runs=1)
     loop_thread = threading.get_ident()
     reading_threads: list[int] = []
 
@@ -762,217 +866,391 @@ async def test_prepare_agent_and_prompt_reads_seen_ids_off_the_event_loop(tmp_pa
         reading_threads.append(threading.get_ident())
         return read_scope_seen_event_ids(*args)  # type: ignore[arg-type]
 
-    with open_scope_session_context(
-        agent=live_agent,
-        agent_name="test_agent",
-        session_id="session-1",
-        runtime_paths=runtime_paths,
-        config=config,
-        execution_identity=None,
-    ) as scope_context:
-        assert scope_context is not None
-        with (
-            patch("mindroom.ai.create_agent", return_value=live_agent),
-            patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
-            patch("mindroom.execution_preparation.read_scope_seen_event_ids", new=recording_read),
-        ):
-            await _prepare_agent_and_prompt(
-                make_turn_context("test_agent", reply_to_event_id="event-2"),
-                prompt="Current prompt",
-                runtime_paths=runtime_paths,
-                config=config,
-                scope_context=scope_context,
-                thread_history=[
-                    make_visible_message(event_id="event-1", sender="alice", body="Earlier message"),
-                    make_visible_message(event_id="event-2", sender="alice", body="Current message body"),
-                ],
-            )
+    scope_context = _scope_context(config, runtime_paths)
+    with _no_memory(), patch("mindroom.execution_preparation.read_scope_seen_event_ids", new=recording_read):
+        await prepare_agent_and_prompt_for_test(
+            make_turn_context("test_agent", reply_to_event_id="event-2"),
+            prompt="Current prompt",
+            runtime_paths=runtime_paths,
+            config=config,
+            scope_context=scope_context,
+            thread_history=[
+                make_visible_message(event_id="event-1", sender="alice", body="Earlier message"),
+                make_visible_message(event_id="event-2", sender="alice", body="Current message body"),
+            ],
+        )
 
     assert len(reading_threads) == 2
     assert loop_thread not in reading_threads
 
 
 @pytest.mark.asyncio
-async def test_prepare_agent_and_prompt_uses_native_history_with_unseen_thread_context(tmp_path: Path) -> None:
+async def test_prepare_agent_and_prompt_uses_native_history_with_unseen_thread_context(
+    tmp_path: Path,
+    provider: _Provider,
+) -> None:
     config, runtime_paths = _make_config(tmp_path, num_history_runs=1)
     storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
-    session = _session(
-        "session-1",
-        runs=[_completed_run("run-1"), _completed_run("run-2")],
-        summary=SessionSummary(summary="stored summary", updated_at=datetime.now(UTC)),
-    )
-    update_scope_seen_event_ids(session, HistoryScope(kind="agent", scope_id="test_agent"), ["event-1"])
+    reading_run = _completed_run("run-2")
+    reading_run.metadata = {MATRIX_SEEN_EVENT_IDS_METADATA_KEY: ["event-1"]}
+    session = _session("session-1", runs=[_completed_run("run-1"), reading_run])
     seed_session(storage, session)
+    seed_summary(storage, session, _SCOPE, "stored summary")
 
-    recording_model = RecordingModel(id="recording-model", provider="fake")
-    live_agent = _agent(model=recording_model, db=storage, num_history_runs=1)
+    scope_context = _scope_context(config, runtime_paths)
+    with _no_memory():
+        prepared_run = await prepare_agent_and_prompt_for_test(
+            make_turn_context("test_agent", reply_to_event_id="event-3"),
+            prompt="Current prompt",
+            runtime_paths=runtime_paths,
+            config=config,
+            scope_context=scope_context,
+            thread_history=[
+                make_visible_message(event_id="event-1", sender="alice", body="Already seen"),
+                make_visible_message(event_id="event-2", sender="alice", body="Fresh follow-up"),
+                make_visible_message(event_id="event-3", sender="alice", body="Current message body"),
+            ],
+        )
 
-    with open_scope_session_context(
-        agent=live_agent,
-        agent_name="test_agent",
-        session_id="session-1",
-        runtime_paths=runtime_paths,
-        config=config,
-        execution_identity=None,
-    ) as scope_context:
-        assert scope_context is not None
-        with (
-            patch("mindroom.ai.create_agent", return_value=live_agent),
-            patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(return_value=MemoryPromptParts())),
-        ):
-            prepared_run = await _prepare_agent_and_prompt(
-                make_turn_context("test_agent", reply_to_event_id="event-3"),
-                prompt="Current prompt",
-                runtime_paths=runtime_paths,
-                config=config,
-                scope_context=scope_context,
-                thread_history=[
-                    make_visible_message(event_id="event-1", sender="alice", body="Already seen"),
-                    make_visible_message(event_id="event-2", sender="alice", body="Fresh follow-up"),
-                    make_visible_message(event_id="event-3", sender="alice", body="Current message body"),
-                ],
-            )
-
-    agent = prepared_run.agent
     full_prompt = prepared_run.prompt_text
-    unseen_event_ids = prepared_run.unseen_event_ids
-    prepared = prepared_run.prepared_history
-    assert unseen_event_ids == ["event-2"]
-    assert prepared.replays_persisted_history is True
+    assert prepared_run.unseen_event_ids == ["event-2"]
+    assert prepared_run.prepared_history.replays_persisted_history is True
     assert "Fresh follow-up" in full_prompt
     assert "Already seen" not in full_prompt
     assert "stored summary" not in full_prompt
     assert "<history_context>" not in full_prompt
 
-    response = await agent.arun(prepared_run.run_input, session_id="session-1")
-
-    assert response.content == "ok"
-    assert [message.role for message in recording_model.seen_messages[:2]] == ["user", "assistant"]
-    assert "stored summary" not in str(recording_model.seen_messages)
-    assert [message.content for message in recording_model.seen_messages[:2]] == [
-        "run-2 question",
-        "run-2 answer",
+    events = [
+        event
+        async for event in run_agent(
+            prepared_run.spec,
+            prepared_run.run_input(MediaInputs()),
+            ctx=RunContext(run_id="run-3", session=UnstoredSession("session-1")),
+            persist=None,
+            request_template=EMPTY_REQUEST,
+        )
     ]
 
-    unseen_user_message = recording_model.seen_messages[-2]
-    assert unseen_user_message.role == "user"
-    assert unseen_user_message.content == render_msg_tag(
-        sender="alice",
-        body="Fresh follow-up",
-        event_id="event-2",
+    finished = events[-1]
+    assert isinstance(finished, RunFinished)
+    assert finished.record.content == "ok"
+    [request] = provider.model.requests
+    seen = _after_prompt(request.messages)
+    assert is_compaction_summary(seen[0])
+    assert "stored summary" in str(seen[0].content)
+    assert [(message.role, message.content) for message in seen[1:3]] == [
+        ("user", "run-2 question"),
+        ("assistant", "run-2 answer"),
+    ]
+    assert (seen[-2].role, seen[-2].content) == (
+        "user",
+        render_msg_tag(sender="alice", body="Fresh follow-up", event_id="event-2"),
     )
-
-    final_user_message = recording_model.seen_messages[-1]
-    assert final_user_message.role == "user"
-    assert final_user_message.content == "Current prompt"
+    assert (seen[-1].role, seen[-1].content) == ("user", "Current prompt")
 
 
 @pytest.mark.asyncio
-async def test_prepare_agent_and_prompt_keeps_transient_memory_out_of_replay_and_compaction(
+async def test_memory_md_reloads_in_the_request_that_carries_a_compaction(
     tmp_path: Path,
+    provider: _Provider,
 ) -> None:
-    config, runtime_paths = _make_config(tmp_path, num_history_runs=10)
-    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
-    recording_model = RecordingModel(id="recording-model", provider="fake")
-    recorded_requests: list[list[dict[str, object]]] = []
+    """Added memory waits for a request whose history changes anyway, so the cached system prompt survives."""
+    config, runtime_paths = _make_config(tmp_path)
+    config.memory.backend = "file"
+    memory_path = agent_workspace_root_path(runtime_paths.storage_root, "test_agent") / "MEMORY.md"
+    memory_path.parent.mkdir(parents=True, exist_ok=True)
+    memory_path.write_text("# Memory\nFact one.\n", encoding="utf-8")
 
-    prompt_parts_by_prompt = {
-        "First prompt": MemoryPromptParts(
-            session_preamble="[File memory entrypoint (agent)]\nStable MEMORY.md",
-            transient_turn_context="turn context one",
-        ),
-        "Second prompt": MemoryPromptParts(
-            session_preamble="[File memory entrypoint (agent)]\nStable MEMORY.md",
-            transient_turn_context="turn context two",
-        ),
-        "Third prompt": MemoryPromptParts(
-            session_preamble="[File memory entrypoint (agent)]\nStable MEMORY.md",
-            transient_turn_context="turn context three",
-        ),
+    async def system_prompt_of_turn(prompt: str) -> str:
+        await ai_response(
+            replace(make_turn_context("test_agent", session_id="session-1"), prompt=prompt),
+            runtime_paths,
+            config,
+        )
+        return system_text(provider.model.requests[-1].messages)
+
+    assert "Fact one." in await system_prompt_of_turn("First prompt")
+    with memory_path.open("a", encoding="utf-8") as memory_file:
+        memory_file.write("Fact two.\n")
+    assert "Fact two." not in await system_prompt_of_turn("Second prompt")
+
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    session = storage.load_session("session-1")
+    assert session is not None
+    storage.update_metadata(session, with_force_compaction)
+    # The compaction model builds as the agent's provider; its summary is the patched one.
+    with patch("mindroom.history.compaction.generate_compaction_summary", new=AsyncMock(return_value="merged summary")):
+        compacted_turn = await system_prompt_of_turn("Third prompt")
+    assert "Fact two." in compacted_turn
+    assert any("merged summary" in str(message.content) for message in provider.model.requests[-1].messages)
+
+    with memory_path.open("a", encoding="utf-8") as memory_file:
+        memory_file.write("Fact three.\n")
+    assert await system_prompt_of_turn("Fourth prompt") == compacted_turn
+
+
+@pytest.mark.asyncio
+async def test_a_new_skill_file_leaves_the_system_prompt_unchanged(tmp_path: Path, provider: _Provider) -> None:
+    """The skill catalog names no reference or script file, so adding one rewrites no conversation's prompt cache."""
+    config, runtime_paths = _make_config(tmp_path)
+    skill = agent_workspace_root_path(runtime_paths.storage_root, "test_agent") / "skills" / "deploying"
+    (skill / "references").mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: deploying\ndescription: Use when deploying\n---\n\nSteps.\n", "utf-8")
+
+    async def system_prompt_of_turn(prompt: str) -> str:
+        with _no_memory():
+            await ai_response(
+                replace(make_turn_context("test_agent", session_id="session-1"), prompt=prompt),
+                runtime_paths,
+                config,
+            )
+        return system_text(provider.model.requests[-1].messages)
+
+    first = await system_prompt_of_turn("First prompt")
+    assert "<name>deploying</name>" in first
+    (skill / "references" / "rollback.md").write_text("How to roll back.\n", encoding="utf-8")
+    (skill / "scripts").mkdir()
+    (skill / "scripts" / "deploy.sh").write_text("echo deploy\n", encoding="utf-8")
+    assert await system_prompt_of_turn("Second prompt") == first
+
+
+@dataclass
+class _MemoryConversation:
+    """One conversation of the test agent with file memory, whose MEMORY.md the system prompt inlines."""
+
+    config: Config
+    runtime_paths: RuntimePaths
+    provider: _Provider
+    memory_path: Path
+
+    @classmethod
+    def start(cls, tmp_path: Path, provider: _Provider) -> _MemoryConversation:
+        config, runtime_paths = _make_config(tmp_path)
+        config.memory.backend = "file"
+        memory_path = agent_workspace_root_path(runtime_paths.storage_root, "test_agent") / "MEMORY.md"
+        memory_path.parent.mkdir(parents=True, exist_ok=True)
+        memory_path.write_text("# Memory\nFact one.\n", encoding="utf-8")
+        return cls(config, runtime_paths, provider, memory_path)
+
+    @property
+    def snapshot(self) -> Path:
+        [snapshot] = self.runtime_paths.storage_root.rglob("memory_entrypoint_snapshots/*.json")
+        return snapshot
+
+    async def system_prompt_of_turn(self, prompt: str, **turn: object) -> str:
+        ctx = replace(make_turn_context("test_agent", session_id="session-1"), prompt=prompt, **turn)
+        await ai_response(ctx, self.runtime_paths, self.config)
+        return system_text(self.provider.model.requests[-1].messages)
+
+    def add_after_idling(self, fact: str, idle_seconds: float) -> None:
+        """Add ``fact`` to MEMORY.md and move the last request that sent the copy ``idle_seconds`` into the past."""
+        with self.memory_path.open("a", encoding="utf-8") as memory_file:
+            memory_file.write(f"{fact}\n")
+        os.utime(self.snapshot, (time.time() - idle_seconds,) * 2)
+
+
+@pytest.mark.asyncio
+async def test_memory_md_stays_while_the_cache_may_be_warm_and_reloads_once_it_is_gone(
+    tmp_path: Path,
+    provider: _Provider,
+) -> None:
+    """A conversation idle past the cache lifetime rewrites its cache anyway, so MEMORY.md loads again.
+
+    The copy and the time of the last request that sent it are a file in the agent's state root, so a restart
+    changes neither, and each such request restarts the idle time.
+    """
+    conversation = _MemoryConversation.start(tmp_path, provider)
+    first = await conversation.system_prompt_of_turn("First prompt")
+    assert "Fact one." in first
+    assert conversation.snapshot.stat().st_mtime == pytest.approx(time.time(), abs=60)
+
+    conversation.add_after_idling("Fact two.", 3000)
+    assert await conversation.system_prompt_of_turn("Second prompt") == first
+    assert conversation.snapshot.stat().st_mtime == pytest.approx(time.time(), abs=60)
+
+    conversation.add_after_idling("Fact three.", 4000)
+    assert "Fact three." in await conversation.system_prompt_of_turn("Third prompt")
+
+
+@pytest.mark.asyncio
+async def test_a_turn_that_sends_another_preamble_leaves_the_copy_s_idle_time_alone(
+    tmp_path: Path,
+    provider: _Provider,
+) -> None:
+    """A scheduled turn with its own history budget sends the current MEMORY.md, so it warms no cache of the copy.
+
+    Had its request restarted the idle time, the next reply would keep a copy whose cache is long gone.
+    """
+    conversation = _MemoryConversation.start(tmp_path, provider)
+    first = await conversation.system_prompt_of_turn("First prompt")
+
+    conversation.add_after_idling("Fact two.", 4000)
+    idle_since = conversation.snapshot.stat().st_mtime
+    scheduled = await conversation.system_prompt_of_turn(
+        "Scheduled prompt",
+        scheduled_history_budget=ScheduledHistoryBudget(limit=0, source_event_id="$schedule"),
+    )
+    assert "Fact two." in scheduled
+    assert conversation.snapshot.stat().st_mtime == idle_since
+
+    after = await conversation.system_prompt_of_turn("Second prompt")
+    assert "Fact two." in after
+    assert after != first
+
+
+@pytest.mark.asyncio
+async def test_two_requesters_private_instances_keep_their_memory_copies_apart(
+    tmp_path: Path,
+    provider: _Provider,
+) -> None:
+    """A private agent keeps each requester's MEMORY.md copy in that requester's state root, though they share a session."""
+    config, runtime_paths = _make_config(tmp_path)
+    config.agents["test_agent"].private = AgentPrivateConfig(per="user", root="data")
+    config = bind_runtime_paths(config, runtime_paths)
+    config.memory.backend = "file"
+
+    async def system_prompt_of(requester: str, fact: str) -> str:
+        identity = ToolExecutionIdentity(
+            channel="matrix",
+            agent_name="test_agent",
+            requester_id=requester,
+            room_id="!room:localhost",
+            thread_id="$thread",
+            resolved_thread_id="$thread",
+            session_id="session-1",
+        )
+        runtime = resolve_agent_runtime("test_agent", config, runtime_paths, execution_identity=identity, create=True)
+        assert runtime.workspace.file_memory_path is not None
+        (runtime.workspace.file_memory_path / "MEMORY.md").write_text(f"# Memory\n{fact}\n", encoding="utf-8")
+        ctx = make_turn_context("test_agent", session_id="session-1", requester_id=requester)
+        await ai_response(replace(ctx, prompt="Hello", execution_identity=identity), runtime_paths, config)
+        return system_text(provider.model.requests[-1].messages)
+
+    assert "Alice is allergic to peanuts." in await system_prompt_of(
+        "@alice:localhost",
+        "Alice is allergic to peanuts.",
+    )
+    bob = await system_prompt_of("@bob:localhost", "Bob collects stamps.")
+    assert "Bob collects stamps." in bob
+    assert "Alice" not in bob
+    alice_copy, bob_copy = sorted(
+        runtime_paths.storage_root.rglob("memory_entrypoint_snapshots/*.json"),
+        key=lambda path: "Bob" in path.read_text(encoding="utf-8"),
+    )
+    assert alice_copy.parent != bob_copy.parent
+    assert "Alice" in alice_copy.read_text(encoding="utf-8")
+    assert "Alice" not in bob_copy.read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_an_agent_that_keeps_no_memory_copy_stamps_nothing(tmp_path: Path, provider: _Provider) -> None:
+    """Only a run whose requests send a kept MEMORY.md copy touches a copy file before its requests."""
+    with patch("mindroom.loop_hooks.stamp_entrypoint_snapshot") as stamp:
+        await _three_turns(tmp_path, provider)
+
+    assert len(provider.model.requests) == 3
+    stamp.assert_not_called()
+
+
+_SESSION_PREAMBLE = "[File memory entrypoint (agent)]\nStable MEMORY.md"
+
+
+async def _three_turns(
+    tmp_path: Path,
+    provider: _Provider,
+    *,
+    model_prompts: dict[str, str] | None = None,
+    timestamps: dict[str, int] | None = None,
+) -> tuple[list[list[dict[str, object]]], Config, RuntimePaths]:
+    """Reply to three prompts in one conversation and return each turn's request without its system message."""
+    config, runtime_paths = _make_config(tmp_path, num_history_runs=10)
+    config.timezone = "America/Los_Angeles"
+    transient_by_prompt = {
+        "First prompt": "turn context one",
+        "Second prompt": "turn context two",
+        "Third prompt": "turn context three",
     }
 
-    async def fake_build_memory_prompt_parts(
-        prompt: str,
-        *_args: object,
-        **_kwargs: object,
-    ) -> MemoryPromptParts:
-        return prompt_parts_by_prompt[prompt]
+    async def memory_for(prompt: str, *_args: object, **_kwargs: object) -> MemoryPromptParts:
+        return MemoryPromptParts(session_preamble=_SESSION_PREAMBLE, transient_turn_context=transient_by_prompt[prompt])
 
-    def create_agent_stub(*_args: object, **_kwargs: object) -> Agent:
-        return _agent(
-            model=recording_model,
-            db=storage,
-            num_history_runs=10,
-        )
-
-    with (
-        patch(
-            "mindroom.ai.create_agent",
-            side_effect=create_agent_stub,
-        ),
-        patch(
-            "mindroom.ai.build_memory_prompt_parts",
-            new=AsyncMock(side_effect=fake_build_memory_prompt_parts),
-        ),
-    ):
-        for prompt in ("First prompt", "Second prompt", "Third prompt"):
-            prepared_run = await _prepare_agent_and_prompt(
-                make_turn_context("test_agent", session_id="session-1"),
-                prompt=prompt,
-                runtime_paths=runtime_paths,
-                config=config,
+    requests: list[list[dict[str, object]]] = []
+    with patch("mindroom.ai.build_memory_prompt_parts", new=AsyncMock(side_effect=memory_for)):
+        for prompt in transient_by_prompt:
+            await ai_response(
+                replace(
+                    make_turn_context(
+                        "test_agent",
+                        session_id="session-1",
+                        requester_id="@alice:localhost" if timestamps is not None else None,
+                    ),
+                    prompt=prompt,
+                    model_prompt=(model_prompts or {}).get(prompt),
+                    current_timestamp_ms=(timestamps or {}).get(prompt),
+                ),
+                runtime_paths,
+                config,
             )
-            await prepared_run.agent.arun(prepared_run.run_input, session_id="session-1")
-            recorded_requests.append(
+            request = provider.model.requests[-1]
+            assert _SESSION_PREAMBLE in system_text(request.messages)
+            requests.append(
                 [
                     {
                         "role": message.role,
                         "content": str(message.content),
                         "add_to_agent_memory": message.add_to_agent_memory,
                     }
-                    for message in recording_model.seen_messages
+                    for message in _after_prompt(request.messages)
                 ],
             )
+    return requests, config, runtime_paths
 
-    second_request = recorded_requests[1]
-    third_request = recorded_requests[2]
 
-    assert stable_serialize(second_request[:-2]) == stable_serialize(third_request[: len(second_request) - 2])
-    session_preamble = "[File memory entrypoint (agent)]\nStable MEMORY.md"
-    assert [message["content"] for message in recorded_requests[0]] == [
-        session_preamble,
-        render_transient_context(("turn context one",)),
-        "First prompt",
-    ]
-    assert [message["content"] for message in second_request] == [
-        session_preamble,
-        "First prompt",
-        "ok",
-        render_transient_context(("turn context two",)),
-        "Second prompt",
-    ]
+@pytest.mark.asyncio
+async def test_each_turn_replays_its_previous_request_whole_and_keeps_turn_context_out_of_compaction(
+    tmp_path: Path,
+    provider: _Provider,
+) -> None:
+    """Every request extends the previous turn's whole request, turn context included, as append-only caches need."""
+    requests, config, runtime_paths = await _three_turns(tmp_path, provider)
+    first_request, second_request, third_request = requests
+
+    assert stable_serialize(first_request) == stable_serialize(second_request[: len(first_request)])
+    assert stable_serialize(second_request) == stable_serialize(third_request[: len(second_request)])
     assert [message["content"] for message in third_request] == [
-        session_preamble,
         "First prompt",
+        render_transient_context(("turn context one",)),
         "ok",
         "Second prompt",
+        render_transient_context(("turn context two",)),
         "ok",
-        render_transient_context(("turn context three",)),
         "Third prompt",
+        render_transient_context(("turn context three",)),
     ]
-    assert third_request[-2]["add_to_agent_memory"] is False
-    assert third_request[-1]["add_to_agent_memory"] is True
+    assert [message["add_to_agent_memory"] for message in third_request[-2:]] == [True, False]
 
-    persisted = get_agent_session(storage, "session-1")
+    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
+    persisted = storage.load_session("session-1")
     assert persisted is not None
-    persisted_contents = [str(message.content) for run in persisted.runs or [] for message in run.messages or []]
-    assert persisted_contents == ["First prompt", "ok", "Second prompt", "ok", "Third prompt", "ok"]
+    persisted_contents = [str(message.content) for run in persisted.runs for message in run.messages]
+    assert persisted_contents == [
+        "First prompt",
+        render_transient_context(("turn context one",)),
+        "ok",
+        "Second prompt",
+        render_transient_context(("turn context two",)),
+        "ok",
+        "Third prompt",
+        render_transient_context(("turn context three",)),
+        "ok",
+    ]
 
     summary_input, included_runs = build_summary_input(
         previous_summary=None,
-        compacted_runs=persisted.runs or [],
+        compacted_runs=persisted.runs,
         max_input_tokens=10_000,
         history_settings=_ALL_HISTORY_SETTINGS,
+        token_estimator=quarter_tokens,
     )
     assert included_runs == persisted.runs
     assert "turn context" not in summary_input
@@ -983,99 +1261,32 @@ async def test_prepare_agent_and_prompt_keeps_transient_memory_out_of_replay_and
 @pytest.mark.asyncio
 async def test_prepare_agent_and_prompt_timestamps_current_turn_without_duplication(
     tmp_path: Path,
+    provider: _Provider,
 ) -> None:
-    config, runtime_paths = _make_config(tmp_path, num_history_runs=10)
-    config.timezone = "America/Los_Angeles"
-    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
-    recording_model = RecordingModel(id="recording-model", provider="fake")
-    recorded_requests: list[list[dict[str, object]]] = []
+    requests, _config, _runtime = await _three_turns(
+        tmp_path,
+        provider,
+        model_prompts={
+            prompt: f"{prompt}\n\nAvailable attachment IDs: att_{index}. Use tool calls to inspect or process them."
+            for index, prompt in enumerate(("First prompt", "Second prompt", "Third prompt"), start=1)
+        },
+        timestamps={
+            "First prompt": 1_774_019_700_000,
+            "Second prompt": 1_774_019_760_000,
+            "Third prompt": 1_774_019_820_000,
+        },
+    )
+    second_request, third_request = requests[1], requests[2]
 
-    prompt_parts_by_prompt = {
-        "First prompt": MemoryPromptParts(
-            session_preamble="[File memory entrypoint (agent)]\nStable MEMORY.md",
-            transient_turn_context="turn context one",
-        ),
-        "Second prompt": MemoryPromptParts(
-            session_preamble="[File memory entrypoint (agent)]\nStable MEMORY.md",
-            transient_turn_context="turn context two",
-        ),
-        "Third prompt": MemoryPromptParts(
-            session_preamble="[File memory entrypoint (agent)]\nStable MEMORY.md",
-            transient_turn_context="turn context three",
-        ),
-    }
-    model_prompt_by_prompt = {
-        "First prompt": "First prompt\n\nAvailable attachment IDs: att_1. Use tool calls to inspect or process them.",
-        "Second prompt": "Second prompt\n\nAvailable attachment IDs: att_2. Use tool calls to inspect or process them.",
-        "Third prompt": "Third prompt\n\nAvailable attachment IDs: att_3. Use tool calls to inspect or process them.",
-    }
-    timestamp_by_prompt = {
-        "First prompt": 1_774_019_700_000,
-        "Second prompt": 1_774_019_760_000,
-        "Third prompt": 1_774_019_820_000,
-    }
-
-    async def fake_build_memory_prompt_parts(
-        prompt: str,
-        *_args: object,
-        **_kwargs: object,
-    ) -> MemoryPromptParts:
-        return prompt_parts_by_prompt[prompt]
-
-    def create_agent_stub(*_args: object, **_kwargs: object) -> Agent:
-        return _agent(
-            model=recording_model,
-            db=storage,
-            num_history_runs=10,
-        )
-
-    with (
-        patch(
-            "mindroom.ai.create_agent",
-            side_effect=create_agent_stub,
-        ),
-        patch(
-            "mindroom.ai.build_memory_prompt_parts",
-            new=AsyncMock(side_effect=fake_build_memory_prompt_parts),
-        ),
-    ):
-        for prompt in ("First prompt", "Second prompt", "Third prompt"):
-            prepared_run = await _prepare_agent_and_prompt(
-                make_turn_context(
-                    "test_agent",
-                    session_id="session-1",
-                    requester_id="@alice:localhost",
-                ),
-                prompt=prompt,
-                runtime_paths=runtime_paths,
-                config=config,
-                model_prompt=model_prompt_by_prompt[prompt],
-                current_timestamp_ms=timestamp_by_prompt[prompt],
-            )
-            await prepared_run.agent.arun(prepared_run.run_input, session_id="session-1")
-            recorded_requests.append(
-                [
-                    {
-                        "role": message.role,
-                        "content": str(message.content),
-                        "add_to_agent_memory": message.add_to_agent_memory,
-                    }
-                    for message in recording_model.seen_messages
-                ],
-            )
-
-    second_request = recorded_requests[1]
-    third_request = recorded_requests[2]
-
-    assert stable_serialize(second_request[:-2]) == stable_serialize(third_request[: len(second_request) - 2])
-    assert third_request[-2] == {
+    assert stable_serialize(second_request) == stable_serialize(third_request[: len(second_request)])
+    assert third_request[-1] == {
         "role": "user",
         "content": render_transient_context(("turn context three",)),
         "add_to_agent_memory": False,
     }
-    assert third_request[-1]["content"] == (
+    assert third_request[-2]["content"] == (
         'Current message:\n<msg from="@alice:localhost" ts="2026-03-20 08:17 PDT"><![CDATA['
         "Third prompt\n\n"
         "Available attachment IDs: att_3. Use tool calls to inspect or process them.]]></msg>"
     )
-    assert third_request[-1]["add_to_agent_memory"] is True
+    assert third_request[-2]["add_to_agent_memory"] is True

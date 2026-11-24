@@ -11,30 +11,26 @@ import pytest
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
-from mindroom.handled_turns import TurnRecord
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.turn_record import TurnRecord
 from tests.access_schema_support import with_current_room_member_access
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
     bind_runtime_paths,
     drain_coalescing,
+    install_edit_regeneration_mock,
     install_runtime_journal_support,
     make_matrix_client_mock,
-    replace_edit_regenerator_deps,
     runtime_paths_for,
     test_runtime_paths,
 )
 from tests.response_attempt_helpers import install_direct_response_admission
+from tests.response_runner_helpers import streamed_answer
 
 if TYPE_CHECKING:
     from pathlib import Path
-
-
-def _delivery_resolution(response_event_id: str | None) -> str | None:
-    """Build one test-side response result for edit-regeneration tests."""
-    return response_event_id
 
 
 @pytest.mark.asyncio
@@ -61,25 +57,19 @@ async def test_agent_regenerates_on_multiple_edits(tmp_path: Path) -> None:
         ),
         test_runtime_paths(tmp_path),
     )
+    config.defaults.enable_streaming = False
 
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         rooms=["!test:localhost"],
-        enable_streaming=False,
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
     install_direct_response_admission(bot)
 
-    # Mock the orchestrator and client
-    mock_orchestrator = MagicMock()
-    mock_orchestrator.current_config = config
-    bot.orchestrator = mock_orchestrator
-
     bot.client = make_matrix_client_mock(user_id="@mindroom_test:localhost")
     install_runtime_journal_support(bot)
-    bot._turn_controller.deps.resolver.dispatch_thread_snapshot = AsyncMock(
+    bot._turn_ingress.deps.resolver._dispatch_thread_snapshot = AsyncMock(
         return_value=thread_history_result([], is_full_history=False),
     )
     bot._conversation_resolver.fetch_thread_history = AsyncMock(
@@ -121,7 +111,10 @@ async def test_agent_regenerates_on_multiple_edits(tmp_path: Path) -> None:
     original_event.source = original_event.__dict__["source"]
 
     # Process original message with mocked AI response
-    with patch("mindroom.response_runner.ai_response", AsyncMock(return_value="Original: 4")):
+    with patch(
+        "mindroom.response_runner.stream_agent_response",
+        new=streamed_answer(AsyncMock(return_value="Original: 4")),
+    ):
         await bot._on_message(room, original_event)
         await drain_coalescing(bot)
 
@@ -129,6 +122,7 @@ async def test_agent_regenerates_on_multiple_edits(tmp_path: Path) -> None:
     assert bot.client.room_send.call_count == 2  # thinking + final
     await bot._turn_store.record_turn(
         TurnRecord.create(["$original123"], response_event_id="$response123"),
+        room_id=room.room_id,
     )
 
     # Reset mock
@@ -161,8 +155,8 @@ async def test_agent_regenerates_on_multiple_edits(tmp_path: Path) -> None:
     edit1_event.source = edit1_event.__dict__["source"]
 
     # Process first edit and verify regeneration happens through the shared response helper.
-    mock_generate_response = AsyncMock(return_value=_delivery_resolution("$response123"))
-    replace_edit_regenerator_deps(bot, generate_response=mock_generate_response)
+    mock_generate_response = AsyncMock(return_value="$response123")
+    install_edit_regeneration_mock(bot, mock_generate_response)
     await bot._on_message(room, edit1_event)
     await drain_coalescing(bot)
 
@@ -198,8 +192,8 @@ async def test_agent_regenerates_on_multiple_edits(tmp_path: Path) -> None:
     edit2_event.source = edit2_event.__dict__["source"]
 
     # Process second edit and verify regeneration happens again.
-    mock_generate_response = AsyncMock(return_value=_delivery_resolution("$response123"))
-    replace_edit_regenerator_deps(bot, generate_response=mock_generate_response)
+    mock_generate_response = AsyncMock(return_value="$response123")
+    install_edit_regeneration_mock(bot, mock_generate_response)
     await bot._on_message(room, edit2_event)
     await drain_coalescing(bot)
 
@@ -235,8 +229,8 @@ async def test_agent_regenerates_on_multiple_edits(tmp_path: Path) -> None:
     bot.client.room_send.reset_mock()
 
     # Process third edit and verify regeneration still happens.
-    mock_generate_response = AsyncMock(return_value=_delivery_resolution("$response123"))
-    replace_edit_regenerator_deps(bot, generate_response=mock_generate_response)
+    mock_generate_response = AsyncMock(return_value="$response123")
+    install_edit_regeneration_mock(bot, mock_generate_response)
     await bot._on_message(room, edit3_event)
     await drain_coalescing(bot)
 

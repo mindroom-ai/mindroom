@@ -3,17 +3,19 @@
 from __future__ import annotations
 
 import base64
+import io
 import json
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
 
-import httpx
+import httpx2
 import nio
 import pytest
 from openai import AsyncOpenAI
 from openai.types.image import Image
 from openai.types.images_response import ImagesResponse
+from rich.console import Console
 
 import mindroom.constants as constants_mod
 from mindroom import avatar_generation as generate_avatars
@@ -258,7 +260,7 @@ def test_has_missing_managed_avatars_ignores_direct_room_ids(
 def test_has_missing_managed_avatars_ignores_full_room_aliases(
     workspace_avatar_dir: Path,
 ) -> None:
-    """External room aliases should not be treated as managed avatar targets."""
+    """A managed room's full alias is not a second managed avatar target."""
     raw_config = {
         "models": {"default": {"provider": "anthropic", "id": "claude-sonnet-5"}},
         "router": {"model": "default"},
@@ -266,14 +268,14 @@ def test_has_missing_managed_avatars_ignores_full_room_aliases(
             "general": {
                 "display_name": "General",
                 "model": "default",
-                "rooms": ["#external:localhost"],
+                "rooms": ["lobby", "#lobby:localhost"],
             },
         },
         "matrix_space": {"enabled": False},
     }
     config = _config_with_runtime_paths(raw_config, workspace_avatar_dir.parent)
     runtime_paths = _runtime_paths(workspace_avatar_dir.parent)
-    for entity_type, entity_name in (("agents", "general"), ("agents", "router")):
+    for entity_type, entity_name in (("agents", "general"), ("agents", "router"), ("rooms", "lobby")):
         avatar_path = workspace_avatar_dir / entity_type / f"{entity_name}.png"
         avatar_path.parent.mkdir(parents=True, exist_ok=True)
         avatar_path.write_bytes(b"avatar")
@@ -328,12 +330,12 @@ async def test_generation_uses_only_openai_for_prompts_and_images(
     """An OpenAI key alone must produce an avatar through both real SDK endpoints."""
     requests: list[tuple[str, dict[str, object]]] = []
 
-    def respond(request: httpx.Request) -> httpx.Response:
+    def respond(request: httpx2.Request) -> httpx2.Response:
         payload = json.loads(request.content)
         requests.append((request.url.path, payload))
         assert request.headers["authorization"] == "Bearer test-openai-key"
         if request.url.path == "/v1/responses":
-            return httpx.Response(
+            return httpx2.Response(
                 200,
                 json={
                     "id": "resp_avatar",
@@ -353,7 +355,7 @@ async def test_generation_uses_only_openai_for_prompts_and_images(
                 },
             )
         assert request.url.path == "/v1/images/generations"
-        return httpx.Response(
+        return httpx2.Response(
             200,
             json={
                 "created": 1,
@@ -364,7 +366,7 @@ async def test_generation_uses_only_openai_for_prompts_and_images(
     client = AsyncOpenAI(
         api_key="test-openai-key",
         base_url="https://api.example.com/v1",
-        http_client=httpx.AsyncClient(transport=httpx.MockTransport(respond)),
+        http_client=httpx2.AsyncClient(transport=httpx2.MockTransport(respond)),
     )
 
     def make_client(*, api_key: str) -> AsyncOpenAI:
@@ -377,18 +379,18 @@ async def test_generation_uses_only_openai_for_prompts_and_images(
     monkeypatch.delenv("GOOGLE_API_KEY_FILE", raising=False)
     try:
         success = await generate_avatars._generate_missing_avatars(
-            generate_avatars.Config(),
+            generate_avatars.Config.model_validate({"agents": {"general": {"display_name": "General"}}}),
             _runtime_paths(workspace_avatar_dir.parent),
-            {("agents", "router")},
+            {("agents", "general")},
         )
         assert success is True
-        assert (workspace_avatar_dir / "agents/router.png").read_bytes() == b"avatar-bytes"
+        assert (workspace_avatar_dir / "agents/general.png").read_bytes() == b"avatar-bytes"
         assert [path for path, _ in requests] == ["/v1/responses", "/v1/images/generations"]
         prompt_request, image_request = [payload for _, payload in requests]
-        assert prompt_request["model"] == "gpt-6-astra"
+        assert prompt_request["model"] == "gpt-6.2-astra"
         assert prompt_request["reasoning"] == {"effort": "low"}
         assert prompt_request["store"] is False
-        assert image_request["model"] == "gpt-image-2.5-sunburst"
+        assert image_request["model"] == "gpt-image-2.6-sunburst"
         assert image_request["prompt"] == f"{AVATAR_CHARACTER_STYLE}, clear compass silhouette"
         assert client.is_closed()
     finally:
@@ -943,11 +945,13 @@ async def test_sync_room_avatars_skips_rooms_without_an_available_avatar(
     monkeypatch: pytest.MonkeyPatch,
     workspace_avatar_dir: Path,
 ) -> None:
-    """A room whose stock avatar cannot be downloaded is counted as skipped, not failed."""
+    """A room without a downloadable stock avatar counts as skipped, not failed; unmanaged room references are not synced."""
     raw_config = {
         "models": {"default": {"provider": "anthropic", "id": "claude-sonnet-5"}},
         "router": {"model": "default"},
-        "agents": {"general": {"display_name": "General", "model": "default", "rooms": ["war_room"]}},
+        "agents": {
+            "general": {"display_name": "General", "model": "default", "rooms": ["war_room", "!external:localhost"]},
+        },
     }
     set_room_avatar_from_file = AsyncMock(return_value=True)
     monkeypatch.setattr(generate_avatars, "room_has_avatar", AsyncMock(return_value=False))
@@ -1240,7 +1244,7 @@ async def test_set_room_avatars_in_matrix_requires_initialized_router_account(
 
     with pytest.raises(
         generate_avatars.AvatarSyncError,
-        match="Router account unavailable for avatar sync",
+        match="MindRoom owner account unavailable for avatar sync",
     ):
         await generate_avatars.set_room_avatars_in_matrix(_runtime_paths(tmp_path))
 
@@ -1256,7 +1260,7 @@ async def test_set_room_avatars_in_matrix_wraps_missing_credentials(
         "create_agent_http_client",
         MagicMock(side_effect=ValueError("Saved access token missing")),
     )
-    with pytest.raises(generate_avatars.AvatarSyncError, match="Router account unavailable for avatar sync"):
+    with pytest.raises(generate_avatars.AvatarSyncError, match="MindRoom owner account unavailable for avatar sync"):
         await generate_avatars.set_room_avatars_in_matrix(_runtime_paths(tmp_path))
 
 
@@ -1318,7 +1322,10 @@ async def test_generate_avatar_raises_after_exhausting_image_attempts(
     )
     target = generate_avatars._AvatarTarget(entity_type="agents", entity_name="general", role="general work")
 
-    with pytest.raises(ValueError, match=f"after {generate_avatars._MAX_IMAGE_ATTEMPTS} attempts"):
+    with pytest.raises(
+        ValueError,
+        match=f"^No image data found for agents/general after {generate_avatars._MAX_IMAGE_ATTEMPTS} attempts$",
+    ):
         await generate_avatars._generate_avatar(
             client,
             target,
@@ -1335,3 +1342,145 @@ async def test_generate_avatar_raises_after_exhausting_image_attempts(
 
     assert not (workspace_avatar_dir / "agents" / "general.png").exists()
     assert client.images.generate.await_count == generate_avatars._MAX_IMAGE_ATTEMPTS
+
+
+def _record_console(monkeypatch: pytest.MonkeyPatch) -> io.StringIO:
+    """Send avatar output to an 80-column console and return the text it prints."""
+    output = io.StringIO()
+    console = Console(file=output, width=80)
+    monkeypatch.setattr(generate_avatars, "_get_console", lambda: console)
+    return output
+
+
+@pytest.mark.asyncio
+async def test_generation_prints_roles_room_names_and_errors_whole(
+    monkeypatch: pytest.MonkeyPatch,
+    workspace_avatar_dir: Path,
+) -> None:
+    """Roles, room names, and errors print as written and whole on one line, though Rich would read markup in them."""
+    output = _record_console(monkeypatch)
+    beta_role = "Ships the [beta] build" + ", with a role that runs past eighty columns" * 2
+    closing_role = "Closes [/x] tags and :fire: alerts" + ", with a role that runs past eighty columns" * 2
+    done_room, retried_room, failing_room = "done[work]", "lab:fire:", "ops[work]"
+    error = "Upstream rejected [/x] :fire:" + ", with an error that runs past eighty columns" * 2
+    config = _config_with_runtime_paths(
+        {
+            "models": {"default": {"provider": "anthropic", "id": "claude-sonnet-5"}},
+            "router": {"model": "default"},
+            "agents": {
+                "beta": {
+                    "display_name": "Beta",
+                    "model": "default",
+                    "role": beta_role,
+                    "rooms": [done_room, retried_room, failing_room],
+                },
+                "closing": {"display_name": "Closing", "model": "default", "role": closing_role},
+            },
+            "matrix_space": {"enabled": False},
+        },
+        workspace_avatar_dir.parent,
+    )
+    done_path = workspace_avatar_dir / "rooms" / f"{done_room}.png"
+    done_path.parent.mkdir(parents=True)
+    done_path.write_bytes(b"existing")
+    image_attempts: dict[str, int] = {}
+
+    async def create_prompt(*, input: str, **_kwargs: object) -> SimpleNamespace:  # noqa: A002
+        return SimpleNamespace(status="completed", output_text=input.splitlines()[0])
+
+    async def generate_image(*, prompt: str, **_kwargs: object) -> ImagesResponse:
+        if failing_room in prompt:
+            raise ValueError(error)
+        image_attempts[prompt] = image_attempts.get(prompt, 0) + 1
+        if retried_room in prompt and image_attempts[prompt] == 1:
+            return _no_image_response()
+        return _image_response(b"avatar")
+
+    client = SimpleNamespace(
+        responses=SimpleNamespace(create=create_prompt),
+        images=SimpleNamespace(generate=generate_image),
+        close=AsyncMock(),
+    )
+    monkeypatch.setattr(generate_avatars, "AsyncOpenAI", lambda **_kwargs: client)
+    monkeypatch.setenv("OPENAI_API_KEY", "test-openai-key")
+    targets = {("agents", "beta"), ("agents", "closing")} | {
+        ("rooms", room) for room in (done_room, retried_room, failing_room)
+    }
+
+    success = await generate_avatars._generate_missing_avatars(
+        config,
+        _runtime_paths(workspace_avatar_dir.parent),
+        targets,
+    )
+
+    assert success is False
+    lines = output.getvalue().splitlines()
+    assert f"✓ Avatar already exists for rooms/{done_room}" in lines
+    assert f"🎨 Generating avatar for rooms/{retried_room}..." in lines
+    assert f"   Role: {beta_role}" in lines
+    assert f"   Role: {closing_role}" in lines
+    assert f"   Role: Collaboration space for {retried_room} activities" in lines
+    assert any(line.startswith("╭") and f" rooms/{retried_room} " in line for line in lines), lines
+    max_attempts = generate_avatars._MAX_IMAGE_ATTEMPTS
+    assert f"⟳ No image returned for rooms/{retried_room} (attempt 1/{max_attempts}); regenerating prompt" in lines
+    assert f"✓ Generated avatar for rooms/{retried_room}" in lines
+    assert f"✗ Failed to generate rooms/{failing_room}: {error}" in lines
+    assert f"✗ Avatar generation failed for: rooms/{failing_room}" in lines
+
+
+@pytest.mark.asyncio
+async def test_sync_prints_room_names_whole(
+    monkeypatch: pytest.MonkeyPatch,
+    workspace_avatar_dir: Path,
+) -> None:
+    """Room names in avatar sync lines print as written, though Rich would read markup or emoji codes in them."""
+    output = _record_console(monkeypatch)
+    kept, bare, new, rejected, missing = "kept[work]", "bare:fire:", "new[work]", "bad[work]:fire:", "gone[work]"
+    raw_config = {
+        "models": {"default": {"provider": "anthropic", "id": "claude-sonnet-5"}},
+        "router": {"model": "default"},
+        "agents": {
+            "general": {
+                "display_name": "General",
+                "model": "default",
+                "rooms": [kept, bare, new, rejected, missing],
+            },
+        },
+        "matrix_space": {"enabled": False},
+    }
+    room_ids = {kept: "!kept:localhost", bare: "!bare:localhost", new: "!new:localhost", rejected: "!bad:localhost"}
+
+    async def resolve_avatar(room_name: str, *_args: object) -> Path | None:
+        return None if room_name == bare else workspace_avatar_dir / "room.png"
+
+    async def has_avatar(_client: object, room_id: str) -> bool:
+        return room_id == room_ids[kept]
+
+    async def set_avatar(_client: object, room_id: str, _path: Path) -> bool:
+        return room_id != room_ids[rejected]
+
+    monkeypatch.setattr(
+        generate_avatars,
+        "_load_validated_config",
+        lambda *_args, **_kwargs: _config_with_runtime_paths(raw_config, workspace_avatar_dir.parent),
+    )
+    monkeypatch.setattr(
+        generate_avatars,
+        "create_agent_http_client",
+        MagicMock(return_value=SimpleNamespace(close=AsyncMock())),
+    )
+    monkeypatch.setattr(generate_avatars, "room_avatar_path", resolve_avatar)
+    monkeypatch.setattr(generate_avatars, "room_has_avatar", has_avatar)
+    monkeypatch.setattr(generate_avatars, "set_room_avatar_from_file", set_avatar)
+    monkeypatch.setattr(generate_avatars, "get_room_id", lambda room_name, _runtime_paths: room_ids.get(room_name))
+
+    with pytest.raises(generate_avatars.AvatarSyncError):
+        await generate_avatars.set_room_avatars_in_matrix(_runtime_paths(workspace_avatar_dir.parent))
+
+    lines = output.getvalue().splitlines()
+    assert f"⊘ Skipped avatar for room '{kept}' (already set)" in lines
+    assert f"⊘ Skipped avatar for room '{bare}' (no avatar available)" in lines
+    assert f"✓ Set avatar for room '{new}'" in lines
+    assert f"✗ Failed to set avatar for room '{rejected}'" in lines
+    assert f"⚠ Room '{missing}' not found in Matrix" in lines
+    assert f"Error: Failed to set avatars for: room '{rejected}'" in lines

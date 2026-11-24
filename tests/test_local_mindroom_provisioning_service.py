@@ -21,7 +21,10 @@ from fastapi.testclient import TestClient
 
 import scripts.local_mindroom_provisioning_service as provisioning
 from mindroom.cli import connect as cli_connect
+from mindroom.config.main import Config
+from mindroom.constants import resolve_runtime_paths, runtime_matrix_homeserver
 from mindroom.matrix import provisioning as matrix_provisioning
+from mindroom.matrix.provisioning_env import provisioning_url_from_env
 from tests.test_cli_connect import _CONNECTED, _START, _fake_transport
 
 if TYPE_CHECKING:
@@ -207,8 +210,10 @@ def _post_register_agent(
     complete: dict[str, str],
     username: str,
     password: str | None = "agent-pass-123",  # noqa: S107
+    *,
+    homeserver: str = "https://mindroom.chat",
 ) -> httpx.Response:
-    payload = {"homeserver": "https://mindroom.chat", "username": username, "display_name": "CodeAgent"}
+    payload = {"homeserver": homeserver, "username": username, "display_name": "CodeAgent"}
     if password is not None:
         payload["password"] = password
     return client.post(
@@ -623,6 +628,52 @@ def test_state_round_trip_preserves_empty_namespace(tmp_path: Path, monkeypatch:
 
     with TestClient(provisioning.create_app(_service_config(state_path))) as client:
         assert _post_register_agent(client, complete, "mindroom_bar").status_code == 200
+
+
+@pytest.mark.parametrize(
+    ("homeserver", "expected_status"),
+    [
+        (None, 200),
+        ("", 200),
+        ("https://mindroom.chat", 200),
+        (" https://mindroom.chat/ ", 200),
+        ("https://mindroom.chat:443", 400),
+        ("https://MINDROOM.CHAT", 400),
+        ("https://matrix.mindroom.chat/", 400),
+        ("mindroom.chat", 400),
+        ("http://localhost:8008", 400),
+    ],
+)
+def test_implicit_hosted_provisioning_matches_registration_contract(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    homeserver: str | None,
+    expected_status: int,
+) -> None:
+    """Every implicitly hosted runtime uses a URL and Matrix domain the service accepts for registration."""
+    env = {} if homeserver is None else {"MATRIX_HOMESERVER": homeserver}
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", process_env=env)
+    if expected_status == 200:
+        assert provisioning_url_from_env(runtime_paths) == "https://mindroom.chat"
+        assert Config().get_domain(runtime_paths) == "mindroom.chat"
+    else:
+        assert provisioning_url_from_env(runtime_paths) is None
+    _patch_openid_auth(monkeypatch)
+    register_calls: list[str] = []
+    _install_fake_register(monkeypatch, register_calls)
+
+    with TestClient(provisioning.create_app(_service_config(tmp_path / "state.sqlite3"))) as client:
+        complete = _pair_local_client(client)
+        username = _managed_agent_username("code", complete["namespace"])
+        response = _post_register_agent(
+            client,
+            complete,
+            username,
+            homeserver=runtime_matrix_homeserver(runtime_paths),
+        )
+
+    assert response.status_code == expected_status, response.text
+    assert register_calls == ([username] if expected_status == 200 else [])
 
 
 def test_register_agent_validates_homeserver(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

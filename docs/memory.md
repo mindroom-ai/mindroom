@@ -5,17 +5,22 @@ icon: lucide/brain
 # Memory System
 
 Memory lets agents remember facts, preferences, and context across conversations.
-This page covers choosing a memory backend, configuring embeddings and extraction, file-based memory, the `memory` tool, and Agno Learning.
+This page covers choosing a memory backend, configuring embeddings and extraction, file-based memory, and the `memory` tool.
 
 | Backend | What it does | Use it when |
 |---|---|---|
 | `mem0` (default) | Vector memory: relevant memories are retrieved before each reply and new ones are extracted automatically after each turn | You want hands-off semantic memory |
 | `file` | Markdown files (`MEMORY.md` plus dated notes in `memory/`) that are the source of truth | You want memory you can read and edit, or an OpenClaw-style workspace |
-| `none` | No built-in memory | The agent should keep no memories ([Agno Learning](#agno-learning) stays on unless disabled) |
+| `none` | No built-in memory | The agent should keep no memories |
 
-<video controls playsinline preload="metadata" aria-label="The agent remembers each person's diet and plans the week's dinners" style="width: 100%" poster="https://github.com/user-attachments/assets/deebd6ee-063e-4227-a2ad-ea3ee15ccf8e" data-poster-light="https://github.com/user-attachments/assets/deebd6ee-063e-4227-a2ad-ea3ee15ccf8e" data-poster-dark="https://github.com/user-attachments/assets/4ae62fd6-04fe-4dcc-aed6-d9b1de92b5f9">
-  <source src="https://github.com/user-attachments/assets/440c7742-da69-41e1-a131-788ca5307e31" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/a7ccca20-2047-4d8c-8bf5-a2251e0946f3" type="video/mp4">
+Before each reply, the `mem0` and `file` backends add the three memories most relevant to the message to the prompt.
+File memory in `semantic` [search mode](#searching-file-memory) adds up to five of the agent's own semantic matches instead: the closest match and any scored within 0.05 of it, at most 800 tokens together, so a closest match longer than that adds nothing; its teams' three best keyword matches follow, each only if it fits what is left of those 800 tokens, and until the semantic index is ready its own three best keyword matches are used.
+With [`rerank`](#searching-file-memory), on by default with an `openai_decisions` or `typesafe` [`reranker`](knowledge.md#reranking), a reranker chooses the semantic matches instead.
+`search_memories` returns up to its own `limit` in every mode.
+
+<video controls playsinline preload="metadata" aria-label="The agent remembers each person's diet and plans the week's dinners" style="width: 100%" poster="https://github.com/user-attachments/assets/9046ecb6-3be5-440d-b06e-5917d58d2f59" data-poster-light="https://github.com/user-attachments/assets/9046ecb6-3be5-440d-b06e-5917d58d2f59" data-poster-dark="https://github.com/user-attachments/assets/00d4a4fc-58c3-4968-855a-61089cf19e0b">
+  <source src="https://github.com/user-attachments/assets/92f62053-ff1e-4982-80c2-bbbac3c5c757" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/f1d8e8ce-8160-46bf-811d-2a3e71cde673" type="video/mp4">
 </video>
 
 ## Choosing a Backend
@@ -39,8 +44,10 @@ agents:
 ```
 
 With `none`, the agent gets no memories in its prompt, stores none after its turns, and does not receive the `memory` tool.
-`none` does not turn off [Agno Learning](#agno-learning); set `learning: false` as well to disable all built-in memory and learning.
+Credential-like values are removed on a best-effort basis before conversation text reaches memory automatically, through `mem0`, auto-flush, a team's `MEMORY.md`, or a voice-call transcript sent to `mem0`; the transcript file itself is kept as spoken.
+What an agent writes itself, with the `memory` tool or in a [dreaming](#dreaming) run, is stored as written.
 Conversation history is separate and stays in the session; see [History & Compaction](configuration/history.md).
+Memories retrieved for a reply [stay in that conversation's history](configuration/history.md#history-settings), so its later replies can still see them after the memory is deleted.
 OpenClaw-compatible agents use this same backend selection.
 
 ## Memory Scopes
@@ -50,8 +57,9 @@ OpenClaw-compatible agents use this same backend selection.
 | Agent | `agent_<name>` | The agent's preferences and durable user context |
 | Team | `team_<agent1>+<agent2>+...` (member names sorted) | Shared memory from team conversations |
 
+Each team fact is kept once: a team fact one member changes or deletes with the `memory` tool changes for every member that reads it.
 An agent's memory reads cover its own scope and the scopes of the configured teams it belongs to, searched through the agent's own backend.
-A team reads its own team scope; set `memory.team_reads_member_memory: true` (default `false`) to let it also read its members' agent scopes.
+A team's replies are not given recalled memories; the team scope is filled from the conversations the team answers, and its members recall it in their own replies.
 
 Team memory picks one backend from the members' effective backends:
 
@@ -60,26 +68,33 @@ Team memory picks one backend from the members' effective backends:
 - Any other combination, including `file` plus `none`, uses Mem0 with the configured `memory.embedder` and `memory.llm`.
 
 A member's `none` setting disables only its own memory, so team conversations it takes part in can still be remembered in the team scope.
-A `file` member of a team that uses Mem0 does not see that team's memory in its own conversations.
+A `file` member of a team that uses Mem0 does not see that team's Mem0 memories in its own conversations.
 
 ## Backend: `mem0`
 
 Before each reply, Mem0 retrieves memories relevant to the message and adds them to the prompt.
-After each turn, the [memory LLM](#memory-llm) extracts durable facts into a Chroma vector store under the agent's storage directory.
+After each turn, the [memory LLM](#memory-llm) extracts durable facts into a Chroma vector store under the agent's storage directory, or, for a team's turn, once into the one Mem0 store under `team_memory/` that holds every team's memories, with each team's records kept apart.
+The `mem0` and `chromadb` extras install on first use unless `MINDROOM_NO_AUTO_INSTALL_TOOLS=1` is set; otherwise install `mindroom[mem0,chromadb]`.
 
 ### Embedder
 
 `memory.embedder` sets the embedding model used by Mem0, semantic file-memory search, and [knowledge bases](knowledge.md#embedder-configuration).
-Mem0 supports the `openai` (default), `ollama`, `huggingface`, and `sentence_transformers` providers; semantic file memory and knowledge bases support the [narrower set](knowledge.md#embedder-configuration).
+Mem0 supports the `openai` (default), `ollama`, `huggingface`, and `sentence_transformers` providers; semantic file memory and knowledge bases support [their own set](knowledge.md#embedder-configuration), which has `vertex_ai` instead of `huggingface`.
+Config load rejects `vertex_ai` while any memory would use Mem0, so with it set `memory.backend` and every agent's `memory_backend` to `file`, or all of them to `none`; a team whose members mix `file` and `none` uses Mem0.
 
 | Field | Default | Description |
 |---|---|---|
 | `provider` | `openai` | Embedding provider |
 | `config.model` | `text-embedding-3-small` | Embedding model name |
-| `config.host` | `null` | Base URL for OpenAI-compatible endpoints, or the Ollama host; for `ollama`, a configured `OLLAMA_HOST` takes precedence, and the fallback is `http://localhost:11434` |
-| `config.dimensions` | `null` | Embedding dimension override (>= 1) for OpenAI-compatible providers |
+| `config.host` | `null` | Base URL for OpenAI-compatible endpoints, or the Ollama host; for `openai`, without it the embedder uses [`OPENAI_BASE_URL`](configuration/index.md#model-providers), else OpenAI's API; for `ollama`, a configured `OLLAMA_HOST` takes precedence over `host`, and without either the host is `http://localhost:11434` |
+| `config.dimensions` | `null` | Embedding dimension override (>= 1) for OpenAI-compatible providers and `vertex_ai` |
 | `config.api_key` | `null` | Explicit API key for the `openai` provider |
 | `config.credentials_service` | `null` | Credential service that supplies the `openai` provider's key |
+| `config.query_prefix` | `null` | Text the `openai` and `vertex_ai` providers prepend to search queries |
+| `config.document_prefix` | `null` | Text the `openai` and `vertex_ai` providers prepend to indexed documents and stored memories |
+
+Only the `openai` provider reads `api_key` and `credentials_service`, only `openai` and `vertex_ai` read `query_prefix` and `document_prefix`, and only `openai` and `ollama` read `host`; config load rejects a nonblank value in these fields for any other provider.
+Config load also rejects `dimensions` for `ollama` and `sentence_transformers`, which always return the model's full-size vectors.
 
 ```yaml
 memory:
@@ -111,8 +126,27 @@ memory:
       host: http://localhost:11434
 ```
 
-MindRoom installs the optional `sentence_transformers` extra the first time that provider is used.
-Changing the embedder provider, model, host, or dimensions switches Mem0 to a separate collection, so memories stored with the previous embedder are no longer retrieved.
+MindRoom installs the optional `sentence_transformers` extra the first time the `sentence_transformers` or `huggingface` embedder is used.
+
+Some models expect a prompt in front of each text, different for queries and documents.
+With a local `sentence_transformers` model, knowledge, file-memory and knowledge-graph searches get the model's own prompts automatically, while Mem0 embeds without them.
+For the same model behind an OpenAI-compatible server such as llama.cpp, set the prompts as prefixes; the `openai` provider applies them everywhere, Mem0 included.
+For EmbeddingGemma 2:
+
+```yaml
+memory:
+  embedder:
+    provider: openai
+    config:
+      model: embeddinggemma-2
+      host: http://localhost:8080/v1
+      dimensions: 768
+      query_prefix: "task: search result | query: "
+      document_prefix: "title: none | text: "
+```
+
+Knowledge-graph texts all get the query prefix, because Graphiti embeds names, facts and searches through the same calls.
+Changing the embedder provider, model, host, dimensions, or prefixes switches Mem0 to a separate collection, so memories stored with the previous embedder are no longer retrieved.
 
 The `openai` embedder takes its API key from the first of these that is set:
 
@@ -122,6 +156,10 @@ The `openai` embedder takes its API key from the first of these that is set:
 
 Use `credentials_service` when the embedding endpoint needs a different key than chat, voice, or other OpenAI-compatible models.
 With no key at all, keyless local OpenAI-compatible endpoints still work, while a keyed endpoint fails with an authentication error.
+
+An Ollama server that requires a key gets `OLLAMA_API_KEY`.
+For knowledge bases, the knowledge graph, and semantic file-memory search, MindRoom reads it from the process environment, then the `.env` beside `config.yaml`.
+Mem0's own Ollama clients, for its embedder and an `ollama` memory LLM, read it only from the process environment.
 When the embedder rejects its credential, semantic memory search reports the cause in `memory` tool output and in the agent's prompt instead of returning empty results, and `/api/health` includes an `embedder` block until a request succeeds again.
 
 ### Memory LLM
@@ -129,8 +167,12 @@ When the embedder rejects its credential, semantic memory search reports the cau
 `memory.llm` sets the model Mem0 uses to extract memories.
 Supported providers are `ollama`, `openai`, `openrouter`, and `anthropic`.
 When `memory.llm` is omitted, MindRoom uses `gemma4` on the Ollama server set by `OLLAMA_HOST` (default `http://localhost:11434`).
-With `provider: ollama`, `config.host` points extraction at a different Ollama server, but a configured `OLLAMA_HOST` takes precedence; other providers ignore `host`.
-With `provider: openai`, use `gpt-6-luna`; MindRoom drops the `temperature` and `top_p` values Mem0 sends, which GPT-6 models reject.
+With `provider: ollama`, `config.host` names the Ollama server only when no `OLLAMA_HOST` is configured, unlike a model's `host`; without either, extraction uses `http://localhost:11434`, and other providers ignore `host`.
+With `provider: openai`, use `gpt-6-luna`; other GPT-5 and GPT-6 models that support Chat Completions also work.
+With `provider: openai`, `config.openai_base_url` sets the server; without it, extraction uses [`OPENAI_BASE_URL`](configuration/index.md#model-providers), else OpenAI's API.
+With `provider: anthropic`, `config.anthropic_base_url` sets the server; without it, extraction uses [`ANTHROPIC_BASE_URL`](configuration/index.md#model-providers), else Anthropic's API.
+With `provider: anthropic`, Mem0 sends no `temperature`, `top_p`, or `top_k`, which Claude API version `2026-10-21` rejects on every model, so `config` sampling values have no effect.
+For GPT-5 and GPT-6 models, with `provider: openai` or as `openai/<model>` with `provider: openrouter`, Mem0 sends no `temperature`, `top_p`, or `max_tokens` from `config` unless `config.is_reasoning_model` is `false`; set `config.reasoning_effort`, for example `low`, to choose their reasoning effort.
 
 ```yaml
 memory:
@@ -167,9 +209,6 @@ File memory keeps `MEMORY.md` and dated notes under `memory/` in the agent's wor
 ```yaml
 memory:
   backend: file
-  file:
-    max_entrypoint_lines: 200
-    max_entrypoint_tokens: 50000
   search:
     mode: keyword
     include:
@@ -181,11 +220,14 @@ memory:
 
 For a single agent, the file backend writes memory only when the agent uses the [`memory` tool](#memory) or edits the files, or when [auto-flush](#file-auto-flush-worker) is enabled; it does not extract memories after every turn like `mem0`.
 A team whose members all use `file` appends each message it answers to the team's `MEMORY.md`, even without auto-flush.
-Before each reply, MindRoom inlines the start of `MEMORY.md` into the prompt under a header with its path, so the agent does not need to re-read it, and adds memories that match the message.
-`memory.file.max_entrypoint_lines` (default `200`, minimum `1`) caps the inlined lines, and `memory.file.max_entrypoint_tokens` (default `50000`, minimum `1`) caps their estimated size at characters / 4.
-Only whole lines are inlined, so a line that would cross the token cap is withheld with everything after it.
-When either cap truncates, a marker reports the included and total line counts, both caps, and the path to read for the rest.
-`memory.file.path` (default unset, relative to the config directory) is a fallback root for team file memory and never moves agent file memory out of the workspace.
+Before each reply, MindRoom inlines `MEMORY.md` into the prompt under a header with its path, so the agent does not need to re-read it, and adds memories that match the message.
+An ongoing conversation's inlined copy can miss lines added to `MEMORY.md` since it last loaded the file, for example from another conversation: lines added anywhere while the file fits the preload limit below, and lines added at the end of a file the limit cuts, until an hour passes without a model request that sends that copy or its history is compacted; edited or deleted lines apply from its next reply, new conversations load the current file (its first lines that fit, when the limit cuts it), and the agent can read the file directly.
+On a route that keeps the system prompt unchanged while its cache is warm and sends changes as a system prompt update, such as Claude Opus through OpenRouter with the hour-long prompt cache, an edited or deleted line that an update can state exactly reaches the conversation as such an update, and the old line can stay quoted in that conversation's later requests until its held prompt starts over: when it idles past the cache lifetime, its history is compacted or its updates alone would need that, the route or model changes, or a change comes that an update cannot state, such as one too long or one whose lines appear more than once in the prompt.
+Such a change, and the first request after the hold starts over, sends the current prompt without the old line.
+`MEMORY.md` is cut by the rule that cuts every [context file](configuration/agents.md#file-based-context-loading): `defaults.max_preload_file_chars` (default `30000`, minimum `1`) characters per file.
+A longer file inlines its first whole lines that fit the limit, counted as they are in the file (only a line feed ends a line), and withholds the rest; only a first line longer than the limit inlines its first characters.
+Lines `add_memory` appends past the cut never reach the prompt until the file is condensed, and they leave the inlined copy unchanged.
+After a cut, a marker names the file, says the rest is left out of the prompt, and asks the agent to condense it without losing information (moving detail into files it can read or search on demand); it holds no counts, so it stays the same while the file grows.
 
 ### File layout
 
@@ -194,10 +236,8 @@ Agent file memory lives in the agent workspace, `agents/<agent>/workspace/` in t
 - `MEMORY.md`, where `add_memory` writes
 - `memory/YYYY-MM-DD.md`, where auto-flush writes
 
-Team file memory is mirrored under each member's storage directory:
-
-- `agents/<agent>/memory_files/team_<sorted_members>/MEMORY.md`
-- `agents/<agent>/memory_files/team_<sorted_members>/memory/YYYY-MM-DD.md`
+Team file memory lives once per team, in `team_memory/team_<sorted_members>/MEMORY.md` in the storage directory.
+A team whose directory name would pass 255 characters gets a shortened one ending in a hash.
 
 Memory files must be regular files; symlinks, FIFOs, and device nodes are ignored when reading and rejected when writing.
 Each file is read up to 1 MiB, cut at its last complete line, and updating a truncated or non-UTF-8 file fails so the rest of it is preserved.
@@ -210,15 +250,40 @@ Each file is read up to 1 MiB, cut at its last complete line, and updating a tru
 |---|---|---|
 | `mode` | `keyword` | `keyword` or `semantic` |
 | `include` | `[memory/**/*.md]` | Glob patterns relative to the file-memory root that semantic search indexes; must be non-empty |
+| `exclude` | `[]` | Glob patterns relative to the file-memory root that semantic search leaves out of `include`, such as `exclude: [memory/archive/**]` for archived notes |
 | `include_entrypoint` | `false` | Also index `MEMORY.md` for semantic search |
+| `rerank` | unset | In `semantic` mode, rerank the hits with the root [`reranker`](knowledge.md#reranking); unset reranks only when that reranker's `provider` is `openai_decisions` or `typesafe` |
 
 In `keyword` mode, `search_memories` matches structured entries with IDs in `MEMORY.md`, plus entries and plain-text lines in `memory/**/*.md`.
-Ordinary prose in `MEMORY.md` reaches the agent through the prompt preload, not keyword search; to reach lines beyond the preload cap, read the file directly or use semantic search with `include_entrypoint: true`.
+Ordinary prose in `MEMORY.md` reaches the agent through the prompt preload, not keyword search; to reach lines beyond the preload limit, read the file directly or use semantic search with `include_entrypoint: true`.
 
-In `semantic` mode, MindRoom builds a vector index of the `include` files with `memory.embedder` on first use and stores it under `<storage-root>/knowledge_db/` (see [Knowledge storage](knowledge.md#storage)).
+In `semantic` mode, MindRoom builds a vector index of the `include` files not matched by `exclude` with `memory.embedder` on first use and stores it under `<storage-root>/knowledge_db/` (see [Knowledge storage](knowledge.md#storage)).
+Each memory entry (a `- [id=...]` line, or a Markdown section up to `###`) is indexed and returned on its own, split at 1,200 characters; a `#` line inside a fenced code block is code, not a new section.
 Until the index is ready, or when embeddings fail, search falls back to keyword results.
 Writes through the `memory` tool, auto-flush, and an applied [dreaming](scheduling.md#dreaming) proposal refresh the index, but a ready index does not notice direct file edits until a later such write refreshes it.
 Semantic mode covers the agent's own memory; team file memory is always keyword searched.
+
+Reranking is on with `rerank: true`, and with `rerank` unset when the [`reranker`](knowledge.md#reranking) is `openai_decisions` or `typesafe`, the two that improved recall in the benchmark below; `rerank: false` turns it off, globally or in `agents.<name>.memory_search`.
+With reranking on and a reranker configured, semantic searches fetch 20 hits, or a `search_memories` call's larger `limit`, and the reranker orders them.
+Per-turn recall then adds, in the reranker's order, up to five hits that score at least the reranker's `threshold` (default `0.5`, or `0.3` for [judgment rerankers](knowledge.md#judgment-rerankers)) within the same 800 tokens, instead of the hits within 0.05 of the closest; when no hit reaches the threshold, it adds none.
+If the reranker fails or takes more than 2 seconds, recall adds the hits it would add without reranking and logs a warning, so a reranker never holds up a reply.
+A hosted reranker, which `vertex_ai`, `typesafe` and `openai_decisions` always are and `cohere` is unless its `url` names your own server, adds its response time to every reply.
+So with an `openai_decisions` or `typesafe` reranker, every reply in `semantic` mode sends about 20 memory entries, clipped and with credential-like values redacted, to OpenAI or System One unless `memory.search.rerank` is `false`.
+With `rerank: true` and a `cohere` or `vertex_ai` reranker, memory entries and the message go to that service unredacted; only the judgment rerankers redact.
+
+On three sets of real conversation turns (132 to 1,247 held-out turns each), judged by a language model for whether recall added a relevant memory, reranked recall at threshold `0.3` compared with recall without a reranker as follows.
+
+| Reranker | Turns with a relevant memory | Relevant memories per 1,000 recalled tokens | Recalled tokens per turn | Added latency (median / 95th percentile) | Cost per turn |
+|---|---|---|---|---|---|
+| none | 36.6% to 76.2% | baseline | 633 to 701 | none | none |
+| `typesafe` | +5.3 to +31.3 points | 1.59 to 2.36 times | 412 to 553 | 118 ms / 178 ms | $0.00023 to $0.00033 |
+| `openai_decisions` | +2.0 to +4.8 points | 1.46 to 2.22 times | 410 to 528 | 290 ms / 578 ms | $0.00060 to $0.00088 |
+
+Latency was measured on 200 turns of one set run one at a time, none of which fell back to recall without reranking; a second judge model gave gains of the same sign on that set and on the largest one.
+A local `BAAI/bge-reranker-v2-m3` with `sentence_transformers` did not improve recall over recall without a reranker, and its scores bunch near 0, so the default threshold `0.5` makes recall add nothing for most turns; if you turn on `memory.search.rerank` with a local cross-encoder, set `reranker.threshold: 0`.
+
+**Behaviour change:** memory reranking is on by default only with the `openai_decisions` and `typesafe` rerankers, which earlier releases did not offer, so a config from an earlier release recalls as before.
+`memory.search.rerank: false` stops reranking in recall and `search_memories`, but `search_knowledge_base` still reranks the agent's semantic file-memory hits with the root reranker.
 
 ```yaml
 agents:
@@ -239,25 +304,28 @@ To give each requester their own file memory from one agent definition, combine 
 
 ## File Auto-Flush Worker
 
-Auto-flush periodically turns recent conversation in file-backed agents into durable memories.
-It applies only to agents whose effective backend is `file`.
+Auto-flush periodically turns the new turns of file-backed agents' conversations into durable memories.
+It applies only to agents whose effective backend is `file`, including each requester's private instance.
 
-1. Each turn marks its session as having unsaved conversation.
-2. A background worker picks eligible sessions in bounded batches.
-3. The agent's own model reads the new messages, plus existing memories to avoid duplicates, and writes durable facts.
-4. When the model answers with the `no_reply_token`, nothing is written.
-5. Results are appended to `memory/YYYY-MM-DD.md`.
+1. Every `flush_interval_seconds`, a background worker looks for conversations with new finished turns that have been quiet for `idle_seconds`.
+2. The agent's own model, or `extractor.model` when set, reads the new messages, plus existing memories to avoid duplicates, and writes durable facts; a longer backlog is read in order over later passes.
+3. When the model answers with the `no_reply_token`, nothing is written.
+4. Results are appended to `memory/YYYY-MM-DD.md`, and a retry never appends the same result twice.
 
-Turns that [automations](scheduling.md#automations) start are not auto-flushed.
+Compacted turns and voice-call turns are included.
+Not auto-flushed: turns that [automations](scheduling.md#automations) start, tasks another agent delegated, team conversations, conversations through the OpenAI-compatible API, and context that hooks attach to messages, such as location.
+A message redacted before its turn is flushed stays out of memory, and so do the turn that read it and every later turn its redaction removes from [history](configuration/history.md#compacted-history-and-redaction).
+A turn that waits for tool approval is flushed once it finishes.
+Enabling auto-flush starts with the turns after that; earlier conversation is not flushed, and turning it off and on again flushes the turns in between.
+An agent switched to `file` memory later starts with its turns from about one `flush_interval_seconds` before auto-flush first sees it, and its private instances, including new ones, keep all their turns since then.
 
 ```yaml
 memory:
   backend: file
   auto_flush:
     enabled: true
-    flush_interval_seconds: 1800
+    flush_interval_seconds: 300
     idle_seconds: 120
-    max_dirty_age_seconds: 600
     batch:
       max_sessions_per_cycle: 10
     extractor:
@@ -267,26 +335,27 @@ memory:
 | Field | Default | Description |
 |---|---|---|
 | `enabled` | `false` | Turn on auto-flush |
-| `flush_interval_seconds` | `1800` (min 5) | Time between worker cycles |
-| `idle_seconds` | `120` (min 0) | Session idle time before it becomes eligible |
-| `max_dirty_age_seconds` | `600` (min 1) | Make a session eligible after this long with unsaved conversation, even if still active |
-| `stale_ttl_seconds` | `86400` (min 60) | Forget pending sessions older than this |
-| `max_cross_session_reprioritize` | `5` (min 0) | Other pending sessions of the same agent moved up the queue when a new message arrives |
-| `retry_cooldown_seconds` | `30` (min 1) | Wait before retrying a failed extraction |
+| `flush_interval_seconds` | `300` (min 5) | Time between worker passes |
+| `idle_seconds` | `120` (min 0) | How long a conversation must be quiet before its new turns are flushed |
+| `stale_ttl_seconds` | `86400` (min 60) | Give up on turns whose flush has kept failing for this long |
+| `retry_cooldown_seconds` | `30` (min 1) | Wait before retrying a failed flush |
 | `max_retry_cooldown_seconds` | `300` (min 1) | Upper bound for the growing retry wait |
-| `batch.max_sessions_per_cycle` | `10` (min 1) | Sessions processed per cycle |
-| `batch.max_sessions_per_agent_per_cycle` | `3` (min 1) | Sessions per agent processed per cycle |
+| `batch.max_sessions_per_cycle` | `10` (min 1) | Conversations flushed per pass, across all agents |
+| `batch.max_sessions_per_agent_per_cycle` | `3` (min 1) | Conversations flushed per pass for one agent or private instance |
+| `extractor.model` | none | A key of `models` that runs extraction instead of the agent's own model; set a fast model when extractions time out |
 | `extractor.no_reply_token` | `NO_REPLY` | Reply meaning nothing should be saved |
-| `extractor.max_messages_per_flush` | `20` (min 1) | Messages considered per extraction |
-| `extractor.max_chars_per_flush` | `12000` (min 1) | Message characters considered per extraction |
-| `extractor.max_extraction_seconds` | `30` (min 1) | Timeout for one extraction, retried in a later cycle |
+| `extractor.max_messages_per_flush` | `20` (min 1) | New messages read per extraction; a longer backlog is read over later passes |
+| `extractor.max_chars_per_flush` | `12000` (min 1) | Message characters read per extraction |
+| `extractor.max_extraction_seconds` | `30` (min 1) | Timeout for one extraction, retried in a later pass |
 | `extractor.include_memory_context.memory_snippets` | `5` (min 0) | Existing memories shown to the model to avoid duplicates |
 | `extractor.include_memory_context.snippet_max_chars` | `400` (min 1) | Characters per existing memory shown |
+
+The retired `max_dirty_age_seconds` and `max_cross_session_reprioritize` settings, which older dashboards saved under `auto_flush`, pass validation but have no effect, and the next dashboard save removes them.
 
 ## Prompt Curation
 
 Agents append to `MEMORY.md` and their context files more often than they condense them, so the prompt they send on every turn keeps growing.
-Enable the [`prompt_curation`](scheduling.md#prompt_curation) automation to have MindRoom check their size daily and, once they pass a trigger, ask the agent in a visible thread to condense them gradually and move detail into searchable `memory/` files, then measure the result and ask the agent to re-check a cut outside the bounds.
+Enable the [`prompt_curation`](scheduling.md#prompt_curation) automation to have MindRoom check their size daily and, once they pass a trigger or the preload has to withhold part of one of them, ask the agent in a visible thread to condense them gradually, fold corrections into the entries they correct, and move detail into searchable `memory/` files, then measure the result and ask the agent to re-check a cut outside the bounds.
 
 ```yaml
 agents:
@@ -334,32 +403,15 @@ delete_memory("abc123")
 The tool reaches every agent and team scope visible to the agent, as described in [Memory Scopes](#memory-scopes).
 Search and list results include an ID: Mem0 memory IDs and file-backed `file:<path>:<line>` IDs work with `get_memory`, `update_memory`, and `delete_memory`.
 Semantic file-memory matches use read-only `semantic:<source_file>:<rank>` locators that these functions do not accept.
+After storing, `add_memory` lists up to three similar existing memories with their IDs, so the agent can rewrite an entry the new memory corrects; file memory finds them by keyword even in `semantic` mode, because semantic matches cannot be edited.
 Result metadata includes `search_mode` (`keyword` or `semantic`), showing which search produced each result.
 Failures are returned as readable error messages rather than raised into the conversation.
 
+A [listening agent](configuration/agents.md#listening) writes memory from a silent turn through this tool when `memory` is in its `listen.tools`, or through a listed tool that writes files (see [What listed tools can do](configuration/agents.md#what-listed-tools-can-do)).
+A silent turn stores no run, so neither automatic extraction nor the file auto-flush worker reads what the agent heard.
+
 ## UI Configuration
 
-The Dashboard **Memory** page edits the `memory` section: backend, `team_reads_member_memory`, embedder provider, model, credential service, and host, file settings (`path`, `max_entrypoint_lines`, `max_entrypoint_tokens`), search settings, and all auto-flush settings.
+The Dashboard **Memory** page edits the `memory` section: backend, embedder provider, model, credential service, and host, search settings, and all auto-flush settings.
 The remaining fields, such as `llm`, are under **More settings**.
 Save from the Memory page to write the changes to `config.yaml`.
-
-## Agno Learning
-
-Agno Learning builds a persistent profile of user preferences from conversations, separately from the memory backends above.
-It is on by default for every agent, and `memory_backend: none` does not disable it.
-
-```yaml
-defaults:
-  learning: true          # default
-  learning_mode: always   # learn after every turn; agentic lets the agent decide via a tool
-
-agents:
-  assistant:
-    learning: false       # disable for one agent
-  research:
-    learning_mode: agentic
-```
-
-See [Agent fields](configuration/agents.md#defaults) for how `learning` and `learning_mode` inherit from `defaults`.
-Disabled agents create and update no learning data.
-Learning data is stored in `learning/<agent>.db` under the agent's state root (`agents/<agent>/` in the storage directory for shared agents), so it survives container restarts when the storage directory is mounted.

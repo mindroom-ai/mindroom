@@ -87,6 +87,7 @@ if TYPE_CHECKING:
         ),
         ConfigField(
             name="api_key",
+            env=("EXA_API_KEY",),
             label="API Key",
             type="password",
             required=False,
@@ -104,7 +105,7 @@ if TYPE_CHECKING:
             label="Livecrawl",
             type="text",
             required=False,
-            default="always",
+            default=None,
         ),
         ConfigField(
             name="start_crawl_date",
@@ -163,6 +164,41 @@ if TYPE_CHECKING:
             default=None,
         ),
         ConfigField(
+            name="include_text",
+            label="Include Text",
+            type="string[]",
+            required=False,
+            default=None,
+        ),
+        ConfigField(
+            name="exclude_text",
+            label="Exclude Text",
+            type="string[]",
+            required=False,
+            default=None,
+        ),
+        ConfigField(
+            name="user_location",
+            label="User Location",
+            type="text",
+            required=False,
+            default=None,
+        ),
+        ConfigField(
+            name="moderation",
+            label="Moderation",
+            type="boolean",
+            required=False,
+            default=None,
+        ),
+        ConfigField(
+            name="highlights",
+            label="Highlights",
+            type="boolean",
+            required=False,
+            default=False,
+        ),
+        ConfigField(
             name="show_results",
             label="Show Results",
             type="boolean",
@@ -192,7 +228,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["exa_py"],
-    docs_url="https://docs.agno.com/tools/toolkits/search/exa",
+    docs_url="https://docs.mindroom.chat/tools/web-search/#exa",
     function_names=("exa_answer", "find_similar", "get_contents", "research", "search_exa"),
 )
 def exa_tools() -> type[ExaTools]:

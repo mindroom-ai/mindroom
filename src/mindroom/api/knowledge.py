@@ -19,30 +19,33 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from mindroom.api import config_lifecycle
 from mindroom.constants import resolve_config_relative_path
 from mindroom.knowledge.availability import KnowledgeAvailability
-from mindroom.knowledge.file_listing import git_checkout_present, include_knowledge_relative_path
+from mindroom.knowledge.file_listing import (
+    git_checkout_present,
+    include_knowledge_relative_path,
+    pinned_canonical_directory,
+)
 from mindroom.knowledge.file_listing import list_git_tracked_knowledge_files as list_git_tracked_managed_knowledge_files
 from mindroom.knowledge.file_listing import list_knowledge_files as list_managed_knowledge_files
 from mindroom.knowledge.indexing_config import knowledge_git_dir
-from mindroom.knowledge.redaction import redact_credentials_in_text, redact_url_credentials
-from mindroom.knowledge.refresh_locks import is_refresh_active_for_binding
+from mindroom.knowledge.redaction import redact_credentials_in_text
 from mindroom.knowledge.refresh_runner import (
     knowledge_binding_mutation_lock,
     publish_file_mode_source_metadata_for_base,
-    refresh_knowledge_binding_in_subprocess,
 )
 from mindroom.knowledge.status import (
     KnowledgeCandidateStatus,
     KnowledgeIndexStatus,
     get_knowledge_index_status,
+    knowledge_base_refreshing,
     mark_knowledge_source_changed_async,
 )
 from mindroom.logging_config import get_logger
-from mindroom.path_confinement import open_directory_within_root, open_regular_file_at, resolve_path_within_root
+from mindroom.path_confinement import open_regular_file_at, resolve_path_within_root
+from mindroom.redaction import redact_url_credentials
 from mindroom.runtime_resolution import shared_knowledge_path
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
-    from contextlib import AbstractContextManager
     from typing import BinaryIO
 
     from mindroom.config.main import Config
@@ -92,16 +95,6 @@ def _knowledge_root(
     if create:
         root.mkdir(parents=True, exist_ok=True)
     return root
-
-
-def _open_checked_directory(root: Path, relative_path: Path = Path()) -> AbstractContextManager[int]:
-    """Pin a directory at or below the checked canonical root, following no link on its whole path.
-
-    Workers can write bases inside agent workspaces, so a folder checked by
-    name may be swapped for a link before the mutation; acting relative to
-    this descriptor refuses the swap instead of reaching the link target.
-    """
-    return open_directory_within_root(Path(root.anchor), root.relative_to(root.anchor) / relative_path)
 
 
 def _resolve_within_root(root: Path, relative_path: str) -> Path:
@@ -198,25 +191,8 @@ async def _list_managed_file_paths(
     return set(paths), None
 
 
-def _request_refresh_scheduler(request: Request) -> KnowledgeRefreshScheduler | None:
-    return config_lifecycle.app_state(request.app).knowledge_refresh_scheduler
-
-
-def _schedule_refresh(
-    config: Config,
-    base_id: str,
-    runtime_paths: RuntimePaths,
-    *,
-    request: Request,
-) -> None:
-    refresh_scheduler = _request_refresh_scheduler(request)
-    if refresh_scheduler is None:
-        return
-    refresh_scheduler.schedule_refresh(
-        base_id,
-        config=config,
-        runtime_paths=runtime_paths,
-    )
+def _request_refresh_scheduler(request: Request) -> KnowledgeRefreshScheduler:
+    return config_lifecycle.app_state(request.app).runtime.knowledge_refresh_scheduler
 
 
 def _schedule_refreshes(
@@ -226,10 +202,10 @@ def _schedule_refreshes(
     *,
     request: Request,
 ) -> None:
+    refresh_scheduler = _request_refresh_scheduler(request)
     for base_id in dict.fromkeys(base_ids):
-        if config.get_knowledge_base_config(base_id).mode != "semantic":
-            continue
-        _schedule_refresh(config, base_id, runtime_paths, request=request)
+        if config.get_knowledge_base_config(base_id).mode == "semantic":
+            refresh_scheduler.schedule_refresh(base_id, config=config, runtime_paths=runtime_paths)
 
 
 def _same_source_base_ids(
@@ -320,32 +296,27 @@ async def _mark_committed_mutation_and_schedule_refresh(
     return cancelled_after_source_changed
 
 
-def _index_status_sync(
+async def _index_status(
     config: Config,
     base_id: str,
     runtime_paths: RuntimePaths,
+    *,
+    refreshing: bool,
 ) -> KnowledgeIndexStatus:
     base_config = config.get_knowledge_base_config(base_id)
     if base_config.mode == "files" and base_config.git is None:
         return KnowledgeIndexStatus(availability=KnowledgeAvailability.READY)
     try:
-        return get_knowledge_index_status(
+        return await asyncio.to_thread(
+            get_knowledge_index_status,
             base_id,
             config=config,
             runtime_paths=runtime_paths,
-            create=False,
+            refreshing=refreshing,
         )
     except ValueError:
         logger.warning("Could not resolve published knowledge index state", base_id=base_id, exc_info=True)
         return KnowledgeIndexStatus()
-
-
-async def _index_status(
-    config: Config,
-    base_id: str,
-    runtime_paths: RuntimePaths,
-) -> KnowledgeIndexStatus:
-    return await asyncio.to_thread(_index_status_sync, config, base_id, runtime_paths)
 
 
 def _redacted_last_error(value: str | None) -> str | None:
@@ -383,14 +354,8 @@ def _is_refreshing(
     *,
     request: Request,
 ) -> bool:
-    refresh_scheduler = _request_refresh_scheduler(request)
-    if refresh_scheduler is not None:
-        return refresh_scheduler.is_refreshing(
-            base_id,
-            config=config,
-            runtime_paths=runtime_paths,
-        )
-    return is_refresh_active_for_binding(
+    return knowledge_base_refreshing(
+        _request_refresh_scheduler(request),
         base_id,
         config=config,
         runtime_paths=runtime_paths,
@@ -402,15 +367,13 @@ async def _git_status(
     base_id: str,
     runtime_paths: RuntimePaths,
     *,
-    request: Request,
-    index_status: KnowledgeIndexStatus | None = None,
+    index_status: KnowledgeIndexStatus,
+    refreshing: bool,
 ) -> dict[str, Any] | None:
     git_config = config.knowledge_bases[base_id].git
     if git_config is None:
         return None
     root = _knowledge_root(config, base_id, runtime_paths)
-    if index_status is None:
-        index_status = _index_status_sync(config, base_id, runtime_paths)
     repo_present = await asyncio.to_thread(
         git_checkout_present,
         root,
@@ -420,7 +383,7 @@ async def _git_status(
         "repo_url": redact_url_credentials(git_config.repo_url),
         "branch": git_config.branch,
         "lfs": git_config.lfs,
-        "syncing": _is_refreshing(config, base_id, runtime_paths, request=request),
+        "syncing": refreshing,
         "repo_present": repo_present,
         "initial_sync_complete": index_status.initial_sync_complete,
         "last_successful_sync_at": index_status.last_published_at,
@@ -550,7 +513,11 @@ class _StagedUpload:
 
 async def _stage_upload(root_fd: int, target: _UploadTarget) -> _StagedUpload:
     _validate_upload_size_hint(target.upload, target.filename)
-    temp_name = f".{target.relative_path}.{uuid.uuid4().hex}.upload.tmp"
+    # Fail on a name too long for the folder before any upload of the batch is published.
+    with suppress(FileNotFoundError):
+        os.lstat(target.relative_path, dir_fd=root_fd)
+    # The name leaves out the target's, so any name the folder accepts can be staged beside it.
+    temp_name = f".{uuid.uuid4().hex}.upload.tmp"
     temp_fd = open_regular_file_at(root_fd, temp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
     try:
         with os.fdopen(temp_fd, "wb") as handle:
@@ -593,10 +560,12 @@ async def _write_uploads(
             return [], False
         root.mkdir(parents=True, exist_ok=True)
         # Upload names are single components, so every upload is staged and published in the pinned root.
-        with _open_checked_directory(root) as root_fd:
+        with pinned_canonical_directory(root) as root_fd:
             staged_uploads: list[_StagedUpload] = []
             try:
-                staged_uploads = [await _stage_upload(root_fd, target) for target in upload_targets]
+                # Record each upload as soon as it is staged, so a failure still removes every one staged before it.
+                for target in upload_targets:
+                    staged_uploads.append(await _stage_upload(root_fd, target))  # noqa: PERF401
                 cancelled_after_source_changed = await before_commit() if before_commit else False
                 for staged_upload in staged_uploads:
                     os.replace(
@@ -626,15 +595,15 @@ async def list_knowledge_bases(request: Request) -> dict[str, Any]:
         base_config = config.knowledge_bases[base_id]
         root = _knowledge_root(config, base_id, runtime_paths)
         file_info = await _count_managed_files(config, base_id, root, runtime_paths)
-        index_status = await _index_status(config, base_id, runtime_paths)
+        refreshing = _is_refreshing(config, base_id, runtime_paths, request=request)
+        index_status = await _index_status(config, base_id, runtime_paths, refreshing=refreshing)
         git_status = await _git_status(
             config,
             base_id,
             runtime_paths,
-            request=request,
             index_status=index_status,
+            refreshing=refreshing,
         )
-        refreshing = _is_refreshing(config, base_id, runtime_paths, request=request)
 
         base_entry: dict[str, Any] = {
             "name": base_id,
@@ -718,7 +687,7 @@ async def upload_knowledge_files(base_id: str, request: Request) -> dict[str, An
         files = [upload for upload in form.getlist("files") if isinstance(upload, UploadFile)]
         if not files:
             raise RequestValidationError(
-                [{"type": "missing", "loc": ("body", "files"), "msg": "Field required", "input": None}],
+                [{"type": "missing", "loc": ("body", "files"), "msg": "Field required"}],
             )
         return await _upload_knowledge_files(base_id, request, files)
     finally:
@@ -789,7 +758,7 @@ async def delete_knowledge_file(base_id: str, path: str, request: Request) -> di
         relative_file = target.relative_to(root)
         relative_path = relative_file.as_posix()
         _reject_unmanaged_knowledge_file_path(config, base_id, relative_path)
-        with _open_checked_directory(root, relative_file.parent) as parent_fd:
+        with pinned_canonical_directory(target.parent) as parent_fd:
             os.unlink(relative_file.name, dir_fd=parent_fd)
         cancelled_after_source_changed = await _mark_committed_mutation_and_schedule_refresh(
             base_id,
@@ -819,16 +788,16 @@ async def knowledge_status(base_id: str, request: Request) -> dict[str, Any]:
     config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
     root = _knowledge_root(config, base_id, runtime_paths)
     base_config = config.knowledge_bases[base_id]
-    index_status = await _index_status(config, base_id, runtime_paths)
+    refreshing = _is_refreshing(config, base_id, runtime_paths, request=request)
+    index_status = await _index_status(config, base_id, runtime_paths, refreshing=refreshing)
     file_info = await _count_managed_files(config, base_id, root, runtime_paths)
     git_status = await _git_status(
         config,
         base_id,
         runtime_paths,
-        request=request,
         index_status=index_status,
+        refreshing=refreshing,
     )
-    refreshing = _is_refreshing(config, base_id, runtime_paths, request=request)
 
     payload: dict[str, Any] = {
         "base_id": base_id,
@@ -859,28 +828,15 @@ async def reindex_knowledge(base_id: str, request: Request) -> dict[str, Any]:
     _ensure_base_exists(config, base_id)
 
     try:
-        refresh_scheduler = _request_refresh_scheduler(request)
-        if refresh_scheduler is not None:
-            result = await refresh_scheduler.refresh_now(
-                base_id,
-                config=config,
-                runtime_paths=runtime_paths,
-                force_reindex=True,
-            )
-        else:
-            result = await refresh_knowledge_binding_in_subprocess(
-                base_id,
-                config=config,
-                runtime_paths=runtime_paths,
-                force_reindex=True,
-            )
-    except Exception as exc:
-        index_status = _index_status_sync(config, base_id, runtime_paths)
-        availability = (
-            index_status.availability
-            if index_status.persisted_index_status is not None
-            else KnowledgeAvailability.REFRESH_FAILED
+        result = await _request_refresh_scheduler(request).refresh_now(
+            base_id,
+            config=config,
+            runtime_paths=runtime_paths,
+            force_reindex=True,
         )
+    except Exception as exc:
+        index_status = await _index_status(config, base_id, runtime_paths, refreshing=False)
+        availability = index_status.availability if index_status.published else KnowledgeAvailability.REFRESH_FAILED
         last_error = index_status.last_error if index_status.last_error is not None else str(exc)
         raise HTTPException(
             status_code=409,
@@ -892,7 +848,7 @@ async def reindex_knowledge(base_id: str, request: Request) -> dict[str, Any]:
                 "last_error": _redacted_last_error(last_error),
             },
         ) from exc
-    if not (result.index_published and result.availability is KnowledgeAvailability.READY):
+    if not result.index_published:
         raise HTTPException(
             status_code=409,
             detail={

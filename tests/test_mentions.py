@@ -4,15 +4,16 @@ from __future__ import annotations
 
 import tempfile
 from pathlib import Path
-from typing import TYPE_CHECKING, NoReturn
+from typing import NoReturn
 
-if TYPE_CHECKING:
-    import pytest
+import nio
+import pytest
 
 from mindroom import constants as constants_mod
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
+from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.matrix import mentions as mentions_module
 from mindroom.matrix.mentions import (
     format_message_with_mentions,
@@ -20,9 +21,11 @@ from mindroom.matrix.mentions import (
     resolve_mentioned_user_ids_from_text,
 )
 from mindroom.matrix.state import MatrixState
+from mindroom.thread_utils import check_agent_mentioned
 from mindroom.tool_system.events import _TOOL_TRACE_KEY, ToolTraceEntry
 from tests.cpu_budget_helpers import cpu_budget
-from tests.identity_helpers import actual_entity_usernames, persist_entity_accounts
+from tests.identity_helpers import entity_ids, persist_actual_entity_accounts
+from tests.matrix_state_helpers import save_matrix_state
 
 _BOUND_RUNTIME_PATHS: dict[int, constants_mod.RuntimePaths] = {}
 
@@ -71,18 +74,9 @@ def _bind_config(
         models={"default": ModelConfig(provider="ollama", id="test-model")},
     )
     bound = Config.validate_with_runtime(config.authored_model_dump(), runtime_paths)
-    _persist_mentions_accounts(bound, runtime_paths)
+    persist_actual_entity_accounts(bound, runtime_paths)
     _BOUND_RUNTIME_PATHS[id(bound)] = runtime_paths
     return bound
-
-
-def _persist_mentions_accounts(
-    config: Config,
-    runtime_paths: constants_mod.RuntimePaths,
-    *,
-    usernames: dict[str, str] | None = None,
-) -> None:
-    persist_entity_accounts(config, runtime_paths, usernames=usernames or actual_entity_usernames(config))
 
 
 def _make_config(runtime_paths: constants_mod.RuntimePaths) -> Config:
@@ -387,103 +381,63 @@ class TestMentionParsing:
             "could you help with this?</p>\n"
         )
 
-    def test_format_message_with_mentions_uses_persisted_current_username_drift(self, tmp_path: Path) -> None:
-        """Mention formatting should target the live persisted Matrix account ID."""
-        runtime_paths = constants_mod.resolve_runtime_paths(
-            config_path=tmp_path / "config.yaml",
-            storage_path=tmp_path / "mindroom_data",
-            process_env={
-                "MATRIX_HOMESERVER": "http://localhost:8008",
-                "MINDROOM_NAMESPACE": "",
-            },
-        )
-        config = _make_config(runtime_paths)
-        state = MatrixState.load(runtime_paths=runtime_paths)
-        state.add_account("agent_general", "actual_general_live", "pw", domain="localhost")
-        state.save(runtime_paths=runtime_paths)
-
-        content = _format_message_with_mentions(
-            config,
-            "@general could you help with this?",
-        )
-
-        assert content["body"] == "@actual_general_live:localhost could you help with this?"
-        assert content["m.mentions"]["user_ids"] == ["@actual_general_live:localhost"]
-
-    def test_format_message_resolves_generated_alias_after_username_drift(self, tmp_path: Path) -> None:
-        """Generated aliases target the current account even after username drift."""
-        runtime_paths = constants_mod.resolve_runtime_paths(
-            config_path=tmp_path / "config.yaml",
-            storage_path=tmp_path / "mindroom_data",
-            process_env={
-                "MATRIX_HOMESERVER": "http://localhost:8008",
-                "MINDROOM_NAMESPACE": "",
-            },
-        )
-        config = _make_config(runtime_paths)
-        state = MatrixState.load(runtime_paths=runtime_paths)
-        state.add_account("agent_general", "actual_general_live", "pw", domain="localhost")
-        state.save(runtime_paths=runtime_paths)
-
-        content = _format_message_with_mentions(
-            config,
-            "@mindroom_general could you help with this?",
-        )
-
-        assert content["body"] == "@actual_general_live:localhost could you help with this?"
-        assert content["m.mentions"]["user_ids"] == ["@actual_general_live:localhost"]
-
-    def test_format_message_rejects_stale_generated_full_mxid_after_drift(self, tmp_path: Path) -> None:
-        """After username drift, stale generated full MXIDs should stay literal."""
-        runtime_paths = constants_mod.resolve_runtime_paths(
-            config_path=tmp_path / "config.yaml",
-            storage_path=tmp_path / "mindroom_data",
-            process_env={
-                "MATRIX_HOMESERVER": "http://localhost:8008",
-                "MINDROOM_NAMESPACE": "",
-            },
-        )
-        config = _make_config(runtime_paths)
-        state = MatrixState.load(runtime_paths=runtime_paths)
-        state.add_account("agent_general", "actual_general_live", "pw", domain="localhost")
-        state.save(runtime_paths=runtime_paths)
-
-        content = _format_message_with_mentions(
-            config,
-            "@mindroom_general:localhost could you help with this?",
-        )
-
-        assert content["body"] == "@mindroom_general:localhost could you help with this?"
-        assert content["m.mentions"]["user_ids"] == ["@mindroom_general:localhost"]
-
-    def test_format_message_rejects_stale_generated_router_full_mxid_after_drift(self, tmp_path: Path) -> None:
-        """After router username drift, stale generated full MXIDs should stay literal."""
-        runtime_paths = constants_mod.resolve_runtime_paths(
-            config_path=tmp_path / "config.yaml",
-            storage_path=tmp_path / "mindroom_data",
-            process_env={
-                "MATRIX_HOMESERVER": "http://localhost:8008",
-                "MINDROOM_NAMESPACE": "",
-            },
-        )
-        config = _make_config(runtime_paths)
-        state = MatrixState.load(runtime_paths=runtime_paths)
-        state.add_account("agent_router", "actual_router_live", "pw", domain="localhost")
-        state.save(runtime_paths=runtime_paths)
-
-        content = _format_message_with_mentions(
-            config,
-            "@mindroom_router:localhost could you route this?",
-        )
-
-        assert content["body"] == "@mindroom_router:localhost could you route this?"
-        assert content["m.mentions"]["user_ids"] == ["@mindroom_router:localhost"]
-
-    def test_format_message_keeps_cross_domain_generated_full_mxid_literal_after_drift(
+    @pytest.mark.parametrize(
+        ("account_key", "username", "text", "expected_body", "expected_user_id"),
+        [
+            (
+                "agent_general",
+                "actual_general_live",
+                "@general could you help with this?",
+                "@actual_general_live:localhost could you help with this?",
+                "@actual_general_live:localhost",
+            ),
+            (
+                "agent_general",
+                "actual_general_live",
+                "@mindroom_general could you help with this?",
+                "@actual_general_live:localhost could you help with this?",
+                "@actual_general_live:localhost",
+            ),
+            (
+                "agent_general",
+                "actual_general_live",
+                "@mindroom_general:localhost could you help with this?",
+                "@mindroom_general:localhost could you help with this?",
+                "@mindroom_general:localhost",
+            ),
+            (
+                "agent_router",
+                "actual_router_live",
+                "@mindroom_router:localhost could you route this?",
+                "@mindroom_router:localhost could you route this?",
+                "@mindroom_router:localhost",
+            ),
+            (
+                "agent_general",
+                "actual_general_live",
+                "@mindroom_general:matrix.org could you help with this?",
+                "@mindroom_general:matrix.org could you help with this?",
+                "@mindroom_general:matrix.org",
+            ),
+        ],
+        ids=(
+            "agent-key-targets-live-account",
+            "generated-alias-targets-live-account",
+            "stale-generated-full-mxid-stays-literal",
+            "stale-generated-router-full-mxid-stays-literal",
+            "cross-domain-generated-full-mxid-stays-literal",
+        ),
+    )
+    def test_format_message_after_username_drift(
         self,
         tmp_path: Path,
+        account_key: str,
+        username: str,
+        text: str,
+        expected_body: str,
+        expected_user_id: str,
     ) -> None:
-        """Remote explicit MXIDs should stay literal even when their localpart looks stale locally."""
+        """After username drift, aliases target the live account and stale or remote full MXIDs stay literal."""
         runtime_paths = constants_mod.resolve_runtime_paths(
             config_path=tmp_path / "config.yaml",
             storage_path=tmp_path / "mindroom_data",
@@ -494,16 +448,13 @@ class TestMentionParsing:
         )
         config = _make_config(runtime_paths)
         state = MatrixState.load(runtime_paths=runtime_paths)
-        state.add_account("agent_general", "actual_general_live", "pw", domain="localhost")
-        state.save(runtime_paths=runtime_paths)
+        state.add_account(account_key, username, "pw", domain="localhost")
+        save_matrix_state(state, runtime_paths)
 
-        content = _format_message_with_mentions(
-            config,
-            "@mindroom_general:matrix.org could you help with this?",
-        )
+        content = _format_message_with_mentions(config, text)
 
-        assert content["body"] == "@mindroom_general:matrix.org could you help with this?"
-        assert content["m.mentions"]["user_ids"] == ["@mindroom_general:matrix.org"]
+        assert content["body"] == expected_body
+        assert content["m.mentions"]["user_ids"] == [expected_user_id]
 
     def test_format_message_rejects_bare_persisted_current_localpart(self, tmp_path: Path) -> None:
         """Bare actual localparts are not runtime aliases."""
@@ -518,7 +469,7 @@ class TestMentionParsing:
         config = _make_config(runtime_paths)
         state = MatrixState.load(runtime_paths=runtime_paths)
         state.add_account("agent_general", "actual_general_live", "pw", domain="localhost")
-        state.save(runtime_paths=runtime_paths)
+        save_matrix_state(state, runtime_paths)
 
         content = _format_message_with_mentions(
             config,
@@ -886,7 +837,7 @@ class TestMentionParsing:
         )
         state = MatrixState.load(runtime_paths=runtime_paths)
         state.add_account("agent_mindroom_dev", "actual_mindroom_dev_oldns", "pw", domain="localhost")
-        state.save(runtime_paths=runtime_paths)
+        save_matrix_state(state, runtime_paths)
 
         text = "@mindroom_dev help"
         processed, mentions, _markdown = _parse_mentions_in_text(text, config)
@@ -970,3 +921,37 @@ class TestMentionParsing:
 
             assert mentioned_agents == expected_agents, f"Failed for text: {text}"
             assert len(mentions) == len(expected_agents)
+
+
+def _owner_id(config: Config) -> str:
+    owner_id = entity_ids(config, _runtime_paths_for(config))[ROUTER_AGENT_NAME]
+    assert owner_id is not None
+    return owner_id.full_id
+
+
+def test_owner_is_not_mentionable() -> None:
+    """The owner account is no mention target by name, and its Matrix ID resolves to no entity."""
+    config = _make_config(_default_runtime_paths())
+    owner_id = _owner_id(config)
+
+    assert _parse_mentions_in_text("@router help", config)[:2] == ("@router help", [])
+    assert _parse_mentions_in_text(f"{owner_id} help", config)[:2] == (f"{owner_id} help", [owner_id])
+
+
+def test_owner_mention_counts_as_non_agent_mention() -> None:
+    """A message that tags the joined owner account is addressed to someone else, like a tag of any person."""
+    config = _make_config(_default_runtime_paths())
+    owner_id = _owner_id(config)
+    room = nio.MatrixRoom("!room:localhost", "@actual_general:localhost")
+    room.add_member(owner_id, None, None)
+    room.members_synced = True
+
+    facts = check_agent_mentioned(
+        {"content": {"body": "hi", "m.mentions": {"user_ids": [owner_id]}}},
+        None,
+        config,
+        _runtime_paths_for(config),
+        room=room,
+    )
+
+    assert facts == ([], False, True)

@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     config_fields=[
         ConfigField(
             name="bot_token",
+            env=("DISCORD_BOT_TOKEN",),
             label="Bot Token",
             type="password",
             required=False,
@@ -71,9 +72,16 @@ if TYPE_CHECKING:
             required=False,
             default=False,
         ),
+        ConfigField(
+            name="timeout",
+            label="Timeout",
+            type="number",
+            required=False,
+            default=30,
+        ),
     ],
     dependencies=["requests"],
-    docs_url="https://docs.agno.com/tools/toolkits/social/discord",
+    docs_url="https://docs.mindroom.chat/tools/messaging-and-social/#discord",
     function_names=(
         "delete_message",
         "get_channel_info",

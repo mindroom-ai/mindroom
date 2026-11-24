@@ -14,7 +14,7 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { toast } from "@/components/ui/toaster";
-import { API_BASE_URL, fetchJSON } from "@/lib/api";
+import { fetchJSON } from "@/lib/api";
 import { cn } from "@/lib/utils";
 
 export type ConnectableProvider = "openrouter" | "anthropic" | "openai";
@@ -33,8 +33,8 @@ interface ConnectProviderResponse {
   missing: MissingProviderKey[];
 }
 
-const STATUS_URL = `${API_BASE_URL}/api/provider-setup/status`;
-const CONNECT_URL = `${API_BASE_URL}/api/provider-setup/connect`;
+const STATUS_URL = "/api/provider-setup/status";
+const CONNECT_URL = "/api/provider-setup/connect";
 
 const PROVIDER_OPTIONS: {
   id: ConnectableProvider;
@@ -125,11 +125,9 @@ export function providerSetupMessage(missing: MissingProviderKey[]): string {
 }
 
 function ProviderSetupDialog({
-  open,
   onOpenChange,
   missing,
 }: {
-  open: boolean;
   onOpenChange: (open: boolean) => void;
   missing: MissingProviderKey[];
 }) {
@@ -187,7 +185,7 @@ function ProviderSetupDialog({
   };
 
   return (
-    <Dialog open={open} onOpenChange={onOpenChange}>
+    <Dialog open onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-[560px]">
         <form onSubmit={(event) => void handleSubmit(event)}>
           <DialogHeader>
@@ -214,7 +212,7 @@ function ProviderSetupDialog({
                   "rounded-lg border px-3 py-2.5 text-left transition-colors",
                   provider === option.id
                     ? "border-primary bg-primary/5"
-                    : "border-border hover:bg-muted/50",
+                    : "border-border hover:bg-secondary",
                 )}
               >
                 <span className="flex items-center gap-2 text-sm font-medium">
@@ -315,7 +313,7 @@ export function ProviderSetupBanner({ refreshKey }: { refreshKey: string }) {
   return (
     <>
       {missing.length > 0 && (
-        <div className="flex flex-wrap items-center justify-between gap-2 border-b border-primary/20 bg-primary/10 px-3 py-2.5 text-sm sm:px-6">
+        <div className="flex flex-wrap items-center justify-between gap-2 border-b bg-card px-3 py-2.5 text-sm sm:px-6">
           <p className="flex items-center gap-2">
             <KeyRound aria-hidden="true" className="h-4 w-4 shrink-0" />
             <span>
@@ -328,13 +326,7 @@ export function ProviderSetupBanner({ refreshKey }: { refreshKey: string }) {
           </Button>
         </div>
       )}
-      {open && (
-        <ProviderSetupDialog
-          open={open}
-          onOpenChange={setOpen}
-          missing={missing}
-        />
-      )}
+      {open && <ProviderSetupDialog onOpenChange={setOpen} missing={missing} />}
     </>
   );
 }

@@ -7,9 +7,12 @@ memberships. This test module verifies that behavior.
 from __future__ import annotations
 
 import asyncio
+import json
 import threading
-from dataclasses import replace
+from contextlib import asynccontextmanager
+from dataclasses import dataclass, replace
 from pathlib import Path  # noqa: TC003
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID
@@ -17,10 +20,11 @@ from uuid import UUID
 import nio
 import pytest
 
-from mindroom import bot_room_lifecycle
+from mindroom import background_tasks, bot_room_lifecycle
 from mindroom.authorization import is_sender_allowed_for_responder
 from mindroom.background_tasks import wait_for_background_tasks
 from mindroom.bot import AgentBot
+from mindroom.bot_room_lifecycle import BotRoomLifecycle, BotRoomLifecycleDeps
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.main import Config
@@ -28,25 +32,30 @@ from mindroom.config.models import RouterConfig
 from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.event_journal import DepartureSource, RoomMembershipPosition
 from mindroom.hooks.matrix_admin import build_hook_matrix_admin
-from mindroom.matrix import client_room_admin
-from mindroom.matrix.client_room_admin import RoomJoinOutcome
+from mindroom.logging_config import get_logger
+from mindroom.matrix import client_room_admin, invited_rooms_store
+from mindroom.matrix.client_room_admin import RoomJoinOutcome, invite_to_room
+from mindroom.matrix.event_types import MINDROOM_SERVER_EVENT_TYPE
 from mindroom.matrix.invited_rooms_store import (
     invited_rooms_path,
     is_inviter_allowed,
-    load_invited_rooms,
     load_pending_room_invites,
     pending_room_invites_path,
-    save_invited_rooms,
+    read_invited_rooms,
+    remember_invited_room,
     should_accept_invites,
 )
 from mindroom.matrix.room_cleanup import cleanup_all_orphaned_bots
-from mindroom.matrix.state import MatrixState
+from mindroom.matrix.sync_continuity import SyncContinuityStore
 from mindroom.matrix.users import AgentMatrixUser
-from mindroom.orchestrator import _MultiAgentOrchestrator
+from mindroom.orchestration.thread_snooze_runtime import ThreadSnoozeRuntimeCoordinator
+from mindroom.thread_summary import notices
+from mindroom.thread_tags import THREAD_TAGS_EVENT_TYPE
 from mindroom.tool_system.worker_routing import agent_state_root_path
-from tests.access_schema_support import with_responder_access
+from tests.access_schema_support import joined_members_response, member_event
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
+    SETTLE_TIMEOUT_SECONDS,
     TEST_PASSWORD,
     bind_runtime_paths,
     install_runtime_journal_support,
@@ -56,12 +65,12 @@ from tests.conftest import (
     test_runtime_paths,
 )
 from tests.identity_helpers import entity_ids
+from tests.journal_helpers import membership_position
 from tests.journal_membership_helpers import admit_room_membership
+from tests.runtime_fakes import ready_runtime
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
-
-    from nio.responses import Response
+    from collections.abc import AsyncIterator, Awaitable, Callable
 
 
 _DURABLE_MEMBERSHIP_GATEWAY = AgentBot.change_local_membership
@@ -138,8 +147,8 @@ def _cache_current_invite(bot: AgentBot, room_id: str, sender: str) -> nio.Matri
 
 async def _handle_invite(bot: AgentBot, room: nio.MatrixRoom, event: nio.InviteEvent) -> None:
     current_room = _cache_current_invite(bot, room.room_id, event.sender)
-    await bot._room_lifecycle.record_pending_room_invite(room.room_id, event.sender)
-    await bot._room_lifecycle.handle_recorded_invite(current_room, event.sender)
+    await bot._room_lifecycle._record_pending_room_invite(room.room_id, event.sender)
+    await bot._room_lifecycle._handle_recorded_invite(current_room, event.sender)
 
 
 def _router_user() -> AgentMatrixUser:
@@ -151,13 +160,90 @@ def _router_user() -> AgentMatrixUser:
     )
 
 
-@pytest.mark.asyncio
-async def test_member_lookup_raced_by_a_membership_change_counts_as_a_failed_fetch() -> None:
-    """A config reload's room setup must skip the room, not abort, when the member list went stale mid-lookup."""
-    client = MagicMock(spec=nio.AsyncClient)
-    client.joined_members = AsyncMock(side_effect=nio.LocalProtocolError("room membership changed during lookup"))
+_INVITEE = "invitee"
 
-    assert await client_room_admin.get_room_members(client, "!room:localhost") is None
+
+def _invitee_user() -> AgentMatrixUser:
+    """Return the account of an agent that accepts invites; the owner account accepts none."""
+    return AgentMatrixUser(
+        agent_name=_INVITEE,
+        user_id="@mindroom_invitee:localhost",
+        display_name="Invitee",
+        password=TEST_PASSWORD,
+    )
+
+
+def _invitee_bot(tmp_path: Path) -> tuple[Config, AgentBot]:
+    """Return a journal-backed bot for an agent that accepts invites, and its config."""
+    config = bind_runtime_paths(
+        Config(agents={_INVITEE: AgentConfig(display_name="Invitee")}),
+        test_runtime_paths(tmp_path),
+    )
+    bot = make_test_agent_bot(agent_user=_invitee_user(), config=config, runtime_paths=runtime_paths_for(config))
+    install_runtime_journal_support(bot)
+    return config, bot
+
+
+def _current_invite(room_id: str, inviter: str) -> nio.MatrixInvitedRoom:
+    """Return the invitee's current invitation to a room, as nio caches it."""
+    room = nio.MatrixInvitedRoom(room_id, _invitee_user().user_id)
+    room.inviter = inviter
+    return room
+
+
+def _invitee_room_lifecycle(
+    config: Config,
+    current_invite: nio.MatrixInvitedRoom,
+    change_membership: AsyncMock,
+) -> BotRoomLifecycle:
+    """Return the invitee's room lifecycle on fakes, where invite work that starts joins through `change_membership`."""
+    client = make_matrix_client_mock(user_id=_invitee_user().user_id)
+    client.rooms = {}
+    client.invited_rooms = {current_invite.room_id: current_invite}
+    runtime_paths = runtime_paths_for(config)
+    return BotRoomLifecycle(
+        BotRoomLifecycleDeps(
+            agent_name=_INVITEE,
+            agent_user=_invitee_user(),
+            runtime=SimpleNamespace(client=client, config=config, agent_reply_memberships=MagicMock()),
+            runtime_paths=runtime_paths,
+            continuity_store=SyncContinuityStore(runtime_paths.storage_root, _INVITEE),
+            get_logger=lambda: get_logger("tests.room_invites"),
+            get_configured_rooms=list,
+            get_retained_room_ids=set,
+            get_cleanup_exclusions=AsyncMock(return_value=set()),
+            send_response=AsyncMock(return_value=None),
+            change_membership=change_membership,
+            admit_response=MagicMock(),
+            on_configured_room_joined=AsyncMock(),
+            on_room_joined=AsyncMock(),
+            publish_server_state=AsyncMock(),
+            get_conversation_reader=MagicMock(),
+            get_agent_bot=lambda _name: None,
+        ),
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("refusals", "members"), [(1, {"@alice:localhost"}), (3, None)])
+async def test_member_lookup_raced_by_a_membership_change_is_read_again_then_counts_as_a_failed_fetch(
+    refusals: int,
+    members: set[str] | None,
+) -> None:
+    """A member list that went stale mid-lookup is read again, and counts as a failed fetch once every read did.
+
+    A config reload's room setup then skips the room instead of aborting.
+    """
+    client = MagicMock(spec=nio.AsyncClient)
+    client.joined_members = AsyncMock(
+        side_effect=[
+            *(nio.LocalProtocolError("room membership changed during lookup") for _ in range(refusals)),
+            joined_members_response("!room:localhost", "@alice:localhost"),
+        ],
+    )
+
+    assert await client_room_admin.get_room_members(client, "!room:localhost") == members
+    assert client.joined_members.await_count == min(refusals + 1, 3)
 
 
 @pytest.mark.parametrize(
@@ -180,7 +266,6 @@ def test_invitation_policy_is_independent_for_every_responder(
     """The dedicated invite policy must decide joins without responder access."""
     config = bind_runtime_paths(
         Config(
-            router=RouterConfig(model="default", accept_invites=policy),
             agents={
                 "research": AgentConfig(
                     display_name="Research",
@@ -199,10 +284,10 @@ def test_invitation_policy_is_independent_for_every_responder(
         test_runtime_paths(tmp_path),
     )
     runtime_paths = runtime_paths_for(config)
-    assert is_inviter_allowed(config, runtime_paths, ROUTER_AGENT_NAME, sender_id) is expected
+    assert is_inviter_allowed(config, runtime_paths, ROUTER_AGENT_NAME, sender_id) is False
     assert is_inviter_allowed(config, runtime_paths, "research", sender_id) is expected
     assert is_inviter_allowed(config, runtime_paths, "reviewers", sender_id) is expected
-    assert should_accept_invites(config, ROUTER_AGENT_NAME) is bool(policy)
+    assert should_accept_invites(config, ROUTER_AGENT_NAME) is False
     assert should_accept_invites(config, "research") is bool(policy)
     assert should_accept_invites(config, "reviewers") is bool(policy)
 
@@ -211,7 +296,6 @@ def test_invitation_policy_resolves_aliases_before_matching(tmp_path: Path) -> N
     """An inviter alias must match the same canonical pattern as conversation access."""
     config = bind_runtime_paths(
         Config(
-            router=RouterConfig(model="default", accept_invites=["@owner:example.com"]),
             agents={
                 "research": AgentConfig(
                     display_name="Research",
@@ -232,7 +316,6 @@ def test_invitation_policy_resolves_aliases_before_matching(tmp_path: Path) -> N
     config.authorization.aliases = {"@owner:example.com": ["@bridge-owner:example.com"]}
     runtime_paths = runtime_paths_for(config)
     entity_ids(config, runtime_paths)
-    assert is_inviter_allowed(config, runtime_paths, ROUTER_AGENT_NAME, "@bridge-owner:example.com") is True
     assert is_inviter_allowed(config, runtime_paths, "research", "@bridge-owner:example.com") is True
     assert is_inviter_allowed(config, runtime_paths, "reviewers", "@bridge-owner:example.com") is True
 
@@ -243,36 +326,36 @@ def test_invitation_policy_does_not_resolve_configured_bot_alias(tmp_path: Path)
     bot_id = "@bridgebot:example.com"
     config = bind_runtime_paths(
         Config(
-            router=RouterConfig(model="default", accept_invites=[human_id]),
+            agents={_INVITEE: AgentConfig(display_name="Invitee", accept_invites=[human_id])},
             bot_accounts=[bot_id],
         ),
         test_runtime_paths(tmp_path),
     )
     config.authorization.aliases = {human_id: [bot_id]}
 
-    assert is_inviter_allowed(config, runtime_paths_for(config), ROUTER_AGENT_NAME, bot_id) is False
+    assert is_inviter_allowed(config, runtime_paths_for(config), _INVITEE, bot_id) is False
 
 
-def _live_router_invite_scenario(
+def _live_invite_scenario(
     tmp_path: Path,
     *,
     room_id: str = "!invited:localhost",
     sender_id: str = "@owner:localhost",
 ) -> tuple[Config, AgentBot, nio.MatrixInvitedRoom, nio.InviteMemberEvent]:
-    """Build one fresh router invitation scenario."""
+    """Build one fresh invitation scenario for an agent that accepts invites."""
     config = bind_runtime_paths(
         Config(
-            router=RouterConfig(
-                model="default",
-                accept_invites=True,
-                access=ResponderAccessConfig(current_room_members=True),
-            ),
+            agents={
+                _INVITEE: AgentConfig(
+                    display_name="Invitee",
+                    access=ResponderAccessConfig(current_room_members=True),
+                ),
+            },
         ),
         test_runtime_paths(tmp_path),
     )
     bot = make_test_agent_bot(
-        agent_user=_router_user(),
-        storage_path=tmp_path,
+        agent_user=_invitee_user(),
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
@@ -304,43 +387,41 @@ def _live_router_invite_scenario(
         ([], "@owner:localhost", False),
     ],
 )
-async def test_router_invitation_list_controls_join(
+async def test_invitation_list_controls_join(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     policy: list[str],
     sender_id: str,
     accepted: bool,
 ) -> None:
-    """The room lifecycle must enforce the router's dedicated inviter patterns."""
-    config, bot, room, event = _live_router_invite_scenario(tmp_path, sender_id=sender_id)
-    config.router.accept_invites = policy
+    """The room lifecycle must enforce an agent's dedicated inviter patterns."""
+    config, bot, room, event = _live_invite_scenario(tmp_path, sender_id=sender_id)
+    config.agents[_INVITEE].accept_invites = policy
     join_room = AsyncMock(return_value=RoomJoinOutcome.JOINED)
     monkeypatch.setattr("mindroom.matrix.client_room_admin.join_room", join_room)
-    monkeypatch.setattr(bot._room_lifecycle, "_send_invite_welcome", AsyncMock())
 
     await _handle_invite(bot, room, event)
 
     if accepted:
         join_room.assert_awaited_once_with(bot.client, room.room_id)
-        assert bot._room_lifecycle.invited_rooms == {room.room_id}
+        assert bot._room_lifecycle.invited_room_ids() == {room.room_id}
     else:
         join_room.assert_not_awaited()
-        assert bot._room_lifecycle.invited_rooms == set()
+        assert bot._room_lifecycle.invited_room_ids() == set()
 
 
 @pytest.mark.asyncio
-async def test_router_invitation_list_uses_current_inviter_at_join_boundary(
+async def test_invitation_list_uses_current_inviter_at_join_boundary(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     """A replacement invite must own authorization before the join starts."""
     allowed_sender = "@owner:localhost"
     replacement_sender = "@outsider:localhost"
-    config, bot, room, event = _live_router_invite_scenario(tmp_path, sender_id=allowed_sender)
-    config.router.accept_invites = [allowed_sender]
+    config, bot, room, event = _live_invite_scenario(tmp_path, sender_id=allowed_sender)
+    config.agents[_INVITEE].accept_invites = [allowed_sender]
     join_room = AsyncMock(return_value=RoomJoinOutcome.JOINED)
     monkeypatch.setattr("mindroom.matrix.client_room_admin.join_room", join_room)
-    monkeypatch.setattr(bot._room_lifecycle, "_send_invite_welcome", AsyncMock())
     update_join_fences = bot._sync_continuity_store.update_join_fences
     fence_started = threading.Event()
     release_fence = threading.Event()
@@ -361,14 +442,14 @@ async def test_router_invitation_list_uses_current_inviter_at_join_boundary(
     try:
         assert await asyncio.to_thread(fence_started.wait, 2)
         room.inviter = replacement_sender
-        await bot._room_lifecycle.record_pending_room_invite(room.room_id, replacement_sender)
+        await bot._room_lifecycle._record_pending_room_invite(room.room_id, replacement_sender)
     finally:
         release_fence.set()
 
     await task
 
     join_room.assert_not_awaited()
-    assert _pending_room_invites(config, ROUTER_AGENT_NAME) == {
+    assert _pending_room_invites(config, _INVITEE) == {
         room.room_id: replacement_sender,
     }
     assert not bot._room_lifecycle.decrypt_notice_is_fenced(room.room_id)
@@ -380,10 +461,9 @@ async def test_authoritative_departure_revokes_current_invite_before_join(
     tmp_path: Path,
 ) -> None:
     """A leave observed while invite fencing is pending must prevent the join from starting."""
-    config, bot, room, event = _live_router_invite_scenario(tmp_path)
+    config, bot, room, event = _live_invite_scenario(tmp_path)
     join_room = AsyncMock(return_value=RoomJoinOutcome.JOINED)
     monkeypatch.setattr("mindroom.matrix.client_room_admin.join_room", join_room)
-    monkeypatch.setattr(bot._room_lifecycle, "_send_invite_welcome", AsyncMock())
     update_join_fences = bot._sync_continuity_store.update_join_fences
     invite_fence_started = threading.Event()
     release_invite_fence = threading.Event()
@@ -413,7 +493,7 @@ async def test_authoritative_departure_revokes_current_invite_before_join(
         client = bot.client
         assert client is not None
         assert room.room_id not in client.invited_rooms
-        assert _pending_room_invites(config, ROUTER_AGENT_NAME) == {}
+        assert _pending_room_invites(config, _INVITEE) == {}
     finally:
         release_invite_fence.set()
 
@@ -424,25 +504,24 @@ async def test_reconciliation_forgets_refused_invites_and_survives_a_failing_joi
     tmp_path: Path,
 ) -> None:
     """Refused inviters leave no pending entries, and one failing join does not stop the pass."""
-    config, bot, _room, _event = _live_router_invite_scenario(tmp_path)
-    config.router.accept_invites = ["@owner:localhost"]
+    config, bot, _room, _event = _live_invite_scenario(tmp_path)
+    config.agents[_INVITEE].accept_invites = ["@owner:localhost"]
     bot.client.invited_rooms = {}
     failing, refused, joinable = "!a-failing:localhost", "!b-refused:localhost", "!c-joinable:localhost"
     _cache_current_invite(bot, failing, "@owner:localhost")
     _cache_current_invite(bot, refused, "@outsider:localhost")
     _cache_current_invite(bot, joinable, "@owner:localhost")
-    await bot._room_lifecycle.record_pending_room_invite(refused, "@outsider:localhost")
+    await bot._room_lifecycle._record_pending_room_invite(refused, "@outsider:localhost")
 
     async def join_room(_client: object, room_id: str) -> RoomJoinOutcome:
         return RoomJoinOutcome.RETRYABLE_FAILURE if room_id == failing else RoomJoinOutcome.JOINED
 
     monkeypatch.setattr("mindroom.matrix.client_room_admin.join_room", AsyncMock(side_effect=join_room))
-    monkeypatch.setattr(bot._room_lifecycle, "_send_invite_welcome", AsyncMock())
 
     await bot._room_lifecycle.reconcile_pending_invites()
 
-    assert bot._room_lifecycle.invited_rooms == {joinable}
-    assert _pending_room_invites(config, ROUTER_AGENT_NAME) == {failing: "@owner:localhost"}
+    assert bot._room_lifecycle.invited_room_ids() == {joinable}
+    assert _pending_room_invites(config, _INVITEE) == {failing: "@owner:localhost"}
 
 
 @pytest.mark.asyncio
@@ -451,7 +530,7 @@ async def test_withdrawn_invites_leave_no_pending_entries(
     tmp_path: Path,
 ) -> None:
     """Invitations withdrawn before their background join cannot accumulate in the durable ledger."""
-    config, bot, _room, _event = _live_router_invite_scenario(tmp_path)
+    config, bot, _room, _event = _live_invite_scenario(tmp_path)
     bot.client.invited_rooms = {}
     join_room = AsyncMock(return_value=RoomJoinOutcome.JOINED)
     monkeypatch.setattr("mindroom.matrix.client_room_admin.join_room", join_room)
@@ -459,12 +538,12 @@ async def test_withdrawn_invites_leave_no_pending_entries(
     for index in range(20):
         room_id = f"!withdrawn-{index}:localhost"
         current = _cache_current_invite(bot, room_id, "@owner:localhost")
-        await bot._room_lifecycle.record_pending_room_invite(room_id, "@owner:localhost")
+        await bot._room_lifecycle._record_pending_room_invite(room_id, "@owner:localhost")
         bot.client.invited_rooms.pop(room_id)
-        await bot._room_lifecycle.handle_recorded_invite(current, "@owner:localhost")
+        await bot._room_lifecycle._handle_recorded_invite(current, "@owner:localhost")
 
     join_room.assert_not_awaited()
-    assert _pending_room_invites(config, ROUTER_AGENT_NAME) == {}
+    assert _pending_room_invites(config, _INVITEE) == {}
 
 
 @pytest.mark.asyncio
@@ -473,57 +552,27 @@ async def test_pending_invite_ledger_keeps_only_the_newest_invites_off_the_event
     tmp_path: Path,
 ) -> None:
     """Invitations whose joins keep failing stay retryable only up to the cap, and saves leave the loop thread."""
-    config, bot, _room, _event = _live_router_invite_scenario(tmp_path)
+    config, bot, _room, _event = _live_invite_scenario(tmp_path)
     monkeypatch.setattr("mindroom.bot_room_lifecycle._MAX_PENDING_ROOM_INVITES", 3)
     save_threads: list[threading.Thread] = []
-    save = bot_room_lifecycle.save_pending_room_invites
+    save = invited_rooms_store._save_pending_room_invites
 
     def save_from_thread(path: Path, pending_invites: dict[str, str]) -> bool:
         save_threads.append(threading.current_thread())
         return save(path, pending_invites)
 
-    monkeypatch.setattr("mindroom.bot_room_lifecycle.save_pending_room_invites", save_from_thread)
+    monkeypatch.setattr("mindroom.matrix.invited_rooms_store._save_pending_room_invites", save_from_thread)
 
     for index in range(5):
-        await bot._room_lifecycle.record_pending_room_invite(f"!failing-{index}:localhost", "@owner:localhost")
+        await bot._room_lifecycle._record_pending_room_invite(f"!failing-{index}:localhost", "@owner:localhost")
 
-    assert list(_pending_room_invites(config, ROUTER_AGENT_NAME)) == [
+    assert list(_pending_room_invites(config, _INVITEE)) == [
         "!failing-2:localhost",
         "!failing-3:localhost",
         "!failing-4:localhost",
     ]
     assert len(save_threads) == 5
     assert threading.current_thread() not in save_threads
-
-
-@pytest.fixture
-def mock_config(tmp_path: Path) -> Config:
-    """Create a mock config with agents and teams."""
-    return bind_runtime_paths(
-        Config(
-            agents={
-                "agent1": AgentConfig(
-                    display_name="Agent 1",
-                    role="Test agent",
-                    rooms=["room1", "room2"],
-                ),
-                "agent2": AgentConfig(
-                    display_name="Agent 2",
-                    role="Another test agent",
-                    rooms=["room1"],
-                ),
-            },
-            teams={
-                "team1": TeamConfig(
-                    display_name="Team 1",
-                    role="Test team",
-                    agents=["agent1", "agent2"],
-                    rooms=["room2"],
-                ),
-            },
-        ),
-        tmp_path,
-    )
 
 
 @pytest.mark.asyncio
@@ -542,7 +591,6 @@ async def test_agent_joins_configured_rooms(monkeypatch: pytest.MonkeyPatch, tmp
 
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["!room1:localhost", "!room2:localhost"],
@@ -562,21 +610,10 @@ async def test_agent_joins_configured_rooms(monkeypatch: pytest.MonkeyPatch, tmp
 
     monkeypatch.setattr("mindroom.matrix.client_room_admin.join_room", mock_join_room)
 
-    # Mock restore_scheduled_tasks
-    async def mock_restore_scheduled_tasks(
-        _client: AsyncMock,
-        _room_id: str,
-        _config: Config,
-        _runtime_paths: object,
-        _conversation_reader: object,
-    ) -> int:
-        return 0
-
-    monkeypatch.setattr("mindroom.bot.restore_scheduled_tasks", mock_restore_scheduled_tasks)
     monkeypatch.setattr("mindroom.bot_room_lifecycle.get_joined_rooms", AsyncMock(return_value=[]))
 
     # Test that the bot joins its configured rooms
-    await bot.join_configured_rooms()
+    await bot._room_lifecycle.join_configured_rooms()
 
     # Verify the bot joined both configured rooms
     assert len(joined_rooms) == 2
@@ -596,7 +633,6 @@ async def test_agent_skips_rejoining_rooms_it_already_has(monkeypatch: pytest.Mo
     config = bind_runtime_paths(Config(router=RouterConfig(model="default")), test_runtime_paths(tmp_path))
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["!room1:localhost", "!room2:localhost"],
@@ -610,11 +646,54 @@ async def test_agent_skips_rejoining_rooms_it_already_has(monkeypatch: pytest.Mo
     join_room = AsyncMock(return_value=RoomJoinOutcome.JOINED)
     monkeypatch.setattr("mindroom.matrix.client_room_admin.join_room", join_room)
     monkeypatch.setattr("mindroom.bot_room_lifecycle.get_joined_rooms", AsyncMock(return_value=["!room1:localhost"]))
-    monkeypatch.setattr("mindroom.bot.restore_scheduled_tasks", AsyncMock(return_value=0))
 
-    await bot.join_configured_rooms()
+    await bot._room_lifecycle.join_configured_rooms()
 
     join_room.assert_awaited_once_with(mock_client, "!room2:localhost")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("accepted", [True, False])
+async def test_only_an_accepted_configured_join_runs_room_setup(
+    accepted: bool,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A joined room's reconcile and a new room's join run the room setup only once the membership change succeeds."""
+    joined_room, new_room = "!room1:localhost", "!room2:localhost"
+    agent_user = AgentMatrixUser(
+        agent_name="agent1",
+        user_id="@mindroom_agent1:localhost",
+        display_name="Agent 1",
+        password=TEST_PASSWORD,
+    )
+    config = bind_runtime_paths(Config(router=RouterConfig(model="default")), test_runtime_paths(tmp_path))
+    bot = make_test_agent_bot(
+        agent_user=agent_user,
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        rooms=[joined_room, new_room],
+    )
+    install_runtime_journal_support(bot)
+    bot.client = AsyncMock()
+    bot.client.rooms = {joined_room: MagicMock()}
+    change_membership = AsyncMock(return_value=accepted)
+    on_room_joined = AsyncMock()
+    on_configured_room_joined = AsyncMock()
+    bot._room_lifecycle.deps = replace(
+        bot._room_lifecycle.deps,
+        change_membership=change_membership,
+        on_room_joined=on_room_joined,
+        on_configured_room_joined=on_configured_room_joined,
+    )
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.get_joined_rooms", AsyncMock(return_value=[joined_room]))
+
+    await bot._room_lifecycle.join_configured_rooms()
+
+    assert sorted(args for args, _ in change_membership.await_args_list) == [(joined_room, "join"), (new_room, "join")]
+    set_up = [joined_room, new_room] if accepted else []
+    assert sorted(room_id for (room_id,), _ in on_room_joined.await_args_list) == set_up
+    assert sorted(room_id for (room_id,), _ in on_configured_room_joined.await_args_list) == set_up
 
 
 @pytest.mark.asyncio
@@ -636,7 +715,6 @@ async def test_startup_already_joined_reconciles_gateway_without_membership_http
     )
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=[room_id],
@@ -652,6 +730,7 @@ async def test_startup_already_joined_reconciles_gateway_without_membership_http
     session.wait_for_membership_idle = AsyncMock()
     session.next_batch = AsyncMock(return_value=None)
     session.change_membership = AsyncMock(return_value=True)
+    session.wait_for_room_ready = AsyncMock(return_value=True)
     bot.journal_principal = MagicMock(return_value=principal)
     bot._ingestion_session = session
     bot._room_lifecycle.deps = replace(
@@ -664,11 +743,12 @@ async def test_startup_already_joined_reconciles_gateway_without_membership_http
         AsyncMock(return_value=[room_id]),
     )
 
-    await bot.join_configured_rooms()
+    await bot._room_lifecycle.join_configured_rooms()
 
     session.wait_for_membership_idle.assert_awaited_once_with()
     principal.ingestion_membership_position.assert_awaited_once_with(room_id)
     session.change_membership.assert_not_awaited()
+    session.wait_for_room_ready.assert_awaited_once_with(room_id)
     bot.client.join.assert_not_awaited()
 
 
@@ -691,7 +771,6 @@ async def test_unconfigured_leave_uses_durable_gateway_without_direct_http(
     )
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=[],
@@ -721,7 +800,7 @@ async def test_unconfigured_leave_uses_durable_gateway_without_direct_http(
         AsyncMock(return_value=False),
     )
 
-    await bot.leave_unconfigured_rooms()
+    await bot._room_lifecycle.leave_unconfigured_rooms()
 
     session.change_membership.assert_awaited_once_with(
         operation_id=UUID("46fba72c-1729-5252-a01c-ca8a8746cc6e"),
@@ -748,7 +827,6 @@ async def test_join_configured_rooms_retries_when_membership_inventory_is_unavai
     config = bind_runtime_paths(Config(router=RouterConfig(model="default")), test_runtime_paths(tmp_path))
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["!room1:localhost", "!room2:localhost"],
@@ -759,7 +837,7 @@ async def test_join_configured_rooms_retries_when_membership_inventory_is_unavai
     monkeypatch.setattr("mindroom.bot_room_lifecycle.get_joined_rooms", AsyncMock(return_value=None))
     monkeypatch.setattr("mindroom.matrix.client_room_admin.join_room", join_room)
 
-    await bot.join_configured_rooms()
+    await bot._room_lifecycle.join_configured_rooms()
 
     assert {call.args[1] for call in join_room.await_args_list} == {
         "!room1:localhost",
@@ -785,7 +863,6 @@ async def test_stale_client_room_after_leave_cannot_reopen_cache(
     config = bind_runtime_paths(Config(router=RouterConfig(model="default")), test_runtime_paths(tmp_path))
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=[room_id],
@@ -800,11 +877,11 @@ async def test_stale_client_room_after_leave_cannot_reopen_cache(
 
     await admit_room_membership(bot.journal_principal(), room_id, "leave")
     with pytest.raises(RuntimeError) as raised:
-        await bot.join_configured_rooms()
+        await bot._room_lifecycle.join_configured_rooms()
 
     assert raised.value is failure
     join_room.assert_awaited_once_with(bot.client, room_id)
-    assert await bot.journal_principal().membership_position(room_id) == RoomMembershipPosition("leave", 1)
+    assert await membership_position(bot.journal_principal(), room_id) == RoomMembershipPosition("leave", 1)
     assert bot._room_lifecycle.decrypt_notice_is_fenced(room_id)
 
 
@@ -839,7 +916,6 @@ async def test_agent_rejoins_persisted_invited_rooms_on_startup(
 
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
@@ -851,29 +927,29 @@ async def test_agent_rejoins_persisted_invited_rooms_on_startup(
     join_room = AsyncMock(return_value=RoomJoinOutcome.JOINED)
     monkeypatch.setattr("mindroom.matrix.client_room_admin.join_room", join_room)
     monkeypatch.setattr("mindroom.bot_room_lifecycle.get_joined_rooms", AsyncMock(return_value=[]))
-    monkeypatch.setattr("mindroom.bot.restore_scheduled_tasks", AsyncMock(return_value=0))
 
-    await bot.join_configured_rooms()
+    await bot._room_lifecycle.join_configured_rooms()
 
     join_room.assert_awaited_once_with(mock_client, "!invited-room:localhost")
 
 
 @pytest.mark.asyncio
-async def test_router_accepts_agent_invite_persists_and_rejoins_on_startup(
+async def test_accepted_agent_invite_persists_and_rejoins_on_startup(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Router should auto-accept an internal agent invite as durable desired membership."""
+    """An accepted internal agent invite is durable desired membership and restores the room's schedules."""
     config = bind_runtime_paths(
         Config(
-            agents={"agent1": AgentConfig(display_name="Agent 1", role="Test agent")},
-            router=RouterConfig(model="default", accept_invites=True),
+            agents={
+                "agent1": AgentConfig(display_name="Agent 1", role="Test agent"),
+                _INVITEE: AgentConfig(display_name="Invitee"),
+            },
         ),
         test_runtime_paths(tmp_path),
     )
     bot = make_test_agent_bot(
-        agent_user=_router_user(),
-        storage_path=tmp_path,
+        agent_user=_invitee_user(),
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
@@ -891,25 +967,25 @@ async def test_router_accepts_agent_invite_persists_and_rejoins_on_startup(
     monkeypatch.setattr("mindroom.matrix.client_room_admin.join_room", join_room)
     welcome_message = AsyncMock()
     monkeypatch.setattr(bot._room_lifecycle, "send_welcome_message_if_empty", welcome_message)
+    restore_room = AsyncMock(return_value=0)
+    monkeypatch.setattr(bot.orchestrator.scheduled_tasks, "restore_room", restore_room)
 
-    room = MagicMock(room_id="!router-invited:localhost")
+    room = MagicMock(room_id="!agent-invited:localhost")
     room.canonical_alias = None
     event = MagicMock(sender="@mindroom_agent1:localhost")
 
     await _handle_invite(bot, room, event)
 
-    join_room.assert_awaited_once_with(bot.client, "!router-invited:localhost")
+    join_room.assert_awaited_once_with(bot.client, "!agent-invited:localhost")
+    restore_room.assert_awaited_once_with(bot, "!agent-invited:localhost")
     assert fenced_during_join == [True]
-    welcome_message.assert_awaited_once_with("!router-invited:localhost", "@mindroom_agent1:localhost")
-    assert bot._room_lifecycle.decrypt_notice_is_fenced("!router-invited:localhost")
-    assert bot._room_lifecycle.invited_rooms == {"!router-invited:localhost"}
-    assert _invited_rooms_path(config, ROUTER_AGENT_NAME).read_text(encoding="utf-8") == (
-        '[\n  "!router-invited:localhost"\n]\n'
-    )
+    welcome_message.assert_not_awaited()
+    assert bot._room_lifecycle.decrypt_notice_is_fenced("!agent-invited:localhost")
+    assert bot._room_lifecycle.invited_room_ids() == {"!agent-invited:localhost"}
+    assert _invited_rooms_path(config, _INVITEE).read_text(encoding="utf-8") == ('[\n  "!agent-invited:localhost"\n]\n')
 
     restarted_bot = make_test_agent_bot(
-        agent_user=_router_user(),
-        storage_path=tmp_path,
+        agent_user=_invitee_user(),
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
@@ -920,35 +996,20 @@ async def test_router_accepts_agent_invite_persists_and_rejoins_on_startup(
     monkeypatch.setattr("mindroom.bot_room_lifecycle.get_joined_rooms", AsyncMock(return_value=[]))
     monkeypatch.setattr(restarted_bot, "_post_join_room_setup", AsyncMock())
 
-    await restarted_bot.join_configured_rooms()
+    await restarted_bot._room_lifecycle.join_configured_rooms()
 
-    join_room.assert_awaited_once_with(restarted_bot.client, "!router-invited:localhost")
+    join_room.assert_awaited_once_with(restarted_bot.client, "!agent-invited:localhost")
 
 
 @pytest.mark.asyncio
 async def test_live_invite_forbidden_join_remains_retryable(
-    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     """A live invite's ambiguous forbidden join must remain retryable."""
-    config = bind_runtime_paths(
-        Config(router=RouterConfig(model="default", accept_invites=True)),
-        test_runtime_paths(tmp_path),
-    )
-    bot = make_test_agent_bot(
-        agent_user=_router_user(),
-        storage_path=tmp_path,
-        config=config,
-        runtime_paths=runtime_paths_for(config),
-    )
-    install_runtime_journal_support(bot)
+    config, bot = _invitee_bot(tmp_path)
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     bot.client.rooms = {}
     bot.client.join = AsyncMock(return_value=nio.JoinError("forbidden", "M_FORBIDDEN"))
-    monkeypatch.setattr(
-        "mindroom.bot_room_lifecycle.is_sender_allowed_for_agent_reply_in_room",
-        lambda *_args, **_kwargs: True,
-    )
 
     with pytest.raises(RuntimeError, match="Failed to join invited room"):
         await _handle_invite(
@@ -956,7 +1017,7 @@ async def test_live_invite_forbidden_join_remains_retryable(
             MagicMock(room_id="!failed:localhost", canonical_alias=None),
             MagicMock(sender="@owner:localhost"),
         )
-    assert _pending_room_invites(config, ROUTER_AGENT_NAME) == {
+    assert _pending_room_invites(config, _INVITEE) == {
         "!failed:localhost": "@owner:localhost",
     }
     assert bot._room_lifecycle.decrypt_notice_is_fenced("!failed:localhost")
@@ -964,28 +1025,13 @@ async def test_live_invite_forbidden_join_remains_retryable(
 
 @pytest.mark.asyncio
 async def test_unconfirmed_invite_join_failure_retains_retry_state(
-    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     """The durable boolean result cannot establish a terminal join rejection."""
-    config = bind_runtime_paths(
-        Config(router=RouterConfig(model="default", accept_invites=True)),
-        test_runtime_paths(tmp_path),
-    )
-    bot = make_test_agent_bot(
-        agent_user=_router_user(),
-        storage_path=tmp_path,
-        config=config,
-        runtime_paths=runtime_paths_for(config),
-    )
-    install_runtime_journal_support(bot)
+    config, bot = _invitee_bot(tmp_path)
     bot.client = AsyncMock()
     bot.client.rooms = {}
     bot.client.join = AsyncMock(return_value=nio.JoinError("bad state", "M_BAD_STATE"))
-    monkeypatch.setattr(
-        "mindroom.bot_room_lifecycle.is_sender_allowed_for_agent_reply_in_room",
-        lambda *_args, **_kwargs: True,
-    )
     event = nio.InviteEvent.parse_event(
         {
             "type": "m.room.member",
@@ -997,48 +1043,33 @@ async def test_unconfirmed_invite_join_failure_retains_retry_state(
     assert isinstance(event, nio.InviteMemberEvent)
 
     room = _cache_current_invite(bot, "!invalid-state:localhost", event.sender)
-    await bot._on_invite_before_sync_certification(room, event)
+    await bot._room_lifecycle.on_invite(room, event)
     assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
 
     bot.client.join.assert_awaited_once_with("!invalid-state:localhost")
     assert await bot._journal_dispatcher.store.pending() == ()
     assert bot._room_lifecycle.decrypt_notice_is_fenced("!invalid-state:localhost")
-    assert "!invalid-state:localhost" in _pending_room_invites(config, ROUTER_AGENT_NAME)
+    assert "!invalid-state:localhost" in _pending_room_invites(config, _INVITEE)
 
 
 @pytest.mark.asyncio
 async def test_recovered_invite_without_current_invite_is_forgotten_without_joining(
-    monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     """A durable pending record must not supply inviter authority, and is forgotten once its invite is gone."""
-    config = bind_runtime_paths(
-        Config(router=RouterConfig(model="default", accept_invites=True)),
-        test_runtime_paths(tmp_path),
-    )
-    bot = make_test_agent_bot(
-        agent_user=_router_user(),
-        storage_path=tmp_path,
-        config=config,
-        runtime_paths=runtime_paths_for(config),
-    )
-    install_runtime_journal_support(bot)
+    config, bot = _invitee_bot(tmp_path)
     bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     bot.client.rooms = {}
     bot.client.invited_rooms = {}
     bot.client.join = AsyncMock(return_value=nio.JoinError("not invited", "M_FORBIDDEN"))
-    monkeypatch.setattr(
-        "mindroom.bot_room_lifecycle.is_sender_allowed_for_agent_reply_in_room",
-        lambda *_args, **_kwargs: True,
-    )
     room_id = "!revoked-invite:localhost"
-    await bot._room_lifecycle.record_pending_room_invite(room_id, "@owner:localhost")
+    await bot._room_lifecycle._record_pending_room_invite(room_id, "@owner:localhost")
 
     await bot._room_lifecycle.reconcile_pending_invites()
     await bot._room_lifecycle.reconcile_pending_invites()
 
     bot.client.join.assert_not_awaited()
-    assert _pending_room_invites(config, ROUTER_AGENT_NAME) == {}
+    assert _pending_room_invites(config, _INVITEE) == {}
     assert not bot._room_lifecycle.decrypt_notice_is_fenced(room_id)
 
 
@@ -1048,25 +1079,11 @@ async def test_initial_sync_invite_is_current_membership_work(
     tmp_path: Path,
 ) -> None:
     """An invite is current membership work during initial sync."""
-    config = bind_runtime_paths(
-        Config(router=RouterConfig(model="default", accept_invites=True)),
-        test_runtime_paths(tmp_path),
-    )
-    bot = make_test_agent_bot(
-        agent_user=_router_user(),
-        storage_path=tmp_path,
-        config=config,
-        runtime_paths=runtime_paths_for(config),
-    )
-    install_runtime_journal_support(bot)
+    _, bot = _invitee_bot(tmp_path)
     bot.client = AsyncMock()
     bot.client.rooms = {}
     join_room = AsyncMock(return_value=RoomJoinOutcome.JOINED)
     welcome_message = AsyncMock()
-    monkeypatch.setattr(
-        "mindroom.bot_room_lifecycle.is_sender_allowed_for_agent_reply_in_room",
-        lambda *_args, **_kwargs: True,
-    )
     monkeypatch.setattr("mindroom.matrix.client_room_admin.join_room", join_room)
     monkeypatch.setattr(bot._room_lifecycle, "send_welcome_message_if_empty", welcome_message)
     event = nio.InviteEvent.parse_event(
@@ -1080,12 +1097,12 @@ async def test_initial_sync_invite_is_current_membership_work(
     assert isinstance(event, nio.InviteMemberEvent)
     room = _cache_current_invite(bot, "!invited:localhost", event.sender)
 
-    await bot._on_invite_before_sync_certification(room, event)
-    assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
+    await bot._room_lifecycle.on_invite(room, event)
+    assert await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=bot._runtime_view)
 
     join_room.assert_awaited_once_with(bot.client, room.room_id)
-    welcome_message.assert_awaited_once_with(room.room_id, event.sender)
-    assert bot._room_lifecycle.invited_rooms == {room.room_id}
+    welcome_message.assert_not_awaited()
+    assert bot._room_lifecycle.invited_room_ids() == {room.room_id}
     assert await bot._journal_dispatcher.store.pending() == ()
 
 
@@ -1107,44 +1124,38 @@ async def test_only_authenticated_self_invites_start_invite_work(
 ) -> None:
     """Unrelated invite-state callbacks must not create join authority or work."""
     config = bind_runtime_paths(
-        Config(router=RouterConfig(model="default", accept_invites=True)),
+        Config(agents={_INVITEE: AgentConfig(display_name="Invitee")}),
         test_runtime_paths(tmp_path),
     )
-    bot = make_test_agent_bot(
-        agent_user=_router_user(),
-        storage_path=tmp_path,
-        config=config,
-        runtime_paths=runtime_paths_for(config),
-    )
-    bot._room_lifecycle.handle_recorded_invite = AsyncMock()
-    room = nio.MatrixInvitedRoom("!metadata:localhost", bot.matrix_id.full_id)
+    room = _current_invite("!metadata:localhost", "@event-sender:localhost")
+    change_membership = AsyncMock(return_value=True)
+    lifecycle = _invitee_room_lifecycle(config, room, change_membership)
     event = nio.InviteEvent.parse_event(
         {
             "type": event_type,
             "sender": "@event-sender:localhost",
-            "state_key": bot.matrix_id.full_id if state_key == "self" else state_key,
+            "state_key": _invitee_user().user_id if state_key == "self" else state_key,
             "content": {"membership": membership} if membership is not None else {"name": "Project"},
         },
     )
     assert isinstance(event, nio.InviteEvent)
 
-    await bot._on_invite_before_sync_certification(room, event)
-    assert await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
+    await lifecycle.on_invite(room, event)
+    assert await wait_for_background_tasks(timeout=1, owner=lifecycle.deps.runtime)
 
-    assert _pending_room_invites(config, ROUTER_AGENT_NAME) == {}
-    bot._room_lifecycle.handle_recorded_invite.assert_not_awaited()
+    assert _pending_room_invites(config, _INVITEE) == {}
+    change_membership.assert_not_awaited()
 
 
 @pytest.mark.asyncio
 async def test_invite_sync_callback_runs_durable_join_in_background(tmp_path: Path) -> None:
     """Durable invite admission must not hold the sync loop across network work."""
     config = bind_runtime_paths(
-        Config(router=RouterConfig(model="default", accept_invites=True)),
+        Config(router=RouterConfig(model="default")),
         test_runtime_paths(tmp_path),
     )
     bot = make_test_agent_bot(
         agent_user=_router_user(),
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
@@ -1158,7 +1169,7 @@ async def test_invite_sync_callback_runs_durable_join_in_background(tmp_path: Pa
         join_started.set()
         await release_join.wait()
 
-    bot._room_lifecycle.handle_recorded_invite = delayed_invite
+    bot._room_lifecycle._handle_recorded_invite = delayed_invite
     room = nio.MatrixRoom("!background-invite:localhost", bot.matrix_id.full_id)
     event = nio.InviteEvent.parse_event(
         {
@@ -1171,13 +1182,15 @@ async def test_invite_sync_callback_runs_durable_join_in_background(tmp_path: Pa
     assert isinstance(event, nio.InviteEvent)
 
     callback_task = asyncio.create_task(
-        bot._on_invite_before_sync_certification(room, event),
+        bot._room_lifecycle.on_invite(room, event),
     )
     try:
         await asyncio.wait_for(join_started.wait(), timeout=1)
         await asyncio.sleep(0)
         assert callback_task.done()
         assert bot._room_lifecycle._pending_room_invites == {room.room_id: event.sender}
+        # The bot's runtime view owns the handling, so stopping the bot drains it.
+        assert len(background_tasks._tasks_for_owner(bot._runtime_view)) == 1
         # The dedicated pending-invite store owns recovery, so no journal row is needed.
         assert await bot._journal_dispatcher.store.pending() == ()
     finally:
@@ -1195,32 +1208,28 @@ async def test_invite_sync_callback_does_not_start_work_when_identity_save_fails
 ) -> None:
     """Invite work must not outlive a failed durable identity write."""
     config = bind_runtime_paths(
-        Config(router=RouterConfig(model="default", accept_invites=True)),
+        Config(agents={_INVITEE: AgentConfig(display_name="Invitee")}),
         test_runtime_paths(tmp_path),
     )
-    bot = make_test_agent_bot(
-        agent_user=_router_user(),
-        storage_path=tmp_path,
-        config=config,
-        runtime_paths=runtime_paths_for(config),
-    )
-    bot._room_lifecycle.handle_recorded_invite = AsyncMock()
-    monkeypatch.setattr("mindroom.bot_room_lifecycle.save_pending_room_invites", lambda *_args: False)
-    room = nio.MatrixRoom("!failed-pending-save:localhost", bot.matrix_id.full_id)
+    room = _current_invite("!failed-pending-save:localhost", "@owner:localhost")
+    change_membership = AsyncMock(return_value=True)
+    lifecycle = _invitee_room_lifecycle(config, room, change_membership)
+    monkeypatch.setattr("mindroom.matrix.invited_rooms_store._save_pending_room_invites", lambda *_args: False)
     event = nio.InviteEvent.parse_event(
         {
             "type": "m.room.member",
             "sender": "@owner:localhost",
-            "state_key": bot.matrix_id.full_id,
+            "state_key": _invitee_user().user_id,
             "content": {"membership": "invite"},
         },
     )
     assert isinstance(event, nio.InviteEvent)
 
     with pytest.raises(OSError, match="Failed to persist pending room invite"):
-        await bot._on_invite_before_sync_certification(room, event)
+        await lifecycle.on_invite(room, event)
+    assert await wait_for_background_tasks(timeout=1, owner=lifecycle.deps.runtime)
 
-    bot._room_lifecycle.handle_recorded_invite.assert_not_awaited()
+    change_membership.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1229,31 +1238,17 @@ async def test_invite_persistence_failure_propagates_to_sync_boundary(
     tmp_path: Path,
 ) -> None:
     """Failed invited-room saves must leave invite work retryable."""
-    config = bind_runtime_paths(
-        Config(router=RouterConfig(model="default", accept_invites=True)),
-        test_runtime_paths(tmp_path),
-    )
-    bot = make_test_agent_bot(
-        agent_user=_router_user(),
-        storage_path=tmp_path,
-        config=config,
-        runtime_paths=runtime_paths_for(config),
-    )
-    install_runtime_journal_support(bot)
+    _, bot = _invitee_bot(tmp_path)
     bot.client = AsyncMock()
     bot.client.rooms = {}
-    monkeypatch.setattr(
-        "mindroom.bot_room_lifecycle.is_sender_allowed_for_agent_reply_in_room",
-        lambda *_args, **_kwargs: True,
-    )
     monkeypatch.setattr(
         "mindroom.matrix.client_room_admin.join_room",
         AsyncMock(return_value=RoomJoinOutcome.JOINED),
     )
-    monkeypatch.setattr("mindroom.bot_room_lifecycle.save_invited_rooms", lambda *_args: False)
+    monkeypatch.setattr("mindroom.matrix.invited_rooms_store._save_invited_rooms", lambda *_args: False)
     monkeypatch.setattr(bot._room_lifecycle, "send_welcome_message_if_empty", AsyncMock())
 
-    with pytest.raises(OSError, match="Failed to persist invited room"):
+    with pytest.raises(OSError, match="Failed to retain invited room"):
         await _handle_invite(
             bot,
             MagicMock(room_id="!failed-save:localhost", canonical_alias=None),
@@ -1262,22 +1257,12 @@ async def test_invite_persistence_failure_propagates_to_sync_boundary(
 
 
 @pytest.mark.asyncio
-async def test_router_invite_preserves_room_created_after_lifecycle_loaded(
+async def test_invite_preserves_room_created_after_lifecycle_loaded(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     """A later invite must not overwrite a hook-created room missing from the lifecycle cache."""
-    config = bind_runtime_paths(
-        Config(router=RouterConfig(model="default", accept_invites=True)),
-        test_runtime_paths(tmp_path),
-    )
-    bot = make_test_agent_bot(
-        agent_user=_router_user(),
-        storage_path=tmp_path,
-        config=config,
-        runtime_paths=runtime_paths_for(config),
-    )
-    install_runtime_journal_support(bot)
+    config, bot = _invitee_bot(tmp_path)
     bot.client = AsyncMock()
     bot.client.rooms = {}
 
@@ -1294,13 +1279,9 @@ async def test_router_invite_preserves_room_created_after_lifecycle_loaded(
         )
         await admin.create_room(name="Hook-created room")
 
-    assert bot._room_lifecycle.invited_rooms == set()
+    assert bot._room_lifecycle.invited_room_ids() == {"!hook-created:localhost"}
 
     join_room = AsyncMock(return_value=RoomJoinOutcome.JOINED)
-    monkeypatch.setattr(
-        "mindroom.bot_room_lifecycle.is_sender_allowed_for_agent_reply_in_room",
-        lambda *_args, **_kwargs: True,
-    )
     monkeypatch.setattr("mindroom.matrix.client_room_admin.join_room", join_room)
     monkeypatch.setattr(bot._room_lifecycle, "send_welcome_message_if_empty", AsyncMock())
     room = MagicMock(room_id="!later-invite:localhost", canonical_alias=None)
@@ -1309,146 +1290,33 @@ async def test_router_invite_preserves_room_created_after_lifecycle_loaded(
     await _handle_invite(bot, room, event)
 
     expected_rooms = {"!hook-created:localhost", "!later-invite:localhost"}
-    assert bot._room_lifecycle.invited_rooms == expected_rooms
-    assert _invited_rooms_path(config, ROUTER_AGENT_NAME).read_text(encoding="utf-8") == (
+    assert bot._room_lifecycle.invited_room_ids() == expected_rooms
+    assert _invited_rooms_path(config, _INVITEE).read_text(encoding="utf-8") == (
         '[\n  "!hook-created:localhost",\n  "!later-invite:localhost"\n]\n'
     )
 
 
 @pytest.mark.asyncio
-async def test_router_cleanup_preserves_room_created_after_lifecycle_loaded(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Cleanup must refresh rooms persisted by hooks after lifecycle construction."""
-    config = bind_runtime_paths(
-        Config(router=RouterConfig(model="default", accept_invites=True)),
-        test_runtime_paths(tmp_path),
-    )
-    bot = make_test_agent_bot(
-        agent_user=_router_user(),
-        storage_path=tmp_path,
-        config=config,
-        runtime_paths=runtime_paths_for(config),
-    )
-    install_runtime_journal_support(bot)
-    bot.client = AsyncMock()
-
-    creator_client = AsyncMock(spec=nio.AsyncClient)
-    creator_client.homeserver = "http://localhost:8008"
-    creator_client.user_id = bot.agent_user.user_id
-    with monkeypatch.context() as patch_context:
-        patch_context.setattr(
-            "mindroom.hooks.matrix_admin.create_room",
-            AsyncMock(return_value="!hook-created:localhost"),
-        )
-        admin = build_hook_matrix_admin(
-            creator_client,
-            runtime_paths_for(config),
-            config=config,
-        )
-        await admin.create_room(name="Hook-created room")
-
-    assert bot._room_lifecycle.invited_rooms == set()
-
-    left_room_ids: list[str] = []
-
-    async def record_rooms_to_leave(
-        _client: AsyncMock,
-        room_ids: list[str],
-        *,
-        leave_room_action: Callable[[str], Awaitable[bool]],
-    ) -> list[str]:
-        del leave_room_action
-        left_room_ids.extend(room_ids)
-        return room_ids
-
-    monkeypatch.setattr(
-        "mindroom.bot_room_lifecycle.get_joined_rooms",
-        AsyncMock(return_value=["!hook-created:localhost", "!stale:localhost"]),
-    )
-    monkeypatch.setattr("mindroom.bot_room_lifecycle.leave_non_dm_rooms", record_rooms_to_leave)
-    monkeypatch.setattr(
-        "mindroom.bot_room_lifecycle.matrix_state_for_runtime",
-        lambda *_args, **_kwargs: MatrixState(),
-    )
-
-    await bot.leave_unconfigured_rooms()
-
-    assert bot._room_lifecycle.invited_rooms == {"!hook-created:localhost"}
-    assert left_room_ids == ["!stale:localhost"]
-
-
-@pytest.mark.asyncio
-async def test_router_cleanup_loads_invited_rooms_off_event_loop(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Durable refresh must not perform file I/O on the event-loop thread."""
-    config = bind_runtime_paths(
-        Config(router=RouterConfig(model="default", accept_invites=True)),
-        test_runtime_paths(tmp_path),
-    )
-    bot = make_test_agent_bot(
-        agent_user=_router_user(),
-        storage_path=tmp_path,
-        config=config,
-        runtime_paths=runtime_paths_for(config),
-    )
-    bot.client = AsyncMock()
-    event_loop_thread_id = threading.get_ident()
-    load_thread_ids: list[int] = []
-
-    def record_load_thread(path: Path) -> set[str]:
-        load_thread_ids.append(threading.get_ident())
-        return load_invited_rooms(path)
-
-    monkeypatch.setattr("mindroom.bot_room_lifecycle.load_invited_rooms", record_load_thread)
-    monkeypatch.setattr("mindroom.bot_room_lifecycle.get_joined_rooms", AsyncMock(return_value=[]))
-    monkeypatch.setattr(
-        "mindroom.bot_room_lifecycle.matrix_state_for_runtime",
-        lambda *_args, **_kwargs: MatrixState(),
-    )
-
-    assert await bot._room_lifecycle._rooms_to_leave() == []
-    assert len(load_thread_ids) == 1
-    assert load_thread_ids[0] != event_loop_thread_id
-
-
-@pytest.mark.asyncio
-async def test_router_invite_keeps_memory_after_transient_persistence_failure(
+async def test_invite_retries_after_transient_persistence_failure(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     """A failed save must not let the next invite erase the first room from memory."""
-    config = bind_runtime_paths(
-        Config(router=RouterConfig(model="default", accept_invites=True)),
-        test_runtime_paths(tmp_path),
-    )
-    bot = make_test_agent_bot(
-        agent_user=_router_user(),
-        storage_path=tmp_path,
-        config=config,
-        runtime_paths=runtime_paths_for(config),
-    )
-    install_runtime_journal_support(bot)
+    config, bot = _invitee_bot(tmp_path)
     bot.client = AsyncMock()
     bot.client.rooms = {}
 
     attempts = 0
+    save = invited_rooms_store._save_invited_rooms
 
     def fail_first_save(path: Path, room_ids: set[str]) -> bool:
         nonlocal attempts
         attempts += 1
         if attempts == 1:
             return False
-        return save_invited_rooms(path, room_ids)
+        return save(path, room_ids)
 
-    monkeypatch.setattr("mindroom.bot_room_lifecycle.save_invited_rooms", fail_first_save)
-    monkeypatch.setattr(
-        "mindroom.bot_room_lifecycle.is_sender_allowed_for_agent_reply_in_room",
-        lambda *_args, **_kwargs: True,
-    )
+    monkeypatch.setattr("mindroom.matrix.invited_rooms_store._save_invited_rooms", fail_first_save)
     monkeypatch.setattr(
         "mindroom.matrix.client_room_admin.join_room",
         AsyncMock(return_value=RoomJoinOutcome.JOINED),
@@ -1457,7 +1325,7 @@ async def test_router_invite_keeps_memory_after_transient_persistence_failure(
 
     first_room = MagicMock(room_id="!first:localhost", canonical_alias=None)
     event = MagicMock(sender="@owner:localhost")
-    with pytest.raises(OSError, match="Failed to persist invited room"):
+    with pytest.raises(OSError, match="Failed to retain invited room"):
         await _handle_invite(bot, first_room, event)
 
     await _handle_invite(bot, first_room, event)
@@ -1468,31 +1336,19 @@ async def test_router_invite_keeps_memory_after_transient_persistence_failure(
     )
 
     expected_rooms = {"!first:localhost", "!second:localhost"}
-    assert bot._room_lifecycle.invited_rooms == expected_rooms
-    assert _invited_rooms_path(config, ROUTER_AGENT_NAME).read_text(encoding="utf-8") == (
+    assert bot._room_lifecycle.invited_room_ids() == expected_rooms
+    assert _invited_rooms_path(config, _INVITEE).read_text(encoding="utf-8") == (
         '[\n  "!first:localhost",\n  "!second:localhost"\n]\n'
     )
 
 
 @pytest.mark.asyncio
-async def test_router_deduplicates_concurrent_invite_callbacks(
+async def test_concurrent_invite_callbacks_join_once(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    """Duplicate invite callbacks for one room should join and welcome only once."""
-    config = bind_runtime_paths(
-        Config(
-            router=RouterConfig(model="default", accept_invites=True),
-        ),
-        test_runtime_paths(tmp_path),
-    )
-    bot = make_test_agent_bot(
-        agent_user=_router_user(),
-        storage_path=tmp_path,
-        config=config,
-        runtime_paths=runtime_paths_for(config),
-    )
-    install_runtime_journal_support(bot)
+    """Duplicate invite callbacks for one room should join only once."""
+    _, bot = _invitee_bot(tmp_path)
     bot.client = AsyncMock()
     bot.client.rooms = {}
 
@@ -1505,14 +1361,10 @@ async def test_router_deduplicates_concurrent_invite_callbacks(
         return RoomJoinOutcome.JOINED
 
     join_room = AsyncMock(side_effect=delayed_join_room)
-    monkeypatch.setattr(
-        "mindroom.bot_room_lifecycle.is_sender_allowed_for_agent_reply_in_room",
-        lambda *_args, **_kwargs: True,
-    )
     monkeypatch.setattr("mindroom.matrix.client_room_admin.join_room", join_room)
     bot.client.room_messages = AsyncMock(
         return_value=nio.RoomMessagesResponse(
-            room_id="!router-invited:localhost",
+            room_id="!agent-invited:localhost",
             chunk=[],
             start="",
             end=None,
@@ -1521,7 +1373,7 @@ async def test_router_deduplicates_concurrent_invite_callbacks(
     send_response = AsyncMock(return_value="$welcome")
     install_send_response_mock(bot, send_response)
 
-    room = MagicMock(room_id="!router-invited:localhost")
+    room = MagicMock(room_id="!agent-invited:localhost")
     room.canonical_alias = None
     event = MagicMock(sender="@owner:localhost")
 
@@ -1532,41 +1384,25 @@ async def test_router_deduplicates_concurrent_invite_callbacks(
 
     await asyncio.gather(first_invite, second_invite)
 
-    join_room.assert_awaited_once_with(bot.client, "!router-invited:localhost")
-    bot.client.room_messages.assert_awaited_once()
-    send_response.assert_awaited_once()
-    assert bot._room_lifecycle.invited_rooms == {"!router-invited:localhost"}
+    join_room.assert_awaited_once_with(bot.client, "!agent-invited:localhost")
+    # An invitation gets no welcome: the owner account welcomes only the rooms the config names.
+    send_response.assert_not_awaited()
+    assert bot._room_lifecycle.invited_room_ids() == {"!agent-invited:localhost"}
 
 
 @pytest.mark.asyncio
-async def test_router_departure_allows_fresh_reinvite(
+async def test_departure_allows_fresh_reinvite(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
     """A new invitation after Nio removes a departed room can join again."""
-    config = bind_runtime_paths(
-        Config(
-            router=RouterConfig(model="default", accept_invites=True),
-        ),
-        test_runtime_paths(tmp_path),
-    )
-    bot = make_test_agent_bot(
-        agent_user=_router_user(),
-        storage_path=tmp_path,
-        config=config,
-        runtime_paths=runtime_paths_for(config),
-    )
-    install_runtime_journal_support(bot)
+    _, bot = _invitee_bot(tmp_path)
     bot.client = AsyncMock()
     bot.client.rooms = {}
-    room_id = "!router-reinvited:localhost"
+    room_id = "!reinvited:localhost"
     room = MagicMock(room_id=room_id, canonical_alias=None)
     event = MagicMock(sender="@owner:localhost")
     join_room = AsyncMock(return_value=RoomJoinOutcome.JOINED)
-    monkeypatch.setattr(
-        "mindroom.bot_room_lifecycle.is_sender_allowed_for_agent_reply_in_room",
-        lambda *_args, **_kwargs: True,
-    )
     monkeypatch.setattr("mindroom.matrix.client_room_admin.join_room", join_room)
     bot.client.room_messages = AsyncMock(
         return_value=nio.RoomMessagesResponse(
@@ -1586,8 +1422,7 @@ async def test_router_departure_allows_fresh_reinvite(
     await _handle_invite(bot, room, event)
 
     assert join_room.await_count == 2
-    assert bot.client.room_messages.await_count == 2
-    assert send_response.await_count == 2
+    send_response.assert_not_awaited()
 
 
 @pytest.mark.asyncio
@@ -1614,15 +1449,14 @@ async def test_agent_forgets_persisted_invited_room_after_being_kicked(
             display_name="Agent 1",
             password=TEST_PASSWORD,
         ),
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
     room_id = "!agent-call:localhost"
-    bot._room_lifecycle._update_invited_room(room_id, remember=True)
+    remember_invited_room(_invited_rooms_path(config, "agent1"), room_id)
     await bot._room_lifecycle.forget_invited_room(room_id)
 
-    assert bot._room_lifecycle.invited_rooms == set()
+    assert bot._room_lifecycle.invited_room_ids() == set()
     assert _invited_rooms_path(config, "agent1").read_text(encoding="utf-8") == "[]\n"
 
 
@@ -1651,77 +1485,36 @@ async def test_agent_retries_failed_persisted_invited_room_forget(
             display_name="Agent 1",
             password=TEST_PASSWORD,
         ),
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
     room_id = "!agent-call:localhost"
-    assert bot._room_lifecycle._update_invited_room(room_id, remember=True)
-    monkeypatch.setattr("mindroom.bot_room_lifecycle.save_invited_rooms", lambda *_args: False)
+    remember_invited_room(_invited_rooms_path(config, "agent1"), room_id)
+    monkeypatch.setattr("mindroom.matrix.invited_rooms_store._save_invited_rooms", lambda *_args: False)
 
     with pytest.raises(OSError, match="Failed to forget invited room"):
         await bot._room_lifecycle.forget_invited_room(room_id)
 
     restarted = make_test_agent_bot(
         agent_user=bot.agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
-    assert restarted._room_lifecycle.invited_rooms == {room_id}
+    assert restarted._room_lifecycle.invited_room_ids() == {room_id}
 
-    monkeypatch.setattr("mindroom.bot_room_lifecycle.save_invited_rooms", save_invited_rooms)
+    monkeypatch.undo()
     await bot._room_lifecycle.forget_invited_room(room_id)
     restarted = make_test_agent_bot(
         agent_user=bot.agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
-    assert restarted._room_lifecycle.invited_rooms == set()
+    assert restarted._room_lifecycle.invited_room_ids() == set()
 
 
 @pytest.mark.asyncio
-async def test_cleanup_does_not_resurrect_room_pending_durable_forget(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """A failed durable forget must still make the departed room eligible for cleanup."""
-    config = bind_runtime_paths(
-        Config(router=RouterConfig(model="default", accept_invites=True)),
-        test_runtime_paths(tmp_path),
-    )
-    invited_path = _invited_rooms_path(config, ROUTER_AGENT_NAME)
-    invited_path.parent.mkdir(parents=True, exist_ok=True)
-    invited_path.write_text('[\n  "!departed:localhost"\n]\n', encoding="utf-8")
-    bot = make_test_agent_bot(
-        agent_user=_router_user(),
-        storage_path=tmp_path,
-        config=config,
-        runtime_paths=runtime_paths_for(config),
-    )
-    bot.client = AsyncMock()
-    monkeypatch.setattr("mindroom.bot_room_lifecycle.save_invited_rooms", lambda *_args: False)
-
-    with pytest.raises(OSError, match="Failed to forget invited room"):
-        await bot._room_lifecycle.forget_invited_room("!departed:localhost")
-
-    monkeypatch.setattr(
-        "mindroom.bot_room_lifecycle.get_joined_rooms",
-        AsyncMock(return_value=["!departed:localhost"]),
-    )
-    monkeypatch.setattr(
-        "mindroom.bot_room_lifecycle.matrix_state_for_runtime",
-        lambda *_args, **_kwargs: MatrixState(),
-    )
-
-    assert await bot._room_lifecycle._rooms_to_leave() == ["!departed:localhost"]
-    assert bot._room_lifecycle.invited_rooms == set()
-
-
-@pytest.mark.asyncio
-async def test_nonpersisting_agent_forget_clears_in_memory_room(tmp_path: Path) -> None:
-    """Disabling invite persistence must not leave stale in-memory membership."""
+async def test_an_entity_that_stops_accepting_invites_keeps_no_invited_rooms(tmp_path: Path) -> None:
+    """A record left from when the entity accepted invites no longer keeps or owns those rooms."""
     config = bind_runtime_paths(
         Config(
             agents={
@@ -1741,131 +1534,14 @@ async def test_nonpersisting_agent_forget_clears_in_memory_room(tmp_path: Path) 
             display_name="Agent 1",
             password=TEST_PASSWORD,
         ),
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
     room_id = "!old-invite:localhost"
-    bot._room_lifecycle.invited_rooms = {room_id}
+    remember_invited_room(_invited_rooms_path(config, "agent1"), room_id)
 
-    await bot._room_lifecycle.forget_invited_room(room_id)
-
-    assert bot._room_lifecycle.invited_rooms == set()
-    assert not _invited_rooms_path(config, "agent1").exists()
-
-
-@pytest.mark.asyncio
-async def test_router_duplicate_invite_retries_failed_welcome_delivery(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Duplicate invite callbacks should retry welcome delivery after a failed first send."""
-    config = bind_runtime_paths(
-        Config(
-            router=RouterConfig(model="default", accept_invites=True),
-        ),
-        test_runtime_paths(tmp_path),
-    )
-    bot = make_test_agent_bot(
-        agent_user=_router_user(),
-        storage_path=tmp_path,
-        config=config,
-        runtime_paths=runtime_paths_for(config),
-    )
-    install_runtime_journal_support(bot)
-    bot.client = AsyncMock()
-    bot.client.rooms = {}
-    bot.client.room_messages = AsyncMock(
-        return_value=nio.RoomMessagesResponse(
-            room_id="!router-invited:localhost",
-            chunk=[],
-            start="",
-            end=None,
-        ),
-    )
-    send_response = AsyncMock(side_effect=[None, "$welcome"])
-    install_send_response_mock(bot, send_response)
-
-    join_room = AsyncMock(return_value=RoomJoinOutcome.JOINED)
-    monkeypatch.setattr(
-        "mindroom.bot_room_lifecycle.is_sender_allowed_for_agent_reply_in_room",
-        lambda *_args, **_kwargs: True,
-    )
-    monkeypatch.setattr("mindroom.matrix.client_room_admin.join_room", join_room)
-
-    room = MagicMock(room_id="!router-invited:localhost")
-    room.canonical_alias = None
-    event = MagicMock(sender="@owner:localhost")
-
-    with pytest.raises(RuntimeError, match="Failed to complete welcome message"):
-        await _handle_invite(bot, room, event)
-    await _handle_invite(bot, room, event)
-
-    join_room.assert_awaited_once_with(bot.client, "!router-invited:localhost")
-    assert bot.client.room_messages.await_count == 2
-    assert send_response.await_count == 2
-    assert bot._room_lifecycle.invited_rooms == {"!router-invited:localhost"}
-
-
-@pytest.mark.asyncio
-async def test_redelivered_invite_retries_a_failed_welcome(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """A redelivered invite must retry a welcome whose delivery failed."""
-    config = bind_runtime_paths(
-        Config(
-            router=RouterConfig(model="default", accept_invites=True),
-        ),
-        test_runtime_paths(tmp_path),
-    )
-    bot = make_test_agent_bot(
-        agent_user=_router_user(),
-        storage_path=tmp_path,
-        config=config,
-        runtime_paths=runtime_paths_for(config),
-    )
-    install_runtime_journal_support(bot)
-    bot.client = AsyncMock()
-    bot.client.rooms = {}
-    bot.client.room_messages = AsyncMock(
-        return_value=nio.RoomMessagesResponse(
-            room_id="!router-invited:localhost",
-            chunk=[],
-            start="",
-            end=None,
-        ),
-    )
-    send_response = AsyncMock(side_effect=[None, "$welcome"])
-    install_send_response_mock(bot, send_response)
-    join_room = AsyncMock(return_value=RoomJoinOutcome.JOINED)
-    monkeypatch.setattr(
-        "mindroom.bot_room_lifecycle.is_sender_allowed_for_agent_reply_in_room",
-        lambda *_args, **_kwargs: True,
-    )
-    monkeypatch.setattr("mindroom.matrix.client_room_admin.join_room", join_room)
-    event = nio.InviteEvent.parse_event(
-        {
-            "type": "m.room.member",
-            "sender": "@owner:localhost",
-            "state_key": bot.matrix_id.full_id,
-            "content": {"membership": "invite"},
-        },
-    )
-    assert isinstance(event, nio.InviteEvent)
-    room = _cache_current_invite(bot, "!router-invited:localhost", event.sender)
-    await bot._on_invite_before_sync_certification(room, event)
-    await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
-
-    # The welcome failed. An invite the bot has not finished acting on is
-    # still in the next sync response, so the retry arrives as a redelivery
-    # rather than from an in-process retry loop.
-    await bot._on_invite_before_sync_certification(room, event)
-    await wait_for_background_tasks(timeout=1, owner=bot._runtime_view)
-
-    join_room.assert_awaited_with(bot.client, room.room_id)
-    assert send_response.await_count == 2
-    assert not await bot._journal_dispatcher.store.pending()
+    assert bot._room_lifecycle.invited_room_ids() == set()
+    assert room_id not in bot.approval_room_ids
 
 
 @pytest.mark.asyncio
@@ -1874,16 +1550,16 @@ async def test_router_welcome_send_is_idempotent_for_concurrent_empty_room_check
 ) -> None:
     """Concurrent empty-room checks should not emit duplicate welcome messages."""
     config = bind_runtime_paths(
-        Config(router=RouterConfig(model="default", accept_invites=True)),
+        Config(router=RouterConfig(model="default")),
         test_runtime_paths(tmp_path),
     )
     bot = make_test_agent_bot(
         agent_user=_router_user(),
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
+        rooms=["!empty:localhost"],
     )
-    bot.client = AsyncMock()
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     bot.client.room_messages = AsyncMock(
         return_value=nio.RoomMessagesResponse(
             room_id="!empty:localhost",
@@ -1896,13 +1572,46 @@ async def test_router_welcome_send_is_idempotent_for_concurrent_empty_room_check
     install_send_response_mock(bot, send_response)
 
     await asyncio.gather(
-        bot._send_welcome_message_if_empty("!empty:localhost"),
-        bot._send_welcome_message_if_empty("!empty:localhost"),
-        bot._send_welcome_message_if_empty("!empty:localhost"),
+        bot._room_lifecycle.send_welcome_message_if_empty("!empty:localhost"),
+        bot._room_lifecycle.send_welcome_message_if_empty("!empty:localhost"),
+        bot._room_lifecycle.send_welcome_message_if_empty("!empty:localhost"),
     )
 
     bot.client.room_messages.assert_awaited_once()
     send_response.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_router_welcome_gets_thread_summary(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The welcome is titled without counting toward automatic summaries."""
+    config = bind_runtime_paths(
+        Config(router=RouterConfig(model="default")),
+        test_runtime_paths(tmp_path),
+    )
+    bot = make_test_agent_bot(
+        agent_user=_router_user(),
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        rooms=["!empty:localhost"],
+    )
+    bot.client = AsyncMock()
+    bot.client.room_messages = AsyncMock(
+        return_value=nio.RoomMessagesResponse(room_id="!empty:localhost", chunk=[], start="", end=None),
+    )
+    install_send_response_mock(bot, AsyncMock(return_value="$welcome"))
+    send_message_result = AsyncMock(return_value=None)
+    monkeypatch.setattr(notices, "send_message_result", send_message_result)
+
+    assert await bot._room_lifecycle.send_welcome_message_if_empty("!empty:localhost")
+
+    content = send_message_result.await_args.args[2]
+    assert content["m.relates_to"]["event_id"] == "$welcome"
+    assert content["io.mindroom.thread_summary"]["summary"] == "Welcome to MindRoom"
+    assert content["io.mindroom.thread_summary"]["message_count"] == 0
+    assert content["io.mindroom.thread_summary"]["model"] == "manual"
 
 
 @pytest.mark.asyncio
@@ -1911,16 +1620,16 @@ async def test_router_welcome_send_retries_after_delivery_failure(
 ) -> None:
     """A failed welcome delivery should not suppress a later retry."""
     config = bind_runtime_paths(
-        Config(router=RouterConfig(model="default", accept_invites=True)),
+        Config(router=RouterConfig(model="default")),
         test_runtime_paths(tmp_path),
     )
     bot = make_test_agent_bot(
         agent_user=_router_user(),
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
+        rooms=["!empty:localhost"],
     )
-    bot.client = AsyncMock()
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
     bot.client.room_messages = AsyncMock(
         return_value=nio.RoomMessagesResponse(
             room_id="!empty:localhost",
@@ -1933,7 +1642,7 @@ async def test_router_welcome_send_retries_after_delivery_failure(
     install_send_response_mock(bot, send_response)
 
     assert not await bot._room_lifecycle.send_welcome_message_if_empty("!empty:localhost")
-    await bot._send_welcome_message_if_empty("!empty:localhost")
+    await bot._room_lifecycle.send_welcome_message_if_empty("!empty:localhost")
 
     assert bot.client.room_messages.await_count == 2
     assert send_response.await_count == 2
@@ -1943,14 +1652,14 @@ async def test_router_welcome_send_retries_after_delivery_failure(
 async def test_router_welcome_lookup_failure_propagates_for_retry(tmp_path: Path) -> None:
     """A failed history lookup must not complete invite delivery."""
     config = bind_runtime_paths(
-        Config(router=RouterConfig(model="default", accept_invites=True)),
+        Config(router=RouterConfig(model="default")),
         test_runtime_paths(tmp_path),
     )
     bot = make_test_agent_bot(
         agent_user=_router_user(),
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
+        rooms=["!empty:localhost"],
     )
     bot.client = AsyncMock()
     bot.client.room_messages = AsyncMock(
@@ -1966,54 +1675,166 @@ async def test_router_welcome_lookup_failure_propagates_for_retry(tmp_path: Path
     assert not await bot._room_lifecycle.send_welcome_message_if_empty("!empty:localhost")
 
 
-@pytest.mark.asyncio
-async def test_router_auto_welcome_lists_ad_hoc_present_responder(tmp_path: Path) -> None:
-    """Automatic ad-hoc room welcomes should advertise live responder candidates."""
+@dataclass
+class _WelcomedRoom:
+    bot: AgentBot
+    room: nio.MatrixRoom
+    members: list[nio.RoomMember]
+    edit: AsyncMock
+
+    async def change(self, name: str, membership: str) -> None:
+        """Sync adds or drops the agent before the router sees its member event, which returns before the edit."""
+        user_id = f"@mindroom_{name}:localhost"
+        if membership == "join":
+            self.members.append(nio.RoomMember(user_id, name.title(), None))
+            self.room.add_member(user_id, name.title(), None)
+        else:
+            self.members[:] = [member for member in self.members if member.user_id != user_id]
+            self.room.remove_member(user_id)
+        # The config assigns the agent to the room before it joins, and drops it before it leaves.
+        self.bot.config.agents[name].rooms = [self.room.room_id] if membership == "join" else []
+        previous = "invite" if membership == "join" else "join"
+        await self.bot.steward_duties.member_event(self.room, member_event(user_id, membership, previous))
+
+
+async def _router_welcomed_an_empty_room(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> _WelcomedRoom:
+    """The owner account in a configured room before any agent is assigned to it, which it welcomes with no agents listed."""
     config = bind_runtime_paths(
         Config(
             agents={
-                "code": AgentConfig(
-                    display_name="Code",
-                    role="Writes code",
+                name: AgentConfig(
+                    display_name=name.title(),
+                    role=f"{name.title()} role",
                     access=ResponderAccessConfig(current_room_members=True),
-                ),
+                )
+                for name in ("code", "docs")
             },
-            router=RouterConfig(model="default", accept_invites=True),
+            router=RouterConfig(model="default"),
         ),
         test_runtime_paths(tmp_path),
     )
     bot = make_test_agent_bot(
         agent_user=_router_user(),
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
+        rooms=["!adhoc:localhost"],
     )
     room = nio.MatrixRoom(room_id="!adhoc:localhost", own_user_id="@mindroom_router:localhost")
     room.members_synced = False
-    bot.client = AsyncMock()
-    bot.client.rooms = {"!adhoc:localhost": room}
+    members: list[nio.RoomMember] = []
+    state: dict[tuple[str, str], dict[str, object]] = {}
+
+    async def get_state_event(
+        room_id: str,
+        event_type: str,
+        state_key: str = "",
+    ) -> nio.RoomGetStateEventResponse | nio.RoomGetStateEventError:
+        if event_type == "m.room.member" and any(member.user_id == state_key for member in members):
+            return nio.RoomGetStateEventResponse({"membership": "join"}, event_type, state_key, room_id)
+        content = state.get((event_type, state_key))
+        if content is None:
+            return nio.RoomGetStateEventError("Absent", "M_NOT_FOUND", room_id=room_id)
+        return nio.RoomGetStateEventResponse(content, event_type, state_key, room_id)
+
+    async def put_state(
+        room_id: str,
+        event_type: str,
+        content: dict[str, object],
+        state_key: str = "",
+    ) -> nio.RoomPutStateResponse:
+        state[event_type, state_key] = content
+        return nio.RoomPutStateResponse("$state", room_id)
+
+    bot.client = make_matrix_client_mock(user_id=room.own_user_id)
+    bot.client.rooms = {room.room_id: room}
     bot.client.joined_members = AsyncMock(
-        return_value=nio.JoinedMembersResponse(
-            members=[nio.RoomMember("@mindroom_code:localhost", "Code", None)],
-            room_id="!adhoc:localhost",
-        ),
+        side_effect=lambda room_id: nio.JoinedMembersResponse(members=list(members), room_id=room_id),
     )
+    # Membership events also reconcile room state; model a healthy homeserver for that work.
+    bot.client.room_get_state_event = AsyncMock(side_effect=get_state_event)
+    bot.client.room_put_state = AsyncMock(side_effect=put_state)
     bot.client.room_messages = AsyncMock(
-        return_value=nio.RoomMessagesResponse(
-            room_id="!adhoc:localhost",
-            chunk=[],
-            start="",
-            end=None,
-        ),
+        return_value=nio.RoomMessagesResponse(room_id="!adhoc:localhost", chunk=[], start="", end=None),
     )
-    send_response = AsyncMock(return_value="$welcome")
-    install_send_response_mock(bot, send_response)
+    install_send_response_mock(bot, AsyncMock(return_value="$welcome"))
+    edit = AsyncMock(return_value=MagicMock(spec=bot_room_lifecycle.DeliveredMatrixEvent))
+    monkeypatch.setattr(bot_room_lifecycle, "edit_message_outcome", edit)
+    await bot._room_lifecycle.send_welcome_message_if_empty("!adhoc:localhost")
+    return _WelcomedRoom(bot, room, members, edit)
 
-    await bot._send_welcome_message_if_empty("!adhoc:localhost", "@alice:localhost")
 
-    response_text = send_response.await_args.kwargs["response_text"]
-    assert "\u2022 **Code** (alias `code`): Writes code" in response_text
-    bot.client.joined_members.assert_awaited_once_with("!adhoc:localhost")
+@pytest.mark.asyncio
+async def test_router_welcome_lists_agents_that_join_after_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A router invited before the agents edits its welcome to list the agents in the room as they join and leave."""
+    welcomed = await _router_welcomed_an_empty_room(tmp_path, monkeypatch)
+    lifecycle = welcomed.bot._room_lifecycle
+    real_fence = lifecycle.deps.admit_response
+    fenced = False
+
+    @asynccontextmanager
+    async def fence() -> AsyncIterator[None]:
+        nonlocal fenced
+        async with real_fence():
+            fenced = True
+            try:
+                yield
+            finally:
+                fenced = False
+
+    edits_fenced: list[bool] = []
+    welcomed.edit.side_effect = lambda *_args: edits_fenced.append(fenced) or welcomed.edit.return_value
+    lifecycle.deps = replace(lifecycle.deps, admit_response=fence)
+
+    for name, membership in [("code", "join"), ("docs", "join"), ("docs", "join"), ("docs", "leave")]:
+        await welcomed.change(name, membership)
+        assert await wait_for_background_tasks(timeout=1, owner=welcomed.bot._runtime_view)
+
+    calls = welcomed.edit.await_args_list
+    texts = [await_call.args[4] for await_call in calls]
+    # The repeated join of an agent already listed leaves the welcome as it is.
+    assert [await_call.args[2] for await_call in calls] == ["$welcome"] * 3
+    code = "\u2022 **Code** (alias `code`): Code role"
+    docs = "\u2022 **Docs** (alias `docs`): Docs role"
+    assert [(code in text, docs in text) for text in texts] == [(True, False), (True, True), (True, False)]
+    # The edit keeps the welcome from waking the agents it lists, and runs where an access reload cannot pass it.
+    assert all(await_call.args[3]["com.mindroom.skip_mentions"] is True for await_call in calls)
+    assert edits_fenced == [True, True, True]
+
+
+@pytest.mark.asyncio
+async def test_welcome_is_not_edited_in_a_room_the_config_dropped(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A room the config no longer names keeps the welcome it has, though the owner account is still joined to it."""
+    welcomed = await _router_welcomed_an_empty_room(tmp_path, monkeypatch)
+    welcomed.bot.rooms = []
+    await welcomed.change("code", "join")
+    assert await wait_for_background_tasks(timeout=1, owner=welcomed.bot._runtime_view)
+    welcomed.edit.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_router_membership_handling_does_not_wait_for_the_welcome_edit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An edit stuck on a slow homeserver holds no later event of the room."""
+    welcomed = await _router_welcomed_an_empty_room(tmp_path, monkeypatch)
+    answered = asyncio.Event()
+
+    async def slow_edit(*_args: object) -> object:
+        await answered.wait()
+        return welcomed.edit.return_value
+
+    welcomed.edit.side_effect = slow_edit
+    await asyncio.wait_for(welcomed.change("code", "join"), timeout=1)
+    answered.set()
+    assert await wait_for_background_tasks(timeout=1, owner=welcomed.bot._runtime_view)
+    welcomed.edit.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -2027,15 +1848,15 @@ async def test_router_startup_welcome_without_requester_omits_responder_list(tmp
                     role="Writes code",
                 ),
             },
-            router=RouterConfig(model="default", accept_invites=True),
+            router=RouterConfig(model="default"),
         ),
         test_runtime_paths(tmp_path),
     )
     bot = make_test_agent_bot(
         agent_user=_router_user(),
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
+        rooms=["!startup:localhost"],
     )
     room = nio.MatrixRoom(room_id="!startup:localhost", own_user_id="@mindroom_router:localhost")
     room.add_member("@mindroom_code:localhost", "Code", None)
@@ -2053,7 +1874,7 @@ async def test_router_startup_welcome_without_requester_omits_responder_list(tmp
     send_response = AsyncMock(return_value="$welcome")
     install_send_response_mock(bot, send_response)
 
-    await bot._send_welcome_message_if_empty("!startup:localhost")
+    await bot._room_lifecycle.send_welcome_message_if_empty("!startup:localhost")
 
     response_text = send_response.await_args.kwargs["response_text"]
     assert "\U0001f9e0 **Available agents and teams in this room:**" not in response_text
@@ -2061,186 +1882,19 @@ async def test_router_startup_welcome_without_requester_omits_responder_list(tmp
 
 
 @pytest.mark.asyncio
-@pytest.mark.usefixtures("enforce_turn_authorization")
-async def test_router_invite_welcome_filters_ad_hoc_responders_for_inviter(
+@pytest.mark.parametrize("router", [{}, {"accept_invites": True}], ids=["unset", "legacy-true"])
+async def test_owner_declines_invites(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    router: dict[str, object],
 ) -> None:
-    """Invite welcomes should advertise responders visible to the inviting user."""
+    """The owner account joins no room it is invited to, whatever an old `router.accept_invites` says."""
     config = bind_runtime_paths(
-        Config(
-            agents={
-                "code": AgentConfig(
-                    display_name="Code",
-                    role="Writes code",
-                    access=ResponderAccessConfig(users=["@alice:localhost"]),
-                ),
-                "research": AgentConfig(
-                    display_name="Research",
-                    role="Finds sources",
-                    access=ResponderAccessConfig(users=["@bob:localhost"]),
-                ),
-            },
-            router=RouterConfig(
-                model="default",
-                accept_invites=True,
-                access=ResponderAccessConfig(users=["@alice:localhost"]),
-            ),
-        ),
+        Config(router=RouterConfig(model="default", **router)),
         test_runtime_paths(tmp_path),
     )
     bot = make_test_agent_bot(
         agent_user=_router_user(),
-        storage_path=tmp_path,
-        config=config,
-        runtime_paths=runtime_paths_for(config),
-    )
-    install_runtime_journal_support(bot)
-    bot.client = AsyncMock()
-    bot.client.rooms = {}
-    bot.client.joined_members = AsyncMock(
-        return_value=nio.JoinedMembersResponse(
-            members=[
-                nio.RoomMember("@mindroom_code:localhost", "Code", None),
-                nio.RoomMember("@mindroom_research:localhost", "Research", None),
-            ],
-            room_id="!adhoc:localhost",
-        ),
-    )
-    bot.client.room_messages = AsyncMock(
-        return_value=nio.RoomMessagesResponse(
-            room_id="!adhoc:localhost",
-            chunk=[],
-            start="",
-            end=None,
-        ),
-    )
-    send_response = AsyncMock(return_value="$welcome")
-    install_send_response_mock(bot, send_response)
-    monkeypatch.setattr(
-        "mindroom.matrix.client_room_admin.join_room",
-        AsyncMock(return_value=RoomJoinOutcome.JOINED),
-    )
-
-    room = MagicMock(room_id="!adhoc:localhost")
-    room.canonical_alias = None
-    event = MagicMock(sender="@alice:localhost")
-
-    await _handle_invite(bot, room, event)
-
-    response_text = send_response.await_args.kwargs["response_text"]
-    assert "\u2022 **Code** (alias `code`): Writes code" in response_text
-    assert "\u2022 **Research**" not in response_text
-
-
-@pytest.mark.asyncio
-@pytest.mark.usefixtures("enforce_turn_authorization")
-async def test_router_invite_welcome_requires_current_reply_authorization(
-    tmp_path: Path,
-) -> None:
-    """Joining an invite must not let the router welcome a reply-denied inviter."""
-    sender_id = "@alice:localhost"
-    config = bind_runtime_paths(
-        Config(
-            router=RouterConfig(
-                model="default",
-                accept_invites=True,
-                access=ResponderAccessConfig(users=[]),
-            ),
-        ),
-        test_runtime_paths(tmp_path),
-    )
-    bot = make_test_agent_bot(
-        agent_user=_router_user(),
-        storage_path=tmp_path,
-        config=config,
-        runtime_paths=runtime_paths_for(config),
-    )
-    install_runtime_journal_support(bot)
-    bot.client = AsyncMock()
-    bot.client.rooms = {}
-    bot.client.room_messages = AsyncMock(
-        return_value=nio.RoomMessagesResponse(
-            room_id="!adhoc:localhost",
-            chunk=[],
-            start="",
-            end=None,
-        ),
-    )
-    send_response = AsyncMock(return_value="$welcome")
-    install_send_response_mock(bot, send_response)
-    room = MagicMock(room_id="!adhoc:localhost", canonical_alias=None)
-
-    await bot._send_welcome_message_if_empty(room.room_id, sender_id)
-
-    send_response.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-@pytest.mark.usefixtures("enforce_turn_authorization")
-async def test_router_invite_welcome_waits_for_replacement_authorization(
-    tmp_path: Path,
-) -> None:
-    """Welcome delivery must use the policy published after a closed reload gate."""
-    sender_id = "@alice:localhost"
-    config = bind_runtime_paths(
-        with_responder_access(
-            Config(router=RouterConfig(model="default", accept_invites=True)),
-            ROUTER_AGENT_NAME,
-            users=[sender_id],
-        ),
-        test_runtime_paths(tmp_path),
-    )
-    denied_config = config.model_copy(deep=True)
-    with_responder_access(denied_config, ROUTER_AGENT_NAME, users=[])
-    bot = make_test_agent_bot(
-        agent_user=_router_user(),
-        storage_path=tmp_path,
-        config=config,
-        runtime_paths=runtime_paths_for(config),
-    )
-    bot.client = AsyncMock()
-    bot.client.rooms = {}
-    bot.client.room_messages = AsyncMock(
-        return_value=nio.RoomMessagesResponse(
-            room_id="!adhoc:localhost",
-            chunk=[],
-            start="",
-            end=None,
-        ),
-    )
-    send_response = AsyncMock(return_value="$welcome")
-    install_send_response_mock(bot, send_response)
-    gate = bot.admission_gate
-    assert gate.close_if_idle()
-
-    welcome_task = asyncio.create_task(
-        bot._room_lifecycle.send_welcome_message_if_empty("!adhoc:localhost", sender_id),
-    )
-    try:
-        await asyncio.sleep(0)
-        assert not welcome_task.done()
-        bot.config = denied_config
-    finally:
-        gate.reopen()
-        await welcome_task
-
-    send_response.assert_not_awaited()
-
-
-@pytest.mark.asyncio
-async def test_router_ignores_invite_when_accept_invites_disabled(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Routers can opt out of accepting room invites."""
-    config = bind_runtime_paths(
-        Config(router=RouterConfig(model="default", accept_invites=False)),
-        test_runtime_paths(tmp_path),
-    )
-    bot = make_test_agent_bot(
-        agent_user=_router_user(),
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
@@ -2249,72 +1903,94 @@ async def test_router_ignores_invite_when_accept_invites_disabled(
     join_room = AsyncMock(return_value=RoomJoinOutcome.JOINED)
     monkeypatch.setattr("mindroom.matrix.client_room_admin.join_room", join_room)
 
-    room = MagicMock(room_id="!router-invited:localhost")
+    room = MagicMock(room_id="!agent-invited:localhost")
     room.canonical_alias = None
     event = MagicMock(sender="@owner:localhost")
 
     await _handle_invite(bot, room, event)
 
     join_room.assert_not_awaited()
-    assert bot._room_lifecycle.invited_rooms == set()
+    assert bot._room_lifecycle.invited_room_ids() == set()
     assert not _invited_rooms_path(config, ROUTER_AGENT_NAME).exists()
 
 
 @pytest.mark.asyncio
-async def test_router_leave_unconfigured_rooms_preserves_persisted_invited_room(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """Router cleanup should preserve a previously accepted invited room."""
-    config = bind_runtime_paths(
-        Config(router=RouterConfig(model="default", accept_invites=True)),
-        test_runtime_paths(tmp_path),
-    )
-    invited_rooms_path = _invited_rooms_path(config, ROUTER_AGENT_NAME)
-    invited_rooms_path.parent.mkdir(parents=True, exist_ok=True)
-    invited_rooms_path.write_text('[\n  "!router-invited:localhost"\n]\n', encoding="utf-8")
+async def test_owner_stays_in_a_joined_room_nothing_tracks(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """The owner account stays in every room it already joined: cleanup makes it leave none."""
+    config = bind_runtime_paths(Config(router=RouterConfig(model="default")), test_runtime_paths(tmp_path))
     bot = make_test_agent_bot(
         agent_user=_router_user(),
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["!configured-room:localhost"],
     )
     install_runtime_journal_support(bot)
-    bot.client = AsyncMock()
-
-    left_room_ids: list[str] = []
-
-    async def mock_leave_non_dm_rooms(
-        _client: AsyncMock,
-        room_ids: list[str],
-        *,
-        leave_room_action: Callable[[str], Awaitable[bool]] | None = None,
-    ) -> list[str]:
-        left_room_ids.extend(room_ids)
-        del leave_room_action
-        return room_ids
-
+    bot.client = AsyncMock(rooms={})
+    leave = AsyncMock(return_value=[])
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.leave_non_dm_rooms", leave)
     monkeypatch.setattr(
         "mindroom.bot_room_lifecycle.get_joined_rooms",
-        AsyncMock(
-            return_value=[
-                "!configured-room:localhost",
-                "!router-invited:localhost",
-                "!old-room:localhost",
-            ],
-        ),
-    )
-    monkeypatch.setattr("mindroom.bot_room_lifecycle.leave_non_dm_rooms", mock_leave_non_dm_rooms)
-    monkeypatch.setattr(
-        "mindroom.bot_room_lifecycle.matrix_state_for_runtime",
-        lambda *_args, **_kwargs: MatrixState(),
+        AsyncMock(return_value=["!configured-room:localhost", "!old-room:localhost"]),
     )
 
-    await bot.leave_unconfigured_rooms()
+    await bot._room_lifecycle.leave_unconfigured_rooms()
 
-    assert bot._room_lifecycle.invited_rooms == {"!router-invited:localhost"}
-    assert left_room_ids == ["!old-room:localhost"]
+    assert leave.await_args.args[1] == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("joined", [[], ["!saved-invite:localhost"]], ids=["invited", "joined"])
+async def test_owner_does_not_join_a_room_its_saved_invite_record_names(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    joined: list[str],
+) -> None:
+    """A room the router once saved as invited is restored when joined, without a membership command either way."""
+    config = bind_runtime_paths(Config(router=RouterConfig(model="default")), test_runtime_paths(tmp_path))
+    invited_path = _invited_rooms_path(config, ROUTER_AGENT_NAME)
+    invited_path.parent.mkdir(parents=True, exist_ok=True)
+    invited_path.write_text('[\n  "!saved-invite:localhost"\n]\n', encoding="utf-8")
+    bot = make_test_agent_bot(agent_user=_router_user(), config=config, runtime_paths=runtime_paths_for(config))
+    install_runtime_journal_support(bot)
+    bot.client = AsyncMock(invited_rooms={"!saved-invite:localhost": MagicMock()})
+    snooze = {
+        "type": THREAD_TAGS_EVENT_TYPE,
+        "state_key": '["$root","snoozed"]',
+        "sender": "@bas:localhost",
+        "event_id": "$tag",
+        "origin_server_ts": 1,
+        "content": {
+            "set_by": "@bas:localhost",
+            "set_at": "2026-11-13T08:00:00+00:00",
+            "data": {"until": "2099-01-01T08:00:00+00:00"},
+        },
+    }
+    bot.client.rooms = {room_id: nio.MatrixRoom(room_id, bot.agent_user.user_id) for room_id in joined}
+    bot.client.room_get_state = AsyncMock(return_value=nio.RoomGetStateResponse([snooze], "!saved-invite:localhost"))
+    snoozes = ThreadSnoozeRuntimeCoordinator(
+        runtime_paths=runtime_paths_for(config),
+        config_provider=lambda: config,
+        bots=lambda: {ROUTER_AGENT_NAME: bot},
+    )
+    lifecycle = bot._room_lifecycle
+    lifecycle.deps = replace(
+        lifecycle.deps,
+        change_membership=AsyncMock(return_value=True),
+        on_room_joined=lambda room_id: snoozes.restore_room(bot, room_id),
+    )
+    monkeypatch.setattr("mindroom.bot_room_lifecycle.get_joined_rooms", AsyncMock(return_value=joined))
+
+    await lifecycle.join_configured_rooms()
+
+    lifecycle.deps.change_membership.assert_not_awaited()
+    assert lifecycle.invited_room_ids() == {"!saved-invite:localhost"}
+    # A cold start reads the joined room's state once, so a snooze older than the synced timeline still wakes.
+    assert list(snoozes._runtime._snoozes) == [(room_id, "$root") for room_id in joined]
+    # The joined room advertises this start's server, as a membership command would have published it.
+    published = [
+        call.args[0] for call in bot.client.room_put_state.await_args_list if call.args[1] == MINDROOM_SERVER_EVENT_TYPE
+    ]
+    assert published == joined
 
 
 @pytest.mark.asyncio
@@ -2325,16 +2001,16 @@ async def test_orphan_cleanup_preserves_router_persisted_invited_room(
     """Orphan cleanup should not kick the router from an accepted invited room."""
     client = AsyncMock()
     config = bind_runtime_paths(
-        Config(router=RouterConfig(model="default", accept_invites=True)),
+        Config(router=RouterConfig(model="default")),
         test_runtime_paths(tmp_path),
     )
     invited_rooms_path = _invited_rooms_path(config, ROUTER_AGENT_NAME)
     invited_rooms_path.parent.mkdir(parents=True, exist_ok=True)
-    invited_rooms_path.write_text('[\n  "!router-invited:localhost"\n]\n', encoding="utf-8")
+    invited_rooms_path.write_text('[\n  "!agent-invited:localhost"\n]\n', encoding="utf-8")
 
     monkeypatch.setattr(
         "mindroom.matrix.room_cleanup.get_joined_rooms",
-        AsyncMock(return_value=["!router-invited:localhost"]),
+        AsyncMock(return_value=["!agent-invited:localhost"]),
     )
     monkeypatch.setattr(
         "mindroom.matrix.room_cleanup.get_room_members",
@@ -2354,7 +2030,7 @@ async def test_orphan_cleanup_preserves_router_persisted_invited_room(
 
 
 @pytest.mark.asyncio
-async def test_agent_leaves_unconfigured_rooms(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:  # noqa: ARG001
+async def test_agent_leaves_unconfigured_rooms(tmp_path: Path) -> None:
     """Test that agents leave rooms they're no longer configured for."""
     # Create a mock agent user
     agent_user = AgentMatrixUser(
@@ -2369,171 +2045,36 @@ async def test_agent_leaves_unconfigured_rooms(monkeypatch: pytest.MonkeyPatch, 
 
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["!room1:localhost"],  # Only configured for room1
     )
 
     # Mock the client
-    mock_client = AsyncMock()
+    mock_client = AsyncMock(rooms={})
+    mock_client.list_direct_rooms.return_value = nio.DirectRoomsErrorResponse("No direct rooms", "M_NOT_FOUND")
+    mock_client.room_get_state.return_value = nio.RoomGetStateResponse([], "!room2:localhost")
     bot.client = mock_client
 
     # Mock joined_rooms to return both room1 and room2 (agent is in both)
-    joined_rooms_response = MagicMock()
-    joined_rooms_response.__class__ = nio.JoinedRoomsResponse
-    joined_rooms_response.rooms = ["!room1:localhost", "!room2:localhost"]
-    mock_client.joined_rooms.return_value = joined_rooms_response
+    mock_client.joined_rooms.return_value = nio.JoinedRoomsResponse(rooms=["!room1:localhost", "!room2:localhost"])
 
     # Track which rooms were left
     left_rooms = []
 
-    async def mock_room_leave(room_id: str) -> Response:
+    async def mock_room_leave(room_id: str) -> nio.RoomLeaveResponse:
         left_rooms.append(room_id)
-        response = MagicMock()
-        response.__class__ = nio.RoomLeaveResponse
-        return response
+        return nio.RoomLeaveResponse()
 
     mock_client.room_leave = mock_room_leave
     install_runtime_journal_support(bot)
 
     # Test that the bot leaves unconfigured rooms
-    await bot.leave_unconfigured_rooms()
+    await bot._room_lifecycle.leave_unconfigured_rooms()
 
     # Verify the bot left room2 (unconfigured) but not room1 (configured)
     assert len(left_rooms) == 1
     assert "!room2:localhost" in left_rooms
-
-
-@pytest.mark.asyncio
-async def test_router_preserves_root_space_when_leaving_unconfigured_rooms(
-    monkeypatch: pytest.MonkeyPatch,
-    tmp_path: Path,
-) -> None:
-    """The router should not leave the managed root Space during room cleanup."""
-    agent_user = AgentMatrixUser(
-        agent_name=ROUTER_AGENT_NAME,
-        user_id="@mindroom_router:localhost",
-        display_name="Router",
-        password=TEST_PASSWORD,
-    )
-    config = bind_runtime_paths(Config(router=RouterConfig(model="default")), test_runtime_paths(tmp_path))
-    bot = make_test_agent_bot(
-        agent_user=agent_user,
-        storage_path=tmp_path,
-        config=config,
-        runtime_paths=runtime_paths_for(config),
-        rooms=["!room1:localhost"],
-    )
-    install_runtime_journal_support(bot)
-
-    mock_client = AsyncMock()
-    bot.client = mock_client
-
-    left_room_ids: list[str] = []
-
-    async def mock_leave_non_dm_rooms(
-        _client: AsyncMock,
-        room_ids: list[str],
-        *,
-        leave_room_action: Callable[[str], Awaitable[bool]] | None = None,
-    ) -> list[str]:
-        left_room_ids.extend(room_ids)
-        del leave_room_action
-        return room_ids
-
-    monkeypatch.setattr(
-        "mindroom.bot_room_lifecycle.get_joined_rooms",
-        AsyncMock(return_value=["!room1:localhost", "!space:localhost", "!room2:localhost"]),
-    )
-    monkeypatch.setattr("mindroom.bot_room_lifecycle.leave_non_dm_rooms", mock_leave_non_dm_rooms)
-    monkeypatch.setattr(
-        "mindroom.bot_room_lifecycle.matrix_state_for_runtime",
-        lambda *_args, **_kwargs: MatrixState(space_room_id="!space:localhost"),
-    )
-
-    await bot.leave_unconfigured_rooms()
-
-    assert set(left_room_ids) == {"!room2:localhost"}
-    assert "!space:localhost" not in left_room_ids
-
-
-@pytest.mark.asyncio
-async def test_agent_manages_rooms_on_config_update(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    """Test that agents update their room memberships when configuration changes."""
-    # Create a mock agent user
-    agent_user = AgentMatrixUser(
-        agent_name="agent1",
-        user_id="@mindroom_agent1:localhost",
-        display_name="Agent 1",
-        password=TEST_PASSWORD,
-    )
-
-    # Start with agent configured for room1 only
-    config = bind_runtime_paths(Config(router=RouterConfig(model="default")), test_runtime_paths(tmp_path))
-
-    bot = make_test_agent_bot(
-        agent_user=agent_user,
-        storage_path=tmp_path,
-        config=config,
-        runtime_paths=runtime_paths_for(config),
-        rooms=["!room1:localhost"],
-    )
-    install_runtime_journal_support(bot)
-
-    # Mock the client
-    mock_client = AsyncMock()
-    bot.client = mock_client
-
-    # Track room operations
-    joined_rooms = []
-    left_rooms = []
-
-    async def mock_join_room(_client: AsyncMock, room_id: str) -> RoomJoinOutcome:
-        joined_rooms.append(room_id)
-        return RoomJoinOutcome.JOINED
-
-    async def mock_room_leave(room_id: str) -> Response:
-        left_rooms.append(room_id)
-        response = MagicMock()
-        response.__class__ = nio.RoomLeaveResponse
-        return response
-
-    monkeypatch.setattr("mindroom.matrix.client_room_admin.join_room", mock_join_room)
-    mock_client.room_leave = mock_room_leave
-
-    # Mock restore_scheduled_tasks
-    async def mock_restore_scheduled_tasks(
-        _client: AsyncMock,
-        _room_id: str,
-        _config: Config,
-        _runtime_paths: object,
-        _conversation_reader: object,
-    ) -> int:
-        return 0
-
-    monkeypatch.setattr("mindroom.bot.restore_scheduled_tasks", mock_restore_scheduled_tasks)
-
-    # Mock joined_rooms to return room1 and room3 (agent is in both)
-    joined_rooms_response = MagicMock()
-    joined_rooms_response.__class__ = nio.JoinedRoomsResponse
-    joined_rooms_response.rooms = ["!room1:localhost", "!room3:localhost"]
-    mock_client.joined_rooms.return_value = joined_rooms_response
-
-    # Update configuration: now configured for room1 and room2 (not room3)
-    bot.rooms = ["!room1:localhost", "!room2:localhost"]
-
-    # Apply room updates
-    await bot.join_configured_rooms()
-    await bot.leave_unconfigured_rooms()
-
-    # Verify:
-    # - Joined room2 (newly configured)
-    # - Left room3 (no longer configured)
-    # - Stayed in room1 (still configured)
-    assert "!room2:localhost" in joined_rooms
-    assert "!room3:localhost" in left_rooms
-    assert "!room1:localhost" not in left_rooms  # Should stay in room1
 
 
 @pytest.mark.asyncio
@@ -2563,7 +2104,6 @@ async def test_agent_refuses_invite_when_accept_invites_disabled(
     )
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
@@ -2611,7 +2151,6 @@ async def test_agent_accepts_invite_independently_of_conversation_access(
     )
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
@@ -2635,7 +2174,7 @@ async def test_agent_accepts_invite_independently_of_conversation_access(
     await _handle_invite(bot, room, event)
 
     join_room.assert_awaited_once_with(bot.client, room.room_id)
-    assert bot._room_lifecycle.invited_rooms == {room.room_id}
+    assert bot._room_lifecycle.invited_room_ids() == {room.room_id}
     assert not is_sender_allowed_for_responder(
         event.sender,
         "agent1",
@@ -2678,7 +2217,6 @@ async def test_agent_explains_joining_a_managed_room_it_cannot_answer_in(
     )
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
@@ -2731,7 +2269,6 @@ async def test_managed_room_notice_is_not_repeated_when_reconciling_a_joined_inv
             display_name="Agent 1",
             password=TEST_PASSWORD,
         ),
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
@@ -2779,7 +2316,6 @@ async def test_managed_room_notice_stays_silent_for_inviters_the_agent_does_not_
             display_name="Agent 1",
             password=TEST_PASSWORD,
         ),
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
@@ -2844,7 +2380,6 @@ async def test_team_invitation_policy_is_independent_of_conversation_access(
     )
     bot = make_test_agent_bot(
         agent_user=team_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
@@ -2858,7 +2393,7 @@ async def test_team_invitation_policy_is_independent_of_conversation_access(
     await _handle_invite(bot, room, event)
 
     assert join_room.await_count == int(expected_join)
-    assert (room.room_id in bot._room_lifecycle.invited_rooms) is expected_join
+    assert (room.room_id in bot._room_lifecycle.invited_room_ids()) is expected_join
 
 
 @pytest.mark.asyncio
@@ -2879,7 +2414,6 @@ async def test_unknown_entity_refuses_invite(
     )
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
@@ -2921,7 +2455,6 @@ async def test_agent_persists_non_dm_invited_room(monkeypatch: pytest.MonkeyPatc
     )
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
@@ -2929,10 +2462,6 @@ async def test_agent_persists_non_dm_invited_room(monkeypatch: pytest.MonkeyPatc
     bot.client = AsyncMock()
 
     join_room = AsyncMock(return_value=RoomJoinOutcome.JOINED)
-    monkeypatch.setattr(
-        "mindroom.bot_room_lifecycle.is_sender_allowed_for_agent_reply_in_room",
-        lambda *_args, **_kwargs: True,
-    )
     monkeypatch.setattr("mindroom.matrix.client_room_admin.join_room", join_room)
 
     room = MagicMock(room_id="!project-room:localhost")
@@ -2942,7 +2471,7 @@ async def test_agent_persists_non_dm_invited_room(monkeypatch: pytest.MonkeyPatc
     await _handle_invite(bot, room, event)
 
     join_room.assert_awaited_once_with(bot.client, "!project-room:localhost")
-    assert bot._room_lifecycle.invited_rooms == {"!project-room:localhost"}
+    assert bot._room_lifecycle.invited_room_ids() == {"!project-room:localhost"}
     assert _invited_rooms_path(config, "agent1").read_text(encoding="utf-8") == '[\n  "!project-room:localhost"\n]\n'
 
 
@@ -2964,7 +2493,7 @@ async def test_agent_invite_does_not_auto_add_router_to_ad_hoc_room(
         ),
         test_runtime_paths(tmp_path),
     )
-    runtime_paths = runtime_paths_for(config)
+    runtime = ready_runtime(config, runtime_paths_for(config))
     bot = make_test_agent_bot(
         agent_user=AgentMatrixUser(
             agent_name="agent1",
@@ -2972,9 +2501,7 @@ async def test_agent_invite_does_not_auto_add_router_to_ad_hoc_room(
             display_name="Agent 1",
             password=TEST_PASSWORD,
         ),
-        storage_path=tmp_path,
-        config=config,
-        runtime_paths=runtime_paths,
+        orchestrator=runtime,
     )
     install_runtime_journal_support(bot)
     bot.client = make_matrix_client_mock(user_id="@mindroom_agent1:localhost")
@@ -2987,28 +2514,15 @@ async def test_agent_invite_does_not_auto_add_router_to_ad_hoc_room(
             display_name="Router",
             password=TEST_PASSWORD,
         ),
-        storage_path=tmp_path,
-        config=config,
-        runtime_paths=runtime_paths,
+        orchestrator=runtime,
     )
     router_bot.client = make_matrix_client_mock(user_id="@mindroom_router:localhost")
-    bot.client.rooms = {}
-    router_bot.join_configured_rooms = AsyncMock()
-
-    orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
-    orchestrator.config = config
-    orchestrator.agent_bots = {"agent1": bot, ROUTER_AGENT_NAME: router_bot}
-    bot.orchestrator = orchestrator
-    router_bot.orchestrator = orchestrator
+    router_bot._room_lifecycle.join_configured_rooms = AsyncMock()
 
     join_room = AsyncMock(return_value=RoomJoinOutcome.JOINED)
     invite_router = AsyncMock(return_value=True)
-    monkeypatch.setattr(
-        "mindroom.bot_room_lifecycle.is_sender_allowed_for_agent_reply_in_room",
-        lambda *_args, **_kwargs: True,
-    )
     monkeypatch.setattr("mindroom.matrix.client_room_admin.join_room", join_room)
-    monkeypatch.setattr("mindroom.orchestrator.invite_to_room", invite_router)
+    monkeypatch.setattr("mindroom.orchestration.rooms.invite_to_room", invite_router)
 
     room = MagicMock(room_id="!project-room:localhost")
     room.canonical_alias = None
@@ -3018,8 +2532,8 @@ async def test_agent_invite_does_not_auto_add_router_to_ad_hoc_room(
 
     join_room.assert_awaited_once_with(bot.client, "!project-room:localhost")
     invite_router.assert_not_awaited()
-    router_bot.join_configured_rooms.assert_not_awaited()
-    assert router_bot._room_lifecycle.invited_rooms == set()
+    router_bot._room_lifecycle.join_configured_rooms.assert_not_awaited()
+    assert router_bot._room_lifecycle.invited_room_ids() == set()
     assert _invited_rooms_path(config, ROUTER_AGENT_NAME).exists() is False
 
 
@@ -3053,13 +2567,12 @@ async def test_leave_unconfigured_rooms_preserves_persisted_invited_room(
     invited_rooms_path.write_text('[\n  "!invited-room:localhost"\n]\n', encoding="utf-8")
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
         rooms=["!configured-room:localhost"],
     )
     install_runtime_journal_support(bot)
-    bot.client = AsyncMock()
+    bot.client = AsyncMock(rooms={})
 
     left_room_ids: list[str] = []
 
@@ -3085,9 +2598,9 @@ async def test_leave_unconfigured_rooms_preserves_persisted_invited_room(
     )
     monkeypatch.setattr("mindroom.bot_room_lifecycle.leave_non_dm_rooms", mock_leave_non_dm_rooms)
 
-    await bot.leave_unconfigured_rooms()
+    await bot._room_lifecycle.leave_unconfigured_rooms()
 
-    assert bot._room_lifecycle.invited_rooms == {"!invited-room:localhost"}
+    assert bot._room_lifecycle.invited_room_ids() == {"!invited-room:localhost"}
     assert left_room_ids == ["!old-room:localhost"]
 
 
@@ -3126,7 +2639,6 @@ def test_corrupt_retention_stops_lifecycle_initialization(tmp_path: Path, conten
     with pytest.raises(ValueError, match=message):
         make_test_agent_bot(
             agent_user=agent_user,
-            storage_path=tmp_path,
             config=config,
             runtime_paths=runtime_paths_for(config),
         )
@@ -3153,10 +2665,100 @@ def test_ledgers_planted_in_a_worker_mounted_state_root_are_ignored(tmp_path: Pa
 
     bot = make_test_agent_bot(
         agent_user=agent_user,
-        storage_path=tmp_path,
         config=config,
         runtime_paths=runtime_paths_for(config),
     )
 
-    assert bot._room_lifecycle.invited_rooms == set()
+    assert bot._room_lifecycle.invited_room_ids() == set()
     assert bot._room_lifecycle._pending_room_invites == {}
+
+
+def test_repeated_invited_room_reads_resolve_the_record_path_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Call-room checks read invited rooms for every room, so later reads only stat the record."""
+    config = bind_runtime_paths(
+        Config(router=RouterConfig(model="default")),
+        test_runtime_paths(tmp_path),
+    )
+    runtime_paths = runtime_paths_for(config)
+    resolved: list[str] = []
+    resolve = invited_rooms_store.agent_state_root_path
+
+    def counting_resolve(base_storage_path: Path, agent_name: str) -> Path:
+        resolved.append(agent_name)
+        return resolve(base_storage_path, agent_name)
+
+    monkeypatch.setattr(invited_rooms_store, "agent_state_root_path", counting_resolve)
+
+    for _ in range(3):
+        assert read_invited_rooms(runtime_paths, config, ROUTER_AGENT_NAME) == frozenset()
+
+    assert resolved == [ROUTER_AGENT_NAME]
+
+
+def test_invited_room_reads_see_every_write_to_the_record(tmp_path: Path) -> None:
+    """A read reflects the record as it is now, whether the store or anything else wrote it."""
+    config = bind_runtime_paths(
+        Config(router=RouterConfig(model="default")),
+        test_runtime_paths(tmp_path),
+    )
+    runtime_paths = runtime_paths_for(config)
+    path = _invited_rooms_path(config, ROUTER_AGENT_NAME)
+    assert read_invited_rooms(runtime_paths, config, ROUTER_AGENT_NAME) == frozenset()
+
+    remember_invited_room(path, "!first:localhost")
+    assert read_invited_rooms(runtime_paths, config, ROUTER_AGENT_NAME) == {"!first:localhost"}
+
+    path.write_text('["!first:localhost", "!edited:localhost"]\n', encoding="utf-8")
+    assert read_invited_rooms(runtime_paths, config, ROUTER_AGENT_NAME) == {"!first:localhost", "!edited:localhost"}
+
+    path.unlink()
+    assert read_invited_rooms(runtime_paths, config, ROUTER_AGENT_NAME) == frozenset()
+
+    path.write_text("not json", encoding="utf-8")
+    with pytest.raises(json.JSONDecodeError):
+        read_invited_rooms(runtime_paths, config, ROUTER_AGENT_NAME)
+
+
+def test_reading_invited_rooms_after_the_store_wrote_them_parses_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """Approval and call-room checks read on the event loop, so a read after the store's own write is one stat."""
+    config = bind_runtime_paths(
+        Config(router=RouterConfig(model="default")),
+        test_runtime_paths(tmp_path),
+    )
+    runtime_paths = runtime_paths_for(config)
+    path = _invited_rooms_path(config, ROUTER_AGENT_NAME)
+    remember_invited_room(path, "!kept:localhost")
+    loads: list[Path] = []
+    load = invited_rooms_store.load_invited_rooms
+
+    def record_load(loaded: Path) -> set[str]:
+        loads.append(loaded)
+        return load(loaded)
+
+    monkeypatch.setattr("mindroom.matrix.invited_rooms_store.load_invited_rooms", record_load)
+
+    assert read_invited_rooms(runtime_paths, config, ROUTER_AGENT_NAME) == {"!kept:localhost"}
+    assert loads == []
+
+
+@pytest.mark.asyncio
+async def test_an_invite_can_carry_a_reason_the_invitee_reads() -> None:
+    """A reason travels in the invite itself, which nio's own invite call cannot send."""
+    client = make_matrix_client_mock()
+    client.access_token = "token"  # noqa: S105 - a fake access token
+    client._send = AsyncMock(return_value=nio.RoomInviteResponse())
+    assert await invite_to_room(client, "!room:localhost", "@dana:other.org", reason="Find a slot")
+    _method, path, _data = nio.Api.room_invite("token", "!room:localhost", "@dana:other.org")
+    client._send.assert_awaited_once_with(
+        nio.RoomInviteResponse,
+        "POST",
+        path,
+        json.dumps({"user_id": "@dana:other.org", "reason": "Find a slot"}, separators=(",", ":")),
+    )
+    client.room_invite.assert_not_awaited()

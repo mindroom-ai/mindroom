@@ -6,19 +6,27 @@ import json
 import os
 import subprocess
 from pathlib import Path
+from typing import TYPE_CHECKING, cast
 
 import pytest
-from agno.media import Image
-from agno.models.openai.chat import OpenAIChat
-from agno.tools.function import Function, ToolResult
 from mcp.types import CallToolResult, TextContent, Tool
 
 from mindroom.custom_tools.browser_mcp import BrowserMCPTools
+from mindroom.llm.media import Image
+from mindroom.providers.openai.chat_wire import function_definition
 from mindroom.tool_system import media_transport
+from mindroom.tool_system.agno_toolkits import adapt_callable
 from mindroom.tool_system.media_transport import decode_media_result, encode_media_result
-from mindroom.tool_system.output_files import ToolOutputFilePolicy, wrap_function_for_output_files
+from mindroom.tool_system.output_files import ToolOutputFilePolicy, with_output_files
+from mindroom.tool_system.registry import builtin_tool_registry
+from mindroom.tool_system.runtime_context import detached_tool_scope
+from mindroom.tool_system.tool_function import ToolValue
 from mindroom.worker_computer.mcp_catalog import browser_mcp_catalog, verify_browser_mcp_catalog
 from mindroom.worker_computer.mcp_provider import WorkerBrowserMCP
+from tests.agent_tool_helpers import toolkit_offers
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable
 
 
 def test_native_catalog_has_fixed_safe_schemas() -> None:
@@ -30,18 +38,16 @@ def test_native_catalog_has_fixed_safe_schemas() -> None:
     assert "browser_route" not in tools
     assert "browser_evaluate" in tools
     assert "browser_pdf_save" in tools
-    assert toolkit.get_async_functions().keys() == tools.keys()
+    assert toolkit.functions.keys() == tools.keys()
     for name, tool in tools.items():
-        assert toolkit.get_async_functions()[name].parameters == tool["inputSchema"]
+        assert toolkit_offers(toolkit, name).parameters == tool["inputSchema"]
 
 
 def test_native_screenshot_wire_keeps_optional_fields_optional() -> None:
     """OpenAI formatting cannot promote omitted native screenshot fields to required empty values."""
-    function = BrowserMCPTools().get_async_functions()["browser_take_screenshot"].model_copy(deep=True)
-    effective_strict = True if function.strict is None else function.strict
-    function.process_entrypoint(strict=effective_strict)
+    function = toolkit_offers(BrowserMCPTools(), "browser_take_screenshot")
 
-    formatted = OpenAIChat(id="gpt-6-astra", api_key="sk-test")._format_tools([function])[0]["function"]
+    formatted = function_definition(function.definition())
 
     assert formatted["strict"] is False
     assert formatted["parameters"]["required"] == ["type", "scale"]
@@ -57,10 +63,10 @@ def test_primary_materialization_has_no_process_or_workspace_effects(
     from mindroom.constants import resolve_primary_runtime_paths  # noqa: PLC0415
     from mindroom.credentials.manager import get_runtime_credentials_manager  # noqa: PLC0415
     from mindroom.tool_system.metadata import get_tool_by_name  # noqa: PLC0415
+    from mindroom.tool_system.sandbox_proxy import tool_placement  # noqa: PLC0415
     from mindroom.tool_system.worker_routing import (  # noqa: PLC0415
         ToolExecutionIdentity,
         build_agent_toolkit_worker_target,
-        tool_execution_identity,
     )
 
     paths = resolve_primary_runtime_paths(
@@ -97,15 +103,19 @@ def test_primary_materialization_has_no_process_or_workspace_effects(
         execution_identity=identity,
         runtime_paths=paths,
     )
-    with tool_execution_identity(identity):
+    with detached_tool_scope(identity):
         toolkit = get_tool_by_name(
             "browser_mcp",
             paths,
             worker_target=target,
-            worker_tools_override=["browser_mcp"],
+            runs_in_worker=tool_placement(paths, builtin_tool_registry()).runs_in_worker(
+                "browser_mcp",
+                ["browser_mcp"],
+            ),
             tool_output_workspace_root=workspace,
+            tools=builtin_tool_registry(),
         )
-    assert toolkit.get_async_functions().keys() == browser_mcp_catalog().keys()
+    assert toolkit.functions.keys() == browser_mcp_catalog().keys()
     assert {
         str(path.relative_to(tmp_path)): path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()
     } == before
@@ -128,7 +138,7 @@ def test_primary_materialization_has_no_process_or_workspace_effects(
 async def test_native_calls_require_worker_binding() -> None:
     """Primary-side materialization never authorizes local execution."""
     toolkit = BrowserMCPTools()
-    function = toolkit.get_async_functions()["browser_snapshot"]
+    function = toolkit_offers(toolkit, "browser_snapshot")
     with pytest.raises(RuntimeError, match="dedicated computer worker"):
         await function.entrypoint()
 
@@ -146,10 +156,10 @@ def test_catalog_drift_fails_closed() -> None:
 
 
 def test_image_result_roundtrip() -> None:
-    """JSON transport preserves real Agno inline image bytes."""
-    result = ToolResult(content="screen", images=[Image(content=b"png", mime_type="image/png")])
+    """JSON transport preserves inline image bytes."""
+    result = ToolValue(content="screen", images=(Image(content=b"png", mime_type="image/png"),))
     decoded = decode_media_result(json.loads(json.dumps(encode_media_result(result))))
-    assert isinstance(decoded, ToolResult)
+    assert isinstance(decoded, ToolValue)
     assert decoded.content == "screen"
     assert decoded.images[0].content == b"png"
     assert decoded.images[0].mime_type == "image/png"
@@ -197,18 +207,18 @@ def test_invalid_images_fail(mime: str, data: str) -> None:
 async def test_output_wrapper_precedes_wire_encoding(tmp_path: Path, media: bool, path: str | None) -> None:
     """Text receipts and explicit media redirect errors keep established workspace semantics."""
 
-    async def result() -> ToolResult:
-        return ToolResult(
+    async def result() -> ToolValue:
+        return ToolValue(
             content="native text",
-            images=[Image(content=b"image", mime_type="image/png")] if media else None,
+            images=(Image(content=b"image", mime_type="image/png"),) if media else (),
         )
 
-    function = Function(name="browser_snapshot", entrypoint=result)
-    wrap_function_for_output_files(function, ToolOutputFilePolicy(workspace_root=tmp_path, auto_save_threshold_bytes=5))
-    output = await function.entrypoint(mindroom_output_path=path)
+    policy = ToolOutputFilePolicy(workspace_root=tmp_path, auto_save_threshold_bytes=5)
+    entrypoint = with_output_files(adapt_callable(result), policy).entrypoint
+    output = await cast("Awaitable[object]", entrypoint(mindroom_output_path=path))
     decoded = decode_media_result(encode_media_result(output))
     if media and path is None:
-        assert isinstance(decoded, ToolResult)
+        assert isinstance(decoded, ToolValue)
         assert decoded.images[0].content == b"image"
         assert not list(tmp_path.iterdir())
     else:
@@ -372,9 +382,9 @@ def small_image_limits(monkeypatch: pytest.MonkeyPatch) -> None:
 @pytest.mark.parametrize("contents", [[b"abcd", b"efgh"], [b"x"] * 8, [b"abc", b"def", b"gh"]])
 def test_independently_padded_images_roundtrip_at_aggregate_limit(contents: list[bytes]) -> None:
     """All eight allowed raw bytes survive transport despite independent padding."""
-    result = ToolResult(content="screens", images=[Image(content=data, mime_type="image/png") for data in contents])
+    result = ToolValue(content="screens", images=tuple(Image(content=data, mime_type="image/png") for data in contents))
     decoded = decode_media_result(json.loads(json.dumps(encode_media_result(result))))
-    assert isinstance(decoded, ToolResult)
+    assert isinstance(decoded, ToolValue)
     assert decoded.content == "screens"
     assert [image.content for image in decoded.images] == contents
     assert all(image.mime_type == "image/png" for image in decoded.images)
@@ -385,7 +395,7 @@ def test_independently_padded_images_roundtrip_at_aggregate_limit(contents: list
 @pytest.mark.parametrize("operation", ["encode", "decode"])
 def test_image_limits_reject_oversized_or_empty_images(contents: list[bytes], operation: str) -> None:
     """Padding allowance never widens raw aggregate, per-image or count limits."""
-    result = ToolResult(content="screens", images=[Image(content=data, mime_type="image/png") for data in contents])
+    result = ToolValue(content="screens", images=tuple(Image(content=data, mime_type="image/png") for data in contents))
     if operation == "encode":
         with pytest.raises(ValueError, match="worker tool result"):
             encode_media_result(result)

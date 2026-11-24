@@ -39,10 +39,12 @@ agents:
     display_name: Researcher
     role: Research with a browser and save results.
     model: default
-    tools: [browser, shell, file]
-    worker_tools: [browser, shell, file]
+    tools: [browser, shell, filesystem]
+    worker_tools: [browser, shell, filesystem]
     worker_scope: user_agent
 ```
+
+Workers of agents with a `shared` or `user` worker scope never become a Computer, even with Computer enabled: their worker-routed `browser` keeps running in the worker without a Computer panel, while `browser_mcp` works only in a Computer.
 
 Keep the `browser` tool's default `target: host`; the connected-user `target: desktop` is a separate feature and does not run in the Computer.
 Browser URL restrictions still apply, so private networks stay blocked unless allowed.
@@ -90,17 +92,29 @@ Set the trusted origin of the MindRoom runtime API, without a path, in Chat's op
 }
 ```
 
-The shipped value is empty, which hides the Computer action.
-Remote origins require HTTPS; loopback HTTP works for local development.
-Chat shows the Computer action when this origin is set and the room has a joined MindRoom agent; with several agents, the user picks one first.
+When it is empty, as shipped, Chat on a homeserver that binds tokens uses the runtime origin that the room's MindRoom agents publish, the origin of `MINDROOM_PUBLIC_URL` or `http://localhost:<MINDROOM_PORT>`; on other homeservers the Computer action stays hidden.
+The iOS app ignores a published `localhost` origin, which on a phone is the phone itself, so for computers there set `MINDROOM_PUBLIC_URL` to an address the phone can reach.
+Remote origins require HTTPS; plain HTTP works for `localhost` and loopback or private IP addresses.
+Chat shows the Computer action when an origin is known and the room has a joined MindRoom agent with a worker computer.
+With a configured Computers URL, an agent whose MindRoom does not yet publish its server counts as having one; without one, each agent must publish its own server with `computer: true`.
+With several agents, the user picks one first.
 Point `apiUrl` at the runtime that owns the agent's workers; a host that only serves Matrix, Chat, or local provisioning (`/v1/local-mindroom/*`) does not serve computers.
 
 On the runtime, `MINDROOM_COMPUTER_ALLOWED_ORIGINS` is a JSON list of exact Chat origins allowed to open computers.
 For the bundled MindRoom Chat iOS app, explicitly add `"capacitor://localhost"` alongside the trusted HTTPS web origins, for example `["https://chat.mindroom.chat", "capacitor://localhost"]`.
 Other custom-scheme origins and opaque `"null"` origins are refused.
+Internationalized domain names must be written in their `xn--` form, for example `https://xn--fa-hia.de`, because browsers send that form.
+Origins with non-ASCII hostnames are refused.
 The iOS app uses Matrix OpenID and computer session tokens; it does not need web sign-in cookies.
-Each entry must be a scheme and host with an optional port, with no path or wildcard, and HTTP is allowed only for `localhost` and literal loopback addresses.
+Each entry must be a scheme and host with an optional port, and no wildcard.
+An optional single trailing `/` is accepted, and any other path is invalid.
+HTTP is allowed only for `localhost` and literal loopback or private IP addresses, such as `http://192.168.1.10:8080`.
 One invalid entry disables the whole list.
+The [Connections portal](https://docs.mindroom.chat/connections-portal/#settings) reads its own list, `MINDROOM_CONNECTIONS_ALLOWED_ORIGINS`, with these same rules but its own defaults, and Chat uses the same runtime origin for both.
+
+Chat opens a computer with a Matrix OpenID token that the runtime verifies at the configured homeserver.
+Audience binding and the rollout order are described under [Token binding](https://docs.mindroom.chat/connections-portal/#token-binding).
+Under binding, the origin of Chat's Computers `apiUrl` must equal the origin of `MINDROOM_PUBLIC_URL`, or `http://localhost:<MINDROOM_PORT>` when it is unset.
 
 Opening a computer requires that the requester and the agent are both joined to the room, that the agent's [access policy](https://docs.mindroom.chat/authorization/#responder-access) lets the requester use it, and that the requester belongs to the configured Matrix server.
 A session lasts at most one hour.
@@ -126,12 +140,12 @@ Expose only this gateway; the worker's display has no public listener.
 
 ## Watch, take control, and resume
 
-<video controls playsinline preload="metadata" aria-label="A user watches the agent's browser, takes control, and hands it back" style="width: 100%" poster="https://github.com/user-attachments/assets/cb907777-89c8-4e0e-9df5-04969e863ec5" data-poster-light="https://github.com/user-attachments/assets/cb907777-89c8-4e0e-9df5-04969e863ec5" data-poster-dark="https://github.com/user-attachments/assets/19244c17-be66-410f-b2cf-b8e3edb4b228">
-  <source src="https://github.com/user-attachments/assets/6aa0e537-bd5e-462d-89e2-6592cd9e3be9" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/00f08e39-3b52-4556-860b-3b5b0b2d7287" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="A user watches the agent's browser, takes control, and hands it back" style="width: 100%" poster="https://github.com/user-attachments/assets/f22ef271-53a8-4000-950c-28b2344de13b" data-poster-light="https://github.com/user-attachments/assets/f22ef271-53a8-4000-950c-28b2344de13b" data-poster-dark="https://github.com/user-attachments/assets/be8be64a-6b82-453f-b294-c888bc8bcda0">
+  <source src="https://github.com/user-attachments/assets/5fc87c49-f21b-4a23-8eeb-d66becd2289c" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/db2b13b5-35c0-4b15-bbc9-93dec148f666" type="video/mp4">
 </video>
 
-- **Watch** shows the browser without input rights.
+- **Watch** shows the worker's desktop and its browser without input rights.
 - **Take control** waits for the agent's current browser action to finish, then gives input to one viewer.
   While the user holds control, the agent's browser calls return a blocked result; background shell processes keep running.
 - **Resume agent** releases control, returns the screen to watch mode, and sends one ordinary message mentioning the agent in the originating room or thread.
@@ -140,12 +154,15 @@ Expose only this gateway; the worker's display has no public listener.
 - **Stop** closes the browser and display and ends the session.
   **Start computer** creates a fresh session; profiles and files remain.
 
+A plugin can show and steer the agent's page in its own interface through [the agent's browser bridge](https://docs.mindroom.chat/plugins/#the-agents-browser), under the same control.
+
 The room header in MindRoom Chat shows a Computer button once the agent has shown its computer in that conversation.
 Before that, and on phones, open it from the room's More menu with **Show Computer**.
 
 Changing room, thread, account, or selected agent closes the old viewer.
 On desktop the panel sits beside the conversation and closes the Members drawer; on mobile it fills the screen and has a close button.
 Keyboard input over a controlled screen goes to the browser, not the composer.
+The desktop has no menu: right-clicking it opens nothing, and no key or click on it starts a program.
 
 The browser keeps running between tool calls, including tabs the user opened.
 When the agent focuses a tab or acts on a page, that page comes to the foreground, so the agent's screenshots and snapshots show what the viewer sees.
@@ -161,7 +178,7 @@ agents:
     display_name: Researcher
     role: Research with a browser and save results.
     model: default
-    tools: [browser_mcp, shell, file]
+    tools: [browser_mcp, shell, filesystem]
     worker_scope: user_agent
 ```
 
@@ -227,6 +244,10 @@ Configuration fails with `MINDROOM_WORKER_COMPUTER_ENABLED=true requires MINDROO
 Computer workers must also run as a non-root user.
 `MINDROOM_DOCKER_WORKER_USER=root` or UID 0, including a runtime that itself runs as root and passes its UID to workers, fails configuration, and a worker that starts as root refuses requests.
 An empty `MINDROOM_DOCKER_WORKER_USER` uses the image's default user.
+
+With gVisor as the worker runtime (`MINDROOM_DOCKER_WORKER_RUNTIME=runsc`), Computer needs gVisor 20261005 or later, because gVisor 20260406 crashes Chromium's page loads.
+By default, gVisor does not apply the `computer` seccomp profile inside its sandbox.
+Kata Containers (`MINDROOM_DOCKER_WORKER_RUNTIME=io.containerd.kata.v2`) applies the profile only when its configuration sets `disable_guest_seccomp = false`, which is not the default.
 
 ### Kubernetes
 

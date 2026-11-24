@@ -22,9 +22,9 @@ spec:
           customer: {{ .Values.customer | quote }}
     ports:
     - port: 8765    # MindRoom runtime (bundled dashboard + API)
-    - port: 8008    # synapse HTTP
+    - port: 8008    # Tuwunel HTTP
   egress:
-  # Allow intra-instance traffic between MindRoom and Synapse pods.
+  # Allow intra-instance traffic between MindRoom and Tuwunel pods.
   - to:
     - podSelector:
         matchLabels:

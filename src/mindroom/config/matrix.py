@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import re
 from typing import TYPE_CHECKING, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from mindroom.config.schema_hints import dashboard_hint
+from mindroom.config.validation import validate_matrix_localpart
 from mindroom.runtime_env_policy import is_runtime_database_url_env_name
 
 if TYPE_CHECKING:
@@ -16,7 +16,6 @@ if TYPE_CHECKING:
 _MatrixSyncMode = Literal["sliding", "classic"]
 RoomJoinRule = Literal["invite", "public", "knock"]
 RoomDirectoryVisibility = Literal["public", "private"]
-_MATRIX_LOCALPART_PATTERN = re.compile(r"^[a-z0-9._=/-]+$")
 
 
 class MatrixSyncConfig(BaseModel):
@@ -54,6 +53,8 @@ class MatrixSyncConfig(BaseModel):
 class MindRoomUserConfig(BaseModel):
     """Configuration for the internal MindRoom user account."""
 
+    model_config = ConfigDict(extra="forbid")
+
     username: str = Field(
         default="mindroom_user",
         description="Matrix username localpart for the internal user account (without @ or domain); set before first startup",
@@ -81,18 +82,13 @@ class MindRoomUserConfig(BaseModel):
             msg = "mindroom_user.username must be a Matrix localpart (without domain)"
             raise ValueError(msg)
 
-        if not _MATRIX_LOCALPART_PATTERN.fullmatch(normalized):
-            msg = (
-                "mindroom_user.username contains invalid characters; "
-                "allowed: lowercase letters, digits, '.', '_', '=', '-', '/'"
-            )
-            raise ValueError(msg)
-
-        return normalized
+        return validate_matrix_localpart(normalized, field_name="mindroom_user.username")
 
 
 class MatrixSpaceConfig(BaseModel):
     """Configuration for the optional root Matrix Space."""
+
+    model_config = ConfigDict(extra="forbid")
 
     enabled: bool = Field(
         default=True,
@@ -110,6 +106,35 @@ class MatrixSpaceConfig(BaseModel):
         normalized = name.strip()
         if not normalized:
             msg = "matrix_space.name cannot be empty"
+            raise ValueError(msg)
+        return normalized
+
+
+class ServerEmojiConfig(BaseModel):
+    """Configuration for the optional room whose emoji packs every MindRoom Chat user on the homeserver can use."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    enabled: bool = Field(
+        default=False,
+        description="Whether to create and maintain the server custom emoji room for MindRoom Chat",
+    )
+    name: str = Field(
+        default="Emoji",
+        description="Display name for the emoji room and its first emoji pack when MindRoom creates them",
+    )
+    moderators_only: bool = Field(
+        default=False,
+        description="Whether only moderators (power level 50) may add, rename, or remove server emoji",
+    )
+
+    @field_validator("name")
+    @classmethod
+    def validate_name(cls, name: str) -> str:
+        """Validate and normalize the emoji room and pack display name."""
+        normalized = name.strip()
+        if not normalized:
+            msg = "server_emoji.name cannot be empty"
             raise ValueError(msg)
         return normalized
 

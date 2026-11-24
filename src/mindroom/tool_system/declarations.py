@@ -2,40 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal, Protocol, runtime_checkable
-from weakref import ref
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Mapping
-
-
-MATRIX_ROOM_RUNTIME_APPROVAL_TYPE = "mindroom_matrix_room_runtime"
-MATRIX_ROOM_RUNTIME_TOOL_NAMES = ("invite_router",)
-
-_SCHEMA_SOURCE_ATTRIBUTE = "__mindroom_tool_schema_source__"
-
-
-@dataclass(frozen=True, slots=True)
-class _ToolSchemaSource:
-    """A wrapper-owned declaration; copied decorator attributes confer no identity."""
-
-    wrapper: ref[Callable[..., object]]
-    source: Callable[..., object]
-
-
-def tool_schema_source(entrypoint: Callable[..., object]) -> Callable[..., object]:
-    """Resolve only schema identity explicitly preserved by a MindRoom wrapper."""
-    declaration = getattr(entrypoint, _SCHEMA_SOURCE_ATTRIBUTE, None)
-    if isinstance(declaration, _ToolSchemaSource) and declaration.wrapper() is entrypoint:
-        return declaration.source
-    return entrypoint
-
-
-def declare_tool_schema_source(wrapper: Callable[..., object], source: Callable[..., object]) -> None:
-    """Declare the source definition used by an owned tool wrapper."""
-    setattr(wrapper, _SCHEMA_SOURCE_ATTRIBUTE, _ToolSchemaSource(ref(wrapper), tool_schema_source(source)))
+    from collections.abc import Callable, Mapping, Sequence
 
 
 @runtime_checkable
@@ -108,11 +80,13 @@ class ToolManagedInitArg(str, Enum):
     WORKER_TARGET = "worker_target"
     RUNTIME_CONFIG = "runtime_config"
     TOOL_OUTPUT_WORKSPACE_ROOT = "tool_output_workspace_root"
-    WORKER_TOOLS_OVERRIDE = "worker_tools_override"
+    WORKSPACE_IN_WORKER = "workspace_in_worker"
     CURRENT_ROOM_ID = "current_room_id"
     AGENT_NAME = "agent_name"
     FILE_ACCESS = "file_access"
     AGENT_STATE_ROOT = "agent_state_root"
+    SHARED_DIRECTORY_ROOTS = "shared_directory_roots"
+    IN_SANDBOX_REQUEST = "in_sandbox_request"
 
 
 @dataclass
@@ -129,6 +103,27 @@ class ConfigField:
     options: list[dict[str, str]] | None = None
     validation: dict[str, Any] | None = None
     authored_override: bool = True
+    # Variables the field falls back to, in order, when no saved, inline, or runtime value sets it, read as
+    # `RuntimePaths.first_env_value` reads them: the process environment, the `.env`, then each `<NAME>_FILE`.
+    env: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        """Keep a password field out of tool entries: only saved settings or the environment may set a secret."""
+        if self.type == "password":
+            self.authored_override = False
+
+
+@dataclass(frozen=True)
+class ApprovalAlias:
+    """Calls of a toolkit's function that do what calls of ``judged_as`` do, so ``judged_as``'s rules judge them too.
+
+    ``judge`` returns the arguments of each call of ``judged_as`` one call amounts to, read from that call's arguments
+    alone, since an approval covers exactly those: an empty list for a call that amounts to none, and None when its
+    arguments cannot tell, which asks for approval whenever ``judged_as``'s rules may.
+    """
+
+    judged_as: str
+    judge: Callable[[Mapping[str, object]], Sequence[Mapping[str, object]] | None]
 
 
 @dataclass(frozen=True)
@@ -147,12 +142,14 @@ class ToolValidationInfo:
     unavailable_due_to_plugin_load_error: bool = False
 
 
-@dataclass
+@dataclass(frozen=True)
 class ToolMetadata:
     """Complete metadata for a tool.
 
     ``requires_room_context`` marks toolkits that need the live Matrix room
     runtime, including its client, requester, and conversation context.
+    ``requires_conversation`` marks toolkits that need the calling agent's
+    conversation, such as its session, model, and usage accounting, but no room.
     ``requires_primary_runtime`` prevents worker routing even when an authored
     ``worker_tools`` override selects the tool. It is independent from the
     overridable ``default_execution_target``.
@@ -172,19 +169,44 @@ class ToolMetadata:
     # Runs arbitrary programs (shell, interpreters, containers); independent of the file_access class.
     executes_code: bool = False
     requires_room_context: bool = False
+    requires_conversation: bool = False
     icon: str | None = None
     icon_color: str | None = None
     config_fields: list[ConfigField] | None = None
     agent_override_fields: list[ConfigField] | None = None
     authored_override_validator: ToolAuthoredOverrideValidator = ToolAuthoredOverrideValidator.DEFAULT
     dependencies: list[str] | None = None
+    # Optional extra that installs this tool's dependencies; None means the extra named like the tool.
+    dependency_extra: str | None = None
     auth_provider: str | None = None
     oauth_fallback_fields: tuple[str, ...] = ()
     docs_url: str | None = None
     helper_text: str | None = None
     function_names: tuple[str, ...] = ()
+    # The toolkit's functions that change the workspace's files, by writing them or by running code there. A toolkit
+    # that names none and runs code counts as changing them through every function.
+    workspace_writers: tuple[str, ...] = ()
+    # The toolkit's functions, by name, whose calls another function's approval rules judge too.
+    approval_aliases: Mapping[str, ApprovalAlias] = field(default_factory=dict)
     # SDK functions that accept, but never use, an injected Agent or Team.
     worker_inert_agent_functions: tuple[str, ...] = ()
     managed_init_args: tuple[ToolManagedInitArg, ...] = ()
     supports_toolkit_filters: bool = False
     factory: Callable[[], type] | None = None
+    # Set only on the entry of one configured MCP server.
+    mcp_server_id: str | None = None
+
+    @property
+    def mcp_available(self) -> bool:
+        """Whether MCP gateway calls, which run without a Matrix room or an agent conversation, can use the tool."""
+        return not (self.requires_room_context or self.requires_conversation)
+
+
+def unconfined_by_file_access(metadata: ToolMetadata, file_access: str) -> bool:
+    """Return whether an agent's ``file_access`` setting leaves a tool's local file access unconfined.
+
+    An ``unconfined`` tool always is, and a tool that follows the setting is under ``unrestricted`` access.
+    """
+    return metadata.file_access is ToolFileAccess.UNCONFINED or (
+        metadata.file_access is ToolFileAccess.AGENT and file_access == "unrestricted"
+    )

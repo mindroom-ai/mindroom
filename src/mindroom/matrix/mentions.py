@@ -7,7 +7,6 @@ from bisect import bisect_left
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
-from mindroom.constants import ROUTER_AGENT_NAME
 from mindroom.entity_resolution import current_entity_id, entity_identity_registry
 from mindroom.matrix.identity import MatrixID, parse_current_matrix_user_id
 from mindroom.matrix.message_builder import build_message_content, markdown_fenced_code_ranges, markdown_to_html
@@ -137,6 +136,12 @@ def format_entity_mention(
         current_entity_id(entity_name, runtime_paths).full_id,
         config=config,
     )
+    return resolution.plain_text, [resolution.user_id], resolution.markdown_text
+
+
+def format_user_mention(user_id: str) -> tuple[str, list[str], str]:
+    """Return one literal Matrix user mention without scanning unrelated text."""
+    resolution = _literal_user_resolution(user_id)
     return resolution.plain_text, [resolution.user_id], resolution.markdown_text
 
 
@@ -391,8 +396,6 @@ def _find_matching_entity_name(
     """Return the configured entity name matched by one localpart candidate."""
     lower_localpart = localpart.lower()
     for entity_name in entities:
-        if entity_name == ROUTER_AGENT_NAME:
-            continue
         if entity_name.lower() == lower_localpart:
             return entity_name
     return None
@@ -448,6 +451,15 @@ def _is_wrapped_in_single_backticks(text: str, start: int, end: int) -> bool:
     return start > 0 and end < len(text) and text[start - 1] == "`" and text[end] == "`"
 
 
+def _parse_visible_mentions(text: str, config: Config, runtime_paths: RuntimePaths) -> tuple[str, list[str], str]:
+    return parse_mentions_in_text(ensure_visible_tool_marker_spacing(text), config, runtime_paths)
+
+
+def visible_markdown(config: Config, runtime_paths: RuntimePaths, text: str) -> str:
+    """Return the Markdown a message's ``formatted_body`` is rendered from: tool markers spaced, mentions as links."""
+    return _parse_visible_mentions(text, config, runtime_paths)[2]
+
+
 def format_message_with_mentions(
     config: Config,
     runtime_paths: RuntimePaths,
@@ -479,12 +491,7 @@ def format_message_with_mentions(
         Properly formatted content dict for room_send
 
     """
-    spaced_text = ensure_visible_tool_marker_spacing(text)
-    plain_text, mentioned_user_ids, markdown_text = parse_mentions_in_text(
-        spaced_text,
-        config,
-        runtime_paths,
-    )
+    plain_text, mentioned_user_ids, markdown_text = _parse_visible_mentions(text, config, runtime_paths)
 
     # Convert markdown (with links) to HTML
     # The markdown converter will properly handle the [@DisplayName](url) format

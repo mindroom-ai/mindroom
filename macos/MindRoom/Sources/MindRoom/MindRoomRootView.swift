@@ -305,6 +305,7 @@ struct MindRoomRootView: View {
                     navigation.section = .computerAccess
                 }
             }
+            ChatAppCard()
             Text("Use either role, or both. Closing this window keeps background work running.")
                 .font(.callout).foregroundStyle(.secondary)
         }

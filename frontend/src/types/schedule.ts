@@ -20,9 +20,16 @@ export interface ScheduleTask {
   created_at: string | null;
 }
 
+export interface UnreadableScheduleRoom {
+  room_id: string;
+  room_alias: string | null;
+  error: string;
+}
+
 export interface ScheduleListResponse {
   timezone: string;
   tasks: ScheduleTask[];
+  unreadable_rooms: UnreadableScheduleRoom[];
 }
 
 export interface UpdateScheduleRequest {

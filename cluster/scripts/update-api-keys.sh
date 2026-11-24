@@ -60,6 +60,9 @@ update_secret() {
 # Update platform secrets
 update_secret "platform-secrets" "mindroom-staging" "platform secrets"
 
+echo "If the platform chart creates platform-secrets, also set these keys in its Helm values (apiKeys and supabase.serviceKey);"
+echo "otherwise the next helm upgrade restores the previous keys."
+
 echo "Restarting platform backend to pick up new keys..."
 kubectl rollout restart deployment/platform-backend -n mindroom-staging --kubeconfig="$KUBECONFIG"
 kubectl rollout status deployment/platform-backend -n mindroom-staging --kubeconfig="$KUBECONFIG"

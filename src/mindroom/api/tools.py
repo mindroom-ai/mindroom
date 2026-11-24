@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
@@ -16,37 +15,37 @@ from mindroom.api.dashboard_credential_scope import (
     resolve_dashboard_agent_execution_scope_request,
     resolve_dashboard_execution_scope_override,
 )
-from mindroom.config.main import Config
+from mindroom.config.models import lazy_loading_prohibited_reason
 from mindroom.credentials.manager import (
     get_runtime_credentials_manager,
     load_scoped_credentials,
-    load_worker_grantable_shared_credentials,
 )
-from mindroom.credentials.policy import credential_service_policy
+from mindroom.mcp.registry import with_catalog_function_names
 from mindroom.oauth import OAuthProviderError
 from mindroom.oauth.credential_lifecycle import (
-    load_oauth_credentials_snapshot,
+    load_oauth_credentials_status,
     oauth_credentials_usable,
     resolve_oauth_credential_context,
 )
-from mindroom.oauth.registry import load_oauth_providers
 from mindroom.oauth.service import oauth_provider_service_account_configured
-from mindroom.tool_system.catalog import (
-    ensure_tool_registry_loaded,
-    export_tools_metadata,
-    resolved_tool_metadata_for_runtime,
-)
+from mindroom.tool_system.catalog import export_tools_metadata
+from mindroom.tool_system.plugins import ConfigPlugins, config_plugins
 from mindroom.tool_system.sandbox_proxy import primary_owns_tool_settings
 from mindroom.tool_system.worker_routing import (
     WorkerScope,
+    build_requester_execution_identity,
     build_worker_target_from_runtime_env,
     unsupported_shared_only_integration_names,
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
+    from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.credentials.manager import CredentialsManager
     from mindroom.oauth.providers import OAuthProvider
+    from mindroom.tool_system.registry import ToolRegistry
     from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
 
 router = APIRouter(prefix="/api/tools", tags=["tools"])
@@ -64,26 +63,16 @@ class _ResolvedToolAvailabilityContext:
     """Runtime tool-availability context for one dashboard request."""
 
     execution_scope: WorkerScope | None
-    dashboard_configuration_supported: bool
+    agent_name: str | None
+    # Whether credential status is authoritative for this scope, which is also when the dashboard can configure it.
     status_authoritative: bool
     credentials_manager: CredentialsManager
     worker_target: ResolvedWorkerTarget | None
     allowed_shared_services: frozenset[str] | None
-    auth_provider_credential_services: dict[str, str]
-    oauth_providers: dict[str, OAuthProvider]
+    oauth_providers: Mapping[str, OAuthProvider]
     runtime_paths: RuntimePaths
+    tools: ToolRegistry
     oauth_config: Config | None = None
-
-
-def _effective_allowed_shared_services(
-    service: str,
-    context: _ResolvedToolAvailabilityContext,
-) -> frozenset[str] | None:
-    """Return the worker allowlist that applies to one dashboard credential lookup."""
-    policy = credential_service_policy(service, context.execution_scope)
-    if policy.uses_local_shared_credentials:
-        return frozenset({service})
-    return context.allowed_shared_services
 
 
 def _check_homeassistant_configured(tool_name: str, ha_creds: dict[str, Any] | None) -> bool:
@@ -147,99 +136,26 @@ def _check_manual_oauth_fallback_configured(
     return True
 
 
-def _check_environment_oauth_fallback_configured(
-    provider: OAuthProvider | None,
-    runtime_paths: RuntimePaths,
-) -> bool:
-    """Return whether a provider's complete runtime fallback is present without exposing values."""
-    if provider is None:
+def _check_environment_oauth_fallback_configured(tool: dict[str, Any], runtime_paths: RuntimePaths) -> bool:
+    """Return whether the environment sets every manual OAuth fallback field, the way the tool reads it."""
+    fallback_fields = tool.get("oauth_fallback_fields")
+    if not fallback_fields:
         return False
-    env_vars = provider.tool_config_oauth_fallback_env_vars
-    return bool(env_vars) and all(
-        isinstance(value := runtime_paths.env_value(env_var), str) and bool(value.strip()) for env_var in env_vars
+    env_by_field = {field["name"]: field["env"] for field in tool["config_fields"]}
+    return all(
+        runtime_paths.first_env_value(env_by_field.get(field_name, ())) is not None for field_name in fallback_fields
     )
 
 
-def _append_config_only_presets(tools: list[dict[str, Any]]) -> None:
-    """Append config-only tool presets so the dashboard can display them."""
-    existing_tool_names = {tool.get("name") for tool in tools}
-    for preset_name, expansion in Config.TOOL_PRESETS.items():
-        if preset_name in existing_tool_names:
-            continue
-        tools.append(
-            {
-                "name": preset_name,
-                "display_name": preset_name.replace("_", " ").title(),
-                "description": f"Tool preset that expands to: {', '.join(expansion)}.",
-                "category": "preset",
-                "status": "available",
-                "setup_type": "none",
-                "icon": "Workflow",
-                "icon_color": "text-orange-500",
-                "config_fields": None,
-                "agent_override_fields": None,
-                "dependencies": None,
-                "auth_provider": None,
-                "docs_url": None,
-                "helper_text": f"Config-only macro. Expands to: {', '.join(expansion)}.",
-                "dashboard_configuration_supported": True,
-            },
-        )
-
-
-def _annotate_dashboard_configuration_support(
-    tools: list[dict[str, Any]],
-    *,
-    supported: bool,
-) -> None:
-    """Expose whether dashboard credential configuration is supported for this scope."""
-    for tool in tools:
-        tool["dashboard_configuration_supported"] = supported
-
-
-def _annotate_lazy_loading_support(tools: list[dict[str, Any]]) -> None:
-    """Expose whether an agent's entry for each tool may set defer/initial."""
-    for tool in tools:
-        tool["lazy_loading_supported"] = Config.supports_lazy_loading(tool["name"])
-
-
-def _annotate_execution_scope_support(
-    tools: list[dict[str, Any]],
-    *,
-    execution_scope: WorkerScope | None,
-) -> None:
-    """Expose whether each tool is supported for the requested execution scope."""
+def _annotate_tool_support(tools: list[dict[str, Any]], context: _ResolvedToolAvailabilityContext) -> None:
+    """Expose, per tool, lazy-loading support, execution-scope support, and dashboard credential configuration."""
     unsupported_tools = set(
-        unsupported_shared_only_integration_names(
-            [tool["name"] for tool in tools],
-            execution_scope,
-        ),
+        unsupported_shared_only_integration_names([tool["name"] for tool in tools], context.execution_scope),
     )
     for tool in tools:
+        tool["lazy_loading_supported"] = lazy_loading_prohibited_reason(tool["name"]) is None
         tool["execution_scope_supported"] = tool["name"] not in unsupported_tools
-
-
-def _load_shared_preview_credentials(
-    service: str,
-    *,
-    credentials_manager: CredentialsManager,
-    allowed_shared_services: frozenset[str] | None,
-) -> dict[str, Any] | None:
-    """Return the shared credentials visible to non-authoritative dashboard previews.
-
-    Dashboard users are not the same trusted requester identity as live Matrix senders.
-    For isolated scopes we can still report capabilities and allowlisted shared availability,
-    but we must not pretend to inspect requester-owned scoped credential state.
-    """
-    shared_manager = credentials_manager.shared_manager()
-    if allowed_shared_services is None:
-        shared_credentials = shared_manager.load_credentials(service)
-        return dict(shared_credentials) if isinstance(shared_credentials, Mapping) else None
-    return load_worker_grantable_shared_credentials(
-        service,
-        shared_manager=shared_manager,
-        allowed_services=allowed_shared_services,
-    )
+        tool["dashboard_configuration_supported"] = context.status_authoritative
 
 
 def _resolve_tool_availability_context(
@@ -247,6 +163,7 @@ def _resolve_tool_availability_context(
     *,
     runtime_paths: RuntimePaths,
     config: Config,
+    plugins: ConfigPlugins,
     agent_name: str | None,
     execution_scope_override_provided: bool,
     execution_scope_override: WorkerScope | None,
@@ -288,40 +205,65 @@ def _resolve_tool_availability_context(
         and (scope_request.agent_name is not None or execution_scope is not None)
         else None
     )
-    oauth_providers = load_oauth_providers(config, runtime_paths)
-    ensure_tool_registry_loaded(runtime_paths)
     return _ResolvedToolAvailabilityContext(
         execution_scope=execution_scope,
-        dashboard_configuration_supported=status_authoritative,
+        agent_name=scope_request.agent_name,
         status_authoritative=status_authoritative,
         credentials_manager=get_runtime_credentials_manager(runtime_paths),
         worker_target=worker_target,
         allowed_shared_services=(config.get_worker_grantable_credentials() if execution_scope is not None else None),
-        auth_provider_credential_services={
-            provider_id: provider.credential_service for provider_id, provider in oauth_providers.items()
-        },
-        oauth_providers=oauth_providers,
+        oauth_providers=plugins.oauth_providers,
         runtime_paths=runtime_paths,
+        tools=plugins.tools,
         oauth_config=config,
     )
 
 
-def _read_tools_runtime_config(request: Request) -> tuple[Config, RuntimePaths]:
-    """Read one coherent config/runtime snapshot for the tools dashboard route."""
-    return config_lifecycle.read_committed_runtime_config(request)
+def _status_worker_target(
+    context: _ResolvedToolAvailabilityContext,
+    *,
+    authoritative: bool,
+) -> ResolvedWorkerTarget | None:
+    """Return the target the runtime reads for this request, or the target of a preview without a requester.
+
+    Dashboard users are not the trusted requester of a live Matrix sender, so a preview reads only what the
+    requested scope, saved or draft, holds for no requester, and a service that lives only in a requester's store
+    previews as unconfigured.
+    """
+    if authoritative:
+        return context.worker_target
+    if context.execution_scope is None:
+        return None
+    identity = (
+        None
+        if context.agent_name is None
+        else build_requester_execution_identity(
+            agent_name=context.agent_name,
+            runtime_paths=context.runtime_paths,
+            requester_id=None,
+        )
+    )
+    return build_worker_target_from_runtime_env(
+        context.execution_scope,
+        context.agent_name,
+        execution_identity=identity,
+        runtime_paths=context.runtime_paths,
+    )
 
 
 async def _load_oauth_provider_credentials(
     provider: OAuthProvider,
     context: _ResolvedToolAvailabilityContext,
     cache: dict[tuple[str, str | None], dict[str, Any] | None],
+    *,
+    authoritative: bool,
 ) -> dict[str, Any] | None:
-    """Load one registered provider through the authoritative lifecycle owner."""
+    """Load one registered provider's connection from its lifecycle owner, or a preview of it without a requester."""
     credential_context = resolve_oauth_credential_context(
         provider,
         context.runtime_paths,
         context.credentials_manager,
-        context.worker_target,
+        _status_worker_target(context, authoritative=authoritative),
         config=context.oauth_config,
     )
     provider_target = credential_context.worker_target
@@ -333,10 +275,35 @@ async def _load_oauth_provider_credentials(
     )
     if cache_key not in cache:
         try:
-            cache[cache_key] = (await load_oauth_credentials_snapshot(credential_context)).credentials
-        except OAuthProviderError:
+            cache[cache_key] = (await load_oauth_credentials_status(credential_context, create_store=False)).credentials
+        except (OAuthProviderError, ValueError):
+            # A ValueError means a preview target lacks the requester or agent its store needs.
             cache[cache_key] = None
     return cache[cache_key]
+
+
+def _tool_status_credentials(
+    service: str,
+    context: _ResolvedToolAvailabilityContext,
+    *,
+    authoritative: bool,
+) -> dict[str, Any] | None:
+    """Return the credentials the runtime would read for one service, or a preview of them without a requester."""
+    worker_target = _status_worker_target(context, authoritative=authoritative)
+    try:
+        return load_scoped_credentials(
+            service,
+            credentials_manager=context.credentials_manager,
+            worker_target=worker_target,
+            allowed_shared_services=context.allowed_shared_services,
+            primary_built_tool=worker_target is not None
+            and worker_target.routing_agent_name is not None
+            and primary_owns_tool_settings(service, context.tools, runtime_paths=context.runtime_paths),
+        )
+    except ValueError:
+        if authoritative:
+            raise
+        return None
 
 
 async def _update_tools_statuses(
@@ -344,34 +311,17 @@ async def _update_tools_statuses(
     context: _ResolvedToolAvailabilityContext,
 ) -> None:
     """Update tool runtime availability using the resolved credential context."""
-    credentials_cache: dict[tuple[str, str | None, bool], dict[str, Any] | None] = {}
+    credentials_cache: dict[tuple[str, bool], dict[str, Any] | None] = {}
     oauth_credentials_cache: dict[tuple[str, str | None], dict[str, Any] | None] = {}
 
-    def get_credentials(
-        service: str,
-        *,
-        worker_target: ResolvedWorkerTarget | None = context.worker_target,
-        use_request_target: bool = False,
-    ) -> dict[str, Any] | None:
-        cache_key = (service, worker_target.worker_key if worker_target is not None else None, use_request_target)
+    def get_credentials(service: str, *, use_request_target: bool = False) -> dict[str, Any] | None:
+        cache_key = (service, use_request_target)
         if cache_key not in credentials_cache:
-            allowed_shared_services = _effective_allowed_shared_services(service, context)
-            if context.status_authoritative or use_request_target:
-                credentials_cache[cache_key] = load_scoped_credentials(
-                    service,
-                    credentials_manager=context.credentials_manager,
-                    worker_target=worker_target,
-                    allowed_shared_services=allowed_shared_services,
-                    primary_built_tool=worker_target is not None
-                    and worker_target.routing_agent_name is not None
-                    and primary_owns_tool_settings(service, runtime_paths=context.runtime_paths),
-                )
-            else:
-                credentials_cache[cache_key] = _load_shared_preview_credentials(
-                    service,
-                    credentials_manager=context.credentials_manager,
-                    allowed_shared_services=allowed_shared_services,
-                )
+            credentials_cache[cache_key] = _tool_status_credentials(
+                service,
+                context,
+                authoritative=context.status_authoritative or use_request_target,
+            )
         return credentials_cache[cache_key]
 
     for tool in tools:
@@ -395,19 +345,16 @@ async def _update_tools_statuses(
             )
             if tool.get("oauth_fallback_fields"):
                 tool["manual_auth_configured"] = manual_auth_configured
-            environment_auth_configured = _check_environment_oauth_fallback_configured(
-                provider,
-                context.runtime_paths,
-            )
+            environment_auth_configured = _check_environment_oauth_fallback_configured(tool, context.runtime_paths)
             tool["environment_auth_configured"] = environment_auth_configured
-            credential_service = context.auth_provider_credential_services.get(auth_provider, auth_provider)
             provider_creds = (
-                await _load_oauth_provider_credentials(provider, context, oauth_credentials_cache)
-                if provider is not None and (context.status_authoritative or use_request_target)
-                else get_credentials(
-                    credential_service,
-                    worker_target=context.worker_target,
-                    use_request_target=use_request_target,
+                get_credentials(auth_provider)
+                if provider is None
+                else await _load_oauth_provider_credentials(
+                    provider,
+                    context,
+                    oauth_credentials_cache,
+                    authoritative=context.status_authoritative or use_request_target,
                 )
             )
             auth_configured = (
@@ -444,32 +391,20 @@ async def get_registered_tools(
     This builds tool metadata from the in-memory registry and updates availability
     based on credentials (including plugin-provided tools).
     """
-    config, runtime_paths = _read_tools_runtime_config(request)
-    tool_metadata = resolved_tool_metadata_for_runtime(
-        runtime_paths,
-        config,
-        tolerate_plugin_load_errors=True,
-    )
-    tools = export_tools_metadata(tool_metadata)
+    config, runtime_paths = config_lifecycle.read_committed_runtime_config(request)
+    plugins = config_plugins(config, runtime_paths)
+    tools = export_tools_metadata(with_catalog_function_names(plugins.tools.listable()))
     execution_scope_override_provided, execution_scope_override = resolve_dashboard_execution_scope_override(request)
     context = _resolve_tool_availability_context(
         request,
         runtime_paths=runtime_paths,
         config=config,
+        plugins=plugins,
         agent_name=agent_name,
         execution_scope_override_provided=execution_scope_override_provided,
         execution_scope_override=execution_scope_override,
     )
-    _append_config_only_presets(tools)
-    _annotate_lazy_loading_support(tools)
-    _annotate_execution_scope_support(
-        tools,
-        execution_scope=context.execution_scope,
-    )
-    _annotate_dashboard_configuration_support(
-        tools,
-        supported=context.dashboard_configuration_supported,
-    )
+    _annotate_tool_support(tools, context)
     await _update_tools_statuses(tools, context)
 
     return ToolsResponse(tools=tools, status_authoritative=context.status_authoritative)

@@ -1,0 +1,989 @@
+{
+ "scenario": {
+  "actions": [
+   {
+    "events": [
+     "$m4",
+     "$a2"
+    ],
+    "op": "admit",
+    "room": "b"
+   },
+   {
+    "events": [
+     "$m2",
+     "$m4"
+    ],
+    "op": "admit",
+    "room": "a"
+   },
+   {
+    "history": [],
+    "op": "prepare",
+    "room": "b",
+    "sources": [
+     "$m2"
+    ]
+   },
+   {
+    "op": "reopen"
+   },
+   {
+    "op": "settle",
+    "publish": true,
+    "sources": [
+     "$m1"
+    ]
+   },
+   {
+    "echo": "$v1b",
+    "fallback": false,
+    "op": "finalize_echo",
+    "source": "$m1"
+   },
+   {
+    "echo": "$v4b",
+    "op": "echo",
+    "source": "$m4"
+   },
+   {
+    "history": [
+     [
+      "$m2",
+      null,
+      0
+     ]
+    ],
+    "op": "prepare",
+    "room": "b",
+    "sources": [
+     "$m3"
+    ]
+   },
+   {
+    "echo": "$v2b",
+    "fallback": false,
+    "op": "finalize_echo",
+    "source": "$m2"
+   },
+   {
+    "commit": true,
+    "edit": "$e4",
+    "op": "edit",
+    "source": "$m3",
+    "ts": 40
+   },
+   {
+    "events": [
+     "$m5",
+     "$m1"
+    ],
+    "op": "admit",
+    "room": "a"
+   },
+   {
+    "op": "terminal",
+    "room": null,
+    "sources": [
+     "$m3"
+    ]
+   },
+   {
+    "echo": "$v2b",
+    "fallback": false,
+    "op": "finalize_echo",
+    "source": "$m2"
+   },
+   {
+    "op": "final_ack",
+    "publish": true,
+    "response": "$r13",
+    "turn": "$m4"
+   },
+   {
+    "body": "transcript 0",
+    "op": "voice",
+    "source": "$m5"
+   },
+   {
+    "commit": true,
+    "edit": "$e4",
+    "op": "edit",
+    "source": "$m3",
+    "ts": 40
+   },
+   {
+    "events": [
+     "$m4",
+     "$m3"
+    ],
+    "op": "admit",
+    "room": "b"
+   },
+   {
+    "op": "pending",
+    "response": "$p17",
+    "room": null,
+    "senders": [
+     "@alice:example.org",
+     "@alice:example.org"
+    ],
+    "sources": [
+     "$m1",
+     "$m2"
+    ]
+   },
+   {
+    "op": "pending",
+    "room": "b",
+    "senders": [
+     "@alice:example.org",
+     null
+    ],
+    "sources": [
+     "$m2",
+     "$m5"
+    ]
+   },
+   {
+    "op": "terminal",
+    "room": "a",
+    "sources": [
+     "$m2",
+     "$m5"
+    ]
+   },
+   {
+    "history": [],
+    "op": "prepare",
+    "room": "a",
+    "sources": [
+     "$m3"
+    ]
+   },
+   {
+    "op": "responded",
+    "response": "$r21",
+    "room": "b",
+    "senders": [
+     "@alice:example.org"
+    ],
+    "sources": [
+     "$m4"
+    ]
+   },
+   {
+    "events": [
+     "$m5",
+     "$a1"
+    ],
+    "op": "admit",
+    "room": "a"
+   },
+   {
+    "echo": "$v3",
+    "op": "echo",
+    "source": "$m3"
+   },
+   {
+    "op": "pending",
+    "room": null,
+    "senders": [
+     "@alice:example.org"
+    ],
+    "sources": [
+     "$m4"
+    ]
+   }
+  ],
+  "ids": [
+   "$a1",
+   "$a2",
+   "$e4",
+   "$m1",
+   "$m2",
+   "$m3",
+   "$m4",
+   "$m5",
+   "$p17",
+   "$r13",
+   "$r21",
+   "$v1b",
+   "$v2b",
+   "$v3",
+   "$v4b"
+  ],
+  "input": null
+ },
+ "steps": [
+  {
+   "action": null,
+   "changes": {},
+   "outcome": null
+  },
+  {
+   "action": {
+    "events": [
+     "$m4",
+     "$a2"
+    ],
+    "op": "admit",
+    "room": "b"
+   },
+   "changes": {},
+   "outcome": "ok"
+  },
+  {
+   "action": {
+    "events": [
+     "$m2",
+     "$m4"
+    ],
+    "op": "admit",
+    "room": "a"
+   },
+   "changes": {},
+   "outcome": "ok"
+  },
+  {
+   "action": {
+    "history": [],
+    "op": "prepare",
+    "room": "b",
+    "sources": [
+     "$m2"
+    ]
+   },
+   "changes": {},
+   "outcome": "proceed"
+  },
+  {
+   "action": {
+    "op": "reopen"
+   },
+   "changes": {},
+   "outcome": "ok"
+  },
+  {
+   "action": {
+    "op": "settle",
+    "publish": true,
+    "sources": [
+     "$m1"
+    ]
+   },
+   "changes": {},
+   "outcome": "unchanged"
+  },
+  {
+   "action": {
+    "echo": "$v1b",
+    "fallback": false,
+    "op": "finalize_echo",
+    "source": "$m1"
+   },
+   "changes": {},
+   "outcome": "ok"
+  },
+  {
+   "action": {
+    "echo": "$v4b",
+    "op": "echo",
+    "source": "$m4"
+   },
+   "changes": {
+    "record_for_response": {
+     "$v4b": {
+      "anchor": "$m4",
+      "completed": false,
+      "echo": "$v4b",
+      "sources": [
+       "$m4"
+      ]
+     }
+    },
+    "turn_record": {
+     "$m4": {
+      "anchor": "$m4",
+      "completed": false,
+      "echo": "$v4b",
+      "sources": [
+       "$m4"
+      ]
+     }
+    },
+    "visible_echo": {
+     "$m4": "$v4b"
+    }
+   },
+   "outcome": "ok"
+  },
+  {
+   "action": {
+    "history": [
+     [
+      "$m2",
+      null,
+      0
+     ]
+    ],
+    "op": "prepare",
+    "room": "b",
+    "sources": [
+     "$m3"
+    ]
+   },
+   "changes": {},
+   "outcome": "proceed"
+  },
+  {
+   "action": {
+    "echo": "$v2b",
+    "fallback": false,
+    "op": "finalize_echo",
+    "source": "$m2"
+   },
+   "changes": {},
+   "outcome": "ok"
+  },
+  {
+   "action": {
+    "commit": true,
+    "edit": "$e4",
+    "op": "edit",
+    "source": "$m3",
+    "ts": 40
+   },
+   "changes": {},
+   "outcome": "declined"
+  },
+  {
+   "action": {
+    "events": [
+     "$m5",
+     "$m1"
+    ],
+    "op": "admit",
+    "room": "a"
+   },
+   "changes": {},
+   "outcome": "ok"
+  },
+  {
+   "action": {
+    "op": "terminal",
+    "room": null,
+    "sources": [
+     "$m3"
+    ]
+   },
+   "changes": {
+    "is_handled": {
+     "$m3": true
+    },
+    "turn_record": {
+     "$m3": {
+      "anchor": "$m3",
+      "completed": true,
+      "sources": [
+       "$m3"
+      ]
+     }
+    }
+   },
+   "outcome": "ok"
+  },
+  {
+   "action": {
+    "echo": "$v2b",
+    "fallback": false,
+    "op": "finalize_echo",
+    "source": "$m2"
+   },
+   "changes": {},
+   "outcome": "ok"
+  },
+  {
+   "action": {
+    "op": "final_ack",
+    "publish": true,
+    "response": "$r13",
+    "turn": "$m4"
+   },
+   "changes": {},
+   "outcome": {
+    "committed": false,
+    "prepared": true,
+    "settled": null
+   }
+  },
+  {
+   "action": {
+    "body": "transcript 0",
+    "op": "voice",
+    "source": "$m5"
+   },
+   "changes": {
+    "prepared_voice": {
+     "$m5": {
+      "body": "transcript 0",
+      "coalescing_thread_id": null,
+      "content_json": "{\"msgtype\": \"m.text\", \"body\": \"transcript 0\"}",
+      "thread_id": null
+     }
+    },
+    "turn_record": {
+     "$m5": {
+      "anchor": "$m5",
+      "completed": false,
+      "prepared_voice": {
+       "$m5": {
+        "body": "transcript 0",
+        "coalescing_thread_id": null,
+        "content_json": "{\"msgtype\": \"m.text\", \"body\": \"transcript 0\"}",
+        "thread_id": null
+       }
+      },
+      "sources": [
+       "$m5"
+      ]
+     }
+    }
+   },
+   "outcome": "ok"
+  },
+  {
+   "action": {
+    "commit": true,
+    "edit": "$e4",
+    "op": "edit",
+    "source": "$m3",
+    "ts": 40
+   },
+   "changes": {
+    "turn_record": {
+     "$m3": {
+      "anchor": "$m3",
+      "completed": true,
+      "prompts": {
+       "$m3": "$m3 as of $e4"
+      },
+      "replay": {
+       "$e4": {
+        "legacy_summary_provenance": false,
+        "redacted": false,
+        "response_event_id": null,
+        "source_event_id": "$m3",
+        "timestamp_ms": 40
+       }
+      },
+      "revisions": {
+       "$m3": [
+        40,
+        "$e4"
+       ]
+      },
+      "sources": [
+       "$m3"
+      ]
+     }
+    }
+   },
+   "outcome": "ok"
+  },
+  {
+   "action": {
+    "events": [
+     "$m4",
+     "$m3"
+    ],
+    "op": "admit",
+    "room": "b"
+   },
+   "changes": {},
+   "outcome": "ok"
+  },
+  {
+   "action": {
+    "op": "pending",
+    "response": "$p17",
+    "room": null,
+    "senders": [
+     "@alice:example.org",
+     "@alice:example.org"
+    ],
+    "sources": [
+     "$m1",
+     "$m2"
+    ]
+   },
+   "changes": {
+    "record_for_response": {
+     "$p17": {
+      "anchor": "$m2",
+      "completed": false,
+      "metadata": {
+       "$m1": {
+        "sender": "@alice:example.org"
+       },
+       "$m2": {
+        "sender": "@alice:example.org"
+       }
+      },
+      "prompts": {
+       "$m1": "$m1 original",
+       "$m2": "$m2 original"
+      },
+      "requester": "@alice:example.org",
+      "response": "$p17",
+      "sources": [
+       "$m1",
+       "$m2"
+      ]
+     }
+    },
+    "turn_record": {
+     "$m1": {
+      "anchor": "$m2",
+      "completed": false,
+      "metadata": {
+       "$m1": {
+        "sender": "@alice:example.org"
+       },
+       "$m2": {
+        "sender": "@alice:example.org"
+       }
+      },
+      "prompts": {
+       "$m1": "$m1 original",
+       "$m2": "$m2 original"
+      },
+      "requester": "@alice:example.org",
+      "response": "$p17",
+      "sources": [
+       "$m1",
+       "$m2"
+      ]
+     },
+     "$m2": {
+      "anchor": "$m2",
+      "completed": false,
+      "metadata": {
+       "$m1": {
+        "sender": "@alice:example.org"
+       },
+       "$m2": {
+        "sender": "@alice:example.org"
+       }
+      },
+      "prompts": {
+       "$m1": "$m1 original",
+       "$m2": "$m2 original"
+      },
+      "requester": "@alice:example.org",
+      "response": "$p17",
+      "sources": [
+       "$m1",
+       "$m2"
+      ]
+     }
+    }
+   },
+   "outcome": "ok"
+  },
+  {
+   "action": {
+    "op": "pending",
+    "room": "b",
+    "senders": [
+     "@alice:example.org",
+     null
+    ],
+    "sources": [
+     "$m2",
+     "$m5"
+    ]
+   },
+   "changes": {
+    "pending_intent": {
+     "$m2": true,
+     "$m5": true
+    },
+    "record_for_response": {
+     "$p17": {
+      "error": "RuntimeError",
+      "message": "Multiple turns own visible response '$p17'"
+     }
+    },
+    "turn_record": {
+     "$m2": {
+      "anchor": "$m5",
+      "completed": false,
+      "history_scope": "agent:agent",
+      "metadata": {
+       "$m2": {
+        "sender": "@alice:example.org"
+       }
+      },
+      "prepared_voice": {
+       "$m5": {
+        "body": "transcript 0",
+        "coalescing_thread_id": null,
+        "content_json": "{\"msgtype\": \"m.text\", \"body\": \"transcript 0\"}",
+        "thread_id": null
+       }
+      },
+      "prompts": {
+       "$m2": "$m2 original",
+       "$m5": "$m5 original"
+      },
+      "requester": "@alice:example.org",
+      "response": "$p17",
+      "response_owner": "agent",
+      "sources": [
+       "$m2",
+       "$m5"
+      ],
+      "target": {
+       "reply_to_event_id": null,
+       "resolved_thread_id": "$thread-b",
+       "room_id": "!b:example.org",
+       "session_id": "!b:example.org:$thread-b",
+       "source_thread_id": "$thread-b"
+      }
+     },
+     "$m5": {
+      "anchor": "$m5",
+      "completed": false,
+      "history_scope": "agent:agent",
+      "metadata": {
+       "$m2": {
+        "sender": "@alice:example.org"
+       }
+      },
+      "prepared_voice": {
+       "$m5": {
+        "body": "transcript 0",
+        "coalescing_thread_id": null,
+        "content_json": "{\"msgtype\": \"m.text\", \"body\": \"transcript 0\"}",
+        "thread_id": null
+       }
+      },
+      "prompts": {
+       "$m2": "$m2 original",
+       "$m5": "$m5 original"
+      },
+      "requester": "@alice:example.org",
+      "response": "$p17",
+      "response_owner": "agent",
+      "sources": [
+       "$m2",
+       "$m5"
+      ],
+      "target": {
+       "reply_to_event_id": null,
+       "resolved_thread_id": "$thread-b",
+       "room_id": "!b:example.org",
+       "session_id": "!b:example.org:$thread-b",
+       "source_thread_id": "$thread-b"
+      }
+     }
+    }
+   },
+   "outcome": "ok"
+  },
+  {
+   "action": {
+    "op": "terminal",
+    "room": "a",
+    "sources": [
+     "$m2",
+     "$m5"
+    ]
+   },
+   "changes": {
+    "is_handled": {
+     "$m2": true,
+     "$m5": true
+    },
+    "pending_intent": {
+     "$m2": null,
+     "$m5": null
+    },
+    "prepared_voice": {
+     "$m5": null
+    },
+    "turn_record": {
+     "$m2": {
+      "anchor": "$m5",
+      "completed": true,
+      "history_scope": "agent:agent",
+      "metadata": {
+       "$m2": {
+        "sender": "@alice:example.org"
+       }
+      },
+      "prompts": {
+       "$m2": "$m2 original",
+       "$m5": "$m5 original"
+      },
+      "requester": "@alice:example.org",
+      "response": "$p17",
+      "response_owner": "agent",
+      "sources": [
+       "$m2",
+       "$m5"
+      ],
+      "target": {
+       "reply_to_event_id": null,
+       "resolved_thread_id": "$thread-a",
+       "room_id": "!a:example.org",
+       "session_id": "!a:example.org:$thread-a",
+       "source_thread_id": "$thread-a"
+      }
+     },
+     "$m5": {
+      "anchor": "$m5",
+      "completed": true,
+      "history_scope": "agent:agent",
+      "metadata": {
+       "$m2": {
+        "sender": "@alice:example.org"
+       }
+      },
+      "prompts": {
+       "$m2": "$m2 original",
+       "$m5": "$m5 original"
+      },
+      "requester": "@alice:example.org",
+      "response": "$p17",
+      "response_owner": "agent",
+      "sources": [
+       "$m2",
+       "$m5"
+      ],
+      "target": {
+       "reply_to_event_id": null,
+       "resolved_thread_id": "$thread-a",
+       "room_id": "!a:example.org",
+       "session_id": "!a:example.org:$thread-a",
+       "source_thread_id": "$thread-a"
+      }
+     }
+    }
+   },
+   "outcome": "ok"
+  },
+  {
+   "action": {
+    "history": [],
+    "op": "prepare",
+    "room": "a",
+    "sources": [
+     "$m3"
+    ]
+   },
+   "changes": {},
+   "outcome": "suppressed"
+  },
+  {
+   "action": {
+    "op": "responded",
+    "response": "$r21",
+    "room": "b",
+    "senders": [
+     "@alice:example.org"
+    ],
+    "sources": [
+     "$m4"
+    ]
+   },
+   "changes": {
+    "is_handled": {
+     "$m4": true
+    },
+    "record_for_response": {
+     "$r21": {
+      "anchor": "$m4",
+      "completed": true,
+      "echo": "$v4b",
+      "history_scope": "agent:agent",
+      "metadata": {
+       "$m4": {
+        "sender": "@alice:example.org"
+       }
+      },
+      "prompts": {
+       "$m4": "$m4 original"
+      },
+      "requester": "@alice:example.org",
+      "response": "$r21",
+      "response_owner": "agent",
+      "sources": [
+       "$m4"
+      ],
+      "target": {
+       "reply_to_event_id": null,
+       "resolved_thread_id": "$thread-b",
+       "room_id": "!b:example.org",
+       "session_id": "!b:example.org:$thread-b",
+       "source_thread_id": "$thread-b"
+      }
+     },
+     "$v4b": {
+      "anchor": "$m4",
+      "completed": true,
+      "echo": "$v4b",
+      "history_scope": "agent:agent",
+      "metadata": {
+       "$m4": {
+        "sender": "@alice:example.org"
+       }
+      },
+      "prompts": {
+       "$m4": "$m4 original"
+      },
+      "requester": "@alice:example.org",
+      "response": "$r21",
+      "response_owner": "agent",
+      "sources": [
+       "$m4"
+      ],
+      "target": {
+       "reply_to_event_id": null,
+       "resolved_thread_id": "$thread-b",
+       "room_id": "!b:example.org",
+       "session_id": "!b:example.org:$thread-b",
+       "source_thread_id": "$thread-b"
+      }
+     }
+    },
+    "turn_record": {
+     "$m4": {
+      "anchor": "$m4",
+      "completed": true,
+      "echo": "$v4b",
+      "history_scope": "agent:agent",
+      "metadata": {
+       "$m4": {
+        "sender": "@alice:example.org"
+       }
+      },
+      "prompts": {
+       "$m4": "$m4 original"
+      },
+      "requester": "@alice:example.org",
+      "response": "$r21",
+      "response_owner": "agent",
+      "sources": [
+       "$m4"
+      ],
+      "target": {
+       "reply_to_event_id": null,
+       "resolved_thread_id": "$thread-b",
+       "room_id": "!b:example.org",
+       "session_id": "!b:example.org:$thread-b",
+       "source_thread_id": "$thread-b"
+      }
+     }
+    }
+   },
+   "outcome": "ok"
+  },
+  {
+   "action": {
+    "events": [
+     "$m5",
+     "$a1"
+    ],
+    "op": "admit",
+    "room": "a"
+   },
+   "changes": {},
+   "outcome": "ok"
+  },
+  {
+   "action": {
+    "echo": "$v3",
+    "op": "echo",
+    "source": "$m3"
+   },
+   "changes": {
+    "record_for_response": {
+     "$v3": {
+      "anchor": "$m3",
+      "completed": true,
+      "echo": "$v3",
+      "prompts": {
+       "$m3": "$m3 as of $e4"
+      },
+      "replay": {
+       "$e4": {
+        "legacy_summary_provenance": false,
+        "redacted": false,
+        "response_event_id": null,
+        "source_event_id": "$m3",
+        "timestamp_ms": 40
+       }
+      },
+      "revisions": {
+       "$m3": [
+        40,
+        "$e4"
+       ]
+      },
+      "sources": [
+       "$m3"
+      ]
+     }
+    },
+    "turn_record": {
+     "$m3": {
+      "anchor": "$m3",
+      "completed": true,
+      "echo": "$v3",
+      "prompts": {
+       "$m3": "$m3 as of $e4"
+      },
+      "replay": {
+       "$e4": {
+        "legacy_summary_provenance": false,
+        "redacted": false,
+        "response_event_id": null,
+        "source_event_id": "$m3",
+        "timestamp_ms": 40
+       }
+      },
+      "revisions": {
+       "$m3": [
+        40,
+        "$e4"
+       ]
+      },
+      "sources": [
+       "$m3"
+      ]
+     }
+    },
+    "visible_echo": {
+     "$m3": "$v3"
+    }
+   },
+   "outcome": "ok"
+  },
+  {
+   "action": {
+    "op": "pending",
+    "room": null,
+    "senders": [
+     "@alice:example.org"
+    ],
+    "sources": [
+     "$m4"
+    ]
+   },
+   "changes": {},
+   "outcome": "already_completed"
+  }
+ ]
+}

@@ -3,17 +3,60 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
-from typing import TYPE_CHECKING, Any, Literal, Protocol, cast
+from typing import TYPE_CHECKING, Any, Literal, Protocol, cast, get_args
+
+from mindroom.history.types import HistoryScope
+from mindroom.redaction import redact_sensitive_text
+from mindroom.tool_system.worker_routing import parse_tool_execution_identity_payload
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Collection, Mapping
 
     from mindroom.agent_modes import AgentMode
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
+    from mindroom.llm.runs import RunRequirement
+    from mindroom.llm.usage import RunMetrics
+    from mindroom.tool_system.tool_function import ToolFunction
+    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+    from mindroom.workers.models import ScriptResourceProfileName
 
 DELEGATION_STATE_KEY = "mindroom_delegation"
+
+# The functions of the ``delegate`` toolkit, each of which runs one child turn.
+RUN_SUBAGENT = "run_subagent"
+CONTINUE_SUBAGENT = "continue_subagent"
+# Where the job of a workflow run's agent keeps the runs that restarts cut short before its current one, in its adapter.
+SPENT_RUNS_KEY = "spent_runs"
+# Under this key the job of a workflow run's agent keeps which toolkit owns each call its paused turn asks about, so
+# the start that resumes the turn after a restart can ask again before it builds the agent.
+APPROVAL_TOOLKITS_KEY = "approval_toolkits"
+# What a child turn that a restart cut short is settled with, as failed.
+RESTART_INTERRUPTION_REASON = (
+    "Subagent turn was interrupted by a restart. MindRoom may continue it automatically; if it doesn't, you may be "
+    "able to continue it with a follow-up."
+)
+# LEGACY_COMPAT: restart-settled child turns with the reason that told the reader to send a follow-up.
+# Legacy format: a failed child whose result is this string, which a stopping build writes for the next one to continue.
+# Last legacy release: v2026.11.444; the first release containing this fix writes
+# `RESTART_INTERRUPTION_REASON` instead.
+# Handling: `interrupted_by_restart` reads it as a restart's, so a turn the old build settled on its way down continues.
+# Coverage: tests/test_background_subagent_behavior.py::test_a_subagent_a_release_before_the_upgrade_stopped_still_continues
+_LEGACY_RESTART_INTERRUPTION_REASON = (
+    "Subagent turn was interrupted by a restart. Send a follow-up to continue its history."
+)
+DELEGATION_FUNCTIONS = (RUN_SUBAGENT, CONTINUE_SUBAGENT)
+
+
+def is_delegation_function(function: ToolFunction) -> bool:
+    """Return whether ``function`` is one of the ``delegate`` toolkit's subagent functions."""
+    return function.registered_toolkit == "delegate" and function.name in DELEGATION_FUNCTIONS
+
+
+# A child, or its record, in one of these statuses is settled for good; a running or paused one can still advance.
+type DelegationTerminalStatus = Literal["completed", "failed", "cancelled", "denied"]
+TERMINAL_CHILD_STATUSES: frozenset[str] = frozenset(get_args(DelegationTerminalStatus.__value__))
 
 type PersonaSourceKind = Literal["inline", "profile", "workflow"]
 _SOURCE_KINDS: tuple[PersonaSourceKind, ...] = ("inline", "profile", "workflow")
@@ -21,29 +64,50 @@ _SOURCE_KINDS: tuple[PersonaSourceKind, ...] = ("inline", "profile", "workflow")
 
 @dataclass(frozen=True)
 class SubagentPersona:
-    """The authored presentation of one child: its authored prompt and optional tool subset."""
+    """The authored presentation of one child: its authored prompt and optional tool, skill, and knowledge subsets."""
 
     source_kind: PersonaSourceKind
     source_name: str
     system_prompt: str
     tools: tuple[str, ...] | None = None
+    skills: tuple[str, ...] | None = None
+    knowledge: tuple[str, ...] | None = None
+
+    @property
+    def kept_skills(self) -> tuple[str, ...] | None:
+        """Return the caller skills this persona keeps, or None for every one."""
+        return self._kept(self.skills)
+
+    @property
+    def kept_knowledge(self) -> tuple[str, ...] | None:
+        """Return the caller knowledge bases this persona can search, or None for every one."""
+        return self._kept(self.knowledge)
+
+    def _kept(self, names: tuple[str, ...] | None) -> tuple[str, ...] | None:
+        # Skills and knowledge follow an explicit tool list: a persona that lists tools but not them keeps
+        # none, so a child narrowed to a few tools never gains skill or knowledge-search functions.
+        if names is None and self.tools is not None:
+            return ()
+        return names
 
     @classmethod
     def from_dict(cls, data: Mapping[str, object]) -> SubagentPersona:
         """Read a snapshot that ``asdict`` wrote into delegation state or a session record."""
-        source_kind, source_name, system_prompt, tools = (
+        source_kind, source_name, system_prompt, tools, skills, knowledge = (
             data["source_kind"],
             data["source_name"],
             data["system_prompt"],
             data["tools"],
+            data["skills"],
+            data["knowledge"],
         )
         if (
             source_kind not in _SOURCE_KINDS
             or not isinstance(source_name, str)
             or not isinstance(system_prompt, str)
-            or not (
-                tools is None or (isinstance(tools, (list, tuple)) and all(isinstance(tool, str) for tool in tools))
-            )
+            or not _optional_names(tools)
+            or not _optional_names(skills)
+            or not _optional_names(knowledge)
         ):
             msg = "Invalid subagent persona snapshot"
             raise TypeError(msg)
@@ -52,12 +116,21 @@ class SubagentPersona:
             source_name=source_name,
             system_prompt=system_prompt,
             tools=None if tools is None else tuple(cast("list[str] | tuple[str, ...]", tools)),
+            skills=None if skills is None else tuple(cast("list[str] | tuple[str, ...]", skills)),
+            knowledge=None if knowledge is None else tuple(cast("list[str] | tuple[str, ...]", knowledge)),
         )
 
 
-@dataclass
+def _optional_names(value: object) -> bool:
+    return value is None or (isinstance(value, (list, tuple)) and all(isinstance(name, str) for name in value))
+
+
+@dataclass(kw_only=True)
 class DelegationChild:
-    """One parent requirement and its stable child execution identity."""
+    """One parent delegation call and its stable child execution identity.
+
+    ``parent_requirement_id`` is the parent call's ``pause_id``.
+    """
 
     delegation_id: str
     parent_tool_call_id: str
@@ -69,32 +142,123 @@ class DelegationChild:
     model_name: str
     depth: int
     execution_identity: dict[str, object]
-    subagent_id: str | None = None
+    # The conversation handle follow-ups name; a follow-up keeps the id of the child it continues.
+    subagent_id: str
     previous_delegation_id: str | None = None
     parent_requirement_id: str = ""
     storage_bindings: dict[str, dict[str, object]] = field(default_factory=dict)
     record_locator: dict[str, object] = field(default_factory=dict)
-    status: Literal["running", "paused", "completed", "failed", "cancelled", "denied"] = "running"
+    status: Literal["running", "paused"] | DelegationTerminalStatus = "running"
     result: str | None = None
-    # LEGACY_COMPAT: Delegated children persisted without an agent mode.
-    # Legacy format: Parent delegation state and subagent session records omitted agent_mode; every child ran in standard mode.
-    # Last legacy release: v2026.10.18; replacement: the next release persists the child's standard or minimal mode.
-    # Handling: The dataclass default reads an absent mode as standard, so retained children and follow-ups keep their behavior.
-    # Coverage: tests/test_delegation_minimal_mode.py::test_child_snapshot_without_mode_continues_in_standard_mode.
-    agent_mode: AgentMode = "standard"
-    # LEGACY_COMPAT: Delegated children persisted without a persona.
-    # Legacy format: Parent delegation state and subagent session records omitted persona; every child ran its configured prompt.
-    # Last legacy release: v2026.10.230; replacement: the next release persists each child's authored persona or null.
-    # Handling: The dataclass default and from_dict read an absent persona as a configured-agent child, so retained children keep their behavior.
-    # Coverage: tests/test_delegation_sessions.py::test_child_snapshot_without_persona_reads_as_configured_child.
-    persona: SubagentPersona | None = None
+    agent_mode: AgentMode
+    # The model the child was asked to use before the requester's budget picked the one it runs on.
+    requested_model_name: str
+    # None for a child that runs its configured agent's own prompt.
+    persona: SubagentPersona | None
+    # LEGACY_COMPAT: Delegation child snapshots stored before a subagent could ask for a dedicated worker.
+    # Legacy format: A child snapshot in a subagent session file, a run's `mindroom_delegation` metadata, or a
+    # background job's adapter that lacks `dedicated_worker` and `worker_resource_profile`.
+    # Last legacy release: v2026.11.119; the next, still unreleased, release writes both fields.
+    # Handling: The defaults read such a child as running on its normal worker with no resource profile, which is how
+    # it ran. They stay on the model, because run metadata is rewritten only by a conversation layout step.
+    # Coverage: tests/test_legacy_delegation_snapshots.py::test_every_reader_reads_a_rewritten_snapshot_as_the_release_before_the_rewrite_did,
+    # tests/test_delegation_dedicated_workers.py::test_child_snapshot_without_worker_fields_runs_on_its_normal_worker.
+    # Whether the child's worker-routed calls run in a worker of its own, and the resource profile that worker gets.
+    dedicated_worker: bool = False
+    worker_resource_profile: ScriptResourceProfileName | None = None
+    # LEGACY_COMPAT: Delegation child snapshots stored before a settled child kept its cost.
+    # Legacy format: A child snapshot in a subagent session file, a run's `mindroom_delegation` metadata, or a
+    # background job's adapter that lacks `cost_usd` and `subagents_cost_usd`.
+    # Last legacy release: v2026.11.361; the next, still unreleased, release writes both.
+    # Handling: The defaults read such a child as of unknown cost, so the turn that receives its result adds nothing
+    # for it, as those releases' replies reported no subagent cost. They stay on the model for the reason above.
+    # Coverage: tests/test_subagent_reply_cost.py::test_a_child_snapshot_keeps_its_cost_and_one_saved_without_it_reads_as_unknown,
+    # tests/test_legacy_delegation_snapshots.py::test_every_reader_reads_a_rewritten_snapshot_as_the_release_before_the_rewrite_did.
+    # What the settled turn cost: its own priced usage plus that of the subagent turns it received, None while unsettled
+    # or when none of it used a priced model. The turn that receives the child's result adds it to its reply's.
+    cost_usd: float | None = None
+    # What the subagent turns whose results the turn received cost so far, across its pauses, None for none of known cost.
+    subagents_cost_usd: float | None = None
+    # LEGACY_COMPAT: Delegation child snapshots stored before a child kept that a subagent's cost was unknown.
+    # Legacy format: A child snapshot in a subagent session file, a run's `mindroom_delegation` metadata, or a
+    # background job's adapter that lacks `subagents_cost_unknown`.
+    # Last legacy release: v2026.11.444; the next, still unreleased, release writes it.
+    # Handling: The default reads such a child as having received no turn of unknown cost, as those releases did.
+    # It stays on the model for the reason above.
+    # Coverage: tests/test_legacy_delegation_snapshots.py::test_every_reader_reads_a_rewritten_snapshot_as_the_release_before_the_rewrite_did.
+    # Whether the turn received a subagent turn whose cost nobody knows, which makes the sum above a lower bound.
+    subagents_cost_unknown: bool = False
+    # LEGACY_COMPAT: Delegation child snapshots stored before a child kept when its running tool calls started.
+    # Legacy format: A child snapshot in a subagent session file, a run's `mindroom_delegation` metadata, or a
+    # background job's adapter that lacks `tool_started_at`.
+    # Last legacy release: v2026.11.370; the next, still unreleased, release writes it.
+    # Handling: The default reads such a child as having no call started, so a call it resumes after a pause is
+    # reported as started when it is announced again, as those releases' progress named no start at all. It stays on
+    # the model for the reason above.
+    # Coverage: tests/test_legacy_delegation_snapshots.py::test_every_reader_reads_a_rewritten_snapshot_as_the_release_before_the_rewrite_did,
+    # tests/test_delegation_execution.py::test_a_call_resumed_after_its_approval_keeps_its_first_start_in_the_caller_s_progress.
+    # Unix seconds when each of the turn's tool calls that has not completed was first announced, across its pauses,
+    # by call id; the caller's progress and the feed's row name it.
+    tool_started_at: dict[str, float] = field(default_factory=dict)
+    # LEGACY_COMPAT: Delegation child snapshots stored before a subagent call named a title.
+    # Legacy format: A child snapshot in a subagent session file, a run's `mindroom_delegation` metadata, or a
+    # background job's adapter that lacks `title`.
+    # Last legacy release: v2026.11.445; the next, still unreleased, release writes it.
+    # Handling: The default reads such a child as untitled, so its rows show its task, as those releases' did. It
+    # stays on the model for the reason above.
+    # Coverage: tests/test_legacy_delegation_snapshots.py::test_every_reader_reads_a_rewritten_snapshot_as_the_release_before_the_rewrite_did.
+    # What people watching the run see it as, from the call that started it; follow-ups keep it.
+    title: str = ""
+    # LEGACY_COMPAT: Delegation child snapshots stored before a workflow run could run agents.
+    # Legacy format: A child snapshot in a subagent session file, a run's `mindroom_delegation` metadata, or a
+    # background job's adapter that lacks `workflow_run_id`, `workflow_node_key` and `workflow_generation`.
+    # Last legacy release: v2026.11.444; the next, still unreleased, release writes all three.
+    # Handling: The defaults read such a child as a subagent of no run, which it was. They stay on the model for the
+    # reason above.
+    # Coverage: tests/test_workflow_targets.py::test_old_child_snapshot_reads_without_the_new_fields,
+    # tests/test_legacy_delegation_snapshots.py::test_every_reader_reads_a_rewritten_snapshot_as_the_release_before_the_rewrite_did.
+    # The workflow run whose script runs this turn, with the node of that call and its generation; None for a
+    # subagent no run runs. Such a child is granted by its caller's `workflow` toolkit (`delegation_grant`).
+    workflow_run_id: str | None = None
+    workflow_node_key: str | None = None
+    workflow_generation: int | None = None
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> DelegationChild:
-        """Read a snapshot written by ``dataclasses.asdict``."""
+        """Read a snapshot written by ``dataclasses.asdict``; ``legacy_snapshots`` rewrites older ones at startup.
+
+        The worker fields are defaulted on the model instead (see their ``LEGACY_COMPAT`` marker).
+        """
         fields: dict[str, Any] = dict(data)
-        persona = fields.pop("persona", None)
+        persona = fields.pop("persona")
         return cls(**fields, persona=None if persona is None else SubagentPersona.from_dict(persona))
+
+
+def display_title(title: object) -> str:
+    """Return ``title`` on one line of at most 80 characters, redacted before it is cut; anything but text is none."""
+    return redact_sensitive_text(" ".join(title.split()), max_length=80) if isinstance(title, str) and title else ""
+
+
+def interrupted_by_restart(child: DelegationChild) -> bool:
+    """Return whether a restart cut the child's turn short, which only that settlement ends with this reason."""
+    return child.status == "failed" and child.result in (
+        RESTART_INTERRUPTION_REASON,
+        _LEGACY_RESTART_INTERRUPTION_REASON,
+    )
+
+
+def child_execution_identity(child: DelegationChild) -> ToolExecutionIdentity:
+    """Validate the retained session and agent before resolving any child resource."""
+    identity = parse_tool_execution_identity_payload(child.execution_identity)
+    if identity.agent_name != child.child_agent_name or identity.session_id != child.session_id:
+        msg = "Delegation child execution identity does not match its retained wait"
+        raise RuntimeError(msg)
+    return identity
+
+
+def child_scope(child: DelegationChild) -> HistoryScope:
+    """Return the history scope the child's runs are stored in: its agent's."""
+    return HistoryScope(kind="agent", scope_id=child.child_agent_name)
 
 
 @dataclass
@@ -104,7 +268,7 @@ class DelegationHookState:
     execution_identity: dict[str, object]
     arguments: dict[str, Any]
     started_at: float
-    tool_name: str = "run_subagent"
+    tool_name: str = RUN_SUBAGENT
     blocked_result: str | None = None
     after_called: bool = False
 
@@ -120,14 +284,19 @@ class DelegationPendingTool:
 
 @dataclass
 class DelegationState:
-    """Persisted parent waits; workspace exports never own this state."""
+    """Persisted parent waits; workspace exports never own this state.
+
+    ``hooks`` are keyed by the ``pause_id`` of the delegation call they run for. ``pending_tools`` are the calls the
+    current approval asks about when the parent does not hold them: a delegation call's gate, under its card id, or
+    the calls of the child it waits on (``pending_child_id``), under ``child_card_id``s. An approval of the parent's
+    own calls lists none, since the parent's paused tool entries are those calls.
+    """
 
     children: list[DelegationChild] = field(default_factory=list)
     gates: dict[str, bool] = field(default_factory=dict)
     hooks: dict[str, DelegationHookState] = field(default_factory=dict)
     pending_tools: list[dict[str, Any]] = field(default_factory=list)
     pending_tool_sources: dict[str, DelegationPendingTool] = field(default_factory=dict)
-    pending_requirements: list[dict[str, Any]] = field(default_factory=list)
     pending_agent_name: str | None = None
     pending_child_id: str | None = None
     storage_bindings: dict[str, dict[str, object]] = field(default_factory=dict)
@@ -138,7 +307,7 @@ class DelegationState:
 
     @classmethod
     def from_metadata(cls, metadata: dict[str, Any] | None) -> DelegationState:
-        """Read the driver-owned snapshot attached to an Agno run."""
+        """Read the driver-owned snapshot attached to a run's metadata."""
         stored = (metadata or {}).get(DELEGATION_STATE_KEY)
         if stored is None:
             return cls()
@@ -159,7 +328,6 @@ class DelegationState:
                 )
                 for call_id, source in snapshot.get("pending_tool_sources", {}).items()
             },
-            pending_requirements=list(snapshot.get("pending_requirements", [])),
             pending_agent_name=snapshot.get("pending_agent_name"),
             pending_child_id=snapshot.get("pending_child_id"),
             storage_bindings=dict(snapshot.get("storage_bindings", {})),
@@ -169,13 +337,72 @@ class DelegationState:
         """Clear only the presented approval generation, retaining sibling results."""
         self.pending_tools = []
         self.pending_tool_sources = {}
-        self.pending_requirements = []
         self.pending_agent_name = None
         self.pending_child_id = None
 
 
+def delegation_card_id(member_id: str | None, call_id: str) -> str:
+    """Return the id of a delegation call's gate and approval card: ``member_id:call_id`` for a team member's call."""
+    return f"{member_id}:{call_id}" if member_id else call_id
+
+
+def member_call_id(member_id: str | None, card_id: str) -> str:
+    """Return the id member ``member_id``'s run gives the call ``card_id`` names, undoing ``delegation_card_id``.
+
+    Without a member, as for an agent's run, every id is the run's own.
+    """
+    return card_id.removeprefix(f"{member_id}:") if member_id else card_id
+
+
+def member_delegation_card(requirement: RunRequirement, member_ids: Collection[str]) -> tuple[str, str] | None:
+    """Return the member and its own call id when ``requirement`` is the card of a delegation call a member made.
+
+    The team holds such a card, so its requirement names no member and its call id is ``member_id:call_id`` for one
+    of ``member_ids``. A child's call as its parent holds it (``child_card_id``) names no member, so it is not such a
+    card.
+    """
+    card_id = requirement.tool_execution.tool_call_id
+    if requirement.member_agent_id is not None:
+        return None
+    member_id, _, call_id = card_id.partition(":")
+    return (member_id, call_id) if call_id and member_id in member_ids else None
+
+
+def pending_call_slot(requirement: RunRequirement, member_ids: Collection[str]) -> tuple[str | None, str]:
+    """Return the member whose slot shows the call ``requirement`` waits on, None for the team's, and its id there.
+
+    A member's own call shows in its member's slot, and the card of a member's own delegation call shows as that
+    call; the leader's own calls and a child's calls its parent holds show in the team's slot under their own id.
+    ``member_ids`` are the team's member ids, and a member it returns is as the requirement or card names it.
+    """
+    if card := member_delegation_card(requirement, member_ids):
+        return card
+    return requirement.member_agent_id, requirement.tool_execution.tool_call_id
+
+
+def member_slot_id(member_ids: Collection[str], member: str | None, reported_name: str | None = None) -> str:
+    """Return ``member`` when it is one of ``member_ids``, the config names a team presentation keys its slots by.
+
+    A name that is not one, None included, has no slot; ``reported_name`` is how the error names it then, if given.
+    """
+    if member is None or member not in member_ids:
+        msg = f"Team has no frozen member slot for {reported_name or member!r}"
+        raise RuntimeError(msg)
+    return member
+
+
+def child_card_id(delegation_id: str, call_id: str) -> str:
+    """Return the id a delegated child's paused call has on its parent, ``delegation_id:call_id``, which its card uses."""
+    return f"{delegation_id}:{call_id}"
+
+
+def child_call_id(delegation_id: str, card_id: str) -> str:
+    """Return the child's own call id from the id ``child_card_id`` gave that call on the child's parent."""
+    return card_id.removeprefix(f"{delegation_id}:")
+
+
 class ChildResponseRunner(Protocol):
-    """Normal response envelope supplied by the caller of the native driver."""
+    """Normal response envelope supplied by the caller of the native driver, whose children can pause for approval."""
 
     async def __call__(
         self,
@@ -185,7 +412,10 @@ class ChildResponseRunner(Protocol):
         config: Config,
         runtime_paths: RuntimePaths,
         refresh_scheduler: KnowledgeRefreshScheduler | None,
-        supports_native_tool_approval: bool,
+        prior_usage: Mapping[str, RunMetrics] | None = None,
     ) -> str:
-        """Execute a child response in its retained scope, reporting exact run IDs."""
+        """Execute a child response in its retained scope, reporting exact run IDs.
+
+        ``prior_usage`` is the usage of the child's turn before this response, by run id, which its runs' records carry.
+        """
         ...

@@ -2,194 +2,173 @@
 
 from pathlib import Path
 
-import httpx
 import pytest
-from agno.exceptions import ModelAuthenticationError, ModelProviderError
-from agno.run.agent import RunErrorEvent
-from agno.utils.events import error_type_of
-from anthropic import AuthenticationError as AnthropicAuthError
-from openai import AuthenticationError as OpenAIAuthError
-from openai import OpenAIError
 
 from mindroom import constants
-from mindroom.agent_cli.minimal_agent import MinimalAgent
 from mindroom.error_handling import (
-    MODEL_SAFEGUARD_REFUSAL_MESSAGE,
-    MinimalModeUnavailableError,
-    ModelSafeguardRefusalError,
-    _extract_provider_from_error,
     get_user_friendly_error_message,
-    run_error_event_exception,
+    minimal_mode_failure_message,
 )
+from mindroom.llm.errors import (
+    MISSING_API_KEY,
+    MODEL_SAFEGUARD_REFUSAL_MESSAGE,
+    TOKENS_PER_MINUTE,
+    AuthenticationFailed,
+    ContextWindowExceeded,
+    InvalidRequest,
+    ModelSafeguardRefusal,
+    ProviderError,
+    ProviderUnavailable,
+    RateLimited,
+)
+from mindroom.llm.usage import MessageMetrics
+from mindroom.providers.errors import classify_provider_error, missing_api_key_error
+from mindroom.tool_system.runtime_context import detached_tool_scope
+from mindroom.tool_system.worker_routing import build_tool_execution_identity
 
-_MOCK_RESPONSE = httpx.Response(status_code=401, request=httpx.Request("POST", "https://api.example.com"))
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Invalid API key",
+        "Error code: 401 - Unauthorized",
+        "Rate limit exceeded",
+        "Quota exceeded for this project",
+        "Request timeout while reading the workspace",
+        "{'type': 'error', 'error': {'type': 'overloaded_error', 'message': 'Overloaded'}}",
+        "the api_key client option must be set",
+    ],
+)
+def test_an_error_that_is_not_a_provider_error_shows_its_own_text(text: str) -> None:
+    """Only a provider error's type reads as a provider failure; any other error's wording is shown, not classified."""
+    assert get_user_friendly_error_message(RuntimeError(text), "assistant") == f"[assistant] ⚠️ Error: {text}"
 
 
-def test_api_key_error() -> None:
-    """Test API key error message includes the original error."""
-    error = Exception("Invalid API key")
+def test_an_error_reply_redacts_secrets() -> None:
+    """Error text is redacted before it becomes Matrix-visible reply text."""
+    error = AuthenticationFailed("Incorrect API key provided: sk-test-secret", provider="OpenAI Chat", status_code=401)
+
     message = get_user_friendly_error_message(error, "assistant")
-    assert "[assistant]" in message
-    assert "Authentication failed" in message
-    assert "Invalid API key" in message
 
-
-def test_api_key_error_with_provider() -> None:
-    """Test that provider is extracted from exception module."""
-    error = OpenAIAuthError(message="Incorrect API key provided", response=_MOCK_RESPONSE, body=None)
-    message = get_user_friendly_error_message(error, "assistant")
-    assert "(openai)" in message
-    assert "Authentication failed" in message
-
-
-def test_provider_auth_error_redacts_secret_from_user_message() -> None:
-    """Provider exception text should be redacted before Matrix-visible user output."""
-    error = OpenAIAuthError(
-        message="Incorrect API key provided: sk-test-secret",
-        response=_MOCK_RESPONSE,
-        body=None,
-    )
-
-    message = get_user_friendly_error_message(error, "assistant")
-
-    assert "Authentication failed" in message
+    assert message.startswith("[assistant] ❌ Authentication failed (OpenAI Chat): ")
     assert "***redacted***" in message
     assert "sk-test-secret" not in message
 
 
-def test_401_error() -> None:
-    """Test that 401 errors are recognized as auth failures."""
-    error = Exception("Error code: 401 - Unauthorized")
-    message = get_user_friendly_error_message(error)
-    assert "Authentication failed" in message
-
-
-def test_generic_api_word_not_false_positive() -> None:
-    """Test that the word 'api' alone does not trigger auth error."""
-    error = Exception("Failed to connect to api endpoint")
-    message = get_user_friendly_error_message(error)
-    # Should NOT be auth error - just contains 'api' but no auth keywords
-    assert "Authentication failed" not in message
-    assert "Error:" in message
-
-
 def test_model_safeguard_refusal_gives_actionable_guidance() -> None:
-    """Explicit safeguard stops should not look like empty model responses."""
-    error = ModelSafeguardRefusalError(
-        message=MODEL_SAFEGUARD_REFUSAL_MESSAGE,
-        model_name="Claude",
-        model_id="claude-fable-5-1",
-    )
+    """An explicit safeguard stop should not look like an empty model response."""
+    error = ModelSafeguardRefusal(provider="Anthropic", usage=MessageMetrics())
 
     message = get_user_friendly_error_message(error, "mind")
 
     assert message == (
         "[mind] ⚠️ This model's safeguards blocked the request. "
-        "Choose a different model (`!model list`) or revise the prompt, then try again."
+        "Choose a different model (`/model list`) or revise the prompt, then try again."
     )
     assert "stop_reason" not in message
 
 
-def test_stringified_model_safeguard_refusal_gives_actionable_guidance() -> None:
-    """Agno run errors preserve provider failures as text rather than exception types."""
-    message = get_user_friendly_error_message(Exception(MODEL_SAFEGUARD_REFUSAL_MESSAGE), "mind")
+def test_only_the_typed_refusal_gets_the_refusal_reply() -> None:
+    """An error that merely carries the refusal's text is no refusal, since every refusal reaches the reply typed."""
+    error = RuntimeError(MODEL_SAFEGUARD_REFUSAL_MESSAGE)
 
-    assert message == (
-        "[mind] ⚠️ This model's safeguards blocked the request. "
-        "Choose a different model (`!model list`) or revise the prompt, then try again."
-    )
-    assert "stop_reason" not in message
+    assert get_user_friendly_error_message(error) == f"⚠️ Error: {MODEL_SAFEGUARD_REFUSAL_MESSAGE}"
 
 
-def test_rate_limit_error() -> None:
-    """Test rate limit error message."""
-    error = Exception("Rate limit exceeded")
-    message = get_user_friendly_error_message(error)
-    assert "Rate limited" in message
+_PROVIDER_UNAVAILABLE_MESSAGE = (
+    "⚠️ Model provider temporarily unavailable after automatic retries. Please try again shortly."
+)
+_RATE_LIMITED_MESSAGE = "⏱️ Rate limited. Please wait a moment and try again."
+# How the requests transport starts its report when the Google sign-in host cannot be reached.
+_OAUTH_HOST_UNREACHABLE = (
+    "HTTPSConnectionPool(host='oauth2.googleapis.com', port=443): Max retries exceeded with url: /token"
+)
 
 
-def test_typed_rate_limit_error_uses_status_code() -> None:
-    """Typed 429 errors remain rate limits even when their message is generic."""
-    error = ModelProviderError(message="upstream unavailable", status_code=429)
-
-    message = get_user_friendly_error_message(error)
-
-    assert "Rate limited" in message
-    assert "temporarily unavailable" not in message
-
-
-def test_overloaded_provider_error_is_user_friendly() -> None:
-    """An exhausted provider overload must not dump its raw payload to Matrix."""
-    error = Exception(
-        "{'type': 'error', 'error': {'type': 'overloaded_error', 'message': 'Overloaded'}, 'request_id': 'req_secret'}",
-    )
-
-    message = get_user_friendly_error_message(error, "assistant")
-
-    assert message == (
-        "[assistant] ⚠️ Model provider temporarily unavailable after automatic retries. Please try again shortly."
-    )
-    assert "req_secret" not in message
-
-
-def test_internal_provider_error_is_user_friendly() -> None:
-    """A transient provider api_error gets the same bounded-retry message."""
-    error = Exception(
-        "{'type': 'error', 'error': {'type': 'api_error', 'message': 'Internal server error'}, "
-        "'request_id': 'req_secret'}",
-    )
-
-    message = get_user_friendly_error_message(error)
-
-    assert "Model provider temporarily unavailable after automatic retries" in message
-    assert "req_secret" not in message
-
-
-def test_json_provider_error_is_case_insensitive() -> None:
-    """Structured JSON provider payloads normalize error type and message casing."""
-    error = Exception(
-        '{"type":"error","error":{"type":"API_ERROR","message":"Internal Server Error"},"request_id":"req_secret"}',
-    )
-
-    message = get_user_friendly_error_message(error)
-
-    assert "Model provider temporarily unavailable after automatic retries" in message
-    assert "req_secret" not in message
-
-
-def test_typed_model_provider_error_is_user_friendly() -> None:
-    """Typed provider errors use their status instead of message substrings."""
-    error = ModelProviderError(message="upstream unavailable", status_code=503)
-
-    message = get_user_friendly_error_message(error)
-
-    assert "Model provider temporarily unavailable after automatic retries" in message
-
-
-def test_unstructured_overloaded_text_is_not_misclassified() -> None:
-    """Arbitrary application errors containing overloaded retain useful details."""
-    error = Exception("Local model overloaded while loading workspace state")
-
-    message = get_user_friendly_error_message(error)
-
-    assert message == "⚠️ Error: Local model overloaded while loading workspace state"
-
-
-def test_unstructured_api_error_text_is_not_misclassified() -> None:
-    """Provider-like words alone do not suppress an arbitrary application error."""
-    error = Exception("api_error: Internal Server Error while reading local cache")
-
-    message = get_user_friendly_error_message(error)
-
-    assert message == "⚠️ Error: api_error: Internal Server Error while reading local cache"
-
-
-def test_timeout_error() -> None:
-    """Test timeout error message."""
-    error = TimeoutError("Request timeout")
-    message = get_user_friendly_error_message(error, "bot")
-    assert "[bot]" in message
-    assert "timed out" in message
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        pytest.param(
+            ProviderUnavailable(_OAUTH_HOST_UNREACHABLE, provider="VertexAI", code="connection_error"),
+            _PROVIDER_UNAVAILABLE_MESSAGE,
+            id="unavailable-host-name-holds-auth",
+        ),
+        pytest.param(
+            ProviderUnavailable("upstream replied 401 from the gateway", provider="OpenAI", status_code=503),
+            _PROVIDER_UNAVAILABLE_MESSAGE,
+            id="unavailable-wording-holds-401",
+        ),
+        pytest.param(
+            ProviderUnavailable("failed to generate a response", provider="OpenAI", status_code=500),
+            _PROVIDER_UNAVAILABLE_MESSAGE,
+            id="unavailable-wording-holds-rate",
+        ),
+        pytest.param(
+            RateLimited("oauth2 gateway throttled the request", provider="OpenAI", status_code=429),
+            _RATE_LIMITED_MESSAGE,
+            id="rate-limited-wording-holds-auth",
+        ),
+        pytest.param(
+            RateLimited("upstream unavailable", provider="OpenAI", status_code=429),
+            _RATE_LIMITED_MESSAGE,
+            id="rate-limited-generic-wording",
+        ),
+        pytest.param(
+            ProviderError(
+                "Project proj_1 does not have access to model gpt-6-astra",
+                provider="OpenAI",
+                status_code=403,
+            ),
+            "⚠️ Error: Project proj_1 does not have access to model gpt-6-astra",
+            id="final",
+        ),
+        pytest.param(
+            ProviderError("upstream unavailable", provider="OpenAI", status_code=503),
+            "⚠️ Error: upstream unavailable",
+            id="final-status-is-not-read-again",
+        ),
+        pytest.param(
+            AuthenticationFailed("Credentials were rejected", provider="VertexAI", status_code=401),
+            "❌ Authentication failed (VertexAI): Credentials were rejected",
+            id="authentication-failed",
+        ),
+        pytest.param(
+            InvalidRequest(
+                "models/gemini-x is not supported for generateContent. Call ListModels to see the api_key methods.",
+                provider="Google",
+                status_code=404,
+            ),
+            "⚠️ Error: models/gemini-x is not supported for generateContent. "
+            "Call ListModels to see the api_key methods.",
+            id="invalid-request-wording-is-not-read-again",
+        ),
+        pytest.param(
+            ProviderError("Request timeout while the provider read the body", provider="Ollama"),
+            "⚠️ Error: Request timeout while the provider read the body",
+            id="final-timeout-wording",
+        ),
+        pytest.param(
+            ContextWindowExceeded("prompt is too long", provider="Anthropic", status_code=400),
+            "⚠️ The conversation no longer fits the model's context window. "
+            "Start a new thread or compact the conversation, then try again.",
+            id="context-window",
+        ),
+        pytest.param(
+            ContextWindowExceeded(
+                "Request too large for gpt-6-astra on tokens per min (TPM)",
+                provider="OpenAI",
+                status_code=429,
+                code=TOKENS_PER_MINUTE,
+            ),
+            "⚠️ This request is larger than the account's tokens-per-minute limit. "
+            "Start a new thread or compact the conversation, then try again.",
+            id="over-tokens-per-minute",
+        ),
+    ],
+)
+def test_a_provider_error_is_reported_by_its_type_alone(error: Exception, expected: str) -> None:
+    """A provider error's message follows its type, which its classification already took from status and wording."""
+    assert get_user_friendly_error_message(error) == expected
 
 
 def test_generic_error() -> None:
@@ -199,64 +178,26 @@ def test_generic_error() -> None:
     assert "Error: Something went wrong" in message
 
 
-def test_extract_provider_from_error() -> None:
-    """Test provider extraction from exception module."""
-    openai_err = OpenAIAuthError(message="test", response=_MOCK_RESPONSE, body=None)
-    assert _extract_provider_from_error(openai_err) == "openai"
-
-    anthropic_err = AnthropicAuthError(message="test", response=_MOCK_RESPONSE, body=None)
-    assert _extract_provider_from_error(anthropic_err) == "anthropic"
-
-    assert _extract_provider_from_error(Exception("test")) is None
+def test_an_error_without_text_is_reported_by_its_type_name() -> None:
+    """An exception without text, such as one an operation raises bare, names its type instead of nothing."""
+    assert get_user_friendly_error_message(ConnectionResetError(), "bot") == "[bot] ⚠️ Error: ConnectionResetError"
 
 
-@pytest.mark.parametrize(
-    "reason",
-    [
-        "CLI gateway must be a separate gateway-only proxy origin",
-        "Minimal catalog requires its authenticated requester.",
-    ],
-)
-def test_minimal_mode_failure_keeps_standard_mode_hint(reason: str) -> None:
-    """Keyword classification never masks the minimal-mode recovery command after Agno flattens it."""
-    agent = MinimalAgent(id="helper", name="Helper")
-    with pytest.raises(MinimalModeUnavailableError) as raised:
-        agent._raise_failure(RuntimeError(reason))
-    event = RunErrorEvent(content=str(raised.value), error_type=error_type_of(raised.value))
-
-    message = get_user_friendly_error_message(run_error_event_exception(event), "helper")
-
-    assert message == (f"[helper] ⚠️ Error: {reason.rstrip('.')}. Return to standard mode with `!mode helper standard`.")
+@pytest.mark.parametrize("error", [TimeoutError(), TimeoutError("lock wait expired")])
+def test_a_timeout_reads_as_a_timeout_by_its_type(error: TimeoutError) -> None:
+    """A timeout is recognized by its type, with or without text."""
+    assert get_user_friendly_error_message(error, "bot") == "[bot] ⏰ Request timed out. Please try again."
 
 
-@pytest.mark.parametrize(
-    "error",
-    [
-        ModelAuthenticationError(
-            message="OPENROUTER_API_KEY not set. Please set the OPENROUTER_API_KEY environment variable.",
-        ),
-        OpenAIError(
-            "The api_key client option must be set either by passing api_key to the client "
-            "or by setting the OPENAI_API_KEY environment variable",
-        ),
-        OpenAIError(
-            "Missing credentials. Please pass an `api_key`, `workload_identity`, `admin_api_key`, "
-            "or set the `OPENAI_API_KEY` or `OPENAI_ADMIN_KEY` environment variable.",
-        ),
-        TypeError(
-            '"Could not resolve authentication method. Expected one of api_key, auth_token, or credentials to be set."',
-        ),
-        # Streaming errors reach the user after Agno flattens them into plain text.
-        Exception("ANTHROPIC_API_KEY or ANTHROPIC_AUTH_TOKEN not set. Please set the ANTHROPIC_API_KEY."),
-    ],
-)
-def test_missing_provider_key_points_to_dashboard_setup(error: Exception, tmp_path: Path) -> None:
+def test_missing_provider_key_points_to_dashboard_setup(tmp_path: Path) -> None:
     """A missing provider key tells the user where to connect one instead of showing the raw exception."""
     runtime_paths = constants.resolve_primary_runtime_paths(
         config_path=tmp_path / "config.yaml",
         storage_path=tmp_path / "mindroom_data",
         process_env={"MINDROOM_PUBLIC_URL": "https://42.mindroom.chat/"},
     )
+
+    error = missing_api_key_error("OPENROUTER_API_KEY", provider="OpenRouter")
 
     message = get_user_friendly_error_message(error, "mind", runtime_paths=runtime_paths)
 
@@ -269,7 +210,7 @@ def test_missing_provider_key_points_to_dashboard_setup(error: Exception, tmp_pa
 
 def test_missing_provider_key_without_public_url_names_dashboard() -> None:
     """Without a known dashboard URL the message still points at the dashboard setup step."""
-    error = ModelAuthenticationError(message="OPENROUTER_API_KEY not set.")
+    error = missing_api_key_error("OPENROUTER_API_KEY", provider="OpenRouter")
 
     message = get_user_friendly_error_message(error)
 
@@ -277,9 +218,34 @@ def test_missing_provider_key_without_public_url_names_dashboard() -> None:
     assert "OPENROUTER_API_KEY" not in message
 
 
+def test_headless_missing_key_reply_keeps_the_error_its_own_sentence(tmp_path: Path) -> None:
+    """A headless run's reply ends the provider's own text before naming the `.env` file, whatever it ended with."""
+    runtime_paths = constants.resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
+    identity = build_tool_execution_identity(
+        channel="headless",
+        agent_name="coder",
+        runtime_paths=runtime_paths,
+        requester_id="@alice:localhost",
+        room_id=None,
+        thread_id=None,
+        resolved_thread_id=None,
+        session_id="headless:1",
+    )
+    error = AuthenticationFailed(
+        "Azure OpenAI authentication not configured. Please provide one of: azure_ad_token_provider",
+        provider="Azure",
+        status_code=401,
+        code=MISSING_API_KEY,
+    )
+    with detached_tool_scope(identity):
+        message = get_user_friendly_error_message(error, runtime_paths=runtime_paths)
+
+    assert f"azure_ad_token_provider. A `.env` file at {tmp_path / '.env'} works too." in message
+
+
 def test_rejected_provider_key_is_still_an_authentication_failure() -> None:
     """A configured but invalid key is not reported as a missing key."""
-    error = OpenAIAuthError(message="Incorrect API key provided", response=_MOCK_RESPONSE, body=None)
+    error = AuthenticationFailed("Incorrect API key provided", provider="OpenAI Chat", status_code=401)
 
     message = get_user_friendly_error_message(error, "assistant")
 
@@ -289,11 +255,46 @@ def test_rejected_provider_key_is_still_an_authentication_failure() -> None:
 
 def test_minimal_subagent_failure_suggests_a_standard_subagent() -> None:
     """A minimal child's runtime failure points the caller at a new standard subagent, not the mode command."""
-    agent = MinimalAgent(id="helper", name="Helper")
-    agent.delegation_depth = 1
-    with pytest.raises(MinimalModeUnavailableError) as raised:
-        agent._raise_failure(RuntimeError("Minimal Bash requires an active managed response owner"))
+    reason = "Minimal Bash requires an active managed response owner"
 
-    assert str(raised.value) == (
+    assert minimal_mode_failure_message(reason, "helper", subagent=True) == (
         "Minimal Bash requires an active managed response owner. Start a new subagent without minimal."
     )
+    assert minimal_mode_failure_message(reason, "helper", subagent=False) == (
+        "Minimal Bash requires an active managed response owner. Return to standard mode with `/mode helper standard`."
+    )
+
+
+@pytest.mark.parametrize(
+    ("status_code", "code", "message"),
+    [
+        pytest.param(
+            402,
+            None,
+            "Insufficient credits. Add more using https://openrouter.ai/settings/credits",
+            id="openrouter-402",
+        ),
+        pytest.param(
+            403,
+            None,
+            "Key limit exceeded (monthly limit). Manage it using https://openrouter.ai/settings/keys",
+            id="openrouter-key-limit",
+        ),
+        pytest.param(402, None, "Insufficient Balance", id="deepseek"),
+        pytest.param(429, "1113", "Insufficient balance or no resource package. Please recharge.", id="zai"),
+        pytest.param(429, "1309", "Your GLM Coding Plan package has expired.", id="zai-plan-expired"),
+        pytest.param(429, "1314", "Your enterprise package has expired.", id="zai-package-expired"),
+    ],
+)
+def test_a_used_up_ai_budget_says_so_without_the_providers_billing_text(
+    status_code: int,
+    code: str | None,
+    message: str,
+) -> None:
+    """A provider refusing for lack of credit gets one plain reply, not its own text and billing links."""
+    error = classify_provider_error(message, provider="openrouter", status_code=status_code, code=code)
+    reply = get_user_friendly_error_message(error, "assistant")
+    assert reply.startswith("[assistant] 💳 The AI budget for this MindRoom is used up or its plan has expired")
+    assert "renew the plan" in reply
+    assert "(openrouter)" in reply
+    assert "openrouter.ai" not in reply

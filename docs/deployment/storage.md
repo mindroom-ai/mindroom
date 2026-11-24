@@ -11,22 +11,33 @@ This page covers where MindRoom keeps its data, what to back up, how to configur
 MindRoom stores data in `mindroom_data/` next to `config.yaml` by default; set `MINDROOM_STORAGE_PATH` to use another directory.
 
 - `agents/*/sessions/` and `teams/*/sessions/` - Conversation history (SQLite)
-- `agents/*/learning/` - Per-agent Agno Learning state when learning is enabled
 - `agents/*/chroma/` - Per-agent Mem0 ChromaDB storage
+- `agents/*/mem0/` - Per-agent Mem0 history, which keeps the text of changed and deleted memories and the recent conversation messages Mem0 reads when it extracts memories
+- `agents/*/workspace/` - Per-agent workspace files, including file-backed memory
+- `team_memory/` - Team memory shared by each team's members: one Mem0 store all teams share (`chroma/`, `mem0/`), each team's records kept apart, and each team's `MEMORY.md` under `team_memory/team_<sorted_members>/`
 - `private_instances/` - The same per-agent directories for private agents, one tree per requester scope
+- `shared_directories/` - [Shared directories](../tools/execution-and-coding.md#shared_directories) at `shared_directories/<agent>/<name>/`; deleting one leaves an empty folder, and the directories of agents removed from the config stay until you delete them
 - `knowledge_db/` - Knowledge base vector stores
+- `knowledge_git/` - Git data of [Git-backed knowledge bases](../knowledge.md#checkout-layout)
 - `tracking/` - Durable response and callback state, including the SQLite event journal, that prevents duplicate replies across restarts
-- `credentials/` - Secrets synchronized from `.env`
+- `control_state/` - Primary-only control records, such as [external triggers](../external-triggers.md), [background script](../tools/background-scripts.md) runs, and [`matrix_message`](../tools/matrix-message.md#safe-send-retries) send receipts, unless [`MINDROOM_CONTROL_STATE_PATH`](../configuration/index.md#environment-variables) points elsewhere
+- `credentials/` - Credentials saved in the dashboard or by tools; keys from the environment are read at each start and not stored (see [Credentials from the Environment](../oauth-framework.md#credentials-from-the-environment))
+- `private_oauth/` - Per-user and per-agent connection credentials, such as OAuth tokens
+- `egress_broker/` - Agent Keys CA, worker token signing key, and request log (see [Resetting broker state](egress-broker.md#resetting-broker-state))
+- `budgets/` - Per-user caps set on the [Budgets](../budgets.md#per-user-caps) page or through the Budget API
 - `logs/` - Application logs
-- `matrix_state.yaml` - Matrix connection state
+- `matrix_state.yaml` - The Matrix accounts and access tokens of MindRoom's agents, teams, owner account, and its internal `mindroom_user` account when configured, the rooms MindRoom manages, the space room ID, and the server emoji room ID
 - `encryption_keys/` - Matrix E2EE keys (if enabled)
+- `sync_continuity/` - Per-agent Matrix rooms still being joined and decrypted, kept across restarts
 
-Set `MINDROOM_SESSION_STORAGE_PATH` to move agent and team session databases to a separate root; learning and memory stay under the storage directory.
+Set `MINDROOM_SESSION_STORAGE_PATH` to move agent and team session databases to a separate root; memory stays under the storage directory.
 
 ### Backups
 
 Back up the whole storage directory, and keep `tracking/` on persistent storage.
 When `MINDROOM_SESSION_STORAGE_PATH` is set in a container, mount that path on persistent storage and back it up too.
+The [conversation storage v2 upgrade notes](upgrades.md#upgrading-to-conversation-storage-v2) cover the `<name>.db.pre-storage-v2` backups it leaves beside each conversation database and what a database restored from a backup taken before that upgrade needs when it converts again.
+The [one-owner upgrade notes](upgrades.md#upgrading-to-one-owner-per-conversation-database) cover the `<name>.db.pre-storage-v4` backups that upgrade leaves.
 
 `tracking/` keeps a small record of every handled event so restarts and resyncs never answer the same message twice.
 These records are never pruned automatically, so size and monitor the volume for growth over the install's lifetime.
@@ -34,7 +45,7 @@ See [Bot Runtime Architecture](../architecture/bot-runtime.md#durable-dispatch-b
 
 ### Incompatible session databases
 
-If an upgraded Agno version requires session columns that an agent's or team's session database lacks, MindRoom moves that `sessions/` directory aside to `sessions.incompatible-<id>/` and starts a fresh conversation history.
+If an upgraded MindRoom release requires session columns that an agent's or team's session database lacks, MindRoom moves that `sessions/` directory aside to `sessions.incompatible-<id>/` and starts a fresh conversation history.
 The archive is kept intact for inspection or manual recovery; back it up and delete it when you no longer need it.
 
 ## Event Journal
@@ -75,7 +86,8 @@ A refused database is left untouched.
 | `Another MindRoom runtime is already using this event journal` | Another storage root's runtime is bound to the same journal database. | Run one runtime per journal; two would both answer every message. |
 
 A PostgreSQL journal is claimed with a session advisory lock, so its connection must be direct or session-pooled; a transaction-pooling proxy cannot hold it.
-If that session is lost, MindRoom shuts down rather than keep running unclaimed; a process supervisor such as Kubernetes or systemd restarts it.
+If that session or any other connection to the journal is lost, such as when the database restarts or closes an idle connection, MindRoom shuts down rather than keep running unclaimed or unable to use the journal; a process supervisor such as Kubernetes or systemd restarts it.
+Leave `idle_session_timeout`, and a session pooler's client idle timeout such as PgBouncer's `client_idle_timeout`, off for MindRoom's database role, because each idle journal connection they close makes MindRoom restart.
 After a runtime's host is lost without closing that session, a replacement is refused with `Another MindRoom runtime is already using this event journal` for about a minute on a direct connection, or for the pooler's client timeout behind a session pooler, until the old session is dropped; a supervisor's retries get through after that.
 
 Do not adopt just because startup refused: a connection URL that drifted to a fresh database is the common cause, and adopting would abandon the real journal's history instead of finding it.

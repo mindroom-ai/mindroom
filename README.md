@@ -21,7 +21,7 @@ Open source under Apache 2.0 · Any model, local or cloud · Self-host the whole
 
 </div>
 
-https://github.com/user-attachments/assets/f8325b3c-7ed0-4cd7-bc77-0c4cd74f226e
+https://github.com/user-attachments/assets/ef8486d4-afb1-49c1-9894-b908e10baaae
 
 MindRoom gives you a personal agent for your calendar, notes, trips, and homelab, and shared agents for your team's email, documents, and code.
 Every agent is a real user on [Matrix](https://matrix.org/), the open chat standard, so you talk to it in [MindRoom Chat](https://github.com/mindroom-ai/mindroom-chat), in any other Matrix client, or in Slack, Telegram, WhatsApp, and Discord through bridges.
@@ -54,41 +54,41 @@ See [Quick start](#quick-start) for every way to run it.
 <table>
 <tr>
 <td width="50%" valign="top">
-<a href="https://docs.mindroom.chat/showcase/#ask-approve-done"><picture><source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/5e389c59-c81a-4f70-9c5d-de7406ff95f4" /><img src="https://github.com/user-attachments/assets/bc6194b1-9398-47f5-b649-2ea17dbb6b9f" alt="A review dialog where the user approves an agent's calendar booking" /></picture></a>
+<a href="https://docs.mindroom.chat/showcase/#ask-approve-done"><picture><source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/9f34ec06-102a-4ee6-8e34-555183669f86" /><img src="https://github.com/user-attachments/assets/5a0aaf55-1276-48fe-87e9-e4545f470b87" alt="A review dialog where the user approves an agent's calendar booking" /></picture></a>
 <p><b>Approve before it acts</b><br />Actions you choose wait for your OK, with the exact arguments in view.</p>
 </td>
 <td width="50%" valign="top">
-<a href="https://docs.mindroom.chat/showcase/#one-thread-the-whole-team"><picture><source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/635ce3ef-217d-494a-a8e5-01e3dd78454d" /><img src="https://github.com/user-attachments/assets/fbd1295d-025d-41d1-9ee8-0cc674706b98" alt="Three colleagues see the same agent thread side by side" /></picture></a>
+<a href="https://docs.mindroom.chat/showcase/#one-thread-the-whole-team"><picture><source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/a07dcd60-a261-40ae-ac99-8425eda0158e" /><img src="https://github.com/user-attachments/assets/5a23cdc1-70d1-4fd8-bd3d-36efa4fc5b3d" alt="Three colleagues see the same agent thread side by side" /></picture></a>
 <p><b>The whole team, one thread</b><br />Colleagues share an agent in a thread and see every answer stream in live.</p>
 </td>
 </tr>
 <tr>
 <td width="50%" valign="top">
-<a href="https://docs.mindroom.chat/showcase/#canvases"><picture><source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/7fc2bc01-1ec5-40d1-971f-5e6f33ba0f18" /><img src="https://github.com/user-attachments/assets/8eb3e6d8-8e9f-4ebb-a51b-bbb5913536e3" alt="Two agent canvases: a week grid of free meeting slots and a weekend trip planner with a budget" /></picture></a>
+<a href="https://docs.mindroom.chat/showcase/#canvases"><picture><source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/010bf718-4e6f-4b92-a03a-21fcd9c41741" /><img src="https://github.com/user-attachments/assets/709f541f-6ed4-4671-8328-72e6caba5fd6" alt="Two agent canvases: a week grid of free meeting slots and a weekend trip planner with a budget" /></picture></a>
 <p><b>Canvases you can click</b><br />An agent lays out free slots or a trip budget beside the chat and acts on what you pick.</p>
 </td>
 <td width="50%" valign="top">
-<a href="https://docs.mindroom.chat/showcase/#canvases"><picture><source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/6ccc9db8-6155-4d50-ae60-f4e011d39617" /><img src="https://github.com/user-attachments/assets/c8492e0c-4864-4753-ad1b-4a7d66e70c91" alt="A data canvas with a fitted curve, its parameters, and one point left out" /></picture></a>
+<a href="https://docs.mindroom.chat/showcase/#canvases"><picture><source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/dbe34552-4ad6-4339-98eb-4e3c759fe610" /><img src="https://github.com/user-attachments/assets/fd142a74-3f45-40af-be42-b05ec0829833" alt="A data canvas with a fitted curve, its parameters, and one point left out" /></picture></a>
 <p><b>Data you can explore</b><br />Leave a point out of a fit, then send the new result back to the agent.</p>
 </td>
 </tr>
 <tr>
 <td width="50%" valign="top">
-<a href="https://docs.mindroom.chat/showcase/#it-drives-you-take-the-wheel"><picture><source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/ddf9402f-a451-4f50-b070-1b50aab739c8" /><img src="https://github.com/user-attachments/assets/6b7a2673-d9b9-446a-b9a7-4e4240241489" alt="The agent hands over the passkey step next to its browser on the order page" /></picture></a>
+<a href="https://docs.mindroom.chat/showcase/#it-drives-you-take-the-wheel"><picture><source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/5351b7c9-7ed4-4d65-9b28-c0f127c9c3a9" /><img src="https://github.com/user-attachments/assets/23e5ee6c-e9c1-48cc-aa81-b3ec2155dcb5" alt="The agent hands over the passkey step next to its browser on the order page" /></picture></a>
 <p><b>It drives, you take the wheel</b><br />Watch an agent work in its own browser and take over when it needs your passkey.</p>
 </td>
 <td width="50%" valign="top">
-<a href="https://docs.mindroom.chat/showcase/#connect-once-then-just-ask"><picture><source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/69f219b2-6fef-419c-9d3b-513aaa340b01" /><img src="https://github.com/user-attachments/assets/4f18f100-5ce8-46c4-a4bf-18be84fccb4f" alt="A thread answered from a wiki next to the connections page where the wiki account is connected" /></picture></a>
+<a href="https://docs.mindroom.chat/showcase/#connect-once-then-just-ask"><picture><source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/95b82db4-bd6f-4cc8-82e1-3987eac6f00b" /><img src="https://github.com/user-attachments/assets/ebaeed54-6c1f-4e15-90eb-7c70e008d8d5" alt="A thread answered from a wiki next to the connections page where the wiki account is connected" /></picture></a>
 <p><b>Connect once, then just ask</b><br />Connect an account once, and the agent answers from it from then on.</p>
 </td>
 </tr>
 <tr>
 <td width="50%" valign="top">
-<a href="https://docs.mindroom.chat/showcase/#lock-up-on-the-way-out"><picture><source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/b35e6de5-09f6-4ae1-b8df-e9ad3e81987e" /><img src="https://github.com/user-attachments/assets/38b5676b-dedf-4bde-a6ba-fad3378d3c12" alt="Two phone screens: a voice note locks up the house, and another sets a reminder" /></picture></a>
+<a href="https://docs.mindroom.chat/showcase/#lock-up-on-the-way-out"><picture><source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/e7957abf-4663-4299-ac39-9026055e50b8" /><img src="https://github.com/user-attachments/assets/29346ba0-1c76-4b58-9b8e-7fcaba09f0a1" alt="Two phone screens: a voice note locks up the house, and another sets a reminder" /></picture></a>
 <p><b>From your phone</b><br />One voice note locks up the house; another becomes a reminder.</p>
 </td>
 <td width="50%" valign="top">
-<a href="https://docs.mindroom.chat/showcase/#your-morning-already-handled"><picture><source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/a78ee8fb-0828-45bc-9cc4-08d4181d017b" /><img src="https://github.com/user-attachments/assets/1ae37f4e-63b9-4cb0-aefd-e0c2431b997a" alt="A scheduled morning brief with today's meetings and what needs attention" /></picture></a>
+<a href="https://docs.mindroom.chat/showcase/#your-morning-already-handled"><picture><source media="(prefers-color-scheme: dark)" srcset="https://github.com/user-attachments/assets/67573e4c-f25f-411f-9168-08abf270f400" /><img src="https://github.com/user-attachments/assets/4e785a12-5855-4282-b664-2258cd716322" alt="A scheduled morning brief with today's meetings and what needs attention" /></picture></a>
 <p><b>Your morning, already handled</b><br />A scheduled brief with today's meetings and what needs you.</p>
 </td>
 </tr>
@@ -169,7 +169,7 @@ Bridges bring the same agents to Slack, Telegram, WhatsApp, and Discord, and an 
 
 **Agents and teams**
 
-- **Multi-agent orchestration** — define specialist agents and teams in `config.yaml` or the dashboard; a built-in router picks the responder when you don't @-mention one, mentioning several agents makes them collaborate in a thread, and agents can hand tasks to each other or run reusable workflows ([Teams](https://docs.mindroom.chat/configuration/teams/), [Agent Orchestration](https://docs.mindroom.chat/tools/agent-orchestration/)).
+- **Multi-agent orchestration** — define specialist agents and teams in `config.yaml` or the dashboard; built-in routing picks the responder when you don't @-mention one, mentioning several agents makes them collaborate in a thread, and agents can hand tasks to each other or run reusable workflows ([Teams](https://docs.mindroom.chat/configuration/teams/), [Agent Orchestration](https://docs.mindroom.chat/tools/agent-orchestration/)).
 - **Adaptive participation** — in a thread with several people, agents you opt in that already replied there decide for themselves when an untagged message is theirs to answer, and a judge can decide whether a new message should interrupt the current task or wait ([Threads](https://docs.mindroom.chat/configuration/threads/#adaptive-participation)).
 - **Personal rooms and access control** — each person can get a private room with their own agent, and each agent answers only the people and rooms you allow ([Personal Rooms](https://docs.mindroom.chat/personal-rooms/), [Access Control](https://docs.mindroom.chat/authorization/)).
 
@@ -177,6 +177,7 @@ Bridges bring the same agents to Slack, Telegram, WhatsApp, and Discord, and an 
 
 - **Persistent memory** — agents remember people, preferences, and context across conversations and platforms (Mem0 + ChromaDB, stored on your disk).
 - **Automatic skill learning** — opt-in background reviews turn work an agent repeats into a small library of reusable skills, following the self-improvement loop of Hermes Agent ([Skills](https://docs.mindroom.chat/skills/#automatic-skill-learning)).
+- **Automatic knowledge graph** — an agent you opt in gets a [Graphiti](https://github.com/getzep/graphiti) graph of the people, projects, and documents its conversations and tool results reveal, with when each fact held and where it came from, and a scheduled `exploration` can have it read the sources its tools and MCP servers reach to fill the graph in ([Knowledge Graph](https://docs.mindroom.chat/knowledge-graph/)).
 - **Knowledge bases (RAG)** — point an agent at a folder or Git repository; MindRoom indexes it and can watch it for changes ([Knowledge Bases](https://docs.mindroom.chat/knowledge/)).
 
 **Tools and computers**
@@ -184,7 +185,7 @@ Bridges bring the same agents to Slack, Telegram, WhatsApp, and Discord, and an 
 - **100+ tool integrations** — Gmail, GitHub, Google Docs, Google Drive, Home Assistant, shell, Python, web search, any [MCP server](https://docs.mindroom.chat/mcp/), and more, plus native Matrix tools and a per-thread `todo` planner.
 - **A real browser you can take over** — an agent works in its own persistent Chromium browser that you watch live in MindRoom Chat, take control of for a login or passkey, and hand back ([Worker Computer](https://docs.mindroom.chat/tools/worker-computer/)).
 - **Reach any computer you pair** — your agents can run on a server across the world and still use your laptop: turn on the desktop bridge on any machine, and the agent can use the apps and folders you allow and run the commands you approve, over end-to-end encrypted Matrix with no open ports or VPN ([Desktop Bridge](https://docs.mindroom.chat/tools/desktop/)).
-- **Lean prompts** — minimal mode gives an agent one Bash tool that calls its other tools, and dynamic tools load rarely used tools only when needed, so each request carries fewer tokens ([Minimal Mode](https://docs.mindroom.chat/tools/agent-cli/), [Dynamic Tools](https://docs.mindroom.chat/tools/dynamic-tools/)).
+- **Lean prompts** — minimal mode gives an agent one Bash tool that calls its other tools, and dynamic tools keep rarely used tool definitions out of the request until the agent searches for them, so each request carries fewer tokens ([Minimal Mode](https://docs.mindroom.chat/tools/agent-cli/), [Dynamic Tools](https://docs.mindroom.chat/tools/dynamic-tools/)).
 
 **In the chat**
 
@@ -192,11 +193,11 @@ Bridges bring the same agents to Slack, Telegram, WhatsApp, and Discord, and an 
 - **Approvals and questions** — one-tap approval cards show exactly what will be sent and to whom, a scheduled send can be approved when it is scheduled, and agents can ask multiple-choice questions you answer with a click ([Tool Approval](https://docs.mindroom.chat/tool-approval/), [Interactive Questions](https://docs.mindroom.chat/interactive/)).
 - **Streaming responses** — agents type into the room with progressive edits, visible tool traces, and cancellation.
 - **Voice** — voice messages are transcribed, agents can join Element Call voice calls and talk in real time, and text-to-speech tools use OpenAI, Groq, ElevenLabs, and Cartesia ([Voice Messages](https://docs.mindroom.chat/voice/), [Voice Calls](https://docs.mindroom.chat/voice-calls/)).
-- **Model routing** — a different model per agent, room, or thread (`!model` and `!room_model`); route sensitive rooms to local Ollama and everything else to a cloud model.
+- **Model routing** — a different model per agent, room, or thread (`/model` and `/room_model`); route sensitive rooms to local Ollama and everything else to a cloud model.
 
 **Automation**
 
-- **Scheduling & automation** — cron or natural-language scheduled tasks (`!schedule`), including silent checks that post only when they find something, plus [supervised background Python watchers](https://docs.mindroom.chat/tools/background-scripts/) that can call governed agent tools and wake the agent only when something changes, and [external triggers](https://docs.mindroom.chat/external-triggers/) that let any process wake an agent with one HTTP request.
+- **Scheduling & automation** — cron or natural-language scheduled tasks (`/schedule`), including silent checks that post only when they find something, plus [supervised background Python watchers](https://docs.mindroom.chat/tools/background-scripts/) that can call governed agent tools and wake the agent only when something changes, and [external triggers](https://docs.mindroom.chat/external-triggers/) that let any process wake an agent with one HTTP request.
 
 **Safety and privacy**
 
@@ -208,7 +209,7 @@ Bridges bring the same agents to Slack, Telegram, WhatsApp, and Discord, and an 
 - **Works with other apps** — bridges bring the same agents to Slack, Telegram, WhatsApp, Discord, and email, an [OpenAI-compatible API](https://docs.mindroom.chat/openai-api/) serves them to LibreChat, Open WebUI, and other clients, and an [MCP gateway](https://docs.mindroom.chat/deployment/mcp-gateway/) shares their tools with Claude Code and Codex ([Bridges](https://docs.mindroom.chat/deployment/bridges/)).
 - **Native macOS app** — runs your agents on your Mac in the background, with a menu bar companion and one-click local model setup ([macOS App](https://docs.mindroom.chat/installation/macos-app/)).
 - **Web dashboard** — create and configure agents, teams, models, tools, credentials, and knowledge bases by clicking instead of editing YAML; chat stays in your Matrix client.
-- **Plugins & hooks** — drop-in [plugins](https://docs.mindroom.chat/plugins/) add custom tools, skills, and OAuth providers, and a typed [event-hook system](https://docs.mindroom.chat/hooks/) (per-hook timeouts, fault isolation) lets them observe and transform messages; reload plugins at runtime with `!reload-plugins`.
+- **Plugins & hooks** — drop-in [plugins](https://docs.mindroom.chat/plugins/) add custom tools, skills, and OAuth providers, and a typed [event-hook system](https://docs.mindroom.chat/hooks/) (per-hook timeouts, fault isolation) lets them observe and transform messages; reload plugins at runtime with `/reload-plugins`.
 - **Hot reload & restart-safe** — `config.yaml` and plugin changes apply live without bringing down the stack, and conversations resume seamlessly after a restart: session history and turn state are durable on disk, so agents pick up where they left off without double-replying.
 - **Enterprise deployment** — the same runtime scales from a laptop to multi-tenant Kubernetes with Helm charts.
 
@@ -317,8 +318,8 @@ To work on MindRoom itself, run it from a checkout.
 <details>
 <summary><b>Run from source</b></summary>
 
-Requires Python 3.12+ and [uv](https://github.com/astral-sh/uv).
-For the dashboard in a fresh source checkout, install Node.js 24 and [Bun](https://bun.sh/) so the first run can build missing assets, or set `MINDROOM_FRONTEND_DIST` to a prebuilt dashboard directory.
+Requires Python 3.13–3.14 and [uv](https://github.com/astral-sh/uv).
+For the dashboard in a fresh source checkout, install Node.js 24 and [Bun](https://bun.sh/) 1.4 or newer so the first run can build missing assets, or set `MINDROOM_FRONTEND_DIST` to a prebuilt dashboard directory.
 The repository dev shell provides Node.js 24 and Bun.
 
 ```bash
@@ -367,13 +368,15 @@ Plain replies that never reach threaded context still stay plain replies.
 1. **Mentioned agents and teams respond** - Tag them to get their attention
 2. **Single responder continues** - In a thread with one person, the agent or team that answered keeps responding without a tag
 3. **Multiple agents collaborate** - Mention multiple agents when you want an ad-hoc collaboration
-4. **Smart routing** - The router picks the best agent or team for a new thread when you don't tag one
+4. **Smart routing** - MindRoom picks the best agent or team for a new thread when you don't tag one, unless the room's [`reply_mode`](https://docs.mindroom.chat/configuration/threads/#reply-mode) is `mentions`
 5. **Group threads stay human-first** - Once two or more people talk in a thread, agents answer only when tagged, so they don't interrupt
 6. **Adaptive participation** - An agent with [`participation`](https://docs.mindroom.chat/configuration/threads/#adaptive-participation) enabled that has already replied in a group thread decides for each untagged message whether it can help, so nobody has to tag it
-7. **DMs need no mentions** - Agents respond naturally in 1:1 rooms, and you can add more agents to a DM for private collaboration
+7. **DMs need no mentions** - Agents respond naturally in 1:1 rooms, unless the room's `reply_mode` is `mentions`, and you can add more agents to a DM for private collaboration
 
 <details>
 <summary><b>Chat commands</b></summary>
+
+Every command also works with `!` instead of `/` (`!help`), including in clients such as Element that intercept `/` commands.
 
 <!-- CODE:START -->
 <!-- import sys -->
@@ -384,21 +387,28 @@ Plain replies that never reach threaded context still stay plain replies.
 <!-- CODE:END -->
 <!-- OUTPUT:START -->
 <!-- ⚠️ This content is auto-generated by `markdown-code-runner`. -->
-- `!help [topic]` - Get help
-- `!reload-plugins` - Reload configured plugins (admin only)
-- `!schedule <task>` - Schedule a task
-- `!list_schedules` - List scheduled tasks
-- `!cancel_schedule <id>` - Cancel a scheduled task
-- `!edit_schedule <id> <task>` - Edit an existing scheduled task
-- `!config <operation>` - Manage configuration
-- `!desktop [setup|status|confirm|rotate|disconnect]` - Manage your Desktop target
-- `!mode <agent> minimal|standard|show|reset` - Switch one agent between standard tools and a Bash-only interface
-- `!model [name|list|reset]` - Show or switch the model used in the current thread
-- `!room_model [name|list|reset]` - Show the room model default or switch it (set/reset require a room admin)
-- `!thread_mode [room|thread|reset|show]` - Show or switch the thread mode used in the current room (room admin only)
-- `!encrypt [confirm]` - Enable end-to-end encryption for this room (irreversible, room admin only)
-- `!e2ee` - Show encryption diagnostics for this room
-- `!hi` - Show welcome message
+- `/help [topic]` - Get help
+- `/reload-plugins` - Reload configured plugins (admin only)
+- `/schedule <task>` - Schedule a task
+- `/list_schedules` - List scheduled tasks
+- `/cancel_schedule <id>` - Cancel a scheduled task
+- `/edit_schedule <id> <task>` - Edit an existing scheduled task
+- `/jobs` - List the background jobs running here
+- `/cancel_job <id|all>` - Cancel a background job, or all of them here
+- `/answer [id] <answer>` - Answer a question a workflow run asked you
+- `/workflows` - List this conversation's workflow runs and saved workflows
+- `/config <operation>` - Manage configuration
+- `/desktop [setup|status|confirm|rotate|disconnect]` - Manage your Desktop target
+- `/mode <agent> minimal|standard|show|reset` - Switch one agent between standard tools and a Bash-only interface
+- `/compact [agent_or_team]` - Compact context now, after any in-progress reply in this conversation
+- `/model [name|name@level|list|reset]` - Show or switch the model used in the current thread
+- `/room_model [name|name@level|list|reset]` - Show the room model default or switch it (set/reset require a room admin)
+- `/thread_mode [room|thread|reset|show]` - Show or switch the thread mode used in the current room (room admin only)
+- `/reply_mode [auto|mentions|reset|show]` - Show or switch whether agents need a mention to start a conversation here (set/reset require a room admin)
+- `/auto_approve [<minutes>|<hours>h|off]` - Run your tool calls in this thread without approval for a while, or show or end that window
+- `/encrypt [confirm]` - Enable end-to-end encryption for this room (irreversible, room admin only)
+- `/e2ee` - Show encryption diagnostics for this room
+- `/hi` - Show welcome message
 
 <!-- OUTPUT:END -->
 
@@ -471,7 +481,7 @@ Teams, per-room models, context compaction, history controls, and memory backend
 - **Local stack** — `mindroom local-stack-setup` bootstraps a local Synapse + MindRoom Chat via Docker.
 - **Your computer + MindRoom Chat (hosted Matrix)** — run only the backend locally against hosted Matrix at [mindroom.chat](https://mindroom.chat), pairing via [chat.mindroom.chat](https://chat.mindroom.chat) ([guide](https://docs.mindroom.chat/deployment/hosted-matrix/)).
 - **Docker** — single-container runtime ([guide](https://docs.mindroom.chat/deployment/docker/)).
-- **Kubernetes** — Helm charts for enterprise-scale, multi-tenant deployments ([guide](https://docs.mindroom.chat/deployment/kubernetes/)).
+- **Kubernetes** — Helm charts from a single-node local `kind` quick start to enterprise multi-tenant deployments ([guide](https://docs.mindroom.chat/deployment/kubernetes/)); coding agents can be told `Follow https://docs.mindroom.chat/deployment/kubernetes/ to deploy MindRoom.`
 - **Agent-managed NixOS container (advanced)** — the author's favorite for personal use: [mindroom-ai/lxc-nixos](https://github.com/mindroom-ai/lxc-nixos) provisions a persistent, agent-controlled NixOS container with the full stack, which the agent can rebuild and manage itself while the host controls what it sees.
 - **Bridges** — connect Slack, Telegram, WhatsApp, and more via [Bridges](https://docs.mindroom.chat/deployment/bridges/).
 
@@ -500,7 +510,7 @@ By building on it, MindRoom inherits instead of reimplements:
 ## Architecture
 
 - **Matrix**: any homeserver (Synapse, Conduit, Dendrite, ...)
-- **Agents**: Python, built on [Agno](https://agno.dev/) and [mindroom-nio](https://github.com/mindroom-ai/mindroom-nio)
+- **Agents**: Python, built on [mindroom-nio](https://github.com/mindroom-ai/mindroom-nio), with [Agno](https://agno.dev/) toolkits
 - **AI models**: Anthropic, OpenAI, Google, Ollama, Bedrock, or any OpenAI-compatible endpoint
 - **Memory**: Mem0 + ChromaDB vector storage, persistent on disk
 - **UI**: web dashboard for administration; [MindRoom Chat](https://github.com/mindroom-ai/mindroom-chat) (or any Matrix client) for chat
@@ -526,5 +536,5 @@ See [AGENTS.md](https://github.com/mindroom-ai/mindroom/blob/main/AGENTS.md) for
 
 Built with:
 - [Matrix](https://matrix.org/) - The federated communication protocol
-- [Agno](https://agno.dev/) - AI agent framework
+- [Agno](https://agno.dev/) - Toolkits that agents call
 - [mindroom-nio](https://github.com/mindroom-ai/mindroom-nio) - Python Matrix client

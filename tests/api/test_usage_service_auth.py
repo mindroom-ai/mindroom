@@ -16,8 +16,11 @@ from structlog.testing import capture_logs
 from mindroom import constants
 from mindroom.api import config_lifecycle, main
 from mindroom.api.usage_export import UsageExportRunner
-from mindroom.usage.legacy_usage_storage import migrate_usage_database
-from tests.api.test_api import _trusted_upstream_jwks, _trusted_upstream_jwt, _trusted_upstream_jwt_key
+from mindroom.config.main import ConfigRuntimeValidationError
+from mindroom.session_storage.agent_storage import prepare_conversation_database
+from mindroom.session_storage.schema import TableNames
+from tests.api.conftest import trusted_upstream_jwks, trusted_upstream_jwt, trusted_upstream_jwt_key
+from tests.session_storage.agno_layout import recorded_owner
 
 _ISSUER = "https://issuer.example"
 _SERVICE_AUDIENCE = "mindroom-usage-export"
@@ -66,15 +69,13 @@ def _service_assertion(
 def usage_service_auth(
     monkeypatch: pytest.MonkeyPatch,
 ) -> tuple[dict[str, str], rsa.RSAPrivateKey]:
-    """Return strict service-auth settings backed by a locally served RSA JWKS."""
-    private_key = _trusted_upstream_jwt_key()
-    monkeypatch.setattr(jwt.PyJWKClient, "fetch_data", lambda _client: _trusted_upstream_jwks(private_key))
+    """Return service-auth settings backed by a locally served RSA JWKS."""
+    private_key = trusted_upstream_jwt_key()
+    monkeypatch.setattr(jwt.PyJWKClient, "fetch_data", lambda _client: trusted_upstream_jwks(private_key))
     return (
         {
             "MINDROOM_API_KEY": "test-usage-key",
             "MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "true",
-            "MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER": "Cf-Access-Authenticated-User-Email",
-            "MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT": "true",
             "MINDROOM_TRUSTED_UPSTREAM_JWT_HEADER": _ASSERTION_HEADER,
             "MINDROOM_TRUSTED_UPSTREAM_JWKS_URL": "https://issuer.example/jwks",
             "MINDROOM_TRUSTED_UPSTREAM_JWT_AUDIENCE": "mindroom-dashboard",
@@ -111,6 +112,18 @@ def _install_manual_export_runner(client: TestClient) -> tuple[UsageExportRunner
     return runner, workers
 
 
+def _publish_failed_config_load(client: TestClient, detail: str) -> None:
+    """Publish a committed config load failure whose diagnostic is `detail`."""
+    api_state = config_lifecycle.require_api_state(client.app)
+    with api_state.config_lock:
+        snapshot = api_state.snapshot
+        api_state.snapshot = replace(
+            snapshot,
+            generation=snapshot.generation + 1,
+            load_error=ConfigRuntimeValidationError(detail),
+        )
+
+
 def _seed_usage_database(storage_root: Path) -> None:
     database = storage_root / "agents/test_agent/sessions/test_agent.db"
     database.parent.mkdir(parents=True)
@@ -122,12 +135,15 @@ def _seed_usage_database(storage_root: Path) -> None:
         "cache_write_tokens": 3,
     }
     with sqlite3.connect(database) as connection:
+        # An Agno 2 sessions table, whose runs blob the conversion reads.
         connection.execute(
             "CREATE TABLE test_agent_sessions (session_id TEXT PRIMARY KEY, session_type TEXT, agent_id TEXT, "
-            "team_id TEXT, user_id TEXT, session_data TEXT, runs TEXT)",
+            "team_id TEXT, user_id TEXT, session_data TEXT, runs TEXT, metadata TEXT, summary TEXT, "
+            "created_at INTEGER NOT NULL, updated_at INTEGER)",
         )
         connection.execute(
-            "INSERT INTO test_agent_sessions VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO test_agent_sessions (session_id, session_type, agent_id, team_id, user_id, session_data, "
+            "runs, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 1700000000)",
             (
                 "session",
                 "agent",
@@ -177,17 +193,17 @@ def _seed_usage_database(storage_root: Path) -> None:
             ),
         )
 
-    migrate_usage_database(database, "test_agent_sessions")
+    prepare_conversation_database(database, TableNames.of_database(database), recorded_owner(database))
 
 
 def _invalid_service_assertion(case: str, private_key: rsa.RSAPrivateKey) -> str | None:
     """Build the one malformed or untrusted assertion named by a rejection test case."""
     now = datetime.now(UTC)
-    missing_claims = ("exp", "iat", "iss", "aud", "type", "common_name", "sub")
+    missing_claims = ("exp", "iat", "iss", "aud", "type", "common_name")
     builders = {
         "missing-assertion": lambda: None,
         "query-assertion": lambda: None,
-        "invalid-signature": lambda: _service_assertion(_trusted_upstream_jwt_key()),
+        "invalid-signature": lambda: _service_assertion(trusted_upstream_jwt_key()),
         "expired": lambda: _service_assertion(private_key, exp=now - timedelta(minutes=1)),
         "future-iat": lambda: _service_assertion(private_key, iat=now + timedelta(minutes=1)),
         "wrong-issuer": lambda: _service_assertion(private_key, iss="https://other-issuer.example"),
@@ -198,7 +214,7 @@ def _invalid_service_assertion(case: str, private_key: rsa.RSAPrivateKey) -> str
         "non-string-client": lambda: _service_assertion(private_key, common_name=123),
         "wrong-type": lambda: _service_assertion(private_key, type="user"),
         "nonempty-subject": lambda: _service_assertion(private_key, sub="person@example.org"),
-        "human-token": lambda: _trusted_upstream_jwt(
+        "human-token": lambda: trusted_upstream_jwt(
             private_key,
             audience=_SERVICE_AUDIENCE,
             email="owner@example.org",
@@ -312,12 +328,12 @@ def test_usage_export_prepares_and_returns_real_daily_report(
     assert str(storage_root) not in ready.text
 
 
-def test_usage_export_fails_closed_when_strict_jwt_configuration_is_partial(
+def test_usage_export_fails_closed_when_trusted_upstream_configuration_is_partial(
     temp_config_file: Path,
     tmp_path: Path,
     usage_service_auth: tuple[dict[str, str], rsa.RSAPrivateKey],
 ) -> None:
-    """The export route must stay disabled until the shared strict JWT settings are complete."""
+    """The export route must stay disabled until the shared trusted-upstream settings are complete."""
     env, private_key = usage_service_auth
     env.pop("MINDROOM_TRUSTED_UPSTREAM_JWT_AUDIENCE")
     client, _storage_root = _initialize_usage_runtime(temp_config_file, tmp_path, env)
@@ -339,19 +355,8 @@ def test_usage_export_sanitizes_failed_committed_configuration(
     env, private_key = usage_service_auth
     client, _storage_root = _initialize_usage_runtime(temp_config_file, tmp_path, env)
     runner, workers = _install_manual_export_runner(client)
-    api_state = config_lifecycle.require_api_state(client.app)
     sensitive_detail = "sensitive-config-diagnostic"
-    with api_state.config_lock:
-        snapshot = api_state.snapshot
-        api_state.snapshot = replace(
-            snapshot,
-            generation=snapshot.generation + 1,
-            config_load_result=config_lifecycle.ConfigLoadResult(
-                success=False,
-                error_status_code=422,
-                error_detail={"diagnostic": sensitive_detail},
-            ),
-        )
+    _publish_failed_config_load(client, sensitive_detail)
 
     try:
         response = client.get(
@@ -373,8 +378,6 @@ def test_usage_export_sanitizes_failed_committed_configuration(
     "missing_setting",
     [
         "MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED",
-        "MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER",
-        "MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT",
         "MINDROOM_TRUSTED_UPSTREAM_JWT_HEADER",
         "MINDROOM_TRUSTED_UPSTREAM_JWKS_URL",
         "MINDROOM_TRUSTED_UPSTREAM_JWT_ISSUER",
@@ -388,7 +391,7 @@ def test_usage_export_fails_closed_when_auth_setting_is_missing(
     usage_service_auth: tuple[dict[str, str], rsa.RSAPrivateKey],
     missing_setting: str,
 ) -> None:
-    """Every shared strict-JWT and service-specific setting must be present."""
+    """Every shared trusted-upstream and service-specific setting must be present."""
     env, private_key = usage_service_auth
     env.pop(missing_setting)
     client, _storage_root = _initialize_usage_runtime(temp_config_file, tmp_path, env)
@@ -415,7 +418,6 @@ def test_usage_export_fails_closed_when_auth_setting_is_missing(
         "missing-aud",
         "missing-type",
         "missing-common_name",
-        "missing-sub",
         "wrong-issuer",
         "wrong-audience",
         "wrong-client",
@@ -479,7 +481,7 @@ def test_dashboard_and_service_routes_share_preparation_and_cache(
     dashboard_email = "owner@example.org"
     dashboard_headers = {
         "Cf-Access-Authenticated-User-Email": dashboard_email,
-        _ASSERTION_HEADER: _trusted_upstream_jwt(
+        _ASSERTION_HEADER: trusted_upstream_jwt(
             private_key,
             email=dashboard_email,
             audience="mindroom-dashboard",

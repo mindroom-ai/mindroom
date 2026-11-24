@@ -35,7 +35,7 @@ Capture what matters. Decisions, context, things to remember. Skip the secrets u
 
 ### 🧠 MEMORY.md - Your Long-Term Memory
 
-- With file memory enabled, MindRoom automatically preloads `MEMORY.md` from the effective memory scope on every turn, up to the configured line and token limits.
+- With file memory enabled, MindRoom automatically preloads `MEMORY.md` from the effective memory scope on every turn, up to the configured per-file character limit.
 - Authorized group-room turns receive this scoped context too, and can produce responses visible in that room or thread.
 - Requester-private storage separates users' files; it does not restrict automatic preload to direct chats.
 - **Keep personal context confidential in shared conversations**; its presence in your prompt is not permission to disclose it.
@@ -145,16 +145,10 @@ Skills provide your tools. When you need one, check its `SKILL.md`. Keep local n
 
 **🛠️ Make your own skills:** When you figure out a reusable workflow, save it as a skill right here in your workspace: `skills/<skill-name>/SKILL.md` with YAML frontmatter (`name`, `description`) followed by the instructions. It loads automatically on your next run — no config change needed. Don't try to write to the global skill folders (like `~/.mindroom/skills`); they can be read-only, and your workspace `skills/` always wins anyway.
 
-**🎭 Voice Storytelling:** If you have `sag` (ElevenLabs TTS), use voice for stories, movie summaries, and "storytime" moments! Way more engaging than walls of text. Surprise people with funny voices.
-
 **📝 Matrix Formatting:**
 
 - Use clear Markdown and keep formatting readable in Matrix rooms.
 - Prefer bullet lists over large tables in chat contexts.
-
-**🧱 MindRoom Tach Boundaries:**
-
-- If your work changes a Tach-governed boundary, update `tach.toml` in the same PR, follow the guidance in the comment at the top of that file, and run `uv run tach check --dependencies --interfaces`.
 
 ## 💓 Periodic Checks
 

@@ -8,13 +8,12 @@ from typing import TYPE_CHECKING, Any
 from fastapi import APIRouter, HTTPException, Request
 from pydantic import BaseModel
 
+from mindroom.api import config_lifecycle
 from mindroom.api.credential_responses import filter_credentials_for_response, filter_oauth_client_config_for_response
 from mindroom.api.credentials_oauth_policy import (
     OAuthCredentialServices,
     dashboard_credentials_for_save,
     dashboard_may_edit_oauth_match,
-    is_client_config_service,
-    oauth_service_match,
     oauth_services_for_request,
     preserve_oauth_client_config_from_existing,
     reject_oauth_api_key_read_field,
@@ -26,17 +25,20 @@ from mindroom.api.credentials_oauth_policy import (
 )
 from mindroom.api.credentials_target import (
     RequestCredentialsTarget,
+    dashboard_candidate_stores,
     delete_credentials_for_target,
     load_credentials_for_target,
-    loaded_runtime_config_for_credentials_request,
-    primary_runtime_scoped_services_for_target,
     request_may_target_scoped_credentials,
     resolve_request_credentials_target,
     save_credentials_for_target,
-    target_primary_owns_tool_settings,
+    target_reads_service_from,
 )
-from mindroom.credentials.manager import list_worker_grantable_shared_services, validate_service_name
-from mindroom.credentials.policy import credential_service_policy, is_oauth_token_service
+from mindroom.credentials.manager import validate_service_name
+from mindroom.credentials.policy import (
+    is_egress_broker_service,
+    is_oauth_client_config_service,
+    is_oauth_token_service,
+)
 from mindroom.credentials.sync import canonical_provider_service, resolve_provider_service_api_key
 from mindroom.embeddings.embedder_health import handle_embedder_credential_change
 from mindroom.embeddings.factory import embedder_client_signature
@@ -61,9 +63,15 @@ class _ActiveEmbedderRuntime:
 
 def _validated_service(service: str) -> str:
     try:
-        return validate_service_name(service)
+        validated = validate_service_name(service)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    if is_egress_broker_service(validated):
+        msg = "Egress broker secrets are managed through /api/egress-broker."
+        raise HTTPException(status_code=400, detail=msg)
+
+    return validated
 
 
 def _save_service(access: _DashboardCredentialAccess, service: str) -> str:
@@ -83,10 +91,11 @@ def _active_embedder_runtime(request: Request, access: _DashboardCredentialAcces
     """Resolve the concrete embedder client identity for the primary runtime."""
     if access.target.worker_scope is not None:
         return None
-    runtime_config = loaded_runtime_config_for_credentials_request(request)
-    if runtime_config is None:
+    # The last config that loaded built the running embedder, even while the current file is broken.
+    config = config_lifecycle.last_good_runtime_config(request)
+    if config is None:
         return None
-    config, runtime_paths = runtime_config
+    runtime_paths = access.target.runtime_paths
     return _ActiveEmbedderRuntime(
         config=config,
         runtime_paths=runtime_paths,
@@ -94,21 +103,16 @@ def _active_embedder_runtime(request: Request, access: _DashboardCredentialAcces
     )
 
 
-def _handle_runtime_credential_change(
-    request: Request,
-    access: _DashboardCredentialAccess,
-    previous_runtime: _ActiveEmbedderRuntime | None,
-) -> None:
-    """Invalidate and re-probe only when the resolved embedder client changed."""
+def _handle_runtime_credential_change(previous_runtime: _ActiveEmbedderRuntime | None) -> None:
+    """Invalidate and re-probe only when the credential change altered the resolved embedder client.
+
+    The request keeps its bound config snapshot, so only the credentials under that config can have changed.
+    """
     if previous_runtime is None:
         return
-    current_runtime = _active_embedder_runtime(request, access)
-    if current_runtime is not None and current_runtime.client_signature == previous_runtime.client_signature:
-        return
-    if current_runtime is None:
-        handle_embedder_credential_change()
-        return
-    handle_embedder_credential_change(current_runtime.config, current_runtime.runtime_paths)
+    config, runtime_paths = previous_runtime.config, previous_runtime.runtime_paths
+    if embedder_client_signature(config, runtime_paths) != previous_runtime.client_signature:
+        handle_embedder_credential_change(config, runtime_paths)
 
 
 @dataclass(frozen=True)
@@ -147,22 +151,17 @@ class _DashboardCredentialAccess:
         """Return the OAuth role for one credential service, if registered."""
         return self.oauth_services.match(service)
 
-    def reject_token_service(self, service: str) -> None:
-        """Reject direct dashboard access to OAuth token credentials."""
-        reject_oauth_token_service(service)
-
-    def reject_stored_oauth_credentials(self, credentials: dict[str, Any]) -> None:
-        """Reject stored OAuth token documents returned through generic routes."""
-        reject_oauth_credentials_document(credentials)
-
     def load(self, service: str) -> dict[str, Any] | None:
         """Load dashboard-visible credentials for one service."""
-        self.reject_token_service(service)
-        return load_credentials_for_target(service, self.target)
+        reject_oauth_token_service(service)
+        try:
+            return load_credentials_for_target(service, self.target)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     def save(self, service: str, credentials: dict[str, Any]) -> None:
         """Save dashboard-visible credentials for one service."""
-        self.reject_token_service(service)
+        reject_oauth_token_service(service)
         try:
             save_credentials_for_target(service, credentials, self.target)
         except ValueError as exc:
@@ -170,13 +169,16 @@ class _DashboardCredentialAccess:
 
     def delete(self, service: str) -> None:
         """Delete dashboard-visible credentials for one service."""
-        self.reject_token_service(service)
-        delete_credentials_for_target(service, self.target)
+        reject_oauth_token_service(service)
+        try:
+            delete_credentials_for_target(service, self.target)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     def response_credentials(self, service: str, credentials: dict[str, Any]) -> dict[str, Any]:
         """Return credentials filtered for dashboard responses."""
         match = self.match(service)
-        if is_client_config_service(service, match):
+        if is_oauth_client_config_service(service):
             return filter_oauth_client_config_for_response(credentials)
         return filter_credentials_for_response(
             credentials,
@@ -184,57 +186,38 @@ class _DashboardCredentialAccess:
             oauth_fallback_fields=match.oauth_fallback_fields if match is not None else frozenset(),
         )
 
-    def credentials_for_save(self, service: str, config_values: dict[str, Any]) -> dict[str, Any]:
-        """Return user-submitted credentials normalized for storage."""
+    def credentials_for_save(
+        self,
+        service: str,
+        config_values: dict[str, Any],
+        existing_credentials: dict[str, Any],
+    ) -> dict[str, Any]:
+        """Return user-submitted credentials normalized for storage over the service's ``existing_credentials``."""
         match = self.match(service)
         credentials = dashboard_credentials_for_save(
             config_values,
-            strip_oauth_fields=dashboard_may_edit_oauth_match(match) and not is_client_config_service(service, match),
+            strip_oauth_fields=dashboard_may_edit_oauth_match(match) and not is_oauth_client_config_service(service),
             oauth_fallback_fields=match.oauth_fallback_fields if match is not None else frozenset(),
         )
-        if is_client_config_service(service, match):
+        if is_oauth_client_config_service(service):
             validate_oauth_client_config_fields(credentials)
-            existing_credentials = load_credentials_for_target(service, self.target) or {}
             preserve_oauth_client_config_from_existing(credentials, existing_credentials, match)
-            return credentials
         return credentials
 
+    def _dashboard_may_list(self, service: str) -> bool:
+        # Egress secrets are managed through /api/egress-broker, so the generic routes reject them.
+        return not is_egress_broker_service(service) and self.oauth_services.dashboard_may_show_service(service)
+
     def list_services(self) -> list[str]:
-        """List dashboard-visible services for the resolved target."""
-        if self.target.worker_scope is None:
-            return [
-                service
-                for service in self.target.target_manager.list_services()
-                if self.oauth_services.dashboard_may_show_service(service)
-            ]
-        # Worker copies of primary-built tool settings are ignored, so they are not listed.
-        worker_services = {
+        """List dashboard-visible services stored where the resolved target reads them."""
+        services = {
             service
-            for service in self.target.target_manager.list_services()
-            if not target_primary_owns_tool_settings(service, self.target)
+            for store in dashboard_candidate_stores(self.target)
+            for service in store.list_services()
+            if self._dashboard_may_list(service) and target_reads_service_from(service, store, self.target)
         }
-        primary_runtime_global_services = {
-            service
-            for service in self.target.base_manager.list_services()
-            if credential_service_policy(service, self.target.worker_scope).uses_primary_runtime_global_credentials
-        }
-        primary_runtime_services = primary_runtime_scoped_services_for_target(self.target)
-        shared_manager = self.target.base_manager.shared_manager()
-        shared_services = set(
-            list_worker_grantable_shared_services(
-                shared_manager=shared_manager,
-                allowed_services=self.target.allowed_shared_services or frozenset(),
-            ),
-        )
-        if self.target.worker_scope == "shared":
-            shared_services |= {
-                service
-                for service in shared_manager.list_services()
-                if credential_service_policy(service, self.target.worker_scope).uses_local_shared_credentials
-            }
-        services = worker_services | primary_runtime_global_services | primary_runtime_services | shared_services
         services -= set(unsupported_shared_only_integration_names(sorted(services), self.target.worker_scope))
-        return sorted(service for service in services if self.oauth_services.dashboard_may_show_service(service))
+        return sorted(services)
 
 
 class SetApiKeyRequest(BaseModel):
@@ -285,7 +268,7 @@ async def get_credential_status(
     credentials = access.load(service)
 
     if credentials:
-        access.reject_stored_oauth_credentials(credentials)
+        reject_oauth_credentials_document(credentials)
         filtered = access.response_credentials(service, credentials)
         return CredentialStatus(
             service=service,
@@ -314,12 +297,12 @@ async def set_credentials(
     service = _save_service(access, service)
     existing_credentials = access.load(service)
     if existing_credentials:
-        access.reject_stored_oauth_credentials(existing_credentials)
+        reject_oauth_credentials_document(existing_credentials)
     previous_embedder_runtime = _active_embedder_runtime(http_request, access)
 
-    creds = access.credentials_for_save(service, payload.credentials)
+    creds = access.credentials_for_save(service, payload.credentials, existing_credentials or {})
     access.save(service, creds)
-    _handle_runtime_credential_change(http_request, access, previous_embedder_runtime)
+    _handle_runtime_credential_change(previous_embedder_runtime)
 
     return {"status": "success", "service": service, "message": f"Credentials saved for {service}"}
 
@@ -364,12 +347,12 @@ def save_dashboard_api_key(
     reject_oauth_api_key_write_field(service, access.match(service), key_name=key_name)
 
     credentials = access.load(service) or {}
-    access.reject_stored_oauth_credentials(credentials)
+    reject_oauth_credentials_document(credentials)
     previous_embedder_runtime = _active_embedder_runtime(http_request, access)
     credentials[key_name] = api_key
     credentials["_source"] = "ui"
     access.save(service, credentials)
-    _handle_runtime_credential_change(http_request, access, previous_embedder_runtime)
+    _handle_runtime_credential_change(previous_embedder_runtime)
     return service
 
 
@@ -388,7 +371,7 @@ def _load_api_key_credentials(
     def load(candidate: str) -> dict[str, Any]:
         if candidate not in loaded:
             credentials = access.load(candidate) or {}
-            access.reject_stored_oauth_credentials(credentials)
+            reject_oauth_credentials_document(credentials)
             loaded[candidate] = credentials
         return loaded[candidate]
 
@@ -418,11 +401,10 @@ async def get_api_key(
         agent_name=agent_name,
         service_names=(service,),
     )
-    oauth_match = access.match(service)
-    reject_oauth_api_key_read_field(service, oauth_match, key_name=key_name)
+    reject_oauth_api_key_read_field(service, access.match(service), key_name=key_name)
     credential_service, credentials = _load_api_key_credentials(access, service, key_name)
     api_key = credentials.get(key_name)
-    if is_client_config_service(service, oauth_match) and api_key is not None and not isinstance(api_key, str):
+    if is_oauth_client_config_service(service) and api_key is not None and not isinstance(api_key, str):
         raise HTTPException(
             status_code=400,
             detail=f"OAuth client config field '{key_name}' is not a readable string.",
@@ -463,7 +445,7 @@ async def get_credentials(
 
     if not credentials:
         return {"service": service, "credentials": {}}
-    access.reject_stored_oauth_credentials(credentials)
+    reject_oauth_credentials_document(credentials)
 
     return {
         "service": service,
@@ -486,12 +468,23 @@ async def delete_credentials(
     )
     existing_credentials = access.load(service)
     if existing_credentials:
-        access.reject_stored_oauth_credentials(existing_credentials)
+        reject_oauth_credentials_document(existing_credentials)
     previous_embedder_runtime = _active_embedder_runtime(request, access)
     access.delete(service)
-    _handle_runtime_credential_change(request, access, previous_embedder_runtime)
+    _handle_runtime_credential_change(previous_embedder_runtime)
 
-    return {"status": "success", "message": f"Credentials deleted for {service}"}
+    if access.load(service) is None:
+        return {"status": "success", "message": f"Credentials deleted for {service}"}
+    # Deleting cannot remove what the environment or a granted shared credential supplies.
+    variable = access.target.base_manager.declared_variable(service)
+    if variable is None:
+        message = f"Credentials for {service} now come from the shared credentials granted to this agent."
+    else:
+        message = (
+            f"Credentials for {service} now come from the {variable} environment variable; "
+            "to remove them, edit it in the environment or .env and restart MindRoom."
+        )
+    return {"status": "success", "message": message}
 
 
 @router.post("/{service}/copy-from/{source_service}")
@@ -510,9 +503,7 @@ async def copy_credentials(
         service_names=(service, source_service),
     )
     service = _save_service(access, service)
-    destination_match = oauth_service_match(request, service)
-    source_match = oauth_service_match(request, source_service)
-    reject_oauth_client_config_copy(source_service, source_match, service, destination_match)
+    reject_oauth_client_config_copy(source_service, service)
     source_creds = access.load(source_service)
     destination_creds = access.load(service)
 
@@ -527,7 +518,7 @@ async def copy_credentials(
     target_creds = {k: v for k, v in source_creds.items() if not k.startswith("_")}
     target_creds["_source"] = "ui"
     access.save(service, target_creds)
-    _handle_runtime_credential_change(request, access, previous_embedder_runtime)
+    _handle_runtime_credential_change(previous_embedder_runtime)
 
     return {
         "status": "success",
@@ -544,7 +535,6 @@ async def validate_credentials(
 ) -> dict[str, Any]:
     """Check stored credentials exist without validating them with the provider."""
     service = _validated_service(service)
-    # This is a placeholder - actual testing would depend on the service
     access = _DashboardCredentialAccess.resolve(
         request,
         agent_name=agent_name,
@@ -556,8 +546,6 @@ async def validate_credentials(
         raise HTTPException(status_code=404, detail=f"No credentials found for {service}")
     reject_oauth_credentials_document(credentials)
 
-    # For now, just check if credentials exist
-    # In the future, we could implement actual validation per service
     return {
         "service": service,
         "status": "success",

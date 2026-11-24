@@ -67,6 +67,22 @@ def test_local_matrix_reset_only_removes_project_volumes(reset_project: Path) ->
     assert [command for command in commands if "|rm|" in command] == [f"{reset_project}|rm|-rf tmp/"]
 
 
+# The state bound to the homeserver's accounts, devices, and events, which a new homeserver cannot honor.
+_MATRIX_BOUND = (
+    "matrix_state.yaml",
+    "encryption_keys/@mindroom_router:localhost_DEVICE.db",
+    "sync_continuity/router.json",
+    "tracking/event_journal.db",
+    "tracking/event_journal_binding.json",
+    "tracking/agents/router/personal_rooms/owner.json",
+    "tracking/agents/router/invited_rooms.json",
+    "tracking/agents/router/pending_room_invites.json",
+    "agents/router/personal_rooms/owner.json",
+    "agents/router/invited_rooms.json",
+    "agents/router/pending_room_invites.json",
+)
+
+
 @pytest.mark.parametrize(
     ("config_path", "process_storage", "dotenv_storage", "selected_storage"),
     [
@@ -103,16 +119,43 @@ def test_local_matrix_reset_removes_only_selected_matrix_state(
         reset_project / "process storage",
     ]
     for storage in candidates:
-        storage.mkdir(parents=True, exist_ok=True)
-        (storage / "matrix_state.yaml").write_text("stale Matrix accounts and rooms\n")
+        for bound in _MATRIX_BOUND:
+            (storage / bound).parent.mkdir(parents=True, exist_ok=True)
+            (storage / bound).write_text("stale Matrix state\n")
         (storage / "keep.txt").write_text("unrelated persistent data\n")
+        (storage / "tracking" / "memory_auto_flush.json").write_text("unrelated tracking record\n")
+        (storage / "tracking" / "agents" / "router" / "agent_modes.json").write_text("unrelated agent record\n")
 
     result = _reset(reset_project)
 
     assert result.returncode == 0, result.stderr
     for storage in candidates:
-        assert (storage / "matrix_state.yaml").exists() == (storage != reset_project / selected_storage)
+        for bound in _MATRIX_BOUND:
+            assert (storage / bound).exists() == (storage != reset_project / selected_storage), (storage, bound)
         assert (storage / "keep.txt").read_text() == "unrelated persistent data\n"
+        assert (storage / "tracking" / "memory_auto_flush.json").read_text() == "unrelated tracking record\n"
+        assert (
+            storage / "tracking" / "agents" / "router" / "agent_modes.json"
+        ).read_text() == "unrelated agent record\n"
+
+
+def test_local_matrix_reset_follows_no_link_in_agents(reset_project: Path) -> None:
+    """Tool code can write agents/, so a planted link must not turn the reset onto data outside it."""
+    storage = reset_project / "mindroom_data"
+    outside = reset_project / "outside"
+    (outside / "personal_rooms").mkdir(parents=True)
+    (outside / "invited_rooms.json").write_text("outside\n")
+    (outside / "personal_rooms" / "owner.json").write_text("outside\n")
+    (storage / "agents" / "router").mkdir(parents=True)
+    (storage / "agents" / "linked").symlink_to(outside)
+    (storage / "agents" / "router" / "personal_rooms").symlink_to(outside / "personal_rooms")
+
+    result = _reset(reset_project)
+
+    assert result.returncode == 0, result.stderr
+    assert (outside / "invited_rooms.json").read_text() == "outside\n"
+    assert (outside / "personal_rooms" / "owner.json").read_text() == "outside\n"
+    assert not (storage / "agents" / "router" / "personal_rooms").is_symlink()
 
 
 def test_local_matrix_reset_allows_missing_state(reset_project: Path) -> None:

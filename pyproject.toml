@@ -7,34 +7,36 @@ name = "mindroom"
 description = "A universal interface for AI agents with persistent memory, where every conversation has a home"
 readme = "README.md"
 license = "Apache-2.0"
-requires-python = ">=3.12"
+requires-python = ">=3.13,<3.15"
 classifiers = [
   "Programming Language :: Python :: 3 :: Only",
-  "Programming Language :: Python :: 3.12",
   "Programming Language :: Python :: 3.13",
   "Programming Language :: Python :: 3.14",
 ]
 dynamic = [ "version" ]
 dependencies = [
-  "agno[anthropic,google,ollama,openai]==3.0.9",
+  "agno==3.2.1",
   "aiohttp>=3.13.3",
-  "aiosqlite>=0.20",
-  "anthropic>=0.120.2",
+  "anthropic>=2.11,<3",
   "anyio>=4.10",
-  "authlib>=1.6",
-  "cerebras-cloud-sdk>=1.46",
+  # Authlib 1.8 moved its HTTPX client to httpx2, which oauth/providers.py now uses.
+  "authlib>=1.9.9",
   "certifi>=2026.4.22",
-  "chromadb>=1.5.8",
+  # Click 8.5 drops `typer.Argument(help=...)` text from Typer 0.25's `--help`.
+  "click<8.5",
   "cron-descriptor>=1.4.5",
   "croniter>=6",
   "cryptography>=47",
-  "fastapi[standard]>=0.136.3",
-  "filetype>=1.2",
+  # Tool descriptions and parameter descriptions come from docstrings (tool_system/tool_schema.py).
+  "docstring-parser>=0.18",
+  "fastapi>=0.136.3",
   "google-auth>=2.40.3",
-  "google-genai>=2",
-  "groq>=0.31",
+  # 3.x sends through httpx2 and defaults the Gemini Developer API to v1; our clients keep v1beta (providers/gemini).
+  "google-genai>=3.6",
+  "h11>=0.16",
   "httpx>=0.27",
-  "httpx2>=2.13",
+  # 2.15.1 stops a long-lived client's TLS handshakes from growing slower on Linux.
+  "httpx2>=2.15.1",
   "humanize>=4.12.3",
   "idna>=3.13",
   "jinja2>=3.1",
@@ -43,28 +45,34 @@ dependencies = [
   "markdown-it-py>=4",
   "mcp[cli]>=2.3,<3",
   "mdit-py-plugins>=0.5",
-  "mem0ai>=0.1.115",
   # Owned to-device transport requires the durable NIO API.
-  "mindroom-nio[e2e]==1.1.4",
-  "openai",
+  "mindroom-nio[e2e]==1.4.4",
+  "ollama>=0.6.1",
+  # 3.30 returns a streamed Chat Completions connection to the pool.
+  "openai>=3.30",
   "packaging>=24",
   "pillow>=10.2",
-  "pydantic>=2",
+  "pydantic>=2.12.5",
   "pydantic-settings>=2.10.1",
   "pygments>=2.20",
-  "pyjwt>=2.13",
+  # 2.14 adds the JWKS refresh cooldown that trusted-upstream auth turns off.
+  "pyjwt>=2.14",
+  # Request sizing reads a PDF attachment's page count (token_counting/requests.py).
+  "pypdf>=6.21.4",
   "python-dotenv>=1",
+  "python-multipart>=0.0.27",
   "pyyaml>=6",
+  "questionary>=2.1.1",
   "referencing>=0.37",
+  "regex>=2024.11.6",
   "rich",
   "segno>=1.6.6",
-  # Agno's SQLite storage imports SQLAlchemy's asyncio layer, which needs greenlet.
-  "sqlalchemy[asyncio]>=2",
   "starlette>=1.3.1",
   "structlog>=24.1",
-  "tenacity>=9.1.2",
   "tiktoken>=0.12",
-  "typer>=0.24",
+  # 0.26 vendors Click, which breaks retrying an invalid `click.Choice` prompt; later releases also rerender `--help`
+  # (`{arg}` usage from 0.27, `<bool>` beside every flag by 0.29), which changes our CLI docs.
+  "typer>=0.24,<0.26",
   "uvicorn>=0.35",
   "watchfiles>=1",
   "websockets>=14",
@@ -72,21 +80,18 @@ dependencies = [
 [[project.authors]]
 name = "mindroom team"
 [project.optional-dependencies]
-agent_vault_access = [
-  "httpx>=0.27",
-]
+agent_manager = []
 agentql = [
   "agentql",
   "playwright",
 ]
 airflow = []
 apify = [
-  "apify-client>=1.12.2; platform_machine!='aarch64'",
+  "apify-client>=1.12.2",
 ]
 approved_egress = []
 arxiv = [
-  "arxiv",
-  "pypdf",
+  "arxiv>=4.1",
 ]
 atlassian = []
 attachments = []
@@ -130,8 +135,11 @@ cartesia = [
   "cartesia",
 ]
 chat_ui = []
+chromadb = [
+  "chromadb>=1.5.8",
+]
 claude_agent = [
-  "claude-agent-sdk>=0.2.140",
+  "claude-agent-sdk>=0.2.181",
 ]
 clickup = [
   "requests",
@@ -146,8 +154,10 @@ config_manager = [
   "pyyaml>=6",
 ]
 confluence = [
-  "atlassian-python-api",
+  # tools/agno_compat_confluence.py builds on the v1 client in atlassian.confluence.server, new in 5.
+  "atlassian-python-api>=5.0.5",
 ]
+contacts = []
 crawl4ai = [
   "crawl4ai>=0.7.3",
 ]
@@ -158,7 +168,7 @@ custom_api = [
   "requests",
 ]
 daytona = [
-  "daytona",
+  "daytona<1",
 ]
 delegate = []
 discord = [
@@ -179,10 +189,12 @@ report_publishing = []
 e2b = [
   "e2b-code-interpreter",
 ]
+egress_credentials = []
 eleven_labs = [
   "elevenlabs",
 ]
 email = []
+email_invite = []
 exa = [
   "exa-py",
 ]
@@ -195,6 +207,7 @@ file_generation = [
   "python-docx>=1.2",
   "reportlab",
 ]
+filesystem = []
 financial_datasets_api = [
   "requests",
 ]
@@ -208,8 +221,8 @@ giphy = [
   "httpx>=0.27",
 ]
 github = [
-  # PyGithub 2.9 injects URL metadata into dictionary responses, breaking Agno's numeric language parser.
-  "pygithub>=2.5,<2.9",
+  # 2.10 adds GithubRetry.max_rate_limit_wait, which the provider-failure retry copy carries over.
+  "pygithub>=2.10",
 ]
 gmail = [
   "google-api-python-client>=2.178",
@@ -221,7 +234,6 @@ google_bigquery = [
   "google-api-python-client>=2.178",
   "google-auth>=2.40.3",
   "google-auth-httplib2>=0.2",
-  "google-auth-oauthlib>=1.2.2",
   "google-cloud-bigquery>=3.41",
 ]
 google_calendar = [
@@ -240,13 +252,14 @@ google_docs = [
   "google-api-python-client>=2.178",
   "google-auth>=2.40.3",
   "google-auth-httplib2>=0.2",
-  "google-auth-oauthlib>=1.2.2",
 ]
 google_maps = [
   "google-maps-places",
   "googlemaps",
 ]
 google_scholar = [
+  # scholarly imports bibtexparser.bibdatabase, which bibtexparser 2 removed.
+  "bibtexparser<2",
   "scholarly",
 ]
 google_sheets = [
@@ -258,7 +271,6 @@ google_tasks = [
   "google-api-python-client>=2.178",
   "google-auth>=2.40.3",
   "google-auth-httplib2>=0.2",
-  "google-auth-oauthlib>=1.2.2",
 ]
 googlesearch = [
   "ddgs",
@@ -280,6 +292,15 @@ jina = [
 jira = [
   "jira>=3.10.5",
 ]
+knowledge_graph = [
+  "graphiti-core[falkordblite]==0.31.2",
+  # C parser for FalkorDB replies; redis-py parses large ones in pure Python on the event loop otherwise.
+  "hiredis",
+  "psutil",
+]
+kubernetes = [
+  "kubernetes>=37",
+]
 linear = [
   "requests",
 ]
@@ -291,16 +312,27 @@ lumalabs = [
 ]
 matrix_api = []
 matrix_calls = [
-  "livekit-agents[openai]>=1.8.1",
+  # 1.8.9 runs on OpenAI SDK 3. Each release pins livekit exactly (1.8.9 to 1.8.10 on 1.1.21, 1.8.11 on 1.2.0), and the
+  # call tests cover the audio mixer of the locked one. 1.8.12 changes GPT Live delegation events and transcript
+  # delivery, which the call agent does not follow yet.
+  "livekit-agents[openai]>=1.8.9,<1.8.12",
 ]
 matrix-e2ee = []
 matrix_message = []
 matrix_room = []
+matrix_user = []
 matrix_voice_message = []
 mem0 = [
-  "mem0ai>=0.1.115",
+  "mem0ai>=2.2.1",
 ]
 memory = []
+microsoft_files = []
+microsoft_meetings = []
+microsoft_onenote = []
+microsoft_people = []
+microsoft_sharepoint = []
+microsoft_teams = []
+microsoft_todo = []
 modelslabs = [
   "requests",
 ]
@@ -317,17 +349,24 @@ newspaper = [
 notion = [
   "notion-client",
 ]
+numpy = [
+  "numpy>=2",
+]
 oauth_connections = []
 openai = [
   "openai",
 ]
 openbb = [
   "openbb",
+  "polars",
+  "pyarrow",
 ]
 openclaw_compat = []
 openweather = [
   "requests",
 ]
+outlook_calendar = []
+outlook_mail = []
 oxylabs = [
   "oxylabs",
 ]
@@ -341,6 +380,7 @@ pubmed = [
   "httpx>=0.27",
 ]
 python = []
+react = []
 reasoning = []
 reddit = [
   "praw",
@@ -365,7 +405,9 @@ self_config = [
   "pyyaml>=6",
 ]
 sentence-transformers = [
-  "sentence-transformers",
+  "sentence-transformers>=6.1",
+  "torchvision",
+  "transformers>=5.19",
 ]
 serpapi = [
   "google-search-results>=2.4.2",
@@ -373,25 +415,24 @@ serpapi = [
 serper = [
   "requests",
 ]
+shared_directories = []
 shell = []
 shopify = [
   "httpx>=0.27",
 ]
 skill_manage = []
-slack = [
-  "slack-sdk",
-]
+slack = []
 sleep = []
 spider = [
   "spider-client",
 ]
 spotify = [
   "httpx>=0.27",
-  "spotipy>=2.25.1",
 ]
 sql = [
   "sqlalchemy",
 ]
+stop_reply = []
 supabase = [
   "supabase>=2.18.1",
 ]
@@ -399,12 +440,14 @@ tavily = [
   "tavily-python",
 ]
 telegram = [
-  "httpx>=0.27",
   "pytelegrambotapi>=4.32",
 ]
+temporary_secrets = []
+terminal = []
 thread_model = []
 thread_move = []
 thread_resolution = []
+thread_snooze = []
 thread_summary = []
 thread_tags = []
 todo = []
@@ -417,6 +460,7 @@ trafilatura = [
 trello = [
   "py-trello",
 ]
+triggers = []
 twilio = [
   "twilio",
 ]
@@ -440,6 +484,7 @@ whatsapp = [
 wikipedia = [
   "wikipedia",
 ]
+workflow = []
 x = [
   "tweepy",
 ]
@@ -453,7 +498,8 @@ zendesk = [
   "requests",
 ]
 zep = [
-  "zep-cloud>=3.3",
+  # Agno 3.2.1 ZepTools calls user.add, which zep-cloud 4 removed.
+  "zep-cloud>=3.3,<4",
 ]
 zoom = [
   "requests",
@@ -487,13 +533,14 @@ dev = [
   "pytest-asyncio>=1.1",
   "pytest-cov>=6.2.1",
   "pytest-mock>=3.14.1",
-  "pytest-shm>=0.1",
+  "pytest-shm>=0.1.3",
   "pytest-timeout>=2.4",
   "pytest-xdist>=3.8",
   "requests>=2.32.4",
   "ruff>=0.12.5",
   "tach>=0.34.1",
-  "ty>=0.0.17",
+  # 0.0.107 renamed the rules the [tool.ty] overrides and ignore comments use.
+  "ty>=0.0.107",
   "vulture>=2.16",
   "zensical",
 ]
@@ -506,7 +553,7 @@ desktop-helper = [
   "mindroom-nio[e2e]",
   "pillow>=10.2",
   "pyautogui>=0.9.54",
-  "pyinstaller==6.16",
+  "pyinstaller==6.22.3",
   "pyobjc-framework-applicationservices>=12.2.1; sys_platform=='darwin'",
   "pyobjc-framework-cocoa>=12.2.1; sys_platform=='darwin'",
   "pyobjc-framework-screencapturekit>=12.2.1; sys_platform=='darwin'",
@@ -527,11 +574,6 @@ version_scheme = "no-guess-dev"
 
 [tool.uv]
 override-dependencies = [
-  # crawl4ai 0.8.6 declares lxml~=5.3, which caps lxml below 6.
-  # The locked lxml 5.4.0 has no cp314 Linux wheels.
-  # On Python 3.14 it source-builds against libxml2/libxslt, so use lxml 6.1+ there.
-  "lxml>=5.3,<6; python_version < '3.14'",
-  "lxml>=6.1.0; python_version >= '3.14'",
   # composio-core 0.7.21 declares Pillow<11,>=10.2.0.
   # The locked Pillow 10.4.0 has no cp314 Linux wheels.
   # On Python 3.14 it source-builds against zlib, so use Pillow 11.x there.
@@ -566,8 +608,10 @@ build-constraint-dependencies = [
 ]
 
 [tool.ruff]
-target-version = "py312"
+target-version = "py313"
 line-length = 120
+extend-exclude = ["tests/workflow_examples"]
+force-exclude = true
 [tool.ruff.lint]
 select = [
   "ALL",
@@ -603,18 +647,28 @@ ignore = [
   "UP042",    # `StrEnum` migration is outside the scope of hook maintenance
   "UP047",    # PEP 695 type-parameter migration is outside the scope of hook maintenance
 ]
+per-file-ignores.".claude/skills/*/scripts/*" = [
+  "INP001", # Part of an implicit namespace package (standalone skill scripts)
+]
 per-file-ignores.".github/scripts/*" = [
   "INP001", # Part of an implicit namespace package (standalone scripts)
 ]
 per-file-ignores."cluster/k8s/kind/*" = [
   "INP001", # Part of an implicit namespace package (namespace package for python -m invocation)
 ]
+per-file-ignores."tests/fixtures/*/*.py" = [
+  "INP001", # Example plugins under test fixtures load by path, never as packages
+]
 per-file-ignores."src/mindroom/tools/*" = [
   "PLC0415", # `import` should be at the top-level of a file"
+]
+per-file-ignores."src/mindroom/tools/__init__.py" = [
+  "F401", # the package imports each registration only so it registers its tool
 ]
 
 [tool.vulture]
 paths = [ "src/mindroom", "vulture_whitelist.py" ]
+ignore_decorators = [ "@register_tool_with_metadata" ]
 min_confidence = 60
 sort_by_size = true
 
@@ -625,7 +679,7 @@ python-version = "3.13"
 # arguments).
 [[tool.ty.overrides]]
 include = [ "tests/" ]
-rules = { call-non-callable = "ignore", invalid-argument-type = "ignore", invalid-assignment = "ignore", invalid-return-type = "ignore", no-matching-overload = "ignore", not-iterable = "ignore", not-subscriptable = "ignore", too-many-positional-arguments = "ignore", unresolved-attribute = "ignore", unsupported-operator = "ignore" }
+rules = { invalid-argument-type = "ignore", invalid-assignment = "ignore", invalid-explicit-return = "ignore", invalid-implicit-return = "ignore", missing-attribute = "ignore", missing-union-attribute = "ignore", no-matching-overload = "ignore", not-callable = "ignore", not-iterable = "ignore", not-subscriptable = "ignore", too-many-positional-arguments = "ignore", unsupported-operator = "ignore" }
 
 # The macOS accessibility backend imports pyobjc, declared
 # `sys_platform=='darwin'` and so genuinely absent everywhere else. Checking on
@@ -640,7 +694,7 @@ rules = { call-non-callable = "ignore", invalid-argument-type = "ignore", invali
 # directives deleted.
 [[tool.ty.overrides]]
 include = [ "src/mindroom/desktop/" ]
-rules = { unresolved-import = "ignore", unused-ignore-comment = "ignore" }
+rules = { import-not-found = "ignore", unused-ignore-comment = "ignore" }
 [tool.ty.rules]
 deprecated = "ignore"  # FastAPI on_event deprecation; refactor to lifespan separately
 [tool.ty.src]
@@ -663,10 +717,8 @@ addopts = """
     --durations 20
 """
 markers = [
-  "requires_matrix: marks tests that require a real Matrix server connection (deselect with '-m \"not requires_matrix\"')",
   "e2e: marks end-to-end tests",
   "slow: marks tests as slow",
-  "ledger_loads_from_disk: the test warms its own handled-turn ledger and needs the real database read",
 ]
 # A full run peaks at about 3 GiB of temporary files on /dev/shm, mostly worker virtualenvs.
 shm_min_free_gib = 4
@@ -678,3 +730,4 @@ exclude_lines = [
   "if TYPE_CHECKING",
   "if __name__ == .__main__.:",
 ]
+exclude_also = [ '^\s*\.\.\.$' ]

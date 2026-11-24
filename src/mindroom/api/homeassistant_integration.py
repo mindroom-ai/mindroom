@@ -1,14 +1,4 @@
-"""Home Assistant Integration for MindRoom.
-
-This module provides OAuth2 integration with Home Assistant, supporting:
-- Device control (lights, switches, climate, etc.)
-- State monitoring (sensors, binary sensors)
-- Scene activation
-- Service calls
-- Automation triggers
-
-Uses the official Home Assistant REST API.
-"""
+"""Dashboard routes that connect, check, and disconnect a Home Assistant instance."""
 
 from __future__ import annotations
 
@@ -21,7 +11,7 @@ from fastapi import APIRouter, HTTPException, Request
 from fastapi.responses import RedirectResponse
 from pydantic import BaseModel
 
-from mindroom.api.auth import verify_user
+from mindroom.api.auth import browser_origin
 from mindroom.api.credentials_oauth_flows import consume_pending_oauth_request, issue_pending_oauth_state
 from mindroom.api.credentials_target import (
     RequestCredentialsTarget,
@@ -30,16 +20,11 @@ from mindroom.api.credentials_target import (
     resolve_request_credentials_target,
     save_credentials_for_target,
 )
-from mindroom.api.integrations import get_dashboard_url
 from mindroom.homeassistant_requests import send_homeassistant_request
 from mindroom.homeassistant_url_validation import homeassistant_url_error_detail, validate_homeassistant_instance_url
 from mindroom.server_fetch_url import ServerFetchAsyncHTTPTransport, ServerFetchUrlError
 
 router = APIRouter(prefix="/api/homeassistant", tags=["homeassistant-integration"])
-
-# OAuth scopes for Home Assistant
-# Home Assistant doesn't use traditional OAuth scopes, but we request full API access
-_SCOPES: list[str] = []
 
 
 class HomeAssistantStatus(BaseModel):
@@ -64,7 +49,6 @@ class HomeAssistantConfig(BaseModel):
     """Home Assistant configuration."""
 
     instance_url: str
-    client_id: str | None = None
     long_lived_token: str | None = None
     allow_private_url: bool = False
 
@@ -77,11 +61,6 @@ def _normalize_instance_url(instance_url: str) -> str:
     return normalized
 
 
-def _get_stored_config(target: RequestCredentialsTarget) -> dict[str, Any] | None:
-    """Get stored Home Assistant configuration."""
-    return load_credentials_for_target("homeassistant", target)
-
-
 def _save_config(target: RequestCredentialsTarget, config: dict[str, Any]) -> None:
     """Save Home Assistant configuration."""
     config_to_save = dict(config)
@@ -90,11 +69,6 @@ def _save_config(target: RequestCredentialsTarget, config: dict[str, Any]) -> No
         config_to_save["instance_url"] = _normalize_instance_url(instance_url)
     config_to_save.setdefault("_source", "ui")
     save_credentials_for_target("homeassistant", config_to_save, target)
-
-
-def _private_url_allowed(config: dict[str, Any]) -> bool:
-    """Return whether stored Home Assistant credentials explicitly allow private URLs."""
-    return config.get("allow_private_url") is True
 
 
 def _validate_homeassistant_instance_url(instance_url: str, *, allow_private_url: bool) -> str:
@@ -122,7 +96,7 @@ def _homeassistant_http_client(*, allow_private_url: bool) -> httpx.AsyncClient:
 
 async def _test_connection(config: dict[str, Any], target: RequestCredentialsTarget) -> dict[str, Any]:
     """Test connection to Home Assistant, renewing an expired OAuth access token."""
-    allow_private_url = _private_url_allowed(config)
+    allow_private_url = config.get("allow_private_url") is True
     try:
         instance_url = _normalize_instance_url(config["instance_url"])
         fetch_url = _validate_homeassistant_instance_url(instance_url, allow_private_url=allow_private_url)
@@ -186,7 +160,7 @@ async def _test_connection(config: dict[str, Any], target: RequestCredentialsTar
 async def get_status(request: Request, agent_name: str | None = None) -> HomeAssistantStatus:
     """Check Home Assistant integration status."""
     target = resolve_request_credentials_target(request, agent_name=agent_name, service_names=("homeassistant",))
-    config = _get_stored_config(target)
+    config = load_credentials_for_target("homeassistant", target)
 
     if not config:
         return HomeAssistantStatus(
@@ -194,18 +168,16 @@ async def get_status(request: Request, agent_name: str | None = None) -> HomeAss
             has_credentials=False,
         )
 
+    instance_url = config.get("instance_url")
+    token = config.get("access_token") or config.get("long_lived_token")
+    if not instance_url or not token:
+        return HomeAssistantStatus(
+            connected=False,
+            has_credentials=True,
+            error="Missing instance URL or token",
+        )
+
     try:
-        # Test the connection
-        instance_url = config.get("instance_url")
-        token = config.get("access_token") or config.get("long_lived_token")
-
-        if not instance_url or not token:
-            return HomeAssistantStatus(
-                connected=False,
-                has_credentials=True,
-                error="Missing instance URL or token",
-            )
-
         info = await _test_connection(config, target)
 
         return HomeAssistantStatus(
@@ -244,33 +216,30 @@ async def connect_oauth(
             detail="Home Assistant instance URL is required",
         )
 
-    if not config.client_id:
-        raise HTTPException(
-            status_code=400,
-            detail="OAuth Client ID is required for OAuth flow",
-        )
-
     instance_url = _normalize_instance_url(config.instance_url)
 
     # Build OAuth authorization URL
     # Home Assistant OAuth2 flow: https://developers.home-assistant.io/docs/auth_api/
     resolve_request_credentials_target(request, agent_name=agent_name, service_names=("homeassistant",))
     fetch_url = _validate_homeassistant_instance_url(instance_url, allow_private_url=config.allow_private_url)
-    redirect_uri = f"{get_dashboard_url(request)}/api/homeassistant/callback"
+    # Home Assistant identifies a client by a URL whose scheme and host the redirect URI must share: MindRoom's origin.
+    client_id = browser_origin(request)
+    if client_id is None:
+        raise HTTPException(status_code=503, detail="MINDROOM_PUBLIC_URL is not a valid URL")
     state = issue_pending_oauth_state(
         request,
         "homeassistant",
         agent_name,
         payload={
             "instance_url": instance_url,
-            "client_id": config.client_id,
+            "client_id": client_id,
             "allow_private_url": "true" if config.allow_private_url else "false",
         },
     )
 
     auth_params = {
-        "client_id": config.client_id,
-        "redirect_uri": redirect_uri,
+        "client_id": client_id,
+        "redirect_uri": f"{client_id}/api/homeassistant/callback",
         "response_type": "code",
         "state": state,
     }
@@ -342,7 +311,6 @@ async def callback(request: Request) -> RedirectResponse:
     if not state:
         raise HTTPException(status_code=400, detail="No OAuth state received")
 
-    await verify_user(request, request.headers.get("authorization"), allow_public_paths=False)
     pending = consume_pending_oauth_request(request, "homeassistant", state)
     agent_name = pending.agent_name
     target = resolve_request_credentials_target(
@@ -353,9 +321,10 @@ async def callback(request: Request) -> RedirectResponse:
         execution_scope_override=pending.execution_scope_override,
     )
 
-    instance_url = (pending.payload or {}).get("instance_url")
-    client_id = (pending.payload or {}).get("client_id")
-    allow_private_url = (pending.payload or {}).get("allow_private_url") == "true"
+    payload = pending.payload or {}
+    instance_url = payload.get("instance_url")
+    client_id = payload.get("client_id")
+    allow_private_url = payload.get("allow_private_url") == "true"
 
     if not all([instance_url, client_id]) or not isinstance(instance_url, str):
         raise HTTPException(status_code=503, detail="Incomplete configuration")
@@ -396,7 +365,7 @@ async def callback(request: Request) -> RedirectResponse:
                 },
             )
 
-            return RedirectResponse(url=f"{get_dashboard_url(request)}/?homeassistant=connected")
+            return RedirectResponse(url="/?homeassistant=connected")
 
     except ServerFetchUrlError as e:
         raise _homeassistant_url_http_error(e, allow_private_url=allow_private_url) from e
@@ -416,119 +385,3 @@ async def disconnect(request: Request, agent_name: str | None = None) -> dict[st
         raise HTTPException(status_code=500, detail=f"Failed to disconnect: {e!s}") from e
     else:
         return {"status": "disconnected"}
-
-
-@router.get("/entities")
-async def get_entities(
-    request: Request,
-    domain: str | None = None,
-    agent_name: str | None = None,
-) -> list[dict[str, Any]]:
-    """Get Home Assistant entities."""
-    target = resolve_request_credentials_target(request, agent_name=agent_name, service_names=("homeassistant",))
-    config = _get_stored_config(target)
-    if not config:
-        raise HTTPException(status_code=401, detail="Not connected to Home Assistant")
-
-    instance_url = config.get("instance_url")
-    token = config.get("access_token") or config.get("long_lived_token")
-
-    if not instance_url or not token:
-        raise HTTPException(status_code=401, detail="Missing credentials")
-    instance_url = _normalize_instance_url(instance_url)
-    allow_private_url = _private_url_allowed(config)
-    fetch_url = _validate_homeassistant_instance_url(instance_url, allow_private_url=allow_private_url)
-
-    try:
-        async with _homeassistant_http_client(allow_private_url=allow_private_url) as client:
-            response = await send_homeassistant_request(
-                client,
-                fetch_url,
-                config,
-                "GET",
-                "/api/states",
-                save_config=partial(_save_config, target),
-            )
-
-            if response.status_code != 200:
-                raise HTTPException(
-                    status_code=response.status_code,
-                    detail=f"Failed to get entities: HTTP {response.status_code}",
-                )
-
-            entities = response.json()
-
-            # Filter by domain if specified
-            if domain:
-                entities = [e for e in entities if e["entity_id"].startswith(f"{domain}.")]
-
-            # Simplify the response
-            return [
-                {
-                    "entity_id": e["entity_id"],
-                    "state": e["state"],
-                    "attributes": e.get("attributes", {}),
-                    "last_changed": e.get("last_changed"),
-                }
-                for e in entities
-            ]
-
-    except ServerFetchUrlError as e:
-        raise _homeassistant_url_http_error(e, allow_private_url=allow_private_url) from e
-    except httpx.RequestError as e:
-        raise HTTPException(status_code=503, detail=f"Failed to get entities: {e!s}") from e
-
-
-@router.post("/service")
-async def call_service(
-    request: Request,
-    domain: str,
-    service: str,
-    entity_id: str | None = None,
-    data: dict[str, Any] | None = None,
-    agent_name: str | None = None,
-) -> dict[str, Any]:
-    """Call a Home Assistant service."""
-    target = resolve_request_credentials_target(request, agent_name=agent_name, service_names=("homeassistant",))
-    config = _get_stored_config(target)
-    if not config:
-        raise HTTPException(status_code=401, detail="Not connected to Home Assistant")
-
-    instance_url = config.get("instance_url")
-    token = config.get("access_token") or config.get("long_lived_token")
-
-    if not instance_url or not token:
-        raise HTTPException(status_code=401, detail="Missing credentials")
-    instance_url = _normalize_instance_url(instance_url)
-    allow_private_url = _private_url_allowed(config)
-    fetch_url = _validate_homeassistant_instance_url(instance_url, allow_private_url=allow_private_url)
-
-    # Build service data
-    service_data = data or {}
-    if entity_id:
-        service_data["entity_id"] = entity_id
-
-    try:
-        async with _homeassistant_http_client(allow_private_url=allow_private_url) as client:
-            response = await send_homeassistant_request(
-                client,
-                fetch_url,
-                config,
-                "POST",
-                f"/api/services/{domain}/{service}",
-                save_config=partial(_save_config, target),
-                json_data=service_data,
-            )
-
-            if response.status_code not in (200, 201):
-                raise HTTPException(
-                    status_code=response.status_code,
-                    detail=f"Failed to call service: HTTP {response.status_code}",
-                )
-
-            return {"success": True, "message": f"Service {domain}.{service} called successfully"}
-
-    except ServerFetchUrlError as e:
-        raise _homeassistant_url_http_error(e, allow_private_url=allow_private_url) from e
-    except httpx.RequestError as e:
-        raise HTTPException(status_code=503, detail=f"Failed to call service: {e!s}") from e

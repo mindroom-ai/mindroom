@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from mindroom.config.knowledge import KnowledgeBaseConfig
+from mindroom.config.resolution import memory_backend, memory_search
 from mindroom.memory_scope_ids import agent_scope_user_id
 from mindroom.runtime_resolution import resolve_agent_runtime
 
@@ -18,7 +19,8 @@ if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
-_CHUNK_SIZE = 5000
+# The most characters of one memory entry chunk; a longer entry is split into pieces.
+_CHUNK_SIZE = 1200
 _CHUNK_OVERLAP = 0
 _MEMORY_KNOWLEDGE_PREFIX = "file_memory"
 _FILE_MEMORY_DESCRIPTION = (
@@ -76,6 +78,8 @@ def resolve_file_memory_knowledge(
         chunk_overlap=_CHUNK_OVERLAP,
         include_extensions=[".md"],
         include_patterns=_memory_include_patterns(search_config),
+        exclude_patterns=search_config.exclude,
+        chunk_strategy="memory_entries",
     )
     return _FileMemoryKnowledgeResolution(
         base_id=base_id,
@@ -94,8 +98,8 @@ def resolve_agent_file_memory_knowledge(
     if agent_name not in config.agents:
         return None
 
-    entity = config.resolve_entity(agent_name)
-    if entity.memory_backend != "file" or entity.memory_search.mode != "semantic":
+    search_config = memory_search(config, agent_name)
+    if memory_backend(config, agent_name) != "file" or search_config.mode != "semantic":
         return None
 
     runtime = resolve_agent_runtime(
@@ -104,12 +108,12 @@ def resolve_agent_file_memory_knowledge(
         runtime_paths,
         execution_identity=execution_identity,
     )
-    if runtime.file_memory_root is None:
+    if runtime.workspace.file_memory_path is None:
         msg = f"File-memory agent '{agent_name}' did not resolve a file-memory root"
         raise ValueError(msg)
     return resolve_file_memory_knowledge(
         scope_user_id=agent_scope_user_id(agent_name),
-        root=runtime.file_memory_root,
+        root=runtime.workspace.file_memory_path,
         config=config,
-        search_config=entity.memory_search,
+        search_config=search_config,
     )

@@ -40,6 +40,16 @@ def test_table_after_heading() -> None:
     assert "<h2>" in html
 
 
+def test_quoted_table_renders_at_every_streamed_prefix() -> None:
+    """A streamed quoted table cut off on a bare quote marker renders instead of raising IndexError."""
+    quoted_table = "> | A | B |\n> | - | - |\n> | 1 | 2 |\n>\n> after"
+    for end in range(1, len(quoted_table) + 1):
+        assert markdown_to_html(quoted_table[:end]).startswith("<blockquote>")
+    html = markdown_to_html("> | A | B |\n> | - | - |\n> | 1 | 2 |\n>")
+    assert "<td>1</td>" in html
+    assert html.endswith("</table>\n</blockquote>\n")
+
+
 # --- nl2br replacement (breaks: True) ---
 
 
@@ -217,6 +227,31 @@ def test_unsupported_tags_escaped() -> None:
     assert "<tool>" not in html
 
 
+@pytest.mark.parametrize(
+    ("md", "html"),
+    [
+        ("Before <!-- <title --> **after**", "<p>Before &lt;!-- &lt;title --&gt; <strong>after</strong></p>\n"),
+        (
+            'See <img src="mxc://example.org/image" alt="<title excerpt"> then **bold**',
+            '<p>See <img src="mxc://example.org/image" alt="&lt;title excerpt"> then <strong>bold</strong></p>\n',
+        ),
+        (
+            """<p><img 1=2 src="mxc://example.org/image" alt="<title name='&amp;'>"></p>""",
+            '<p><img src="mxc://example.org/image" alt="&lt;title name=&#x27;&amp;&#x27;&gt;"></p>',
+        ),
+    ],
+    ids=["comment", "quoted-attribute", "attribute-markdown-it-rejects"],
+)
+def test_a_raw_text_tag_name_inside_other_html_is_not_a_tag(md: str, html: str) -> None:
+    """A ``<title`` inside a comment or a quoted attribute value is left to the sanitizer, as on main."""
+    assert markdown_to_html(md) == html
+
+
+def test_unterminated_processing_instructions_render_as_on_main() -> None:
+    """Many unterminated processing instructions in block HTML stay escaped text."""
+    assert markdown_to_html("<p>" + "<? note " * 4000 + "</p>") == "<p>" + "&lt;? note " * 4000 + "&lt;/p&gt;"
+
+
 def test_tag_followed_by_long_whitespace_renders_within_a_cpu_budget() -> None:
     """A line opening a tag and trailing off into whitespace classifies in linear time."""
     for line in ("<a" + " " * 1_000, "<a" + " " * 60_000, "<a" + " " * 60_000 + "x"):
@@ -364,10 +399,41 @@ def test_unsafe_raw_html_attributes_are_stripped() -> None:
     assert "<a>click</a>" in html
     assert 'href="javascript:alert(1)"' not in html
     assert "onclick=" not in html
-    assert "<img" in html
-    assert 'alt="safe"' in html
-    assert 'src="javascript:alert(1)"' not in html
+    assert "<img" not in html
+    assert "⚠️ Image not sent: safe (no uploaded file)" in html
+    assert "javascript:" not in html
     assert "onerror=" not in html
+
+
+@pytest.mark.parametrize(
+    ("markdown", "expected"),
+    [
+        ("[open](obsidian://open?vault=notes)", '<p><a href="obsidian://open?vault=notes">open</a></p>\n'),
+        (
+            "[open](readdlespark://bl=QTpqb2huQGV4YW1wbGUuY29tO0lEOjxhYmNAeC5jb20+)",
+            '<p><a href="readdlespark://bl=QTpqb2huQGV4YW1wbGUuY29tO0lEOjxhYmNAeC5jb20+">open</a></p>\n',
+        ),
+        ("[open](OBSIDIAN://open)", '<p><a href="OBSIDIAN://open">open</a></p>\n'),
+        ('<a href="&#111;bsidian://open">open</a>', '<p><a href="obsidian://open">open</a></p>\n'),
+        ('<a href=" readdlespark://bl=abc ">open</a>', '<p><a href="readdlespark://bl=abc">open</a></p>\n'),
+    ],
+)
+def test_app_links_keep_their_href(markdown: str, expected: str) -> None:
+    """Links to the apps MindRoom Chat opens by default stay clickable."""
+    assert markdown_to_html(markdown) == expected
+
+
+@pytest.mark.parametrize(
+    ("markdown", "expected"),
+    [
+        ("[open](someapp://x)", "<p><a>open</a></p>\n"),
+        ("![x](readdlespark://bl=abc)", "<p>⚠️ Image not sent: x (no uploaded file)</p>\n"),
+        ('<img src="obsidian://open" alt="x">', "⚠️ Image not sent: x (no uploaded file)"),
+    ],
+)
+def test_other_app_urls_are_dropped(markdown: str, expected: str) -> None:
+    """Unknown schemes lose their link, and an app-scheme image becomes a note."""
+    assert markdown_to_html(markdown) == expected
 
 
 def test_data_uri_attributes_are_stripped() -> None:
@@ -382,8 +448,8 @@ def test_malformed_ipv6_url_attribute_is_dropped_without_crashing() -> None:
     html = markdown_to_html('<a href="http://[">x</a>\n<img src="http://[" alt="safe">')
     assert "<a>x</a>" in html
     assert 'href="http://["' not in html
-    assert 'alt="safe"' in html
-    assert 'src="http://["' not in html
+    assert "⚠️ Image not sent: safe (no uploaded file)" in html
+    assert "<img" not in html
 
 
 @pytest.mark.parametrize(
@@ -502,3 +568,10 @@ def test_no_raw_markdown_leaks(md: str, forbidden_markers: tuple[str, ...], requ
     for marker in forbidden_markers:
         assert marker not in html
     assert required_html in html
+
+
+def test_mxc_image_source_is_preserved() -> None:
+    """Inline Matrix images survive markdown rendering and HTML sanitization."""
+    html = markdown_to_html("![cat](mxc://hs/abc)")
+    assert '<img src="mxc://hs/abc"' in html
+    assert 'alt="cat"' in html

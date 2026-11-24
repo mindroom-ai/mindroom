@@ -11,10 +11,13 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from mindroom.config.access import validate_concrete_matrix_user_ids
 from mindroom.constants import ROUTER_AGENT_NAME, primary_records_dir
 from mindroom.durable_write import write_json_file_durable
+from mindroom.file_locks import async_exclusive_file_lock
 from mindroom.tool_system.worker_routing import agent_state_root_path
 
 if TYPE_CHECKING:
+    from contextlib import AbstractAsyncContextManager
     from pathlib import Path
+    from typing import TextIO
 
     from mindroom.constants import RuntimePaths
 
@@ -26,6 +29,13 @@ class PersonalRoomAdoption(BaseModel):
 
     creator_user_id: str
     agent_user_id: str
+    # LEGACY_COMPAT: personal-room adoption records that name the router account.
+    # Legacy format: `adoption.router_user_id`, the router an operator attested as a member of an imported room.
+    # Last legacy release: every release before the router-free change ships, v2026.11.459 the newest when written,
+    #   writes it; replacement: unreleased, a personal room needs no owner account, so new records omit the field.
+    # Handling: the field still loads; a named ID must be the persisted owner account, which then stays a
+    #   permitted member and keeps the room at cleanup.
+    # Coverage: tests/test_personal_rooms.py::test_adoption_record_naming_router_still_loads
     router_user_id: str | None = None
     expected_history_visibility: Literal["invited", "joined", "shared"] = "invited"
     additional_user_ids: list[str] = Field(default_factory=list)
@@ -54,6 +64,8 @@ class PersonalRoomRecord(BaseModel):
     welcome_completed: bool = False
     welcome_device_id: str | None = None
     confirmation_content: dict[str, Any] | None = None
+    # The account that sends the confirmation; absent in older records, which the owner account sent.
+    confirmation_user_id: str | None = None
     confirmation_device_id: str | None = None
     confirmation_event_id: str | None = None
     avatar_done: bool = False
@@ -100,11 +112,49 @@ def read_personal_room(path: Path) -> PersonalRoomRecord | None:
     return record
 
 
+def personal_room_create_lock(path: Path) -> AbstractAsyncContextManager[TextIO]:
+    """Hold one record's room create until its room ID is recorded; room cleanup waits on this lock alone."""
+    return async_exclusive_file_lock(path.with_suffix(".create.lock"))
+
+
+# Each agent's records directory by storage root, and the room IDs of its records with the directory's mtime when read.
+_RECORDS_DIRECTORIES: dict[tuple[Path, str], Path] = {}
+_PERSONAL_ROOM_IDS: dict[Path, tuple[int, frozenset[str]]] = {}
+
+
 def write_personal_room(path: Path, record: PersonalRoomRecord) -> None:
     """Publish one lifecycle update with the existing durable-write primitive."""
     data = record.model_dump(mode="json")
     PersonalRoomRecord.model_validate(data)
     write_json_file_durable(path, data, strict_atomic_replace=True)
+    _PERSONAL_ROOM_IDS.pop(path.parent, None)
+
+
+def personal_room_ids(runtime_paths: RuntimePaths, agent_name: str) -> frozenset[str]:
+    """Return the rooms of one agent's personal-room records, read again only after a record changes.
+
+    Call-room checks ask on every call event. A damaged record leaves out only its own room; the lifecycle reports it.
+    """
+    key = (runtime_paths.storage_root, agent_name)
+    if (directory := _RECORDS_DIRECTORIES.get(key)) is None:
+        directory = _RECORDS_DIRECTORIES[key] = personal_room_record_path(runtime_paths, agent_name, "").parent
+    try:
+        version = directory.stat().st_mtime_ns
+    except FileNotFoundError:
+        return frozenset()
+    cached = _PERSONAL_ROOM_IDS.get(directory)
+    if cached is not None and cached[0] == version:
+        return cached[1]
+    rooms: set[str] = set()
+    for path in directory.glob("*.json"):
+        try:
+            record = read_personal_room(path)
+        except ValueError:
+            continue
+        if record is not None and record.room_id is not None:
+            rooms.add(record.room_id)
+    _PERSONAL_ROOM_IDS[directory] = (version, frozenset(rooms))
+    return frozenset(rooms)
 
 
 def _personal_room_records(runtime_paths: RuntimePaths, agent_name: str) -> list[PersonalRoomRecord]:
@@ -113,22 +163,32 @@ def _personal_room_records(runtime_paths: RuntimePaths, agent_name: str) -> list
     return [record for path in directory.glob("*.json") if (record := read_personal_room(path)) is not None]
 
 
+def _every_agents_personal_room_records(runtime_paths: RuntimePaths) -> list[PersonalRoomRecord]:
+    """Read the room lifecycle records of every agent."""
+    directory = primary_records_dir(
+        agent_state_root_path(runtime_paths.storage_root, ROUTER_AGENT_NAME),
+        runtime_paths,
+    ).parent
+    return [
+        record for path in directory.glob("*/personal_rooms/*.json") if (record := read_personal_room(path)) is not None
+    ]
+
+
 def retained_personal_rooms(runtime_paths: RuntimePaths, agent_name: str, *, user_id: str | None = None) -> set[str]:
     """Protect existing rooms even when onboarding has subsequently been disabled."""
     records = _personal_room_records(runtime_paths, agent_name)
     if agent_name == ROUTER_AGENT_NAME and user_id is not None:
-        directory = primary_records_dir(
-            agent_state_root_path(runtime_paths.storage_root, agent_name),
-            runtime_paths,
-        ).parent
         records.extend(
             record
-            for path in directory.glob("*/personal_rooms/*.json")
-            if (record := read_personal_room(path)) is not None
-            and record.adoption is not None
-            and record.adoption.router_user_id == user_id
+            for record in _every_agents_personal_room_records(runtime_paths)
+            if record.adoption is not None and record.adoption.router_user_id == user_id
         )
     return {record.room_id for record in records if record.room_id is not None}
+
+
+def is_personal_room(runtime_paths: RuntimePaths, room_id: str) -> bool:
+    """Return whether any agent's personal-room record names this room."""
+    return any(record.room_id == room_id for record in _every_agents_personal_room_records(runtime_paths))
 
 
 async def personal_room_cleanup_exclusions(
@@ -136,11 +196,18 @@ async def personal_room_cleanup_exclusions(
     runtime_paths: RuntimePaths,
     agent_name: str,
 ) -> set[str]:
-    """Conservatively preserve interrupted creates without adopting or joining aliases."""
+    """Wait out in-flight creates and conservatively preserve interrupted ones without adopting or joining aliases."""
     rooms = retained_personal_rooms(runtime_paths, agent_name, user_id=client.user_id)
     for record in _personal_room_records(runtime_paths, agent_name):
-        if record.room_id is not None:
-            rooms.add(record.room_id)
+        room_id = record.room_id
+        if room_id is None:
+            # A homeserver can make the creator a member before the new alias resolves,
+            # so wait for a create in flight to record its room.
+            path = personal_room_record_path(runtime_paths, agent_name, record.user_id)
+            async with personal_room_create_lock(path):
+                room_id = (read_personal_room(path) or record).room_id
+        if room_id is not None:
+            rooms.add(room_id)
             continue
         response = await client.room_resolve_alias(record.alias)
         if isinstance(response, nio.RoomResolveAliasResponse):

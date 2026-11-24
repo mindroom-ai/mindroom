@@ -1,6 +1,6 @@
 """Where a turn stops being the journal's work and becomes the outbox's.
 
-Contract 2 of the event-journal cutover moves that handoff off "the turn is
+The event-journal cutover moves that handoff off "the turn is
 terminal" and onto "the answer is durably owed to a room". The two are not the
 same moment and not the same fact: a turn can be terminal with nothing durable
 behind it, and an answer can be durable long before its turn ends.
@@ -34,14 +34,13 @@ from mindroom.event_journal import (
     EventJournalStore,
     EventKind,
 )
-from mindroom.event_journal.matrix_delivery import MatrixDeliveryWorker, TurnHandoff
-from mindroom.handled_turns import TurnRecord
+from mindroom.event_journal.matrix_delivery import MatrixDeliveryWorker
 from mindroom.journal_dispatch import JournalCallbacks, JournalDispatcher
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent
 from mindroom.matrix.journal_ingress import _inbound_event, _projected_event
 from mindroom.message_target import MessageTarget
 from mindroom.pending_event_worker import PendingEventWorker
-from mindroom.turn_record import canonicalize_turn_record
+from mindroom.turn_record import TurnRecord, canonicalize_turn_record
 from tests.conftest import CrashError, DiesAfterNextWriteCommit, ignore_delivered_projection
 from tests.journal_helpers import admit_dispatch_event
 from tests.journal_membership_helpers import admit_room_membership
@@ -155,12 +154,15 @@ async def deliver_answer(
         observe_delivered=ignore_delivered_projection,
         handoff=bot._delivery_gateway.deps.turn_handoff,
     )
+    # The producer names the turn it recorded, as a recoverable answer's request does.
+    turn = await bot._turn_store.get_turn_record(turn_id)
     return await delivery.deliver(
         delivery_id=turn_id,
         stage=stage,
         room_id=ROOM,
         thread_id=None,
         payload={"msgtype": "m.text", "body": body},
+        turn_key=None if turn is None else turn.turn_key,
     )
 
 
@@ -197,6 +199,8 @@ def _dispatcher(
             source_has_live_owner=lambda _event_id: owner_is_live,
             turn_has_live_claim=lambda _event_id: False,
             replies_ended=lambda _reply_ids: None,
+            on_runtime_source=AsyncMock(),
+            on_job_cancel=AsyncMock(),
         ),
         room_for_id=lambda room_id: nio.MatrixRoom(room_id, BOT),
     )
@@ -446,7 +450,7 @@ class TestWhatARestartOwesAfterTheHandoff:
 
 
 class TestTheJournalNoLongerAsksWhetherATurnFinished:
-    """The duplicate execution authority contract 2 exists to remove."""
+    """The duplicate execution authority the outbox-enqueue handoff exists to remove."""
 
     async def test_a_terminal_turn_does_not_retire_a_source_the_journal_still_owes(
         self,
@@ -477,7 +481,7 @@ class TestTheJournalNoLongerAsksWhetherATurnFinished:
         await dispatcher.drain_once()
         assert dispatched == ["$cause"]
 
-        await bot._turn_store.record_turn(TurnRecord.create(["$cause"], response_event_id="$response"))
+        await bot._turn_store.record_turn(TurnRecord.create(["$cause"], response_event_id="$response"), room_id=ROOM)
         await dispatcher.drain_once()
         dispatcher.start()
         try:
@@ -485,7 +489,7 @@ class TestTheJournalNoLongerAsksWhetherATurnFinished:
         finally:
             await dispatcher.stop()
 
-        assert bot._turn_store.is_handled("$cause")
+        assert await bot._turn_store.is_handled(ROOM, "$cause")
         assert dispatched == ["$cause", "$cause"], "the journal decided on the turn engine's behalf"
 
     async def test_the_handoff_stops_the_worker_holding_the_event_it_gave_away(
@@ -570,7 +574,10 @@ class TestTheHandoffIsOneCommit:
         await admit(journal(bot), *(text_event(event_id, ts=1_000 + index) for index, event_id in enumerate(batch)))
         await adopt(bot, batch)
         backend = DiesAfterNextWriteCommit(inner=bot._journal_store.backend)
-        crashing = EventJournalStore(backend=cast("Any", backend)).principal(bot._journal_principal_id)
+        crashing = EventJournalStore(
+            backend=cast("Any", backend),
+            approval_signals=bot._journal_store.approval_signals,
+        ).principal(bot._journal_principal_id)
         sends: list[str] = []
         model_runs = 0
 
@@ -626,13 +633,13 @@ class TestTheHandoffIsOneCommit:
             return f"$sent-{claimed.transaction_id}"
 
         await MatrixDeliveryWorker(
-            store=EventJournalStore(backend=cast("Any", backend)).principal(bot._journal_principal_id),
+            store=EventJournalStore(
+                backend=cast("Any", backend),
+                approval_signals=bot._journal_store.approval_signals,
+            ).principal(bot._journal_principal_id),
             send=send,
             observe_delivered=ignore_delivered_projection,
-            handoff=TurnHandoff(
-                sources_for_turn=handoff.sources_for_turn,
-                released=lambda event_ids: commits_when_released.append(backend.commits) or handoff.released(event_ids),
-            ),
+            handoff=lambda event_ids: commits_when_released.append(backend.commits) or handoff(event_ids),
         ).deliver(
             delivery_id="$cause",
             stage=DeliveryStage.FINAL,

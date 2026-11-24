@@ -6,12 +6,13 @@ import asyncio
 import fcntl
 import json
 import re
-from contextlib import asynccontextmanager, contextmanager
+from contextlib import asynccontextmanager, contextmanager, suppress
 from dataclasses import asdict, replace
 from typing import TYPE_CHECKING
 
 from mindroom.background_tasks import run_blocking_until_complete
-from mindroom.delegation.state import DelegationChild
+from mindroom.constants import subagent_sessions_dir
+from mindroom.delegation.state import TERMINAL_CHILD_STATUSES, DelegationChild
 from mindroom.delegation.storage import freeze_delegation_storage
 from mindroom.durable_write import create_directory_durable, write_json_file_durable
 from mindroom.file_locks import advisory_file_lock
@@ -26,7 +27,9 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 _UNAVAILABLE = "Subagent ID is not available in this conversation."
-_TERMINAL = frozenset({"completed", "failed", "cancelled", "denied"})
+SUBAGENT_BUSY = "Subagent is busy or awaiting approval. Finish its current turn before sending a follow-up."
+_SUBAGENT_ID_PATTERN = re.compile(r"[a-f0-9]{32}")
+SUBAGENT_PREFIX_PATTERN = re.compile(r"[a-f0-9]{8,31}")
 
 
 class SubagentSessionError(ValueError):
@@ -34,9 +37,9 @@ class SubagentSessionError(ValueError):
 
 
 def _path(subagent_id: str, paths: RuntimePaths) -> Path:
-    if not re.fullmatch(r"[a-f0-9]{32}", subagent_id):
+    if not _SUBAGENT_ID_PATTERN.fullmatch(subagent_id):
         raise SubagentSessionError(_UNAVAILABLE)
-    root = paths.storage_root / "subagent_sessions"
+    root = subagent_sessions_dir(paths)
     path = root / f"{subagent_id}.json"
     if (
         root.is_symlink()
@@ -64,6 +67,46 @@ def _read(path: Path, owner: ToolExecutionIdentity) -> DelegationChild:
     return DelegationChild.from_dict(payload["child"])
 
 
+async def resolve_subagent_id(
+    subagent_id: str,
+    *,
+    owner: ToolExecutionIdentity,
+    runtime_paths: RuntimePaths,
+    depth: int,
+) -> str:
+    """Resolve a full 32-hex subagent ID or a unique owned 8..31-hex prefix to the full ID."""
+    if _SUBAGENT_ID_PATTERN.fullmatch(subagent_id):
+        return subagent_id
+    if not SUBAGENT_PREFIX_PATTERN.fullmatch(subagent_id) or not owner.session_id:
+        raise SubagentSessionError(_UNAVAILABLE)
+
+    def resolve() -> str:
+        root = subagent_sessions_dir(runtime_paths)
+        if root.is_symlink():
+            msg = "Subagent storage must not use symlinks."
+            raise SubagentSessionError(msg)
+        matches: list[str] = []
+        for path in sorted(root.glob(f"{subagent_id}*.json")) if root.exists() else ():
+            if not _SUBAGENT_ID_PATTERN.fullmatch(candidate := path.stem):
+                continue
+            with suppress(SubagentSessionError, OSError, KeyError, TypeError, ValueError):
+                child = _read(_path(candidate, runtime_paths), owner)
+                if (
+                    child.subagent_id == candidate
+                    and child.caller_agent_name == owner.agent_name
+                    and child.depth == depth + 1
+                ):
+                    matches.append(candidate)
+        if len(matches) == 1:
+            return matches[0]
+        if len(matches) > 1:
+            msg = f'Subagent ID prefix "{subagent_id}" matches several subagents in this conversation: {", ".join(matches)}. Pass the full ID.'
+            raise SubagentSessionError(msg)
+        raise SubagentSessionError(_UNAVAILABLE)
+
+    return await asyncio.to_thread(resolve)
+
+
 async def load_subagent(
     subagent_id: str,
     *,
@@ -87,8 +130,6 @@ async def load_subagent(
 
 async def load_retained_subagent_turn(child: DelegationChild, runtime_paths: RuntimePaths) -> DelegationChild | None:
     """Read a trusted wait's latest attempt without crossing into a later follow-up."""
-    if child.subagent_id is None:
-        return None
     path = _path(child.subagent_id, runtime_paths)
 
     def read() -> DelegationChild | None:
@@ -104,7 +145,9 @@ async def load_retained_subagent_turn(child: DelegationChild, runtime_paths: Run
 def subagent_recovery_lock(subagent_id: str, runtime_paths: RuntimePaths) -> Iterator[bool]:
     """Recover only while no process is executing or claiming a turn on this handle."""
     path = _path(subagent_id, runtime_paths)
-    with path.with_suffix(".active.lock").open("a") as lock:
+    # A job stopped before its child first claimed liveness may recover a handle no turn has created yet.
+    create_directory_durable(path.parent, mode=0o700)
+    with path.with_suffix(".active.lock").open("a+") as lock:
         try:
             fcntl.flock(lock.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
@@ -119,12 +162,9 @@ def subagent_recovery_lock(subagent_id: str, runtime_paths: RuntimePaths) -> Ite
 @asynccontextmanager
 async def subagent_liveness(child: DelegationChild, runtime_paths: RuntimePaths) -> AsyncIterator[None]:
     """Hold an OS-released liveness claim from reservation through child settlement."""
-    if child.subagent_id is None:
-        yield
-        return
     path = _path(child.subagent_id, runtime_paths)
     create_directory_durable(path.parent, mode=0o700)
-    with path.with_suffix(".active.lock").open("a") as lock:
+    with path.with_suffix(".active.lock").open("a+") as lock:
         while True:
             try:
                 fcntl.flock(lock.fileno(), fcntl.LOCK_SH | fcntl.LOCK_NB)
@@ -144,8 +184,6 @@ async def reserve_subagent_turn(
     runtime_paths: RuntimePaths,
 ) -> DelegationChild | None:
     """Reserve a fresh turn or return the retained snapshot for exact-owner reentry."""
-    if child.subagent_id is None:
-        return None
     path = _path(child.subagent_id, runtime_paths)
 
     def reserve() -> DelegationChild | None:
@@ -155,9 +193,8 @@ async def reserve_subagent_turn(
                 previous = _read(path, owner)
                 if previous.delegation_id == child.delegation_id:
                     return previous
-                if previous.status not in _TERMINAL:
-                    msg = "Subagent is busy or awaiting approval. Finish its current turn before sending a follow-up."
-                    raise SubagentSessionError(msg)
+                if previous.status not in TERMINAL_CHILD_STATUSES:
+                    raise SubagentSessionError(SUBAGENT_BUSY)
                 if child.previous_delegation_id != previous.delegation_id:
                     msg = "Subagent changed since this follow-up was prepared; retry the follow-up."
                     raise SubagentSessionError(msg)
@@ -176,8 +213,6 @@ async def update_subagent_turn(child: DelegationChild, runtime_paths: RuntimePat
 
 def update_subagent_turn_sync(child: DelegationChild, runtime_paths: RuntimePaths) -> None:
     """Retain the exact attempt before execution; never overwrite a newer follow-up."""
-    if child.subagent_id is None:
-        return
     path = _path(child.subagent_id, runtime_paths)
     with advisory_file_lock(path.with_suffix(".lock")):
         if not path.exists():

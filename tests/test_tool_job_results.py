@@ -1,0 +1,288 @@
+"""A tool job result is one typed payload in one bounded, non-executable envelope."""
+
+from __future__ import annotations
+
+import io
+import json
+import math
+import os
+from dataclasses import asdict
+from datetime import UTC, datetime
+from decimal import Decimal
+from pathlib import Path
+from typing import TYPE_CHECKING
+
+import pytest
+
+from mindroom.llm.media import Audio, File, Image
+from mindroom.tool_jobs import results
+from mindroom.tool_jobs.results import (
+    ToolResultPayload,
+    _decode_result_payload,
+    encode_result_payload,
+    read_result_payload,
+)
+from mindroom.tool_system.tool_function import ToolValue
+from tests.tool_job_helpers import job_owner, start_job, tool_job_runtime
+
+if TYPE_CHECKING:
+    from mindroom.tool_jobs.runtime import BackgroundOutcome
+
+
+def _saved(payload: ToolResultPayload) -> ToolResultPayload:
+    return _decode_result_payload(json.loads(json.dumps(encode_result_payload(payload))))
+
+
+_LEGACY_PAYLOADS = Path(__file__).parent / "fixtures" / "tool_jobs" / "agno_executor_payloads.json"
+# A payload as releases through v2026.10.634 saved it, with its tool value tagged `ToolResult`.
+_TOOL_RESULT_TAGGED = Path(__file__).parent / "fixtures" / "tool_jobs" / "tool_result_tagged_payload.json"
+
+
+def test_payload_round_trips_every_field_with_exact_types() -> None:
+    """Rich values, structured values, state changes, and the error survive persistence unchanged."""
+    payload = ToolResultPayload(
+        value=[
+            ToolValue(
+                content="picture",
+                images=(Image(content=b"\x00\xff", metadata={"source": {"pages": [2, 3]}}),),
+                files=(File(url="https://f.test/a"),),
+            ),
+            {"structured_content": {"a": 1}, "pairs": [(1, "two"), ([], (3,))]},
+        ],
+        state_delta={"counter": {"before_present": True, "before": 1, "present": True, "value": 2}},
+        error="partial failure",
+    )
+
+    assert _saved(payload) == payload
+
+
+def test_a_payload_the_agno_executor_saved_decodes_to_its_text_and_media() -> None:
+    """A stream's saved event layout is dropped: the value already holds the text the model read, with its media."""
+    saved = json.loads(_LEGACY_PAYLOADS.read_text())["streamed"]
+
+    payload = _decode_result_payload(saved)
+
+    assert payload == ToolResultPayload(
+        value=ToolValue(content="streamed tail", images=(Image(id="image-1", content=b"\x00\xff"),)),
+        state_delta={"counter": {"before_present": True, "before": 1, "present": True, "value": 2}},
+    )
+
+
+def test_a_tool_value_is_saved_under_its_own_tag() -> None:
+    """A job's tool value is saved tagged ``ToolValue``, the name of the type it decodes to."""
+    encoded = encode_result_payload(ToolResultPayload(value=ToolValue(content="drawn")))
+
+    assert encoded["value"]["value"]["value"]["type"] == "ToolValue"
+
+
+def test_a_tool_value_saved_under_its_earlier_tag_decodes_as_before() -> None:
+    """A job saved with its tool value tagged ``ToolResult`` is consumed with the same text, media, and state."""
+    saved = json.loads(_TOOL_RESULT_TAGGED.read_text())
+
+    assert _decode_result_payload(saved) == ToolResultPayload(
+        value=ToolValue(
+            content="drawn",
+            images=(Image(id="image-1", content=b"\x89PNG", mime_type="image/png"),),
+            audios=(Audio(id="audio-1", url="https://example.org/a.mp3"),),
+            files=(File(id="file-1", content=b"a,b", mime_type="text/csv", filename="t.csv"),),
+        ),
+        state_delta={"counter": {"before_present": False, "present": True, "value": 1}},
+    )
+
+
+def test_a_legacy_control_payload_reads_as_its_error() -> None:
+    """A tool's raised run control was saved with its text as the error, which is what the call reports now."""
+    saved = json.loads(_LEGACY_PAYLOADS.read_text())["control"]
+
+    assert _decode_result_payload(saved) == ToolResultPayload(value=None, error="stop requested")
+
+
+def test_payload_keeps_other_values_as_the_text_the_model_reads() -> None:
+    """A value with no wire tag, such as a database driver's datetime, keeps its text, so the call's result stands."""
+    created = datetime(2026, 10, 10, 12, 30, tzinfo=UTC)
+    by_id = {1: "one", "1": "text one"}
+    payload = ToolResultPayload(value={"created": created, "amount": Decimal("1.50"), "ratio": math.nan, "ids": by_id})
+
+    assert _saved(payload).value == {"created": str(created), "amount": "1.50", "ratio": "nan", "ids": str(by_id)}
+
+
+@pytest.mark.parametrize("kind", ["dict", "list", "metadata", "medium"])
+def test_payload_refuses_a_value_inside_itself_and_says_so(kind: str) -> None:
+    """A value that holds itself, also through a medium's metadata, is refused with that reason, not a recursion limit."""
+    cycle: object
+    if kind == "dict":
+        mapping: dict[str, object] = {}
+        mapping["self"] = mapping
+        cycle = mapping
+    elif kind == "list":
+        items: list[object] = []
+        items.append(items)
+        cycle = items
+    else:
+        metadata: dict[str, object] = {}
+        image = Image(content=b"chart", metadata=metadata)
+        metadata["self"] = image if kind == "medium" else [metadata]
+        cycle = ToolValue(content="chart", images=(image,))
+
+    with pytest.raises(ValueError, match=r"^it refers to itself$"):
+        encode_result_payload(ToolResultPayload(value=[{"events": (cycle,)}]))
+
+
+def test_payload_keeps_a_medium_inside_media_metadata_as_its_fields(tmp_path: Path) -> None:
+    """A medium inside another one's metadata saves as its fields, so a file it names is neither read nor needed."""
+    thumbnail = Image(filepath=str(tmp_path / "gone.png"))
+    image = Image(content=b"chart", metadata={"thumbnail": thumbnail})
+
+    saved = _saved(ToolResultPayload(value=ToolValue(content="chart", images=(image,))))
+
+    assert saved.value.images[0].metadata == {"thumbnail": asdict(thumbnail)}
+
+
+def test_payload_saves_an_item_held_in_several_places_in_each() -> None:
+    """Only a value inside itself is refused: an item that several places hold saves in each of them."""
+    shared = {"tags": ["a"]}
+    payload = ToolResultPayload(value={"first": shared, "second": [shared, {"again": shared}]})
+
+    assert _saved(payload) == payload
+
+
+def test_payload_captures_a_local_artifact_before_cleanup(tmp_path: Path) -> None:
+    """Durable media bytes survive deletion of a toolkit-owned file."""
+    path = tmp_path / "image.png"
+    path.write_bytes(b"artifact bytes")
+    encoded = encode_result_payload(
+        ToolResultPayload(value=ToolValue(content="image", images=(Image(filepath=str(path)),))),
+    )
+    path.unlink()
+
+    image = _decode_result_payload(encoded).value.images[0]
+
+    assert image.content == b"artifact bytes"
+    assert image.filepath is None
+
+
+def test_payload_limit_counts_the_whole_encoding_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Value and state share one limit: the exact encoded size passes and one byte less fails."""
+    payload = ToolResultPayload(value=b"a" * 40, state_delta={"large": {"value": "é" * 40}})
+    size = len(json.dumps(encode_result_payload(payload)).encode("utf-8"))
+    monkeypatch.setattr(results, "_MAX_ENCODED_RESULT_BYTES", size)
+    encode_result_payload(payload)
+    monkeypatch.setattr(results, "_MAX_ENCODED_RESULT_BYTES", size - 1)
+
+    with pytest.raises(ValueError, match="encoded JSON limit"):
+        encode_result_payload(payload)
+
+
+def test_payload_rejects_an_oversized_artifact_without_reading_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A file whose base64 form cannot fit is rejected from its size before any read."""
+    monkeypatch.setattr(results, "_MAX_ENCODED_RESULT_BYTES", 400)
+    path = tmp_path / "artifact.bin"
+    path.write_bytes(b"x" * 301)
+    monkeypatch.setattr(os, "fdopen", lambda *_args, **_kwargs: pytest.fail("oversized artifact was read"))
+
+    with pytest.raises(ValueError, match="encoded JSON limit"):
+        encode_result_payload(ToolResultPayload(value=File(filepath=str(path))))
+
+
+def test_payload_artifacts_share_one_read_allowance(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Files that each fit alone cannot be read together: the second is rejected from its size unread."""
+    monkeypatch.setattr(results, "_MAX_ENCODED_RESULT_BYTES", 400)
+    first, second = tmp_path / "first.bin", tmp_path / "second.bin"
+    first.write_bytes(b"x" * 200)
+    second.write_bytes(b"y" * 200)
+    read: list[int] = []
+    real_fdopen = os.fdopen
+
+    def recording_fdopen(descriptor: int, *args: object, **kwargs: object) -> object:
+        read.append(os.fstat(descriptor).st_ino)
+        return real_fdopen(descriptor, *args, **kwargs)
+
+    monkeypatch.setattr(os, "fdopen", recording_fdopen)
+
+    with pytest.raises(ValueError, match="encoded JSON limit"):
+        encode_result_payload(ToolResultPayload(value=[File(filepath=str(first)), File(filepath=str(second))]))
+
+    assert read == [first.stat().st_ino]
+
+
+def test_payload_reads_a_growing_artifact_once_within_its_bound(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A file that grows after its size check is rejected after one bounded read."""
+    monkeypatch.setattr(results, "_MAX_ENCODED_RESULT_BYTES", 2048)
+    path = tmp_path / "artifact.bin"
+    path.write_bytes(b"x")
+    read_sizes: list[int] = []
+
+    class GrowingFile(io.BytesIO):
+        def read(self, size: int | None = -1, /) -> bytes:
+            effective_size = -1 if size is None else size
+            read_sizes.append(effective_size)
+            return b"x" * (4096 if effective_size < 0 else effective_size)
+
+    monkeypatch.setattr(os, "fdopen", lambda *_args, **_kwargs: GrowingFile())
+
+    with pytest.raises(ValueError, match="encoded JSON limit"):
+        encode_result_payload(ToolResultPayload(value=File(filepath=str(path))))
+
+    assert read_sizes == [3 * (2048 // 4) + 1]
+
+
+def test_payload_keeps_returned_bytes_without_reopening_their_path(tmp_path: Path) -> None:
+    """Worker code can replace a returned file, so bytes the tool returned stand and its path is never read."""
+    secret = tmp_path / "secret"
+    secret.write_bytes(b"primary secret")
+    path = tmp_path / "generated.txt"
+    path.symlink_to(secret)
+    encoded = encode_result_payload(ToolResultPayload(value=File(content=b"generated", filepath=str(path))))
+
+    restored = _decode_result_payload(encoded).value
+
+    assert (restored.content, restored.filepath) == (b"generated", None)
+
+
+@pytest.mark.parametrize("kind", ["link", "fifo"])
+def test_payload_reads_a_path_only_artifact_only_as_a_regular_file(tmp_path: Path, kind: str) -> None:
+    """A path-only artifact replaced by a link is refused, and a FIFO cannot stall encoding."""
+    path = tmp_path / "artifact.bin"
+    if kind == "link":
+        secret = tmp_path / "secret"
+        secret.write_bytes(b"primary secret")
+        path.symlink_to(secret)
+    else:
+        os.mkfifo(path)
+
+    with pytest.raises(OSError if kind == "link" else ValueError):
+        encode_result_payload(ToolResultPayload(value=File(filepath=str(path))))
+
+
+@pytest.mark.asyncio
+async def test_runtime_written_summary_reports_its_truncation(tmp_path: Path) -> None:
+    """A long message the runtime saved only as a summary says it was cut when read as the result."""
+    runtime = await tool_job_runtime(tmp_path)
+    message = "failure detail " * 100
+
+    async def operation() -> BackgroundOutcome:
+        raise RuntimeError(message)
+
+    try:
+        await start_job(
+            runtime,
+            "failed",
+            tool_name="tool",
+            depth=0,
+            adapter={},
+            owner=job_owner(),
+            operation=operation,
+        )
+        waited = await runtime.wait("failed", owner=job_owner(), depth=0)
+        await runtime.release_wait("failed", waited.claim)
+        assert (waited.job.status, waited.job.has_result_payload) == ("failed", False)
+        payload = await read_result_payload(runtime, waited.job)
+        assert payload.value == f"{message[:500]}\n{results._SUMMARY_TRUNCATED_NOTICE}"
+    finally:
+        await runtime.shutdown()

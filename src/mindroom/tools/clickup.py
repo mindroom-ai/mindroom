@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     config_fields=[
         ConfigField(
             name="api_key",
+            env=("CLICKUP_API_KEY",),
             label="API Key",
             type="password",
             required=True,
@@ -32,6 +33,7 @@ if TYPE_CHECKING:
         ),
         ConfigField(
             name="master_space_id",
+            env=("MASTER_SPACE_ID",),
             label="Master Space ID",
             type="text",
             required=True,
@@ -48,7 +50,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["requests"],
-    docs_url="https://docs.agno.com/tools/toolkits/others/clickup",
+    docs_url="https://docs.mindroom.chat/tools/project-management/#clickup",
     helper_text="Get your API key from [ClickUp Settings > Apps](https://app.clickup.com/settings/apps)",
     function_names=("create_task", "delete_task", "get_task", "list_lists", "list_spaces", "list_tasks", "update_task"),
 )

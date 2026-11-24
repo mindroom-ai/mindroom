@@ -18,7 +18,6 @@ from mindroom.tool_system.tool_calls import (
     record_tool_failure,
     record_tool_success,
 )
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import test_runtime_paths
 
 if TYPE_CHECKING:
@@ -39,18 +38,6 @@ def reset_tool_call_loggers() -> Iterator[None]:
     cleanup()
     yield
     cleanup()
-
-
-def _execution_identity() -> ToolExecutionIdentity:
-    return ToolExecutionIdentity(
-        channel="matrix",
-        agent_name="code",
-        requester_id="@user:localhost",
-        room_id="!room:localhost",
-        thread_id="$thread",
-        resolved_thread_id="$resolved-thread",
-        session_id="session-1",
-    )
 
 
 class _BadStr:
@@ -88,7 +75,7 @@ def test_build_tool_failure_record_redacts_nested_arguments_and_urls() -> None:
             "tokens": [{"refresh_token": "refresh-secret"}],
         },
         error=error,
-        duration_ms=12.345,
+        timing=ToolCallTiming(result_ready_ms=12.345),
         agent_name="code",
         channel="matrix",
         room_id="!room:localhost",
@@ -104,7 +91,7 @@ def test_build_tool_failure_record_redacts_nested_arguments_and_urls() -> None:
         "nested": {
             "api_key": "***redacted***",
             "items": [
-                {"url": "https://alice:***@example.com/private"},
+                {"url": "https://***@example.com/private"},
                 {"authorization": "***redacted***"},
             ],
         },
@@ -114,10 +101,35 @@ def test_build_tool_failure_record_redacts_nested_arguments_and_urls() -> None:
     assert "***redacted***" in record.error_message
 
 
+def test_a_failed_answer_s_record_holds_only_its_redacted_text() -> None:
+    """A call that answered with a failed outcome raised nothing, so its record has no error type or traceback."""
+    record = _build_tool_failure_record(
+        tool_name="run_scheduled_call",
+        arguments={"task_id": "task-1"},
+        error="❌ Scheduled call `task-1` failed: GET https://alice:secret@example.com/private returned 403",
+        timing=ToolCallTiming(result_ready_ms=1.0),
+        agent_name="code",
+        channel="matrix",
+        room_id="!room:localhost",
+        thread_id="$resolved-thread",
+        reply_to_event_id=None,
+        requester_id="@user:localhost",
+        session_id="session-1",
+        correlation_id="corr-1",
+    )
+
+    stored = record.as_dict()
+    assert stored["success"] is False
+    assert stored["error_message"] == (
+        "❌ Scheduled call `task-1` failed: GET https://***@example.com/private returned 403"
+    )
+    assert {"error_type", "traceback", "result"}.isdisjoint(stored)
+
+
 def test_sanitize_failure_text_redacts_url_credentials() -> None:
     """Credential-bearing HTTP(S) URLs should be masked in free-form error text."""
     sanitized = tool_calls.sanitize_failure_text("clone failed for https://alice:secret@example.com/private.git")
-    assert sanitized == "clone failed for https://alice:***@example.com/private.git"
+    assert sanitized == "clone failed for https://***@example.com/private.git"
 
 
 def test_sanitize_failure_text_redacts_signed_url_query_credentials() -> None:
@@ -131,7 +143,7 @@ def test_sanitize_failure_text_redacts_signed_url_query_credentials() -> None:
 
     assert sanitized == (
         "fetch failed for "
-        "https://alice:***@example.com/private?"
+        "https://***@example.com/private?"
         "sig=***redacted***&X-Amz-Signature=***redacted***&X-Amz-Credential=***redacted***"
         "&X-Amz-Security-Token=***redacted***&api_key=***redacted***&keep=1"
     )
@@ -227,7 +239,7 @@ def test_build_tool_failure_record_redacts_camel_case_and_prefixed_secret_keys(
         error=RuntimeError(
             f"{secret_key}=secret-value {prefixed_key}='prefixed-secret' payload={{'{secret_key}': 'secret-value'}}",
         ),
-        duration_ms=1.0,
+        timing=ToolCallTiming(result_ready_ms=1.0),
         agent_name="code",
         channel="matrix",
         room_id="!room:localhost",
@@ -304,7 +316,7 @@ def test_build_tool_failure_record_normalizes_non_finite_duration(duration_ms: f
         tool_name="demo",
         arguments={},
         error=RuntimeError("boom"),
-        duration_ms=duration_ms,
+        timing=ToolCallTiming(result_ready_ms=duration_ms),
         agent_name="code",
         channel="matrix",
         room_id="!room:localhost",
@@ -343,7 +355,7 @@ def test_build_tool_failure_record_handles_unrepresentable_exception_text(
         tool_name="explode",
         arguments={},
         error=error,
-        duration_ms=1.0,
+        timing=ToolCallTiming(result_ready_ms=1.0),
         agent_name="code",
         channel="matrix",
         room_id="!room:localhost",
@@ -374,7 +386,7 @@ def test_build_tool_failure_record_truncates_tracebacks(monkeypatch: pytest.Monk
             tool_name="explode",
             arguments={},
             error=error,
-            duration_ms=1.0,
+            timing=ToolCallTiming(result_ready_ms=1.0),
             agent_name="code",
             channel="matrix",
             room_id="!room:localhost",
@@ -404,7 +416,7 @@ def test_record_tool_failure_writes_jsonl_and_rotates(tmp_path: Path, monkeypatc
             tool_name="explode",
             arguments={"payload": "x" * 200, "api_key": "secret"},
             error=RuntimeError(f"boom-{index}"),
-            duration_ms=10.0 + index,
+            timing=ToolCallTiming(result_ready_ms=10.0 + index),
             agent_name="code",
             room_id="!room:localhost",
             thread_id="$resolved-thread",
@@ -412,7 +424,7 @@ def test_record_tool_failure_writes_jsonl_and_rotates(tmp_path: Path, monkeypatc
             requester_id="@user:localhost",
             session_id="session-1",
             correlation_id=f"corr-{index}",
-            execution_identity=_execution_identity(),
+            channel="matrix",
             runtime_paths=runtime_paths,
         )
 
@@ -438,7 +450,6 @@ def test_tool_call_records_include_success_and_failure_rows(tmp_path: Path) -> N
         tool_name="echo",
         arguments={"api_key": "secret"},
         result={"authorization": "Bearer hidden-token", "ok": True},
-        duration_ms=5.0,
         timing=ToolCallTiming(
             before_hooks_ms=1.111,
             tool_body_ms=3.333,
@@ -451,14 +462,14 @@ def test_tool_call_records_include_success_and_failure_rows(tmp_path: Path) -> N
         requester_id="@user:localhost",
         session_id="session-1",
         correlation_id="corr-shared",
-        execution_identity=_execution_identity(),
+        channel="matrix",
         runtime_paths=runtime_paths,
     )
     failure_record = record_tool_failure(
         tool_name="echo",
         arguments={"api_key": "secret"},
         error=RuntimeError("boom"),
-        duration_ms=7.0,
+        timing=ToolCallTiming(result_ready_ms=7.0),
         agent_name="code",
         room_id="!room:localhost",
         thread_id="$resolved-thread",
@@ -466,7 +477,7 @@ def test_tool_call_records_include_success_and_failure_rows(tmp_path: Path) -> N
         requester_id="@user:localhost",
         session_id="session-1",
         correlation_id="corr-shared",
-        execution_identity=_execution_identity(),
+        channel="matrix",
         runtime_paths=runtime_paths,
     )
 
@@ -494,89 +505,55 @@ def test_tool_call_records_include_success_and_failure_rows(tmp_path: Path) -> N
     assert records[1]["success"] is False
     assert records[1]["reply_to_event_id"] == "$reply"
     assert records[1]["error_type"] == "RuntimeError"
-    assert "timing" not in records[1]
+    assert records[1]["timing"] == {"result_ready_ms": 7.0}
+    assert (records[0]["duration_ms"], records[1]["duration_ms"]) == (6.67, 7.0)
     for key in ("agent_name", "channel", "room_id", "thread_id", "requester_id", "session_id", "correlation_id"):
         assert records[0][key] == records[1][key]
 
 
-def test_tool_call_records_omit_timing_without_measured_phases(tmp_path: Path) -> None:
-    """Tool-call rows should omit timing when no phases were measured."""
+def test_tool_call_records_omit_unmeasured_phases(tmp_path: Path) -> None:
+    """A call measured only to its result records its ready time, which is its duration, and no other phase."""
     runtime_paths = test_runtime_paths(tmp_path)
     log_path = tracking_dir(runtime_paths) / "tool_calls.jsonl"
 
-    none_success_record = record_tool_success(
+    success_record = record_tool_success(
         tool_name="echo",
         arguments={},
         result="ok",
-        duration_ms=1.0,
-        timing=None,
+        timing=ToolCallTiming(result_ready_ms=1.0),
         agent_name="code",
+        channel="matrix",
         room_id="!room:localhost",
         thread_id="$resolved-thread",
         reply_to_event_id="$reply-success",
         requester_id="@user:localhost",
         session_id="session-1",
-        correlation_id="corr-no-timing",
-        execution_identity=_execution_identity(),
+        correlation_id="corr-ready-only",
         runtime_paths=runtime_paths,
     )
-    none_failure_record = record_tool_failure(
+    failure_record = record_tool_failure(
         tool_name="explode",
         arguments={},
         error=RuntimeError("boom"),
-        duration_ms=2.0,
-        timing=None,
+        timing=ToolCallTiming(result_ready_ms=2.0),
         agent_name="code",
+        channel="matrix",
         room_id="!room:localhost",
         thread_id="$resolved-thread",
         reply_to_event_id="$reply-failure",
         requester_id="@user:localhost",
         session_id="session-1",
-        correlation_id="corr-no-timing",
-        execution_identity=_execution_identity(),
-        runtime_paths=runtime_paths,
-    )
-    empty_success_record = record_tool_success(
-        tool_name="empty-timing",
-        arguments={},
-        result="ok",
-        duration_ms=3.0,
-        timing=ToolCallTiming(),
-        agent_name="code",
-        room_id="!room:localhost",
-        thread_id="$resolved-thread",
-        reply_to_event_id="$reply-empty-success",
-        requester_id="@user:localhost",
-        session_id="session-1",
-        correlation_id="corr-empty-timing",
-        execution_identity=_execution_identity(),
-        runtime_paths=runtime_paths,
-    )
-    empty_failure_record = record_tool_failure(
-        tool_name="empty-timing-failure",
-        arguments={},
-        error=RuntimeError("boom"),
-        duration_ms=4.0,
-        timing=ToolCallTiming(),
-        agent_name="code",
-        room_id="!room:localhost",
-        thread_id="$resolved-thread",
-        reply_to_event_id="$reply-empty-failure",
-        requester_id="@user:localhost",
-        session_id="session-1",
-        correlation_id="corr-empty-timing",
-        execution_identity=_execution_identity(),
+        correlation_id="corr-ready-only",
         runtime_paths=runtime_paths,
     )
 
-    assert "timing" not in none_success_record.as_dict()
-    assert "timing" not in none_failure_record.as_dict()
-    assert "timing" not in empty_success_record.as_dict()
-    assert "timing" not in empty_failure_record.as_dict()
-
+    assert success_record.as_dict()["timing"] == {"result_ready_ms": 1.0}
+    assert failure_record.as_dict()["timing"] == {"result_ready_ms": 2.0}
     records = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines() if line]
-    assert len(records) == 4
-    assert all("timing" not in record for record in records)
+    assert [(record["duration_ms"], record["timing"]) for record in records] == [
+        (1.0, {"result_ready_ms": 1.0}),
+        (2.0, {"result_ready_ms": 2.0}),
+    ]
 
 
 def test_record_tool_failure_logs_secondary_write_errors(tmp_path: Path) -> None:
@@ -591,7 +568,7 @@ def test_record_tool_failure_logs_secondary_write_errors(tmp_path: Path) -> None
             tool_name="explode",
             arguments={"api_key": "secret"},
             error=RuntimeError("boom"),
-            duration_ms=10.0,
+            timing=ToolCallTiming(result_ready_ms=10.0),
             agent_name="code",
             room_id="!room:localhost",
             thread_id="$resolved-thread",
@@ -599,7 +576,7 @@ def test_record_tool_failure_logs_secondary_write_errors(tmp_path: Path) -> None
             requester_id="@user:localhost",
             session_id="session-1",
             correlation_id="corr-write-fail",
-            execution_identity=_execution_identity(),
+            channel="matrix",
             runtime_paths=runtime_paths,
         )
 
@@ -619,7 +596,7 @@ def test_record_tool_failure_skips_persistence_without_runtime_paths() -> None:
             tool_name="explode",
             arguments={"api_key": "secret"},
             error=RuntimeError("boom"),
-            duration_ms=10.0,
+            timing=ToolCallTiming(result_ready_ms=10.0),
             agent_name="code",
             room_id="!room:localhost",
             thread_id="$resolved-thread",
@@ -627,7 +604,7 @@ def test_record_tool_failure_skips_persistence_without_runtime_paths() -> None:
             requester_id="@user:localhost",
             session_id="session-1",
             correlation_id="corr-no-runtime",
-            execution_identity=_execution_identity(),
+            channel="matrix",
             runtime_paths=None,
         )
 
@@ -645,7 +622,7 @@ def test_build_tool_success_record_redacts_large_result_payloads() -> None:
             "authorization": "Bearer hidden-token",
             "payload": "x" * 5000,
         },
-        duration_ms=5.0,
+        timing=ToolCallTiming(result_ready_ms=5.0),
         agent_name="code",
         channel="matrix",
         room_id="!room:localhost",
@@ -674,7 +651,7 @@ def test_build_tool_failure_record_uses_redaction_markers_and_truncates_large_pa
             "items": [str(index) for index in range(30)],
         },
         error=RuntimeError("cookie=session-secret"),
-        duration_ms=5.0,
+        timing=ToolCallTiming(result_ready_ms=5.0),
         agent_name="code",
         channel="matrix",
         room_id="!room:localhost",

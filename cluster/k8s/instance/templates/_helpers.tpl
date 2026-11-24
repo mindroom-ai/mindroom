@@ -18,7 +18,7 @@
 {{- if $instanceSecrets.hash -}}
 {{- $instanceSecrets.hash -}}
 {{- else -}}
-{{- printf "%s|%s|%s|%s|%s|%s|%s|%s|%s|%s" (.openai_key | default "") (.anthropic_key | default "") (.openrouter_key | default "") (.google_key | default "") (.deepseek_key | default "") (.sandbox_proxy_token | default "") (.credentials_encryption_key | default "") (.matrixOidc.clientSecret | default "") (.matrixRegistrationSharedSecret | default .matrix_admin_password | default "") (.platformSsoSecret | default "") | sha256sum -}}
+{{- printf "%s|%s|%s|%s|%s|%s|%s|%s|%s|%s" (.openai_key | default "") (.anthropic_key | default "") (.openrouter_key | default "") (.google_key | default "") (.deepseek_key | default "") (.sandbox_proxy_token | default "") (.credentials_encryption_key | default "") (.matrixOidc.clientSecret | default "") (.matrixRegistrationSharedSecret | default "") (.platformSsoSecret | default "") | sha256sum -}}
 {{- end -}}
 {{- end }}
 
@@ -72,6 +72,9 @@ Its config path matches the primary's only so config-relative snapshot paths res
   - name: storage
     mountPath: {{ $values.storagePath }}/private_instances
     subPath: private_instances
+  - name: storage
+    mountPath: {{ $values.storagePath }}/shared_directories
+    subPath: shared_directories
   - name: sandbox-workspace
     mountPath: /app/workspace
   resources:

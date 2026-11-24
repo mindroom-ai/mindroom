@@ -2,25 +2,35 @@
 
 # Platform and optional runtime imports stay lazy so status works before desktop
 # extras are installed. The action dispatcher mirrors the finite wire action set.
-# ruff: noqa: ANN401, C901, EM101, PLC0415, PLR0911, PLR0912, PLR0915, SIM105, TRY003
+# ruff: noqa: C901, EM101, PLC0415, PLR0911, PLR0912, PLR0915, TRY003
 
 from __future__ import annotations
 
 import asyncio
-import json
+import os
 import shutil
 import stat
 import sys
+from contextlib import contextmanager
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, BinaryIO, Protocol, cast
+from typing import TYPE_CHECKING, BinaryIO, Protocol, cast
 
-from mindroom.desktop.command_journal import DesktopCommandJournalError, check_controller_binding
+from mindroom.desktop.command_journal import (
+    DesktopCommandJournalError,
+    check_controller_binding,
+    controller_journal_key,
+)
 from mindroom.desktop.local_dashboard import local_dashboard_configuration
+from mindroom.desktop.login_method import DesktopLoginMethod
 from mindroom.desktop.native_config import (
+    NativeBrowserConfig,
+    NativeCaptureConfig,
     NativeConfigError,
+    NativeControllerEntry,
     NativeDesktopConfig,
     load_native_config,
+    merge_single_controller_update,
     native_config_path,
     save_native_config,
 )
@@ -36,19 +46,25 @@ from mindroom.desktop.protocol import DesktopSetupDescriptor
 from mindroom.file_locks import async_exclusive_file_lock
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Iterator
 
     from mindroom.constants import RuntimePaths
+    from mindroom.desktop.bridge import DesktopBridge
+    from mindroom.desktop.bridge_session import DesktopBridgeSession, DesktopBridgeSessionDeps
+    from mindroom.desktop.playwright_mcp import PlaywrightMCPBrowserProvider
+    from mindroom.matrix.device_identity import PinnedMatrixDevice
 
 
+_CAPABILITIES = ("observe", "control", "browser", "files", "shell")
 _MAX_REGULAR_NATIVE_REQUESTS = 4
 _MAX_STOP_NATIVE_REQUESTS = 1
 _IMMEDIATE_NATIVE_ACTIONS = frozenset(
     {
         "status",
         "dashboard_configuration",
+        # Grant shares revoke's ordered lane, so a revoke sent after a grant always lands after it.
+        "grant_control",
         "revoke_control",
-        "reset_emergency_stop",
         "decide_shell",
         "grant_shell",
         "revoke_shell",
@@ -63,9 +79,14 @@ class _NativeBridgeRuntimeProtocol(Protocol):
     async def start(self) -> None: ...
     async def stop(self) -> None: ...
     def status(self) -> dict[str, object]: ...
-    def grant_control(self, duration_seconds: int) -> dict[str, object]: ...
-    def revoke_control(self) -> dict[str, object]: ...
-    def reset_emergency_stop(self) -> dict[str, object]: ...
+    def grant_control(
+        self,
+        duration_seconds: int | None = None,
+        *,
+        computer: bool = False,
+        controller_key: str | None = None,
+    ) -> dict[str, object]: ...
+    def revoke_control(self, *, controller_key: str | None = None) -> dict[str, object]: ...
     def decide_shell(
         self,
         command_id: str,
@@ -74,9 +95,18 @@ class _NativeBridgeRuntimeProtocol(Protocol):
         auto_approve_seconds: int,
         auto_approve_until_revoked: bool = False,
     ) -> dict[str, object]: ...
-    def grant_shell(self, duration_seconds: int | None = None, *, until_revoked: bool = False) -> dict[str, object]: ...
-    def revoke_shell(self) -> dict[str, object]: ...
+    def grant_shell(
+        self,
+        duration_seconds: int | None = None,
+        *,
+        until_revoked: bool = False,
+        controller_key: str | None = None,
+    ) -> dict[str, object]: ...
+    def revoke_shell(self, *, controller_key: str | None = None) -> dict[str, object]: ...
     def kill_shell_handle(self, handle: str) -> dict[str, object]: ...
+    async def verify_controller(self, entry: NativeControllerEntry) -> None: ...
+    def update_controllers(self, config: NativeDesktopConfig) -> dict[str, object]: ...
+    async def pair_controller(self, controller: PinnedMatrixDevice, *, code: str) -> dict[str, str]: ...
     async def connect_browser(self) -> None: ...
     async def disconnect_browser(self) -> None: ...
 
@@ -111,6 +141,7 @@ class NativeDesktopHost:
         self._lock = asyncio.Lock()
         self._runtime: _NativeBridgeRuntimeProtocol | None = None
         self._startup_task: asyncio.Task[None] | None = None
+        self._host_lock_fd: int | None = None
         self._helper_state = "running"
         self._last_error: dict[str, object] | None = None
         self._pairing_state = "unpaired"
@@ -128,9 +159,11 @@ class NativeDesktopHost:
         except NativeConfigError as exc:
             self._config = None
             self._config_error_revision = exc.revision
-            self._config_error = _error_payload(exc.code, str(exc)) if exc.code != "configuration_missing" else None
+            self._config_error = (
+                NativeProtocolError(exc.code, str(exc)).to_payload() if exc.code != "configuration_missing" else None
+            )
         else:
-            if self._config is not None and self._config.controller != config.controller:
+            if self._config is not None and _primary_controller(self._config) != _primary_controller(config):
                 self._pairing_state = "unpaired"
             self._config = config
             self._config_error = None
@@ -143,7 +176,7 @@ class NativeDesktopHost:
             "type": "hello",
             "protocol_version": NATIVE_PROTOCOL_VERSION,
             "helper_version": self._helper_version,
-            "capabilities": ["observe", "control", "browser", "files", "shell"],
+            "capabilities": list(_CAPABILITIES),
         }
 
     def status(self) -> dict[str, object]:
@@ -152,6 +185,9 @@ class NativeDesktopHost:
         config = self._config
         session_state, session_identity = _saved_session_identity(self._runtime_paths)
         runtime_status = self._runtime.status() if self._runtime is not None else {}
+        if isinstance(opened := runtime_status.get("session"), dict):
+            # A running bridge keeps the session it opened, whatever a later login saved.
+            session_state, session_identity = "ready", cast("dict[str, str]", opened)
         gui_mode = str(runtime_status.get("gui_mode", "stopped"))
         bridge_state = (
             gui_mode if gui_mode in {"stopped", "observe_only", "control", "stopping", "faulted"} else "faulted"
@@ -159,15 +195,44 @@ class NativeDesktopHost:
         if self._helper_state == "stopping":
             bridge_state = "stopping"
         browser_configured = bool(config and config.browser.enabled)
+        primary = _primary_controller(config)
+        raw_shell = runtime_status.get(
+            "shell",
+            {
+                "enabled": bool(config and config.shell.enabled),
+                "pending": None,
+                "auto_approve_remaining_seconds": 0,
+                "auto_approve_until_revoked": False,
+                "active_request_id": None,
+                "handles": [],
+            },
+        )
+        shell_status_payload = dict(cast("dict[str, object]", raw_shell))
+        shell_status_payload["ready"] = bool(shell_status_payload.get("enabled")) and bridge_state in {
+            "observe_only",
+            "control",
+        }
+        shell_status_payload["controllers"] = _shell_controllers_status(config, runtime_status)
         return {
             "config": {
                 "state": "ready" if config is not None else ("invalid" if self._config_error else "missing"),
                 "revision": config.revision if config is not None else self._config_error_revision,
                 "enabled": config.enabled if config is not None else False,
-                "controller_user_id": config.controller.user_id if config is not None else None,
-                "controller_device_id": config.controller.device_id if config is not None else None,
+                "controller_user_id": primary.user_id if primary is not None else None,
+                "controller_device_id": primary.device_id if primary is not None else None,
                 "allowed_requester_ids": list(config.allowed_requester_ids) if config is not None else [],
                 "allowed_agent_names": list(config.allowed_agent_names) if config is not None else [],
+                "controllers": [
+                    {
+                        "controller_key": controller_journal_key(entry.controller),
+                        "user_id": entry.controller.user_id,
+                        "device_id": entry.controller.device_id,
+                        "ed25519": entry.controller.ed25519,
+                        "allowed_requester_ids": list(entry.allowed_requester_ids),
+                        "allowed_agent_names": list(entry.allowed_agent_names),
+                    }
+                    for entry in (config.controllers if config is not None else ())
+                ],
                 "allowed_app_ids": list(config.allowed_app_ids) if config is not None else [],
                 "file_roots": [str(root) for root in config.files.roots] if config is not None else [],
                 "shell_enabled": config.shell.enabled if config is not None else False,
@@ -178,7 +243,7 @@ class NativeDesktopHost:
                 "homeserver": session_identity.get("homeserver"),
                 "user_id": session_identity.get("user_id"),
                 "device_id": session_identity.get("device_id"),
-                "controller_fingerprint": config.controller.ed25519 if config is not None else None,
+                "controller_fingerprint": primary.ed25519 if primary is not None else None,
             },
             "helper": {"state": self._helper_state, "version": self._helper_version},
             "bridge": {
@@ -190,20 +255,11 @@ class NativeDesktopHost:
                 "control_available": bool(runtime_status.get("control_available", False)),
                 "lease_remaining_seconds": runtime_status.get("lease_remaining_seconds", 0),
                 "lease_expires_at_ms": runtime_status.get("lease_expires_at_ms"),
-                "emergency_stop_latched": bool(runtime_status.get("emergency_stop_latched", False)),
+                "control_scope": runtime_status.get("control_scope", "saved_apps"),
+                "controllers": _authority_controllers_status(config, runtime_status),
             },
             "permissions": _permission_status(),
-            "shell": runtime_status.get(
-                "shell",
-                {
-                    "enabled": bool(config and config.shell.enabled),
-                    "pending": None,
-                    "auto_approve_remaining_seconds": 0,
-                    "auto_approve_until_revoked": False,
-                    "active_request_id": None,
-                    "handles": [],
-                },
-            ),
+            "shell": shell_status_payload,
             "browser": {
                 "configured": browser_configured,
                 "executable_path": str(config.browser.executable_path)
@@ -223,7 +279,7 @@ class NativeDesktopHost:
                 {"id": app_id, "name": app_id, "installed": None, "running": None}
                 for app_id in (config.allowed_app_ids if config is not None else ())
             ],
-            "capabilities": ["observe", "control", "browser", "files", "shell"],
+            "capabilities": list(_CAPABILITIES),
         }
 
     async def handle(self, request: NativeRequest) -> dict[str, object]:
@@ -235,7 +291,7 @@ class NativeDesktopHost:
 
     async def _handle_guarded(self, request: NativeRequest) -> dict[str, object]:
         try:
-            return await self._handle_locked(request)
+            return await self._dispatch(request)
         except NativeProtocolError:
             raise
         except NativeConfigError as exc:
@@ -243,21 +299,16 @@ class NativeDesktopHost:
         except ValueError as exc:
             raise NativeProtocolError("invalid_request", str(exc)) from exc
         except Exception as exc:
-            message = str(exc) or "Native desktop operation failed."
-            self._last_error = _error_payload(
+            error = NativeProtocolError(
                 "internal_error",
-                message,
+                str(exc) or "Native desktop operation failed.",
                 recovery="Retry the operation or restart the helper.",
                 retryable=True,
             )
-            raise NativeProtocolError(
-                "internal_error",
-                message,
-                recovery="Retry the operation or restart the helper.",
-                retryable=True,
-            ) from exc
+            self._last_error = error.to_payload()
+            raise error from exc
 
-    async def _handle_locked(self, request: NativeRequest) -> dict[str, object]:
+    async def _dispatch(self, request: NativeRequest) -> dict[str, object]:
         action, parameters = request.action, request.parameters
         self._refresh_config()
         if action == "status":
@@ -278,92 +329,195 @@ class NativeDesktopHost:
             _expect_keys(parameters, {"expected_revision", *edited_keys})
             if self._runtime is not None:
                 raise NativeProtocolError("busy", "Stop the desktop bridge before changing its configuration.")
-            if action == "set_allowed_apps":
-                if self._config is None:
-                    raise NativeProtocolError("invalid_request", "Complete desktop setup before saving app access.")
-                config = self._config.with_allowed_apps(parameters.get("allowed_app_ids"))
-            elif action == "set_local_access":
-                config = self._require_config().with_local_access(parameters.get("files"), parameters.get("shell"))
-            elif action == "set_browser_config":
-                current = self._require_config()
-                browser_raw = parameters.get("browser")
-                if not isinstance(browser_raw, dict):
-                    raise NativeProtocolError("invalid_request", "Native desktop browser must be a JSON object.")
-                browser = cast("dict[str, object]", browser_raw)
-                _expect_keys(browser, {"enabled", "executable_path", "user_data_dir"})
-                payload = current.to_payload()
-                payload["browser"] = {**browser, "timeout_seconds": current.browser.timeout_seconds}
-                config = NativeDesktopConfig.from_payload(payload, validate_browser_paths=False)
-                if (
-                    config.browser.executable_path != current.browser.executable_path
-                    and config.browser.executable_path is not None
-                    and not config.browser.executable_path.is_file()
-                ):
-                    raise NativeProtocolError(
-                        "invalid_request",
-                        "Native desktop browser executable_path must be a file.",
-                    )
-                if (
-                    config.browser.user_data_dir != current.browser.user_data_dir
-                    and config.browser.user_data_dir is not None
-                    and not config.browser.user_data_dir.is_dir()
-                ):
-                    raise NativeProtocolError(
-                        "invalid_request",
-                        "Native desktop browser user_data_dir must be a directory.",
-                    )
-            elif action == "finish_setup":
-                config = replace(self._require_config(), enabled=True)
-            else:
-                raw_config = parameters.get("config")
-                config = NativeDesktopConfig.from_payload(raw_config)
-                # Folder and shell authority carries over only for the same controller.
-                previous = self._config if self._config and self._config.controller == config.controller else None
-                if previous is not None and "files" not in cast("dict[str, object]", raw_config):
-                    config = replace(config, files=previous.files, shell=previous.shell)
+            with _host_lock_guard(self._runtime_paths.storage_root, held=False):
+                self._refresh_config()
+                if action == "set_allowed_apps":
+                    if self._config is None:
+                        raise NativeProtocolError("invalid_request", "Complete desktop setup before saving app access.")
+                    config = self._config.with_allowed_apps(parameters.get("allowed_app_ids"))
+                elif action == "set_local_access":
+                    config = self._require_config().with_local_access(parameters.get("files"), parameters.get("shell"))
+                elif action == "set_browser_config":
+                    current = self._require_config()
+                    browser_raw = parameters.get("browser")
+                    if not isinstance(browser_raw, dict):
+                        raise NativeProtocolError("invalid_request", "Native desktop browser must be a JSON object.")
+                    browser = cast("dict[str, object]", browser_raw)
+                    _expect_keys(browser, {"enabled", "executable_path", "user_data_dir"})
+                    payload = current.to_payload()
+                    payload["browser"] = {**browser, "timeout_seconds": current.browser.timeout_seconds}
+                    config = NativeDesktopConfig.from_payload(payload, validate_browser_paths=False)
+                    if (
+                        config.browser.executable_path != current.browser.executable_path
+                        and config.browser.executable_path is not None
+                        and not config.browser.executable_path.is_file()
+                    ):
+                        raise NativeProtocolError(
+                            "invalid_request",
+                            "Native desktop browser executable_path must be a file.",
+                        )
+                    if (
+                        config.browser.user_data_dir != current.browser.user_data_dir
+                        and config.browser.user_data_dir is not None
+                        and not config.browser.user_data_dir.is_dir()
+                    ):
+                        raise NativeProtocolError(
+                            "invalid_request",
+                            "Native desktop browser user_data_dir must be a directory.",
+                        )
+                elif action == "finish_setup":
+                    config = replace(self._require_config(), enabled=True)
                 else:
-                    config = config.with_canonical_new_roots(previous.files.roots if previous else ())
-            try:
-                check_controller_binding(
-                    self._runtime_paths.storage_root / "desktop_bridge" / "commands.sqlite3",
-                    json.dumps([config.controller.user_id, config.controller.device_id, config.controller.ed25519]),
-                )
-            except DesktopCommandJournalError as exc:
-                raise NativeProtocolError("invalid_request", str(exc)) from exc
-            expected_revision = _required_int(parameters, "expected_revision", minimum=0)
-            if action == "finish_setup":
-                from mindroom.desktop.session import desktop_session_path
+                    raw_config = parameters.get("config")
+                    config = NativeDesktopConfig.from_payload(raw_config)
+                    if isinstance(raw_config, dict) and raw_config.get("v") == 1:
+                        controllers, preserve_local_access = merge_single_controller_update(
+                            self._config,
+                            config.controllers[0],
+                            promote_to_primary=True,
+                        )
+                        config = replace(config, controllers=controllers)
+                    else:
+                        preserve_local_access = (
+                            self._config is not None
+                            and bool(config.controllers)
+                            and all(
+                                any(saved.controller == entry.controller for saved in self._config.controllers)
+                                for entry in config.controllers
+                            )
+                        )
+                    # Folder and shell authority carries over only when saving an already-pinned controller identity.
+                    previous = self._config if preserve_local_access else None
+                    if previous is not None and "files" not in cast("dict[str, object]", raw_config):
+                        config = replace(config, files=previous.files, shell=previous.shell)
+                    else:
+                        config = config.with_canonical_new_roots(previous.files.roots if previous else ())
+                for entry in config.controllers:
+                    try:
+                        check_controller_binding(self._runtime_paths.storage_root, entry.controller)
+                    except DesktopCommandJournalError as exc:
+                        raise NativeProtocolError("invalid_request", str(exc)) from exc
+                expected_revision = _required_int(parameters, "expected_revision", minimum=0)
+                if action == "finish_setup":
+                    from mindroom.desktop.session import desktop_session_path
 
-                expected_session_raw = parameters.get("expected_session")
-                if not isinstance(expected_session_raw, dict):
-                    raise NativeProtocolError("invalid_request", "Expected desktop session must be a JSON object.")
-                expected_session = cast("dict[str, object]", expected_session_raw)
-                _expect_keys(expected_session, {"homeserver", "user_id", "device_id"})
-                for key in expected_session:
-                    _required_text(expected_session, key)
-                async with async_exclusive_file_lock(desktop_session_path(self._runtime_paths).with_suffix(".lock")):
-                    session_state, session_identity = _saved_session_identity(self._runtime_paths)
-                    if session_state != "ready":
-                        raise NativeProtocolError(
-                            "session_missing",
-                            "Sign in to a saved Matrix session before finishing setup.",
+                    expected_session_raw = parameters.get("expected_session")
+                    if not isinstance(expected_session_raw, dict):
+                        raise NativeProtocolError("invalid_request", "Expected desktop session must be a JSON object.")
+                    expected_session = cast("dict[str, object]", expected_session_raw)
+                    _expect_keys(expected_session, {"homeserver", "user_id", "device_id"})
+                    for key in expected_session:
+                        _required_text(expected_session, key)
+                    async with async_exclusive_file_lock(
+                        desktop_session_path(self._runtime_paths).with_suffix(".lock"),
+                    ):
+                        session_state, session_identity = _saved_session_identity(self._runtime_paths)
+                        if session_state != "ready":
+                            raise NativeProtocolError(
+                                "session_missing",
+                                "Sign in to a saved Matrix session before finishing setup.",
+                            )
+                        if session_identity != expected_session:
+                            raise NativeProtocolError(
+                                "session_conflict",
+                                "The saved Matrix session changed; review setup and retry.",
+                            )
+                        self._config = save_native_config(
+                            native_config_path(self._runtime_paths.storage_root),
+                            config,
+                            expected_revision=expected_revision,
                         )
-                    if session_identity != expected_session:
-                        raise NativeProtocolError(
-                            "session_conflict",
-                            "The saved Matrix session changed; review setup and retry.",
-                        )
+                else:
                     self._config = save_native_config(
                         native_config_path(self._runtime_paths.storage_root),
                         config,
                         expected_revision=expected_revision,
                     )
-            else:
+            self._last_error = None
+            return {"status": self.status()}
+        if action == "upsert_controller":
+            _expect_keys(
+                parameters,
+                {"expected_revision", "controller", "allowed_requester_ids", "allowed_agent_names"},
+            )
+            with _host_lock_guard(self._runtime_paths.storage_root, held=self._host_lock_fd is not None):
+                self._refresh_config()
+                expected_revision = _required_int(parameters, "expected_revision", minimum=0)
+                entry = NativeControllerEntry.from_payload(
+                    {
+                        "controller": parameters.get("controller"),
+                        "allowed_requester_ids": parameters.get("allowed_requester_ids"),
+                        "allowed_agent_names": parameters.get("allowed_agent_names"),
+                    },
+                )
+                try:
+                    check_controller_binding(self._runtime_paths.storage_root, entry.controller)
+                except DesktopCommandJournalError as exc:
+                    raise NativeProtocolError("invalid_request", str(exc)) from exc
+                updated = (
+                    self._config.with_upserted_controller(entry)
+                    if self._config is not None
+                    else NativeDesktopConfig(
+                        revision=0,
+                        enabled=False,
+                        controllers=(entry,),
+                        allowed_app_ids=(),
+                        capture=NativeCaptureConfig(),
+                        browser=NativeBrowserConfig(),
+                    )
+                )
+                if expected_revision != updated.revision:
+                    raise NativeProtocolError(
+                        "revision_conflict",
+                        "Native desktop configuration changed; reload it and try again.",
+                    )
+                runtime = self._runtime
+                if runtime is not None:
+                    try:
+                        await runtime.verify_controller(entry)
+                    except NativeProtocolError:
+                        raise
+                    except Exception as exc:
+                        raise NativeProtocolError(
+                            "controller_verification_failed",
+                            str(exc) or "Could not verify the controller device on Matrix.",
+                            recovery="Check that the controller device exists and matches the pinned key, then retry.",
+                            retryable=True,
+                        ) from exc
                 self._config = save_native_config(
                     native_config_path(self._runtime_paths.storage_root),
-                    config,
+                    updated,
                     expected_revision=expected_revision,
                 )
+                if runtime is not None and self._runtime is runtime:
+                    runtime.update_controllers(self._config)
+            self._last_error = None
+            return {"status": self.status()}
+        if action == "remove_controller":
+            _expect_keys(parameters, {"expected_revision", "controller_key"})
+            with _host_lock_guard(self._runtime_paths.storage_root, held=self._host_lock_fd is not None):
+                self._refresh_config()
+                expected_revision = _required_int(parameters, "expected_revision", minimum=0)
+                controller_key = _required_text(parameters, "controller_key")
+                updated = self._require_config().with_removed_controller(controller_key)
+                self._config = save_native_config(
+                    native_config_path(self._runtime_paths.storage_root),
+                    updated,
+                    expected_revision=expected_revision,
+                )
+                runtime = self._runtime
+                if runtime is not None and self._runtime is runtime:
+                    if not self._config.controllers:
+                        self._helper_state = "stopping"
+                        try:
+                            await runtime.stop()
+                        finally:
+                            if self._runtime is runtime:
+                                self._runtime = None
+                                self._release_host_lock()
+                            self._helper_state = "running"
+                    else:
+                        runtime.update_controllers(self._config)
             self._last_error = None
             return {"status": self.status()}
         if action == "import_setup":
@@ -387,15 +541,40 @@ class NativeDesktopHost:
             self._pairing_state = "unpaired"
             return {**_redacted_identity(details), "status": self.status()}
         if action == "pair":
-            if self._runtime is not None:
-                raise NativeProtocolError("busy", "Stop the desktop bridge before pairing.")
+            config = self._require_config()
+            _allow_keys(parameters, {"code", "cloudflare_access", "expected_revision", "controller_key"})
+            code = _required_text(parameters, "code")
+            _optional_bool(parameters, "cloudflare_access")
+            controller_key = _optional_text(parameters, "controller_key")
+            if "expected_revision" in parameters:
+                expected_revision = _required_int(parameters, "expected_revision", minimum=0)
+                if expected_revision != config.revision:
+                    raise NativeProtocolError(
+                        "revision_conflict",
+                        "Desktop configuration changed; review setup and retry pairing.",
+                    )
+            target_entry = _resolve_pair_controller(config, controller_key)
+            runtime = self._runtime
             self._pairing_state = "claiming"
             try:
-                result = await (self._dependencies.pair or _pair)(
-                    self._runtime_paths,
-                    self._require_config(),
-                    parameters,
-                )
+                if self._dependencies.pair is not None:
+                    result = await self._dependencies.pair(self._runtime_paths, config, parameters)
+                elif runtime is not None:
+                    claimed = await runtime.pair_controller(target_entry.controller, code=code)
+                    result = _pair_result(
+                        code=code,
+                        verification=claimed["verification"],
+                        device_id=claimed["device_id"],
+                        device_ed25519=claimed["device_ed25519"],
+                        entry=target_entry,
+                    )
+                else:
+                    result = await _pair(
+                        self._runtime_paths,
+                        config,
+                        parameters,
+                        entry=target_entry,
+                    )
             except Exception as exc:
                 self._pairing_state = "invalid"
                 if isinstance(exc, NativeProtocolError):
@@ -413,31 +592,38 @@ class NativeDesktopHost:
             config = self._require_config()
             if not config.enabled:
                 raise NativeProtocolError("configuration_missing", "Enable Desktop Control before starting.")
-            if not (config.allowed_app_ids or config.files.roots or config.shell.enabled or config.browser.enabled):
+            if not config.has_local_capability:
                 raise NativeProtocolError(
                     "configuration_missing",
                     "Select and save at least one local capability before starting.",
                 )
             if self._runtime is not None:
                 raise NativeProtocolError("already_running", "The desktop bridge is already running.")
-            runtime = (self._dependencies.runtime_factory or NativeBridgeRuntime)(self._runtime_paths, config)
-            self._helper_state = "starting"
-            self._startup_task = asyncio.create_task(runtime.start())
+            self._host_lock_fd = _acquire_host_lock(self._runtime_paths.storage_root)
+            started = False
             try:
-                await self._startup_task
-            except asyncio.CancelledError as exc:
-                self._helper_state = "running"
-                raise NativeProtocolError("not_running", "Desktop bridge startup was stopped.") from exc
-            except Exception as exc:
-                from mindroom.desktop.startup_errors import desktop_startup_error
+                runtime = (self._dependencies.runtime_factory or NativeBridgeRuntime)(self._runtime_paths, config)
+                self._helper_state = "starting"
+                self._startup_task = asyncio.create_task(runtime.start())
+                try:
+                    await self._startup_task
+                except asyncio.CancelledError as exc:
+                    self._helper_state = "running"
+                    raise NativeProtocolError("not_running", "Desktop bridge startup was stopped.") from exc
+                except Exception as exc:
+                    from mindroom.desktop.startup_errors import desktop_startup_error
 
-                self._helper_state = "faulted"
-                raise desktop_startup_error(exc) from exc
+                    self._helper_state = "faulted"
+                    raise desktop_startup_error(exc) from exc
+                finally:
+                    self._startup_task = None
+                self._runtime = runtime
+                self._helper_state = "running"
+                started = True
+                return {"status": self.status()}
             finally:
-                self._startup_task = None
-            self._runtime = runtime
-            self._helper_state = "running"
-            return {"status": self.status()}
+                if not started:
+                    self._release_host_lock()
         if action == "stop":
             _expect_keys(parameters, set())
             if self._startup_task is not None:
@@ -452,28 +638,37 @@ class NativeDesktopHost:
                     return {"status": self.status()}
             runtime = self._require_runtime()
             self._helper_state = "stopping"
-            await runtime.stop()
-            if self._runtime is runtime:
-                self._runtime = None
-            self._helper_state = "running"
+            try:
+                await runtime.stop()
+            finally:
+                # A stopped runtime is retired even when a release failed; that failure is this stop's response.
+                if self._runtime is runtime:
+                    self._runtime = None
+                    self._release_host_lock()
+                self._helper_state = "running"
             return {"status": self.status()}
         if action == "grant_control":
-            _expect_keys(parameters, {"duration_seconds"})
+            # The whole computer is granted only until revoked; a duration grants only the saved apps.
+            grant_params, controller_key = _optional_controller_key(parameters)
+            computer = (
+                grant_params == {"until_revoked": True, "scope": "computer"} and grant_params["until_revoked"] is True
+            )
+            if not computer:
+                _expect_keys(grant_params, {"duration_seconds"})
             try:
                 self._require_runtime().grant_control(
-                    _required_int(parameters, "duration_seconds", minimum=60, maximum=3600),
+                    None if computer else _required_int(grant_params, "duration_seconds", minimum=60, maximum=3600),
+                    computer=computer,
+                    controller_key=controller_key,
                 )
             except ValueError as exc:
                 raise NativeProtocolError("control_denied", str(exc)) from exc
             return {"status": self.status()}
         if action == "revoke_control":
-            _expect_keys(parameters, set())
-            self._require_runtime().revoke_control()
-            return {"status": self.status()}
-        if action == "reset_emergency_stop":
-            _expect_keys(parameters, set())
+            revoke_params, controller_key = _optional_controller_key(parameters)
+            _expect_keys(revoke_params, set())
             try:
-                self._require_runtime().reset_emergency_stop()
+                self._require_runtime().revoke_control(controller_key=controller_key)
             except ValueError as exc:
                 raise NativeProtocolError("control_denied", str(exc)) from exc
             return {"status": self.status()}
@@ -510,10 +705,11 @@ class NativeDesktopHost:
                 raise NativeProtocolError("shell_denied", str(exc)) from exc
             return {"status": self.status()}
         if action == "grant_shell":
-            if set(parameters) == {"until_revoked"} and parameters["until_revoked"] is True:
+            grant_params, controller_key = _optional_controller_key(parameters)
+            if set(grant_params) == {"until_revoked"} and grant_params["until_revoked"] is True:
                 duration_seconds = None
-            elif set(parameters) == {"duration_seconds"}:
-                duration_seconds = _required_int(parameters, "duration_seconds", minimum=60, maximum=3600)
+            elif set(grant_params) == {"duration_seconds"}:
+                duration_seconds = _required_int(grant_params, "duration_seconds", minimum=60, maximum=3600)
             else:
                 raise NativeProtocolError(
                     "invalid_request",
@@ -521,15 +717,20 @@ class NativeDesktopHost:
                 )
             runtime = self._require_runtime()
             try:
-                runtime.grant_shell(duration_seconds, until_revoked=duration_seconds is None)
+                runtime.grant_shell(
+                    duration_seconds,
+                    until_revoked=duration_seconds is None,
+                    controller_key=controller_key,
+                )
             except ValueError as exc:
                 raise NativeProtocolError("shell_denied", str(exc)) from exc
             return {"status": self.status()}
         if action == "revoke_shell":
-            _expect_keys(parameters, set())
+            revoke_params, controller_key = _optional_controller_key(parameters)
+            _expect_keys(revoke_params, set())
             runtime = self._require_runtime()
             try:
-                runtime.revoke_shell()
+                runtime.revoke_shell(controller_key=controller_key)
             except ValueError as exc:
                 raise NativeProtocolError("shell_denied", str(exc)) from exc
             return {"status": self.status()}
@@ -594,10 +795,17 @@ class NativeDesktopHost:
         """Clear local authority and close owned runtime resources."""
         async with self._lock:
             self._helper_state = "stopping"
-            if self._runtime is not None:
-                runtime, self._runtime = self._runtime, None
-                await runtime.stop()
-            self._helper_state = "stopped"
+            try:
+                if self._runtime is not None:
+                    runtime, self._runtime = self._runtime, None
+                    await runtime.stop()
+            finally:
+                self._release_host_lock()
+                self._helper_state = "stopped"
+
+    def _release_host_lock(self) -> None:
+        lock_fd, self._host_lock_fd = self._host_lock_fd, None
+        _release_host_lock(lock_fd)
 
     def _require_config(self) -> NativeDesktopConfig:
         if self._config is None:
@@ -615,117 +823,103 @@ class NativeDesktopHost:
 
 
 class NativeBridgeRuntime:
-    """Own the existing Python bridge, transport, provider, browser, and session."""
+    """Run one Desktop bridge session for the app, recording a worker failure for its status."""
 
-    def __init__(self, runtime_paths: RuntimePaths, config: NativeDesktopConfig) -> None:
+    def __init__(
+        self,
+        runtime_paths: RuntimePaths,
+        config: NativeDesktopConfig,
+        deps: DesktopBridgeSessionDeps | None = None,
+    ) -> None:
         self._runtime_paths, self._config = runtime_paths, config
-        self._owner: Any = None
-        self._bridge: Any = None
-        self._browser: Any = None
-        self._registration: Any = None
-        self._tasks: set[asyncio.Task[None]] = set()
+        self._deps = deps
+        self._session: DesktopBridgeSession | None = None
+        self._opened_session: dict[str, str] = {}
         self._supervisor: asyncio.Task[None] | None = None
-        self._stopping = False
         self._fault: str | None = None
-        self._filesystem: Any = None
-        self._shell: Any = None
 
     async def start(self) -> None:
         """Open one observe-only bridge session."""
-        from nio import AuthenticatedToDeviceEvent
-
-        from mindroom.desktop.bridge_components import build_desktop_bridge
-        from mindroom.desktop.cloudflare_access import cloudflare_access_headers
-        from mindroom.desktop.session import (
-            desktop_session_path,
-            load_desktop_http_headers,
-            load_desktop_session,
-            open_desktop_client,
-            prepare_desktop_client,
-        )
-        from mindroom.desktop.transport import DesktopTransport
-        from mindroom.matrix.olm_to_device import resolve_pinned_device
+        from mindroom.desktop.bridge_session import start_desktop_bridge_session
+        from mindroom.desktop.session import desktop_http_headers, desktop_session_path, load_desktop_session
 
         session = load_desktop_session(desktop_session_path(self._runtime_paths))
-        headers_path = _optional_env_path(self._runtime_paths, "MINDROOM_DESKTOP_MATRIX_HTTP_HEADERS_FILE")
-        http_headers = load_desktop_http_headers(headers_path)
-        if session.cloudflare_access:
-            http_headers = cloudflare_access_headers(session.homeserver, http_headers)
-        try:
-            self._owner = await open_desktop_client(
-                session,
-                runtime_paths=self._runtime_paths,
-                http_headers=http_headers,
-            )
-            # The builder closes its own providers if it fails; afterwards this runtime owns them.
-            components = await build_desktop_bridge(
-                self._config,
-                client=self._owner.client,
-                runtime_paths=self._runtime_paths,
-            )
-            self._bridge, self._browser = components.bridge, components.browser
-            self._filesystem, self._shell = components.filesystem, components.shell
-            self._owner.client.add_to_device_callback(self._bridge.on_to_device_event, AuthenticatedToDeviceEvent)
-            self._registration = self._owner.client.to_device_callbacks[-1]
-            await resolve_pinned_device(self._owner.client, self._config.controller)
-            await prepare_desktop_client(self._owner.client)
-            transport = DesktopTransport(self._owner.source, wait_for_capacity=self._bridge.wait_for_capacity)
-            self._tasks = {
-                asyncio.create_task(self._bridge.run(), name="native_desktop_workers"),
-                asyncio.create_task(transport.run(), name="native_desktop_transport"),
-            }
-            self._supervisor = asyncio.create_task(self._supervise(), name="native_desktop_supervisor")
-        except BaseException:
-            await self._cleanup()
-            raise
+        http_headers = desktop_http_headers(
+            session.homeserver,
+            _matrix_http_headers_path(self._runtime_paths),
+            cloudflare_access=session.cloudflare_access,
+        )
+        self._opened_session = {
+            "homeserver": session.homeserver,
+            "user_id": session.user_id,
+            "device_id": session.device_id,
+        }
+        self._session = await start_desktop_bridge_session(
+            self._config,
+            session,
+            runtime_paths=self._runtime_paths,
+            http_headers=http_headers,
+            deps=self._deps,
+        )
+        self._supervisor = asyncio.create_task(self._supervise(self._session), name="native_desktop_supervisor")
 
     async def stop(self) -> None:
-        """Fence admission, drain the active action, and close resources."""
-        self._stopping = True
-        if self._bridge is not None:
-            await self._bridge.stop()
-        for task in self._tasks:
-            task.cancel()
-        await asyncio.gather(*self._tasks, return_exceptions=True)
-        if self._supervisor is not None and self._supervisor is not asyncio.current_task():
+        """Fence admission, drain the active action, and close resources; a requested stop is never a fault."""
+        # Cancelling the supervisor and starting the close both happen before the first yield, so admission is fenced at once.
+        if self._supervisor is not None:
             self._supervisor.cancel()
-            await asyncio.gather(self._supervisor, return_exceptions=True)
-        await self._cleanup()
+        try:
+            if self._session is not None:
+                # The close is shared, so this also waits for a close the cancelled supervisor began.
+                await self._session.close()
+        finally:
+            if self._supervisor is not None:
+                await asyncio.gather(self._supervisor, return_exceptions=True)
 
     def status(self) -> dict[str, object]:
-        """Return current local bridge authority."""
+        """Return current local bridge authority; a fault shows once the failed bridge has drained."""
+        session = self._live_session()
+        if session is not None:
+            browser = session.browser
+            return {
+                **session.bridge.local_status(),
+                "browser_connected": browser is not None and browser.running,
+                "session": self._opened_session,
+            }
         if self._fault is not None:
             return {
                 "gui_mode": "faulted",
                 "control_available": False,
                 "lease_remaining_seconds": 0,
                 "lease_expires_at_ms": None,
-                "emergency_stop_latched": False,
                 "active_action": None,
-                "last_error": _error_payload(
+                "last_error": NativeProtocolError(
                     "internal_error",
                     self._fault,
                     recovery="Stop and restart the desktop bridge.",
                     retryable=True,
-                ),
+                ).to_payload(),
                 "browser_connected": False,
             }
-        if self._bridge is None:
-            return {"gui_mode": "stopped", "control_available": False, "browser_connected": False}
-        browser_connected = self._browser is not None and self._browser.running
-        return {**self._bridge.local_status(), "browser_connected": browser_connected}
+        return {"gui_mode": "stopped", "control_available": False, "browser_connected": False}
 
-    def grant_control(self, duration_seconds: int) -> dict[str, object]:
-        """Grant a bounded local control lease."""
-        return self._required_bridge().grant_local_control(duration_seconds)
+    def grant_control(
+        self,
+        duration_seconds: int | None = None,
+        *,
+        computer: bool = False,
+        controller_key: str | None = None,
+    ) -> dict[str, object]:
+        """Grant a bounded lease over the saved apps, or control of the whole computer until revoked or stopped."""
+        return self._required_bridge().grant_local_control(
+            duration_seconds,
+            computer=computer,
+            controller_key=controller_key,
+        )
 
-    def revoke_control(self) -> dict[str, object]:
+    def revoke_control(self, *, controller_key: str | None = None) -> dict[str, object]:
         """Revoke new local control actions."""
-        return self._required_bridge().revoke_local_control()
-
-    def reset_emergency_stop(self) -> dict[str, object]:
-        """Reset the local emergency latch while idle."""
-        return self._required_bridge().reset_local_emergency_stop()
+        return self._required_bridge().revoke_local_control(controller_key=controller_key)
 
     def decide_shell(
         self,
@@ -743,101 +937,89 @@ class NativeBridgeRuntime:
             auto_approve_until_revoked=auto_approve_until_revoked,
         )
 
-    def grant_shell(self, duration_seconds: int | None = None, *, until_revoked: bool = False) -> dict[str, object]:
+    def grant_shell(
+        self,
+        duration_seconds: int | None = None,
+        *,
+        until_revoked: bool = False,
+        controller_key: str | None = None,
+    ) -> dict[str, object]:
         """Enable local auto-approval for a bounded duration or until revoked or stopped."""
-        return self._required_bridge().grant_local_shell(duration_seconds, until_revoked=until_revoked)
+        return self._required_bridge().grant_local_shell(
+            duration_seconds,
+            until_revoked=until_revoked,
+            controller_key=controller_key,
+        )
 
-    def revoke_shell(self) -> dict[str, object]:
-        """Revoke local shell authority and kill every handle; an active command stops promptly."""
-        return self._required_bridge().revoke_local_shell()
+    def revoke_shell(self, *, controller_key: str | None = None) -> dict[str, object]:
+        """Revoke local shell authority and kill handles for one or all controllers."""
+        return self._required_bridge().revoke_local_shell(controller_key=controller_key)
 
     def kill_shell_handle(self, handle: str) -> dict[str, object]:
-        """Kill one handle from any caller; its owner's next check reports it killed."""
+        """Kill one handle from any caller; its owner's check reports it killed."""
         return self._required_bridge().kill_local_shell_handle(handle)
+
+    async def verify_controller(self, entry: NativeControllerEntry) -> None:
+        """Verify one pinned controller device on this running Matrix client."""
+        await self._required_session().verify_controller(entry.controller)
+
+    def update_controllers(self, config: NativeDesktopConfig) -> dict[str, object]:
+        """Hot-reload live bridge controllers from saved config without dropping handles."""
+        session = self._required_session()
+        self._config = config
+        return session.update_controllers(config)
+
+    async def pair_controller(self, controller: PinnedMatrixDevice, *, code: str) -> dict[str, str]:
+        """Claim one pairing against a pinned controller using this live bridge's Matrix client."""
+        from mindroom.desktop.pairing_client import send_desktop_pairing_claim_on_client
+        from mindroom.desktop.session import client_ed25519_fingerprint
+
+        client = self._required_bridge().client
+        verification = await send_desktop_pairing_claim_on_client(client, controller, code=code)
+        return {
+            "verification": verification,
+            "device_id": self._opened_session.get("device_id") or str(client.device_id or ""),
+            "device_ed25519": client_ed25519_fingerprint(client),
+        }
 
     async def connect_browser(self) -> None:
         """Connect the configured installed-profile extension."""
-        if self._browser is None:
-            raise ValueError("Browser integration is not configured.")
-        await self._browser.execute("start", {})
+        await self._required_browser().execute("start", {})
 
     async def disconnect_browser(self) -> None:
         """Disconnect the installed-profile extension without stopping Matrix."""
-        if self._browser is None:
-            raise ValueError("Browser integration is not configured.")
-        await self._browser.execute("stop", {})
+        await self._required_browser().execute("stop", {})
 
-    def _required_bridge(self) -> Any:
-        if self._bridge is None:
+    def _live_session(self) -> DesktopBridgeSession | None:
+        return self._session if self._session is not None and self._session.live else None
+
+    def _required_session(self) -> DesktopBridgeSession:
+        session = self._live_session()
+        if session is None:
             raise ValueError("The desktop bridge is not running.")
-        return self._bridge
+        return session
 
-    async def _supervise(self) -> None:
-        assert self._bridge is not None
-        failure = await supervise_native_tasks(self._tasks, self._bridge.stop)
-        if not self._stopping:
-            self._fault = str(failure)
-            await self._cleanup()
+    def _required_bridge(self) -> DesktopBridge:
+        return self._required_session().bridge
 
-    async def _cleanup(self) -> None:
-        self._tasks.clear()
-        if self._registration is not None and self._owner is not None:
-            try:
-                self._owner.client.to_device_callbacks.remove(self._registration)
-            except ValueError:
-                pass
-        self._registration = None
-        if self._shell is not None:
-            await self._shell.close()
-        self._shell = None
-        if self._bridge is not None:
-            self._bridge.close()
-        self._bridge = None
-        if self._filesystem is not None:
-            self._filesystem.close()
-        self._filesystem = None
-        if self._browser is not None:
-            await self._browser.close()
-        self._browser = None
-        if self._owner is not None:
-            await self._owner.close()
-        self._owner = None
-        if self._supervisor is asyncio.current_task():
-            self._supervisor = None
+    def _required_browser(self) -> PlaywrightMCPBrowserProvider:
+        session = self._live_session()
+        if session is None or session.browser is None:
+            raise ValueError("Browser integration is not configured.")
+        return session.browser
 
+    async def _supervise(self, session: DesktopBridgeSession) -> None:
+        from mindroom.desktop.bridge_session import first_worker_exit
 
-async def supervise_native_tasks(
-    tasks: set[asyncio.Task[None]],
-    fence: Callable[[], Awaitable[None]],
-) -> BaseException:
-    """Fence the bridge on first worker exit, then cancel and drain peers."""
-    done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-    failure: BaseException | None = None
-    for task in done:
-        try:
-            await task
-        except asyncio.CancelledError:
-            raise
-        except BaseException as exc:
-            failure = exc
-            break
-    if failure is None:
-        failure = RuntimeError("A native desktop worker stopped unexpectedly.")
-    await fence()
-    for task in tasks:
-        if task not in done:
-            task.cancel()
-    await asyncio.gather(*tasks, return_exceptions=True)
-    return failure
+        self._fault = str(await first_worker_exit(session.workers))
+        await session.close()
 
 
 async def _login(runtime_paths: RuntimePaths, parameters: dict[str, object]) -> dict[str, object]:
-    from mindroom.desktop.cloudflare_access import cloudflare_access_headers
-    from mindroom.desktop.login_method import DesktopLoginMethod
     from mindroom.desktop.session import (
         client_ed25519_fingerprint,
+        desktop_http_headers,
         desktop_session_path,
-        load_desktop_http_headers,
         login_desktop_client,
         resolve_desktop_login_method,
         save_desktop_session,
@@ -876,11 +1058,11 @@ async def _login(runtime_paths: RuntimePaths, parameters: dict[str, object]) -> 
                 "The saved Matrix session path is not a regular file.",
                 recovery="Move the directory, link, or special file aside before signing in again.",
             )
-    headers_path = _optional_env_path(runtime_paths, "MINDROOM_DESKTOP_MATRIX_HTTP_HEADERS_FILE")
-    http_headers = load_desktop_http_headers(headers_path)
-    if cloudflare_access:
-        http_headers = cloudflare_access_headers(homeserver, http_headers)
-        await http_headers.prepare()
+    http_headers = desktop_http_headers(
+        homeserver,
+        _matrix_http_headers_path(runtime_paths),
+        cloudflare_access=cloudflare_access,
+    )
     method = await resolve_desktop_login_method(
         requested,
         homeserver=homeserver,
@@ -927,34 +1109,28 @@ async def _pair(
     runtime_paths: RuntimePaths,
     config: NativeDesktopConfig,
     parameters: dict[str, object],
+    *,
+    entry: NativeControllerEntry,
 ) -> dict[str, object]:
-    from mindroom.desktop.cloudflare_access import cloudflare_access_headers
     from mindroom.desktop.pairing_client import send_desktop_pairing_claim
     from mindroom.desktop.session import (
+        client_ed25519_fingerprint,
+        desktop_http_headers,
         desktop_session_path,
-        load_desktop_http_headers,
         load_desktop_session,
         open_desktop_client,
         save_desktop_session,
     )
 
-    _allow_keys(parameters, {"code", "cloudflare_access", "expected_revision"})
     code = _required_text(parameters, "code")
     cloudflare_access = _optional_bool(parameters, "cloudflare_access")
-    if "expected_revision" in parameters:
-        expected_revision = _required_int(parameters, "expected_revision", minimum=0)
-        if expected_revision != config.revision:
-            raise NativeProtocolError(
-                "revision_conflict",
-                "Desktop configuration changed; review setup and retry pairing.",
-            )
     session_path = desktop_session_path(runtime_paths)
     session = load_desktop_session(session_path)
-    headers_path = _optional_env_path(runtime_paths, "MINDROOM_DESKTOP_MATRIX_HTTP_HEADERS_FILE")
-    http_headers = load_desktop_http_headers(headers_path)
-    if cloudflare_access or session.cloudflare_access:
-        http_headers = cloudflare_access_headers(session.homeserver, http_headers)
-        await http_headers.prepare()
+    http_headers = desktop_http_headers(
+        session.homeserver,
+        _matrix_http_headers_path(runtime_paths),
+        cloudflare_access=cloudflare_access or session.cloudflare_access,
+    )
     owner = await open_desktop_client(session, runtime_paths=runtime_paths, http_headers=http_headers)
     try:
         if "expected_revision" in parameters:
@@ -970,10 +1146,17 @@ async def _pair(
                     "revision_conflict",
                     "Desktop configuration changed; review setup and retry pairing.",
                 )
-        verification = await send_desktop_pairing_claim(owner, config.controller, code=code)
+        verification = await send_desktop_pairing_claim(owner, entry.controller, code=code)
+        device_ed25519 = client_ed25519_fingerprint(owner.client)
         if cloudflare_access and not session.cloudflare_access:
             save_desktop_session(session_path, replace(session, cloudflare_access=True), expected_session=session)
-        return {"verification": verification, "confirmation_command": f"!desktop confirm {code} {verification}"}
+        return _pair_result(
+            code=code,
+            verification=verification,
+            device_id=session.device_id,
+            device_ed25519=device_ed25519,
+            entry=entry,
+        )
     finally:
         await owner.close()
 
@@ -1002,7 +1185,7 @@ async def serve_native_stream(
             return
         last_status = rendered
         sequence += 1
-        await emit({"v": 1, "type": "status", "sequence": sequence, "status": status})
+        await emit({"v": NATIVE_PROTOCOL_VERSION, "type": "status", "sequence": sequence, "status": status})
 
     async def watch_status() -> None:
         while True:
@@ -1015,42 +1198,40 @@ async def serve_native_stream(
     regular_tasks: set[asyncio.Task[None]] = set()
     stop_tasks: set[asyncio.Task[None]] = set()
 
+    async def respond_error(request_id: str | None, error: NativeProtocolError) -> None:
+        await emit(
+            {
+                "v": NATIVE_PROTOCOL_VERSION,
+                "type": "response",
+                "request_id": request_id,
+                "ok": False,
+                "error": error.to_payload(),
+            },
+        )
+
     async def answer(request: NativeRequest) -> None:
         try:
             result = await host.handle(request)
-            await emit({"v": 1, "type": "response", "request_id": request.request_id, "ok": True, "result": result})
+            await emit(
+                {
+                    "v": NATIVE_PROTOCOL_VERSION,
+                    "type": "response",
+                    "request_id": request.request_id,
+                    "ok": True,
+                    "result": result,
+                },
+            )
             if request.action != "status":
                 await emit_status_if_changed()
         except NativeProtocolError as exc:
-            await emit(
-                {
-                    "v": 1,
-                    "type": "response",
-                    "request_id": request.request_id,
-                    "ok": False,
-                    "error": exc.to_payload(),
-                },
-            )
-
-    async def reject_busy(request: NativeRequest) -> None:
-        error = NativeProtocolError(
-            "busy",
-            "The native desktop helper is handling its maximum number of local requests.",
-            recovery="Wait for the current operation to finish, then retry.",
-            retryable=True,
-        )
-        await emit(
-            {"v": 1, "type": "response", "request_id": request.request_id, "ok": False, "error": error.to_payload()},
-        )
+            await respond_error(request.request_id, exc)
 
     try:
         while line := await _read_native_line(input_stream):
             try:
                 request = parse_native_request(line.rstrip(b"\r\n"))
             except NativeProtocolError as exc:
-                await emit(
-                    {"v": 1, "type": "response", "request_id": None, "ok": False, "error": exc.to_payload()},
-                )
+                await respond_error(None, exc)
                 continue
             if request.action in _IMMEDIATE_NATIVE_ACTIONS:
                 await answer(request)
@@ -1061,7 +1242,15 @@ async def serve_native_stream(
                 else (regular_tasks, _MAX_REGULAR_NATIVE_REQUESTS)
             )
             if len(tasks) >= limit:
-                await reject_busy(request)
+                await respond_error(
+                    request.request_id,
+                    NativeProtocolError(
+                        "busy",
+                        "The native desktop helper is handling its maximum number of local requests.",
+                        recovery="Wait for the current operation to finish, then retry.",
+                        retryable=True,
+                    ),
+                )
                 continue
             task = asyncio.create_task(answer(request), name=f"native_desktop_request_{request.action}")
             tasks.add(task)
@@ -1099,18 +1288,122 @@ async def run_native_stdio(runtime_paths: RuntimePaths, *, helper_version: str) 
     )
 
 
+def _primary_controller(config: NativeDesktopConfig | None) -> PinnedMatrixDevice | None:
+    return config.controllers[0].controller if config is not None and config.controllers else None
+
+
+def _resolve_pair_controller(config: NativeDesktopConfig, controller_key: str | None) -> NativeControllerEntry:
+    if controller_key is None:
+        if not config.controllers:
+            raise NativeProtocolError(
+                "configuration_missing",
+                "Native desktop configuration has no paired controllers.",
+            )
+        return config.controllers[0]
+    for entry in config.controllers:
+        if controller_journal_key(entry.controller) == controller_key:
+            return entry
+    raise NativeProtocolError("invalid_request", "Unknown desktop controller.")
+
+
+def _pair_result(
+    *,
+    code: str,
+    verification: str,
+    device_id: str,
+    device_ed25519: str,
+    entry: NativeControllerEntry,
+) -> dict[str, object]:
+    result: dict[str, object] = {
+        "verification": verification,
+        "confirmation_command": f"!desktop confirm {code} {verification}",
+        "device_id": device_id,
+        "device_ed25519": device_ed25519,
+    }
+    if len(entry.allowed_agent_names) == 1:
+        result["agent_confirmation_command"] = f"!desktop confirm {entry.allowed_agent_names[0]} {code} {verification}"
+    return result
+
+
+def _authority_controllers_status(
+    config: NativeDesktopConfig | None,
+    runtime_status: dict[str, object],
+) -> dict[str, dict[str, object]]:
+    live = runtime_status.get("controllers")
+    if isinstance(live, dict):
+        return {
+            str(key): {
+                "control_available": bool(entry.get("control_available", False)),
+                "control_scope": entry.get("control_scope", "saved_apps"),
+                "lease_remaining_seconds": entry.get("lease_remaining_seconds", 0),
+                "lease_expires_at_ms": entry.get("lease_expires_at_ms"),
+            }
+            for key, entry in live.items()
+            if isinstance(entry, dict)
+        }
+    return {
+        controller_journal_key(entry.controller): {
+            "control_available": False,
+            "control_scope": "saved_apps",
+            "lease_remaining_seconds": 0,
+            "lease_expires_at_ms": None,
+        }
+        for entry in (config.controllers if config is not None else ())
+    }
+
+
+def _shell_controllers_status(
+    config: NativeDesktopConfig | None,
+    runtime_status: dict[str, object],
+) -> dict[str, dict[str, object]]:
+    live = runtime_status.get("controllers")
+    if isinstance(live, dict):
+        result: dict[str, dict[str, object]] = {}
+        for key, entry in live.items():
+            shell_entry = entry.get("shell") if isinstance(entry, dict) else None
+            if isinstance(shell_entry, dict):
+                result[str(key)] = {
+                    "auto_approve_remaining_seconds": shell_entry.get("auto_approve_remaining_seconds", 0),
+                    "auto_approve_until_revoked": bool(shell_entry.get("auto_approve_until_revoked", False)),
+                }
+        if result or not (config and config.controllers):
+            return result
+    return {
+        controller_journal_key(entry.controller): {
+            "auto_approve_remaining_seconds": 0,
+            "auto_approve_until_revoked": False,
+        }
+        for entry in (config.controllers if config is not None else ())
+    }
+
+
+def _optional_controller_key(parameters: dict[str, object]) -> tuple[dict[str, object], str | None]:
+    if "controller_key" not in parameters:
+        return parameters, None
+    controller_key = _required_text(parameters, "controller_key")
+    return {key: value for key, value in parameters.items() if key != "controller_key"}, controller_key
+
+
 def _permission_status() -> dict[str, object]:
     unknown = {"state": "unknown", "can_request": sys.platform == "darwin", "recovery": None}
     if sys.platform != "darwin":
-        return {"accessibility": unknown.copy(), "screen_recording": unknown.copy()}
+        return {
+            "accessibility": unknown.copy(),
+            "screen_recording": unknown.copy(),
+            "gui_permissions_ready": False,
+        }
     try:
         import ApplicationServices
         import Quartz
 
-        accessibility = bool(ApplicationServices.AXIsProcessTrusted())  # ty: ignore[unresolved-attribute]
-        screen_recording = bool(Quartz.CGPreflightScreenCaptureAccess())  # ty: ignore[unresolved-attribute]
+        accessibility = bool(ApplicationServices.AXIsProcessTrusted())  # ty: ignore[missing-attribute]
+        screen_recording = bool(Quartz.CGPreflightScreenCaptureAccess())  # ty: ignore[missing-attribute]
     except (ImportError, AttributeError):
-        return {"accessibility": unknown.copy(), "screen_recording": unknown.copy()}
+        return {
+            "accessibility": unknown.copy(),
+            "screen_recording": unknown.copy(),
+            "gui_permissions_ready": False,
+        }
     return {
         "accessibility": {
             "state": "granted" if accessibility else "missing",
@@ -1122,6 +1415,7 @@ def _permission_status() -> dict[str, object]:
             "can_request": True,
             "recovery": None if screen_recording else "Grant Screen Recording in System Settings > Privacy & Security.",
         },
+        "gui_permissions_ready": accessibility and screen_recording,
     }
 
 
@@ -1131,13 +1425,13 @@ def _request_permission(permission: str) -> None:
     if permission == "accessibility":
         import ApplicationServices
 
-        ApplicationServices.AXIsProcessTrustedWithOptions(  # ty: ignore[unresolved-attribute]
-            {ApplicationServices.kAXTrustedCheckOptionPrompt: True},  # ty: ignore[unresolved-attribute]
+        ApplicationServices.AXIsProcessTrustedWithOptions(  # ty: ignore[missing-attribute]
+            {ApplicationServices.kAXTrustedCheckOptionPrompt: True},  # ty: ignore[missing-attribute]
         )
     else:
         import Quartz
 
-        Quartz.CGRequestScreenCaptureAccess()  # ty: ignore[unresolved-attribute]
+        Quartz.CGRequestScreenCaptureAccess()  # ty: ignore[missing-attribute]
 
 
 def _expect_keys(parameters: dict[str, object], allowed: set[str]) -> None:
@@ -1207,26 +1501,114 @@ def _redacted_identity(details: dict[str, object]) -> dict[str, object]:
     return {key: details[key] for key in ("homeserver", "user_id", "device_id", "ed25519") if key in details}
 
 
-def _error_payload(
-    code: str,
-    message: str,
-    *,
-    recovery: str | None = None,
-    retryable: bool = False,
-) -> dict[str, object]:
-    return {"code": code, "message": message, "recovery": recovery, "retryable": retryable}
+def _matrix_http_headers_path(runtime_paths: RuntimePaths) -> Path | None:
+    value = runtime_paths.env_value("MINDROOM_DESKTOP_MATRIX_HTTP_HEADERS_FILE")
+    return Path(value) if value else None
 
 
-def _optional_env_path(runtime_paths: RuntimePaths, name: str) -> Path | None:
-    value = runtime_paths.env_value(name)
-    return Path(value).expanduser() if value else None
+if sys.platform == "win32":
+    import msvcrt
+
+    def _try_lock_host_fd(fd: int) -> bool:
+        os.lseek(fd, 0, os.SEEK_SET)
+        try:
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+        except PermissionError:
+            return False
+        return True
+
+    def _unlock_host_fd(fd: int) -> None:
+        os.lseek(fd, 0, os.SEEK_SET)
+        msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+
+else:
+    try:
+        import fcntl
+    except ImportError:  # pragma: no cover - non-POSIX fallback
+
+        def _try_lock_host_fd(fd: int) -> bool:  # noqa: ARG001
+            return True
+
+        def _unlock_host_fd(fd: int) -> None:  # noqa: ARG001
+            return None
+
+    else:
+
+        def _try_lock_host_fd(fd: int) -> bool:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                return False
+            return True
+
+        def _unlock_host_fd(fd: int) -> None:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+
+
+def _host_lock_path(storage_root: Path) -> Path:
+    return storage_root / "desktop_bridge" / "host.lock"
+
+
+def _acquire_host_lock(storage_root: Path) -> int:
+    lock_path = _host_lock_path(storage_root)
+    lock_path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    if os.name != "nt":
+        lock_path.parent.chmod(0o700)
+    flags = os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0)
+    fd = os.open(lock_path, flags, 0o600)
+    locked = False
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise NativeProtocolError("invalid_request", "Native desktop host lock path must be a regular file.")
+        if not _try_lock_host_fd(fd):
+            raise NativeProtocolError(
+                "already_running",
+                "Another MindRoom app or CLI bridge is already running Desktop access for this storage path.",
+                recovery="Stop Computer Access in the other MindRoom app or terminal bridge and try again.",
+            )
+        if os.name != "nt":
+            os.fchmod(fd, 0o600)
+        locked = True
+        return fd
+    finally:
+        if not locked:
+            os.close(fd)
+
+
+def _release_host_lock(fd: int | None) -> None:
+    if fd is None:
+        return
+    try:
+        _unlock_host_fd(fd)
+    finally:
+        os.close(fd)
+
+
+@contextmanager
+def desktop_host_lock(storage_root: Path) -> Iterator[None]:
+    """Acquire and hold ``host.lock`` exclusively for one running Desktop host or CLI bridge."""
+    fd = _acquire_host_lock(storage_root)
+    try:
+        yield
+    finally:
+        _release_host_lock(fd)
+
+
+@contextmanager
+def _host_lock_guard(storage_root: Path, *, held: bool) -> Iterator[None]:
+    """Ensure no other process holds host.lock for the duration of a configuration mutation."""
+    if held:
+        yield
+        return
+    with desktop_host_lock(storage_root):
+        yield
 
 
 __all__ = [
     "NativeBridgeRuntime",
     "NativeDesktopHost",
     "NativeHostDependencies",
+    "desktop_host_lock",
     "run_native_stdio",
     "serve_native_stream",
-    "supervise_native_tasks",
 ]

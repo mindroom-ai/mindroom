@@ -27,7 +27,6 @@ is why both resolve it through ``mindroom.tool_system.worker_routing``.
 from __future__ import annotations
 
 import ipaddress
-import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -35,6 +34,7 @@ from typing import TYPE_CHECKING
 from mindroom.tool_system.worker_routing import resolve_worker_key
 
 if TYPE_CHECKING:
+    from mindroom.constants import RuntimePaths
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope
 
 _DEFAULT_ALLOWLIST_PATH = "/etc/mindroom-egress/allowed-domains.txt"
@@ -78,14 +78,14 @@ class WorkerEgressPolicy:
     grant_subject: EgressGrantSubject | None = None
 
 
-def load_static_allowlist() -> tuple[str, ...]:
-    """Read the static egress allowlist from env or the mounted allowlist file."""
-    inline = os.environ.get("MINDROOM_APPROVED_EGRESS_ALLOWLIST", "").strip()
+def load_static_allowlist(runtime_paths: RuntimePaths) -> tuple[str, ...]:
+    """Read the static egress allowlist from the runtime env or the mounted allowlist file."""
+    inline = (runtime_paths.env_value("MINDROOM_APPROVED_EGRESS_ALLOWLIST") or "").strip()
     text = inline.replace(",", "\n") if inline else ""
     if not text:
         allowlist_path = (
-            os.environ.get("MINDROOM_APPROVED_EGRESS_ALLOWLIST_PATH")
-            or os.environ.get("MINDROOM_EGRESS_ALLOWLIST_PATH")
+            runtime_paths.env_value("MINDROOM_APPROVED_EGRESS_ALLOWLIST_PATH")
+            or runtime_paths.env_value("MINDROOM_EGRESS_ALLOWLIST_PATH")
             or _DEFAULT_ALLOWLIST_PATH
         ).strip()
         if allowlist_path:
@@ -214,6 +214,7 @@ def resolve_grant_subject(
 
 
 def resolve_worker_egress_policy(
+    runtime_paths: RuntimePaths,
     *,
     agent_name: str | None = None,
     worker_scope: WorkerScope | None = None,
@@ -233,4 +234,4 @@ def resolve_worker_egress_policy(
         if agent_name is not None
         else None
     )
-    return WorkerEgressPolicy(static_allowlist=load_static_allowlist(), grant_subject=grant_subject)
+    return WorkerEgressPolicy(static_allowlist=load_static_allowlist(runtime_paths), grant_subject=grant_subject)

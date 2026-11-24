@@ -41,7 +41,7 @@ if TYPE_CHECKING:
             default=False,
             description=(
                 "Let the agent show interactive web pages in the Canvas panel. "
-                "MindRoom Chat must also turn canvases on (mindroom.canvas.enabled)."
+                "MindRoom Chat shows them unless its deployment turns canvases off (mindroom.canvas.enabled)."
             ),
         ),
         ConfigField(
@@ -55,14 +55,24 @@ if TYPE_CHECKING:
                 "Needs enable_show_canvas, and MindRoom Chat must also allow them (mindroom.canvas.libraries)."
             ),
         ),
+        ConfigField(
+            name="enable_canvas_remote_assets",
+            label="Enable Canvas Remote Assets",
+            type="boolean",
+            required=False,
+            default=False,
+            description=(
+                "Tell the agent its canvas pages may load images, styles, fonts, media and scripts from any https: address. "
+                "Needs enable_show_canvas, and MindRoom Chat must also allow them (mindroom.canvas.remoteAssets)."
+            ),
+        ),
     ],
     requires_primary_runtime=True,
     requires_room_context=True,
     icon="PanelsTopLeft",
     icon_color="text-violet-500",
-    dependencies=["agno"],
     docs_url="https://docs.mindroom.chat/tools/chat-ui/",
-    function_names=("show_computer", "open_settings", "open_panel", "show_canvas", "read_canvas_state"),
+    function_names=("open_settings", "open_panel", "show_canvas", "read_canvas_state"),
     managed_init_args=(ToolManagedInitArg.TOOL_OUTPUT_WORKSPACE_ROOT, ToolManagedInitArg.FILE_ACCESS),
 )
 def chat_ui_tools() -> type[ChatUITools]:

@@ -25,6 +25,7 @@ if TYPE_CHECKING:
         # Authentication parameters
         ConfigField(
             name="account_id",
+            env=("ZOOM_ACCOUNT_ID",),
             label="Account ID",
             type="text",
             required=False,
@@ -33,6 +34,7 @@ if TYPE_CHECKING:
         ),
         ConfigField(
             name="client_id",
+            env=("ZOOM_CLIENT_ID",),
             label="Client ID",
             type="text",
             required=False,
@@ -41,6 +43,7 @@ if TYPE_CHECKING:
         ),
         ConfigField(
             name="client_secret",
+            env=("ZOOM_CLIENT_SECRET",),
             label="Client Secret",
             type="password",
             required=False,
@@ -57,14 +60,12 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["requests"],
-    docs_url="https://docs.agno.com/tools/toolkits/social/zoom",
+    docs_url="https://docs.mindroom.chat/tools/messaging-and-social/#zoom",
     function_names=(
         "delete_meeting",
-        "get_access_token",
         "get_meeting",
         "get_meeting_recordings",
         "get_upcoming_meetings",
-        "instructions",
         "list_meetings",
         "schedule_meeting",
     ),
@@ -73,4 +74,31 @@ def zoom_tools() -> type[ZoomTools]:
     """Return Zoom tools for video conferencing and meeting management."""
     from agno.tools.zoom import ZoomTools
 
-    return ZoomTools
+    class MindRoomZoomTools(ZoomTools):
+        """Zoom toolkit that never hands the account's access token to the model."""
+
+        def __init__(
+            self,
+            account_id: str | None = None,
+            client_id: str | None = None,
+            client_secret: str | None = None,
+            timeout: int = 30,
+            **kwargs: object,
+        ) -> None:
+            # AGNO_COMPAT: ZoomTools offers its OAuth access token to the model as a tool.
+            # Reason: get_access_token returns the Server-to-Server bearer token for the whole Zoom account,
+            # which works outside MindRoom's approvals; the meeting tools mint it themselves.
+            # Upstream issue: Tracking gap; no matching issue has been verified.
+            # Upstream PR: No matching fix identified.
+            # Remove when: Agno stops registering get_access_token as a toolkit function.
+            # Coverage: tests/test_tool_config_sync.py::test_zoom_never_offers_its_access_token_to_the_model.
+            super().__init__(
+                account_id=account_id,
+                client_id=client_id,
+                client_secret=client_secret,
+                timeout=timeout,
+                exclude_tools=["get_access_token"],
+                **kwargs,
+            )
+
+    return MindRoomZoomTools

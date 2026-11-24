@@ -2,14 +2,26 @@
 
 from __future__ import annotations
 
-from typing import Annotated, Literal, cast
+from typing import Annotated, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, JsonValue, TypeAdapter, model_validator
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    JsonValue,
+    TypeAdapter,
+    model_validator,
+)
 
 from mindroom.agent_cli.json_io import canonical_json as _canonical_json
+from mindroom.config.tool_aliases import canonical_tool_name
 
 _SELECTOR = Annotated[str, Field(min_length=1, max_length=128)]
+# A toolkit's other names select the one toolkit the turn's catalog offers.
+_TOOLKIT = Annotated[_SELECTOR, AfterValidator(canonical_tool_name)]
 # Strict models still accept the canonical JSON UUID string.
 _WIRE_UUID = Annotated[UUID, BeforeValidator(lambda value: UUID(value) if isinstance(value, str) else value)]
 
@@ -36,7 +48,7 @@ class ToolSearchOperation(_Operation):
 
     operation: Literal["tools.search"]
     query: str = Field(min_length=1, max_length=1024)
-    toolkit: _SELECTOR | None = None
+    toolkit: _TOOLKIT | None = None
     limit: int = Field(default=20, ge=1, le=100)
 
 
@@ -44,7 +56,7 @@ class ToolDescribeOperation(_Operation):
     """Load one exact toolkit/function descriptor."""
 
     operation: Literal["tools.describe"]
-    toolkit: _SELECTOR
+    toolkit: _TOOLKIT
     function: _SELECTOR
 
 
@@ -53,9 +65,12 @@ class ToolCallOperation(_Operation):
 
     operation: Literal["tools.call"]
     call_id: _WIRE_UUID
-    toolkit: _SELECTOR
+    toolkit: _TOOLKIT
     function: _SELECTOR
     arguments: dict[str, JsonValue] = Field(default_factory=dict)
+    # Set by `mindroom-agent workers run` alone: the command of this shell call streams its raw output and takes
+    # stdin through the call's stream and stdin routes. No argument, so approval and hooks see the same call.
+    stream: bool = False
 
     @property
     def canonical_arguments_json(self) -> str:
@@ -88,6 +103,10 @@ class ToolCallReceipt(_Operation):
     function: _SELECTOR
     status: Literal["queued", "running", "waiting", "completed", "failed", "cancelled"]
     parent_bash_call_id: str | None = Field(default=None, max_length=128)
+    progress: str | None = Field(default=None, max_length=256)
+    progress_revision: int = Field(default=0, ge=0)
+    error_kind: Literal["named_worker_refusal"] | None = None
+    cancel_outcome: Literal["never_ran", "stopped"] | None = None
     outcome: JsonValue = None
     attachments: list[dict[str, JsonValue]] = Field(default_factory=list)
 
@@ -106,4 +125,4 @@ _OPERATION_ADAPTER = TypeAdapter(AgentCliOperation)
 
 def parse_operation(payload: object) -> AgentCliOperation:
     """Validate one untrusted operation without adding caller identity."""
-    return cast("AgentCliOperation", _OPERATION_ADAPTER.validate_python(payload))
+    return _OPERATION_ADAPTER.validate_python(payload)

@@ -5,37 +5,39 @@ from __future__ import annotations
 import asyncio
 import sys
 import time
-import traceback
-from pathlib import Path
+from collections import deque
 from typing import TYPE_CHECKING, Any
 
 from mindroom.background_tasks import wait_for_future_until_complete
-from mindroom.logging_config import get_logger
+from mindroom.logging_config import exception_frames, get_logger
+from mindroom.matrix_rtc.spoken_turns import merge_spoken_turns
 from mindroom.matrix_rtc.voice_agent import (
     CallVoiceAgentOptions,
     LiveVoiceAgentOptions,
     LiveVoiceUsage,
     RealtimeVoiceBridge,
 )
+from mindroom.model_defaults import OPENAI_BASE_URL_DEFAULT
+from mindroom.timing import elapsed_ms_since
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Callable, Iterator
 
-    from livekit.agents import Agent
+    from livekit.agents import Agent, ErrorEvent
     from livekit.agents.llm import ChatContext, RealtimeSessionReconnectedEvent
     from livekit.plugins.openai.realtime import GPTLiveDelegation, GPTLiveSession
 
 logger = get_logger(__name__)
 _DELEGATION_ERROR = "Voice call error: the agent could not complete the delegated request. Please try again."
 _EMPTY_DELEGATION_RESPONSE = "No response is available from the agent for this request."
-
-
-def _exception_frames(error: BaseException) -> list[str]:
-    """Retain stack locations without exception text, source lines, or locals."""
-    return [
-        f"{Path(frame.filename).name}:{frame.lineno} ({frame.name})"
-        for frame in traceback.extract_tb(error.__traceback__)
-    ]
+_CONTENT_CLOSE_RECOVERY_WINDOW_SECONDS = 5 * 60
+_CONTENT_CLOSE_FAST_REPEAT_SECONDS = 30
+_CONTENT_CLOSE_RECOVERY_TIMEOUT_SECONDS = 10
+_MODERATION_NOTICE = "Voice call notice: the voice model's moderation stopped that reply. Try rephrasing."
+_MODERATION_ENDED_NOTICE = (
+    "Voice call notice: moderation closed the voice session again, so the call ended. "
+    "Leave and rejoin to start a new call."
+)
 
 
 def _commentary_chunks(text: str) -> Iterator[str]:
@@ -66,6 +68,11 @@ class _LiveDelegationRunner:
         self._pending_transcript = ""
         self._generation = 0
         self._closed = False
+        self._created_at: dict[str, float] = {}
+        # Delegated commentary chunks as (delegation ID, chunk index, chunk count), first in
+        # call order until the SDK sends them, then by the client event ID awaiting acknowledgement.
+        self._unsent_chunks: deque[tuple[str, int, int]] = deque()
+        self._unacked_chunks: dict[str, tuple[str, int, int]] = {}
 
     def submit(self, delegation: GPTLiveDelegation, context: ChatContext) -> None:
         """Snapshot new speech synchronously before the SDK finalizes pending text."""
@@ -74,6 +81,8 @@ class _LiveDelegationRunner:
         if self._closed or delegation.id in self._delegation_ids:
             return
         self._delegation_ids.add(delegation.id)
+        self._created_at[delegation.id] = time.monotonic()
+        self._log_stage(delegation.id, "created")
         messages = tuple(
             (item.id, item.role, item.text_content)
             for item in context.items
@@ -85,27 +94,27 @@ class _LiveDelegationRunner:
 
     def _prompt(self, messages: tuple[tuple[str, str, str], ...], pending: str) -> tuple[str, str]:
         """Compute a delta against requests already dispatched to the delegate."""
-        lines: list[str] = []
+        turns: list[tuple[str, str]] = []
         previous_pending = self._pending_transcript
         for identifier, role, content in messages:
             if identifier in self._message_ids:
                 continue
-            text = content
+            text = " ".join(content.split())
             if role == "user" and previous_pending and text.startswith(previous_pending):
                 text = text[len(previous_pending) :].strip()
                 previous_pending = ""
             if text:
-                lines.append(f"{role}: {text}")
+                turns.append((role, text))
         new_pending = pending
         if previous_pending and new_pending.startswith(previous_pending):
             new_pending = new_pending[len(previous_pending) :].strip()
-        if new_pending and (not lines or lines[-1] != f"user: {new_pending}"):
-            lines.append(f"user: {new_pending}")
+        if new_pending and (not turns or turns[-1] != ("user", new_pending)):
+            turns.append(("user", new_pending))
         prompt = (
             "Handle the current voice request using your normal instructions and tools. "
             "The following is new conversation context since the previous delegation; "
-            "earlier context is already in this call's history. Return a concise result for the voice assistant.\n\n"
-            + "\n".join(lines)
+            "earlier context is already in this call's history.\n\n"
+            + "\n".join(f"{role}: {text}" for role, text in merge_spoken_turns(turns))
         )
         return prompt, pending or previous_pending
 
@@ -116,30 +125,61 @@ class _LiveDelegationRunner:
         generation: int,
     ) -> None:
         async with self._lock:
+            self._log_stage(delegation.id, "lock_acquired")
             if self._closed or generation != self._generation:
                 return
-            prompt, pending = self._prompt(messages, delegation.pending_transcript.strip())
+            prompt, pending = self._prompt(messages, " ".join(delegation.pending_transcript.split()))
             # An attempted request can complete tools without returning text,
             # or fail after side effects. Never label it as new context again.
             self._message_ids.update(identifier for identifier, _, _ in messages)
             self._pending_transcript = pending
             try:
                 response = await self._options.respond(prompt, self._options.on_tools_executed)
+                self._log_stage(delegation.id, "response_done", response_chars=len(response.text))
                 if self._closed or generation != self._generation:
                     return
-                for chunk in _commentary_chunks(response.text or _EMPTY_DELEGATION_RESPONSE):
-                    self._session.append_commentary(chunk, delegation_id=delegation.id)
+                self._append_commentary(
+                    delegation.id,
+                    list(_commentary_chunks(response.text or _EMPTY_DELEGATION_RESPONSE)),
+                )
             except Exception as error:
                 logger.warning(
                     "call_live_delegation_failed",
+                    delegation_id=delegation.id,
                     error_type=type(error).__name__,
-                    traceback_frames=_exception_frames(error),
+                    traceback_frames=exception_frames(error),
                 )
                 if self._closed or generation != self._generation:
                     return
                 if self._options.on_session_error is not None:
                     self._options.on_session_error(_DELEGATION_ERROR)
-                self._session.append_commentary(_DELEGATION_ERROR, delegation_id=delegation.id)
+                self._append_commentary(delegation.id, [_DELEGATION_ERROR])
+
+    def _append_commentary(self, delegation_id: str, chunks: list[str]) -> None:
+        for index, chunk in enumerate(chunks):
+            self._session.append_commentary(chunk, delegation_id=delegation_id)
+            self._unsent_chunks.append((delegation_id, index, len(chunks)))
+            self._log_stage(delegation_id, "commentary_appended", chunk_index=index, chunk_count=len(chunks))
+
+    def on_client_event(self, event: dict[str, Any]) -> None:
+        """Learn the client event ID the SDK assigned when it sent a delegated commentary chunk."""
+        if event.get("type") == "session.commentary.append" and event.get("delegation_id") is not None:
+            self._unacked_chunks[event["event_id"]] = self._unsent_chunks.popleft()
+
+    def on_commentary_acked(self, event: dict[str, Any]) -> None:
+        """Time the provider's acknowledgement of one delegated commentary chunk."""
+        if (chunk := self._unacked_chunks.pop(event.get("client_event_id", ""), None)) is not None:
+            delegation_id, index, count = chunk
+            self._log_stage(delegation_id, "commentary_acked", chunk_index=index, chunk_count=count)
+
+    def _log_stage(self, delegation_id: str, stage: str, **fields: object) -> None:
+        logger.info(
+            "call_delegation_stage",
+            delegation_id=delegation_id,
+            stage=stage,
+            elapsed_ms=elapsed_ms_since(self._created_at[delegation_id]),
+            **fields,
+        )
 
     def _on_task_done(self, task: asyncio.Task[None]) -> None:
         self._tasks.discard(task)
@@ -147,8 +187,13 @@ class _LiveDelegationRunner:
             logger.warning(
                 "call_live_delegation_delivery_failed",
                 error_type=type(error).__name__,
-                traceback_frames=_exception_frames(error),
+                traceback_frames=exception_frames(error),
             )
+
+    @property
+    def has_unsent_commentary(self) -> bool:
+        """Return whether the SDK could send queued delegated commentary after reconnecting."""
+        return bool(self._unsent_chunks)
 
     def on_reconnected(self) -> None:
         """Invalidate connection-scoped IDs and cancel their unfinished work."""
@@ -169,7 +214,11 @@ class _LiveDelegationRunner:
             await asyncio.gather(*self._tasks, return_exceptions=True)
 
 
-def _build_live_agent(options: LiveVoiceAgentOptions, instructions: str) -> Agent:  # noqa: C901 - SDK class is defined lazily
+def _build_live_agent(  # noqa: C901 - SDK class is defined lazily
+    options: LiveVoiceAgentOptions,
+    instructions: str,
+    suppress_wrapped_error: Callable[[], None],
+) -> Agent:
     """Load the optional SDK only when a Live call starts."""
     from livekit.agents import Agent  # noqa: PLC0415
     from livekit.plugins.openai.realtime import GPTLiveSession  # noqa: PLC0415
@@ -180,13 +229,14 @@ def _build_live_agent(options: LiveVoiceAgentOptions, instructions: str) -> Agen
             self._delegations: _LiveDelegationRunner | None = None
             self._live_session: GPTLiveSession | None = None
             self._provider_close_task: asyncio.Task[None] | None = None
+            self._last_recovered_content_close: float | None = None
+            self._recovery_deadline: asyncio.TimerHandle | None = None
+            self._awaiting_replacement_start = False
             self._exiting = False
             self._exit_task: asyncio.Task[None] | None = None
             self._voice_started_at = time.time()
             self._voice_usage: dict[str, LiveVoiceUsage] = {}
-            self._failed_usage: dict[str, LiveVoiceUsage] = {}
             self._usage_tasks: set[asyncio.Task[None]] = set()
-            self._usage_lock = asyncio.Lock()
 
         async def on_enter(self) -> None:
             session = self.duplex_session
@@ -198,31 +248,119 @@ def _build_live_agent(options: LiveVoiceAgentOptions, instructions: str) -> Agen
             session.on("delegation_created", self._on_delegation)
             session.on("session_reconnected", self._on_reconnected)
             session.on("openai_server_event_received", self._on_server_event)
+            session.on("openai_client_event_queued", self._on_client_event)
 
         def _on_delegation(self, event: GPTLiveDelegation) -> None:
-            if self._delegations is not None:
+            # A delegation can follow the accepted start in the same receive-loop turn.
+            self._confirm_replacement_started()
+            if self._delegations is not None and self._recovery_deadline is None:
                 self._delegations.submit(event, self.chat_ctx)
 
         def _on_reconnected(self, _event: RealtimeSessionReconnectedEvent) -> None:
+            self._awaiting_replacement_start = self._recovery_deadline is not None
             if self._delegations is not None:
                 self._delegations.on_reconnected()
 
+        def _on_client_event(self, event: dict[str, Any]) -> None:
+            if self._delegations is not None:
+                self._delegations.on_client_event(event)
+
         def _on_server_event(self, event: dict[str, Any]) -> None:
-            if event.get("type") == "session.started":
+            event_type = event.get("type")
+            if event_type == "session.commentary.appended" and self._delegations is not None:
+                self._delegations.on_commentary_acked(event)
+            if event_type == "session.started":
                 self._voice_started_at = time.time()
-            if event.get("type") in {"session.usage.updated", "session.closed"}:
+                if self._awaiting_replacement_start:
+                    # The SDK handles this event synchronously after the raw callback.
+                    asyncio.get_running_loop().call_soon(self._confirm_replacement_started)
+            if event_type in {"session.usage.updated", "session.closed"}:
                 self._capture_usage(event)
-            if event.get("type") != "session.closed" or self._provider_close_task is not None or self._exiting:
+            if event_type == "session.closed":
+                self._on_provider_close(event.get("reason"))
+            elif event_type == "error" and not self._exiting and self._provider_close_task is None:
+                error = event.get("error")
+                if (
+                    options.on_session_error is not None
+                    and isinstance(error, dict)
+                    and "content_filter" in (error.get("code"), error.get("type"))
+                ):
+                    suppress_wrapped_error()
+                    options.on_session_error(_MODERATION_NOTICE)
+
+        def _on_provider_close(self, reason: object) -> None:
+            if reason not in ("close_requested", "expired", "content", "remote_hangup", "connection_lost"):
+                reason = "unknown"
+            ending = self._provider_close_task is not None or self._exiting
+            delegations = self._delegations
+            retryable = True
+            fast_repeat_fallback = False
+            queued_commentary_fallback = False
+            if not ending and reason == "content":
+                now = time.monotonic()
+                previous = self._last_recovered_content_close
+                elapsed = now - previous if previous is not None else None
+                if self._recovery_deadline is not None or (
+                    elapsed is not None and elapsed < _CONTENT_CLOSE_FAST_REPEAT_SECONDS
+                ):
+                    # If replaying history triggers another close, rejoin without that history.
+                    fast_repeat_fallback = True
+                elif elapsed is not None and elapsed < _CONTENT_CLOSE_RECOVERY_WINDOW_SECONDS:
+                    retryable = False
+                else:
+                    # The SDK queue survives reconnect. Rejoin fresh rather than replay queued commentary.
+                    queued_commentary_fallback = delegations is not None and delegations.has_unsent_commentary
+                    if not queued_commentary_fallback:
+                        logger.info("call_live_session_closed", reason=reason, action="recovering")
+                        self._last_recovered_content_close = now
+                        # Fence off the moderated delegation now; the SDK reconnects with its own history.
+                        if delegations is not None:
+                            delegations.on_reconnected()
+                        self._recovery_deadline = asyncio.get_running_loop().call_later(
+                            _CONTENT_CLOSE_RECOVERY_TIMEOUT_SECONDS,
+                            self._on_recovery_timeout,
+                        )
+                        return
+
+            logger.info(
+                "call_live_session_closed",
+                reason=reason,
+                action="ending",
+                fast_repeat_fallback=fast_repeat_fallback,
+                queued_commentary_fallback=queued_commentary_fallback,
+            )
+            if not ending:
+                self._end_provider_session(retryable=retryable)
+
+        def _confirm_replacement_started(self) -> None:
+            # The SDK resets session_id on reconnect and assigns it only after accepting session.started.
+            if self._awaiting_replacement_start and self._live_session is not None and self._live_session.session_id:
+                self._cancel_recovery_deadline()
+
+        def _cancel_recovery_deadline(self) -> None:
+            self._awaiting_replacement_start = False
+            if self._recovery_deadline is not None:
+                self._recovery_deadline.cancel()
+                self._recovery_deadline = None
+
+        def _on_recovery_timeout(self) -> None:
+            self._confirm_replacement_started()
+            if self._recovery_deadline is None:
                 return
+            logger.warning("call_live_session_recovery_timed_out")
+            self._end_provider_session(retryable=True)
+
+        def _end_provider_session(self, *, retryable: bool) -> None:
+            self._cancel_recovery_deadline()
             if self._delegations is not None:
                 self._delegations.stop()
             if self._live_session is not None:
-                # Even with max_retry=0, the SDK reconnects after a graceful
-                # server close. Close its queue before that loop resumes so
-                # old delegation commentary cannot enter a fresh session.
+                # Close the queue before the SDK can reconnect, even with max_retry=0.
                 self._provider_close_task = asyncio.create_task(self._live_session.aclose())
+            if not retryable and options.on_session_error is not None:
+                options.on_session_error(_MODERATION_ENDED_NOTICE)
             if options.on_session_terminated is not None:
-                options.on_session_terminated(True)
+                options.on_session_terminated(retryable)
 
         def _capture_usage(self, event: dict[str, Any]) -> None:
             session_id = self._live_session.session_id if self._live_session is not None else None
@@ -246,23 +384,14 @@ def _build_live_agent(options: LiveVoiceAgentOptions, instructions: str) -> Agen
                 finalized=event["type"] == "session.closed" or (previous is not None and previous.finalized),
             )
             self._voice_usage[session_id] = usage
-            task = asyncio.create_task(self._record_usage(usage))
+            # The call audio process only forwards usage to MindRoom, which retries failed saves.
+            task = asyncio.ensure_future(options.record_usage(usage))
             self._usage_tasks.add(task)
             task.add_done_callback(self._usage_tasks.discard)
 
-        async def _record_usage(self, usage: LiveVoiceUsage) -> None:
-            if options.record_usage is not None:
-                async with self._usage_lock:
-                    try:
-                        await options.record_usage(usage)
-                    except Exception as error:
-                        self._failed_usage[usage.provider_session_id] = usage
-                        logger.warning("call_live_usage_save_failed", error_type=type(error).__name__)
-                    else:
-                        self._failed_usage.pop(usage.provider_session_id, None)
-
         async def on_exit(self) -> None:
             self._exiting = True
+            self._cancel_recovery_deadline()
             if self._exit_task is None:
                 self._exit_task = asyncio.create_task(self._close())
             await wait_for_future_until_complete(self._exit_task)
@@ -277,15 +406,12 @@ def _build_live_agent(options: LiveVoiceAgentOptions, instructions: str) -> Agen
                 self._live_session.off("delegation_created", self._on_delegation)
                 self._live_session.off("session_reconnected", self._on_reconnected)
                 self._live_session.off("openai_server_event_received", self._on_server_event)
+                self._live_session.off("openai_client_event_queued", self._on_client_event)
                 self._live_session = None
             if self._provider_close_task is not None:
                 await asyncio.gather(self._provider_close_task, return_exceptions=True)
             if self._usage_tasks:
                 await asyncio.gather(*self._usage_tasks)
-            for usage in tuple(self._failed_usage.values()):
-                await self._record_usage(usage)
-            if self._failed_usage:
-                logger.error("call_live_usage_unpersisted", sessions=len(self._failed_usage))
 
     return LiveCallAgent()
 
@@ -296,6 +422,21 @@ class LiveVoiceBridge(RealtimeVoiceBridge):
     def __init__(self, *, local_identity: str, e2ee_enabled: bool) -> None:
         super().__init__(local_identity=local_identity, e2ee_enabled=e2ee_enabled)
         self._live_agent: Agent | None = None
+        self._suppress_wrapped_error = False
+
+    def _mark_moderation_error(self) -> None:
+        # The SDK emits the wrapped error synchronously after the raw event and drops its code.
+        self._suppress_wrapped_error = True
+        asyncio.get_running_loop().call_soon(self._clear_moderation_error)
+
+    def _clear_moderation_error(self) -> None:
+        self._suppress_wrapped_error = False
+
+    def _describe_session_error(self, event: ErrorEvent) -> str | None:
+        if self._suppress_wrapped_error and event.error.type == "realtime_model_error" and event.error.recoverable:
+            self._clear_moderation_error()
+            return None
+        return super()._describe_session_error(event)
 
     async def start_agent(self, options: CallVoiceAgentOptions) -> None:
         """Start GPT-Live with the same authorized media path as other calls."""
@@ -315,16 +456,16 @@ class LiveVoiceBridge(RealtimeVoiceBridge):
         model = GPTLiveModel(
             model=options.model,
             api_key=options.api_key,
-            base_url="https://api.openai.com/v1",
+            base_url=OPENAI_BASE_URL_DEFAULT,
             voice=options.voice,
             delegation="client",
-            # CallManager retries with a fresh provider queue and the same
-            # agent history. SDK retries can replay connection-scoped IDs.
+            # CallManager retries transport failures with a fresh provider queue.
+            # The SDK can still reconnect after a graceful moderation close.
             conn_options=APIConnectOptions(max_retry=0),
         )
         self._owned_speech_resource_closers += (model.aclose,)
         session = AgentSession(llm=model)
-        self._live_agent = _build_live_agent(options, instructions)
+        self._live_agent = _build_live_agent(options, instructions, self._mark_moderation_error)
         await self._start_session(session, self._live_agent, options, rtc_module=rtc, room_io_module=room_io)
         if options.greeting_instructions:
             session.generate_reply(instructions=options.greeting_instructions)

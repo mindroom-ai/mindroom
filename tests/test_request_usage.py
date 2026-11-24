@@ -4,32 +4,37 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import closing
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
-from agno.db.sqlite import SqliteDb
-from agno.metrics import MessageMetrics, ModelMetrics, RunMetrics
-from agno.models.base import MessageData
-from agno.models.message import Message
-from agno.models.response import ModelResponse
-from agno.run.agent import RunOutput
-from agno.session.agent import AgentSession
 
-from mindroom.agent_storage import create_state_storage
 from mindroom.config.agent import AgentConfig
 from mindroom.config.auth import AuthorizationConfig
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
-from mindroom.usage.legacy_usage_storage import migrate_usage_database
+from mindroom.llm.messages import Message
+from mindroom.llm.runs import RunRecord, RunStatus
+from mindroom.llm.usage import MessageMetrics, ModelMetrics, RunMetrics, TokenCounts
+from mindroom.session_storage.agent_storage import create_agent_state_storage
+from mindroom.session_storage.legacy_agno3_schema import AgnoTableNames, agno_runs_sql
+from mindroom.session_storage.schema import usage_upsert_sql
+from mindroom.session_storage.types import ConversationSession
 from mindroom.usage.stats import collect_admin_usage
-from tests.history_helpers import RecordingModel
+from tests.conftest import persist_runs, seed_session_row
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from pathlib import Path
 
     from mindroom.constants import RuntimePaths
+    from mindroom.session_storage.store import ConversationStore
+
+
+def _session() -> ConversationSession:
+    """Return the conversation's row; each save gets its own, since a save updates the session it is given."""
+    return ConversationSession(kind="agent", session_id="session", owner_id="code")
+
 
 _FIRST = {
     "input_tokens": 120_000,
@@ -55,9 +60,9 @@ _SECOND = {
 }
 
 
-def _run() -> RunOutput:
+def _run() -> RunRecord:
     totals = {name: value + _SECOND[name] for name, value in _FIRST.items()}
-    return RunOutput(
+    return RunRecord(
         run_id="run-1",
         session_id="session",
         agent_id="code",
@@ -68,65 +73,66 @@ def _run() -> RunOutput:
         created_at=1_700_000_000,
         content="private output",
         metrics=RunMetrics(
-            **totals,
-            details={"model": [ModelMetrics(id="test-model", provider="test-provider", **totals)]},
+            tokens=TokenCounts(**totals),
+            details={"model": [ModelMetrics(tokens=TokenCounts(**totals), id="test-model", provider="test-provider")]},
         ),
         messages=[
-            Message(role="assistant", content="private history", from_history=True, metrics=MessageMetrics(**_FIRST)),
-            Message(role="user", content="private prompt", metrics=MessageMetrics(**_FIRST)),
+            Message(
+                role="assistant",
+                content="private history",
+                from_history=True,
+                metrics=MessageMetrics(tokens=TokenCounts(**_FIRST)),
+            ),
+            Message(role="user", content="private prompt", metrics=MessageMetrics(tokens=TokenCounts(**_FIRST))),
             Message(
                 role="assistant",
                 content="private first response",
                 created_at=1_700_000_001,
-                metrics=MessageMetrics(**_FIRST),
+                metrics=MessageMetrics(tokens=TokenCounts(**_FIRST)),
                 provider_data={"secret": "private provider metadata"},
             ),
-            Message(role="tool", content="private tool output", metrics=MessageMetrics(**_FIRST)),
+            Message(role="tool", content="private tool output", metrics=MessageMetrics(tokens=TokenCounts(**_FIRST))),
             Message(role="assistant", content="private unmetered response"),
             Message(
                 role="assistant",
                 content="private second response",
                 created_at=1_700_000_002,
-                metrics=MessageMetrics(**_SECOND),
+                metrics=MessageMetrics(tokens=TokenCounts(**_SECOND)),
             ),
         ],
     )
 
 
-@pytest.fixture
-def request_usage(tmp_path: Path) -> Iterator[tuple[Config, RuntimePaths, SqliteDb]]:
-    """Persist real run and session rows through the production storage owner."""
+def _usage_runtime(tmp_path: Path) -> tuple[Config, RuntimePaths]:
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path, process_env={})
     config = Config(
         agents={"code": AgentConfig(display_name="Code")},
         authorization=AuthorizationConfig(aliases={"@alice:example.test": ["@alias:example.test"]}),
     )
-    storage = create_state_storage("code", tmp_path / "agents/code", subdir="sessions", session_table="code_sessions")
-    assert isinstance(storage, SqliteDb)
-    run = _run()
-    assert run.metrics is not None
-    storage.upsert_session(
-        AgentSession(
-            session_id="session",
-            agent_id="code",
-            user_id="@alice:example.test",
-            session_data={"session_metrics": run.metrics.to_dict()},
-        ),
-    )
-    storage.upsert_run(run, session_id="session")
-    try:
-        yield config, paths, storage
-    finally:
-        storage.close()
+    return config, paths
 
 
-def test_request_projection_survives_repeated_save_without_content(
-    request_usage: tuple[Config, RuntimePaths, SqliteDb],
-) -> None:
+def _usage_store(tmp_path: Path, *runs: RunRecord) -> tuple[Config, RuntimePaths, ConversationStore]:
+    """Open the agent's store through the production storage owner and persist ``runs`` as their turns do."""
+    config, paths = _usage_runtime(tmp_path)
+    storage = create_agent_state_storage("code", tmp_path / "agents/code")
+    persist_runs(storage, _session(), *runs)
+    return config, paths, storage
+
+
+@pytest.fixture
+def request_usage(tmp_path: Path) -> tuple[Config, RuntimePaths, ConversationStore]:
+    """Persist real run and session rows through the production storage owner."""
+    return _usage_store(tmp_path, _run())
+
+
+def test_request_projection_survives_repeated_save_without_content(tmp_path: Path) -> None:
     """Saving again replaces projected requests instead of appending or copying conversation data."""
-    _, _, storage = request_usage
-    storage.upsert_run(_run(), session_id="session")
-    with sqlite3.connect(storage.db_file) as connection:
+    paused = _run()
+    paused.status = RunStatus.paused
+    # A paused run saves again when it continues; a finished one never changes.
+    _, _, storage = _usage_store(tmp_path, paused, _run())
+    with sqlite3.connect(storage.path) as connection:
         payloads = connection.execute("SELECT usage_data FROM code_sessions_usage").fetchall()
     assert len(payloads) == 1
     payload = json.loads(payloads[0][0])
@@ -138,7 +144,7 @@ def test_request_projection_survives_repeated_save_without_content(
 
 
 def test_request_export_keeps_short_calls_distinct_and_preserves_all_counters(
-    request_usage: tuple[Config, RuntimePaths, SqliteDb],
+    request_usage: tuple[Config, RuntimePaths, ConversationStore],
 ) -> None:
     """A large run must not turn two smaller provider requests into one pricing input."""
     config, paths, _ = request_usage
@@ -177,21 +183,20 @@ def test_request_export_keeps_short_calls_distinct_and_preserves_all_counters(
 @pytest.mark.parametrize("first_after_midnight", [False, True])
 @pytest.mark.parametrize("retained_run", [False, True])
 def test_daily_usage_follows_requests_across_midnight_without_counting_extra_replies(
-    request_usage: tuple[Config, RuntimePaths, SqliteDb],
+    tmp_path: Path,
     first_after_midnight: bool,
     retained_run: bool,
 ) -> None:
     """A run's earlier creation date must not pull later provider usage into that day."""
-    config, paths, storage = request_usage
     midnight = int(datetime(2023, 11, 15, tzinfo=UTC).timestamp())
     run = _run()
     assert run.messages is not None
     run.messages[2].created_at = midnight + (10 if first_after_midnight else -10)
     run.messages[5].created_at = midnight + 30
-    storage.upsert_run(run, session_id="session")
+    config, paths, storage = _usage_store(tmp_path, run)
     if not retained_run:
-        with sqlite3.connect(storage.db_file) as connection:
-            connection.execute("DELETE FROM code_sessions_runs")
+        with sqlite3.connect(storage.path) as connection:
+            connection.execute("DELETE FROM code_sessions_log_runs")
 
     payload = collect_admin_usage(config=config, runtime_paths=paths, include_daily=True).to_dict()
     days = payload["daily_breakdown"]
@@ -212,12 +217,12 @@ def test_daily_usage_follows_requests_across_midnight_without_counting_extra_rep
     ["old", "malformed", "mixed_models", "unknown", "undated", *[f"{field}_mismatch" for field in _FIRST]],
 )
 def test_unreconciled_request_details_preserve_aggregates_and_mark_coverage(
-    request_usage: tuple[Config, RuntimePaths, SqliteDb],
+    request_usage: tuple[Config, RuntimePaths, ConversationStore],
     case: str,
 ) -> None:
     """Incomplete or ambiguous request facts must never acquire a guessed provider/model."""
     config, paths, storage = request_usage
-    with sqlite3.connect(storage.db_file) as connection:
+    with sqlite3.connect(storage.path) as connection:
         payload = json.loads(connection.execute("SELECT usage_data FROM code_sessions_usage").fetchone()[0])
         payload["requests"] = [
             {"created_at": 1_700_086_401, "metrics": dict(_FIRST)},
@@ -251,23 +256,137 @@ def test_unreconciled_request_details_preserve_aggregates_and_mark_coverage(
     assert report.request_coverage.unavailable_sources == 1
 
 
-@pytest.mark.parametrize("streaming", [False, True])
+def test_a_compaction_summary_stored_with_an_untagged_request_reports_its_model(tmp_path: Path) -> None:
+    """A summary row from before its request named its model reports the request under the summary's model."""
+    config, paths = _usage_runtime(tmp_path)
+    storage = create_agent_state_storage("code", tmp_path / "agents/code")
+    counters = {"input_tokens": 40, "output_tokens": 4, "total_tokens": 44}
+    # The row as compaction summaries stored it before its request named its model.
+    stored = {
+        "run_id": "compaction:summary",
+        "parent_run_id": None,
+        "team_id": None,
+        "user_id": "@alice:example.test",
+        "model_provider": "summary-provider",
+        "model": "summary-model",
+        "created_at": 1_700_000_500.5,
+        "metrics": counters,
+        "requests": [{"created_at": 1_700_000_500.5, "metrics": counters}],
+        "kind": "compaction_summary",
+    }
+    seed_session_row(storage, _session())
+    with storage.transaction(write=True) as connection:
+        connection.execute(
+            usage_upsert_sql(storage.names),
+            ("session", "compaction:summary", json.dumps(stored)),
+        )
+
+    report = collect_admin_usage(config=config, runtime_paths=paths, include_requests=True)
+
+    assert [
+        (row["provider"], row["model"], row["kind"], row["totals"]["total_tokens"])
+        for row in report.to_dict()["request_breakdown"]
+    ] == [("summary-provider", "summary-model", "compaction_summary", 44)]
+    assert report.request_coverage is not None
+    assert report.request_coverage.unavailable_sources == 0
+
+
+def _per_api_snapshot(
+    usage_id: str,
+    stored: tuple[str, str],
+    model: str,
+    *,
+    tokens: int,
+    kind: str = "run",
+    details: bool = True,
+) -> dict[str, object]:
+    """Return a usage row as v2026.10.729 stored it for a model whose usage carried a per-API provider name.
+
+    ``stored`` holds the row's own provider, the route's name for a run, and the per-API name its model was counted
+    under; a compaction summary stored no per-model ``details``.
+    """
+    row_provider, provider = stored
+    counters = {"input_tokens": tokens, "total_tokens": tokens}
+    model_details = {"details": {"model": [{"id": model, "provider": provider, **counters}]}} if details else {}
+    return {
+        "run_id": usage_id,
+        "parent_run_id": None,
+        "team_id": None,
+        "user_id": "@alice:example.test",
+        "model_provider": row_provider,
+        "model": model,
+        "created_at": 1_700_000_000 + tokens,
+        "metrics": {**counters, **model_details},
+        "requests": [
+            {"created_at": 1_700_000_000 + tokens, "metrics": counters, "model": model, "model_provider": provider},
+        ],
+        "kind": kind,
+    }
+
+
+def test_usage_stored_under_a_per_api_provider_name_reports_under_its_route_name(tmp_path: Path) -> None:
+    """Usage stored before each route had one provider name adds up with newer usage of the same model."""
+    newer = _run()
+    assert newer.metrics is not None
+    newer.model_provider = "OpenAI"
+    newer.model = "gpt-6-luna"
+    for message in newer.messages or ():
+        if message.metrics.tokens.total_tokens and message.role == "assistant" and not message.from_history:
+            message.provider_data = {"mindroom_model": {"id": "gpt-6-luna", "provider": "OpenAI"}}
+    newer.metrics.details = {
+        "model": [ModelMetrics(tokens=newer.metrics.tokens, id="gpt-6-luna", provider="OpenAI")],
+    }
+    config, paths, storage = _usage_store(tmp_path, newer)
+    with storage.transaction(write=True) as connection:
+        for snapshot in (
+            _per_api_snapshot("chat", ("OpenAI", "OpenAI Chat"), "gpt-6-luna", tokens=1),
+            _per_api_snapshot("responses", ("OpenAI", "OpenAI Responses"), "gpt-6-luna", tokens=2),
+            _per_api_snapshot(
+                "memory_extraction:old",
+                ("OpenAI Chat", "OpenAI Chat"),
+                "gpt-6-luna",
+                tokens=4,
+                kind="memory_extraction",
+            ),
+            _per_api_snapshot(
+                "compaction:old",
+                ("OpenAI Responses", "OpenAI Responses"),
+                "gpt-6-luna",
+                tokens=32,
+                kind="compaction_summary",
+                details=False,
+            ),
+            _per_api_snapshot("codex", ("OpenAI Codex", "OpenAI Codex Responses"), "gpt-6.1-sol", tokens=8),
+            _per_api_snapshot("kimi", ("Kimi", "Kimi Chat"), "k3", tokens=16),
+        ):
+            connection.execute(usage_upsert_sql(storage.names), ("session", snapshot["run_id"], json.dumps(snapshot)))
+
+    report = collect_admin_usage(config=config, runtime_paths=paths, include_requests=True).to_dict()
+
+    assert [(row["provider"], row["model"], row["totals"]["total_tokens"]) for row in report["model_breakdown"]] == [
+        ("OpenAI", "gpt-6-luna", 250_014 + 1 + 2 + 4 + 32),
+        ("Kimi", "k3", 16),
+        ("OpenAI Codex", "gpt-6.1-sol", 8),
+    ]
+    assert {row["provider"] for row in report["request_breakdown"]} == {"OpenAI", "OpenAI Codex", "Kimi"}
+    assert len(report["request_breakdown"]) == 2 + 6
+    assert report["request_coverage"]["unavailable_sources"] == 0
+
+
 @pytest.mark.parametrize("retained_run", [False, True])
 def test_mixed_model_requests_keep_models_and_actual_dates(
-    request_usage: tuple[Config, RuntimePaths, SqliteDb],
+    tmp_path: Path,
     *,
-    streaming: bool,
     retained_run: bool,
 ) -> None:
     """Changing models must not omit request detail or move new usage to the run's original day."""
-    config, paths, storage = request_usage
     run = _run()
     assert run.messages is not None
     assert run.metrics is not None
     run.metrics.details = {
         "model": [
-            ModelMetrics(id="first-model", provider="first-provider", **_FIRST),
-            ModelMetrics(id="second-model", provider="second-provider", **_SECOND),
+            ModelMetrics(tokens=TokenCounts(**_FIRST), id="first-model", provider="first-provider"),
+            ModelMetrics(tokens=TokenCounts(**_SECOND), id="second-model", provider="second-provider"),
         ],
     }
     first_day = int(datetime(2023, 11, 15, tzinfo=UTC).timestamp())
@@ -276,25 +395,17 @@ def test_mixed_model_requests_keep_models_and_actual_dates(
         (run.messages[2], "first-model", "first-provider", _FIRST, first_day + 1),
         (run.messages[5], "second-model", "second-provider", _SECOND, second_day + 1),
     ):
-        model = RecordingModel(id=model_id, provider=provider)
+        # What the owned loop stamps on each request's assistant message: its usage and the model that answered.
         message.created_at = created_at
-        message.metrics = MessageMetrics()
-        provider_data = {"secret": "private provider metadata"}
-        if streaming:
-            model._populate_assistant_message_from_stream_data(
-                message,
-                MessageData(response_metrics=MessageMetrics(**metrics), response_provider_data=provider_data),
-            )
-        else:
-            populated = model._populate_assistant_message(
-                message,
-                ModelResponse(response_usage=MessageMetrics(**metrics), provider_data=provider_data),
-            )
-            assert populated is message
-    storage.upsert_run(run, session_id="session")
+        message.metrics = MessageMetrics(tokens=TokenCounts(**metrics))
+        message.provider_data = {
+            "secret": "private provider metadata",
+            "mindroom_model": {"id": model_id, "provider": provider},
+        }
+    config, paths, storage = _usage_store(tmp_path, run)
     if not retained_run:
-        with sqlite3.connect(storage.db_file) as connection:
-            connection.execute("DELETE FROM code_sessions_runs")
+        with sqlite3.connect(storage.path) as connection:
+            connection.execute("DELETE FROM code_sessions_log_runs")
 
     payload = collect_admin_usage(
         config=config,
@@ -318,17 +429,17 @@ def test_mixed_model_requests_keep_models_and_actual_dates(
     ]
     assert payload["user_breakdown"][0]["daily_breakdown"] == days
     assert payload["request_coverage"]["unavailable_sources"] == 0
-    with sqlite3.connect(storage.db_file) as connection:
+    with sqlite3.connect(storage.path) as connection:
         stored = connection.execute("SELECT usage_data FROM code_sessions_usage").fetchone()[0]
     assert "private" not in stored
 
 
 def test_daily_mixed_models_count_run_once_per_model(
-    request_usage: tuple[Config, RuntimePaths, SqliteDb],
+    request_usage: tuple[Config, RuntimePaths, ConversationStore],
 ) -> None:
     """Repeated calls count one run overall and one run for each model used."""
     config, paths, storage = request_usage
-    with sqlite3.connect(storage.db_file) as connection:
+    with sqlite3.connect(storage.path) as connection:
         payload = json.loads(connection.execute("SELECT usage_data FROM code_sessions_usage").fetchone()[0])
         payload["metrics"] = {
             "input_tokens": 6,
@@ -362,12 +473,12 @@ def test_daily_mixed_models_count_run_once_per_model(
 
 @pytest.mark.parametrize("invalid", ["swapped_models", "missing_provider", "malformed_model", "empty_model"])
 def test_request_attribution_must_reconcile_per_model(
-    request_usage: tuple[Config, RuntimePaths, SqliteDb],
+    request_usage: tuple[Config, RuntimePaths, ConversationStore],
     invalid: str,
 ) -> None:
     """Correct overall totals cannot justify a wrong or incomplete per-request model."""
     config, paths, storage = request_usage
-    with sqlite3.connect(storage.db_file) as connection:
+    with sqlite3.connect(storage.path) as connection:
         payload = json.loads(connection.execute("SELECT usage_data FROM code_sessions_usage").fetchone()[0])
         payload["metrics"]["details"]["model"] = [
             {"id": "first-model", "provider": "test-provider", **_FIRST},
@@ -393,37 +504,39 @@ def test_request_attribution_must_reconcile_per_model(
     assert report.request_coverage.unavailable_sources == 1
 
 
-def test_initial_migration_imports_available_requests_without_reseeding_old_ledgers(
-    request_usage: tuple[Config, RuntimePaths, SqliteDb],
-) -> None:
+def test_initial_conversion_imports_available_requests_without_reseeding_old_ledgers(tmp_path: Path) -> None:
     """Initial seeding may use retained messages; an initialized ledger is never reconstructed."""
-    config, paths, storage = request_usage
-    with sqlite3.connect(storage.db_file) as connection:
-        connection.execute("DROP TABLE code_sessions_usage")
-    migrate_usage_database(Path(storage.db_file), "code_sessions")
+    config, paths = _usage_runtime(tmp_path)
+    # A database from before the usage ledger: its Agno-layout run row holds the run's messages.
+    names = AgnoTableNames("code")
+    state_root = tmp_path / "agents/code"
+    database = names.database_path(state_root)
+    database.parent.mkdir(parents=True)
+    run = _run()
+    assert run.metrics is not None
+    with closing(sqlite3.connect(database)) as connection, connection:
+        for statement in agno_runs_sql(names):
+            connection.execute(statement)
+        connection.execute(
+            "INSERT INTO code_sessions (session_id, session_type, agent_id, user_id, session_data, created_at) "
+            "VALUES ('session', 'agent', 'code', ?, ?, ?)",
+            (run.user_id, json.dumps({"session_metrics": run.metrics.to_dict()}), run.created_at),
+        )
+        connection.execute(
+            "INSERT INTO code_sessions_runs (run_id, session_id, run_type, agent_id, user_id, status, run_index, "
+            "run_data, created_at) VALUES (?, 'session', 'agent', 'code', ?, ?, 0, ?, ?)",
+            (run.run_id, run.user_id, run.status.value, json.dumps(run.to_dict()), run.created_at),
+        )
+    storage = create_agent_state_storage("code", state_root)
     report = collect_admin_usage(config=config, runtime_paths=paths, include_requests=True)
     assert [row.totals.input_tokens for row in report.request_breakdown] == [120_000, 130_000]
-    with sqlite3.connect(storage.db_file) as connection:
+    with sqlite3.connect(storage.path) as connection:
         payload = json.loads(connection.execute("SELECT usage_data FROM code_sessions_usage").fetchone()[0])
         del payload["requests"]
         connection.execute("UPDATE code_sessions_usage SET usage_data = ?", (json.dumps(payload),))
-    migrate_usage_database(Path(storage.db_file), "code_sessions")
+    create_agent_state_storage("code", state_root)
     report = collect_admin_usage(config=config, runtime_paths=paths, include_requests=True)
     assert report.totals.total_tokens == 250_014
     assert report.request_breakdown == ()
-    assert report.request_coverage is not None
-    assert report.request_coverage.unavailable_sources == 1
-
-
-def test_history_without_retained_requests_marks_request_coverage(
-    request_usage: tuple[Config, RuntimePaths, SqliteDb],
-) -> None:
-    """A readable aggregate cannot claim complete request detail after historical rows are lost."""
-    config, paths, storage = request_usage
-    with sqlite3.connect(storage.db_file) as connection:
-        connection.execute("DELETE FROM code_sessions_usage")
-    report = collect_admin_usage(config=config, runtime_paths=paths, include_requests=True)
-    assert report.totals.total_tokens == 250_014
-    assert report.to_dict()["request_breakdown"] == []
     assert report.request_coverage is not None
     assert report.request_coverage.unavailable_sources == 1

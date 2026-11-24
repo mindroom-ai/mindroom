@@ -1,9 +1,15 @@
-"""Narrow interfaces for worker computer resource ownership."""
+"""Narrow interfaces for worker computer resource ownership, and the limits of its streams."""
 
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal, Protocol, TypedDict
+from typing import TYPE_CHECKING, Literal, Protocol, TypedDict
+
+if TYPE_CHECKING:
+    from playwright.async_api import Page
+
+# A worker stream message is a chunk of the desktop's RFB stream.
+MAX_WORKER_STREAM_MESSAGE_BYTES = 4 * 1024 * 1024
 
 
 class ComputerStatus(TypedDict):
@@ -32,7 +38,8 @@ class ComputerDisplay(Protocol):
 
 @dataclass(frozen=True)
 class BrowserSession:
-    """Validated browser entrypoint and its asynchronous resource closer."""
+    """Validated browser entrypoint, its asynchronous resource closer, and the page it shows, if it runs in this process."""
 
     execute: Callable[..., Awaitable[object]]
     close: Callable[[], Awaitable[None]]
+    page: "Callable[[], Page | None] | None" = None

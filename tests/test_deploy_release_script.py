@@ -114,26 +114,35 @@ def _run(tmp_path: Path, *args: str, values: dict = _VALUES, fail_ids: str = "")
 
 @pytest.mark.parametrize(
     ("selection", "expected_ids"),
-    [(None, [1]), ("running", [1]), ("all", [1, 2]), ("2,1", [1, 2]), ("none", [])],
+    [(None, [1]), ("running", [1]), ("all", [1, 2, 3]), ("2,1", [1, 2]), ("3", [3]), ("none", [])],
 )
-def test_instance_selection_skips_manually_stopped_and_deprovisioned(
+def test_instance_selection_skips_deprovisioned(
     tmp_path: Path,
     selection: str | None,
     expected_ids: list[int],
 ) -> None:
-    """Default and all selections never include manually stopped or deprovisioned instances."""
+    """Default selection takes running instances; all also takes held and manually stopped ones, never deprovisioned."""
     run = _run(tmp_path, *(["--instances", selection] if selection else []))
     assert run.returncode == 0, run.output
     assert [body["instance_id"] for body in run.provisioned()] == expected_ids
     assert not any("/stop" in arg for call in run.calls for arg in call["args"])
 
 
-@pytest.mark.parametrize("instance_id", ["3", "4", "1,3"])
-def test_explicit_manually_stopped_or_deprovisioned_ids_are_refused(tmp_path: Path, instance_id: str) -> None:
-    """Explicitly requested manually stopped or deprovisioned instances stop the run before any change."""
+def test_manually_stopped_instances_are_redeployed_and_kept_stopped(tmp_path: Path) -> None:
+    """A stopped instance gets the release's chart without starting, so a later Start runs the current version."""
+    run = _run(tmp_path, "--instances", "all")
+    assert run.returncode == 0, run.output
+    assert {body["instance_id"]: body.get("keep_stopped") for body in run.provisioned()} == {1: None, 2: None, 3: True}
+    rollouts = [call["args"] for call in run.calls if call["name"] == "kubectl" and "rollout" in call["args"]]
+    assert [args[2] for args in rollouts] == ["deployment/tuwunel-1", "deployment/mindroom-1"]
+
+
+@pytest.mark.parametrize("instance_id", ["4", "1,4"])
+def test_explicit_deprovisioned_ids_are_refused(tmp_path: Path, instance_id: str) -> None:
+    """Explicitly requested deprovisioned instances stop the run before any change, since provisioning recreates them."""
     run = _run(tmp_path, "--instances", instance_id)
     assert run.returncode == 1
-    assert "Refusing manually stopped or deprovisioned instances" in run.output
+    assert "Refusing deprovisioned instances" in run.output
     assert not any(call["name"] in {"sudo", "tar"} for call in run.calls)
     assert run.provisioned() == []
 
@@ -177,5 +186,5 @@ def test_failed_instance_does_not_stop_the_run(tmp_path: Path) -> None:
     """A failed provision is recorded, later instances still run, and the script exits non-zero."""
     run = _run(tmp_path, "--instances", "all", fail_ids="1")
     assert run.returncode == 1
-    assert [body["instance_id"] for body in run.provisioned()] == [1, 2]
+    assert [body["instance_id"] for body in run.provisioned()] == [1, 2, 3]
     assert "Finished with failures: 1" in run.output

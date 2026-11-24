@@ -4,25 +4,36 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import nio
 import pytest
 
+from mindroom.authorization import configured_responder_entities_for_room
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.calls import CallsConfig, RealtimeCallProfile
 from mindroom.config.main import Config
+from mindroom.config.models import ModelConfig
 from mindroom.constants import ROUTER_AGENT_NAME, resolve_runtime_paths
 from mindroom.entity_resolution import (
     DuplicateManagedEntityIdentityError,
     MissingManagedEntityAccountError,
     configured_bot_user_ids_for_room,
     configured_call_agent_name_for_room,
+    configured_routable_entity_names_for_room,
     entity_identity_registry,
     persisted_bot_user_ids,
+    prepared_entity_names_by_user_id,
 )
+from mindroom.matrix import state as matrix_state
+from mindroom.matrix.identity import MatrixID, managed_account_key
 from mindroom.matrix.state import MatrixState
 from tests.conftest import bind_runtime_paths, runtime_paths_for
+from tests.matrix_state_helpers import save_matrix_state
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from pathlib import Path
+
+    from mindroom.constants import RuntimePaths
 
 
 def _call_config(tmp_path: Path, **accept_invites_by_agent: bool) -> Config:
@@ -83,7 +94,7 @@ def test_configured_bot_user_ids_for_room_includes_agents_teams_and_router(tmp_p
     state.add_account("agent_general", "mindroom_general", "pw", domain="localhost")
     state.add_account("agent_other", "mindroom_other", "pw", domain="localhost")
     state.add_account("agent_team", "mindroom_team", "pw", domain="localhost")
-    state.save(runtime_paths=runtime_paths)
+    save_matrix_state(state, runtime_paths)
 
     user_ids = configured_bot_user_ids_for_room(config, "!room:server", runtime_paths)
 
@@ -121,7 +132,7 @@ def test_configured_bot_user_ids_for_room_uses_persisted_current_user_ids(tmp_pa
     state.add_account(f"agent_{ROUTER_AGENT_NAME}", "actual_router", "pw", domain="matrix.example")
     state.add_account("agent_general", "actual_general", "pw", domain="matrix.example")
     state.add_account("agent_team", "actual_team", "pw", domain="matrix.example")
-    state.save(runtime_paths=runtime_paths)
+    save_matrix_state(state, runtime_paths)
 
     user_ids = configured_bot_user_ids_for_room(config, "!room:server", runtime_paths)
 
@@ -130,6 +141,41 @@ def test_configured_bot_user_ids_for_room_uses_persisted_current_user_ids(tmp_pa
         "@actual_general:matrix.example",
         "@actual_team:matrix.example",
     }
+
+
+@pytest.mark.parametrize(
+    ("namespace", "canonical_alias", "expected"),
+    [
+        ("team1", "#dev:localhost", None),
+        ("", "#dev:other.org", None),
+        ("team1", "#dev_team1:localhost", "a"),
+        ("", "#dev:localhost", "a"),
+    ],
+    ids=["namespace-missing", "other-server", "namespaced", "plain"],
+)
+def test_live_canonical_alias_selects_configured_responders_only_when_it_is_the_managed_alias(
+    tmp_path: Path,
+    namespace: str,
+    canonical_alias: str,
+    expected: str | None,
+) -> None:
+    """A room outside MindRoom whose alias only shares a room key's localpart answers with the agents present."""
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "mindroom_data",
+        process_env={"MATRIX_HOMESERVER": "http://localhost:8008", "MINDROOM_NAMESPACE": namespace},
+    )
+    config = bind_runtime_paths(
+        Config(agents={"a": AgentConfig(display_name="A", rooms=["dev"])}),
+        runtime_paths,
+    )
+    room = nio.MatrixRoom("!other:localhost", "@user:localhost")
+    room.canonical_alias = canonical_alias
+
+    responders = configured_responder_entities_for_room(room, config, runtime_paths)
+
+    expected_ids = None if expected is None else [entity_identity_registry(config, runtime_paths).current_id(expected)]
+    assert responders == expected_ids
 
 
 def test_configured_call_agent_includes_authorized_ad_hoc_invited_room(tmp_path: Path) -> None:
@@ -142,6 +188,7 @@ def test_configured_call_agent_includes_authorized_ad_hoc_invited_room(tmp_path:
             "!agent-call:server",
             runtime_paths,
             invited_rooms_by_agent={"general": {"!agent-call:server"}},
+            personal_rooms_by_agent={},
         )
         == "general"
     )
@@ -160,6 +207,7 @@ def test_configured_call_agent_rejects_ambiguous_invited_room(tmp_path: Path) ->
                 "general": {"!agent-call:server"},
                 "other": {"!agent-call:server"},
             },
+            personal_rooms_by_agent={},
         )
 
 
@@ -177,6 +225,7 @@ def test_explicit_call_room_owner_overrides_ambiguous_invited_membership(tmp_pat
                 "general": {"!agent-call:server"},
                 "other": {"!agent-call:server"},
             },
+            personal_rooms_by_agent={},
         )
         == "general"
     )
@@ -192,6 +241,7 @@ def test_configured_call_agent_ignores_stale_invites_when_acceptance_is_disabled
             "!agent-call:server",
             runtime_paths,
             invited_rooms_by_agent={"general": {"!agent-call:server"}},
+            personal_rooms_by_agent={},
         )
         is None
     )
@@ -210,6 +260,7 @@ def test_configured_call_agent_uses_live_invited_room_state(tmp_path: Path) -> N
             "!agent-call:server",
             runtime_paths,
             invited_rooms_by_agent=invited_rooms_by_agent,
+            personal_rooms_by_agent={},
         )
         is None
     )
@@ -222,6 +273,7 @@ def test_configured_call_agent_uses_live_invited_room_state(tmp_path: Path) -> N
             "!agent-call:server",
             runtime_paths,
             invited_rooms_by_agent=invited_rooms_by_agent,
+            personal_rooms_by_agent={},
         )
         == "general"
     )
@@ -245,13 +297,16 @@ def test_entity_identity_registry_uses_only_persisted_current_ids(tmp_path: Path
     state = MatrixState()
     state.add_account(f"agent_{ROUTER_AGENT_NAME}", "mindroom_router_oldns", "pw", domain="localhost")
     state.add_account("agent_general", "mindroom_general_oldns", "pw", domain="localhost")
-    state.save(runtime_paths=runtime_paths)
+    save_matrix_state(state, runtime_paths)
 
     identity = entity_identity_registry(config, runtime_paths)
 
     assert identity.current_ids["general"].full_id == "@mindroom_general_oldns:localhost"
     assert identity.current_entity_name_for_user_id("@mindroom_general_oldns:localhost") == "general"
     assert identity.current_entity_name_for_user_id("@mindroom_general:localhost") is None
+    # Team resolution names the router too, and an unmanaged member by its username.
+    assert identity.entity_name_or_username(MatrixID.parse("@mindroom_router_oldns:localhost")) == ROUTER_AGENT_NAME
+    assert identity.entity_name_or_username(MatrixID.parse("@mindroom_general:localhost")) == "mindroom_general"
 
 
 def test_entity_identity_registry_requires_prepared_entity_accounts(tmp_path: Path) -> None:
@@ -262,11 +317,14 @@ def test_entity_identity_registry_requires_prepared_entity_accounts(tmp_path: Pa
         process_env={},
     )
     config = Config.validate_with_runtime(
-        Config(agents={"general": AgentConfig(display_name="General", role="General agent")}).authored_model_dump(),
+        Config(
+            agents={"general": AgentConfig(display_name="General", role="General agent")},
+            models={"default": ModelConfig(provider="openai", id="test-model")},
+        ).authored_model_dump(),
         runtime_paths,
     )
 
-    with pytest.raises(MissingManagedEntityAccountError, match="router"):
+    with pytest.raises(MissingManagedEntityAccountError, match="general"):
         entity_identity_registry(config, runtime_paths)
 
 
@@ -282,10 +340,10 @@ def test_persisted_bot_user_ids_keep_removed_entities_and_skip_internal_user(tmp
     state.add_account("agent_retired", "mindroom_retired", "pw", domain="server")
     state.add_account("agent_legacy", "mindroom_legacy", "pw")
     state.add_account("agent_user", "mindroom_user", "pw", domain="server")
-    state.save(runtime_paths=runtime_paths)
+    save_matrix_state(state, runtime_paths)
 
     assert persisted_bot_user_ids(runtime_paths) == frozenset(
-        {"@mindroom_router:server", "@mindroom_retired:server", "@mindroom_legacy:localhost"},
+        {"@mindroom_router:server", "@mindroom_retired:server", "@mindroom_legacy:mindroom.chat"},
     )
 
 
@@ -309,7 +367,99 @@ def test_entity_identity_registry_rejects_duplicate_persisted_entity_ids(tmp_pat
     state.add_account(f"agent_{ROUTER_AGENT_NAME}", "mindroom_router", "pw", domain="localhost")
     state.add_account("agent_general", "shared_bot", "pw", domain="localhost")
     state.add_account("agent_writer", "shared_bot", "pw", domain="localhost")
-    state.save(runtime_paths=runtime_paths)
+    save_matrix_state(state, runtime_paths)
 
     with pytest.raises(DuplicateManagedEntityIdentityError, match="shared_bot"):
         entity_identity_registry(config, runtime_paths)
+
+
+def test_prepared_entity_names_skip_entities_without_accounts(tmp_path: Path) -> None:
+    """Entities whose Matrix accounts are prepared are named by their user ID; one not prepared yet is left out."""
+    config = Config(agents={"mind": AgentConfig(display_name="Mind"), "pal": AgentConfig(display_name="Pal")})
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
+    domain = config.get_domain(runtime_paths)
+    state = MatrixState.load(runtime_paths=runtime_paths)
+    state.add_account(managed_account_key("mind"), "mindroom_mind", "pw", domain=domain)
+    save_matrix_state(state, runtime_paths)
+
+    assert prepared_entity_names_by_user_id(config, runtime_paths) == {f"@mindroom_mind:{domain}": "mind"}
+
+
+@pytest.mark.parametrize("resolve", [entity_identity_registry, prepared_entity_names_by_user_id])
+def test_resolving_every_entity_reads_matrix_state_once(
+    resolve: Callable[[Config, RuntimePaths], object],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Resolving every configured entity reads Matrix state once, not once per entity.
+
+    Message handling builds the identity registry many times per turn.
+    """
+    config = bind_runtime_paths(
+        Config(agents={name: AgentConfig(display_name=name.title()) for name in ("general", "writer", "coder")}),
+        runtime_paths=resolve_runtime_paths(
+            config_path=tmp_path / "config.yaml",
+            storage_path=tmp_path / "mindroom_data",
+            process_env={},
+        ),
+    )
+    runtime_paths = runtime_paths_for(config)
+    state = MatrixState()
+    for entity_name in (ROUTER_AGENT_NAME, *config.agents):
+        state.add_account(managed_account_key(entity_name), f"mindroom_{entity_name}", "pw", domain="localhost")
+    save_matrix_state(state, runtime_paths)
+    reads = 0
+    cache_key = matrix_state._matrix_state_cache_key
+
+    def counting_cache_key(state_file: Path) -> tuple[Path, int, int | None, int | None]:
+        nonlocal reads
+        reads += 1
+        return cache_key(state_file)
+
+    monkeypatch.setattr(matrix_state, "_matrix_state_cache_key", counting_cache_key)
+
+    resolve(config, runtime_paths)
+
+    assert reads == 1
+
+
+def test_room_entity_lookup_reads_matrix_state_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Finding a room's agents and teams reads Matrix state once, not once per entity.
+
+    Call reconciliation runs this for every joined room of every call agent.
+    """
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "by_key": AgentConfig(display_name="By Key", rooms=["dev"]),
+                "by_alias": AgentConfig(display_name="By Alias", rooms=["#dev:localhost"]),
+                "by_id": AgentConfig(display_name="By ID", rooms=["!dev:localhost"]),
+                "elsewhere": AgentConfig(display_name="Elsewhere", rooms=["lobby", "!other:localhost"]),
+            },
+            teams={"crew": TeamConfig(display_name="Crew", role="Crew", agents=["by_key"], rooms=["dev"])},
+        ),
+        runtime_paths=resolve_runtime_paths(
+            config_path=tmp_path / "config.yaml",
+            storage_path=tmp_path / "mindroom_data",
+            process_env={"MATRIX_HOMESERVER": "http://localhost:8008"},
+        ),
+    )
+    runtime_paths = runtime_paths_for(config)
+    state = MatrixState()
+    state.add_room("dev", "!dev:localhost", "#dev:localhost", "Dev")
+    state.add_room("lobby", "!lobby:localhost", "#lobby:localhost", "Lobby")
+    save_matrix_state(state, runtime_paths)
+    reads = 0
+    cache_key = matrix_state._matrix_state_cache_key
+
+    def counting_cache_key(state_file: Path) -> tuple[Path, int, int | None, int | None]:
+        nonlocal reads
+        reads += 1
+        return cache_key(state_file)
+
+    monkeypatch.setattr(matrix_state, "_matrix_state_cache_key", counting_cache_key)
+
+    names = configured_routable_entity_names_for_room(config, "!dev:localhost", runtime_paths)
+
+    assert names == ["by_key", "by_alias", "by_id", "crew"]
+    assert reads == 1

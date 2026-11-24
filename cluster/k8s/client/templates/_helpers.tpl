@@ -40,7 +40,7 @@ app.kubernetes.io/component: client
 {{- end -}}
 
 {{- define "mindroom-client.image" -}}
-{{- $tag := .Values.image.tag | default .Chart.AppVersion -}}
+{{- $tag := required "image.tag is required, for example a MindRoom Chat release such as v2026.11.0" .Values.image.tag -}}
 {{- if .Values.image.digest -}}
 {{- printf "%s:%s@%s" .Values.image.repository $tag .Values.image.digest -}}
 {{- else -}}
@@ -132,7 +132,66 @@ Returns JSON {"value": <rendered>} so scalars survive fromJson.
 {{- with .Values.bugReports.admins -}}
 {{- $_ := set $wellKnown "io.mindroom.bug_reports" (dict "admins" .) -}}
 {{- end -}}
+{{- with .Values.serverEmoji.room -}}
+{{- $_ := set $wellKnown "io.mindroom.emoji" (dict "room" .) -}}
+{{- end -}}
 {{- $wellKnown | toJson -}}
+{{- end -}}
+
+{{/*
+The image's main nginx config, without what makes an unprivileged nginx log routine lines at every start and stop.
+Only a root master can switch workers to another user, and nginx warns about the user directive otherwise, so the
+directive stays only when neither security context makes the container run as a non-root user.
+The warn level keeps notices such as worker starts and graceful shutdowns out of the error log on stderr.
+*/}}
+{{- define "mindroom-client.mainNginxConf" -}}
+{{- $pod := default dict .Values.podSecurityContext -}}
+{{- $container := default dict .Values.securityContext -}}
+{{- $runAsUser := ternary $container.runAsUser $pod.runAsUser (hasKey $container "runAsUser") -}}
+{{- $runAsNonRoot := ternary $container.runAsNonRoot $pod.runAsNonRoot (hasKey $container "runAsNonRoot") -}}
+{{- if not (or $runAsUser $runAsNonRoot) -}}
+user nginx;
+{{ end -}}
+worker_processes auto;
+
+error_log /var/log/nginx/error.log warn;
+pid /run/nginx.pid;
+
+events {
+  worker_connections 1024;
+}
+
+http {
+  include /etc/nginx/mime.types;
+  default_type application/octet-stream;
+
+  log_format main '$remote_addr - $remote_user [$time_local] "$request" '
+                  '$status $body_bytes_sent "$http_referer" '
+                  '"$http_user_agent" "$http_x_forwarded_for"';
+
+  access_log /var/log/nginx/access.log main;
+
+  sendfile on;
+  keepalive_timeout 65;
+
+  include /etc/nginx/conf.d/*.conf;
+}
+{{- end -}}
+
+{{/*
+Who may frame a response: "none" for no origin, anything else for the client's own origin, which
+frames its own pages such as the PDF viewer's frame page and client plugin pages under public/plugins/.
+nginx drops every inherited add_header in a location that sets its own, so each such location
+includes these headers again.
+*/}}
+{{- define "mindroom-client.frameHeaders" -}}
+{{- if eq . "none" -}}
+add_header Content-Security-Policy "frame-ancestors 'none'" always;
+add_header X-Frame-Options "DENY" always;
+{{- else -}}
+add_header Content-Security-Policy "frame-ancestors 'self'" always;
+add_header X-Frame-Options "SAMEORIGIN" always;
+{{- end -}}
 {{- end -}}
 
 {{/*
@@ -151,12 +210,31 @@ runtime-config.js straight from nginx and the Deployment bypasses the entrypoint
 {{- $authenticationRecoveryLoader := "if (!window.__AUTHENTICATION_RECOVERY_READY__) { const script = document.createElement(\"script\"); script.src = new URL(\"authentication-recovery.js\", document.currentScript.src).href; script.async = false; window.__AUTHENTICATION_RECOVERY_READY__ = new Promise((resolve) => { script.onload = resolve; script.onerror = resolve; }); document.head.appendChild(script); }" -}}
 {{- $runtimeConfig = printf "%s window.__AUTHENTICATION_RECOVERY_CONFIG__ = %s; %s" $runtimeConfig $authenticationRecoveryConfig $authenticationRecoveryLoader -}}
 {{- end -}}
+{{- $publicFiles := list (regexQuoteMeta "/runtime-config.js") (regexQuoteMeta (printf "%s/sw.js" $prefix)) -}}
+{{- if .Values.authenticationRecovery.enabled -}}
+{{- $publicFiles = append $publicFiles (regexQuoteMeta "/authentication-recovery.js") -}}
+{{- end -}}
+{{- if .Values.rootServiceWorkerCleanup.enabled -}}
+{{- $publicFiles = append $publicFiles (regexQuoteMeta "/sw.js") -}}
+{{- end -}}
+{{- with .Values.nginx.httpSnippet -}}
+# Additional http directives supplied through nginx.httpSnippet.
+{{ tpl . $ }}
+{{ end -}}
+# Only names under assets/ change with their content. Files under public/,
+# such as locales/<lang>.json, keep their names across releases.
+map $client_build_dir $client_build_cache_control {
+  assets "public, max-age=31536000, immutable";
+  default "no-cache";
+}
+
 server {
   listen {{ .Values.nginx.port }};
 {{- if .Values.nginx.ipv6 }}
   listen [::]:{{ .Values.nginx.port }};
 {{- end }}
   absolute_redirect off;
+{{ include "mindroom-client.frameHeaders" "self" | indent 2 }}
 {{- if ne $base "/" }}
 
   location = / {
@@ -172,8 +250,27 @@ server {
   location = /runtime-config.js {
     default_type application/javascript;
     add_header Cache-Control "no-store, max-age=0" always;
+{{ include "mindroom-client.frameHeaders" "self" | indent 4 }}
     return 200 {{ $runtimeConfig | quote }};
   }
+
+  # Browsers fetch runtime-config.js, the recovery script, and the service
+  # workers without a gateway session, so a gateway may make them public, and
+  # its path rules usually cover every path below them too. Answer 404 there
+  # instead of the app shell or build files. The request line check catches
+  # paths such as /sw.js/../x before nginx resolves them elsewhere, for
+  # gateways that match a path before resolving its dot segments; the locations
+  # catch forms nginx normalizes, such as //sw.js/x. Some gateways treat a
+  # backslash as a slash.
+  if ($request_uri ~ "^(?:{{ join "|" $publicFiles }})(?:[/\x5c]|%2[fF]|%5[cC])") {
+    return 404;
+  }
+{{- range $publicFiles }}
+
+  location ~ ^{{ . }}[/\x5c] {
+    return 404;
+  }
+{{- end }}
 {{- if .Values.authenticationRecovery.enabled }}
 
   # The client image owns the recovery implementation. This chart only loads
@@ -182,14 +279,22 @@ server {
     alias /usr/share/nginx/html/authentication-recovery.js;
     default_type application/javascript;
     add_header Cache-Control "no-store, max-age=0" always;
+{{ include "mindroom-client.frameHeaders" "self" | indent 4 }}
   }
 
   location = /authentication-recovery-probe {
     add_header Cache-Control "no-store, max-age=0" always;
+{{ include "mindroom-client.frameHeaders" "self" | indent 4 }}
     return 204;
   }
 {{- end }}
-{{- if or .Values.matrixRTC.enabled .Values.bugReports.admins }}
+
+  # iOS reads app links from the origin root regardless of basePath.
+  location = /.well-known/apple-app-site-association {
+    alias /usr/share/nginx/html/.well-known/apple-app-site-association;
+    default_type application/json;
+  }
+{{- if or .Values.matrixRTC.enabled .Values.bugReports.admins .Values.serverEmoji.room }}
 {{- if .Values.matrixRTC.enabled }}
 
   # MatrixRTC backend discovery for Matrix voice and video calls.
@@ -198,12 +303,17 @@ server {
 
   # Bug-report administrators for the client's Report a bug menu item.
 {{- end }}
+{{- if .Values.serverEmoji.room }}
+
+  # Server custom emoji room for the client's emoji picker.
+{{- end }}
   location = /.well-known/matrix/client {
     default_type application/json;
     add_header Cache-Control "no-store, max-age=0" always;
     add_header Access-Control-Allow-Origin "*" always;
     add_header Access-Control-Allow-Methods "GET, OPTIONS" always;
     add_header Access-Control-Allow-Headers "X-Requested-With, Content-Type, Authorization" always;
+{{ include "mindroom-client.frameHeaders" "self" | indent 4 }}
     return 200 '{{ include "mindroom-client.matrixClientWellKnown" . }}';
   }
 {{- end }}
@@ -245,6 +355,7 @@ server {
     alias /usr/share/nginx/html/config.json;
     default_type application/json;
     add_header Cache-Control "no-store, no-cache, must-revalidate, max-age=0" always;
+{{ include "mindroom-client.frameHeaders" "self" | indent 4 }}
   }
 
   # The client polls this manifest and reloads after a new build is published.
@@ -252,6 +363,16 @@ server {
     alias /usr/share/nginx/html/version.json;
     default_type application/json;
     add_header Cache-Control "no-store, no-cache, must-revalidate, max-age=0" always;
+{{ include "mindroom-client.frameHeaders" "self" | indent 4 }}
+  }
+
+  # Operator notices come from the image's notices directory, which an operator
+  # can replace with a mount; nginx reads the file on every request.
+  location = {{ $prefix }}/notices.json {
+    alias /opt/mindroom/notices/notices.json;
+    default_type application/json;
+    add_header Cache-Control "no-store, max-age=0" always;
+{{ include "mindroom-client.frameHeaders" "self" | indent 4 }}
   }
 
   # The client service worker, scoped to basePath.
@@ -259,6 +380,7 @@ server {
     alias /usr/share/nginx/html/sw.js;
     default_type application/javascript;
     add_header Cache-Control "no-store, max-age=0" always;
+{{ include "mindroom-client.frameHeaders" "self" | indent 4 }}
   }
 {{- if .Values.rootServiceWorkerCleanup.enabled }}
 
@@ -270,6 +392,7 @@ server {
     alias /usr/share/nginx/html/root-cleanup-sw.js;
     default_type application/javascript;
     add_header Cache-Control "no-store, max-age=0" always;
+{{ include "mindroom-client.frameHeaders" "self" | indent 4 }}
   }
 {{- end }}
 {{- if ne $base "/" }}
@@ -277,12 +400,24 @@ server {
   location = {{ $prefix }}/manifest.json {
     alias /usr/share/nginx/html/manifest.json;
     add_header Cache-Control "no-store, max-age=0" always;
+{{ include "mindroom-client.frameHeaders" "self" | indent 4 }}
   }
 
+  # Older images selected through image.tag, such as latest, load the PDF.js
+  # worker from basePath.
   location = {{ $prefix }}/pdf.worker.min.js {
     alias /usr/share/nginx/html/pdf.worker.min.js;
   }
 {{- end }}
+
+  # The device pairing page approves a sign-in, so no origin may frame it. The
+  # client router matches its name in any letter case.
+  location ~ ^{{ regexQuoteMeta $prefix }}/(?i:connect)/?$ {
+    root /usr/share/nginx/html;
+    add_header Cache-Control "no-store, no-cache, must-revalidate, max-age=0" always;
+{{ include "mindroom-client.frameHeaders" "none" | indent 4 }}
+    try_files /index.html =404;
+  }
 
   # The bundled Element Call ships its own assets/ directory, so strip only the
   # route prefix before public/element-call/. Its hashed assets never change.
@@ -292,6 +427,7 @@ server {
     root /usr/share/nginx/html;
     try_files /$1 =404;
     add_header Cache-Control "public, max-age=31536000, immutable";
+{{ include "mindroom-client.frameHeaders" "self" | indent 4 }}
   }
 
   # Stable Element Call names such as index.html must revalidate so a client
@@ -300,22 +436,23 @@ server {
     root /usr/share/nginx/html;
     try_files /$1 =404;
     add_header Cache-Control "no-cache";
+{{ include "mindroom-client.frameHeaders" "self" | indent 4 }}
   }
 
-  # Hashed build assets are referenced relative to the current route, so strip
-  # any route prefix before the assets/ or public/ segment.
-  location ~ ^/(?:.+/)?(assets|public)/(.+)$ {
+  # Build files are referenced relative to the current route, so strip any
+  # route prefix before the assets/ or public/ segment.
+  location ~ ^/(?:.+/)?(?<client_build_dir>assets|public)/(.+)$ {
     root /usr/share/nginx/html;
     try_files /$1/$2 =404;
-    add_header Cache-Control "public, max-age=31536000, immutable";
+    add_header Cache-Control $client_build_cache_control;
+{{ include "mindroom-client.frameHeaders" "self" | indent 4 }}
   }
 {{- if eq $base "/" }}
 
   location / {
     root /usr/share/nginx/html;
     add_header Cache-Control "no-store, no-cache, must-revalidate, max-age=0" always;
-    add_header Content-Security-Policy "frame-ancestors 'self'" always;
-    add_header X-Frame-Options "SAMEORIGIN" always;
+{{ include "mindroom-client.frameHeaders" "self" | indent 4 }}
     try_files $uri $uri/ /index.html;
   }
 {{- else }}
@@ -324,8 +461,7 @@ server {
   location {{ $base }}/ {
     root /usr/share/nginx/html;
     add_header Cache-Control "no-store, no-cache, must-revalidate, max-age=0" always;
-    add_header Content-Security-Policy "frame-ancestors 'self'" always;
-    add_header X-Frame-Options "SAMEORIGIN" always;
+{{ include "mindroom-client.frameHeaders" "self" | indent 4 }}
     try_files /index.html =404;
   }
 {{- end }}

@@ -13,11 +13,12 @@ Every agent is an ordinary Matrix user, so you can reach it from any Matrix clie
 
 ## Agent Users
 
-Each agent, team, and the router has its own Matrix user, created automatically at startup.
+Each agent and team has its own Matrix user, created automatically at startup.
+One more account, shown as "MindRoom", administers the rooms in `config.yaml` and answers nobody.
 Account credentials are stored in `matrix_state.yaml` in the storage directory (default `mindroom_data/`).
 
 In chat, address an agent or team by its configured key, such as `@assistant`.
-MindRoom requests localparts such as `mindroom_assistant`, but the account recorded in `matrix_state.yaml` is authoritative, so an agent's actual Matrix ID (for example `@assistant_live:example.com`) can differ from the requested one.
+MindRoom requests localparts such as `mindroom_assistant`, or an agent's [`matrix_username`](configuration/agents.md#configuration-options), but the account recorded in `matrix_state.yaml` is authoritative, so an agent's actual Matrix ID (for example `@assistant_live:example.com`) can differ from the requested one.
 
 `MATRIX_MANAGED_ACCOUNT_AUTH` selects how these accounts authenticate:
 
@@ -25,8 +26,28 @@ MindRoom requests localparts such as `mindroom_assistant`, but the account recor
 - `appservice` registers passwordless accounts inside an exclusive application-service namespace and gives each account its own device token for encryption and sync.
   First register an application service with the homeserver whose exclusive user namespace covers every account MindRoom manages, then supply that registration's `as_token`.
   Provide exactly one of `MATRIX_APPSERVICE_TOKEN` or `MATRIX_APPSERVICE_TOKEN_FILE`; setting either one without `MATRIX_MANAGED_ACCOUNT_AUTH=appservice` stops startup.
-  The application-service token is used only to register accounts and log in new devices.
+  The application-service token is used only to register accounts and log in new devices; the [`matrix_user`](tools/matrix-and-attachments.md#matrix_user) tool acts as people with the token of a separate application service.
   After switching an existing install to `appservice`, stored passwords are removed from `matrix_state.yaml` once each account logs in.
+
+### Use an Existing Matrix Account
+
+An agent can take over a Matrix account that already exists, such as one another agent platform used, and keep its Matrix ID and rooms.
+Before the agent's first start, while `matrix_state.yaml` has no entry for the agent, add the account under `accounts` with its localpart and password:
+
+```yaml
+accounts:
+  agent_assistant:  # agent_<agent key>
+    username: jarvis
+    password: the-account-password
+```
+
+MindRoom then logs in to that account instead of registering one.
+With `MATRIX_MANAGED_ACCOUNT_AUTH=appservice`, leave out `password`; the account must be inside the application service's exclusive user namespace.
+In `config.yaml`, list every room the account should stay in under the agent's `rooms` by room ID, because an agent leaves joined rooms it is not configured for, except direct messages.
+Room IDs in `rooms` grant no conversation access, so admit the people in those rooms through the agent's [`access`](authorization.md#responder-access), such as `access.users`.
+Stop the other platform from using the account first, or both will answer.
+An adopted account needs no `matrix_username`.
+With password auth, a `matrix_username` that names an existing account stops startup with `Matrix account collision` instead of taking it over; with `appservice` auth, MindRoom takes over an existing account inside its namespace.
 
 ## Internal User
 
@@ -40,7 +61,7 @@ mindroom_user:
 
 | Field | Type | Default | Meaning |
 | --- | --- | --- | --- |
-| `username` | string | `mindroom_user` | Matrix localpart, without `@` or a domain, using lowercase letters, digits, `.`, `_`, `=`, `-`, or `/`; it must not match an agent, team, or router account |
+| `username` | string | `mindroom_user` | Matrix localpart, without `@` or a domain, using lowercase letters, digits, `.`, `_`, `=`, `-`, or `/`; it must not match an agent, team, or owner account |
 | `display_name` | string | `MindRoomUser` | Display name, changeable at any time |
 
 Set `username` before first startup.
@@ -77,7 +98,8 @@ Enable end-to-end encryption for the current room.
 
 `!encrypt` explains what enabling encryption means for the room without changing anything.
 `!encrypt confirm` enables encryption and is restricted to Matrix room admins.
-The responding bot also needs permission to change room state; if it lacks that permission, a room admin can enable encryption from their own Matrix client.
+A MindRoom account in the room also needs permission to change room state; otherwise the command answers `I need moderator rights in this room to enable encryption.`, and a room admin can enable encryption from their own Matrix client.
+Any other failure asks you to run the command again.
 People joining an encrypted room later cannot read messages sent before they joined.
 
 ### `!e2ee`
@@ -94,6 +116,9 @@ Use it when an agent seems to ignore messages in an encrypted room.
 ### Troubleshooting Undecryptable Messages
 
 When an agent cannot decrypt a message from an authorized sender, it logs a `matrix_event_decryption_failed` warning and posts one notice for that message's encryption session asking the user to resend.
+The notice replies to that message where an agent reply would go: in the message's thread, in the thread of the message an edit or reply targets, or in a new thread under the message.
+When none of these is known, for example when the edited message cannot be found or the homeserver does not answer within 10 seconds, the notice is a plain reply.
+In `thread_mode: room` rooms, agent replies stay in the room timeline, but this notice still starts or joins a thread, because MindRoom Chat opens room-mode rooms in its Threads view, where room-level notices are hidden.
 Only one agent posts the notice, even in multi-agent rooms.
 Resending normally fixes it, because the sender's client then shares a new key with the agent.
 Decryption-failure counters also appear on `/api/health` under `e2ee`.
@@ -120,7 +145,7 @@ Every agent, team, and managed room gets a Matrix avatar by default, chosen from
 To choose a picture, place a PNG at `avatars/<agents|teams|rooms|spaces>/<name>.png` next to `config.yaml`; containerized deployments read these overrides from `<storage>/avatars/` instead.
 Run `mindroom avatars sync --force` to reset every managed room and the root Space to its default avatar: its own file, its single agent's or team's avatar, or its stock pick.
 
-`mindroom avatars generate` creates a custom avatar file for every entity without a workspace or bundled avatar file, using `gpt-6-astra` to write prompts and `gpt-image-2.5-sunburst` to render them; it requires only `OPENAI_API_KEY` or `OPENAI_API_KEY_FILE`.
+`mindroom avatars generate` creates a custom avatar file for every entity without a workspace or bundled avatar file, using `gpt-6.2-astra` to write prompts and `gpt-image-2.6-sunburst` to render them; it requires only `OPENAI_API_KEY` or `OPENAI_API_KEY_FILE`.
 Run `mindroom avatars generate --force` to overwrite existing workspace avatar files after changing prompts or styles.
 Override the generation styles with the root `prompts` block:
 
@@ -165,4 +190,4 @@ Changing `matrix_sync` through config reload restarts running agents.
 If a large initial sync exceeds the response limit, raise `max_response_bytes` enough to fit it.
 If processing received events exceeds the pending limit, raise `max_pending_bytes`; stored events can take more space than the HTTP response, so raising the response limit may also require raising the pending limit.
 Each bot has its own sync session, so allow enough memory and disk space when raising these limits.
-Large initial syncs may also need more startup time: `MINDROOM_MATRIX_SYNC_STARTUP_TIMEOUT_SECONDS` sets the first-sync allowance, and the runtime Helm chart's `probes.startup` values set the Kubernetes startup probe allowance.
+Large initial syncs may also need more startup time: `MINDROOM_MATRIX_SYNC_STARTUP_TIMEOUT_SECONDS` sets the first-sync allowance.

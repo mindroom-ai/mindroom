@@ -1,396 +1,201 @@
-"""Canonical history scope resolution and ownership of session storage handles."""
+"""Canonical history scope resolution and the conversation store each scope opens."""
 
 from __future__ import annotations
 
-import hashlib
-import re
-from collections.abc import Callable
-from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from functools import partial
 from typing import TYPE_CHECKING
 
-from mindroom.agent_storage import (
-    create_session_storage,
-    create_state_storage,
-    get_agent_runtime_state_dbs,
-    get_agent_session,
-    get_team_session,
-)
-from mindroom.constants import prompt_roles_for_history_storage, resolve_session_state_root
-from mindroom.history.storage import new_scope_session
+from mindroom.background_tasks import run_blocking_until_complete
+from mindroom.constants import resolve_session_state_root
+from mindroom.history.storage import new_scope_session, remove_history_of_redacted_events
 from mindroom.history.team_scope import ad_hoc_team_scope_id
 from mindroom.history.types import HistoryScope
+from mindroom.session_storage.agent_storage import (
+    agent_session_database_path,
+    create_session_storage,
+    create_state_storage,
+)
+from mindroom.session_storage.schema import TableNames
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterator
+    from collections.abc import Awaitable, Callable, Mapping, Sequence
     from pathlib import Path
-
-    from agno.agent import Agent
-    from agno.db.base import BaseDb
-    from agno.session.agent import AgentSession
-    from agno.session.team import TeamSession
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.session_storage.store import ConversationStore
+    from mindroom.session_storage.types import ConversationSession
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
 _TEAM_STATE_ROOT_DIRNAME = "teams"
 
-_TEAM_STORAGE_NAME_PATTERN = re.compile(r"[^a-zA-Z0-9_]+")
-
 
 @dataclass(frozen=True)
 class ScopeSessionContext:
-    """Resolved storage/session context for one logical history scope."""
+    """Resolved storage/session context for one logical history scope.
+
+    ``session`` is the session the scope's runs load from and save into: the stored one, or a first one the context
+    was given (``with_session``) before anything stored it; None while the context holds neither.
+    ``session_exists`` tells whether the scope had a stored session when the context was loaded. ``session_id`` is
+    the id the context was loaded for, which the scope's first session takes, so a run is saved from the context alone.
+    ``storage_factory`` opens the scope's store again, for work that outlives ``storage``'s handle.
+    """
 
     scope: HistoryScope
-    storage: BaseDb
-    session: AgentSession | TeamSession | None
-    session_id: str | None = None
-    storage_factory: Callable[[], BaseDb] | None = None
+    storage: ConversationStore
+    session: ConversationSession | None
+    session_id: str
+    storage_factory: Callable[[], ConversationStore]
     session_exists: bool = True
 
+    def first_session(self) -> ConversationSession:
+        """Return a new session of this scope under ``session_id``, as the scope's first run starts it."""
+        return new_scope_session(session_id=self.session_id, scope=self.scope)
 
-@dataclass(frozen=True)
-class BoundTeamScopeContext:
-    """Resolved stable owner and scope for one live team run."""
+    def stored_or_first_session(self) -> ConversationSession:
+        """Return the session a run of this scope is saved into: the stored one, else the scope's first."""
+        return self.session if self.session is not None else self.first_session()
 
-    owner_agent: Agent
-    owner_agent_name: str
-    scope: HistoryScope
+    def with_session(self) -> ScopeSessionContext:
+        """Return this context holding the session its runs save into (``stored_or_first_session``).
 
-
-def resolve_history_scope(agent: Agent) -> HistoryScope | None:
-    """Return the persisted history scope addressed by one live agent."""
-    team_id = agent.team_id
-    if isinstance(team_id, str) and team_id:
-        return HistoryScope(kind="team", scope_id=team_id)
-    agent_id = agent.id
-    if isinstance(agent_id, str) and agent_id:
-        return HistoryScope(kind="agent", scope_id=agent_id)
-    return None
+        A run that reads the returned context later loads the session an earlier run was saved into.
+        """
+        return replace(self, session=self.stored_or_first_session())
 
 
-def resolve_bound_history_owner(agents: list[Agent]) -> tuple[Agent | None, str | None]:
-    """Return the canonical storage owner for one bound team run."""
-    candidates = [(agent_id, agent) for agent in agents if isinstance((agent_id := agent.id), str) and agent_id]
-    if not candidates:
-        return None, None
-
-    owner_agent_name = min(agent_id for agent_id, _agent in candidates)
-    for agent_id, agent in candidates:
-        if agent_id == owner_agent_name:
-            return agent, owner_agent_name
-    return None, None
-
-
-def resolve_bound_team_scope_context(
+def resolve_bound_team_scope(
     *,
-    agents: list[Agent],
+    member_names: Sequence[str],
     config: Config,
-    team_name: str | None = None,
-    execution_identity: ToolExecutionIdentity | None = None,
-) -> BoundTeamScopeContext | None:
-    """Resolve the stable owner and scope backing one live team run."""
-    owner_agent, owner_agent_name = resolve_bound_history_owner(agents)
-    if owner_agent is None or owner_agent_name is None:
-        return None
+    team_name: str | None,
+    requester_user_id: str | None = None,
+) -> HistoryScope:
+    """Resolve the history scope backing one live team run: the configured team's, else its members' ad hoc scope.
 
+    ``team_name`` is the configured team's name; None, or a name no configured team has, means an ad hoc team. Every
+    team run names a member, as a configured team lists one and an ad hoc team forms from them, so an ad hoc team that
+    names none is refused.
+    """
     if team_name is not None and team_name in config.teams:
-        team_scope_id = team_name
-    else:
-        team_scope_id = ad_hoc_team_scope_id(
-            ad_hoc_team_agent_names(agents),
-            config.agents,
-            requester_user_id=execution_identity.requester_id if execution_identity is not None else None,
-        )
+        return HistoryScope(kind="team", scope_id=team_name)
+    team_scope_id = ad_hoc_team_scope_id(member_names, config.agents, requester_user_id=requester_user_id)
     if team_scope_id is None:
-        return None
-    scope = HistoryScope(kind="team", scope_id=team_scope_id)
-    return BoundTeamScopeContext(
-        owner_agent=owner_agent,
-        owner_agent_name=owner_agent_name,
-        scope=scope,
-    )
+        msg = "An ad hoc team that names no member has no history scope"
+        raise ValueError(msg)
+    return HistoryScope(kind="team", scope_id=team_scope_id)
 
 
-@contextmanager
-def _open_scope_storage(
-    *,
-    agent_name: str,
+def load_scope_session_from_storage(
     scope: HistoryScope,
+    session_id: str,
+    storage_factory: Callable[[], ConversationStore],
+) -> ScopeSessionContext:
+    """Open one scope's conversation store and load its session context."""
+    storage = storage_factory()
+    session = storage.load_session(session_id)
+    return ScopeSessionContext(scope, storage, session, session_id, storage_factory, session_exists=session is not None)
+
+
+def load_scope_session(
+    scope: HistoryScope,
+    session_id: str,
     runtime_paths: RuntimePaths,
     config: Config,
     execution_identity: ToolExecutionIdentity | None,
-) -> Iterator[BaseDb]:
-    """Open the canonical storage for one persisted history scope."""
-    storage = create_scope_session_storage(
-        agent_name=agent_name,
+) -> ScopeSessionContext:
+    """Load the session context of one already-resolved persisted history scope for the current request."""
+    storage_factory = partial(
+        create_scope_session_storage,
         scope=scope,
         config=config,
         runtime_paths=runtime_paths,
         execution_identity=execution_identity,
     )
-    try:
-        yield storage
-    finally:
-        storage.close()
+    return load_scope_session_from_storage(scope, session_id, storage_factory)
 
 
-def _build_scope_session_context(
-    *,
-    scope: HistoryScope | None,
-    session_id: str | None,
-    storage: BaseDb,
-    storage_factory: Callable[[], BaseDb],
-    create_session_if_missing: bool = False,
-) -> ScopeSessionContext | None:
-    """Build one scope/session context from an already-open storage handle."""
-    if session_id is None or scope is None:
-        return None
+async def load_scrubbed_scope_session(
+    load_scope: Callable[[], ScopeSessionContext],
+    redacted_history_events: Callable[[tuple[str, ...]], Awaitable[Mapping[str, str | None]]] | None,
+) -> tuple[ScopeSessionContext, list[str]]:
+    """Load one scope session off the event loop, then remove its history derived from events since redacted.
 
-    session = get_team_session(storage, session_id) if scope.kind == "team" else get_agent_session(storage, session_id)
-    session_exists = session is not None
-    if session is None and create_session_if_missing:
-        session = new_scope_session(
-            session_id=session_id,
-            scope_id=scope.scope_id,
-            is_team=scope.kind == "team",
-        )
-    return ScopeSessionContext(
-        scope=scope,
-        storage=storage,
-        session=session,
-        session_id=session_id,
-        storage_factory=storage_factory,
-        session_exists=session_exists,
+    This is the only cleanup after a redaction: every event the scope's history derives from is checked against the
+    agent's recorded redactions each time the scope is opened, which also covers a message no turn answered but a
+    later turn read as context. Returns the event IDs whose history was removed.
+    """
+    scope_context = await run_blocking_until_complete(load_scope)
+    if redacted_history_events is None or scope_context.session is None:
+        return scope_context, []
+    removed_event_ids = await remove_history_of_redacted_events(
+        scope_context.storage,
+        scope_context.session,
+        redacted_history_events,
     )
+    return scope_context, removed_event_ids
 
 
-@contextmanager
-def open_resolved_scope_session_context(
+def load_bound_scope_session(
     *,
-    agent_name: str,
-    scope: HistoryScope | None,
-    session_id: str | None,
+    member_names: Sequence[str],
+    session_id: str,
     runtime_paths: RuntimePaths,
     config: Config,
     execution_identity: ToolExecutionIdentity | None,
-    create_session_if_missing: bool = False,
-) -> Iterator[ScopeSessionContext | None]:
-    """Open one already-resolved persisted history scope for the current request."""
-    if session_id is None:
-        yield None
-        return
-    if scope is None:
-        yield None
-        return
-
-    def storage_factory() -> BaseDb:
-        return create_scope_session_storage(
-            agent_name=agent_name,
-            scope=scope,
+    team_name: str | None,
+) -> ScopeSessionContext:
+    """Load the canonical scope-backed session context for one bound team run (``resolve_bound_team_scope``)."""
+    return load_scope_session(
+        scope=resolve_bound_team_scope(
+            member_names=member_names,
             config=config,
-            runtime_paths=runtime_paths,
-            execution_identity=execution_identity,
-        )
-
-    with _open_scope_storage(
-        agent_name=agent_name,
-        scope=scope,
-        runtime_paths=runtime_paths,
-        config=config,
-        execution_identity=execution_identity,
-    ) as storage:
-        yield _build_scope_session_context(
-            scope=scope,
-            session_id=session_id,
-            storage=storage,
-            storage_factory=storage_factory,
-            create_session_if_missing=create_session_if_missing,
-        )
-
-
-@contextmanager
-def open_scope_session_context(
-    *,
-    agent: Agent,
-    agent_name: str,
-    session_id: str | None,
-    runtime_paths: RuntimePaths,
-    config: Config,
-    execution_identity: ToolExecutionIdentity | None,
-    scope: HistoryScope | None = None,
-    create_session_if_missing: bool = False,
-) -> Iterator[ScopeSessionContext | None]:
-    """Open the canonical persisted history scope for one live agent."""
-    resolved_scope = scope or resolve_history_scope(agent)
-    with open_resolved_scope_session_context(
-        agent_name=agent_name,
-        scope=resolved_scope,
+            team_name=team_name,
+            requester_user_id=execution_identity.requester_id if execution_identity is not None else None,
+        ),
         session_id=session_id,
         runtime_paths=runtime_paths,
         config=config,
-        execution_identity=execution_identity,
-        create_session_if_missing=create_session_if_missing,
-    ) as scope_context:
-        yield scope_context
-
-
-@contextmanager
-def open_bound_scope_session_context(
-    *,
-    agents: list[Agent],
-    session_id: str | None,
-    runtime_paths: RuntimePaths,
-    config: Config,
-    execution_identity: ToolExecutionIdentity | None,
-    team_name: str | None = None,
-    scope: HistoryScope | None = None,
-    create_session_if_missing: bool = False,
-) -> Iterator[ScopeSessionContext | None]:
-    """Open the canonical scope-backed session context for one bound team run."""
-    if scope is not None:
-        _owner_agent, owner_agent_name = resolve_bound_history_owner(agents)
-        if owner_agent_name is None:
-            yield None
-            return
-        with open_resolved_scope_session_context(
-            agent_name=owner_agent_name,
-            scope=scope,
-            session_id=session_id,
-            runtime_paths=runtime_paths,
-            config=config,
-            execution_identity=execution_identity,
-            create_session_if_missing=create_session_if_missing,
-        ) as scope_context:
-            yield scope_context
-        return
-    if not agents and team_name is not None and team_name in config.teams:
-        with open_resolved_scope_session_context(
-            agent_name=team_name,
-            scope=HistoryScope(kind="team", scope_id=team_name),
-            session_id=session_id,
-            runtime_paths=runtime_paths,
-            config=config,
-            execution_identity=execution_identity,
-            create_session_if_missing=create_session_if_missing,
-        ) as scope_context:
-            yield scope_context
-        return
-
-    bound_scope = resolve_bound_team_scope_context(
-        agents=agents,
-        config=config,
-        team_name=team_name,
         execution_identity=execution_identity,
     )
-    if bound_scope is None:
-        yield None
-        return
-    with open_resolved_scope_session_context(
-        agent_name=bound_scope.owner_agent_name,
-        scope=bound_scope.scope,
-        session_id=session_id,
-        runtime_paths=runtime_paths,
-        config=config,
-        execution_identity=execution_identity,
-        create_session_if_missing=create_session_if_missing,
-    ) as scope_context:
-        yield scope_context
 
 
 def create_scope_session_storage(
     *,
-    agent_name: str,
     scope: HistoryScope,
     config: Config,
     runtime_paths: RuntimePaths,
     execution_identity: ToolExecutionIdentity | None,
-) -> BaseDb:
-    """Create the canonical storage for one persisted history scope."""
+) -> ConversationStore:
+    """Open the canonical conversation store of one persisted history scope; an agent scope's id is its agent."""
     if scope.kind == "agent":
-        return create_session_storage(
-            agent_name,
-            config,
-            runtime_paths,
-            execution_identity=execution_identity,
-        )
-
-    storage_name = _scope_session_storage_name(scope)
-    return create_state_storage(
-        storage_name=storage_name,
-        state_root=resolve_session_state_root(
-            _team_scope_state_root(storage_name=storage_name, runtime_paths=runtime_paths),
-            runtime_paths,
-        ),
-        subdir="sessions",
-        session_table=f"{storage_name}_sessions",
-        prompt_roles=prompt_roles_for_history_storage(),
-    )
+        return create_session_storage(scope.scope_id, config, runtime_paths, execution_identity=execution_identity)
+    storage_name = TableNames.of_team(scope).storage_name
+    return create_state_storage(storage_name, _team_session_state_root(storage_name, runtime_paths), scope)
 
 
-def _close_unique_state_dbs(*storages: BaseDb | None) -> None:
-    """Close each distinct state DB handle at most once."""
-    seen: set[int] = set()
-    for storage in storages:
-        if storage is None:
-            continue
-        storage_id = id(storage)
-        if storage_id in seen:
-            continue
-        seen.add(storage_id)
-        storage.close()
-
-
-def close_agent_runtime_state_dbs(
-    agent: Agent | None,
+def scope_session_database_path(
     *,
-    shared_scope_storage: BaseDb | None = None,
-) -> None:
-    """Close one agent's runtime-owned state DB handles except a shared scope storage."""
-    if agent is None:
-        return
-    _close_unique_state_dbs(
-        *(storage for storage in get_agent_runtime_state_dbs(agent) if storage is not shared_scope_storage),
-    )
-
-
-def close_team_runtime_state_dbs(
-    *,
-    agents: list[Agent],
-    team_db: BaseDb | None,
-    shared_scope_storage: BaseDb | None = None,
-) -> None:
-    """Close all runtime-owned state DB handles for one team request."""
-    _close_unique_state_dbs(
-        *(
-            storage
-            for agent in agents
-            for storage in get_agent_runtime_state_dbs(agent)
-            if storage is not shared_scope_storage
-        ),
-        team_db if team_db is not shared_scope_storage else None,
-    )
-
-
-def _scope_session_storage_name(scope: HistoryScope) -> str:
-    if scope.kind == "agent":
-        return scope.scope_id
-    normalized_scope_id = _TEAM_STORAGE_NAME_PATTERN.sub("_", scope.scope_id).strip("_") or "team"
-    digest = hashlib.sha256(scope.key.encode()).hexdigest()[:12]
-    return f"team_{normalized_scope_id}_{digest}"
-
-
-def _team_scope_state_root(
-    *,
-    storage_name: str,
+    scope: HistoryScope,
+    config: Config,
     runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None,
 ) -> Path:
+    """Return the database file ``create_scope_session_storage`` opens, resolved without creating anything."""
+    if scope.kind == "agent":
+        return agent_session_database_path(scope.scope_id, config, runtime_paths, execution_identity)
+    names = TableNames.of_team(scope)
+    return names.database_path(_team_session_state_root(names.storage_name, runtime_paths))
+
+
+def _team_session_state_root(storage_name: str, runtime_paths: RuntimePaths) -> Path:
+    return resolve_session_state_root(
+        _team_scope_state_root(storage_name=storage_name, runtime_paths=runtime_paths),
+        runtime_paths,
+    )
+
+
+def _team_scope_state_root(*, storage_name: str, runtime_paths: RuntimePaths) -> Path:
     return runtime_paths.storage_root / _TEAM_STATE_ROOT_DIRNAME / storage_name
-
-
-def ad_hoc_team_agent_names(agents: list[Agent]) -> tuple[str, ...]:
-    """Return stable member identities used to resolve an ad hoc team scope."""
-    return tuple(agent_id for agent in agents if isinstance((agent_id := agent.id), str) and agent_id)

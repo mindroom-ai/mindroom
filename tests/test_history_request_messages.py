@@ -1,0 +1,862 @@
+"""Owned history request assembly reproduces Agno's history selection and MindRoom's replay policy.
+
+Selection parity reads the history goldens Agno 3.0.9 produced for each stored session
+(``tests/fixtures/legacy_agno3/history``) and the loaded sessions they were selected from.
+"""
+# ruff: noqa: D103
+
+from __future__ import annotations
+
+import json
+from dataclasses import replace
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any
+
+import pytest
+
+from mindroom.history import message_content
+from mindroom.history.interrupted_replay import (
+    _build_interrupted_replay_run,
+    build_interrupted_replay_snapshot,
+    stored_turn_input,
+)
+from mindroom.history.request_messages import (
+    TurnMessages,
+    build_request,
+    build_resume_request,
+    filter_tool_calls,
+    scope_history_messages,
+)
+from mindroom.history.storage import new_scope_session
+from mindroom.history.summary_message import compaction_summary_message, mark_summary_follows
+from mindroom.history.types import HistoryScope, ScopeSummary
+from mindroom.llm.media import Audio, File, Image, Video
+from mindroom.llm.messages import QUEUED_MESSAGE_NOTICE_MARKER_KEY, Message, model_provenance
+from mindroom.llm.runs import AnyRunRecord, RunRecord, RunStatus, TeamRunRecord
+from mindroom.media_delivery import VIEWED_IMAGE_ID_PREFIX
+from mindroom.media_inputs import MediaInputs
+from mindroom.session_storage.types import ConversationSession
+from tests.conftest import seed_session
+from tests.llm.agno_dict_helpers import stored_run_record
+from tests.session_storage.goldens import LEGACY_AGNO3, loaded_sessions
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from mindroom.session_storage.store import ConversationStore
+
+_HISTORY = LEGACY_AGNO3 / "history"
+_SCOPED_SELECTIONS: dict[str, dict[str, dict[str, Any]]] = json.loads(
+    (_HISTORY / "scoped_selections.json").read_text(),
+)
+_HISTORY_GOLDENS = sorted(path for path in _HISTORY.glob("*.json") if path.name != "scoped_selections.json")
+_AGENT = HistoryScope(kind="agent", scope_id="code")
+_TEAM = HistoryScope(kind="team", scope_id="squad")
+_SUMMARY = ScopeSummary(
+    text="Goal: ship the release.\nProgress: tests pass.",
+    updated_at=datetime(2027, 1, 15, tzinfo=UTC),
+)
+_SUMMARY_FOLLOWS = {"mindroom_compaction_summary_follows": True}
+
+
+def _golden(name: str) -> dict[str, Any]:
+    return json.loads((_HISTORY / name).read_text())
+
+
+def _session(golden: dict[str, Any]) -> dict[str, Any]:
+    return loaded_sessions()[golden["store"]][golden["session_id"]]
+
+
+def _stored_runs(golden: dict[str, Any]) -> list[AnyRunRecord]:
+    return [stored_run_record(run) for run in _session(golden)["runs"] or []]
+
+
+def _stored_scope(golden: dict[str, Any]) -> HistoryScope:
+    session = _session(golden)
+    if session.get("team_id"):
+        return HistoryScope(kind="team", scope_id=session["team_id"])
+    return HistoryScope(kind="agent", scope_id=session["agent_id"])
+
+
+def _as_replayed(stored: dict[str, Any]) -> Message:
+    """Return a stored message dict as history replays it: a history copy whose only media are viewed images."""
+    message = Message.from_dict(stored)
+    viewed = [image for image in message.images or () if image.id.startswith(VIEWED_IMAGE_ID_PREFIX)]
+    return replace(message, images=viewed or None, audio=None, videos=None, files=None, from_history=True)
+
+
+def _selection_cases() -> list[Any]:
+    cases = []
+    for path in _HISTORY_GOLDENS:
+        for name, selection in _golden(path.name)["get_messages"].items():
+            # Asked for every status without skipping roles, Agno keeps one stored system message first and counts it
+            # toward the limit. Only paused runs keep a system message, and MindRoom replays neither those runs nor
+            # prompt roles, so such a selection has no MindRoom counterpart.
+            if selection["params"].get("skip_statuses") == [] and any(
+                message["role"] == "system" for message in selection["messages"]
+            ):
+                continue
+            cases.append(pytest.param(path.name, name, id=f"{path.stem}/{name}"))
+    return cases
+
+
+def _filter_cases() -> list[Any]:
+    return [
+        pytest.param(path.name, name, id=f"{path.stem}/{name}")
+        for path in _HISTORY_GOLDENS
+        for name in _golden(path.name)["filter_tool_calls"]
+    ]
+
+
+@pytest.mark.parametrize(("golden_name", "selection_name"), _selection_cases())
+def test_selection_matches_the_history_golden(golden_name: str, selection_name: str) -> None:
+    golden = _golden(golden_name)
+    selection = golden["get_messages"][selection_name]
+    # MindRoom always skips prompt roles; finished stored runs hold none, so Agno's skip_roles changes nothing here.
+    params = selection["params"]
+    runs = _stored_runs(golden)
+    if params.get("skip_statuses") == []:
+        # Every run counts as finished, as Agno's empty status filter selected them all.
+        runs = [replace(run, status=RunStatus.completed) for run in runs]
+
+    history = scope_history_messages(
+        runs,
+        scope=_stored_scope(golden),
+        num_history_runs=params.get("last_n_runs"),
+        num_history_messages=params.get("limit"),
+        max_tool_calls_from_history=None,
+    )
+
+    assert history == [_as_replayed(message) for message in selection["messages"]]
+
+
+@pytest.mark.parametrize(
+    ("session_key", "selection_name"),
+    [
+        pytest.param(session_key, name, id=f"{session_key}/{name}")
+        for session_key, selections in _SCOPED_SELECTIONS.items()
+        for name in selections
+    ],
+)
+def test_scoped_selection_matches_the_scoped_selection_golden(session_key: str, selection_name: str) -> None:
+    store, session_id = session_key.split(":", 1)
+    selection = _SCOPED_SELECTIONS[session_key][selection_name]
+    params = selection["params"]
+    scope = (
+        HistoryScope(kind="team", scope_id=params["team_id"])
+        if "team_id" in params
+        else HistoryScope(kind="agent", scope_id=params["agent_id"])
+    )
+    runs = [stored_run_record(run) for run in loaded_sessions()[store][session_id]["runs"] or []]
+
+    history = scope_history_messages(
+        runs,
+        scope=scope,
+        num_history_runs=params["last_n_runs"],
+        num_history_messages=params["limit"],
+        max_tool_calls_from_history=None,
+    )
+
+    assert history == [_as_replayed(message) for message in selection["messages"]]
+
+
+@pytest.mark.parametrize(("golden_name", "case_name"), _filter_cases())
+def test_filter_tool_calls_matches_the_history_golden(golden_name: str, case_name: str) -> None:
+    golden = _golden(golden_name)
+    case = golden["filter_tool_calls"][case_name]
+    copies = [
+        replace(Message.from_dict(message), from_history=True)
+        for message in golden["get_messages"][case["selection"]]["messages"]
+    ]
+
+    filtered = filter_tool_calls(copies, case["max_tool_calls"])
+
+    assert filtered == [Message.from_dict(message) for message in case["messages"]]
+
+
+@pytest.mark.parametrize("golden_path", _HISTORY_GOLDENS, ids=lambda path: path.stem)
+@pytest.mark.parametrize("max_tool_calls", [0, 1, 2])
+def test_replayed_history_limits_tool_calls_as_the_history_golden_does(golden_path: Path, max_tool_calls: int) -> None:
+    golden = _golden(golden_path.name)
+    expected = golden["filter_tool_calls"][f"all/max_tool_calls_{max_tool_calls}"]["messages"]
+
+    history = scope_history_messages(
+        _stored_runs(golden),
+        scope=_stored_scope(golden),
+        num_history_runs=None,
+        num_history_messages=None,
+        max_tool_calls_from_history=max_tool_calls,
+    )
+
+    assert history == [_as_replayed(message) for message in expected]
+
+
+def _exchange(prefix: str) -> list[Message]:
+    return [Message(role="user", content=f"{prefix} question"), Message(role="assistant", content=f"{prefix} answer")]
+
+
+def _agent_run(
+    run_id: str,
+    *,
+    agent_id: str = "code",
+    messages: list[Message] | None = None,
+    status: RunStatus = RunStatus.completed,
+    parent_run_id: str | None = None,
+) -> RunRecord:
+    return RunRecord(
+        run_id=run_id,
+        agent_id=agent_id,
+        messages=_exchange(run_id) if messages is None else messages,
+        status=status,
+        parent_run_id=parent_run_id,
+    )
+
+
+def _team_run(
+    run_id: str,
+    *,
+    team_id: str = "squad",
+    status: RunStatus = RunStatus.completed,
+    parent_run_id: str | None = None,
+) -> TeamRunRecord:
+    return TeamRunRecord(
+        run_id=run_id,
+        team_id=team_id,
+        messages=_exchange(run_id),
+        status=status,
+        parent_run_id=parent_run_id,
+    )
+
+
+def _replay(
+    runs: list[AnyRunRecord],
+    *,
+    scope: HistoryScope = _AGENT,
+    max_tool_calls_from_history: int | None = None,
+    num_history_runs: int | None = None,
+    num_history_messages: int | None = None,
+) -> list[Message]:
+    return scope_history_messages(
+        runs,
+        scope=scope,
+        num_history_runs=num_history_runs,
+        num_history_messages=num_history_messages,
+        max_tool_calls_from_history=max_tool_calls_from_history,
+    )
+
+
+def _contents(messages: list[Message]) -> list[object]:
+    return [message.content for message in messages]
+
+
+def _shape(messages: list[Message]) -> list[Message]:
+    """Return what the model reads of each message: a copy without the per-object id and timestamp."""
+    return [replace(message, id="", created_at=0) for message in messages]
+
+
+def test_agent_scope_replays_only_its_own_finished_top_level_runs() -> None:
+    runs: list[AnyRunRecord] = [
+        _agent_run("own"),
+        _agent_run("other-agent", agent_id="helper"),
+        _agent_run("delegated-member", parent_run_id="team-run"),
+        _agent_run("paused", status=RunStatus.paused),
+        _agent_run("cancelled", status=RunStatus.cancelled),
+        _agent_run("failed", status=RunStatus.error),
+        _team_run("team-named-like-the-agent", team_id="code"),
+        _agent_run("still-running", status=RunStatus.running),
+    ]
+
+    assert _contents(_replay(runs)) == [
+        "own question",
+        "own answer",
+        "still-running question",
+        "still-running answer",
+    ]
+
+
+def test_team_scope_replays_only_its_own_finished_top_level_runs() -> None:
+    runs: list[AnyRunRecord] = [
+        _agent_run("member", agent_id="squad", parent_run_id="team"),
+        _team_run("team"),
+        _team_run("other-team", team_id="panel"),
+        _team_run("nested-member-team", parent_run_id="outer"),
+        _team_run("paused-team", status=RunStatus.paused),
+        _agent_run("agent-named-like-the-team", agent_id="squad"),
+    ]
+
+    assert _contents(_replay(runs, scope=_TEAM)) == ["team question", "team answer"]
+
+
+def test_a_save_keeps_no_system_message_in_a_visible_run_so_none_replays(store: ConversationStore) -> None:
+    """Replay takes every stored message, because a save never keeps a prompt message in a run that replays."""
+    run = _agent_run("run", messages=[Message(role="system", content="old system prompt"), *_exchange("run")])
+    seed_session(store, ConversationSession(session_id="s1", kind="agent", owner_id="code", runs=[run]))
+
+    loaded = store.load_session("s1")
+
+    assert loaded is not None
+    assert [message.role for message in loaded.runs[0].messages] == ["user", "assistant"]
+    assert _contents(_replay(loaded.runs)) == ["run question", "run answer"]
+
+
+def test_message_limit_applies_after_the_run_limit_and_drops_orphaned_tool_results() -> None:
+    tool_turn = [
+        Message(role="user", content="add"),
+        Message(
+            role="assistant",
+            tool_calls=[{"id": "call", "type": "function", "function": {"name": "add", "arguments": "{}"}}],
+        ),
+        Message(role="tool", tool_call_id="call", content="5"),
+        Message(role="assistant", content="It is 5."),
+    ]
+    runs: list[AnyRunRecord] = [_agent_run("old"), _agent_run("tools", messages=tool_turn)]
+
+    assert _contents(_replay(runs, num_history_messages=2)) == ["It is 5."]
+    assert _contents(_replay(runs, num_history_messages=5)) == ["old answer", *_contents(tool_turn)]
+    assert _contents(_replay(runs, num_history_runs=1, num_history_messages=5)) == _contents(tool_turn)
+    assert _replay(runs, num_history_runs=0) == []
+    assert _replay(runs, num_history_messages=0) == []
+
+
+def test_turn_context_replays_where_it_was_sent_but_takes_no_slot_in_a_message_window() -> None:
+    """A message window counts conversation, so a stored turn context neither shrinks it nor opens it orphaned."""
+    runs: list[AnyRunRecord] = [
+        _agent_run(
+            run_id,
+            messages=[
+                Message(role="user", content=f"{run_id} question"),
+                Message(role="user", content=f"{run_id} memories", add_to_agent_memory=False),
+                Message(role="assistant", content=f"{run_id} answer"),
+            ],
+        )
+        for run_id in ("one", "two", "three")
+    ]
+
+    assert _contents(_replay(runs, num_history_runs=1)) == ["three question", "three memories", "three answer"]
+    assert _contents(_replay(runs, num_history_messages=4)) == [
+        "two question",
+        "two answer",
+        "three question",
+        "three answer",
+    ]
+
+
+def test_replayed_history_is_a_marked_copy_that_never_changes_stored_runs() -> None:
+    blocks = [{"type": "text", "text": "block"}]
+    stored = [Message(role="user", content="question"), Message(role="assistant", content=blocks)]
+    runs: list[AnyRunRecord] = [_agent_run("run", messages=stored)]
+
+    history = _replay(runs)
+    history[0].content = "changed"
+    content = history[1].content
+    assert isinstance(content, list)
+    content[0]["text"] = "changed"
+
+    assert all(message.from_history for message in history)
+    assert stored[0].content == "question"
+    assert blocks == [{"type": "text", "text": "block"}]
+    assert not any(message.from_history for message in stored)
+
+
+def test_filter_tool_calls_copies_what_it_changes() -> None:
+    call = {"id": "old", "type": "function", "function": {"name": "add", "arguments": "{}"}}
+    assistant = Message(role="assistant", content="Checking.", tool_calls=[call])
+    messages = [
+        assistant,
+        Message(role="tool", tool_call_id="old", content="5"),
+        Message(role="tool", tool_call_id="new", content="6"),
+    ]
+
+    filtered = filter_tool_calls(messages, 1)
+
+    assert [(message.role, message.content, message.tool_calls) for message in filtered] == [
+        ("assistant", "Checking.", None),
+        ("tool", "6", None),
+    ]
+    assert assistant.tool_calls == [call]
+    assert len(messages) == 3
+
+
+def test_filter_tool_calls_within_the_limit_returns_the_same_messages() -> None:
+    messages = [
+        Message(role="assistant", tool_calls=[{"id": "call", "type": "function", "function": {"name": "add"}}]),
+        Message(role="tool", tool_call_id="call", content="5"),
+        Message(role="tool", content="a result without a call id"),
+    ]
+
+    filtered = filter_tool_calls(messages, 2)
+
+    assert len(filtered) == len(messages)
+    assert all(kept is message for kept, message in zip(filtered, messages, strict=True))
+
+
+def _viewed_image(index: int, content: bytes) -> Image:
+    return Image(id=f"{VIEWED_IMAGE_ID_PREFIX}{index}", content=content, mime_type="image/png")
+
+
+def _media_follow_up(*images: Image) -> Message:
+    return Message(role="user", content="The tool call above generated the attached media.", images=list(images))
+
+
+def test_history_replays_only_the_newest_four_viewed_images_and_says_so() -> None:
+    stored = [_media_follow_up(_viewed_image(index, f"image-{index}".encode())) for index in range(6)]
+
+    history = _replay([_agent_run("run", messages=stored)])
+
+    assert [image.id for message in history for image in message.images or []] == [
+        f"{VIEWED_IMAGE_ID_PREFIX}{index}" for index in range(2, 6)
+    ]
+    notice = (
+        "The tool call above generated the attached media.\n\n"
+        "[1 historical viewed image omitted from replay to keep history within the 4-image, 10 MiB limit. "
+        "Reopen the original workspace path with view_file, or an authorized attachment ID with get_attachment(view=True).]"
+    )
+    assert _contents(history[:2]) == [notice, notice]
+    assert all(message.images for message in stored)
+
+
+def test_history_viewed_images_fit_the_aggregate_byte_cap(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(message_content, "_MAX_HISTORY_VIEWED_IMAGE_BYTES", 5)
+    stored = [_media_follow_up(_viewed_image(index, b"x" * size)) for index, size in enumerate((3, 2, 3))]
+    # A shortened copy Agno's retired ``compress_tool_results`` stored beside a message still stands for its content.
+    stored[0] = replace(stored[0], compressed_content="compressed earlier content")
+
+    history = _replay([_agent_run("run", messages=stored)])
+
+    assert [image.id for message in history for image in message.images or []] == [
+        f"{VIEWED_IMAGE_ID_PREFIX}1",
+        f"{VIEWED_IMAGE_ID_PREFIX}2",
+    ]
+    assert str(history[0].content).startswith("compressed earlier content\n\n[1 historical viewed image omitted")
+    # The notice replaces the content, so the copy, which the notice now quotes, goes.
+    assert history[0].compressed_content is None
+
+
+def test_history_drops_every_other_media_kind() -> None:
+    stored = Message(
+        role="user",
+        content="voice note",
+        audio=[Audio(content=b"audio", mime_type="audio/ogg")],
+        images=[Image(content=b"photo"), _viewed_image(1, b"viewed")],
+        files=[File(content=b"file", mime_type="text/plain")],
+        videos=[Video(content=b"video")],
+    )
+
+    (replayed,) = _replay([_agent_run("run", messages=[stored])])
+
+    assert (replayed.audio, replayed.files, replayed.videos) == (None, None, None)
+    assert [image.id for image in replayed.images or []] == [f"{VIEWED_IMAGE_ID_PREFIX}1"]
+    assert replayed.content == "voice note"
+    assert stored.audio
+    assert stored.files
+    assert stored.videos
+    assert len(stored.images or []) == 2
+
+
+def _system() -> Message:
+    return Message(role="system", content="Be precise.")
+
+
+def _request(*, summary: ScopeSummary | None, history: list[Message], turn: TurnMessages) -> list[Message]:
+    """Return a new run's request as ``run_agent`` sends it: the system message, then what ``build_request`` builds."""
+    return [_system(), *build_request(summary=summary, history=history, turn=turn, media=MediaInputs())]
+
+
+def _rendered_summary(text: str) -> str:
+    return (
+        "The earlier part of this conversation was compacted into this summary:\n\n"
+        f"<compacted_history>\n{text}\n</compacted_history>\n\n"
+        "The conversation continues after this summary. If it records progress on the current request, "
+        "continue that work from its next steps instead of starting over."
+    )
+
+
+def test_new_request_orders_system_summary_history_context_prompt_then_transient_context() -> None:
+    history = _replay([_agent_run("earlier")])
+    turn = TurnMessages(
+        context=(Message(role="user", content="unseen thread message"),),
+        prompt=Message(role="user", content="current request"),
+        transient=(Message(role="user", content="memories", add_to_agent_memory=False),),
+    )
+
+    request = _request(summary=_SUMMARY, history=history, turn=turn)
+
+    assert _shape(request) == _shape(
+        [
+            Message(role="system", content="Be precise."),
+            Message(
+                role="user",
+                content=_rendered_summary(_SUMMARY.text),
+                provider_data={"mindroom_compaction_summary": "scope"},
+                from_history=True,
+            ),
+            *history,
+            *turn.context,
+            turn.prompt,
+            *turn.transient,
+        ],
+    )
+
+
+def test_each_attempt_request_carries_its_media_on_a_copy_of_the_prompt() -> None:
+    """An attempt's request copies the prepared history and turn, so a retry never sees an earlier attempt's media."""
+    history = _replay([_agent_run("earlier")])
+    turn = TurnMessages(prompt=Message(role="user", content="describe these"))
+    media = MediaInputs(
+        audio=(Audio(content=b"audio", mime_type="audio/ogg"),),
+        images=(Image(content=b"photo"),),
+        files=(File(content=b"file", mime_type="text/plain"),),
+        videos=(Video(content=b"video"),),
+    )
+
+    with_media = build_request(summary=None, history=history, turn=turn, media=media)
+    without_media = build_request(summary=None, history=history, turn=turn, media=MediaInputs())
+
+    prompt = with_media[-1]
+    assert (prompt.audio, prompt.images, prompt.files, prompt.videos) == (
+        media.audio,
+        media.images,
+        media.files,
+        media.videos,
+    )
+    for request in (without_media, [turn.prompt]):
+        assert (request[-1].audio, request[-1].images, request[-1].files, request[-1].videos) == (None,) * 4
+    assert _shape(with_media[:-1]) == _shape(history)
+    assert not {id(message) for message in with_media} & {id(message) for message in [*history, turn.prompt]}
+
+
+def test_next_request_repeats_the_previous_one_whole() -> None:
+    """Turn context is stored where it was sent, so the next turn's request extends the previous one whole."""
+    first_turn = TurnMessages(
+        context=(Message(role="user", content="thread message"),),
+        prompt=Message(role="user", content="question one"),
+        transient=(Message(role="user", content="context one", add_to_agent_memory=False),),
+    )
+    first = _request(summary=None, history=[], turn=first_turn)
+    stored = [*first[1:], Message(role="assistant", content="answer one")]
+    second_turn = TurnMessages(
+        prompt=Message(role="user", content="question two"),
+        transient=(Message(role="user", content="context two", add_to_agent_memory=False),),
+    )
+
+    second = _request(
+        summary=None,
+        history=_replay([_agent_run("first", messages=stored)]),
+        turn=second_turn,
+    )
+
+    assert _contents(first) == ["Be precise.", "thread message", "question one", "context one"]
+    assert _contents(second) == [*_contents(first), "answer one", "question two", "context two"]
+
+
+@pytest.mark.parametrize("summary", [None, ScopeSummary(text=" \n ", updated_at=_SUMMARY.updated_at)])
+def test_no_summary_message_without_summary_text(summary: ScopeSummary | None) -> None:
+    turn = TurnMessages(prompt=Message(role="user", content="current request"))
+
+    request = _request(summary=summary, history=[], turn=turn)
+
+    assert _contents(request) == ["Be precise.", "current request"]
+
+
+def test_summary_replays_without_runs_and_with_its_text_trimmed() -> None:
+    turn = TurnMessages(prompt=Message(role="user", content="current request"))
+    padded = ScopeSummary(text=f"\n{_SUMMARY.text}  ", updated_at=_SUMMARY.updated_at)
+
+    request = _request(summary=padded, history=[], turn=turn)
+
+    assert _contents(request) == ["Be precise.", _rendered_summary(_SUMMARY.text), "current request"]
+
+
+def test_summary_follows_the_prompt_a_mid_turn_compaction_placed_it_after() -> None:
+    folded_prompt = Message(role="user", content="long task", provider_data=_SUMMARY_FOLLOWS)
+    runs: list[AnyRunRecord] = [
+        _agent_run("folded", messages=[folded_prompt, Message(role="assistant", content="done")]),
+    ]
+    turn = TurnMessages(prompt=Message(role="user", content="next request"))
+
+    request = _request(summary=_SUMMARY, history=_replay(runs), turn=turn)
+
+    assert _contents(request) == [
+        "Be precise.",
+        "long task",
+        _rendered_summary(_SUMMARY.text),
+        "done",
+        "next request",
+    ]
+
+
+def test_a_replayed_run_local_summary_does_not_replace_the_scope_summary() -> None:
+    run_local = Message(
+        role="user",
+        content=_rendered_summary("local work"),
+        provider_data={"mindroom_compaction_summary": "run"},
+    )
+    runs: list[AnyRunRecord] = [_agent_run("run", messages=[Message(role="user", content="task"), run_local])]
+    turn = TurnMessages(prompt=Message(role="user", content="next request"))
+
+    request = _request(summary=_SUMMARY, history=_replay(runs), turn=turn)
+
+    assert _contents(request) == [
+        "Be precise.",
+        _rendered_summary(_SUMMARY.text),
+        "task",
+        _rendered_summary("local work"),
+        "next request",
+    ]
+
+
+def _tool_call(call_id: str) -> Message:
+    return Message(
+        role="assistant",
+        tool_calls=[{"id": call_id, "type": "function", "function": {"name": "multiply", "arguments": "{}"}}],
+    )
+
+
+def _paused_row(messages: list[Message]) -> RunRecord:
+    """Return the paused run storing ``messages`` as a stored row reads back."""
+    paused = RunRecord(run_id="paused", agent_id="code", status=RunStatus.paused, messages=messages)
+    return RunRecord.from_dict(json.loads(json.dumps(paused.to_dict())))
+
+
+def _steered_run() -> RunRecord:
+    """Return a run a Steer ended after its tool batch: its calls and results, with no final answer."""
+    calls = [{"id": call_id, "type": "function", "function": {"name": "echo", "arguments": "{}"}} for call_id in "ab"]
+    return RunRecord(
+        run_id="steered",
+        agent_id="code",
+        status=RunStatus.completed,
+        messages=[
+            Message(role="user", content="Do the task"),
+            Message(role="assistant", content="Looking.", tool_calls=calls),
+            Message(role="tool", tool_call_id="a", content="result a"),
+            Message(role="tool", tool_call_id="b", content="result b"),
+        ],
+    )
+
+
+@pytest.mark.parametrize(
+    ("limits", "replayed"),
+    [
+        pytest.param({}, ["Do the task", ("Looking.", "a", "b"), "result a", "result b"], id="unlimited"),
+        pytest.param({"max_tool_calls_from_history": 1}, ["Do the task", ("Looking.", "b"), "result b"], id="one-call"),
+        pytest.param({"max_tool_calls_from_history": 0}, ["Do the task", ("Looking.",)], id="no-calls"),
+        pytest.param(
+            {"num_history_messages": 3},
+            [("Looking.", "a", "b"), "result a", "result b"],
+            id="three-messages",
+        ),
+        # A window too small for the whole batch replays none of it, never a result without its call.
+        pytest.param({"num_history_messages": 2}, [], id="two-messages"),
+    ],
+)
+def test_steered_history_obeys_tool_call_and_message_limits(limits: dict[str, int], replayed: list[object]) -> None:
+    """The next turn replays a steered run's calls and results under the configured limits, keeping pairs whole."""
+    run = _steered_run()
+    stored = run.to_dict()
+    turn = TurnMessages(prompt=Message(role="user", content="Also print the date"))
+
+    request = _request(summary=None, history=_replay([run], **limits), turn=turn)
+
+    system, *history, prompt = request
+    assert (system.content, prompt.content) == ("Be precise.", "Also print the date")
+    assert [
+        (message.content, *(call["id"] for call in message.tool_calls or ()))
+        if message.role == "assistant"
+        else message.content
+        for message in history
+    ] == replayed
+    calls = [call["id"] for message in history for call in message.tool_calls or ()]
+    assert [message.tool_call_id for message in history if message.role == "tool"] == calls
+    assert run.to_dict() == stored
+
+
+def test_resumed_request_repeats_the_request_that_paused() -> None:
+    """A resume sends the paused request again, so its prefix and the paused call's reasoning stay valid."""
+    runs: list[AnyRunRecord] = [_agent_run("earlier")]
+    turn = TurnMessages(
+        prompt=Message(role="user", content="multiply"),
+        transient=(Message(role="user", content="memories", add_to_agent_memory=False),),
+    )
+    paused_request = _request(summary=_SUMMARY, history=_replay(runs), turn=turn)
+    call = _tool_call("call-multiply")
+    # A paused run stores its own messages, its system message and its turn context included, and never history.
+    stored = _paused_row([message for message in [*paused_request, call] if not message.from_history]).messages
+
+    resumed = build_resume_request(paused=stored, summary=_SUMMARY, history=_replay(runs))
+
+    assert _shape(resumed) == _shape([*paused_request, call])
+    assert resumed[0] is stored[0]
+
+
+def test_a_run_paused_without_its_turn_context_resumes_without_it() -> None:
+    """A row paused before runs stored their turn context resumes from the messages it stored, as it did then."""
+    runs: list[AnyRunRecord] = [_agent_run("earlier")]
+    turn = TurnMessages(
+        prompt=Message(role="user", content="multiply"),
+        transient=(Message(role="user", content="memories", add_to_agent_memory=False),),
+    )
+    paused_request = _request(summary=_SUMMARY, history=_replay(runs), turn=turn)
+    call = _tool_call("call-multiply")
+    old_row = _paused_row(
+        [message for message in [*paused_request, call] if not message.from_history and message.add_to_agent_memory],
+    )
+    assert all("add_to_agent_memory" not in message for message in old_row.to_dict()["messages"])
+
+    resumed = build_resume_request(paused=old_row.messages, summary=_SUMMARY, history=_replay(runs))
+
+    assert _shape(resumed) == _shape([message for message in [*paused_request, call] if message.add_to_agent_memory])
+
+
+@pytest.mark.parametrize("transient", [True, False], ids=["with-transient-context", "without-transient-context"])
+def test_a_paused_run_s_turn_input_is_the_context_its_request_sent_before_the_prompt(transient: bool) -> None:
+    """The stored context ends at the prompt, which the transient context or the model's first call follows."""
+    context = (
+        Message(role="user", content='<msg from="@alice:hs"><![CDATA[Slot 7.]]></msg>'),
+        Message(role="assistant", content="\n\nAn earlier reply."),
+    )
+    turn = TurnMessages(
+        prompt=Message(role="user", content="multiply"),
+        context=context,
+        transient=(Message(role="user", content="memories", add_to_agent_memory=False),) if transient else (),
+    )
+    paused_request = _request(summary=_SUMMARY, history=_replay([_agent_run("earlier")]), turn=turn)
+    answer = replace(_tool_call("call-multiply"), provider_data=model_provenance("m", "Synthetic"))
+    stored = _paused_row([message for message in [*paused_request, answer] if not message.from_history]).messages
+
+    turn_input = stored_turn_input(stored)
+    assert [message.id for message in turn_input.context] == [message.id for message in context]
+    assert turn_input.summary == ()
+
+
+def test_a_paused_row_whose_answers_name_no_model_ends_its_input_at_the_first_call() -> None:
+    """A row stored before answers named their model, without the transient context too, still reads its context."""
+    context = Message(role="user", content='<msg from="@alice:hs"><![CDATA[Slot 7.]]></msg>')
+    stored = _paused_row(
+        [
+            _system(),
+            context,
+            Message(role="user", content="multiply"),
+            _tool_call("call-multiply"),
+            Message(role="tool", tool_call_id="call-multiply", content="42"),
+        ],
+    ).messages
+
+    assert [message.id for message in stored_turn_input(stored).context] == [context.id]
+
+
+def test_a_row_without_turn_context_ends_its_input_at_its_model_s_first_answer() -> None:
+    """A row without turn context ends its input at its model's first answer, even one without a call."""
+    context = Message(role="user", content='<msg from="@alice:hs"><![CDATA[Slot 7.]]></msg>')
+    answer = Message(role="assistant", content="Partial", provider_data=model_provenance("m", "Synthetic"))
+    stored = _paused_row([context, Message(role="user", content="multiply"), answer]).messages
+
+    assert [message.id for message in stored_turn_input(stored).context] == [context.id]
+
+
+@pytest.mark.parametrize("folded", [True, False], ids=["after-a-fold-into-the-summary", "without-a-fold"])
+def test_a_stopped_row_replays_the_scope_summary_where_its_run_placed_it(folded: bool) -> None:
+    """A fold into the scope's summary places the summary after the run's prompt; the stopped row keeps it there."""
+    stored_prompt = Message(role="user", content="multiply")
+    if folded:
+        mark_summary_follows(stored_prompt)
+    answer = Message(role="assistant", content="Partial", provider_data=model_provenance("m", "Synthetic"))
+    snapshot = build_interrupted_replay_snapshot(
+        user_message="multiply",
+        user_message_is_structured=False,
+        partial_text="Partial",
+        completed_tools=(),
+        interrupted_tools=(),
+        run_metadata=None,
+        turn_input=stored_turn_input(_paused_row([stored_prompt, answer]).messages),
+    )
+    row = _build_interrupted_replay_run(
+        snapshot=snapshot,
+        run_id="stopped",
+        session=new_scope_session(session_id="s", scope=_AGENT),
+    )
+
+    request = _request(summary=_SUMMARY, history=_replay([row]), turn=TurnMessages(prompt=Message(role="user")))
+
+    contents = [message.content for message in request]
+    assert contents.index(_rendered_summary(_SUMMARY.text)) == (2 if folded else 1)
+    assert contents.index("multiply") == (1 if folded else 2)
+
+
+def test_a_run_s_turn_input_holds_its_own_fold_summary_in_place_of_the_context_the_fold_took() -> None:
+    """A run-local fold replaces the turn's context with a summary after the prompt, which a queued notice can follow."""
+    summary = compaction_summary_message("Progress: multiplied.", run_local=True)
+    notice = Message(
+        role="user",
+        content="A newer message arrived.",
+        provider_data={QUEUED_MESSAGE_NOTICE_MARKER_KEY: True, "mindroom_queued_message_notice_response_turn_id": "a"},
+    )
+    stored = _paused_row(
+        [_system(), Message(role="user", content="multiply"), summary, notice, _tool_call("call-multiply")],
+    ).messages
+
+    turn_input = stored_turn_input(stored)
+    assert turn_input.context == ()
+    assert [message.id for message in turn_input.summary] == [summary.id]
+
+
+def test_a_resume_leaves_out_the_queued_notice_of_the_reply_that_paused() -> None:
+    """A paused run's queued-message notice is the paused reply's; the resume's own hooks decide its notice again."""
+    notice = Message(
+        role="user",
+        content="A newer message is waiting.",
+        provider_data={QUEUED_MESSAGE_NOTICE_MARKER_KEY: True, "mindroom_queued_message_notice_response_turn_id": "a"},
+    )
+    result = Message(role="tool", tool_call_id="call-1", content="6")
+    paused = _paused_row([_system(), Message(role="user", content="multiply"), _tool_call("call-1"), result, notice])
+
+    resumed = build_resume_request(paused=paused.messages, summary=None, history=[])
+
+    assert _contents(resumed) == ["Be precise.", "multiply", None, "6"]
+
+
+def test_resumed_request_moves_the_stored_system_message_first() -> None:
+    paused = [Message(role="user", content="multiply"), _system(), _tool_call("call")]
+
+    resumed = build_resume_request(paused=paused, summary=None, history=_replay([_agent_run("earlier")]))
+
+    assert _contents(resumed) == ["Be precise.", "earlier question", "earlier answer", "multiply", None]
+
+
+def test_a_resumed_request_keeps_both_stored_system_messages_in_order() -> None:
+    """A run paused with a stable and a turn system message resumes with both, ahead of history, as it sent them."""
+    turn = Message(role="system", content="Today is Monday.")
+    paused = [_system(), turn, Message(role="user", content="multiply"), _tool_call("call")]
+
+    resumed = build_resume_request(paused=paused, summary=None, history=_replay([_agent_run("earlier")]))
+
+    assert _contents(resumed) == [
+        "Be precise.",
+        "Today is Monday.",
+        "earlier question",
+        "earlier answer",
+        "multiply",
+        None,
+    ]
+
+
+def test_resuming_messages_that_carry_the_scope_summary_keeps_that_one() -> None:
+    carried = Message(
+        role="user",
+        content=_rendered_summary("carried"),
+        provider_data={"mindroom_compaction_summary": "scope"},
+        from_history=True,
+    )
+    paused = [_system(), carried, Message(role="user", content="multiply"), _tool_call("call")]
+
+    resumed = build_resume_request(paused=paused, summary=_SUMMARY, history=[])
+
+    assert resumed == paused
+
+
+def test_resume_places_the_summary_after_a_paused_prompt_marked_for_it() -> None:
+    prompt = Message(role="user", content="long task", provider_data=_SUMMARY_FOLLOWS)
+    paused = [_system(), prompt, _tool_call("call")]
+
+    resumed = build_resume_request(paused=paused, summary=_SUMMARY, history=[])
+
+    assert _contents(resumed) == ["Be precise.", "long task", _rendered_summary(_SUMMARY.text), None]

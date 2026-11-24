@@ -131,7 +131,7 @@ describe("RoomList", () => {
     await waitFor(() => {
       expect(mockCreateRoom).toHaveBeenCalledWith({
         display_name: "Test Room",
-        description: "New room",
+        description: "",
         agents: [],
       });
     });
@@ -180,7 +180,7 @@ describe("RoomList", () => {
     await waitFor(() => {
       expect(mockCreateRoom).toHaveBeenCalledWith({
         display_name: "Enter Test Room",
-        description: "New room",
+        description: "",
         agents: [],
       });
     });

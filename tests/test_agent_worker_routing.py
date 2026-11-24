@@ -2,16 +2,12 @@
 
 from __future__ import annotations
 
-import inspect
 import json
 from typing import TYPE_CHECKING
 
 import nio
 import pytest
-from agno.run import RunContext
 from agno.tools.calculator import CalculatorTools
-from agno.tools.function import FunctionCall
-from agno.tools.toolkit import Toolkit
 
 from mindroom.agents import create_agent
 from mindroom.config.main import Config
@@ -19,18 +15,24 @@ from mindroom.constants import resolve_runtime_paths
 from mindroom.message_target import MessageTarget
 from mindroom.shell.execution import ShellRunResult
 from mindroom.tool_system import sandbox_proxy
-from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
+from mindroom.tool_system.invocation import ToolCallContext
+from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.plugins import config_plugins
+from mindroom.tool_system.registry import builtin_tool_registry
+from mindroom.tool_system.runtime_context import tool_runtime_context
 from mindroom.tool_system.worker_routing import ResolvedWorkerTarget, ToolExecutionIdentity
 from mindroom.tools import shell as shell_module
 from mindroom.workers.backend import WorkerBackendError
+from tests.agent_tool_helpers import blocking_entrypoint, call_entrypoint, offered_function, run_offered
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import make_conversation_reader_mock, make_matrix_client_mock, make_relation_lookup
 from tests.identity_helpers import persist_entity_accounts
+from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from agno.agent import Agent
+    from mindroom.agent_loop.build import AgentBuild
 
 
 def _create_routing_agent(
@@ -40,7 +42,7 @@ def _create_routing_agent(
     agent_settings: dict[str, object] | None = None,
     defaults: dict[str, object] | None = None,
     execution_identity: ToolExecutionIdentity | None = None,
-) -> Agent:
+) -> AgentBuild:
     runtime_paths = resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
         storage_path=tmp_path / "storage",
@@ -69,25 +71,17 @@ def _create_routing_agent(
         runtime_paths,
         execution_identity=execution_identity,
         include_interactive_questions=False,
-        persist_runtime_state=False,
         supports_native_tool_approval=True,
+        knowledge=None,
+        model=turn_model(config, runtime_paths, "routing"),
+        plugins=config_plugins(config, runtime_paths),
     )
 
 
-async def _invoke(agent: Agent, function_name: str, **kwargs: object) -> str:
-    for toolkit in agent.tools or []:
-        if not isinstance(toolkit, Toolkit):
-            continue
-        function = toolkit.get_async_functions().get(function_name)
-        if function is None:
-            continue
-        assert function.entrypoint is not None
-        result = function.entrypoint(**kwargs)
-        if inspect.isawaitable(result):
-            result = await result
-        assert isinstance(result, str)
-        return result
-    pytest.fail(f"Agent did not materialize {function_name}")
+async def _invoke(agent: AgentBuild, function_name: str, **kwargs: object) -> str:
+    result = await call_entrypoint(offered_function(agent, function_name), **kwargs)
+    assert isinstance(result, str)
+    return result
 
 
 @pytest.fixture(autouse=True)
@@ -111,14 +105,9 @@ def proxy_targets(monkeypatch: pytest.MonkeyPatch) -> list[ResolvedWorkerTarget 
     """Replace only remote dispatch; retain resolver, registry and proxy wrappers."""
     targets: list[ResolvedWorkerTarget | None] = []
 
-    def dispatch(
-        *,
-        tool_name: str,
-        worker_target: ResolvedWorkerTarget | None,
-        **_kwargs: object,
-    ) -> str:
-        targets.append(worker_target)
-        return f"worker:{tool_name}"
+    def dispatch(*, stand_ins: sandbox_proxy.WorkerStandIns, **_kwargs: object) -> str:
+        targets.append(stand_ins.worker_target)
+        return f"worker:{stand_ins.tool_name}"
 
     monkeypatch.setattr(sandbox_proxy, "_call_proxy_sync", dispatch)
     return targets
@@ -164,7 +153,7 @@ async def test_omitted_worker_tools_honors_environment(
     assert (await _invoke(agent, "run_shell_command", args=["unused"])).endswith(expected[0])
     assert await _invoke(agent, "add", a=1, b=2) == expected[1]
     if expected == ("local:shell", "local:calculator"):
-        assert "No tools use a worker runtime." in (agent.role or "")
+        assert "No tools use a worker runtime." in agent.prompt.role
 
 
 @pytest.mark.asyncio
@@ -186,8 +175,9 @@ async def test_dedicated_defaults_ignore_static_runner_url(
     assert await _invoke(agent, "add", a=1, b=2) == "local:calculator"
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize("worker_tools", [None, ["reasoning"]])
-def test_reasoning_retains_primary_run_state(
+async def test_reasoning_retains_primary_run_state(
     tmp_path: Path,
     proxy_targets: list[ResolvedWorkerTarget | None],
     worker_tools: list[str] | None,
@@ -198,17 +188,13 @@ def test_reasoning_retains_primary_run_state(
         {"MINDROOM_SANDBOX_EXECUTION_MODE": "all", "MINDROOM_SANDBOX_PROXY_URL": "http://sandbox.invalid"},
         agent_settings={"tools": ["reasoning"], "worker_tools": worker_tools},
     )
-    toolkit = next(tool for tool in agent.tools or [] if isinstance(tool, Toolkit) and "think" in tool.functions)
-    function = toolkit.functions["think"]
-    context = RunContext(run_id="reasoning-run", session_id="reasoning-session", session_state={})
-    function._run_context = context
-    result = FunctionCall(function=function, arguments={"title": "Step", "thought": "Preserve run state"}).execute()
+    context = ToolCallContext(run_id="reasoning-run", session_id="reasoning-session", user_id=None)
+    result = await run_offered(agent, "think", {"title": "Step", "thought": "Preserve run state"}, context=context)
 
-    assert result.status == "success"
-    assert context.session_state is not None
+    assert not result.is_error
     assert context.session_state["reasoning_steps"]
     assert proxy_targets == []
-    assert "No tools use a worker runtime." in (agent.role or "")
+    assert "No tools use a worker runtime." in agent.prompt.role
 
 
 @pytest.mark.asyncio
@@ -270,6 +256,80 @@ async def test_runner_mode_keeps_real_agent_tools_local(tmp_path: Path) -> None:
 
 @pytest.mark.asyncio
 @pytest.mark.usefixtures("proxy_targets")
+async def test_toolkits_built_in_the_primary_are_never_worker_routed(tmp_path: Path) -> None:
+    """A toolkit MindRoom builds in this process, such as self_config, stays local even when every tool routes."""
+    agent = _create_routing_agent(
+        tmp_path,
+        {"MINDROOM_SANDBOX_EXECUTION_MODE": "all", "MINDROOM_SANDBOX_PROXY_URL": "http://sandbox.invalid"},
+        agent_settings={"allow_self_config": True},
+    )
+
+    assert "- Local tools (primary MindRoom runtime): `self_config`." in agent.prompt.role
+    assert "- Worker-routed tools: `shell`, `calculator`." in agent.prompt.role
+
+
+_ROUTES_EVERY_TOOL = {"MINDROOM_SANDBOX_PROXY_URL": "http://sandbox.invalid"}
+_ROUTES_NO_TOOL = {
+    **_ROUTES_EVERY_TOOL,
+    "MINDROOM_SANDBOX_EXECUTION_MODE": "selective",
+    "MINDROOM_SANDBOX_PROXY_TOOLS": "",
+}
+
+
+@pytest.mark.usefixtures("proxy_targets")
+@pytest.mark.parametrize(
+    ("process_env", "worker_tools", "expected"),
+    [
+        pytest.param(_ROUTES_EVERY_TOOL, None, "worker:calculator", id="runtime-routes"),
+        pytest.param(_ROUTES_EVERY_TOOL, [], "worker:calculator", id="agent-list-cannot-keep-it-local"),
+        pytest.param(_ROUTES_NO_TOOL, ["calculator"], "worker:calculator", id="agent-list-routes"),
+        pytest.param(_ROUTES_NO_TOOL, None, "local:calculator", id="runtime-keeps-local"),
+    ],
+)
+def test_a_toolkit_built_without_a_placement_runs_in_a_worker_when_the_runtime_or_its_agent_routes_it(
+    tmp_path: Path,
+    process_env: dict[str, str],
+    worker_tools: list[str] | None,
+    expected: str,
+) -> None:
+    """A toolkit a tool builds for its agent, such as a plugin's sub-toolkit, never runs looser than the runtime routes it.
+
+    The agent's explicit worker_tools can move it into a worker but not out of one, since the agent may not have it.
+    """
+    runtime_paths = resolve_runtime_paths(
+        config_path=tmp_path / "config.yaml",
+        storage_path=tmp_path / "storage",
+        process_env=process_env,
+    )
+    agent: dict[str, object] = {"display_name": "Routing", "tools": ["calculator"], "include_default_tools": False}
+    if worker_tools is not None:
+        agent["worker_tools"] = worker_tools
+    config = Config.validate_with_runtime(
+        {"models": {"default": {"provider": "ollama", "id": "test-model"}}, "agents": {"routing": agent}},
+        runtime_paths,
+    )
+    target = ResolvedWorkerTarget(
+        worker_scope=None,
+        routing_agent_name="routing",
+        execution_identity=None,
+        tenant_id=None,
+        account_id=None,
+        worker_key=None,
+    )
+
+    toolkit = get_tool_by_name(
+        "calculator",
+        runtime_paths,
+        runtime_config=config,
+        worker_target=target,
+        tools=builtin_tool_registry(),
+    )
+
+    assert blocking_entrypoint(toolkit, "add")(a=1, b=2) == expected
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("proxy_targets")
 @pytest.mark.parametrize("worker_tools", [None, ["usage_stats"]])
 async def test_primary_runtime_tool_stays_local_after_real_materialization(
     tmp_path: Path,
@@ -284,7 +344,7 @@ async def test_primary_runtime_tool_stays_local_after_real_materialization(
 
     result = json.loads(await _invoke(agent, "get_my_usage"))
     assert result["code"] == "context_unavailable"
-    assert "No tools use a worker runtime." in (agent.role or "")
+    assert "No tools use a worker runtime." in agent.prompt.role
 
 
 @pytest.mark.asyncio
@@ -344,22 +404,21 @@ async def test_room_context_tool_uses_primary_matrix_client(
         "routing",
         config,
         runtime_paths,
-        execution_identity=build_execution_identity_from_runtime_context(context),
+        execution_identity=context.execution_identity,
         include_interactive_questions=False,
-        persist_runtime_state=False,
         supports_native_tool_approval=True,
-    )
-    toolkit = next(
-        tool for tool in agent.tools or [] if isinstance(tool, Toolkit) and "list_schedules" in tool.async_functions
+        knowledge=None,
+        model=turn_model(config, runtime_paths, "routing"),
+        plugins=config_plugins(config, runtime_paths),
     )
     with tool_runtime_context(context):
-        result = await FunctionCall(function=toolkit.async_functions["list_schedules"], arguments={}).aexecute()
+        result = await run_offered(agent, "list_schedules")
 
-    assert result.status == "success"
-    assert result.result == "No scheduled tasks found."
+    assert not result.is_error
+    assert result.content == "No scheduled tasks found."
     client.room_get_state.assert_awaited_once_with(target.room_id)
     assert proxy_targets == []
-    assert "No tools use a worker runtime." in (agent.role or "")
+    assert "No tools use a worker runtime." in agent.prompt.role
 
 
 @pytest.mark.asyncio

@@ -1,0 +1,110 @@
+{
+  "description": "A shell agent in minimal mode: one Bash facade and the agent context as context documents.",
+  "input": {
+    "agent_mode": "minimal",
+    "config": {
+      "agents": {
+        "operator": {
+          "display_name": "Operator",
+          "instructions": [
+            "Explain each command before running it."
+          ],
+          "memory_backend": "file",
+          "minimal_instructions": [
+            "Prefer read-only commands."
+          ],
+          "role": "Operate the build machine.",
+          "tools": [
+            "shell",
+            "calculator"
+          ]
+        }
+      },
+      "models": {
+        "default": {
+          "extra_kwargs": {
+            "api_key": "test-key"
+          },
+          "id": "claude-sonnet-5-5",
+          "provider": "anthropic"
+        }
+      },
+      "timezone": "UTC"
+    },
+    "turn": {
+      "api_server": "127.0.0.1:8765",
+      "entry_point": "mindroom.ai.stream_agent_response",
+      "prompt": "How much free disk space is left?",
+      "requester_id": "@user:localhost",
+      "room_id": "!room:localhost",
+      "thread_history": [
+        "Our handbook moved to the new wiki last week."
+      ],
+      "thread_id": "$thread:localhost"
+    }
+  },
+  "requests": [
+    {
+      "model": {
+        "id": "claude-sonnet-5-5",
+        "provider": "Anthropic"
+      },
+      "messages": [
+        {
+          "content": "You are Operator (operator) in minimal mode.\nBash starts in your workspace.\nFile memory: `MEMORY.md`, `memory/`.\nOther tools and full agent context: mindroom-agent --help; call a tool with `mindroom-agent tools call TOOLKIT.FUNCTION '<json>'`.\nToolkits callable through mindroom-agent: calculator, scheduler, shell\nPrefer read-only commands.",
+          "role": "system"
+        },
+        {
+          "content": "<mindroom_session_context>\n## Current Date and Time\nToday is <DATE>.\nTimezone: UTC (UTC)\n</mindroom_session_context>",
+          "role": "system"
+        },
+        {
+          "content": "<msg event_id=\"$earlier:localhost\" from=\"@user:localhost\"><![CDATA[Our handbook moved to the new wiki last week.]]></msg>",
+          "role": "user"
+        },
+        {
+          "content": "Current message:\n<msg event_id=\"$current:localhost\" from=\"@user:localhost\" ts=\"2026-09-21 14:14 UTC\"><![CDATA[How much free disk space is left?]]></msg>",
+          "role": "user"
+        }
+      ],
+      "tools": [
+        {
+          "name": "bash",
+          "description": "Run a Bash command and return its output.\nBy default the call waits at most 120 seconds in the foreground. A command still running after 120 seconds\n(with ``timeout`` omitted or > 120) moves to the background and returns its PID, live log path, and\nwait/stop commands; it stops automatically after ``timeout`` (if set) or when the turn ends, and cannot make\nnew ``mindroom-agent`` CLI calls after handoff. Start servers or work meant to outlive the turn detached with\n``nohup cmd > out.log 2>&1 &`` and read the log in later commands. Wait for something inside one command,\nsuch as ``until <check>; do sleep 10; done`` with a ``timeout``, not with repeated ``sleep`` calls: every\ncall is a model turn.",
+          "parameters": {
+            "type": "object",
+            "properties": {
+              "command": {
+                "type": "string",
+                "description": "The Bash command to run."
+              },
+              "timeout": {
+                "anyOf": [
+                  {
+                    "type": "integer"
+                  },
+                  {
+                    "type": "null"
+                  }
+                ],
+                "description": "Seconds after which the command and every process it started are stopped. Values <= 120 stop\nthe command inline and return the output so far; null or > 120 moves it to the background after 120\nseconds and stops it after ``timeout`` (if set) or when the turn ends."
+              },
+              "tail": {
+                "type": "integer",
+                "description": "The number of output lines to return."
+              }
+            },
+            "required": [
+              "command"
+            ],
+            "additionalProperties": false
+          }
+        }
+      ],
+      "tool_choice": null,
+      "output_schema": null,
+      "deferred_tool_names": []
+    }
+  ],
+  "scenario": "agent_minimal_mode"
+}

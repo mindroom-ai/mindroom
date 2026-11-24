@@ -1,4 +1,4 @@
-"""Typed runtime shutdown intent shared by sync, bot, and response drains."""
+"""Typed runtime shutdown intent shared by sync, bot, and response drains, and the closers orderly shutdown awaits."""
 
 from __future__ import annotations
 
@@ -7,12 +7,15 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal
 
+from mindroom.logging_config import get_logger
+
 if TYPE_CHECKING:
-    from collections.abc import Awaitable
+    from collections.abc import Awaitable, Callable
 
     from mindroom.cancellation import TaskCancelSource
 
 __all__ = [
+    "CONFIG_RELOAD_SHUTDOWN",
     "ENTITY_REMOVED_SHUTDOWN",
     "GENERIC_SHUTDOWN",
     "ORDERLY_SHUTDOWN",
@@ -25,10 +28,13 @@ __all__ = [
     "RuntimeShutdownIntent",
     "ShutdownBudget",
     "StopReason",
+    "close_at_process_shutdown",
     "gather_shutdown_phase",
     "restart_reason_category_for",
-    "shutdown_intent_for_entity",
+    "run_process_shutdown_closers",
 ]
+
+logger = get_logger(__name__)
 
 StopReason = Literal["restart", "entity_removed", "shutdown"]
 
@@ -45,6 +51,23 @@ async def gather_shutdown_phase(
         return list(await asyncio.shield(phase)), None
     except asyncio.CancelledError as cancellation:
         return list(await phase), cancellation
+
+
+_PROCESS_SHUTDOWN_CLOSERS: list[Callable[[], Awaitable[object]]] = []
+
+
+def close_at_process_shutdown(closer: Callable[[], Awaitable[object]]) -> None:
+    """Have the runtime's orderly shutdown await ``closer`` once its agents stopped, such as to end a tool's sessions."""
+    _PROCESS_SHUTDOWN_CLOSERS.append(closer)
+
+
+async def run_process_shutdown_closers() -> None:
+    """Await every closer ``close_at_process_shutdown`` registered; one that fails does not skip the rest."""
+    for closer in _PROCESS_SHUTDOWN_CLOSERS:
+        try:
+            await closer()
+        except Exception:
+            logger.exception("Process shutdown closer failed")
 
 
 class ResponseShutdownTimeoutError(RuntimeError):
@@ -86,6 +109,8 @@ class RuntimeShutdownIntent:
 
     stop_reason: StopReason | None
     cancel_source: TaskCancelSource | None = None
+    # A config reload, rather than another refresh, replaces the entity.
+    config_reload: bool = False
 
     @property
     def hands_off_unfinished_work(self) -> bool:
@@ -125,19 +150,9 @@ GENERIC_SHUTDOWN = RuntimeShutdownIntent(stop_reason=None, cancel_source=None)
 ORDERLY_SHUTDOWN = RuntimeShutdownIntent(stop_reason="shutdown", cancel_source=None)
 ENTITY_REMOVED_SHUTDOWN = RuntimeShutdownIntent(stop_reason="entity_removed", cancel_source=None)
 SYNC_RESTART_SHUTDOWN = RuntimeShutdownIntent(stop_reason="restart", cancel_source="sync_restart")
+CONFIG_RELOAD_SHUTDOWN = RuntimeShutdownIntent(stop_reason="restart", cancel_source="sync_restart", config_reload=True)
 
 
 def restart_reason_category_for(shutdown_intent: RuntimeShutdownIntent) -> RestartReasonCategory:
     """Return the log category describing why one response runtime is shutting down."""
     return _STOP_REASON_CATEGORIES[shutdown_intent.stop_reason]
-
-
-def shutdown_intent_for_entity(
-    entity_name: str,
-    *,
-    restart_entities: set[str],
-) -> RuntimeShutdownIntent:
-    """Return shutdown intent for one stopped entity."""
-    if entity_name in restart_entities:
-        return SYNC_RESTART_SHUTDOWN
-    return ENTITY_REMOVED_SHUTDOWN

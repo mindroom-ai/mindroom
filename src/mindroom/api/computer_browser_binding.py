@@ -7,16 +7,18 @@ from typing import TYPE_CHECKING
 
 from fastapi import HTTPException
 
+from mindroom.tool_system.agno_toolkits import toolkit_function
+from mindroom.tool_system.media_transport import encode_media_result
+from mindroom.tool_system.tool_function import ToolValue
 from mindroom.worker_computer.protocol import BrowserSession
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
     from pathlib import Path
 
-    from agno.tools.toolkit import Toolkit
-
     from mindroom.custom_tools.browser import BrowserTools
     from mindroom.custom_tools.browser_mcp import BrowserMCPTools
+    from mindroom.tool_system.agno_toolkits import AnyToolkit
 
 
 @dataclass(frozen=True)
@@ -27,7 +29,7 @@ class _ComputerBrowserProvider:
     function_names: frozenset[str]
     encode_result: Callable[[object], object]
 
-    def validate_toolkit(self, toolkit: Toolkit) -> BrowserTools | BrowserMCPTools:
+    def validate_toolkit(self, toolkit: AnyToolkit) -> BrowserTools | BrowserMCPTools:
         """Reject replacement toolkits, including subclasses of the built-in type."""
         if type(toolkit) is not self.toolkit_type:
             raise HTTPException(status_code=400, detail="Worker computer requires the built-in browser tool.")
@@ -52,9 +54,11 @@ class _ComputerBrowserProvider:
         toolkit: BrowserTools | BrowserMCPTools,
         display: str,
         workspace: Path,
-        invoke: Callable[[Toolkit, Callable[..., object], list[object], dict[str, object]], Awaitable[object]],
+        invoke: Callable[[AnyToolkit, Callable[..., object], list[object], dict[str, object]], Awaitable[object]],
     ) -> tuple[str, BrowserSession]:
         """Bind the output-wrapped toolkit; the caller owns invocation policy and timeout."""
+        from mindroom.custom_tools.browser import BrowserTools  # noqa: PLC0415
+
         key = toolkit.bind_worker_display(display, workspace)
 
         async def execute(current_function: str, *args: object, **kwargs: object) -> object:
@@ -62,13 +66,15 @@ class _ComputerBrowserProvider:
             if current_function not in self.function_names:
                 msg = "Unsupported worker browser function."
                 raise ValueError(msg)
-            function = toolkit.get_async_functions().get(current_function)
-            if function is None or function.entrypoint is None:
+            function = toolkit_function(toolkit, current_function)
+            if function is None:
                 msg = "Unsupported worker browser function."
                 raise ValueError(msg)
             return await invoke(toolkit, function.entrypoint, list(args), kwargs)
 
-        return key, BrowserSession(execute=execute, close=toolkit.aclose)
+        # The agent's browser bridge reaches the built-in browser's page because it runs in this process.
+        page = toolkit.worker_shown_page if isinstance(toolkit, BrowserTools) else None
+        return key, BrowserSession(execute=execute, close=toolkit.aclose, page=page)
 
 
 def select_browser_provider(
@@ -81,7 +87,6 @@ def select_browser_provider(
     # Browser SDK imports remain lazy for slim runner startup.
     from mindroom.custom_tools.browser import BrowserTools  # noqa: PLC0415
     from mindroom.custom_tools.browser_mcp import BrowserMCPTools  # noqa: PLC0415
-    from mindroom.tool_system.media_transport import encode_media_result  # noqa: PLC0415
     from mindroom.tools.browser import browser_tools  # noqa: PLC0415
     from mindroom.tools.browser_mcp import browser_mcp_tools  # noqa: PLC0415
     from mindroom.worker_computer.mcp_catalog import browser_mcp_catalog  # noqa: PLC0415
@@ -96,10 +101,9 @@ def select_browser_provider(
             encode_media_result,
         )
     elif tool_name == "browser" and function_name == "browser_control":
-        from agno.tools.function import ToolResult  # noqa: PLC0415
 
         def encode_action_browser_result(result: object) -> object:
-            if isinstance(result, ToolResult):
+            if isinstance(result, ToolValue):
                 return encode_media_result(result)
             return encode_json(result)
 

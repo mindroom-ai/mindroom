@@ -1,0 +1,430 @@
+"""MindRoom's OAuth connections as an egress broker secret source; access tokens never leave the primary.
+
+Tokens come only from `mindroom.oauth.credential_lifecycle`, which refreshes a token near expiry under the
+same serialized transaction the tools sharing that connection use. Credential scope follows each provider's own
+policy, so a requester-scoped provider such as GitHub uses the requester from the verified proxy token. Such a
+requester's own account is used only in a sandbox that belongs to that requester; see `shared_worker_oauth`.
+The broker neither reads nor refreshes a connection for a service until someone allowed it (`oauth_reuse`), nor for a
+request that an account allowed only to read may not serve; the egress pages show its state through the Connections
+portal's own status reader.
+Logs carry the service, the provider id, and error types, never tokens or connect links.
+"""
+
+from __future__ import annotations
+
+import contextlib
+import threading
+import time
+from dataclasses import dataclass, field, replace
+from typing import TYPE_CHECKING, Any, Literal
+
+from mindroom.egress_broker.oauth_reuse import oauth_reuse_access
+from mindroom.egress_broker.rules import read_only_allows
+from mindroom.egress_broker.secrets import (
+    OAuthStatus,
+    Secret,
+    SecretMissing,
+    SecretNeedsReconnect,
+    SecretReadOnly,
+    SecretResult,
+    SecretUnavailable,
+    is_personal_target,
+)
+from mindroom.logging_config import get_logger
+from mindroom.oauth.credential_lifecycle import (
+    OAuthCredentialUnreadableError,
+    load_oauth_credentials_snapshot_sync,
+    oauth_account_label,
+    oauth_credentials_may_exist,
+    oauth_credentials_usable,
+    refresh_oauth_credentials_blocking,
+    resolve_oauth_credential_context,
+)
+from mindroom.oauth.providers import OAuthProviderError, OAuthRefreshRejectedError
+from mindroom.oauth.service import (
+    OAUTH_REFRESH_REJECTED_REASON,
+    oauth_connection_required,
+    oauth_provider_service_account_configured,
+)
+from mindroom.tool_system.plugins import config_plugins
+from mindroom.workers.backend_kinds import worker_backend_kind
+
+if TYPE_CHECKING:
+    from mindroom.config.egress_broker import EgressReadOnly
+    from mindroom.config.main import Config
+    from mindroom.constants import RuntimePaths
+    from mindroom.credentials.manager import CredentialsManager
+    from mindroom.egress_broker.secrets import SecretRequest
+    from mindroom.oauth.credential_lifecycle import OAuthCredentialContext
+    from mindroom.oauth.providers import OAuthProvider
+    from mindroom.tool_system.worker_routing import ResolvedWorkerTarget
+
+__all__ = [
+    "SharedWorkerOAuth",
+    "broker_credential_context",
+    "oauth_connection_for_display",
+    "oauth_status",
+    "resolve_oauth_token",
+    "separate_account_provider",
+    "shared_worker_oauth",
+    "shared_worker_unavailable_status",
+]
+
+logger = get_logger(__name__)
+
+_warned_unknown_providers: set[tuple[str, str]] = set()
+_warned_unknown_providers_lock = threading.Lock()
+# Each connect link stores a one-time token in the OAuth state file, so a worker retrying in a loop would grow it
+# without bound. A link is reused for this long per provider, reason, and resolved OAuth target; the target carries
+# the caller's identity, so reuse is per caller, finer than the credential scope. 60 s is well inside the token's
+# 10-minute lifetime.
+_CONNECT_URL_REUSE_SECONDS = 60.0
+_connect_urls: dict[tuple[object, ...], tuple[float, str | None]] = {}
+_connect_urls_lock = threading.Lock()
+# After a refresh fails for a reason that may pass (a provider outage, a timeout, a network error), lookups for
+# that credential scope answer at once for this long instead of running the grant again.
+_TRANSIENT_FAILURE_BACKOFF_SECONDS = 30.0
+
+
+type SharedWorkerOAuth = Literal["refused", "allowed"]
+
+
+@dataclass
+class _RefreshGate:
+    """Serializes the broker's refreshes of one credential scope and remembers its last transient failure."""
+
+    lock: threading.Lock = field(default_factory=threading.Lock)
+    failed_at: float | None = None
+
+    def backing_off(self) -> bool:
+        return self.failed_at is not None and time.monotonic() - self.failed_at < _TRANSIENT_FAILURE_BACKOFF_SECONDS
+
+
+_refresh_gates: dict[tuple[object, ...], _RefreshGate] = {}
+_refresh_gates_lock = threading.Lock()
+
+
+def resolve_oauth_token(  # noqa: PLR0911 - checks in order
+    *,
+    service: str,
+    provider_id: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    credentials_manager: CredentialsManager,
+    worker_target: ResolvedWorkerTarget,
+    request: SecretRequest,
+    read_only: EgressReadOnly | None,
+    separate_account: bool,
+) -> SecretResult:
+    """Return a fresh access token from the scope's connection to `provider_id`, refreshing it when near expiry.
+
+    Without an opt-in for `service` (`oauth_reuse`) the connection is never read: the result names the provider, that
+    Agent Keys may not use it (`reuse_off`), and whether it is the requester's own (`requester_owned`), with no link.
+    Nor is it read for a `request` that an opt-in allowing only reads may not serve, as the service's `read_only`
+    declares (`read_only_allows`); that result is `SecretReadOnly`.
+    Only a rejected grant or an unreadable credential asks the user to act (`SecretNeedsReconnect`); any other refresh
+    failure is `SecretUnavailable`, as the tools treat it, and the scope then answers that without another grant
+    for `_TRANSIENT_FAILURE_BACKOFF_SECONDS`. `service` names the egress service in the one warning logged for a
+    provider id the registry does not know. A `separate_account` service reads only its own account
+    (`separate_account_provider`), and gets no connect link, which would connect the tools' one. Blocks on the OAuth
+    transaction owner, and on another lookup refreshing the same connection, so callers on an event loop run it in a
+    thread.
+    """
+    provider = _registered_provider(service, provider_id, config, runtime_paths, separate_account=separate_account)
+    if provider is None:
+        return SecretMissing()
+    access = shared_worker_oauth(
+        provider,
+        worker_target,
+        opted_in=_oauth_on_shared_workers(config, service),
+        runtime_paths=runtime_paths,
+    )
+    if access == "refused":
+        # Connecting an account would not change that, so there is no link either.
+        return SecretMissing()
+    context = broker_credential_context(provider, config, runtime_paths, credentials_manager, worker_target)
+    if provider.requester_scoped_credentials and context.worker_target is None:
+        # No requester to bind the connection to, so there is no stored token to use or allow.
+        return SecretMissing()
+    level = oauth_reuse_access(context, service, provider.id, separate_account=separate_account)
+    if level is None:
+        return SecretMissing(
+            provider=provider.id,
+            reuse_off=True,
+            requester_owned=provider.requester_scoped_credentials,
+            own_account=separate_account,
+        )
+    if level == "read" and not read_only_allows(read_only, request):
+        return SecretReadOnly(provider=provider.id, requester_owned=provider.requester_scoped_credentials)
+    credentials = _refreshed_credentials(service, context, linked=not separate_account)
+    if isinstance(credentials, SecretNeedsReconnect | SecretUnavailable):
+        return credentials
+    token = (credentials or {}).get("token") or (credentials or {}).get("access_token")
+    if not oauth_credentials_usable(provider, runtime_paths, credentials) or not isinstance(token, str) or not token:
+        return SecretMissing(own_account=True) if separate_account else _missing(context)
+    return Secret(token)
+
+
+def oauth_status(
+    provider_id: str,
+    worker_target: ResolvedWorkerTarget | None,
+    *,
+    service: str,
+    separate_account: bool,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    credentials_manager: CredentialsManager,
+) -> OAuthStatus | None:
+    """Return the scope's connection state for `provider_id` without refreshing; None for an unknown provider.
+
+    A stored connection whose access token expired still counts as connected while it can be refreshed.
+    `reuse_enabled` says whether Agent Keys may use it for `service`, and `reuse_access` at which level; without that
+    the connection is not read, so it reports nothing connected. A None `worker_target` is the global store that agents without a worker scope read.
+    A `separate_account` service reports its own account. Binding the keyword arguments gives `secrets.service_status`
+    its `oauth_status` reader.
+    """
+    provider = _registered_provider(service, provider_id, config, runtime_paths, separate_account=separate_account)
+    if provider is None:
+        return None
+    access = shared_worker_oauth(
+        provider,
+        worker_target,
+        opted_in=_oauth_on_shared_workers(config, service),
+        runtime_paths=runtime_paths,
+    )
+    if access == "refused":
+        return shared_worker_unavailable_status(provider, runtime_paths)
+    context = broker_credential_context(provider, config, runtime_paths, credentials_manager, worker_target)
+    reuse_access = oauth_reuse_access(context, service, provider.id, separate_account=separate_account)
+    credentials = None
+    reset_required = False
+    if reuse_access is not None:
+        try:
+            credentials = load_oauth_credentials_snapshot_sync(context).credentials
+        except OAuthCredentialUnreadableError:
+            reset_required = True
+    connected = oauth_credentials_usable(provider, runtime_paths, credentials)
+    return OAuthStatus(
+        provider=provider.id,
+        display_name=provider.display_name,
+        connected=connected,
+        account_label=oauth_account_label(credentials) if connected and credentials else None,
+        can_connect=_connectable(provider, runtime_paths),
+        reset_required=reset_required,
+        service_account=oauth_provider_service_account_configured(provider, runtime_paths),
+        shared_worker_opt_in=access == "allowed",
+        reuse_enabled=reuse_access is not None,
+        reuse_access=reuse_access,
+    )
+
+
+def oauth_connection_for_display(context: OAuthCredentialContext) -> tuple[bool, str | None]:
+    """Return whether the context's stored connection is usable and its account label, read whatever the opt-in.
+
+    Only the egress pages call this, to show an account a user may allow or disconnect; the broker reads through
+    `resolve_oauth_token` and `oauth_status`, which never read a connection Agent Keys may not use. A scope without a
+    store or legacy tokens reads as not connected, and listing it creates no store.
+    """
+    credentials = None
+    if oauth_credentials_may_exist(context):
+        with contextlib.suppress(OAuthCredentialUnreadableError):
+            credentials = load_oauth_credentials_snapshot_sync(context).credentials
+    connected = oauth_credentials_usable(context.provider, context.runtime_paths, credentials)
+    return connected, oauth_account_label(credentials) if connected and credentials else None
+
+
+def separate_account_provider(provider: OAuthProvider, service: str) -> OAuthProvider:
+    """Return the provider whose connection is a user service's own account (`oauth_separate_account`).
+
+    Only the stored name changes, to `<base>__<service>_oauth` beside the tools' `<base>_oauth`, so connect, refresh,
+    and the opt-in work on it unchanged in the same scope store, and the name stays an OAuth token service's.
+    """
+    base = provider.credential_service.removesuffix("_oauth")
+    return replace(provider, credential_service=f"{base}__{service}_oauth")
+
+
+def shared_worker_oauth(
+    provider: OAuthProvider,
+    worker_target: ResolvedWorkerTarget | None,
+    *,
+    opted_in: bool,
+    runtime_paths: RuntimePaths,
+) -> SharedWorkerOAuth | None:
+    """Return whether the broker uses a requester's own account in a sandbox that several requesters share.
+
+    A requester-scoped provider (GitHub, built-in Atlassian) supplies the calling requester's own token. Its sandbox belongs
+    to that requester only when the worker scope is `user` or `user_agent` and the worker backend is dedicated
+    (Docker or Kubernetes). Every other sandbox is shared: a `shared` worker, one without a worker scope (a None
+    target is the global store such agents read), and any scope on the static runner, where all calls run in one
+    process. There another user's later command can read an earlier caller's proxy token, for example from a
+    background process's environment, and act with that caller's account until the token expires.
+    Such accounts are "refused" there unless the service sets `oauth_on_shared_workers`, which makes them
+    "allowed". None means the rule does not apply: the provider follows the worker scope, or the sandbox belongs to
+    one requester. Injection, placeholders, the status APIs, and the agent tool all decide through this.
+    """
+    if not provider.requester_scoped_credentials:
+        return None
+    if is_personal_target(worker_target) and worker_backend_kind(runtime_paths).dedicated:
+        return None
+    return "allowed" if opted_in else "refused"
+
+
+def shared_worker_unavailable_status(provider: OAuthProvider, runtime_paths: RuntimePaths) -> OAuthStatus:
+    """Return the status of a provider that `shared_worker_oauth` refuses: nothing to use, connect, or reset."""
+    return OAuthStatus(
+        provider=provider.id,
+        display_name=provider.display_name,
+        connected=False,
+        account_label=None,
+        can_connect=False,
+        reset_required=False,
+        service_account=oauth_provider_service_account_configured(provider, runtime_paths),
+        unavailable_reason="shared_sandbox",
+    )
+
+
+def _oauth_on_shared_workers(config: Config, service: str) -> bool:
+    # Config services alone can opt in. User services never set the flag, and the effective config ignores a user
+    # service named like a config service, so the config's services answer for every service a requester can use.
+    egress_service = config.egress_broker.services.get(service)
+    return egress_service is not None and egress_service.oauth_on_shared_workers
+
+
+def _registered_provider(
+    service: str,
+    provider_id: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    *,
+    separate_account: bool,
+) -> OAuthProvider | None:
+    provider = config_plugins(config, runtime_paths).oauth_providers.get(provider_id)
+    if provider is None:
+        with _warned_unknown_providers_lock:
+            first = (service, provider_id) not in _warned_unknown_providers
+            _warned_unknown_providers.add((service, provider_id))
+        if first:
+            logger.warning("egress_broker_oauth_provider_unknown", service=service, provider_id=provider_id)
+        return None
+    return separate_account_provider(provider, service) if separate_account else provider
+
+
+def _refreshed_credentials(
+    service: str,
+    context: OAuthCredentialContext,
+    *,
+    linked: bool,
+) -> dict[str, Any] | SecretNeedsReconnect | SecretUnavailable | None:
+    """Refresh the scope's credentials through its gate; a failed refresh becomes the result to return.
+
+    A reconnect carries a connect link only when `linked`.
+    """
+    gate = _refresh_gate(context)
+    with gate.lock:
+        # Lookups queued behind a failed refresh answer here instead of each repeating the grant.
+        if gate.backing_off():
+            return SecretUnavailable(provider=context.provider.id)
+        try:
+            credentials = refresh_oauth_credentials_blocking(context)
+        except (OAuthCredentialUnreadableError, OAuthRefreshRejectedError) as exc:
+            terminal = exc
+        except OAuthProviderError as exc:
+            gate.failed_at = time.monotonic()
+            _log_token_unavailable(service, context.provider, exc)
+            return SecretUnavailable(provider=context.provider.id)
+        else:
+            gate.failed_at = None
+            return credentials
+    _log_token_unavailable(service, context.provider, terminal)
+    requester_owned = context.provider.requester_scoped_credentials
+    if isinstance(terminal, OAuthCredentialUnreadableError):
+        # Unreadable state must be reset from the dashboard before a new connection can be stored.
+        return SecretNeedsReconnect(provider=context.provider.id, reset_required=True, requester_owned=requester_owned)
+    return SecretNeedsReconnect(
+        provider=context.provider.id,
+        connect_url=_connect_url(context, OAUTH_REFRESH_REJECTED_REASON) if linked else None,
+        requester_owned=requester_owned,
+    )
+
+
+def _log_token_unavailable(service: str, provider: OAuthProvider, exc: OAuthProviderError) -> None:
+    logger.warning(
+        "egress_broker_oauth_token_unavailable",
+        service=service,
+        provider_id=provider.id,
+        error_type=type(exc).__name__,
+    )
+
+
+def _refresh_gate(context: OAuthCredentialContext) -> _RefreshGate:
+    """Return the gate of the context's credential store: one per stored connection, worker scope, and worker key."""
+    target = context.worker_target
+    key = (
+        context.runtime_paths.storage_root,
+        context.provider.credential_service,
+        None if target is None else (target.worker_scope, target.worker_key),
+    )
+    with _refresh_gates_lock:
+        return _refresh_gates.setdefault(key, _RefreshGate())
+
+
+def broker_credential_context(
+    provider: OAuthProvider,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    credentials_manager: CredentialsManager,
+    worker_target: ResolvedWorkerTarget | None,
+) -> OAuthCredentialContext:
+    """Resolve the credential scope the provider's tools use for this worker target.
+
+    The broker reads connections and their opt-ins (`oauth_reuse`) here, and the APIs write opt-ins here, so both
+    always name the same store.
+    """
+    if worker_target is not None and worker_target.worker_scope is None and worker_target.worker_key is not None:
+        # An unscoped worker's routing key is not part of its credential scope: tools on unscoped agents have none.
+        worker_target = replace(worker_target, worker_key=None)
+    return resolve_oauth_credential_context(
+        provider,
+        runtime_paths,
+        credentials_manager,
+        worker_target,
+        config=config,
+    )
+
+
+def _connectable(provider: OAuthProvider, runtime_paths: RuntimePaths) -> bool:
+    """Return whether a user can connect a personal account: the client is configured and no service account is."""
+    return provider.client_config(runtime_paths) is not None and not oauth_provider_service_account_configured(
+        provider,
+        runtime_paths,
+    )
+
+
+def _missing(context: OAuthCredentialContext) -> SecretMissing:
+    """Return the missing result, naming the provider only when the caller gets a link to connect an account."""
+    url = _connect_url(context)
+    return SecretMissing() if url is None else SecretMissing(provider=context.provider.id, connect_url=url)
+
+
+def _connect_url(context: OAuthCredentialContext, reason: str | None = None) -> str | None:
+    """Return the caller's connect link, minting at most one per caller, provider, and reason every reuse period.
+
+    There is none for a connection several requesters share (a provider that follows the worker scope, on a `shared`
+    agent or one without a worker scope): its link skips the browser sign-in, and the broker hands links to worker
+    code, where any process in the shared worker could read it.
+    """
+    shared = not context.provider.requester_scoped_credentials and not is_personal_target(context.worker_target)
+    if shared or not _connectable(context.provider, context.runtime_paths):
+        return None
+    key = (context.runtime_paths.storage_root, context.provider.id, context.worker_target, reason)
+    now = time.monotonic()
+    with _connect_urls_lock:
+        expired = [old for old, (minted, _url) in _connect_urls.items() if now - minted >= _CONNECT_URL_REUSE_SECONDS]
+        for old in expired:
+            del _connect_urls[old]
+        if (cached := _connect_urls.get(key)) is not None:
+            return cached[1]
+    url = oauth_connection_required(context, reason=reason).connect_url
+    with _connect_urls_lock:
+        _connect_urls[key] = (now, url)
+    return url

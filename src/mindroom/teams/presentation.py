@@ -1,0 +1,396 @@
+# Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
+"""The team reply as the user reads it: the header, one slot per member, the consensus, and the tool trace.
+
+``TeamStreamPresentation`` is the structured document a streamed or collected team run renders from and the durable
+``team_stream`` snapshot an approval continuation restores. A slot is named by its member's config name, its member id,
+and the consensus slot by None, in the document and in each tool call's ``ToolTraceEntry.member_id``.
+``publish_team_presentation`` shows a resumed run's document live in the reply it continues.
+"""
+
+from __future__ import annotations
+
+from copy import deepcopy
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING, cast
+
+from mindroom.delegation.state import member_slot_id
+from mindroom.llm.events import TextDelta, ToolCompleted, ToolStarted
+from mindroom.matrix.message_builder import opens_with_markdown_block
+from mindroom.teams.legacy_team_presentation import upgrade_v2_team_snapshot
+from mindroom.teams.runtime import MemberEvent
+from mindroom.tool_system.events import (
+    StreamingToolTracker,
+    StructuredStreamChunk,
+    ToolTraceEntry,
+    append_stream_text,
+    complete_pending_tool_block,
+    is_visible_tool_marker_line,
+    remap_visible_tool_marker_indices,
+    strip_visible_tool_markers,
+)
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
+
+    from mindroom.llm.events import ReportedCall
+    from mindroom.streaming import ProgressPublisher
+    from mindroom.teams.runtime import TeamRunEvent
+
+
+_TEAM_HEADER_PREFIX = "🤝 **Team Response** ("
+_TEAM_HEADER_END = "):\n\n"
+_NO_CONSENSUS_NOTE = "\n*No team consensus - showing individual responses only*"
+NO_TEAM_RESPONSE = "No team response generated."
+
+
+def format_team_header(agent_names: list[str]) -> str:
+    """Return the team reply's header naming ``agent_names``."""
+    return f"{_TEAM_HEADER_PREFIX}{', '.join(agent_names)}{_TEAM_HEADER_END}"
+
+
+def strip_team_display(text: str) -> str:
+    """Remove the display-only header and no-consensus note from a visible team reply."""
+    if text.startswith(_TEAM_HEADER_PREFIX):
+        _header, separator, body = text.partition(_TEAM_HEADER_END)
+        text = body if separator else text
+    return text.removesuffix(_NO_CONSENSUS_NOTE).rstrip()
+
+
+def _format_member_contribution(agent_name: str, content: str) -> str:
+    """Return one member's contribution: its bold name, then its content."""
+    first_line = content.lstrip().splitlines()[0] if content.strip() else ""
+    # Content that opens with a tool marker or a block such as a table needs its own paragraph to render.
+    own_paragraph = is_visible_tool_marker_line(first_line) or opens_with_markdown_block(content)
+    separator = "\n\n" if own_paragraph else " "
+    return f"**{agent_name}**:{separator}{content}"
+
+
+def _with_consensus(contributions: list[str], consensus: str, *, finished: bool) -> list[str]:
+    """Return the contributions, then the consensus or, for a finished reply in which only members spoke, the note.
+
+    ``finished`` means the team run completed. A reply still running or waiting for an approval may yet get its
+    leader's answer, and a stopped or failed one ended without it, so neither shows the note.
+    """
+    if consensus.strip():
+        return [*contributions, "\n**Team Consensus**:", consensus]
+    return [*contributions, _NO_CONSENSUS_NOTE] if contributions and finished else contributions
+
+
+def render_team_member_slots(
+    member_ids: Sequence[str],
+    *,
+    display_names_by_id: Mapping[str, str],
+    per_member: Mapping[str, str],
+    consensus: str,
+    finished: bool,
+) -> list[str]:
+    """Render stable identity slots using labels only as presentation attributes; each slot's text is stripped.
+
+    A ``finished`` reply whose leader said nothing ends with the no-consensus note (``_with_consensus``).
+    """
+    contributions = [
+        _format_member_contribution(display_names_by_id[member_id], per_member[member_id].strip())
+        for member_id in member_ids
+        if per_member[member_id].strip()
+    ]
+    return _with_consensus(contributions, consensus.strip(), finished=finished)
+
+
+_INVALID_SNAPSHOT = "Team continuation presentation snapshot is invalid"
+_SNAPSHOT_VERSION = 3
+# The run a restored slot's text is attributed to: none a resumed run can have, since every run id is non-empty.
+_RUN_BEFORE_THE_PAUSE = ""
+
+
+def _is_snapshot_member(member: object) -> bool:
+    """Return whether one stored member slot holds its id, display name, and content as text."""
+    if not isinstance(member, dict):
+        return False
+    fields = cast("dict[str, object]", member)
+    return all(isinstance(fields.get(key), str) for key in ("id", "display_name", "content"))
+
+
+@dataclass
+class TeamStreamPresentation:
+    """Structured team document that survives an approval continuation; its member ids are the members' config names."""
+
+    member_ids: list[str]
+    display_names_by_id: dict[str, str]
+    show_tool_calls: bool
+    per_member: dict[str, str]
+    consensus: str = ""
+    tool_trace: list[ToolTraceEntry] = field(default_factory=list)
+    tool_tracker: StreamingToolTracker = field(default_factory=StreamingToolTracker, init=False)
+    # The slots, a member id or None for the consensus, whose next text a tool call or a new member run separates.
+    separate_next_slots: set[str | None] = field(default_factory=set, init=False, repr=False)
+    # The member run whose deltas last gave each member slot text.
+    _last_text_run: dict[str, str] = field(default_factory=dict, init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        """Restore pending tool identity from the durable trace; the snapshot restores which slots a call separates."""
+        self.tool_tracker.restore_pending(self.tool_trace)
+
+    @classmethod
+    def new(
+        cls,
+        config_names: Sequence[str],
+        display_names: Sequence[str],
+        *,
+        show_tool_calls: bool,
+    ) -> TeamStreamPresentation:
+        """Create an empty presentation for a new team run."""
+        ids = list(config_names)
+        if len(ids) != len(display_names) or len(ids) != len(set(ids)) or not all(ids):
+            msg = "Team presentation member identities are invalid"
+            raise RuntimeError(msg)
+        return cls(
+            member_ids=ids,
+            display_names_by_id=dict(zip(ids, display_names, strict=True)),
+            show_tool_calls=show_tool_calls,
+            per_member=dict.fromkeys(ids, ""),
+        )
+
+    @classmethod
+    def restore(
+        cls,
+        *,
+        config_names: Sequence[str],
+        show_tool_calls: bool,
+        state: Mapping[str, object] | None,
+        tool_trace: Sequence[ToolTraceEntry],
+    ) -> TeamStreamPresentation:
+        """Restore a durable structured snapshot without interpreting its rendered Markdown.
+
+        The snapshot must hold the slots of ``config_names`` in order, and every tool call of ``tool_trace`` one of
+        them; a call or a new run separates only slot text written before it. A snapshot an earlier release stored as
+        version 2 restores as the version 3 it stands for (``upgrade_v2_team_snapshot``).
+        """
+        if state is not None and state.get("kind") == "team_stream" and state.get("version") == 2:
+            upgraded = upgrade_v2_team_snapshot(state, tool_trace)
+            if upgraded is None:
+                raise RuntimeError(_INVALID_SNAPSHOT)
+            state, tool_trace = upgraded
+        if state is None or state.get("kind") != "team_stream" or state.get("version") != _SNAPSHOT_VERSION:
+            raise RuntimeError(_INVALID_SNAPSHOT)
+        stored_members = state.get("members")
+        if not isinstance(stored_members, list) or not all(_is_snapshot_member(member) for member in stored_members):
+            raise RuntimeError(_INVALID_SNAPSHOT)
+        members = cast("list[dict[str, str]]", stored_members)
+        member_ids = [member["id"] for member in members]
+        if member_ids != list(config_names):
+            raise RuntimeError(_INVALID_SNAPSHOT)
+        valid_slots = {None, *member_ids}
+        if any(entry.member_id not in valid_slots for entry in tool_trace):
+            msg = "Team continuation durable tool call is not in a frozen presentation slot"
+            raise RuntimeError(msg)
+        per_member = {member["id"]: member["content"] for member in members}
+        consensus = state.get("consensus")
+        separators = state.get("separate_next_slots", [])
+        if (
+            not isinstance(consensus, str)
+            or not isinstance(separators, list)
+            or any(not isinstance(slot, str | None) or slot not in valid_slots for slot in separators)
+        ):
+            raise RuntimeError(_INVALID_SNAPSHOT)
+        slots = cast("list[str | None]", separators)
+        if len(slots) != len(set(slots)) or any(
+            not (consensus if slot is None else per_member[slot]) for slot in slots
+        ):
+            raise RuntimeError(_INVALID_SNAPSHOT)
+        restored = cls(
+            member_ids=member_ids,
+            display_names_by_id={member["id"]: member["display_name"] for member in members},
+            show_tool_calls=show_tool_calls,
+            per_member=per_member,
+            consensus=consensus,
+            tool_trace=list(deepcopy(tool_trace)),
+        )
+        restored.separate_next_slots.update(slots)
+        # A restored slot's text came from runs before the pause, so any run's next text starts a paragraph of its own.
+        restored._last_text_run = {member_id: _RUN_BEFORE_THE_PAUSE for member_id, text in per_member.items() if text}
+        return restored
+
+    def to_state(self) -> dict[str, object]:
+        """Serialize only the structure needed to reproduce the current body."""
+        state: dict[str, object] = {
+            "kind": "team_stream",
+            "version": _SNAPSHOT_VERSION,
+            "members": [
+                {
+                    "id": member_id,
+                    "display_name": self.display_names_by_id[member_id],
+                    "content": self.per_member[member_id],
+                }
+                for member_id in self.member_ids
+            ],
+            "consensus": self.consensus,
+        }
+        if self.separate_next_slots:
+            document_slots = [*self.member_ids, None]
+            state["separate_next_slots"] = [slot for slot in document_slots if slot in self.separate_next_slots]
+        return state
+
+    def resolve_member_id(self, agent_id: str | None, reported_name: str | None) -> str:
+        """Resolve an event or a member run only through its stable member identity, by ``member_slot_id``.
+
+        A run record's member identity is optional, and a run that names no member has no slot.
+        """
+        return member_slot_id(self.member_ids, agent_id, reported_name)
+
+    def append_member(self, member_id: str, content: object | None, *, separate: bool = False) -> None:
+        """Append a member content delta to the slot of ``member_id``, which ``resolve_member_id`` returned.
+
+        ``separate`` starts the content in a paragraph of its own when the slot already holds text.
+        """
+        self._append_text(member_id, content, separate=separate)
+
+    def append_member_run(self, member_id: str, run_id: str, content: str) -> None:
+        """Append a delta of member run ``run_id``; text from another run than the slot's last text starts a paragraph."""
+        if not content:
+            return
+        self.append_member(member_id, content, separate=self._last_text_run.get(member_id, run_id) != run_id)
+        self._last_text_run[member_id] = run_id
+
+    def append_consensus(self, content: object | None, *, separate: bool = False) -> None:
+        """Append a coordinator content delta to the consensus slot; ``separate`` as for ``append_member``."""
+        self._append_text(None, content, separate=separate)
+
+    def _append_text(self, member_id: str | None, content: object | None, *, separate: bool) -> None:
+        """Append to a slot; text after a tool call or another run's text in that slot starts a paragraph of its own."""
+        text = self._slot_text(member_id)
+        if separate and text and content:
+            self.separate_next_slots.add(member_id)
+        separate = member_id in self.separate_next_slots
+        self._set_slot_text(member_id, append_stream_text(text, content, separate=separate))
+        if str(content or "").strip("\r\n"):
+            self.separate_next_slots.discard(member_id)
+
+    def _slot_text(self, member_id: str | None) -> str:
+        return self.consensus if member_id is None else self.per_member[member_id]
+
+    def _set_slot_text(self, member_id: str | None, text: str) -> None:
+        if member_id is None:
+            self.consensus = text
+        else:
+            self.per_member[member_id] = text
+
+    def _align_tool_trace_with_document(self) -> None:
+        """Keep trace slots and visible indices in rendered document order."""
+        slot_order: dict[str | None, int] = {member_id: index for index, member_id in enumerate(self.member_ids)}
+        slot_order[None] = len(self.member_ids)
+        old_indices = {id(trace_entry): index for index, trace_entry in enumerate(self.tool_trace, start=1)}
+        self.tool_trace.sort(key=lambda trace_entry: slot_order[trace_entry.member_id])
+        index_map = {
+            old_indices[id(trace_entry)]: new_index for new_index, trace_entry in enumerate(self.tool_trace, start=1)
+        }
+        if self.show_tool_calls:
+            self.per_member = {
+                member_id: remap_visible_tool_marker_indices(member_text, index_map)
+                for member_id, member_text in self.per_member.items()
+            }
+            self.consensus = remap_visible_tool_marker_indices(self.consensus, index_map)
+        self.tool_tracker.sync_visible_indices(self.tool_trace)
+
+    def start_tool(self, call: ReportedCall, *, member_id: str | None = None) -> None:
+        """Record a tool start in the slot of ``member_id``, which ``resolve_member_id`` returned, or the consensus's."""
+        tool_index = len(self.tool_trace) + 1
+        marker, trace_entry = self.tool_tracker.start(call, member_id=member_id, tool_index=tool_index)
+        if trace_entry is None:
+            return
+        self.tool_trace.append(trace_entry)
+        if self.show_tool_calls:
+            self._set_slot_text(member_id, append_stream_text(self._slot_text(member_id), marker, marker=True))
+        if self._slot_text(member_id):
+            self.separate_next_slots.add(member_id)
+        self._align_tool_trace_with_document()
+
+    def complete_tool(self, call: ReportedCall, *, member_id: str | None = None) -> None:
+        """Complete only the pending call of this tool event in the slot of ``member_id``, or the consensus's."""
+        pending_tool, completed_trace = self.tool_tracker.complete(call, member_id=member_id)
+        if pending_tool is None or pending_tool.visible_tool_index is None:
+            return
+        if self.show_tool_calls:
+            updated_text = complete_pending_tool_block(
+                self._slot_text(member_id),
+                call.tool_name,
+                tool_index=pending_tool.visible_tool_index,
+            )
+            self._set_slot_text(member_id, updated_text)
+        self.tool_tracker.update_visible_trace_entry(self.tool_trace, pending_tool, completed_trace)
+
+    def text_without_tool_markers(self, *, finished: bool) -> str:
+        """Return the document's slots without its header and tool markers: the text a streamed reply records.
+
+        With tool calls hidden the slots hold no markers; with them shown, each marker line goes and the text around it
+        stays a blank line apart, as hidden tool calls leave it. Only a ``finished`` reply, one whose team run
+        completed, ends with the no-consensus note.
+        """
+        per_member, consensus = self.per_member, self.consensus
+        if self.show_tool_calls:
+            per_member = {member_id: strip_visible_tool_markers(text) for member_id, text in per_member.items()}
+            consensus = strip_visible_tool_markers(consensus)
+        return "\n\n".join(
+            render_team_member_slots(
+                self.member_ids,
+                display_names_by_id=self.display_names_by_id,
+                per_member=per_member,
+                consensus=consensus,
+                finished=finished,
+            ),
+        )
+
+    def render_body(self, *, finished: bool) -> str:
+        """Render the current structured document: a ``finished`` reply's, or one still running or waiting.
+
+        Only a finished reply whose leader said nothing ends with the no-consensus note.
+        """
+        parts = render_team_member_slots(
+            self.member_ids,
+            display_names_by_id=self.display_names_by_id,
+            per_member=self.per_member,
+            consensus=self.consensus,
+            finished=finished,
+        )
+        header = format_team_header([self.display_names_by_id[member_id] for member_id in self.member_ids])
+        return header + "\n\n".join(parts) if parts else ""
+
+
+def apply_team_event(presentation: TeamStreamPresentation, event: TeamRunEvent) -> None:
+    """Apply one team run event to the document: member events to the member's slot, the leader's to the consensus."""
+    if isinstance(event, MemberEvent):
+        member_id = presentation.resolve_member_id(event.member_id, event.member_name)
+        inner = event.event
+        if isinstance(inner, TextDelta):
+            presentation.append_member_run(member_id, event.run_id, inner.text)
+        elif isinstance(inner, ToolStarted):
+            presentation.start_tool(inner.call, member_id=member_id)
+        elif isinstance(inner, ToolCompleted):
+            presentation.complete_tool(inner.call, member_id=member_id)
+    elif isinstance(event, TextDelta):
+        presentation.append_consensus(event.text)
+    elif isinstance(event, ToolStarted):
+        presentation.start_tool(event.call)
+    elif isinstance(event, ToolCompleted):
+        presentation.complete_tool(event.call)
+
+
+async def publish_team_presentation(
+    progress: ProgressPublisher | None,
+    presentation: TeamStreamPresentation,
+) -> None:
+    """Show the team continuation's current document, still running, in the reply it resumes."""
+    if progress is not None:
+        await progress(
+            StructuredStreamChunk(content=presentation.render_body(finished=False), tool_trace=presentation.tool_trace),
+        )
+
+
+__all__ = [
+    "NO_TEAM_RESPONSE",
+    "TeamStreamPresentation",
+    "apply_team_event",
+    "format_team_header",
+    "publish_team_presentation",
+    "render_team_member_slots",
+    "strip_team_display",
+]

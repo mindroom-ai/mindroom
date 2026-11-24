@@ -47,34 +47,48 @@ async def _upload_avatar_file(
         logger.warning("avatar_file_missing", path=str(avatar_path))
         return None
 
-    content_type = _guess_avatar_content_type(avatar_path)
-
     with avatar_path.open("rb") as f:
         avatar_data = f.read()
 
+    return await _upload_avatar_bytes(
+        client,
+        avatar_data,
+        content_type=_guess_avatar_content_type(avatar_path),
+        filename=avatar_path.name,
+    )
+
+
+async def _upload_avatar_bytes(
+    client: nio.AsyncClient,
+    avatar_data: bytes,
+    *,
+    content_type: str,
+    filename: str,
+) -> str | None:
+    """Upload avatar bytes to the Matrix server and return their content URI, or None after logging the failure."""
     upload_result = await upload_media_bytes(
         client,
         avatar_data,
         content_type=content_type,
-        filename=avatar_path.name,
+        filename=filename,
     )
 
     # nio returns tuple (response, error)
     if isinstance(upload_result, tuple):
         upload_response, error = upload_result
         if error:
-            logger.error("avatar_upload_failed", path=str(avatar_path), error=str(error))
+            logger.error("avatar_upload_failed", filename=filename, error=str(error))
             return None
     else:
         upload_response = upload_result
 
     if not isinstance(upload_response, nio.UploadResponse):
-        logger.error("avatar_upload_failed", path=str(avatar_path), error=str(upload_response))
+        logger.error("avatar_upload_failed", filename=filename, error=str(upload_response))
         return None
 
     mxc_uri = upload_content_uri(upload_response)
     if mxc_uri is None:
-        logger.error("avatar_upload_missing_content_uri", path=str(avatar_path))
+        logger.error("avatar_upload_missing_content_uri", filename=filename)
         return None
 
     return mxc_uri
@@ -94,7 +108,19 @@ async def set_user_avatar_from_file(
         True if successful, False otherwise
 
     """
-    avatar_url = await _upload_avatar_file(client, avatar_path)
+    return await _set_user_avatar_url(client, await _upload_avatar_file(client, avatar_path))
+
+
+async def set_user_avatar_from_png(client: nio.AsyncClient, png: bytes) -> bool:
+    """Set a user's avatar from PNG bytes, returning whether Matrix accepted it."""
+    return await _set_user_avatar_url(
+        client,
+        await _upload_avatar_bytes(client, png, content_type="image/png", filename="avatar.png"),
+    )
+
+
+async def _set_user_avatar_url(client: nio.AsyncClient, avatar_url: str | None) -> bool:
+    """Point the client's own profile at an uploaded avatar; a failed upload arrives as None."""
     if not avatar_url:
         return False
 

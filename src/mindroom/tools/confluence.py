@@ -25,6 +25,7 @@ if TYPE_CHECKING:
         # Authentication/Connection parameters
         ConfigField(
             name="url",
+            env=("CONFLUENCE_URL",),
             label="Confluence URL",
             type="url",
             required=False,
@@ -33,6 +34,7 @@ if TYPE_CHECKING:
         ),
         ConfigField(
             name="username",
+            env=("CONFLUENCE_USERNAME",),
             label="Username",
             type="text",
             required=False,
@@ -41,6 +43,7 @@ if TYPE_CHECKING:
         ),
         ConfigField(
             name="password",
+            env=("CONFLUENCE_PASSWORD",),
             label="Password",
             type="password",
             required=False,
@@ -49,6 +52,7 @@ if TYPE_CHECKING:
         ),
         ConfigField(
             name="api_key",
+            env=("CONFLUENCE_API_KEY",),
             label="API Key",
             type="password",
             required=False,
@@ -66,7 +70,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["atlassian-python-api"],
-    docs_url="https://docs.agno.com/tools/toolkits/others/confluence",
+    docs_url="https://docs.mindroom.chat/tools/project-management/#confluence",
     function_names=(
         "create_page",
         "get_all_page_from_space",
@@ -78,6 +82,6 @@ if TYPE_CHECKING:
 )
 def confluence_tools() -> type[ConfluenceTools]:
     """Return Confluence tools for wiki management."""
-    from agno.tools.confluence import ConfluenceTools
+    from mindroom.tools.agno_compat_confluence import V1ConfluenceTools
 
-    return ConfluenceTools
+    return V1ConfluenceTools

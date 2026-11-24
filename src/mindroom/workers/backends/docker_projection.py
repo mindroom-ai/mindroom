@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import copy
 import hashlib
-import json
 import os
 import re
 import shutil
@@ -14,11 +13,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, cast
 
-import yaml
-
 from mindroom import yaml_io
-from mindroom.config.worker_projection import worker_config_data
-from mindroom.config.yaml_includes import load_yaml_config_source_with_digests
 from mindroom.constants import config_relative_path, resolve_config_relative_path
 from mindroom.logging_config import get_logger
 from mindroom.path_confinement import open_directory_within_root, open_regular_file_at, open_regular_file_within_root
@@ -27,10 +22,11 @@ from mindroom.tool_system.worker_routing import (
     resolved_worker_key_scope,
     shared_storage_root,
     worker_key_agent_name,
+    worker_log_id,
     written_by_other_workers,
 )
 from mindroom.workers.backend import WorkerBackendError
-from mindroom.workers.backends._dedicated_worker_common import resolved_agent_policies_from_config_data
+from mindroom.workers.backends._dedicated_worker_common import stable_json_digest
 from mindroom.workers.worker_retirement import open_worker_state_root
 from mindroom.workspaces import (
     iter_local_copy_source_entries,
@@ -39,13 +35,14 @@ from mindroom.workspaces import (
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Sequence
+    from collections.abc import Iterable, Mapping, Sequence
 
     from mindroom.agent_policy import ResolvedAgentPolicy
     from mindroom.constants import RuntimePaths
     from mindroom.tool_system.worker_routing import WorkerScope
     from mindroom.workers.backends.docker_config import DockerWorkerBackendConfig
     from mindroom.workers.backends.local import LocalWorkerStatePaths
+    from mindroom.workers.models import WorkerLaunchConfig
 
 logger = get_logger(__name__)
 
@@ -142,21 +139,6 @@ def _path_state_fingerprint(host_path: Path) -> str:
     if resolved_host_path.is_dir():
         return f"dir:{_directory_state_fingerprint(resolved_host_path)}"
     return _file_state_fingerprint(resolved_host_path)
-
-
-def _config_sources_state_fingerprint(source_files: frozenset[Path]) -> str | None:
-    """Stat-based cache key over the config file plus every !include file.
-
-    ``None`` when any source file is unreadable, which callers treat as a cache
-    miss so the next load re-derives the source set.
-    """
-    entries = []
-    for path in sorted(source_files):
-        try:
-            entries.append(f"{path.as_posix()}:{_file_state_fingerprint(path)}")
-        except OSError:
-            return None
-    return hashlib.sha256("\0".join(entries).encode("utf-8")).hexdigest()
 
 
 def _compute_path_contents_hash(host_path: Path) -> str:
@@ -262,15 +244,15 @@ class DockerProjectionManager:
         self._projected_configs_root = projected_configs_root
         self._runtime_paths = runtime_paths
         self._asset_hash_cache: dict[Path, tuple[str, str]] = {}
-        self._config_data_cache: tuple[Path, str | None, dict[str, object], frozenset[Path]] | None = None
 
     def config_mount_specs(
         self,
         paths: LocalWorkerStatePaths,
         *,
-        worker_key: str | None = None,
-        materialize_projection: bool = True,
-        storage_mounts: Sequence[tuple[Path, str, bool]] = (),
+        launch: WorkerLaunchConfig,
+        worker_key: str,
+        materialize_projection: bool,
+        storage_mounts: Sequence[tuple[Path, str, bool]],
     ) -> tuple[list[tuple[Path, str, bool]], _DockerProjectedConfig | None]:
         """Return projected config mount specs plus the selected projection, if any."""
         if self.config.host_config_path is None:
@@ -278,6 +260,7 @@ class DockerProjectionManager:
 
         projection = self._projected_config(
             paths,
+            launch=launch,
             worker_key=worker_key,
             materialize=materialize_projection,
             storage_mounts=storage_mounts,
@@ -289,18 +272,15 @@ class DockerProjectionManager:
         self,
         paths: LocalWorkerStatePaths,
         *,
+        launch: WorkerLaunchConfig,
         worker_key: str | None = None,
         materialize: bool = True,
         storage_mounts: Sequence[tuple[Path, str, bool]] = (),
     ) -> _DockerProjectedConfig:
         """Return the projected config snapshot for one worker root."""
-        host_config_path = self.config.host_config_path
-        if host_config_path is None:
-            msg = "Projected Docker worker config requires a host config path."
-            raise WorkerBackendError(msg)
-
-        config_data = worker_config_data(self._load_host_config_data(host_config_path))
-        resolved_agent_policies = resolved_agent_policies_from_config_data(config_data)
+        # The launch's mapping is shared by every worker, and projection rewrites it in place.
+        config_data = cast("dict[str, object]", copy.deepcopy(launch.config_data))
+        resolved_agent_policies = launch.agent_policies
         asset_paths_by_host: dict[Path, PurePosixPath] = {}
         host_paths_by_relative_asset_path: dict[PurePosixPath, Path] = {}
         assets: list[_DockerProjectedConfigAsset] = []
@@ -343,9 +323,7 @@ class DockerProjectionManager:
                 for asset in assets
             ],
         }
-        projection_hash = hashlib.sha256(
-            json.dumps(projection_manifest, sort_keys=True, separators=(",", ":")).encode("utf-8"),
-        ).hexdigest()[:12]
+        projection_hash = stable_json_digest(projection_manifest)[:12]
         projection_dir = self._worker_projected_configs_root(paths) / f"config-projection-{projection_hash}"
         projection = _DockerProjectedConfig(
             root=projection_dir,
@@ -363,13 +341,6 @@ class DockerProjectionManager:
     def _worker_projected_configs_root(self, paths: LocalWorkerStatePaths) -> Path:
         """Return the directory containing one worker root's projected config snapshots."""
         return self._projected_configs_root / paths.root.name
-
-    def current_resolved_agent_policies(self) -> dict[str, ResolvedAgentPolicy]:
-        """Return the current agent-policy view derived from the host config."""
-        host_config_path = self.config.host_config_path
-        if host_config_path is None:
-            return {}
-        return resolved_agent_policies_from_config_data(self._load_host_config_data(host_config_path))
 
     def retire_worker_projection(self, worker_name: str) -> None:
         """Remove every projected config snapshot owned by one exact worker root."""
@@ -440,35 +411,6 @@ class DockerProjectionManager:
         except Exception:
             _remove_path(temp_root)
             raise
-
-    def _load_host_config_data(self, host_config_path: Path) -> dict[str, object]:
-        resolved_host_config_path = host_config_path.expanduser().resolve()
-        cached = self._config_data_cache
-        if (
-            cached is not None
-            and cached[0] == resolved_host_config_path
-            and cached[1] is not None
-            and cached[1] == _config_sources_state_fingerprint(cached[3])
-        ):
-            return copy.deepcopy(cached[2])
-
-        try:
-            data, source_digests, _uses_includes = load_yaml_config_source_with_digests(resolved_host_config_path)
-        except (OSError, yaml.YAMLError, UnicodeError) as exc:
-            msg = f"Failed to read Docker worker config file '{resolved_host_config_path}': {exc}"
-            raise WorkerBackendError(msg) from exc
-        if not isinstance(data, dict):
-            msg = f"Docker worker config file '{resolved_host_config_path}' must contain a YAML object."
-            raise WorkerBackendError(msg)
-        normalized_data = cast("dict[str, object]", data)
-        source_files = frozenset(source_digests)
-        self._config_data_cache = (
-            resolved_host_config_path,
-            _config_sources_state_fingerprint(source_files),
-            copy.deepcopy(normalized_data),
-            source_files,
-        )
-        return copy.deepcopy(normalized_data)
 
     def _asset_contents_hash(self, host_path: Path) -> str:
         resolved_host_path = host_path.expanduser().resolve()
@@ -553,14 +495,14 @@ class DockerProjectionManager:
         self,
         *,
         worker_key: str | None,
-        resolved_agent_policies: dict[str, ResolvedAgentPolicy],
+        resolved_agent_policies: Mapping[str, ResolvedAgentPolicy],
     ) -> tuple[str, ...] | None:
         if worker_key is None:
             return None
 
         worker_scope = resolved_worker_key_scope(worker_key)
         if worker_scope is None:
-            msg = f"Unsupported worker key for projected agent selection: {worker_key}"
+            msg = f"Unsupported worker key for projected agent selection: {worker_log_id(worker_key)}"
             raise WorkerBackendError(msg)
         if worker_scope == "user":
             user_scoped_agent_names = tuple(
@@ -572,7 +514,7 @@ class DockerProjectionManager:
                 return user_scoped_agent_names
             if not resolved_agent_policies:
                 return None
-            msg = f"Worker key does not match any configured agent policy: {worker_key}"
+            msg = f"Worker key does not match any configured agent policy: {worker_log_id(worker_key)}"
             raise WorkerBackendError(msg)
 
         matching_agent_names = tuple(
@@ -585,13 +527,13 @@ class DockerProjectionManager:
             )
         )
         if len(matching_agent_names) > 1:
-            msg = f"Worker key '{worker_key}' has an ambiguous normalized agent name."
+            msg = f"Worker '{worker_log_id(worker_key)}' has an ambiguous normalized agent name."
             raise WorkerBackendError(msg)
         if matching_agent_names:
             return (matching_agent_names[0],)
         if not resolved_agent_policies:
             return None
-        msg = f"Worker key does not match any configured agent policy: {worker_key}"
+        msg = f"Worker key does not match any configured agent policy: {worker_log_id(worker_key)}"
         raise WorkerBackendError(msg)
 
     def _projected_knowledge_base_ids(
@@ -599,7 +541,7 @@ class DockerProjectionManager:
         config_data: dict[str, object],
         *,
         agent_names: tuple[str, ...] | None,
-        resolved_agent_policies: dict[str, ResolvedAgentPolicy],
+        resolved_agent_policies: Mapping[str, ResolvedAgentPolicy],
     ) -> tuple[str, ...] | None:
         if agent_names is None:
             return None

@@ -9,6 +9,19 @@
           "title": "Display Name",
           "type": "string"
         },
+        "matrix_username": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Matrix localpart for the account MindRoom creates for this agent, instead of mindroom_<agent key>; set it before the agent's first start",
+          "title": "Matrix Username"
+        },
         "role": {
           "default": "",
           "description": "Description of the agent's purpose",
@@ -25,7 +38,10 @@
             "$ref": "#/$defs/ToolConfigEntry"
           },
           "title": "Tools",
-          "type": "array"
+          "type": "array",
+          "x-mindroom": {
+            "reference": "tool"
+          }
         },
         "include_default_tools": {
           "default": true,
@@ -62,7 +78,7 @@
         },
         "rooms": {
           "default": [],
-          "description": "List of room IDs or names to auto-join",
+          "description": "Room keys or Matrix room IDs to join",
           "items": {
             "type": "string"
           },
@@ -84,6 +100,30 @@
           "default": null,
           "description": "Opt-in adaptive participation in existing multi-human threads across all rooms"
         },
+        "listen": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ListenConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Opt-in listening: hear chosen rooms and act silently, through an allowlist of tools, after a quiet period"
+        },
+        "contacts": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ContactsConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Opt-in contacts: approved relationships with other personal agents and people"
+        },
         "mid_turn": {
           "anyOf": [
             {
@@ -95,6 +135,30 @@
           ],
           "default": null,
           "description": "Opt-in judgments for messages queued during this agent's response across all rooms"
+        },
+        "cold_cache": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ColdCacheConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Opt-in switch of an idle thread to cheap_model for the rest of the thread"
+        },
+        "room_activity": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AgentRoomActivityConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Per-agent override of defaults.room_activity; omitted fields inherit it"
         },
         "access": {
           "anyOf": [
@@ -149,10 +213,10 @@
             }
           ],
           "default": null,
-          "description": "Whether to use markdown formatting",
+          "description": "Whether the system prompt tells the agent its replies are shown as Markdown",
           "title": "Markdown"
         },
-        "learning": {
+        "knowledge_graph": {
           "anyOf": [
             {
               "type": "boolean"
@@ -162,25 +226,21 @@
             }
           ],
           "default": null,
-          "description": "Enable Agno Learning (defaults to true when omitted)",
-          "title": "Learning"
+          "description": "Build a knowledge graph from this agent's conversations and give it the knowledge_graph tool",
+          "title": "Knowledge Graph"
         },
-        "learning_mode": {
+        "knowledge_graph_edits": {
           "anyOf": [
             {
-              "enum": [
-                "always",
-                "agentic"
-              ],
-              "type": "string"
+              "type": "boolean"
             },
             {
               "type": "null"
             }
           ],
           "default": null,
-          "description": "Learning mode for Agno Learning: always (automatic) or agentic (tool-driven)",
-          "title": "Learning Mode"
+          "description": "Let this agent delete wrong facts and entities from its knowledge graph, merge duplicate entities, and rewrite entity summaries",
+          "title": "Knowledge Graph Edits"
         },
         "model": {
           "default": "default",
@@ -190,6 +250,35 @@
           "x-mindroom": {
             "reference": "model"
           }
+        },
+        "cheap_model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Cheaper model alias this agent may switch to, used by cold_cache",
+          "title": "Cheap Model",
+          "x-mindroom": {
+            "reference": "model"
+          }
+        },
+        "timezone": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "IANA timezone for this agent's dates, times, and schedules; inherits the top-level timezone",
+          "title": "Timezone"
         },
         "memory_backend": {
           "anyOf": [
@@ -294,7 +383,7 @@
             "type": "string"
           },
           "default": {},
-          "description": "Per-room thread mode overrides keyed by room alias/name or Matrix room ID",
+          "description": "Per-room thread mode overrides keyed by room key or Matrix room ID",
           "title": "Room Thread Modes",
           "type": "object",
           "x-mindroom": {
@@ -312,7 +401,7 @@
             }
           ],
           "default": null,
-          "description": "Number of prior Agno runs to include as history context (per-agent override)",
+          "description": "Number of prior runs to include as history context (per-agent override)",
           "title": "Num History Runs"
         },
         "num_history_messages": {
@@ -328,19 +417,6 @@
           "default": null,
           "description": "Max messages from history (mutually exclusive with num_history_runs)",
           "title": "Num History Messages"
-        },
-        "compress_tool_results": {
-          "anyOf": [
-            {
-              "type": "boolean"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Compress tool results in history to save context (per-agent override). On Anthropic/Vertex Claude, setting this to true can mutate replayed tool messages and invalidate prompt-cache prefixes.",
-          "title": "Compress Tool Results"
         },
         "max_tool_calls_from_history": {
           "anyOf": [
@@ -383,6 +459,19 @@
           "description": "Whether to show tool call details inline in responses (per-agent override)",
           "title": "Show Tool Calls"
         },
+        "show_reasoning": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Whether streamed replies show the model's reasoning to the room (per-agent override)",
+          "title": "Show Reasoning"
+        },
         "worker_tools": {
           "anyOf": [
             {
@@ -397,7 +486,10 @@
           ],
           "default": null,
           "description": "Tool names to route through scoped workers (overrides defaults; None = use the built-in default routing policy)",
-          "title": "Worker Tools"
+          "title": "Worker Tools",
+          "x-mindroom": {
+            "reference": "tool"
+          }
         },
         "worker_scope": {
           "anyOf": [
@@ -434,6 +526,17 @@
           "description": "Per-agent override of defaults.file_access (None = inherit the default)",
           "title": "File Access"
         },
+        "terminals": {
+          "default": "none",
+          "description": "What people in the agent's rooms may do with its terminals: none, watch, or type",
+          "enum": [
+            "none",
+            "watch",
+            "type"
+          ],
+          "title": "Terminals",
+          "type": "string"
+        },
         "allow_self_config": {
           "anyOf": [
             {
@@ -447,6 +550,13 @@
           "description": "Allow this agent to modify its own configuration via a tool",
           "title": "Allow Self Config"
         },
+        "created_agents_per_owner": {
+          "default": 0,
+          "description": "How many agents each person may create through this agent with create_agent; 0 turns create_agent off",
+          "minimum": 0,
+          "title": "Created Agents Per Owner",
+          "type": "integer"
+        },
         "automations": {
           "anyOf": [
             {
@@ -457,6 +567,9 @@
                   },
                   {
                     "$ref": "#/$defs/DreamingAutomation"
+                  },
+                  {
+                    "$ref": "#/$defs/ExplorationAutomation"
                   },
                   {
                     "$ref": "#/$defs/PluginAutomation"
@@ -499,6 +612,25 @@
           "x-mindroom": {
             "reference": "agent"
           }
+        },
+        "dedicated_subagent_workers": {
+          "default": false,
+          "description": "Allow run_subagent to run a subagent in its own dedicated worker on the docker or kubernetes worker backend",
+          "title": "Dedicated Subagent Workers",
+          "type": "boolean"
+        },
+        "tailnet_ssh": {
+          "default": false,
+          "description": "Let authorized users SSH from the operator's tailnet to the dedicated worker this agent's shell uses",
+          "title": "Tailnet Ssh",
+          "type": "boolean"
+        },
+        "named_workers": {
+          "default": 0,
+          "description": "How many named workers this agent's shell calls may have at once for one requester on the kubernetes worker backend, for an agent whose workers are per requester and agent; 0 turns them off",
+          "minimum": 0,
+          "title": "Named Workers",
+          "type": "integer"
         }
       },
       "required": [
@@ -508,6 +640,7 @@
       "type": "object"
     },
     "AgentMemorySearchConfig": {
+      "additionalProperties": false,
       "description": "Optional per-agent override for file-backed memory search.",
       "properties": {
         "mode": {
@@ -543,6 +676,22 @@
           "description": "Per-agent included memory-search glob patterns",
           "title": "Include"
         },
+        "exclude": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Per-agent excluded memory-search glob patterns",
+          "title": "Exclude"
+        },
         "include_entrypoint": {
           "anyOf": [
             {
@@ -555,12 +704,26 @@
           "default": null,
           "description": "Per-agent MEMORY.md indexing override",
           "title": "Include Entrypoint"
+        },
+        "rerank": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Per-agent memory reranking override",
+          "title": "Rerank"
         }
       },
       "title": "AgentMemorySearchConfig",
       "type": "object"
     },
     "AgentPrivateConfig": {
+      "additionalProperties": false,
       "description": "Requester-private materialized state for one shared agent definition.",
       "properties": {
         "per": {
@@ -634,6 +797,7 @@
       "type": "object"
     },
     "AgentPrivateKnowledgeConfig": {
+      "additionalProperties": false,
       "description": "PrivateAgentKnowledge indexed from the agent's private root.",
       "properties": {
         "enabled": {
@@ -695,6 +859,57 @@
         }
       },
       "title": "AgentPrivateKnowledgeConfig",
+      "type": "object"
+    },
+    "AgentRoomActivityConfig": {
+      "additionalProperties": false,
+      "description": "Per-agent override of ``defaults.room_activity``; each unset field keeps the default.",
+      "properties": {
+        "enabled": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Per-agent override of room_activity.enabled",
+          "title": "Enabled"
+        },
+        "window_minutes": {
+          "anyOf": [
+            {
+              "maximum": 1440,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Per-agent override of room_activity.window_minutes",
+          "title": "Window Minutes"
+        },
+        "max_threads": {
+          "anyOf": [
+            {
+              "maximum": 20,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Per-agent override of room_activity.max_threads",
+          "title": "Max Threads"
+        }
+      },
+      "title": "AgentRoomActivityConfig",
       "type": "object"
     },
     "AgentThreadExportConfig": {
@@ -783,11 +998,12 @@
       "type": "object"
     },
     "AuthorizationConfig": {
+      "additionalProperties": false,
       "description": "Authorization configuration with fine-grained permissions.",
       "properties": {
         "config_command_enabled": {
           "default": false,
-          "description": "Enable the chat !config command for platform administrators.",
+          "description": "Enable the chat /config command for platform administrators.",
           "title": "Config Command Enabled",
           "type": "boolean"
         },
@@ -805,6 +1021,119 @@
         }
       },
       "title": "AuthorizationConfig",
+      "type": "object"
+    },
+    "BackgroundToolJobsConfig": {
+      "additionalProperties": false,
+      "description": "Generic execution policy for registered toolkits; its feature switch and exclusions are pinned at startup.",
+      "properties": {
+        "enabled": {
+          "default": true,
+          "description": "Enable managed tool waits and durable jobs; requires restart.",
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "exclude_toolkits": {
+          "default": [],
+          "description": "Registered toolkit names that keep their own waiting behavior; requires restart.",
+          "items": {
+            "type": "string"
+          },
+          "title": "Exclude Toolkits",
+          "type": "array",
+          "x-mindroom": {
+            "reference": "tool"
+          }
+        },
+        "approval_wait_timeout": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": 300,
+          "description": "Seconds a reply waits for the approval of a gated call that runs as a job before continuing while the job waits; null waits until the decision or a newer message.",
+          "title": "Approval Wait Timeout"
+        }
+      },
+      "title": "BackgroundToolJobsConfig",
+      "type": "object"
+    },
+    "BudgetsConfig": {
+      "additionalProperties": false,
+      "description": "Default monthly USD cap per requester, with a fallback model once a cap is reached.",
+      "properties": {
+        "monthly_limit_usd": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Default monthly cap in USD for each user without a cap of their own; unset leaves them uncapped",
+          "title": "Monthly Limit Usd"
+        },
+        "fallback_model": {
+          "description": "Model that replies use instead of a priced model once the requester reaches their cap",
+          "title": "Fallback Model",
+          "type": "string",
+          "x-mindroom": {
+            "reference": "model"
+          }
+        }
+      },
+      "required": [
+        "fallback_model"
+      ],
+      "title": "BudgetsConfig",
+      "type": "object"
+    },
+    "CallTranscriptsConfig": {
+      "additionalProperties": false,
+      "description": "Transcripts of calls between people, with notes when the call ends.",
+      "properties": {
+        "enabled": {
+          "default": false,
+          "description": "Transcribe calls between people",
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "notes_model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Configured LLM alias that writes each call's notes (none writes no notes)",
+          "title": "Notes Model",
+          "x-mindroom": {
+            "reference": "model"
+          }
+        },
+        "languages": {
+          "default": [],
+          "description": "Language codes hinted to speech-to-text (the first is sent)",
+          "items": {
+            "minLength": 1,
+            "type": "string"
+          },
+          "title": "Languages",
+          "type": "array"
+        }
+      },
+      "title": "CallTranscriptsConfig",
       "type": "object"
     },
     "CallsConfig": {
@@ -849,11 +1178,11 @@
             "type": "string"
           },
           "default": {},
-          "description": "Call profile name by agent name (at most one agent per room)",
+          "description": "Call profile name by agent name, or by personal_agents template key for every user's agent from that template (at most one agent per room)",
           "title": "Agents",
           "type": "object",
           "x-mindroom": {
-            "key_reference": "agent"
+            "key_reference": "personal_room_agent"
           }
         },
         "livekit_service_url": {
@@ -868,6 +1197,15 @@
           "default": null,
           "description": "Same-server MatrixRTC authorization service URL override (otherwise discovered from .well-known)",
           "title": "Livekit Service Url"
+        },
+        "transcripts": {
+          "$ref": "#/$defs/CallTranscriptsConfig",
+          "default": {
+            "enabled": false,
+            "notes_model": null,
+            "languages": []
+          },
+          "description": "Transcripts of calls between people in rooms with a MindRoom account"
         }
       },
       "title": "CallsConfig",
@@ -922,7 +1260,7 @@
       "properties": {
         "debounce_ms": {
           "default": 1000,
-          "description": "Sliding window in milliseconds that a media-tailed live batch waits for more attachments or a trailing caption; batches ending in text dispatch immediately",
+          "description": "Sliding window in milliseconds that a live batch ending in unmarked media waits for more attachments or a trailing caption; batches ending in text dispatch immediately, and events marked as part of a composer submission wait for its last event instead",
           "minimum": 0,
           "title": "Debounce Ms",
           "type": "integer"
@@ -931,7 +1269,35 @@
       "title": "CoalescingConfig",
       "type": "object"
     },
+    "ColdCacheConfig": {
+      "additionalProperties": false,
+      "description": "Let a judge move a thread to the agent's cheap model once its prompt cache went cold.",
+      "properties": {
+        "idle_seconds": {
+          "default": 3600,
+          "description": "Seconds since the agent's last reply in a thread after which its prompt cache counts as cold",
+          "minimum": 1,
+          "title": "Idle Seconds",
+          "type": "integer"
+        },
+        "judgment": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JudgmentConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "LLM model alias, TypeSafe, or OpenAI Decisions backend; unset asks the cheap model itself"
+        }
+      },
+      "title": "ColdCacheConfig",
+      "type": "object"
+    },
     "CompactionConfig": {
+      "additionalProperties": false,
       "description": "Concrete text compaction configuration.",
       "properties": {
         "enabled": {
@@ -1034,6 +1400,7 @@
       "type": "object"
     },
     "CompactionOverrideConfig": {
+      "additionalProperties": false,
       "description": "Optional per-scope overrides for text compaction.\n\nAn authored null clears the value inherited from defaults, except for ``enabled``, where it turns compaction off.",
       "properties": {
         "enabled": {
@@ -1156,7 +1523,58 @@
       "title": "CompactionOverrideConfig",
       "type": "object"
     },
+    "ContactsConfig": {
+      "additionalProperties": false,
+      "description": "Contacts settings of one agent: the rules, default tools, and judge of every contact it has.",
+      "properties": {
+        "rules": {
+          "default": [],
+          "description": "Rules that apply to every contact of this agent, ahead of each owner's own rules",
+          "items": {
+            "type": "string"
+          },
+          "title": "Rules",
+          "type": "array"
+        },
+        "tools": {
+          "default": [],
+          "description": "Default tools offered in contact turns when the owner chose none for that contact",
+          "items": {
+            "type": "string"
+          },
+          "title": "Tools",
+          "type": "array",
+          "x-mindroom": {
+            "reference": "tool"
+          }
+        },
+        "judgment": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/JudgmentConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Judgment backend that checks each message against the rules; unset runs no judge"
+        },
+        "remote_agents": {
+          "default": [],
+          "description": "Exact or wildcard Matrix IDs of agents on other MindRoom deployments that this agent may ask for contact and be asked by; empty keeps contacts within this deployment",
+          "items": {
+            "type": "string"
+          },
+          "title": "Remote Agents",
+          "type": "array"
+        }
+      },
+      "title": "ContactsConfig",
+      "type": "object"
+    },
     "DebugConfig": {
+      "additionalProperties": false,
       "description": "Debug and diagnostic settings.",
       "properties": {
         "log_llm_requests": {
@@ -1202,7 +1620,7 @@
         },
         "markdown": {
           "default": true,
-          "description": "Default markdown setting",
+          "description": "Default for whether system prompts tell agents and team leaders their replies are shown as Markdown",
           "title": "Markdown",
           "type": "boolean"
         },
@@ -1235,6 +1653,15 @@
           "title": "Show Stop Button",
           "type": "boolean"
         },
+        "room_activity": {
+          "$ref": "#/$defs/RoomActivityConfig",
+          "default": {
+            "enabled": false,
+            "window_minutes": 120,
+            "max_threads": 5
+          },
+          "description": "Opt-in note in thread replies listing the room's other threads with new messages"
+        },
         "max_consecutive_agent_replies": {
           "default": 50,
           "description": "Most consecutive agent or team messages in one conversation before mentions in them stop waking other agents and teams; a message from a person resets the count",
@@ -1242,21 +1669,33 @@
           "title": "Max Consecutive Agent Replies",
           "type": "integer"
         },
-        "learning": {
-          "default": true,
-          "description": "Default Agno Learning setting",
-          "title": "Learning",
+        "knowledge_graph": {
+          "default": false,
+          "description": "Default knowledge graph setting",
+          "title": "Knowledge Graph",
           "type": "boolean"
         },
-        "learning_mode": {
-          "default": "always",
-          "description": "Default Agno Learning mode",
-          "enum": [
-            "always",
-            "agentic"
+        "knowledge_graph_edits": {
+          "default": true,
+          "description": "Default knowledge graph edits setting",
+          "title": "Knowledge Graph Edits",
+          "type": "boolean"
+        },
+        "cheap_model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
           ],
-          "title": "Learning Mode",
-          "type": "string"
+          "default": null,
+          "description": "Cheaper model key for agents without their own cheap_model, used by cold_cache",
+          "title": "Cheap Model",
+          "x-mindroom": {
+            "reference": "model"
+          }
         },
         "compaction": {
           "anyOf": [
@@ -1290,7 +1729,7 @@
             }
           ],
           "default": null,
-          "description": "Default number of prior Agno runs to include as history context (None = all)",
+          "description": "Default number of prior runs to include as history context (None = all)",
           "title": "Num History Runs"
         },
         "num_history_messages": {
@@ -1306,12 +1745,6 @@
           "default": null,
           "description": "Default max messages from history (mutually exclusive with num_history_runs)",
           "title": "Num History Messages"
-        },
-        "compress_tool_results": {
-          "default": false,
-          "description": "Compress tool results in history to save context. Disabled by default because on Anthropic/Vertex Claude this can mutate replayed tool messages and invalidate prompt-cache prefixes.",
-          "title": "Compress Tool Results",
-          "type": "boolean"
         },
         "max_tool_calls_from_history": {
           "anyOf": [
@@ -1340,9 +1773,15 @@
           "title": "Show Tool Calls",
           "type": "boolean"
         },
+        "show_reasoning": {
+          "default": true,
+          "description": "Whether streamed replies show the model's reasoning to the room",
+          "title": "Show Reasoning",
+          "type": "boolean"
+        },
         "file_access": {
           "default": "workspace",
-          "description": "Where in-process path-taking tools (file, coding, attachments, matrix_message, gmail, google_drive, browser) may read and write files: workspace confines them to the agent workspace and its attachments, unrestricted allows any path their process can reach. Code-execution tools such as shell and python are always unrestricted; isolate them with worker_tools",
+          "description": "Where in-process path-taking tools (filesystem, attachments, matrix_message, gmail, google_drive, browser) may read and write files: workspace confines them to the agent workspace and its attachments, unrestricted allows any path their process can reach. Code-execution tools such as shell and python are always unrestricted; isolate them with worker_tools",
           "enum": [
             "workspace",
             "unrestricted"
@@ -1387,6 +1826,12 @@
           "description": "Default worker runtime reuse mode for routed tools: shared, user, or user_agent. user reuses one runtime per requester across agents and is not an agent-level filesystem isolation boundary",
           "title": "Worker Scope"
         },
+        "allow_shell_without_worker": {
+          "default": false,
+          "description": "Whether the shell tool may run commands in MindRoom's own process when an agent's shell calls do not run in a worker; off refuses each such call",
+          "title": "Allow Shell Without Worker",
+          "type": "boolean"
+        },
         "worker_grantable_credentials": {
           "anyOf": [
             {
@@ -1409,11 +1854,23 @@
           "title": "Allow Self Config",
           "type": "boolean"
         },
-        "max_preload_chars": {
-          "default": 50000,
-          "description": "Hard cap for extra role preload context loaded from context_files",
+        "desktop_pairing": {
+          "default": "self_service",
+          "description": "Desktop pairing policy for agents: 'self_service' lets requesters pair any concrete agent and activates the desktop tool only for paired requesters, 'explicit_only' requires agents to declare the desktop tool, and 'disabled' disables desktop pairing for all agents",
+          "enum": [
+            "self_service",
+            "explicit_only",
+            "disabled"
+          ],
+          "title": "Desktop Pairing",
+          "type": "string"
+        },
+        "max_preload_file_chars": {
+          "default": 30000,
+          "description": "Characters of each file inlined into the system prompt, context files and MEMORY.md alike; a longer file keeps its first whole lines within this limit",
+          "maximum": 200000,
           "minimum": 1,
-          "title": "Max Preload Chars",
+          "title": "Max Preload File Chars",
           "type": "integer"
         },
         "automations": {
@@ -1426,6 +1883,9 @@
               },
               {
                 "$ref": "#/$defs/DreamingAutomation"
+              },
+              {
+                "$ref": "#/$defs/ExplorationAutomation"
               },
               {
                 "$ref": "#/$defs/PluginAutomation"
@@ -1451,7 +1911,8 @@
             "update_interval": 5.0,
             "min_update_interval": 0.5,
             "interval_ramp_seconds": 15.0,
-            "max_idle": 2.0
+            "max_idle": 2.0,
+            "live_frames": true
           },
           "description": "Streaming response timing parameters"
         },
@@ -1481,7 +1942,7 @@
             }
           ],
           "default": 0.2,
-          "description": "Temperature override for automatic thread summaries. Set to null to omit temperature and use provider defaults. MindRoom always uses provider temperature defaults for GPT-6 Astra, Sol, and Luna, Vertex Claude, Claude Opus 5.5, Sonnet 5.5, Opus 5, Sonnet 5, Fable 5.1, and direct Google Gemini 3.8 Flash and Gemini 3.5 Flash-Lite thread summaries.",
+          "description": "Temperature override for automatic thread summaries. Set to null to omit temperature and use provider defaults. MindRoom always uses provider temperature defaults for OpenAI GPT-5 and GPT-6 models, Vertex Claude, Claude Opus 4.7, Opus 4.8, Mythos Preview, Claude 5 and 5.x models, and direct Google Gemini 4 Carbon, Argon, and Hydrogen, Gemini 3.8 Flash, Gemini 3.6 Flash, and Gemini 3.5 Flash-Lite thread summaries.",
           "title": "Thread Summary Temperature"
         },
         "thread_summary_first_threshold": {
@@ -1508,7 +1969,7 @@
       "properties": {
         "cron": {
           "default": "15 3 * * *",
-          "description": "When to check, in the configured timezone",
+          "description": "When to check, in the agent's timezone",
           "title": "Cron",
           "type": "string"
         },
@@ -1522,7 +1983,7 @@
             }
           ],
           "default": null,
-          "description": "Room alias or ID for the prompt; defaults to the agent's first configured room",
+          "description": "Room key or Matrix room ID of a room the agent is in, for the prompt; defaults to the agent's first configured room",
           "title": "Room"
         },
         "model": {
@@ -1555,7 +2016,427 @@
         "name"
       ]
     },
+    "Ed25519EventSourceConfig": {
+      "additionalProperties": false,
+      "description": "Shared Ed25519-signed external event source configuration.",
+      "properties": {
+        "kind": {
+          "const": "ed25519",
+          "default": "ed25519",
+          "description": "Event source type for Ed25519-signed events",
+          "title": "Kind",
+          "type": "string"
+        },
+        "public_key": {
+          "description": "Ed25519 public key used to verify signed events",
+          "title": "Public Key",
+          "type": "string"
+        },
+        "key_id": {
+          "default": "default",
+          "description": "Expected signing key identifier",
+          "maxLength": 128,
+          "minLength": 1,
+          "title": "Key Id",
+          "type": "string"
+        },
+        "allowed_kinds": {
+          "default": [],
+          "description": "Optional allowlist of accepted event kinds",
+          "items": {
+            "type": "string"
+          },
+          "title": "Allowed Kinds",
+          "type": "array"
+        },
+        "subscribers": {
+          "default": [],
+          "description": "Matrix user IDs allowed to subscribe reactive triggers to this source",
+          "items": {
+            "type": "string"
+          },
+          "title": "Subscribers",
+          "type": "array"
+        },
+        "replay_window_seconds": {
+          "default": 300,
+          "description": "Maximum accepted signature age in seconds",
+          "maximum": 3600,
+          "minimum": 30,
+          "title": "Replay Window Seconds",
+          "type": "integer"
+        },
+        "max_body_bytes": {
+          "default": 65536,
+          "description": "Maximum accepted request body size in bytes",
+          "maximum": 262144,
+          "minimum": 1024,
+          "title": "Max Body Bytes",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "public_key"
+      ],
+      "title": "Ed25519EventSourceConfig",
+      "type": "object"
+    },
+    "EgressAuth": {
+      "additionalProperties": false,
+      "description": "Authentication configuration for an egress rule.",
+      "properties": {
+        "type": {
+          "description": "Authentication type",
+          "enum": [
+            "bearer",
+            "basic",
+            "header",
+            "query"
+          ],
+          "title": "Type",
+          "type": "string"
+        },
+        "username": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Username for basic auth; required when type=basic",
+          "title": "Username"
+        },
+        "name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Header or query param name; required for header/query types",
+          "title": "Name"
+        },
+        "template": {
+          "default": "{secret}",
+          "description": "Template for header/query value; must contain {secret} exactly once",
+          "title": "Template",
+          "type": "string"
+        }
+      },
+      "required": [
+        "type"
+      ],
+      "title": "EgressAuth",
+      "type": "object"
+    },
+    "EgressBrokerConfig": {
+      "additionalProperties": false,
+      "description": "Top-level egress broker configuration.",
+      "properties": {
+        "unmatched_hosts": {
+          "default": "passthrough",
+          "description": "Action for hosts with no matching rules",
+          "enum": [
+            "passthrough",
+            "deny"
+          ],
+          "title": "Unmatched Hosts",
+          "type": "string"
+        },
+        "private_networks": {
+          "default": [],
+          "description": "Private address ranges (CIDR) agents may reach through the broker; loopback and cloud metadata stay blocked",
+          "items": {
+            "type": "string"
+          },
+          "title": "Private Networks",
+          "type": "array"
+        },
+        "services": {
+          "additionalProperties": {
+            "$ref": "#/$defs/EgressService"
+          },
+          "default": {},
+          "description": "Service configurations by name",
+          "title": "Services",
+          "type": "object"
+        }
+      },
+      "title": "EgressBrokerConfig",
+      "type": "object"
+    },
+    "EgressGitHubApp": {
+      "additionalProperties": false,
+      "description": "A GitHub App installation whose short-lived tokens, limited to some repositories, are a service's credential.",
+      "properties": {
+        "credentials_service": {
+          "description": "Stored credential that holds the App, as Git knowledge bases use it: auth_type github_app, app_id, installation_id, and private_key_file",
+          "title": "Credentials Service",
+          "type": "string"
+        },
+        "repositories": {
+          "additionalProperties": {
+            "$ref": "#/$defs/GitHubRepositoryAccess"
+          },
+          "description": "Repositories the tokens cover, as owner/repository: read or read_write; all of one owner, the account the App is installed on",
+          "title": "Repositories",
+          "type": "object"
+        }
+      },
+      "required": [
+        "credentials_service",
+        "repositories"
+      ],
+      "title": "EgressGitHubApp",
+      "type": "object"
+    },
+    "EgressReadOnly": {
+      "additionalProperties": false,
+      "description": "How a service's API reads: with `GET` and `HEAD`, and with `POST` only to `post_paths`.",
+      "properties": {
+        "post_paths": {
+          "default": [],
+          "description": "Path prefixes, matched by segment like a rule's path_prefix, of the endpoints that read with POST; a connected account allowed read-only may POST only to these",
+          "items": {
+            "type": "string"
+          },
+          "title": "Post Paths",
+          "type": "array"
+        }
+      },
+      "title": "EgressReadOnly",
+      "type": "object"
+    },
+    "EgressRule": {
+      "additionalProperties": false,
+      "description": "One egress routing rule.",
+      "properties": {
+        "host": {
+          "description": "Host to match (exact, IP, or *.domain.com)",
+          "title": "Host",
+          "type": "string"
+        },
+        "port": {
+          "anyOf": [
+            {
+              "maximum": 65535,
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Port to match; None matches any port",
+          "title": "Port"
+        },
+        "path_prefix": {
+          "default": "/",
+          "description": "Path prefix to match by segment: one ending in / matches every path under it; otherwise the exact path or that path followed by / (/repos/o/r never matches /repos/o/r-old)",
+          "title": "Path Prefix",
+          "type": "string"
+        },
+        "auth": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EgressAuth"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Authentication config for this rule; required unless the service is restrict_only, which ignores it"
+        }
+      },
+      "required": [
+        "host"
+      ],
+      "title": "EgressRule",
+      "type": "object"
+    },
+    "EgressService": {
+      "additionalProperties": false,
+      "description": "One egress service configuration.",
+      "properties": {
+        "preset": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Built-in service preset that supplies display_name, description, rules, placeholder_env, oauth_provider, and read_only; fields set explicitly here replace the preset's values",
+          "title": "Preset"
+        },
+        "display_name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Human-readable service name",
+          "title": "Display Name"
+        },
+        "description": {
+          "default": "",
+          "description": "Service description",
+          "title": "Description",
+          "type": "string"
+        },
+        "rules": {
+          "default": [],
+          "description": "Routing rules for this service; at least one is required unless a preset supplies them",
+          "items": {
+            "$ref": "#/$defs/EgressRule"
+          },
+          "title": "Rules",
+          "type": "array"
+        },
+        "placeholder_env": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "description": "Placeholder environment variables",
+          "title": "Placeholder Env",
+          "type": "object"
+        },
+        "oauth_provider": {
+          "anyOf": [
+            {
+              "pattern": "^[a-z0-9][a-z0-9_-]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "MindRoom OAuth provider id whose connection supplies the secret when no API key is stored, once someone allows Agent Keys to use it for this service; checked against the provider registry at runtime",
+          "title": "Oauth Provider"
+        },
+        "oauth_separate_account": {
+          "default": false,
+          "description": "Give a service a user adds its own oauth_provider login, separate from the connection the agent's tools use; a request chooses the service with the X-Agent-Keys-Service header. Config services and services of shared or unscoped agents cannot set it. Presets never set this",
+          "title": "Oauth Separate Account",
+          "type": "boolean"
+        },
+        "read_only": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EgressReadOnly"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Offer read-only access for the service's connected account: allowed read-only, it gets the token only for GET and HEAD, and for POST to read_only.post_paths. Set it only for an API whose writes never use GET or HEAD; without it, an account can only be allowed read and write"
+        },
+        "oauth_on_shared_workers": {
+          "default": false,
+          "description": "Use a requester's own connected account (GitHub, Atlassian) in shared sandboxes too: shared and unscoped agents, and any agent on the static runner. Every user of such a sandbox can act with another user's connected account until that user's proxy token expires; presets never set this",
+          "title": "Oauth On Shared Workers",
+          "type": "boolean"
+        },
+        "restrict_to_rules": {
+          "default": false,
+          "description": "Refuse requests to this service's hosts whose path matches no rule of the same party's services on that host (the administrator's for a config service, the requester's own for a user service; 403 path_not_allowed) instead of forwarding them without credentials. GraphQL (/graphql) is then refused unless a rule lists it; a listed GraphQL endpoint reaches everything the credential can. Presets never set this",
+          "title": "Restrict To Rules",
+          "type": "boolean"
+        },
+        "restrict_only": {
+          "default": false,
+          "description": "Only limit paths, for a service a user adds; a config service is refused with it and uses restrict_to_rules. The rules take part in the path check like restrict_to_rules (which this implies), but never choose a credential, so an allowed path still uses the credential of the most specific other service on the host. Such a service has no key, OAuth login, or placeholders, its rules need no auth, and a preset contributes only its display_name, description, and rules. Presets never set this",
+          "title": "Restrict Only",
+          "type": "boolean"
+        },
+        "admin_key": {
+          "default": false,
+          "description": "Use one key for every agent the service serves, which only an administrator sets, on the dashboard; users and credential managers see that it is set but cannot set, replace, or remove it. Such a service uses no connected account, so a preset's oauth_provider and read_only are left out. Only config.yaml may set it, and presets never do",
+          "title": "Admin Key",
+          "type": "boolean"
+        },
+        "agents": {
+          "anyOf": [
+            {
+              "items": {
+                "type": "string"
+              },
+              "type": "array"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Agents whose requests get the service's credential; a request of any other agent goes to a matching service that serves it, is refused (403 agent_not_allowed) when none does, and the service is not offered to that agent. Omit to serve every agent that uses Agent Keys. Only config.yaml may set it, and presets never do",
+          "title": "Agents"
+        },
+        "github_app": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/EgressGitHubApp"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Send tokens that the broker mints from a GitHub App installation, limited to the listed repositories, instead of a key or connected account; a preset's oauth_provider and read_only are left out. Only config.yaml may set it, and presets never do"
+        }
+      },
+      "title": "EgressService",
+      "type": "object"
+    },
+    "EmailInvitesConfig": {
+      "additionalProperties": false,
+      "description": "Settings of the `email_invite` tool: the Chat link, the expiry, and the approvers.",
+      "properties": {
+        "chat_url": {
+          "default": "https://chat.mindroom.chat",
+          "description": "Origin of the MindRoom Chat web app the invite link opens, without a path",
+          "title": "Chat Url",
+          "type": "string"
+        },
+        "expiry_days": {
+          "default": 7,
+          "description": "Days an invite link stays valid",
+          "maximum": 30,
+          "minimum": 1,
+          "title": "Expiry Days",
+          "type": "integer"
+        },
+        "approvers": {
+          "default": [],
+          "description": "Matrix user IDs who may approve email invites in any room",
+          "items": {
+            "type": "string"
+          },
+          "title": "Approvers",
+          "type": "array"
+        }
+      },
+      "title": "EmailInvitesConfig",
+      "type": "object"
+    },
     "EmbedderConfig": {
+      "additionalProperties": false,
       "description": "Configuration for memory embedder.",
       "properties": {
         "model": {
@@ -1574,7 +2455,7 @@
             }
           ],
           "default": null,
-          "description": "Optional credential service used only by this embedder. When omitted, legacy resolution checks the dedicated 'embedder' service and then the provider credential",
+          "description": "Optional credential service used only by this embedder, for the openai provider. When omitted, legacy resolution checks the dedicated 'embedder' service and then the provider credential",
           "title": "Credentials Service"
         },
         "api_key": {
@@ -1587,7 +2468,7 @@
             }
           ],
           "default": null,
-          "description": "Explicit embedder API key. Highest priority, above credentials_service and the legacy dedicated embedder-to-openai fallback",
+          "description": "Explicit embedder API key for the openai provider. Highest priority, above credentials_service and the legacy dedicated embedder-to-openai fallback",
           "title": "Api Key",
           "x-mindroom": {
             "secret": true
@@ -1617,8 +2498,34 @@
             }
           ],
           "default": null,
-          "description": "Optional embedding dimension override for OpenAI-compatible providers",
+          "description": "Optional embedding dimension override for OpenAI-compatible providers and vertex_ai",
           "title": "Dimensions"
+        },
+        "query_prefix": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Text prepended to search queries for OpenAI-compatible providers and vertex_ai, for models that expect a query prompt (EmbeddingGemma 2: 'task: search result | query: ')",
+          "title": "Query Prefix"
+        },
+        "document_prefix": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Text prepended to indexed documents for OpenAI-compatible providers and vertex_ai, for models that expect a document prompt (EmbeddingGemma 2: 'title: none | text: ')",
+          "title": "Document Prefix"
         }
       },
       "title": "EmbedderConfig",
@@ -1663,6 +2570,82 @@
       },
       "title": "EventJournalConfig",
       "type": "object"
+    },
+    "ExplorationAutomation": {
+      "additionalProperties": false,
+      "description": "A scheduled prompt asking the agent to explore the sources its tools reach, feeding its knowledge graph.",
+      "properties": {
+        "cron": {
+          "default": "30 2 * * *",
+          "description": "When to check, in the agent's timezone",
+          "title": "Cron",
+          "type": "string"
+        },
+        "room": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Room key or Matrix room ID of a room the agent is in, for the prompt; defaults to the agent's first configured room",
+          "title": "Room"
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Model for the prompt's runs, a key of models; defaults to the agent's own model",
+          "title": "Model",
+          "x-mindroom": {
+            "reference": "model"
+          }
+        },
+        "name": {
+          "const": "exploration",
+          "default": "exploration",
+          "description": "Built-in automation name",
+          "title": "Name",
+          "type": "string"
+        },
+        "max_tool_calls": {
+          "default": 40,
+          "description": "Tool calls the exploration prompt asks the agent to stay within",
+          "maximum": 1000,
+          "minimum": 1,
+          "title": "Max Tool Calls",
+          "type": "integer"
+        },
+        "max_leads": {
+          "default": 20,
+          "description": "Most tool calls seen in conversations that one exploration prompt lists",
+          "maximum": 200,
+          "minimum": 0,
+          "title": "Max Leads",
+          "type": "integer"
+        },
+        "revisit_days": {
+          "default": 7,
+          "description": "Explore without new leads once this many days have passed since the last run",
+          "minimum": 1,
+          "title": "Revisit Days",
+          "type": "integer"
+        }
+      },
+      "title": "ExplorationAutomation",
+      "type": "object",
+      "required": [
+        "name"
+      ]
     },
     "ExternalTriggerPolicyConfig": {
       "additionalProperties": false,
@@ -1722,12 +2705,227 @@
           },
           "title": "Admin Users",
           "type": "array"
+        },
+        "reactive_enabled": {
+          "default": true,
+          "description": "Whether reactive triggers are enabled",
+          "title": "Reactive Enabled",
+          "type": "boolean"
+        },
+        "max_reactive_triggers_per_owner": {
+          "default": 50,
+          "description": "Maximum reactive trigger records one owner may create",
+          "maximum": 1000,
+          "minimum": 1,
+          "title": "Max Reactive Triggers Per Owner",
+          "type": "integer"
+        },
+        "max_fires_per_hour": {
+          "default": 60,
+          "description": "Maximum allowed fires per hour cap for reactive triggers",
+          "maximum": 600,
+          "minimum": 1,
+          "title": "Max Fires Per Hour",
+          "type": "integer"
+        },
+        "event_sources": {
+          "additionalProperties": {
+            "discriminator": {
+              "mapping": {
+                "ed25519": "#/$defs/Ed25519EventSourceConfig",
+                "github": "#/$defs/GitHubEventSourceConfig",
+                "hmac": "#/$defs/HmacEventSourceConfig"
+              },
+              "propertyName": "kind"
+            },
+            "oneOf": [
+              {
+                "$ref": "#/$defs/GitHubEventSourceConfig"
+              },
+              {
+                "$ref": "#/$defs/Ed25519EventSourceConfig"
+              },
+              {
+                "$ref": "#/$defs/HmacEventSourceConfig"
+              }
+            ]
+          },
+          "default": {},
+          "description": "Named shared external event sources keyed by source_id",
+          "title": "Event Sources",
+          "type": "object"
         }
       },
       "title": "ExternalTriggerPolicyConfig",
       "type": "object"
     },
+    "GitHubEventSourceConfig": {
+      "additionalProperties": false,
+      "description": "Shared GitHub webhook event source configuration.",
+      "properties": {
+        "kind": {
+          "const": "github",
+          "default": "github",
+          "description": "Event source type for GitHub webhooks",
+          "title": "Kind",
+          "type": "string"
+        },
+        "secret_env": {
+          "description": "Environment variable name holding the GitHub webhook secret",
+          "title": "Secret Env",
+          "type": "string"
+        },
+        "allowed_repos": {
+          "description": "Allowlisted owner/repo repositories for this source",
+          "items": {
+            "type": "string"
+          },
+          "title": "Allowed Repos",
+          "type": "array"
+        },
+        "allowed_events": {
+          "default": [
+            "pull_request",
+            "pull_request_review",
+            "check_suite",
+            "release",
+            "issues",
+            "push"
+          ],
+          "description": "Allowlisted GitHub X-GitHub-Event names",
+          "items": {
+            "type": "string"
+          },
+          "title": "Allowed Events",
+          "type": "array"
+        },
+        "subscribers": {
+          "default": [],
+          "description": "Matrix user IDs allowed to subscribe reactive triggers to this source",
+          "items": {
+            "type": "string"
+          },
+          "title": "Subscribers",
+          "type": "array"
+        },
+        "max_body_bytes": {
+          "default": 262144,
+          "description": "Maximum accepted webhook body size in bytes",
+          "maximum": 1048576,
+          "minimum": 1024,
+          "title": "Max Body Bytes",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "secret_env",
+        "allowed_repos"
+      ],
+      "title": "GitHubEventSourceConfig",
+      "type": "object"
+    },
+    "GitHubRepositoryAccess": {
+      "enum": [
+        "read",
+        "read_write"
+      ],
+      "type": "string"
+    },
+    "HmacEventSourceConfig": {
+      "additionalProperties": false,
+      "description": "Generic HMAC-SHA256 webhook event source configuration.",
+      "properties": {
+        "kind": {
+          "const": "hmac",
+          "default": "hmac",
+          "description": "Event source type for generic HMAC-SHA256 webhooks",
+          "title": "Kind",
+          "type": "string"
+        },
+        "secret_env": {
+          "description": "Environment variable name holding the HMAC webhook secret",
+          "title": "Secret Env",
+          "type": "string"
+        },
+        "signature_header": {
+          "default": "X-Webhook-Signature-256",
+          "description": "HTTP header name carrying the HMAC-SHA256 signature",
+          "title": "Signature Header",
+          "type": "string"
+        },
+        "signature_prefix": {
+          "default": "sha256=",
+          "description": "Optional prefix before the hex digest; empty string means bare hex",
+          "title": "Signature Prefix",
+          "type": "string"
+        },
+        "kind_header": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional HTTP header name carrying the event kind",
+          "title": "Kind Header"
+        },
+        "kind_field": {
+          "default": "kind",
+          "description": "JSON field or dot-path carrying the event kind when kind_header is unset",
+          "title": "Kind Field",
+          "type": "string"
+        },
+        "event_id_header": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Optional HTTP header name carrying a deduplication event ID",
+          "title": "Event Id Header"
+        },
+        "allowed_kinds": {
+          "default": [],
+          "description": "Optional allowlist of accepted event kinds",
+          "items": {
+            "type": "string"
+          },
+          "title": "Allowed Kinds",
+          "type": "array"
+        },
+        "subscribers": {
+          "default": [],
+          "description": "Matrix user IDs allowed to subscribe reactive triggers to this source",
+          "items": {
+            "type": "string"
+          },
+          "title": "Subscribers",
+          "type": "array"
+        },
+        "max_body_bytes": {
+          "default": 262144,
+          "description": "Maximum accepted webhook body size in bytes",
+          "maximum": 1048576,
+          "minimum": 1024,
+          "title": "Max Body Bytes",
+          "type": "integer"
+        }
+      },
+      "required": [
+        "secret_env"
+      ],
+      "title": "HmacEventSourceConfig",
+      "type": "object"
+    },
     "HookOverrideConfig": {
+      "additionalProperties": false,
       "description": "Per-hook deployer override configuration.",
       "properties": {
         "enabled": {
@@ -1788,6 +2986,7 @@
       ]
     },
     "KnowledgeBaseConfig": {
+      "additionalProperties": false,
       "description": "Knowledge base configuration.",
       "properties": {
         "mode": {
@@ -1814,9 +3013,23 @@
         },
         "watch": {
           "default": true,
-          "description": "When true, shared local folders watch filesystem changes and schedule background published-index refresh without blocking reads; when false, direct external file edits require explicit reindex or dashboard/API mutations",
+          "description": "When true, shared local folders watch filesystem changes and schedule background published-index refresh without blocking reads; when false, direct external file edits require explicit reindex or dashboard/API mutations unless poll_interval_seconds is set",
           "title": "Watch",
           "type": "boolean"
+        },
+        "poll_interval_seconds": {
+          "anyOf": [
+            {
+              "minimum": 5,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "How often to schedule a background refresh for a local knowledge folder that another host writes to, such as an NFS share, where filesystem watching never sees the writes; unset means no polling; only for semantic mode, and Git-backed bases use git.poll_interval_seconds instead",
+          "title": "Poll Interval Seconds"
         },
         "require_content_before_publish": {
           "default": false,
@@ -1837,6 +3050,32 @@
           "minimum": 0,
           "title": "Chunk Overlap",
           "type": "integer"
+        },
+        "chunk_context_model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Model that writes a short context for each chunk of a multi-chunk file before it is indexed (contextual retrieval); costs one model call per chunk of each changed file",
+          "title": "Chunk Context Model",
+          "x-mindroom": {
+            "reference": "model"
+          }
+        },
+        "chunk_strategy": {
+          "default": "fixed",
+          "description": "How text-like files are split into chunks: fixed splits at chunk_size characters, memory_entries makes each memory entry or Markdown section its own chunk of at most chunk_size characters",
+          "enum": [
+            "fixed",
+            "memory_entries"
+          ],
+          "title": "Chunk Strategy",
+          "type": "string"
         },
         "include_extensions": {
           "anyOf": [
@@ -1994,6 +3233,198 @@
       "title": "KnowledgeGitConfig",
       "type": "object"
     },
+    "KnowledgeGraphConfig": {
+      "additionalProperties": false,
+      "description": "The Graphiti knowledge graph that graph-enabled agents build from their conversations and exploration.",
+      "properties": {
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Model alias that extracts entities and facts; required when any agent enables the graph",
+          "title": "Model",
+          "x-mindroom": {
+            "reference": "model"
+          }
+        },
+        "extraction_instructions": {
+          "default": "",
+          "description": "Instructions added to the built-in ones when extracting entities and facts, such as which topics, systems, or kinds of facts matter most",
+          "title": "Extraction Instructions",
+          "type": "string",
+          "x-mindroom": {
+            "multiline": true
+          }
+        },
+        "ingest": {
+          "$ref": "#/$defs/KnowledgeGraphIngestConfig",
+          "default": {
+            "interval_seconds": 600,
+            "idle_seconds": 120,
+            "max_sessions_per_cycle": 10,
+            "max_episode_chars": 24000,
+            "max_tool_result_chars": 4000,
+            "backfill_days": 7
+          },
+          "description": "Conversation ingestion settings"
+        },
+        "generation": {
+          "default": 0,
+          "description": "Raise to start every graph over from the conversations within backfill_days; new replies and calls read the new graphs",
+          "minimum": 0,
+          "title": "Generation",
+          "type": "integer"
+        },
+        "aliases": {
+          "additionalProperties": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "default": {},
+          "description": "One name per person, agent, or thing, mapped to its other names, Matrix IDs, and agent keys",
+          "title": "Aliases",
+          "type": "object"
+        }
+      },
+      "title": "KnowledgeGraphConfig",
+      "type": "object"
+    },
+    "KnowledgeGraphIngestConfig": {
+      "additionalProperties": false,
+      "description": "How the background worker turns finished conversation turns into graph episodes.",
+      "properties": {
+        "interval_seconds": {
+          "default": 600,
+          "description": "How often to check a graph whose last ingestion pass ingested nothing; one that did is followed at once",
+          "minimum": 30,
+          "title": "Interval Seconds",
+          "type": "integer"
+        },
+        "idle_seconds": {
+          "default": 120,
+          "description": "Seconds a conversation must be idle before its new turns are ingested",
+          "minimum": 1,
+          "title": "Idle Seconds",
+          "type": "integer"
+        },
+        "max_sessions_per_cycle": {
+          "default": 10,
+          "description": "Conversations each graph ingests per pass",
+          "minimum": 1,
+          "title": "Max Sessions Per Cycle",
+          "type": "integer"
+        },
+        "max_episode_chars": {
+          "default": 24000,
+          "description": "Largest episode sent for extraction, in characters; a longer turn is split into several episodes",
+          "maximum": 60000,
+          "minimum": 1000,
+          "title": "Max Episode Chars",
+          "type": "integer"
+        },
+        "max_tool_result_chars": {
+          "default": 4000,
+          "description": "Characters kept from each tool result",
+          "minimum": 100,
+          "title": "Max Tool Result Chars",
+          "type": "integer"
+        },
+        "backfill_days": {
+          "default": 7,
+          "description": "A new graph starts from conversations active within this many days",
+          "minimum": 0,
+          "title": "Backfill Days",
+          "type": "integer"
+        }
+      },
+      "title": "KnowledgeGraphIngestConfig",
+      "type": "object"
+    },
+    "KnowledgeRerankerConfig": {
+      "additionalProperties": false,
+      "description": "Reranker that reorders search results by how well each one answers the query.",
+      "properties": {
+        "provider": {
+          "description": "'cohere' calls a Cohere-compatible rerank API (Cohere, Jina, vLLM, Infinity); 'sentence_transformers' runs a cross-encoder locally; 'vertex_ai' calls Google's Vertex AI ranking API with Application Default Credentials",
+          "enum": [
+            "cohere",
+            "sentence_transformers",
+            "vertex_ai"
+          ],
+          "title": "Provider",
+          "type": "string"
+        },
+        "model": {
+          "description": "Rerank model, such as 'rerank-v3.5', 'BAAI/bge-reranker-v2-m3' or 'semantic-ranker-default@latest'",
+          "title": "Model",
+          "type": "string"
+        },
+        "url": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Rerank endpoint for the 'cohere' provider; defaults to https://api.cohere.com/v2/rerank",
+          "title": "Url"
+        },
+        "api_key": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "API key for the 'cohere' provider; above credentials_service",
+          "title": "Api Key",
+          "x-mindroom": {
+            "secret": true
+          }
+        },
+        "credentials_service": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Credential service holding the 'cohere' provider's API key; defaults to 'cohere'",
+          "title": "Credentials Service"
+        },
+        "threshold": {
+          "default": 0.5,
+          "description": "Minimum score, from 0 to 1, of a memory recalled without being asked for (memory.search.rerank)",
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Threshold",
+          "type": "number"
+        }
+      },
+      "required": [
+        "provider",
+        "model"
+      ],
+      "title": "Cohere, Sentence Transformers or Vertex AI",
+      "type": "object"
+    },
     "LLMJudgmentConfig": {
       "additionalProperties": false,
       "description": "Use a configured model alias for a structured judgment.",
@@ -2027,6 +3458,84 @@
         "model"
       ],
       "title": "LLMJudgmentConfig",
+      "type": "object"
+    },
+    "ListenConfig": {
+      "additionalProperties": false,
+      "description": "Rooms an agent listens in, when it runs a silent turn over what it heard, and what that turn may do.",
+      "properties": {
+        "rooms": {
+          "description": "Room keys, Matrix room IDs, or aliases the agent listens in",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Rooms",
+          "type": "array",
+          "x-mindroom": {
+            "reference": "room"
+          }
+        },
+        "quiet_seconds": {
+          "default": 60,
+          "description": "Seconds a room must stay quiet before the agent runs a silent turn over what it heard",
+          "minimum": 10,
+          "title": "Quiet Seconds",
+          "type": "integer"
+        },
+        "max_messages": {
+          "default": 200,
+          "description": "Most messages one silent turn reads; the rest wait for the next turn",
+          "maximum": 500,
+          "minimum": 1,
+          "title": "Max Messages",
+          "type": "integer"
+        },
+        "max_runs_per_hour": {
+          "default": 6,
+          "description": "Most silent turns per hour; further due runs are skipped and what was heard is kept",
+          "maximum": 60,
+          "minimum": 1,
+          "title": "Max Runs Per Hour",
+          "type": "integer"
+        },
+        "tools": {
+          "default": [
+            "memory",
+            "react"
+          ],
+          "description": "Tools a silent turn may use, as toolkit names or toolkit.function, each one of the agent's own tools; no other tool is available",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Tools",
+          "type": "array",
+          "x-mindroom": {
+            "reference": "tool"
+          }
+        },
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Model alias under models for silent turns; unset uses the room's model, then the agent's model",
+          "title": "Model",
+          "x-mindroom": {
+            "reference": "model"
+          }
+        }
+      },
+      "required": [
+        "rooms"
+      ],
+      "title": "ListenConfig",
       "type": "object"
     },
     "LiveCallProfile": {
@@ -2193,7 +3702,7 @@
         },
         "dynamic_client_registration": {
           "default": true,
-          "description": "Whether dynamic registration may be used",
+          "description": "Whether a client may be obtained automatically, by dynamic registration or client ID metadata document",
           "title": "Dynamic Client Registration",
           "type": "boolean"
         },
@@ -2415,6 +3924,12 @@
           "description": "Remote URL for SSE or streamable HTTP",
           "title": "Url"
         },
+        "allow_private_network": {
+          "default": false,
+          "description": "Let a remote server's URL reach private-network addresses (RFC 1918 or IPv6 unique-local), such as a cluster-internal service; loopback, link-local and cloud metadata addresses stay blocked",
+          "title": "Allow Private Network",
+          "type": "boolean"
+        },
         "headers": {
           "additionalProperties": {
             "type": "string"
@@ -2505,6 +4020,7 @@
       "type": "object"
     },
     "MatrixSpaceConfig": {
+      "additionalProperties": false,
       "description": "Configuration for the optional root Matrix Space.",
       "properties": {
         "enabled": {
@@ -2563,6 +4079,7 @@
       "type": "object"
     },
     "MemoryAutoFlushConfig": {
+      "additionalProperties": false,
       "description": "Background memory auto-flush configuration.",
       "properties": {
         "enabled": {
@@ -2572,43 +4089,29 @@
           "type": "boolean"
         },
         "flush_interval_seconds": {
-          "default": 1800,
-          "description": "Background auto-flush loop interval",
+          "default": 300,
+          "description": "Time between auto-flush passes",
           "minimum": 5,
           "title": "Flush Interval Seconds",
           "type": "integer"
         },
         "idle_seconds": {
           "default": 120,
-          "description": "Session idle time before dirty session becomes flush-eligible",
+          "description": "How long a conversation must be quiet before its new turns are flushed",
           "minimum": 0,
           "title": "Idle Seconds",
           "type": "integer"
         },
-        "max_dirty_age_seconds": {
-          "default": 600,
-          "description": "Force flush eligibility once a session remains dirty for this long",
-          "minimum": 1,
-          "title": "Max Dirty Age Seconds",
-          "type": "integer"
-        },
         "stale_ttl_seconds": {
           "default": 86400,
-          "description": "Drop stale flush-state entries older than this TTL",
+          "description": "Give up on turns whose flush has kept failing for this long",
           "minimum": 60,
           "title": "Stale Ttl Seconds",
           "type": "integer"
         },
-        "max_cross_session_reprioritize": {
-          "default": 5,
-          "description": "Maximum same-agent dirty sessions reprioritized per incoming prompt",
-          "minimum": 0,
-          "title": "Max Cross Session Reprioritize",
-          "type": "integer"
-        },
         "retry_cooldown_seconds": {
           "default": 30,
-          "description": "Cooldown before retrying a failed extraction attempt",
+          "description": "Cooldown before retrying a failed flush",
           "minimum": 1,
           "title": "Retry Cooldown Seconds",
           "type": "integer"
@@ -2631,6 +4134,7 @@
         "extractor": {
           "$ref": "#/$defs/_MemoryAutoFlushExtractorConfig",
           "default": {
+            "model": null,
             "no_reply_token": "NO_REPLY",
             "max_messages_per_flush": 20,
             "max_chars_per_flush": 12000,
@@ -2647,6 +4151,7 @@
       "type": "object"
     },
     "MemoryConfig": {
+      "additionalProperties": false,
       "description": "Memory system configuration.",
       "properties": {
         "backend": {
@@ -2660,12 +4165,6 @@
           "title": "Backend",
           "type": "string"
         },
-        "team_reads_member_memory": {
-          "default": false,
-          "description": "When true, team-context memory reads can access member agent memories in addition to the shared team scope",
-          "title": "Team Reads Member Memory",
-          "type": "boolean"
-        },
         "embedder": {
           "$ref": "#/$defs/_MemoryEmbedderConfig",
           "default": {
@@ -2674,8 +4173,10 @@
               "api_key": null,
               "credentials_service": null,
               "dimensions": null,
+              "document_prefix": null,
               "host": null,
-              "model": "text-embedding-3-small"
+              "model": "text-embedding-3-small",
+              "query_prefix": null
             }
           },
           "description": "Embedder configuration for memory"
@@ -2692,15 +4193,6 @@
           "default": null,
           "description": "LLM configuration for memory"
         },
-        "file": {
-          "$ref": "#/$defs/_MemoryFileConfig",
-          "default": {
-            "path": null,
-            "max_entrypoint_lines": 200,
-            "max_entrypoint_tokens": 50000
-          },
-          "description": "File-backed memory configuration"
-        },
         "search": {
           "$ref": "#/$defs/MemorySearchConfig",
           "default": {
@@ -2708,7 +4200,9 @@
             "include": [
               "memory/**/*.md"
             ],
-            "include_entrypoint": false
+            "exclude": [],
+            "include_entrypoint": false,
+            "rerank": null
           },
           "description": "Search behavior for file-backed memory"
         },
@@ -2716,11 +4210,9 @@
           "$ref": "#/$defs/MemoryAutoFlushConfig",
           "default": {
             "enabled": false,
-            "flush_interval_seconds": 1800,
+            "flush_interval_seconds": 300,
             "idle_seconds": 120,
-            "max_dirty_age_seconds": 600,
             "stale_ttl_seconds": 86400,
-            "max_cross_session_reprioritize": 5,
             "retry_cooldown_seconds": 30,
             "max_retry_cooldown_seconds": 300,
             "batch": {
@@ -2735,6 +4227,7 @@
               "max_chars_per_flush": 12000,
               "max_extraction_seconds": 30,
               "max_messages_per_flush": 20,
+              "model": null,
               "no_reply_token": "NO_REPLY"
             }
           },
@@ -2745,6 +4238,7 @@
       "type": "object"
     },
     "MemorySearchConfig": {
+      "additionalProperties": false,
       "description": "Search behavior for file-backed memory.",
       "properties": {
         "mode": {
@@ -2768,11 +4262,33 @@
           "title": "Include",
           "type": "array"
         },
+        "exclude": {
+          "default": [],
+          "description": "Root-relative glob patterns left out of file-memory semantic search after include filtering",
+          "items": {
+            "type": "string"
+          },
+          "title": "Exclude",
+          "type": "array"
+        },
         "include_entrypoint": {
           "default": false,
           "description": "When true, include MEMORY.md in file-memory semantic search",
           "title": "Include Entrypoint",
           "type": "boolean"
+        },
+        "rerank": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "When true, semantic file-memory searches rerank their hits with the root reranker, and recall keeps only hits that score at least its threshold; unset reranks with an openai_decisions or typesafe reranker",
+          "title": "Rerank"
         }
       },
       "title": "MemorySearchConfig",
@@ -2819,6 +4335,7 @@
       "type": "object"
     },
     "MindRoomUserConfig": {
+      "additionalProperties": false,
       "description": "Configuration for the internal MindRoom user account.",
       "properties": {
         "username": {
@@ -2838,6 +4355,7 @@
       "type": "object"
     },
     "ModelConfig": {
+      "additionalProperties": false,
       "description": "Configuration for an AI model.",
       "properties": {
         "provider": {
@@ -2933,7 +4451,7 @@
             }
           ],
           "default": null,
-          "description": "Additional provider-specific parameters passed directly to the model; may include api_key",
+          "description": "Additional provider-specific parameters the model's provider accepts; config load rejects any other key; may include api_key",
           "title": "Extra Kwargs",
           "x-mindroom": {
             "secret": true
@@ -2950,7 +4468,7 @@
             }
           ],
           "default": null,
-          "description": "Actual provider context window size in tokens. MindRoom uses it for compaction summary input and as the default replay-planning window unless compaction.replay_window_tokens sets a smaller replay cap. An explicit compaction.model or compaction.fallback_model also needs its own context_window for summary generation. On vertexai_claude models it additionally enables request-time fitting that trims replayed history when a request would exceed the window",
+          "description": "Actual provider context window size in tokens. MindRoom uses it for compaction summary input and as the default replay-planning window unless compaction.replay_window_tokens sets a smaller replay cap. An explicit compaction.model or compaction.fallback_model also needs its own context_window for summary generation. With compaction enabled, every model request of a reply is also checked against it, and the reply compacts when its next request would not fit",
           "title": "Context Window"
         },
         "stream_idle_timeout_seconds": {
@@ -2966,6 +4484,30 @@
           "default": null,
           "description": "Seconds a streamed model request may go without a provider event before MindRoom treats it as stalled and retries once if nothing was streamed yet; unset uses 300 for hosted providers on their built-in endpoint and no limit for ollama, llama_cpp, or a configured endpoint; 0 disables the limit",
           "title": "Stream Idle Timeout Seconds"
+        },
+        "pricing": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ModelPricing"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Provider prices in USD per million tokens, used to measure spend against budgets"
+        },
+        "reasoning": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/ReasoningConfig"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Reasoning levels this model offers; its provider's reasoning key in extra_kwargs then follows the level"
         }
       },
       "required": [
@@ -2973,6 +4515,58 @@
         "id"
       ],
       "title": "ModelConfig",
+      "type": "object"
+    },
+    "ModelPricing": {
+      "additionalProperties": false,
+      "description": "Provider prices in USD per million tokens.",
+      "properties": {
+        "input": {
+          "description": "USD per million uncached input tokens",
+          "minimum": 0,
+          "title": "Input",
+          "type": "number"
+        },
+        "output": {
+          "description": "USD per million output tokens, including reasoning tokens",
+          "minimum": 0,
+          "title": "Output",
+          "type": "number"
+        },
+        "cache_read": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "USD per million cache-read input tokens; unset uses the input price",
+          "title": "Cache Read"
+        },
+        "cache_write": {
+          "anyOf": [
+            {
+              "minimum": 0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "USD per million cache-write input tokens; unset uses the input price",
+          "title": "Cache Write"
+        }
+      },
+      "required": [
+        "input",
+        "output"
+      ],
+      "title": "ModelPricing",
       "type": "object"
     },
     "OpenAIDecisionsJudgmentConfig": {
@@ -3074,16 +4668,84 @@
       "title": "ParticipationConfig",
       "type": "object"
     },
+    "PersonalAgentTemplateConfig": {
+      "additionalProperties": false,
+      "description": "Defaults for the agent that every onboarded user gets of their own.",
+      "properties": {
+        "name": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Agent key pattern with one {username}; defaults to '<template key>_{username}'",
+          "title": "Name"
+        },
+        "matrix_username": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Matrix localpart pattern with one {username} and at least one other character; defaults to the usual mindroom_<agent key> account",
+          "title": "Matrix Username"
+        },
+        "agent": {
+          "$ref": "#/$defs/AgentConfig",
+          "description": "Agent fields shared by every user's agent; display_name, role, and instructions accept {user}, {username}, {user_display_name}, and {user_first_name}, and the template key in delegate_to names each user's own agent. Only the owner may use each agent, platform administrators included, unless access admits others, and the owner is always added to access.users and credential_managers"
+        },
+        "users": {
+          "additionalProperties": {
+            "additionalProperties": true,
+            "type": "object"
+          },
+          "default": {},
+          "description": "Per-user agent field overrides as YAML, such as model: opus, keyed by concrete Matrix user ID; each replaces the template field whole, so a list or object is not merged",
+          "title": "Users",
+          "type": "object",
+          "x-mindroom": {
+            "key_placeholder": "@alice:example.org"
+          }
+        },
+        "workspace_template": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": "mind",
+          "description": "Files copied into each user's agent workspace without overwriting any: 'mind' for the starter files mindroom config init gives the mind agent, whose six context files load unless agent.context_files is set, a directory relative to the config file, or null for none",
+          "title": "Workspace Template"
+        }
+      },
+      "required": [
+        "agent"
+      ],
+      "title": "PersonalAgentTemplateConfig",
+      "type": "object"
+    },
     "PersonalRoomsConfig": {
       "additionalProperties": false,
       "description": "One private room per eligible human, managed by a selected agent.",
       "properties": {
         "agent": {
-          "description": "Agent that owns and answers in personal rooms",
+          "description": "Agent, or personal_agents template, that owns and answers in personal rooms",
           "title": "Agent",
           "type": "string",
           "x-mindroom": {
-            "reference": "agent"
+            "reference": "personal_room_agent"
           }
         },
         "onboarding_rooms": {
@@ -3204,7 +4866,7 @@
       "description": "An automation a loaded plugin provides; its options mean what the plugin documents.",
       "properties": {
         "cron": {
-          "description": "When to check, in the configured timezone",
+          "description": "When to check, in the agent's timezone",
           "title": "Cron",
           "type": "string"
         },
@@ -3218,7 +4880,7 @@
             }
           ],
           "default": null,
-          "description": "Room alias or ID for the prompt; defaults to the agent's first configured room",
+          "description": "Room key or Matrix room ID of a room the agent is in, for the prompt; defaults to the agent's first configured room",
           "title": "Room"
         },
         "model": {
@@ -3242,7 +4904,8 @@
           "not": {
             "enum": [
               "prompt_curation",
-              "dreaming"
+              "dreaming",
+              "exploration"
             ]
           },
           "pattern": "^[a-z][a-z0-9_]*$",
@@ -3268,6 +4931,7 @@
       }
     },
     "PluginEntryConfig": {
+      "additionalProperties": false,
       "description": "Normalized plugin entry from the root config.",
       "properties": {
         "path": {
@@ -3279,6 +4943,12 @@
           "default": true,
           "description": "Load the plugin; false disables it without removing the entry",
           "title": "Enabled",
+          "type": "boolean"
+        },
+        "required": {
+          "default": false,
+          "description": "Fail startup, and refuse a reload, when this plugin does not load, instead of running without it",
+          "title": "Required",
           "type": "boolean"
         },
         "settings": {
@@ -3330,7 +5000,7 @@
       "properties": {
         "cron": {
           "default": "0 4 * * *",
-          "description": "When to check, in the configured timezone",
+          "description": "When to check, in the agent's timezone",
           "title": "Cron",
           "type": "string"
         },
@@ -3344,7 +5014,7 @@
             }
           ],
           "default": null,
-          "description": "Room alias or ID for the prompt; defaults to the agent's first configured room",
+          "description": "Room key or Matrix room ID of a room the agent is in, for the prompt; defaults to the agent's first configured room",
           "title": "Room"
         },
         "model": {
@@ -3371,8 +5041,8 @@
           "type": "string"
         },
         "trigger_tokens": {
-          "default": 50000,
-          "description": "Post the prompt once MEMORY.md and the context files total more than this many estimated tokens",
+          "default": 20000,
+          "description": "Post the prompt once MEMORY.md and the context files total more than this many of the agent model's tokens; a file the preload cannot show whole (over defaults.max_preload_file_chars) also posts it",
           "minimum": 1,
           "title": "Trigger Tokens",
           "type": "integer"
@@ -3443,6 +5113,73 @@
       "title": "RealtimeCallProfile",
       "type": "object"
     },
+    "ReasoningConfig": {
+      "additionalProperties": false,
+      "description": "The reasoning levels one model offers and the level its plain name runs at.",
+      "properties": {
+        "levels": {
+          "description": "Levels clients offer for this model, in order; `name@level` runs the model at one of them",
+          "items": {
+            "enum": [
+              "off",
+              "minimal",
+              "low",
+              "medium",
+              "high",
+              "xhigh",
+              "max"
+            ],
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Levels",
+          "type": "array"
+        },
+        "default": {
+          "enum": [
+            "off",
+            "minimal",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "type": "string",
+          "description": "Level the plain model name runs at; one of levels",
+          "title": "Default"
+        }
+      },
+      "required": [
+        "levels",
+        "default"
+      ],
+      "title": "ReasoningConfig",
+      "type": "object"
+    },
+    "RerankerConfig": {
+      "discriminator": {
+        "mapping": {
+          "cohere": "#/$defs/KnowledgeRerankerConfig",
+          "openai_decisions": "#/$defs/_OpenAIDecisionsRerankerConfig",
+          "sentence_transformers": "#/$defs/KnowledgeRerankerConfig",
+          "typesafe": "#/$defs/_TypeSafeRerankerConfig",
+          "vertex_ai": "#/$defs/KnowledgeRerankerConfig"
+        },
+        "propertyName": "provider"
+      },
+      "oneOf": [
+        {
+          "$ref": "#/$defs/KnowledgeRerankerConfig"
+        },
+        {
+          "$ref": "#/$defs/_TypeSafeRerankerConfig"
+        },
+        {
+          "$ref": "#/$defs/_OpenAIDecisionsRerankerConfig"
+        }
+      ]
+    },
     "ResponderAccessConfig": {
       "additionalProperties": false,
       "description": "Authored conversation-access rules for one responder.",
@@ -3492,6 +5229,36 @@
       "title": "ResponderAccessConfig",
       "type": "object"
     },
+    "RoomActivityConfig": {
+      "additionalProperties": false,
+      "description": "Whether, and how far back, an agent's thread replies hear about activity in the room's other threads.",
+      "properties": {
+        "enabled": {
+          "default": false,
+          "description": "Add a short note listing the room's other threads with new messages to the agent's thread replies",
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "window_minutes": {
+          "default": 120,
+          "description": "How far back the note looks, in minutes, and at most since the agent's last reply in the thread",
+          "maximum": 1440,
+          "minimum": 1,
+          "title": "Window Minutes",
+          "type": "integer"
+        },
+        "max_threads": {
+          "default": 5,
+          "description": "Most threads one note lists, the most recent first",
+          "maximum": 20,
+          "minimum": 1,
+          "title": "Max Threads",
+          "type": "integer"
+        }
+      },
+      "title": "RoomActivityConfig",
+      "type": "object"
+    },
     "RoomConfig": {
       "additionalProperties": false,
       "description": "Configuration for a managed Matrix room.",
@@ -3511,7 +5278,7 @@
         },
         "description": {
           "default": "",
-          "description": "Dashboard-facing room purpose",
+          "description": "Room purpose shown in the dashboard and used as the topic of a new room or a room without one",
           "title": "Description",
           "type": "string"
         },
@@ -3590,6 +5357,16 @@
           "default": null,
           "description": "Room-specific Matrix administrator override",
           "title": "Admins"
+        },
+        "reply_mode": {
+          "default": "auto",
+          "description": "'auto' lets the best-fitting or the room's only agent or team answer a message that mentions no one; 'mentions' answers only messages that mention an agent or team, and follow-ups in threads an agent or team already replied in or is still answering",
+          "enum": [
+            "auto",
+            "mentions"
+          ],
+          "title": "Reply Mode",
+          "type": "string"
         }
       },
       "title": "RoomConfig",
@@ -3645,7 +5422,8 @@
       "type": "object"
     },
     "RouterConfig": {
-      "description": "Configuration for the router system.",
+      "additionalProperties": false,
+      "description": "Configuration for routing and for the MindRoom owner account.",
       "properties": {
         "model": {
           "default": "default",
@@ -3678,10 +5456,13 @@
                 "type": "string"
               },
               "type": "array"
+            },
+            {
+              "type": "null"
             }
           ],
-          "default": true,
-          "description": "true accepts every room invite to the router, false accepts none, and a list accepts only invites from matching inviter Matrix IDs or glob patterns",
+          "default": null,
+          "description": "Deprecated and ignored: the MindRoom owner account accepts no room invites",
           "title": "Accept Invites"
         },
         "access": {
@@ -3698,6 +5479,32 @@
         }
       },
       "title": "RouterConfig",
+      "type": "object"
+    },
+    "ServerEmojiConfig": {
+      "additionalProperties": false,
+      "description": "Configuration for the optional room whose emoji packs every MindRoom Chat user on the homeserver can use.",
+      "properties": {
+        "enabled": {
+          "default": false,
+          "description": "Whether to create and maintain the server custom emoji room for MindRoom Chat",
+          "title": "Enabled",
+          "type": "boolean"
+        },
+        "name": {
+          "default": "Emoji",
+          "description": "Display name for the emoji room and its first emoji pack when MindRoom creates them",
+          "title": "Name",
+          "type": "string"
+        },
+        "moderators_only": {
+          "default": false,
+          "description": "Whether only moderators (power level 50) may add, rename, or remove server emoji",
+          "title": "Moderators Only",
+          "type": "boolean"
+        }
+      },
+      "title": "ServerEmojiConfig",
       "type": "object"
     },
     "SkillLearningConfig": {
@@ -3721,7 +5528,10 @@
           ],
           "default": null,
           "description": "Review model alias; defaults to the model of the reviewed response",
-          "title": "Model"
+          "title": "Model",
+          "x-mindroom": {
+            "reference": "model"
+          }
         },
         "review_interval": {
           "default": 10,
@@ -3755,6 +5565,40 @@
         }
       },
       "title": "SkillLearningConfig",
+      "type": "object"
+    },
+    "SlackConfig": {
+      "additionalProperties": false,
+      "description": "How Slack workspace members map to Matrix users.",
+      "properties": {
+        "email_domain": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Email domain of the Slack workspace's members, for example `example.com`; set with matrix_user_id_template",
+          "title": "Email Domain"
+        },
+        "matrix_user_id_template": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Matrix user ID a member's email localpart maps to, with one `{localpart}`, for example `@{localpart}:example.org`; set with email_domain",
+          "title": "Matrix User Id Template"
+        }
+      },
+      "title": "SlackConfig",
       "type": "object"
     },
     "SpeechServiceConfig": {
@@ -3836,6 +5680,7 @@
       "type": "object"
     },
     "StreamingConfig": {
+      "additionalProperties": false,
       "description": "Timing parameters for streaming response edits.",
       "properties": {
         "update_interval": {
@@ -3865,12 +5710,54 @@
           "exclusiveMinimum": 0,
           "title": "Max Idle",
           "type": "number"
+        },
+        "live_frames": {
+          "default": true,
+          "description": "Stream live updates as ephemeral frames when the homeserver relays them, editing the message only every update_interval",
+          "title": "Live Frames",
+          "type": "boolean"
         }
       },
       "title": "StreamingConfig",
       "type": "object"
     },
+    "TailnetSshConfig": {
+      "additionalProperties": false,
+      "description": "Operator-supplied tailnet SSH settings, keyed by concrete Matrix user ID.",
+      "properties": {
+        "logins": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "default": {},
+          "description": "Exact Tailscale or Headscale login each Matrix user may connect from",
+          "title": "Logins",
+          "type": "object",
+          "x-mindroom": {
+            "key_placeholder": "@alice:example.org"
+          }
+        },
+        "authorized_keys": {
+          "additionalProperties": {
+            "items": {
+              "type": "string"
+            },
+            "type": "array"
+          },
+          "default": {},
+          "description": "OpenSSH public key lines each Matrix user may authenticate with",
+          "title": "Authorized Keys",
+          "type": "object",
+          "x-mindroom": {
+            "key_placeholder": "@alice:example.org"
+          }
+        }
+      },
+      "title": "TailnetSshConfig",
+      "type": "object"
+    },
     "TeamConfig": {
+      "additionalProperties": false,
       "description": "Configuration for a team of agents.",
       "properties": {
         "display_name": {
@@ -3900,7 +5787,7 @@
         },
         "rooms": {
           "default": [],
-          "description": "List of room IDs or names to auto-join",
+          "description": "Room keys or Matrix room IDs to join",
           "items": {
             "type": "string"
           },
@@ -3939,17 +5826,10 @@
           "title": "Accept Invites"
         },
         "model": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
           "default": "default",
           "description": "Configured model alias used for this team's replies",
           "title": "Model",
+          "type": "string",
           "x-mindroom": {
             "reference": "model"
           }
@@ -3957,6 +5837,10 @@
         "mode": {
           "default": "coordinate",
           "description": "Team collaboration mode: coordinate or collaborate",
+          "enum": [
+            "coordinate",
+            "collaborate"
+          ],
           "title": "Mode",
           "type": "string"
         },
@@ -4096,13 +5980,13 @@
         },
         "defer": {
           "default": false,
-          "description": "Hide the tool schema until the agent loads the tool for the current session",
+          "description": "Keep the tool's function definitions out of the model's context until the agent searches for them",
           "title": "Defer",
           "type": "boolean"
         },
         "initial": {
           "default": false,
-          "description": "Load a deferred tool at session start and keep it loaded; requires defer",
+          "description": "Send a deferred tool as an ordinary tool on every request; requires defer",
           "title": "Initial",
           "type": "boolean"
         }
@@ -4147,6 +6031,7 @@
       "type": "object"
     },
     "VoiceConfig": {
+      "additionalProperties": false,
       "description": "Configuration for voice message handling.",
       "properties": {
         "enabled": {
@@ -4155,10 +6040,23 @@
           "title": "Enabled",
           "type": "boolean"
         },
+        "dictation": {
+          "anyOf": [
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Enable streaming composer dictation via voice.stt (defaults to voice.enabled)",
+          "title": "Dictation"
+        },
         "visible_router_echo": {
           "default": true,
-          "description": "Show router voice progress, or direct fallback text when transcription is disabled",
-          "title": "Visible Router Echo",
+          "description": "Post the transcript of a voice message before the reply",
+          "title": "Voice Transcript",
           "type": "boolean"
         },
         "stt": {
@@ -4260,18 +6158,19 @@
       "type": "object"
     },
     "_MemoryAutoFlushBatchConfig": {
+      "additionalProperties": false,
       "description": "Batching controls for background memory auto-flush.",
       "properties": {
         "max_sessions_per_cycle": {
           "default": 10,
-          "description": "Maximum sessions processed in one auto-flush loop iteration",
+          "description": "Maximum conversations flushed in one auto-flush pass, across all agents",
           "minimum": 1,
           "title": "Max Sessions Per Cycle",
           "type": "integer"
         },
         "max_sessions_per_agent_per_cycle": {
           "default": 3,
-          "description": "Maximum sessions per agent processed in one auto-flush loop iteration",
+          "description": "Maximum conversations of one agent or private instance flushed in one auto-flush pass",
           "minimum": 1,
           "title": "Max Sessions Per Agent Per Cycle",
           "type": "integer"
@@ -4281,6 +6180,7 @@
       "type": "object"
     },
     "_MemoryAutoFlushContextConfig": {
+      "additionalProperties": false,
       "description": "Existing-memory context limits injected into extraction runs.",
       "properties": {
         "memory_snippets": {
@@ -4302,8 +6202,25 @@
       "type": "object"
     },
     "_MemoryAutoFlushExtractorConfig": {
+      "additionalProperties": false,
       "description": "Extraction limits for one background memory flush job.",
       "properties": {
+        "model": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Model config that runs extraction instead of the agent's own model",
+          "title": "Model",
+          "x-mindroom": {
+            "reference": "model"
+          }
+        },
         "no_reply_token": {
           "default": "NO_REPLY",
           "description": "Token indicating no durable memory should be written",
@@ -4312,21 +6229,21 @@
         },
         "max_messages_per_flush": {
           "default": 20,
-          "description": "Maximum session chat messages considered by one extraction job",
+          "description": "Maximum new messages read by one extraction job; a longer backlog is read over later passes",
           "minimum": 1,
           "title": "Max Messages Per Flush",
           "type": "integer"
         },
         "max_chars_per_flush": {
           "default": 12000,
-          "description": "Maximum message characters considered by one extraction job",
+          "description": "Maximum message characters read by one extraction job",
           "minimum": 1,
           "title": "Max Chars Per Flush",
           "type": "integer"
         },
         "max_extraction_seconds": {
           "default": 30,
-          "description": "Timeout for one extraction job before retrying in a later cycle",
+          "description": "Timeout for one extraction job before retrying in a later pass",
           "minimum": 1,
           "title": "Max Extraction Seconds",
           "type": "integer"
@@ -4344,11 +6261,12 @@
       "type": "object"
     },
     "_MemoryEmbedderConfig": {
+      "additionalProperties": false,
       "description": "Memory embedder configuration.",
       "properties": {
         "provider": {
           "default": "openai",
-          "description": "Embedder provider (openai, ollama, huggingface, sentence_transformers, etc)",
+          "description": "Embedder provider (openai, ollama, huggingface, sentence_transformers, vertex_ai, etc)",
           "title": "Provider",
           "type": "string"
         },
@@ -4359,7 +6277,9 @@
             "credentials_service": null,
             "api_key": null,
             "host": null,
-            "dimensions": null
+            "dimensions": null,
+            "query_prefix": null,
+            "document_prefix": null
           },
           "description": "Provider-specific config"
         }
@@ -4367,41 +6287,8 @@
       "title": "_MemoryEmbedderConfig",
       "type": "object"
     },
-    "_MemoryFileConfig": {
-      "description": "File-backed memory configuration.",
-      "properties": {
-        "path": {
-          "anyOf": [
-            {
-              "type": "string"
-            },
-            {
-              "type": "null"
-            }
-          ],
-          "default": null,
-          "description": "Optional fallback root for direct file-memory paths. Relative paths resolve from the config directory. Canonical agent and team file memory live under their canonical workspace or scope roots.",
-          "title": "Path"
-        },
-        "max_entrypoint_lines": {
-          "default": 200,
-          "description": "Maximum number of lines to preload from MEMORY.md",
-          "minimum": 1,
-          "title": "Max Entrypoint Lines",
-          "type": "integer"
-        },
-        "max_entrypoint_tokens": {
-          "default": 50000,
-          "description": "Maximum estimated tokens (characters / 4) of whole lines to preload from MEMORY.md",
-          "minimum": 1,
-          "title": "Max Entrypoint Tokens",
-          "type": "integer"
-        }
-      },
-      "title": "_MemoryFileConfig",
-      "type": "object"
-    },
     "_MemoryLLMConfig": {
+      "additionalProperties": false,
       "description": "Memory LLM configuration.",
       "properties": {
         "provider": {
@@ -4424,7 +6311,87 @@
       "title": "_MemoryLLMConfig",
       "type": "object"
     },
+    "_OpenAIDecisionsRerankerConfig": {
+      "additionalProperties": false,
+      "description": "OpenAI Decisions as the reranker: one probability per candidate, and recall keeps those at its threshold.",
+      "properties": {
+        "threshold": {
+          "default": 0.3,
+          "description": "Minimum probability, from 0 to 1, of a memory recalled without being asked for; 0.3 is the value the recall benchmark picked",
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Threshold",
+          "type": "number"
+        },
+        "timeout_seconds": {
+          "default": 1.5,
+          "description": "Seconds to wait for the judgment before falling back",
+          "exclusiveMinimum": 0.0,
+          "maximum": 30.0,
+          "title": "Timeout Seconds",
+          "type": "number"
+        },
+        "provider": {
+          "const": "openai_decisions",
+          "description": "Judge with the OpenAI Decisions API; uses the OpenAI API key",
+          "title": "Provider",
+          "type": "string"
+        },
+        "credentials_service": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "description": "Credential service holding the OpenAI API key; defaults to the OpenAI provider credential, which may hold a proxy key that api.openai.com rejects",
+          "title": "Credentials Service"
+        }
+      },
+      "required": [
+        "provider"
+      ],
+      "title": "_OpenAIDecisionsRerankerConfig",
+      "type": "object"
+    },
+    "_TypeSafeRerankerConfig": {
+      "additionalProperties": false,
+      "description": "System One as the reranker: one probability per candidate, and recall keeps those at its threshold.",
+      "properties": {
+        "threshold": {
+          "default": 0.3,
+          "description": "Minimum probability, from 0 to 1, of a memory recalled without being asked for; 0.3 is the value the recall benchmark picked",
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Threshold",
+          "type": "number"
+        },
+        "timeout_seconds": {
+          "default": 1.5,
+          "description": "Seconds to wait for the judgment before falling back",
+          "exclusiveMinimum": 0.0,
+          "maximum": 30.0,
+          "title": "Timeout Seconds",
+          "type": "number"
+        },
+        "provider": {
+          "const": "typesafe",
+          "description": "Judge with System One; requires TYPESAFE_API_KEY",
+          "title": "Provider",
+          "type": "string"
+        }
+      },
+      "required": [
+        "provider"
+      ],
+      "title": "_TypeSafeRerankerConfig",
+      "type": "object"
+    },
     "_VoiceLLMConfig": {
+      "additionalProperties": false,
       "description": "Configuration for voice transcript normalization.",
       "properties": {
         "model": {
@@ -4444,6 +6411,15 @@
   "additionalProperties": false,
   "description": "Complete configuration from YAML.",
   "properties": {
+    "egress_broker": {
+      "$ref": "#/$defs/EgressBrokerConfig",
+      "default": {
+        "unmatched_hosts": "passthrough",
+        "private_networks": [],
+        "services": {}
+      },
+      "description": "Credential-injecting egress broker for worker shell and python traffic"
+    },
     "administrators": {
       "default": [],
       "description": "Concrete Matrix user IDs with platform-wide administrative authority",
@@ -4559,9 +6535,15 @@
           "debounce_ms": 1000
         },
         "show_stop_button": true,
+        "room_activity": {
+          "enabled": false,
+          "max_threads": 5,
+          "window_minutes": 120
+        },
         "max_consecutive_agent_replies": 50,
-        "learning": true,
-        "learning_mode": "always",
+        "knowledge_graph": false,
+        "knowledge_graph_edits": true,
+        "cheap_model": null,
         "compaction": {
           "enabled": true,
           "fallback_model": null,
@@ -4574,20 +6556,23 @@
         },
         "num_history_runs": null,
         "num_history_messages": null,
-        "compress_tool_results": false,
         "max_tool_calls_from_history": null,
         "max_tool_calls_per_turn": 1000,
         "show_tool_calls": true,
+        "show_reasoning": true,
         "file_access": "workspace",
         "worker_tools": null,
         "worker_scope": null,
+        "allow_shell_without_worker": false,
         "worker_grantable_credentials": null,
         "allow_self_config": false,
-        "max_preload_chars": 50000,
+        "desktop_pairing": "self_service",
+        "max_preload_file_chars": 30000,
         "automations": [],
         "tool_output_auto_save_threshold_bytes": 51200,
         "streaming": {
           "interval_ramp_seconds": 15.0,
+          "live_frames": true,
           "max_idle": 2.0,
           "min_update_interval": 0.5,
           "update_interval": 5.0
@@ -4603,29 +6588,27 @@
       "$ref": "#/$defs/MemoryConfig",
       "default": {
         "backend": "mem0",
-        "team_reads_member_memory": false,
         "embedder": {
           "config": {
             "api_key": null,
             "credentials_service": null,
             "dimensions": null,
+            "document_prefix": null,
             "host": null,
-            "model": "text-embedding-3-small"
+            "model": "text-embedding-3-small",
+            "query_prefix": null
           },
           "provider": "openai"
         },
         "llm": null,
-        "file": {
-          "max_entrypoint_lines": 200,
-          "max_entrypoint_tokens": 50000,
-          "path": null
-        },
         "search": {
+          "exclude": [],
           "include": [
             "memory/**/*.md"
           ],
           "include_entrypoint": false,
-          "mode": "keyword"
+          "mode": "keyword",
+          "rerank": null
         },
         "auto_flush": {
           "batch": {
@@ -4641,18 +6624,35 @@
             "max_chars_per_flush": 12000,
             "max_extraction_seconds": 30,
             "max_messages_per_flush": 20,
+            "model": null,
             "no_reply_token": "NO_REPLY"
           },
-          "flush_interval_seconds": 1800,
+          "flush_interval_seconds": 300,
           "idle_seconds": 120,
-          "max_cross_session_reprioritize": 5,
-          "max_dirty_age_seconds": 600,
           "max_retry_cooldown_seconds": 300,
           "retry_cooldown_seconds": 30,
           "stale_ttl_seconds": 86400
         }
       },
       "description": "Memory configuration"
+    },
+    "knowledge_graph": {
+      "$ref": "#/$defs/KnowledgeGraphConfig",
+      "default": {
+        "model": null,
+        "extraction_instructions": "",
+        "ingest": {
+          "backfill_days": 7,
+          "idle_seconds": 120,
+          "interval_seconds": 600,
+          "max_episode_chars": 24000,
+          "max_sessions_per_cycle": 10,
+          "max_tool_result_chars": 4000
+        },
+        "generation": 0,
+        "aliases": {}
+      },
+      "description": "Knowledge graph built from graph-enabled agents' conversations"
     },
     "knowledge_bases": {
       "additionalProperties": {
@@ -4662,6 +6662,18 @@
       "description": "Knowledge base configurations keyed by base ID",
       "title": "Knowledge Bases",
       "type": "object"
+    },
+    "reranker": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/RerankerConfig"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Optional reranker for search_knowledge_base results, and for memory searches with memory.search.rerank; searches keep hybrid ranking without one"
     },
     "mcp_servers": {
       "additionalProperties": {
@@ -4681,7 +6693,11 @@
         "default_max_body_bytes": 65536,
         "max_body_bytes": 262144,
         "max_triggers_per_owner": 20,
-        "admin_users": []
+        "admin_users": [],
+        "reactive_enabled": true,
+        "max_reactive_triggers_per_owner": 50,
+        "max_fires_per_hour": 60,
+        "event_sources": {}
       },
       "description": "Global policy for tool-managed signed external triggers"
     },
@@ -4704,15 +6720,36 @@
       },
       "description": "Tool-approval rules for agent-initiated tool calls"
     },
+    "email_invites": {
+      "$ref": "#/$defs/EmailInvitesConfig",
+      "default": {
+        "chat_url": "https://chat.mindroom.chat",
+        "expiry_days": 7,
+        "approvers": []
+      },
+      "description": "Invites to a room by email through the email_invite tool"
+    },
     "router": {
       "$ref": "#/$defs/RouterConfig",
       "default": {
         "model": "default",
         "judgment": null,
-        "accept_invites": true,
+        "accept_invites": null,
         "access": null
       },
       "description": "Router configuration"
+    },
+    "personal_agents": {
+      "additionalProperties": {
+        "$ref": "#/$defs/PersonalAgentTemplateConfig"
+      },
+      "default": {},
+      "description": "Templates that give every onboarded user their own agent; select a template's key as the Personal rooms agent to use it",
+      "title": "Personal Agents",
+      "type": "object",
+      "x-mindroom": {
+        "key_placeholder": "mind"
+      }
     },
     "personal_rooms": {
       "anyOf": [
@@ -4726,10 +6763,23 @@
       "default": null,
       "description": "Optional native personal agent rooms"
     },
+    "budgets": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/BudgetsConfig"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "description": "Optional per-user monthly spending budgets"
+    },
     "voice": {
       "$ref": "#/$defs/VoiceConfig",
       "default": {
         "enabled": false,
+        "dictation": null,
         "visible_router_echo": true,
         "stt": {
           "api_key": null,
@@ -4751,9 +6801,23 @@
         "enabled": false,
         "profiles": {},
         "agents": {},
-        "livekit_service_url": null
+        "livekit_service_url": null,
+        "transcripts": {
+          "enabled": false,
+          "languages": [],
+          "notes_model": null
+        }
       },
       "description": "Voice call (MatrixRTC) configuration"
+    },
+    "background_tool_jobs": {
+      "$ref": "#/$defs/BackgroundToolJobsConfig",
+      "default": {
+        "enabled": true,
+        "exclude_toolkits": [],
+        "approval_wait_timeout": 300.0
+      },
+      "description": "Managed background tool execution, on by default; turning it on or off and its exclusions need a restart."
     },
     "event_journal": {
       "$ref": "#/$defs/EventJournalConfig",
@@ -4774,9 +6838,25 @@
       },
       "description": "Matrix event sync transport configuration"
     },
+    "slack": {
+      "$ref": "#/$defs/SlackConfig",
+      "default": {
+        "email_domain": null,
+        "matrix_user_id_template": null
+      },
+      "description": "Slack integration: how Slack workspace members map to Matrix users"
+    },
+    "tailnet_ssh": {
+      "$ref": "#/$defs/TailnetSshConfig",
+      "default": {
+        "logins": {},
+        "authorized_keys": {}
+      },
+      "description": "Tailnet SSH credentials for users of the operator-managed tailnet"
+    },
     "timezone": {
       "default": "UTC",
-      "description": "Timezone for interpreting scheduling requests and displaying scheduled tasks (e.g., 'America/New_York')",
+      "description": "IANA timezone for dates, times, and schedules (e.g., 'America/New_York'); agents can override it",
       "title": "Timezone",
       "type": "string"
     },
@@ -4806,6 +6886,15 @@
         "name": "MindRoom"
       },
       "description": "Optional root Matrix Space for grouping managed rooms"
+    },
+    "server_emoji": {
+      "$ref": "#/$defs/ServerEmojiConfig",
+      "default": {
+        "enabled": false,
+        "name": "Emoji",
+        "moderators_only": false
+      },
+      "description": "Optional room whose emoji packs every MindRoom Chat user on the homeserver can use"
     },
     "authorization": {
       "$ref": "#/$defs/AuthorizationConfig",

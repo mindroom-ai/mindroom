@@ -1,9 +1,17 @@
-"""Opt-in heap type probe behavior."""
+"""Heap freezes, refreezes with their page-in, and the opt-in heap type probe."""
 
 from __future__ import annotations
 
 import asyncio
+import ctypes
+import gc
+import mmap
+import os
+import platform
+import re
+import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from structlog.testing import capture_logs
@@ -12,10 +20,19 @@ from mindroom import heap_probe
 from mindroom.constants import RuntimePaths
 from mindroom.heap_probe import (
     _HEAP_PROBE_INTERVAL_ENV,
+    _HEAP_REFREEZE_INTERVAL_ENV,
+    _MADV_POPULATE_READ,
     _heap_probe_interval_seconds,
+    _heap_refreeze_interval_seconds,
     _log_heap_type_probe,
+    _madvise,
+    _raise_full_collection_threshold,
+    _read_swapped_memory_back,
+    _refreeze_runtime_heap,
+    _run_heap_refreeze,
     _run_heap_type_probe,
-    start_heap_type_probe,
+    freeze_startup_heap,
+    start_heap_tasks,
 )
 
 
@@ -54,21 +71,265 @@ def test_interval_rejects_short_negative_nonfinite_or_non_numeric_values(raw: st
         _heap_probe_interval_seconds(_fake_runtime_paths(**{_HEAP_PROBE_INTERVAL_ENV: raw}))
 
 
+async def _never_ready() -> None:
+    await asyncio.Event().wait()
+
+
 @pytest.mark.asyncio
-async def test_start_is_a_no_op_when_disabled() -> None:
-    """The default configuration starts no task at all."""
+async def test_start_is_a_no_op_when_both_heap_tasks_are_disabled() -> None:
+    """Disabling the refreeze and leaving the probe off starts no task at all."""
     tasks_before = asyncio.all_tasks()
 
-    assert start_heap_type_probe(_fake_runtime_paths()) is None
-    assert start_heap_type_probe(_fake_runtime_paths(**{_HEAP_PROBE_INTERVAL_ENV: "0"})) is None
+    assert start_heap_tasks(_fake_runtime_paths(**{_HEAP_REFREEZE_INTERVAL_ENV: "0"}), runtime_ready=_never_ready) == []
+    assert (
+        start_heap_tasks(
+            _fake_runtime_paths(**{_HEAP_REFREEZE_INTERVAL_ENV: "0", _HEAP_PROBE_INTERVAL_ENV: "0"}),
+            runtime_ready=_never_ready,
+        )
+        == []
+    )
 
     assert asyncio.all_tasks() == tasks_before
 
 
+def test_refreeze_interval_defaults_to_one_hour_and_zero_disables_it() -> None:
+    """Unset and blank keep the hourly refreeze; zero disables it; other values are seconds."""
+    assert _heap_refreeze_interval_seconds(_fake_runtime_paths()) == 3600.0
+    assert _heap_refreeze_interval_seconds(_fake_runtime_paths(**{_HEAP_REFREEZE_INTERVAL_ENV: " "})) == 3600.0
+    assert _heap_refreeze_interval_seconds(_fake_runtime_paths(**{_HEAP_REFREEZE_INTERVAL_ENV: "0"})) is None
+    assert _heap_refreeze_interval_seconds(_fake_runtime_paths(**{_HEAP_REFREEZE_INTERVAL_ENV: " 900.5 "})) == 900.5
+
+
+@pytest.mark.parametrize("raw", ["59.9", "-60", "inf", "nan", "hourly"])
+def test_refreeze_interval_rejects_short_negative_nonfinite_or_non_numeric_values(raw: str) -> None:
+    """A refreeze interval that is not 0 or at least one minute fails loudly instead of being clamped."""
+    with pytest.raises(ValueError, match=_HEAP_REFREEZE_INTERVAL_ENV):
+        _heap_refreeze_interval_seconds(_fake_runtime_paths(**{_HEAP_REFREEZE_INTERVAL_ENV: raw}))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "env",
+    [
+        {_HEAP_REFREEZE_INTERVAL_ENV: "1", _HEAP_PROBE_INTERVAL_ENV: "60"},
+        {_HEAP_REFREEZE_INTERVAL_ENV: "60", _HEAP_PROBE_INTERVAL_ENV: "1"},
+    ],
+)
+async def test_an_invalid_interval_fails_before_any_heap_task_exists(env: dict[str, str]) -> None:
+    """Shutdown cannot cancel a task that startup created before failing, so validation comes first."""
+    tasks_before = asyncio.all_tasks()
+
+    with pytest.raises(ValueError, match="at least 60 seconds"):
+        start_heap_tasks(_fake_runtime_paths(**env), runtime_ready=_never_ready)
+
+    assert asyncio.all_tasks() == tasks_before
+
+
+@pytest.mark.asyncio
+async def test_refreeze_collects_released_objects_before_freezing_the_survivors(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Replaced bots must be collectable again, and garbage must be gone before the survivors are frozen."""
+    gc_calls: list[str] = []
+    frozen = [12_000]
+
+    def unfreeze() -> None:
+        gc_calls.append("unfreeze")
+        frozen[0] = 0
+
+    def collect() -> int:
+        gc_calls.append("collect")
+        return 4_321
+
+    def freeze() -> None:
+        gc_calls.append("freeze")
+        frozen[0] = 3_000_000
+
+    fake_gc = SimpleNamespace(unfreeze=unfreeze, collect=collect, freeze=freeze, get_freeze_count=lambda: frozen[0])
+    monkeypatch.setattr(heap_probe, "gc", fake_gc)
+    monkeypatch.setattr(heap_probe, "_read_swapped_memory_back", lambda: 512)
+
+    with capture_logs() as logs:
+        await _refreeze_runtime_heap()
+
+    assert gc_calls == ["unfreeze", "collect", "freeze"]
+    [record] = [entry for entry in logs if entry["event"] == "runtime_heap_refrozen"]
+    assert record["frozen_objects"] == 3_000_000
+    assert record["collected"] == 4_321
+    assert record["collect_seconds"] >= 0
+    assert record["paged_in_kib"] == 512
+    assert record["page_in_seconds"] >= 0
+
+
+@pytest.mark.asyncio
+async def test_refreeze_task_waits_for_runtime_readiness_then_refreezes_every_interval(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Bots built during startup are frozen as soon as the runtime is ready, then again after each interval."""
+    steps: list[object] = []
+    ready = asyncio.Event()
+    parked = asyncio.Event()
+    monkeypatch.setattr(heap_probe, "_read_swapped_memory_back", lambda: steps.append("page_in") or 0)
+    monkeypatch.setattr(
+        heap_probe,
+        "gc",
+        SimpleNamespace(
+            unfreeze=lambda: steps.append("unfreeze"),
+            collect=lambda: 0,
+            freeze=lambda: steps.append("freeze"),
+            get_freeze_count=lambda: 0,
+            get_threshold=lambda: (2000, 10, 10),
+            set_threshold=lambda *thresholds: steps.append(thresholds),
+        ),
+    )
+
+    async def _sleep(seconds: float) -> None:
+        steps.append(seconds)
+        if steps.count(seconds) == 2:
+            parked.set()
+            await asyncio.Event().wait()
+
+    task = asyncio.create_task(_run_heap_refreeze(600.0, ready=ready.wait, sleep=_sleep))
+    await asyncio.sleep(0)
+    assert steps == []
+
+    ready.set()
+    await asyncio.wait_for(parked.wait(), timeout=1)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert steps == [
+        "page_in",
+        "unfreeze",
+        "freeze",
+        (2000, 10, 100),
+        600.0,
+        "page_in",
+        "unfreeze",
+        "freeze",
+        600.0,
+    ]
+
+
+_SMAPS = (
+    b"55d0c8a5b000-55d0c8a7d000 rw-p 00000000 00:00 0                          [heap]\n"
+    b"Size:                136 kB\n"
+    b"Swap:                120 kB\n"
+    b"SwapPss:             120 kB\n"
+    b"THPeligible:\t\t0\n"
+    b"VmFlags: rd wr mr mw me ac\n"
+    b"7f0000000000-7f0000100000 rw-p 00000000 00:00 0\n"
+    b"Swap:                  0 kB\n"
+    b"7f0000100000-7f0000200000 rw-s 00000000 00:01 42                         /dev/shm/shared\n"
+    b"Swap:                 64 kB\n"
+    b"7f0000200000-7f0000201000 ---p 00000000 00:00 0\n"
+    b"Swap:                  8 kB\n"
+    b"7f0000300000-7f0000304000 r--p 00010000 fd:01 99                         /opt/caf\xe9\r7f0000400000-7f0000500000 rw-p 0 0:0 0\n"
+    b"Swap:                  4 kB\n"
+    b"7f0000600000-7f0000700000 rw-p 00000000 00:00 0\n"
+    b"Swap:                 16 kB\n"
+)
+
+
+def test_page_in_advises_each_swapped_private_mapping_once(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Readable private mappings with pages in swap are faulted back in; shared memory and guards are not.
+
+    Tab-separated fields (Linux 5.4) are ignored, a mapped path's bytes never start a new line, and swap in
+    a mapping whose advice the kernel rejects is not counted.
+    """
+    smaps = tmp_path / "smaps"
+    smaps.write_bytes(_SMAPS)
+    calls: list[tuple[int, int, int]] = []
+
+    def advise(address: int, length: int, advice: int) -> int:
+        calls.append((address, length, advice))
+        return -1 if address == 0x7F0000600000 else 0
+
+    monkeypatch.setattr(heap_probe, "_SMAPS_PATH", smaps)
+    monkeypatch.setattr(heap_probe, "_madvise", lambda: advise)
+
+    assert _read_swapped_memory_back() == 124
+    assert calls == [
+        (0x55D0C8A5B000, 0x22000, _MADV_POPULATE_READ),
+        (0x7F0000300000, 0x4000, _MADV_POPULATE_READ),
+        (0x7F0000600000, 0x100000, _MADV_POPULATE_READ),
+    ]
+
+
+def test_page_in_is_a_no_op_without_procfs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Platforms without /proc keep refreezing; they only skip the page-in."""
+    monkeypatch.setattr(heap_probe, "_SMAPS_PATH", tmp_path / "missing")
+    monkeypatch.setattr(heap_probe, "_madvise", lambda: pytest.fail("no mapping to advise"))
+
+    assert _read_swapped_memory_back() == 0
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="madvise(MADV_POPULATE_READ) is Linux-only")
+def test_populate_read_faults_an_untouched_page_in() -> None:
+    """The advice value makes the kernel fault a page in; a never-touched page stands in for one in swap."""
+    assert _MADV_POPULATE_READ == 22  # include/uapi/asm-generic/mman-common.h
+    kernel = tuple(int(part) for part in re.findall(r"\d+", platform.release())[:2])
+    if kernel < (5, 14):
+        pytest.skip(f"MADV_POPULATE_READ needs Linux 5.14, this kernel reports {platform.release()}")
+    page_size = mmap.PAGESIZE
+    region = mmap.mmap(-1, page_size, flags=mmap.MAP_PRIVATE | mmap.MAP_ANONYMOUS)
+    address = ctypes.addressof(ctypes.c_char.from_buffer(region))
+    resident = (ctypes.c_ubyte * 1)()
+    mincore = ctypes.CDLL(None, use_errno=True).mincore
+    mincore.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_void_p]
+    try:
+        assert mincore(address, page_size, resident) == 0
+        assert resident[0] & 1 == 0
+        assert _madvise()(address, page_size, _MADV_POPULATE_READ) == 0, os.strerror(ctypes.get_errno())
+        assert mincore(address, page_size, resident) == 0
+        assert resident[0] & 1 == 1
+    finally:
+        region.close()
+
+
+@pytest.mark.skipif((3, 14) <= sys.version_info < (3, 14, 5), reason="3.14.0-3.14.4's incremental GC ignores it")
+@pytest.mark.parametrize(("configured", "expected", "logged"), [(10, 100, True), (500, 500, False)])
+def test_frozen_heap_raises_the_full_collection_threshold_without_lowering_it(
+    configured: int,
+    expected: int,
+    logged: bool,
+) -> None:
+    """Full passes walk everything since the refreeze yet find little garbage, so they run less often."""
+    young, middle, _ = gc.get_threshold()
+    gc.set_threshold(young, middle, configured)
+    with capture_logs() as logs:
+        _raise_full_collection_threshold()
+    assert gc.get_threshold() == (young, middle, expected)
+    records = [entry for entry in logs if entry["event"] == "gc_full_collection_threshold_raised"]
+    assert [(record["previous"], record["threshold"]) for record in records] == (
+        [(configured, expected)] if logged else []
+    )
+
+
+@pytest.mark.asyncio
+async def test_default_start_runs_only_the_named_refreeze_task() -> None:
+    """Without a probe interval the primary gets the refreeze task alone, and shutdown can cancel it."""
+    with capture_logs() as logs:
+        tasks = start_heap_tasks(_fake_runtime_paths(), runtime_ready=_never_ready)
+        assert [task.get_name() for task in tasks] == ["heap_refreeze"]
+        await asyncio.sleep(0)
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
+    assert all(task.cancelled() for task in tasks)
+    [started] = [entry for entry in logs if entry["event"] == "heap_refreeze_started"]
+    assert started["interval_seconds"] == 3600.0
+    assert [entry for entry in logs if entry["event"] == "runtime_heap_refrozen"] == []
+
+
 def test_probe_logs_bounded_type_histogram_and_rss(monkeypatch: pytest.MonkeyPatch) -> None:
-    """One probe logs total tracked objects, the most common types, RSS, and walk time."""
+    """One probe logs unfrozen and frozen object totals, the most common types, RSS, and walk time."""
     heap = [_ProbeMarker(), _ProbeMarker(), _ProbeMarker(), {}, {}, []]
     monkeypatch.setattr(heap_probe.gc, "get_objects", lambda: list(heap))
+    monkeypatch.setattr(heap_probe.gc, "get_freeze_count", lambda: 747_738)
     monkeypatch.setattr(heap_probe, "_TOP_TYPE_COUNT", 2)
 
     with capture_logs() as logs:
@@ -77,6 +338,7 @@ def test_probe_logs_bounded_type_histogram_and_rss(monkeypatch: pytest.MonkeyPat
     [probe] = _probe_logs(logs)
     assert probe["log_level"] == "info"
     assert probe["tracked_objects"] == 6
+    assert probe["frozen_objects"] == 747_738
     assert probe["top_types"] == [
         {"type": f"{__name__}._ProbeMarker", "count": 3},
         {"type": "builtins.dict", "count": 2},
@@ -146,8 +408,10 @@ async def test_probe_task_logs_once_per_interval_and_stops_on_cancel(monkeypatch
 async def test_start_helper_returns_named_task_that_cancels_cleanly() -> None:
     """An opted-in primary gets one named background task that shutdown can cancel before any walk."""
     with capture_logs() as logs:
-        task = start_heap_type_probe(_fake_runtime_paths(**{_HEAP_PROBE_INTERVAL_ENV: "60"}))
-        assert task is not None
+        [task] = start_heap_tasks(
+            _fake_runtime_paths(**{_HEAP_PROBE_INTERVAL_ENV: "60", _HEAP_REFREEZE_INTERVAL_ENV: "0"}),
+            runtime_ready=_never_ready,
+        )
         assert task.get_name() == "heap_type_probe"
         await asyncio.sleep(0)
         task.cancel()
@@ -157,3 +421,30 @@ async def test_start_helper_returns_named_task_that_cancels_cleanly() -> None:
     assert _probe_logs(logs) == []
     [started] = [entry for entry in logs if entry["event"] == "heap_type_probe_started"]
     assert started["interval_seconds"] == 60.0
+
+
+def test_freeze_startup_heap_collects_then_freezes_and_logs_the_frozen_count(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Garbage is collected before the survivors are frozen, and one record reports both."""
+    frozen = [0]
+    gc_calls: list[str] = []
+
+    def freeze() -> None:
+        gc_calls.append("freeze")
+        frozen[0] = 469_281
+
+    fake_gc = SimpleNamespace(
+        collect=lambda: gc_calls.append("collect"),
+        freeze=freeze,
+        get_freeze_count=lambda: frozen[0],
+    )
+    monkeypatch.setattr(heap_probe, "gc", fake_gc)
+
+    with capture_logs() as logs:
+        freeze_startup_heap()
+
+    assert gc_calls == ["collect", "freeze"]
+    [record] = [entry for entry in logs if entry["event"] == "startup_heap_frozen"]
+    assert record["frozen_objects"] == 469_281
+    assert record["collect_seconds"] >= 0

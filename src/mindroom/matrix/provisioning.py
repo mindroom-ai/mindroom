@@ -72,8 +72,10 @@ def _raise_for_register_agent_error(response: httpx.Response, *, username: str) 
         msg = f"Provisioning service refused to register agent user {username!r}: {detail}"
         if detail == _NAMESPACE_MISMATCH_DETAIL:
             msg += (
-                ". Usernames must match mindroom_<entity>_<namespace>; check that MINDROOM_NAMESPACE "
-                "matches this connection's namespace or re-run `mindroom connect`."
+                ". This service registers only names of the form mindroom_<name>_<namespace>, or mindroom_<name> on "
+                "a namespace-exempt connection, so a configured matrix_username or mindroom_user.username needs that "
+                "form; otherwise check that MINDROOM_NAMESPACE matches this connection's namespace or re-run "
+                "`mindroom connect`."
             )
         raise matrix_startup_error(msg, permanent=True)
     if response.status_code == 404:

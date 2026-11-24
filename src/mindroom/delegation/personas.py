@@ -1,8 +1,8 @@
 """Agent-authored subagent personas and the workspace profile files that store them.
 
-A persona replaces only a child's presentation, its system prompt and visible
-tools; the child keeps the caller's own principal, so it never reaches more
-than the caller can.
+A persona replaces only a child's presentation, its system prompt, visible
+tools, skills, and searched knowledge bases; the child keeps the caller's own
+principal, so it never reaches more than the caller can.
 """
 
 from __future__ import annotations
@@ -11,23 +11,33 @@ import re
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, cast
 
-from mindroom.agent_cli.shell_contract import SHELL_OPERATION_NAMES
+from mindroom.agent_cli.shell_contract import SHELL_FUNCTION
+from mindroom.config.tool_aliases import canonical_tool_names
 from mindroom.delegation.state import SubagentPersona
+from mindroom.knowledge.search import KNOWLEDGE_SEARCH_TOOL_NAME
+from mindroom.knowledge.utils import semantic_agent_knowledge_base_ids
 from mindroom.path_confinement import open_directory_within_root, read_regular_file_within_root
-from mindroom.tool_system.catalog import TOOL_METADATA
+from mindroom.tool_system.agent_tools import resolve_agent_tools
 from mindroom.tool_system.declarations import ToolAuthoredOverrideValidator
-from mindroom.tool_system.dynamic_toolkits import visible_tool_surface
-from mindroom.tool_system.skills import SkillMarkdownError, parse_skill_markdown, workspace_entry_names
+from mindroom.tool_system.plugins import config_plugins
+from mindroom.tool_system.skills import (
+    SKILL_FUNCTION_NAMES,
+    SkillMarkdownError,
+    build_skills_toolkit,
+    parse_skill_markdown,
+    workspace_entry_names,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Collection, Mapping, Sequence
     from pathlib import Path
 
-    from agno.tools.function import Function
-
     from mindroom.agent_modes import AgentMode
     from mindroom.config.main import Config
+    from mindroom.constants import RuntimePaths
     from mindroom.delegation.state import PersonaSourceKind
+    from mindroom.tool_system.registry import ToolRegistry
+    from mindroom.tool_system.tool_function import ToolFunction
 
 _MAX_PERSONA_PROMPT_BYTES = 64 << 10
 _PROFILE_DIRNAME = "subagents"
@@ -38,8 +48,10 @@ _MAX_LISTED_PROFILE_BYTES = 1 << 20
 _MAX_DESCRIPTION_CHARS = 1024
 _MAX_LISTING_CHARS = 2000
 _PROFILE_NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,63}")
-_PROFILE_KEYS = frozenset({"description", "tools", "model", "mode"})
+_PROFILE_KEYS = frozenset({"description", "tools", "skills", "knowledge", "model", "mode"})
 _MODES: tuple[AgentMode, ...] = ("standard", "minimal")
+# Generated functions an authored persona keeps beside an explicit tool list; each loads only when kept.
+_GENERATED_PERSONA_FUNCTIONS = SKILL_FUNCTION_NAMES | {KNOWLEDGE_SEARCH_TOOL_NAME}
 _NAME_RULE = "profile names use lowercase letters, digits, '-', and '_', at most 64 characters"
 
 
@@ -76,28 +88,32 @@ def _system_prompt(value: object) -> str:
     return value
 
 
-def _tool_entries(value: object) -> tuple[str, ...] | None:
+def _name_entries(value: object, argument: str, noun: str) -> tuple[str, ...] | None:
     if value is None:
         return None
-    if not isinstance(value, (list, tuple)) or not all(isinstance(tool, str) and tool.strip() for tool in value):
-        msg = "Cannot delegate: tools must be a list of tool names."
+    if not isinstance(value, (list, tuple)) or not all(isinstance(entry, str) and entry.strip() for entry in value):
+        msg = f"Cannot delegate: {argument} must be a list of {noun} names."
         raise PersonaError(msg)
-    return tuple(dict.fromkeys(cast("str", tool).strip() for tool in value))
+    return tuple(dict.fromkeys(cast("str", entry).strip() for entry in value))
 
 
 def inline_persona(
     system_prompt: object,
     tools: object,
+    skills: object,
+    knowledge: object,
     *,
     source_kind: PersonaSourceKind = "inline",
     source_name: str = "",
 ) -> SubagentPersona:
-    """Validate an authored prompt and optional tool list into a persona."""
+    """Validate an authored prompt and optional tool, skill, and knowledge base lists into a persona."""
     return SubagentPersona(
         source_kind=source_kind,
         source_name=source_name,
         system_prompt=_system_prompt(system_prompt),
-        tools=_tool_entries(tools),
+        tools=_name_entries(tools, "tools", "tool"),
+        skills=_name_entries(skills, "skills", "skill"),
+        knowledge=_name_entries(knowledge, "knowledge", "knowledge base"),
     )
 
 
@@ -131,7 +147,14 @@ def _parse_profile(name: str, content: str) -> _PersonaProfile:
         msg = "the body after the frontmatter is the system prompt and must not be empty"
         raise PersonaError(msg)
     try:
-        persona = inline_persona(body, frontmatter.get("tools"), source_kind="profile", source_name=name)
+        persona = inline_persona(
+            body,
+            frontmatter.get("tools"),
+            frontmatter.get("skills"),
+            frontmatter.get("knowledge"),
+            source_kind="profile",
+            source_name=name,
+        )
     except PersonaError as exc:
         msg = str(exc).removeprefix("Cannot delegate: ").removesuffix(".")
         raise PersonaError(msg) from exc
@@ -198,11 +221,8 @@ def list_profiles(workspace_root: Path) -> list[_PersonaProfile | _InvalidPerson
     return entries
 
 
-def load_profile(workspace_root: Path | None, name: str) -> _PersonaProfile:
+def load_profile(workspace_root: Path, name: str) -> _PersonaProfile:
     """Read one named profile, raising ``PersonaError`` with the user-facing reason."""
-    if workspace_root is None:
-        msg = "Cannot delegate: subagent profiles need an agent workspace."
-        raise PersonaError(msg)
     if not _PROFILE_NAME.fullmatch(name):
         msg = f"Cannot delegate: {_NAME_RULE}."
         raise PersonaError(msg)
@@ -237,34 +257,58 @@ def render_profile_listing(entries: Sequence[_PersonaProfile | _InvalidPersonaPr
     return f"Too many subagent profiles to list are saved in {_PROFILE_DIRNAME}/; list that directory to see them."
 
 
-def caller_toolkit_names(agent_name: str, config: Config, *, delegation_depth: int) -> list[str]:
-    """Return every toolkit this agent may use, including deferred toolkits it loads on demand.
+def caller_toolkit_names(
+    agent_name: str,
+    config: Config,
+    tools: ToolRegistry,
+    *,
+    delegation_depth: int,
+) -> dict[str, tuple[str, ...] | None]:
+    """Return every toolkit this agent may use, deferred toolkits included, with the functions each declares.
 
     Matrix room tools are listed too; a child naming one outside a Matrix room refuses to start.
     The deferred-tool manager is not, since an explicit tool list loads every toolkit it names.
     """
     if agent_name not in config.agents:
         # A reload can remove the caller mid-response; its copies then have no tools to inherit.
+        return {}
+    agent_tools = resolve_agent_tools(config, agent_name, tools)
+    names = agent_tools.toolkit_names(agent_tools.candidates(depth=delegation_depth))
+    return {name: declared_function_names(name, tools) for name in names}
+
+
+def caller_skill_names(
+    agent_name: str,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    workspace_root: Path,
+) -> list[str]:
+    """Return every skill this agent may use: its configured skills and the skills in its workspace."""
+    if agent_name not in config.agents:
         return []
-    deferred = [entry.name for entry in config.resolve_entity(agent_name).authored_deferred_tool_configs]
-    surface = visible_tool_surface(
-        agent_name=agent_name,
-        config=config,
-        loaded_tools=deferred,
-        delegation_depth=delegation_depth,
-        enable_dynamic_tools_manager=False,
-        include_matrix_room_runtime_tools=True,
+    toolkit = build_skills_toolkit(
+        agent_name,
+        config,
+        runtime_paths,
+        workspace_root=workspace_root,
+        plugin_skill_roots=config_plugins(config, runtime_paths).skill_roots,
     )
-    # A preset has no functions of its own; its member toolkits are listed by their own names.
-    return [entry.name for entry in surface.runtime_tool_configs if not config.is_tool_preset(entry.name)]
+    return [] if toolkit is None else [skill.name for skill in toolkit.skills]
 
 
-def declared_function_names(toolkit: str) -> tuple[str, ...] | None:
-    """Return the functions a toolkit declares up front, or None when they are known only once it is built.
+def caller_knowledge_names(agent_name: str, config: Config) -> list[str]:
+    """Return the knowledge bases this agent can search."""
+    if agent_name not in config.agents:
+        return []
+    return list(semantic_agent_knowledge_base_ids(agent_name, config))
+
+
+def declared_function_names(toolkit: str, tools: ToolRegistry) -> tuple[str, ...] | None:
+    """Return the functions a toolkit of ``tools`` declares up front, or None when they are known only once it is built.
 
     An MCP toolkit discovers its functions from its server, so its metadata may list only bridge functions.
     """
-    metadata = TOOL_METADATA.get(toolkit)
+    metadata = tools.get(toolkit)
     if (
         metadata is None
         or not metadata.function_names
@@ -281,15 +325,17 @@ def persona_allows(entries: tuple[str, ...], toolkit: str, function: str) -> boo
 
 def missing_persona_tool(
     tools: tuple[str, ...] | None,
-    available_toolkits: Sequence[str],
+    available_toolkits: Mapping[str, tuple[str, ...] | None],
     cap: tuple[str, ...] | None = None,
 ) -> str | None:
-    """Return the first entry naming neither a caller toolkit nor a known function of one, or outside ``cap``."""
-    available = set(available_toolkits)
+    """Return the first entry naming neither a caller toolkit nor a function it declares, or outside ``cap``.
+
+    ``available_toolkits`` maps each caller toolkit to the functions it declares, None when known only once built.
+    """
     for entry in tools or ():
         toolkit, separator, function = entry.partition(".")
-        declared = declared_function_names(toolkit)
-        known = toolkit in available and (
+        declared = available_toolkits.get(toolkit)
+        known = toolkit in available_toolkits and (
             not separator or (bool(function) and (declared is None or function in declared))
         )
         if not known or (cap is not None and entry not in cap and toolkit not in cap):
@@ -299,13 +345,18 @@ def missing_persona_tool(
 
 def validate_persona_tools(
     tools: tuple[str, ...] | None,
-    available_toolkits: Sequence[str],
-    cap: tuple[str, ...] | None = None,
+    available_toolkits: Mapping[str, tuple[str, ...] | None],
+    cap: tuple[str, ...] | None,
 ) -> None:
     """Require every entry to name one of the caller's toolkits, or a known function of one, within ``cap``."""
     entry = missing_persona_tool(tools, available_toolkits, cap)
     if entry is not None:
-        yours = cap if cap is not None else sorted(set(available_toolkits))
+        # A cap entry the caller has since lost is no longer theirs to offer.
+        yours = (
+            [kept for kept in cap if kept.partition(".")[0] in available_toolkits]
+            if cap is not None
+            else sorted(available_toolkits)
+        )
         msg = f"Cannot delegate: unknown tool '{entry}'. Your tools: {', '.join(yours) or 'none'}."
         raise PersonaError(msg)
 
@@ -313,17 +364,17 @@ def validate_persona_tools(
 def require_built_persona_tools(
     tools: tuple[str, ...],
     built: Mapping[str, Collection[str]],
-    hidden: Mapping[str, Collection[str]],
+    left_out: Mapping[str, Collection[str]],
 ) -> None:
     """Refuse to start an authored child without every tool it names, whatever removed it.
 
-    ``built`` maps each toolkit the child built to its functions after the caller's filters, and
-    ``hidden`` the functions the session's MCP collision projection removed from them.
+    ``built`` maps each toolkit the child built to its functions after the caller's filters, and ``left_out`` the
+    functions the build left out of them because another toolkit offers their name.
     """
     for entry in tools:
         toolkit, separator, function = entry.partition(".")
         if toolkit not in built or (
-            separator and (function not in built[toolkit] or function in hidden.get(toolkit, ()))
+            separator and (function not in built[toolkit] or function in left_out.get(toolkit, ()))
         ):
             msg = f"Cannot delegate: tool '{entry}' is not available to you."
             raise PersonaError(msg)
@@ -333,6 +384,7 @@ def follow_up_refusal(
     persona: SubagentPersona | None,
     agent_name: str,
     config: Config,
+    tools: ToolRegistry,
     *,
     delegation_depth: int,
 ) -> str | None:
@@ -342,7 +394,7 @@ def follow_up_refusal(
         return "Subagent belongs to a Dynamic Workflow run and cannot be continued outside it; start a new subagent."
     if persona is None or persona.tools is None:
         return None
-    available = caller_toolkit_names(agent_name, config, delegation_depth=delegation_depth)
+    available = caller_toolkit_names(agent_name, config, tools, delegation_depth=delegation_depth)
     missing = missing_persona_tool(persona.tools, available)
     return (
         None if missing is None else f"Subagent tool '{missing}' is no longer available to you; start a new subagent."
@@ -351,7 +403,10 @@ def follow_up_refusal(
 
 def self_only_refusal(agent_name: str) -> str:
     """Explain that a caller may author only its own subagents."""
-    return f"Cannot author a subagent for '{agent_name}': system_prompt, tools, and profile apply only to yourself."
+    return (
+        f"Cannot author a subagent for '{agent_name}': "
+        "system_prompt, tools, skills, knowledge, and profile apply only to yourself."
+    )
 
 
 @dataclass(frozen=True)
@@ -369,45 +424,55 @@ def resolve_persona_request(  # noqa: PLR0911
     agent_name: str,
     system_prompt: object,
     tools: object,
+    skills: object,
+    knowledge: object,
     profile: object,
     model: str | None,
     minimal: bool,
-    workspace_root: Path | None,
-    available_toolkits: Callable[[], Sequence[str]],
-    cap: tuple[str, ...] | None = None,
+    workspace_root: Callable[[], Path],
+    available_toolkits: Callable[[], Mapping[str, tuple[str, ...] | None]],
+    available_skills: Callable[[], Sequence[str]],
+    available_knowledge: Callable[[], Sequence[str]],
+    cap: SubagentPersona | None,
 ) -> PersonaRequest | str:
     """Resolve ``run_subagent`` authoring arguments, returning a user-facing refusal when they are invalid.
 
-    ``cap`` holds the tools of the authored subagent making this call, if any: copies it
-    authors stay within them, and it cannot start an unauthored copy with every caller tool.
+    ``cap`` is the persona of the authored subagent making this call, if any: copies it authors stay
+    within its tools, skills, and knowledge bases, and while it lists any, it cannot start an unauthored copy.
+    ``workspace_root`` returns the caller's workspace, which is resolved only to read a profile.
     """
     mode: AgentMode = "minimal" if minimal else "standard"
     # Some models fill every optional argument; empty values author nothing.
     system_prompt = system_prompt or None
     profile = profile or None
-    if system_prompt is None and not tools:
-        tools = None
-    if system_prompt is None and tools is None and profile is None:
-        if cap is not None and agent_name == caller_name:
+    if system_prompt is None:
+        tools, skills, knowledge = tools or None, skills or None, knowledge or None
+    if system_prompt is None and tools is None and skills is None and knowledge is None and profile is None:
+        restricted = cap is not None and (cap.tools is not None or cap.skills is not None or cap.knowledge is not None)
+        if restricted and agent_name == caller_name:
             return (
                 f"Cannot start a configured copy of '{agent_name}' from an authored subagent; "
-                "pass system_prompt or profile so the copy stays within your tools."
+                "pass system_prompt or profile so the copy stays within your tools, skills, and knowledge."
             )
         return PersonaRequest(persona=None, model=model, agent_mode=mode)
     if agent_name != caller_name:
         return self_only_refusal(agent_name)
-    if profile is not None and (system_prompt is not None or tools is not None):
-        return "Cannot delegate: pass either profile or system_prompt and tools, not both."
+    inline = (system_prompt, tools, skills, knowledge)
+    if profile is not None and any(value is not None for value in inline):
+        return "Cannot delegate: pass either profile or system_prompt, tools, skills, and knowledge, not both."
     try:
         if profile is None:
-            persona = inline_persona(system_prompt, tools)
+            persona = inline_persona(system_prompt, tools, skills, knowledge)
+            if persona.tools is not None:
+                # Only tools this call names may say file or coding; a saved profile or snapshot is read as written.
+                persona = replace(persona, tools=canonical_tool_names(persona.tools))
         elif not isinstance(profile, str):
             return "Cannot delegate: profile must be a profile name."
         else:
-            loaded = load_profile(workspace_root, profile)
+            loaded = load_profile(workspace_root(), profile)
             persona, model = loaded.persona, model or loaded.model
             mode = "minimal" if minimal else loaded.mode or "standard"
-        persona = _capped_persona(persona, available_toolkits(), cap)
+        persona = _capped_persona(persona, available_toolkits(), available_skills, available_knowledge, cap)
         require_minimal_shell(persona, mode)
     except PersonaError as exc:
         return str(exc)
@@ -419,48 +484,103 @@ def require_minimal_shell(persona: SubagentPersona, mode: AgentMode) -> None:
     tools = persona.tools
     if mode != "minimal" or tools is None:
         return
-    if "shell" in tools or all(f"shell.{name}" in tools for name in SHELL_OPERATION_NAMES):
+    if persona_allows(tools, "shell", SHELL_FUNCTION):
         return
-    msg = "Cannot delegate: a minimal subagent needs shell among its tools."
+    msg = (
+        "Cannot delegate: a minimal subagent runs its tools through shell, so its tools must include shell or "
+        f"shell.{SHELL_FUNCTION}; use standard mode for a subagent without shell."
+    )
     raise PersonaError(msg)
 
 
 def _capped_persona(
     persona: SubagentPersona,
-    available_toolkits: Sequence[str],
-    cap: tuple[str, ...] | None,
+    available_toolkits: Mapping[str, tuple[str, ...] | None],
+    available_skills: Callable[[], Sequence[str]],
+    available_knowledge: Callable[[], Sequence[str]],
+    cap: SubagentPersona | None,
 ) -> SubagentPersona:
-    """Validate a persona's tools against the caller and ``cap``; a persona without tools inherits ``cap``.
+    """Validate a persona's tools, skills, and knowledge against the caller and ``cap``, whose tools a persona without its own inherits.
 
     ``available_toolkits`` lists the caller's toolkits at the copy's depth, so a copy at the maximum
-    depth inherits ``cap`` without ``delegate``; any other inherited tool the caller lost still refuses.
+    depth inherits the cap's tools without ``delegate``; any other inherited tool the caller lost still refuses.
     """
-    if persona.tools is None and cap is not None:
+    # Skills and knowledge resolve first, while persona.tools still says whether the author named tools.
+    persona = capped_persona_skills(persona, available_skills, cap.kept_skills if cap is not None else None)
+    persona = replace(
+        persona,
+        knowledge=_capped_names(
+            persona.kept_knowledge,
+            cap.kept_knowledge if cap is not None else None,
+            available_knowledge,
+            ("knowledge base", "knowledge bases"),
+        ),
+    )
+    cap_tools = cap.tools if cap is not None else None
+    if persona.tools is None and cap_tools is not None:
         keep_delegate = "delegate" in available_toolkits
-        tools = tuple(entry for entry in cap if keep_delegate or entry.partition(".")[0] != "delegate")
+        tools = tuple(entry for entry in cap_tools if keep_delegate or entry.partition(".")[0] != "delegate")
         persona = replace(persona, tools=tools)
-    validate_persona_tools(persona.tools, available_toolkits, cap)
+    validate_persona_tools(persona.tools, available_toolkits, cap_tools)
     return persona
+
+
+def capped_persona_skills(
+    persona: SubagentPersona,
+    available_skills: Callable[[], Sequence[str]],
+    skill_cap: tuple[str, ...] | None,
+) -> SubagentPersona:
+    """Freeze a persona's kept skills, requiring them to be caller skills within ``skill_cap``."""
+    return replace(
+        persona,
+        skills=_capped_names(persona.kept_skills, skill_cap, available_skills, ("skill", "skills")),
+    )
+
+
+def _capped_names(
+    kept: tuple[str, ...] | None,
+    cap: tuple[str, ...] | None,
+    available_names: Callable[[], Sequence[str]],
+    nouns: tuple[str, str],
+) -> tuple[str, ...] | None:
+    """Freeze a persona's kept names, requiring them to be the caller's within ``cap``.
+
+    A persona that keeps all of the caller's names inherits instead the ``cap`` names its caller still
+    has, as a follow-up loads them. The caller's names are read only when the persona names or inherits some.
+    """
+    if kept is None and cap is not None:
+        available = set(available_names()) if cap else set()
+        return tuple(name for name in cap if name in available)
+    if kept:
+        available = set(available_names())
+        for name in kept:
+            if name not in available or (cap is not None and name not in cap):
+                yours = [entry for entry in cap if entry in available] if cap is not None else sorted(available)
+                msg = f"Cannot delegate: unknown {nouns[0]} '{name}'. Your {nouns[1]}: {', '.join(yours) or 'none'}."
+                raise PersonaError(msg)
+    return kept
 
 
 def persona_tool_policy(
     persona_tools: tuple[str, ...] | None,
-    available_toolkits: Callable[[], Sequence[str]],
-    tool_function_filter: Callable[[Function], bool] | None,
-    disabled_tool_names: frozenset[str],
-) -> tuple[Callable[[Function], bool] | None, frozenset[str]]:
-    """Narrow an agent's own tools to an authored persona's explicit list; its principal is unchanged.
+    available_toolkits: Callable[[], Collection[str]],
+    tool_function_filter: Callable[[ToolFunction], bool] | None,
+) -> tuple[Callable[[ToolFunction], bool] | None, frozenset[str]]:
+    """Narrow an agent's own tools to an authored persona's explicit list, returning the filter and toolkits to omit.
 
-    Toolkits the list never names are not built, nor is the deferred-tool manager, since a persona
-    loads every toolkit it names. Generated functions such as skills and knowledge search stay hidden;
-    toolkit functions are narrowed by concrete toolkit name while the toolkits are built.
+    The principal is unchanged. Toolkits the list never names are not built, nor is the deferred-tool manager, since
+    a persona loads every toolkit it names. Other generated functions stay hidden, except those that load the
+    persona's skills and search its knowledge, which exist only when it keeps them; toolkit functions
+    are narrowed by concrete toolkit name while the toolkits are built.
     """
     if persona_tools is None:
-        return tool_function_filter, disabled_tool_names
+        return tool_function_filter, frozenset()
     named = {entry.partition(".")[0] for entry in persona_tools}
     unused = {toolkit for toolkit in available_toolkits() if toolkit not in named}
 
-    def visible(function: Function) -> bool:
-        return function.owning_toolkit is not None and (tool_function_filter is None or tool_function_filter(function))
+    def visible(function: ToolFunction) -> bool:
+        return (function.toolkit is not None or function.name in _GENERATED_PERSONA_FUNCTIONS) and (
+            tool_function_filter is None or tool_function_filter(function)
+        )
 
-    return visible, disabled_tool_names | unused | {"dynamic_tools"}
+    return visible, frozenset({*unused, "dynamic_tools"})

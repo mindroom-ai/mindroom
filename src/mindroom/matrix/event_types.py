@@ -3,3 +3,32 @@
 CALL_MEMBER_EVENT_TYPE = "org.matrix.msc3401.call.member"
 CALL_ENCRYPTION_KEYS_EVENT_TYPE = "io.element.call.encryption_keys"
 RTC_NOTIFICATION_EVENT_TYPE = "org.matrix.msc4075.rtc.notification"
+# Each agent publishes its live background jobs as state keyed by its own user ID, for a client jobs bar.
+BACKGROUND_JOBS_EVENT_TYPE = "io.mindroom.background_jobs"
+# Each agent publishes its live reply runs as state keyed by its own user ID, for client thread-card working state.
+ACTIVE_RUNS_EVENT_TYPE = "io.mindroom.active_runs"
+# Each entity publishes its runtime's origin, whether it has a worker computer, and its role, keyed by its own user ID,
+# so MindRoom Chat finds its MindRoom server without a typed URL and shows what the entity does.
+MINDROOM_SERVER_EVENT_TYPE = "io.mindroom.server"
+# The room's steward publishes its open `!auto_approve` windows as state keyed by its own user ID, for a client indicator.
+AUTO_APPROVE_WINDOWS_EVENT_TYPE = "io.mindroom.auto_approve"
+# The steward triggers reconciliation, and the bound account publishes the roster under its own user ID when eligible.
+# Otherwise the steward publishes under its own user ID; Chat trusts only a sender and state key matching the binding.
+MINDROOM_ACCOUNTS_EVENT_TYPE = "io.mindroom.accounts"
+# The room's steward names itself under the name today's clients read, state key "", content `{"user_id": ...}`.
+# It keeps the default state level, so MindRoom Chat trusts a binding only ordinary members cannot write.
+# Chat folds voice echoes from that bound account and from accounts listed in its trusted roster.
+ROUTER_BINDING_EVENT_TYPE = "io.mindroom.router"
+# The live graph of a workflow run: ephemeral frames, sent as `io.mindroom.subagents` frames are.
+WORKFLOW_FRAME_EVENT_TYPE = "io.mindroom.workflow"
+# The card of a workflow run: a notice of the run's agent that carries the run under this content key, and is edited.
+WORKFLOW_RUN_CONTENT_KEY = "io.mindroom.workflow_run"
+# The card of a workflow run's question to its requester: a notice that carries the question under this content key.
+WORKFLOW_QUESTION_CONTENT_KEY = "io.mindroom.workflow_question"
+# A person's answer to such a card, `{run, node, option | text}` as a reply to it, and why one did not count.
+WORKFLOW_ANSWER_EVENT_TYPE = "io.mindroom.workflow_answer"
+WORKFLOW_ANSWER_REJECTED_EVENT_TYPE = "io.mindroom.workflow_answer_rejected"
+# What a person's client sends to act on a workflow run: `{run, action}` in the run's thread.
+WORKFLOW_CONTROL_EVENT_TYPE = "io.mindroom.workflow_control"
+# Room admins set per-room MindRoom settings, one state event per setting keyed by its name, content `{"value": ...}`.
+ROOM_SETTINGS_EVENT_TYPE = "io.mindroom.room_settings"

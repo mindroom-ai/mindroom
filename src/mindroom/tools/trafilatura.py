@@ -166,14 +166,12 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["trafilatura"],
-    docs_url="https://docs.agno.com/tools/toolkits/others/trafilatura",
+    docs_url="https://docs.mindroom.chat/tools/web-scraping-and-browser/#trafilatura",
     function_names=("crawl_website", "extract_batch", "extract_metadata_only", "extract_text", "html_to_text"),
 )
 def trafilatura_tools() -> type[TrafilaturaTools]:
-    """Return Trafilatura tools whose downloads follow the server-fetch policy."""
-    from agno.tools.trafilatura import TrafilaturaTools
-
-    from mindroom.tools.agno_compat_trafilatura import install_server_fetch_guard
+    """Return Trafilatura tools whose downloads follow the server-fetch policy within one time limit per call."""
+    from mindroom.tools.agno_compat_trafilatura import TimeLimitedTrafilaturaTools, install_server_fetch_guard
 
     install_server_fetch_guard()
-    return TrafilaturaTools
+    return TimeLimitedTrafilaturaTools

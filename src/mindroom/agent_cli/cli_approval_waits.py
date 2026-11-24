@@ -7,61 +7,97 @@ import time
 from contextlib import asynccontextmanager
 from copy import deepcopy
 from dataclasses import dataclass, field, replace
-from typing import TYPE_CHECKING, Protocol
+from typing import TYPE_CHECKING
 
+from mindroom.active_runs import pause_current_active_run
 from mindroom.agent_cli.events import emit_cli_suspension
 from mindroom.agent_cli.lifetime import current_cli_lifetime
-from mindroom.event_journal import ApprovalDecision
-from mindroom.orchestration.runtime import (
-    cancel_failure_reason,
-    classify_cancel_source,
-    current_task_is_process_shutdown,
+from mindroom.approval.continuation_rules import CliExit
+from mindroom.approval.failure import cancelled_failure
+from mindroom.final_delivery import (
+    AwaitingApproval,
+    Cancelled,
+    Failed,
+    FailureCause,
+    Owed,
+    Suppressed,
+    TurnEnding,
+    approval_failure,
 )
+from mindroom.orchestration.runtime import classify_cancel_source, current_task_is_process_shutdown
 from mindroom.response_turn import ResponsePausedForApproval, apply_exact_approval_decisions
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Awaitable, Callable
 
-    from agno.run.requirement import RunRequirement
-
-    from mindroom.approval.response import ApprovalResponseCoordinator
-    from mindroom.event_journal import ApprovalContinuation, PrincipalStore
-    from mindroom.final_delivery import FinalDeliveryOutcome
+    from mindroom.cancellation import CancelSource
+    from mindroom.event_journal import ApprovalContinuation, ApprovalFailure
+    from mindroom.event_journal.approval_store import ApprovalStore
+    from mindroom.final_delivery import TurnProgress
+    from mindroom.llm.runs import RunRequirement
     from mindroom.message_target import MessageTarget
     from mindroom.response_turn import PausedAttempt
 
 
-class _ApprovalProgress(Protocol):
-    failure_reason: str | None
-    delivery_outcome: FinalDeliveryOutcome | None
+# What a response that ended without saying how leaves its paused CLI call to fail with.
+_ENDED_BEFORE_FINAL = approval_failure(
+    Failed(FailureCause.ERROR, "CLI approval response ended before final delivery."),
+)
 
-    def note_task_cancelled(self, failure_reason: str) -> None: ...
+
+def _exit_failure(ending: TurnEnding | None, cancelled: CancelSource | None) -> ApprovalFailure:
+    """Return how a response that ended without an answer fails its paused CLI call."""
+    if isinstance(ending, Cancelled | Failed | Suppressed):
+        return approval_failure(ending)
+    if cancelled is not None:
+        return cancelled_failure(cancelled)
+    return _ENDED_BEFORE_FINAL
 
 
 @dataclass
-class CliApprovalWaits:
-    """Keep waiter registration, durable claims, and terminal cleanup in one owner."""
+class CliWaiters:
+    """Which journal sources a response waits on in place for a minimal-mode approval decision.
 
-    store: PrincipalStore
-    responses: ApprovalResponseCoordinator
-    runtime_generation: str
-    retry_sources: Callable[[str, tuple[str, ...]], None]
-    # Claims a ready continuation for the waiting response, with its reply's resume in place.
-    claim: Callable[[ApprovalContinuation], Awaitable[ApprovalContinuation | None]]
-    # Records a claimed continuation's next pause while the response waits in place.
-    advance: Callable[[ApprovalContinuation, PausedAttempt, MessageTarget], Awaitable[object]]
-    waiters: dict[str, asyncio.Event] = field(default_factory=dict, init=False)
+    Its own owner, so a source retry can wake a waiting response without reaching the response or approval runners.
+    """
+
+    _waiters: dict[str, asyncio.Event] = field(default_factory=dict, init=False)
+
+    def register(self, source_event_ids: tuple[str, ...], waiter: asyncio.Event) -> None:
+        """Make ``waiter`` the response-local owner of these sources."""
+        for event_id in source_event_ids:
+            self._waiters[event_id] = waiter
+
+    def forget(self, source_event_ids: tuple[str, ...], waiter: asyncio.Event) -> None:
+        """Drop ``waiter``'s ownership of these sources, leaving a newer waiter's in place."""
+        for event_id in source_event_ids:
+            if self._waiters.get(event_id) is waiter:
+                self._waiters.pop(event_id)
 
     def wake(self, source_event_ids: tuple[str, ...]) -> tuple[str, ...]:
         """Wake response-local owners and return sources that have no live waiter."""
         unowned: list[str] = []
         for source_event_id in source_event_ids:
-            waiter = self.waiters.get(source_event_id)
+            waiter = self._waiters.get(source_event_id)
             if waiter is None:
                 unowned.append(source_event_id)
             else:
                 waiter.set()
         return tuple(unowned)
+
+
+@dataclass
+class CliApprovalWaits:
+    """Keep durable claims of response-local waits in one owner, and report each scope's end."""
+
+    store: ApprovalStore
+    # Claims a ready continuation for the waiting response, with its reply's resume in place.
+    claim: Callable[[ApprovalContinuation], Awaitable[ApprovalContinuation | None]]
+    # Records a claimed continuation's next pause while the response waits in place.
+    advance: Callable[[ApprovalContinuation, PausedAttempt, MessageTarget], Awaitable[object]]
+    # Runs what the paused reply of a source does as a scope that paused it ends.
+    exit: Callable[[str, CliExit], Awaitable[None]]
+    waiters: CliWaiters
 
     async def wait(  # noqa: C901 - expiry fences both sides of awaited authorization
         self,
@@ -93,8 +129,10 @@ class CliApprovalWaits:
             if current is None or current.state not in {"waiting", "ready"}:
                 # A failed publication records its cause; report that, not the lost ownership it implies.
                 msg = (
-                    current.failure_reason if current is not None else None
-                ) or "CLI approval lost its source ownership"
+                    "CLI approval lost its source ownership"
+                    if current is None or current.failure is None
+                    else current.failure.reason
+                )
                 raise RuntimeError(msg)
             lifetime = current_cli_lifetime()
             deadline = lifetime.grant_expires_at_ns if lifetime is not None else None
@@ -110,18 +148,11 @@ class CliApprovalWaits:
                 if claimed is None:
                     msg = "CLI approval lost its single execution claim"
                     raise RuntimeError(msg)
-                return tuple(
-                    apply_exact_approval_decisions(
-                        deepcopy(paused.requirements),
-                        decisions={
-                            call.tool_call_id: call.decision is ApprovalDecision.APPROVED for call in claimed.calls
-                        },
-                        denial_reasons={call.tool_call_id: call.reason for call in claimed.calls},
-                    ),
-                )
+                return tuple(apply_exact_approval_decisions(deepcopy(paused.requirements), claimed.calls))
             try:
-                async with asyncio.timeout(None if deadline is None else max(0, (deadline - time.time_ns()) / 1e9)):
-                    await waiter.wait()
+                with pause_current_active_run():
+                    async with asyncio.timeout(None if deadline is None else max(0, (deadline - time.time_ns()) / 1e9)):
+                        await waiter.wait()
             except TimeoutError:
                 raise ResponsePausedForApproval(paused) from None
 
@@ -130,7 +161,7 @@ class CliApprovalWaits:
         self,
         *,
         source_event_ids: tuple[str, ...],
-        progress: _ApprovalProgress,
+        progress: TurnProgress,
         target: MessageTarget,
         publish: Callable[[PausedAttempt], Awaitable[object]],
         authorize: Callable[[], Awaitable[bool]],
@@ -145,13 +176,13 @@ class CliApprovalWaits:
         lock = asyncio.Lock()
         source = source_event_ids[0]
         used = suspended = False
+        cancelled: CancelSource | None = None
 
         async def pause(paused: PausedAttempt) -> tuple[RunRequirement, ...]:
             nonlocal used, suspended
             used = True
             async with lock:
-                for event_id in source_event_ids:
-                    self.waiters[event_id] = waiter
+                self.waiters.register(source_event_ids, waiter)
                 try:
                     return await self.wait(
                         paused,
@@ -169,57 +200,20 @@ class CliApprovalWaits:
         try:
             yield pause
         except asyncio.CancelledError as error:
-            progress.note_task_cancelled(cancel_failure_reason(classify_cancel_source(error)))
+            cancelled = classify_cancel_source(error)
             raise
         finally:
-            for event_id in source_event_ids:
-                if self.waiters.get(event_id) is waiter:
-                    self.waiters.pop(event_id)
+            self.waiters.forget(source_event_ids, waiter)
             # Responses that never paused a CLI call, including every standard one, own no CLI state.
             if used:
-                await self._settle(
+                await self.exit(
                     source,
-                    suspended=suspended
-                    or (
-                        progress.delivery_outcome is not None
-                        and progress.delivery_outcome.terminal_status == "suspended"
+                    CliExit(
+                        # A pause, or an answer the outbox still owes: the continuation finishes through its
+                        # acknowledged FINAL, which dispatch reads.
+                        suspended=suspended or isinstance(progress.ending, AwaitingApproval | Owed),
+                        live=settle_terminal,
+                        shutting_down=current_task_is_process_shutdown(),
+                        failure=_exit_failure(progress.ending, cancelled),
                     ),
-                    progress=progress,
-                    settle_terminal=settle_terminal,
-                )
-
-    async def _settle(
-        self,
-        source: str,
-        *,
-        suspended: bool,
-        progress: _ApprovalProgress,
-        settle_terminal: bool,
-    ) -> None:
-        current = await self.store.approval_continuation_for_source(source)
-        if suspended and current is not None and current.state == "ready":
-            self.retry_sources(current.room_id, tuple(current.source_event_ids))
-        if (
-            settle_terminal
-            and not suspended
-            and current is not None
-            and current.cli_call is not None
-            and (current.state != "claimed" or current.runtime_generation == self.runtime_generation)
-        ):
-            final = await self.responses.final_delivery(current)
-            if current.state == "failing" and await self.responses.successful_final_delivery(current) is None:
-                # A Stop or failure fenced the wait before an answer: its settlement expires the cards before it
-                # ends the reply, which approval recovery does instead after a shutdown.
-                if not current_task_is_process_shutdown():
-                    await self.responses.settle_failure(
-                        current,
-                        current.failure_reason or "CLI approval response ended before final delivery.",
-                    )
-            elif final is not None and not final.permanently_failed:
-                await self.responses.finish_approval(current.approval_id)
-            elif not current_task_is_process_shutdown():
-                # No answer reached the room, including one Matrix refused for good: the approval fails.
-                await self.responses.request_failure(
-                    current,
-                    progress.failure_reason or "CLI approval response ended before final delivery.",
                 )

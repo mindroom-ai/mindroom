@@ -31,13 +31,6 @@ if TYPE_CHECKING:
             default=None,
         ),
         ConfigField(
-            name="db_engine",
-            label="Db Engine",
-            type="text",
-            required=False,
-            default=None,
-        ),
-        ConfigField(
             name="user",
             label="User",
             type="text",
@@ -80,13 +73,6 @@ if TYPE_CHECKING:
             default=None,
         ),
         ConfigField(
-            name="tables",
-            label="Tables",
-            type="text",
-            required=False,
-            default=None,
-        ),
-        ConfigField(
             name="enable_list_tables",
             label="Enable List Tables",
             type="boolean",
@@ -116,7 +102,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["sqlalchemy"],
-    docs_url="https://docs.agno.com/tools/toolkits/database/sql",
+    docs_url="https://docs.mindroom.chat/tools/data-and-databases/#sql",
     function_names=("describe_table", "list_tables", "run_sql", "run_sql_query"),
 )
 def sql_tools() -> type[SQLTools]:

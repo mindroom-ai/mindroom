@@ -1,4 +1,18 @@
-"""Opt-in periodic type histogram of the primary process's Python heap.
+"""Heap freezes and an opt-in periodic type histogram of the primary process's Python heap.
+
+Call audio shares the event loop with full garbage collections, so the primary
+freezes its import-time heap once before any bot exists. A full collection
+walks every live object, so a large runtime pauses for seconds. Once the
+runtime is ready, and then every ``MINDROOM_HEAP_REFREEZE_INTERVAL_SECONDS``,
+the primary unfreezes, collects once, and freezes the survivors again. Routine
+full collections then only walk objects created since the last refreeze, and
+bots a config reload replaced are collected at the next refreeze instead of
+staying frozen. A refreeze touches every object, so it first reads swapped-out
+memory back in on a worker thread; otherwise the whole process would wait on
+swap one page fault at a time while the collector holds the GIL. After the
+first refreeze the primary also raises CPython's full-collection threshold,
+because each routine full collection walks the whole unfrozen heap to find
+little garbage; how much rarer they get depends on the workload.
 
 A long-running primary can grow for hours without saying what it holds, and
 external memory profilers cannot attach inside hardened containers. When
@@ -7,6 +21,9 @@ every object tracked by the garbage collector by type and logs the most common
 types, so successive records show which kinds of objects accumulate.
 
 Only GC-tracked containers are counted; strings, bytes, and numbers are not.
+Frozen objects are left out of the histogram and only counted, so the types
+show what the runtime created since the last freeze; disable the refreeze to
+see accumulation over the whole process lifetime.
 Each record also carries glibc's malloc totals and Python's allocated block
 count. Live malloc bytes are ``arena_in_use_bytes`` plus ``mmap_bytes``;
 Python's small-object arenas come straight from mmap, so malloc does not count
@@ -28,6 +45,7 @@ import functools
 import gc
 import math
 import os
+import re
 import sys
 import time
 from collections import Counter
@@ -45,29 +63,58 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 _HEAP_PROBE_INTERVAL_ENV = "MINDROOM_HEAP_PROBE_INTERVAL_SECONDS"
-# A walk costs about one full collection; shorter intervals would make the probe the main source of pauses.
-_MIN_HEAP_PROBE_INTERVAL_SECONDS = 60.0
+_HEAP_REFREEZE_INTERVAL_ENV = "MINDROOM_HEAP_REFREEZE_INTERVAL_SECONDS"
+_DEFAULT_HEAP_REFREEZE_INTERVAL_SECONDS = 3600.0
+# A probe walk or a refreeze costs about one full collection; shorter intervals would make it the main source of pauses.
+_MIN_HEAP_TASK_INTERVAL_SECONDS = 60.0
+# CPython runs a full collection on the 11th middle pass once the objects promoted since the last full pass
+# exceed a quarter of the old generation as counted at that pass. gc.freeze() keeps that count, so frozen objects
+# raise the bar only until the first full pass after a refreeze; from then on it covers objects since the refreeze.
+# Turn state that outlives two young passes and is later freed by refcount crosses it quickly, so under load a
+# full pass ran every few seconds, walked every object since the refreeze and found little garbage.
+_FROZEN_HEAP_FULL_COLLECTION_THRESHOLD = 100
 _TOP_TYPE_COUNT = 25
+_SMAPS_PATH = Path("/proc/self/smaps")
+# A mapping header ("start-end perms offset device inode [path]") or its "Swap:" line; every other line is ignored.
+# Bytes, because mapped paths may hold any byte except an escaped newline.
+_SMAPS_LINE = re.compile(rb"^(?:([0-9a-f]+)-([0-9a-f]+) (\S+) |Swap:[ \t]+(\d+) kB$)", re.MULTILINE)
+# madvise(2) advice that faults a range in as reads would, including pages in swap (Linux 5.14 and later).
+_MADV_POPULATE_READ = 22
 
 
-def _heap_probe_interval_seconds(runtime_paths: RuntimePaths) -> float | None:
-    """Return the probe interval, or ``None`` when unset or zero disables the probe."""
-    raw = (runtime_paths.env_value(_HEAP_PROBE_INTERVAL_ENV) or "").strip()
+def _interval_seconds(runtime_paths: RuntimePaths, env_name: str, *, default: float | None, task: str) -> float | None:
+    """Return one heap task interval, ``default`` when unset, or ``None`` when zero disables the task."""
+    raw = (runtime_paths.env_value(env_name) or "").strip()
     if not raw:
-        return None
+        return default
     try:
         interval_seconds = float(raw)
     except ValueError:
         interval_seconds = math.nan
     if interval_seconds == 0:
         return None
-    if not math.isfinite(interval_seconds) or interval_seconds < _MIN_HEAP_PROBE_INTERVAL_SECONDS:
+    if not math.isfinite(interval_seconds) or interval_seconds < _MIN_HEAP_TASK_INTERVAL_SECONDS:
         msg = (
-            f"{_HEAP_PROBE_INTERVAL_ENV} must be 0 to disable the heap probe or at least "
-            f"{_MIN_HEAP_PROBE_INTERVAL_SECONDS:g} seconds, got {raw!r}"
+            f"{env_name} must be 0 to disable the {task} or at least "
+            f"{_MIN_HEAP_TASK_INTERVAL_SECONDS:g} seconds, got {raw!r}"
         )
         raise ValueError(msg)
     return interval_seconds
+
+
+def _heap_probe_interval_seconds(runtime_paths: RuntimePaths) -> float | None:
+    """Return the probe interval, or ``None`` when unset or zero disables the probe."""
+    return _interval_seconds(runtime_paths, _HEAP_PROBE_INTERVAL_ENV, default=None, task="heap probe")
+
+
+def _heap_refreeze_interval_seconds(runtime_paths: RuntimePaths) -> float | None:
+    """Return the refreeze interval, hourly by default, or ``None`` when zero disables refreezing."""
+    return _interval_seconds(
+        runtime_paths,
+        _HEAP_REFREEZE_INTERVAL_ENV,
+        default=_DEFAULT_HEAP_REFREEZE_INTERVAL_SECONDS,
+        task="heap refreeze",
+    )
 
 
 def _rss_bytes() -> int | None:
@@ -124,6 +171,55 @@ def _malloc_stats() -> dict[str, int] | None:
     }
 
 
+@functools.cache
+def _madvise() -> Callable[[int, int, int], int]:
+    """Return libc's ``madvise``; ctypes releases the GIL for each call."""
+    function = ctypes.CDLL(None, use_errno=True).madvise
+    function.argtypes = [ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
+    function.restype = ctypes.c_int
+    return function
+
+
+def _read_swapped_memory_back() -> int:
+    """Fault this process's swapped-out private memory back in and return the KiB of swap the kernel accepted.
+
+    Run it on a worker thread. A full collection reads every object's header,
+    so on a partly swapped heap it takes one major page fault per swapped page
+    while holding the GIL, which stopped a production process for over a
+    minute. Faulting those mappings in from a thread first lets the loop keep
+    running. Kernels without ``MADV_POPULATE_READ`` reject the advice and
+    nothing changes.
+    """
+    try:
+        smaps = _SMAPS_PATH.read_bytes()
+    except OSError:  # no procfs, such as on macOS
+        return 0
+    paged_in_kib = 0
+    mapping: tuple[int, int] | None = None
+    for start, end, permissions, swap_kib in _SMAPS_LINE.findall(smaps):
+        if permissions:
+            readable_private = permissions.startswith(b"r") and permissions.endswith(b"p")
+            mapping = (int(start, 16), int(end, 16) - int(start, 16)) if readable_private else None
+        elif mapping is not None and int(swap_kib) > 0 and _madvise()(*mapping, _MADV_POPULATE_READ) == 0:
+            paged_in_kib += int(swap_kib)
+    return paged_in_kib
+
+
+def freeze_startup_heap() -> None:
+    """Collect garbage, then exclude every surviving object from later collections.
+
+    Call audio is pumped on the event loop, and a full collection that walks every
+    imported module pauses agent speech for hundreds of milliseconds. Run this
+    before any bot exists, so runtime objects stay collectable until the runtime
+    heap refreeze takes them over.
+    """
+    started = time.perf_counter()
+    gc.collect()
+    collect_seconds = time.perf_counter() - started
+    gc.freeze()
+    logger.info("startup_heap_frozen", frozen_objects=gc.get_freeze_count(), collect_seconds=round(collect_seconds, 3))
+
+
 def _log_heap_type_probe() -> None:
     """Walk the GC-tracked heap once and log its most common object types."""
     started = time.perf_counter()
@@ -132,6 +228,7 @@ def _log_heap_type_probe() -> None:
     logger.info(
         "heap_type_probe",
         tracked_objects=counts.total(),
+        frozen_objects=gc.get_freeze_count(),
         top_types=[
             {"type": f"{object_type.__module__}.{object_type.__qualname__}", "count": count}
             for object_type, count in counts.most_common(_TOP_TYPE_COUNT)
@@ -154,10 +251,81 @@ async def _run_heap_type_probe(
         _log_heap_type_probe()
 
 
-def start_heap_type_probe(runtime_paths: RuntimePaths) -> asyncio.Task[None] | None:
-    """Start the probe task when the env knob opts in; the caller cancels it at shutdown."""
-    interval_seconds = _heap_probe_interval_seconds(runtime_paths)
-    if interval_seconds is None:
-        return None
-    logger.info("heap_type_probe_started", interval_seconds=interval_seconds)
-    return create_background_task(_run_heap_type_probe(interval_seconds), name="heap_type_probe")
+async def _refreeze_runtime_heap() -> None:
+    """Read swapped-out memory back in off the loop, then collect what the frozen heap released and refreeze.
+
+    Unfreezing first makes objects frozen earlier collectable, such as bots a
+    config reload replaced; collecting before freezing keeps garbage out of
+    the frozen set. Objects still alive here that later become cyclic garbage,
+    such as a reply in flight, wait for the next refreeze together with
+    everything they reference. The collection walks the whole heap once,
+    including the import-time heap frozen at startup, so it pauses the loop a
+    little longer than a full collection of the unfrozen heap.
+    """
+    started = time.perf_counter()
+    paged_in_kib = await asyncio.to_thread(_read_swapped_memory_back)
+    page_in_seconds = time.perf_counter() - started
+    started = time.perf_counter()
+    gc.unfreeze()
+    collected = gc.collect()
+    collect_seconds = time.perf_counter() - started
+    gc.freeze()
+    logger.info(
+        "runtime_heap_refrozen",
+        frozen_objects=gc.get_freeze_count(),
+        collected=collected,
+        collect_seconds=round(collect_seconds, 3),
+        paged_in_kib=paged_in_kib,
+        page_in_seconds=round(page_in_seconds, 3),
+    )
+
+
+async def _run_heap_refreeze(
+    interval_seconds: float,
+    *,
+    ready: Callable[[], Awaitable[object]],
+    sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+) -> None:
+    """Refreeze once the runtime is ready, then after each interval until cancelled."""
+    await ready()
+    await _refreeze_runtime_heap()
+    _raise_full_collection_threshold()
+    while True:
+        await sleep(interval_seconds)
+        await _refreeze_runtime_heap()
+
+
+def _raise_full_collection_threshold() -> None:
+    """Make routine full collections rarer once the runtime heap is frozen, never lowering a higher setting."""
+    young, middle, full = gc.get_threshold()
+    if full >= _FROZEN_HEAP_FULL_COLLECTION_THRESHOLD:
+        return
+    gc.set_threshold(young, middle, _FROZEN_HEAP_FULL_COLLECTION_THRESHOLD)
+    logger.info("gc_full_collection_threshold_raised", previous=full, threshold=_FROZEN_HEAP_FULL_COLLECTION_THRESHOLD)
+
+
+def start_heap_tasks(
+    runtime_paths: RuntimePaths,
+    *,
+    runtime_ready: Callable[[], Awaitable[object]],
+) -> list[asyncio.Task[None]]:
+    """Start the heap refreeze and the opt-in probe; the caller cancels them at shutdown.
+
+    Both intervals are validated before either task exists, so an invalid value
+    fails startup without leaving a task that shutdown would never cancel.
+    """
+    refreeze_interval_seconds = _heap_refreeze_interval_seconds(runtime_paths)
+    probe_interval_seconds = _heap_probe_interval_seconds(runtime_paths)
+    tasks: list[asyncio.Task[None]] = []
+    if refreeze_interval_seconds is not None:
+        logger.info("heap_refreeze_started", interval_seconds=refreeze_interval_seconds)
+        tasks.append(
+            create_background_task(
+                _run_heap_refreeze(refreeze_interval_seconds, ready=runtime_ready),
+                name="heap_refreeze",
+            ),
+        )
+    if probe_interval_seconds is not None:
+        logger.info("heap_type_probe_started", interval_seconds=probe_interval_seconds)
+        tasks.append(create_background_task(_run_heap_type_probe(probe_interval_seconds), name="heap_type_probe"))
+    return tasks

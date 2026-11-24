@@ -2,29 +2,30 @@
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import TYPE_CHECKING, Literal
 
 import yaml
-from agno.tools import Toolkit
 from pydantic import ValidationError
 
-from mindroom.api.config_lifecycle import validate_and_persist_config_payload
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import ConfigRuntimeValidationError, format_invalid_config_message, load_config_or_user_error
-from mindroom.config.models import AgentLearningMode  # noqa: TC001
+from mindroom.config.tool_aliases import canonical_tool_names
 from mindroom.custom_tools.config_manager import (
+    commit_authored_config,
     platform_administrator_error,
     preserve_tool_overrides,
     redaction_marker_error,
     validate_knowledge_bases,
 )
-from mindroom.logging_config import get_logger
-from mindroom.tool_system.catalog import resolved_tool_metadata_for_runtime
+from mindroom.tool_system.authoring import Toolkit
+from mindroom.tool_system.plugins import config_plugins
+from mindroom.tool_system.tool_function import ToolGate
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
+    from mindroom.tool_system.tool_function import ToolFunction
 
-logger = get_logger(__name__)
 
 _SELF_CONFIG_BLOCKED_TOOLS = {"config_manager"}
 _CONFIG_CHANGE_REJECTED_MESSAGE = "Changes were NOT applied."
@@ -39,14 +40,18 @@ class SelfConfigTools(Toolkit):
     def __init__(self, agent_name: str, runtime_paths: RuntimePaths) -> None:
         self.agent_name = agent_name
         self.runtime_paths = runtime_paths
-        self.config_path = runtime_paths.config_path
         super().__init__(
             name="self_config",
             tools=[self.get_own_config, self.update_own_config],
         )
+
+    def offered_function(self, function: ToolFunction) -> ToolFunction:
+        """Require confirmation of every write."""
         # A human confirms every write, even under tool_approval.default: auto_approve,
         # because the model issuing the call also reads untrusted content.
-        self.functions["update_own_config"].requires_confirmation = True
+        if function.name == "update_own_config":
+            return replace(function, gate=ToolGate.CONFIRM)
+        return function
 
     def get_own_config(self) -> str:
         """Get this agent's current redacted configuration as YAML.
@@ -84,8 +89,6 @@ class SelfConfigTools(Toolkit):
         model: str | None = None,
         rooms: list[str] | None = None,
         markdown: bool | None = None,
-        learning: bool | None = None,
-        learning_mode: AgentLearningMode | None = None,
         knowledge_bases: list[str] | None = None,
         skills: list[str] | None = None,
         include_default_tools: bool | None = None,
@@ -93,7 +96,6 @@ class SelfConfigTools(Toolkit):
         thread_mode: Literal["thread", "room"] | None = None,
         num_history_runs: int | None = None,
         num_history_messages: int | None = None,
-        compress_tool_results: bool | None = None,
         max_tool_calls_from_history: int | None = None,
         context_files: list[str] | None = None,
     ) -> str:
@@ -106,9 +108,7 @@ class SelfConfigTools(Toolkit):
             tools: List of tool names to enable
             model: Model name to use
             rooms: List of room names to auto-join
-            markdown: Whether to use markdown formatting
-            learning: Whether to enable Agno Learning
-            learning_mode: Learning mode ("always" or "agentic")
+            markdown: Whether your system prompt says your replies are shown as Markdown
             knowledge_bases: List of knowledge base IDs
             skills: List of skill names
             include_default_tools: Whether to merge defaults.tools
@@ -116,7 +116,6 @@ class SelfConfigTools(Toolkit):
             thread_mode: Conversation threading mode ("thread" or "room")
             num_history_runs: Number of prior runs to include as history
             num_history_messages: Max messages from history
-            compress_tool_results: Compress tool results in history (disabled by default because it can invalidate Anthropic/Vertex Claude prompt caches)
             max_tool_calls_from_history: Max tool call messages replayed from history
             context_files: Workspace-relative file paths loaded into each freshly built agent instance
 
@@ -147,11 +146,8 @@ class SelfConfigTools(Toolkit):
 
         # Validate tools against known tool metadata
         if tools is not None:
-            tool_metadata = resolved_tool_metadata_for_runtime(
-                self.runtime_paths,
-                config,
-                tolerate_plugin_load_errors=True,
-            )
+            tools = canonical_tool_names(tools)
+            tool_metadata = config_plugins(config, self.runtime_paths).tools
             invalid_tools = [t for t in tools if t not in tool_metadata]
             if invalid_tools:
                 return f"Error: Unknown tools: {', '.join(invalid_tools)}"
@@ -183,8 +179,6 @@ class SelfConfigTools(Toolkit):
             ("model", model),
             ("rooms", rooms),
             ("markdown", markdown),
-            ("learning", learning),
-            ("learning_mode", learning_mode),
             ("knowledge_bases", knowledge_bases),
             ("skills", skills),
             ("include_default_tools", include_default_tools),
@@ -192,26 +186,24 @@ class SelfConfigTools(Toolkit):
             ("thread_mode", thread_mode),
             ("num_history_runs", num_history_runs),
             ("num_history_messages", num_history_messages),
-            ("compress_tool_results", compress_tool_results),
             ("max_tool_calls_from_history", max_tool_calls_from_history),
             ("context_files", context_files),
         ]
         non_null_updates = {field_name: value for field_name, value in requested_updates if value is not None}
 
-        candidate_agent_data = agent.model_dump()
+        # Only the fields the entry already set, plus the requested ones, so saving does not spell out every default.
+        candidate_agent_data = agent.model_dump(exclude_unset=True)
         candidate_agent_data.update(non_null_updates)
 
         try:
             validated_agent = AgentConfig.model_validate(candidate_agent_data)
         except ValidationError as e:
-            return f"Error validating configuration: {e}"
+            return format_invalid_config_message(e, footer=_CONFIG_CHANGE_REJECTED_MESSAGE)
 
         current_values = agent.model_dump()
         validated_values = validated_agent.model_dump()
         updates: dict[str, str] = {}
-        for field_name, new_value in requested_updates:
-            if new_value is None:
-                continue
+        for field_name in non_null_updates:
             current_value = current_values[field_name]
             validated_value = validated_values[field_name]
             if validated_value == current_value:
@@ -230,7 +222,7 @@ class SelfConfigTools(Toolkit):
 
         config.agents[self.agent_name] = validated_agent
         try:
-            validate_and_persist_config_payload(config.authored_model_dump(), self.runtime_paths)
+            commit_authored_config(config, self.runtime_paths)
         except (ValidationError, ConfigRuntimeValidationError) as exc:
             return format_invalid_config_message(exc, footer=_CONFIG_CHANGE_REJECTED_MESSAGE)
         except Exception as e:

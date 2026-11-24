@@ -1,0 +1,528 @@
+"""Generated background subagent lifecycles checked against invariants that must hold on every path.
+
+The leader's replies and the children's turns run scripted models on the owned loop: each subagent call runs as an
+ordinary managed call's job, with the approval cards each job posts for its child, parent waits, cancellation, client
+cancels, orderly restart, and crash recovery, after which the worker's pass continues the children a restart cut short.
+The child's approval-gated tool records every execution, so the oracle compares effects with the decisions given.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import re
+from collections import Counter
+from concurrent.futures import Executor, Future
+from dataclasses import dataclass, field, replace
+from typing import TYPE_CHECKING, ClassVar, Literal
+
+from mindroom import pre_model_preparation
+from mindroom.approval import manager as approval_manager
+from mindroom.config.approval import ApprovalRuleConfig
+from mindroom.custom_tools.job import JobTools
+from mindroom.delegation.background import delegation_child
+from mindroom.delegation.recovery import read_child_run
+from mindroom.event_journal import BackgroundApprovalDecision, EventJournalStore, tool_job_run_id
+from mindroom.llm.runs import RunRecord, RunStatus
+from mindroom.orchestration.tool_job_runtime import _is_subagent_job
+from mindroom.session_storage import lanes
+from mindroom.tool_jobs.instances import pin_background_tool_jobs
+from mindroom.tool_jobs.runtime import TERMINAL_STATUSES, register_background_runtime
+from mindroom.tool_system.agno_toolkits import Toolkit
+from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess
+from mindroom.tool_system.registration import register_tool_with_metadata
+from mindroom.tool_system.runtime_context import get_tool_runtime_context, tool_runtime_context
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+from tests.conftest import FakeApprovalTransport, restore_builtin_tools, snapshot_builtin_tools
+from tests.delegation_helpers import ScriptedAgents, _delegate_runtime_context, _runtime_paths
+from tests.fakes.scripted_model import ScriptedModel, ScriptStep, answer, calls, tool_call
+from tests.tool_job_helpers import (
+    DELEGATING_REQUESTER,
+    DelegatingLeader,
+    continue_stopped_jobs,
+    delegating_config,
+    job_card_decision,
+    lookup,
+    reserve_job_card,
+    run_journal_statements_inline,
+    settle_stopped_subagent,
+    tool_job_journal,
+    tool_job_runtime,
+)
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Callable, Coroutine, Sequence
+    from pathlib import Path
+
+    import pytest
+
+    from mindroom.approval.tool_approval import BackgroundScriptToolOrigin
+    from mindroom.llm.provider import ModelRequest, StreamEvent
+    from mindroom.tool_jobs.runtime import BackgroundJob
+    from tests.tool_job_helpers import ProcessRuntime
+
+_WRITTEN = "Report written"
+# Loop iterations, and timer waits shorter than this many seconds, one step may take before it counts as stuck.
+_IDLE_ROUNDS = 20_000
+# Each child's task names the child, which its model's requests carry.
+_TASK = re.compile(r"script(\d+)")
+_TIMER_HORIZON = 1.0
+# How many restarts may cut one job short before the next one ends it, as the continuation's own limit says.
+_CONTINUATION_LIMIT = 2
+# More cards than any generated child can request.
+_MAX_CARDS = 20
+
+
+@dataclass(frozen=True)
+class ChildScript:
+    """What one delegated child does: approval-gated tool calls, one per model turn, then its answer."""
+
+    approvals: int = 0
+    # The child waits for an explicit release before its first model call.
+    hold_start: bool = False
+    # Each approved tool call waits for an explicit release before it finishes.
+    hold_tool: bool = False
+
+
+@dataclass(frozen=True)
+class Step:
+    """A printable, shrinkable step; it names a child or card by index, never by identity."""
+
+    kind: Literal["delegate", "wait", "approve", "cancel", "client_cancel", "release", "restart", "crash"]
+    index: int = 0
+    script: ChildScript = ChildScript()
+    # A parent wait budget: None waits until the job finishes, 0 returns at once.
+    budget: float | None = None
+    # The requester's answer to a card.
+    approve: bool = True
+
+
+@dataclass
+class _Card:
+    run_id: str
+    call_id: str
+    decision: asyncio.Future[BackgroundApprovalDecision]
+
+
+@dataclass
+class _Cards:
+    """The approval store a job posts its child's cards to: each card stays answerable until decided or its job ends.
+
+    Each card's call is reserved in the journal, as the router reserves it, so the save of its job's end denies it.
+    """
+
+    journal: EventJournalStore
+    cards: list[_Card] = field(default_factory=list)
+    transport: FakeApprovalTransport = field(default_factory=FakeApprovalTransport)
+
+    async def request_background_approval(
+        self,
+        *,
+        origin: BackgroundScriptToolOrigin,
+        tool_name: str,
+        **_kwargs: object,
+    ) -> BackgroundApprovalDecision:
+        await reserve_job_card(self.journal, origin.run_id, origin.call_id, tool_name=tool_name)
+        card = _Card(origin.run_id, origin.call_id, asyncio.get_running_loop().create_future())
+        self.cards.append(card)
+        # A cancelled wait leaves its card answerable; only a decision or its job's end decides it.
+        return await asyncio.shield(card.decision)
+
+    async def pending(self) -> list[_Card]:
+        return [
+            card
+            for card in self.cards
+            if not card.decision.done() and await job_card_decision(self.journal, card.run_id, card.call_id) is None
+        ]
+
+
+@dataclass
+class _Child:
+    script: ChildScript
+    model: ScriptedModel
+    job_id: str | None = None
+    # How often the child's model was asked; recovery never asks it.
+    requests: int = 0
+
+
+@dataclass(kw_only=True)
+class _ChildModels(ScriptedModel):
+    """The model every child runs on: each request plays the script of the child its task names."""
+
+    runner: DelegationFuzzRunner
+
+    async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
+        """Play the next turn of the child whose task the request carries, after its held start."""
+        runner = self.runner
+        [index] = {int(found) for message in request.messages for found in _TASK.findall(str(message.content))}
+        record = runner.children[index]
+        record.requests += 1
+        context = get_tool_runtime_context()
+        assert context is not None
+        runner.sessions[context.session_id] = index
+        if record.requests == 1 and record.script.hold_start:
+            await runner.gate.wait()
+        async for event in record.model.stream(request):
+            yield event
+
+
+@dataclass
+class _Turn:
+    name: str
+    task: asyncio.Task[RunRecord | str]
+
+
+class _NotesTools(Toolkit):
+    """The child's approval-gated tool, which records every execution with the running fuzz example."""
+
+    runner: ClassVar[DelegationFuzzRunner | None] = None
+
+    def __init__(self) -> None:
+        super().__init__(name="notes", tools=[self.write_report])
+
+    async def write_report(self, note: str) -> str:
+        """Write one report.
+
+        Args:
+            note: The report's note.
+
+        """
+        runner = type(self).runner
+        context = get_tool_runtime_context()
+        assert runner is not None
+        assert context is not None
+        runner.executed[note] += 1
+        if runner.children[runner.sessions[context.session_id]].script.hold_tool:
+            await runner.gate.wait()
+        return _WRITTEN
+
+
+class DelegationFuzzRunner:
+    """Drive one parent conversation's background children through generated steps over durable storage."""
+
+    def __init__(self, root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        self.paths = _runtime_paths(root)
+        self.config = delegating_config(
+            child_tools=["notes"],
+            rules=[ApprovalRuleConfig(match="write_report", action="require_approval")],
+        )
+        self.identity = ToolExecutionIdentity(
+            "matrix",
+            "leader",
+            DELEGATING_REQUESTER,
+            "!room:example.org",
+            None,
+            None,
+            "parent",
+        )
+        self._baseline = asyncio.all_tasks()
+        self._turn_count = 0
+        self.gate = asyncio.Event()
+        self.children: list[_Child] = []
+        self.approvals = _Cards(tool_job_journal(self.paths.storage_root))
+        self.turns: list[_Turn] = []
+        self.executed: Counter[str] = Counter()
+        # Notes of calls some resolution approved; only those may ever run.
+        self.approved: set[str] = set()
+        # What first stopped each job's work: a cancellation or a restart; the first cause stands, until a restart's
+        # continuation takes the job's work up again.
+        self.causes: dict[str, Literal["cancel", "restart"]] = {}
+        # Each child's session, by the child it belongs to.
+        self.sessions: dict[str, int] = {}
+        pin_background_tool_jobs(self.config, self.paths)
+        self.runtime: ProcessRuntime
+        self._register_notes(monkeypatch)
+        self.agents = ScriptedAgents({"code": _ChildModels([], runner=self)})
+        self.agents.install(monkeypatch)
+        monkeypatch.setattr(approval_manager, "get_approval_store", lambda: self.approvals)
+        # Blocking work, agent builds and storage lanes included, runs on the event loop, so an idle loop marks the end
+        # of each step and a crash lands between two awaits.
+        monkeypatch.setattr(asyncio, "to_thread", _inline)
+        monkeypatch.setattr(pre_model_preparation, "_AGENT_BUILD_EXECUTOR", _InlineExecutor())
+        monkeypatch.setattr(lanes, "_lane", lambda _store: _InlineExecutor())
+        run_journal_statements_inline(monkeypatch)
+
+    async def open(self) -> None:
+        """Start the first process."""
+        self.runtime = await self._open()
+
+    async def _open(self) -> ProcessRuntime:
+        # A restart interrupts a recovered child, and its end denies its cards.
+        runtime = await tool_job_runtime(
+            self.paths.storage_root,
+            cancel=settle_stopped_subagent(self.config, self.paths),
+            continues=_is_subagent_job,
+        )
+        register_background_runtime(self.paths, runtime)
+        return runtime
+
+    async def run(self, steps: list[Step]) -> None:
+        """Apply each step, then release everything and check the settled state."""
+        for step in steps:
+            await self.step(step)
+        await self.finish()
+
+    async def step(self, step: Step) -> None:
+        """Apply one step, run every task it woke to a standstill, then check every invariant."""
+        await getattr(self, f"_{step.kind}")(step)
+        await self._idle()
+        await self._collect()
+
+    async def finish(self) -> None:
+        """Release all held work and approve every card; every turn must finish and every child settle consistently."""
+        self.gate.set()
+        await self._idle()
+        for _ in range(_MAX_CARDS):
+            if not await self.approvals.pending():
+                break
+            await self._approve(Step("approve"))
+            await self._idle()
+        await self._collect()
+        assert not self.turns, [turn.name for turn in self.turns]
+        await self._check_settled()
+
+    async def close(self) -> None:
+        """End every task this example started and release storage, even after a failed check."""
+        self.gate.set()
+        await self._end_tasks()
+        await self.runtime.close_journal()
+        await self.approvals.journal.close()
+        restore_builtin_tools(self._builtin_tools)
+
+    def _register_notes(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Register the child's ``notes`` toolkit for this example; ``close`` restores the built-in tools."""
+        monkeypatch.setattr(_NotesTools, "runner", self)
+        self._builtin_tools = snapshot_builtin_tools()
+        register_tool_with_metadata(
+            name="notes",
+            file_access=ToolFileAccess.NONE,
+            display_name="Notes",
+            description="Writes the reports a delegated child was asked for.",
+            category=ToolCategory.DEVELOPMENT,
+        )(lambda: _NotesTools)
+
+    async def _drive(self, *turns: Sequence[ScriptStep]) -> RunRecord:
+        leader = DelegatingLeader(self.config, self.paths, self.identity, self.agents)
+        return await leader.reply(*turns, run_id=f"parent{self._turn_count}")
+
+    def _start_turn(self, name: str, coroutine: Coroutine[object, object, RunRecord | str]) -> None:
+        self._turn_count += 1
+        context = replace(
+            _delegate_runtime_context(self.config, self.paths, execution_identity=self.identity),
+            membership_turn_id=f"$turn{self._turn_count}",
+        )
+
+        async def run() -> RunRecord | str:
+            with tool_runtime_context(context):
+                return await coroutine
+
+        self.turns.append(_Turn(name, asyncio.create_task(run())))
+
+    async def _delegate(self, step: Step) -> None:
+        index = len(self.children)
+        turns: list[Sequence[ScriptStep]] = [
+            calls(tool_call("write_report", f"w{index}-{turn}", note=f"w{index}-{turn}"))
+            for turn in range(step.script.approvals)
+        ]
+        self.children.append(_Child(step.script, ScriptedModel([*turns, answer(f"Child {index} result")])))
+        budget = {} if step.budget is None else {"background_after": step.budget}
+        call = tool_call("run_subagent", f"delegate{index}", agent_name="code", task=f"script{index}", **budget)
+        self._start_turn(f"delegate{index}", self._drive(calls(call), answer("Parent done")))
+
+    def _find_jobs(self) -> None:
+        """Note each child's job, which its call's admission named, by the task the child was first given."""
+        known = {child.job_id for child in self.children}
+        for job in self.runtime.retained_jobs():
+            if job.kind == "delegation" and job.job_id not in known:
+                self.children[int(_TASK.fullmatch(delegation_child(job).task)[1])].job_id = job.job_id
+
+    def _job(self, index: int) -> str | None:
+        self._find_jobs()
+        known = [child.job_id for child in self.children if child.job_id is not None]
+        return known[index % len(known)] if known else None
+
+    async def _wait(self, step: Step) -> None:
+        if (job_id := self._job(step.index)) is None:
+            return
+        budget = {} if step.budget is None else {"background_after": step.budget}
+        call = tool_call("job", f"wait{self._turn_count}", action="wait", job_id=job_id, **budget)
+        self._start_turn(f"wait:{job_id}", self._drive(calls(call), answer("Parent read")))
+
+    async def _approve(self, step: Step) -> None:
+        """Answer one card a job is still waiting on."""
+        if not (pending := await self.approvals.pending()):
+            return
+        card = pending[step.index % len(pending)]
+        if step.approve:
+            # A card names the child's turn with its call.
+            self.approved.add(card.call_id.rpartition(":")[2])
+        status = "approved" if step.approve else "denied"
+        card.decision.set_result(BackgroundApprovalDecision(status, None if step.approve else "Not now"))
+
+    def _cause(self, job_id: str, cause: Literal["cancel", "restart"]) -> None:
+        entry = self.runtime._entries.get(job_id)
+        if entry is not None and entry.job.status not in TERMINAL_STATUSES:
+            self.causes.setdefault(job_id, cause)
+
+    async def _cancel(self, step: Step) -> None:
+        if (job_id := self._job(step.index)) is not None:
+            self._cause(job_id, "cancel")
+            self._start_turn(f"cancel:{job_id}", JobTools(self.paths).job("cancel", job_id))
+
+    async def _client_cancel(self, step: Step) -> None:
+        """Cancel from the jobs bar, which asks the job to stop without waiting for it."""
+        if (job_id := self._job(step.index)) is None:
+            return
+        self._cause(job_id, "cancel")
+        await self.runtime.request_cancel(job_id)
+
+    async def _release(self, _step: Step) -> None:
+        self.gate.set()
+        await self._idle()
+        self.gate = asyncio.Event()
+
+    def _mark_restart(self) -> None:
+        """Note a restart as the first cause that stops each known child's job still running."""
+        self._find_jobs()
+        for child in self.children:
+            if child.job_id is not None:
+                self._cause(child.job_id, "restart")
+
+    async def _restart(self, _step: Step) -> None:
+        """Stop the process in order: replies are cancelled, then the job runtime drains and closes."""
+        self._mark_restart()
+        await self._end_turns()
+        shutdown = asyncio.create_task(self.runtime.shutdown())
+        await self._idle()
+        self.gate.set()
+        await self._idle()
+        assert shutdown.done()
+        shutdown.result()
+        self.gate = asyncio.Event()
+        await self._reopen()
+
+    async def _crash(self, _step: Step) -> None:
+        """Tear down the event loop between two awaits: work unwinds unasked, and only saved state survives."""
+        self._mark_restart()
+        await self._end_tasks()
+        self.turns.clear()
+        await self._reopen()
+
+    async def _reopen(self) -> None:
+        requests = [child.requests for child in self.children]
+        # Each step ends idle, so a job still running holds a child the restart cut short at work.
+        working = {
+            job.job_id
+            for job in self.runtime.retained_jobs()
+            if job.status == "running" and job.adapter.get("restart_continuations", 0) < _CONTINUATION_LIMIT
+        }
+        # The previous process is gone, and so is its connection.
+        await self.runtime.close_journal()
+        self.runtime = await self._open()
+        await self.runtime.recover()
+        # Recovery never runs a child again; the worker's pass then continues or settles every job it kept.
+        assert [child.requests for child in self.children] == requests
+        context = _delegate_runtime_context(self.config, self.paths, execution_identity=self.identity)
+        await continue_stopped_jobs(self.runtime, self.config, self.paths, context)
+        assert not self.runtime.awaiting_continuation()
+        continued = {job.job_id for job in self.runtime.retained_jobs() if job.status not in TERMINAL_STATUSES}
+        # Exactly the children cut short at work continue, each under its job, until restarts keep stopping one.
+        assert continued == working, (continued, working)
+        for job_id in continued:
+            self.causes.pop(job_id, None)
+
+    async def _end_turns(self) -> None:
+        for turn in self.turns:
+            turn.task.cancel()
+        await asyncio.gather(*(turn.task for turn in self.turns), return_exceptions=True)
+        self.turns.clear()
+
+    async def _end_tasks(self) -> None:
+        current = asyncio.current_task()
+        while pending := [
+            task
+            for task in asyncio.all_tasks()
+            if task not in self._baseline and task is not current and not task.done()
+        ]:
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+
+    async def _idle(self) -> None:
+        """Yield until no task is runnable and no near timer remains; every waiter then awaits a test gate."""
+        loop = asyncio.get_running_loop()
+        for _ in range(_IDLE_ROUNDS):
+            await asyncio.sleep(0)
+            if loop._ready:  # type: ignore[attr-defined]
+                continue
+            timers = [
+                handle.when()
+                for handle in loop._scheduled  # type: ignore[attr-defined]
+                if not handle.cancelled() and handle.when() - loop.time() < _TIMER_HORIZON
+            ]
+            if not timers:
+                return
+            await asyncio.sleep(max(0.0, min(timers) - loop.time()))
+        msg = "Delegation fuzz step never became idle"
+        raise AssertionError(msg)
+
+    async def _collect(self) -> None:
+        """Check effects, finished turns, and that every answerable card belongs to a job still waiting on it."""
+        for name, count in self.executed.items():
+            assert count <= 1, (name, count)
+            assert name in self.approved, f"{name} ran without approval"
+        for turn in [turn for turn in self.turns if turn.task.done()]:
+            self.turns.remove(turn)
+            result = turn.task.result()
+            # A child's approvals never pause its parent; the job asks for them.
+            assert not (isinstance(result, RunRecord) and result.status is RunStatus.paused), turn.name
+        waiting = {tool_job_run_id(job.job_id) for job in await self._jobs() if job.status == "awaiting_approval"}
+        answerable = {card.run_id for card in await self.approvals.pending()}
+        assert answerable <= waiting, (answerable, waiting)
+
+    async def _jobs(self) -> list[BackgroundJob]:
+        self._find_jobs()
+        return [
+            await lookup(self.runtime, job.job_id, owner=self.identity, depth=0)
+            for job in self.runtime.retained_jobs()
+            if job.kind == "delegation"
+        ]
+
+    async def _check_settled(self) -> None:
+        """Compare each job with its child's saved run, and each approved effect with that run's tools."""
+        assert not await self.approvals.pending()
+        for job in await self._jobs():
+            assert job.status in TERMINAL_STATUSES, (job.job_id, job.status)
+            run = await read_child_run(delegation_child(job), self.config, self.paths)
+            if job.status == "completed":
+                assert run is not None
+                assert run.status is RunStatus.completed, (job.job_id, run.status)
+            elif run is not None:
+                assert run.status not in {RunStatus.running, RunStatus.paused}, (job.job_id, job.status, run.status)
+            if job.status in {"completed", "cancelled"}:
+                assert job.adapter["child"]["status"] == job.status, (job.job_id, job.adapter["child"]["status"])
+            cause = self.causes.get(job.job_id)
+            if cause == "cancel":
+                # A cancellation ends the child as cancelled, even when a restart finishes settling it.
+                assert job.status == "cancelled", (job.job_id, job.status, job.result)
+            elif cause == "restart":
+                assert job.status in {"failed", "interrupted"}, (job.job_id, job.status, job.result)
+                assert "restart" in (job.result or "") or "shutdown" in (job.result or ""), (job.job_id, job.result)
+            for tool in (run.tools or ()) if run is not None else ():
+                if tool.tool_name == "write_report" and tool.result == _WRITTEN:
+                    assert self.executed[str(tool.tool_args["note"])] == 1, tool.tool_call_id
+
+
+async def _inline[Result](function: Callable[..., Result], /, *args: object, **kwargs: object) -> Result:
+    return function(*args, **kwargs)
+
+
+class _InlineExecutor(Executor):
+    """Run each submitted call at once on the calling thread, handing back its settled future."""
+
+    def submit[Result](self, fn: Callable[..., Result], /, *args: object, **kwargs: object) -> Future[Result]:
+        future: Future[Result] = Future()
+        try:
+            future.set_result(fn(*args, **kwargs))
+        except Exception as error:
+            future.set_exception(error)
+        return future

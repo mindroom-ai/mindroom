@@ -3,23 +3,36 @@
 from __future__ import annotations
 
 import tempfile
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
+from typing import TYPE_CHECKING
 from unittest.mock import patch
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import pytest
-from agno.models.ollama import Ollama
-from agno.session import AgentSession, TeamSession
 
+from mindroom.agent_loop.build import prompt_for_turn
 from mindroom.agents import create_agent
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.config.models import DefaultsConfig
-from mindroom.prompts import DATETIME_CONTEXT_TEMPLATE
-from mindroom.system_prompt import render_date_context
-from mindroom.teams import TeamMode, build_materialized_team_instance
-from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from mindroom.config.models import DefaultsConfig, ModelConfig
+from mindroom.llm.messages import system_text
+from mindroom.system_prompt import render_session_context
+from mindroom.teams.members import build_team_spec, resolve_exact_team_members
+from mindroom.teams.spec import TeamMode
+from mindroom.tool_system.plugins import config_plugins
+from tests.conftest import (
+    bind_runtime_paths,
+    install_model_providers,
+    runtime_paths_for,
+    test_runtime_paths,
+    unstored_team_scope_context,
+)
+from tests.fakes.scripted_model import ScriptedModel
+from tests.turn_model_helpers import turn_model
+
+if TYPE_CHECKING:
+    from mindroom.agent_loop.build import AgentBuild
 
 
 def _datetime_test_config() -> Config:
@@ -36,54 +49,66 @@ def _datetime_test_config() -> Config:
                 ),
             },
             defaults=DefaultsConfig(tools=[]),
+            models={"default": ModelConfig(provider="openai", id="gpt-6-astra")},
         ),
         runtime_paths,
     )
 
 
-def test_render_date_context_format() -> None:
-    """Test the datetime context formatting."""
+def test_the_session_context_names_the_date_and_timezone() -> None:
+    """The session context holds the date and the timezone it is rendered in, without a clock time."""
     frozen_now = datetime(2026, 3, 20, 13, 30, tzinfo=ZoneInfo("America/New_York"))
     with patch("mindroom.system_prompt.datetime") as mock_datetime:
         mock_datetime.now.return_value = frozen_now
-        context = render_date_context("America/New_York", datetime_context_template=DATETIME_CONTEXT_TEMPLATE)
+        context = render_session_context(Config(), "America/New_York")
 
     assert context == (
-        "## Current Date and Time\nToday is Friday, March 20, 2026.\nTimezone: America/New_York (EDT)\n\n"
+        "<mindroom_session_context>\n## Current Date and Time\nToday is Friday, March 20, 2026.\n"
+        "Timezone: America/New_York (EDT)\n</mindroom_session_context>"
     )
 
 
-def test_render_date_context_utc() -> None:
-    """Test datetime context with UTC timezone."""
+def test_the_session_context_in_utc() -> None:
+    """The default timezone is UTC."""
     frozen_now = datetime(2026, 3, 20, 8, 15, tzinfo=ZoneInfo("UTC"))
     with patch("mindroom.system_prompt.datetime") as mock_datetime:
         mock_datetime.now.return_value = frozen_now
-        context = render_date_context("UTC", datetime_context_template=DATETIME_CONTEXT_TEMPLATE)
+        context = render_session_context(Config(), Config().timezone)
 
-    assert context == ("## Current Date and Time\nToday is Friday, March 20, 2026.\nTimezone: UTC (UTC)\n\n")
+    assert "Today is Friday, March 20, 2026.\nTimezone: UTC (UTC)\n" in context
 
 
-def test_render_date_context_invalid_timezone() -> None:
-    """Test that invalid timezone raises ZoneInfoNotFoundError."""
+def test_the_session_context_rejects_an_unknown_timezone() -> None:
+    """An unknown timezone raises ZoneInfoNotFoundError."""
     with pytest.raises(ZoneInfoNotFoundError):
-        render_date_context("Invalid/Timezone", datetime_context_template=DATETIME_CONTEXT_TEMPLATE)
+        render_session_context(Config(), "Invalid/Timezone")
 
 
-def test_agent_prompt_includes_datetime() -> None:
+def _build(config: Config, monkeypatch: pytest.MonkeyPatch) -> AgentBuild:
+    """Build the general agent on the scripted provider."""
+    install_model_providers(monkeypatch, {"default": ScriptedModel([])})
+    return create_agent(
+        "general",
+        config,
+        runtime_paths_for(config),
+        execution_identity=None,
+        knowledge=None,
+        model=turn_model(config, runtime_paths_for(config), "general"),
+        plugins=config_plugins(config, runtime_paths_for(config)),
+    )
+
+
+def test_agent_prompt_includes_datetime(monkeypatch: pytest.MonkeyPatch) -> None:
     """Date context remains in the system prompt after the shared role."""
     config = _datetime_test_config()
     config.timezone = "America/Los_Angeles"
-    runtime_paths = runtime_paths_for(config)
-    model = Ollama(id="test-model")
 
-    with (
-        patch("mindroom.system_prompt.datetime") as mock_datetime,
-        patch("mindroom.providers.model_loading.get_model_instance", return_value=model),
-    ):
+    with patch("mindroom.system_prompt.datetime") as mock_datetime:
         mock_datetime.now.side_effect = lambda tz: datetime(2026, 3, 20, 8, 15, tzinfo=tz)
-        agent = create_agent("general", config, runtime_paths, execution_identity=None)
+        build = _build(config, monkeypatch)
 
-    role = agent.role
+    role = build.prompt.role
+    assert role is not None
 
     assert "## Your Identity" in role
     assert "You are GeneralAgent" in role
@@ -91,89 +116,101 @@ def test_agent_prompt_includes_datetime() -> None:
 
     assert "General assistant" in role
     assert "## Current Date and Time" not in role
-    message = agent.get_system_message(session=AgentSession(session_id="date-test", agent_id=agent.id))
-    assert message is not None
-    assert isinstance(message.content, str)
-    assert "## Current Date and Time" in message.content
-    assert "Today is Friday, March 20, 2026." in message.content
-    assert "Timezone: America/Los_Angeles (PDT)" in message.content
-    assert "The current time is" not in message.content
-    assert message.content.index("General assistant") < message.content.index("## Current Date and Time")
+    stable, turn = prompt_for_turn(build)
+    assert isinstance(turn.content, str)
+    assert "## Current Date and Time" in turn.content
+    assert "Today is Friday, March 20, 2026." in turn.content
+    assert "Timezone: America/Los_Angeles (PDT)" in turn.content
+    assert "The current time is" not in turn.content
+    assert "General assistant" in str(stable.content)
+    assert "## Current Date and Time" not in str(stable.content)
 
 
-def test_agent_prompt_datetime_changes_with_timezone() -> None:
+def test_agent_timezone_overrides_the_global_timezone_in_the_prompt(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An agent with its own timezone sees its own date, even when the install's timezone is still on the day before."""
+    config = _datetime_test_config()
+    config.timezone = "America/Los_Angeles"
+    config.agents["general"].timezone = "Europe/Amsterdam"
+    instant = datetime(2026, 3, 20, 23, 30, tzinfo=UTC)
+
+    with patch("mindroom.system_prompt.datetime") as mock_datetime:
+        mock_datetime.now.side_effect = instant.astimezone
+        build = _build(config, monkeypatch)
+
+    assert build.prompt.turn_context is not None
+    assert "Today is Saturday, March 21, 2026." in build.prompt.turn_context
+    assert "Timezone: Europe/Amsterdam (CET)" in build.prompt.turn_context
+
+
+def test_agent_prompt_datetime_changes_with_timezone(monkeypatch: pytest.MonkeyPatch) -> None:
     """Test that changing timezone in config changes the prompt timezone line."""
     config = _datetime_test_config()
-    runtime_paths = runtime_paths_for(config)
-    model = Ollama(id="test-model")
 
-    with (
-        patch("mindroom.system_prompt.datetime") as mock_datetime,
-        patch("mindroom.providers.model_loading.get_model_instance", return_value=model),
-    ):
+    with patch("mindroom.system_prompt.datetime") as mock_datetime:
         mock_datetime.now.side_effect = lambda tz: datetime(2026, 3, 20, 8, 15, tzinfo=tz)
         config.timezone = "America/New_York"
-        agent_ny = create_agent("general", config, runtime_paths, execution_identity=None)
+        agent_ny = _build(config, monkeypatch)
 
         config.timezone = "Asia/Tokyo"
-        agent_tokyo = create_agent("general", config, runtime_paths, execution_identity=None)
+        agent_tokyo = _build(config, monkeypatch)
 
-    assert agent_ny.additional_context is not None
-    assert agent_tokyo.additional_context is not None
-    assert "Timezone: America/New_York (EDT)" in agent_ny.additional_context
-    assert "Timezone: Asia/Tokyo (JST)" in agent_tokyo.additional_context
-    assert agent_ny.role == agent_tokyo.role
+    assert agent_ny.prompt.turn_context is not None
+    assert agent_tokyo.prompt.turn_context is not None
+    assert "Timezone: America/New_York (EDT)" in agent_ny.prompt.turn_context
+    assert "Timezone: Asia/Tokyo (JST)" in agent_tokyo.prompt.turn_context
+    assert agent_ny.prompt.role == agent_tokyo.prompt.role
 
 
-def test_agent_prompt_datetime_stable_within_same_day() -> None:
+def test_agent_prompt_datetime_stable_within_same_day(monkeypatch: pytest.MonkeyPatch) -> None:
     """System prompt date context should stay identical across turns within one day."""
     config = _datetime_test_config()
     config.timezone = "UTC"
-    runtime_paths = runtime_paths_for(config)
-    model = Ollama(id="test-model")
 
-    with (
-        patch("mindroom.system_prompt.datetime") as mock_datetime,
-        patch("mindroom.providers.model_loading.get_model_instance", return_value=model),
-    ):
+    with patch("mindroom.system_prompt.datetime") as mock_datetime:
         mock_datetime.now.side_effect = [
             datetime(2026, 3, 20, 0, 1, tzinfo=ZoneInfo("UTC")),
             datetime(2026, 3, 20, 23, 59, tzinfo=ZoneInfo("UTC")),
         ]
-        first_agent = create_agent("general", config, runtime_paths, execution_identity=None)
-        second_agent = create_agent("general", config, runtime_paths, execution_identity=None)
+        first_agent = _build(config, monkeypatch)
+        second_agent = _build(config, monkeypatch)
 
-    assert first_agent.role == second_agent.role
-    assert first_agent.additional_context == second_agent.additional_context
-    assert first_agent.additional_context is not None
-    assert "Today is Friday, March 20, 2026." in first_agent.additional_context
+    assert first_agent.prompt.role == second_agent.prompt.role
+    assert first_agent.prompt.turn_context == second_agent.prompt.turn_context
+    assert first_agent.prompt.turn_context is not None
+    assert "Today is Friday, March 20, 2026." in first_agent.prompt.turn_context
 
 
-def test_team_leader_keeps_date_when_members_have_stable_roles() -> None:
+def test_team_leader_keeps_date_when_members_have_stable_roles(monkeypatch: pytest.MonkeyPatch) -> None:
     """Moving dates out of member roles must not remove the leader's date context."""
     config = _datetime_test_config()
     config.timezone = "UTC"
     runtime_paths = runtime_paths_for(config)
-    with (
-        patch("mindroom.system_prompt.datetime") as mock_datetime,
-        patch("mindroom.providers.model_loading.get_model_instance", return_value=Ollama(id="test-model")),
-    ):
+    install_model_providers(monkeypatch, {"default": ScriptedModel([])})
+    with patch("mindroom.system_prompt.datetime") as mock_datetime:
         mock_datetime.now.return_value = datetime(2026, 3, 20, 8, 15, tzinfo=ZoneInfo("UTC"))
-        member = create_agent("general", config, runtime_paths, execution_identity=None)
-        team = build_materialized_team_instance(
-            requested_agent_names=["general"],
-            agents=[member],
+        members = resolve_exact_team_members(
+            ["general"],
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=None,
+            refresh_scheduler=None,
+            active_model_names={"general": turn_model(config, runtime_paths, "general").model_name},
+        )
+        team = build_team_spec(
+            members=members,
             mode=TeamMode.COORDINATE,
             config=config,
             runtime_paths=runtime_paths,
-            scope_context=None,
+            scope_context=unstored_team_scope_context(config, ["general"], team_name=None),
             execution_identity=None,
             model_name="default",
             configured_team_name=None,
+            timezone="UTC",
         )
+        member = members.build("general", members.model_names["general"])
 
-    message = team.get_system_message(session=TeamSession(session_id="team-date-test", team_id=team.id))
-    assert message is not None
-    assert isinstance(message.content, str)
-    assert "Today is Friday, March 20, 2026." in message.content
-    assert "Timezone: UTC (UTC)" in message.content
+    assert member.prompt.role is not None
+    assert "## Current Date and Time" not in member.prompt.role
+    leader_prompt = system_text(team.spec.leader.system_messages)
+    assert "Today is Friday, March 20, 2026." in leader_prompt
+    assert "Timezone: UTC (UTC)" in leader_prompt

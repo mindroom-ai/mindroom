@@ -1,0 +1,783 @@
+import { type FormEvent, useEffect, useRef, useState } from "react";
+import { Loader2 } from "lucide-react";
+import { Alert, AlertDescription } from "@/components/ui/alert";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
+import {
+  accountReuseDescription,
+  egressDisconnectDescription,
+} from "./accountCopy";
+import { ConfirmDialog } from "./ConfirmDialog";
+import {
+  canEdit,
+  adminKeyNote,
+  agentsNote,
+  githubAppNote,
+  limitedNote,
+  limitOverlap,
+  limitOf,
+  limitTarget,
+  removeWarning,
+  type RowAgent,
+  type ServiceEditing,
+  servicesUsingAccount,
+  sharesAccount,
+  unsetNote,
+} from "./egressRowText";
+import { BusyNote, useLimitActions } from "./EgressLimitRows";
+import { ServiceStatus } from "./EgressServiceStatus";
+import {
+  AgentSees,
+  Code,
+  type RowAction,
+  RowActionsMenu,
+  SERVICE_CELL,
+  SERVICE_ROW,
+  ServiceHosts,
+} from "./EgressServiceTable";
+import { coversGithub } from "./githubLimits";
+import { connectWithPopup, type OAuthAuthorization } from "./oauthPopup";
+import {
+  errorText,
+  type RequestErrorMessages,
+  requestConnection,
+} from "./request";
+import { SharedAccountDialog } from "./SharedAccountDialog";
+import { ItemName } from "./ToolRow";
+import type { EgressAccess, EgressCredentialService } from "./types";
+
+/** The endpoints one service row talks to. */
+export interface ServicePaths {
+  secret: string;
+  connect: string;
+  disconnect: string;
+  /** Where Agent Keys' use of the account is allowed (PUT) or stopped (DELETE). */
+  reuse: string;
+  /** Whether the service's account is connected now, read again from the listing the row came from. */
+  accountConnected: (signal: AbortSignal) => Promise<boolean>;
+}
+
+// What the server needs before Agent Keys may use an account: the user saw that commands skip the tools' approvals.
+export const REUSE_BODY = { acknowledge_approval_bypass: true };
+
+/**
+ * Asked before Agent Keys may use an account, or at more access; a second
+ * click while it closes goes on only once. With `onAccessChange`, for a
+ * service that offers read only, it also asks how much the account may do.
+ */
+export function AccountReuseDialog({
+  open,
+  title,
+  description,
+  confirmLabel,
+  access,
+  onAccessChange,
+  onContinue,
+  onCancel,
+}: {
+  open: boolean;
+  title: string;
+  description: string;
+  confirmLabel: string;
+  access: EgressAccess;
+  onAccessChange: ((access: EgressAccess) => void) | null;
+  onContinue: () => void;
+  onCancel: () => void;
+}) {
+  const continued = useRef(false);
+  useEffect(() => {
+    if (open) continued.current = false;
+  }, [open]);
+  return (
+    <ConfirmDialog
+      open={open}
+      title={title}
+      description={description}
+      confirmLabel={confirmLabel}
+      destructive={false}
+      onCancel={onCancel}
+      onConfirm={() => {
+        if (continued.current) return;
+        continued.current = true;
+        onContinue();
+      }}
+    >
+      {onAccessChange && (
+        <ToggleGroup
+          type="single"
+          aria-label="Access"
+          className="justify-self-start"
+          value={access}
+          // Pressing the chosen level again would clear it; one stays chosen.
+          onValueChange={(value) =>
+            value && onAccessChange(value as EgressAccess)
+          }
+        >
+          <ToggleGroupItem value="read">Read only</ToggleGroupItem>
+          <ToggleGroupItem value="read_write">Read and write</ToggleGroupItem>
+        </ToggleGroup>
+      )}
+    </ConfirmDialog>
+  );
+}
+
+export function EgressServiceItem({
+  paths,
+  service,
+  onChanged,
+  errorMessages,
+  serviceEditing,
+  agent,
+  hideKeyActions,
+}: {
+  paths: ServicePaths;
+  service: EgressCredentialService;
+  onChanged: () => void;
+  errorMessages?: RequestErrorMessages;
+  serviceEditing: ServiceEditing;
+  agent: RowAgent;
+  hideKeyActions: boolean;
+}) {
+  const [editing, setEditing] = useState(false);
+  const [secret, setSecret] = useState("");
+  const [busy, setBusy] = useState<
+    "save" | "remove" | "connect" | "disconnect" | "reuse" | "delete" | null
+  >(null);
+  const [error, setError] = useState<string | null>(null);
+  const [confirm, setConfirm] = useState<
+    "key" | "account" | "service" | "shared" | "reuse" | null
+  >(null);
+  const operation = useRef<AbortController | null>(null);
+  const keyLabel = `${service.display_name} API key`;
+  const oauth = service.oauth;
+  // Rows with an account keep the key behind a toggle until a key is set.
+  const showKeyControls = !oauth || service.key_configured || editing;
+  // A service with its own account or a GitHub App uses only that, so it takes no key.
+  const canManageKey =
+    service.can_manage &&
+    !hideKeyActions &&
+    !service.separate_account &&
+    !service.github_app_repositories;
+  const keyInsteadLabel = oauth?.connected
+    ? "Use an API key instead of the account"
+    : "Use an API key instead";
+  // Requester-scoped accounts belong to the requester, so the server lets any
+  // eligible user manage them even without key rights.
+  const canResetAccount =
+    oauth !== null &&
+    !hideKeyActions &&
+    (oauth.connected || oauth.reset_required) &&
+    (service.can_manage || oauth.can_connect);
+  // Allowing or stopping Agent Keys' use of the account follows the same rule,
+  // where the broker can use the account at all.
+  const canChangeReuse =
+    oauth !== null &&
+    !hideKeyActions &&
+    oauth.unavailable_reason === null &&
+    (service.can_manage || oauth.can_connect);
+  const reuseEnabled = oauth?.reuse_enabled === true;
+  // The level the reuse question allows the account at; a service that
+  // offers read only asks, starting from it, a change of an allowed
+  // account's level sends it, and anything else sends no level.
+  const readOnlyOffered = service.read_only_supported;
+  const [access, setAccess] = useState<EgressAccess>("read");
+  const reuseBody = (level: EgressAccess) =>
+    readOnlyOffered || reuseEnabled
+      ? { ...REUSE_BODY, access: level }
+      : REUSE_BODY;
+  const askReuse = (level: EgressAccess) => {
+    setAccess(level);
+    setConfirm("reuse");
+  };
+
+  // A limit of the viewer's that narrows this administrator's service.
+  const limit = limitOf(service, agent.services);
+  // Another service of the viewer's with rules on the limit's hosts.
+  const overlap =
+    limit &&
+    limitOverlap(
+      limit.rules.map((rule) => rule.host),
+      agent.services,
+    );
+  // A service that already has a limit changes or removes it instead of getting another.
+  const canLimit =
+    limit === null &&
+    serviceEditing.onLimitToRepositories !== undefined &&
+    service.source === "config" &&
+    service.can_manage &&
+    coversGithub(service.rules);
+  // Everyone using a shared agent acts as the account connected there.
+  const asksAboutSharedAccount = sharesAccount(agent, oauth);
+  const limitedText = limitedNote(service);
+  const unsetText = unsetNote(service);
+  const adminKeyText = adminKeyNote(service);
+  const githubAppText = githubAppNote(service);
+  const agentsText = agentsNote(service);
+  const limitActions = useLimitActions(
+    limit,
+    service.display_name,
+    serviceEditing,
+    setError,
+  );
+
+  useEffect(() => () => operation.current?.abort(), []);
+
+  const openKeyForm = () => {
+    setError(null);
+    setEditing(true);
+  };
+  const closeEditor = () => {
+    setEditing(false);
+    setSecret("");
+  };
+
+  /**
+   * Runs one key or account action: the row is busy and shows its error, a
+   * saved key closes the key form, and the page reloads the row after it. An
+   * action abandoned by leaving the page changes nothing.
+   */
+  const run = async (
+    kind: "save" | "remove" | "connect" | "disconnect" | "reuse",
+    failure: string,
+    action: (signal: AbortSignal) => Promise<unknown>,
+  ) => {
+    setConfirm(null);
+    const controller = new AbortController();
+    operation.current = controller;
+    setBusy(kind);
+    setError(null);
+    try {
+      await action(controller.signal);
+      if (controller.signal.aborted) return;
+      if (kind === "save") closeEditor();
+      onChanged();
+    } catch (cause) {
+      if (!controller.signal.aborted) setError(errorText(cause, failure));
+    } finally {
+      if (!controller.signal.aborted) setBusy(null);
+    }
+  };
+  const write =
+    (path: string, method: string, body?: object) => (signal: AbortSignal) =>
+      requestConnection<void>(path, signal, method, body, errorMessages);
+
+  const save = (event: FormEvent) => {
+    event.preventDefault();
+    if (!secret.trim() || busy) return;
+    void run(
+      "save",
+      "Could not save the key. Try again.",
+      write(paths.secret, "PUT", { secret }),
+    );
+  };
+
+  const deleteService = async () => {
+    setConfirm(null);
+    setBusy("delete");
+    setError(null);
+    try {
+      await serviceEditing.onDelete(service);
+    } catch (cause) {
+      setError(errorText(cause, "Could not delete the service. Try again."));
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const connect = () => {
+    // A second click on Continue, while the first connect is under way, starts nothing.
+    if (!oauth || busy !== null) return;
+    void run("connect", "Could not connect. Try again.", (signal) =>
+      connectWithPopup(
+        oauth.provider,
+        async () => {
+          // Connecting here is for Agent Keys, so it allows the account first; the popup is already open.
+          if (!oauth.reuse_enabled)
+            await requestConnection<void>(
+              paths.reuse,
+              signal,
+              "PUT",
+              reuseBody(access),
+              errorMessages,
+            );
+          return requestConnection<OAuthAuthorization>(
+            paths.connect,
+            signal,
+            "POST",
+            {},
+            errorMessages,
+          );
+        },
+        signal,
+        // A popup that closed after connecting is a connection, not a cancel.
+        () => paths.accountConnected(signal),
+      ),
+    );
+  };
+
+  const name = service.display_name;
+  // Connecting reads the saved connection first, so an unreadable one needs a reset before.
+  const canConnect =
+    oauth !== null &&
+    !hideKeyActions &&
+    oauth.can_connect &&
+    !oauth.connected &&
+    !oauth.reset_required;
+  // A connected account only its tools use, which Agent Keys may use once allowed; a key wins over it anyway.
+  const canUseAccount =
+    canChangeReuse &&
+    oauth.connected &&
+    !reuseEnabled &&
+    !oauth.reset_required &&
+    !service.key_configured;
+  const keyActions = canManageKey && service.key_configured && !editing;
+  // A key is the main action when there is no account to connect instead.
+  const setKeyFirst =
+    canManageKey &&
+    !service.key_configured &&
+    !editing &&
+    (!oauth || (!canConnect && !oauth.connected && !oauth.reset_required));
+  const editable = canEdit(serviceEditing, service);
+  const addAccount = serviceEditing.addAccount?.(service);
+  // A service just saved with an account of its own asks to sign in to it,
+  // once, when the listing shows it so with that login; one that cannot
+  // connect asks nothing.
+  const { signInNext, onSignInOpened } = serviceEditing;
+  useEffect(() => {
+    if (
+      signInNext?.name !== service.name ||
+      !service.separate_account ||
+      oauth?.provider !== signInNext.provider
+    )
+      return;
+    onSignInOpened?.();
+    if (canConnect) askReuse("read");
+  });
+  // Everything but the action that makes the service work, which is a button of its own.
+  const actions: RowAction[] = [
+    ...(oauth && canManageKey && !showKeyControls && !setKeyFirst
+      ? [
+          {
+            label: keyInsteadLabel,
+            ariaLabel: `${keyInsteadLabel} for ${name}`,
+            onSelect: openKeyForm,
+          },
+        ]
+      : []),
+    ...(keyActions
+      ? [
+          {
+            label: "Replace key",
+            ariaLabel: `Replace key for ${name}`,
+            onSelect: openKeyForm,
+          },
+        ]
+      : []),
+    ...(canLimit && serviceEditing.onLimitToRepositories
+      ? [
+          {
+            label: "Limit to repositories",
+            ariaLabel: `Limit to repositories for ${name}`,
+            disabled: serviceEditing.disabled || serviceEditing.limitDisabled,
+            onSelect: () => serviceEditing.onLimitToRepositories?.(service),
+          },
+        ]
+      : []),
+    ...limitActions.actions,
+    ...(editable
+      ? [
+          {
+            label: "Edit service",
+            ariaLabel: `Edit service for ${name}`,
+            disabled:
+              serviceEditing.disabled ||
+              serviceEditing.editingName === service.name,
+            onSelect: () => serviceEditing.onEdit(service),
+          },
+        ]
+      : []),
+    ...(keyActions
+      ? [
+          {
+            label: "Remove key",
+            ariaLabel: `Remove key for ${name}`,
+            destructive: true,
+            onSelect: () => setConfirm("key"),
+          },
+        ]
+      : []),
+    // Only a connected account: connecting one already allowed keeps its level.
+    // One allowed only to read, where the service no longer offers read only,
+    // is refused everything until it changes to read and write.
+    ...(oauth?.connected &&
+    reuseEnabled &&
+    canChangeReuse &&
+    (readOnlyOffered || oauth.reuse_access === "read")
+      ? [
+          oauth.reuse_access === "read"
+            ? {
+                label: "Change to read and write",
+                ariaLabel: `Change to read and write for ${name}`,
+                // More access skips the tools' approvals for writes too, so it is confirmed.
+                onSelect: () => askReuse("read_write"),
+              }
+            : {
+                label: "Change to read only",
+                ariaLabel: `Change to read only for ${name}`,
+                onSelect: () =>
+                  void run(
+                    "reuse",
+                    "Could not change the access. Try again.",
+                    write(paths.reuse, "PUT", reuseBody("read")),
+                  ),
+              },
+        ]
+      : []),
+    ...(oauth && reuseEnabled && canChangeReuse
+      ? [
+          {
+            label: `Stop using ${oauth.display_name} account`,
+            ariaLabel: `Stop using ${oauth.display_name} account for ${name}`,
+            onSelect: () =>
+              void run(
+                "reuse",
+                "Could not stop using the account. Try again.",
+                write(paths.reuse, "DELETE"),
+              ),
+          },
+        ]
+      : []),
+    ...(oauth?.connected && canResetAccount
+      ? [
+          {
+            label: "Disconnect",
+            ariaLabel: `Disconnect for ${name}`,
+            destructive: true,
+            onSelect: () => setConfirm("account"),
+          },
+        ]
+      : []),
+    ...(editable
+      ? [
+          {
+            label: "Delete service",
+            ariaLabel: `Delete service for ${name}`,
+            disabled: serviceEditing.disabled,
+            destructive: true,
+            onSelect: () => setConfirm("service"),
+          },
+        ]
+      : []),
+  ];
+  const busyNote =
+    busy === "remove" || limitActions.busy
+      ? "Removing…"
+      : busy === "disconnect"
+        ? "Disconnecting…"
+        : busy === "delete"
+          ? "Deleting…"
+          : busy === "reuse"
+            ? "Saving…"
+            : null;
+
+  return (
+    <tr aria-label={service.display_name} className={SERVICE_ROW}>
+      {/* What the service is, what the agent sees, and the limit that narrows it. */}
+      <th scope="row" className={SERVICE_CELL.name}>
+        <ItemName
+          names={[
+            service.name,
+            service.display_name,
+            ...(oauth ? [oauth.provider] : []),
+          ]}
+          title={service.display_name}
+          description={service.description}
+        >
+          <AgentSees service={service} />
+          {service.separate_account && (
+            <p className="text-xs text-muted-foreground">
+              Agents choose it with{" "}
+              <Code>X-Agent-Keys-Service: {service.name}</Code>
+            </p>
+          )}
+          {adminKeyText && (
+            <p className="text-xs text-muted-foreground">{adminKeyText}</p>
+          )}
+          {githubAppText && (
+            <p className="text-xs text-muted-foreground">{githubAppText}</p>
+          )}
+          {agentsText && (
+            <p className="text-xs text-muted-foreground">{agentsText}</p>
+          )}
+          {limitedText && (
+            <p className="text-xs text-muted-foreground">{limitedText}</p>
+          )}
+          {limit && (
+            <p className="text-xs text-muted-foreground">
+              {overlap
+                ? `Limited to ${limitTarget(limit)}. ${overlap}`
+                : `Limited to ${limitTarget(limit)}`}
+            </p>
+          )}
+        </ItemName>
+      </th>
+      <td data-label="Hosts" className={SERVICE_CELL.hosts}>
+        <ServiceHosts service={service} />
+      </td>
+      <td data-label="Status" className={SERVICE_CELL.status}>
+        <div className="flex flex-col items-start gap-1">
+          <ServiceStatus
+            service={service}
+            agent={agent}
+            serviceEditing={serviceEditing}
+          />
+          {unsetText && (
+            <span className="text-xs text-muted-foreground">{unsetText}</span>
+          )}
+          {addAccount && oauth && (
+            <Button
+              variant="link"
+              size="sm"
+              className="h-auto p-0 text-xs"
+              aria-label={`Add another ${oauth.display_name} account for ${name}`}
+              disabled={serviceEditing.disabled || serviceEditing.limitDisabled}
+              onClick={addAccount}
+            >
+              Add another {oauth.display_name} account
+            </Button>
+          )}
+        </div>
+      </td>
+      <td className={SERVICE_CELL.actions}>
+        <div className="flex flex-wrap items-center gap-1 max-sm:justify-start sm:flex-nowrap sm:justify-end">
+          {busyNote ? (
+            <BusyNote>{busyNote}</BusyNote>
+          ) : canConnect ? (
+            <>
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={busy !== null}
+                aria-label={`Connect ${oauth.display_name} for Agent Keys for ${name}`}
+                onClick={() =>
+                  !reuseEnabled
+                    ? askReuse("read")
+                    : asksAboutSharedAccount
+                      ? setConfirm("shared")
+                      : connect()
+                }
+              >
+                {busy === "connect" ? "Connecting…" : "Connect"}
+              </Button>
+              {busy === "connect" && (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  onClick={() => {
+                    operation.current?.abort();
+                    setBusy(null);
+                  }}
+                >
+                  Cancel
+                </Button>
+              )}
+            </>
+          ) : oauth?.reset_required && canResetAccount ? (
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={busy !== null}
+              aria-label={`Reset connection for ${name}`}
+              onClick={() => setConfirm("account")}
+            >
+              Reset connection
+            </Button>
+          ) : canUseAccount ? (
+            <Button
+              size="sm"
+              variant="outline"
+              disabled={busy !== null}
+              aria-label={`Let commands use ${name}`}
+              onClick={() => askReuse("read")}
+            >
+              Let commands use it
+            </Button>
+          ) : (
+            setKeyFirst && (
+              <Button
+                size="sm"
+                variant="outline"
+                disabled={busy !== null}
+                aria-label={`Set key for ${name}`}
+                onClick={openKeyForm}
+              >
+                Set key
+              </Button>
+            )
+          )}
+          <RowActionsMenu
+            service={name}
+            actions={actions}
+            disabled={busy !== null || limitActions.busy}
+          />
+        </div>
+        {canManageKey && editing && (
+          <form
+            className="mt-2 flex flex-wrap items-center gap-2 sm:justify-end"
+            onSubmit={save}
+          >
+            <Input
+              type="password"
+              autoComplete="off"
+              aria-label={keyLabel}
+              placeholder="Paste the key"
+              autoFocus
+              className="h-9 min-w-0 basis-full"
+              value={secret}
+              disabled={busy !== null}
+              onChange={(event) => setSecret(event.target.value)}
+            />
+            <Button
+              type="submit"
+              size="sm"
+              disabled={busy !== null || !secret.trim()}
+            >
+              {busy === "save" ? (
+                <>
+                  <Loader2
+                    className="mr-2 h-3.5 w-3.5 animate-spin"
+                    aria-hidden="true"
+                  />
+                  Saving…
+                </>
+              ) : (
+                "Save"
+              )}
+            </Button>
+            <Button
+              type="button"
+              size="sm"
+              variant="ghost"
+              disabled={busy !== null}
+              onClick={closeEditor}
+            >
+              Cancel
+            </Button>
+          </form>
+        )}
+        {error && (
+          <Alert variant="destructive" className="mt-2 p-2 text-left">
+            <AlertDescription>{error}</AlertDescription>
+          </Alert>
+        )}
+        {limitActions.dialog}
+        <ConfirmDialog
+          open={confirm === "key"}
+          title={`Remove ${keyLabel}?`}
+          description={removeWarning(service)}
+          confirmLabel="Remove"
+          onCancel={() => setConfirm(null)}
+          onConfirm={() =>
+            void run(
+              "remove",
+              "Could not remove the key. Try again.",
+              write(paths.secret, "DELETE"),
+            )
+          }
+        />
+        {editable && (
+          <ConfirmDialog
+            open={confirm === "service"}
+            title={`Delete ${service.display_name}?`}
+            description={serviceEditing.deleteWarning(service)}
+            confirmLabel="Delete"
+            onCancel={() => setConfirm(null)}
+            onConfirm={() => void deleteService()}
+          />
+        )}
+        {oauth && (
+          <SharedAccountDialog
+            open={confirm === "shared"}
+            agent={agent.displayName}
+            provider={oauth.display_name}
+            onCancel={() => setConfirm(null)}
+            onContinue={() => {
+              setConfirm(null);
+              connect();
+            }}
+          />
+        )}
+        {oauth && (
+          <AccountReuseDialog
+            open={confirm === "reuse"}
+            // An allowed account asks again only to change to read and write;
+            // a service's own account not connected yet is another than the tools' one.
+            title={
+              reuseEnabled
+                ? `Change ${oauth.display_name} to read and write?`
+                : service.separate_account && !oauth.connected
+                  ? `Sign in to another ${oauth.display_name} account?`
+                  : `Use your ${oauth.display_name} account for Agent Keys?`
+            }
+            description={accountReuseDescription({
+              provider: oauth.display_name,
+              account: oauth.connected
+                ? (oauth.account_label ??
+                  `the connected ${oauth.display_name} account`)
+                : `the ${oauth.display_name} account you connect`,
+              service: name,
+              sharedAgent: asksAboutSharedAccount ? agent.displayName : null,
+              unscoped: agent.scope === "unscoped",
+              readOnly: readOnlyOffered && access === "read",
+              // A `user` scope's services and their own accounts serve all of the user's agents in it.
+              oneAgent:
+                service.separate_account === true &&
+                agent.scope === "user_agent",
+            })}
+            confirmLabel={
+              reuseEnabled
+                ? "Change"
+                : oauth.connected
+                  ? "Let commands use it"
+                  : "Continue"
+            }
+            access={access}
+            onAccessChange={readOnlyOffered && !reuseEnabled ? setAccess : null}
+            onCancel={() => setConfirm(null)}
+            onContinue={() =>
+              oauth.connected
+                ? void run(
+                    "reuse",
+                    "Could not allow the account. Try again.",
+                    write(paths.reuse, "PUT", reuseBody(access)),
+                  )
+                : connect()
+            }
+          />
+        )}
+        {oauth && (
+          <ConfirmDialog
+            open={confirm === "account"}
+            title={`${oauth.connected ? "Disconnect" : "Reset"} ${oauth.display_name}?`}
+            description={egressDisconnectDescription(
+              oauth.display_name,
+              agent.displayName,
+              servicesUsingAccount(agent.services, oauth.provider),
+              reuseEnabled,
+            )}
+            confirmLabel={oauth.connected ? "Disconnect" : "Reset connection"}
+            onCancel={() => setConfirm(null)}
+            onConfirm={() =>
+              void run(
+                "disconnect",
+                "Could not disconnect. Try again.",
+                write(paths.disconnect, "POST"),
+              )
+            }
+          />
+        )}
+      </td>
+    </tr>
+  );
+}

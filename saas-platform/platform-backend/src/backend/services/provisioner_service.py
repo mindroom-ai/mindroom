@@ -35,13 +35,10 @@ from backend.config import (
     INSTANCE_MATRIX_OIDC_ISSUER,
     INSTANCE_MINDROOM_IMAGE,
     INSTANCE_MINDROOM_IMAGE_PULL_POLICY,
-    INSTANCE_SYNAPSE_IMAGE,
-    INSTANCE_SYNAPSE_IMAGE_PULL_POLICY,
     INSTANCE_STORAGE_CLASS_NAME,
     INSTANCE_TRUSTED_UPSTREAM_AUTH_ENABLED,
     INSTANCE_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE,
     INSTANCE_TRUSTED_UPSTREAM_EMAIL_DOMAIN,
-    INSTANCE_TRUSTED_UPSTREAM_EMAIL_HEADER,
     INSTANCE_TRUSTED_UPSTREAM_JWKS_URL,
     INSTANCE_TRUSTED_UPSTREAM_JWT_AUDIENCE,
     INSTANCE_TRUSTED_UPSTREAM_JWT_EMAIL_CLAIM,
@@ -49,9 +46,8 @@ from backend.config import (
     INSTANCE_TRUSTED_UPSTREAM_JWT_ISSUER,
     INSTANCE_TRUSTED_UPSTREAM_JWT_MATRIX_USER_ID_CLAIM,
     INSTANCE_TRUSTED_UPSTREAM_JWT_USER_ID_CLAIM,
-    INSTANCE_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER,
-    INSTANCE_TRUSTED_UPSTREAM_REQUIRE_JWT,
-    INSTANCE_TRUSTED_UPSTREAM_USER_ID_HEADER,
+    INSTANCE_TUWUNEL_IMAGE,
+    INSTANCE_TUWUNEL_IMAGE_PULL_POLICY,
     OPENROUTER_PROVISIONING_API_KEY,
     PLATFORM_DOMAIN,
     PROVISIONER_API_KEY,
@@ -60,8 +56,11 @@ from backend.config import (
     logger,
 )
 from backend.deps import ensure_supabase
+from backend.entitlements import parse_timestamp
 from backend.k8s import (
+    INSTANCES_NAMESPACE,
     check_deployment_exists,
+    get_deployment,
     instance_deployment_ref,
     run_kubectl,
     tenant_start_deployment_refs,
@@ -105,12 +104,12 @@ _RESOURCE_PROFILE_HELM_VALUES = {
         "mindroomResources.limits.memory": "4Gi",
         "mindroomResources.limits.cpu": "2000m",
         "mindroomResources.limits.ephemeral-storage": "32Gi",
-        "synapseResources.requests.memory": "384Mi",
-        "synapseResources.requests.cpu": "100m",
-        "synapseResources.requests.ephemeral-storage": "64Mi",
-        "synapseResources.limits.memory": "4Gi",
-        "synapseResources.limits.cpu": "2000m",
-        "synapseResources.limits.ephemeral-storage": "4Gi",
+        "tuwunelResources.requests.memory": "384Mi",
+        "tuwunelResources.requests.cpu": "100m",
+        "tuwunelResources.requests.ephemeral-storage": "64Mi",
+        "tuwunelResources.limits.memory": "4Gi",
+        "tuwunelResources.limits.cpu": "2000m",
+        "tuwunelResources.limits.ephemeral-storage": "4Gi",
         "sandboxRunnerResources.requests.memory": "256Mi",
         "sandboxRunnerResources.requests.cpu": "50m",
         "sandboxRunnerResources.requests.ephemeral-storage": "64Mi",
@@ -120,7 +119,6 @@ _RESOURCE_PROFILE_HELM_VALUES = {
     }
 }
 
-_INSTANCES_NAMESPACE = "mindroom-instances"
 # Tenant pods run tenant code, so admission must reject privileged and host-reaching pods in their namespace.
 _POD_SECURITY_ENFORCE_LABEL = "pod-security.kubernetes.io/enforce=baseline"
 # PostgreSQL unique_violation of the constraint that allows one instance per subscription (migration 007).
@@ -138,13 +136,21 @@ def _env_flag_enabled(value: str) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
-async def _background_mark_running_when_ready(instance_id: str, namespace: str = _INSTANCES_NAMESPACE) -> None:
+def _record_running(sb: Any, instance_id: str) -> None:
+    """Record a ready instance as running over its provisioning claim."""
+    # A status another writer recorded meanwhile, such as an admin's stop, stands.
+    update_instance(sb, instance_id, {"status": "running"}, expected_status="provisioning")
+
+
+async def _background_mark_running_when_ready(instance_id: str) -> None:
     """Background task: wait longer and mark instance running when ready, unless the lifecycle held it meanwhile."""
     try:
-        ready = await wait_for_deployment_ready(instance_id, namespace=namespace, timeout_seconds=600)
-        if ready and not _held_by_lifecycle(ensure_supabase(), instance_id):
+        if not await wait_for_deployment_ready(instance_id, namespace=INSTANCES_NAMESPACE, timeout_seconds=600):
+            return
+        sb = ensure_supabase()
+        if not _held_by_lifecycle(sb, instance_id):
             try:
-                update_instance(ensure_supabase(), instance_id, {"status": "running"})
+                _record_running(sb, instance_id)
             except Exception:
                 logger.warning("Background update: failed to mark instance %s as running", instance_id)
     except Exception:
@@ -183,7 +189,7 @@ def _instance_credentials_encryption_key(instance_id: str) -> str:
 
 
 def _instance_matrix_registration_shared_secret(instance_id: str) -> str:
-    """Derive a stable per-instance Synapse registration shared secret."""
+    """Derive a stable per-instance Matrix registration shared secret."""
     return _stable_instance_secret("matrix-registration", instance_id)
 
 
@@ -210,8 +216,8 @@ def _stable_instance_secret(purpose: str, instance_id: str) -> str:
     return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
 
 
-def _matrix_localpart_from_email(email: str) -> str:
-    """Return the Matrix localpart Synapse derives from our OIDC email template."""
+def matrix_localpart_from_email(email: str) -> str:
+    """Return the Matrix localpart the platform's OIDC issuer asks tenant homeservers to give an account email."""
     email_localpart = email.strip().lower().rsplit("@", maxsplit=1)[0]
     if not email_localpart:
         msg = "Account email is required to configure Matrix owner access"
@@ -226,7 +232,7 @@ def _matrix_localpart_from_email(email: str) -> str:
 
 def _owner_matrix_user_id_from_email(email: str, *, instance_id: str, base_domain: str) -> str:
     """Build the hosted tenant owner MXID from a platform account email."""
-    return f"@{_matrix_localpart_from_email(email)}:{instance_id}.{base_domain}"
+    return f"@{matrix_localpart_from_email(email)}:{instance_id}.{base_domain}"
 
 
 def _owner_matrix_user_id_for_account(sb: Any, *, account_id: Any, instance_id: str, base_domain: str) -> str | None:
@@ -292,7 +298,7 @@ def _instance_secret_name(instance_id: str) -> str:
 
 def _instance_pvc_names(instance_id: str | int) -> list[str]:
     """Return the chart-managed PVC names that hold one instance's data."""
-    return [f"mindroom-storage-{instance_id}", f"synapse-storage-{instance_id}"]
+    return [f"mindroom-storage-{instance_id}", f"tuwunel-storage-{instance_id}"]
 
 
 def _instance_secret_names(instance_id: str | int) -> list[str]:
@@ -317,7 +323,7 @@ def _instance_secret_hash(secret_data: dict[str, str]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
-async def _apply_instance_secret(instance_id: str, namespace: str, secret_data: dict[str, str]) -> str:
+async def _apply_instance_secret(instance_id: str, namespace: str, secret_data: dict[str, str]) -> None:
     """Apply instance secrets outside Helm so release values stay non-sensitive."""
     secret_name = _instance_secret_name(instance_id)
     manifest = {
@@ -339,7 +345,6 @@ async def _apply_instance_secret(instance_id: str, namespace: str, secret_data: 
         msg = f"Failed to apply instance Secret {secret_name}: {err or out}"
         raise RuntimeError(msg)
     await _remove_stale_instance_secret_keys(secret_name, namespace, secret_data.keys())
-    return _instance_secret_hash(secret_data)
 
 
 async def _remove_stale_instance_secret_keys(secret_name: str, namespace: str, current_keys: Iterable[str]) -> None:
@@ -387,11 +392,6 @@ async def _existing_instance_secret_value(instance_id: str, namespace: str, key:
     return value or None
 
 
-async def _existing_instance_credentials_encryption_key(instance_id: str, namespace: str) -> str | None:
-    """Return the existing credential encryption key from an instance Secret when present."""
-    return await _existing_instance_secret_value(instance_id, namespace, "credentials_encryption_key")
-
-
 async def _provision_credentials_encryption_key(
     *, customer_id: str, existing_instance_id: Any, existing_storage: bool, data: dict, namespace: str
 ) -> str:
@@ -401,7 +401,9 @@ async def _provision_credentials_encryption_key(
     torn down, always gets the derived key.
     """
     existing_key = (
-        await _existing_instance_credentials_encryption_key(customer_id, namespace) if existing_instance_id else None
+        await _existing_instance_secret_value(customer_id, namespace, "credentials_encryption_key")
+        if existing_instance_id
+        else None
     )
     if existing_key is not None:
         return existing_key
@@ -475,11 +477,6 @@ def _append_storage_helm_args(helm_args: list[str], resource_profile: str, exist
         helm_args += ["--set", f"storage={existing_storage}"]
 
 
-def _openrouter_key_name(*, tier: str, account_id: Any, instance_id: str) -> str:
-    """Return a stable human-readable OpenRouter key name."""
-    return f"MindRoom {tier} account {account_id} instance {instance_id}"
-
-
 def _matching_openrouter_metadata(row: Mapping[str, Any] | None, monthly_limit_usd: int) -> bool:
     """Return whether stored OpenRouter metadata matches the requested budget."""
     if not row:
@@ -519,23 +516,41 @@ def _included_ai_budget_usd(tier: str) -> int:
     return plan.included_ai_budget_usd if plan else 0
 
 
-def openrouter_key_matches_plan(instance_row: Mapping[str, Any], tier: str) -> bool:
-    """Return whether an instance holds exactly the platform-paid OpenRouter key its tier includes.
+def allowed_openrouter_limit_usd(
+    tier: str, subscription: Mapping[str, Any] | None, *, now: datetime | None = None
+) -> int:
+    """Return the monthly OpenRouter limit an instance's key may have.
+
+    OpenRouter resets key usage on the first of each UTC calendar month, not when a billing period starts, so the
+    usage of a trial that converted to paid still counts in the month the trial ended. That month the key gets twice
+    the plan budget, so the paid period starts with a full budget whatever the trial spent.
+    """
+    budget = _included_ai_budget_usd(tier)
+    if subscription is None or subscription.get("status") != "active":
+        return budget
+    trial_ends_at = parse_timestamp(subscription.get("trial_ends_at"))
+    now = (now or datetime.now(UTC)).astimezone(UTC)
+    if trial_ends_at is not None and (trial_ends_at.year, trial_ends_at.month) == (now.year, now.month):
+        return 2 * budget
+    return budget
+
+
+def openrouter_key_matches_plan(instance_row: Mapping[str, Any], limit_usd: int) -> bool:
+    """Return whether an instance holds exactly the platform-paid OpenRouter key with the allowed limit.
 
     A tier without an included AI budget may retain a key with a zero limit.
     """
-    budget = _included_ai_budget_usd(tier)
-    if budget <= 0 and _stored_openrouter_key_hash(instance_row) is None:
+    if limit_usd <= 0 and _stored_openrouter_key_hash(instance_row) is None:
         return True
-    return _matching_openrouter_metadata(instance_row, budget)
+    return _matching_openrouter_metadata(instance_row, limit_usd)
 
 
-def openrouter_key_exceeds_plan(instance_row: Mapping[str, Any], tier: str) -> bool:
-    """Return whether an instance holds a platform-paid key with a larger budget than its tier includes."""
+def openrouter_key_exceeds_plan(instance_row: Mapping[str, Any], limit_usd: int) -> bool:
+    """Return whether an instance holds a platform-paid key with a larger limit than allowed."""
     if _stored_openrouter_key_hash(instance_row) is None:
         return False
     limit = instance_row.get("openrouter_key_limit_usd")
-    return limit is None or int(limit) > _included_ai_budget_usd(tier)
+    return limit is None or int(limit) > limit_usd
 
 
 async def set_instance_openrouter_key_disabled(instance_row: Mapping[str, Any], *, disabled: bool) -> None:
@@ -560,9 +575,8 @@ async def set_instance_openrouter_key_disabled(instance_row: Mapping[str, Any], 
         logger.info("OpenRouter key %s for instance %s no longer exists", key_hash, instance_row.get("instance_id"))
 
 
-async def set_instance_openrouter_key_limit(sb: Any, instance_row: Mapping[str, Any], tier: str) -> None:
-    """Apply the plan budget to the stored key, preserving its usage and identity."""
-    limit = _included_ai_budget_usd(tier)
+async def set_instance_openrouter_key_limit(sb: Any, instance_row: Mapping[str, Any], limit: int) -> None:
+    """Apply the allowed limit to the stored key, preserving its usage and identity."""
     await anyio.to_thread.run_sync(
         partial(
             set_openrouter_key_limit,
@@ -593,11 +607,19 @@ async def _delete_resources_outside_release(instance_id: str | int) -> None:
     """Delete instance PVCs and Secrets that `helm uninstall` does not own or may leave behind."""
     for kind, names in (("pvc", _instance_pvc_names(instance_id)), ("secret", _instance_secret_names(instance_id))):
         code, out, err = await run_kubectl(
-            ["delete", kind, *names, "--ignore-not-found", "--wait=false"], namespace=_INSTANCES_NAMESPACE
+            ["delete", kind, *names, "--ignore-not-found", "--wait=false"], namespace=INSTANCES_NAMESPACE
         )
         if code != 0:
             msg = f"Failed to delete {kind} for instance {instance_id}: {err or out}"
             raise RuntimeError(msg)
+
+
+def _subscription_row(sb: Any, subscription_id: Any) -> dict[str, Any] | None:
+    """Return the subscription fields the allowed OpenRouter limit depends on."""
+    if not subscription_id:
+        return None
+    rows = sb.table("subscriptions").select("status,trial_ends_at").eq("id", subscription_id).limit(1).execute().data
+    return rows[0] if rows else None
 
 
 def _persist_openrouter_key_metadata(sb: Any, instance_id: str, created_key: CreatedOpenRouterKey) -> bool:
@@ -633,6 +655,7 @@ async def _provision_openrouter_key(
     tier: str,
     existing_instance_row: Mapping[str, Any] | None,
     namespace: str,
+    subscription: Mapping[str, Any] | None = None,
 ) -> tuple[str, CreatedOpenRouterKey | None]:
     """Return the OpenRouter key value this tenant instance should receive, and the key if it was just created.
 
@@ -640,11 +663,11 @@ async def _provision_openrouter_key(
     A created key is recorded before its Secret is published, so a run that loses the record to another run never
     publishes its key; the key is discarded when it cannot be recorded or its publication fails.
     """
-    monthly_limit_usd = _included_ai_budget_usd(tier)
+    monthly_limit_usd = allowed_openrouter_limit_usd(tier, subscription)
     if _stored_openrouter_key_hash(existing_instance_row) is not None:
         try:
             if not _matching_openrouter_metadata(existing_instance_row, monthly_limit_usd):
-                await set_instance_openrouter_key_limit(sb, existing_instance_row, tier)
+                await set_instance_openrouter_key_limit(sb, existing_instance_row, monthly_limit_usd)
             existing_key = await _existing_instance_secret_value(instance_id, namespace, "openrouter_key")
         except OpenRouterKeyNotFoundError:
             pass
@@ -659,7 +682,7 @@ async def _provision_openrouter_key(
         create_openrouter_key,
         management_api_key=OPENROUTER_PROVISIONING_API_KEY,
         plan=OpenRouterKeyPlan(
-            name=_openrouter_key_name(tier=tier, account_id=account_id, instance_id=instance_id),
+            name=f"MindRoom {tier} account {account_id} instance {instance_id}",
             monthly_limit_usd=monthly_limit_usd,
         ),
     )
@@ -735,6 +758,8 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
 
     An instance the subscription lifecycle holds is redeployed stopped with its key disabled,
     unless the lifecycle itself is resuming it (`resume_lifecycle_hold`) and its account is not pending deletion.
+    With `keep_stopped` in `data`, as the release script sends for an instance a customer or admin stopped, the
+    instance is redeployed onto the current chart and scaled back to zero.
     A re-provision with `expected_status` claims the instance only while it still has that status, so concurrent
     requests on several backend replicas cannot each deploy it and mint an OpenRouter key; the losers get
     `InstanceClaimLostError`.
@@ -748,6 +773,7 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
     account_id = data.get("account_id")
     tier = data.get("tier", "free")
     existing_instance_id = data.get("instance_id")  # For re-provisioning
+    keep_stopped = data.get("keep_stopped") is True
 
     # If re-provisioning, update existing instance; otherwise insert new
     if existing_instance_id:
@@ -802,7 +828,7 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
     helm_release_name = f"instance-{customer_id}"
     logger.info("Provisioning instance for subscription %s, new id: %s, tier: %s", subscription_id, customer_id, tier)
 
-    namespace = _INSTANCES_NAMESPACE
+    namespace = INSTANCES_NAMESPACE
     try:
         await run_kubectl(["create", "namespace", namespace])
     except FileNotFoundError:
@@ -862,10 +888,11 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
             tier=tier,
             existing_instance_row=existing_instance_row,
             namespace=namespace,
+            subscription=_subscription_row(sb, subscription_id),
         )
         # User BYOK credentials live in tenant storage; hosted budgets use only a scoped OpenRouter key.
         # Tenant workloads are untrusted, so every value here must be scoped to this instance,
-        # except the platform-wide OIDC client secret, which the instance chart mounts only into Synapse.
+        # except the platform-wide OIDC client secret, which the instance chart mounts only into Tuwunel.
         instance_secret_data = {
             "openai_key": "",
             "anthropic_key": "",
@@ -936,23 +963,14 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
                 "--set",
                 (f"matrixHomeserverStartupTimeoutSeconds={INSTANCE_MATRIX_HOMESERVER_STARTUP_TIMEOUT_SECONDS}"),
             ]
-        if INSTANCE_SYNAPSE_IMAGE:
-            helm_args += ["--set", f"synapse_image={INSTANCE_SYNAPSE_IMAGE}"]
-        if INSTANCE_SYNAPSE_IMAGE_PULL_POLICY:
-            helm_args += ["--set", f"synapse_image_pull_policy={INSTANCE_SYNAPSE_IMAGE_PULL_POLICY}"]
+        if INSTANCE_TUWUNEL_IMAGE:
+            helm_args += ["--set", f"tuwunel_image={INSTANCE_TUWUNEL_IMAGE}"]
+        if INSTANCE_TUWUNEL_IMAGE_PULL_POLICY:
+            helm_args += ["--set", f"tuwunel_image_pull_policy={INSTANCE_TUWUNEL_IMAGE_PULL_POLICY}"]
         if INSTANCE_TRUSTED_UPSTREAM_AUTH_ENABLED:
             helm_args += ["--set", f"trustedUpstreamAuth.enabled={INSTANCE_TRUSTED_UPSTREAM_AUTH_ENABLED}"]
-        if INSTANCE_TRUSTED_UPSTREAM_USER_ID_HEADER:
-            helm_args += ["--set", f"trustedUpstreamAuth.userIdHeader={INSTANCE_TRUSTED_UPSTREAM_USER_ID_HEADER}"]
         if INSTANCE_TRUSTED_UPSTREAM_EMAIL_DOMAIN:
             helm_args += ["--set", f"trustedUpstreamAuth.emailDomain={INSTANCE_TRUSTED_UPSTREAM_EMAIL_DOMAIN}"]
-        if INSTANCE_TRUSTED_UPSTREAM_EMAIL_HEADER:
-            helm_args += ["--set", f"trustedUpstreamAuth.emailHeader={INSTANCE_TRUSTED_UPSTREAM_EMAIL_HEADER}"]
-        if INSTANCE_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER:
-            helm_args += [
-                "--set",
-                f"trustedUpstreamAuth.matrixUserIdHeader={INSTANCE_TRUSTED_UPSTREAM_MATRIX_USER_ID_HEADER}",
-            ]
         if INSTANCE_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE:
             helm_args += [
                 "--set",
@@ -961,8 +979,6 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
                     f"{INSTANCE_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE}"
                 ),
             ]
-        if INSTANCE_TRUSTED_UPSTREAM_REQUIRE_JWT:
-            helm_args += ["--set", f"trustedUpstreamAuth.requireJwt={INSTANCE_TRUSTED_UPSTREAM_REQUIRE_JWT}"]
         if INSTANCE_TRUSTED_UPSTREAM_JWT_HEADER:
             helm_args += ["--set", f"trustedUpstreamAuth.jwtHeader={INSTANCE_TRUSTED_UPSTREAM_JWT_HEADER}"]
         if INSTANCE_TRUSTED_UPSTREAM_JWKS_URL:
@@ -985,8 +1001,7 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
         # Record a created key before publishing it, so a run that loses the record never publishes its key.
         if created_openrouter_key is not None:
             await _commit_openrouter_key(sb, customer_id, created_openrouter_key)
-        # Apply before Helm so pods restarted by the new secret hash read the new values;
-        # Synapse reads its OIDC client secret only at startup.
+        # Apply before Helm so pods restarted by the new secret hash read the new values.
         try:
             await _apply_instance_secret(customer_id, namespace, instance_secret_data)
         except Exception:
@@ -1025,6 +1040,12 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
     if _held_by_lifecycle(sb, customer_id, resuming=resume_lifecycle_hold):
         await _keep_held_instance_stopped(sb, customer_id, tier)
         return held_response
+    if keep_stopped:
+        await _scale_tenant_deployments(
+            tenant_stop_deployment_refs(customer_id), replicas=0, namespace=INSTANCES_NAMESPACE
+        )
+        update_instance(sb, customer_id, {"status": "stopped", "tier": tier})
+        return {**held_response, "message": "Instance redeployed and kept stopped"}
 
     # Optional readiness poll; if ready, mark running. Otherwise remain provisioning.
     ready = await wait_for_deployment_ready(customer_id, namespace=namespace, timeout_seconds=180)
@@ -1033,23 +1054,21 @@ async def provision_instance(  # noqa: C901, PLR0912, PLR0915
         return held_response
     try:
         # The tier is recorded only once deployed; the subscription lifecycle redeploys an instance whose tier differs.
-        update_instance(sb, customer_id, {"status": "running" if ready else "provisioning", "tier": tier})
+        update_instance(sb, customer_id, {"tier": tier})
+        if ready:
+            _record_running(sb, customer_id)
     except Exception:
         logger.warning("Failed to update instance status after readiness poll")
 
     if not ready and background_tasks is not None:
         # Fire-and-forget longer background wait to mark running later
         try:
-            background_tasks.add_task(_background_mark_running_when_ready, customer_id, namespace)
+            background_tasks.add_task(_background_mark_running_when_ready, customer_id)
         except Exception:
             logger.warning("Failed to schedule background readiness task for instance %s", customer_id)
 
     return {
-        "customer_id": customer_id,
-        "frontend_url": frontend_url,
-        "api_url": api_url,
-        "matrix_url": matrix_url,
-        "success": True,
+        **held_response,
         "message": "Instance provisioned successfully" if ready else "Provisioning started; instance is getting ready",
     }
 
@@ -1084,26 +1103,33 @@ def _held_by_lifecycle(sb: Any, instance_id: str | int, *, resuming: bool = Fals
 
 async def _keep_held_instance_stopped(sb: Any, instance_id: str, tier: str) -> None:
     """Scale a freshly deployed instance the lifecycle holds back to zero with its platform key disabled."""
-    await _scale_tenant_deployments(
-        tenant_stop_deployment_refs(instance_id), replicas=0, namespace=_INSTANCES_NAMESPACE
-    )
+    await _scale_tenant_deployments(tenant_stop_deployment_refs(instance_id), replicas=0, namespace=INSTANCES_NAMESPACE)
     held_row = get_instance(sb, instance_id, columns="instance_id,openrouter_key_hash") or {}
     await set_instance_openrouter_key_disabled(held_row, disabled=True)
     update_instance(sb, instance_id, {"status": "stopped", "tier": tier})
+
+
+async def _require_deployment(instance_id: int) -> None:
+    """Raise 404 when the instance has no deployment, or 500 when Kubernetes cannot be asked."""
+    try:
+        exists = await check_deployment_exists(instance_id)
+    except RuntimeError as e:
+        raise HTTPException(status_code=500, detail=f"Failed to look up the instance deployment: {e}") from e
+    if not exists:
+        error_msg = f"Deployment {instance_deployment_ref(instance_id)} not found"
+        logger.warning(error_msg)
+        raise HTTPException(status_code=404, detail=error_msg)
 
 
 async def start_instance(instance_id: int) -> dict[str, Any]:
     """Start a tenant instance by scaling its deployments up."""
     logger.info("Starting instance %s", instance_id)
 
-    if not await check_deployment_exists(instance_id):
-        error_msg = f"Deployment {instance_deployment_ref(instance_id)} not found"
-        logger.warning(error_msg)
-        raise HTTPException(status_code=404, detail=error_msg)
+    await _require_deployment(instance_id)
 
     try:
         out = await _scale_tenant_deployments(
-            tenant_start_deployment_refs(instance_id), replicas=1, namespace=_INSTANCES_NAMESPACE
+            tenant_start_deployment_refs(instance_id), replicas=1, namespace=INSTANCES_NAMESPACE
         )
         logger.info("Started instance %s: %s", instance_id, out)
         # Reflect desired state in DB immediately
@@ -1120,14 +1146,11 @@ async def stop_instance(instance_id: int) -> dict[str, Any]:
     """Stop a tenant instance by scaling its deployments down."""
     logger.info("Stopping instance %s", instance_id)
 
-    if not await check_deployment_exists(instance_id):
-        error_msg = f"Deployment {instance_deployment_ref(instance_id)} not found"
-        logger.warning(error_msg)
-        raise HTTPException(status_code=404, detail=error_msg)
+    await _require_deployment(instance_id)
 
     try:
         out = await _scale_tenant_deployments(
-            tenant_stop_deployment_refs(instance_id), replicas=0, namespace=_INSTANCES_NAMESPACE
+            tenant_stop_deployment_refs(instance_id), replicas=0, namespace=INSTANCES_NAMESPACE
         )
         logger.info("Stopped instance %s: %s", instance_id, out)
         # Reflect desired state in DB immediately
@@ -1144,14 +1167,11 @@ async def restart_instance(instance_id: int) -> dict[str, Any]:
     """Restart a tenant instance via rolling restarts of its deployments."""
     logger.info("Restarting instance %s", instance_id)
 
-    if not await check_deployment_exists(instance_id):
-        error_msg = f"Deployment {instance_deployment_ref(instance_id)} not found"
-        logger.warning(error_msg)
-        raise HTTPException(status_code=404, detail=error_msg)
+    await _require_deployment(instance_id)
 
     try:
         out = await _run_kubectl_for_deployments(
-            ["rollout", "restart"], tenant_start_deployment_refs(instance_id), namespace=_INSTANCES_NAMESPACE
+            ["rollout", "restart"], tenant_start_deployment_refs(instance_id), namespace=INSTANCES_NAMESPACE
         )
         logger.info("Restarted instance %s: %s", instance_id, out)
     except Exception as e:
@@ -1172,7 +1192,7 @@ async def uninstall_instance(instance_id: int) -> dict[str, Any]:
 
     try:
         helm_release_name = f"instance-{instance_id}"
-        code, stdout, stderr = await run_helm(["uninstall", helm_release_name, f"--namespace={_INSTANCES_NAMESPACE}"])
+        code, stdout, stderr = await run_helm(["uninstall", helm_release_name, f"--namespace={INSTANCES_NAMESPACE}"])
 
         if code != 0:
             error_msg = stderr
@@ -1200,76 +1220,64 @@ async def uninstall_instance(instance_id: int) -> dict[str, Any]:
     return {"success": True, "message": f"Instance {instance_id} uninstalled successfully", "instance_id": instance_id}
 
 
+def _deployment_status(deployment: Mapping[str, Any]) -> str:
+    """Return the status a deployment shows: running once every desired pod is ready, available, and updated."""
+    desired = deployment["spec"]["replicas"]
+    if desired == 0:
+        return "stopped"
+    # Kubernetes omits replica counts that are zero.
+    counts = deployment.get("status", {})
+    ready = min(counts.get(key, 0) for key in ("readyReplicas", "availableReplicas", "updatedReplicas"))
+    return "running" if ready >= desired else "provisioning"
+
+
+async def sync_instance_status(sb: Any, instance_id: int | str, stored_status: str) -> SyncUpdateOut | None:
+    """Record the status Kubernetes shows for an instance, unless its row left `stored_status` meanwhile.
+
+    Returns the change it recorded, or None when the status stayed or another writer changed the row first.
+    Raises when kubectl fails, before stamping the row, so the next dashboard poll checks again.
+    """
+    deployment = await get_deployment(instance_id)
+    if deployment is not None:
+        status, reason = _deployment_status(deployment), "status_mismatch"
+    elif stored_status in ("provisioning", "deprovisioned"):
+        # A provision records its row before Helm creates the deployment, and teardown deletes it.
+        status, reason = stored_status, "deployment_not_found"
+    else:
+        status, reason = "error", "deployment_not_found"
+    recorded = update_instance(
+        sb,
+        instance_id,
+        {"status": status, "kubernetes_synced_at": datetime.now(UTC).isoformat()},
+        expected_status=stored_status,
+    )
+    if not recorded or status == stored_status:
+        return None
+    logger.info("Instance %s status changed from %s to %s (%s)", instance_id, stored_status, status, reason)
+    return SyncUpdateOut(instance_id=instance_id, old_status=stored_status, new_status=status, reason=reason)
+
+
 async def sync_instances(sb: Any) -> dict[str, Any]:
-    """Sync instance states between database and Kubernetes cluster."""
+    """Record the status Kubernetes shows for every instance and summarize the changes."""
     logger.info("Starting instance sync")
-
     try:
-        instances = list_instances(sb)
-
-        sync_results: dict[str, Any] = {"total": len(instances), "synced": 0, "errors": 0, "updates": []}
-
-        for instance in instances:
-            instance_id = instance.get("instance_id") or instance.get("subdomain")
-            if not instance_id:
-                logger.warning("Instance %s has no instance_id or subdomain", instance.get("id"))
-                sync_results["errors"] += 1
-                continue
-
-            exists = await check_deployment_exists(instance_id)
-            current_status = instance.get("status", "unknown")
-
-            if not exists:
-                if current_status not in ["error", "deprovisioned"]:
-                    logger.info("Instance %s not found in cluster, marking as error", instance_id)
-                    now = datetime.now(UTC).isoformat()
-                    sb.table("instances").update(
-                        {"status": "error", "kubernetes_synced_at": now, "updated_at": now}
-                    ).eq("id", instance["id"]).execute()
-
-                    sync_results["updates"].append(
-                        SyncUpdateOut(
-                            instance_id=instance_id,
-                            old_status=current_status,
-                            new_status="error",
-                            reason="deployment_not_found",
-                        ).model_dump()
-                    )
-                    sync_results["synced"] += 1
-            else:
-                try:
-                    code, out, _ = await run_kubectl(
-                        ["get", instance_deployment_ref(instance_id), "-o=jsonpath={.spec.replicas}"],
-                        namespace=_INSTANCES_NAMESPACE,
-                    )
-                    if code == 0:
-                        replicas = int(out.strip() or "0")
-                        actual_status = "running" if replicas > 0 else "stopped"
-
-                        if current_status != actual_status:
-                            logger.info(
-                                "Instance %s status mismatch: DB=%s, K8s=%s", instance_id, current_status, actual_status
-                            )
-                            now = datetime.now(UTC).isoformat()
-                            sb.table("instances").update(
-                                {"status": actual_status, "kubernetes_synced_at": now, "updated_at": now}
-                            ).eq("id", instance["id"]).execute()
-
-                            sync_results["updates"].append(
-                                SyncUpdateOut(
-                                    instance_id=instance_id,
-                                    old_status=current_status,
-                                    new_status=actual_status,
-                                    reason="status_mismatch",
-                                ).model_dump()
-                            )
-                            sync_results["synced"] += 1
-                except Exception:
-                    logger.exception("Error checking instance %s state", instance_id)
-                    sync_results["errors"] += 1
-
-        logger.info("Instance sync completed: %s", sync_results)
-        return sync_results  # noqa: TRY300
+        instances = list_instances(sb, columns="instance_id,status")
     except Exception as e:
         logger.exception("Failed to sync instances")
         raise HTTPException(status_code=500, detail=f"Failed to sync instances: {e}") from e
+
+    updates: list[dict[str, Any]] = []
+    errors = 0
+    for instance in instances:
+        try:
+            update = await sync_instance_status(sb, instance["instance_id"], instance["status"])
+        except Exception:
+            logger.exception("Error checking instance %s state", instance["instance_id"])
+            errors += 1
+            continue
+        if update is not None:
+            updates.append(update.model_dump())
+
+    sync_results = {"total": len(instances), "synced": len(updates), "errors": errors, "updates": updates}
+    logger.info("Instance sync completed: %s", sync_results)
+    return sync_results

@@ -5,22 +5,31 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Protocol
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable
+    from collections.abc import Awaitable, Mapping
 
     import nio
 
     from mindroom.agent_cli.session import TurnToolRegistry
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
+    from mindroom.agent_reply_membership_sync import AgentReplyMembershipSync
     from mindroom.automations.runner import AutomationRunner
-    from mindroom.bot import AgentBot, TeamBot
+    from mindroom.bot import AgentBot
+    from mindroom.budgets.monitor import BudgetMonitor
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.desktop.identity import DesktopControllerIdentity
-    from mindroom.hooks import HookMatrixAdmin, HookMessageSender, HookRoomStatePutter, HookRoomStateQuerier
+    from mindroom.event_journal import EventJournalStore
+    from mindroom.hooks import HookBindings, HookRegistryState
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
+    from mindroom.orchestration.config_lifecycle import ConfigReloadLifecycle
+    from mindroom.orchestration.script_runtime import ScriptRuntimeLifecycle
+    from mindroom.orchestration.thread_snooze_runtime import ThreadSnoozeRuntimeCoordinator
+    from mindroom.reactive_triggers.service import ReactiveTriggerService
     from mindroom.response_admission import ResponseAdmissionGate
+    from mindroom.scheduling.runtime import ScheduledTaskRuntime
     from mindroom.skill_learning.runner import SkillReviewRunner
     from mindroom.tool_system.plugins import PluginReloadResult
+    from mindroom.workflow_runs.engine import WorkflowEngine
 
 __all__ = [
     "OrchestratorRuntime",
@@ -44,13 +53,16 @@ class OrchestratorRuntime(SupportsRunningState, Protocol):
     """Narrow orchestrator surface used by extracted runtime collaborators."""
 
     @property
-    def config(self) -> Config | None: ...  # noqa: D102
+    def config(self) -> Config: ...  # noqa: D102
 
     @property
     def runtime_paths(self) -> RuntimePaths: ...  # noqa: D102
 
     @property
-    def agent_bots(self) -> object: ...  # noqa: D102
+    def api_enabled(self) -> bool: ...  # noqa: D102
+
+    @property
+    def agent_bots(self) -> Mapping[str, AgentBot]: ...  # noqa: D102
 
     @property
     def knowledge_refresh_scheduler(self) -> KnowledgeRefreshScheduler: ...  # noqa: D102
@@ -65,24 +77,74 @@ class OrchestratorRuntime(SupportsRunningState, Protocol):
     def automations(self) -> AutomationRunner: ...  # noqa: D102
 
     @property
+    def budgets(self) -> BudgetMonitor: ...  # noqa: D102
+
+    @property
+    def scheduled_tasks(self) -> ScheduledTaskRuntime: ...  # noqa: D102
+
+    @property
+    def thread_snooze(self) -> ThreadSnoozeRuntimeCoordinator: ...  # noqa: D102
+
+    @property
+    def reactive_triggers(self) -> ReactiveTriggerService: ...  # noqa: D102
+
+    @property
+    def script_runtime(self) -> ScriptRuntimeLifecycle: ...  # noqa: D102
+
+    @property
+    def workflow_engine(self) -> WorkflowEngine: ...  # noqa: D102
+
+    @property
     def agent_reply_memberships(self) -> AgentReplyMembershipIndex: ...  # noqa: D102
 
-    def hook_message_sender(self) -> HookMessageSender | None: ...  # noqa: D102
+    @property
+    def agent_reply_membership_sync(self) -> AgentReplyMembershipSync: ...  # noqa: D102
 
-    def hook_room_state_querier(self) -> HookRoomStateQuerier | None: ...  # noqa: D102
+    @property
+    def response_admission_gate(self) -> ResponseAdmissionGate: ...  # noqa: D102
 
-    def hook_room_state_putter(self) -> HookRoomStatePutter | None: ...  # noqa: D102
+    @property
+    def hook_registry_state(self) -> HookRegistryState: ...  # noqa: D102
 
-    def hook_matrix_admin(self) -> HookMatrixAdmin | None: ...  # noqa: D102
+    @property
+    def config_reload(self) -> ConfigReloadLifecycle: ...  # noqa: D102
+
+    def event_journal_store(self) -> EventJournalStore:
+        """Return the one event-journal store every bot of this runtime borrows."""
+        ...
+
+    def observe_room_activity(self, room_id: str) -> None:
+        """Note that a bot admitted a conversation event in one room."""
+        ...
+
+    def service_hook_bindings(self) -> HookBindings:
+        """Return the hook bindings of the runtime's own emissions, which each room's poster and steward back."""
+        ...
+
+    def room_steward(self, room_id: str) -> AgentBot | None:
+        """Return the bot that does one room's shared invisible work now."""
+        ...
+
+    def room_poster(self, room_id: str, sender: tuple[str | None, str] | None = None) -> AgentBot | None:
+        """Return the bot that posts in one room where no agent answers, for a retry only its first sender."""
+        ...
 
     def running_entity_client(self, entity_name: str) -> nio.AsyncClient | None:
         """Return the Matrix client of one running managed entity."""
+        ...
+
+    def open_reply_event_id(self, entity_name: str, room_id: str, thread_id: str | None) -> Awaitable[str | None]:
+        """Return the event of one running managed entity's unfinished reply in one conversation."""
         ...
 
     def reload_plugins_now(self, *, source: str) -> Awaitable[PluginReloadResult]: ...  # noqa: D102
 
     def validate_managed_entity_identities(self) -> None:
         """Validate persisted managed Matrix identities for the live config."""
+        ...
+
+    def running_entity_names(self) -> frozenset[str]:
+        """Return the entities whose current bot generation is running."""
         ...
 
     def entity_first_sync_complete(self, entity_name: str) -> bool | None:
@@ -93,28 +155,16 @@ class OrchestratorRuntime(SupportsRunningState, Protocol):
         """Resolve the current running bot's already-owned Matrix device pin."""
         ...
 
-    def handle_bot_ready(self, bot: AgentBot | TeamBot) -> Awaitable[None]:
+    def handle_bot_ready(self, bot: AgentBot) -> Awaitable[None]:
         """Handle a managed bot completing its first sync."""
         ...
 
-    def invalidate_agent_reply_memberships(self, *, reason: str) -> None:
-        """Revoke room-backed reply grants until the router refreshes them."""
+    def refresh_agent_reply_memberships(self) -> Awaitable[object]:
+        """Rebuild room-backed reply grants from each room's observer."""
         ...
 
-    def refresh_agent_reply_memberships(self) -> Awaitable[None]:
-        """Rebuild room-backed reply grants from the router client."""
-        ...
-
-    async def reconcile_reply_authorized_calls(self) -> None:
-        """Revoke denied calls, then reconcile newly authorized joined rooms."""
-        ...
-
-    async def reconcile_pending_invites(self) -> None:
-        """Recheck cached room invites against each entity's invitation policy."""
-        ...
-
-    def revoke_reply_authorized_calls(self) -> Awaitable[None]:
-        """End active calls without running positive room reconciliation."""
+    def refresh_agent_reply_memberships_when_needed(self) -> Awaitable[None]:
+        """Rebuild room-backed reply grants when they need it, for an access check."""
         ...
 
     def send_approval_notice(
@@ -158,20 +208,17 @@ class SupportsClientConfigMemberships(SupportsClientConfig, SupportsAgentReplyMe
 
 
 class SupportsConfigOrchestrator(SupportsConfig, SupportsAgentReplyMemberships, Protocol):
-    """Expose the config plus optional orchestrator handle."""
+    """Expose the config plus the orchestrator handle."""
 
     @property
-    def orchestrator(self) -> OrchestratorRuntime | None: ...  # noqa: D102
+    def orchestrator(self) -> OrchestratorRuntime: ...  # noqa: D102
 
 
 class SupportsClientConfigOrchestrator(SupportsClientConfig, SupportsAgentReplyMemberships, Protocol):
     """Expose client/config access, orchestrator access, and runtime freshness."""
 
     @property
-    def orchestrator(self) -> OrchestratorRuntime | None: ...  # noqa: D102
-
-    @property
-    def response_admission_gate(self) -> ResponseAdmissionGate: ...  # noqa: D102
+    def orchestrator(self) -> OrchestratorRuntime: ...  # noqa: D102
 
     @property
     def runtime_started_at(self) -> float: ...  # noqa: D102

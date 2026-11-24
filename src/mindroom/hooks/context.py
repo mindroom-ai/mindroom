@@ -2,15 +2,23 @@
 
 from __future__ import annotations
 
+import os
+import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any
+from pathlib import PurePath
+from typing import TYPE_CHECKING, Any, Literal
 
 from mindroom.constants import HOOK_MESSAGE_RECEIVED_DEPTH_KEY, ORIGINAL_SENDER_KEY, ROUTER_AGENT_NAME
 from mindroom.entity_resolution import mindroom_user_id
 from mindroom.logging_config import get_logger
+from mindroom.response_admission import ResponseAdmissionRefusedError
 from mindroom.runtime_protocols import SupportsClientConfigOrchestrator  # noqa: TC001
-from mindroom.tool_system.plugin_identity import validate_plugin_name
+from mindroom.tool_system.events import tool_args_chat_preview
+from mindroom.tool_system.plugin_identity import plugin_state_root
+from mindroom.tool_system.tool_environment import ToolEnvironment
 
+from .registry import HookRegistry
+from .sender import send_hook_message
 from .state import (
     build_hook_room_state_putter,
     build_hook_room_state_querier,
@@ -18,10 +26,14 @@ from .state import (
     chain_hook_room_state_queriers,
 )
 from .types import (
+    EVENT_CONTACT_BEFORE_SEND,
     EVENT_TOOL_AFTER_CALL,
     EVENT_TOOL_BEFORE_CALL,
+    EVENT_TOOL_ENVIRONMENT,
+    EVENT_TOOL_RESULT_TRANSFORM,
     EnrichmentCachePolicy,
     EnrichmentItem,
+    TurnOutcome,
     format_hook_source,
 )
 
@@ -33,23 +45,26 @@ class _UnsetType:
 _UNSET = _UnsetType()
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable
+    from collections.abc import Awaitable, Callable
     from pathlib import Path
     from typing import Protocol
 
+    import nio
     import structlog
-    from agno.models.message import Message
 
+    from mindroom.bot import AgentBot
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.history.types import HistoryScope
     from mindroom.matrix.agent_message_snapshot import AgentMessageSnapshot
+    from mindroom.matrix.conversation_reads import ConversationReader
     from mindroom.message_target import MessageTarget
+    from mindroom.runtime_protocols import OrchestratorRuntime
     from mindroom.scheduling.tasks import ScheduledWorkflow
     from mindroom.tool_system.events import ToolTraceEntry
     from mindroom.turn_origin import TurnOrigin
 
-    from .registry import HookRegistry, HookRegistryState
+    from .registry import HookRegistrySource
     from .sender import HookMessageSender
     from .types import HookMatrixAdmin, HookRoomStatePutter, HookRoomStateQuerier
 
@@ -65,164 +80,231 @@ if TYPE_CHECKING:
             """Read the latest visible sender message for one room or thread scope."""
 
 
-def _resolve_plugin_state_root(
-    runtime_paths: RuntimePaths | None,
-    plugin_name: str,
-) -> Path:
-    """Return the plugin state root, creating it on first access."""
-    if runtime_paths is None:
-        msg = "runtime_paths are required to access hook state_root"
-        raise RuntimeError(msg)
-    plugin_root = runtime_paths.storage_root / "plugins" / validate_plugin_name(plugin_name)
-    plugin_root.mkdir(parents=True, exist_ok=True)
-    return plugin_root
+@dataclass(frozen=True, slots=True)
+class HookBindings:
+    """The hook registry and the Matrix capabilities that hooks emitted for one bot or turn receive.
 
+    A turn captures its bot's bindings when it starts; ``registry`` is the registry snapshot it emits to, and
+    ``registry_state`` the live state a hook compares that snapshot with (``HookContext.is_active``).
+    """
 
-async def _send_bound_message(
-    logger: structlog.stdlib.BoundLogger,
-    message_sender: HookMessageSender | None,
-    plugin_name: str,
-    event_name: str,
-    room_id: str,
-    text: str,
-    *,
-    thread_id: str | None = None,
-    extra_content: dict[str, Any] | None = None,
-    requester_id: str | None = None,
-    message_received_depth: int = 0,
-    trigger_dispatch: bool = False,
-) -> str | None:
-    """Send one hook-originated Matrix message through a bound sender."""
-    if message_sender is None:
-        logger.warning("send_message called but no sender registered")
-        return None
-    resolved_extra_content = dict(extra_content or {})
-    if requester_id:
-        resolved_extra_content.setdefault(ORIGINAL_SENDER_KEY, requester_id)
-    if message_received_depth > 0:
-        resolved_extra_content[HOOK_MESSAGE_RECEIVED_DEPTH_KEY] = message_received_depth
-    return await message_sender(
-        room_id,
-        text,
-        thread_id,
-        format_hook_source(plugin_name, event_name),
-        resolved_extra_content or None,
-        trigger_dispatch=trigger_dispatch,
-    )
+    registry: HookRegistry = field(default_factory=HookRegistry.empty)
+    registry_state: HookRegistrySource | None = None
+    message_sender: HookMessageSender | None = None
+    matrix_admin: HookMatrixAdmin | None = None
+    room_state_querier: HookRoomStateQuerier | None = None
+    room_state_putter: HookRoomStatePutter | None = None
+    agent_message_snapshot_reader: HookAgentMessageSnapshotReader | None = None
+    runtime_started_at: float | None = None
 
-
-async def _query_bound_room_state(
-    logger: structlog.stdlib.BoundLogger,
-    room_state_querier: HookRoomStateQuerier | None,
-    room_id: str,
-    event_type: str,
-    state_key: str | None = None,
-) -> dict[str, Any] | None:
-    """Query Matrix room state through a bound hook querier when available."""
-    if room_state_querier is None:
-        logger.warning("No room state querier available")
-        return None
-    return await room_state_querier(room_id, event_type, state_key)
-
-
-async def _put_bound_room_state(
-    logger: structlog.stdlib.BoundLogger,
-    room_state_putter: HookRoomStatePutter | None,
-    room_id: str,
-    event_type: str,
-    state_key: str,
-    content: dict[str, Any],
-) -> bool:
-    """Write Matrix room state through a bound hook putter when available."""
-    if room_state_putter is None:
-        logger.warning("No room state putter available")
-        return False
-    return await room_state_putter(room_id, event_type, state_key, content)
+    def context_kwargs(
+        self,
+        event_name: str,
+        *,
+        config: Config,
+        runtime_paths: RuntimePaths,
+        correlation_id: str,
+    ) -> dict[str, Any]:
+        """Return the base fields of a ``HookContext`` for ``event_name`` that these bindings emit."""
+        return {
+            "event_name": event_name,
+            "config": config,
+            "runtime_paths": runtime_paths,
+            "correlation_id": correlation_id,
+            "runtime_started_at": self.runtime_started_at,
+            "message_sender": self.message_sender,
+            "agent_message_snapshot_reader": self.agent_message_snapshot_reader,
+            "matrix_admin": self.matrix_admin,
+            "room_state_querier": self.room_state_querier,
+            "room_state_putter": self.room_state_putter,
+            "_hook_registry_state": self.registry_state,
+        }
 
 
 @dataclass
 class HookContextSupport:
-    """Own live hook bindings and shared hook-context base fields."""
+    """Own a bot's hook capabilities: its own live client first, and each room's poster or steward for what that cannot do."""
 
     runtime: SupportsClientConfigOrchestrator
-    logger: structlog.stdlib.BoundLogger
     runtime_paths: RuntimePaths
     agent_name: str
-    hook_registry_state: HookRegistryState
-    hook_send_message: HookMessageSender
-    agent_message_snapshot_reader: HookAgentMessageSnapshotReader | None = None
+    hook_registry_state: HookRegistrySource
+    conversation_reader: ConversationReader
+    logger: structlog.stdlib.BoundLogger
 
     @property
     def registry(self) -> HookRegistry:
         """Return the currently active hook registry snapshot."""
         return self.hook_registry_state.registry
 
-    def message_sender(self) -> HookMessageSender | None:
-        """Return the current sender bound into hook contexts."""
-        if self.runtime.client is not None:
-            return self.hook_send_message
-        orchestrator = self.runtime.orchestrator
-        if orchestrator is not None:
-            sender = orchestrator.hook_message_sender()
-            if sender is not None:
-                return sender
+    async def send_message(
+        self,
+        room_id: str,
+        body: str,
+        thread_id: str | None,
+        source_hook: str,
+        extra_content: dict[str, Any] | None,
+        *,
+        trigger_dispatch: bool = False,
+        mentions: list[str] | None = None,
+        wake_mentioned: bool = True,
+    ) -> str | None:
+        """Send a hook-originated Matrix message as this bot, with the client and config it has when sending."""
+        client = self.runtime.client
+        if client is None:
+            self.logger.warning("Hook send requested before Matrix client is ready", room_id=room_id)
+            return None
+        event_id = await send_hook_message(
+            client,
+            self.runtime.config,
+            self.runtime_paths,
+            room_id,
+            body,
+            thread_id,
+            source_hook,
+            extra_content,
+            trigger_dispatch=trigger_dispatch,
+            mentions=mentions,
+            wake_mentioned=wake_mentioned,
+            conversation_reader=self.conversation_reader,
+        )
+        if event_id:
+            self.logger.info("Sent hook message", event_id=event_id, room_id=room_id, source_hook=source_hook)
+            return event_id
+        self.logger.error("Failed to send hook message", room_id=room_id, source_hook=source_hook)
         return None
 
-    def room_state_querier(self) -> HookRoomStateQuerier | None:
-        """Return the room-state querier bound into hook contexts."""
-        primary = build_hook_room_state_querier(self.runtime.client) if self.runtime.client is not None else None
-        fallback = None
-        orchestrator = self.runtime.orchestrator
-        if self.agent_name != ROUTER_AGENT_NAME and orchestrator is not None:
-            fallback = orchestrator.hook_room_state_querier()
-        return chain_hook_room_state_queriers(primary, fallback)
+    async def agent_message_snapshot(
+        self,
+        room_id: str,
+        thread_id: str | None,
+        sender: str,
+    ) -> AgentMessageSnapshot | None:
+        """Read the latest visible message ``sender`` has in one of this bot's conversations."""
+        # Imported on first use: the conversation reads pull nio, which the slim plugin-API import path must not.
+        from mindroom.matrix.conversation_reads import latest_agent_message_snapshot  # noqa: PLC0415
 
-    def room_state_putter(self) -> HookRoomStatePutter | None:
-        """Return the room-state putter bound into hook contexts."""
-        primary = build_hook_room_state_putter(self.runtime.client) if self.runtime.client is not None else None
-        fallback = None
-        orchestrator = self.runtime.orchestrator
-        if self.agent_name != ROUTER_AGENT_NAME and orchestrator is not None:
-            fallback = orchestrator.hook_room_state_putter()
-        return chain_hook_room_state_putters(primary, fallback)
+        return await latest_agent_message_snapshot(
+            self.conversation_reader,
+            room_id=room_id,
+            thread_id=thread_id,
+            sender=sender,
+        )
+
+    def message_sender(self) -> HookMessageSender | None:
+        """Return the sender bound into hook contexts: this bot's own while it has a client, else each room's poster."""
+        if self.runtime.client is not None:
+            return self.send_message
+        return _room_poster_sender(self.runtime.orchestrator)
+
+    def room_state_querier(self) -> HookRoomStateQuerier:
+        """Return the room-state querier: own client; steward for unjoined rooms or non-``M_NOT_FOUND`` errors."""
+        client = self.runtime.client
+        steward = _steward_state_querier(self.runtime.orchestrator)
+        if client is None:
+            return steward
+        return chain_hook_room_state_queriers(client, steward)
+
+    def room_state_putter(self) -> HookRoomStatePutter:
+        """Return the room-state putter bound into hook contexts: this bot's own client, else the room's steward."""
+        client = self.runtime.client
+        return chain_hook_room_state_putters(
+            None if client is None else build_hook_room_state_putter(client),
+            _steward_state_putter(self.runtime.orchestrator),
+        )
 
     def matrix_admin(self) -> HookMatrixAdmin | None:
-        """Return the router-backed Matrix admin helper bound into hook contexts."""
-        orchestrator = self.runtime.orchestrator
-        if orchestrator is not None:
-            admin = orchestrator.hook_matrix_admin()
-            if admin is not None:
-                return admin
-        if self.agent_name == ROUTER_AGENT_NAME and self.runtime.client is not None:
-            # Imported on first use so the tool-registry import chain stays free
-            # of the nio matrix-client import (#1436).
-            from .matrix_admin import build_hook_matrix_admin  # noqa: PLC0415
+        """Return the Matrix admin helper bound into hook contexts, which only the owner account's client backs."""
+        if self.agent_name != ROUTER_AGENT_NAME:
+            return _owner_matrix_admin(self.runtime.orchestrator)
+        if self.runtime.client is None:
+            return None
+        # Imported on first use so the tool-registry import chain stays free
+        # of the nio matrix-client import (#1436).
+        from .matrix_admin import build_hook_matrix_admin  # noqa: PLC0415
 
-            return build_hook_matrix_admin(
-                self.runtime.client,
-                self.runtime_paths,
-                config=self.runtime.config,
-            )
-        return None
+        return build_hook_matrix_admin(self.runtime.client, self.runtime_paths, config=self.runtime.config)
+
+    def bindings(self) -> HookBindings:
+        """Return the bot's hook bindings as they are now."""
+        return HookBindings(
+            registry=self.registry,
+            registry_state=self.hook_registry_state,
+            message_sender=self.message_sender(),
+            matrix_admin=self.matrix_admin(),
+            room_state_querier=self.room_state_querier(),
+            room_state_putter=self.room_state_putter(),
+            agent_message_snapshot_reader=self.agent_message_snapshot,
+            runtime_started_at=self.runtime.runtime_started_at,
+        )
 
     def base_kwargs(self, event_name: str, correlation_id: str) -> dict[str, Any]:
-        """Return shared base fields for hook context construction."""
-        return {
-            "event_name": event_name,
-            "plugin_name": "",
-            "settings": {},
-            "config": self.runtime.config,
-            "runtime_paths": self.runtime_paths,
-            "logger": self.logger.bind(event_name=event_name),
-            "correlation_id": correlation_id,
-            "runtime_started_at": self.runtime.runtime_started_at,
-            "message_sender": self.message_sender(),
-            "agent_message_snapshot_reader": self.agent_message_snapshot_reader,
-            "matrix_admin": self.matrix_admin(),
-            "room_state_querier": self.room_state_querier(),
-            "room_state_putter": self.room_state_putter(),
-            "_hook_registry_state": self.hook_registry_state,
-        }
+        """Return the base fields of a hook context the bot emits now."""
+        return self.bindings().context_kwargs(
+            event_name,
+            config=self.runtime.config,
+            runtime_paths=self.runtime_paths,
+            correlation_id=correlation_id,
+        )
+
+
+def _as_room_bot[T](
+    pick: Callable[[str], AgentBot | None],
+    capability: Callable[[AgentBot, nio.AsyncClient], Callable[..., Awaitable[T]]],
+    refused: T,
+) -> Callable[..., Awaitable[T]]:
+    """Return one capability of the bot ``pick`` names for each call's room, which a reload waits for.
+
+    A room with no such bot, or with one that is stopping or closed its client, gives ``refused``.
+    """
+
+    async def call(room_id: str, *args: Any, **options: Any) -> T:  # noqa: ANN401
+        # Imported on first use: the slim plugin-API import path must not pull nio.
+        import nio  # noqa: PLC0415
+
+        bot = pick(room_id)
+        if bot is None:
+            return refused
+        try:
+            async with bot.admission_fence():
+                return refused if bot.client is None else await capability(bot, bot.client)(room_id, *args, **options)
+        except (ResponseAdmissionRefusedError, nio.LocalProtocolError):
+            return refused
+
+    return call
+
+
+def _room_poster_sender(orchestrator: OrchestratorRuntime) -> HookMessageSender:
+    """Return a sender that sends each message as the poster of its room."""
+    return _as_room_bot(orchestrator.room_poster, lambda poster, _client: poster.hook_context.send_message, None)
+
+
+def _steward_state_querier(orchestrator: OrchestratorRuntime) -> HookRoomStateQuerier:
+    return _as_room_bot(orchestrator.room_steward, lambda _bot, client: build_hook_room_state_querier(client), None)
+
+
+def _steward_state_putter(orchestrator: OrchestratorRuntime) -> HookRoomStatePutter:
+    return _as_room_bot(orchestrator.room_steward, lambda _bot, client: build_hook_room_state_putter(client), False)
+
+
+def _owner_matrix_admin(orchestrator: OrchestratorRuntime) -> HookMatrixAdmin | None:
+    """Return the owner account's Matrix admin helper while that account runs, None in a runtime without one."""
+    owner = orchestrator.agent_bots.get(ROUTER_AGENT_NAME)
+    return None if owner is None else owner.hook_context.matrix_admin()
+
+
+def service_hook_bindings(orchestrator: OrchestratorRuntime, registry_state: HookRegistrySource) -> HookBindings:
+    """Return the bindings of a runtime's own hooks: each room's poster sends, and its steward reads and writes state."""
+    started = (bot.hook_context.runtime.runtime_started_at for bot in orchestrator.agent_bots.values())
+    return HookBindings(
+        registry=registry_state.registry,
+        registry_state=registry_state,
+        message_sender=_room_poster_sender(orchestrator),
+        matrix_admin=_owner_matrix_admin(orchestrator),
+        room_state_querier=_steward_state_querier(orchestrator),
+        room_state_putter=_steward_state_putter(orchestrator),
+        runtime_started_at=min(started, default=time.time()),
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -299,41 +381,20 @@ class ResponseResult:
     envelope: MessageEnvelope
 
 
-@dataclass(slots=True, kw_only=True)
-class _HookLifecycleContext:
-    """Track whether a bound hook still belongs to the active registry."""
-
-    _hook_registry_state: HookRegistryState | None = field(
-        default=None,
-        repr=False,
-        compare=False,
-    )
-    _hook_registry_snapshot: HookRegistry | None = field(
-        default=None,
-        repr=False,
-        compare=False,
-    )
-
-    def is_active(self) -> bool:
-        """Return whether this hook still belongs to the live registry snapshot."""
-        return (
-            self._hook_registry_state is not None
-            and self._hook_registry_snapshot is not None
-            and self._hook_registry_state.registry is self._hook_registry_snapshot
-        )
-
-
 @dataclass(slots=True)
-class HookContext(_HookLifecycleContext):
+class HookContext:
     """Base fields available to every hook."""
 
+    _hook_registry_state: HookRegistrySource | None = field(default=None, kw_only=True, repr=False, compare=False)
+    _hook_registry_snapshot: HookRegistry | None = field(default=None, kw_only=True, repr=False, compare=False)
     event_name: str
-    plugin_name: str
-    settings: dict[str, Any]
     config: Config
     runtime_paths: RuntimePaths
-    logger: structlog.stdlib.BoundLogger
     correlation_id: str
+    # `emit` fills these three with each hook's own before calling it.
+    plugin_name: str = field(default="", kw_only=True)
+    settings: dict[str, Any] = field(default_factory=dict, kw_only=True)
+    logger: structlog.stdlib.BoundLogger = field(default_factory=lambda: get_logger("mindroom.hooks"), kw_only=True)
     runtime_started_at: float | None = field(default=None, kw_only=True)
     message_sender: HookMessageSender | None = field(default=None, kw_only=True)
     agent_message_snapshot_reader: HookAgentMessageSnapshotReader | None = field(
@@ -343,11 +404,22 @@ class HookContext(_HookLifecycleContext):
     matrix_admin: HookMatrixAdmin | None = field(default=None, kw_only=True)
     room_state_querier: HookRoomStateQuerier | None = field(default=None, kw_only=True)
     room_state_putter: HookRoomStatePutter | None = field(default=None, kw_only=True)
+    # The agent turn this hook runs in, and in a delegated child's turn the turn that delegated it; None outside a turn.
+    turn_id: str | None = field(default=None, kw_only=True)
+    parent_turn_id: str | None = field(default=None, kw_only=True)
+
+    def is_active(self) -> bool:
+        """Return whether this hook still belongs to the live registry snapshot."""
+        return (
+            self._hook_registry_state is not None
+            and self._hook_registry_snapshot is not None
+            and self._hook_registry_state.registry is self._hook_registry_snapshot
+        )
 
     @property
     def state_root(self) -> Path:
-        """Return the plugin state root, creating it on first access."""
-        return _resolve_plugin_state_root(self.runtime_paths, self.plugin_name)
+        """Return the plugin's own state directory, created at mode 0700 on first access."""
+        return plugin_state_root(self.runtime_paths.storage_root, self.plugin_name)
 
     async def send_message(
         self,
@@ -357,6 +429,8 @@ class HookContext(_HookLifecycleContext):
         thread_id: str | None = None,
         extra_content: dict[str, Any] | None = None,
         trigger_dispatch: bool = False,
+        mentions: list[str] | None = None,
+        wake_mentioned: bool = True,
     ) -> str | None:
         """Send a Matrix message from a hook and return the event ID when available.
 
@@ -370,19 +444,28 @@ class HookContext(_HookLifecycleContext):
         plugin on the first synthetic hop, then suppresses deeper
         ``message:received`` re-entry for the rest of that synthetic
         chain to avoid cross-plugin feedback loops.
+        *mentions* lists every Matrix user ID the message mentions, so
+        names quoted in *text* mention nobody else, and *wake_mentioned*
+        False keeps every agent it mentions from being activated by that
+        mention.
         """
-        return await _send_bound_message(
-            self.logger,
-            self.message_sender,
-            self.plugin_name,
-            self.event_name,
+        if self.message_sender is None:
+            self.logger.warning("send_message called but no sender registered")
+            return None
+        resolved_extra_content = dict(extra_content or {})
+        requester_id = _requester_id_for_hook_send(self, trigger_dispatch=trigger_dispatch)
+        if requester_id:
+            resolved_extra_content.setdefault(ORIGINAL_SENDER_KEY, requester_id)
+        resolved_extra_content[HOOK_MESSAGE_RECEIVED_DEPTH_KEY] = _message_received_depth_for_hook_send(self)
+        return await self.message_sender(
             room_id,
             text,
-            thread_id=thread_id,
-            extra_content=extra_content,
-            requester_id=_requester_id_for_hook_send(self, trigger_dispatch=trigger_dispatch),
-            message_received_depth=_message_received_depth_for_hook_send(self),
+            thread_id,
+            format_hook_source(self.plugin_name, self.event_name),
+            resolved_extra_content,
             trigger_dispatch=trigger_dispatch,
+            mentions=mentions,
+            wake_mentioned=wake_mentioned,
         )
 
     async def query_room_state(
@@ -392,13 +475,10 @@ class HookContext(_HookLifecycleContext):
         state_key: str | None = None,
     ) -> dict[str, Any] | None:
         """Query Matrix room state and return the result when a querier is available."""
-        return await _query_bound_room_state(
-            self.logger,
-            self.room_state_querier,
-            room_id,
-            event_type,
-            state_key,
-        )
+        if self.room_state_querier is None:
+            self.logger.warning("No room state querier available")
+            return None
+        return await self.room_state_querier(room_id, event_type, state_key)
 
     async def get_latest_agent_message_snapshot(
         self,
@@ -425,14 +505,10 @@ class HookContext(_HookLifecycleContext):
         content: dict[str, Any],
     ) -> bool:
         """Write a Matrix room state event and return ``True`` on success."""
-        return await _put_bound_room_state(
-            self.logger,
-            self.room_state_putter,
-            room_id,
-            event_type,
-            state_key,
-            content,
-        )
+        if self.room_state_putter is None:
+            self.logger.warning("No room state putter available")
+            return False
+        return await self.room_state_putter(room_id, event_type, state_key, content)
 
 
 @dataclass(slots=True)
@@ -442,6 +518,8 @@ class MessageReceivedContext(HookContext):
     envelope: MessageEnvelope
     skip_plugin_names: frozenset[str] = field(default_factory=frozenset)
     suppress: bool = False
+    # Whether the envelope is a steward's hidden route of a person's message, which ran the room's hooks as it arrived.
+    _routed: bool = field(default=False, kw_only=True, repr=False, compare=False)
 
 
 @dataclass(slots=True)
@@ -524,6 +602,15 @@ class CancelledResponseContext(HookContext):
 
 
 @dataclass(slots=True)
+class TurnLifecycleContext(HookContext):
+    """Context for turn:started, turn:paused, turn:resumed, and turn:ended hooks."""
+
+    envelope: MessageEnvelope
+    # How the turn ended; set only for turn:ended.
+    outcome: TurnOutcome | None = None
+
+
+@dataclass(slots=True)
 class AgentLifecycleContext(HookContext):
     """Context for agent lifecycle observer hooks."""
 
@@ -535,6 +622,20 @@ class AgentLifecycleContext(HookContext):
     stop_reason: str | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class TranscriptLine:
+    """One thing said in a compacted conversation: who said it and the words they wrote."""
+
+    # "user" for a message the agent was sent, "assistant" for the agent's or team's own reply.
+    role: Literal["user", "assistant"]
+    # A user line's sender: a Matrix ID, or a placeholder such as "unknown" when none was recorded; None for a reply.
+    sender: str | None
+    # The display name a user line's message carried, as the sender had it then; None when it carried none.
+    display_name: str | None
+    # The words without the context hooks attached to the message; not redacted.
+    text: str
+
+
 @dataclass(slots=True)
 class CompactionHookContext(HookContext):
     """Context for compaction lifecycle observer hooks."""
@@ -543,7 +644,7 @@ class CompactionHookContext(HookContext):
     scope: HistoryScope
     room_id: str
     thread_id: str | None
-    messages: list[Message]
+    transcript: tuple[TranscriptLine, ...]
     session_id: str
     token_count_before: int
     token_count_after: int | None
@@ -570,21 +671,20 @@ class ScheduleFiredContext(HookContext):
         thread_id: str | None | _UnsetType = _UNSET,
         extra_content: dict[str, Any] | None = None,
         trigger_dispatch: bool = False,
+        mentions: list[str] | None = None,
+        wake_mentioned: bool = True,
     ) -> str | None:
         """Send a Matrix message from a schedule hook and return the event ID when available."""
-        resolved_thread_id = self.thread_id if isinstance(thread_id, _UnsetType) else thread_id
-        return await _send_bound_message(
-            self.logger,
-            self.message_sender,
-            self.plugin_name,
-            self.event_name,
+        # Named base call: zero-argument super() breaks in slots dataclasses.
+        return await HookContext.send_message(
+            self,
             room_id,
             text,
-            thread_id=resolved_thread_id,
+            thread_id=self.thread_id if isinstance(thread_id, _UnsetType) else thread_id,
             extra_content=extra_content,
-            requester_id=_requester_id_for_hook_send(self, trigger_dispatch=trigger_dispatch),
-            message_received_depth=_message_received_depth_for_hook_send(self),
             trigger_dispatch=trigger_dispatch,
+            mentions=mentions,
+            wake_mentioned=wake_mentioned,
         )
 
 
@@ -663,10 +763,11 @@ class CustomEventContext(HookContext):
     message_received_depth: int = 0
 
 
-@dataclass(slots=True)
-class ToolBeforeCallContext(_HookLifecycleContext):
+@dataclass(slots=True, kw_only=True)
+class ToolBeforeCallContext(HookContext):
     """Context passed to tool:before_call hook callbacks."""
 
+    event_name: str = EVENT_TOOL_BEFORE_CALL
     tool_name: str
     arguments: dict[str, Any]
     agent_name: str
@@ -674,92 +775,27 @@ class ToolBeforeCallContext(_HookLifecycleContext):
     thread_id: str | None
     requester_id: str | None
     session_id: str | None
+    message_received_depth: int = 0
+    # Whether the reply the call runs in shows it, which a turn no reply shows, such as a listening turn's, never does.
+    shown: bool = False
     declined: bool = False
     decline_reason: str = ""
-    event_name: str = EVENT_TOOL_BEFORE_CALL
-    plugin_name: str = ""
-    settings: dict[str, Any] = field(default_factory=dict)
-    config: Config | None = None
-    runtime_paths: RuntimePaths | None = None
-    logger: Any = field(default_factory=lambda: get_logger("mindroom.hooks.tool"))
-    correlation_id: str = ""
-    message_sender: HookMessageSender | None = field(default=None, kw_only=True)
-    matrix_admin: HookMatrixAdmin | None = field(default=None, kw_only=True)
-    room_state_querier: HookRoomStateQuerier | None = field(default=None, kw_only=True)
-    room_state_putter: HookRoomStatePutter | None = field(default=None, kw_only=True)
-    message_received_depth: int = 0
+
+    def chat_preview(self) -> str | None:
+        """Return the call's arguments as its reply's tool trace previews them, or None when the reply hides the call."""
+        return tool_args_chat_preview(self.arguments) if self.shown else None
 
     def decline(self, reason: str) -> None:
         """Mark the tool call as declined with one model-facing reason."""
         self.declined = True
         self.decline_reason = reason
 
-    @property
-    def state_root(self) -> Path:
-        """Return the plugin state root, creating it on first access."""
-        return _resolve_plugin_state_root(self.runtime_paths, self.plugin_name)
 
-    async def send_message(
-        self,
-        room_id: str,
-        text: str,
-        *,
-        thread_id: str | None = None,
-        extra_content: dict[str, Any] | None = None,
-        trigger_dispatch: bool = False,
-    ) -> str | None:
-        """Send a Matrix message from a tool hook and return the event ID when available."""
-        return await _send_bound_message(
-            self.logger,
-            self.message_sender,
-            self.plugin_name,
-            self.event_name,
-            room_id,
-            text,
-            thread_id=thread_id,
-            extra_content=extra_content,
-            requester_id=self.requester_id,
-            message_received_depth=_message_received_depth_for_hook_send(self),
-            trigger_dispatch=trigger_dispatch,
-        )
-
-    async def query_room_state(
-        self,
-        room_id: str,
-        event_type: str,
-        state_key: str | None = None,
-    ) -> dict[str, Any] | None:
-        """Query Matrix room state and return the result when a querier is available."""
-        return await _query_bound_room_state(
-            self.logger,
-            self.room_state_querier,
-            room_id,
-            event_type,
-            state_key,
-        )
-
-    async def put_room_state(
-        self,
-        room_id: str,
-        event_type: str,
-        state_key: str,
-        content: dict[str, Any],
-    ) -> bool:
-        """Write a Matrix room state event and return ``True`` on success."""
-        return await _put_bound_room_state(
-            self.logger,
-            self.room_state_putter,
-            room_id,
-            event_type,
-            state_key,
-            content,
-        )
-
-
-@dataclass(slots=True)
-class ToolAfterCallContext(_HookLifecycleContext):
+@dataclass(slots=True, kw_only=True)
+class ToolAfterCallContext(HookContext):
     """Context passed to tool:after_call hook callbacks."""
 
+    event_name: str = EVENT_TOOL_AFTER_CALL
     tool_name: str
     arguments: dict[str, Any]
     agent_name: str
@@ -771,86 +807,141 @@ class ToolAfterCallContext(_HookLifecycleContext):
     error: BaseException | None
     blocked: bool
     duration_ms: float
-    event_name: str = EVENT_TOOL_AFTER_CALL
-    plugin_name: str = ""
-    settings: dict[str, Any] = field(default_factory=dict)
-    config: Config | None = None
-    runtime_paths: RuntimePaths | None = None
-    logger: Any = field(default_factory=lambda: get_logger("mindroom.hooks.tool"))
-    correlation_id: str = ""
-    message_sender: HookMessageSender | None = field(default=None, kw_only=True)
-    matrix_admin: HookMatrixAdmin | None = field(default=None, kw_only=True)
-    room_state_querier: HookRoomStateQuerier | None = field(default=None, kw_only=True)
-    room_state_putter: HookRoomStatePutter | None = field(default=None, kw_only=True)
     message_received_depth: int = 0
+    # Whether the reply the call ran in shows it, which a turn no reply shows, such as a listening turn's, never does.
+    shown: bool = False
 
-    @property
-    def state_root(self) -> Path:
-        """Return the plugin state root, creating it on first access."""
-        return _resolve_plugin_state_root(self.runtime_paths, self.plugin_name)
-
-    async def send_message(
-        self,
-        room_id: str,
-        text: str,
-        *,
-        thread_id: str | None = None,
-        extra_content: dict[str, Any] | None = None,
-        trigger_dispatch: bool = False,
-    ) -> str | None:
-        """Send a Matrix message from a tool hook and return the event ID when available."""
-        return await _send_bound_message(
-            self.logger,
-            self.message_sender,
-            self.plugin_name,
-            self.event_name,
-            room_id,
-            text,
-            thread_id=thread_id,
-            extra_content=extra_content,
-            requester_id=self.requester_id,
-            message_received_depth=_message_received_depth_for_hook_send(self),
-            trigger_dispatch=trigger_dispatch,
-        )
-
-    async def query_room_state(
-        self,
-        room_id: str,
-        event_type: str,
-        state_key: str | None = None,
-    ) -> dict[str, Any] | None:
-        """Query Matrix room state and return the result when a querier is available."""
-        return await _query_bound_room_state(
-            self.logger,
-            self.room_state_querier,
-            room_id,
-            event_type,
-            state_key,
-        )
-
-    async def put_room_state(
-        self,
-        room_id: str,
-        event_type: str,
-        state_key: str,
-        content: dict[str, Any],
-    ) -> bool:
-        """Write a Matrix room state event and return ``True`` on success."""
-        return await _put_bound_room_state(
-            self.logger,
-            self.room_state_putter,
-            room_id,
-            event_type,
-            state_key,
-            content,
-        )
+    def chat_preview(self) -> str | None:
+        """Return the call's arguments as its reply's tool trace previews them, or None when the reply hides the call."""
+        return tool_args_chat_preview(self.arguments) if self.shown else None
 
 
-def _requester_id_for_hook_send(
-    context: HookContext,
-    *,
-    trigger_dispatch: bool = False,
-) -> str | None:
+@dataclass(slots=True, kw_only=True)
+class ToolResultTransformContext(HookContext):
+    """Context passed to tool:result_transform hooks: ``result`` is the text the model reads for a successful call."""
+
+    event_name: str = EVENT_TOOL_RESULT_TRANSFORM
+    tool_name: str
+    arguments: dict[str, Any]
+    agent_name: str
+    room_id: str | None
+    thread_id: str | None
+    requester_id: str | None
+    session_id: str | None
+    result: str
+    message_received_depth: int = 0
+    shown: bool = False
+
+
+@dataclass(slots=True, kw_only=True)
+class ToolEnvironmentContext(HookContext):
+    """Context passed to tool:environment hook callbacks, which change the environment of the call's shell commands."""
+
+    event_name: str = EVENT_TOOL_ENVIRONMENT
+    function_name: str
+    registered_toolkit: str | None
+    arguments: dict[str, Any]
+    agent_name: str
+    room_id: str | None
+    requester_id: str | None
+    message_received_depth: int = 0
+    declined: bool = False
+    decline_reason: str = ""
+    _environment: ToolEnvironment = field(default_factory=ToolEnvironment, repr=False)
+
+    def set_env(self, name: str, value: str) -> None:
+        """Give the call's shell commands the variable ``name`` with ``value``."""
+        _check_env_name(name)
+        if not isinstance(value, str) or "\0" in value:
+            msg = f"Environment variable {name} needs a string value without NUL characters"
+            raise ValueError(msg)
+        self._environment = self._environment.then(ToolEnvironment(values={name: value}))
+
+    def unset_env(self, name: str) -> None:
+        """Keep the variable ``name`` from the call's shell commands; ``PATH`` cannot be removed, only set."""
+        _check_env_name(name)
+        if name == "PATH":
+            msg = "PATH cannot be removed, since no command would run without it; set it instead"
+            raise ValueError(msg)
+        self._environment = self._environment.then(ToolEnvironment(values={name: None}))
+
+    def pass_through(self, name: str) -> None:
+        """Give the call's shell commands MindRoom's own variables that ``name``, a name or glob pattern, matches."""
+        _check_env_name(name)
+        self._environment = self._environment.then(ToolEnvironment(pass_through=(name,)))
+
+    def prepend_path(self, directory: str) -> None:
+        """Put ``directory`` first on the call's shell commands' ``PATH``, ahead of the shell tool's own entries."""
+        if (
+            not isinstance(directory, str)
+            or not PurePath(directory).is_absolute()
+            or os.pathsep in directory
+            or "\0" in directory
+        ):
+            msg = f"A PATH entry must be one absolute directory: {directory!r}"
+            raise ValueError(msg)
+        self._environment = self._environment.then(ToolEnvironment(path_prepend=(directory,)))
+
+    def decline(self, reason: str) -> None:
+        """Refuse the tool call with one model-facing reason, so it does not run."""
+        self.declined = True
+        self.decline_reason = reason
+
+
+@dataclass(slots=True, kw_only=True)
+class ContactBeforeSendContext(HookContext):
+    """Context passed to contact:before_send hook callbacks, which decide whether a message may reach a contact.
+
+    A hook leaves the message alone, replaces it with ``rewrite()``, sends it back to the agent with ``revise()``,
+    or blocks it with ``deny()``.
+    """
+
+    event_name: str = EVENT_CONTACT_BEFORE_SEND
+    agent_name: str
+    room_id: str
+    thread_id: str | None
+    requester_id: str
+    contact_id: str
+    counterparty_id: str
+    counterparty_name: str
+    rules: str
+    text: str
+    message_received_depth: int = 0
+    verdict: Literal["send", "revise", "deny"] = "send"
+    feedback: str = ""
+
+    def rewrite(self, text: str) -> None:
+        """Send ``text`` instead of the agent's message; later hooks and the judge see the new text."""
+        self.text = text
+
+    def revise(self, feedback: str) -> None:
+        """Send nothing and give the agent ``feedback`` so it can write a new message."""
+        self.verdict = "revise"
+        self.feedback = feedback
+
+    def deny(self, reason: str) -> None:
+        """Send nothing and give the agent ``reason``."""
+        self.verdict = "deny"
+        self.feedback = reason
+
+
+# The contexts of hooks that run during one of an agent's tool calls, which name its agent, room, and requester.
+CallHookContext = (
+    ToolBeforeCallContext
+    | ToolAfterCallContext
+    | ToolResultTransformContext
+    | ToolEnvironmentContext
+    | ContactBeforeSendContext
+)
+
+
+def _check_env_name(name: str) -> None:
+    if not name or any(char.isspace() or char in "=,\0" for char in name):
+        msg = f"Invalid environment variable name: {name!r}"
+        raise ValueError(msg)
+
+
+def _requester_id_for_hook_send(context: HookContext, *, trigger_dispatch: bool) -> str | None:
     """Return the requester identity to preserve on hook-originated sends."""
     envelope = message_envelope_for_hook_context(context)
     if envelope is not None:
@@ -859,6 +950,8 @@ def _requester_id_for_hook_send(
         requester_id = context.created_by
     elif isinstance(context, ReactionReceivedContext | CustomEventContext):
         requester_id = context.sender_id
+    elif isinstance(context, CallHookContext):
+        requester_id = context.requester_id
     else:
         requester_id = None
     if requester_id is not None:
@@ -868,24 +961,19 @@ def _requester_id_for_hook_send(
     return None
 
 
-def _message_received_depth_for_hook_send(context: object) -> int:
-    """Return the synthetic hook-chain depth to preserve on hook sends."""
-    return _next_message_received_depth(_current_message_received_depth(context))
-
-
-def _current_message_received_depth(context: object) -> int:
-    """Return the inbound synthetic hook-chain depth for one hook context."""
+def _message_received_depth_for_hook_send(context: HookContext) -> int:
+    """Return the synthetic hook-chain depth to preserve on hook sends: one hop past the context's inbound depth."""
     envelope = message_envelope_for_hook_context(context)
     if envelope is not None:
-        return envelope.message_received_depth
-    if isinstance(context, CustomEventContext | ToolBeforeCallContext | ToolAfterCallContext):
-        return context.message_received_depth
-    return 0
+        return envelope.message_received_depth + 1
+    if isinstance(context, CustomEventContext | CallHookContext):
+        return context.message_received_depth + 1
+    return 1
 
 
-def message_envelope_for_hook_context(context: object) -> MessageEnvelope | None:
+def message_envelope_for_hook_context(context: HookContext) -> MessageEnvelope | None:
     """Return the message envelope carried by one hook context when present."""
-    if isinstance(context, MessageReceivedContext | MessageEnrichContext | SystemEnrichContext):
+    if isinstance(context, MessageReceivedContext | MessageEnrichContext | SystemEnrichContext | TurnLifecycleContext):
         return context.envelope
     if isinstance(context, BeforeResponseContext | FinalResponseTransformContext):
         return context.draft.envelope
@@ -894,8 +982,3 @@ def message_envelope_for_hook_context(context: object) -> MessageEnvelope | None
     if isinstance(context, CancelledResponseContext):
         return context.info.envelope
     return None
-
-
-def _next_message_received_depth(current_depth: int) -> int:
-    """Return the next synthetic-chain depth after one downstream hook hop."""
-    return current_depth + 1

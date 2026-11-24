@@ -7,9 +7,9 @@ icon: lucide/mic
 This page covers Matrix voice messages sent to agents and teams: speech-to-text (STT) setup, transcript cleanup, what appears in the room, and what happens without STT.
 For live spoken conversations in Matrix calls, see [Voice Calls](voice-calls.md).
 
-<video controls playsinline preload="metadata" aria-label="A voice message becomes a reminder" style="width: 100%" poster="https://github.com/user-attachments/assets/d8829350-12c9-4045-aed0-4a5a5127213c" data-poster-light="https://github.com/user-attachments/assets/d8829350-12c9-4045-aed0-4a5a5127213c" data-poster-dark="https://github.com/user-attachments/assets/9ec1837a-3566-4b0c-8274-7af7c30b988c">
-  <source src="https://github.com/user-attachments/assets/823df173-50ae-4304-b652-36a61bfbc911" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/f048c8cc-3384-41e2-be59-000d3ab22099" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="A voice message becomes a reminder" style="width: 100%" poster="https://github.com/user-attachments/assets/5b7b4f52-ea23-415c-b2d5-50b3fbbb7bc1" data-poster-light="https://github.com/user-attachments/assets/5b7b4f52-ea23-415c-b2d5-50b3fbbb7bc1" data-poster-dark="https://github.com/user-attachments/assets/3fb56349-ad0f-435d-be4e-6c95860e7b9a">
+  <source src="https://github.com/user-attachments/assets/4c49c8f1-2b87-45a1-949a-b165d0e18c1a" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/f91d0d7f-b8b0-4039-9fda-c7a9caed7534" type="video/mp4">
 </video>
 
 With voice enabled, MindRoom transcribes each voice message, cleans up the transcript, and handles it like a text message prefixed with `🎤`.
@@ -57,7 +57,8 @@ Without `api_key` or `credentials_service`, MindRoom sends a non-secret placehol
 | Field | Default | Description |
 |-------|---------|-------------|
 | `voice.enabled` | `false` | Transcribe voice messages; when `false`, voice messages use the [raw-audio fallback](#voice-fallback-no-stt-available). |
-| `voice.visible_router_echo` | `true` | Let the router show transcription progress and the transcript in the room; see [Voice Message Processing](#voice-message-processing). |
+| `voice.dictation` | `null` (follows `voice.enabled`) | Enable streaming composer dictation via `voice.stt`; set `true` or `false` to override `voice.enabled`. |
+| `voice.visible_router_echo` | `true` | Post the transcript of a voice message before the reply ("Voice Transcript" in the dashboard); see [Voice Message Processing](#voice-message-processing). |
 | `voice.stt.provider` | `openai` | `openai` or `openai_compatible`. |
 | `voice.stt.model` | `gpt-transcribe` | STT model name. |
 | `voice.stt.host` | none | Service root or `/v1` base URL; must be an HTTP(S) URL. Required for `openai_compatible`. |
@@ -73,25 +74,22 @@ On timeout or service error, the message uses the raw-audio fallback.
 
 ## Voice Message Processing
 
-What appears in the room depends on whether the router is present and whether the responder is already clear.
+What appears in the room depends on whether the responder is already clear.
 Voice messages follow the same mention, thread, and access rules as text from the original sender.
 
-**Router echo.**
-With `voice.enabled: true` and `voice.visible_router_echo: true`, the router immediately posts `Router agent is transcribing…` and then replaces it with the cleaned transcript, or with the fallback text if transcription failed.
-With `voice.enabled: false`, the router posts the fallback text directly instead.
-The echo is display-only: agents answer the original voice message, not the echo.
-The echo appears only when the router is in the room and allowed to reply to the sender.
-Set `voice.visible_router_echo: false` to hide it; this does not change who answers.
+**Transcript.**
+With `voice.visible_router_echo: true`, one agent or team that answers a voice message posts its transcript just before its reply, except in a contact room, where no transcript is posted.
+No transcript appears for a voice message nobody answers, or for one that could not be transcribed.
 
 **Responder already clear.**
-If only one agent or team can respond, the transcript or caption mentions one, or thread context picks one, that responder answers the voice message directly without a router handoff.
+If only one agent or team can respond, the transcript or caption mentions one, or thread context picks one, that responder answers the voice message directly.
 
-**Router must choose.**
-If several agents or teams can respond and none is targeted, the router routes on the transcript and posts a normal handoff such as `@home could you help with this?`.
-The chosen responder answers that handoff and still receives the original audio attachment.
+**Routing must choose.**
+If several agents or teams can respond and none is targeted, [routing](configuration/router.md#how-routing-works) chooses from the transcript as it does for text, and no handoff message appears in the room.
+The chosen responder answers the voice message and still receives the original audio attachment.
 
-**No router, or router cannot reply to the sender.**
-Agents and teams handle the voice message directly with the same rules as text, and no router echo appears.
+**Sender is not routed.**
+When `router.access` leaves out the sender, agents and teams handle the voice message directly with the same rules as text.
 If several responders remain and none is targeted, nobody answers until the user mentions an agent or team.
 
 ## Transcript Normalization
@@ -114,6 +112,17 @@ Attachment IDs follow the context-scoping rules in [File & Video Attachments](at
 If the audio cannot be downloaded from Matrix, the fallback text is dispatched without an attachment.
 
 Without a transcript, routing has little text to work with, so use explicit `@mentions` or reply in an existing thread in rooms with several responders.
+
+## Streaming Composer Dictation
+
+Clients with a Matrix client session can dictate directly into the message composer using the same `voice.stt` backend.
+Dictation is enabled whenever `voice.dictation` is `true`, or when `voice.dictation` is unset and `voice.enabled` is `true`, provided `voice.stt` resolves an endpoint and credential.
+
+- `GET /api/dictation/v1/status` (optional `?room_id=...`): returns `{"enabled": true, "maxSegmentSeconds": 30, "maxSegmentBytes": 1000000}` for authorized users, or `404` when dictation or STT is unavailable.
+- `POST /api/dictation/v1/transcribe` (optional `?room_id=...`): accepts `multipart/form-data` with `audio` (16 kHz mono 16-bit PCM WAV, up to 30 seconds and 1,000,000 bytes) and optional `prompt` and `language`, returning `{"text": "...", "seconds": ...}`.
+
+MindRoom itself keeps dictation audio strictly in memory and never writes audio or transcripts to disk or logs (if you run behind a reverse proxy such as nginx and require zero proxy-side buffering, disable request buffering, e.g. `proxy_request_buffering off;`).
+Provider token usage is recorded under `voice_dictation` in [usage](usage.md#token-usage).
 
 ## Limitations and Tips
 

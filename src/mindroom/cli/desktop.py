@@ -6,10 +6,8 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 import sys
-import time
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -17,20 +15,19 @@ from typing import TYPE_CHECKING
 import typer
 from rich.console import Console
 
+from mindroom import constants
+from mindroom.cli.config import activate_cli_runtime, print_literal
+from mindroom.cli.help_format import PanelOrderedGroup
 from mindroom.desktop.command_journal import DesktopCommandJournalError, check_controller_binding
 from mindroom.desktop.login_method import DesktopLoginMethod
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Mapping
-
-    import nio
-    from nio.client.base_client import ClientCallback
+    from collections.abc import Callable, Mapping
 
     from mindroom.constants import RuntimePaths
-    from mindroom.desktop.bridge_components import DesktopBridgeComponents
-    from mindroom.desktop.native_config import NativeDesktopConfig
-    from mindroom.desktop.session import DesktopMatrixSession, DesktopOwnedSession
-    from mindroom.matrix.device_identity import PinnedMatrixDevice
+    from mindroom.desktop.bridge_session import DesktopBridgeSessionDeps
+    from mindroom.desktop.native_config import NativeControllerEntry, NativeDesktopConfig
+    from mindroom.desktop.session import DesktopMatrixSession
 
 _console = Console()
 _error_console = Console(stderr=True)
@@ -50,16 +47,89 @@ _SHELL_WARNING = (
 )
 
 desktop_app = typer.Typer(
+    cls=PanelOrderedGroup,
     name="desktop",
     help=(
-        "Connect allowlisted local apps, read-only folders, and locally approved shell commands to cloud "
-        "MindRoom over Matrix E2EE."
+        "Share local apps, folders, and shell commands with cloud MindRoom.\n\n"
+        "Agents reach only allowlisted apps, read-only folders, and shell commands approved here, over Matrix E2EE."
     ),
     no_args_is_help=True,
 )
 
+_USER_ID_OPTION: str | None = typer.Option(
+    None,
+    "--user-id",
+    help="Expected Matrix user ID; required for password login and optional for SSO.",
+    rich_help_panel="Matrix connection",
+)
 
-@desktop_app.command("app")
+_HOMESERVER_OPTION: str | None = typer.Option(
+    None,
+    "--homeserver",
+    help="Matrix homeserver URL; defaults to the configured MindRoom homeserver.",
+    rich_help_panel="Matrix connection",
+)
+
+_CLOUDFLARE_ACCESS_OPTION: bool = typer.Option(
+    False,
+    "--cloudflare-access",
+    envvar="MINDROOM_DESKTOP_CLOUDFLARE_ACCESS",
+    help="Authenticate Matrix requests interactively with the local cloudflared CLI.",
+    rich_help_panel="Matrix connection",
+)
+
+_MATRIX_HTTP_HEADERS_FILE_OPTION: Path | None = typer.Option(
+    None,
+    "--matrix-http-headers-file",
+    envvar="MINDROOM_DESKTOP_MATRIX_HTTP_HEADERS_FILE",
+    help="Owner-only JSON file of HTTP headers added to every Matrix request.",
+    rich_help_panel="Matrix connection",
+)
+
+_CONFIG_PATH_OPTION: Path | None = typer.Option(
+    None,
+    "--config",
+    "-c",
+    help="MindRoom config path used for runtime env.",
+)
+
+_STORAGE_PATH_OPTION: Path | None = typer.Option(
+    None,
+    "--storage-path",
+    "-s",
+    help="Desktop bridge state directory.",
+)
+
+_CODE_OPTION: str = typer.Option(
+    ...,
+    "--code",
+    help="Short-lived code returned by /desktop setup.",
+    rich_help_panel="Pairing",
+)
+
+_CONTROLLER_USER_ID_OPTION: str = typer.Option(
+    ...,
+    "--controller-user-id",
+    help="Pinned cloud controller Matrix user.",
+    rich_help_panel="Pairing",
+)
+
+_CONTROLLER_DEVICE_ID_OPTION: str = typer.Option(
+    ...,
+    "--controller-device-id",
+    help="Pinned cloud controller device.",
+    rich_help_panel="Pairing",
+)
+
+_CONTROLLER_ED25519_OPTION: str = typer.Option(
+    ...,
+    "--controller-ed25519",
+    help="Pinned controller fingerprint.",
+    rich_help_panel="Pairing",
+)
+
+
+@desktop_app.command("app", rich_help_panel="Advanced")
 def desktop_native_app(
     config_path: Path | None = typer.Option(  # noqa: B008
         None,
@@ -72,7 +142,7 @@ def desktop_native_app(
         help="Path to local MindRoom storage.",
     ),
 ) -> None:
-    """Run the native app's private structured helper over inherited standard I/O."""
+    """Serve the macOS app's private helper over standard input and output."""
     from mindroom import __version__  # noqa: PLC0415
     from mindroom.desktop.native_host import run_native_stdio  # noqa: PLC0415
 
@@ -82,9 +152,6 @@ def desktop_native_app(
 
 def _activate_desktop_runtime(config_path: Path | None, *, storage_path: Path | None) -> RuntimePaths:
     """Resolve local Desktop state without making it depend on the working directory."""
-    from mindroom import constants  # noqa: PLC0415
-    from mindroom.cli.config import activate_cli_runtime  # noqa: PLC0415
-
     process_env = constants.exported_process_env()
     has_explicit_config = any(
         value is not None and str(value).strip()
@@ -138,18 +205,10 @@ def _request_required_desktop_permissions() -> None:
     raise DesktopProviderError(msg)
 
 
-@desktop_app.command("login")
+@desktop_app.command("login", rich_help_panel="Advanced")
 def desktop_login(
-    user_id: str | None = typer.Option(
-        None,
-        "--user-id",
-        help="Expected Matrix user ID; required for password login and optional for SSO.",
-    ),
-    homeserver: str | None = typer.Option(
-        None,
-        "--homeserver",
-        help="Matrix homeserver URL; defaults to the configured MindRoom homeserver.",
-    ),
+    user_id: str | None = _USER_ID_OPTION,
+    homeserver: str | None = _HOMESERVER_OPTION,
     login_method: DesktopLoginMethod = typer.Option(  # noqa: B008
         DesktopLoginMethod.AUTO,
         "--login-method",
@@ -166,42 +225,19 @@ def desktop_login(
         "--open-browser/--no-open-browser",
         help="Open Matrix SSO in the default browser; otherwise print the URL.",
     ),
-    cloudflare_access: bool = typer.Option(
-        False,
-        "--cloudflare-access",
-        envvar="MINDROOM_DESKTOP_CLOUDFLARE_ACCESS",
-        help="Authenticate Matrix requests interactively with the local cloudflared CLI.",
-    ),
+    cloudflare_access: bool = _CLOUDFLARE_ACCESS_OPTION,
     replace: bool = typer.Option(False, "--replace", help="Replace the saved session with a fresh Matrix device."),
-    matrix_http_headers_file: Path | None = typer.Option(  # noqa: B008
-        None,
-        "--matrix-http-headers-file",
-        envvar="MINDROOM_DESKTOP_MATRIX_HTTP_HEADERS_FILE",
-        help="Owner-only JSON file of HTTP headers added to every Matrix request.",
-    ),
-    config_path: Path | None = typer.Option(  # noqa: B008
-        None,
-        "--config",
-        "-c",
-        help="MindRoom config path used for runtime env.",
-    ),
-    storage_path: Path | None = typer.Option(  # noqa: B008
-        None,
-        "--storage-path",
-        "-s",
-        help="Desktop bridge state directory.",
-    ),
+    matrix_http_headers_file: Path | None = _MATRIX_HTTP_HEADERS_FILE_OPTION,
+    config_path: Path | None = _CONFIG_PATH_OPTION,
+    storage_path: Path | None = _STORAGE_PATH_OPTION,
 ) -> None:
     """Log in once, create an Olm device, and save its access token privately."""
     from mindroom.constants import runtime_matrix_homeserver  # noqa: PLC0415
-    from mindroom.desktop.cloudflare_access import (  # noqa: PLC0415
-        CloudflareAccessError,
-        cloudflare_access_headers,
-    )
+    from mindroom.desktop.cloudflare_access import CloudflareAccessError  # noqa: PLC0415
     from mindroom.desktop.session import (  # noqa: PLC0415
         DesktopSessionError,
+        desktop_http_headers,
         desktop_session_path,
-        load_desktop_http_headers,
         resolve_desktop_login_method,
     )
     from mindroom.desktop.sso import DesktopSsoError, receive_sso_login_token  # noqa: PLC0415
@@ -209,13 +245,19 @@ def desktop_login(
     runtime_paths = _activate_desktop_runtime(config_path, storage_path=storage_path)
     session_path = desktop_session_path(runtime_paths)
     if session_path.exists() and not replace:
-        _error_console.print(f"[red]Error:[/red] Session already exists at {session_path}. Use --replace explicitly.")
+        print_literal(
+            "[red]Error:[/red] ",
+            f"Session already exists at {session_path}. Use --replace explicitly.",
+            console=_error_console,
+        )
         raise typer.Exit(1)
     try:
         resolved_homeserver = homeserver or runtime_matrix_homeserver(runtime_paths)
-        http_headers: Mapping[str, str] | None = load_desktop_http_headers(matrix_http_headers_file)
-        if cloudflare_access:
-            http_headers = cloudflare_access_headers(resolved_homeserver, http_headers)
+        http_headers = desktop_http_headers(
+            resolved_homeserver,
+            matrix_http_headers_file,
+            cloudflare_access=cloudflare_access,
+        )
         requested_login_method = _login_method_for_sso_idp(login_method, sso_idp=sso_idp)
         resolved_login_method = asyncio.run(
             resolve_desktop_login_method(
@@ -236,7 +278,7 @@ def desktop_login(
             login_token = receive_sso_login_token(
                 resolved_homeserver,
                 open_browser=open_browser,
-                announce=lambda message: _console.print(message, markup=False),
+                announce=lambda message: print_literal("", message, console=_console),
                 idp_id=sso_idp,
             )
         asyncio.run(
@@ -252,7 +294,7 @@ def desktop_login(
             ),
         )
     except (CloudflareAccessError, DesktopSessionError, DesktopSsoError) as exc:
-        _error_console.print(f"[red]Desktop login failed:[/red] {exc}")
+        print_literal("[red]Desktop login failed:[/red] ", exc, console=_error_console)
         raise typer.Exit(1) from None
 
 
@@ -290,8 +332,8 @@ async def _login_and_save(
     password: str | None,
     login_token: str | None,
     session_path: Path,
-    http_headers: Mapping[str, str] | None = None,
-    cloudflare_access: bool = False,
+    http_headers: Mapping[str, str] | None,
+    cloudflare_access: bool,
 ) -> None:
     from mindroom.desktop.session import (  # noqa: PLC0415
         client_ed25519_fingerprint,
@@ -323,64 +365,40 @@ def _print_device_identity(
     session_path: Path,
 ) -> None:
     _console.print("[green]Desktop Matrix device ready.[/green]")
-    _console.print(f"  Session: {session_path}")
-    _console.print(f"  User: {session.user_id}")
+    print_literal("  Session: ", session_path, console=_console)
+    print_literal("  User: ", session.user_id, console=_console)
     _console.print(f"  Device: {session.device_id}")
     _console.print(f"  Ed25519: {fingerprint}")
-    _console.print("\nUse the pairing command returned by `!desktop setup` in the direct agent chat.")
+    _console.print("\nUse the pairing command returned by `/desktop setup` in the direct agent chat.")
 
 
-@desktop_app.command("pair")
-def desktop_pair(
-    code: str = typer.Option(..., "--code", help="Short-lived code returned by !desktop setup."),
-    controller_user_id: str = typer.Option(..., "--controller-user-id", help="Pinned cloud controller Matrix user."),
-    controller_device_id: str = typer.Option(..., "--controller-device-id", help="Pinned cloud controller device."),
-    controller_ed25519: str = typer.Option(..., "--controller-ed25519", help="Pinned controller fingerprint."),
-    cloudflare_access: bool = typer.Option(
-        False,
-        "--cloudflare-access",
-        envvar="MINDROOM_DESKTOP_CLOUDFLARE_ACCESS",
-        help="Authenticate Matrix requests interactively with the local cloudflared CLI.",
-    ),
-    matrix_http_headers_file: Path | None = typer.Option(  # noqa: B008
-        None,
-        "--matrix-http-headers-file",
-        envvar="MINDROOM_DESKTOP_MATRIX_HTTP_HEADERS_FILE",
-        help="Owner-only JSON file of HTTP headers added to every Matrix request.",
-    ),
-    config_path: Path | None = typer.Option(  # noqa: B008
-        None,
-        "--config",
-        "-c",
-        help="MindRoom config path used for runtime env.",
-    ),
-    storage_path: Path | None = typer.Option(  # noqa: B008
-        None,
-        "--storage-path",
-        "-s",
-        help="Desktop bridge state directory.",
-    ),
-) -> None:
-    """Claim one requester-agent pairing through authenticated Matrix E2EE."""
-    from mindroom.desktop.cloudflare_access import (  # noqa: PLC0415
-        CloudflareAccessError,
-        cloudflare_access_headers,
-    )
+def _claim_pairing(
+    *,
+    runtime_paths: RuntimePaths,
+    code: str,
+    controller_user_id: str,
+    controller_device_id: str,
+    controller_ed25519: str,
+    cloudflare_access: bool,
+    matrix_http_headers_file: Path | None,
+) -> str:
+    from mindroom.desktop.cloudflare_access import CloudflareAccessError  # noqa: PLC0415
     from mindroom.desktop.session import (  # noqa: PLC0415
         DesktopSessionError,
+        desktop_http_headers,
         desktop_session_path,
-        load_desktop_http_headers,
         load_desktop_session,
     )
     from mindroom.matrix.olm_to_device import OlmToDeviceError  # noqa: PLC0415
 
-    runtime_paths = _activate_desktop_runtime(config_path, storage_path=storage_path)
     try:
-        http_headers: Mapping[str, str] | None = load_desktop_http_headers(matrix_http_headers_file)
         session = load_desktop_session(desktop_session_path(runtime_paths))
-        if cloudflare_access or session.cloudflare_access:
-            http_headers = cloudflare_access_headers(session.homeserver, http_headers)
-        verification = asyncio.run(
+        http_headers = desktop_http_headers(
+            session.homeserver,
+            matrix_http_headers_file,
+            cloudflare_access=cloudflare_access or session.cloudflare_access,
+        )
+        return asyncio.run(
             _pair_desktop(
                 runtime_paths=runtime_paths,
                 session=session,
@@ -392,72 +410,78 @@ def desktop_pair(
             ),
         )
     except (CloudflareAccessError, DesktopSessionError, OlmToDeviceError, ValueError) as exc:
-        _error_console.print(f"[red]Desktop pairing failed:[/red] {exc}")
+        print_literal("[red]Desktop pairing failed:[/red] ", exc, console=_error_console)
         raise typer.Exit(1) from None
+
+
+def _print_pairing_confirmation(code: str, verification: str) -> None:
     _console.print("[green]Pairing claim accepted.[/green] Return to the chat and run:")
     _console.print(f"!desktop confirm {code} {verification}", markup=False)
 
 
-@desktop_app.command("setup")
+@desktop_app.command("pair", rich_help_panel="Advanced")
+def desktop_pair(
+    code: str = _CODE_OPTION,
+    controller_user_id: str = _CONTROLLER_USER_ID_OPTION,
+    controller_device_id: str = _CONTROLLER_DEVICE_ID_OPTION,
+    controller_ed25519: str = _CONTROLLER_ED25519_OPTION,
+    cloudflare_access: bool = _CLOUDFLARE_ACCESS_OPTION,
+    matrix_http_headers_file: Path | None = _MATRIX_HTTP_HEADERS_FILE_OPTION,
+    config_path: Path | None = _CONFIG_PATH_OPTION,
+    storage_path: Path | None = _STORAGE_PATH_OPTION,
+) -> str:
+    """Claim one requester-agent pairing through authenticated Matrix E2EE."""
+    runtime_paths = _activate_desktop_runtime(config_path, storage_path=storage_path)
+    verification = _claim_pairing(
+        runtime_paths=runtime_paths,
+        code=code,
+        controller_user_id=controller_user_id,
+        controller_device_id=controller_device_id,
+        controller_ed25519=controller_ed25519,
+        cloudflare_access=cloudflare_access,
+        matrix_http_headers_file=matrix_http_headers_file,
+    )
+    _print_pairing_confirmation(code, verification)
+    return verification
+
+
+@desktop_app.command("setup", rich_help_panel="Set up and run")
 def desktop_setup(
-    code: str = typer.Option(..., "--code", help="Short-lived code returned by !desktop setup."),
-    controller_user_id: str = typer.Option(..., "--controller-user-id", help="Pinned cloud controller Matrix user."),
-    controller_device_id: str = typer.Option(..., "--controller-device-id", help="Pinned cloud controller device."),
-    controller_ed25519: str = typer.Option(..., "--controller-ed25519", help="Pinned controller fingerprint."),
+    code: str = _CODE_OPTION,
+    controller_user_id: str = _CONTROLLER_USER_ID_OPTION,
+    controller_device_id: str = _CONTROLLER_DEVICE_ID_OPTION,
+    controller_ed25519: str = _CONTROLLER_ED25519_OPTION,
+    allow_requester: list[str] | None = typer.Option(  # noqa: B008
+        None,
+        "--allow-requester",
+        help="Chat user from the setup message; defaults to the logged-in account. Repeat as needed.",
+        rich_help_panel="Access",
+    ),
     allow_agent: list[str] | None = typer.Option(  # noqa: B008
         None,
         "--allow-agent",
         help="Agent name from the setup message; prompts if omitted. Repeat as needed.",
+        rich_help_panel="Access",
     ),
     allow_app: list[str] | None = typer.Option(  # noqa: B008
         None,
         "--allow-app",
         help="Save allowed app IDs, or choose apps later in the macOS app.",
+        rich_help_panel="Access",
     ),
-    user_id: str | None = typer.Option(
-        None,
-        "--user-id",
-        help="Expected Matrix user ID; required for password login and optional for SSO.",
-    ),
-    homeserver: str | None = typer.Option(
-        None,
-        "--homeserver",
-        help="Matrix homeserver URL; defaults to the configured MindRoom homeserver.",
-    ),
-    cloudflare_access: bool = typer.Option(
-        False,
-        "--cloudflare-access",
-        envvar="MINDROOM_DESKTOP_CLOUDFLARE_ACCESS",
-        help="Authenticate Matrix requests interactively with the local cloudflared CLI.",
-    ),
-    matrix_http_headers_file: Path | None = typer.Option(  # noqa: B008
-        None,
-        "--matrix-http-headers-file",
-        envvar="MINDROOM_DESKTOP_MATRIX_HTTP_HEADERS_FILE",
-        help="Owner-only JSON file of HTTP headers added to every Matrix request.",
-    ),
-    config_path: Path | None = typer.Option(  # noqa: B008
-        None,
-        "--config",
-        "-c",
-        help="MindRoom config path used for runtime env.",
-    ),
-    storage_path: Path | None = typer.Option(  # noqa: B008
-        None,
-        "--storage-path",
-        "-s",
-        help="Desktop bridge state directory.",
-    ),
+    user_id: str | None = _USER_ID_OPTION,
+    homeserver: str | None = _HOMESERVER_OPTION,
+    cloudflare_access: bool = _CLOUDFLARE_ACCESS_OPTION,
+    matrix_http_headers_file: Path | None = _MATRIX_HTTP_HEADERS_FILE_OPTION,
+    config_path: Path | None = _CONFIG_PATH_OPTION,
+    storage_path: Path | None = _STORAGE_PATH_OPTION,
 ) -> None:
     """Pair and save the connection shared with the macOS app."""
     from mindroom.constants import runtime_matrix_homeserver  # noqa: PLC0415
     from mindroom.desktop.native_config import (  # noqa: PLC0415
-        NativeBrowserConfig,
-        NativeCaptureConfig,
         NativeConfigError,
+        NativeControllerEntry,
         NativeDesktopConfig,
-        NativeFilesConfig,
-        NativeShellConfig,
         load_native_config,
         native_config_path,
         save_native_config,
@@ -505,38 +529,25 @@ def desktop_setup(
             previous = None
             base_revision = exc.revision
         controller = PinnedMatrixDevice(controller_user_id, controller_device_id, controller_ed25519)
-        check_controller_binding(
-            runtime_paths.storage_root / "desktop_bridge" / "commands.sqlite3",
-            json.dumps([controller.user_id, controller.device_id, controller.ed25519]),
-        )
+        check_controller_binding(runtime_paths.storage_root, controller)
         session = load_desktop_session(session_path)
-        # Saved local authority carries over only for the same controller.
-        matching = previous if previous is not None and previous.controller == controller else None
-        config = NativeDesktopConfig(
-            revision=base_revision,
-            enabled=True,
+        entry = NativeControllerEntry(
             controller=controller,
-            allowed_requester_ids=(session.user_id,),
+            allowed_requester_ids=tuple(allow_requester) if allow_requester else (session.user_id,),
             allowed_agent_names=tuple(allow_agent),
-            allowed_app_ids=tuple(allow_app)
-            if allow_app is not None
-            else (matching.allowed_app_ids if matching else ()),
-            capture=matching.capture if matching else NativeCaptureConfig(),
-            browser=matching.browser if matching else NativeBrowserConfig(),
-            files=matching.files if matching else NativeFilesConfig(),
-            shell=matching.shell if matching else NativeShellConfig(),
         )
+        config = _build_setup_config(previous, base_revision=base_revision, entry=entry, allow_app=allow_app)
         config = NativeDesktopConfig.from_payload(config.to_payload(), validate_browser_paths=False)
-        desktop_pair(
+        verification = _claim_pairing(
+            runtime_paths=runtime_paths,
             code=code,
             controller_user_id=controller_user_id,
             controller_device_id=controller_device_id,
             controller_ed25519=controller_ed25519,
             cloudflare_access=cloudflare_access,
             matrix_http_headers_file=matrix_http_headers_file,
-            config_path=config_path,
-            storage_path=storage_path,
         )
+        _print_pairing_confirmation(code, verification)
         save_desktop_session(
             session_path,
             replace(session, cloudflare_access=cloudflare_access or session.cloudflare_access),
@@ -544,15 +555,53 @@ def desktop_setup(
         )
         save_native_config(path, config, expected_revision=config.revision)
     except (DesktopCommandJournalError, DesktopSessionError, ValueError) as exc:
-        _error_console.print(f"[red]Desktop setup failed:[/red] {exc}")
+        print_literal("[red]Desktop setup failed:[/red] ", exc, console=_error_console)
         raise typer.Exit(1) from None
     _console.print("Setup saved for both the terminal and MindRoom app.")
-    if not (config.allowed_app_ids or config.files.roots or config.shell.enabled):
+    if not config.has_local_capability:
         _console.print(
             "In MindRoom, open Computer access and choose apps, folders, or shell access, "
             "or run `mindroom desktop access`.",
         )
     _console.print("After confirming in chat, start access in the app or run `mindroom desktop run`.")
+
+
+def _build_setup_config(
+    previous: NativeDesktopConfig | None,
+    *,
+    base_revision: int,
+    entry: NativeControllerEntry,
+    allow_app: list[str] | None,
+) -> NativeDesktopConfig:
+    """Apply one CLI setup controller update with the shared single/multi-controller merge rule."""
+    from mindroom.desktop.native_config import (  # noqa: PLC0415
+        NativeBrowserConfig,
+        NativeCaptureConfig,
+        NativeDesktopConfig,
+        NativeFilesConfig,
+        NativeShellConfig,
+        merge_single_controller_update,
+    )
+
+    controllers, preserve_local_access = merge_single_controller_update(previous, entry)
+    if preserve_local_access and previous is not None:
+        return replace(
+            previous,
+            revision=base_revision,
+            enabled=True,
+            controllers=controllers,
+            allowed_app_ids=tuple(allow_app) if allow_app is not None else previous.allowed_app_ids,
+        )
+    return NativeDesktopConfig(
+        revision=base_revision,
+        enabled=True,
+        controllers=controllers,
+        allowed_app_ids=tuple(allow_app) if allow_app is not None else (),
+        capture=NativeCaptureConfig(),
+        browser=NativeBrowserConfig(),
+        files=NativeFilesConfig(),
+        shell=NativeShellConfig(),
+    )
 
 
 def _require_saved_session_matches(session_path: Path, *, user_id: str | None, homeserver: str) -> None:
@@ -562,16 +611,18 @@ def _require_saved_session_matches(session_path: Path, *, user_id: str | None, h
     try:
         session = load_desktop_session(session_path)
     except DesktopSessionError as exc:
-        _error_console.print(f"[red]Desktop setup failed:[/red] {exc}")
+        print_literal("[red]Desktop setup failed:[/red] ", exc, console=_error_console)
         raise typer.Exit(1) from None
     homeserver_differs = homeserver.rstrip("/") != session.homeserver.rstrip("/")
     user_differs = user_id is not None and user_id != session.user_id
     if homeserver_differs or user_differs:
-        _error_console.print(
-            f"[red]Desktop setup failed:[/red] The saved session at {session_path} belongs to "
+        print_literal(
+            "[red]Desktop setup failed:[/red] ",
+            f"The saved session at {session_path} belongs to "
             f"{session.user_id} on {session.homeserver}, not {user_id or session.user_id} on "
             f"{homeserver}. Pass --storage-path for a separate setup, or run "
             "'mindroom desktop login --replace' to replace the saved session.",
+            console=_error_console,
         )
         raise typer.Exit(1)
 
@@ -584,7 +635,7 @@ async def _pair_desktop(
     controller_user_id: str,
     controller_device_id: str,
     controller_ed25519: str,
-    http_headers: Mapping[str, str] | None = None,
+    http_headers: Mapping[str, str] | None,
 ) -> str:
     from mindroom.desktop.pairing_client import send_desktop_pairing_claim  # noqa: PLC0415
     from mindroom.desktop.session import open_desktop_client  # noqa: PLC0415
@@ -606,7 +657,7 @@ async def _pair_desktop(
         await owner.close()
 
 
-@desktop_app.command("access")
+@desktop_app.command("access", rich_help_panel="Set up and run")
 def desktop_access(
     allow_folder: list[Path] | None = typer.Option(  # noqa: B008
         None,
@@ -619,20 +670,13 @@ def desktop_access(
         "--shell/--no-shell",
         help="Let agents request shell commands, each approved on this computer while the bridge runs.",
     ),
-    config_path: Path | None = typer.Option(  # noqa: B008
-        None,
-        "--config",
-        "-c",
-        help="MindRoom config path used for runtime env.",
-    ),
-    storage_path: Path | None = typer.Option(  # noqa: B008
-        None,
-        "--storage-path",
-        "-s",
-        help="Desktop bridge state directory.",
-    ),
+    config_path: Path | None = _CONFIG_PATH_OPTION,
+    storage_path: Path | None = _STORAGE_PATH_OPTION,
 ) -> None:
-    """Save read-only folders and shell requests shared with the macOS app; omitted options keep saved values."""
+    """Save the read-only folders and shell access shared with the macOS app.
+
+    Options you leave out keep their saved values.
+    """
     from mindroom.desktop.native_config import (  # noqa: PLC0415
         NativeConfigError,
         native_config_path,
@@ -654,7 +698,7 @@ def desktop_access(
             config = save_native_config(path, edited, expected_revision=config.revision)
             changed = True
     except NativeConfigError as exc:
-        _error_console.print(f"[red]Desktop access update failed:[/red] {exc}")
+        print_literal("[red]Desktop access update failed:[/red] ", exc, console=_error_console)
         raise typer.Exit(1) from None
     _print_plain(f"Saved Desktop access (revision {config.revision}):")
     _print_plain(f"  Applications: {', '.join(config.allowed_app_ids) or 'none'}")
@@ -709,43 +753,43 @@ def _edited_local_access(
 
 def _print_plain(text: str) -> None:
     """Print local values such as paths without Rich markup or line wrapping."""
-    _console.print(text, markup=False, highlight=False, soft_wrap=True)
+    _console.print(text, markup=False, emoji=False, highlight=False, soft_wrap=True)
 
 
-@desktop_app.command("run")
+@desktop_app.command("run", rich_help_panel="Set up and run")
 def desktop_run(
-    controller_user_id: str | None = typer.Option(
-        None,
-        "--controller-user-id",
-        help="Pinned cloud controller Matrix user.",
-    ),
-    controller_device_id: str | None = typer.Option(
-        None,
-        "--controller-device-id",
-        help="Pinned cloud controller device.",
-    ),
-    controller_ed25519: str | None = typer.Option(None, "--controller-ed25519", help="Pinned controller fingerprint."),
     allow_requester: list[str] | None = typer.Option(  # noqa: B008
         None,
         "--allow-requester",
         help="Human Matrix requester allowed to operate this desktop; repeat as needed.",
+        rich_help_panel="Access",
     ),
     allow_agent: list[str] | None = typer.Option(  # noqa: B008
         None,
         "--allow-agent",
         help="MindRoom agent name allowed to operate this desktop; repeat as needed.",
+        rich_help_panel="Access",
     ),
     allow_app: list[str] | None = typer.Option(  # noqa: B008
         None,
         "--allow-app",
         help="Exact local application ID exposed to the agent; repeat as needed.",
+        rich_help_panel="Access",
     ),
     allow_control: bool = typer.Option(
         False,
         "--allow-control",
         help="Enable semantic and fallback app input for a short local lease. Default: apps are observe-only.",
+        rich_help_panel="Access",
     ),
-    lease_minutes: int = typer.Option(15, "--lease-minutes", min=1, max=60, help="Local control lease duration."),
+    lease_minutes: int = typer.Option(
+        15,
+        "--lease-minutes",
+        min=1,
+        max=60,
+        help="Local control lease duration.",
+        rich_help_panel="Access",
+    ),
     shell_auto_approve_minutes: int | None = typer.Option(
         None,
         "--shell-auto-approve-minutes",
@@ -755,23 +799,41 @@ def desktop_run(
             "Approve shell commands from every allowed requester and agent automatically for this many minutes "
             "of this run; never saved."
         ),
+        rich_help_panel="Access",
     ),
-    max_screenshot_width: int | None = typer.Option(None, "--max-screenshot-width", min=320, max=3840),
-    jpeg_quality: int | None = typer.Option(None, "--jpeg-quality", min=40, max=95),
+    max_screenshot_width: int | None = typer.Option(
+        None,
+        "--max-screenshot-width",
+        min=320,
+        max=3840,
+        help="Widest screenshot sent to agents, in pixels; defaults to the saved setup (1568 unless changed).",
+        rich_help_panel="Screenshots",
+    ),
+    jpeg_quality: int | None = typer.Option(
+        None,
+        "--jpeg-quality",
+        min=40,
+        max=95,
+        help="JPEG quality of screenshots sent to agents; defaults to the saved setup (80 unless changed).",
+        rich_help_panel="Screenshots",
+    ),
     browser_extension: bool | None = typer.Option(
         None,
         "--browser-extension/--no-browser-extension",
         help="Expose Playwright MCP control of an existing browser profile when its extension is installed.",
+        rich_help_panel="Browser",
     ),
     browser_executable: Path | None = typer.Option(  # noqa: B008
         None,
         "--browser-executable",
         help="Chrome-family executable to open the Playwright extension connection page, including Brave.",
+        rich_help_panel="Browser extension",
     ),
     browser_user_data_dir: Path | None = typer.Option(  # noqa: B008
         None,
         "--browser-user-data-dir",
         help="Existing browser user-data root containing the profile where the extension is installed.",
+        rich_help_panel="Browser extension",
     ),
     browser_timeout_seconds: int | None = typer.Option(
         None,
@@ -779,43 +841,49 @@ def desktop_run(
         min=1,
         max=120,
         help="Local Playwright MCP call timeout.",
+        rich_help_panel="Browser extension",
     ),
-    log_level: str = typer.Option("INFO", "--log-level", "-l"),
-    cloudflare_access: bool = typer.Option(
-        False,
-        "--cloudflare-access",
-        envvar="MINDROOM_DESKTOP_CLOUDFLARE_ACCESS",
-        help="Authenticate Matrix requests interactively with the local cloudflared CLI.",
-    ),
-    matrix_http_headers_file: Path | None = typer.Option(  # noqa: B008
+    controller_user_id: str | None = typer.Option(
         None,
-        "--matrix-http-headers-file",
-        envvar="MINDROOM_DESKTOP_MATRIX_HTTP_HEADERS_FILE",
-        help="Owner-only JSON file of HTTP headers added to every Matrix request.",
+        "--controller-user-id",
+        help="Pinned cloud controller Matrix user.",
+        rich_help_panel="Controller",
     ),
-    config_path: Path | None = typer.Option(  # noqa: B008
+    controller_device_id: str | None = typer.Option(
         None,
-        "--config",
-        "-c",
-        help="MindRoom config path used for runtime env.",
+        "--controller-device-id",
+        help="Pinned cloud controller device.",
+        rich_help_panel="Controller",
     ),
-    storage_path: Path | None = typer.Option(  # noqa: B008
+    controller_ed25519: str | None = typer.Option(
         None,
-        "--storage-path",
-        "-s",
-        help="Desktop bridge state directory.",
+        "--controller-ed25519",
+        help="Pinned controller fingerprint.",
+        rich_help_panel="Controller",
     ),
+    log_level: str = typer.Option(
+        "INFO",
+        "--log-level",
+        "-l",
+        help="Set the logging level (DEBUG, INFO, WARNING, ERROR)",
+    ),
+    cloudflare_access: bool = _CLOUDFLARE_ACCESS_OPTION,
+    matrix_http_headers_file: Path | None = _MATRIX_HTTP_HEADERS_FILE_OPTION,
+    config_path: Path | None = _CONFIG_PATH_OPTION,
+    storage_path: Path | None = _STORAGE_PATH_OPTION,
 ) -> None:
-    """Run the bridge with the saved app, folder, and shell setup; flags override this run only."""
-    from mindroom.desktop.cloudflare_access import (  # noqa: PLC0415
-        CloudflareAccessError,
-        cloudflare_access_headers,
-    )
+    """Run the bridge with the saved app, folder, and shell setup.
+
+    Flags override the saved setup for this run only.
+    """
+    from mindroom.desktop.bridge_session import DesktopWorkerStoppedError  # noqa: PLC0415
+    from mindroom.desktop.cloudflare_access import CloudflareAccessError  # noqa: PLC0415
+    from mindroom.desktop.native_host import desktop_host_lock  # noqa: PLC0415
     from mindroom.desktop.provider import DesktopProviderError  # noqa: PLC0415
     from mindroom.desktop.session import (  # noqa: PLC0415
         DesktopSessionError,
+        desktop_http_headers,
         desktop_session_path,
-        load_desktop_http_headers,
         load_desktop_session,
     )
     from mindroom.logging_config import setup_logging  # noqa: PLC0415
@@ -843,35 +911,39 @@ def desktop_run(
             executable_path=config.browser.executable_path if config.browser.enabled else browser_executable,
             user_data_dir=config.browser.user_data_dir if config.browser.enabled else browser_user_data_dir,
         )
-        http_headers: Mapping[str, str] | None = load_desktop_http_headers(matrix_http_headers_file)
         session = load_desktop_session(desktop_session_path(runtime_paths))
-        if cloudflare_access or session.cloudflare_access:
-            http_headers = cloudflare_access_headers(session.homeserver, http_headers)
-        # Folder and shell access need no GUI runtime or macOS GUI permissions.
-        if config.allowed_app_ids:
-            _ensure_desktop_dependencies(runtime_paths)
-        asyncio.run(
-            _run_bridge(
-                runtime_paths=runtime_paths,
-                session=session,
-                config=config,
-                allow_control=allow_control,
-                lease_minutes=lease_minutes,
-                shell_auto_approve_minutes=shell_auto_approve_minutes,
-                http_headers=http_headers,
-            ),
+        http_headers = desktop_http_headers(
+            session.homeserver,
+            matrix_http_headers_file,
+            cloudflare_access=cloudflare_access or session.cloudflare_access,
         )
+        with desktop_host_lock(runtime_paths.storage_root):
+            # Folder and shell access need no GUI runtime or macOS GUI permissions.
+            if config.allowed_app_ids:
+                _ensure_desktop_dependencies(runtime_paths)
+            asyncio.run(
+                _run_bridge(
+                    runtime_paths=runtime_paths,
+                    session=session,
+                    config=config,
+                    allow_control=allow_control,
+                    lease_minutes=lease_minutes,
+                    shell_auto_approve_minutes=shell_auto_approve_minutes,
+                    http_headers=http_headers,
+                ),
+            )
     except KeyboardInterrupt:
         _console.print("\n[yellow]Desktop bridge stopped.[/yellow]")
     except (
         CloudflareAccessError,
         DesktopCommandJournalError,
         DesktopProviderError,
+        DesktopWorkerStoppedError,
         ValueError,
         DesktopSessionError,
         OlmToDeviceError,
     ) as exc:
-        _error_console.print(f"[red]Desktop bridge failed:[/red] {exc}")
+        print_literal("[red]Desktop bridge failed:[/red] ", exc, console=_error_console)
         raise typer.Exit(1) from None
 
 
@@ -912,7 +984,11 @@ def _resolve_run_config(
             msg = "Provide all three --controller options together, or omit them to use saved setup."
             raise NativeConfigError("invalid_request", msg)
         controller = PinnedMatrixDevice(user_id, device_id, fingerprint)
-        if config is None or config.controller != controller:
+        matched = next(
+            (entry for entry in (config.controllers if config is not None else ()) if entry.controller == controller),
+            None,
+        )
+        if config is None or matched is None:
             if not allow_requester or not allow_agent or not allow_app:
                 msg = "A new controller requires --allow-requester, --allow-agent, and --allow-app."
                 raise NativeConfigError("invalid_request", msg)
@@ -927,14 +1003,25 @@ def _resolve_run_config(
                 capture=NativeCaptureConfig(),
                 browser=NativeBrowserConfig(),
             )
+        else:
+            config = replace(config, controllers=(matched,))
     if config is None:
         raise NativeConfigError("configuration_missing", _SETUP_MISSING)
     if not config.enabled:
         raise NativeConfigError("configuration_missing", _SETUP_DISABLED)
+    updated_controllers = tuple(
+        replace(
+            entry,
+            allowed_requester_ids=tuple(allow_requester)
+            if allow_requester is not None
+            else entry.allowed_requester_ids,
+            allowed_agent_names=tuple(allow_agent) if allow_agent is not None else entry.allowed_agent_names,
+        )
+        for entry in config.controllers
+    )
     config = replace(
         config,
-        allowed_requester_ids=tuple(allow_requester) if allow_requester is not None else config.allowed_requester_ids,
-        allowed_agent_names=tuple(allow_agent) if allow_agent is not None else config.allowed_agent_names,
+        controllers=updated_controllers,
         allowed_app_ids=tuple(allow_app) if allow_app is not None else config.allowed_app_ids,
         capture=replace(
             config.capture,
@@ -957,7 +1044,7 @@ def _resolve_run_config(
             else config.browser.timeout_seconds,
         ),
     )
-    if not (config.allowed_app_ids or config.files.roots or config.shell.enabled or config.browser.enabled):
+    if not config.has_local_capability:
         msg = (
             "Choose and save apps, folders, or shell access in MindRoom > Computer access, run "
             "`mindroom desktop access`, or pass --allow-app APPLICATION_ID for this run."
@@ -986,31 +1073,15 @@ def _validate_browser_options(
         )
         raise typer.Exit(2)
     if executable_path is not None and not executable_path.expanduser().is_file():
-        _error_console.print(f"[red]Error:[/red] Browser executable does not exist: {executable_path}")
+        print_literal("[red]Error:[/red] Browser executable does not exist: ", executable_path, console=_error_console)
         raise typer.Exit(2)
     if user_data_dir is not None and not user_data_dir.expanduser().is_dir():
-        _error_console.print(f"[red]Error:[/red] Browser user-data directory does not exist: {user_data_dir}")
+        print_literal(
+            "[red]Error:[/red] Browser user-data directory does not exist: ",
+            user_data_dir,
+            console=_error_console,
+        )
         raise typer.Exit(2)
-
-
-async def _open_bridge_client(
-    session: DesktopMatrixSession,
-    runtime_paths: RuntimePaths,
-    http_headers: Mapping[str, str] | None,
-) -> DesktopOwnedSession:
-    """Adopt the saved device's crypto store and durable source for this run."""
-    from mindroom.desktop.session import open_desktop_client  # noqa: PLC0415
-
-    return await open_desktop_client(session, runtime_paths=runtime_paths, http_headers=http_headers)
-
-
-async def _prepare_bridge_client(client: nio.AsyncClient, controller: PinnedMatrixDevice) -> None:
-    """Check the pinned controller's current identity before publishing this device's encryption keys."""
-    from mindroom.desktop.session import prepare_desktop_client  # noqa: PLC0415
-    from mindroom.matrix.olm_to_device import resolve_pinned_device  # noqa: PLC0415
-
-    await resolve_pinned_device(client, controller)
-    await prepare_desktop_client(client)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1018,11 +1089,7 @@ class _BridgeRunDeps:
     """macOS and Matrix collaborators of one terminal bridge run; the defaults import their modules on first call."""
 
     request_permissions: Callable[[], None] = _request_required_desktop_permissions
-    open_client: Callable[
-        [DesktopMatrixSession, RuntimePaths, Mapping[str, str] | None],
-        Awaitable[DesktopOwnedSession],
-    ] = _open_bridge_client
-    prepare_client: Callable[[nio.AsyncClient, PinnedMatrixDevice], Awaitable[None]] = _prepare_bridge_client
+    session: DesktopBridgeSessionDeps | None = None
 
 
 _DEFAULT_BRIDGE_RUN_DEPS = _BridgeRunDeps()
@@ -1039,108 +1106,48 @@ async def _run_bridge(
     http_headers: Mapping[str, str] | None = None,
     deps: _BridgeRunDeps = _DEFAULT_BRIDGE_RUN_DEPS,
 ) -> None:
-    """Run one terminal-owned bridge for the resolved configuration; control and auto-approval last this run only."""
-    from nio import AuthenticatedToDeviceEvent  # noqa: PLC0415
-
-    from mindroom.desktop.bridge_components import build_desktop_bridge  # noqa: PLC0415
-    from mindroom.desktop.transport import DesktopTransport  # noqa: PLC0415
+    """Run one terminal-owned bridge until a worker ends; control and auto-approval last this run only."""
+    from mindroom.desktop.bridge_session import first_worker_exit, start_desktop_bridge_session  # noqa: PLC0415
 
     # Folder and shell access need no GUI permissions.
     if config.allowed_app_ids:
         deps.request_permissions()
-    owner = None
-    components: DesktopBridgeComponents | None = None
-    registration = None
+    run = await start_desktop_bridge_session(
+        config,
+        session,
+        runtime_paths=runtime_paths,
+        http_headers=http_headers,
+        control_lease_seconds=lease_minutes * 60 if allow_control else None,
+        shell_auto_approve_seconds=None if shell_auto_approve_minutes is None else shell_auto_approve_minutes * 60,
+        deps=deps.session,
+    )
     approvals: asyncio.Task[None] | None = None
-    tasks: set[asyncio.Task[None]] = set()
     try:
-        owner = await deps.open_client(session, runtime_paths, http_headers)
-        client = owner.client
-        lease_expiry = round((time.time() + lease_minutes * 60) * 1000) if allow_control else None
-        # The builder closes its own providers if it fails; afterwards this function owns them.
-        components = await build_desktop_bridge(
-            config,
-            client=client,
-            runtime_paths=runtime_paths,
-            control_lease_expires_at_ms=lease_expiry,
-        )
-        bridge = components.bridge
-        if shell_auto_approve_minutes is not None:
-            bridge.grant_local_shell(shell_auto_approve_minutes * 60)
-        client.add_to_device_callback(bridge.on_to_device_event, AuthenticatedToDeviceEvent)
-        registration = client.to_device_callbacks[-1]
-        await deps.prepare_client(client, config.controller)
-
         _announce_bridge(
             config,
             allow_control=allow_control,
             lease_minutes=lease_minutes,
             shell_auto_approve_minutes=shell_auto_approve_minutes,
         )
-        transport = DesktopTransport(owner.source, wait_for_capacity=bridge.wait_for_capacity)
-        tasks.update(
-            (
-                asyncio.create_task(bridge.run(), name="desktop_workers"),
-                asyncio.create_task(transport.run(), name="desktop_transport"),
-            ),
-        )
+        workers = run.workers
         if config.shell.enabled:
-            # Terminal approval needs termios; the bridge builder already refused shell access without POSIX.
+            # Terminal approval needs termios; the session already refused shell access without POSIX.
             from mindroom.desktop.shell_prompt import serve_terminal_shell_approvals  # noqa: PLC0415
 
             approvals = asyncio.create_task(
-                serve_terminal_shell_approvals(bridge, input_fd=_terminal_input_fd(), output=sys.stdout),
+                serve_terminal_shell_approvals(run.bridge, input_fd=_terminal_input_fd(), output=sys.stdout),
                 name="desktop_shell_approvals",
             )
-            tasks.add(approvals)
-        done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
-        for task in done:
-            await task
+            workers = (*workers, approvals)
+        raise await first_worker_exit(workers)
     finally:
-        await _close_bridge_run(
-            owner=owner,
-            components=components,
-            registration=registration,
-            tasks=tasks,
-            approvals=approvals,
-        )
-
-
-async def _close_bridge_run(
-    *,
-    owner: DesktopOwnedSession | None,
-    components: DesktopBridgeComponents | None,
-    registration: ClientCallback | None,
-    tasks: set[asyncio.Task[None]],
-    approvals: asyncio.Task[None] | None,
-) -> None:
-    """Stop the terminal approver, then drain the bridge before releasing workers, storage, and the session."""
-    # The terminal stops reading before stop settles pending approval.
-    if approvals is not None:
-        approvals.cancel()
-        await asyncio.gather(approvals, return_exceptions=True)
-    # Native input runs in threads; cancelling its worker cannot stop the input.
-    # Keep the journal and device lease until the active action has drained.
-    # Stopping also closes the shell: its grant ends, pending approval is rejected, and handles are killed.
-    if components is not None:
-        await components.bridge.stop()
-        if components.shell is not None:
+        # The terminal stops reading before stopping the bridge settles pending approval.
+        if approvals is not None:
+            approvals.cancel()
+            await asyncio.gather(approvals, return_exceptions=True)
+        await run.close()
+        if approvals is not None:
             _console.print("Shell access revoked; pending and running shell commands were stopped.")
-    for task in tasks:
-        task.cancel()
-    await asyncio.gather(*tasks, return_exceptions=True)
-    if registration is not None and owner is not None:
-        owner.client.to_device_callbacks.remove(registration)
-    try:
-        if components is not None:
-            components.bridge.close()
-    finally:
-        try:
-            if components is not None and components.browser is not None:
-                await components.browser.close()
-        finally:
-            if owner is not None:
-                await owner.close()
 
 
 def _terminal_input_fd() -> int | None:
@@ -1160,8 +1167,18 @@ def _announce_bridge(
 ) -> None:
     """Show the locally granted authority; the observe-only input mode describes applications only."""
     _console.print("[green]Desktop bridge online.[/green]")
-    _print_plain(f"Allowed requesters: {', '.join(sorted(config.allowed_requester_ids))}")
-    _print_plain(f"Allowed agents: {', '.join(sorted(config.allowed_agent_names))}")
+    if len(config.controllers) == 1:
+        _print_plain(f"Allowed requesters: {', '.join(sorted(config.allowed_requester_ids))}")
+        _print_plain(f"Allowed agents: {', '.join(sorted(config.allowed_agent_names))}")
+    else:
+        _print_plain("Controllers:")
+        for entry in config.controllers:
+            requesters = ", ".join(sorted(entry.allowed_requester_ids))
+            agents = ", ".join(sorted(entry.allowed_agent_names))
+            _print_plain(
+                f"  - {entry.controller.user_id} ({entry.controller.device_id}): "
+                f"requesters={requesters}; agents={agents}",
+            )
     if config.allowed_app_ids:
         mode = f"control enabled for {lease_minutes} minute(s)" if allow_control else "observe-only"
         _print_plain(f"Applications ({mode}): {', '.join(sorted(config.allowed_app_ids))}")
@@ -1180,8 +1197,6 @@ def _announce_bridge(
             _print_plain(auto_approval_notice(shell_auto_approve_minutes))
     if config.browser.enabled:
         _console.print("Playwright browser extension: enabled for the active installed browser profile")
-    if config.allowed_app_ids:
-        _console.print("Move the pointer to the upper-left corner to trigger PyAutoGUI's emergency stop.")
 
 
 __all__ = [

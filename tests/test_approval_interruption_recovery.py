@@ -2,20 +2,25 @@
 
 from __future__ import annotations
 
+import time
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
 import pytest
 import pytest_asyncio
 
-from mindroom.approval.manager import initialize_approval_store
+from mindroom import reply_lifecycle as rl
+from mindroom.approval.continuation_rules import Resumed, next_step
+from mindroom.approval.response import continuation_target
 from mindroom.constants import STREAM_STATUS_ERROR, STREAM_STATUS_KEY
-from mindroom.final_delivery import FinalDeliveryOutcome
+from mindroom.event_journal import ApprovalFailure
+from mindroom.final_delivery import Cancelled, approval_failure
+from mindroom.reply_lifecycle import ApprovalFailureKind, NoteKind
 from mindroom.runtime_shutdown import ENTITY_REMOVED_SHUTDOWN
 from mindroom.streaming import RESTART_INTERRUPTED_RESPONSE_NOTE
 from tests.approval_continuation_helpers import approval_continuation, resumed_approval
 from tests.bot_helpers import unique_room_send_responses
-from tests.conftest import unwrap_extracted_collaborator
+from tests.conftest import initialize_approval_store_for_test, unwrap_extracted_collaborator
 from tests.reply_span_helpers import paused_for_approval
 from tests.response_runner_helpers import _bot
 from tests.test_response_runner_focused import _admit_approval_source
@@ -33,9 +38,9 @@ if TYPE_CHECKING:
 async def approval(tmp_path: Path) -> AsyncIterator[tuple[AgentBot, ApprovalContinuation]]:
     """Create real journal ownership, a paused reply shown as ``$waiting``, and this runtime's claim of its approval."""
     bot = _bot(tmp_path)
-    initialize_approval_store(bot.runtime_paths, cards=bot.journal_principal())
+    initialize_approval_store_for_test(bot.runtime_paths, cards=bot.journal_principal())
     runner = unwrap_extracted_collaborator(bot._response_runner)
-    store = runner.deps.approval_store
+    store = runner.deps.replies.store
     await _admit_approval_source(store)
     continuation = approval_continuation(
         approval_id="approval-recovery",
@@ -46,9 +51,9 @@ async def approval(tmp_path: Path) -> AsyncIterator[tuple[AgentBot, ApprovalCont
         assert claimed.state == "claimed"
     # The next instance takes the replies over and recovers the resume the stopped one left.
     restarted = _bot(tmp_path)
-    initialize_approval_store(restarted.runtime_paths, cards=restarted.journal_principal())
-    await restarted._reply_runtime.start()
-    left = await restarted.journal_principal().approval_continuation(continuation.approval_id)
+    initialize_approval_store_for_test(restarted.runtime_paths, cards=restarted.journal_principal())
+    await restarted._take_over_replies()
+    left = await restarted.journal_principal().approvals.approval_continuation(continuation.approval_id)
     assert left is not None
     assert left.state == "claimed"
     unique_room_send_responses(restarted.client)
@@ -64,16 +69,11 @@ def _sent_bodies(bot: AgentBot) -> list[dict[str, object]]:
 
 async def _settle(bot: AgentBot, claimed: ApprovalContinuation) -> None:
     """Settle an active restart cancellation of the claimed approval."""
-    runner = unwrap_extracted_collaborator(bot._response_runner)
-    await runner._settle_failed_approval_outcome(
-        claimed,
-        FinalDeliveryOutcome(
-            terminal_status="cancelled",
-            event_id="$waiting",
-            is_visible_response=True,
-            failure_reason="sync_restart_cancelled",
-        ),
-    )
+    approvals = unwrap_extracted_collaborator(bot._response_runner).approvals
+    # A resume a restart cancelled settles its approval as failed, as the resume lifecycle does.
+    trigger = Resumed("failed", approval_failure(Cancelled("sync_restart")))
+    step = next_step(await approvals._facts(claimed, recover=True), trigger)
+    await approvals._run_step(claimed, step, target=continuation_target(claimed))
 
 
 async def _assert_settled_with_interruption_note(bot: AgentBot, claimed: ApprovalContinuation, shown: str) -> None:
@@ -83,7 +83,7 @@ async def _assert_settled_with_interruption_note(bot: AgentBot, claimed: Approva
     assert str(note["body"]).rstrip().endswith(RESTART_INTERRUPTED_RESPONSE_NOTE)
     assert note[STREAM_STATUS_KEY] == STREAM_STATUS_ERROR
     store = bot.journal_principal()
-    assert await store.approval_continuation(claimed.approval_id) is None
+    assert await store.approvals.approval_continuation(claimed.approval_id) is None
     assert not await store.is_pending("$source")
 
 
@@ -102,7 +102,10 @@ async def test_missing_approval_owner_does_not_edit_the_reply(
     """Successful no-op retirement is not evidence of a visible interruption."""
     bot, claimed = approval
     runner = unwrap_extracted_collaborator(bot._response_runner)
-    failing = await runner._approval_responses.request_failure(claimed, "sync_restart_cancelled")
+    failing = await runner.approvals._request_failure(
+        claimed,
+        ApprovalFailure(ApprovalFailureKind.RESTART),
+    )
     assert failing is not None
     await bot._journal_store.backend.write(lambda tx: tx.execute("DELETE FROM approval_continuations"))
     sends = bot.client.room_send.await_count
@@ -128,3 +131,62 @@ async def test_approval_settlement_after_removal_still_settles_in_place(
     await _fence_bot(bot, ENTITY_REMOVED_SHUTDOWN)
     await _settle(bot, claimed)
     await _assert_settled_with_interruption_note(bot, claimed, "partial answer")
+
+
+async def _approval_note(bot: AgentBot, claimed: ApprovalContinuation) -> bool:
+    """Write the paused reply's interruption note as a failed continuation's settlement does."""
+    gateway = unwrap_extracted_collaborator(bot._delivery_gateway)
+    return await gateway.write_approval_failure_note(
+        claimed.response_event_id,
+        approval_id=claimed.approval_id,
+        note=NoteKind.INTERRUPTED,
+        text="",
+        target=continuation_target(claimed),
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_note_for_a_reply_that_already_ended_counts_as_written(
+    approval: tuple[AgentBot, ApprovalContinuation],
+) -> None:
+    """A reply the continuation's finish ended first refuses the note, and the settlement moves on without it."""
+    bot, claimed = approval
+    store = bot.journal_principal()
+    reply = await store.replies.for_event(claimed.response_event_id)
+    assert reply is not None
+    paused_span_id = claimed.span_id
+    assert paused_span_id is not None
+    resume = await store.replies.span(reply.last_span_id)
+
+    def finished(current: rl.Reply) -> rl.Transition:
+        return rl.approval_settled(
+            current,
+            resume,
+            approval_id=claimed.approval_id,
+            paused_span_id=paused_span_id,
+            failure_kind=ApprovalFailureKind.RESTART,
+            answers_turn=False,
+            now_ns=time.time_ns(),
+        )
+
+    assert await store.replies.update(reply.reply_id, finished) is not None
+    ended = await store.replies.for_event(claimed.response_event_id)
+    assert ended is not None
+    assert ended.terminal
+    sends = bot.client.room_send.await_count
+
+    assert await _approval_note(bot, claimed)
+    assert bot.client.room_send.await_count == sends
+
+
+@pytest.mark.asyncio
+async def test_a_retried_note_matrix_has_not_taken_is_not_written_yet(
+    approval: tuple[AgentBot, ApprovalContinuation],
+) -> None:
+    """A retry resends the note the first attempt recorded, and reports it unwritten until Matrix takes it."""
+    bot, claimed = approval
+    bot.client.room_send = AsyncMock(side_effect=RuntimeError("homeserver down"))
+
+    assert not await _approval_note(bot, claimed)
+    assert not await _approval_note(bot, claimed)
+    assert bot.client.room_send.await_count == 2

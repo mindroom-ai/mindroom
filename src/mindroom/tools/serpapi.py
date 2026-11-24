@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     config_fields=[
         ConfigField(
             name="api_key",
+            env=("SERP_API_KEY",),
             label="API Key",
             type="password",
             required=False,
@@ -52,7 +53,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["google-search-results"],
-    docs_url="https://docs.agno.com/tools/toolkits/search/serpapi",
+    docs_url="https://docs.mindroom.chat/tools/web-search/#serpapi",
     function_names=("search_google", "search_youtube"),
 )
 def serpapi_tools() -> type[SerpApiTools]:

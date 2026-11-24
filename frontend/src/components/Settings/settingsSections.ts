@@ -33,7 +33,10 @@ const PAGE_OWNED_ROOTS: Record<string, "*" | readonly string[]> = {
   // New voice keys land in Other; the Voice page renders these by hand.
   voice: ["enabled", "visible_router_echo", "stt", "intelligence"],
   calls: "*",
+  budgets: "*",
   room_defaults: ["admins"],
+  // The Agent Keys card edits services and shows only while the broker runs; unmatched_hosts and private_networks stay in config.yaml.
+  egress_broker: "*",
 };
 
 const SETTINGS_SECTIONS: readonly SettingsSection[] = [
@@ -51,6 +54,7 @@ const SETTINGS_SECTIONS: readonly SettingsSection[] = [
           "large_message_strategy",
           "show_stop_button",
           "show_tool_calls",
+          "show_reasoning",
           "coalescing",
         ],
       },
@@ -59,20 +63,16 @@ const SETTINGS_SECTIONS: readonly SettingsSection[] = [
   {
     id: "history",
     title: "History and context",
-    description:
-      "What agents replay, learn, and summarize from earlier conversation.",
+    description: "What agents replay and summarize from earlier conversation.",
     entries: [
       {
         root: "defaults",
         keys: [
-          "learning",
-          "learning_mode",
           "num_history_runs",
           "num_history_messages",
           "max_tool_calls_from_history",
-          "compress_tool_results",
           "compaction",
-          "max_preload_chars",
+          "max_preload_file_chars",
           "thread_summary_model",
           "thread_summary_temperature",
           "thread_summary_first_threshold",
@@ -101,6 +101,12 @@ const SETTINGS_SECTIONS: readonly SettingsSection[] = [
     ],
   },
   {
+    id: "search",
+    title: "Search",
+    description: "How knowledge and memory searches rank their results.",
+    entries: [{ root: "reranker" }],
+  },
+  {
     id: "router",
     title: "Router",
     description:
@@ -110,8 +116,9 @@ const SETTINGS_SECTIONS: readonly SettingsSection[] = [
   {
     id: "personal-rooms",
     title: "Personal rooms",
-    description: "One private room per person, owned by a selected agent.",
-    entries: [{ root: "personal_rooms" }],
+    description: "Private rooms and per-person agents for everyone who joins.",
+    // A template comes first because Personal rooms selects it as its agent.
+    entries: [{ root: "personal_agents" }, { root: "personal_rooms" }],
   },
   {
     id: "room-defaults",
@@ -153,13 +160,15 @@ const SETTINGS_SECTIONS: readonly SettingsSection[] = [
     id: "access",
     title: "Access and identity",
     description:
-      "Administrators, permissions, and accounts MindRoom treats specially.",
+      "Administrators, permissions, email invites, and accounts MindRoom treats specially.",
     entries: [
       { root: "administrators" },
       { root: "authorization" },
       { root: "bot_accounts" },
       { root: "mindroom_user" },
       { root: "external_trigger_policy" },
+      { root: "email_invites" },
+      { root: "slack" },
     ],
   },
   {
@@ -170,6 +179,7 @@ const SETTINGS_SECTIONS: readonly SettingsSection[] = [
       { root: "timezone" },
       { root: "scheduler_catch_up_grace_seconds" },
       { root: "matrix_space" },
+      { root: "server_emoji" },
       { root: "matrix_sync" },
       { root: "event_journal" },
     ],

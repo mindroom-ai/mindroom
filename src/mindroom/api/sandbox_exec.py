@@ -11,6 +11,7 @@ import signal
 import site
 import subprocess
 import sys
+import tempfile
 import time
 from contextlib import suppress
 from pathlib import Path
@@ -18,14 +19,21 @@ from types import MappingProxyType
 from typing import TYPE_CHECKING
 
 from mindroom import constants
+from mindroom.egress_broker.env import (
+    apply_runner_ca_bundle,
+)
 from mindroom.path_confinement import resolve_path_within_root
 from mindroom.runtime_env_policy import (
+    KUBERNETES_POD_CPU_LIMIT_ENV,
+    KUBERNETES_POD_LIMIT_ENV_NAMES,
+    KUBERNETES_POD_MEMORY_LIMIT_BYTES_ENV,
     KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY,
     SANDBOX_RUNTIME_ENV_BY_KEY,
     SHARED_CREDENTIALS_PATH_ENV,
     is_trusted_tool_runtime_env_file_name,
     sandbox_runner_runtime_state_env,
     sandbox_subprocess_system_env,
+    strip_authenticated_proxy_env,
 )
 from mindroom.tool_system.worker_routing import worker_dir_name
 from mindroom.vendor_telemetry import vendor_telemetry_env_values
@@ -46,13 +54,23 @@ _WORKSPACE_ENV_HOOK_MAX_VALUE_BYTES = 32 * 1024
 _WORKSPACE_ENV_HOOK_MAX_OVERLAY_BYTES = 128 * 1024
 _KUBERNETES_STORAGE_SUBPATH_PREFIX_ENV = KUBERNETES_WORKER_BACKEND_CONFIG_ENV_BY_KEY["storage_subpath_prefix"]
 _DEFAULT_WORKER_STORAGE_SUBPATH_PREFIX = "workers"
+_WORKER_CPUS_ENV = "MINDROOM_WORKER_CPUS"
+_WORKER_MEMORY_BYTES_ENV = "MINDROOM_WORKER_MEMORY_BYTES"
+_DERIVED_WORKER_CPU_ENV_NAMES = (
+    "OMP_NUM_THREADS",
+    "PYTEST_XDIST_AUTO_NUM_WORKERS",
+    "PYTHON_CPU_COUNT",
+)
 EXECUTION_ENV_TOOL_NAMES = constants.EXECUTION_ENV_TOOL_NAMES
 
 
 def _runner_execution_mode(runtime_paths: RuntimePaths) -> str:
     """Return the configured sandbox runner execution mode."""
-    raw_mode = runtime_paths.env_value(SANDBOX_RUNTIME_ENV_BY_KEY["runner_execution_mode"], default="inprocess")
-    return (raw_mode or "inprocess").strip().lower()
+    return (
+        runtime_paths.env_value(SANDBOX_RUNTIME_ENV_BY_KEY["runner_execution_mode"], default="inprocess")
+        .strip()
+        .lower()
+    )
 
 
 def runner_uses_subprocess(runtime_paths: RuntimePaths) -> bool:
@@ -72,7 +90,7 @@ def runner_subprocess_timeout_seconds(runtime_paths: RuntimePaths) -> float:
         default=str(_DEFAULT_SUBPROCESS_TIMEOUT_SECONDS),
     )
     try:
-        timeout = float(raw_timeout or _DEFAULT_SUBPROCESS_TIMEOUT_SECONDS)
+        timeout = float(raw_timeout)
     except ValueError:
         timeout = _DEFAULT_SUBPROCESS_TIMEOUT_SECONDS
     return max(1.0, timeout)
@@ -80,16 +98,15 @@ def runner_subprocess_timeout_seconds(runtime_paths: RuntimePaths) -> float:
 
 def runner_dedicated_worker_key(runtime_paths: RuntimePaths) -> str | None:
     """Return the pinned dedicated worker key when configured."""
-    raw = (runtime_paths.env_value(SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_key"], default="") or "").strip()
-    return raw or None
+    raw = runtime_paths.env_value(SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_key"])
+    return None if raw is None else raw.strip()
 
 
-def runner_dedicated_worker_root(runtime_paths: RuntimePaths) -> Path | None:
+def runner_dedicated_worker_root(runtime_paths: RuntimePaths) -> Path:
     """Return the dedicated worker root visible to this runner."""
-    raw_root = runtime_paths.env_value(SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_root"], default="")
-    dedicated_root = (raw_root or "").strip()
-    if dedicated_root:
-        return Path(dedicated_root).expanduser().resolve()
+    raw_root = runtime_paths.env_value(SANDBOX_RUNTIME_ENV_BY_KEY["dedicated_worker_root"])
+    if raw_root is not None:
+        return Path(raw_root.strip()).expanduser().resolve()
     return runtime_paths.storage_root.resolve()
 
 
@@ -115,24 +132,20 @@ def _shared_root_from_dedicated_worker_root(
 
 def _runner_shared_storage_root(runtime_paths: RuntimePaths) -> Path | None:
     """Return the shared storage root for worker-visible agent paths."""
-    shared_root = (runtime_paths.env_value(SANDBOX_RUNTIME_ENV_BY_KEY["shared_storage_root"], default="") or "").strip()
-    if shared_root:
-        return Path(shared_root).expanduser().resolve()
+    shared_root = runtime_paths.env_value(SANDBOX_RUNTIME_ENV_BY_KEY["shared_storage_root"])
+    if shared_root is not None:
+        return Path(shared_root.strip()).expanduser().resolve()
 
-    dedicated_root = runner_dedicated_worker_root(runtime_paths)
     worker_key = runner_dedicated_worker_key(runtime_paths)
-    if dedicated_root is None or worker_key is None:
+    if worker_key is None:
         return None
 
-    raw_storage_subpath_prefix = runtime_paths.env_value(
+    storage_subpath_prefix = runtime_paths.env_value(
         _KUBERNETES_STORAGE_SUBPATH_PREFIX_ENV,
         default=_DEFAULT_WORKER_STORAGE_SUBPATH_PREFIX,
-    )
-    storage_subpath_prefix = (raw_storage_subpath_prefix or _DEFAULT_WORKER_STORAGE_SUBPATH_PREFIX).strip() or (
-        _DEFAULT_WORKER_STORAGE_SUBPATH_PREFIX
-    )
+    ).strip()
     return _shared_root_from_dedicated_worker_root(
-        dedicated_root=dedicated_root,
+        dedicated_root=runner_dedicated_worker_root(runtime_paths),
         worker_key=worker_key,
         storage_subpath_prefix=storage_subpath_prefix,
     )
@@ -160,33 +173,26 @@ def request_execution_env(
     """Return the effective runtime-scoped execution env for one request."""
     if tool_name not in EXECUTION_ENV_TOOL_NAMES:
         return {}
-    # Agent Vault egress is composed from the worker pod's own token + endpoint,
-    # so it is always overlaid here at the worker (never shipped from the
-    # primary, which has neither the token nor the endpoint env).
-    worker_local_env = {**runtime_paths.process_env, **os.environ}
-    agent_vault_env = constants.worker_proxy_execution_env(worker_local_env)
     if execution_env:
         protected_env_names = _protected_dedicated_worker_execution_env_names(runtime_paths)
         if protected_env_names:
             # The primary's HOME is a host path; a dedicated worker keeps its own HOME until the
             # workspace HOME contract replaces it, so only the incoming request env drops it.
             protected_env_names |= {"HOME"}
+        protected_env_names |= KUBERNETES_POD_LIMIT_ENV_NAMES
         env = {key: value for key, value in execution_env.items() if key not in protected_env_names}
-        env.update(agent_vault_env)
+        apply_runner_ca_bundle(env, Path(tempfile.gettempdir()) / "mindroom-egress-broker")
         return env
     shell_process_env = (
         runtime_paths.process_env
         if runner_uses_dedicated_worker(runtime_paths)
         else {**os.environ, **runtime_paths.process_env}
     )
-    return (
-        constants.build_execution_tool_env(
-            tool_name,
-            runtime_paths,
-            extra_env_passthrough=extra_env_passthrough,
-            shell_process_env=shell_process_env,
-        )
-        | agent_vault_env
+    return constants.build_execution_tool_env(
+        tool_name,
+        runtime_paths,
+        extra_env_passthrough=extra_env_passthrough,
+        shell_process_env=shell_process_env,
     )
 
 
@@ -195,13 +201,8 @@ def _protected_dedicated_worker_execution_env_names(runtime_paths: RuntimePaths)
     if not runner_uses_dedicated_worker(runtime_paths):
         return frozenset()
 
-    protected_names = {"MINDROOM_CONFIG_PATH", "MINDROOM_STORAGE_PATH", SHARED_CREDENTIALS_PATH_ENV}
-    protected_names.update(
-        name for name in {*runtime_paths.process_env, *runtime_paths.env_file_values} if name.endswith("_FILE")
-    )
-    if runtime_paths.env_value("GOOGLE_APPLICATION_CREDENTIALS"):
-        protected_names.add("GOOGLE_APPLICATION_CREDENTIALS")
-    return frozenset(protected_names)
+    control_paths = {"MINDROOM_CONFIG_PATH", "MINDROOM_STORAGE_PATH", SHARED_CREDENTIALS_PATH_ENV}
+    return frozenset(control_paths) | constants.secret_path_env_names(runtime_paths)
 
 
 def tool_runtime_paths_with_request_env(
@@ -210,6 +211,7 @@ def tool_runtime_paths_with_request_env(
     *,
     include_base_execution_env: bool = True,
     trusted_env_overlay: Mapping[str, str] | None = None,
+    sandbox: bool = False,
 ) -> RuntimePaths:
     """Return runtime paths overlaid with one tool-request env snapshot."""
     protected_env_names = _protected_dedicated_worker_execution_env_names(runtime_paths)
@@ -241,6 +243,9 @@ def tool_runtime_paths_with_request_env(
     if trusted_env_overlay:
         env_file_values.update(trusted_env_overlay)
         process_env.update(trusted_env_overlay)
+    if sandbox:
+        process_env = strip_authenticated_proxy_env(process_env)
+        env_file_values = strip_authenticated_proxy_env(env_file_values)
     return constants.RuntimePaths(
         config_path=runtime_paths.config_path,
         config_dir=runtime_paths.config_dir,
@@ -272,14 +277,9 @@ def _current_runtime_site_packages() -> list[str]:
     return list(dict.fromkeys(discovered_paths))
 
 
-def _subprocess_passthrough_env() -> dict[str, str]:
-    """Return the small set of host env vars forwarded to subprocesses."""
-    return dict(sandbox_subprocess_system_env(os.environ))
-
-
 def generic_subprocess_env() -> dict[str, str]:
-    """Build the baseline subprocess env for non-worker execution."""
-    env = _subprocess_passthrough_env()
+    """Build the baseline subprocess env for non-worker execution, starting from the forwarded host vars."""
+    env = dict(sandbox_subprocess_system_env(os.environ))
     env.update(vendor_telemetry_env_values())
     for key in ("HOME", "PATH", "VIRTUAL_ENV"):
         value = os.environ.get(key)
@@ -311,9 +311,39 @@ def worker_tmp_dir(paths: LocalWorkerStatePaths) -> Path:
     return paths.tmp_dir
 
 
+def _positive_int_env_value(value: str | None) -> str | None:
+    """Return a canonical positive integer string, or None when unset or invalid."""
+    if value is None or not value.isascii() or not value.isdigit():
+        return None
+    parsed = int(value)
+    return str(parsed) if parsed > 0 else None
+
+
+def worker_resource_limit_env(environ: Mapping[str, str] | None = None) -> dict[str, str]:
+    """Return worker CPU/memory limit vars derived from a Kubernetes worker container's env.
+
+    Active only when the runner process has a positive integer ``MINDROOM_KUBERNETES_POD_CPU_LIMIT``
+    from the downward API. Operator overrides in the runner env win by key presence (even when empty).
+    Local, Docker, and in-process runners return an empty mapping.
+    """
+    source = os.environ if environ is None else environ
+    cpus = _positive_int_env_value(source.get(KUBERNETES_POD_CPU_LIMIT_ENV))
+    if cpus is None:
+        return {}
+    limits = {_WORKER_CPUS_ENV: source.get(_WORKER_CPUS_ENV, cpus)}
+    if _WORKER_MEMORY_BYTES_ENV in source:
+        limits[_WORKER_MEMORY_BYTES_ENV] = source[_WORKER_MEMORY_BYTES_ENV]
+    elif (memory_bytes := _positive_int_env_value(source.get(KUBERNETES_POD_MEMORY_LIMIT_BYTES_ENV))) is not None:
+        limits[_WORKER_MEMORY_BYTES_ENV] = memory_bytes
+    for name in _DERIVED_WORKER_CPU_ENV_NAMES:
+        limits[name] = source.get(name, cpus)
+    return limits
+
+
 def worker_subprocess_env(paths: LocalWorkerStatePaths) -> dict[str, str]:
     """Build the subprocess env for one prepared local worker."""
     env = generic_subprocess_env()
+    env.update(worker_resource_limit_env())
     env["HOME"] = str(paths.root)
     env["XDG_CACHE_HOME"] = str(paths.cache_dir)
     env["PIP_CACHE_DIR"] = str(paths.cache_dir / "pip")
@@ -352,17 +382,19 @@ def resolve_subprocess_worker_context(
 def subprocess_env_for_request(
     base_env: dict[str, str] | None,
     execution_env: dict[str, str],
+    *,
+    sandbox: bool = False,
 ) -> dict[str, str] | None:
     """Overlay request execution env onto one subprocess env snapshot."""
     if base_env is None:
         return None
     if not execution_env:
-        return base_env
+        return strip_authenticated_proxy_env(base_env) if sandbox else base_env
 
     env = dict(base_env)
     env.update(execution_env)
     env.update(vendor_telemetry_env_values())
-    return env
+    return strip_authenticated_proxy_env(env) if sandbox else env
 
 
 def subprocess_worker_command(

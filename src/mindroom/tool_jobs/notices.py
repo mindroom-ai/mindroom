@@ -1,0 +1,133 @@
+"""Tell a running reply, once each, about its conversation's background jobs that ended, and ask it to collect them."""
+
+from __future__ import annotations
+
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+
+from mindroom.hooks.types import EnrichmentItem
+from mindroom.tool_jobs.conversation import current_conversation, current_ended_jobs
+from mindroom.tool_jobs.runtime import describe_job
+from mindroom.tool_system.runtime_context import get_tool_runtime_context
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator, Sequence
+
+    from mindroom.agent_loop.model_loop import AfterToolBatchHook
+    from mindroom.llm.messages import Message
+    from mindroom.tool_jobs.runtime import BackgroundJob
+
+
+@dataclass
+class JobNotices:
+    """The ended jobs one reply has told its model about, across all of its attempts."""
+
+    noticed: set[str] = field(default_factory=set)
+    # The note every attempt of the reply opens with, once the first attempt has looked.
+    start_note: str | None = None
+    started: bool = False
+
+
+_NOTICES: ContextVar[JobNotices | None] = ContextVar("tool_job_notices", default=None)
+
+
+@contextmanager
+def job_notice_context(notices: JobNotices) -> Iterator[None]:
+    """Bind one reply's notices for one call or stream pull."""
+    token = _NOTICES.set(notices)
+    try:
+        yield
+    finally:
+        _NOTICES.reset(token)
+
+
+def _job_notice_text(jobs: Sequence[BackgroundJob], notice: str) -> str:
+    """List each ended job on its own line, followed by what to do about them."""
+    lines = []
+    for job in jobs:
+        # A restart stopped an interrupted job at an unknown point, and it is never run again on its own.
+        partly = "; it may have partly run" if job.status == "interrupted" else ""
+        lines.append(f"{describe_job(job)} {job.status}{partly}")
+    return "\n".join([*lines, notice])
+
+
+async def _unnoticed_notice(notices: JobNotices) -> str | None:
+    """Describe this reply's ended jobs it was not told about yet, and count them as told."""
+    context = get_tool_runtime_context()
+    if context is None:
+        return None
+    jobs = [job for job in await current_ended_jobs() if job.job_id not in notices.noticed]
+    if not jobs:
+        return None
+    notices.noticed.update(job.job_id for job in jobs)
+    return _job_notice_text(jobs, context.current_config.get_prompt("BACKGROUND_JOBS_ENDED_NOTICE"))
+
+
+def _continued_jobs() -> list[BackgroundJob]:
+    """Return the jobs this turn started that a restart stopped and that MindRoom continues on its own.
+
+    A turn the same restart cut short while its call waited for such a job holds no handle of it: its recovered run
+    only says the call was interrupted, so without a note of them the model would start the job's work again.
+    """
+    current = current_conversation()
+    context = get_tool_runtime_context()
+    if current is None or context is None or context.membership_turn_id is None:
+        return []
+    runtime, key = current
+    return [job for job in runtime.stopped_by_restart(key) if job.source_event_id == context.membership_turn_id]
+
+
+async def _turn_start_job_note() -> str | None:
+    """Describe the conversation's jobs that ended before this reply, once per reply.
+
+    Every attempt of the reply asks again and gets the same note, since no later attempt replays an earlier one's
+    turn context.
+    """
+    notices = _NOTICES.get()
+    if notices is None:
+        return None
+    if not notices.started:
+        notices.started = True
+        # Read before the ended jobs, so a job that ends between the two reads is in one of them.
+        continued = _continued_jobs()
+        notes = [await _unnoticed_notice(notices)]
+        continued = [job for job in continued if job.job_id not in notices.noticed]
+        context = get_tool_runtime_context()
+        if continued and context is not None:
+            notice = context.current_config.get_prompt("BACKGROUND_JOBS_CONTINUED_NOTICE")
+            notes.append(_job_notice_text(continued, notice))
+        notices.start_note = "\n\n".join(note for note in notes if note is not None) or None
+    return notices.start_note
+
+
+async def append_turn_start_job_note(items: Sequence[EnrichmentItem]) -> tuple[EnrichmentItem, ...]:
+    """Add the turn-start job note to the reply's turn context, when jobs ended before it."""
+    note = await _turn_start_job_note()
+    if note is None:
+        return tuple(items)
+    return (*items, EnrichmentItem(key="background_jobs", text=note, cache_policy="volatile", persist=False))
+
+
+def job_notice_hook(entity_name: str) -> AfterToolBatchHook:
+    """Return the loop hook that appends, after each tool batch, the notice of jobs that ended meanwhile.
+
+    The notice goes on the batch's last tool result, and only the answering entity ``entity_name`` hears it: an
+    agent, or a configured team's leader, never a member it delegated to; an ad hoc team answers as the agent whose
+    account posts its replies, so that member hears it.
+    """
+
+    async def after_tool_batch(messages: list[Message], _results: Sequence[Message]) -> None:
+        notices = _NOTICES.get()
+        context = get_tool_runtime_context()
+        if notices is None or context is None or context.recipient != entity_name:
+            return
+        result = next((message for message in reversed(messages) if message.role == "tool"), None)
+        if result is None or not isinstance(result.content, str | None):
+            return
+        text = await _unnoticed_notice(notices)
+        if text is not None:
+            result.content = f"{result.content}\n\n{text}" if result.content else text
+
+    return after_tool_batch

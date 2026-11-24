@@ -3,6 +3,7 @@
 from unittest.mock import Mock, patch
 
 import pytest
+from backend.pricing import get_stripe_price_id
 from backend.routes import admin, webhooks
 from backend.deps import verify_admin
 from fastapi.testclient import TestClient
@@ -49,20 +50,8 @@ def database():
     )
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("seam", ["created", "updated", "refresh", "payment_failed"])
-@pytest.mark.parametrize(
-    "amount,paid_subscription,expected",
-    [
-        (0, "sub_1", "unpaid"),
-        (15, "other", "unpaid"),
-        (15, "sub_1", "past_due"),
-    ],
-)
-async def test_past_due_requires_a_paid_payment(seam, amount, paid_subscription, expected):
-    db = database()
-    db.tables["payments"] = [{"subscription_id": paid_subscription, "amount": amount, "status": "succeeded"}]
-    remote = subscription("past_due")
+async def apply_stripe_subscription(seam, db, remote, event=None):
+    """Store `remote`, as Stripe now reports it, through the nightly refresh or a webhook handler that receives `event`."""
     with (
         patch.object(webhooks, "ensure_supabase", return_value=db),
         patch.object(
@@ -77,7 +66,23 @@ async def test_past_due_requires_a_paid_payment(seam, amount, paid_subscription,
                 {"id": "in_1", "parent": {"subscription_details": {"subscription": "sub_1"}}}
             )
         else:
-            getattr(webhooks, f"handle_subscription_{seam}")(remote)
+            getattr(webhooks, f"handle_subscription_{seam}")(event or remote)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("seam", ["created", "updated", "refresh", "payment_failed"])
+@pytest.mark.parametrize(
+    "amount,paid_subscription,expected",
+    [
+        (0, "sub_1", "unpaid"),
+        (15, "other", "unpaid"),
+        (15, "sub_1", "past_due"),
+    ],
+)
+async def test_past_due_requires_a_paid_payment(seam, amount, paid_subscription, expected):
+    db = database()
+    db.tables["payments"] = [{"subscription_id": paid_subscription, "amount": amount, "status": "succeeded"}]
+    await apply_stripe_subscription(seam, db, subscription("past_due"))
     assert db.row("subscriptions", id="local_1")["status"] == expected
 
 
@@ -85,21 +90,73 @@ async def test_past_due_requires_a_paid_payment(seam, amount, paid_subscription,
 @pytest.mark.parametrize("seam", ["updated", "refresh"])
 async def test_subscription_projection_uses_the_live_tier(seam):
     db = database()
-    remote = subscription("active", "hobby")
-    with (
-        patch.object(webhooks, "ensure_supabase", return_value=db),
-        patch.object(
-            instance_lifecycle, "stripe", Mock(api_key="test", Subscription=Mock(retrieve=Mock(return_value=remote)))
-        ),
-        patch.object(webhooks.stripe.Subscription, "retrieve", return_value=remote),
-    ):
-        if seam == "refresh":
-            await instance_lifecycle._refresh_status_from_stripe(db, "local_1")
-        else:
-            webhooks.handle_subscription_updated(subscription("active", "pro"))
+    await apply_stripe_subscription(seam, db, subscription("active", "hobby"), event=subscription("active", "pro"))
     row = db.row("subscriptions", id="local_1")
     assert row["tier"] == "hobby"
     assert row["stripe_price_id"] == "price_hobby"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("seam", ["updated", "refresh"])
+@pytest.mark.parametrize(("billing_cycle", "unit_amount"), [("monthly", 1000), ("yearly", 9600)])
+@pytest.mark.parametrize("listed", [True, False], ids=["listed", "unlisted"])
+async def test_subscription_records_the_price_it_pays(seam, billing_cycle, unit_amount, listed):
+    db = database()
+    remote = subscription("active", "byok")
+    price = remote["items"]["data"][0]["price"]
+    price["unit_amount"] = unit_amount
+    if listed:
+        # A price in pricing-config.yaml takes its billing cycle from there, whatever its metadata says.
+        price["id"] = get_stripe_price_id("byok", billing_cycle)
+        price["metadata"] = {"tier": "byok", "billing_cycle": "yearly" if billing_cycle == "monthly" else "monthly"}
+    else:
+        price["metadata"] = {"tier": "byok", "billing_cycle": billing_cycle}
+    await apply_stripe_subscription(seam, db, remote)
+    row = db.row("subscriptions", id="local_1")
+    assert (row["billing_cycle"], row["price_cents"]) == (billing_cycle, unit_amount)
+
+
+@pytest.mark.asyncio
+async def test_refresh_logs_the_fields_it_corrected():
+    db = database()
+    db.row("subscriptions", id="local_1")["stripe_price_id"] = "price_pro"
+    remote = subscription("active", "pro")
+    remote["items"]["data"][0]["price"]["unit_amount"] = 20000
+    retrieve = Mock(return_value=remote)
+    with (
+        patch.object(instance_lifecycle, "stripe", Mock(api_key="test", Subscription=Mock(retrieve=retrieve))),
+        patch.object(instance_lifecycle, "logger") as logger,
+    ):
+        await instance_lifecycle._refresh_status_from_stripe(db, "local_1")
+
+    # A row stored before prices were recorded gets its price, and the warning says so instead of an unchanged status.
+    logger.warning.assert_called_once_with(
+        "Corrected subscription %s from Stripe: %s",
+        "local_1",
+        "billing_cycle None -> 'monthly', price_cents None -> 20000",
+    )
+
+
+@pytest.mark.asyncio
+async def test_refresh_of_an_unchanged_subscription_writes_nothing():
+    db = database()
+    db.row("subscriptions", id="local_1").update(
+        stripe_price_id="price_pro",
+        billing_cycle="monthly",
+        price_cents=20000,
+        trial_ends_at="2027-01-15T08:00:00Z",  # The trial end Stripe reports, spelled differently.
+    )
+    remote = subscription("active", "pro") | {"trial_end": 1_800_000_000}
+    remote["items"]["data"][0]["price"]["unit_amount"] = 20000
+    retrieve = Mock(return_value=remote)
+    with (
+        patch.object(instance_lifecycle, "stripe", Mock(api_key="test", Subscription=Mock(retrieve=retrieve))),
+        patch.object(instance_lifecycle, "logger") as logger,
+    ):
+        await instance_lifecycle._refresh_status_from_stripe(db, "local_1")
+
+    assert db.row("subscriptions", id="local_1")["updated_at"] == "before"
+    logger.warning.assert_not_called()
 
 
 def test_subscription_rebound_during_retrieve_is_not_overwritten():

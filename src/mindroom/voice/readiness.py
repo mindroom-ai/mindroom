@@ -1,8 +1,7 @@
-"""Prepare durable voice input and satisfy its visible publication requirement."""
+"""Prepare durable voice input: transcribe a voice message once and checkpoint the result."""
 
 from __future__ import annotations
 
-import asyncio
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING, Any
 
@@ -16,10 +15,9 @@ from mindroom.constants import (
 from mindroom.dispatch_handoff import PreparedIngress
 from mindroom.dispatch_source import VOICE_SOURCE_KIND
 from mindroom.inbound_turn_normalizer import VoiceNormalizationRequest
-from mindroom.matrix.media import extract_media_caption
+from mindroom.matrix.media import carried_media_content, extract_media_caption
 from mindroom.timing import attach_dispatch_pipeline_timing
 from mindroom.turn_record import PreparedVoiceSource
-from mindroom.voice.visible_voice_echo import VisibleVoiceEchoRequest
 
 if TYPE_CHECKING:
     import nio
@@ -30,7 +28,6 @@ if TYPE_CHECKING:
     from mindroom.message_target import MessageTarget
     from mindroom.timing import DispatchPipelineTiming
     from mindroom.turn_store import TurnStore
-    from mindroom.voice.visible_voice_echo import VisibleVoiceEchoLifecycle
 
 
 def _text_only_fallback(event: AudioMessageEvent, *, thread_id: str | None) -> PreparedIngress:
@@ -41,21 +38,14 @@ def _text_only_fallback(event: AudioMessageEvent, *, thread_id: str | None) -> P
     """
     body = f"{VOICE_PREFIX}{extract_media_caption(event, default='[Attached voice message]')}"
     source = dict(event.source) if isinstance(event.source, dict) else {}
-    source_content = source.get("content")
-    original_content = source_content if isinstance(source_content, dict) else {}
     content: dict[str, Any] = {
         "msgtype": "m.text",
         "body": body,
         ORIGINAL_SENDER_KEY: event.sender,
         SOURCE_KIND_KEY: VOICE_SOURCE_KIND,
         VOICE_RAW_AUDIO_FALLBACK_KEY: True,
+        **carried_media_content(event),
     }
-    inherited_mentions = original_content.get("m.mentions")
-    if isinstance(inherited_mentions, dict):
-        content["m.mentions"] = inherited_mentions
-    inherited_relation = original_content.get("m.relates_to")
-    if isinstance(inherited_relation, dict):
-        content["m.relates_to"] = inherited_relation
     if thread_id is not None:
         content["m.relates_to"] = {"rel_type": "m.thread", "event_id": thread_id}
     source["content"] = content
@@ -65,23 +55,22 @@ def _text_only_fallback(event: AudioMessageEvent, *, thread_id: str | None) -> P
         body=body,
         source=source,
         server_timestamp=event.server_timestamp if isinstance(event.server_timestamp, int) else None,
-        source_kind_override=VOICE_SOURCE_KIND,
+        payload_trusted=True,
     )
 
 
 @dataclass(frozen=True)
 class VoiceReadiness:
-    """Own preparation, checkpointing, and publication before voice lane handoff."""
+    """Own preparation and checkpointing before voice lane handoff."""
 
     normalizer: InboundTurnNormalizer
     turn_store: TurnStore
-    visible_echo: VisibleVoiceEchoLifecycle
     logger: structlog.stdlib.BoundLogger
 
-    def prepared_source(self, source_event_id: str) -> PreparedVoiceSource | None:
-        """Read the checkpoint before the controller resolves the conversation target."""
+    async def prepared_source(self, source_event_id: str) -> PreparedVoiceSource | None:
+        """Read the checkpoint before voice ingress resolves the conversation target."""
         try:
-            return self.turn_store.prepared_voice_for_source(source_event_id)
+            return await self.turn_store.prepared_voice_for_source(source_event_id)
         except Exception as exc:
             self.logger.exception("Prepared voice checkpoint read failed", event_id=source_event_id)
             raise IngressRetryError from exc
@@ -93,20 +82,11 @@ class VoiceReadiness:
         event: AudioMessageEvent,
         target: MessageTarget,
         coalescing_thread_id: str | None,
-        requester_user_id: str,
         dispatch_timing: DispatchPipelineTiming | None,
     ) -> PreparedIngress:
-        """Return one checkpointed event only after required visible publication succeeds."""
-        handle = self.visible_echo.start(
-            VisibleVoiceEchoRequest(
-                source_event_id=event.event_id,
-                target=target,
-                requester_user_id=requester_user_id,
-                raw_source=event.source,
-            ),
-        )
+        """Return one transcribed event only after its checkpoint is saved."""
         try:
-            checkpoint = self.prepared_source(event.event_id)
+            checkpoint = await self.prepared_source(event.event_id)
             if checkpoint is not None:
                 prepared_event = PreparedIngress(
                     sender=event.sender,
@@ -114,7 +94,7 @@ class VoiceReadiness:
                     body=checkpoint.body,
                     source={**event.source, "content": checkpoint.to_content()},
                     server_timestamp=event.server_timestamp,
-                    source_kind_override=VOICE_SOURCE_KIND,
+                    payload_trusted=True,
                 )
             else:
                 if dispatch_timing is not None:
@@ -125,6 +105,7 @@ class VoiceReadiness:
                 if dispatch_timing is not None:
                     dispatch_timing.mark("ingress_normalize_ready")
                 checkpoint = await self.turn_store.record_prepared_voice(
+                    room.room_id,
                     event.event_id,
                     PreparedVoiceSource.from_content(
                         prepared_event.body,
@@ -145,31 +126,15 @@ class VoiceReadiness:
                 source={**prepared_event.source, "content": checkpoint.to_content()},
             )
             attach_dispatch_pipeline_timing(prepared_event.source, dispatch_timing)
-            if not await self.visible_echo.finish(handle, prepared_event):
-                raise IngressRetryError  # noqa: TRY301 - preserve expected retry without exception logging
-            if not await self.visible_echo.await_publication(
-                room=room,
-                source_event_id=event.event_id,
-                requester_user_id=requester_user_id,
-            ):
-                raise IngressRetryError  # noqa: TRY301 - preserve expected retry without exception logging
         except IngressRetryError:
-            raise
-        except asyncio.CancelledError:
-            self.visible_echo.finish_after_cancellation(
-                handle,
-                _text_only_fallback(event, thread_id=target.resolved_thread_id),
-            )
             raise
         except Exception as exc:
             self.logger.exception(
-                "Voice preparation checkpoint or publication failed; deferring this voice turn",
+                "Voice preparation checkpoint failed; deferring this voice turn",
                 event_id=event.event_id,
                 room_id=room.room_id,
             )
             raise IngressRetryError from exc
-        finally:
-            self.visible_echo.abandon_unsettled(handle)
         return prepared_event
 
     async def _normalize(self, request: VoiceNormalizationRequest) -> PreparedIngress:

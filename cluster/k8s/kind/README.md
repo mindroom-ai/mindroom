@@ -1,6 +1,9 @@
 # MindRoom Local Development with Kind
 
-Run MindRoom locally with Kubernetes using [kind](https://kind.sigs.k8s.io/).
+> **Looking to deploy MindRoom locally on kind?** Follow the [Kubernetes Quick Start](../../../docs/deployment/kubernetes.md#quick-start-local-kind-cluster) for a local setup (Docker, `kind`, `kubectl`, `helm`, `git`, `python3`, and `openssl`; no `sudo` or existing cluster) using the runtime and Tuwunel charts.
+> This page is for developing the SaaS platform and instance charts.
+
+Run the MindRoom SaaS platform locally with Kubernetes using [kind](https://kind.sigs.k8s.io/).
 
 Run all commands below from the repository root.
 The bootstrap and diagnostic scripts use your exported `KUBECONFIG`, or the default `~/.kube/config` when unset.
@@ -23,11 +26,11 @@ just cluster-kind-down
 
 ## Prerequisites
 
-- Docker running
+- Docker 28 or newer running
 - `just` and Nix (`nix-shell`) for the `just cluster-kind-*` recipes
 - kind (`brew install kind` or [install guide](https://kind.sigs.k8s.io/docs/user/quick-start/#installation))
-- kubectl (`brew install kubectl`)
-- helm (`brew install helm`)
+- kubectl (`brew install kubectl` or [install guide](https://kubernetes.io/docs/tasks/tools/))
+- helm (`brew install helm` or [install guide](https://helm.sh/docs/intro/install/))
 
 ## First Time Setup
 
@@ -82,7 +85,7 @@ kubectl port-forward -n ingress-nginx svc/ingress-nginx-controller 8080:80
 
 ## Deploy a Test Instance
 
-The instance chart deploys a bundled Synapse homeserver; MindRoom connects to `http://synapse-1:8008` for this example.
+The instance chart deploys a bundled Tuwunel homeserver; MindRoom connects to `http://tuwunel-1:8008` for this example.
 The storage and image pull policies below match the kind smoke helper and use the images loaded during fresh setup.
 
 Create a private values file for the shared sandbox token required by the default file and shell tools:
@@ -106,7 +109,7 @@ helm upgrade --install instance-1 cluster/k8s/instance \
   --set baseDomain=local \
   --set storageClassName=standard \
   --set mindroom_image_pull_policy=IfNotPresent \
-  --set synapse_image_pull_policy=IfNotPresent
+  --set tuwunel_image_pull_policy=IfNotPresent
 
 # Access instance
 kubectl port-forward -n mindroom-instances svc/mindroom-1 8765:8765
@@ -152,6 +155,10 @@ kubectl logs -n mindroom-staging -l app=platform-frontend -f
 
 # Deploy and smoke-test a real MindRoom instance
 python -m cluster.k8s.kind.smoke_instance
+
+# Smoke-test worker SSH in TAILNET_SSH_SMOKE_CONTEXT (default kind-mindroom).
+# Requires a kind cluster; creates and deletes only its own namespace.
+uv run --no-project --with pyyaml python -m cluster.k8s.kind.smoke_tailnet_ssh_worker
 ```
 
 ## Clean Up
@@ -197,12 +204,12 @@ The installer forwards these variables to the platform chart:
 | `INSTANCE_STORAGE_CLASS_NAME` | `provisioner.instanceStorageClassName` | `standard` |
 | `INSTANCE_MINDROOM_IMAGE` | `provisioner.instanceMindroomImage` | `ghcr.io/mindroom-ai/mindroom:latest` |
 | `INSTANCE_MINDROOM_IMAGE_PULL_POLICY` | `provisioner.instanceMindroomImagePullPolicy` | `IfNotPresent` |
-| `INSTANCE_SYNAPSE_IMAGE` | `provisioner.instanceSynapseImage` | `matrixdotorg/synapse:latest` |
-| `INSTANCE_SYNAPSE_IMAGE_PULL_POLICY` | `provisioner.instanceSynapseImagePullPolicy` | `IfNotPresent` |
+| `INSTANCE_TUWUNEL_IMAGE` | `provisioner.instanceTuwunelImage` | `ghcr.io/mindroom-ai/mindroom-tuwunel:latest` |
+| `INSTANCE_TUWUNEL_IMAGE_PULL_POLICY` | `provisioner.instanceTuwunelImagePullPolicy` | `IfNotPresent` |
 
 Use `SUPABASE_SERVICE_ROLE_KEY`; the kind installer does not read `SUPABASE_SERVICE_KEY`.
 These instance overrides configure future provisioner deployments, not the platform domain or the manual Helm example above.
-The image helper separately accepts `SYNAPSE_IMAGE`; set it to the same image as `INSTANCE_SYNAPSE_IMAGE` when overriding both loading and provisioning.
+The image helper separately accepts `TUWUNEL_IMAGE`; set it to the same image as `INSTANCE_TUWUNEL_IMAGE` when overriding both loading and provisioning.
 Provider keys, Matrix settings, and platform domain/environment values are not forwarded from this environment file; configure those through the relevant Helm chart values in `cluster/k8s/platform/values.yaml` or `cluster/k8s/instance/values.yaml`.
 
 ## Notes

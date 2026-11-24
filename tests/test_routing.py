@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
+import json
 import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
-from unittest.mock import AsyncMock, MagicMock, patch
 
 import nio
 import pytest
@@ -19,45 +19,47 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.entity_resolution import entity_identity_registry, mindroom_user_id
+from mindroom.llm.errors import ProviderError
 from mindroom.matrix.identity import MatrixID
-from mindroom.matrix.users import AgentMatrixUser
-from tests.bot_helpers import make_test_agent_bot
+from mindroom.routing_judgment import ResponderSelection
+from mindroom.tool_system.registry import builtin_tool_registry
 from tests.conftest import (
-    TEST_ACCESS_TOKEN,
-    TEST_PASSWORD,
     bind_runtime_paths,
+    install_model_providers,
     make_visible_message,
     runtime_paths_for,
     test_runtime_paths,
 )
+from tests.fakes.scripted_model import Await, ScriptedModel, answer
 from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
-    from mindroom.bot import AgentBot
-    from mindroom.matrix.client import ResolvedVisibleMessage
+    from collections.abc import Sequence
+
+    from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 
 
 def _runtime_bound_config(config: Config, runtime_root: Path | None = None) -> Config:
     """Return a runtime-bound config for routing tests."""
     runtime_paths = test_runtime_paths(runtime_root or Path(tempfile.mkdtemp()))
-    bound_config = bind_runtime_paths(config, runtime_paths)
-    persist_entity_accounts(bound_config, runtime_paths)
-    return bound_config
+    return bind_runtime_paths(config, runtime_paths)
 
 
 async def suggest_responder_for_message(
     message: str,
     agents: list[MatrixID],
     config: Config,
-    thread_history: list[ResolvedVisibleMessage] | None = None,
-) -> str | None:
-    """Run routing with the test config's bound runtime context."""
+    thread_history: Sequence[ResolvedVisibleMessage] = (),
+) -> ResponderSelection | None:
+    """Run routing for a message in a room's main timeline with the test config's bound runtime context."""
     return await mindroom.routing.suggest_responder_for_message(
         message,
         agents,
         config,
         runtime_paths_for(config),
         thread_history,
+        room_id="!room:localhost",
+        thread_id=None,
     )
 
 
@@ -119,14 +121,6 @@ def entity_name_for_sender(sender_id: str, config: Config) -> str | None:
     return entity_identity_registry(config, runtime_paths_for(config)).current_entity_name_for_user_id(sender_id)
 
 
-def _agent_bot(*args: object, **kwargs: object) -> AgentBot:
-    """Construct an agent bot with the explicit runtime bound to the test config."""
-    config = kwargs["config"]
-    assert isinstance(config, Config)
-    kwargs["runtime_paths"] = runtime_paths_for(config)
-    return make_test_agent_bot(*args, **kwargs)
-
-
 def _agent_description_config() -> Config:
     """Build a deterministic config for agent description tests."""
     return _runtime_bound_config(
@@ -151,32 +145,11 @@ def _agent_description_config() -> Config:
     )
 
 
-def test_teams_public_seam_exports_status_helpers() -> None:
-    """The declared teams seam should export the fallback status helpers it exposes elsewhere."""
-    teams_module = importlib.import_module("mindroom.teams")
-
-    assert "is_cancelled_run_output" in teams_module.__all__
-    assert "is_errored_run_output" in teams_module.__all__
-
-
 def test_flattened_seams_keep_public_exports_at_the_behavior_layer() -> None:
     """Curated seam modules should not freeze low-level runtime or prompt-plumbing helpers as public API."""
     hidden_attrs = {
-        "mindroom.agents": (
-            "create_state_storage",
-            "get_agent_runtime_state_dbs",
-            "build_agent_tool_init_context",
-        ),
-        "mindroom.ai": (
-            "attach_media_to_run_input",
-            "copy_run_input",
-            "cached_agent_run",
-            "get_model_instance",
-            "install_queued_message_notice_hook",
-            "queued_message_signal_context",
-            "scrub_queued_notice_session_context",
-        ),
-        "mindroom.teams": ("PreparedMaterializedTeamExecution",),
+        "mindroom.agents": ("create_state_storage",),
+        "mindroom.ai": ("queued_message_signal_context",),
     }
     for module_name, attrs in hidden_attrs.items():
         module = importlib.import_module(module_name)
@@ -185,8 +158,8 @@ def test_flattened_seams_keep_public_exports_at_the_behavior_layer() -> None:
                 getattr(module, attr)
             assert attr not in getattr(module, "__all__", ())
 
-    model_loading_module = importlib.import_module("mindroom.providers.model_loading")
-    assert callable(model_loading_module.get_model_instance)
+    registry_module = importlib.import_module("mindroom.providers.registry")
+    assert callable(registry_module.build_model_provider)
 
 
 def test_flattened_seams_reject_legacy_delegation_signature_shims() -> None:
@@ -210,11 +183,27 @@ def test_flattened_seams_reject_legacy_delegation_signature_shims() -> None:
         config_get_closure("alpha", visiting=set())
 
 
+def _router_model(suggestion: dict[str, str]) -> ScriptedModel:
+    """Return a router model that answers with one routing suggestion."""
+    return ScriptedModel([answer(json.dumps(suggestion))])
+
+
+def _routing_prompt(model: ScriptedModel) -> str:
+    """Return the user prompt of the router's only request."""
+    [request] = model.requests
+    return request.messages[-1].get_content_string()
+
+
+async def _raise_provider_error() -> None:
+    msg = "Model error"
+    raise ProviderError(msg, provider="Synthetic")
+
+
 class TestAIRouting:
     """Tests for AI routing in multi-agent threads."""
 
     @pytest.mark.asyncio
-    async def test_suggest_responder_for_message_basic(self) -> None:
+    async def test_suggest_responder_for_message_basic(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Test basic agent suggestion functionality."""
         # Create config with the agents we're testing
         config = _runtime_bound_config(
@@ -227,30 +216,20 @@ class TestAIRouting:
             ),
         )
 
-        with patch("mindroom.providers.model_loading.get_model_instance"):
-            # Mock the Agent and response
-            mock_agent = AsyncMock()
-            mock_response = MagicMock()
-            mock_response.content = {
-                "entity_name": "calculator",
-                "reasoning": "User is asking about math calculation",
-            }
-            mock_agent.arun.return_value = mock_response
+        model = _router_model({"entity_name": "calculator", "reasoning": "User is asking about math calculation"})
+        install_model_providers(monkeypatch, {"default": model})
+        agents = [
+            MatrixID(username="mindroom_calculator", domain="localhost"),
+            MatrixID(username="mindroom_general", domain="localhost"),
+        ]
+        result = await suggest_responder_for_message("What is 2 + 2?", agents, config)
 
-            with patch("mindroom.routing.Agent", return_value=mock_agent):
-                # Create MatrixID objects for agents
-                agents = [
-                    MatrixID(username="mindroom_calculator", domain="localhost"),
-                    MatrixID(username="mindroom_general", domain="localhost"),
-                ]
-                result = await suggest_responder_for_message("What is 2 + 2?", agents, config)
-
-                assert result == "calculator"
-                assert "calculator" in mock_agent.arun.call_args[0][0]
-                assert "general" in mock_agent.arun.call_args[0][0]
+        assert result == ResponderSelection("calculator")
+        assert "calculator" in _routing_prompt(model)
+        assert "general" in _routing_prompt(model)
 
     @pytest.mark.asyncio
-    async def test_suggest_responder_uses_router_prompt_override(self) -> None:
+    async def test_suggest_responder_uses_router_prompt_override(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Router selection should use the configured prompt template override."""
         config = _runtime_bound_config(
             Config(
@@ -267,25 +246,20 @@ class TestAIRouting:
             ),
         )
 
-        with patch("mindroom.providers.model_loading.get_model_instance"):
-            mock_agent = AsyncMock()
-            mock_response = MagicMock()
-            mock_response.content = {"entity_name": "general", "reasoning": "Custom route"}
-            mock_agent.arun.return_value = mock_response
+        model = _router_model({"entity_name": "general", "reasoning": "Custom route"})
+        install_model_providers(monkeypatch, {"default": model})
+        agents = [
+            MatrixID(username="mindroom_calculator", domain="localhost"),
+            MatrixID(username="mindroom_general", domain="localhost"),
+        ]
+        result = await suggest_responder_for_message("Hello", agents, config)
 
-            with patch("mindroom.routing.Agent", return_value=mock_agent):
-                agents = [
-                    MatrixID(username="mindroom_calculator", domain="localhost"),
-                    MatrixID(username="mindroom_general", domain="localhost"),
-                ]
-                result = await suggest_responder_for_message("Hello", agents, config)
-
-        assert result == "general"
-        assert mock_agent.arun.call_args.args[0].startswith("CUSTOM ROUTER")
-        assert "Message=Hello" in mock_agent.arun.call_args.args[0]
+        assert result == ResponderSelection("general")
+        assert _routing_prompt(model).startswith("CUSTOM ROUTER")
+        assert "Message=Hello" in _routing_prompt(model)
 
     @pytest.mark.asyncio
-    async def test_suggest_responder_with_thread_context(self) -> None:
+    async def test_suggest_responder_with_thread_context(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Test agent suggestion with thread history."""
         # Create config with the agents we're testing
         config = _runtime_bound_config(
@@ -303,37 +277,28 @@ class TestAIRouting:
             _message("@mindroom_finance:localhost", "I can help with that"),
         ]
 
-        with patch("mindroom.providers.model_loading.get_model_instance"):
-            mock_agent = AsyncMock()
-            mock_response = MagicMock()
-            mock_response.content = {
-                "entity_name": "finance",
-                "reasoning": "Continuing financial discussion",
-            }
-            mock_agent.arun.return_value = mock_response
+        model = _router_model({"entity_name": "finance", "reasoning": "Continuing financial discussion"})
+        install_model_providers(monkeypatch, {"default": model})
+        agents = [
+            MatrixID(username="mindroom_calculator", domain="localhost"),
+            MatrixID(username="mindroom_finance", domain="localhost"),
+            MatrixID(username="mindroom_general", domain="localhost"),
+        ]
+        result = await suggest_responder_for_message(
+            "How do I calculate deductions?",
+            agents,
+            config,
+            thread_context,
+        )
 
-            with patch("mindroom.routing.Agent", return_value=mock_agent):
-                # Create MatrixID objects for agents
-                agents = [
-                    MatrixID(username="mindroom_calculator", domain="localhost"),
-                    MatrixID(username="mindroom_finance", domain="localhost"),
-                    MatrixID(username="mindroom_general", domain="localhost"),
-                ]
-                result = await suggest_responder_for_message(
-                    "How do I calculate deductions?",
-                    agents,
-                    config,
-                    thread_context,
-                )
-
-                assert result == "finance"
-                # Check that context was included in prompt
-                prompt = mock_agent.arun.call_args[0][0]
-                assert "taxes" in prompt
-                assert "Previous messages:" in prompt
+        assert result == ResponderSelection("finance")
+        # Check that context was included in prompt
+        prompt = _routing_prompt(model)
+        assert "taxes" in prompt
+        assert "Previous messages:" in prompt
 
     @pytest.mark.asyncio
-    async def test_suggest_responder_unavailable_returns_none(self) -> None:
+    async def test_suggest_responder_unavailable_returns_none(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Test that suggesting unavailable agent returns None."""
         # Create config with the agents we're testing
         config = _runtime_bound_config(
@@ -346,32 +311,23 @@ class TestAIRouting:
             ),
         )
 
-        with patch("mindroom.providers.model_loading.get_model_instance"):
-            mock_agent = AsyncMock()
-            mock_response = MagicMock()
-            # AI suggests an agent not in available list
-            mock_response.content = {
-                "entity_name": "code",  # Not available
-                "reasoning": "User asking about programming",
-            }
-            mock_agent.arun.return_value = mock_response
+        # The model suggests an agent that is not available.
+        model = _router_model({"entity_name": "code", "reasoning": "User asking about programming"})
+        install_model_providers(monkeypatch, {"default": model})
+        agents = [
+            MatrixID(username="mindroom_calculator", domain="localhost"),
+            MatrixID(username="mindroom_general", domain="localhost"),
+        ]
+        result = await suggest_responder_for_message(
+            "How do I write a Python function?",
+            agents,
+            config,
+        )
 
-            with patch("mindroom.routing.Agent", return_value=mock_agent):
-                # Create MatrixID objects for agents
-                agents = [
-                    MatrixID(username="mindroom_calculator", domain="localhost"),
-                    MatrixID(username="mindroom_general", domain="localhost"),
-                ]  # code not available
-                result = await suggest_responder_for_message(
-                    "How do I write a Python function?",
-                    agents,
-                    config,
-                )
-                # Should return None when agent is not available
-                assert result is None
+        assert result is None
 
     @pytest.mark.asyncio
-    async def test_suggest_responder_error_handling(self) -> None:
+    async def test_suggest_responder_error_handling(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Test error handling in agent suggestion."""
         # Create config with the agents we're testing
         config = _runtime_bound_config(
@@ -383,54 +339,13 @@ class TestAIRouting:
             ),
         )
 
-        with patch("mindroom.providers.model_loading.get_model_instance") as mock_model:
-            mock_model.side_effect = Exception("Model error")
+        failing = ScriptedModel([[Await(_raise_provider_error)]])
+        install_model_providers(monkeypatch, {"default": failing})
+        agents = [MatrixID(username="mindroom_general", domain="localhost")]
+        result = await suggest_responder_for_message("Test message", agents, config)
 
-            agents = [MatrixID(username="mindroom_general", domain="localhost")]
-            result = await suggest_responder_for_message("Test message", agents, config)
-
-            assert result is None
-
-    @pytest.mark.asyncio
-    async def test_only_router_agent_routes(self, tmp_path: Path) -> None:
-        """Test that only the router agent handles routing."""
-        # Create general agent (not router)
-        agent = AgentMatrixUser(
-            agent_name="general",
-            user_id="@mindroom_general:localhost",
-            display_name="GeneralAgent",
-            password=TEST_PASSWORD,
-            access_token=TEST_ACCESS_TOKEN,
-        )
-
-        config = _runtime_bound_config(Config(router=RouterConfig(model="default")))
-
-        bot = _agent_bot(agent, tmp_path, config=config)
-
-        mock_room = MagicMock()
-        mock_room.users = MagicMock()
-        mock_room.users.keys.return_value = [
-            "@mindroom_calculator:localhost",
-            "@mindroom_general:localhost",
-            "@user:localhost",
-        ]
-
-        mock_event = MagicMock()
-        mock_event.body = "Test message"
-
-        with patch("mindroom.router_relay.suggest_responder_for_message") as mock_suggest:
-            # Should raise AssertionError since general is not the router agent
-            with pytest.raises(AssertionError):
-                await bot._turn_controller._execute_router_relay(
-                    mock_room,
-                    mock_event,
-                    [],
-                    None,
-                    requester_user_id="@user:localhost",
-                )
-
-            # Should not call routing since it failed the assertion
-            mock_suggest.assert_not_called()
+        assert result is None
+        assert len(failing.requests) == 1
 
 
 class TestThreadUtils:
@@ -441,8 +356,8 @@ class TestThreadUtils:
         self.config = _runtime_bound_config(
             Config(
                 agents={
-                    "calculator": AgentConfig(display_name="Calculator", rooms=["#test:example.org"]),
-                    "general": AgentConfig(display_name="General", rooms=["#test:example.org"]),
+                    "calculator": AgentConfig(display_name="Calculator", rooms=["!test:example.org"]),
+                    "general": AgentConfig(display_name="General", rooms=["!test:example.org"]),
                 },
                 teams={},
                 room_models={},
@@ -558,8 +473,8 @@ class TestThreadUtils:
         config = _runtime_bound_config(
             Config(
                 agents={
-                    "calculator": AgentConfig(display_name="Calculator", rooms=["#test:example.org"]),
-                    "general": AgentConfig(display_name="General", rooms=["#test:example.org"]),
+                    "calculator": AgentConfig(display_name="Calculator", rooms=["!test:example.org"]),
+                    "general": AgentConfig(display_name="General", rooms=["!test:example.org"]),
                 },
                 models={"default": ModelConfig(provider="ollama", id="test-model")},
                 bot_accounts=["@telegram:localhost"],
@@ -584,7 +499,7 @@ class TestThreadUtils:
         config = _runtime_bound_config(
             Config(
                 agents={
-                    "calculator": AgentConfig(display_name="Calculator", rooms=["#test:example.org"]),
+                    "calculator": AgentConfig(display_name="Calculator", rooms=["!test:example.org"]),
                 },
                 models={"default": ModelConfig(provider="ollama", id="test-model")},
                 bot_accounts=["@telegram:localhost"],
@@ -609,7 +524,7 @@ class TestThreadUtils:
         config = _runtime_bound_config(
             Config(
                 agents={
-                    "calculator": AgentConfig(display_name="Calculator", rooms=["#test:example.org"]),
+                    "calculator": AgentConfig(display_name="Calculator", rooms=["!test:example.org"]),
                 },
                 models={"default": ModelConfig(provider="ollama", id="test-model")},
                 bot_accounts=["@telegram:localhost"],
@@ -638,8 +553,8 @@ class TestBridgeMentionFallback:
         self.config = _runtime_bound_config(
             Config(
                 agents={
-                    "calculator": AgentConfig(display_name="Calculator", rooms=["#test:example.org"]),
-                    "general": AgentConfig(display_name="General", rooms=["#test:example.org"]),
+                    "calculator": AgentConfig(display_name="Calculator", rooms=["!test:example.org"]),
+                    "general": AgentConfig(display_name="General", rooms=["!test:example.org"]),
                 },
                 models={"default": ModelConfig(provider="ollama", id="test-model")},
             ),
@@ -786,7 +701,7 @@ class TestAgentDescription:
     def test_describe_agent_with_tools(self) -> None:
         """Test describing an agent with tools."""
         config = _agent_description_config()
-        description = describe_agent("calculator", config)
+        description = describe_agent("calculator", config, builtin_tool_registry())
 
         assert "calculator" in description
         assert "Solve mathematical problems" in description
@@ -797,7 +712,7 @@ class TestAgentDescription:
         """Test describing an agent without tools."""
         config = _agent_description_config()
         config.defaults.tools = []
-        description = describe_agent("general", config)
+        description = describe_agent("general", config, builtin_tool_registry())
 
         assert "general" in description
         assert "general-purpose assistant" in description
@@ -810,7 +725,7 @@ class TestAgentDescription:
         config.defaults.tools = ["scheduler"]
         config.agents["general"].tools = []
 
-        description = describe_agent("general", config)
+        description = describe_agent("general", config, builtin_tool_registry())
 
         assert "Tools: scheduler" in description
 
@@ -821,13 +736,13 @@ class TestAgentDescription:
         config.agents["general"].tools = []
         config.agents["general"].include_default_tools = False
 
-        description = describe_agent("general", config)
+        description = describe_agent("general", config, builtin_tool_registry())
 
         assert "Tools:" not in description
 
     def test_describe_unknown_agent(self) -> None:
         """Test describing an unknown agent."""
         config = _agent_description_config()
-        description = describe_agent("nonexistent", config)
+        description = describe_agent("nonexistent", config, builtin_tool_registry())
 
         assert description == "nonexistent: Unknown agent or team"

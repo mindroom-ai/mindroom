@@ -17,13 +17,16 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Never, cast
 from unittest.mock import patch
+from urllib.parse import urlsplit
 
 import pytest
 import requests
 from agno.tools import github as agno_github_module
 from agno.utils import log as agno_log_module
-from github import BadCredentialsException, Github, GithubException
+from github import Auth, BadCredentialsException, Github, GithubException
+from github.GithubRetry import GithubRetry
 from github.Requester import Requester
+from requests.adapters import HTTPAdapter
 from urllib3.response import HTTPResponse
 
 from mindroom.constants import RuntimePaths, resolve_runtime_paths
@@ -35,12 +38,15 @@ from mindroom.credentials.manager import (
 from mindroom.custom_tools import github as mindroom_github_module
 from mindroom.custom_tools.agno_compat_github_errors import _PROVIDER_DETAIL_LOG_PREFIXES
 from mindroom.custom_tools.github import GithubTools
+from mindroom.oauth import credential_lifecycle
 from mindroom.oauth.credential_lifecycle import OAuthCredentialContext, load_oauth_credentials_snapshot_sync
 from mindroom.oauth.credential_store import _oauth_credential_database_path
 from mindroom.oauth.github import github_oauth_provider
 from mindroom.oauth.providers import OAuthProviderError, OAuthRefreshRejectedError
 from mindroom.tool_system.metadata import get_tool_by_name
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target, tool_execution_identity
+from mindroom.tool_system.registry import builtin_tool_registry
+from mindroom.tool_system.runtime_context import detached_tool_scope
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
 from tests.oauth_test_utils import corrupt_oauth_credential_payload, publish_oauth_credentials
 
 if TYPE_CHECKING:
@@ -234,7 +240,7 @@ class _CapturedNestedProviderFailureRepository(_FakeRepositoryStats):
 
     def get_issues(self, *, state: str) -> list[object]:
         assert state == "open"
-        raise mindroom_github_module._GithubProviderFailureRequester.createException(
+        raise mindroom_github_module._MindRoomGithubRequester.createException(
             self.status_code,
             {},
             {"message": self.sentinel},
@@ -365,15 +371,19 @@ class _RevokedTokenGithub:
 
 
 class _ProviderControlledFailureGithub:
-    def __init__(self, status_code: int, sentinel: str) -> None:
+    """Fail with GitHub's message plus a sentinel in fields that must never reach the agent."""
+
+    def __init__(self, status_code: int, sentinel: str, github_message: str = "Server Error") -> None:
         self.status_code = status_code
         self.sentinel = sentinel
+        self.github_message = github_message
         self.closed = False
 
     def _raise_provider_error(self) -> Never:
         raise GithubException(
             self.status_code,
-            {"message": self.sentinel},
+            {"message": self.github_message, "documentation_url": f"https://docs.example.org/{self.sentinel}"},
+            {"x-github-request-id": self.sentinel},
             message=self.sentinel,
         )
 
@@ -401,6 +411,23 @@ class _ProviderControlledFailureGithub:
 
     def close(self) -> None:
         self.closed = True
+
+
+class _RejectedPullRequestGithub:
+    """Reject pull request creation with a GitHub validation error response."""
+
+    def __init__(self, data: dict[str, object], headers: dict[str, str] | None = None) -> None:
+        self.data = data
+        self.headers = headers
+
+    def get_repo(self, _repo_name: str) -> _RejectedPullRequestGithub:
+        return self
+
+    def create_pull(self, **_kwargs: object) -> Never:
+        raise GithubException(422, self.data, self.headers)
+
+    def close(self) -> None:
+        pass
 
 
 class _RetryProviderFailureGithub:
@@ -597,11 +624,43 @@ def test_requesters_cannot_use_each_others_github_oauth_credentials(tmp_path: Pa
         worker_target=_oauth_target("@alice:example.test"),
     )
     alice = _build_tool(runtime_paths, manager, alice_target)
-    alice.g = _FakeGithub()
+    alice.authenticate = lambda: _FakeGithub()
     bob = _build_tool(runtime_paths, manager, bob_target)
 
     assert json.loads(alice.list_repositories()) == ["example/project"]
     assert json.loads(bob.list_repositories())["oauth_connection_required"] is True
+
+
+def test_github_tool_reads_stored_token_only_in_a_calling_thread(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every reply builds its toolkits, so building one reads no store; the thread that calls it authenticates."""
+    runtime_paths = _runtime_paths(tmp_path)
+    manager = _save_client_config(runtime_paths)
+    _save_scoped_oauth_credentials(
+        "github_oauth",
+        _oauth_credentials("alice-access"),
+        credentials_manager=manager,
+        worker_target=_oauth_target("@alice:example.test"),
+    )
+
+    def fail_store_access() -> None:
+        raise AssertionError
+
+    with monkeypatch.context() as no_store:
+        no_store.setattr(credential_lifecycle, "_get_oauth_transaction_loop", fail_store_access)
+        tool = _build_tool(runtime_paths, manager, _worker_target("@alice:example.test"))
+    tool.authenticate = _FakeGithub
+
+    def call() -> tuple[object, str | None]:
+        return json.loads(tool.list_repositories()), tool.access_token
+
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        repositories, access_token = executor.submit(call).result()
+
+    assert repositories == ["example/project"]
+    assert access_token == "alice-access"  # noqa: S105
 
 
 def test_github_workers_keep_token_and_client_ownership_thread_local(tmp_path: Path) -> None:
@@ -681,7 +740,7 @@ def test_active_requester_overrides_tool_construction_identity(tmp_path: Path) -
     tool = _build_tool(runtime_paths, manager, alice_target)
     tool.g = _FakeGithub()
 
-    with tool_execution_identity(bob_target.execution_identity):
+    with detached_tool_scope(bob_target.execution_identity):
         result = json.loads(tool.list_repositories())
 
     assert result["oauth_connection_required"] is True
@@ -705,9 +764,9 @@ def test_github_oauth_is_requester_scoped_when_agent_runtime_is_not(
         worker_target=alice_oauth_target,
     )
     alice = _build_tool(runtime_paths, manager, alice_target)
-    alice.g = _FakeGithub()
+    alice.authenticate = lambda: _FakeGithub()
     bob = _build_tool(runtime_paths, manager, bob_target)
-    bob.g = _FakeGithub()
+    bob.authenticate = lambda: _FakeGithub()
 
     assert json.loads(alice.list_repositories()) == ["example/project"]
     assert json.loads(bob.list_repositories())["oauth_connection_required"] is True
@@ -754,7 +813,13 @@ def test_explicit_access_token_takes_precedence_over_scoped_oauth(tmp_path: Path
 def test_environment_access_token_remains_an_explicit_fallback(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths(tmp_path, {"GITHUB_ACCESS_TOKEN": ENV_ACCESS_TOKEN})
     manager = _save_client_config(runtime_paths)
-    tool = _build_tool(runtime_paths, manager, _worker_target("@alice:example.test"))
+    tool = get_tool_by_name(
+        "github",
+        runtime_paths,
+        tools=builtin_tool_registry(),
+        credentials_manager=manager,
+        worker_target=_worker_target("@alice:example.test"),
+    )
     tool.g = _FakeGithub()
 
     assert json.loads(tool.list_repositories()) == ["example/project"]
@@ -790,7 +855,13 @@ def test_worker_github_config_cannot_redirect_primary_token(
         return response
 
     with patch.object(requests.Session, "send", autospec=True, side_effect=send):
-        tool = get_tool_by_name("github", runtime_paths, credentials_manager=manager, worker_target=target)
+        tool = get_tool_by_name(
+            "github",
+            runtime_paths,
+            credentials_manager=manager,
+            worker_target=target,
+            tools=builtin_tool_registry(),
+        )
         assert isinstance(tool, GithubTools)
         try:
             assert json.loads(tool.list_repositories()) == []
@@ -824,8 +895,16 @@ def test_whitespace_explicit_tokens_fall_back_to_scoped_oauth(
         worker_target=_oauth_target("@alice:example.test"),
     )
 
-    tool = _build_tool(runtime_paths, manager, target, access_token=access_token)
-    tool.g = _FakeGithub()
+    tool = get_tool_by_name(
+        "github",
+        runtime_paths,
+        tools=builtin_tool_registry(),
+        credentials_manager=manager,
+        credential_overrides={"access_token": access_token} if access_token is not None else None,
+        worker_target=target,
+    )
+    assert isinstance(tool, GithubTools)
+    tool.authenticate = lambda: _FakeGithub()
 
     assert json.loads(tool.list_repositories()) == ["example/project"]
     assert tool.access_token == "oauth-access"  # noqa: S105
@@ -877,18 +956,99 @@ def test_base_url_is_forwarded_to_pygithub(tmp_path: Path) -> None:
     assert captured["base_url"] == "https://github.example.test/api/v3"
 
 
-def test_pygithub_language_payload_remains_numeric_for_agno_stats() -> None:
-    client = Github(lazy=True)
+_FAKE_GITHUB_API = "https://api.github.com"
+_FAKE_REPOSITORY_URL = f"{_FAKE_GITHUB_API}/repos/example/project"
+
+
+def _fake_github_http_response(request: requests.PreparedRequest) -> requests.Response:
+    """Answer the repository endpoints the language tools read like GitHub's REST API."""
+    path = urlsplit(request.url).path
+    bodies: dict[str, object] = {
+        "/repos/example/project": {
+            "id": 1,
+            "name": "project",
+            "full_name": "example/project",
+            "owner": {"login": "example", "url": f"{_FAKE_GITHUB_API}/users/example"},
+            "url": _FAKE_REPOSITORY_URL,
+            "html_url": "https://github.com/example/project",
+            "description": None,
+            "homepage": None,
+            "language": "Python",
+            "created_at": "2026-01-01T00:00:00Z",
+            "updated_at": "2026-01-02T00:00:00Z",
+            "pushed_at": "2026-01-03T00:00:00Z",
+            "size": 12,
+            "stargazers_count": 4,
+            "watchers_count": 4,
+            "forks_count": 1,
+            "open_issues_count": 0,
+            "default_branch": "main",
+            "license": None,
+            "private": False,
+            "archived": False,
+        },
+        "/repos/example/project/topics": {"names": ["example"]},
+        "/repos/example/project/languages": {"Python": 123, "Shell": 7},
+    }
+    response = requests.Response()
+    response.status_code = 200
+    response.headers["Content-Type"] = "application/json"
+    response.url = request.url
+    response.request = request
+    response._content = json.dumps(bodies.get(path, [])).encode()
+    return response
+
+
+def test_language_tools_drop_pygithub_injected_url_over_http(tmp_path: Path) -> None:
+    """PyGithub adds the GET URL to the languages map; Agno's tools must still see only byte counts."""
+    runtime_paths = _runtime_paths(tmp_path)
+    manager = _save_client_config(runtime_paths)
+    tool = _build_tool(
+        runtime_paths,
+        manager,
+        _worker_target("@alice:example.test"),
+        access_token=MANUAL_ACCESS_TOKEN,
+    )
+    requested_paths: list[str] = []
+
+    def send(_adapter: object, request: requests.PreparedRequest, **_kwargs: object) -> requests.Response:
+        requested_paths.append(urlsplit(request.url).path)
+        return _fake_github_http_response(request)
+
+    with patch.object(HTTPAdapter, "send", send):
+        languages = json.loads(tool.get_repository_languages("example/project"))
+        stats = json.loads(tool.get_repository_with_stats("example/project"))
+        raw_client = Github(auth=Auth.Token(MANUAL_ACCESS_TOKEN))
+        try:
+            raw_languages = raw_client.get_repo("example/project").get_languages()
+        finally:
+            raw_client.close()
+
+    assert raw_languages == {"Python": 123, "Shell": 7, "url": f"{_FAKE_REPOSITORY_URL}/languages"}
+    assert languages == {"Python": 123, "Shell": 7}
+    assert stats["languages"] == {"Python": 123, "Shell": 7}
+    assert stats["topics"] == ["example"]
+    assert stats["stargazers_count"] == 4
+    assert "/repos/example/project/languages" in requested_paths
+
+
+def test_provider_failure_capture_keeps_github_retry_settings() -> None:
+    """Swapping in the capturing retry must keep PyGithub's rate-limit wait settings."""
+    client = Github(
+        auth=Auth.Token(MANUAL_ACCESS_TOKEN),
+        retry=GithubRetry(secondary_rate_wait=7, max_rate_limit_wait=30, total=3),
+    )
     try:
-        repo = client.get_repo("example/project", lazy=True)
-        with patch.object(
-            repo._requester,
-            "requestJson",
-            return_value=(200, {}, '{"Python": 123}'),
-        ):
-            assert repo.get_languages() == {"Python": 123}
+        mindroom_github_module._install_github_provider_failure_capture(client)
+        requester = client._Github__requester
+        retry = requester.kwargs["retry"]
     finally:
         client.close()
+
+    assert isinstance(requester, mindroom_github_module._MindRoomGithubRequester)
+    assert isinstance(retry, mindroom_github_module._GithubProviderFailureRetry)
+    assert (retry.secondary_rate_wait, retry.max_rate_limit_wait, retry.total) == (7, 30, 3)
+    assert retry.new(total=2).max_rate_limit_wait == 30
 
 
 def test_repository_stats_consumes_numeric_language_payload(tmp_path: Path) -> None:
@@ -966,7 +1126,7 @@ def test_github_captured_nested_failure_preserves_partial_result(
     )
     tool = _build_tool(runtime_paths, manager, target)
     sentinel = f"provider-controlled-nested-secret-{status_code}"
-    tool.g = _CapturedNestedProviderFailureGithub(status_code, sentinel)
+    tool.authenticate = lambda: _CapturedNestedProviderFailureGithub(status_code, sentinel)
 
     result = tool.get_repository_with_stats("example/project")
 
@@ -1212,7 +1372,7 @@ def test_oauth_refresh_works_when_agno_calls_sync_tool_on_running_loop(tmp_path:
         worker_target=_oauth_target("@alice:example.test"),
     )
     tool = _build_tool(runtime_paths, manager, target)
-    tool.g = _FakeGithub()
+    tool.authenticate = lambda: _FakeGithub()
 
     async def call_sync_tool_entrypoint() -> str:
         return tool.list_repositories()
@@ -1338,11 +1498,12 @@ def test_revoked_unexpired_oauth_token_returns_connection_payload(tmp_path: Path
         "get_file_content",
     ],
 )
-def test_github_provider_failures_do_not_expose_provider_controlled_text(
+def test_github_provider_failures_relay_only_github_message_to_agent(
     tmp_path: Path,
     status_code: int,
     operation: str,
 ) -> None:
+    """GitHub's message reaches the agent, but never the logs, and headers or links reach neither."""
     runtime_paths = _runtime_paths(tmp_path)
     manager = _save_client_config(runtime_paths)
     target = _worker_target("@alice:example.test")
@@ -1354,7 +1515,8 @@ def test_github_provider_failures_do_not_expose_provider_controlled_text(
     )
     tool = _build_tool(runtime_paths, manager, target)
     sentinel = f"provider-controlled-secret-{operation}-{status_code}"
-    tool.g = _ProviderControlledFailureGithub(status_code, sentinel)
+    github_message = f"GitHub explanation for {operation}"
+    tool.authenticate = lambda: _ProviderControlledFailureGithub(status_code, sentinel, github_message)
     mindroom_logger = _CapturingLogger()
     agno_log_output = io.StringIO()
     agno_handler = logging.StreamHandler(agno_log_output)
@@ -1383,20 +1545,156 @@ def test_github_provider_failures_do_not_expose_provider_controlled_text(
     if status_code == 401:
         assert payload["oauth_connection_required"] is True
         assert payload["reason"] == "access_rejected"
+        assert github_message not in result
     else:
         assert set(payload) == {"error"}
         assert payload["error"].startswith(f"GitHub request failed with HTTP {status_code}")
+        assert payload["error"].endswith(f". GitHub said: {github_message}")
     captured_logs = (
         agno_log_output.getvalue(),
         repr(mindroom_logger.warning_calls),
         repr(mindroom_logger.exception_calls),
     )
-    assert all(sentinel not in output for output in captured_logs)
+    assert all(sentinel not in output and github_message not in output for output in captured_logs)
     assert sentinel not in result
-    assert any(kwargs.get("status_code") == status_code for _event, kwargs in mindroom_logger.warning_calls)
+    assert any(
+        kwargs.get("status_code") == status_code and kwargs.get("tool_name") == operation
+        for _event, kwargs in mindroom_logger.warning_calls
+    )
+
+
+def _create_rejected_pull_request(
+    tmp_path: Path,
+    github: _RejectedPullRequestGithub,
+) -> tuple[str, _CapturingLogger, str]:
+    """Run create_pull_request through the wrapped tool and return its result and both log streams."""
+    runtime_paths = _runtime_paths(tmp_path)
+    manager = _save_client_config(runtime_paths)
+    tool = _build_tool(
+        runtime_paths,
+        manager,
+        _worker_target("@alice:example.test"),
+        access_token=MANUAL_ACCESS_TOKEN,
+    )
+    tool.g = github
+    mindroom_logger = _CapturingLogger()
+    agno_log_output = io.StringIO()
+    agno_handler = logging.StreamHandler(agno_log_output)
+    agno_handler.setFormatter(logging.Formatter("%(message)s"))
+    agno_github_module.logger.addHandler(agno_handler)
+
+    try:
+        with patch("mindroom.custom_tools.github.logger", mindroom_logger):
+            result = tool.create_pull_request("example/project", "Add notes", "Body", "feature", "main")
+    finally:
+        agno_github_module.logger.removeHandler(agno_handler)
+        agno_handler.close()
+    return result, mindroom_logger, agno_log_output.getvalue()
+
+
+def test_github_validation_failure_tells_agent_why_github_rejected_the_request(tmp_path: Path) -> None:
+    """A bare 422 cannot tell an existing pull request from a bad branch, so GitHub's reason must reach the agent."""
+    header_sentinel = "response-header-must-not-reach-agent"
+    github = _RejectedPullRequestGithub(
+        {
+            "message": "Validation Failed",
+            "errors": [
+                {
+                    "resource": "PullRequest",
+                    "code": "custom",
+                    "message": "A pull request already exists for example:feature.",
+                },
+                {"resource": "PullRequest", "field": "base", "code": "invalid"},
+            ],
+            "documentation_url": "https://docs.github.com/rest/pulls/pulls#create-a-pull-request",
+        },
+        {"x-github-request-id": header_sentinel},
+    )
+
+    result, mindroom_logger, agno_log_text = _create_rejected_pull_request(tmp_path, github)
+
+    assert json.loads(result) == {
+        "error": "GitHub request failed with HTTP 422. GitHub said: Validation Failed; "
+        "A pull request already exists for example:feature. (code: custom); field: base, code: invalid",
+    }
+    assert header_sentinel not in result
+    assert "docs.github.com" not in result
+    assert mindroom_logger.warning_calls == [
+        (
+            "github_tool_call_failed",
+            {
+                "provider_id": "github",
+                "tool_name": "create_pull_request",
+                "error_type": "GithubException",
+                "status_code": 422,
+            },
+        ),
+    ]
+    assert "operation=create_pull_request" in agno_log_text
+    assert "already exists" not in agno_log_text
+
+
+_FAKE_GITHUB_TOKEN = "ghp_" + "a1B2c3D4" * 5
+_FAKE_URL_PASSWORD = "hunter2-" + "Zq9" * 6
+
+
+@pytest.mark.parametrize(
+    ("data", "truncated"),
+    [
+        pytest.param(
+            {
+                "message": f"GitHub explanation: token {_FAKE_GITHUB_TOKEN} was rejected",
+                "errors": [
+                    {
+                        "code": "custom",
+                        "message": f"Push to https://alice:{_FAKE_URL_PASSWORD}@git.example.org/example/project.git failed",
+                    },
+                ],
+            },
+            False,
+            id="credentials",
+        ),
+        pytest.param(
+            {
+                "message": "GitHub explanation\nsecond line\r\n\tthird line",
+                "errors": [{"code": "custom", "message": "first entry line\n\nsecond entry line"}],
+            },
+            False,
+            id="multiline",
+        ),
+        pytest.param(
+            # The token starts before the 500-character cap and ends after it.
+            {"message": "GitHub explanation " + "word " * 92 + _FAKE_GITHUB_TOKEN + " " + "tail " * 60},
+            True,
+            id="credential-straddling-cap",
+        ),
+    ],
+)
+def test_github_provider_detail_is_redacted_single_line_and_bounded(
+    tmp_path: Path,
+    data: dict[str, object],
+    truncated: bool,
+) -> None:
+    """GitHub's text reaches the agent only redacted, on one line, within 500 characters, and never in logs."""
+    result, mindroom_logger, agno_log_text = _create_rejected_pull_request(tmp_path, _RejectedPullRequestGithub(data))
+
+    status_text, detail = json.loads(result)["error"].split(". GitHub said: ", 1)
+    assert status_text == "GitHub request failed with HTTP 422"
+    assert detail.startswith("GitHub explanation")
+    assert len(detail) <= 500
+    assert not any(character in detail for character in "\r\n\t")
+    assert detail.endswith("... [truncated]") is truncated
+    for secret in (_FAKE_GITHUB_TOKEN, _FAKE_URL_PASSWORD):
+        assert secret[:12] not in result
+    process_logs = (agno_log_text, repr(mindroom_logger.warning_calls), repr(mindroom_logger.exception_calls))
+    assert all("GitHub explanation" not in output for output in process_logs)
+    assert all(
+        secret[:12] not in output for output in process_logs for secret in (_FAKE_GITHUB_TOKEN, _FAKE_URL_PASSWORD)
+    )
 
 
 def test_github_provider_message_cannot_spoof_error_status(tmp_path: Path) -> None:
+    """GitHub's text follows MindRoom's own status and never triggers OAuth recovery."""
     runtime_paths = _runtime_paths(tmp_path)
     manager = _save_client_config(runtime_paths)
     target = _worker_target("@alice:example.test")
@@ -1407,13 +1705,16 @@ def test_github_provider_message_cannot_spoof_error_status(tmp_path: Path) -> No
         worker_target=_oauth_target("@alice:example.test"),
     )
     tool = _build_tool(runtime_paths, manager, target)
-    sentinel = "provider-controlled-secret: 401 null"
-    tool.g = _ProviderControlledFailureGithub(500, sentinel)
+    sentinel = "provider-controlled-secret-for-spoofing"
+    tool.authenticate = lambda: _ProviderControlledFailureGithub(500, sentinel, "Bad credentials: 401 null")
 
     result = tool.list_repositories()
 
-    assert json.loads(result) == {"error": "GitHub request failed with HTTP 500"}
+    assert json.loads(result) == {
+        "error": "GitHub request failed with HTTP 500. GitHub said: Bad credentials: 401 null",
+    }
     assert sentinel not in result
+    assert tool.access_token == "managed-access"  # noqa: S105
 
 
 @pytest.mark.parametrize(
@@ -1422,13 +1723,13 @@ def test_github_provider_message_cannot_spoof_error_status(tmp_path: Path) -> No
         (
             404,
             "GitHub request failed with HTTP 404: the requested repository, ref, path, issue, or other resource "
-            "does not exist, or this GitHub connection cannot access it",
+            "does not exist, or this GitHub connection cannot access it. GitHub said: Not Found",
         ),
-        (418, "GitHub request failed with HTTP 418"),
-        (600, "GitHub request failed"),
+        (418, "GitHub request failed with HTTP 418. GitHub said: Not Found"),
+        (600, "GitHub request failed. GitHub said: Not Found"),
     ],
 )
-def test_github_provider_failure_reports_status_without_provider_text(
+def test_github_provider_failure_reports_status_and_github_message(
     tmp_path: Path,
     status_code: int,
     expected_error: str,
@@ -1445,7 +1746,7 @@ def test_github_provider_failure_reports_status_without_provider_text(
     )
     tool = _build_tool(runtime_paths, manager, target)
     sentinel = "provider-controlled-secret-for-status"
-    tool.g = _ProviderControlledFailureGithub(status_code, sentinel)
+    tool.authenticate = lambda: _ProviderControlledFailureGithub(status_code, sentinel, "Not Found")
 
     wrapped_result = tool.get_file_content("example/project", "src/notes.txt", ref="feature/notes")
     owned_result = tool.edit_issue("example/project", 7, title="Updated")
@@ -1476,14 +1777,18 @@ def test_github_provider_failure_stays_sanitized_when_upstream_logging_is_disabl
         with patch.object(
             Requester,
             "requestJson",
-            return_value=(500, {}, json.dumps({"message": sentinel})),
+            return_value=(
+                500,
+                {"x-github-request-id": sentinel},
+                json.dumps({"message": "Server Error", "documentation_url": f"https://docs.example.org/{sentinel}"}),
+            ),
         ):
             tool.g = tool.authenticate()
             result = tool.list_repositories()
     finally:
         agno_github_module.logger.disabled = previous_disabled
 
-    assert json.loads(result) == {"error": "GitHub request failed with HTTP 500"}
+    assert json.loads(result) == {"error": "GitHub request failed with HTTP 500. GitHub said: Server Error"}
     assert sentinel not in result
 
 
@@ -1506,7 +1811,7 @@ def test_github_retry_failure_stays_sanitized_when_upstream_logging_is_disabled(
     retry = cast("Retry", client._Github__requester.kwargs["retry"])
     client.close()
     sentinel = "provider-controlled-retry-secret-with-logging-disabled"
-    tool.g = _RetryProviderFailureGithub(retry, sentinel)
+    tool.authenticate = lambda: _RetryProviderFailureGithub(retry, sentinel)
     previous_disabled = agno_github_module.logger.disabled
     agno_github_module.logger.disabled = True
 
@@ -1546,7 +1851,7 @@ def test_github_wrapper_preserves_local_validation_error(tmp_path: Path) -> None
         worker_target=_oauth_target("@alice:example.test"),
     )
     tool = _build_tool(runtime_paths, manager, target)
-    tool.g = _ValidationGithub()
+    tool.authenticate = lambda: _ValidationGithub()
 
     result = tool.set_default_branch("example/project", "missing")
 
@@ -1588,9 +1893,6 @@ def test_revoked_github_token_requires_reconnect_when_upstream_logging_is_disabl
 
 
 def test_wrapper_preserves_all_registered_github_function_names(tmp_path: Path) -> None:
-    from mindroom import tools as _mindroom_tools  # noqa: F401, PLC0415
-    from mindroom.tool_system.catalog import TOOL_METADATA  # noqa: PLC0415
-
     runtime_paths = _runtime_paths(tmp_path)
     manager = _save_client_config(runtime_paths)
     tool = _build_tool(
@@ -1600,4 +1902,4 @@ def test_wrapper_preserves_all_registered_github_function_names(tmp_path: Path) 
         access_token=MANUAL_ACCESS_TOKEN,
     )
 
-    assert set(tool.functions) == set(TOOL_METADATA["github"].function_names)
+    assert set(tool.functions) == set(builtin_tool_registry().entries["github"].function_names)

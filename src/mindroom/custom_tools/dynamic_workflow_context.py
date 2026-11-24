@@ -3,45 +3,22 @@
 from __future__ import annotations
 
 import hashlib
+from typing import TYPE_CHECKING
 
+from mindroom.dynamic_workflows.spec import DynamicWorkflowError
 from mindroom.dynamic_workflows.store import DynamicWorkflowRun, DynamicWorkflowStore
-from mindroom.dynamic_workflows.validation import DynamicWorkflowError
 from mindroom.runtime_resolution import resolve_agent_execution
-from mindroom.tool_system.runtime_context import ToolRuntimeContext, build_execution_identity_from_runtime_context
+
+if TYPE_CHECKING:
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 
-def dynamic_workflow_store(context: ToolRuntimeContext) -> DynamicWorkflowStore:
-    """Return the Dynamic Workflow store for the current tool runtime."""
-    return DynamicWorkflowStore(context.runtime_paths.storage_root)
-
-
-def dynamic_workflow_store_and_owner(
-    context: ToolRuntimeContext,
-    scope: str,
-) -> tuple[DynamicWorkflowStore, str]:
-    """Return the Dynamic Workflow store and caller-visible owner ID."""
+def dynamic_workflow_store_and_owner(context: ToolRuntimeContext) -> tuple[DynamicWorkflowStore, str]:
+    """Return the Dynamic Workflow store and the caller's owner ID in the store's ``AGENT_SCOPE``."""
     if not context.agent_name:
         msg = "Agent name is missing in the tool runtime context."
         raise DynamicWorkflowError(msg)
-    if scope in {"room", "tenant"}:
-        msg = f"{scope} scope requires Dynamic Workflow approval policy and is not available to agent tools yet."
-        raise DynamicWorkflowError(msg)
-    return dynamic_workflow_store(context), _dynamic_workflow_owner_id(context, scope)
-
-
-def _dynamic_workflow_owner_id(context: ToolRuntimeContext, scope: str) -> str:
-    """Resolve the owner ID for a Dynamic Workflow scope."""
-    if scope == "agent":
-        return _agent_scope_owner_id(context)
-    if scope == "room":
-        if not context.room_id:
-            msg = "Room ID is missing in the tool runtime context."
-            raise DynamicWorkflowError(msg)
-        return context.room_id
-    if scope == "tenant":
-        return "tenant"
-    msg = f"Unsupported Dynamic Workflow scope '{scope}'."
-    raise DynamicWorkflowError(msg)
+    return DynamicWorkflowStore(context.runtime_paths.storage_root), _agent_scope_owner_id(context)
 
 
 def authorize_dynamic_workflow_run(context: ToolRuntimeContext, run: DynamicWorkflowRun) -> None:
@@ -52,11 +29,11 @@ def authorize_dynamic_workflow_run(context: ToolRuntimeContext, run: DynamicWork
 
 
 def _agent_scope_owner_id(context: ToolRuntimeContext) -> str:
-    execution_identity = build_execution_identity_from_runtime_context(context)
     resolved_execution = resolve_agent_execution(
         context.agent_name,
         context.config,
-        execution_identity=execution_identity,
+        context.runtime_paths,
+        execution_identity=context.execution_identity,
     )
     if not resolved_execution.policy.private_workspace_enabled:
         return context.agent_name

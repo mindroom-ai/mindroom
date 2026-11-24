@@ -1,0 +1,138 @@
+"""Preflight and retained archives for owned session databases."""
+
+from __future__ import annotations
+
+import os
+import sqlite3
+import stat
+from contextlib import closing, contextmanager
+from typing import TYPE_CHECKING, Literal
+from uuid import uuid4
+
+from mindroom.durable_write import fsync_directory_durable
+from mindroom.file_locks import wait_for_exclusive_lock
+from mindroom.logging_config import get_logger
+from mindroom.path_confinement import open_directory_within_root, open_regular_file_at
+from mindroom.session_storage.schema import SESSION_COLUMNS
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
+    from pathlib import Path
+
+    from mindroom.session_storage.schema import TableNames
+
+logger = get_logger(__name__)
+
+_RECOVERY_LOCK = ".sessions-recovery.lock"
+# LEGACY_COMPAT: Sessions tables from before layout version 4, which lack `session_state`.
+# Legacy format: A sessions table of the Agno layout or of layout version 2 or 3, which keeps the state inside
+# `session_data` and has no `session_state` column.
+# Last legacy release: v2026.10.676; replacement: the next release, whose sessions table has the column.
+# Handling: The preflight does not require the column, which the database's conversion adds
+# (`legacy_session_columns`), so such a database converts instead of being archived.
+# Coverage: tests/session_storage/test_legacy_session_columns.py.
+_REQUIRED_SESSION_COLUMNS = frozenset(SESSION_COLUMNS) - {"session_state"}
+
+
+# LEGACY_COMPAT: Session databases missing required schema columns.
+# Legacy format: Session databases may lack columns of the sessions table layout the store writes.
+# Last legacy release: schema-based boundary with no single release cutoff or safe row conversion.
+# Handling: Archive the sessions directory before creating a current store; preserve its bytes.
+# Coverage: tests/test_agent_session_storage_recovery.py::test_incompatible_session_schema_is_archived_before_real_session_use.
+@contextmanager
+def session_storage_preflight(
+    state_root: Path,
+    names: TableNames,
+    *,
+    timeout_seconds: float,
+) -> Iterator[None]:
+    """Inspect and, if necessary, archive the sessions directory of the database ``names`` under ``state_root``."""
+    db_file = names.database_path(state_root)
+    db_dir = db_file.parent
+    session_table = names.sessions
+    with _recovery_lock(state_root, timeout_seconds=timeout_seconds):
+        if _existing_session_database(db_dir, db_file):
+            try:
+                columns = _session_columns(db_file, session_table, timeout_seconds=timeout_seconds, mode="ro")
+            except sqlite3.OperationalError as error:
+                if error.sqlite_errorcode != sqlite3.SQLITE_READONLY_ROLLBACK:
+                    raise
+                # A hot rollback journal needs SQLite's native writable recovery
+                # before even a metadata query. The failed probe is already closed.
+                columns = _session_columns(db_file, session_table, timeout_seconds=timeout_seconds, mode="rw")
+            if columns is not None and (missing := _REQUIRED_SESSION_COLUMNS - columns):
+                _archive_sessions(db_dir, missing)
+        yield
+
+
+@contextmanager
+def _recovery_lock(state_root: Path, *, timeout_seconds: float) -> Iterator[None]:
+    """Serialize recovery of one state root without following links, blocking on a FIFO, or waiting forever.
+
+    Sandbox runners can write state roots, so worker code can plant or hold this lock.
+    A holder then fails storage creation after SQLite's own busy timeout, as a held database lock would.
+    """
+    state_root.mkdir(parents=True, exist_ok=True)
+    with open_directory_within_root(state_root) as directory:
+        descriptor = open_regular_file_at(directory, _RECOVERY_LOCK, os.O_RDWR | os.O_CREAT)
+    try:
+        if not wait_for_exclusive_lock(descriptor, timeout_seconds=timeout_seconds):
+            msg = f"Session recovery lock stayed held for {timeout_seconds:g} seconds: {state_root / _RECOVERY_LOCK}"
+            raise TimeoutError(msg)
+        yield
+    finally:
+        os.close(descriptor)
+
+
+def _existing_session_database(db_dir: Path, db_file: Path) -> bool:
+    try:
+        directory_mode = db_dir.lstat().st_mode
+    except FileNotFoundError:
+        return False
+    if not stat.S_ISDIR(directory_mode):
+        msg = "Cannot recover a session directory that is not an owned real directory"
+        raise ValueError(msg)
+    try:
+        file_mode = db_file.lstat().st_mode
+    except FileNotFoundError:
+        return False
+    if not stat.S_ISREG(file_mode):
+        msg = "Cannot recover a session database that is not an owned regular file"
+        raise ValueError(msg)
+    return True
+
+
+def _session_columns(
+    db_file: Path,
+    session_table: str,
+    *,
+    timeout_seconds: float,
+    mode: Literal["ro", "rw"],
+) -> frozenset[str] | None:
+    uri = f"{db_file.absolute().as_uri()}?mode={mode}"
+    with closing(sqlite3.connect(uri, uri=True, timeout=timeout_seconds)) as connection:
+        schema_entry = connection.execute("SELECT type FROM sqlite_schema WHERE name = ?", (session_table,)).fetchone()
+        if schema_entry is None:
+            return None
+        if schema_entry[0] != "table":
+            msg = "Expected session table name belongs to a different SQLite schema object"
+            raise ValueError(msg)
+        return frozenset(
+            row[0] for row in connection.execute("SELECT name FROM pragma_table_info(?)", (session_table,))
+        )
+
+
+def _archive_sessions(db_dir: Path, missing_columns: frozenset[str]) -> None:
+    archive = db_dir.with_name(f"sessions.incompatible-{uuid4().hex}")
+    mode = stat.S_IMODE(db_dir.stat().st_mode)
+    db_dir.rename(archive)
+    fsync_directory_durable(db_dir.parent)
+    db_dir.mkdir(mode=mode)
+    db_dir.chmod(mode)
+    fsync_directory_durable(db_dir)
+    fsync_directory_durable(db_dir.parent)
+    logger.warning(
+        "session_schema_incompatible_archived",
+        archive=str(archive),
+        missing_columns=sorted(missing_columns),
+    )

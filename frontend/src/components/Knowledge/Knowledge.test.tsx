@@ -4,6 +4,7 @@ import { Knowledge } from "./Knowledge";
 import { API_ENDPOINTS } from "@/lib/api";
 import { useConfigStore } from "@/store/configStore";
 import { useConfigSchema } from "@/hooks/useConfigSchema";
+import { confirmLeavingUnsavedDrafts } from "@/hooks/useUnsavedDraft";
 import type { SaveConfigResult } from "@/store/configStore";
 import type { Config, KnowledgeBaseConfig } from "@/types/config";
 
@@ -135,6 +136,23 @@ function setKnowledgeApiMock(
   });
 }
 
+function emptyKnowledgePayloads(
+  baseId: string,
+  status: Partial<KnowledgeApiPayloads["status"]> = {},
+): KnowledgeApiPayloads {
+  return {
+    status: {
+      base_id: baseId,
+      folder_path: `./knowledge_docs/${baseId}`,
+      watch: true,
+      file_count: 0,
+      indexed_count: 0,
+      ...status,
+    },
+    files: { base_id: baseId, files: [], total_size: 0, file_count: 0 },
+  };
+}
+
 function mockStore(
   knowledgeBases: Record<string, KnowledgeBaseConfig>,
   options: { isDirty?: boolean } = {},
@@ -153,6 +171,35 @@ function mockStore(
     saveConfig: mockSaveConfig,
     isDirty: options.isDirty ?? false,
   });
+}
+
+/** Back the component with the real store so edits re-render, while recording writes and stubbing saves. */
+async function mockStatefulStore(
+  knowledgeBases: Record<string, KnowledgeBaseConfig>,
+) {
+  const actual = await vi.importActual<typeof import("@/store/configStore")>(
+    "@/store/configStore",
+  );
+  const config = { knowledge_bases: knowledgeBases } as unknown as Config;
+  actual.useConfigStore.setState({
+    config,
+    loadedConfig: config,
+    isDirty: false,
+  });
+  (useConfigStore as unknown as Mock).mockImplementation(() => ({
+    ...actual.useConfigStore(),
+    updateKnowledgeBase: (
+      baseName: string,
+      baseConfig: KnowledgeBaseConfig,
+    ) => {
+      mockUpdateKnowledgeBase(baseName, baseConfig);
+      actual.useConfigStore
+        .getState()
+        .updateKnowledgeBase(baseName, baseConfig);
+    },
+    saveConfig: mockSaveConfig,
+  }));
+  return actual.useConfigStore;
 }
 
 describe("Knowledge", () => {
@@ -461,6 +508,62 @@ describe("Knowledge", () => {
     });
   });
 
+  async function renderCreateForm() {
+    mockStore({});
+    setKnowledgeApiMock({});
+    render(<Knowledge />);
+    await screen.findByText("Knowledge Bases");
+  }
+
+  it("asks before leaving the page drops a typed Create form name", async () => {
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+    await renderCreateForm();
+    expect(confirmLeavingUnsavedDrafts()).toBe(true);
+
+    fireEvent.change(screen.getByLabelText("Base Name"), {
+      target: { value: "docs_git" },
+    });
+
+    expect(confirmLeavingUnsavedDrafts()).toBe(false);
+    expect(confirmSpy).toHaveBeenCalledWith("Discard unsaved changes?");
+    confirmSpy.mockRestore();
+  });
+
+  it("counts a changed Git branch in the Create form as unsaved until the form is back to empty", async () => {
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+    await renderCreateForm();
+    fireEvent.click(screen.getByRole("button", { name: "Create git source" }));
+    fireEvent.change(screen.getByLabelText("Branch"), {
+      target: { value: "release" },
+    });
+    expect(confirmLeavingUnsavedDrafts()).toBe(false);
+
+    fireEvent.change(screen.getByLabelText("Branch"), {
+      target: { value: "main" },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "Create local source" }),
+    );
+    expect(confirmLeavingUnsavedDrafts()).toBe(true);
+    confirmSpy.mockRestore();
+  });
+
+  it("counts a changed access mode in the Create form as unsaved", async () => {
+    const confirmSpy = vi.spyOn(window, "confirm").mockReturnValue(false);
+    await renderCreateForm();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Create files-only access" }),
+    );
+    expect(confirmLeavingUnsavedDrafts()).toBe(false);
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Create semantic search access" }),
+    );
+    expect(confirmLeavingUnsavedDrafts()).toBe(true);
+    confirmSpy.mockRestore();
+  });
+
   it("creates a git-based knowledge base in one step", async () => {
     mockStore({});
     setKnowledgeApiMock({
@@ -519,21 +622,7 @@ describe("Knowledge", () => {
   it("creates a knowledge base with a description", async () => {
     mockStore({});
     setKnowledgeApiMock({
-      product_docs: {
-        status: {
-          base_id: "product_docs",
-          folder_path: "./knowledge_docs/product_docs",
-          watch: true,
-          file_count: 0,
-          indexed_count: 0,
-        },
-        files: {
-          base_id: "product_docs",
-          files: [],
-          total_size: 0,
-          file_count: 0,
-        },
-      },
+      product_docs: emptyKnowledgePayloads("product_docs"),
     });
 
     render(<Knowledge />);
@@ -559,28 +648,22 @@ describe("Knowledge", () => {
         }),
       );
     });
+    // A created base leaves an empty Create form, which is no unsaved draft.
+    await waitFor(() =>
+      expect(screen.getByLabelText("Base Name")).toHaveValue(""),
+    );
+    expect(confirmLeavingUnsavedDrafts()).toBe(true);
   });
 
   it("creates a files-only knowledge base", async () => {
     mockStore({});
     setKnowledgeApiMock({
-      file_docs: {
-        status: {
-          base_id: "file_docs",
-          folder_path:
-            "${MINDROOM_STORAGE_PATH}/agents/helper/workspace/knowledge/file_docs",
-          watch: false,
-          mode: "files",
-          file_count: 0,
-          indexed_count: 0,
-        },
-        files: {
-          base_id: "file_docs",
-          files: [],
-          total_size: 0,
-          file_count: 0,
-        },
-      },
+      file_docs: emptyKnowledgePayloads("file_docs", {
+        folder_path:
+          "${MINDROOM_STORAGE_PATH}/agents/helper/workspace/knowledge/file_docs",
+        watch: false,
+        mode: "files",
+      }),
     });
 
     render(<Knowledge />);
@@ -672,32 +755,19 @@ describe("Knowledge", () => {
       },
     });
     setKnowledgeApiMock({
-      git_docs: {
-        status: {
-          base_id: "git_docs",
-          folder_path: "./knowledge_docs/git_docs",
-          watch: true,
-          file_count: 0,
-          indexed_count: 0,
-          git: {
-            repo_url: "git@github.com:org/git-docs.git",
-            branch: "release",
-            lfs: false,
-            syncing: false,
-            repo_present: true,
-            initial_sync_complete: true,
-            last_successful_sync_at: null,
-            last_successful_commit: null,
-            last_error: null,
-          },
+      git_docs: emptyKnowledgePayloads("git_docs", {
+        git: {
+          repo_url: "git@github.com:org/git-docs.git",
+          branch: "release",
+          lfs: false,
+          syncing: false,
+          repo_present: true,
+          initial_sync_complete: true,
+          last_successful_sync_at: null,
+          last_successful_commit: null,
+          last_error: null,
         },
-        files: {
-          base_id: "git_docs",
-          files: [],
-          total_size: 0,
-          file_count: 0,
-        },
-      },
+      }),
     });
 
     render(<Knowledge />);
@@ -727,33 +797,20 @@ describe("Knowledge", () => {
       },
     });
     setKnowledgeApiMock({
-      git_docs: {
-        status: {
-          base_id: "git_docs",
-          folder_path: "./knowledge_docs/git_docs",
-          watch: true,
-          file_count: 0,
-          indexed_count: 0,
-          git: {
-            repo_url:
-              "https://token:secret@github.com/org/git-docs;token=path-secret?token=query-secret#fragment-secret",
-            branch: "release",
-            lfs: false,
-            syncing: false,
-            repo_present: true,
-            initial_sync_complete: true,
-            last_successful_sync_at: null,
-            last_successful_commit: null,
-            last_error: null,
-          },
+      git_docs: emptyKnowledgePayloads("git_docs", {
+        git: {
+          repo_url:
+            "https://token:secret@github.com/org/git-docs;token=path-secret?token=query-secret#fragment-secret",
+          branch: "release",
+          lfs: false,
+          syncing: false,
+          repo_present: true,
+          initial_sync_complete: true,
+          last_successful_sync_at: null,
+          last_successful_commit: null,
+          last_error: null,
         },
-        files: {
-          base_id: "git_docs",
-          files: [],
-          total_size: 0,
-          file_count: 0,
-        },
-      },
+      }),
     });
 
     render(<Knowledge />);
@@ -811,32 +868,19 @@ describe("Knowledge", () => {
         },
       });
       setKnowledgeApiMock({
-        git_docs: {
-          status: {
-            base_id: "git_docs",
-            folder_path: "./knowledge_docs/git_docs",
-            watch: true,
-            file_count: 0,
-            indexed_count: 0,
-            git: {
-              repo_url: repoUrl,
-              branch: "release",
-              lfs: false,
-              syncing: false,
-              repo_present: true,
-              initial_sync_complete: true,
-              last_successful_sync_at: null,
-              last_successful_commit: null,
-              last_error: null,
-            },
+        git_docs: emptyKnowledgePayloads("git_docs", {
+          git: {
+            repo_url: repoUrl,
+            branch: "release",
+            lfs: false,
+            syncing: false,
+            repo_present: true,
+            initial_sync_complete: true,
+            last_successful_sync_at: null,
+            last_successful_commit: null,
+            last_error: null,
           },
-          files: {
-            base_id: "git_docs",
-            files: [],
-            total_size: 0,
-            file_count: 0,
-          },
-        },
+        }),
       });
 
       render(<Knowledge />);
@@ -856,21 +900,9 @@ describe("Knowledge", () => {
       docs: { path: "./knowledge_docs/docs", watch: false },
     });
     setKnowledgeApiMock({
-      docs: {
-        status: {
-          base_id: "docs",
-          folder_path: "./knowledge_docs/docs",
-          watch: false,
-          file_count: 0,
-          indexed_count: 0,
-        },
-        files: {
-          base_id: "docs",
-          files: [],
-          total_size: 0,
-          file_count: 0,
-        },
-      },
+      docs: emptyKnowledgePayloads("docs", {
+        watch: false,
+      }),
     });
 
     render(<Knowledge />);
@@ -885,23 +917,12 @@ describe("Knowledge", () => {
       docs: { path: "./knowledge_docs/docs", watch: true },
     });
     setKnowledgeApiMock({
-      docs: {
-        status: {
-          base_id: "docs",
-          folder_path: "./knowledge_docs/docs",
-          watch: true,
-          file_count: 2,
-          indexed_count: 1,
-          refreshing: true,
-          refresh_state: "refreshing",
-        },
-        files: {
-          base_id: "docs",
-          files: [],
-          total_size: 0,
-          file_count: 0,
-        },
-      },
+      docs: emptyKnowledgePayloads("docs", {
+        file_count: 2,
+        indexed_count: 1,
+        refreshing: true,
+        refresh_state: "refreshing",
+      }),
     });
 
     render(<Knowledge />);
@@ -915,24 +936,13 @@ describe("Knowledge", () => {
       docs: { path: "./knowledge_docs/docs", watch: true },
     });
     setKnowledgeApiMock({
-      docs: {
-        status: {
-          base_id: "docs",
-          folder_path: "./knowledge_docs/docs",
-          watch: true,
-          file_count: 2,
-          indexed_count: 1,
-          refreshing: false,
-          refresh_state: "refresh_failed",
-          last_error: "Git command failed: https://***@example.com/repo.git",
-        },
-        files: {
-          base_id: "docs",
-          files: [],
-          total_size: 0,
-          file_count: 0,
-        },
-      },
+      docs: emptyKnowledgePayloads("docs", {
+        file_count: 2,
+        indexed_count: 1,
+        refreshing: false,
+        refresh_state: "refresh_failed",
+        last_error: "Git command failed: https://***@example.com/repo.git",
+      }),
     });
 
     render(<Knowledge />);
@@ -957,32 +967,21 @@ describe("Knowledge", () => {
       },
     });
     setKnowledgeApiMock({
-      git_docs: {
-        status: {
-          base_id: "git_docs",
-          folder_path: "./knowledge_docs/git_docs",
-          watch: true,
-          file_count: 4,
-          indexed_count: 3,
-          git: {
-            repo_url: "https://token:secret@github.com/org/git-docs",
-            branch: "release",
-            lfs: true,
-            syncing: true,
-            repo_present: true,
-            initial_sync_complete: false,
-            last_successful_sync_at: "2026-04-17T12:00:00+00:00",
-            last_successful_commit: "abc123",
-            last_error: "fetch failed",
-          },
+      git_docs: emptyKnowledgePayloads("git_docs", {
+        file_count: 4,
+        indexed_count: 3,
+        git: {
+          repo_url: "https://token:secret@github.com/org/git-docs",
+          branch: "release",
+          lfs: true,
+          syncing: true,
+          repo_present: true,
+          initial_sync_complete: false,
+          last_successful_sync_at: "2026-04-17T12:00:00+00:00",
+          last_successful_commit: "abc123",
+          last_error: "fetch failed",
         },
-        files: {
-          base_id: "git_docs",
-          files: [],
-          total_size: 0,
-          file_count: 0,
-        },
-      },
+      }),
     });
 
     render(<Knowledge />);
@@ -1229,7 +1228,37 @@ describe("Knowledge", () => {
     expect(uploadCalls).toHaveLength(0);
   });
 
-  it("surfaces structured reindex failure details", async () => {
+  it.each([
+    {
+      body: "structured details",
+      response: jsonResponse(
+        {
+          detail: {
+            success: false,
+            base_id: "git_docs",
+            indexed_count: 0,
+            availability: "refresh_failed",
+            last_error: "Indexed 0 of 1 managed knowledge files",
+          },
+        },
+        409,
+      ),
+      message: "Indexed 0 of 1 managed knowledge files",
+    },
+    {
+      body: "no JSON",
+      response: new Response("<html>Bad gateway</html>", { status: 502 }),
+      message: "Request failed (502)",
+    },
+    {
+      body: "no JSON and a status text",
+      response: new Response("<html>Bad gateway</html>", {
+        status: 502,
+        statusText: "Bad Gateway",
+      }),
+      message: "Bad Gateway",
+    },
+  ])("surfaces a reindex failure with $body", async ({ response, message }) => {
     mockStore({
       git_docs: {
         path: "./knowledge_docs/git_docs",
@@ -1242,49 +1271,22 @@ describe("Knowledge", () => {
     });
     setKnowledgeApiMock(
       {
-        git_docs: {
-          status: {
-            base_id: "git_docs",
-            folder_path: "./knowledge_docs/git_docs",
-            watch: true,
-            file_count: 1,
-            indexed_count: 0,
-            git: {
-              repo_url: "https://github.com/org/git-docs",
-              branch: "release",
-              lfs: false,
-              syncing: false,
-              repo_present: true,
-              initial_sync_complete: false,
-              last_successful_sync_at: null,
-              last_successful_commit: null,
-              last_error: null,
-            },
+        git_docs: emptyKnowledgePayloads("git_docs", {
+          file_count: 1,
+          git: {
+            repo_url: "https://github.com/org/git-docs",
+            branch: "release",
+            lfs: false,
+            syncing: false,
+            repo_present: true,
+            initial_sync_complete: false,
+            last_successful_sync_at: null,
+            last_successful_commit: null,
+            last_error: null,
           },
-          files: {
-            base_id: "git_docs",
-            files: [],
-            total_size: 0,
-            file_count: 0,
-          },
-        },
+        }),
       },
-      {
-        reindexResponses: {
-          git_docs: jsonResponse(
-            {
-              detail: {
-                success: false,
-                base_id: "git_docs",
-                indexed_count: 0,
-                availability: "refresh_failed",
-                last_error: "Indexed 0 of 1 managed knowledge files",
-              },
-            },
-            409,
-          ),
-        },
-      },
+      { reindexResponses: { git_docs: response } },
     );
 
     render(<Knowledge />);
@@ -1292,38 +1294,22 @@ describe("Knowledge", () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Reindex" }));
 
-    expect(
-      await screen.findByText("Indexed 0 of 1 managed knowledge files"),
-    ).toBeInTheDocument();
+    expect(await screen.findByText(message)).toBeInTheDocument();
     expect(mockToast).toHaveBeenCalledWith(
       expect.objectContaining({
         title: "Reindex failed",
-        description: "Indexed 0 of 1 managed knowledge files",
+        description: message,
         variant: "destructive",
       }),
     );
   });
 
   it("switches source type in settings and toggles git fields", async () => {
-    mockStore({
+    await mockStatefulStore({
       docs: { path: "./knowledge_docs/docs", watch: true },
     });
     setKnowledgeApiMock({
-      docs: {
-        status: {
-          base_id: "docs",
-          folder_path: "./knowledge_docs/docs",
-          watch: true,
-          file_count: 0,
-          indexed_count: 0,
-        },
-        files: {
-          base_id: "docs",
-          files: [],
-          total_size: 0,
-          file_count: 0,
-        },
-      },
+      docs: emptyKnowledgePayloads("docs"),
     });
 
     render(<Knowledge />);
@@ -1378,6 +1364,35 @@ describe("Knowledge", () => {
     );
   });
 
+  it("drops the local poll interval from the payload when a polled base switches to git", async () => {
+    const polledBase: KnowledgeBaseConfig = {
+      path: "./knowledge_docs/docs",
+      watch: true,
+      poll_interval_seconds: 600,
+    };
+    mockStore({ docs: polledBase });
+    setKnowledgeApiMock({
+      docs: emptyKnowledgePayloads("docs"),
+    });
+
+    render(<Knowledge />);
+    await screen.findByText("Active: docs");
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Settings git source" }),
+    );
+
+    const update = mockUpdateKnowledgeBase.mock.lastCall?.[1] as
+      KnowledgeBaseConfig | undefined;
+    expect(update?.git).toBeDefined();
+    // The store merges updates into the existing base, then JSON.stringify drops undefined keys.
+    const savedBase = JSON.parse(
+      JSON.stringify({ ...polledBase, ...update }),
+    ) as Record<string, unknown>;
+    expect(savedBase).not.toHaveProperty("poll_interval_seconds");
+    expect(savedBase).toHaveProperty("git");
+  });
+
   it("hides local refresh controls for files-only bases", async () => {
     mockStore({
       docs: {
@@ -1387,23 +1402,12 @@ describe("Knowledge", () => {
       },
     });
     setKnowledgeApiMock({
-      docs: {
-        status: {
-          base_id: "docs",
-          folder_path:
-            "${MINDROOM_STORAGE_PATH}/agents/helper/workspace/knowledge/docs",
-          watch: false,
-          mode: "files",
-          file_count: 0,
-          indexed_count: 0,
-        },
-        files: {
-          base_id: "docs",
-          files: [],
-          total_size: 0,
-          file_count: 0,
-        },
-      },
+      docs: emptyKnowledgePayloads("docs", {
+        folder_path:
+          "${MINDROOM_STORAGE_PATH}/agents/helper/workspace/knowledge/docs",
+        watch: false,
+        mode: "files",
+      }),
     });
 
     render(<Knowledge />);
@@ -1420,21 +1424,7 @@ describe("Knowledge", () => {
       },
     });
     setKnowledgeApiMock({
-      docs: {
-        status: {
-          base_id: "docs",
-          folder_path: "./knowledge_docs/docs",
-          watch: true,
-          file_count: 0,
-          indexed_count: 0,
-        },
-        files: {
-          base_id: "docs",
-          files: [],
-          total_size: 0,
-          file_count: 0,
-        },
-      },
+      docs: emptyKnowledgePayloads("docs"),
     });
 
     render(<Knowledge />);
@@ -1450,6 +1440,7 @@ describe("Knowledge", () => {
         mode: "files",
         path: "",
         watch: false,
+        poll_interval_seconds: undefined,
       }),
     );
   });
@@ -1463,22 +1454,9 @@ describe("Knowledge", () => {
       },
     });
     setKnowledgeApiMock({
-      docs: {
-        status: {
-          base_id: "docs",
-          description: "Old docs description",
-          folder_path: "./knowledge_docs/docs",
-          watch: true,
-          file_count: 0,
-          indexed_count: 0,
-        },
-        files: {
-          base_id: "docs",
-          files: [],
-          total_size: 0,
-          file_count: 0,
-        },
-      },
+      docs: emptyKnowledgePayloads("docs", {
+        description: "Old docs description",
+      }),
     });
 
     render(<Knowledge />);
@@ -1499,38 +1477,233 @@ describe("Knowledge", () => {
     );
   });
 
-  it("saves updated git settings from base settings", async () => {
-    mockStore(
-      {
-        docs: {
-          path: "./knowledge_docs/docs",
-          watch: true,
-          chunk_size: 5000,
-          chunk_overlap: 0,
-          git: {
-            repo_url: "https://github.com/org/repo",
-            branch: "main",
-          },
-        },
-      },
-      { isDirty: true },
-    );
-    setKnowledgeApiMock({
+  it("writes a description edit through the store and shows the store value", async () => {
+    const store = await mockStatefulStore({
       docs: {
-        status: {
-          base_id: "docs",
-          folder_path: "./knowledge_docs/docs",
-          watch: true,
-          file_count: 0,
-          indexed_count: 0,
-        },
-        files: {
-          base_id: "docs",
-          files: [],
-          total_size: 0,
-          file_count: 0,
+        description: "Old docs description",
+        path: "./knowledge_docs/docs",
+        watch: true,
+        chunk_size: 64,
+      },
+    });
+    setKnowledgeApiMock({
+      docs: emptyKnowledgePayloads("docs", {
+        description: "Old docs description",
+      }),
+    });
+
+    render(<Knowledge />);
+    await screen.findByText("Active: docs");
+
+    expect(screen.getByLabelText("Chunk Size (characters)")).toHaveValue(128);
+
+    const descriptionInput = screen.getByLabelText("Search Description");
+    fireEvent.change(descriptionInput, {
+      target: { value: "New docs description" },
+    });
+
+    expect(descriptionInput).toHaveValue("New docs description");
+    expect(store.getState().config?.knowledge_bases?.docs).toEqual({
+      description: "New docs description",
+      mode: "semantic",
+      path: "./knowledge_docs/docs",
+      watch: true,
+      chunk_size: 128,
+      chunk_overlap: 0,
+      git: undefined,
+    });
+    expect(store.getState().isDirty).toBe(true);
+  });
+
+  it("keeps a chunk size typed key by key and shows the stored value on blur", async () => {
+    const store = await mockStatefulStore({
+      docs: { path: "./knowledge_docs/docs", watch: true },
+    });
+    setKnowledgeApiMock({ docs: emptyKnowledgePayloads("docs") });
+
+    render(<Knowledge />);
+    await screen.findByText("Active: docs");
+
+    const chunkSize = screen.getByLabelText("Chunk Size (characters)");
+    for (const value of ["", "2", "20", "204", "2048"]) {
+      fireEvent.change(chunkSize, { target: { value } });
+      expect(chunkSize).toHaveDisplayValue(value);
+    }
+    expect(store.getState().config?.knowledge_bases?.docs?.chunk_size).toBe(
+      2048,
+    );
+
+    fireEvent.change(chunkSize, { target: { value: "2" } });
+    fireEvent.blur(chunkSize);
+    expect(chunkSize).toHaveDisplayValue("128");
+  });
+
+  it("shows the chunk overlap a save would write while the chunk size is retyped", async () => {
+    const store = await mockStatefulStore({
+      docs: {
+        path: "./knowledge_docs/docs",
+        watch: true,
+        chunk_size: 1000,
+        chunk_overlap: 300,
+      },
+    });
+    setKnowledgeApiMock({ docs: emptyKnowledgePayloads("docs") });
+
+    render(<Knowledge />);
+    await screen.findByText("Active: docs");
+
+    const chunkSize = screen.getByLabelText("Chunk Size (characters)");
+    for (const value of ["5", "50", "500"]) {
+      fireEvent.change(chunkSize, { target: { value } });
+    }
+    const storedOverlap =
+      store.getState().config?.knowledge_bases?.docs?.chunk_overlap;
+    expect(
+      screen.getByLabelText("Chunk Overlap (characters)"),
+    ).toHaveDisplayValue(String(storedOverlap));
+  });
+
+  it("stores the chunk overlap it shows when one edit makes the size smaller", async () => {
+    const store = await mockStatefulStore({
+      docs: {
+        path: "./knowledge_docs/docs",
+        watch: true,
+        chunk_size: 1000,
+        chunk_overlap: 300,
+      },
+    });
+    setKnowledgeApiMock({ docs: emptyKnowledgePayloads("docs") });
+
+    render(<Knowledge />);
+    await screen.findByText("Active: docs");
+
+    fireEvent.change(screen.getByLabelText("Chunk Size (characters)"), {
+      target: { value: "256" },
+    });
+    expect(
+      screen.getByLabelText("Chunk Overlap (characters)"),
+    ).toHaveDisplayValue("255");
+    expect(store.getState().config?.knowledge_bases?.docs).toMatchObject({
+      chunk_size: 256,
+      chunk_overlap: 255,
+    });
+  });
+
+  it("keeps a new line typed into the git include patterns", async () => {
+    const store = await mockStatefulStore({
+      docs: {
+        path: "./knowledge_docs/docs",
+        watch: true,
+        git: { repo_url: "https://github.com/org/repo", branch: "main" },
+      },
+    });
+    setKnowledgeApiMock({ docs: emptyKnowledgePayloads("docs") });
+
+    render(<Knowledge />);
+    await screen.findByText("Active: docs");
+
+    const include = screen.getByLabelText("Include Patterns (optional)");
+    for (const value of ["docs/**", "docs/**\n", "docs/**\nguides/**"]) {
+      fireEvent.change(include, { target: { value } });
+      expect(include).toHaveDisplayValue(value);
+    }
+    expect(
+      store.getState().config?.knowledge_bases?.docs?.git?.include_patterns,
+    ).toEqual(["docs/**", "guides/**"]);
+  });
+
+  it("keeps git settings typed key by key", async () => {
+    const store = await mockStatefulStore({
+      docs: {
+        path: "./knowledge_docs/docs",
+        watch: true,
+        git: { repo_url: "https://github.com/org/repo", branch: "main" },
+      },
+    });
+    setKnowledgeApiMock({ docs: emptyKnowledgePayloads("docs") });
+
+    render(<Knowledge />);
+    await screen.findByText("Active: docs");
+
+    const branch = screen.getByLabelText("Branch");
+    fireEvent.change(branch, { target: { value: "" } });
+    expect(store.getState().config?.knowledge_bases?.docs?.git?.branch).toBe(
+      "main",
+    );
+    for (const value of ["", "d", "dev"]) {
+      fireEvent.change(branch, { target: { value } });
+      expect(branch).toHaveDisplayValue(value);
+    }
+    const pollInterval = screen.getByLabelText("Poll Interval (seconds)");
+    const syncTimeout = screen.getByLabelText("Sync Timeout (seconds)");
+    for (const input of [pollInterval, syncTimeout]) {
+      for (const value of ["", "3", "30"]) {
+        fireEvent.change(input, { target: { value } });
+        expect(input).toHaveDisplayValue(value);
+      }
+    }
+    fireEvent.change(pollInterval, { target: { value: "3" } });
+    expect(
+      store.getState().config?.knowledge_bases?.docs?.git
+        ?.poll_interval_seconds,
+    ).toBe(5);
+    fireEvent.change(pollInterval, { target: { value: "30" } });
+    expect(store.getState().config?.knowledge_bases?.docs?.git).toMatchObject({
+      branch: "dev",
+      poll_interval_seconds: 30,
+      sync_timeout_seconds: 30,
+    });
+  });
+
+  it("stores a trimmed git branch and credentials service while keeping the typed text", async () => {
+    const store = await mockStatefulStore({
+      docs: {
+        path: "./knowledge_docs/docs",
+        watch: true,
+        git: { repo_url: "https://github.com/org/repo", branch: "release" },
+      },
+    });
+    setKnowledgeApiMock({ docs: emptyKnowledgePayloads("docs") });
+
+    render(<Knowledge />);
+    await screen.findByText("Active: docs");
+
+    const branch = screen.getByLabelText("Branch");
+    fireEvent.change(branch, { target: { value: "main " } });
+    const credentialsService = screen.getByLabelText(
+      "Credentials Service (optional)",
+    );
+    fireEvent.change(credentialsService, { target: { value: " github-pat " } });
+
+    expect(branch).toHaveDisplayValue("main ");
+    expect(credentialsService).toHaveDisplayValue(" github-pat ");
+    // Every Save button sends this draft, not only Save Settings.
+    expect(store.getState().config?.knowledge_bases?.docs?.git).toMatchObject({
+      branch: "main",
+      credentials_service: "github-pat",
+    });
+
+    fireEvent.change(credentialsService, { target: { value: " " } });
+    expect(
+      store.getState().config?.knowledge_bases?.docs?.git?.credentials_service,
+    ).toBeUndefined();
+  });
+
+  it("saves updated git settings from base settings", async () => {
+    await mockStatefulStore({
+      docs: {
+        path: "./knowledge_docs/docs",
+        watch: true,
+        chunk_size: 5000,
+        chunk_overlap: 0,
+        git: {
+          repo_url: "https://github.com/org/repo",
+          branch: "main",
         },
       },
+    });
+    setKnowledgeApiMock({
+      docs: emptyKnowledgePayloads("docs"),
     });
 
     render(<Knowledge />);
@@ -1595,37 +1768,20 @@ describe("Knowledge", () => {
   });
 
   it("preserves a credential-bearing git URL when saving other git settings", async () => {
-    mockStore(
-      {
-        docs: {
-          path: "./knowledge_docs/docs",
-          watch: true,
-          chunk_size: 5000,
-          chunk_overlap: 0,
-          git: {
-            repo_url: "https://token:secret@github.com/org/repo",
-            branch: "main",
-          },
-        },
-      },
-      { isDirty: true },
-    );
-    setKnowledgeApiMock({
+    await mockStatefulStore({
       docs: {
-        status: {
-          base_id: "docs",
-          folder_path: "./knowledge_docs/docs",
-          watch: true,
-          file_count: 0,
-          indexed_count: 0,
-        },
-        files: {
-          base_id: "docs",
-          files: [],
-          total_size: 0,
-          file_count: 0,
+        path: "./knowledge_docs/docs",
+        watch: true,
+        chunk_size: 5000,
+        chunk_overlap: 0,
+        git: {
+          repo_url: "https://token:secret@github.com/org/repo",
+          branch: "main",
         },
       },
+    });
+    setKnowledgeApiMock({
+      docs: emptyKnowledgePayloads("docs"),
     });
 
     render(<Knowledge />);
@@ -1650,6 +1806,35 @@ describe("Knowledge", () => {
     });
   });
 
+  it("saves files-only bases without watch and reports superseded saves", async () => {
+    mockStore(
+      {
+        docs: { mode: "files", path: "/srv/docs", watch: true },
+      },
+      { isDirty: true },
+    );
+    setKnowledgeApiMock({ docs: emptyKnowledgePayloads("docs") });
+    mockSaveConfig.mockResolvedValueOnce({ status: "stale" });
+
+    render(<Knowledge />);
+    await screen.findByText("Active: docs");
+
+    fireEvent.click(screen.getByRole("button", { name: "Save Settings" }));
+
+    expect(
+      await screen.findByText("Save was superseded by newer draft edits"),
+    ).toBeInTheDocument();
+    expect(mockUpdateKnowledgeBase).toHaveBeenLastCalledWith(
+      "docs",
+      expect.objectContaining({ mode: "files", watch: false }),
+    );
+    expect(mockToast).toHaveBeenCalledWith({
+      title: "Save failed",
+      description: "Save was superseded by newer draft edits",
+      variant: "destructive",
+    });
+  });
+
   it("rejects git URL replacements containing the redaction sentinel", async () => {
     mockStore({
       docs: {
@@ -1664,21 +1849,7 @@ describe("Knowledge", () => {
       },
     });
     setKnowledgeApiMock({
-      docs: {
-        status: {
-          base_id: "docs",
-          folder_path: "./knowledge_docs/docs",
-          watch: true,
-          file_count: 0,
-          indexed_count: 0,
-        },
-        files: {
-          base_id: "docs",
-          files: [],
-          total_size: 0,
-          file_count: 0,
-        },
-      },
+      docs: emptyKnowledgePayloads("docs"),
     });
 
     render(<Knowledge />);
@@ -1699,39 +1870,22 @@ describe("Knowledge", () => {
   });
 
   it("saves advanced git settings from base settings", async () => {
-    mockStore(
-      {
-        docs: {
-          path: "./knowledge_docs/docs",
-          watch: true,
-          chunk_size: 5000,
-          chunk_overlap: 0,
-          git: {
-            repo_url: "https://github.com/org/repo",
-            branch: "main",
-            lfs: true,
-            sync_timeout_seconds: 1800,
-          },
-        },
-      },
-      { isDirty: true },
-    );
-    setKnowledgeApiMock({
+    await mockStatefulStore({
       docs: {
-        status: {
-          base_id: "docs",
-          folder_path: "./knowledge_docs/docs",
-          watch: true,
-          file_count: 0,
-          indexed_count: 0,
-        },
-        files: {
-          base_id: "docs",
-          files: [],
-          total_size: 0,
-          file_count: 0,
+        path: "./knowledge_docs/docs",
+        watch: true,
+        chunk_size: 5000,
+        chunk_overlap: 0,
+        git: {
+          repo_url: "https://github.com/org/repo",
+          branch: "main",
+          lfs: true,
+          sync_timeout_seconds: 1800,
         },
       },
+    });
+    setKnowledgeApiMock({
+      docs: emptyKnowledgePayloads("docs"),
     });
 
     render(<Knowledge />);

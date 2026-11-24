@@ -1,469 +1,253 @@
-"""Single owner of durable compaction state.
+"""Runtime owner of durable compaction state.
 
-This module is the only code allowed to read or write the durable
-compaction-state locations of a stored Agno session:
+This module owns the durable compaction-state locations of a stored session;
+outside it, only the session loader and the run-metadata patch in
+``session_storage/store.py``, which adds the event ids a patch links to the summary
+row covering the run, the open-time conversion in
+``session_storage/legacy_agno3_conversion.py``, and the owner adoption in
+``session_storage/legacy_agent_session_owners.py``, which moves summary rows to their
+agent's scope, read or write summary rows directly:
 
-- the compaction archive (``history/archive.py``): summary generations and the
-  runs each compaction chunk moved out of the live runs table
-- ``session.summary``, a cache of the scope's latest generation summary that
-  Agno replays
-- per-scope control state under ``MINDROOM_COMPACTION_METADATA_KEY`` (force flag)
-- per-scope consumed Matrix event ids under ``MINDROOM_MATRIX_HISTORY_METADATA_KEY``
-  that no stored run carries (team consumption)
-- the pending force-compaction scope keys list inside Agno ``session_state``
+- the summary rows of the conversation log (``session_storage/summary_rows.py``), positioned
+  between the runs by ``seq``; replay is the scope's latest summary row and the
+  runs it does not cover, and ``session.summary`` is derived from that row on read
+- the database owner's history state under ``MINDROOM_HISTORY_METADATA_KEY``: whether its next run
+  compacts first
 
-Nothing else the archive already knows is stored: the event ids compacted history
-represents are derived from the archive when seen ids are read. Metadata seen ids
-have no archive counterpart, so a stale whole-row write can restore ids a redaction
-dropped; that only withholds those messages from unseen thread context.
+Nothing else the summary rows already know is stored: the event ids compacted
+history represents are derived from them when seen ids are read. A metadata change
+applies to the metadata the stored row holds, under the write lock, so it never
+restores what another writer dropped, and every write here leaves the in-memory
+session holding what the store does.
 
-It enforces the durable-state half of the compaction invariants
-(see ``tests/test_compaction_invariants.py`` and ``tests/test_compaction_fuzz.py``):
-
-1. Compaction loses nothing.
-   ``archive_compaction_chunk`` moves one chunk's runs, member runs included,
-   into the archive in the same transaction that deletes their live rows.
-
-2. Compacted runs never reappear in replay.
-   ``reconcile_compaction_state`` deletes live runs that are archived, for
-   example after a stale write resurrected one, before each run uses history.
-
-3. The replayed summary is the latest generation's.
-   The archive transaction commits before ``session.summary`` is written;
-   ``reconcile_compaction_state`` refreshes the cached summary that an
-   interruption or a stale session write left behind.
+Compaction appends summary rows and never deletes a run (a mid-turn fold stores
+only its own run after its row); edits and redactions cut the log,
+deleting one element and everything after it, which returns the runs a deleted
+summary covered to replay (see ``tests/test_compaction_fuzz.py`` for the invariants).
 """
 
 from __future__ import annotations
 
-from copy import deepcopy
-from dataclasses import replace
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any
 
-from agno.db.base import SessionType
-from agno.run.agent import RunOutput
-from agno.run.team import TeamRunOutput
-from agno.session.agent import AgentSession
-from agno.session.summary import SessionSummary
-from agno.session.team import TeamSession
-
-from mindroom.agent_storage import (
-    get_agent_session,
-    get_team_session,
-    replace_runs,
-    runs_without,
-    save_compaction_usage,
-    save_runs,
-)
 from mindroom.background_tasks import run_blocking_until_complete
-from mindroom.constants import (
-    MATRIX_EVENT_ID_METADATA_KEY,
-    MATRIX_RESPONSE_EVENT_ID_METADATA_KEY,
-    MATRIX_SEEN_EVENT_IDS_METADATA_KEY,
-    MATRIX_SOURCE_EVENT_IDS_METADATA_KEY,
-    MATRIX_SOURCE_EVENT_REVISIONS_METADATA_KEY,
-    MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY,
-    MINDROOM_COMPACTION_METADATA_KEY,
-    MINDROOM_MATRIX_HISTORY_METADATA_KEY,
-)
-from mindroom.history import archive
-from mindroom.history.run_visibility import is_model_history_visible_run
-from mindroom.history.types import HistoryScope, HistoryScopeState
-from mindroom.legacy_revision_replay import summary_depends_on_source
-from mindroom.logging_config import get_logger
+from mindroom.constants import MINDROOM_HISTORY_METADATA_KEY
+from mindroom.history.run_visibility import replays_in_scope, run_in_scope
+from mindroom.history.types import HistoryScope, HistoryScopeState, owner_scope, replayed_summary_text
+from mindroom.session_storage import summary_rows
+from mindroom.session_storage.agent_storage import save_compaction_usage
+from mindroom.session_storage.lanes import run_session_storage_operation
+from mindroom.session_storage.store import seen_event_ids, source_event_ids
+from mindroom.session_storage.types import ConversationSession
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Mapping, Sequence
+    from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 
-    from agno.db.base import BaseDb
-    from agno.models.base import Model
-    from agno.models.response import ModelResponse
+    from mindroom.llm.provider import ModelIdentity
+    from mindroom.llm.runs import AnyRunRecord
+    from mindroom.llm.usage import MessageMetrics
+    from mindroom.session_storage.store import ConversationStore
 
 
-_COMPACTION_METADATA_VERSION = 2
-_MATRIX_HISTORY_METADATA_VERSION = 1
-_PENDING_COMPACTION_SCOPE_KEYS_SESSION_STATE_KEY = "mindroom_pending_compaction_scope_keys"
-logger = get_logger(__name__)
+# The only field of the owner's history state, left out of the stored value at its default.
+_FORCE_COMPACTION = "force_compact_before_next_run"
 
 
 async def record_summary_usage(
-    model: Model,
-    response: ModelResponse,
+    model: ModelIdentity,
+    usage: MessageMetrics,
     *,
-    storage: BaseDb,
+    storage: ConversationStore,
     session_id: str,
     requester_id: str | None,
+    initial_session: ConversationSession | None = None,
 ) -> None:
-    """Record returned counters even when the summary is rejected or later cancelled."""
-    if response.response_usage is None:
-        return
+    """Record a summary response's counters even when the summary is rejected or later cancelled."""
     await run_blocking_until_complete(
         partial(
             save_compaction_usage,
             storage,
             session_id=session_id,
             requester_id=requester_id,
-            model_provider=model.get_provider(),
-            model=model.id,
-            metrics=response.response_usage.to_dict(),
+            model=model,
+            usage=usage,
+            initial_session=initial_session,
         ),
     )
 
 
-def new_scope_session(*, session_id: str, scope_id: str, is_team: bool) -> AgentSession | TeamSession:
-    """Return one empty session row for a scope with no stored session yet."""
+def new_scope_session(*, session_id: str, scope: HistoryScope) -> ConversationSession:
+    """Return the empty session row the first run of ``session_id`` in ``scope`` starts from."""
     created_at = int(datetime.now(UTC).timestamp())
-    if is_team:
-        return TeamSession(
-            session_id=session_id,
-            team_id=scope_id,
-            metadata={},
-            runs=[],
-            created_at=created_at,
-            updated_at=created_at,
-        )
-    return AgentSession(
+    return ConversationSession(
         session_id=session_id,
-        agent_id=scope_id,
-        metadata={},
-        runs=[],
+        kind=scope.kind,
+        owner_id=scope.scope_id,
         created_at=created_at,
-        updated_at=created_at,
     )
 
 
-def read_scope_state(session: AgentSession | TeamSession, scope: HistoryScope) -> HistoryScopeState:
-    """Return the scoped compaction state for one session and scope."""
-    raw_state = _read_raw_scope_states(session).get(scope.key)
-    return _parse_state(raw_state) if raw_state is not None else HistoryScopeState()
+def read_scope_state(session: ConversationSession) -> HistoryScopeState:
+    """Return the compaction state of the scope owning ``session``."""
+    return _scope_state(session.metadata)
 
 
-def _read_raw_scope_states(session: AgentSession | TeamSession) -> dict[str, dict[str, Any]]:
-    """Return every scope's stored compaction-state mapping from session metadata."""
-    metadata = session.metadata
-    if isinstance(metadata, dict):
-        raw_value = metadata.get(MINDROOM_COMPACTION_METADATA_KEY)
-        if isinstance(raw_value, dict) and raw_value.get("version") == _COMPACTION_METADATA_VERSION:
-            raw_states = raw_value.get("states")
-            if isinstance(raw_states, dict):
-                return {
-                    scope_key: raw_state
-                    for scope_key, raw_state in raw_states.items()
-                    if isinstance(scope_key, str) and scope_key and isinstance(raw_state, dict)
-                }
-    return {}
+def _scope_state(metadata: dict[str, Any] | None) -> HistoryScopeState:
+    return HistoryScopeState(force_compact_before_next_run=_history_state(metadata).get(_FORCE_COMPACTION) is True)
 
 
-def _write_scope_state(
-    session: AgentSession | TeamSession,
-    scope: HistoryScope,
-    state: HistoryScopeState,
-) -> None:
-    """Persist one scope's compaction control state back into session metadata.
+def _history_state(metadata: dict[str, Any] | None) -> dict[str, Any]:
+    """Return the owner's stored history state from session ``metadata``, or an empty one."""
+    raw_value = metadata.get(MINDROOM_HISTORY_METADATA_KEY) if isinstance(metadata, dict) else None
+    return raw_value if isinstance(raw_value, dict) else {}
 
-    Other scopes' stored mappings are kept verbatim.
+
+# LEGACY_COMPAT: Seen ids earlier releases copied into the owner's history state.
+# Legacy format: ``seen_event_ids`` in a session row's ``MINDROOM_HISTORY_METADATA_KEY`` value, which layout version 7
+# fills from the older per-scope entry (``session_storage/legacy_scope_metadata.py``): the destructive compactor merged
+# compacted runs' ids into it, and team turns merged the ids each one consumed, which its stored run also holds.
+# Last legacy release: v2026.10.760; replacement: v2026.10.761, where each team turn's stored run is the only record of
+# the events it consumed.
+# Handling: Nothing reads the ids; seen ids come only from the replayable runs and the summary rows. The force flag's
+# writer keeps the field beside the flag, so a row holds it as inert data.
+# Coverage: tests/test_history_scope_state.py::test_seen_event_ids_match_model_history_visibility,
+# tests/test_history_scope_state.py::test_an_edit_cut_returns_the_messages_only_the_removed_run_read, and
+# tests/test_history_scope_state.py::test_the_force_flag_is_set_and_cleared_beside_the_seen_ids.
+def _with_force_flag(metadata: dict[str, Any] | None, *, forced: bool) -> dict[str, Any]:
+    """Return session ``metadata`` with the owner's force flag set to ``forced``; ``metadata`` is left alone.
+
+    A false flag is left out, and an empty state removes the key.
     """
-    raw_states = _read_raw_scope_states(session)
-    if _state_is_empty(state):
-        raw_states.pop(scope.key, None)
+    state = {**_history_state(metadata), _FORCE_COMPACTION: forced}
+    state = {name: stored for name, stored in state.items() if stored}
+    session_metadata = dict(metadata or {})
+    if state:
+        session_metadata[MINDROOM_HISTORY_METADATA_KEY] = state
     else:
-        raw_states[scope.key] = _state_to_metadata(state)
-
-    session_metadata = dict(session.metadata or {})
-    if not raw_states:
-        session_metadata.pop(MINDROOM_COMPACTION_METADATA_KEY, None)
-    else:
-        session_metadata[MINDROOM_COMPACTION_METADATA_KEY] = {
-            "version": _COMPACTION_METADATA_VERSION,
-            "states": raw_states,
-        }
-    session.metadata = session_metadata
+        session_metadata.pop(MINDROOM_HISTORY_METADATA_KEY, None)
+    return session_metadata
 
 
-def clear_force_compaction_state(
-    session: AgentSession | TeamSession,
-    scope: HistoryScope,
-    state: HistoryScopeState,
-) -> HistoryScopeState:
-    """Clear the next-run force flag in one session scope."""
-    return set_force_compaction_state(session, scope, state, force=False)
+def with_force_compaction(metadata: dict[str, Any] | None) -> dict[str, Any]:
+    """Return session ``metadata`` asking its owner to compact before its next run; ``metadata`` itself is left alone."""
+    return _with_force_flag(metadata, forced=True)
 
 
-def set_force_compaction_state(
-    session: AgentSession | TeamSession,
-    scope: HistoryScope,
-    state: HistoryScopeState,
-    *,
-    force: bool,
-) -> HistoryScopeState:
-    """Set the next-run force flag in one session scope."""
-    next_state = replace(state, force_compact_before_next_run=force)
-    _write_scope_state(session, scope, next_state)
-    return next_state
+def has_queued_force_compaction(storage: ConversationStore, session_id: str) -> bool:
+    """Return whether the database owner must compact before its next run in session ``session_id``.
 
-
-def add_pending_force_compaction_scope(
-    session_state: dict[str, object] | None,
-    scope: HistoryScope,
-) -> dict[str, object]:
-    """Record a next-run compaction request inside Agno session_state."""
-    next_session_state = session_state if session_state is not None else {}
-    raw_scope_keys = next_session_state.get(_PENDING_COMPACTION_SCOPE_KEYS_SESSION_STATE_KEY)
-    scope_keys = (
-        [scope_key for scope_key in raw_scope_keys if isinstance(scope_key, str) and scope_key]
-        if isinstance(raw_scope_keys, list)
-        else []
-    )
-    if scope.key not in scope_keys:
-        scope_keys.append(scope.key)
-    next_session_state[_PENDING_COMPACTION_SCOPE_KEYS_SESSION_STATE_KEY] = scope_keys
-    return next_session_state
-
-
-def consume_pending_force_compaction_scope(
-    session: AgentSession | TeamSession,
-    scope: HistoryScope,
-) -> bool:
-    """Consume one pending next-run compaction request from Agno session_state."""
-    session_data = session.session_data
-    if not isinstance(session_data, dict):
-        return False
-    raw_session_state = session_data.get("session_state")
-    if not isinstance(raw_session_state, dict):
-        return False
-    raw_scope_keys = raw_session_state.get(_PENDING_COMPACTION_SCOPE_KEYS_SESSION_STATE_KEY)
-    if not isinstance(raw_scope_keys, list):
-        return False
-
-    scope_keys = [scope_key for scope_key in raw_scope_keys if isinstance(scope_key, str) and scope_key]
-    if scope.key not in scope_keys:
-        return False
-
-    remaining_scope_keys = [scope_key for scope_key in scope_keys if scope_key != scope.key]
-    next_session_state = dict(raw_session_state)
-    if remaining_scope_keys:
-        next_session_state[_PENDING_COMPACTION_SCOPE_KEYS_SESSION_STATE_KEY] = remaining_scope_keys
-    else:
-        next_session_state.pop(_PENDING_COMPACTION_SCOPE_KEYS_SESSION_STATE_KEY, None)
-
-    next_session_data = dict(session_data)
-    if next_session_state:
-        next_session_data["session_state"] = next_session_state
-    else:
-        next_session_data.pop("session_state", None)
-
-    session.session_data = next_session_data or None
-    return True
-
-
-def has_pending_force_compaction_scope(
-    session: AgentSession | TeamSession,
-    scope: HistoryScope,
-) -> bool:
-    """Return whether Agno session_state has an unconsumed compaction request."""
-    session_data = session.session_data
-    if not isinstance(session_data, dict):
-        return False
-    raw_session_state = session_data.get("session_state")
-    if not isinstance(raw_session_state, dict):
-        return False
-    raw_scope_keys = raw_session_state.get(_PENDING_COMPACTION_SCOPE_KEYS_SESSION_STATE_KEY)
-    if not isinstance(raw_scope_keys, list):
-        return False
-    return scope.key in {scope_key for scope_key in raw_scope_keys if isinstance(scope_key, str) and scope_key}
-
-
-def read_scope_seen_event_ids(
-    storage: BaseDb,
-    session: AgentSession | TeamSession,
-    scope: HistoryScope,
-) -> set[str]:
-    """Return the Matrix event ids one scope's replayed history already represents.
-
-    Live runs carry their own ids, the archive supplies those of compacted history,
-    and session metadata adds ids no stored run carries.
+    Reads only the session row's metadata, which holds the request; loading the session would also decode every
+    stored run, which takes seconds on a long session.
     """
-    seen_event_ids = _read_preserved_scope_seen_event_ids(session, scope)
-    seen_event_ids |= archive.compacted_event_ids(storage, session_id=session.session_id, scope_key=scope.key)
-    for run in session.runs or []:
-        if not is_model_history_visible_run(run):
-            continue
-        if _scope_for_run(run) != scope:
-            continue
-        seen_event_ids.update(_run_seen_event_ids(run))
-    return seen_event_ids
+    return _scope_state(storage.read_session_metadata(session_id)).force_compact_before_next_run
 
 
-def _read_scope_history_event_ids(
-    storage: BaseDb,
-    session: AgentSession | TeamSession,
-    scope: HistoryScope,
-) -> set[str]:
-    """Return every Matrix event id one scope's stored history derives from.
+def read_scope_seen_event_ids(storage: ConversationStore, session: ConversationSession) -> set[str]:
+    """Return the Matrix event ids the replayed history of the scope owning ``session`` already represents.
 
-    These are the ids redaction cleanup matches: what each top-level run consumed,
+    Loaded runs carry their own ids, and the summary rows supply those of compacted history.
+    """
+    scope = owner_scope(session)
+    seen = summary_rows.history_event_ids(storage, session_id=session.session_id, scope_key=scope.key, kind="seen")
+    for run in session.runs:
+        if replays_in_scope(run, scope):
+            seen.update(seen_event_ids(run.metadata))
+    return seen
+
+
+def _read_scope_history_event_ids(storage: ConversationStore, session: ConversationSession) -> set[str]:
+    """Return every Matrix event id the stored history of the scope owning ``session`` derives from.
+
+    These are the ids redaction cleanup matches: what each loaded top-level run consumed,
     answered, or wrote, including a run paused for approval, and what compacted
     history represents.
     """
-    event_ids = archive.redactable_compacted_event_ids(storage, session_id=session.session_id, scope_key=scope.key)
-    for run in session.runs or []:
-        if isinstance(run, (RunOutput, TeamRunOutput)) and run.parent_run_id is None and _scope_for_run(run) == scope:
-            event_ids |= _run_seen_event_ids(run) | _run_source_event_ids(run)
+    scope = owner_scope(session)
+    event_ids = summary_rows.history_event_ids(storage, session_id=session.session_id, scope_key=scope.key, kind="all")
+    for run in session.runs:
+        if run_in_scope(run, scope) and run.parent_run_id is None:
+            event_ids |= seen_event_ids(run.metadata) | source_event_ids(run.metadata)
     return event_ids
 
 
-def _run_event_ids(run: RunOutput | TeamRunOutput) -> set[str]:
-    """Return every Matrix event id one run consumed or answered, as redaction matches them."""
-    if not is_model_history_visible_run(run):
-        return set()
-    return _run_seen_event_ids(run) | _run_source_event_ids(run)
-
-
-def _run_source_event_ids(run: RunOutput | TeamRunOutput) -> set[str]:
-    """Return the Matrix event ids one run answered."""
-    metadata = run.metadata
-    if not isinstance(metadata, dict):
-        return set()
-    event_ids: set[str] = set()
-    event_id = metadata.get(MATRIX_EVENT_ID_METADATA_KEY)
-    if isinstance(event_id, str) and event_id:
-        event_ids.add(event_id)
-    for key in (MATRIX_SOURCE_EVENT_IDS_METADATA_KEY, MATRIX_TURN_DISCOVERY_EVENT_IDS_METADATA_KEY):
-        raw_ids = metadata.get(key)
-        if isinstance(raw_ids, list):
-            event_ids.update(candidate for candidate in raw_ids if isinstance(candidate, str) and candidate)
-    return event_ids
-
-
-def _run_seen_event_ids(run: RunOutput | TeamRunOutput) -> set[str]:
-    """Return Matrix event ids already represented by one run."""
-    metadata = run.metadata
-    if not isinstance(metadata, dict):
-        return set()
-    seen_event_ids: set[str] = set()
-    raw_seen_ids = metadata.get(MATRIX_SEEN_EVENT_IDS_METADATA_KEY)
-    if isinstance(raw_seen_ids, list):
-        seen_event_ids.update(event_id for event_id in raw_seen_ids if isinstance(event_id, str) and event_id)
-    raw_revisions = metadata.get(MATRIX_SOURCE_EVENT_REVISIONS_METADATA_KEY)
-    if isinstance(raw_revisions, dict):
-        seen_event_ids.update(
-            revision[1]
-            for revision in raw_revisions.values()
-            if isinstance(revision, list | tuple) and len(revision) == 2 and isinstance(revision[1], str)
-        )
-    response_event_id = metadata.get(MATRIX_RESPONSE_EVENT_ID_METADATA_KEY)
-    if isinstance(response_event_id, str) and response_event_id:
-        seen_event_ids.add(response_event_id)
-    return seen_event_ids
-
-
-def update_scope_seen_event_ids(
-    session: AgentSession | TeamSession,
-    scope: HistoryScope,
-    event_ids: list[str],
-) -> bool:
-    """Merge consumed Matrix event ids into one session scope."""
-    existing_seen_ids = _read_preserved_scope_seen_event_ids(session, scope)
-    updated_seen_ids = existing_seen_ids.union(event_id for event_id in event_ids if event_id)
-    if updated_seen_ids == existing_seen_ids:
-        return False
-    _replace_scope_seen_event_ids(session, scope, updated_seen_ids)
-    return True
-
-
-def remove_run_by_event_id(
-    storage: BaseDb,
+def remove_runs_answering(
+    storage: ConversationStore,
     session_id: str,
+    scope: HistoryScope,
     event_id: str,
     *,
-    session_type: SessionType = SessionType.AGENT,
-    include_seen_event_ids: bool = False,
-    remove_following_runs: bool = False,
+    keeping: Collection[str] = (),
 ) -> bool:
-    """Remove a run whose Matrix source identity, or with ``include_seen_event_ids`` its whole history, matches.
+    """Remove the first element of the scope's history that answered ``event_id`` and everything after it.
 
-    Its whole history is what it read, what revisions it consumed, and the reply it wrote.
-    Redaction cleanup can also remove the causal suffix after the first match,
-    because later model output may depend on content from the matching run.
-    Returns True if any run was removed.
+    Later model output may build on that reply, so the whole suffix goes; when a
+    compacted run answered the event, so does the summary that folded it.
+    A run that read every revision of ``keeping`` answered the edit those revisions
+    are, not what the edit replaces, so the removal never starts at it.
+    Returns True if anything was removed.
     """
-    session = (
-        get_team_session(storage, session_id)
-        if session_type is SessionType.TEAM
-        else get_agent_session(storage, session_id)
+    return summary_rows.cut_at_event(
+        storage,
+        session_id=session_id,
+        scope_key=scope.key,
+        event_id=event_id,
+        match="answered",
+        keeping=keeping,
     )
-    if session is None or not session.runs:
-        return False
-    removed_runs: list[RunOutput | TeamRunOutput] = []
-    for run in session.runs:
-        if not isinstance(run, (RunOutput, TeamRunOutput)):
-            continue
-        matched_event_ids = _run_source_event_ids(run)
-        if include_seen_event_ids:
-            matched_event_ids |= _run_seen_event_ids(run)
-        if (removed_runs and remove_following_runs) or event_id in matched_event_ids:
-            removed_runs.append(run)
-    if not removed_runs:
-        return False
-    # Team member runs hang off the team run through parent_run_id and go with it.
-    kept = runs_without(session.runs, [run.run_id for run in removed_runs if run.run_id])
-    replace_runs(storage, session, [run for run in kept if not any(run is gone for gone in removed_runs)])
-    return True
 
 
 def _remove_redacted_event_from_history(
-    storage: BaseDb,
-    session: AgentSession | TeamSession,
-    scope: HistoryScope,
+    storage: ConversationStore,
     *,
+    session: ConversationSession,
     event_id: str,
     legacy_source_event_id: str | None = None,
 ) -> bool:
-    """Remove the part of one scope's history that derives from a redacted Matrix event.
+    """Remove the part of the history of the scope owning ``session`` that derives from a redacted Matrix event.
 
-    The first run that answered, read, or wrote the event goes with every run after it,
-    and compacted history is rolled back the same way. ``session`` is synced to
-    the stored result. Returns whether the scope's history changed.
+    The first element that answered, read, or wrote the event goes with everything
+    after it, and the runs a removed summary covered replay again. ``session`` is synced
+    to the stored result.
+    Returns whether the scope's history changed.
     """
-    removed_run = remove_run_by_event_id(
+    session_id, scope = session.session_id, owner_scope(session)
+    legacy_event_ids = summary_rows.legacy_event_ids(storage, session_id=session_id, scope_key=scope.key)
+    if legacy_event_ids is not None and _legacy_summary_may_contain(event_id, legacy_source_event_id, legacy_event_ids):
+        summary_rows.cut_at_legacy_row(storage, session=session, scope_key=scope.key)
+        return True
+    if not summary_rows.cut_at_event(
         storage,
-        session.session_id,
-        event_id,
-        session_type=SessionType.TEAM if isinstance(session, TeamSession) else SessionType.AGENT,
-        include_seen_event_ids=True,
-        remove_following_runs=True,
-    )
-    latest_session = _latest_persisted_session(storage, session)
-    removed_compacted = _remove_redacted_event_from_compaction(
-        storage,
-        latest_session,
-        scope,
+        # The id repeats the session's: `remove_runs_answering` cuts with the id alone, so this function takes both.
+        session_id=session_id,
+        scope_key=scope.key,
         event_id=event_id,
-        removed_live_run=removed_run,
-        legacy_source_event_id=legacy_source_event_id,
-    )
-    _adopt_session_fields(session, latest_session)
-    return removed_run or removed_compacted
+        match="any",
+        session=session,
+    ):
+        return False
+    if legacy_event_ids is not None:
+        summary_rows.retire(storage, session=session, scope_key=scope.key)
+    return True
 
 
 async def remove_history_of_redacted_events(
-    storage: BaseDb,
-    session: AgentSession | TeamSession,
-    scope: HistoryScope,
+    storage: ConversationStore,
+    session: ConversationSession,
     redacted_history_events: Callable[[tuple[str, ...]], Awaitable[Mapping[str, str | None]]],
 ) -> list[str]:
-    """Remove the part of one scope's history derived from events since redacted, and return those events.
+    """Remove the history of the scope owning ``session`` derived from events since redacted, and return those events.
 
     ``redacted_history_events`` maps each redacted event to the source a legacy summary
-    consumed it through, or None. A rollback can restore older runs that read another
-    redacted event, so the check repeats until a pass removes nothing new. ``session``
-    is synced to the stored result.
+    consumed it through, or None. A cut can bring older runs back to replay that read
+    another redacted event, so the check repeats until a pass removes nothing new.
+    ``session`` is synced to the stored result.
     """
     removed_event_ids: list[str] = []
     while True:
-        event_ids = await run_blocking_until_complete(_read_scope_history_event_ids, storage, session, scope)
+        event_ids = await run_blocking_until_complete(_read_scope_history_event_ids, storage, session)
         if not event_ids:
             return removed_event_ids
         redacted = await redacted_history_events(tuple(sorted(event_ids)))
@@ -471,330 +255,183 @@ async def remove_history_of_redacted_events(
         for event_id in sorted(set(redacted).difference(removed_event_ids)):
             removal = partial(
                 _remove_redacted_event_from_history,
-                storage,
-                session,
-                scope,
+                session=session,
                 event_id=event_id,
                 legacy_source_event_id=redacted[event_id],
             )
-            if await run_blocking_until_complete(removal):
+            if await run_session_storage_operation(lambda: storage, removal):
                 newly_removed.append(event_id)
         if not newly_removed:
             return removed_event_ids
         removed_event_ids.extend(newly_removed)
 
 
-def _remove_redacted_event_from_compaction(
-    storage: BaseDb,
-    session: AgentSession | TeamSession,
-    scope: HistoryScope,
-    *,
-    event_id: str,
-    removed_live_run: bool,
-    legacy_source_event_id: str | None = None,
-) -> bool:
-    """Remove a redacted Matrix event from compacted history, keeping everything before it.
-
-    Callers remove live runs that represent the event first and report whether any
-    went. When an archived run represents the event, compaction is undone from that
-    run's generation onward: the generation's earlier runs return to the live table,
-    the previous generation's summary is replayed again, and the run plus everything
-    after it is removed. Archived runs record every event they represent, so an
-    event no archived run represents never reached an archive-era summary.
-    Afterwards the scope's preserved metadata seen ids are dropped, so messages only
-    they covered return as unseen thread context; compacted history's ids stay
-    derived from the archive. Returns whether the scope's history changed for this event.
-    """
-    live_run_ids = [run.run_id for run in session.runs or [] if run.run_id]
-    legacy_redaction = _legacy_redaction(
-        storage,
-        session,
-        scope,
-        event_id=event_id,
-        removed_live_run=removed_live_run,
-        legacy_source_event_id=legacy_source_event_id,
-    )
-    if legacy_redaction == "clear":
-        archive.clear_to_legacy(
-            storage,
-            session_id=session.session_id,
-            scope_key=scope.key,
-            live_run_ids=live_run_ids,
-        )
-    elif (
-        hit := archive.find_archived_event(
-            storage,
-            session_id=session.session_id,
-            scope_key=scope.key,
-            event_id=event_id,
-        )
-    ) is not None:
-        archive.roll_back_to(
-            storage,
-            session_id=session.session_id,
-            scope_key=scope.key,
-            hit=hit,
-            live_run_ids=live_run_ids,
-        )
-    elif not removed_live_run:
-        return False
-    if legacy_redaction == "retire":
-        archive.retire_summaries(storage, session_id=session.session_id, scope_key=scope.key)
-    target_session = _latest_persisted_session(storage, session)
-    _replace_scope_seen_event_ids(target_session, scope, set())
-    generation = archive.latest_generation(storage, session_id=session.session_id, scope_key=scope.key)
-    if generation is not None:
-        _refresh_summary(target_session, generation.summary)
-    storage.upsert_session(target_session)
-    _adopt_session_fields(session, target_session)
-    return True
-
-
 # LEGACY_COMPAT: Redaction of history compacted before the archive existed.
-# Legacy format: A legacy generation (see ``history/legacy_compaction_state.py``) whose summary
-# still replays and whose provenance is only the preserved seen ids the migration captured.
-# Last legacy release: v2026.9.314; replacement: the next release records exact per-run provenance.
+# Legacy format: A legacy summary row (see ``session_storage/legacy_compaction_state.py``) whose summary
+# is still in force and whose provenance is only the seen ids the migration captured.
+# Last legacy release: v2026.9.314; replacement: v2026.9.315 recorded exact per-run provenance.
 # Handling: That summary cannot be split by run, and every later summary includes it. An event it
-# may contain (its captured seen ids or retained source ownership) clears it together with every
-# later generation and live run, which may repeat its content. A live run removed for any other
-# event only retires the summaries, because provenance from before per-scope seen ids may be
-# incomplete; live runs stay, and archived runs stay stored without counting as compacted history.
-# This matches how redaction treated such a summary before the archive existed.
-# Coverage: tests/test_compaction_redaction.py::test_redacting_legacy_provenance_clears_summary_and_archived_generations,
-# tests/test_compaction_redaction.py::test_legacy_provenance_wins_over_a_later_archive_hit,
-# tests/test_compaction_redaction.py::test_removing_a_live_run_retires_a_legacy_summary,
-# and tests/test_compaction_redaction.py::test_removing_a_live_run_keeps_runs_archived_after_a_legacy_summary.
-def _legacy_redaction(
-    storage: BaseDb,
-    session: AgentSession | TeamSession,
-    scope: HistoryScope,
-    *,
+# may contain (its captured seen ids or retained source ownership) cuts at it, removing every run and
+# later summary of the scope. A cut for any other event, of loaded or folded runs, retires the summaries,
+# because provenance from before per-scope seen ids may be incomplete; runs stay, and folded runs stay
+# stored without counting as compacted history. This matches how redaction treated such a summary before.
+# Coverage: tests/test_compaction_redaction.py::test_redacting_legacy_provenance_clears_summary_and_folded_runs,
+# tests/test_compaction_redaction.py::test_legacy_provenance_wins_over_a_later_folded_hit,
+# tests/test_compaction_redaction.py::test_removing_a_loaded_run_retires_a_legacy_summary, and
+# tests/test_compaction_redaction.py::test_removing_only_folded_runs_retires_a_legacy_summary.
+def _legacy_summary_may_contain(
     event_id: str,
-    removed_live_run: bool,
     legacy_source_event_id: str | None,
-) -> Literal["clear", "retire"] | None:
-    """Return how redacting the event must treat a summary written before the archive existed."""
-    if not archive.has_legacy_summary(storage, session_id=session.session_id, scope_key=scope.key):
-        return None
-    legacy_event_ids = archive.legacy_event_ids(storage, session_id=session.session_id, scope_key=scope.key)
-    if event_id in legacy_event_ids or summary_depends_on_source(
-        legacy_source_event_id,
-        has_summary=True,
-        seen_event_ids=legacy_event_ids,
-    ):
-        return "clear"
-    return "retire" if removed_live_run else None
+    legacy_event_ids: frozenset[str],
+) -> bool:
+    """Return whether a summary written before the archive existed may contain the redacted event."""
+    return event_id in legacy_event_ids or legacy_source_event_id in legacy_event_ids
 
 
-def _parse_state(raw_state: dict[str, Any]) -> HistoryScopeState:
-    return HistoryScopeState(force_compact_before_next_run=bool(raw_state.get("force_compact_before_next_run")))
-
-
-def _state_to_metadata(state: HistoryScopeState) -> dict[str, object]:
-    return {"force_compact_before_next_run": state.force_compact_before_next_run}
-
-
-def _state_is_empty(state: HistoryScopeState) -> bool:
-    return not state.force_compact_before_next_run
-
-
-def reconcile_compaction_state(
-    storage: BaseDb,
-    session: AgentSession | TeamSession,
-    scope: HistoryScope,
-) -> None:
-    """Restore the archive invariants before a run uses persisted history (invariants 2 and 3)."""
-    live_run_ids = [run.run_id for run in session.runs or [] if run.run_id]
-    resurrected = archive.archived_run_ids(storage, session_id=session.session_id, run_ids=live_run_ids)
-    if resurrected:
-        logger.warning(
-            "Removed live runs that compaction already archived",
-            session_id=session.session_id,
-            scope=scope.key,
-            run_count=len(resurrected),
-        )
-        replace_runs(storage, session, runs_without(session.runs or [], resurrected))
-    generation = archive.latest_generation(storage, session_id=session.session_id, scope_key=scope.key)
-    if generation is None or _summary_text(session) == generation.summary:
-        return
-    logger.warning(
-        "Restored the replayed summary from the compaction archive",
-        session_id=session.session_id,
-        scope=scope.key,
-    )
-    target_session = _latest_persisted_session(storage, session)
-    _refresh_summary(target_session, generation.summary)
-    # A row with a stale summary was written from a snapshot older than the archive's
-    # latest change, so its preserved ids may cover history a redaction removed.
-    _replace_scope_seen_event_ids(target_session, scope, set())
-    storage.upsert_session(target_session)
-    _adopt_session_fields(session, target_session)
-
-
-def _refresh_summary(session: AgentSession | TeamSession, summary: str | None) -> None:
-    """Make the cached ``session.summary`` the archive's latest generation summary."""
-    if _summary_text(session) != summary:
-        session.summary = SessionSummary(summary=summary, updated_at=datetime.now(UTC)) if summary is not None else None
-
-
-def _summary_text(session: AgentSession | TeamSession) -> str | None:
-    return session.summary.summary if session.summary is not None else None
-
-
-def _latest_persisted_session(
-    storage: BaseDb,
-    session: AgentSession | TeamSession,
-) -> AgentSession | TeamSession:
-    """Return the freshest stored row for one session, or the given session when unavailable."""
-    session_type = SessionType.TEAM if isinstance(session, TeamSession) else SessionType.AGENT
-    latest_session = storage.get_session(session_id=session.session_id, session_type=session_type)
-    return latest_session if isinstance(latest_session, type(session)) else session
-
-
-def _adopt_session_fields(
-    session: AgentSession | TeamSession,
-    source: AgentSession | TeamSession,
-) -> None:
-    """Sync one in-memory session's durable fields from another loaded row."""
-    session.metadata = source.metadata
-    session.runs = source.runs
-    session.summary = source.summary
-
-
-def update_scope_state_on_latest(
-    storage: BaseDb,
-    session: AgentSession | TeamSession,
-    scope: HistoryScope,
-    update: Callable[[HistoryScopeState], HistoryScopeState],
-) -> HistoryScopeState:
-    """Apply one scope-state update against the freshest stored row and sync the session.
-
-    The update callable sees the latest persisted state, so it can refuse to write
-    (return its input unchanged) when the durable row moved since the caller read it.
-    """
-    target_session = _latest_persisted_session(storage, session)
-    latest_state = read_scope_state(target_session, scope)
-    next_state = update(latest_state)
-    if next_state != latest_state:
-        _write_scope_state(target_session, scope, next_state)
-        storage.upsert_session(target_session)
-    _adopt_session_fields(session, target_session)
-    return next_state
-
-
-def archive_compaction_chunk(
+def set_force_compaction(
+    storage: ConversationStore,
     *,
-    storage: BaseDb,
-    session: AgentSession | TeamSession,
-    scope: HistoryScope,
-    summary: SessionSummary,
-    summary_model: str,
-    archived_runs: Sequence[RunOutput | TeamRunOutput],
+    session: ConversationSession,
+    forced: bool,
 ) -> None:
-    """Durably persist one compaction chunk before the next chunk is attempted (invariants 1 and 3).
+    """Store whether the next run of the scope owning ``session`` compacts first.
 
-    ``archived_runs`` is the chunk's complete removed subtree in stored order. The
-    archive transaction commits first; the summary then lands on the freshest session
-    row. An interruption in between is repaired by the next ``reconcile_compaction_state``.
+    The flag changes in the metadata the stored row holds, which writes nothing when the flag already reads
+    ``forced``, and ``session`` then holds that metadata.
     """
-    archive.archive_runs(
+
+    def change(metadata: dict[str, Any] | None) -> dict[str, Any] | None:
+        if _scope_state(metadata).force_compact_before_next_run == forced:
+            return metadata
+        return _with_force_flag(metadata, forced=forced)
+
+    storage.update_metadata(session, change)
+
+
+def _latest_summary_row(storage: ConversationStore, session: ConversationSession) -> tuple[int | None, str | None]:
+    """Return the id of the owner scope's latest summary row and its text as replay reads it, or ``None`` for each."""
+    latest = summary_rows.latest_row(storage, session_id=session.session_id, scope_key=owner_scope(session).key)
+    if latest is None:
+        return None, None
+    return latest.id, replayed_summary_text(latest.summary)
+
+
+@dataclass(frozen=True)
+class ChunkBasis:
+    """What one compaction chunk's summary is built on: the latest summary row and the candidate runs, as read."""
+
+    based_on: int | None
+    covered: tuple[summary_rows.CoveredRun, ...]
+
+
+def read_chunk_basis(
+    storage: ConversationStore,
+    session: ConversationSession,
+    run_ids: Sequence[str],
+    *,
+    previous_summary: str | None,
+) -> ChunkBasis | None:
+    """Read what a chunk folding some of ``run_ids`` after ``previous_summary`` builds on, before its summary call.
+
+    The chunk summarizes the session as it was loaded, so this returns ``None`` when its owner scope's stored history
+    has changed since: the latest row's text is not ``previous_summary``, or a candidate run is gone or hidden.
+    """
+    based_on, latest_summary = _latest_summary_row(storage, session)
+    covered = tuple(summary_rows.covered_runs(storage, session_id=session.session_id, run_ids=run_ids))
+    if latest_summary != previous_summary or {run.run_id for run in covered if run.visible} != set(run_ids):
+        return None
+    return ChunkBasis(based_on=based_on, covered=covered)
+
+
+def append_compaction_chunk(
+    storage: ConversationStore,
+    *,
+    session: ConversationSession,
+    basis: ChunkBasis,
+    included_run_ids: Collection[str],
+    summary: str,
+) -> bool:
+    """Durably append one compaction chunk's summary row to the scope owning ``session``, before the next chunk.
+
+    The append writes nothing when the scope's latest row, or a run the chunk folded,
+    changed since ``basis`` was read. ``session`` then holds the stored result.
+    Returns whether the row was appended.
+    """
+    row_id = summary_rows.append_summary(
+        storage,
+        session_id=session.session_id,
+        scope_key=owner_scope(session).key,
+        based_on=basis.based_on,
+        covered=[run for run in basis.covered if run.run_id in included_run_ids],
+        summary=summary,
+        session=session,
+    )
+    return row_id is not None
+
+
+@dataclass(frozen=True)
+class FoldBasis:
+    """What a mid-turn fold builds on: the scope's latest summary row and the stored runs after it, as read."""
+
+    based_on: int | None
+    summary: str | None
+    runs: tuple[AnyRunRecord, ...]
+    covered: tuple[summary_rows.CoveredRun, ...]
+
+
+def read_fold_basis(storage: ConversationStore, session: ConversationSession) -> FoldBasis | None:
+    """Read the latest summary row of the scope owning ``session`` and the visible stored runs after it.
+
+    The stored log, not the running loop's own session, is authoritative for what earlier folds covered, so
+    the basis is read from it. A stored copy of the running run is paused or cancelled, so it never counts
+    as visible.
+    Returns ``None`` when the stored history changed between the reads.
+    """
+    based_on, latest_summary = _latest_summary_row(storage, session)
+    stored = storage.load_session(session.session_id)
+    scope = owner_scope(session)
+    runs = [run for run in (stored.runs if stored is not None else []) if replays_in_scope(run, scope)]
+    run_ids = [run.run_id for run in runs]
+    covered = tuple(summary_rows.covered_runs(storage, session_id=session.session_id, run_ids=run_ids))
+    if {run.run_id for run in covered if run.visible} != set(run_ids):
+        return None
+    return FoldBasis(
+        based_on=based_on,
+        summary=latest_summary,
+        runs=tuple(runs),
+        covered=covered,
+    )
+
+
+def append_fold(
+    storage: ConversationStore,
+    *,
+    session: ConversationSession,
+    basis: FoldBasis,
+    summary: str,
+    fold: summary_rows.Fold,
+) -> bool:
+    """Append a mid-turn fold's summary row to the scope owning ``session`` and store what it took.
+
+    Nothing is written when its basis went stale or a cut removed its run. ``session``, the turn's own, then holds
+    what a fresh load does, so a request rebuilt from it within the turn, as a delegation continuation is, replays
+    only what the summary does not cover.
+    """
+    scope = owner_scope(session)
+    row_id = summary_rows.append_summary(
         storage,
         session_id=session.session_id,
         scope_key=scope.key,
-        summary=summary.summary,
-        summary_model=summary_model,
-        runs=archived_runs,
-        event_ids={run.run_id: _run_event_ids(run) for run in archived_runs if run.run_id},
-        seen_event_ids={
-            run.run_id: _run_seen_event_ids(run)
-            for run in archived_runs
-            if run.run_id and is_model_history_visible_run(run)
-        },
+        based_on=basis.based_on,
+        covered=basis.covered,
+        summary=summary,
+        fold=fold,
+        session=session,
+        initial_session=new_scope_session(session_id=session.session_id, scope=scope),
     )
-    target_session = _latest_persisted_session(storage, session)
-    target_session.summary = summary
-    storage.upsert_session(target_session)
-    _adopt_session_fields(session, target_session)
+    return row_id is not None
 
 
-def save_working_run_changes(
-    storage: BaseDb,
-    session: AgentSession | TeamSession,
-    working_session: AgentSession | TeamSession,
-) -> None:
-    """Persist edits compaction made to the runs it kept, such as stripped replay fields."""
-    save_runs(storage, session, _runs_changed_by_working(session.runs or [], working_session.runs or []))
-
-
-def _runs_changed_by_working(
-    target_runs: list[RunOutput | TeamRunOutput],
-    working_runs: list[RunOutput | TeamRunOutput],
-) -> list[RunOutput | TeamRunOutput]:
-    """Copies of the working-session versions of stored runs whose contents changed."""
-    working_by_id = {run.run_id: run for run in working_runs if isinstance(run.run_id, str) and run.run_id}
-    changed: list[RunOutput | TeamRunOutput] = []
-    for run in target_runs:
-        working_run = working_by_id.get(run.run_id) if isinstance(run.run_id, str) else None
-        if working_run is not None and working_run.to_dict() != run.to_dict():
-            changed.append(deepcopy(working_run))
-    return changed
-
-
-def _read_preserved_scope_seen_event_ids(session: AgentSession | TeamSession, scope: HistoryScope) -> set[str]:
-    raw_value = _valid_matrix_history_metadata(session.metadata or {})
-    raw_states = raw_value.get("states") if raw_value is not None else None
-    raw_state = raw_states.get(scope.key) if isinstance(raw_states, dict) else None
-    raw_seen_ids = raw_state.get("seen_event_ids") if isinstance(raw_state, dict) else None
-    if not isinstance(raw_seen_ids, list):
-        return set()
-    return {event_id for event_id in raw_seen_ids if isinstance(event_id, str) and event_id}
-
-
-def _replace_scope_seen_event_ids(
-    session: AgentSession | TeamSession,
-    scope: HistoryScope,
-    event_ids: set[str],
-) -> None:
-    """Make ``event_ids`` the scope's preserved seen ids, leaving other scopes untouched."""
-    session_metadata = dict(session.metadata or {})
-    raw_value = _valid_matrix_history_metadata(session_metadata)
-    matrix_history: dict[str, Any] = (
-        dict(raw_value) if raw_value is not None else {"version": _MATRIX_HISTORY_METADATA_VERSION}
-    )
-    raw_states = matrix_history.get("states")
-    next_states = dict(raw_states) if isinstance(raw_states, dict) else {}
-    if event_ids:
-        raw_state = next_states.get(scope.key)
-        next_states[scope.key] = {
-            **(raw_state if isinstance(raw_state, dict) else {}),
-            "seen_event_ids": sorted(event_ids),
-        }
-    else:
-        next_states.pop(scope.key, None)
-    if next_states:
-        matrix_history["states"] = next_states
-        session_metadata[MINDROOM_MATRIX_HISTORY_METADATA_KEY] = matrix_history
-    else:
-        session_metadata.pop(MINDROOM_MATRIX_HISTORY_METADATA_KEY, None)
-    session.metadata = session_metadata
-
-
-def _valid_matrix_history_metadata(metadata: dict[str, Any]) -> dict[str, Any] | None:
-    raw_value = metadata.get(MINDROOM_MATRIX_HISTORY_METADATA_KEY)
-    if not isinstance(raw_value, dict):
-        return None
-    if raw_value.get("version") != _MATRIX_HISTORY_METADATA_VERSION:
-        return None
-    return raw_value
-
-
-def _scope_for_run(run: RunOutput | TeamRunOutput) -> HistoryScope | None:
-    if isinstance(run, TeamRunOutput):
-        team_id = run.team_id
-        if isinstance(team_id, str) and team_id:
-            return HistoryScope(kind="team", scope_id=team_id)
-        return None
-    agent_id = run.agent_id
-    if isinstance(agent_id, str) and agent_id:
-        return HistoryScope(kind="agent", scope_id=agent_id)
-    return None
+def run_folded_tool_call_ids(storage: ConversationStore, *, session_id: str, run_id: str) -> set[str]:
+    """Return the tool calls the run's mid-turn folds summarized, from the rows they flagged."""
+    return summary_rows.folded_tool_call_ids(storage, session_id=session_id, run_id=run_id)

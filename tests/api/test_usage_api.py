@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
@@ -12,8 +11,8 @@ from fastapi.testclient import TestClient
 
 from mindroom import constants
 from mindroom.api import config_lifecycle, main
-from tests.api.test_api import _trusted_upstream_jwks, _trusted_upstream_jwt, _trusted_upstream_jwt_key
-from tests.api.test_usage_service_auth import _install_manual_export_runner
+from tests.api.conftest import trusted_upstream_jwks, trusted_upstream_jwt, trusted_upstream_jwt_key
+from tests.api.test_usage_service_auth import _install_manual_export_runner, _publish_failed_config_load
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -24,18 +23,15 @@ if TYPE_CHECKING:
 def signed_usage_auth(
     monkeypatch: pytest.MonkeyPatch,
 ) -> tuple[dict[str, str], Callable[..., dict[str, str]]]:
-    """Return strict dashboard auth settings and real signed identity headers."""
-    private_key = _trusted_upstream_jwt_key()
-    monkeypatch.setattr(jwt.PyJWKClient, "fetch_data", lambda _client: _trusted_upstream_jwks(private_key))
+    """Return dashboard auth settings and real signed identity headers."""
+    private_key = trusted_upstream_jwt_key()
+    monkeypatch.setattr(jwt.PyJWKClient, "fetch_data", lambda _client: trusted_upstream_jwks(private_key))
     env = {
         "MINDROOM_API_KEY": "test-usage-key",
         "MINDROOM_CONNECTIONS_AGENT": "test_agent",
         "MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "true",
-        "MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER": "Cf-Access-Authenticated-User-Email",
-        "MINDROOM_TRUSTED_UPSTREAM_EMAIL_HEADER": "Cf-Access-Authenticated-User-Email",
         "MINDROOM_TRUSTED_UPSTREAM_EMAIL_DOMAIN": "example.org",
         "MINDROOM_TRUSTED_UPSTREAM_EMAIL_TO_MATRIX_USER_ID_TEMPLATE": "@{localpart}:example.org",
-        "MINDROOM_TRUSTED_UPSTREAM_REQUIRE_JWT": "true",
         "MINDROOM_TRUSTED_UPSTREAM_JWT_HEADER": "Cf-Access-Jwt-Assertion",
         "MINDROOM_TRUSTED_UPSTREAM_JWKS_URL": "https://issuer.example/jwks",
         "MINDROOM_TRUSTED_UPSTREAM_JWT_AUDIENCE": "mindroom-dashboard",
@@ -50,8 +46,7 @@ def signed_usage_auth(
         expires_at: datetime | None = None,
     ) -> dict[str, str]:
         return {
-            "Cf-Access-Authenticated-User-Email": email,
-            "Cf-Access-Jwt-Assertion": _trusted_upstream_jwt(
+            "Cf-Access-Jwt-Assertion": trusted_upstream_jwt(
                 private_key,
                 email=email,
                 audience=audience,
@@ -116,19 +111,8 @@ def test_usage_dashboard_sanitizes_failed_committed_configuration(
     """Dashboard polling must not expose committed configuration diagnostics."""
     client = _dashboard_client(temp_config_file, tmp_path, {"MINDROOM_API_KEY": "test-usage-key"})
     runner, workers = _install_manual_export_runner(client)
-    api_state = config_lifecycle.require_api_state(client.app)
     sensitive_detail = "sensitive-dashboard-config-diagnostic"
-    with api_state.config_lock:
-        snapshot = api_state.snapshot
-        api_state.snapshot = replace(
-            snapshot,
-            generation=snapshot.generation + 1,
-            config_load_result=config_lifecycle.ConfigLoadResult(
-                success=False,
-                error_status_code=422,
-                error_detail={"diagnostic": sensitive_detail},
-            ),
-        )
+    _publish_failed_config_load(client, sensitive_detail)
 
     try:
         response = client.get(
@@ -179,7 +163,7 @@ def test_usage_dashboard_accepts_real_signed_administrator(
         ("expired", 401),
         ("wrong-audience", 401),
         ("wrong-issuer", 401),
-        ("mismatched-email", 401),
+        ("owner-email-header", 403),
     ],
 )
 def test_usage_dashboard_rejects_invalid_or_unauthorized_identity(
@@ -201,7 +185,7 @@ def test_usage_dashboard_rejects_invalid_or_unauthorized_identity(
         "expired": signed_headers(expires_at=datetime.now(UTC) - timedelta(minutes=1)),
         "wrong-audience": signed_headers(audience="another-application"),
         "wrong-issuer": signed_headers(issuer="https://another-issuer.example"),
-        "mismatched-email": {
+        "owner-email-header": {
             **signed_headers("alice@example.org"),
             "Cf-Access-Authenticated-User-Email": "owner@example.org",
         },
@@ -216,3 +200,79 @@ def test_usage_dashboard_rejects_invalid_or_unauthorized_identity(
     assert response.status_code == status
     assert set(response.json()) == {"detail"}
     assert workers.targets == []
+
+
+def test_provider_limits_endpoint_enforces_admin_auth_and_returns_contract_shape(
+    temp_config_file: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    signed_usage_auth: tuple[dict[str, str], Callable[..., dict[str, str]]],
+) -> None:
+    """GET /api/usage/provider-limits requires admin auth, sets Cache-Control: no-store, and forwards refresh."""
+    from unittest.mock import AsyncMock  # noqa: PLC0415
+
+    from mindroom.usage.provider_limits import ProviderLimitAccount, ProviderUsageSnapshot  # noqa: PLC0415
+
+    snapshot = ProviderUsageSnapshot(
+        checked_at="2026-11-23T20:00:00Z",
+        partial=False,
+        accounts=(
+            ProviderLimitAccount(
+                id="anthropic:default",
+                provider="anthropic",
+                display_name="Anthropic",
+                account_label="Pay-as-you-go",
+                plan="Pay-as-you-go",
+                model_keys=("default",),
+                windows=(),
+                unavailable_reason=None,
+                checked_at="2026-11-23T20:00:00Z",
+                stale=False,
+                tokens_7d=500,
+                cost_usd_7d=None,
+                cost_estimated=False,
+            ),
+        ),
+        daily_7d=(),
+        unattributed_tokens_7d=0,
+        unattributed_cost_usd_7d=None,
+    )
+    mock_snapshot = AsyncMock(return_value=snapshot)
+    monkeypatch.setattr("mindroom.api.usage.get_provider_usage_snapshot", mock_snapshot)
+
+    env, signed_headers = signed_usage_auth
+    client = _dashboard_client(temp_config_file, tmp_path, env)
+
+    assert client.get("/api/usage/provider-limits").status_code == 401
+    assert client.get("/api/usage/provider-limits", headers=signed_headers("alice@example.org")).status_code == 403
+    mock_snapshot.assert_not_awaited()
+
+    resp = client.get("/api/usage/provider-limits?refresh=true", headers=signed_headers("owner@example.org"))
+    assert resp.status_code == 200
+    assert resp.headers["cache-control"] == "no-store"
+    body = resp.json()
+    assert body["version"] == 1
+    assert "request_id" not in body
+    assert body["accounts"][0]["id"] == "anthropic:default"
+    mock_snapshot.assert_awaited_once()
+    assert mock_snapshot.await_args.kwargs["force_refresh"] is True
+
+
+def test_provider_limits_sanitizes_failed_committed_configuration(
+    temp_config_file: Path,
+    tmp_path: Path,
+) -> None:
+    """GET /api/usage/provider-limits returns 503 with Cache-Control: no-store on committed config load errors."""
+    client = _dashboard_client(temp_config_file, tmp_path, {"MINDROOM_API_KEY": "test-usage-key"})
+    sensitive_detail = "/secret/include/path/broken.yaml"
+    _publish_failed_config_load(client, sensitive_detail)
+
+    response = client.get(
+        "/api/usage/provider-limits",
+        headers={"Authorization": "Bearer test-usage-key"},
+    )
+
+    assert response.status_code == 503
+    assert response.content == b""
+    assert response.headers["cache-control"] == "no-store"
+    assert sensitive_detail not in response.text

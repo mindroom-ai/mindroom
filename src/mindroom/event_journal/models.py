@@ -39,9 +39,6 @@ class IngestionConsumer:  # noqa: D101
     stream_id: UUID | None
 
 
-DURABLE_DELIVERY_ID_KEY = "io.mindroom.delivery_id"
-
-
 class EventClass(StrEnum):
     """Whether an admitted event may start semantic work.
 
@@ -60,12 +57,23 @@ class EventKind(StrEnum):
     MESSAGE = "message"
     MEDIA = "media"
     SCHEDULE_TRIGGER = "schedule_trigger"
+    # A room's steward tells the responder it selected to answer a person's message.
+    ROUTE = "route"
     REACTION = "reaction"
     APPROVAL = "approval"
     ROOM_LIFECYCLE = "room_lifecycle"
     RTC = "rtc"
     REDACTION = "redaction"
     OPAQUE_HISTORY = "opaque_history"
+    # A runtime source, not a Matrix event: background jobs ended that no reply collected.
+    JOB_FOLLOW_UP = "job_follow_up"
+    # A target owes a manual history fold, not a reply.
+    COMPACTION = "compaction"
+    # A person asks from their client to cancel background jobs.
+    JOB_CANCEL = "job_cancel"
+    # A person acts on a workflow run from their client: resumes it, or answers its question.
+    WORKFLOW_CONTROL = "workflow_control"
+    WORKFLOW_ANSWER = "workflow_answer"
 
 
 # Kinds whose work outlives its callback, because the callback only starts a
@@ -77,7 +85,9 @@ class EventKind(StrEnum):
 # pending alone does not mean that. Thread membership is derived from content
 # for every readable kind alike, so a pending reaction or approval can sit
 # in a thread and be mistaken for an unanswered turn.
-TURN_BACKED_KINDS = frozenset({EventKind.MESSAGE, EventKind.MEDIA, EventKind.SCHEDULE_TRIGGER})
+TURN_BACKED_KINDS = frozenset({EventKind.MESSAGE, EventKind.MEDIA, EventKind.SCHEDULE_TRIGGER, EventKind.ROUTE})
+# Runtime sources admitted by MindRoom itself rather than Matrix sync; nothing for Matrix ingress to parse.
+RUNTIME_SOURCE_KINDS = frozenset({EventKind.JOB_FOLLOW_UP, EventKind.COMPACTION})
 
 
 class SemanticConsumer(StrEnum):
@@ -102,6 +112,7 @@ class AdmissionResult(StrEnum):
 
     ADMITTED = "admitted"
     DUPLICATE = "duplicate"
+    MEMBERSHIP_FENCED = "membership_fenced"
 
 
 class IngestionRecordDisposition(StrEnum):
@@ -364,6 +375,8 @@ class RefreshRequest:
     revision_event_id: str
     refresh_token: int
     membership_epoch: int
+    # The room's projection generation when the debt was read; a departure since then refuses the refetch.
+    projection_generation: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -379,6 +392,27 @@ class ConversationPage:
     messages: tuple[VisibleMessage, ...]
     refresh_pending: tuple[RefreshRequest, ...]
     next_cursor: ConversationCursor | None
+
+
+@dataclass(frozen=True, slots=True)
+class RoomPage:
+    """Messages of a whole room after a cursor, oldest first.
+
+    ``last_cursor`` is the position of the last message in ``messages``, which
+    a caller passes back as ``after`` to continue. It is ``None`` when nothing
+    was returned, which means no progress: keep the cursor you had. The page
+    stops before the first message owing a refetch, so the cursor never passes
+    one; ``stopped_at`` is that message's position, which a caller that gives
+    up on the refetch passes back to skip it. A message owing a refetch is in
+    ``refresh_pending`` and not in ``messages``, as in a ``ConversationPage``.
+    """
+
+    messages: tuple[VisibleMessage, ...]
+    refresh_pending: tuple[RefreshRequest, ...]
+    # Whether rows follow the page's, past its limit or its content budgets.
+    more: bool
+    last_cursor: ConversationCursor | None
+    stopped_at: ConversationCursor | None
 
 
 @dataclass(frozen=True, slots=True)
@@ -471,23 +505,27 @@ class ResponseRecoveryState:
 
 
 @dataclass(frozen=True, slots=True)
+class FinalAnswerEnqueue:
+    """A recorded non-AI FINAL answer and the journal sources its enqueue handed to the outbox."""
+
+    transaction_id: str
+    settled_event_ids: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class DeliveryAcknowledgement:
     """What one delivery's row names afterwards, and what binding it committed.
 
     Two processes can send the same frozen transaction ID from the same
     device; Matrix deduplicates and hands both callers the *same* event ID,
-    while only one conditional update binds the row. The settled event
-    therefore cannot tell a loser it lost: only the caller that bound the row
-    gets the terminal turn record its transaction committed, and so only it
-    publishes one.
+    while only one conditional update binds the row, and only that binding
+    completes the turn the delivery answers.
     """
 
     # The event the row names now: this call's if it bound the row, the
     # winner's if it did not, and ``None`` when there is no row left to name
     # one. Membership fences retain rows as retired identity tombstones.
     settled_event_id: str | None
-    # The terminal turn record this call's binding of a FINAL row committed.
-    terminal_turn: TerminalTurnWrite | None = None
     # Work a reply row's acknowledgement left for after the commit, such as
     # cancelling a span a Stop that waited for this event now reaches.
     reply_effects: tuple[PostCommitEffect, ...] = ()
@@ -501,26 +539,3 @@ class PermanentDeliveryFailure:
     acknowledged_event_id: str | None = None
     # Work refused reply rows left for after the commit.
     reply_effects: tuple[PostCommitEffect, ...] = ()
-
-
-@dataclass(frozen=True, slots=True)
-class TerminalTurnWrite:
-    """One agent's terminal turn record, committed with a delivery acknowledgement.
-
-    The acknowledgement is the proof that a visible answer exists and what its
-    event ID is, and that is exactly the fact the turn record needs. Keeping
-    them in separate commits leaves a window where a delivered answer has a
-    record that does not know its response event -- and an edit of that message
-    arriving afterwards is dropped, because there is nothing recorded to edit.
-    A startup pass used to rejoin the two; carrying the record into the
-    acknowledgement transaction removes the window instead of repairing it.
-
-    Agent-scoped while the acknowledgement is principal-scoped, which is fine
-    and is the reason these rows live in the journal's database at all: one
-    transaction needs one database, not one scope key.
-    """
-
-    agent_name: str
-    index_event_ids: tuple[str, ...]
-    anchor_event_id: str
-    record_json: str

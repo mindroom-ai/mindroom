@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     config_fields=[
         ConfigField(
             name="api_key",
+            env=("FIRECRAWL_API_KEY",),
             label="API Key",
             type="password",
             required=False,
@@ -94,7 +95,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["firecrawl-py"],
-    docs_url="https://docs.agno.com/tools/toolkits/web_scrape/firecrawl",
+    docs_url="https://docs.mindroom.chat/tools/web-scraping-and-browser/#firecrawl",
     function_names=("crawl_website", "map_website", "scrape_website", "search_web"),
 )
 def firecrawl_tools() -> type[FirecrawlTools]:

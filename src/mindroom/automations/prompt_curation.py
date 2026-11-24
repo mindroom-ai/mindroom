@@ -1,7 +1,9 @@
 """The prompt_curation automation: when an agent's always-loaded files grow too large, ask it to condense them.
 
-The check measures `MEMORY.md` and the agent's `context_files` with the estimate behind `static_prompt_tokens`.
-When they exceed the trigger, the prompt asks the agent for a bounded cut in a normal visible run.
+The check measures `MEMORY.md` and the always-loaded context files in the workspace it maintains (`private.context_files`
+for a private agent) with the agent's model's token counter.
+When they exceed the trigger, or any of them is over the preload's per-file limit, the prompt asks the agent for a
+bounded cut in a normal visible run.
 Agents told to "clean up" tend to cut most of a file, so verify measures the files again once the run ends and, when
 the result is outside the bounds, asks the agent once to re-check its change.
 Verify never writes the files back, because other conversations with the same agent may write them meanwhile.
@@ -10,26 +12,29 @@ Files are read through no-follow descriptor walks, because worker code writes th
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from contextlib import suppress
+from dataclasses import dataclass, replace
 from functools import partial
-from pathlib import PurePosixPath
 from typing import TYPE_CHECKING
 
 from mindroom.automations.registry import automation
-from mindroom.automations.steps import Ask, AutomationContext, Done
+from mindroom.automations.steps import Ask, AutomationContext, Done, workspace_context_files
 from mindroom.config.automations import MAX_FILE_SHRINK, PromptCurationAutomation
+from mindroom.config.resolution import entity_model_name
 from mindroom.logging_config import get_logger
 from mindroom.memory import read_scope_memory_files
 from mindroom.path_confinement import read_regular_file_within_root
-from mindroom.runtime_resolution import resolve_agent_runtime
-from mindroom.token_budget import estimate_text_tokens
+from mindroom.preload_cap import cap_preload_text
+from mindroom.providers.registry import model_token_counter
+from mindroom.token_counting.counts import count
+from mindroom.token_counting.families import finish_loading
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
     from pathlib import Path
 
     from mindroom.config.main import Config
-    from mindroom.constants import RuntimePaths
+    from mindroom.llm.provider import TokenCounter
 
 logger = get_logger(__name__)
 
@@ -50,8 +55,13 @@ class _CurationPlan:
     # Every memory/ topic file the scan read at fire time, so verify can tell detail moved from detail deleted.
     memory_tokens: int
     curated: Mapping[str, int]
+    # The files whose end the preload left out at fire time, cut at defaults.max_preload_file_chars characters.
+    over_limit: tuple[str, ...]
+    max_file_chars: int
     upper_tokens: int
     floor_tokens: int
+    # How the agent's model counts tokens; verify measures the files again with it.
+    counter: TokenCounter
 
     @property
     def measured_tokens(self) -> int:
@@ -75,58 +85,65 @@ def _read(root: Path, path: str) -> bytes | None:
         return None
 
 
-def _tokens(payload: bytes) -> int:
-    return estimate_text_tokens(payload.decode("utf-8"))
+def _tokens(counter: TokenCounter, payload: bytes) -> int:
+    return count(counter, payload.decode("utf-8"))
 
 
-def _memory_dir_tokens(root: Path, exclude: Iterable[str]) -> int:
+def _memory_dir_tokens(root: Path, exclude: Iterable[str], counter: TokenCounter) -> int:
     """Return the estimated tokens of the memory/ topic files, except ``exclude``.
 
     Curated files are excluded even under memory/, so their content is counted once.
     """
     excluded = set(exclude)
     return sum(
-        estimate_text_tokens(memory_file.text)
+        count(counter, memory_file.text)
         for memory_file in read_scope_memory_files(root)
         if memory_file.relative_path.startswith(_MEMORY_DIR_PREFIX) and memory_file.relative_path not in excluded
     )
 
 
+def _over_limit(payload: bytes, max_chars: int) -> bool:
+    """Return whether the preload leaves out part of the file ``payload``, judged as a reply's preload judges it."""
+    return cap_preload_text(payload.decode("utf-8"), max_chars)[1]
+
+
 def _curated_paths(config: Config, agent_name: str) -> list[str]:
-    paths = [_ENTRYPOINT, *(PurePosixPath(path).as_posix() for path in config.get_agent(agent_name).context_files)]
-    return list(dict.fromkeys(paths))
+    return list(dict.fromkeys([_ENTRYPOINT, *workspace_context_files(config, agent_name)]))
 
 
 def _plan_curation(
     config: Config,
-    runtime_paths: RuntimePaths,
+    root: Path,
     agent_name: str,
     settings: PromptCurationAutomation,
+    counter: TokenCounter,
 ) -> _CurationPlan | None:
-    """Return the plan for a due prompt, or None while the files are within the trigger.
+    """Return the plan for a due prompt over the file memory at ``root``, or None while the files are within the limits.
 
     Raises ``OSError``, ``ValueError``, or ``UnicodeDecodeError`` for a file that cannot be read safely.
     """
-    # Automations only run for shared agents, which have no requester-private state.
-    root = resolve_agent_runtime(agent_name, config, runtime_paths, execution_identity=None).file_memory_root
-    if root is None:
-        return None
     curated_payloads = {
         path: payload for path in _curated_paths(config, agent_name) if (payload := _read(root, path)) is not None
     }
-    curated = {path: _tokens(payload) for path, payload in curated_payloads.items()}
+    curated = {path: _tokens(counter, payload) for path, payload in curated_payloads.items()}
     measured = sum(curated.values())
-    if measured <= settings.trigger_tokens:
+    max_file_chars = config.defaults.max_preload_file_chars
+    # What the preload leaves out never reaches the prompt, at any token count.
+    over_limit = tuple(path for path, payload in curated_payloads.items() if _over_limit(payload, max_file_chars))
+    if measured <= settings.trigger_tokens and not over_limit:
         return None
     return _CurationPlan(
         agent_name=agent_name,
         root=root,
         settings=settings,
         snapshot=curated_payloads,
-        memory_tokens=_memory_dir_tokens(root, exclude=curated_payloads),
+        memory_tokens=_memory_dir_tokens(root, curated_payloads, counter),
         curated=curated,
+        over_limit=over_limit,
+        max_file_chars=max_file_chars,
         upper_tokens=round(measured * (1 - settings.min_reduction)),
         floor_tokens=round(measured * (1 - settings.max_reduction)),
+        counter=counter,
     )
 
 
@@ -136,6 +153,8 @@ def _curation_prompt(config: Config, plan: _CurationPlan) -> str:
         "PROMPT_CURATION_PROMPT_TEMPLATE",
         measured_tokens=plan.measured_tokens,
         trigger_tokens=plan.settings.trigger_tokens,
+        max_file_chars=plan.max_file_chars,
+        over_limit_files=", ".join(plan.over_limit) or "none",
         file_sizes=", ".join(f"{path} ({tokens} tokens)" for path, tokens in plan.curated.items()),
         upper_tokens=plan.upper_tokens,
         floor_tokens=plan.floor_tokens,
@@ -164,7 +183,7 @@ def _findings(
             unreadable.append(f"{path} cannot be read ({payload})")
             continue
         try:
-            after[path] = _tokens(payload or b"")
+            after[path] = _tokens(plan.counter, payload or b"")
         except UnicodeDecodeError:
             unreadable.append(f"{path} is no longer valid UTF-8")
     if unreadable:
@@ -181,6 +200,12 @@ def _findings(
         findings.append(f"the files total {total} tokens, below the floor of {plan.floor_tokens}")
     if total >= plan.measured_tokens:
         findings.append(f"the files did not shrink ({total} tokens)")
+    # A file over the limit left as long as it was keeps the same text out of the prompt; one pass may not fit it.
+    for path in plan.over_limit:
+        payload = after_run[path]
+        chars_after = len(payload.decode("utf-8")) if isinstance(payload, bytes) else 0
+        if chars_after >= len(plan.snapshot[path].decode("utf-8")):
+            findings.append(f"{path} is over the {plan.max_file_chars}-character prompt limit and did not get shorter")
     if loss := _content_loss(plan, total):
         findings.append(loss)
     return total, findings
@@ -188,7 +213,8 @@ def _findings(
 
 def _content_loss(plan: _CurationPlan, curated_tokens: int) -> str | None:
     """Describe memory content deleted rather than moved beyond the allowance, or return None."""
-    lost = plan.measured_tokens + plan.memory_tokens - (curated_tokens + _memory_dir_tokens(plan.root, plan.snapshot))
+    memory_tokens = _memory_dir_tokens(plan.root, plan.snapshot, plan.counter)
+    lost = plan.measured_tokens + plan.memory_tokens - (curated_tokens + memory_tokens)
     if lost <= (max_loss := round(plan.settings.max_content_loss * plan.measured_tokens)):
         return None
     return f"about {lost} tokens of memory were deleted rather than moved to memory/ (at most {max_loss})"
@@ -214,14 +240,37 @@ def _curation_notice(config: Config, plan: _CurationPlan, result: _CurationResul
     return f"✅ Prompt files condensed from {plan.measured_tokens} to {result.tokens_after} tokens."
 
 
+def _stable_counter(counter: TokenCounter) -> TokenCounter:
+    """Return ``counter`` once it counts with a loaded vocabulary, else the stand-in, so verify counts as the plan did.
+
+    Its first count starts loading the vocabulary it counts with, such as cl100k_base for an older OpenAI model, which
+    this waits for. Without network access and a cached vocabulary, loading fails on every run.
+    """
+    with suppress(OSError, ValueError):
+        counter.estimate("a")
+        finish_loading()
+    if counter.estimate("a") is None:
+        return replace(counter, estimate=lambda _text: None)
+    return counter
+
+
 @automation("prompt_curation", requires_file_memory=True)
 def check_curation(ctx: AutomationContext) -> Ask | None:
-    """Return the prompt asking for a cut, or None while the files are within the trigger."""
+    """Return the prompt asking for a cut, or None while the files are within the limits."""
     if not isinstance(ctx.entry, PromptCurationAutomation):
         msg = f"prompt_curation cannot run the {ctx.entry.name} entry"
         raise ValueError(msg)  # noqa: TRY004 - the runner turns ValueError into a visible notice
     config, agent_name = ctx.config, ctx.agent_name
-    plan = _plan_curation(config, ctx.runtime_paths, agent_name, ctx.entry)
+    counter = _stable_counter(
+        model_token_counter(
+            config,
+            ctx.runtime_paths,
+            entity_model_name(config, agent_name),
+            execution_identity=ctx.execution_identity,
+        ),
+    )
+    # The workspace of an agent with file memory, which this automation requires, is its file-memory root.
+    plan = _plan_curation(config, ctx.workspace, agent_name, ctx.entry, counter)
     if plan is None:
         return None
     logger.info(
@@ -229,6 +278,7 @@ def check_curation(ctx: AutomationContext) -> Ask | None:
         agent=agent_name,
         # A field named only "tokens" is redacted as a credential.
         file_tokens=plan.measured_tokens,
+        over_limit=list(plan.over_limit),
         target_tokens=plan.upper_tokens,
         floor_tokens=plan.floor_tokens,
     )

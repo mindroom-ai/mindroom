@@ -9,10 +9,11 @@ from agno.tools import Toolkit
 from composio.client.collections import ActionModel
 from composio_agno import ComposioToolSet
 
-from mindroom.agents import _reject_matrix_room_runtime_tool_function_collisions
 from mindroom.constants import resolve_runtime_paths
 from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tools.composio import composio_tools
+from tests.agent_tool_helpers import toolkit_offers
 
 
 @pytest.fixture
@@ -73,11 +74,8 @@ def offline_composio(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
 def _assert_registered_actions(tool: Toolkit) -> None:
     """Exercise the same Toolkit protocol agent assembly consumes."""
     assert isinstance(tool, Toolkit)
-    _reject_matrix_room_runtime_tool_function_collisions("composio", tool)
     assert set(tool.get_functions()) == {"github_get_a_repository", "github_get_the_authenticated_user"}
-    function = tool.get_functions()["github_get_a_repository"]
-    assert function.entrypoint is not None
-    function.process_entrypoint()
+    function = toolkit_offers(tool, "github_get_a_repository")
     assert function.parameters["properties"]["owner"]["type"] == "string"
     assert "owner" in function.parameters["required"]
     assert json.loads(function.entrypoint(owner="example")) == {
@@ -115,8 +113,9 @@ def test_composio_registry_loads_selected_actions(tmp_path: Path, with_workspace
             "lock": False,
         },
         tool_output_workspace_root=tmp_path / "workspace" if with_workspace else None,
-        disable_sandbox_proxy=True,
+        runs_in_worker=False,
         worker_target=None,
+        tools=builtin_tool_registry(),
     )
 
     _assert_registered_actions(tool)

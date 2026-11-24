@@ -33,15 +33,17 @@ from mindroom.matrix.client_room_admin import (
     leave_room,
 )
 from mindroom.matrix.room_reconciliation import RoomStateSnapshot, read_room_state
-from mindroom.matrix.state import MatrixState
-from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY, INTERNAL_USER_AGENT_NAME, AgentMatrixUser, login_agent_user
+from mindroom.matrix.state import update_matrix_state
+from mindroom.matrix.users import INTERNAL_USER_AGENT_NAME, load_agent_user, login_agent_http_client
 from mindroom.matrix_identifiers import (
     extract_server_name_from_homeserver,
+    managed_room_alias,
     managed_room_alias_localpart,
     managed_space_alias_localpart,
+    server_emoji_alias_localpart,
     split_concrete_matrix_user_ids,
 )
-from mindroom.topic_generator import ensure_room_has_topic, generate_room_topic_ai
+from mindroom.topic_generator import configured_room_topic, ensure_room_has_topic, generate_room_topic_ai
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
@@ -53,6 +55,11 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 _ROOT_SPACE_TOPIC = "Your MindRoom AI workspace"
 _DENIED_ROOM_STATE_ERROR_CODES = frozenset({"M_FORBIDDEN", "M_NOT_FOUND"})
+# MindRoom Chat hides rooms of this type and uses their MSC2545 emoji packs everywhere.
+_SERVER_EMOJI_ROOM_TYPE = "io.mindroom.emoji"
+_EMOJI_PACK_EVENT_TYPE = "im.ponies.room_emotes"
+_POWER_LEVELS_EVENT_TYPE = "m.room.power_levels"
+_MODERATOR_POWER_LEVEL = 50
 
 
 class _AliasResolution(Enum):
@@ -148,11 +155,6 @@ async def _configure_managed_room_access(
     return False
 
 
-def _managed_room_should_be_encrypted(room_policy: EffectiveRoomPolicy) -> bool:
-    """Return whether one managed room is configured for Matrix encryption."""
-    return room_policy.encrypted
-
-
 def _room_admin_user_ids(
     room_policy: EffectiveRoomPolicy,
 ) -> list[str]:
@@ -176,29 +178,6 @@ def _room_key_to_name(room_key: str) -> str:
     return room_key.replace("_", " ").title()
 
 
-def _add_room(
-    room_key: str,
-    room_id: str,
-    alias: str,
-    name: str,
-    runtime_paths: RuntimePaths,
-) -> None:
-    """Add a new room to the state."""
-    state = MatrixState.load(runtime_paths=runtime_paths)
-    state.add_room(room_key, room_id, alias, name)
-    state.save(runtime_paths=runtime_paths)
-
-
-def _remove_room(room_key: str, runtime_paths: RuntimePaths) -> bool:
-    """Remove a room from the state."""
-    state = MatrixState.load(runtime_paths=runtime_paths)
-    if room_key in state.rooms:
-        del state.rooms[room_key]
-        state.save(runtime_paths=runtime_paths)
-        return True
-    return False
-
-
 async def _reconcile_joined_existing_room(
     client: nio.AsyncClient,
     room_key: str,
@@ -217,7 +196,7 @@ async def _reconcile_joined_existing_room(
         await ensure_room_name(client, room_id, explicit_room_name, snapshot=snapshot)
     await ensure_room_has_topic(client, room_id, room_key, topic_room_name, config, runtime_paths, snapshot=snapshot)
     await ensure_managed_room_power_levels(client, room_id, admin_user_ids, snapshot=snapshot)
-    if _managed_room_should_be_encrypted(room_policy):
+    if room_policy.encrypted:
         await ensure_room_encryption_enabled(client, room_id, snapshot=snapshot)
     await _configure_managed_room_access(
         client=client,
@@ -230,7 +209,7 @@ async def _reconcile_joined_existing_room(
 
 
 def _alias_target_problem(state_events: list[dict[str, Any]], router_user_id: str, room_alias: str) -> str | None:
-    """Return why a readable room is not the router's room for one managed alias, or None when it is."""
+    """Return why a readable room is not the owner account's room for one managed alias, or None when it is."""
     state = {(event["type"], event["state_key"]): event for event in state_events}
     create_event = state.get(("m.room.create", ""), {})
     create_content = create_event.get("content")
@@ -239,7 +218,7 @@ def _alias_target_problem(state_events: list[dict[str, Any]], router_user_id: st
     if create_event.get("sender") != router_user_id or additional_creators not in ([], [router_user_id]):
         return f"created by {create_event.get('sender')}, additional creators {additional_creators}"
     # Any account may point an alias at any room, and members with enough power may publish it there,
-    # so only the canonical alias the router set when creating the room binds the alias to it.
+    # so only the canonical alias the owner account set when creating the room binds the alias to it.
     canonical_event = state.get(("m.room.canonical_alias", ""), {})
     canonical_content = canonical_event.get("content")
     if (
@@ -247,7 +226,7 @@ def _alias_target_problem(state_events: list[dict[str, Any]], router_user_id: st
         or not isinstance(canonical_content, dict)
         or canonical_content.get("alias") != room_alias
     ):
-        return f"its canonical alias is not {room_alias} as set by the router"
+        return f"its canonical alias is not {room_alias} as set by the owner account"
     return None
 
 
@@ -273,13 +252,13 @@ async def _verify_alias_target(
     room_id: str,
     room_alias: str,
 ) -> str | _AliasResolution:
-    """Return an unrecorded alias target when the router created it for this alias, or how to proceed instead."""
+    """Return an unrecorded alias target when the owner account created it for this alias, or how to proceed instead."""
     response = await _get_room_state(client, room_id, room_alias)
     if response is None:
         return _AliasResolution.RETRY_LATER
     if isinstance(response, nio.RoomGetStateError):
-        # The router can read every room it created and is still joined to, so a denial is definitive.
-        problem = f"its state is not readable by the router ({response.status_code})"
+        # The owner account can read every room it created and is still joined to, so a denial is definitive.
+        problem = f"its state is not readable by the owner account ({response.status_code})"
     else:
         problem = _alias_target_problem(response.events, str(client.user_id), room_alias)
     if problem is None:
@@ -289,13 +268,13 @@ async def _verify_alias_target(
         room_alias=room_alias,
         room_id=room_id,
         reason=problem,
-        hint="The alias points at a room the router did not create for it; MindRoom creates a room without the alias.",
+        hint="The alias points at a room the owner account did not create for it, so MindRoom does not adopt it.",
     )
     return _AliasResolution.CREATE_WITHOUT_ALIAS
 
 
 async def _republish_missing_alias(client: nio.AsyncClient, room_alias: str, room_id: str) -> bool:
-    """Point a deleted managed alias back at its recorded room, returning False only when the router lost the room."""
+    """Point a deleted managed alias back at its recorded room; False only when the owner account lost the room."""
     response = await _get_room_state(client, room_id, room_alias)
     if isinstance(response, nio.RoomGetStateError):
         return False
@@ -382,25 +361,32 @@ async def _ensure_room_exists(
     # Resolving the alias recovers rooms that exist on the server but not in our state.
     server_name = extract_server_name_from_homeserver(client.homeserver, runtime_paths=runtime_paths)
     alias_localpart = managed_room_alias_localpart(room_key, runtime_paths=runtime_paths)
-    full_alias = f"#{alias_localpart}:{server_name}"
+    full_alias = managed_room_alias(room_key, server_name, runtime_paths)
 
     resolution = await _resolve_managed_alias(client, full_alias, existing_room.room_id if existing_room else None)
     if resolution is _AliasResolution.RETRY_LATER:
         return None
     if isinstance(resolution, str):
         if existing_room is None:
-            _add_room(room_key, resolution, full_alias, room_name, runtime_paths)
+            update_matrix_state(
+                runtime_paths,
+                lambda state: state.add_room(room_key, resolution, full_alias, room_name),
+            )
             logger.info("managed_room_state_updated", room_key=room_key, room_id=resolution, room_alias=full_alias)
         return resolution
 
-    # Either the alias is missing and the router lost any recorded room, or another account holds the alias
+    # Either the alias is missing and the owner account lost any recorded room, or another account holds the alias
     if existing_room is not None:
         # Remove stale entry from state
         logger.debug("managed_room_state_entry_removed", room_key=room_key)
-        _remove_room(room_key, runtime_paths=runtime_paths)
+        update_matrix_state(runtime_paths, lambda state: state.rooms.pop(room_key, None))
 
-    # Generate a contextual topic for the room using AI
-    topic = await generate_room_topic_ai(room_key, room_name, config, runtime_paths)
+    topic = configured_room_topic(room_key, config) or await generate_room_topic_ai(
+        room_key,
+        room_name,
+        config,
+        runtime_paths,
+    )
     logger.info("managed_room_creation_started", room_key=room_key, topic=topic)
 
     created_room_id = await create_room(
@@ -410,13 +396,16 @@ async def _ensure_room_exists(
         topic=topic,
         power_users=power_users or [],
         admin_users=list(admin_user_ids),
-        encrypted=_managed_room_should_be_encrypted(room_policy),
+        encrypted=room_policy.encrypted,
     )
 
     if created_room_id:
         # Record the managed alias even when another account holds it, so local lookups never resolve elsewhere.
         # An alias-less room lost before this record is saved stays untracked, and the next pass creates another.
-        _add_room(room_key, created_room_id, full_alias, room_name, runtime_paths)
+        update_matrix_state(
+            runtime_paths,
+            lambda state: state.add_room(room_key, created_room_id, full_alias, room_name),
+        )
         logger.info("managed_room_created", room_key=room_key, room_id=created_room_id, room_alias=full_alias)
 
         await _configure_managed_room_access(
@@ -456,11 +445,8 @@ async def ensure_all_rooms_exist(
 
     """
     room_ids = {}
-
-    # Get all configured rooms
-    all_rooms = config.get_all_configured_rooms()
-
-    pending_rooms = iter(room_key for room_key in all_rooms if not room_key.startswith("!"))
+    managed_room_keys = config.managed_room_keys()
+    pending_rooms = iter(managed_room_keys)
 
     async def reconcile_rooms() -> None:
         for room_key in pending_rooms:
@@ -492,7 +478,7 @@ async def ensure_all_rooms_exist(
     # Bound network fanout, retaining sequential policy mutations in each room.
     # TaskGroup drains/cancels sibling workers before config reload can proceed.
     async with asyncio.TaskGroup() as workers:
-        for _ in range(min(4, len(all_rooms))):
+        for _ in range(min(4, len(managed_room_keys))):
             workers.create_task(reconcile_rooms())
 
     return room_ids
@@ -552,18 +538,15 @@ async def _ensure_root_space_exists(
     runtime_paths: RuntimePaths,
 ) -> str | None:
     """Ensure the configured root Matrix Space exists and return its room ID."""
-    if not config.matrix_space.enabled:
-        return None
-
-    state = MatrixState.load(runtime_paths=runtime_paths)
+    known_space_room_id = matrix_state.matrix_state_for_runtime(runtime_paths).space_room_id
     joined_room_ids = await get_joined_rooms(client) or []
-    if state.space_room_id and state.space_room_id in joined_room_ids:
-        return state.space_room_id
+    if known_space_room_id and known_space_room_id in joined_room_ids:
+        return known_space_room_id
 
     server_name = extract_server_name_from_homeserver(client.homeserver, runtime_paths=runtime_paths)
     alias_localpart = managed_space_alias_localpart(runtime_paths=runtime_paths)
     full_alias = f"#{alias_localpart}:{server_name}"
-    resolution = await _resolve_managed_alias(client, full_alias, state.space_room_id or None)
+    resolution = await _resolve_managed_alias(client, full_alias, known_space_room_id or None)
     if resolution is _AliasResolution.RETRY_LATER:
         return None
     if isinstance(resolution, str):
@@ -571,14 +554,13 @@ async def _ensure_root_space_exists(
         joined_space = space_room_id in client.rooms or space_room_id in joined_room_ids
         if not joined_space and await join_room(client, space_room_id) is not RoomJoinOutcome.JOINED:
             logger.warning(
-                "Resolved existing root space but router could not join it; skipping reconciliation",
+                "Resolved existing root space but the owner account could not join it; skipping reconciliation",
                 space_room_id=space_room_id,
                 space_alias=full_alias,
             )
             return None
-        if state.space_room_id != space_room_id:
-            state.set_space_room_id(space_room_id)
-            state.save(runtime_paths=runtime_paths)
+        if known_space_room_id != space_room_id:
+            update_matrix_state(runtime_paths, lambda state: state.set_space_room_id(space_room_id))
         return space_room_id
 
     space_room_id = await create_space(
@@ -588,8 +570,7 @@ async def _ensure_root_space_exists(
         topic=_ROOT_SPACE_TOPIC,
     )
     if space_room_id is not None:
-        state.set_space_room_id(space_room_id)
-        state.save(runtime_paths=runtime_paths)
+        update_matrix_state(runtime_paths, lambda state: state.set_space_room_id(space_room_id))
     return space_room_id
 
 
@@ -642,39 +623,165 @@ async def ensure_root_space(
     return root_space_id
 
 
+async def _is_server_emoji_room(client: nio.AsyncClient, room_id: str, room_alias: str) -> bool:
+    """Return whether a room the owner account made for the alias is a server emoji room, not one made for another use."""
+    response = await _get_room_state(client, room_id, room_alias)
+    if not isinstance(response, nio.RoomGetStateResponse):
+        return False
+    state = {(event["type"], event["state_key"]): event["content"] for event in response.events}
+    create = state.get(("m.room.create", ""))
+    # MindRoom Chat trusts an alias only in a local-only emoji room.
+    if isinstance(create, dict) and create.get("type") == _SERVER_EMOJI_ROOM_TYPE and create.get("m.federate") is False:
+        return True
+    logger.error(
+        "server_emoji_room_alias_taken",
+        room_alias=room_alias,
+        room_id=room_id,
+        hint="The alias names a room MindRoom made for another use; no emoji room was created.",
+    )
+    return False
+
+
+async def _ensure_server_emoji_room_exists(
+    client: nio.AsyncClient,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    alias_localpart: str,
+    full_alias: str,
+) -> str | None:
+    """Return the server emoji room, joining the owner account's room for the alias or creating it."""
+    known_room_id = matrix_state.matrix_state_for_runtime(runtime_paths).server_emoji_room_id
+    joined_room_ids = await get_joined_rooms(client) or []
+    # Resolving the alias even for a joined room publishes it again when someone deleted it.
+    resolution = await _resolve_managed_alias(client, full_alias, known_room_id)
+    if resolution is _AliasResolution.RETRY_LATER:
+        return None
+    if resolution is _AliasResolution.CREATE_WITHOUT_ALIAS:
+        # A room without the alias would be a second emoji room next to the one the alias names.
+        logger.error("server_emoji_room_alias_taken", room_alias=full_alias, hint="No emoji room was created.")
+        return None
+    if isinstance(resolution, str):
+        room_id = resolution
+        if room_id != known_room_id and not await _is_server_emoji_room(client, room_id, full_alias):
+            return None
+        joined = room_id in client.rooms or room_id in joined_room_ids
+        if not joined and await join_room(client, room_id) is not RoomJoinOutcome.JOINED:
+            logger.warning("server_emoji_room_join_failed", room_alias=full_alias, room_id=room_id)
+            return None
+    else:
+        name = config.server_emoji.name
+        # The same shape as scripts/utilities/create_server_emoji_room.py: a hidden, local-only room any local
+        # user may join, outside the room directory, holding one empty pack.
+        response = await client.room_create(
+            visibility=nio.RoomVisibility.private,
+            alias=alias_localpart,
+            name=name,
+            room_type=_SERVER_EMOJI_ROOM_TYPE,
+            federate=False,
+            preset=nio.RoomPreset.public_chat,
+            # Members may not post from the start, even when the power-level update below fails.
+            power_level_override={"events_default": _MODERATOR_POWER_LEVEL},
+            initial_state=[
+                {
+                    "type": _EMOJI_PACK_EVENT_TYPE,
+                    "state_key": "",
+                    "content": {"pack": {"display_name": name, "usage": ["emoticon"]}, "images": {}},
+                },
+            ],
+        )
+        if not isinstance(response, nio.RoomCreateResponse):
+            logger.error("server_emoji_room_creation_failed", room_alias=full_alias, error=str(response))
+            return None
+        room_id = str(response.room_id)
+    if known_room_id != room_id:
+        update_matrix_state(runtime_paths, lambda state: state.set_server_emoji_room_id(room_id))
+    return room_id
+
+
+def _server_emoji_power_levels(levels: dict[str, Any], *, moderators_only: bool) -> dict[str, Any]:
+    """Return power levels that let members, or only moderators, change the packs, and keep members from posting."""
+    current_events = levels.get("events")
+    events = dict(current_events) if isinstance(current_events, dict) else {}
+    events[_EMOJI_PACK_EVENT_TYPE] = _MODERATOR_POWER_LEVEL if moderators_only else 0
+    # Members join this hidden room by themselves and cannot mute it, so a message there would notify the whole server.
+    # Explicit levels for message types would undercut events_default, so raise those too.
+    for message_type in ("m.room.message", "m.room.encrypted"):
+        if message_type in events:
+            events[message_type] = max(events[message_type], _MODERATOR_POWER_LEVEL)
+    events_default = max(levels.get("events_default", 0), _MODERATOR_POWER_LEVEL)
+    return {**levels, "events": events, "events_default": events_default}
+
+
+async def ensure_server_emoji_room(
+    client: nio.AsyncClient,
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> str | None:
+    """Create and maintain the optional server custom emoji room, returning its room ID once it is ready."""
+    if not config.server_emoji.enabled:
+        return None
+
+    server_name = extract_server_name_from_homeserver(client.homeserver, runtime_paths=runtime_paths)
+    alias_localpart = server_emoji_alias_localpart(runtime_paths)
+    full_alias = f"#{alias_localpart}:{server_name}"
+    room_id = await _ensure_server_emoji_room_exists(client, config, runtime_paths, alias_localpart, full_alias)
+    snapshot = await read_room_state(client, room_id) if room_id is not None else None
+    levels = snapshot.events.get((_POWER_LEVELS_EVENT_TYPE, "")) if snapshot is not None else None
+    if room_id is None or snapshot is None or levels is None:
+        return None
+
+    # MindRoom Chat matches the room by its canonical alias, which deleting the alias also clears.
+    canonical_alias = snapshot.events.get(("m.room.canonical_alias", ""))
+    if not isinstance(canonical_alias, dict) or canonical_alias.get("alias") != full_alias:
+        response = await client.room_put_state(room_id, "m.room.canonical_alias", {"alias": full_alias})
+        if not isinstance(response, nio.RoomPutStateResponse):
+            logger.warning(
+                "server_emoji_room_alias_failed",
+                room_alias=full_alias,
+                room_id=room_id,
+                error=str(response),
+            )
+            return None
+
+    # Every other level stays as the homeserver or a room admin set it.
+    desired_levels = _server_emoji_power_levels(levels, moderators_only=config.server_emoji.moderators_only)
+    if desired_levels != levels:
+        response = await client.room_put_state(room_id, _POWER_LEVELS_EVENT_TYPE, desired_levels)
+        if not isinstance(response, nio.RoomPutStateResponse):
+            logger.warning("server_emoji_room_power_levels_failed", room_id=room_id, error=str(response))
+            return None
+    admin_user_ids, _ = split_concrete_matrix_user_ids(config.room_defaults.admins)
+    if not await ensure_room_admin_power_levels(client, room_id, admin_user_ids, snapshot=snapshot):
+        logger.warning("server_emoji_room_power_levels_failed", room_id=room_id)
+        return None
+
+    logger.info("server_emoji_room_ready", room_alias=full_alias, room_id=room_id)
+    return room_id
+
+
 async def ensure_user_in_rooms(
     homeserver: str,
     room_ids: dict[str, str],
     runtime_paths: RuntimePaths,
+    *,
+    display_name: str,
 ) -> None:
-    """Ensure the user account is a member of all specified rooms.
+    """Join the internal user account to every given room through an HTTP-only client.
 
     Args:
         homeserver: Matrix homeserver URL
         room_ids: Dict mapping room keys to room IDs
-        runtime_paths: Explicit runtime context for server-name resolution.
+        runtime_paths: Explicit runtime context holding the saved account.
+        display_name: The account's configured display name.
 
     """
-    state = matrix_state.matrix_state_for_runtime(runtime_paths)
-    user_account = state.get_account(INTERNAL_USER_ACCOUNT_KEY)
-    if not user_account:
+    user = load_agent_user(INTERNAL_USER_AGENT_NAME, runtime_paths)
+    if user is None:
         logger.warning("No user account found, skipping user room membership")
         return
 
-    server_name = user_account.domain or extract_server_name_from_homeserver(homeserver, runtime_paths=runtime_paths)
-    user_id = f"@{user_account.username}:{server_name}"
-    user_client = await login_agent_user(
-        homeserver,
-        AgentMatrixUser(
-            agent_name=INTERNAL_USER_AGENT_NAME,
-            user_id=user_id,
-            display_name=INTERNAL_USER_AGENT_NAME,
-            password=user_account.password,
-            device_id=user_account.device_id,
-            access_token=user_account.access_token,
-        ),
-        runtime_paths,
-    )
+    user.display_name = display_name
+    user_client = await login_agent_http_client(homeserver, user, runtime_paths)
     try:
         logger.info("matrix_user_logged_in", user_id=user_client.user_id)
         joined_room_ids = set(await get_joined_rooms(user_client) or ())
@@ -711,8 +818,8 @@ def _dm_cache_key(client: nio.AsyncClient, room_id: str) -> tuple[str, str]:
     return (str(client.user_id or ""), room_id)
 
 
-async def _get_direct_room_ids(client: nio.AsyncClient) -> set[str]:
-    """Get DM room IDs from the user's ``m.direct`` account data.
+async def _get_direct_room_ids(client: nio.AsyncClient) -> set[str] | None:
+    """Get DM room IDs from the user's ``m.direct`` account data, or ``None`` when the read fails.
 
     Results are cached per user for ``_DIRECT_ROOMS_TTL`` seconds so that
     newly created DM rooms are picked up without a restart.
@@ -728,15 +835,21 @@ async def _get_direct_room_ids(client: nio.AsyncClient) -> set[str]:
             return room_ids
 
     response = await client.list_direct_rooms()
-    if isinstance(response, nio.DirectRoomsResponse):
+    transport = response.transport_response
+    # nio parses a non-JSON error body, such as a proxy's 502 page, as an empty m.direct list.
+    if (
+        isinstance(response, nio.DirectRoomsResponse)
+        and isinstance(transport, aiohttp.ClientResponse)
+        and transport.status == 200
+    ):
         direct_room_ids = {room_id for room_ids in response.rooms.values() for room_id in room_ids}
-        _DIRECT_ROOMS_CACHE[user_id] = (time.monotonic(), direct_room_ids)
-        return direct_room_ids
-    if isinstance(response, nio.DirectRoomsErrorResponse) and response.status_code == "M_NOT_FOUND":
+    elif isinstance(response, nio.DirectRoomsErrorResponse) and response.status_code == "M_NOT_FOUND":
         # No m.direct account data is a stable empty state for this user.
-        _DIRECT_ROOMS_CACHE[user_id] = (time.monotonic(), set())
-
-    return set()
+        direct_room_ids = set()
+    else:
+        return None
+    _DIRECT_ROOMS_CACHE[user_id] = (time.monotonic(), direct_room_ids)
+    return direct_room_ids
 
 
 def _is_two_member_group_room(client: nio.AsyncClient, room_id: str) -> bool:
@@ -768,7 +881,7 @@ def _has_is_direct_marker(state_events: list[dict[str, Any]]) -> bool:
     return False
 
 
-async def is_dm_room(client: nio.AsyncClient, room_id: str) -> bool:
+async def is_dm_room(client: nio.AsyncClient, room_id: str) -> bool | None:
     """Check if a room is a Direct Message (DM) room.
 
     Detection uses multiple signals in this order:
@@ -781,7 +894,8 @@ async def is_dm_room(client: nio.AsyncClient, room_id: str) -> bool:
         room_id: The room ID to check
 
     Returns:
-        True if the room is a DM room, False otherwise
+        True if the room is a DM room, False if it is not, and None when the ``m.direct`` read or the room state read
+        failed and the other signals do not mark the room as a DM, since the unread source alone may mark it
 
     """
     cache_key = _dm_cache_key(client, room_id)
@@ -792,7 +906,7 @@ async def is_dm_room(client: nio.AsyncClient, room_id: str) -> bool:
             return is_dm
 
     direct_room_ids = await _get_direct_room_ids(client)
-    if room_id in direct_room_ids:
+    if direct_room_ids is not None and room_id in direct_room_ids:
         _DM_ROOM_CACHE[cache_key] = (time.monotonic(), True)
         return True
 
@@ -804,16 +918,19 @@ async def is_dm_room(client: nio.AsyncClient, room_id: str) -> bool:
     # Get the room state events, specifically member events.
     response = await client.room_get_state(room_id)
     if not isinstance(response, nio.RoomGetStateResponse):
-        return False
+        return None
 
     is_dm = _has_is_direct_marker(response.events)
+    # After a failed m.direct read only a marked room is known; nothing is cached, so the next call reads it again.
+    if direct_room_ids is None:
+        return is_dm or None
     _DM_ROOM_CACHE[cache_key] = (time.monotonic(), is_dm)
     return is_dm
 
 
 async def filter_non_dm_rooms(client: nio.AsyncClient, room_ids: list[str]) -> list[str]:
-    """Return rooms from *room_ids* that are not DM rooms."""
-    return [room_id for room_id in room_ids if not await is_dm_room(client, room_id)]
+    """Return rooms from *room_ids* that are not DM rooms, leaving out rooms whose DM status is unknown."""
+    return [room_id for room_id in room_ids if await is_dm_room(client, room_id) is False]
 
 
 async def _leave_room(
@@ -851,9 +968,13 @@ async def leave_non_dm_rooms(
     *,
     leave_room_action: Callable[[str], Awaitable[bool]] | None = None,
 ) -> None:
-    """Leave non-DM rooms and settle each departure before continuing."""
+    """Leave non-DM rooms, settling each departure before continuing, and skip rooms whose DM status is unknown."""
     for room_id in room_ids:
-        if await is_dm_room(client, room_id):
+        is_dm = await is_dm_room(client, room_id)
+        if is_dm is None:
+            logger.warning("dm_room_status_unknown_leave_skipped", room_id=room_id)
+            continue
+        if is_dm:
             logger.debug("dm_room_preserved", room_id=room_id)
             continue
         operation = asyncio.create_task(

@@ -8,6 +8,7 @@ Earlier versions list the creator in `users` like any other member.
 from __future__ import annotations
 
 import math
+import re
 from typing import TYPE_CHECKING, cast
 
 if TYPE_CHECKING:
@@ -16,6 +17,8 @@ if TYPE_CHECKING:
 _PRIVILEGED_CREATOR_PREVIEW_VERSION = "org.matrix.hydra.11"
 _FIRST_PRIVILEGED_CREATOR_VERSION = 12
 _DEFAULT_USER_POWER_LEVEL = 0
+# The level Matrix clients show as room admin, and the one MindRoom grants the users it makes room admins.
+ROOM_ADMIN_POWER_LEVEL = 100
 
 
 def has_privileged_creators(room_version: str) -> bool:
@@ -56,9 +59,29 @@ def user_power_level(
     if user_id in creators:
         return math.inf
     users = power_levels_content.get("users")
-    if isinstance(users, dict):
-        level = cast("Mapping[str, object]", users).get(user_id)
-        if type(level) is int:
-            return level
-    users_default = power_levels_content.get("users_default")
-    return users_default if type(users_default) is int else _DEFAULT_USER_POWER_LEVEL
+    if isinstance(users, dict) and (level := _level(cast("Mapping[str, object]", users).get(user_id))) is not None:
+        return level
+    users_default = _level(power_levels_content.get("users_default"))
+    return users_default if users_default is not None else _DEFAULT_USER_POWER_LEVEL
+
+
+def send_power_level(power_levels_content: Mapping[str, object], event_type: str) -> int:
+    """Return the power level sending message events of ``event_type`` needs: its own entry, else ``events_default``, else 0."""
+    events = power_levels_content.get("events")
+    level = cast("Mapping[str, object]", events).get(event_type) if isinstance(events, dict) else None
+    if type(level) is int:
+        return level
+    default = power_levels_content.get("events_default")
+    return default if type(default) is int else 0
+
+
+def _level(value: object) -> int | None:
+    """Return a power level: an integer, or the integer string room versions before 10 allow; else None."""
+    if type(value) is int:
+        return value
+    return int(value) if isinstance(value, str) and re.fullmatch(r"\s*[+-]?\d+\s*", value) else None
+
+
+def invite_power_level(power_levels_content: Mapping[str, object]) -> int | None:
+    """Return the power level inviting users needs: 0 when absent, None when the value is not a power level."""
+    return _level(power_levels_content["invite"]) if "invite" in power_levels_content else 0

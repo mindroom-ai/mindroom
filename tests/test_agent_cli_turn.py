@@ -1,6 +1,6 @@
 """Queue admission and canonical nested shell progress in one real live turn."""
 
-# ruff: noqa: D103, ANN001, ANN003, ANN202, ARG001, PLR0915, ASYNC110
+# ruff: noqa: D103, ANN001, ANN202, ARG001, PLR0915, ASYNC110
 from __future__ import annotations
 
 import asyncio
@@ -16,13 +16,13 @@ from uuid import uuid4
 
 import pytest
 from agno.media import Image
-from agno.models.message import Message
-from agno.tools.function import Function, ToolResult
+from agno.tools.function import ToolResult
 from agno.tools.toolkit import Toolkit
 
 from mindroom.agent_cli import turn
 from mindroom.agent_cli.json_io import canonical_json
 from mindroom.agent_cli.lifetime import current_cli_lifetime, response_cli_lifetime
+from mindroom.agent_cli.main import main as cli_main
 from mindroom.agent_cli.protocol import (
     ContextReadOperation,
     ToolCallOperation,
@@ -39,22 +39,31 @@ from mindroom.agent_cli.session import (
     TurnToolRegistry,
 )
 from mindroom.agent_cli.shell_contract import AgentCliShellEnv, current_agent_cli_shell_env
-from mindroom.agent_cli.turn import LiveTurnTools
-from mindroom.agent_storage import create_state_storage
 from mindroom.api.agent_cli import bind_agent_cli_registry, router
 from mindroom.cancellation import request_task_cancel
+from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, HookBindings, HookRegistry, ToolBeforeCallContext, hook
+from mindroom.session_storage.agent_storage import create_agent_state_storage
+from mindroom.session_storage.store import ConversationStore
+from mindroom.tool_jobs.control import JobControl, job_control_context, job_owns_execution
+from mindroom.tool_jobs.resources import execution_resources
 from mindroom.tool_system.agent_tool_calls import DeferredAgentToolkit
+from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.output_files import ToolOutputFilePolicy
-from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context
 from mindroom.tool_system.tool_access import ToolKey
-from tests.minimal_agent_fixtures import cli_window
-from tests.test_agent_tool_calls import _catalog
+from mindroom.tool_system.tool_function import ToolValue
+from tests.agent_tool_helpers import detached_policy
+from tests.conftest import SETTLE_TIMEOUT_SECONDS, live_turn_tools_for_test, stored_session_state
+from tests.minimal_agent_fixtures import capture_bash_batch, cli_window, run_bash_batch, settled_receipt
+from tests.test_agent_tool_calls import _catalog, _function, _toolkit
+from tests.test_tool_hooks import _plugin
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
     from pathlib import Path
 
     from agno.run import RunContext
+
+    from mindroom.agent_cli.turn import LiveTurnTools
 
 # Scripted shells call the owner directly; only the real `mindroom-agent` test dials this URL.
 _SHELL_ENV = AgentCliShellEnv("http://127.0.0.1:9", "test-grant")
@@ -100,54 +109,44 @@ async def test_outer_shell_cli_nested_shell_cli_mutation_and_late_rejection(
         run_context.session_state["count"] = run_context.session_state.get("count", 0) + 1
         return "mutated"
 
-    async def hook(name, function_call, arguments):
-        hooks.append(("before", arguments["args"]))
-        result = await function_call(**arguments)
-        hooks.append(("after", arguments["args"]))
+    async def hook(call, call_next):
+        if call.function.name != "run_shell_command":
+            return await call_next(call.arguments)
+        hooks.append(("before", call.arguments["args"]))
+        result = await call_next(call.arguments)
+        hooks.append(("after", call.arguments["args"]))
         return result
 
-    shell = Toolkit(name="shell", tools=[run_shell_command])
-    shell.get_async_functions()["run_shell_command"].tool_hooks = [hook]
-    catalog = await _catalog(tmp_path, [shell, Toolkit(name="state", tools=[mutate])])
-    catalog.run_response.agent_id = "helper"
-    catalog.agent.db = create_state_storage("helper", tmp_path, subdir="sessions", session_table="sessions")
+    catalog = await _catalog(
+        tmp_path,
+        [_toolkit("shell", run_shell_command), _toolkit("state", mutate)],
+        middleware=(hook,),
+    )
+    catalog.store = create_agent_state_storage("helper", tmp_path)
 
     async def authorize(key, arguments) -> None:
         return None
 
     async def wait(call_id):
-        while (receipt := await owner.get_call(call_id))["status"] in {"queued", "running"}:
-            await asyncio.sleep(0.001)
+        receipt = await settled_receipt(owner, call_id)
         assert receipt["status"] == "completed", receipt
         return receipt
 
-    owner = LiveTurnTools(
-        CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
+    owner = live_turn_tools_for_test(
+        CliTurnOwner(catalog.runtime_context.execution_identity, "turn", "run"),
         catalog=catalog,
         authorize=authorize,
+        output_file_policy=ToolOutputFilePolicy(tmp_path / "workspace"),
     )
     owner.shell_env = _SHELL_ENV
 
-    async def bash(command: str) -> str:
-        return command
-
-    function = Function.from_callable(bash)
-    message = Message(
-        role="assistant",
-        tool_calls=[
-            {"id": "outer-1", "type": "function", "function": {"name": "bash", "arguments": '{"command":"outer"}'}},
-        ],
-    )
-    async with response_cli_lifetime() as lifetime:
-        lifetime.bind_provider(owner.checkpoint, function)
-        calls = catalog.agent.model.get_function_calls_to_run(message, [message], {"bash": function})
-        async with asyncio.timeout(3):
-            assert (
-                await owner.execute_bash(ToolKey("shell", "run_shell_command"), {"args": "outer"}, calls[0])
-                == "shell done"
-            )
+    async with response_cli_lifetime():
+        await capture_bash_batch(owner, ("outer-1", {"command": "outer"}))
+        async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+            outcome = await owner.execute_bash(ToolKey("shell", "run_shell_command"), {"args": "outer"}, "outer-1")
+    assert outcome.content == "shell done"
     assert hooks == [("before", "outer"), ("before", "nested"), ("after", "nested"), ("after", "outer")]
-    assert catalog.run_context.session_state["count"] == 1
+    assert catalog.run.session_state["count"] == 1
     late = ToolCallOperation(operation="tools.call", call_id=uuid4(), toolkit="state", function="mutate")
     with pytest.raises(CliBashWindowRequiredError, match="Bash call has ended"):
         await owner.operation(window="outer-1", operation=late)
@@ -159,7 +158,17 @@ async def test_outer_shell_cli_nested_shell_cli_mutation_and_late_rejection(
     with pytest.raises(CliAuthenticationError):
         await owner.get_call(str(late.call_id))
     await owner.close()
-    assert catalog.run_context.session_state["count"] == 1
+    assert catalog.run.session_state["count"] == 1
+
+
+def test_cli_operations_select_filesystem_by_its_other_names() -> None:
+    """A call, a description, and a search naming file or coding address the catalog's filesystem toolkit."""
+    call = ToolCallOperation(operation="tools.call", call_id=uuid4(), toolkit="coding", function="read_file")
+    describe = ToolDescribeOperation(operation="tools.describe", toolkit="file", function="read_file")
+    search = ToolSearchOperation(operation="tools.search", query="read", toolkit="coding")
+
+    assert (call.toolkit, describe.toolkit, search.toolkit) == ("filesystem", "filesystem", "filesystem")
+    assert ToolSearchOperation(operation="tools.search", query="read").toolkit is None
 
 
 @pytest.mark.asyncio
@@ -170,17 +179,17 @@ async def test_native_shell_call_admits_cli_calls_only_while_it_runs(tmp_path: P
         run_context.session_state["count"] = run_context.session_state.get("count", 0) + 1
         return "mutated"
 
-    catalog = await _catalog(tmp_path, [Toolkit(name="state", tools=[mutate])])
-    catalog.run_response.agent_id = "helper"
-    catalog.agent.db = create_state_storage("helper", tmp_path, subdir="sessions", session_table="sessions")
+    catalog = await _catalog(tmp_path, [_toolkit("state", mutate)])
+    catalog.store = create_agent_state_storage("helper", tmp_path)
 
     async def authorize(key, arguments) -> None:
         return None
 
-    owner = LiveTurnTools(
-        CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
+    owner = live_turn_tools_for_test(
+        CliTurnOwner(catalog.runtime_context.execution_identity, "turn", "run"),
         catalog=catalog,
         authorize=authorize,
+        output_file_policy=ToolOutputFilePolicy(tmp_path / "workspace"),
     )
     owner.shell_env = _SHELL_ENV
 
@@ -194,14 +203,13 @@ async def test_native_shell_call_admits_cli_calls_only_while_it_runs(tmp_path: P
             window=cli_window(),
             operation=ToolCallOperation(operation="tools.call", call_id=uuid4(), toolkit="state", function="mutate"),
         )
-        while (receipt := await owner.get_call(queued["call_id"]))["status"] in {"queued", "running"}:
-            await asyncio.sleep(0.001)
+        receipt = await settled_receipt(owner, queued["call_id"])
         assert receipt["status"] == "completed", receipt
         return "shell done"
 
-    async with asyncio.timeout(3):
+    async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
         assert await owner.run_native_shell(command) == "shell done"
-    assert catalog.run_context.session_state["count"] == 1
+    assert catalog.run.session_state["count"] == 1
     assert current_agent_cli_shell_env() is None
     with pytest.raises(CliBashWindowRequiredError, match="Bash call has ended"):
         await owner.operation(
@@ -218,17 +226,16 @@ async def test_native_shell_result_carries_media_from_its_cli_calls(tmp_path: Pa
     async def produce() -> ToolResult:
         return ToolResult(content="image", images=[Image(content=b"png", mime_type="image/png")])
 
-    catalog = await _catalog(tmp_path, [Toolkit(name="media", tools=[produce])])
+    catalog = await _catalog(tmp_path, [_toolkit("media", produce)])
     catalog.runtime_context = replace(catalog.runtime_context, storage_path=tmp_path / "storage")
-    catalog.run_response.agent_id = "helper"
-    catalog.agent.db = create_state_storage("helper", tmp_path, subdir="sessions", session_table="sessions")
+    catalog.store = create_agent_state_storage("helper", tmp_path)
     (tmp_path / "workspace").mkdir()
 
     async def authorize(key, arguments) -> None:
         return None
 
-    owner = LiveTurnTools(
-        CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
+    owner = live_turn_tools_for_test(
+        CliTurnOwner(catalog.runtime_context.execution_identity, "turn", "run"),
         catalog=catalog,
         authorize=authorize,
         output_file_policy=ToolOutputFilePolicy(tmp_path / "workspace"),
@@ -240,28 +247,36 @@ async def test_native_shell_result_carries_media_from_its_cli_calls(tmp_path: Pa
             window=cli_window(),
             operation=ToolCallOperation(operation="tools.call", call_id=uuid4(), toolkit="media", function="produce"),
         )
-        while (receipt := await owner.get_call(queued["call_id"]))["status"] in {"queued", "running"}:
-            await asyncio.sleep(0.001)
+        receipt = await settled_receipt(owner, queued["call_id"])
         assert receipt["status"] == "completed", receipt
         return "shell done"
 
-    async with asyncio.timeout(3):
+    async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
         result = await owner.run_native_shell(command)
 
-    assert isinstance(result, ToolResult)
+    assert isinstance(result, ToolValue)
     assert result.content == "shell done"
     assert [image.content for image in result.images or []] == [b"png"]
     await owner.close()
 
 
-async def _native_owner(tmp_path: Path, tools: list, authorize) -> LiveTurnTools:
-    catalog = await _catalog(tmp_path, [Toolkit(name="calls", tools=tools)])
-    catalog.runtime_context = replace(catalog.runtime_context, storage_path=tmp_path / "storage")
-    catalog.run_response.agent_id = "helper"
-    catalog.agent.db = create_state_storage("helper", tmp_path, subdir="sessions", session_table="sessions")
+async def _native_owner(
+    tmp_path: Path,
+    tools: list,
+    authorize,
+    middleware: tuple = (),
+    hooks: HookBindings | None = None,
+) -> LiveTurnTools:
+    catalog = await _catalog(tmp_path, [_toolkit("calls", *tools)], middleware=middleware)
+    catalog.runtime_context = replace(
+        catalog.runtime_context,
+        storage_path=tmp_path / "storage",
+        hooks=hooks or catalog.runtime_context.hooks,
+    )
+    catalog.store = create_agent_state_storage("helper", tmp_path)
     (tmp_path / "workspace").mkdir(exist_ok=True)
-    owner = LiveTurnTools(
-        CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
+    owner = live_turn_tools_for_test(
+        CliTurnOwner(catalog.runtime_context.execution_identity, "turn", "run"),
         catalog=catalog,
         authorize=authorize,
         output_file_policy=ToolOutputFilePolicy(tmp_path / "workspace"),
@@ -270,14 +285,211 @@ async def _native_owner(tmp_path: Path, tools: list, authorize) -> LiveTurnTools
     return owner
 
 
-async def _settled_receipt(owner: LiveTurnTools, function: str) -> dict:
+async def _call_receipt(owner: LiveTurnTools, function: str) -> dict:
+    """Call ``calls.<function>`` from this command's CLI window and return the call's settled receipt."""
     queued = await owner.operation(
         window=cli_window(),
         operation=ToolCallOperation(operation="tools.call", call_id=uuid4(), toolkit="calls", function=function),
     )
-    while (receipt := await owner.get_call(queued["call_id"]))["status"] in {"queued", "running"}:
-        await asyncio.sleep(0.001)
-    return receipt
+    return await settled_receipt(owner, queued["call_id"])
+
+
+async def _start_call(owner: LiveTurnTools, toolkit: str, function: str, **arguments: object) -> dict[str, object]:
+    return await owner.operation(
+        window=cli_window(),
+        operation=ToolCallOperation(
+            operation="tools.call",
+            call_id=uuid4(),
+            toolkit=toolkit,
+            function=function,
+            arguments=arguments,
+        ),
+    )
+
+
+async def _allow(key, arguments) -> None:
+    return None
+
+
+@pytest.mark.asyncio
+async def test_a_command_waits_for_the_cli_calls_it_left_running(tmp_path: Path) -> None:
+    """A command's timeout stops its processes, not the agent's tool calls it started, which its shell call awaits."""
+    finished = asyncio.Event()
+
+    async def slow() -> str:
+        await asyncio.sleep(0.3)
+        finished.set()
+        return "slow done"
+
+    owner = await _native_owner(tmp_path, [slow], _allow)
+
+    async def command() -> str:
+        await _start_call(owner, "calls", "slow")
+        return "returned"
+
+    async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+        assert await owner.run_native_shell(command) == "returned"
+    assert finished.is_set()
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_a_cli_call_approved_after_its_commands_timeout_still_runs(tmp_path: Path) -> None:
+    """A person's approval is never cut short by the timeout of the command that asked for the call.
+
+    The call's receipt reads as waiting while the person decides.
+    """
+    effects: list[str] = []
+    call_ids: list[str] = []
+
+    async def run_shell_command(args: str, timeout: float | None = None) -> str:  # noqa: ASYNC109
+        receipt = await _start_call(owner, "actions", "action", value="sent")
+        call_ids.append(str(receipt["call_id"]))
+        # The CLI client reports the call as waiting and exits, well before the command's timeout.
+        return "waiting"
+
+    def action(value: str) -> str:
+        effects.append(value)
+        return value
+
+    catalog = await _catalog(
+        tmp_path,
+        [_toolkit("shell", run_shell_command), _function(action, requires_confirmation=True)],
+    )
+    catalog.store = create_agent_state_storage("helper", tmp_path)
+
+    async def decide_later(paused):
+        assert (await owner.get_call(call_ids[0]))["status"] == "waiting"
+        # The person decides after the command's timeout has passed.
+        await asyncio.sleep(0.6)
+        requirement = paused.requirements[0]
+        requirement.confirm()
+        return (requirement,)
+
+    catalog.runtime_context = replace(catalog.runtime_context, cli_approval_handler=decide_later)
+    owner = live_turn_tools_for_test(
+        CliTurnOwner(catalog.runtime_context.execution_identity, "turn", "run"),
+        catalog=catalog,
+        authorize=_allow,
+        output_file_policy=ToolOutputFilePolicy(tmp_path / "workspace"),
+    )
+    owner.shell_env = _SHELL_ENV
+
+    async with response_cli_lifetime():
+        await capture_bash_batch(owner, ("outer", {"command": "work"}))
+        async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+            result = await owner.execute_bash(
+                ToolKey("shell", "run_shell_command"),
+                {"args": "work", "timeout": 0.2},
+                "outer",
+            )
+    assert result.content == "waiting"
+    assert effects == ["sent"]
+    assert (await owner.get_call(call_ids[0]))["status"] == "completed"
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_a_cli_approval_pause_records_its_run_and_that_run_s_model(tmp_path: Path) -> None:
+    """The approval a CLI call waits on names its run and that run's model, which the approved call's recovery resumes."""
+    pauses: list[tuple[str | None, str | None, str | None]] = []
+
+    async def run_shell_command(args: str, timeout: float | None = None) -> str:  # noqa: ASYNC109
+        await _start_call(owner, "actions", "action", value="sent")
+        return "waiting"
+
+    def action(value: str) -> str:
+        return value
+
+    catalog = await _catalog(
+        tmp_path,
+        [_toolkit("shell", run_shell_command), _function(action, requires_confirmation=True)],
+    )
+    catalog.store = create_agent_state_storage("helper", tmp_path)
+    catalog.run = replace(catalog.run, model_name="run-model")
+
+    async def approve(paused):
+        pauses.append((paused.session_id, paused.run_id, paused.runtime_model_name))
+        requirement = paused.requirements[0]
+        requirement.confirm()
+        return (requirement,)
+
+    # The ambient model of the tool runtime is not the run's.
+    catalog.runtime_context = replace(
+        catalog.runtime_context,
+        cli_approval_handler=approve,
+        active_model_name="ambient-model",
+    )
+    owner = live_turn_tools_for_test(
+        CliTurnOwner(catalog.runtime_context.execution_identity, "turn", "run"),
+        catalog=catalog,
+        authorize=_allow,
+        output_file_policy=ToolOutputFilePolicy(tmp_path / "workspace"),
+    )
+    owner.shell_env = _SHELL_ENV
+
+    async with response_cli_lifetime():
+        await capture_bash_batch(owner, ("outer", {"command": "work"}))
+        async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+            await owner.execute_bash(ToolKey("shell", "run_shell_command"), {"args": "work"}, "outer")
+    assert pauses == [("session", "run", "run-model")]
+    await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_a_call_a_plugin_hook_declines_settles_failed_and_the_cli_exits_1(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A call a before-call hook declines never runs; its receipt fails with the decline, so ``tools call`` exits 1."""
+    ran: list[str] = []
+
+    async def write_note() -> str:
+        ran.append("note")
+        return "noted"
+
+    @hook(EVENT_TOOL_BEFORE_CALL)
+    async def decline(ctx: ToolBeforeCallContext) -> None:
+        ctx.decline("notes are paused")
+
+    registry = HookRegistry.from_plugins([_plugin("policy", [decline])])
+    policy = detached_policy(registry)
+    owner = await _native_owner(
+        tmp_path,
+        [write_note],
+        _allow,
+        middleware=(policy,),
+        hooks=HookBindings(registry=registry),
+    )
+    receipts: list[dict] = []
+
+    async def command() -> str:
+        receipts.append(await _call_receipt(owner, "write_note"))
+        return "done"
+
+    async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+        assert await owner.run_native_shell(command) == "done"
+    await owner.close()
+    [receipt] = receipts
+
+    assert ran == []
+    assert receipt["status"] == "failed"
+    assert "[TOOL CALL DECLINED]" in json.dumps(receipt["outcome"])
+    assert "Reason: notes are paused" in json.dumps(receipt["outcome"])
+
+    class Client:
+        """The agent CLI's transport, answering with the receipt the turn settled."""
+
+        def operation(self, _payload: dict[str, object]) -> dict[str, object]:
+            return receipt
+
+        def receipt(self, _call_id: str) -> dict[str, object]:
+            return receipt
+
+    monkeypatch.setattr("mindroom.agent_cli.main.AgentCliClient", Client)
+    assert cli_main(["tools", "call", "calls.write_note"]) == 1
+    assert json.loads(capsys.readouterr().out)["status"] == "failed"
 
 
 @pytest.mark.asyncio
@@ -293,14 +505,14 @@ async def test_failed_native_shell_keeps_its_media_from_the_next_result(tmp_path
     owner = await _native_owner(tmp_path, [produce], authorize)
 
     async def failing() -> str:
-        assert (await _settled_receipt(owner, "produce"))["status"] == "completed"
+        assert (await _call_receipt(owner, "produce"))["status"] == "completed"
         msg = "worker failed"
         raise RuntimeError(msg)
 
     async def plain() -> str:
         return "plain"
 
-    async with asyncio.timeout(3):
+    async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
         with pytest.raises(RuntimeError, match="worker failed"):
             await owner.run_native_shell(failing)
         assert await owner.run_native_shell(plain) == "plain"
@@ -329,14 +541,14 @@ async def test_overlapping_native_shell_reports_only_its_own_failed_calls(tmp_pa
         return "first output"
 
     async def second() -> str:
-        assert (await _settled_receipt(owner, "explode"))["status"] == "failed"
+        assert (await _call_receipt(owner, "explode"))["status"] == "failed"
         second_failed.set()
         # The first command drains before this one, while the failed call is still in flight to its owner.
         while not first_task.done():
             await asyncio.sleep(0.001)
         return "second output"
 
-    async with asyncio.timeout(3):
+    async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
         first_task = asyncio.create_task(owner.run_native_shell(first))
         await first_open.wait()
         second_result, first_result = await asyncio.gather(
@@ -372,7 +584,7 @@ async def test_overlapping_commands_run_their_cli_calls_in_their_own_context(tmp
     async def first() -> str:
         first_open.set()
         await second_open.wait()
-        seen["first"] = (await _settled_receipt(owner, "tag"))["outcome"]
+        seen["first"] = (await _call_receipt(owner, "tag"))["outcome"]
         first_called.set()
         return "first"
 
@@ -385,13 +597,40 @@ async def test_overlapping_commands_run_their_cli_calls_in_their_own_context(tmp
         _COMMAND_TAG.set(label)
         return await owner.run_native_shell(command)
 
-    async with asyncio.timeout(3):
+    async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
         first_task = asyncio.create_task(run("first", first))
         await first_open.wait()
         await asyncio.create_task(run("second", second))
         await first_task
 
     assert seen["first"] == "first"
+    await owner.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("in_job", [False, True])
+async def test_a_cli_call_from_a_job_command_runs_as_part_of_that_job(tmp_path: Path, *, in_job: bool) -> None:
+    """A CLI call inherits whether its command runs as a job, so its own shell gets no default time limit there."""
+
+    async def owned() -> str:
+        return str(job_owns_execution())
+
+    async def authorize(key, arguments) -> None:
+        return None
+
+    owner = await _native_owner(tmp_path, [owned], authorize)
+
+    async def command() -> str:
+        return (await _call_receipt(owner, "owned"))["outcome"]
+
+    async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+        if in_job:
+            with job_control_context(JobControl()):
+                seen = await owner.run_native_shell(command)
+        else:
+            seen = await owner.run_native_shell(command)
+
+    assert seen == str(in_job)
     await owner.close()
 
 
@@ -410,13 +649,13 @@ async def test_nested_cli_shell_keeps_its_parent_window_while_a_newer_window_is_
     async def authorize(key, arguments) -> None:
         return None
 
-    catalog = await _catalog(tmp_path, [Toolkit(name="shell", tools=[run_shell_command])])
-    catalog.run_response.agent_id = "helper"
-    catalog.agent.db = create_state_storage("helper", tmp_path, subdir="sessions", session_table="sessions")
-    owner = LiveTurnTools(
-        CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
+    catalog = await _catalog(tmp_path, [_toolkit("shell", run_shell_command)])
+    catalog.store = create_agent_state_storage("helper", tmp_path)
+    owner = live_turn_tools_for_test(
+        CliTurnOwner(catalog.runtime_context.execution_identity, "turn", "run"),
         catalog=catalog,
         authorize=authorize,
+        output_file_policy=ToolOutputFilePolicy(tmp_path / "workspace"),
     )
     owner.shell_env = _SHELL_ENV
 
@@ -434,8 +673,7 @@ async def test_nested_cli_shell_keeps_its_parent_window_while_a_newer_window_is_
                 arguments={"args": "nested"},
             ),
         )
-        while (await owner.get_call(queued["call_id"]))["status"] in {"queued", "running"}:
-            await asyncio.sleep(0.001)
+        await settled_receipt(owner, queued["call_id"])
         nested_done.set()
         return "first"
 
@@ -445,7 +683,7 @@ async def test_nested_cli_shell_keeps_its_parent_window_while_a_newer_window_is_
         await nested_done.wait()
         return "second"
 
-    async with asyncio.timeout(5):
+    async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
         first_task = asyncio.create_task(owner.run_native_shell(first))
         await first_open.wait()
         await owner.run_native_shell(second)
@@ -527,7 +765,7 @@ async def test_overlapping_native_shells_each_keep_their_own_cli_calls(tmp_path:
         first_open.set()
         # The second command starts later, so it is the newest window when this one calls.
         await second_open.wait()
-        receipt = await _settled_receipt(owner, "produce")
+        receipt = await _call_receipt(owner, "produce")
         windows["first call"] = receipt["parent_bash_call_id"]
         first_called.set()
         return "first output"
@@ -538,14 +776,14 @@ async def test_overlapping_native_shells_each_keep_their_own_cli_calls(tmp_path:
         await first_called.wait()
         return "second output"
 
-    async with asyncio.timeout(3):
+    async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
         first_task = asyncio.create_task(owner.run_native_shell(first))
         await first_open.wait()
         second_result = await owner.run_native_shell(second)
         first_result = await first_task
 
     assert windows["first call"] == windows["first"] != windows["second"]
-    assert isinstance(first_result, ToolResult)
+    assert isinstance(first_result, ToolValue)
     assert [image.content for image in first_result.images or []] == [b"png"]
     assert second_result == "second output"
     await owner.close()
@@ -579,6 +817,228 @@ async def test_response_lifetime_keeps_owner_across_attempts_and_revokes_at_end(
         assert events == ["retire"]
     assert current_cli_lifetime() is None
     assert events == ["retire", "close"]
+    # Contexts copied during the response can still reach the ended lifetime, which keeps no owner and takes none.
+    assert lifetime.owner is None
+    with pytest.raises(RuntimeError, match="CLI lifetime has ended"):
+        lifetime.register(Owner(), registry)
+    assert not registry._owners
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("job_running", [False, True], ids=["no-job", "job-running"])
+async def test_response_lifetime_keeps_its_owner_until_its_background_jobs_settle(*, job_running: bool) -> None:
+    """A shell job that outlives its reply keeps the reply's CLI; the owner closes once the last job settles.
+
+    Only then does the ended lifetime forget its owner, which a context copied during the reply can outlive.
+    """
+    events = []
+
+    class Owner:
+        def bind_response_task(self, task):
+            pass
+
+        async def close(self) -> None:
+            events.append("close")
+
+    registry = TurnToolRegistry()
+    owner = Owner()
+    async with execution_resources() as resources:
+        job = resources.acquire() if job_running else None
+        async with response_cli_lifetime() as lifetime:
+            lifetime.register(owner, registry)
+        assert events == ([] if job_running else ["close"])
+        assert (lifetime.owner is owner) is job_running
+    assert events == ([] if job_running else ["close"])
+    if job is not None:
+        await job.release()
+    assert events == ["close"]
+    assert lifetime.owner is None
+
+
+@pytest.mark.asyncio
+async def test_a_shell_job_calls_its_tools_after_its_reply_finished(tmp_path: Path) -> None:
+    """A shell job released from its reply keeps calling tools through the CLI until the job settles."""
+
+    async def ping() -> str:
+        return "pong"
+
+    async def authorize(key, arguments) -> None:
+        return None
+
+    owner = await _native_owner(tmp_path, [ping], authorize)
+    reply_finished = asyncio.Event()
+    running = asyncio.Event()
+    statuses = []
+
+    async def command() -> str:
+        running.set()
+        await reply_finished.wait()
+        statuses.append((await _call_receipt(owner, "ping"))["status"])
+        return "job done"
+
+    async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+        async with execution_resources() as resources:
+            job = resources.acquire()
+            async with response_cli_lifetime() as lifetime:
+                lifetime.register(owner, TurnToolRegistry())
+                shell_job = asyncio.create_task(owner.run_native_shell(command))
+                await running.wait()
+                # Every reply attempt ends by retiring its catalog, as the response driver does.
+                await lifetime.retire_attempt()
+        reply_finished.set()
+        assert await shell_job == "job done"
+        assert statuses == ["completed"]
+        await job.release()
+
+    with pytest.raises(CliAuthenticationError):
+        await owner.operation(
+            window=None,
+            operation=ToolCallOperation(operation="tools.call", call_id=uuid4(), toolkit="calls", function="ping"),
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_shell_job_approved_after_its_reply_finished_still_calls_its_tools(tmp_path: Path) -> None:
+    """A job waiting for approval opens its shell window only after the reply ended, and its CLI still works."""
+
+    async def ping() -> str:
+        return "pong"
+
+    async def authorize(key, arguments) -> None:
+        return None
+
+    owner = await _native_owner(tmp_path, [ping], authorize)
+
+    async def command() -> str:
+        return str((await _call_receipt(owner, "ping"))["status"])
+
+    async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+        async with execution_resources() as resources:
+            job = resources.acquire()
+            async with response_cli_lifetime() as lifetime:
+                lifetime.register(owner, TurnToolRegistry())
+                # The reply ends while the job still waits for its approval, so no shell window is open yet.
+                await lifetime.retire_attempt()
+        assert await owner.run_native_shell(command) == "completed"
+        await job.release()
+
+
+@pytest.mark.asyncio
+async def test_a_second_shell_job_approved_after_the_first_ended_still_calls_its_tools(tmp_path: Path) -> None:
+    """One job's shell ending must not close the catalog a later-approved job of the same reply still needs."""
+
+    async def ping() -> str:
+        return "pong"
+
+    async def authorize(key, arguments) -> None:
+        return None
+
+    owner = await _native_owner(tmp_path, [ping], authorize)
+    first_running = asyncio.Event()
+    first_may_end = asyncio.Event()
+
+    async def first() -> str:
+        first_running.set()
+        await first_may_end.wait()
+        return "first done"
+
+    async def second() -> str:
+        return str((await _call_receipt(owner, "ping"))["status"])
+
+    async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+        async with execution_resources() as resources:
+            first_job, second_job = resources.acquire(), resources.acquire()
+            async with response_cli_lifetime() as lifetime:
+                lifetime.register(owner, TurnToolRegistry())
+                first_task = asyncio.create_task(owner.run_native_shell(first))
+                await first_running.wait()
+                await lifetime.retire_attempt()
+        first_may_end.set()
+        assert await first_task == "first done"
+        await first_job.release()
+        # The second job was waiting for its approval and opens its shell only now.
+        assert await owner.run_native_shell(second) == "completed"
+        await second_job.release()
+
+
+@pytest.mark.asyncio
+async def test_a_shell_window_keeps_its_cli_while_its_reply_rebuilds_the_catalog(tmp_path: Path) -> None:
+    """A retired attempt's catalog stays open for a running shell command and closes with the response's owner."""
+
+    async def ping() -> str:
+        return "pong"
+
+    async def authorize(key, arguments) -> None:
+        return None
+
+    owner = await _native_owner(tmp_path, [ping], authorize)
+    old = owner.catalog
+    running = asyncio.Event()
+    rebuilt = asyncio.Event()
+
+    async def command() -> str:
+        running.set()
+        await rebuilt.wait()
+        return str((await _call_receipt(owner, "ping"))["status"])
+
+    async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+        window = asyncio.create_task(owner.run_native_shell(command))
+        await running.wait()
+        await owner.retire_binding()
+        assert (await owner.operation(window=None, operation=ToolListOperation(operation="tools.list")))["items"]
+        new = await _catalog(tmp_path, [_toolkit("calls", ping)])
+        new.store = create_agent_state_storage("helper", tmp_path)
+        owner.bind_catalog(new)
+        rebuilt.set()
+        assert await window == "completed"
+
+    await owner.close()
+    with pytest.raises(RuntimeError, match="closed"):
+        await old.bind(ToolKey("calls", "ping"))
+
+
+@pytest.mark.asyncio
+async def test_cancelling_one_native_shell_leaves_the_others_their_cli(tmp_path: Path) -> None:
+    """Cancelling one shell job stops its CLI calls only; a command still running keeps calling tools."""
+
+    async def ping() -> str:
+        return "pong"
+
+    async def hang() -> str:
+        await asyncio.Event().wait()
+        return "unreachable"
+
+    async def authorize(key, arguments) -> None:
+        return None
+
+    owner = await _native_owner(tmp_path, [ping, hang], authorize)
+    hanging = asyncio.Event()
+    first_cancelled = asyncio.Event()
+
+    async def first() -> str:
+        await owner.operation(
+            window=cli_window(),
+            operation=ToolCallOperation(operation="tools.call", call_id=uuid4(), toolkit="calls", function="hang"),
+        )
+        hanging.set()
+        await asyncio.Event().wait()
+        return "unreachable"
+
+    async def second() -> str:
+        await first_cancelled.wait()
+        receipt = await _call_receipt(owner, "ping")
+        return str(receipt["status"])
+
+    async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+        first_task = asyncio.create_task(owner.run_native_shell(first))
+        second_task = asyncio.create_task(owner.run_native_shell(second))
+        await hanging.wait()
+        first_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first_task
+        first_cancelled.set()
+        assert await second_task == "completed"
+    await owner.close()
 
 
 @pytest.mark.asyncio
@@ -593,47 +1053,96 @@ async def test_write_failure_prevents_shell_and_inner_effects(
         effects.append("shell")
         return args
 
-    catalog = await _catalog(tmp_path, [Toolkit(name="shell", tools=[run_shell_command])])
-    catalog.run_response.agent_id = "helper"
-    catalog.agent.db = create_state_storage("helper", tmp_path, subdir="sessions", session_table="sessions")
+    catalog = await _catalog(tmp_path, [_toolkit("shell", run_shell_command)])
+    catalog.store = create_agent_state_storage("helper", tmp_path)
 
     async def authorize(key, arguments) -> None:
         effects.append("authorize")
 
-    owner = LiveTurnTools(
-        CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
+    owner = live_turn_tools_for_test(
+        CliTurnOwner(catalog.runtime_context.execution_identity, "turn", "run"),
         catalog=catalog,
         authorize=authorize,
+        output_file_policy=ToolOutputFilePolicy(tmp_path / "workspace"),
     )
     owner.shell_env = _SHELL_ENV
 
-    async def bash(command: str) -> str:
-        return command
-
-    function = Function.from_callable(bash)
-    message = Message(
-        role="assistant",
-        tool_calls=[
-            {"id": "bash-1", "type": "function", "function": {"name": "bash", "arguments": '{"command":"touch"}'}},
-        ],
-    )
-
-    def fail(**kwargs) -> Never:
+    def fail(*_args: object, **_kwargs: object) -> Never:
         msg = "database unavailable"
         raise OSError(msg)
 
-    monkeypatch.setattr(catalog.agent.db, "upsert_run", fail)
-    async with response_cli_lifetime() as lifetime:
-        lifetime.bind_provider(owner.checkpoint, function)
-        calls = catalog.agent.model.get_function_calls_to_run(message, [message], {"bash": function})
+    monkeypatch.setattr(ConversationStore, "save_run", fail)
+    async with response_cli_lifetime():
+        await capture_bash_batch(owner, ("bash-1", {"command": "touch"}))
         with pytest.raises(OSError, match="database unavailable"):
-            await owner.execute_bash(ToolKey("shell", "run_shell_command"), {"args": "touch"}, calls[0])
+            await owner.execute_bash(ToolKey("shell", "run_shell_command"), {"args": "touch"}, "bash-1")
     assert effects == []
     await owner.close()
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("failure", "limit", "text", "failed"),
+    [
+        (None, None, "work", False),
+        (RuntimeError("worker unavailable"), None, "worker unavailable", True),
+        (TimeoutError(), None, "TimeoutError", True),
+        (None, 0, "Tool call limit reached", True),
+    ],
+    ids=["succeeded", "raised", "raised_without_text", "over_the_call_limit"],
+)
+async def test_a_failed_shell_call_answers_its_bash_call_as_failed(
+    tmp_path: Path,
+    failure: Exception | None,
+    limit: int | None,
+    text: str,
+    failed: bool,
+) -> None:
+    """The shell call's failure reaches the model as a failed Bash result, so Claude and Gemini read it as one.
+
+    The batch checkpoint a sibling's approval wait saves answers the call the same way.
+    """
+
+    async def run_shell_command(args: str, tail: int = 100) -> str:
+        if failure is not None:
+            raise failure
+        return args
+
+    catalog = await _catalog(tmp_path, [_toolkit("shell", run_shell_command)], max_tool_calls_per_turn=limit)
+    catalog.store = create_agent_state_storage("helper", tmp_path)
+    owner = live_turn_tools_for_test(
+        CliTurnOwner(catalog.runtime_context.execution_identity, "turn", "run"),
+        catalog=catalog,
+        authorize=_allow,
+        output_file_policy=ToolOutputFilePolicy(tmp_path / "workspace"),
+    )
+    owner.shell_env = _SHELL_ENV
+    try:
+        async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+            record = await run_bash_batch(owner, "work")
+        [bash] = record.tools or []
+        assert (bash.tool_name, bash.result, bash.is_error) == ("bash", text, failed)
+        [result] = [message for message in record.messages if message.role == "tool"]
+        assert (result.content, result.tool_call_error) == (text, failed)
+        await owner.checkpoint.persist("bash-0", refresh=True)
+        assert catalog.store is not None
+        saved = catalog.store.get_run("run")
+        assert saved is not None
+        assert [(tool.result, tool.is_error) for tool in saved.tools or ()] == [(text, failed)]
+        assert (saved.messages[-1].content, saved.messages[-1].tool_call_error) == (text, failed)
+    finally:
+        await owner.close()
+
+
 def _run_cli(env: dict[str, str], *argv: str) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(["mindroom-agent", *argv], env=env, capture_output=True, text=True, timeout=5, check=False)
+    return subprocess.run(
+        ["mindroom-agent", *argv],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=SETTLE_TIMEOUT_SECONDS,
+        check=False,
+    )
 
 
 def _cli_call_until_settled(env: dict[str, str], *, separate_wait: bool) -> dict[str, object]:
@@ -674,10 +1183,8 @@ async def test_real_cli_call_wait_completes_inside_outer_bash(
         run_context.session_state["http"] = "inside-bash"
         return "completed-via-http"
 
-    catalog = await _catalog(
-        tmp_path,
-        [Toolkit(name="shell", tools=[run_shell_command]), Toolkit(name="state", tools=[mutate])],
-    )
+    state = Toolkit(name="state", tools=[mutate], requires_confirmation_tools=["mutate"] if approval else None)
+    catalog = await _catalog(tmp_path, [_toolkit("shell", run_shell_command), adapt_toolkit(state)])
     waiting = asyncio.Event()
     decision = asyncio.Event()
 
@@ -688,19 +1195,17 @@ async def test_real_cli_call_wait_completes_inside_outer_bash(
         return paused.requirements
 
     if approval:
-        binding = await catalog.bind(ToolKey("state", "mutate"))
-        binding.function.requires_confirmation = True
         catalog.runtime_context = replace(catalog.runtime_context, cli_approval_handler=pause)
-    catalog.run_response.agent_id = "helper"
-    catalog.agent.db = create_state_storage("helper", tmp_path, subdir="sessions", session_table="sessions")
+    catalog.store = create_agent_state_storage("helper", tmp_path)
 
     async def authorize(key, arguments) -> None:
         return None
 
-    owner = LiveTurnTools(
-        CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
+    owner = live_turn_tools_for_test(
+        CliTurnOwner(catalog.runtime_context.execution_identity, "turn", "run"),
         catalog=catalog,
         authorize=authorize,
+        output_file_policy=ToolOutputFilePolicy(tmp_path / "workspace"),
     )
     registry = TurnToolRegistry()
     registry.register(owner)
@@ -715,42 +1220,28 @@ async def test_real_cli_call_wait_completes_inside_outer_bash(
     server = uvicorn.Server(uvicorn.Config(app, log_level="error", lifespan="off", ws="none"))
     server_task = asyncio.create_task(server.serve(sockets=[sock]))
     try:
-        while not server.started:
-            await asyncio.sleep(0.01)
+        async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+            while not server.started:
+                await asyncio.sleep(0.01)
 
-        async def bash(command: str) -> str:
-            return command
-
-        function = Function.from_callable(bash)
-        message = Message(
-            role="assistant",
-            tool_calls=[
-                {
-                    "id": "bash-http",
-                    "type": "function",
-                    "function": {"name": "bash", "arguments": '{"command":"http"}'},
-                },
-            ],
-        )
-        async with response_cli_lifetime() as lifetime:
-            lifetime.bind_provider(owner.checkpoint, function)
-            calls = catalog.agent.model.get_function_calls_to_run(message, [message], {"bash": function})
-            async with asyncio.timeout(10):
+        async with response_cli_lifetime():
+            await capture_bash_batch(owner, ("bash-http", {"command": "http"}))
+            async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
                 bash_task = asyncio.create_task(
                     owner.execute_bash(
                         ToolKey("shell", "run_shell_command"),
                         {"args": "http"},
-                        calls[0],
+                        "bash-http",
                     ),
                 )
                 if approval:
                     await waiting.wait()
                     assert not bash_task.done()
-                    assert catalog.run_context.session_state == {}
+                    assert catalog.run.session_state == {}
                     decision.set()
-                assert await bash_task == "same-window"
-        assert catalog.run_context.session_state == {"http": "inside-bash"}
-        assert catalog.run_response.messages == []
+                assert (await bash_task).content == "same-window"
+        assert catalog.run.session_state == {"http": "inside-bash"}
+        assert catalog.record.messages == []
     finally:
         server.should_exit = True
         await server_task
@@ -773,11 +1264,6 @@ async def test_provider_batch_serializes_bash_but_independent_turns_progress(
     async def authorize(key, arguments):
         return None
 
-    async def bash(command: str) -> str:
-        return command
-
-    function = Function.from_callable(bash)
-
     for name in ("one", "two"):
 
         async def run_shell_command(args: str, name=name) -> str:
@@ -792,41 +1278,31 @@ async def test_provider_batch_serializes_bash_but_independent_turns_progress(
             entered[name] -= 1
             return args
 
-        catalog = await _catalog(tmp_path / name, [Toolkit(name="shell", tools=[run_shell_command])])
-        catalog.run_response.agent_id = "helper"
-        catalog.agent.db = create_state_storage("helper", tmp_path / name, subdir="sessions", session_table="sessions")
-        owner = LiveTurnTools(
-            CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), name, "run"),
+        catalog = await _catalog(tmp_path / name, [_toolkit("shell", run_shell_command)])
+        catalog.store = create_agent_state_storage("helper", tmp_path / name)
+        owner = live_turn_tools_for_test(
+            CliTurnOwner(catalog.runtime_context.execution_identity, name, "run"),
             catalog=catalog,
             authorize=authorize,
+            output_file_policy=ToolOutputFilePolicy(tmp_path / "workspace"),
         )
         owner.shell_env = _SHELL_ENV
         owners.append(owner)
 
     async def drive(owner):
-        message = Message(
-            role="assistant",
-            tool_calls=[
-                {
-                    "id": f"{owner.owner.turn_id}-{index}",
-                    "type": "function",
-                    "function": {"name": "bash", "arguments": '{"command":"batch"}'},
-                }
-                for index in range(2)
-            ],
-        )
-        async with response_cli_lifetime() as lifetime:
-            lifetime.bind_provider(owner.checkpoint, function)
-            calls = owner.catalog.agent.model.get_function_calls_to_run(message, [message], {"bash": function})
-            return await asyncio.gather(
+        call_ids = [f"{owner.owner.turn_id}-{index}" for index in range(2)]
+        async with response_cli_lifetime():
+            await capture_bash_batch(owner, *((call_id, {"command": "batch"}) for call_id in call_ids))
+            outcomes = await asyncio.gather(
                 *(
-                    owner.execute_bash(ToolKey("shell", "run_shell_command"), {"args": str(index)}, call)
-                    for index, call in enumerate(calls)
+                    owner.execute_bash(ToolKey("shell", "run_shell_command"), {"args": str(index)}, call_id)
+                    for index, call_id in enumerate(call_ids)
                 ),
             )
+            return [outcome.content for outcome in outcomes]
 
     try:
-        async with asyncio.timeout(3):
+        async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
             assert await asyncio.gather(*(drive(owner) for owner in owners)) == [["0", "1"], ["0", "1"]]
         assert maximum == {"one": 1, "two": 1}
         assert [args for name, args in order if name == "one"] == ["0", "1"]
@@ -851,8 +1327,7 @@ async def test_catalog_rebind_retains_shell_env_and_rejects_between_attempt_call
             operation=ToolCallOperation(operation="tools.call", call_id=uuid4(), toolkit="state", function="change"),
         )
         receipts.append(receipt)
-        while (await owner.get_call(receipt["call_id"]))["status"] in {"queued", "running"}:
-            await asyncio.sleep(0.001)
+        await settled_receipt(owner, receipt["call_id"])
         return "drained"
 
     async def change() -> str:
@@ -863,10 +1338,11 @@ async def test_catalog_rebind_retains_shell_env_and_rejects_between_attempt_call
         return None
 
     old = await _catalog(tmp_path, [])
-    owner = LiveTurnTools(
-        CliTurnOwner(build_execution_identity_from_runtime_context(old.runtime_context), "turn", "run"),
+    owner = live_turn_tools_for_test(
+        CliTurnOwner(old.runtime_context.execution_identity, "turn", "run"),
         catalog=old,
         authorize=authorize,
+        output_file_policy=ToolOutputFilePolicy(tmp_path / "workspace"),
     )
     owner.shell_env = _SHELL_ENV
     await owner.retire_binding()
@@ -879,30 +1355,16 @@ async def test_catalog_rebind_retains_shell_env_and_rejects_between_attempt_call
         )
     new = await _catalog(
         tmp_path,
-        [Toolkit(name="shell", tools=[run_shell_command]), Toolkit(name="state", tools=[change])],
+        [_toolkit("shell", run_shell_command), _toolkit("state", change)],
     )
-    new.run_response.agent_id = "helper"
-    new.agent.db = create_state_storage("helper", tmp_path, subdir="sessions", session_table="sessions")
+    new.store = create_agent_state_storage("helper", tmp_path)
     owner.bind_catalog(new)
 
-    async def bash(command: str) -> str:
-        return command
-
-    function = Function.from_callable(bash)
-    message = Message(
-        role="assistant",
-        tool_calls=[
-            {"id": "new-bash", "type": "function", "function": {"name": "bash", "arguments": '{"command":"new"}'}},
-        ],
-    )
-    async with response_cli_lifetime() as lifetime:
-        lifetime.bind_provider(owner.checkpoint, function)
-        provider_calls = new.agent.model.get_function_calls_to_run(message, [message], {"bash": function})
-        async with asyncio.timeout(3):
-            assert (
-                await owner.execute_bash(ToolKey("shell", "run_shell_command"), {"args": "new"}, provider_calls[0])
-                == "drained"
-            )
+    async with response_cli_lifetime():
+        await capture_bash_batch(owner, ("new-bash", {"command": "new"}))
+        async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+            outcome = await owner.execute_bash(ToolKey("shell", "run_shell_command"), {"args": "new"}, "new-bash")
+    assert outcome.content == "drained"
     assert calls == ["new binding"]
     assert (await owner.get_call(receipts[0]["call_id"]))["parent_bash_call_id"] == "new-bash"
     await owner.close()
@@ -939,37 +1401,27 @@ async def test_cancelling_outer_io_cancels_and_joins_admitted_work(
 
     catalog = await _catalog(
         tmp_path,
-        [Toolkit(name="shell", tools=[run_shell_command]), Toolkit(name="state", tools=[wait])],
+        [_toolkit("shell", run_shell_command), _toolkit("state", wait)],
     )
-    catalog.run_response.agent_id = "helper"
-    catalog.agent.db = create_state_storage("helper", tmp_path, subdir="sessions", session_table="sessions")
-    owner = LiveTurnTools(
-        CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
+    catalog.store = create_agent_state_storage("helper", tmp_path)
+    owner = live_turn_tools_for_test(
+        CliTurnOwner(catalog.runtime_context.execution_identity, "turn", "run"),
         catalog=catalog,
         authorize=authorize,
+        output_file_policy=ToolOutputFilePolicy(tmp_path / "workspace"),
     )
     owner.shell_env = _SHELL_ENV
 
-    async def bash(command: str) -> str:
-        return command
-
-    function = Function.from_callable(bash)
-    message = Message(
-        role="assistant",
-        tool_calls=[
-            {"id": "cancel-bash", "type": "function", "function": {"name": "bash", "arguments": '{"command":"wait"}'}},
-        ],
-    )
-    async with response_cli_lifetime() as lifetime:
-        lifetime.bind_provider(owner.checkpoint, function)
-        calls = catalog.agent.model.get_function_calls_to_run(message, [message], {"bash": function})
+    async with response_cli_lifetime():
+        await capture_bash_batch(owner, ("cancel-bash", {"command": "wait"}))
         task = asyncio.create_task(
-            owner.execute_bash(ToolKey("shell", "run_shell_command"), {"args": "wait"}, calls[0]),
+            owner.execute_bash(ToolKey("shell", "run_shell_command"), {"args": "wait"}, "cancel-bash"),
         )
-        await started.wait()
+        await asyncio.wait_for(started.wait(), SETTLE_TIMEOUT_SECONDS)
         request_task_cancel(task, process_shutdown=True)
-        async with asyncio.timeout(1):
-            with pytest.raises(asyncio.CancelledError):
+        # The deadline sits inside the raises check, or its own cancellation would pass for the task's.
+        with pytest.raises(asyncio.CancelledError):
+            async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
                 await task
     assert cleaned.is_set()
     assert shutdown_seen == [True]
@@ -995,11 +1447,12 @@ async def test_admission_closes_at_quiescence_and_rejects_later_submission(
     async def authorize(key, arguments):
         return None
 
-    catalog = await _catalog(tmp_path, [Toolkit(name="state", tools=[change])])
-    owner = LiveTurnTools(
-        CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
+    catalog = await _catalog(tmp_path, [_toolkit("state", change)])
+    owner = live_turn_tools_for_test(
+        CliTurnOwner(catalog.runtime_context.execution_identity, "turn", "run"),
         catalog=catalog,
         authorize=authorize,
+        output_file_policy=ToolOutputFilePolicy(tmp_path / "workspace"),
     )
     leave = asyncio.Event()
 
@@ -1075,15 +1528,17 @@ async def test_cursor_discovery_and_deferred_describe_require_window(
             loaded.append(index)
 
             async def selected() -> str:
+                """Return the selected item."""
                 return "selected"
 
-            return Toolkit(name=f"tool{index}", tools=[selected])
+            return _toolkit(f"tool{index}", selected, instructions=f"Select with tool {index}.")
 
         catalog.add_deferred(DeferredAgentToolkit(f"tool{index}", f"Metadata {index}", factory))
-    owner = LiveTurnTools(
-        CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
+    owner = live_turn_tools_for_test(
+        CliTurnOwner(catalog.runtime_context.execution_identity, "turn", "run"),
         catalog=catalog,
         authorize=authorize,
+        output_file_policy=ToolOutputFilePolicy(tmp_path / "workspace"),
     )
     names = []
     cursor = None
@@ -1110,7 +1565,13 @@ async def test_cursor_discovery_and_deferred_describe_require_window(
     assert loaded == []
     async with owner._window("describe-bash"):
         descriptor = await owner.operation(window="describe-bash", operation=operation)
-        assert descriptor["input_schema"]["properties"] == {}
+        assert descriptor == {
+            "toolkit": "tool12",
+            "function": "selected",
+            "description": "Return the selected item.",
+            "input_schema": {"type": "object", "properties": {}, "required": []},
+            "instructions": ["Select with tool 12."],
+        }
         with pytest.raises(CliOperationError, match=r"^No toolkit 'unassigned'$"):
             await owner.operation(
                 window="describe-bash",
@@ -1126,8 +1587,7 @@ async def test_cursor_discovery_and_deferred_describe_require_window(
             window="describe-bash",
             operation=ToolCallOperation(operation="tools.call", call_id=uuid4(), toolkit="tool3", function="send"),
         )
-        while (receipt := await owner.get_call(receipt["call_id"]))["status"] in {"queued", "running"}:
-            await asyncio.sleep(0.001)
+        receipt = await settled_receipt(owner, receipt["call_id"])
         assert (receipt["status"], receipt["outcome"]) == ("failed", unknown)
     assert loaded == [12, 3]
     assert ToolKey("tool12", "selected") in authorized
@@ -1145,11 +1605,12 @@ async def test_refused_describe_is_a_caller_safe_rejection(tmp_path: Path) -> No
         msg = "Current configuration no longer permits this CLI catalog"
         raise PermissionError(msg)
 
-    catalog = await _catalog(tmp_path, [Toolkit(name="state", tools=[selected])])
-    owner = LiveTurnTools(
-        CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
+    catalog = await _catalog(tmp_path, [_toolkit("state", selected)])
+    owner = live_turn_tools_for_test(
+        CliTurnOwner(catalog.runtime_context.execution_identity, "turn", "run"),
         catalog=catalog,
         authorize=authorize,
+        output_file_policy=ToolOutputFilePolicy(tmp_path / "workspace"),
     )
     async with owner._window("bash"):
         with pytest.raises(CliOperationError, match="Tool is unavailable"):
@@ -1175,11 +1636,12 @@ async def test_live_turn_bounds_receipts_and_concurrent_operations(
     async def authorize(key, arguments):
         return None
 
-    catalog = await _catalog(tmp_path, [Toolkit(name="state", tools=[slow])])
-    owner = LiveTurnTools(
-        CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
+    catalog = await _catalog(tmp_path, [_toolkit("state", slow)])
+    owner = live_turn_tools_for_test(
+        CliTurnOwner(catalog.runtime_context.execution_identity, "turn", "run"),
         catalog=catalog,
         authorize=authorize,
+        output_file_policy=ToolOutputFilePolicy(tmp_path / "workspace"),
     )
     monkeypatch.setattr(turn, "_MAX_ACTIVE_OPERATIONS", 1)
     monkeypatch.setattr(turn, "_MAX_CALL_RECEIPTS", 2)
@@ -1192,8 +1654,7 @@ async def test_live_turn_bounds_receipts_and_concurrent_operations(
         with pytest.raises(CliOperationError, match="at once"):
             await owner.operation(window="bash", operation=call())
         release.set()
-        while (await owner.get_call(first["call_id"]))["status"] != "completed":
-            await asyncio.sleep(0.001)
+        assert (await settled_receipt(owner, first["call_id"]))["status"] == "completed"
         await owner.operation(window="bash", operation=call())
         with pytest.raises(CliOperationError, match="already holds 2"):
             await owner.operation(window="bash", operation=call())
@@ -1211,10 +1672,10 @@ async def test_owner_rejects_catalog_bound_to_another_execution_identity(
         return None
 
     with pytest.raises(ValueError, match="identity"):
-        LiveTurnTools(
+        live_turn_tools_for_test(
             CliTurnOwner(
                 replace(
-                    build_execution_identity_from_runtime_context(catalog.runtime_context),
+                    catalog.runtime_context.execution_identity,
                     requester_id="@other:test",
                 ),
                 "turn",
@@ -1222,6 +1683,7 @@ async def test_owner_rejects_catalog_bound_to_another_execution_identity(
             ),
             catalog=catalog,
             authorize=authorize,
+            output_file_policy=ToolOutputFilePolicy(tmp_path / "workspace"),
         )
 
 
@@ -1234,10 +1696,11 @@ async def test_context_page_caps_complete_unicode_envelope(tmp_path: Path) -> No
         return None
 
     context = "😀" * 20000
-    owner = LiveTurnTools(
-        CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
+    owner = live_turn_tools_for_test(
+        CliTurnOwner(catalog.runtime_context.execution_identity, "turn", "run"),
         catalog=catalog,
         authorize=authorize,
+        output_file_policy=ToolOutputFilePolicy(tmp_path / "workspace"),
         context={"instructions": context},
     )
     first = await owner.operation(
@@ -1277,11 +1740,13 @@ async def test_live_call_retains_frozen_arguments_and_bounds_terminal_output(
     async def authorize(key, arguments):
         return None
 
-    catalog = await _catalog(tmp_path, [Toolkit(name="state", tools=[change])])
-    owner = LiveTurnTools(
-        CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
+    catalog = await _catalog(tmp_path, [_toolkit("state", change)])
+    (tmp_path / "workspace").mkdir()
+    owner = live_turn_tools_for_test(
+        CliTurnOwner(catalog.runtime_context.execution_identity, "turn", "run"),
         catalog=catalog,
         authorize=authorize,
+        output_file_policy=ToolOutputFilePolicy(tmp_path / "workspace"),
     )
     operation = ToolCallOperation(
         operation="tools.call",
@@ -1299,13 +1764,55 @@ async def test_live_call_retains_frozen_arguments_and_bounds_terminal_output(
     assert receipt["status"] == "completed"
     outcome = ToolCallReceipt.model_validate(receipt).outcome
     if large_result:
-        # Without a workspace to save it to, the output is shortened to fit its receipt.
-        assert isinstance(outcome, str)
-        assert outcome.startswith("x" * 1000)
-        assert outcome.endswith("Call the tool directly for all of it.]")
+        # The full output is saved to the agent's workspace, and the receipt that fits its budget references it.
+        assert isinstance(outcome, dict)
+        saved = outcome["mindroom_tool_output"]
+        assert saved["status"] == "saved_to_file"
+        assert (tmp_path / "workspace" / saved["path"]).read_text() == "x" * 65536
+        assert len(canonical_json(outcome).encode()) <= 16 * 1024
     else:
         assert outcome == "original"
     await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_cli_preserves_plugin_result_fields_beside_a_saved_output(tmp_path: Path) -> None:
+    from mindroom.tool_system.output_files import saved_tool_output_receipt  # noqa: PLC0415
+
+    result = {
+        "finding": "needs-review",
+        "mindroom_tool_output": saved_tool_output_receipt(path="findings.txt", byte_count=10, output_format="text"),
+    }
+
+    async def inspect_findings():
+        return result
+
+    async def authorize(key, arguments):
+        return None
+
+    catalog = await _catalog(tmp_path, [_toolkit("analysis", inspect_findings)])
+    owner = live_turn_tools_for_test(
+        CliTurnOwner(catalog.runtime_context.execution_identity, "turn", "run"),
+        catalog=catalog,
+        authorize=authorize,
+        output_file_policy=ToolOutputFilePolicy(tmp_path / "workspace"),
+    )
+    try:
+        async with owner._window("bash"):
+            queued = await owner.operation(
+                window="bash",
+                operation=ToolCallOperation(
+                    operation="tools.call",
+                    call_id=uuid4(),
+                    toolkit="analysis",
+                    function="inspect_findings",
+                ),
+            )
+            receipt = await settled_receipt(owner, queued["call_id"])
+        assert receipt["status"] == "completed"
+        assert receipt["outcome"] == str(result)
+    finally:
+        await owner.close()
 
 
 @pytest.mark.asyncio
@@ -1347,35 +1854,38 @@ async def test_nested_shell_submits_child_after_outer_shell_returns(
                 function="change",
             ),
         )
-        while (receipt := await owner.get_call(child["call_id"]))["status"] in {"queued", "running"}:
-            await asyncio.sleep(0)
+        receipt = await settled_receipt(owner, child["call_id"])
         assert receipt["status"] == "completed"
         assert receipt["parent_bash_call_id"] == "bash-drain"
         return "nested complete"
 
     async def change() -> str:
-        catalog.run_context.session_state["changed"] = True
+        catalog.run.session_state["changed"] = True
         return "child complete"
 
-    async def hook(name, function_call, arguments):
-        hooks.append(("before", arguments["args"]))
-        result = await function_call(**arguments)
-        hooks.append(("after", arguments["args"]))
+    async def hook(call, call_next):
+        if call.function.name != "run_shell_command":
+            return await call_next(call.arguments)
+        hooks.append(("before", call.arguments["args"]))
+        result = await call_next(call.arguments)
+        hooks.append(("after", call.arguments["args"]))
         return result
 
-    shell = Toolkit(name="shell", tools=[run_shell_command])
-    shell.get_async_functions()["run_shell_command"].tool_hooks = [hook]
-    catalog = await _catalog(tmp_path, [shell, Toolkit(name="state", tools=[change])])
-    catalog.run_response.agent_id = "helper"
-    catalog.agent.db = create_state_storage("helper", tmp_path, subdir="sessions", session_table="sessions")
+    catalog = await _catalog(
+        tmp_path,
+        [_toolkit("shell", run_shell_command), _toolkit("state", change)],
+        middleware=(hook,),
+    )
+    catalog.store = create_agent_state_storage("helper", tmp_path)
 
     async def authorize(key, arguments):
         return None
 
-    owner = LiveTurnTools(
-        CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
+    owner = live_turn_tools_for_test(
+        CliTurnOwner(catalog.runtime_context.execution_identity, "turn", "run"),
         catalog=catalog,
         authorize=authorize,
+        output_file_policy=ToolOutputFilePolicy(tmp_path / "workspace"),
     )
     owner.shell_env = _SHELL_ENV
     drain_window = owner._drain_window
@@ -1386,30 +1896,17 @@ async def test_nested_shell_submits_child_after_outer_shell_returns(
 
     monkeypatch.setattr(owner, "_drain_window", observed_drain)
 
-    async def bash(command: str) -> str:
-        return command
-
-    function = Function.from_callable(bash)
-    message = Message(
-        role="assistant",
-        tool_calls=[
-            {
-                "id": "bash-drain",
-                "type": "function",
-                "function": {"name": "bash", "arguments": '{"command":"outer"}'},
-            },
-        ],
-    )
     try:
-        async with response_cli_lifetime() as lifetime:
-            lifetime.bind_provider(owner.checkpoint, function)
-            calls = catalog.agent.model.get_function_calls_to_run(message, [message], {"bash": function})
-            async with asyncio.timeout(2):
-                assert (
-                    await owner.execute_bash(ToolKey("shell", "run_shell_command"), {"args": "outer"}, calls[0])
-                    == "outer complete"
+        async with response_cli_lifetime():
+            await capture_bash_batch(owner, ("bash-drain", {"command": "outer"}))
+            async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+                outcome = await owner.execute_bash(
+                    ToolKey("shell", "run_shell_command"),
+                    {"args": "outer"},
+                    "bash-drain",
                 )
-        assert catalog.run_context.session_state["changed"] is True
+            assert outcome.content == "outer complete"
+        assert catalog.run.session_state["changed"] is True
         assert hooks == [("before", "outer"), ("before", "nested"), ("after", "nested"), ("after", "outer")]
     finally:
         await owner.close()
@@ -1436,10 +1933,11 @@ async def test_admitted_describe_waiter_settles_when_its_task_is_cancelled(
     async def authorize(key, arguments):
         return None
 
-    owner = LiveTurnTools(
-        CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
+    owner = live_turn_tools_for_test(
+        CliTurnOwner(catalog.runtime_context.execution_identity, "turn", "run"),
         catalog=catalog,
         authorize=authorize,
+        output_file_policy=ToolOutputFilePolicy(tmp_path / "workspace"),
     )
     try:
         async with owner._window("bash"):
@@ -1481,7 +1979,7 @@ async def test_bash_waits_for_exact_native_approval_without_holding_catalog(tmp_
     decide = asyncio.Event()
 
     async def run_shell_command(args: str) -> str:
-        catalog.run_context.session_state["before_pause"] = True
+        catalog.run.session_state["before_pause"] = True
         receipt = await owner.operation(
             window=cli_window(),
             operation=ToolCallOperation(
@@ -1492,8 +1990,7 @@ async def test_bash_waits_for_exact_native_approval_without_holding_catalog(tmp_
                 arguments={"value": "exact\nvalue"},
             ),
         )
-        while (receipt := await owner.get_call(receipt["call_id"]))["status"] in {"queued", "running", "waiting"}:
-            await asyncio.sleep(0)
+        receipt = await settled_receipt(owner, receipt["call_id"])
         assert receipt["status"] == ("completed" if approved else "failed")
         return "Bash finished after decision"
 
@@ -1501,12 +1998,11 @@ async def test_bash_waits_for_exact_native_approval_without_holding_catalog(tmp_
         effects.append(value)
         return value
 
-    function = Function.from_callable(action)
-    function.owning_toolkit = "actions"
-    function.requires_confirmation = True
-    catalog = await _catalog(tmp_path, [Toolkit(name="shell", tools=[run_shell_command]), function])
-    catalog.run_response.agent_id = "helper"
-    catalog.agent.db = create_state_storage("helper", tmp_path, subdir="sessions", session_table="sessions")
+    catalog = await _catalog(
+        tmp_path,
+        [_toolkit("shell", run_shell_command), _function(action, requires_confirmation=True)],
+    )
+    catalog.store = create_agent_state_storage("helper", tmp_path)
 
     async def pause(paused):
         assert not catalog._lock.locked()
@@ -1514,8 +2010,7 @@ async def test_bash_waits_for_exact_native_approval_without_holding_catalog(tmp_
         assert paused.cli_call["parent_bash_call_id"] == "outer"
         assert paused.tool_trace[0].parent_bash_call_id == "outer"
         assert paused.tool_trace[0].toolkit_name == "actions"
-        saved = catalog.agent.db.get_session("session")
-        assert saved.session_data["session_state"]["before_pause"] is True
+        assert stored_session_state(catalog.store, "session")["before_pause"] is True
         waiting.set()
         await decide.wait()
         requirement = paused.requirements[0]
@@ -1530,36 +2025,26 @@ async def test_bash_waits_for_exact_native_approval_without_holding_catalog(tmp_
     async def authorize(key, arguments):
         pass
 
-    owner = LiveTurnTools(
-        CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
+    owner = live_turn_tools_for_test(
+        CliTurnOwner(catalog.runtime_context.execution_identity, "turn", "run"),
         catalog=catalog,
         authorize=authorize,
+        output_file_policy=ToolOutputFilePolicy(tmp_path / "workspace"),
     )
     owner.shell_env = _SHELL_ENV
 
-    async def bash(command: str) -> str:
-        return command
-
-    provider = Function.from_callable(bash)
-    message = Message(
-        role="assistant",
-        tool_calls=[
-            {"id": "outer", "type": "function", "function": {"name": "bash", "arguments": '{"command":"work"}'}},
-        ],
-    )
-    async with response_cli_lifetime() as lifetime:
-        lifetime.bind_provider(owner.checkpoint, provider)
-        calls = catalog.agent.model.get_function_calls_to_run(message, [message], {"bash": provider})
+    async with response_cli_lifetime():
+        await capture_bash_batch(owner, ("outer", {"command": "work"}))
         task = asyncio.create_task(
-            owner.execute_bash(ToolKey("shell", "run_shell_command"), {"args": "work"}, calls[0]),
+            owner.execute_bash(ToolKey("shell", "run_shell_command"), {"args": "work"}, "outer"),
         )
         try:
-            async with asyncio.timeout(3):
+            async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
                 await waiting.wait()
                 assert not task.done()
                 assert effects == []
                 decide.set()
-                assert await task == "Bash finished after decision"
+                assert (await task).content == "Bash finished after decision"
         finally:
             await owner.close()
             await asyncio.gather(task, return_exceptions=True)

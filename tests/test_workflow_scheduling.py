@@ -2,25 +2,31 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import tempfile
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Literal
-from unittest.mock import AsyncMock, MagicMock, Mock, patch
+from unittest.mock import AsyncMock, patch
 
 import nio
 import pytest
-from agno.run.agent import RunOutput
+from structlog.testing import capture_logs
 
 from mindroom.config.agent import AgentConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.constants import ORIGINAL_SENDER_KEY
 from mindroom.entity_resolution import entity_identity_registry
+from mindroom.hooks import HookRegistry, HookRegistryState
+from mindroom.llm.errors import MODEL_SAFEGUARD_REFUSAL_MESSAGE, ModelSafeguardRefusal
+from mindroom.llm.usage import MessageMetrics
 from mindroom.matrix.client_delivery import DeliveredMatrixEvent, MatrixDeliveryFailure, MatrixDeliveryFailureKind
 from mindroom.matrix.identity import MatrixID
 from mindroom.message_target import MessageTarget
+from mindroom.scheduling import tasks as scheduling_tasks
+from mindroom.scheduling.errors import SchedulingError
 from mindroom.scheduling.executor import execute_scheduled_workflow, send_scheduled_failure_notice
 from mindroom.scheduling.tasks import (
     CronSchedule,
@@ -29,7 +35,6 @@ from mindroom.scheduling.tasks import (
     _existing_task_parse_context,
     _parse_workflow_schedule,
     _validate_conditional_workflow,
-    _WorkflowParseError,
     build_edited_scheduled_workflow,
     schedule_task,
 )
@@ -38,24 +43,67 @@ from tests.authorization_helpers import (
 )
 from tests.conftest import (
     bind_runtime_paths,
+    install_model_providers,
     make_conversation_reader_mock,
     runtime_paths_for,
     test_runtime_paths,
 )
+from tests.fakes.scripted_model import Await, ScriptedModel, answer
 from tests.identity_helpers import persist_entity_accounts
 from tests.scheduling_helpers import serve_task_state_events
+
+
+def _parser_model(workflow: ScheduledWorkflow) -> ScriptedModel:
+    """Return a schedule parser model that answers with ``workflow`` as the JSON it would write."""
+    return ScriptedModel([answer(workflow.model_dump_json(exclude_unset=True))])
+
+
+def _parse_prompt(model: ScriptedModel) -> str:
+    """Return the user prompt of the parser's only request."""
+    [request] = model.requests
+    return request.messages[-1].get_content_string()
+
+
+async def _refuse_parse() -> None:
+    raise ModelSafeguardRefusal(provider="Anthropic", usage=MessageMetrics())
 
 
 def _mid(name: str) -> MatrixID:
     return MatrixID(username=name, domain="localhost")
 
 
-def _runtime_bound_config(config: Config, runtime_root: Path | None = None) -> Config:
-    """Return a runtime-bound workflow config."""
-    runtime_paths = test_runtime_paths(runtime_root or Path(tempfile.mkdtemp()))
+def _runtime_bound_config(config: Config, *, usernames: dict[str, str] | None = None) -> Config:
+    """Return a runtime-bound workflow config whose entity accounts use ``usernames`` where given."""
+    runtime_paths = test_runtime_paths(Path(tempfile.mkdtemp()))
     bound_config = bind_runtime_paths(config, runtime_paths)
-    persist_entity_accounts(bound_config, runtime_paths)
+    persist_entity_accounts(bound_config, runtime_paths, usernames=usernames)
     return bound_config
+
+
+def _research_room_config() -> tuple[Config, nio.MatrixRoom]:
+    """Return a config whose research agent is configured for ``!room:server`` and that room with research in it."""
+    config = _runtime_bound_config(
+        Config(
+            agents={
+                "research": AgentConfig(
+                    display_name="Research",
+                    role="Research agent",
+                    rooms=["!room:server"],
+                ),
+            },
+            router=RouterConfig(model="default"),
+        ),
+        usernames={"router": "router", "research": "research"},
+    )
+    room = nio.MatrixRoom("!room:server", "@bot:server")
+    research_matrix_id = entity_identity_registry(config, runtime_paths_for(config)).current_id("research").full_id
+    room.users[research_matrix_id] = nio.RoomMember(
+        user_id=research_matrix_id,
+        display_name="Research",
+        avatar_url=None,
+    )
+    room.members_synced = True
+    return config, room
 
 
 def _conversation_reader(*, latest_thread_event_id: str | None = None) -> AsyncMock:
@@ -105,28 +153,24 @@ def test_existing_task_parse_context_renders_unset_history_limit_as_null() -> No
 @pytest.fixture
 def mock_config() -> Config:
     """Create a runtime-bound config with test agents."""
-    config = _runtime_bound_config(
-        Config(
-            agents={
-                "general": AgentConfig(display_name="General"),
-                "research": AgentConfig(display_name="Research"),
-                "email_assistant": AgentConfig(display_name="Email Assistant"),
-                "finance": AgentConfig(display_name="Finance"),
-                "shell": AgentConfig(display_name="Shell"),
-                "analyst": AgentConfig(display_name="Analyst"),
-            },
-            teams={
-                "ops": TeamConfig(display_name="Ops Team", role="Operations team", agents=["research", "analyst"]),
-            },
-            models={"default": ModelConfig(provider="test", id="test-model")},
-        ),
+    config = Config(
+        agents={
+            "general": AgentConfig(display_name="General"),
+            "research": AgentConfig(display_name="Research"),
+            "email_assistant": AgentConfig(display_name="Email Assistant"),
+            "finance": AgentConfig(display_name="Finance"),
+            "shell": AgentConfig(display_name="Shell"),
+            "analyst": AgentConfig(display_name="Analyst"),
+        },
+        teams={
+            "ops": TeamConfig(display_name="Ops Team", role="Operations team", agents=["research", "analyst"]),
+        },
+        models={"default": ModelConfig(provider="openai", id="test-model")},
     )
-    persist_entity_accounts(
+    return _runtime_bound_config(
         config,
-        runtime_paths_for(config),
         usernames={alias: alias for alias in ["router", *config.agents, *config.teams]},
     )
-    return config
 
 
 def test_naive_execute_at_is_treated_as_utc() -> None:
@@ -166,31 +210,6 @@ class TestCronSchedule:
 
 class TestScheduledWorkflow:
     """Test ScheduledWorkflow model."""
-
-    def test_once_workflow(self) -> None:
-        """Test creating a one-time workflow."""
-        exec_time = datetime.now(UTC) + timedelta(hours=1)
-        workflow = ScheduledWorkflow(
-            schedule_type="once",
-            execute_at=exec_time,
-            message="@research Please find AI news",
-            description="One-time research task",
-        )
-        assert workflow.schedule_type == "once"
-        assert workflow.execute_at == exec_time
-        assert "@research" in workflow.message
-
-    def test_cron_workflow(self) -> None:
-        """Test creating a recurring workflow."""
-        cron = CronSchedule(minute="0", hour="9")
-        workflow = ScheduledWorkflow(
-            schedule_type="cron",
-            cron_schedule=cron,
-            message="@finance Daily market analysis",
-            description="Daily market report",
-        )
-        assert workflow.schedule_type == "cron"
-        assert workflow.cron_schedule.to_cron_string() == "0 9 * * *"
 
     def test_history_limit_round_trips_through_persisted_json(self) -> None:
         """The per-schedule history limit must survive the Matrix-state serialization format."""
@@ -255,26 +274,21 @@ class TestScheduledWorkflow:
 class TestParseWorkflowSchedule:
     """Test parse_workflow_schedule function."""
 
-    @patch("mindroom.providers.model_loading.get_model_instance")
-    @patch("mindroom.scheduling.tasks.Agent")
     async def test_parse_research_email_workflow(
         self,
-        mock_agent_class: Mock,
-        mock_get_model: Mock,  # noqa: ARG002
-        mock_config: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+        mock_config: Config,
     ) -> None:
         """Test parsing research + email workflow."""
-        # Setup mock agent response
-        mock_agent = AsyncMock()
-        mock_response = RunOutput()
-        mock_response.content = ScheduledWorkflow(
-            schedule_type="cron",
-            cron_schedule=CronSchedule(minute="0", hour="9", weekday="1"),
-            message="@research @email_assistant Please research the latest AI news and email me a summary",
-            description="Weekly AI news research and email",
+        model = _parser_model(
+            ScheduledWorkflow(
+                schedule_type="cron",
+                cron_schedule=CronSchedule(minute="0", hour="9", weekday="1"),
+                message="@research @email_assistant Please research the latest AI news and email me a summary",
+                description="Weekly AI news research and email",
+            ),
         )
-        mock_agent.arun.return_value = mock_response
-        mock_agent_class.return_value = mock_agent
+        install_model_providers(monkeypatch, {"default": model})
 
         # Parse the request
         result = await _parse_workflow_schedule(
@@ -282,6 +296,7 @@ class TestParseWorkflowSchedule:
             config=mock_config,
             runtime_paths=runtime_paths_for(mock_config),
             available_responders=[_mid("research"), _mid("email_assistant")],
+            timezone="UTC",
         )
 
         assert isinstance(result, ScheduledWorkflow)
@@ -290,57 +305,52 @@ class TestParseWorkflowSchedule:
         assert "@research" in result.message
         assert "@email_assistant" in result.message
 
-    @patch("mindroom.providers.model_loading.get_model_instance")
-    @patch("mindroom.scheduling.tasks.Agent")
     async def test_parse_simple_reminder(
         self,
-        mock_agent_class: Mock,
-        mock_get_model: Mock,  # noqa: ARG002
-        mock_config: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+        mock_config: Config,
     ) -> None:
         """Test parsing simple reminder without agents."""
-        mock_agent = AsyncMock()
-        mock_response = RunOutput()
-        mock_response.content = ScheduledWorkflow(
-            schedule_type="once",
-            execute_at=datetime.now(UTC) + timedelta(minutes=5),
-            message="Check the deployment status",
-            description="Deployment check reminder",
+        model = _parser_model(
+            ScheduledWorkflow(
+                schedule_type="once",
+                execute_at=datetime.now(UTC) + timedelta(minutes=5),
+                message="Check the deployment status",
+                description="Deployment check reminder",
+            ),
         )
-        mock_agent.arun.return_value = mock_response
-        mock_agent_class.return_value = mock_agent
+        install_model_providers(monkeypatch, {"default": model})
 
         result = await _parse_workflow_schedule(
             "ping me in 5 minutes to check the deployment",
             config=mock_config,
             runtime_paths=runtime_paths_for(mock_config),
             available_responders=[_mid("general")],
+            timezone="UTC",
         )
 
         assert isinstance(result, ScheduledWorkflow)
         assert result.schedule_type == "once"
         assert result.message == "Check the deployment status"
 
-    @patch("mindroom.providers.model_loading.get_model_instance")
-    @patch("mindroom.scheduling.tasks.Agent")
-    async def test_parse_daily_task(self, mock_agent_class: Mock, mock_get_model: Mock, mock_config: MagicMock) -> None:  # noqa: ARG002
+    async def test_parse_daily_task(self, monkeypatch: pytest.MonkeyPatch, mock_config: Config) -> None:
         """Test parsing daily recurring task."""
-        mock_agent = AsyncMock()
-        mock_response = RunOutput()
-        mock_response.content = ScheduledWorkflow(
-            schedule_type="cron",
-            cron_schedule=CronSchedule(minute="0", hour="9"),
-            message="@finance Please provide a market analysis for today",
-            description="Daily market analysis",
+        model = _parser_model(
+            ScheduledWorkflow(
+                schedule_type="cron",
+                cron_schedule=CronSchedule(minute="0", hour="9"),
+                message="@finance Please provide a market analysis for today",
+                description="Daily market analysis",
+            ),
         )
-        mock_agent.arun.return_value = mock_response
-        mock_agent_class.return_value = mock_agent
+        install_model_providers(monkeypatch, {"default": model})
 
         result = await _parse_workflow_schedule(
             "Daily at 9am, give me a market analysis",
             config=mock_config,
             runtime_paths=runtime_paths_for(mock_config),
             available_responders=[_mid("finance")],
+            timezone="UTC",
         )
 
         assert isinstance(result, ScheduledWorkflow)
@@ -348,26 +358,21 @@ class TestParseWorkflowSchedule:
         assert result.cron_schedule.to_cron_string() == "0 9 * * *"
         assert "@finance" in result.message
 
-    @patch("mindroom.providers.model_loading.get_model_instance")
-    @patch("mindroom.scheduling.tasks.Agent")
     async def test_parse_prompt_interprets_times_in_user_timezone(
         self,
-        mock_agent_class: Mock,
-        mock_get_model: Mock,  # noqa: ARG002
-        mock_config: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+        mock_config: Config,
     ) -> None:
-        """The parse prompt must carry the user's timezone and local wall-clock time."""
-        mock_config.timezone = "America/Los_Angeles"
-        mock_agent = AsyncMock()
-        mock_response = RunOutput()
-        mock_response.content = ScheduledWorkflow(
-            schedule_type="once",
-            execute_at=datetime(2026, 7, 4, 6, 45, tzinfo=UTC),
-            message="Reminder",
-            description="Reminder",
+        """The parse prompt must carry the requesting agent's timezone and local wall-clock time, not the global one."""
+        model = _parser_model(
+            ScheduledWorkflow(
+                schedule_type="once",
+                execute_at=datetime(2026, 7, 4, 6, 45, tzinfo=UTC),
+                message="Reminder",
+                description="Reminder",
+            ),
         )
-        mock_agent.arun.return_value = mock_response
-        mock_agent_class.return_value = mock_agent
+        install_model_providers(monkeypatch, {"default": model})
 
         await _parse_workflow_schedule(
             "Remind me today at 11:45 PM",
@@ -375,42 +380,40 @@ class TestParseWorkflowSchedule:
             runtime_paths=runtime_paths_for(mock_config),
             available_responders=[_mid("general")],
             current_time=datetime(2026, 7, 3, 16, 0, tzinfo=UTC),
+            timezone="America/Los_Angeles",
         )
 
-        prompt = mock_agent.arun.call_args.args[0]
+        prompt = _parse_prompt(model)
         assert "Current time (UTC): 2026-07-03T16:00:00+00:00" in prompt
         assert "(America/Los_Angeles): 2026-07-03T09:00:00-07:00" in prompt
         assert "Interpret times in the request as America/Los_Angeles wall-clock times" in prompt
 
-    @patch("mindroom.providers.model_loading.get_model_instance")
-    @patch("mindroom.scheduling.tasks.Agent")
     async def test_parse_prompt_includes_history_limit_instructions(
         self,
-        mock_agent_class: Mock,
-        mock_get_model: Mock,  # noqa: ARG002
-        mock_config: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+        mock_config: Config,
     ) -> None:
         """The parse prompt must teach the model when to set the per-schedule history limit."""
-        mock_agent = AsyncMock()
-        mock_response = RunOutput()
-        mock_response.content = ScheduledWorkflow(
-            schedule_type="cron",
-            cron_schedule=CronSchedule(minute="*/25"),
-            message="Poll the queue",
-            description="Queue poller",
-            history_limit=0,
+        model = _parser_model(
+            ScheduledWorkflow(
+                schedule_type="cron",
+                cron_schedule=CronSchedule(minute="*/25"),
+                message="Poll the queue",
+                description="Queue poller",
+                history_limit=0,
+            ),
         )
-        mock_agent.arun.return_value = mock_response
-        mock_agent_class.return_value = mock_agent
+        install_model_providers(monkeypatch, {"default": model})
 
         result = await _parse_workflow_schedule(
             "every 25 minutes poll the queue with no history",
             config=mock_config,
             runtime_paths=runtime_paths_for(mock_config),
             available_responders=[_mid("general")],
+            timezone="UTC",
         )
 
-        prompt = mock_agent.arun.call_args.args[0]
+        prompt = _parse_prompt(model)
         assert "Resolve history_limit using the conversation context rules below" in prompt
         assert '"with no history", "without context", or "context-free" -> history_limit=0' in prompt
         assert '"restore full history" or "use unlimited history" -> history_limit=null' in prompt
@@ -419,125 +422,97 @@ class TestParseWorkflowSchedule:
         assert isinstance(result, ScheduledWorkflow)
         assert result.history_limit == 0
 
-    @patch("mindroom.providers.model_loading.get_model_instance")
-    @patch("mindroom.scheduling.tasks.Agent")
-    async def test_parse_once_without_execute_at_returns_parse_error(
+    async def test_parse_once_without_execute_at_fails(
         self,
-        mock_agent_class: Mock,
-        mock_get_model: Mock,  # noqa: ARG002
-        mock_config: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+        mock_config: Config,
     ) -> None:
         """A one-time parse without execute_at must fail instead of silently defaulting."""
-        mock_agent = AsyncMock()
-        mock_response = RunOutput()
-        mock_response.content = ScheduledWorkflow(
-            schedule_type="once",
-            message="Check deployment",
-            description="Deployment check",
+        model = _parser_model(
+            ScheduledWorkflow(
+                schedule_type="once",
+                message="Check deployment",
+                description="Deployment check",
+            ),
         )
-        mock_agent.arun.return_value = mock_response
-        mock_agent_class.return_value = mock_agent
+        install_model_providers(monkeypatch, {"default": model})
 
-        result = await _parse_workflow_schedule(
-            "in 10 minutes check the deployment",
-            config=mock_config,
-            runtime_paths=runtime_paths_for(mock_config),
-            available_responders=[_mid("general")],
-        )
+        with pytest.raises(SchedulingError) as exc_info:
+            await _parse_workflow_schedule(
+                "in 10 minutes check the deployment",
+                config=mock_config,
+                runtime_paths=runtime_paths_for(mock_config),
+                available_responders=[_mid("general")],
+                timezone="UTC",
+            )
 
-        assert isinstance(result, _WorkflowParseError)
-        assert "when to run" in result.error
+        error, _suggestion = str(exc_info.value).split("\n\n💡 ")
+        assert "when to run" in error
 
-    @patch("mindroom.providers.model_loading.get_model_instance")
-    @patch("mindroom.scheduling.tasks.Agent")
-    async def test_parse_cron_without_schedule_returns_parse_error(
+    async def test_parse_cron_without_schedule_fails(
         self,
-        mock_agent_class: Mock,
-        mock_get_model: Mock,  # noqa: ARG002
-        mock_config: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+        mock_config: Config,
     ) -> None:
         """A recurring parse without cron_schedule must fail instead of silently defaulting."""
-        mock_agent = AsyncMock()
-        mock_response = RunOutput()
-        mock_response.content = ScheduledWorkflow(
-            schedule_type="cron",
-            message="Market analysis",
-            description="Daily market analysis",
+        model = _parser_model(
+            ScheduledWorkflow(
+                schedule_type="cron",
+                message="Market analysis",
+                description="Daily market analysis",
+            ),
         )
-        mock_agent.arun.return_value = mock_response
-        mock_agent_class.return_value = mock_agent
+        install_model_providers(monkeypatch, {"default": model})
 
-        result = await _parse_workflow_schedule(
-            "give me a market analysis regularly",
-            config=mock_config,
-            runtime_paths=runtime_paths_for(mock_config),
-            available_responders=[_mid("general")],
-        )
+        with pytest.raises(SchedulingError) as exc_info:
+            await _parse_workflow_schedule(
+                "give me a market analysis regularly",
+                config=mock_config,
+                runtime_paths=runtime_paths_for(mock_config),
+                available_responders=[_mid("general")],
+                timezone="UTC",
+            )
 
-        assert isinstance(result, _WorkflowParseError)
-        assert "recurring schedule" in result.error
+        error, _suggestion = str(exc_info.value).split("\n\n💡 ")
+        assert "recurring schedule" in error
 
-    @patch("mindroom.providers.model_loading.get_model_instance")
-    @patch("mindroom.scheduling.tasks.Agent")
-    async def test_parse_error_handling(
+    async def test_parse_refusal_reports_declined_request_without_rephrase_hint(
         self,
-        mock_agent_class: Mock,
-        mock_get_model: Mock,  # noqa: ARG002
-        mock_config: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+        mock_config: Config,
     ) -> None:
-        """Test error handling in parse_workflow_schedule."""
-        mock_agent = AsyncMock()
-        mock_agent.arun.side_effect = Exception("AI service error")
-        mock_agent_class.return_value = mock_agent
+        """A parser model refusal must say the parser declined instead of asking for a more specific request."""
+        install_model_providers(monkeypatch, {"default": ScriptedModel([[Await(_refuse_parse)]])})
 
-        result = await _parse_workflow_schedule(
-            "Schedule something",
-            config=mock_config,
-            runtime_paths=runtime_paths_for(mock_config),
-            available_responders=[_mid("general")],
+        with pytest.raises(SchedulingError) as exc_info:
+            await _parse_workflow_schedule(
+                "Every day at 9am, summarize the news",
+                config=mock_config,
+                runtime_paths=runtime_paths_for(mock_config),
+                available_responders=[_mid("general")],
+                timezone="UTC",
+            )
+
+        assert (
+            str(exc_info.value)
+            == f"The schedule parser model declined this request ({MODEL_SAFEGUARD_REFUSAL_MESSAGE})."
         )
 
-        assert isinstance(result, _WorkflowParseError)
-        assert "Error parsing schedule" in result.error
-        assert result.suggestion is not None
-
-    @patch("mindroom.scheduling.tasks.Agent")
-    async def test_parse_empty_available_responders_returns_parse_error(
-        self,
-        mock_agent_class: Mock,
-        mock_config: MagicMock,
-    ) -> None:
-        """Empty responder sets should fail deterministically for direct callers."""
-        result = await _parse_workflow_schedule(
-            "Schedule something",
-            config=mock_config,
-            runtime_paths=runtime_paths_for(mock_config),
-            available_responders=[],
-        )
-
-        assert isinstance(result, _WorkflowParseError)
-        assert result.error == "No agents or teams available for scheduling."
-        mock_agent_class.assert_not_called()
-
-    @patch("mindroom.providers.model_loading.get_model_instance")
-    @patch("mindroom.scheduling.tasks.Agent")
     async def test_parse_formats_available_agents_without_double_at(
         self,
-        mock_agent_class: Mock,
-        mock_get_model: Mock,  # noqa: ARG002
-        mock_config: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+        mock_config: Config,
     ) -> None:
         """Available-agent prompt rendering should never produce @@ mentions."""
-        mock_agent = AsyncMock()
-        mock_response = RunOutput()
-        mock_response.content = ScheduledWorkflow(
-            schedule_type="once",
-            execute_at=datetime.now(UTC) + timedelta(minutes=5),
-            message="Check in",
-            description="Reminder",
+        model = _parser_model(
+            ScheduledWorkflow(
+                schedule_type="once",
+                execute_at=datetime.now(UTC) + timedelta(minutes=5),
+                message="Check in",
+                description="Reminder",
+            ),
         )
-        mock_agent.arun.return_value = mock_response
-        mock_agent_class.return_value = mock_agent
+        install_model_providers(monkeypatch, {"default": model})
 
         await _parse_workflow_schedule(
             "remind me later",
@@ -550,43 +525,87 @@ class TestParseWorkflowSchedule:
                 _mid("finance"),
                 _mid("analyst"),
             ],
+            timezone="UTC",
         )
 
-        prompt = mock_agent.arun.call_args.args[0]
+        prompt = _parse_prompt(model)
         assert "Available agents and teams: @general, @research, @ops, @finance, @analyst" in prompt
         assert "@@" not in prompt
 
-    @patch("mindroom.providers.model_loading.get_model_instance")
-    @patch("mindroom.scheduling.tasks.Agent")
     async def test_parse_conditional_schedule_accepts_numeric_cron(
         self,
-        mock_agent_class: Mock,
-        mock_get_model: Mock,  # noqa: ARG002
-        mock_config: MagicMock,
+        monkeypatch: pytest.MonkeyPatch,
+        mock_config: Config,
     ) -> None:
         """Conditional schedules should accept numeric five-field crons because they recur."""
-        mock_agent = AsyncMock()
-        mock_response = RunOutput()
-        mock_response.content = ScheduledWorkflow(
-            schedule_type="cron",
-            is_conditional=True,
-            cron_schedule=CronSchedule(minute="0", hour="9", day="5", month="6", weekday="1"),
-            message="@general Check for messages containing urgent. If found, notify the team.",
-            description="Monitor urgent mentions",
+        model = _parser_model(
+            ScheduledWorkflow(
+                schedule_type="cron",
+                is_conditional=True,
+                cron_schedule=CronSchedule(minute="0", hour="9", day="5", month="6", weekday="1"),
+                message="@general Check for messages containing urgent. If found, notify the team.",
+                description="Monitor urgent mentions",
+            ),
         )
-        mock_agent.arun.return_value = mock_response
-        mock_agent_class.return_value = mock_agent
+        install_model_providers(monkeypatch, {"default": model})
 
         result = await _parse_workflow_schedule(
             "If someone mentions urgent then notify the team immediately",
             config=mock_config,
             runtime_paths=runtime_paths_for(mock_config),
             available_responders=[_mid("general")],
+            timezone="UTC",
         )
 
         assert isinstance(result, ScheduledWorkflow)
         assert result.cron_schedule is not None
         assert result.cron_schedule.to_cron_string() == "0 9 5 6 1"
+
+    async def test_parse_workflow_schedule_times_out_and_logs_error(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        mock_config: Config,
+    ) -> None:
+        """Schedule parsing raises SchedulingError and logs an error when complete_prompt stalls."""
+
+        async def slow_complete_prompt(*_args: object, **_kwargs: object) -> object:
+            await asyncio.sleep(5)
+            pytest.fail("should have timed out")
+
+        install_model_providers(monkeypatch, {"default": ScriptedModel([])})
+        monkeypatch.setattr(scheduling_tasks, "complete_prompt", slow_complete_prompt)
+        monkeypatch.setattr(scheduling_tasks, "_SCHEDULE_PARSE_TIMEOUT_SECONDS", 0.05)
+
+        with capture_logs() as logs, pytest.raises(SchedulingError, match="Timed out parsing the schedule request"):
+            await _parse_workflow_schedule(
+                "Daily at 9am check my email",
+                config=mock_config,
+                runtime_paths=runtime_paths_for(mock_config),
+                available_responders=[_mid("general")],
+                timezone="UTC",
+            )
+
+        assert [entry["log_level"] for entry in logs if entry["event"] == "Timed out parsing workflow schedule"] == [
+            "error",
+        ]
+
+        async def provider_timeout(*_args: object, **_kwargs: object) -> object:
+            msg = "upstream read timeout"
+            raise TimeoutError(msg)
+
+        monkeypatch.setattr(scheduling_tasks, "complete_prompt", provider_timeout)
+        monkeypatch.setattr(scheduling_tasks, "_SCHEDULE_PARSE_TIMEOUT_SECONDS", 5.0)
+        with capture_logs() as provider_logs, pytest.raises(SchedulingError, match="Error parsing schedule:"):
+            await _parse_workflow_schedule(
+                "Daily at 9am check my email",
+                config=mock_config,
+                runtime_paths=runtime_paths_for(mock_config),
+                available_responders=[_mid("general")],
+                timezone="UTC",
+            )
+        assert [
+            entry["log_level"] for entry in provider_logs if entry["event"] == "Error parsing workflow schedule"
+        ] == ["error"]
 
 
 @pytest.mark.asyncio
@@ -602,13 +621,9 @@ class TestExecuteScheduledWorkflow:
                     "research": AgentConfig(display_name="Research"),
                     "analyst": AgentConfig(display_name="Analyst"),
                 },
-                models={"default": ModelConfig(provider="test", id="test-model")},
+                models={"default": ModelConfig(provider="openai", id="test-model")},
             ),
-        )
-        persist_entity_accounts(
-            config,
-            runtime_paths_for(config),
-            usernames={alias: alias for alias in ["router", *config.agents]},
+            usernames={"router": "router", "research": "research", "analyst": "analyst"},
         )
         workflow = ScheduledWorkflow(
             schedule_type="once",
@@ -636,6 +651,7 @@ class TestExecuteScheduledWorkflow:
                 config,
                 runtime_paths_for(config),
                 conversation_reader,
+                HookRegistryState(HookRegistry.empty()),
             )
 
         conversation_reader.latest_thread_event_id.assert_awaited_once_with(
@@ -663,13 +679,9 @@ class TestExecuteScheduledWorkflow:
                     "research": AgentConfig(display_name="Research"),
                     "analyst": AgentConfig(display_name="Analyst"),
                 },
-                models={"default": ModelConfig(provider="test", id="test-model")},
+                models={"default": ModelConfig(provider="openai", id="test-model")},
             ),
-        )
-        persist_entity_accounts(
-            config,
-            runtime_paths_for(config),
-            usernames={alias: alias for alias in ["router", *config.agents]},
+            usernames={"router": "router", "research": "research", "analyst": "analyst"},
         )
         workflow = ScheduledWorkflow(
             schedule_type="once",
@@ -698,6 +710,7 @@ class TestExecuteScheduledWorkflow:
                 config,
                 runtime_paths_for(config),
                 conversation_reader,
+                HookRegistryState(HookRegistry.empty()),
             )
 
         conversation_reader.latest_thread_event_id.assert_not_awaited()
@@ -712,15 +725,6 @@ class TestExecuteScheduledWorkflow:
 
     async def test_scheduled_failure_notice_labels_latest_thread_lookup(self) -> None:
         """Scheduled failure notices should attribute latest-thread lookups."""
-        workflow = ScheduledWorkflow(
-            schedule_type="once",
-            execute_at=datetime.now(UTC),
-            message="Run report",
-            description="report",
-            thread_id="$thread123",
-            room_id="!room:server",
-            created_by="@user:server",
-        )
         target = MessageTarget.resolve("!room:server", "$thread123", None)
         conversation_reader = _conversation_reader(latest_thread_event_id="$latest456")
 
@@ -735,7 +739,6 @@ class TestExecuteScheduledWorkflow:
         ) as mock_send:
             await send_scheduled_failure_notice(
                 AsyncMock(),
-                workflow,
                 target,
                 "Workflow failed",
                 conversation_reader,
@@ -778,6 +781,7 @@ class TestExecuteScheduledWorkflow:
                 config,
                 runtime_paths_for(config),
                 _conversation_reader(latest_thread_event_id="$thread123"),
+                HookRegistryState(HookRegistry.empty()),
             )
             mock_send.assert_awaited_once()
 
@@ -817,6 +821,7 @@ class TestExecuteScheduledWorkflow:
                 config,
                 runtime_paths_for(config),
                 _conversation_reader(latest_thread_event_id="$thread123"),
+                HookRegistryState(HookRegistry.empty()),
             )
 
             # Should have tried to send original and error message
@@ -862,34 +867,13 @@ class TestExecuteScheduledWorkflow:
                 config,
                 runtime_paths_for(config),
                 conversation_reader,
+                HookRegistryState(HookRegistry.empty()),
             )
 
         assert mock_send.await_count == 2
         mock_info.assert_not_called()
         error_content = mock_send.await_args_list[1].args[2]
         assert "Scheduled task failed" in error_content["body"]
-
-    async def test_execute_workflow_no_room_id(self) -> None:
-        """Test that workflow without room_id doesn't execute."""
-        client = AsyncMock()
-        config = _runtime_bound_config(Config())
-        workflow = ScheduledWorkflow(
-            schedule_type="once",
-            execute_at=datetime.now(UTC),
-            message="Test message",
-            description="Test task",
-            room_id=None,  # No room ID
-        )
-
-        with patch("mindroom.matrix.client_delivery.send_message_outcome", new=AsyncMock()) as mock_send:
-            await execute_scheduled_workflow(
-                client,
-                workflow,
-                config,
-                runtime_paths_for(config),
-                _conversation_reader(),
-            )
-            mock_send.assert_not_called()
 
 
 class TestWorkflowSerialization:
@@ -980,108 +964,74 @@ class TestIntegrationWithScheduling:
             message="@research Daily AI news",
             description="Daily AI research",
         )
+        config, room = _research_room_config()
 
-        # Create a proper config with the research agent configured for the room.
-        config = _runtime_bound_config(
-            Config(
-                agents={
-                    "research": AgentConfig(
-                        display_name="Research",
-                        role="Research agent",
-                        rooms=["!room:server"],
-                    ),
-                },
-                router=RouterConfig(model="default"),
+        message = await schedule_task(
+            runtime=make_test_scheduling_runtime(
+                client=client,
+                config=config,
+                runtime_paths=runtime_paths_for(config),
+                room=room,
+                conversation_reader=make_conversation_reader_mock(),
             ),
+            room_id="!room:server",
+            thread_id="$thread123",
+            scheduled_by="@user:server",
+            full_text="Daily at 9am, research AI news",
         )
-        persist_entity_accounts(
-            config,
-            runtime_paths_for(config),
-            usernames={"router": "router", "research": "research"},
-        )
 
-        # Create a mock room with research agent using the correct MatrixID
-        room = nio.MatrixRoom("!room:server", "@bot:server")
-        research_matrix_id = entity_identity_registry(config, runtime_paths_for(config)).current_id("research").full_id
-        room.users[research_matrix_id] = nio.RoomMember(
-            user_id=research_matrix_id,
-            display_name="Research",
-            avatar_url=None,
-        )
-        room.members_synced = True
+        assert "\n**Task ID:** `" in message
+        assert "recurring task" in message
+        assert "0 9 * * *" in message
 
-        with patch("mindroom.scheduling.tasks._run_cron_task", new=AsyncMock()):
-            task_id, message = await schedule_task(
-                runtime=make_test_scheduling_runtime(
-                    client=client,
-                    config=config,
-                    runtime_paths=runtime_paths_for(config),
-                    room=room,
-                    conversation_reader=make_conversation_reader_mock(),
-                ),
-                room_id="!room:server",
-                thread_id="$thread123",
-                scheduled_by="@user:server",
-                full_text="Daily at 9am, research AI news",
-            )
-
-            assert task_id is not None
-            assert "recurring task" in message
-            assert "0 9 * * *" in message
-
-    @patch("mindroom.providers.model_loading.get_model_instance")
-    @patch("mindroom.scheduling.tasks.Agent")
-    async def test_edit_reparse_preserves_message_and_can_clear_history_limit(
+    @pytest.mark.parametrize(
+        ("original_message", "parsed_history_limit", "request_text", "stored_history_limit"),
+        [
+            pytest.param(
+                "tool-audit schedule test — safe to ignore",
+                {},
+                "Change to 6 hours from now instead, keep the same message, and restore full history",
+                None,
+                id="restore_full_history_clears_limit",
+            ),
+            pytest.param(
+                "tool-audit schedule test - safe to ignore",
+                {"history_limit": 5},
+                "Change to 6 hours from now instead and keep the same message",
+                5,
+                id="request_without_context_keeps_limit",
+            ),
+        ],
+    )
+    async def test_edit_reparse_preserves_message_and_stores_parsed_history_limit(
         self,
-        mock_agent_class: Mock,
-        mock_get_model: Mock,  # noqa: ARG002
+        monkeypatch: pytest.MonkeyPatch,
+        original_message: str,
+        parsed_history_limit: dict[str, int],
+        request_text: str,
+        stored_history_limit: int | None,
     ) -> None:
-        """An edit can clear a limit while preserving the original scheduled message."""
-        original_message = "tool-audit schedule test — safe to ignore"
+        """An edit keeps the original scheduled message and stores the history limit the request resolves to."""
         client = AsyncMock()
         client.room_put_state = AsyncMock(return_value=nio.RoomPutStateResponse("$scheduled-state", "!room:server"))
 
-        mock_agent = AsyncMock()
-        mock_response = RunOutput()
-        mock_response.content = ScheduledWorkflow(
-            schedule_type="once",
-            execute_at=datetime.now(UTC) + timedelta(hours=6),
-            message=original_message,
-            description="Post a test reminder in the current thread.",
-        )
-        mock_agent.arun.return_value = mock_response
-        mock_agent_class.return_value = mock_agent
-
-        config = _runtime_bound_config(
-            Config(
-                agents={
-                    "research": AgentConfig(
-                        display_name="Research",
-                        role="Research agent",
-                        rooms=["!room:server"],
-                    ),
-                },
-                router=RouterConfig(model="default"),
+        model = _parser_model(
+            ScheduledWorkflow(
+                schedule_type="once",
+                execute_at=datetime.now(UTC) + timedelta(hours=6),
+                message=original_message,
+                description="Post a test reminder in the current thread.",
+                **parsed_history_limit,
             ),
         )
-        persist_entity_accounts(
-            config,
-            runtime_paths_for(config),
-            usernames={"router": "router", "research": "research"},
-        )
-        room = nio.MatrixRoom("!room:server", "@bot:server")
-        research_matrix_id = entity_identity_registry(config, runtime_paths_for(config)).current_id("research").full_id
-        room.users[research_matrix_id] = nio.RoomMember(
-            user_id=research_matrix_id,
-            display_name="Research",
-            avatar_url=None,
-        )
-        room.members_synced = True
+        install_model_providers(monkeypatch, {"default": model})
+        config, room = _research_room_config()
 
         existing_task = ScheduledTaskRecord(
             task_id="task123",
             room_id="!room:server",
             status="pending",
+            owner_id=entity_identity_registry(config, runtime_paths_for(config)).current_id("router").full_id,
             created_at=datetime.now(UTC),
             workflow=ScheduledWorkflow(
                 schedule_type="once",
@@ -1111,7 +1061,7 @@ class TestIntegrationWithScheduling:
             sender=entity_identity_registry(config, runtime_paths_for(config)).current_id("router").full_id,
         )
 
-        task_id, message = await schedule_task(
+        message = await schedule_task(
             runtime=make_test_scheduling_runtime(
                 client=client,
                 config=config,
@@ -1122,132 +1072,22 @@ class TestIntegrationWithScheduling:
             room_id="!room:server",
             thread_id="$thread123",
             scheduled_by="@user:server",
-            full_text="Change to 6 hours from now instead, keep the same message, and restore full history",
-            task_id="task123",
+            full_text=request_text,
             existing_task=existing_task,
         )
 
-        assert task_id == "task123"
-        prompt = mock_agent.arun.call_args.args[0]
+        assert "**Task ID:** `task123`" in message
+        prompt = _parse_prompt(model)
         assert "This request EDITS an existing scheduled task." in prompt
         assert f'"message": "{original_message}"' in prompt
         assert '"history_limit": 5' in prompt
-
-        assert f"**Will post:** {original_message}" in message
-        stored_content = client.room_put_state.await_args.kwargs["content"]
-        stored_workflow = ScheduledWorkflow(**json.loads(stored_content["workflow"]))
-        assert stored_workflow.message == original_message
-        assert stored_workflow.history_limit is None
-
-    @patch("mindroom.providers.model_loading.get_model_instance")
-    @patch("mindroom.scheduling.tasks.Agent")
-    async def test_edit_reparse_preserves_existing_history_limit_when_request_omits_context(
-        self,
-        mock_agent_class: Mock,
-        mock_get_model: Mock,  # noqa: ARG002
-    ) -> None:
-        """A timing-only edit carries an existing history limit forward."""
-        original_message = "tool-audit schedule test - safe to ignore"
-        client = AsyncMock()
-        client.room_put_state = AsyncMock(return_value=nio.RoomPutStateResponse("$scheduled-state", "!room:server"))
-
-        mock_agent = AsyncMock()
-        mock_response = RunOutput()
-        mock_response.content = ScheduledWorkflow(
-            schedule_type="once",
-            execute_at=datetime.now(UTC) + timedelta(hours=6),
-            message=original_message,
-            description="Post a test reminder in the current thread.",
-            history_limit=5,
-        )
-        mock_agent.arun.return_value = mock_response
-        mock_agent_class.return_value = mock_agent
-
-        config = _runtime_bound_config(
-            Config(
-                agents={
-                    "research": AgentConfig(
-                        display_name="Research",
-                        role="Research agent",
-                        rooms=["!room:server"],
-                    ),
-                },
-                router=RouterConfig(model="default"),
-            ),
-        )
-        persist_entity_accounts(
-            config,
-            runtime_paths_for(config),
-            usernames={"router": "router", "research": "research"},
-        )
-        room = nio.MatrixRoom("!room:server", "@bot:server")
-        research_matrix_id = entity_identity_registry(config, runtime_paths_for(config)).current_id("research").full_id
-        room.users[research_matrix_id] = nio.RoomMember(
-            user_id=research_matrix_id,
-            display_name="Research",
-            avatar_url=None,
-        )
-        room.members_synced = True
-
-        existing_task = ScheduledTaskRecord(
-            task_id="task123",
-            room_id="!room:server",
-            status="pending",
-            created_at=datetime.now(UTC),
-            workflow=ScheduledWorkflow(
-                schedule_type="once",
-                execute_at=datetime.now(UTC) + timedelta(hours=3),
-                message=original_message,
-                description="Post a test reminder in the current thread.",
-                history_limit=5,
-                room_id="!room:server",
-                thread_id="$thread123",
-                created_by="@user:server",
-            ),
-        )
-
-        assert existing_task.created_at is not None
-        client.room_get_state_event.return_value = nio.RoomGetStateEventResponse(
-            content={
-                "status": "pending",
-                "workflow": existing_task.workflow.model_dump_json(),
-                "created_at": existing_task.created_at.isoformat(),
-            },
-            event_type="com.mindroom.scheduled.task",
-            state_key="task123",
-            room_id="!room:server",
-        )
-        serve_task_state_events(
-            client,
-            sender=entity_identity_registry(config, runtime_paths_for(config)).current_id("router").full_id,
-        )
-
-        task_id, message = await schedule_task(
-            runtime=make_test_scheduling_runtime(
-                client=client,
-                config=config,
-                runtime_paths=runtime_paths_for(config),
-                room=room,
-                conversation_reader=make_conversation_reader_mock(),
-            ),
-            room_id="!room:server",
-            thread_id="$thread123",
-            scheduled_by="@user:server",
-            full_text="Change to 6 hours from now instead and keep the same message",
-            task_id="task123",
-            existing_task=existing_task,
-        )
-
-        assert task_id == "task123"
-        prompt = mock_agent.arun.call_args.args[0]
         assert "keep the current history_limit unchanged" in prompt
-        assert '"history_limit": 5' in prompt
 
         assert f"**Will post:** {original_message}" in message
         stored_content = client.room_put_state.await_args.kwargs["content"]
         stored_workflow = ScheduledWorkflow(**json.loads(stored_content["workflow"]))
         assert stored_workflow.message == original_message
-        assert stored_workflow.history_limit == 5
+        assert stored_workflow.history_limit == stored_history_limit
 
 
 class TestValidateConditionalWorkflow:
@@ -1264,7 +1104,7 @@ class TestValidateConditionalWorkflow:
         return ScheduledWorkflow(
             schedule_type=schedule_type,
             is_conditional=is_conditional,
-            cron_schedule=cron_schedule or CronSchedule(minute="0", hour="9"),
+            cron_schedule=cron_schedule,
             message=message,
             description="test",
         )
@@ -1281,24 +1121,19 @@ class TestValidateConditionalWorkflow:
     )
     def test_conditional_with_recurring_cron_passes(self, cron_schedule: CronSchedule) -> None:
         """Allow every valid five-field cron because none can encode a single year."""
-        result = _validate_conditional_workflow(
+        _validate_conditional_workflow(
             self._workflow("@ops check something; if true, alert me", cron_schedule=cron_schedule),
         )
-        assert result is None
 
     def test_non_conditional_schedule_is_ignored(self) -> None:
-        """Skip validation for normal time-based schedules."""
-        result = _validate_conditional_workflow(self._workflow("", is_conditional=False))
-        assert result is None
+        """Skip validation for normal time-based schedules, even one-time ones a conditional would reject."""
+        _validate_conditional_workflow(self._workflow("", schedule_type="once", is_conditional=False))
 
-    def test_conditional_once_returns_error(self) -> None:
+    def test_conditional_once_is_rejected(self) -> None:
         """Reject one-time parses for conditional requests."""
-        result = _validate_conditional_workflow(
-            self._workflow(
-                "Check deployment status and notify me.",
-                schedule_type="once",
-                cron_schedule=None,
-            ),
-        )
-        assert isinstance(result, _WorkflowParseError)
-        assert "recurring polling schedule" in result.error
+        with pytest.raises(SchedulingError) as exc_info:
+            _validate_conditional_workflow(
+                self._workflow("Check deployment status and notify me.", schedule_type="once"),
+            )
+        error, _suggestion = str(exc_info.value).split("\n\n💡 ")
+        assert "recurring polling schedule" in error

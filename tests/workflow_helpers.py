@@ -1,0 +1,1187 @@
+"""Shared helpers for the workflow tests.
+
+`FakeWorkflowGateway` answers the SDK over real HTTP (pure level).
+`WorkflowStack` is the engine harness: the real workflow store, script store, broker and engine, with a fake script
+manager, so a test plays the script by calling the engine's gateway methods. With `script_agents`, the agents a run
+runs are real delegation jobs whose models answer what the test scripted.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import base64
+import hashlib
+import json
+import shutil
+import sqlite3
+import threading
+import time
+from contextlib import closing, contextmanager, suppress
+from contextvars import ContextVar
+from dataclasses import replace
+from functools import partial
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from types import MappingProxyType, SimpleNamespace
+from typing import TYPE_CHECKING, Any, Literal, Self
+from unittest.mock import AsyncMock
+from uuid import uuid4
+
+import httpx
+import nio
+from fastapi import FastAPI
+from nio.api import Api
+
+import mindroom.workflow as sdk
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
+from mindroom.api.workflow_gateway import bind_workflow_engine
+from mindroom.api.workflow_gateway import router as workflow_router
+from mindroom.approval.tool_approval import ToolApprovalDecision
+from mindroom.config.agent import AgentConfig
+from mindroom.config.main import Config
+from mindroom.config.memory import MemoryConfig
+from mindroom.config.models import DefaultsConfig, ModelConfig, ModelPricing
+from mindroom.constants import RuntimePaths
+from mindroom.custom_tools.workflow import WorkflowTools
+from mindroom.message_target import MessageTarget
+from mindroom.orchestration.tool_job_runtime import ToolJobRuntimeCoordinator
+from mindroom.providers.identity import model_identity
+from mindroom.script_runs.broker import ScriptRuntimeWorkerAuthority, ScriptToolBroker
+from mindroom.script_runs.launch_contract import GATEWAY_URL_ENV, RUN_ID_ENV, TOKEN_PATH_ENV
+from mindroom.script_runs.manager import ScriptRunManager
+from mindroom.script_runs.models import TERMINAL_SCRIPT_RUN_STATES, ScriptRunRecord, ScriptRunState
+from mindroom.script_runs.reasons import (
+    INTERRUPTION_REASONS,
+    PROCESS_EXIT_OBSERVED,
+    RUNTIME_RESTARTED,
+    RUNTIME_SHUTDOWN,
+)
+from mindroom.script_runs.store import ScriptRunStore, mint_script_capability
+from mindroom.session_storage import store as session_store
+from mindroom.tool_jobs.instances import pin_background_tool_jobs, release_background_tool_jobs
+from mindroom.tool_jobs.resources import execution_resources
+from mindroom.tool_jobs.results import read_result_payload
+from mindroom.tool_jobs.runtime import register_background_runtime, workflow_job_admission, workflow_job_standing
+from mindroom.tool_system.agno_toolkits import Toolkit
+from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_construction
+from mindroom.tool_system.runtime_context import tool_runtime_context
+from mindroom.tool_system.worker_routing import serialize_tool_execution_identity
+from mindroom.workflow_runs.agent_nodes import AgentRuntime
+from mindroom.workflow_runs.engine import WorkflowEngine
+from mindroom.workflow_runs.limits import WorkflowLimits
+from mindroom.workflow_runs.models import (
+    TERMINAL_RUN_STATES,
+    NodeReceipt,
+    NodeRequest,
+    WorkflowNode,
+    WorkflowNodeState,
+    WorkflowRun,
+    WorkflowRunState,
+    new_workflow_run_id,
+)
+from mindroom.workflow_runs.recovery import recover_runs
+from mindroom.workflow_runs.store import WorkflowRunStore
+from mindroom.workflow_runs.view import RunViews
+from tests.access_schema_support import with_responder_access
+from tests.authorization_helpers import make_test_tool_runtime_context
+from tests.conftest import (
+    SETTLE_TIMEOUT_SECONDS,
+    bind_runtime_paths,
+    make_conversation_reader_mock,
+    make_relation_lookup,
+    runtime_paths_for,
+)
+from tests.delegation_helpers import ScriptedAgents
+from tests.fakes.scripted_model import ScriptedModel
+from tests.identity_helpers import entity_ids
+from tests.scripted_agent_helpers import registered_toolkit
+from tests.subagent_activity_helpers import FrameRoom
+from tests.tool_job_helpers import (
+    call_job_tool,
+    continue_stopped_jobs,
+    job_actor,
+    stopped_job_coordinator,
+    tool_job_runtime,
+    toolkit_job_tools,
+)
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable, Iterator, Mapping
+    from pathlib import Path
+
+    import pytest
+
+    from mindroom.approval.tool_approval import BackgroundScriptToolOrigin
+    from mindroom.script_runs.manager import ScriptRunLimits
+    from mindroom.script_runs.models import ScriptToolGrant
+    from mindroom.tool_jobs.runtime import BackgroundJob, JobGrant
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
+    from mindroom.workflow_runs.engine import ResumeAccess
+    from tests.tool_job_helpers import ProcessRuntime
+
+SCRIPT_RUN_ID = "script-" + "a" * 32
+TOKEN = "invented-capability"  # noqa: S105 - an invented placeholder, not a credential.
+
+
+def completed(result: object, **extra: object) -> dict[str, object]:
+    """Return a receipt for a node that completed with *result*."""
+    return {"state": "completed", "cached": False, "result": result, "error": None, **extra}
+
+
+def failed(kind: str, message: str, *, state: str = "failed") -> dict[str, object]:
+    """Return a receipt for a node that ended without a result."""
+    return {"state": state, "cached": False, "result": None, "error": {"kind": kind, "message": message}}
+
+
+class _Server(ThreadingHTTPServer):
+    # A fan-out connects from every lane at once.
+    request_queue_size = 512
+
+
+class FakeWorkflowGateway:
+    """A threaded HTTP server that records the SDK's requests and answers nodes from `respond`."""
+
+    def __init__(self, token_path: Path) -> None:
+        self.token_path = token_path
+        token_path.write_text(TOKEN + "\n", encoding="utf-8")
+        self.args: object = {}
+        self.respond: Callable[[dict[str, object]], dict[str, object]] = lambda _request: completed(None)
+        self.requests: list[tuple[str, str]] = []
+        self.nodes: list[dict[str, object]] = []
+        self.logs: list[str] = []
+        self.finished: dict[str, object] | None = None
+        self.results: dict[str, object] = {}
+        self.sources: dict[str, bytes] = {}
+        self.polls_before_settled = 0
+        """How many `GET nodes/{id}` answers say `running` before the receipt of `respond` is returned."""
+        self.drop_connections = 0
+        """How many of the next requests are cut off without an answer, as a restarting gateway does."""
+        self.refuse: tuple[int, object] | None = None
+        """A status and JSON body answered to every request instead of the normal answer."""
+        self.hold: Callable[[dict[str, object]], str | None] = lambda _request: None
+        """Asked at every answer for a node: a state such as `waiting` keeps the node in it, None lets it settle."""
+        self.peak_open = 0
+        """The most node submissions that were being answered at one moment."""
+        self._open = 0
+        self._lock = threading.Lock()
+        self._receipts: dict[str, dict[str, object]] = {}
+        self._server = _Server(("127.0.0.1", 0), self._handler())
+        self._thread = threading.Thread(target=self._server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
+        self.url = f"http://127.0.0.1:{self._server.server_port}/api/script-gateway"
+
+    def __enter__(self) -> Self:
+        """Start serving."""
+        self._thread.start()
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        """Stop serving and release the port."""
+        self._server.shutdown()
+        self._server.server_close()
+        self._thread.join()
+
+    def _answer(self, method: str, route: str, body: dict[str, object]) -> object:  # noqa: PLR0911
+        if (method, route) == ("GET", "run"):
+            return {"run_id": "wf-" + "b" * 32, "attempt": 1, "args": self.args}
+        if method == "GET" and route.startswith("sources/"):
+            name = route.removeprefix("sources/")
+            raw = self.sources[name]
+            return {
+                "name": name,
+                "source_b64": base64.b64encode(raw).decode("ascii"),
+                "sha256": hashlib.sha256(raw).hexdigest(),
+            }
+        if (method, route) == ("POST", "nodes"):
+            with self._lock:
+                self.nodes.append(body)
+                node_id = f"n{len(self.nodes) - 1}"
+                self._open += 1
+                self.peak_open = max(self.peak_open, self._open)
+            try:
+                self._receipts[node_id] = {"id": node_id, "request": body, **self.respond(body)}
+            finally:
+                with self._lock:
+                    self._open -= 1
+            if self.polls_before_settled:
+                return {"id": node_id, "state": "running", "cached": False, "result": None, "error": None}
+            return self._receipt(node_id)
+        if method == "GET" and route.startswith("nodes/"):
+            node_id = route.removeprefix("nodes/").partition("?")[0]
+            self.polls_before_settled -= 1
+            if self.polls_before_settled > 0:
+                return {"id": node_id, "state": "running", "cached": False, "result": None, "error": None}
+            return self._receipt(node_id)
+        if method == "GET" and route.startswith("results/"):
+            return self.results[route.removeprefix("results/")]
+        if (method, route) == ("POST", "log"):
+            self.logs.append(str(body["text"]))
+            return {}
+        if (method, route) == ("POST", "finish"):
+            self.finished = body
+            return {}
+        msg = f"Unexpected request {method} {route}"
+        raise AssertionError(msg)
+
+    def _receipt(self, node_id: str) -> dict[str, object]:
+        """Return the node's receipt, or one in the state `hold` keeps it in."""
+        receipt = dict(self._receipts[node_id])
+        held = self.hold(receipt.pop("request"))  # type: ignore[arg-type]
+        if held is None:
+            return receipt
+        time.sleep(0.005)
+        return {"id": node_id, "state": held, "cached": False, "result": None, "error": None}
+
+    def nodes_of_kind(self, kind: str) -> list[dict[str, object]]:
+        """Return the submitted nodes of one kind, in the order they arrived."""
+        return [node for node in self.nodes if node["kind"] == kind]
+
+    def _handler(self) -> type[BaseHTTPRequestHandler]:
+        gateway = self
+        prefix = f"/api/script-gateway/workflow/{SCRIPT_RUN_ID}/"
+
+        class Handler(BaseHTTPRequestHandler):
+            def _handle(self) -> None:
+                length = int(self.headers.get("Content-Length") or 0)
+                body = json.loads(self.rfile.read(length)) if length else {}
+                gateway.requests.append((self.command, self.path))
+                if gateway.drop_connections:
+                    gateway.drop_connections -= 1
+                    self.close_connection = True
+                    return
+                if self.headers.get("Authorization") != f"Bearer {TOKEN}" or not self.path.startswith(prefix):
+                    status, answer = 404, {"detail": "Workflow run not found."}
+                elif gateway.refuse is not None:
+                    status, answer = gateway.refuse
+                else:
+                    try:
+                        status, answer = 200, gateway._answer(self.command, self.path.removeprefix(prefix), body)
+                    except AssertionError as exc:
+                        status, answer = 400, {"detail": str(exc)}
+                payload = json.dumps(answer).encode()
+                self.send_response(status)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+
+            do_GET = do_POST = _handle  # noqa: N815 - the names `http.server` dispatches to.
+
+            def log_message(self, format: str, *args: object) -> None:  # noqa: A002
+                pass
+
+        return Handler
+
+
+def sdk_env(monkeypatch: pytest.MonkeyPatch, gateway: FakeWorkflowGateway) -> None:
+    """Point the SDK at *gateway* as the launcher would, with no pause between retries."""
+    monkeypatch.setenv(GATEWAY_URL_ENV, gateway.url)
+    monkeypatch.setenv(RUN_ID_ENV, SCRIPT_RUN_ID)
+    monkeypatch.setenv(TOKEN_PATH_ENV, str(gateway.token_path))
+    monkeypatch.setattr(sdk, "_RETRY_SECONDS", 0.0)
+    sdk._gateway.cache_clear()
+
+
+_SETTLED_STATES = frozenset({"completed", "failed", "cancelled", "indeterminate"})
+# Set when the call that `WorkflowStack.call` is making has returned, for the job that call starts.
+_CALL_RETURNED: ContextVar[asyncio.Event | None] = ContextVar("workflow_call_returned", default=None)
+
+
+def tool_args(toolkit: str, function: str, **arguments: object) -> dict[str, object]:
+    """Return the arguments of a `tool` node, as the SDK's `tool()` sends them."""
+    return {"toolkit": toolkit, "function": function, "arguments": arguments}
+
+
+class NodeFailed(Exception):  # noqa: N818 - named as the plan's tests name it.
+    """A node that ended without a result, as the SDK would raise it."""
+
+    def __init__(self, receipt: NodeReceipt) -> None:
+        error = receipt.error or {}
+        super().__init__(str(error.get("message")))
+        self.kind = str(error.get("kind"))
+        self.receipt = receipt
+
+
+class CallFailed(Exception):  # noqa: N818 - named after what happened to the call.
+    """A tool call that failed, with the text the model reads."""
+
+
+class CountingTool:
+    """State of the stack's `counter` toolkit, whose effect is one line appended to a file."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.calls = 0
+        self.failures = 0
+        self.answers: list[object] = []
+        self.before_effect: Callable[[], object] | None = None
+        self.after_effect: Callable[[], Awaitable[object]] | None = None
+        """Awaited after the line is written and before the tool answers; one that never returns leaves the call open."""
+
+    @property
+    def lines(self) -> list[str]:
+        """The lines the tool has appended so far."""
+        return self.path.read_text(encoding="utf-8").splitlines() if self.path.exists() else []
+
+    def toolkit(self) -> type[Toolkit]:  # noqa: C901  # one small function per tool
+        """Return the toolkit class to register as `counter`."""
+        counter = self
+
+        class CounterTools(Toolkit):
+            def __init__(self) -> None:
+                tools = [self.append, self.fail, self.fail_once, self.text, self.count, self.answer]
+                super().__init__(name="counter", tools=tools)
+
+            async def append(self, line: str) -> str:
+                """Append one line to the file."""
+                counter.calls += 1
+                if counter.before_effect is not None:
+                    counter.before_effect()
+                with counter.path.open("a", encoding="utf-8") as file:
+                    file.write(f"{line}\n")
+                if counter.after_effect is not None:
+                    await counter.after_effect()
+                return "appended"
+
+            def fail_once(self) -> str:
+                """Raise the first time, answer afterwards."""
+                counter.calls += 1
+                counter.failures += 1
+                if counter.failures == 1:
+                    msg = "The counter failed once."
+                    raise RuntimeError(msg)
+                return "ok"
+
+            def count(self) -> int:
+                """Return how many calls the toolkit has had, which differs on every call."""
+                counter.calls += 1
+                return counter.calls
+
+            def fail(self) -> str:
+                """Raise."""
+                counter.calls += 1
+                msg = "The counter failed."
+                raise RuntimeError(msg)
+
+            def text(self, size: int, note: str = "") -> str:
+                """Return a text of *size* characters, whatever the *note* says."""
+                del note
+                counter.calls += 1
+                return "x" * size
+
+            def answer(self) -> object:
+                """Return the next of the answers the test queued."""
+                counter.calls += 1
+                return counter.answers.pop(0)
+
+        return CounterTools
+
+
+class _StackResolver:
+    """The live runtime of the stack's one owner; approvals answer at once unless a test holds them."""
+
+    def __init__(self, context: ToolRuntimeContext) -> None:
+        self.context = context
+        self.asks: list[str] = []
+        self.hold_approvals: asyncio.Event | None = None
+        self.decision = ToolApprovalDecision(approved=True)
+
+    def is_authorized(self, run: ScriptRunRecord, *, config: Config | None = None, **_options: object) -> bool | None:
+        del run, config
+        return True
+
+    def resolve(self, run: ScriptRunRecord, *, correlation_id: str) -> ToolRuntimeContext:
+        del run
+        return replace(self.context, correlation_id=correlation_id)
+
+    def resolve_worker_authority(
+        self,
+        run: ScriptRunRecord,
+        *,
+        context: ToolRuntimeContext,
+    ) -> ScriptRuntimeWorkerAuthority:
+        return ScriptRuntimeWorkerAuthority(
+            worker_id=run.worker_id,
+            local_unsafe=True,
+            worker_target=context.resolve_worker_target(),
+        )
+
+    async def request_approval(
+        self,
+        *,
+        origin: BackgroundScriptToolOrigin,
+        context: ToolRuntimeContext,
+        grant: ScriptToolGrant,
+        arguments: dict[str, object],
+        timeout_seconds: float,
+    ) -> ToolApprovalDecision:
+        del origin, context, arguments, timeout_seconds
+        self.asks.append(f"{grant.toolkit_name}.{grant.function_name}")
+        if self.hold_approvals is not None:
+            await self.hold_approvals.wait()
+        return self.decision
+
+    async def settle_approval(self, origin: BackgroundScriptToolOrigin, *, reason: str) -> None:
+        del origin, reason
+
+    async def settle_run_approvals(self, run_id: str, *, reason: str) -> None:
+        del run_id, reason
+
+
+class FakeScripts:
+    """The script manager as the engine uses it, with no process: real attempt records that the test ends."""
+
+    def __init__(self, store: ScriptRunStore, broker: ScriptToolBroker) -> None:
+        self.store = store
+        self.broker = broker
+        self.launched: list[ScriptRunRecord] = []
+        self.limits: list[ScriptRunLimits | None] = []
+        self.tokens: dict[str, str] = {}
+        self.hold_launch: asyncio.Event | None = None
+        """While set and not released, `run` has written its attempt's record and waits, as a starting process does."""
+        self.refuse_launch: Exception | None = None
+        self.refused = 0
+        self.ending: set[str] = set()
+
+    # The real confined read of a script's source, which needs nothing of the manager itself.
+    resolve_source = ScriptRunManager.resolve_source
+
+    async def run(
+        self,
+        context: ToolRuntimeContext,
+        *,
+        source: str,
+        workflow_run_id: str,
+        resource_profile: str | None = None,
+        limits: ScriptRunLimits | None = None,
+    ) -> ScriptRunRecord:
+        """Record one running attempt of *workflow_run_id* and keep its capability token."""
+        if self.refuse_launch is not None:
+            self.refused += 1
+            raise self.refuse_launch
+        token, token_hash = mint_script_capability()
+        attempt = self.store.create_run(
+            ScriptRunRecord(
+                run_id=f"script-{uuid4().hex}",
+                agent_name=context.agent_name,
+                owner_user_id=context.requester_id,
+                room_id=context.room_id,
+                thread_root_event_id=context.resolved_thread_id,
+                execution_identity=serialize_tool_execution_identity(context.execution_identity),
+                source_digest=hashlib.sha256(source.encode()).hexdigest(),
+                # Empty, so a call that runs proves the broker reads the owner's live tools and no launch snapshot.
+                grants=(),
+                token_hash=token_hash,
+                workflow_run_id=workflow_run_id,
+                resource_profile=resource_profile,
+                local_unsafe=True,
+                max_tool_calls_per_minute=600 if limits is None else limits.max_tool_calls_per_minute,
+            ),
+        )
+        self.tokens[attempt.run_id] = token
+        self.limits.append(limits)
+        self.launched.append(self.store.transition_run(attempt.run_id, state=ScriptRunState.RUNNING))
+        if self.hold_launch is not None:
+            await self.hold_launch.wait()
+        return self.launched[-1]
+
+    async def revoke(self, run_id: str, *, reason: str) -> ScriptRunRecord:
+        """Revoke the attempt's capability and the broker's work for it."""
+        revoked = self.store.request_cancel(run_id, reason=reason)
+        await self.broker.cancel_run(run_id)
+        return revoked
+
+    async def reconcile_durable(self, *, run_id: str) -> ScriptRunRecord:
+        """End a revoked attempt as the manager does once its process is confirmed dead: interrupted or cancelled."""
+        attempt = self.store.get_run(run_id)
+        # An attempt that `end` is ending in its two steps is not a revoked one: that end decides its state.
+        if attempt.state in TERMINAL_SCRIPT_RUN_STATES or attempt.cancel_requested_at is None or run_id in self.ending:
+            return attempt
+        interrupted = attempt.cancellation_reason in INTERRUPTION_REASONS
+        return await self.end(run_id, ScriptRunState.INTERRUPTED if interrupted else ScriptRunState.CANCELLED)
+
+    async def end(
+        self,
+        run_id: str,
+        state: ScriptRunState,
+        *,
+        reason: str = PROCESS_EXIT_OBSERVED,
+        output: str = "",
+    ) -> ScriptRunRecord:
+        """End the attempt's process as the manager records it: the exit, the broker's calls, the terminal state."""
+        exit_code = 0 if state is ScriptRunState.EXITED else 1
+        self.ending.add(run_id)
+        try:
+            self.store.record_process_exit(
+                run_id,
+                exit_code=exit_code,
+                error=None,
+                output=output,
+                cancellation_reason=reason,
+            )
+            await self.broker.cancel_run(run_id)
+            return self.store.finalize_cleaned_run(run_id, state=state)
+        finally:
+            self.ending.discard(run_id)
+
+
+def owner_context(
+    tmp_path: Path,
+    *,
+    extra_tools: tuple[str, ...] = (),
+    process_env: Mapping[str, str] = MappingProxyType({}),
+    require_approval: tuple[str, ...] = ("append",),
+    thread_id: str = "$thread:example.test",
+    delegate_to: tuple[str, ...] = (),
+    other_agents: tuple[str, ...] = (),
+    pricing: ModelPricing | None = None,
+) -> ToolRuntimeContext:
+    """Return the tool context of the stack's owner: the agent `watcher` with `counter` and `shell`, for Alice.
+
+    The operator allows shell on this machine and approves by default; only the functions in *require_approval* ask.
+    *process_env* is the primary's environment, which says for example where its sandbox runner listens.
+    *other_agents* are configured beside the owner, with `counter` only; the owner may delegate to *delegate_to*.
+    *pricing* is what the one model costs per million tokens; without it the model has no price.
+    """
+    defaults = DefaultsConfig(tools=[], allow_shell_without_worker=True)
+    runtime_paths = RuntimePaths(
+        config_path=tmp_path / "config.yaml",
+        config_dir=tmp_path,
+        env_path=tmp_path / ".env",
+        storage_root=tmp_path / "storage",
+        control_state_root=tmp_path / "control",
+        process_env=MappingProxyType(dict(process_env)),
+    )
+    config = bind_runtime_paths(
+        Config(
+            agents={
+                "watcher": AgentConfig(
+                    display_name="Watcher",
+                    tools=["counter", "shell", *extra_tools],
+                    delegate_to=list(delegate_to),
+                ),
+                **{name: AgentConfig(display_name=name.title(), tools=["counter"]) for name in other_agents},
+            },
+            defaults=defaults,
+            # No agent recalls memories, unless a test gives the owner the `memory` toolkit.
+            memory=MemoryConfig() if "memory" in extra_tools else MemoryConfig(backend="none"),
+            models={"default": ModelConfig(provider="openai", id="test-model", pricing=pricing)},
+            tool_approval={
+                "default": "auto_approve",
+                "rules": [{"match": name, "action": "require_approval"} for name in require_approval],
+            },
+        ),
+        runtime_paths,
+    )
+    return make_test_tool_runtime_context(
+        agent_name="watcher",
+        target=MessageTarget.resolve(
+            room_id="!room:example.test",
+            thread_id=thread_id,
+            reply_to_event_id=None,
+        ),
+        requester_id="@alice:example.test",
+        client=SimpleNamespace(),
+        config=config,
+        runtime_paths=runtime_paths_for(config),
+        storage_path=runtime_paths.storage_root,
+        relations=make_relation_lookup(),
+        conversation_reader=make_conversation_reader_mock(),
+    )
+
+
+class HeldWrite:
+    """Hold one call of a store method in its thread, before it writes, so a test moves the run on meanwhile."""
+
+    def __init__(
+        self,
+        store: WorkflowRunStore,
+        name: str,
+        monkeypatch: pytest.MonkeyPatch,
+        when: Callable[..., bool] = lambda *_args, **_options: True,
+    ) -> None:
+        self._entered, self._release, self.done = threading.Event(), threading.Event(), threading.Event()
+        write = getattr(store, name)
+
+        def held(*args: Any, **options: Any) -> object:  # noqa: ANN401
+            if self._entered.is_set() or not when(*args, **options):
+                return write(*args, **options)
+            self._entered.set()
+            self._release.wait(SETTLE_TIMEOUT_SECONDS)
+            try:
+                return write(*args, **options)
+            finally:
+                self.done.set()
+
+        monkeypatch.setattr(store, name, held)
+
+    @property
+    def stands(self) -> bool:
+        """Whether the call got as far as its write."""
+        return self._entered.is_set()
+
+    async def reached(self) -> None:
+        """Wait until the call stands before its write."""
+        assert await asyncio.to_thread(self._entered.wait, SETTLE_TIMEOUT_SECONDS)
+
+    async def release(self) -> None:
+        """Let the call write, and wait until it did or was refused."""
+        self._release.set()
+        assert await asyncio.to_thread(self.done.wait, SETTLE_TIMEOUT_SECONDS)
+
+
+def _copy_saved(source: Path, target: Path) -> None:
+    """Copy a directory of durable state as it is saved now, each SQLite database with what it has committed."""
+    for path in sorted(source.rglob("*")):
+        copy = target / path.relative_to(source)
+        if path.is_dir():
+            copy.mkdir(parents=True, exist_ok=True)
+        elif not path.name.endswith(("-wal", "-shm", "-journal")):
+            copy.parent.mkdir(parents=True, exist_ok=True)
+            with path.open("rb") as file:
+                database = file.read(16) == b"SQLite format 3\x00"
+            if database:
+                with closing(sqlite3.connect(path)) as saved, closing(sqlite3.connect(copy)) as copied:
+                    saved.backup(copied)
+            else:
+                shutil.copy2(path, copy)
+
+
+class StackRoom(FrameRoom):
+    """The stack's room as its bot's client sends to it: frames as `FrameRoom` records them, and room events.
+
+    An event sent again under a transaction ID the room has seen gets the event of the first send, as a homeserver
+    answers it. In an encrypted room `encrypted_size` says how large an event is once it is encrypted.
+    """
+
+    def __init__(self, room_id: str, *, encrypted: bool = False) -> None:
+        super().__init__(encrypted=encrypted, room_id=room_id)
+        self.events: list[tuple[str, str, dict[str, Any]]] = []
+        """Each event the room took: its ID, its type and its content."""
+        self.refuse_sends = False
+        self._by_transaction: dict[str, str] = {}
+        self.client.room_send = AsyncMock(side_effect=self._room_send)
+        if encrypted:
+            self.client.olm = SimpleNamespace(device_id="TESTDEVICE")
+
+    async def _room_send(
+        self,
+        room_id: str,
+        message_type: str,
+        content: dict[str, Any],
+        tx_id: str | None = None,
+        **_options: object,
+    ) -> nio.RoomSendResponse | nio.RoomSendError:
+        assert room_id == self.room_id
+        if self.refuse_sends:
+            return nio.RoomSendError("refused", "M_UNKNOWN")
+        event_id = self._by_transaction.get(tx_id or "")
+        if event_id is None:
+            event_id = f"$event-{len(self.events)}:example.test"
+            self.events.append((event_id, message_type, content))
+            if tx_id:
+                self._by_transaction[tx_id] = event_id
+        return nio.RoomSendResponse(event_id, room_id)
+
+    def carried(self, key: str) -> list[dict[str, Any]]:
+        """Return what each message that carries the content *key* says under it, a post or an edit, in order."""
+        contents = [content.get("m.new_content", content) for _, _, content in self.events]
+        return [content[key] for content in contents if key in content]
+
+    def encrypted_size(self, content: dict[str, Any]) -> int:
+        """Return the size of the event that carries *content* as the room's real Megolm session encrypts it."""
+        plaintext = Api.to_json({"content": content, "type": "m.room.message", "room_id": self.room_id})
+        envelope = {
+            "algorithm": "m.megolm.v1.aes-sha2",
+            "sender_key": "k" * 43,
+            "ciphertext": self._session.encrypt(plaintext, count=False),
+            "session_id": self._session.id,
+            "device_id": "TESTDEVICE",
+            "m.relates_to": content.get("m.relates_to"),
+        }
+        return len(Api.to_json({"content": envelope, "type": "m.room.encrypted", "room_id": self.room_id}))
+
+
+def set_run(store: WorkflowRunStore, run_id: str, **changes: object) -> WorkflowRun:
+    """Write fields of a run as a test arranges it, in whatever state it is; a new state raises its epoch."""
+    return store.update_run(run_id, store.get_run(run_id).epoch, when=frozenset(WorkflowRunState), **changes)
+
+
+class WorkflowStack:
+    """The engine harness: real stores, broker and engine around a fake script manager (see the module docstring)."""
+
+    def __init__(self, tmp_path: Path, counting_tool: CountingTool, **owner_options: Any) -> None:  # noqa: ANN401
+        self.tmp_path = tmp_path
+        self.counting_tool = counting_tool
+        self.owner_options = owner_options
+        self.run_id = ""
+        self.tokens: dict[str, str] = {}
+        self.admission: JobGrant = "allowed"
+        self.now = 0.0
+        """What the engine's clock reads, in seconds; a test moves it to let working time pass."""
+        self.limits: WorkflowLimits | None = None
+        """The limits `start` launches with; the engine's defaults when None."""
+        self.access: Literal["pending", "revoked"] | None = None
+        """What an automatic resume finds of the owner's access; None is confirmed access, with the owner's context."""
+        self.has_jobs = False
+        """Whether `open_jobs` started the job runtime, `jobs`."""
+        self.continues: Callable[[BackgroundJob], bool] = lambda _job: False
+        """Which jobs the job runtime keeps for a restart to continue; the coordinator's own rule in a recovery test."""
+        self.models: dict[str, ScriptedModel] = {}
+        """The scripted model of each agent, once `script_agents` serves them."""
+        self.bot_rooms: dict[str, tuple[str, ...]] = {}
+        self.unsynced: set[str] = set()
+        """The agents whose bots have not finished their first sync, so they do not know their rooms yet."""
+        """The rooms each agent's bot is in, as a run's check of the agents it may run reads them."""
+        self.room: StackRoom | None = None
+        """The room the stack's bot posts to, once `show` gave it one."""
+        self._open()
+
+    def show(self, *, encrypted: bool = False) -> RunViews:
+        """Give the stack a room and the views that show its runs there; a test builds a view with `views.show`.
+
+        No frames are sent unless the test turns `views.live_frames` on.
+        """
+        self.room = StackRoom(self.context.room_id, encrypted=encrypted)
+        self._open_views()
+        return self.views
+
+    def _open_views(self) -> None:
+        room = self.room
+        assert room is not None
+        self.context = replace(self.context, client=room.client)
+        self.resolver.context = self.context
+        self.views = RunViews(
+            self.engine,
+            client=lambda _account: room.client,
+            homeserver_url="http://homeserver.test",
+            live_frames=lambda: False,
+            clock=lambda: self.now,
+        )
+
+    def _open(self) -> None:
+        """Build the runtimes on the stack's databases, as a starting primary does."""
+        self.context = owner_context(self.tmp_path, **self.owner_options)
+        self.script_store = ScriptRunStore(self.context.runtime_paths)
+        self.store = WorkflowRunStore(self.tmp_path / "control" / "workflow_runs" / "workflow_runs.sqlite3")
+        self.resolver = _StackResolver(self.context)
+        self.broker = ScriptToolBroker(store=self.script_store, runtime_resolver=self.resolver)
+        self.broker.open_call_admission()
+        self.scripts = FakeScripts(self.script_store, self.broker)
+        self.scripts.tokens = self.tokens
+        self.engine = WorkflowEngine(self.store, self.scripts, self.broker, clock=lambda: self.now)  # type: ignore[arg-type]
+        self.engine.owner_access = self._owner_access
+        self.engine.owner_limits = self._owner_limits
+        self.engine.agents = self._agents
+        # What a turn of the owner sees: the context with the orchestrator that holds the engine. Each agent's bot is
+        # in the rooms `bot_rooms` lists for it.
+        orchestrator = SimpleNamespace(
+            workflow_engine=self.engine,
+            running=True,
+            budgets=None,
+            knowledge_refresh_scheduler=None,
+            agent_bots={
+                name: SimpleNamespace(
+                    client=SimpleNamespace(rooms=rooms),
+                    first_sync_complete=name not in self.unsynced,
+                )
+                for name, rooms in self.bot_rooms.items()
+            },
+        )
+        self.context = replace(self.context, orchestrator=orchestrator)  # type: ignore[arg-type]
+        # A script's tool call runs in the same live context, so a call of the `workflow` toolkit finds the engine.
+        self.resolver.context = self.context
+        if self.room is not None:
+            self._open_views()
+
+    def _agents(self) -> AgentRuntime | None:
+        """Answer as the live runtime does: the job runtime once `open_jobs` started it, with the owner's config."""
+        return AgentRuntime(self.jobs, self.context.config, self.context.runtime_paths) if self.has_jobs else None
+
+    def script_agents(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """Run the agents of a run as real delegation jobs whose models take the turns `child_script` gives them."""
+        ScriptedAgents(self.models).install(monkeypatch)
+        entity_ids(self.context.config, self.context.runtime_paths)
+
+    def child_script(self, *turns: Any, agent: str = "watcher") -> ScriptedModel:  # noqa: ANN401 - scripted steps.
+        """Give the model of *agent* its next turns, one per request, and return it with the requests it gets."""
+        # As the model the agents are configured with, so its usage is priced as the operator priced that model.
+        identity = model_identity(self.context.config.models["default"])
+        self.models[agent] = ScriptedModel(list(turns), identity=identity)
+        return self.models[agent]
+
+    async def continue_agents(self, *, joined: bool = True) -> None:
+        """Run the job coordinator's pass over the agents' jobs that a restart stopped, as a starting primary does.
+
+        Without *joined* the owner's bot is no longer in the run's room, so each job ends instead of going on.
+        """
+        await continue_stopped_jobs(
+            self.jobs,
+            self.context.config,
+            self.context.runtime_paths,
+            self.context,
+            joined=joined,
+        )
+
+    def status(self, run_id: str) -> tuple[WorkflowRun, list[WorkflowNode]]:
+        """Return the run and its current nodes."""
+        return self.store.get_run(run_id), self.store.nodes(run_id)
+
+    def node_job(self, key: str) -> BackgroundJob:
+        """Return the job of the agent node at *key*, as the job runtime holds it."""
+        node = self.store.get_node(self.run_id, key)
+        assert node is not None
+        return next(job for job in self.jobs.retained_jobs() if job.job_id == node.links["job_id"])
+
+    def _owner_access(self, _run: WorkflowRun) -> ResumeAccess:
+        """Answer for the run's saved owner as the live runtime does: the stack's own context, or what `access` says."""
+        return self.access or self.context
+
+    def _owner_limits(self, _context: ToolRuntimeContext, _agent_name: str) -> WorkflowLimits:
+        return self.limits or WorkflowLimits()
+
+    @property
+    def attempt(self) -> ScriptRunRecord:
+        """The live record of the run's current attempt."""
+        script_run_id = self.store.get_run(self.run_id).script_run_id
+        assert script_run_id is not None
+        return self.script_store.get_run(script_run_id)
+
+    @property
+    def token(self) -> str:
+        """The capability token of the run's current attempt."""
+        return self.tokens[self.attempt.run_id]
+
+    async def start(self, source: str = "", args: object = None, **options: object) -> WorkflowRun:
+        """Reserve a run for the owner and launch its first attempt."""
+        return await self.engine.launch(self.reserve(source, args, **options).run_id, self.context, self.limits)
+
+    async def resume(self, run_id: str, *, limits: WorkflowLimits | None = None, **request: Any) -> WorkflowRun:  # noqa: ANN401
+        """Take an ended run for the owner and start its next attempt, as a person's resume does."""
+        await self.engine.reopen(run_id, self.context, limits=limits, **request)
+        return await self.engine.launch(run_id, self.context, limits)
+
+    def reserve(self, source: str = "", args: object = None, **options: object) -> WorkflowRun:
+        """Write the intent of a run for the owner, which nothing has launched yet."""
+        context = self.context
+        run = WorkflowRun(
+            run_id=new_workflow_run_id(),
+            agent_name=context.agent_name,
+            owner_user_id=context.requester_id,
+            room_id=context.room_id,
+            thread_root_event_id=context.resolved_thread_id,
+            execution_identity=serialize_tool_execution_identity(context.execution_identity),
+            persona=None,
+            title=None,
+            source=source,
+            source_digest=hashlib.sha256(source.encode()).hexdigest(),
+            args=args,
+            max_concurrent=16,
+            max_cost_usd=None,
+            resource_profile=None,
+            runtime_seconds_left=None,
+            origin_job_id=None,
+        )
+        self.run_id = run.run_id
+        run = replace(run, **options)
+        # The invocation that reserves a run owns it: its job, or the call that waits for it.
+        return self.store.reserve_run(replace(run, owner=run.owner or run.origin_job_id))[0]
+
+    async def submit(
+        self,
+        key: str,
+        kind: str,
+        args: dict[str, object],
+        meta: dict[str, object] | None = None,
+    ) -> NodeReceipt:
+        """Submit one node as the attempt's script would."""
+        return await self.engine.calls.submit_node(self.attempt, NodeRequest(key, kind, args, meta or {}))
+
+    async def result(
+        self,
+        key: str,
+        kind: str,
+        args: dict[str, object],
+        meta: dict[str, object] | None = None,
+    ) -> object:
+        """Submit one node, wait until it settles, and return its result or raise `NodeFailed`."""
+        receipt = await self.submit(key, kind, args, meta)
+        while receipt.state not in _SETTLED_STATES:
+            receipt = await self.engine.calls.node_receipt(self.attempt, receipt.id, wait=SETTLE_TIMEOUT_SECONDS)
+        if receipt.state != "completed":
+            raise NodeFailed(receipt)
+        return receipt.result
+
+    async def leave_indeterminate(self, key: str, args: dict[str, object]) -> WorkflowNode:
+        """Leave the call at *key* as a primary that stopped mid-call does, and end the attempt as failed.
+
+        The tool's effect happened and its receipt has no end, so the node ends `indeterminate`.
+        """
+        calls = self.counting_tool.calls
+        self.counting_tool.after_effect = asyncio.Event().wait
+        await self.submit(key, "tool", args)
+        await self.until(lambda: self.counting_tool.calls == calls + 1)
+        self.counting_tool.after_effect = None
+        await self.end_attempt(ScriptRunState.FAILED)
+        node = self.store.get_node(self.run_id, key)
+        assert node is not None
+        assert node.state is WorkflowNodeState.INDETERMINATE
+        return node
+
+    async def end_attempt(self, state: ScriptRunState, reason: str | None = None, *, output: str = "") -> None:
+        """End the attempt's process in *state* and let the engine see it."""
+        await self.scripts.end(self.attempt.run_id, state, reason=reason or PROCESS_EXIT_OBSERVED, output=output)
+        await self.settle()
+
+    async def settle(self) -> None:
+        """End each run whose attempt has ended as that attempt left it, with no next attempt."""
+        for run in self.store.list_runs(include_finished=False):
+            await self.engine.settle(run)
+
+    async def open_jobs(self) -> ProcessRuntime:
+        """Start the real job runtime on the stack's journal as the instance of the owner's storage root."""
+        paths = self.context.runtime_paths
+        self.has_jobs = True
+        coordinator = ToolJobRuntimeCoordinator(
+            runtime_paths=paths,
+            config_provider=lambda: self.context.config,
+            bot_provider=lambda _name: None,
+            agent_reply_memberships=AgentReplyMembershipIndex(),
+            journal_provider=lambda: self.jobs.journal,
+            workflow_engine=lambda: self.engine,
+        )
+        self.coordinator = coordinator
+        """The job coordinator of the stack, for its passes over ended jobs."""
+        self.jobs = await tool_job_runtime(
+            paths.storage_root,
+            grant=lambda _job: self.admission,
+            # What the coordinator's runtime does for a job whose own handler is gone or declined.
+            cancel=coordinator._interrupt,
+            continues=lambda job: self.continues(job),
+        )
+        start = self.jobs.start
+
+        async def start_job(job_id: str, *, operation: Callable[[], Awaitable[Any]], **options: Any) -> object:  # noqa: ANN401
+            returned = _CALL_RETURNED.get()
+
+            async def work() -> object:
+                if returned is not None:
+                    await returned.wait()
+                return await operation()
+
+            return await start(job_id, operation=work, **options)
+
+        # The job of a call made with `call` works once that call has returned, see there.
+        self.jobs.start = start_job  # type: ignore[method-assign]
+        self._instance = pin_background_tool_jobs(self.context.config, paths)
+        register_background_runtime(paths, self.jobs)
+        coordinator._runtime, coordinator._journal = self.jobs, self.jobs.journal
+        return self.jobs
+
+    async def close(self) -> None:
+        """Stop the job runtime and the engine, and withdraw the instance."""
+        await self.jobs.shutdown()
+        release_background_tool_jobs(self.context.runtime_paths, self._instance)
+        await self.engine.close()
+
+    def refuse_admission(self) -> None:
+        """Make the job runtime's grant check refuse every job from now on."""
+        self.admission = "denied"
+
+    async def call(
+        self,
+        name: str,
+        /,
+        *,
+        context: ToolRuntimeContext | None = None,
+        depth: int = 0,
+        call_id: str | None = None,
+        **arguments: object,
+    ) -> str:
+        """Make one model call of the `workflow` toolkit through job admission, as a turn in *context* does.
+
+        A call that fails raises `CallFailed` with the text the model would read.
+
+        A call that starts or resumes a run waits no time for its job, and returns the job's own end instead of its
+        handle when the job had ended by the time the call looked. Which of the two a job that ends at once gives
+        is a matter of timing, so here the job works once its call has returned: the call returns the handle.
+        """
+        context = context or self.context
+        toolkit = WorkflowTools(context.config)
+        bind_toolkit_construction(toolkit, ToolConstruction("workflow", None))
+        tools = toolkit_job_tools(toolkit, authored_name="workflow").values()
+        returned = asyncio.Event()
+        held = _CALL_RETURNED.set(returned if depth == 0 and name in ("start_workflow", "resume_workflow") else None)
+        try:
+            async with execution_resources():
+                with tool_runtime_context(context):
+                    outcome = await call_job_tool(
+                        job_actor(*tools, name=context.agent_name, depth=depth),
+                        name,
+                        arguments,
+                        call_id=call_id or uuid4().hex,
+                        session_id=context.execution_identity.session_id or "session",
+                    )
+        finally:
+            _CALL_RETURNED.reset(held)
+            returned.set()
+        if outcome.is_error:
+            raise CallFailed(outcome.content)
+        return outcome.content
+
+    async def finish_attempt(self, result: object = None, error: str | None = None) -> None:
+        """Let the attempt's script report and exit, as `main` returning or raising does."""
+        await self.engine.calls.finish(self.attempt, result=result, error=error)
+        await self.end_attempt(ScriptRunState.EXITED if error is None else ScriptRunState.FAILED)
+
+    async def collect(self, job: BackgroundJob) -> object:
+        """Return the whole result an ended job delivers to the conversation that started it."""
+        return (await read_result_payload(self.jobs, job)).value
+
+    async def restart(self, *, kill: bool = False) -> WorkflowStack:
+        """Stop the runtimes and reopen them on the same databases, as a primary restart does.
+
+        A primary that is killed closes nothing: its tasks stop where they are, and only what was saved survives.
+        An orderly one stops its engine and interrupts its attempts first. The job runtime keeps the jobs of a kind
+        it continues as they are saved, in both cases.
+        """
+        if kill:
+            # A dead process starts nothing more, whatever its stopping tasks would make room for.
+            self.engine.live.closed = True
+            tasks = [
+                *self.broker._tasks.values(),
+                *(task for owned in self.engine.live.tasks.values() for task in owned),
+            ]
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+        else:
+            await self.engine.close()
+            await self._retire_attempts(RUNTIME_SHUTDOWN)
+        if self.has_jobs:
+            # A killed primary saves nothing more: an outcome its journal refused stays unsaved.
+            with suppress(*([ExceptionGroup] if kill else [])):
+                await self.jobs.quiesce()
+            await self.jobs.close_journal()
+            release_background_tool_jobs(self.context.runtime_paths, self._instance)
+        self._open()
+        if self.has_jobs:
+            await (await self.open_jobs()).recover()
+        return self
+
+    async def kill(self) -> WorkflowStack:
+        """Stop the primary as `SIGKILL` does and start the next one: only what was saved by now survives.
+
+        The harness cannot stop a task without its cleanup, so it keeps a copy of everything durable as it is now,
+        lets the runtimes stop, and puts the copy back before the next primary opens it.
+        """
+        durable = [self.tmp_path / name for name in ("storage", "control")]
+        saved = self.tmp_path / "killed"
+        for path in durable:
+            _copy_saved(path, saved / path.name)
+        self.engine.live.closed = True
+        tasks = [*self.broker._tasks.values(), *(task for owned in self.engine.live.tasks.values() for task in owned)]
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        if self.has_jobs:
+            with suppress(ExceptionGroup):
+                await self.jobs.quiesce()
+            await self.jobs.close_journal()
+            release_background_tool_jobs(self.context.runtime_paths, self._instance)
+        for path in durable:
+            shutil.rmtree(path)
+            (saved / path.name).rename(path)
+        saved.rmdir()
+        # The dead primary's memory of the rows its saves left is gone with it: the next one writes every row.
+        session_store._WRITTEN.clear()
+        self._open()
+        if self.has_jobs:
+            await (await self.open_jobs()).recover()
+        return self
+
+    async def _retire_attempts(self, reason: str) -> None:
+        """Revoke and end every unfinished attempt, as the script runtime does when it stops and when it starts."""
+        for attempt in self.script_store.list_runs(include_finished=False):
+            await self.scripts.revoke(attempt.run_id, reason=reason)
+            await self.scripts.reconcile_durable(run_id=attempt.run_id)
+
+    async def recover(self) -> list[str]:
+        """Run a starting primary's steps for workflows and return the runs that got a new attempt.
+
+        The script runtime adopts no workflow attempt, so it retires the ones it inherited; then the workflow pass runs.
+        """
+        await self._retire_attempts(RUNTIME_RESTARTED)
+        return await self.maintain()
+
+    async def next_primary(self) -> None:
+        """Run a starting primary's passes for the run of a job: the workflow pass, then the job coordinator's.
+
+        The workflow pass leaves a run whose job waits to be continued; the continued job goes on with the run, and
+        this returns once the run names its next attempt or has ended.
+        """
+        assert await self.recover() == []
+        old = self.store.get_run(self.run_id).script_run_id
+        await self.continue_jobs()
+
+        def moved_on() -> bool:
+            run = self.store.get_run(self.run_id)
+            return run.script_run_id != old or run.state in TERMINAL_RUN_STATES
+
+        await self.until(moved_on)
+
+    async def maintain(self) -> list[str]:
+        """Run the workflow pass that follows each pass of the script runtime."""
+        standing = partial(workflow_job_standing, self.context.runtime_paths)
+        return await recover_runs(self.engine, standing, partial(workflow_job_admission, self.context.runtime_paths))
+
+    async def continue_jobs(self, context: ToolRuntimeContext | None = None) -> None:
+        """Run the job coordinator's pass that continues the jobs a restart stopped, with the owner's access granted.
+
+        *context* is the conversation the jobs' bot rebuilds for them, the stack's own when not given.
+        """
+        config = with_responder_access(self.context.config, self.context.agent_name, users=[self.context.requester_id])
+        await continue_stopped_jobs(self.jobs, config, self.context.runtime_paths, context or self.context)
+
+    async def follow_ups(self) -> list[str]:
+        """Run the job coordinator's follow-up pass and return the IDs of the follow-up turns it admits.
+
+        A follow-up delivers the ended jobs nobody collected to their conversation. Its ID names the conversation and
+        those jobs, and the journal admits one ID once, so the same ID from two passes or two primaries is one delivery.
+        """
+        config = with_responder_access(self.context.config, self.context.agent_name, users=[self.context.requester_id])
+        coordinator = stopped_job_coordinator(self.jobs, config, self.context.runtime_paths, self.context)
+        await coordinator._admit_follow_ups(self.jobs)
+        admitted = coordinator.bot_provider(self.context.agent_name).admit_job_follow_up
+        return [call.args[1] for call in admitted.await_args_list]
+
+    async def until(self, predicate: Callable[[], object]) -> None:
+        """Wait until *predicate* holds."""
+        async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+            while not predicate():  # noqa: ASYNC110 - the predicate reads state no event announces.
+                await asyncio.sleep(0.01)
+
+    def app(self) -> FastAPI:
+        """Return an app that serves the workflow routes from the stack's engine."""
+        app = FastAPI()
+        app.include_router(workflow_router)
+        bind_workflow_engine(app, self.engine)
+        return app
+
+    def http(self, token: str | None = None) -> httpx.AsyncClient:
+        """Return a client of the current attempt's workflow routes, as the SDK in that attempt's process is."""
+        return httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=self.app()),
+            base_url=f"http://gateway.test/api/script-gateway/workflow/{self.attempt.run_id}/",
+            headers={"Authorization": f"Bearer {self.token if token is None else token}"},
+        )
+
+
+@contextmanager
+def workflow_stack(
+    tmp_path: Path,
+    stack_type: type[WorkflowStack] = WorkflowStack,
+    **owner_options: Any,  # noqa: ANN401 - the options of `owner_context`.
+) -> Iterator[WorkflowStack]:
+    """Build the engine harness with its `counter` toolkit registered for the block."""
+    counting_tool = CountingTool(tmp_path / "counter.txt")
+    with registered_toolkit("counter", counting_tool.toolkit()):
+        yield stack_type(tmp_path, counting_tool, **owner_options)

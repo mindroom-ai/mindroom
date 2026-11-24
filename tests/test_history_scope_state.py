@@ -3,120 +3,121 @@
 
 from __future__ import annotations
 
-from copy import deepcopy
-from datetime import UTC, datetime
+from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, patch
 
 import pytest
-from agno.agent import Agent as AgnoAgent
-from agno.run.agent import RunOutput
-from agno.run.base import RunStatus
-from agno.run.team import TeamRunOutput
-from agno.session.agent import AgentSession
-from agno.session.summary import SessionSummary
-from agno.session.team import TeamSession
-from agno.team import Team as AgnoTeam
-from agno.tools.function import Function
 
-from mindroom.agent_storage import create_session_storage, create_state_storage, get_agent_session
-from mindroom.config.models import CompactionOverrideConfig
 from mindroom.constants import (
-    MINDROOM_COMPACTION_METADATA_KEY,
+    MATRIX_EVENT_ID_METADATA_KEY,
+    MATRIX_SEEN_EVENT_IDS_METADATA_KEY,
+    MINDROOM_HISTORY_METADATA_KEY,
+)
+from mindroom.history.interrupted_replay import (
+    build_interrupted_replay_snapshot,
+    is_interrupted_replay_run,
+    persist_interrupted_replay_snapshot,
 )
 from mindroom.history.replay import scope_visible_runs
 from mindroom.history.storage import (
+    has_queued_force_compaction,
     read_scope_seen_event_ids,
     read_scope_state,
-    set_force_compaction_state,
-    update_scope_seen_event_ids,
+    remove_runs_answering,
+    set_force_compaction,
+    with_force_compaction,
 )
 from mindroom.history.types import (
     HistoryScope,
-    HistoryScopeState,
 )
-from mindroom.providers.synthetic_model import SyntheticModel
+from mindroom.llm.runs import RunRecord, RunStatus, TeamRunRecord
+from mindroom.session_storage.agent_storage import create_agent_state_storage, create_state_storage
+from mindroom.session_storage.types import ConversationSession
 from tests.conftest import (
-    FakeModel,
-    prepare_history_for_run_for_test,
     seed_session,
 )
-from tests.history_helpers import (  # noqa: F401
-    _agent,
-    _close_test_storages,
+from tests.history_helpers import (
     _completed_run,
-    _make_config,
     _session,
+    _team_session,
+    trace_store_statements,
 )
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
-
-    from agno.db.base import BaseDb
+    from mindroom.session_storage.store import ConversationStore
 
 
 @pytest.fixture
-def storage(tmp_path: Path) -> Iterator[BaseDb]:
-    """Conversation storage for reading seen ids, which include the compaction archive's."""
-    db = create_state_storage("test_agent", tmp_path / "seen", subdir="sessions", session_table="test_agent_sessions")
-    try:
-        yield db
-    finally:
-        db.close()
+def storage(tmp_path: Path) -> ConversationStore:
+    """The test agent's conversation storage."""
+    return create_agent_state_storage("test_agent", tmp_path / "seen")
 
 
-def _shared_session(*, is_team: bool) -> AgentSession | TeamSession:
-    if is_team:
-        return TeamSession(
-            session_id="session-1",
-            team_id="test_agent",
-            user_id="@history-owner:localhost",
-            runs=[],
-            created_at=1,
-            updated_at=1,
-        )
-    return AgentSession(
-        session_id="session-1",
-        agent_id="test_agent",
-        user_id="@history-owner:localhost",
-        runs=[],
-        created_at=1,
-        updated_at=1,
+def test_the_force_flag_is_set_and_cleared_beside_the_seen_ids(storage: ConversationStore) -> None:
+    """The owner's force flag and earlier releases' preserved seen ids share one value, and each field changes alone."""
+    session = seed_session(
+        storage,
+        _session(
+            "session-1",
+            runs=[_completed_run("run-1")],
+            metadata={MINDROOM_HISTORY_METADATA_KEY: {"seen_event_ids": ["$kept"]}},
+        ),
     )
 
-
-def test_scope_seen_event_ids_survive_scope_state_writes(tmp_path: Path, storage: BaseDb) -> None:
-    _config, _runtime_paths_value = _make_config(tmp_path)
-    scope = HistoryScope(kind="team", scope_id="team-123")
-    session = _session("session-1")
-
-    assert update_scope_seen_event_ids(session, scope, ["event-1"]) is True
-    set_force_compaction_state(session, scope, HistoryScopeState(), force=True)
-
-    assert read_scope_seen_event_ids(storage, session, scope) == {"event-1"}
+    set_force_compaction(storage, session=session, forced=True)
+    assert session.metadata == {
+        MINDROOM_HISTORY_METADATA_KEY: {"seen_event_ids": ["$kept"], "force_compact_before_next_run": True},
+    }
+    set_force_compaction(storage, session=session, forced=False)
+    assert session.metadata == {MINDROOM_HISTORY_METADATA_KEY: {"seen_event_ids": ["$kept"]}}
+    assert with_force_compaction(None) == {MINDROOM_HISTORY_METADATA_KEY: {"force_compact_before_next_run": True}}
 
 
-def test_set_force_compaction_state_updates_only_force_flag(tmp_path: Path) -> None:
-    _config, _runtime_paths_value = _make_config(tmp_path)
-    scope = HistoryScope(kind="agent", scope_id="test_agent")
-    session = _session("session-1")
+def test_clearing_the_force_flag_through_a_stale_session_lands_on_the_freshest_row(storage: ConversationStore) -> None:
+    """The clear applies to the stored row's latest metadata, keeps what another writer stored, and syncs the session."""
+    stale_session = seed_session(storage, _session("session-1", runs=[_completed_run("run-1")]))
 
-    forced_state = set_force_compaction_state(session, scope, HistoryScopeState(), force=True)
+    concurrent_session = storage.load_session("session-1")
+    assert concurrent_session is not None
+    storage.update_metadata(concurrent_session, lambda metadata: {**with_force_compaction(metadata), "other": "kept"})
+    storage.save_run(concurrent_session, _completed_run("run-2"), record_usage=False)
 
-    assert forced_state == HistoryScopeState(force_compact_before_next_run=True)
-    assert read_scope_state(session, scope) == forced_state
+    set_force_compaction(storage, session=stale_session, forced=False)
 
-    cleared_state = set_force_compaction_state(session, scope, forced_state, force=False)
+    persisted_session = storage.load_session("session-1")
+    assert persisted_session is not None
+    assert persisted_session.metadata == {"other": "kept"}
+    assert stale_session.metadata == persisted_session.metadata
+    assert [run.run_id for run in persisted_session.runs] == ["run-1", "run-2"]
 
-    assert cleared_state == HistoryScopeState()
-    assert read_scope_state(session, scope) == cleared_state
-    assert session.metadata == {}
+
+@pytest.mark.parametrize("forced", [True, False], ids=["already-forced", "never-forced"])
+def test_a_force_flag_update_that_changes_nothing_writes_nothing(
+    storage: ConversationStore,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    forced: bool,
+) -> None:
+    """Setting the flag to what the freshest row holds writes nothing, and the session then holds that row's metadata."""
+    stale_session = seed_session(storage, _session("session-1", runs=[_completed_run("run-1")]))
+    if forced:
+        concurrent_session = storage.load_session("session-1")
+        assert concurrent_session is not None
+        storage.update_metadata(concurrent_session, with_force_compaction)
+    statements = trace_store_statements(monkeypatch)
+
+    set_force_compaction(storage, session=stale_session, forced=forced)
+
+    assert read_scope_state(stale_session).force_compact_before_next_run is forced
+    assert statements
+    assert not [statement for statement in statements if statement.lstrip().upper().startswith("UPDATE")]
+    persisted_session = storage.load_session("session-1")
+    assert persisted_session is not None
+    assert stale_session.metadata == persisted_session.metadata
 
 
-def test_scope_seen_event_ids_include_persisted_response_event_ids(tmp_path: Path, storage: BaseDb) -> None:
-    _config, _runtime_paths_value = _make_config(tmp_path)
-    scope = HistoryScope(kind="agent", scope_id="test_agent")
+def test_scope_seen_event_ids_include_persisted_response_event_ids(storage: ConversationStore) -> None:
     run = _completed_run("run-1")
     run.metadata = {
         "matrix_seen_event_ids": ["question-1"],
@@ -124,25 +125,26 @@ def test_scope_seen_event_ids_include_persisted_response_event_ids(tmp_path: Pat
     }
     session = _session("session-1", runs=[run])
 
-    assert read_scope_seen_event_ids(storage, session, scope) == {"question-1", "answer-1"}
+    assert read_scope_seen_event_ids(storage, session) == {"question-1", "answer-1"}
 
 
 @pytest.mark.parametrize("is_team", [False, True], ids=["agent", "team"])
-def test_seen_event_ids_match_model_history_visibility(storage: BaseDb, *, is_team: bool) -> None:
+def test_seen_event_ids_match_model_history_visibility(tmp_path: Path, *, is_team: bool) -> None:
     entity_id = "team-123" if is_team else "test_agent"
     scope = HistoryScope(kind="team" if is_team else "agent", scope_id=entity_id)
+    storage = create_state_storage(entity_id, tmp_path / "seen", scope)
 
-    def make_run(run_id: str, status: RunStatus, *, parent_run_id: str | None = None) -> RunOutput | TeamRunOutput:
+    def make_run(run_id: str, status: RunStatus, *, parent_run_id: str | None = None) -> RunRecord | TeamRunRecord:
         metadata = {"matrix_seen_event_ids": [f"{run_id}-event"]}
         if is_team:
-            return TeamRunOutput(
+            return TeamRunRecord(
                 run_id=run_id,
                 team_id=entity_id,
                 status=status,
                 parent_run_id=parent_run_id,
                 metadata=metadata,
             )
-        return RunOutput(
+        return RunRecord(
             run_id=run_id,
             agent_id=entity_id,
             status=status,
@@ -158,181 +160,76 @@ def test_seen_event_ids_match_model_history_visibility(storage: BaseDb, *, is_te
         make_run("error", RunStatus.error),
         make_run("child", RunStatus.completed, parent_run_id="completed"),
     ]
-    session: AgentSession | TeamSession
-    if is_team:
-        session = TeamSession(session_id="session-1", team_id=entity_id, runs=runs, created_at=1, updated_at=1)
-    else:
-        session = AgentSession(session_id="session-1", agent_id=entity_id, runs=runs, created_at=1, updated_at=1)
-    update_scope_seen_event_ids(session, scope, ["preserved-event"])
-
-    assert read_scope_seen_event_ids(storage, session, scope) == {"completed-event", "preserved-event", "running-event"}
-    assert [run.run_id for run in scope_visible_runs(session, scope)] == ["completed", "running"]
-
-
-@pytest.mark.parametrize("is_team", [False, True], ids=["agent", "team"])
-@pytest.mark.asyncio
-async def test_shared_session_paused_run_preserves_prompt_roles_until_continuation_completes(
-    tmp_path: Path,
-    is_team: bool,
-) -> None:
-    """A fresh runtime must resume a paused run in a session shared by multiple requesters."""
-    config, runtime_paths = _make_config(tmp_path)
-    executed: list[list[str]] = []
-
-    def run_shell_command(args: list[str]) -> str:
-        executed.append(args)
-        return "ok"
-
-    def runtime(storage: object) -> tuple[AgnoAgent | AgnoTeam, SyntheticModel]:
-        model = SyntheticModel(
-            id="synthetic",
-            seed=1,
-            min_response_chars=20,
-            max_response_chars=20,
-            chars_per_second=0,
-            tool_call_probability=1,
-        )
-        shared = {
-            "id": "test_agent",
-            "model": model,
-            "tools": [
-                Function(
-                    name="run_shell_command",
-                    entrypoint=run_shell_command,
-                    requires_confirmation=True,
-                ),
-            ],
-            "db": storage,
-            "system_message": "SYSTEM SENTINEL",
-        }
-        entity: AgnoAgent | AgnoTeam = AgnoTeam(members=[], **shared) if is_team else AgnoAgent(**shared)
-        return entity, model
-
-    first_storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
-    seed_session(first_storage, _shared_session(is_team=is_team))
-
-    first, _first_model = runtime(first_storage)
-    paused = await first.arun(
-        "exercise the tool",
+    session = ConversationSession(
+        kind=scope.kind,
         session_id="session-1",
-        user_id="@requester:localhost",
-        stream=False,
-    )
-    assert paused.status is RunStatus.paused
-    assert paused.run_id is not None
-    first_storage.close()
-
-    resumed_storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
-    resumed, resumed_model = runtime(resumed_storage)
-    try:
-        session = await resumed.aget_session(
-            session_id="session-1",
-            user_id="@requester:localhost",
-        )
-        assert session is not None
-        assert session.user_id == "@history-owner:localhost"
-        persisted = session.get_run(paused.run_id)
-        assert persisted is not None
-        assert persisted.status == RunStatus.paused
-        assert persisted.user_id == "@requester:localhost"
-        assert [message.role for message in persisted.messages or ()][:2] == ["system", "user"]
-        requirements = deepcopy(persisted.requirements or [])
-        assert len(requirements) == 1
-        requirements[0].confirm()
-
-        with patch.object(resumed_model, "ainvoke", wraps=resumed_model.ainvoke) as invoke:
-            if isinstance(resumed, AgnoTeam):
-                completed = await resumed.acontinue_run(
-                    run_response=persisted,
-                    requirements=requirements,
-                    session_id="session-1",
-                    user_id="@requester:localhost",
-                    stream=False,
-                )
-            else:
-                completed = await resumed.acontinue_run(
-                    run_id=paused.run_id,
-                    requirements=requirements,
-                    session_id="session-1",
-                    user_id="@requester:localhost",
-                    stream=False,
-                )
-
-        assert isinstance(completed, (RunOutput, TeamRunOutput))
-        assert completed.status is RunStatus.completed
-        continued_messages = invoke.call_args.kwargs["messages"]
-        assert any(message.role == "system" and message.content == "SYSTEM SENTINEL" for message in continued_messages)
-        assert len(executed) == 1
-
-        completed_session = await resumed.aget_session(
-            session_id="session-1",
-            user_id="@requester:localhost",
-        )
-        assert completed_session is not None
-        assert completed_session.user_id == "@history-owner:localhost"
-        completed_run = completed_session.get_run(paused.run_id)
-        assert completed_run is not None
-        assert completed_run.user_id == "@requester:localhost"
-        assert all(message.role not in {"system", "developer"} for message in completed_run.messages or ())
-    finally:
-        resumed_storage.close()
-
-
-def test_scope_states_do_not_bleed_between_scopes(tmp_path: Path) -> None:
-    _config, _runtime_paths_value = _make_config(tmp_path)
-    agent_scope = HistoryScope(kind="agent", scope_id="test_agent")
-    team_scope = HistoryScope(kind="team", scope_id="team-123")
-    session = _session("session-1")
-
-    set_force_compaction_state(session, agent_scope, HistoryScopeState(), force=True)
-
-    assert read_scope_state(session, agent_scope).force_compact_before_next_run is True
-    assert read_scope_state(session, team_scope).force_compact_before_next_run is False
-
-
-def test_legacy_scope_state_metadata_is_ignored(tmp_path: Path) -> None:
-    _config, _runtime_paths_value = _make_config(tmp_path)
-    agent_scope = HistoryScope(kind="agent", scope_id="test_agent")
-    session = _session(
-        "session-1",
-        metadata={
-            MINDROOM_COMPACTION_METADATA_KEY: {
-                "version": 1,
-                "force_compact_before_next_run": True,
-            },
-        },
+        owner_id=entity_id,
+        runs=runs,
+        # Seen ids earlier releases copied onto the session row; no run or summary row holds them.
+        metadata={MINDROOM_HISTORY_METADATA_KEY: {"seen_event_ids": ["preserved-event"]}},
+        created_at=1,
     )
 
-    assert read_scope_state(session, agent_scope).force_compact_before_next_run is False
-
-    set_force_compaction_state(session, agent_scope, HistoryScopeState(), force=True)
-
-    assert session.metadata == {
-        MINDROOM_COMPACTION_METADATA_KEY: {
-            "version": 2,
-            "states": {
-                agent_scope.key: {
-                    "force_compact_before_next_run": True,
-                },
-            },
-        },
-    }
+    assert read_scope_seen_event_ids(storage, session) == {"completed-event", "running-event"}
+    assert [run.run_id for run in scope_visible_runs(session)] == ["completed", "running"]
 
 
-def test_scope_seen_event_ids_do_not_bleed_between_scopes(tmp_path: Path, storage: BaseDb) -> None:
-    _config, _runtime_paths_value = _make_config(tmp_path)
-    agent_scope = HistoryScope(kind="agent", scope_id="test_agent")
+def test_an_edit_cut_returns_the_messages_only_the_removed_run_read(storage: ConversationStore) -> None:
+    """The context only an edited turn's removed run read returns, although earlier releases copied it onto the row."""
+    runs = [
+        replace(
+            _completed_run(run_id),
+            metadata={MATRIX_EVENT_ID_METADATA_KEY: f"${run_id}", MATRIX_SEEN_EVENT_IDS_METADATA_KEY: seen},
+        )
+        for run_id, seen in (("t1", ["$t1"]), ("t2", ["$t2", "$context-of-t2"]))
+    ]
+    copy = {MINDROOM_HISTORY_METADATA_KEY: {"seen_event_ids": ["$t1", "$t2", "$context-of-t2"]}}
+    session = seed_session(storage, _session("session-1", runs=runs, metadata=copy))
+    assert read_scope_seen_event_ids(storage, session) == {"$t1", "$t2", "$context-of-t2"}
+
+    assert remove_runs_answering(storage, "session-1", HistoryScope(kind="agent", scope_id="test_agent"), "$t2")
+
+    stored = storage.load_session("session-1")
+    assert stored is not None
+    assert [run.run_id for run in stored.runs] == ["t1"]
+    assert read_scope_seen_event_ids(storage, stored) == {"$t1"}
+
+
+def test_queued_force_compaction_reads_the_session_row_without_its_runs(
+    storage: ConversationStore,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    assert has_queued_force_compaction(storage, "flagged") is False
+
+    flagged = _session("flagged", runs=[_completed_run("run-1")])
+    flagged.metadata = with_force_compaction(flagged.metadata)
+    for session in (flagged, _session("idle", runs=[_completed_run("run-2")])):
+        seed_session(storage, session)
+    statements = trace_store_statements(monkeypatch)
+
+    assert has_queued_force_compaction(storage, "flagged") is True
+    assert has_queued_force_compaction(storage, "idle") is False
+    assert has_queued_force_compaction(storage, "missing") is False
+    assert statements
+    run_tables = (storage.names.log_runs, storage.names.log_messages)
+    assert not any(table in statement for table in run_tables for statement in statements)
+
+
+def test_scope_seen_event_ids_do_not_bleed_between_scopes(tmp_path: Path) -> None:
+    """A scope's seen ids leave out the runs of another scope with the same id."""
     team_scope = HistoryScope(kind="team", scope_id="team-123")
-    session = _session(
+    storage = create_state_storage("team_123", tmp_path / "seen", team_scope)
+    session = _team_session(
         "session-1",
+        team_id="team-123",
         runs=[
-            RunOutput(
+            RunRecord(
                 run_id="agent-run",
-                agent_id="test_agent",
+                agent_id="team-123",
                 status=RunStatus.completed,
                 metadata={"matrix_seen_event_ids": ["agent-event"]},
             ),
-            TeamRunOutput(
+            TeamRunRecord(
                 run_id="team-run",
                 team_id="team-123",
                 status=RunStatus.completed,
@@ -340,100 +237,36 @@ def test_scope_seen_event_ids_do_not_bleed_between_scopes(tmp_path: Path, storag
             ),
         ],
     )
-    update_scope_seen_event_ids(session, team_scope, ["preserved-team-event"])
 
-    assert read_scope_seen_event_ids(storage, session, agent_scope) == {"agent-event"}
-    assert read_scope_seen_event_ids(storage, session, team_scope) == {"team-event", "preserved-team-event"}
+    assert read_scope_seen_event_ids(storage, replace(session, kind="agent")) == {"agent-event"}
+    assert read_scope_seen_event_ids(storage, session) == {"team-event"}
 
 
-@pytest.mark.asyncio
-async def test_prepare_history_for_run_compaction_preserves_seen_event_ids(tmp_path: Path) -> None:
-    config, runtime_paths = _make_config(
-        tmp_path,
-        compaction=CompactionOverrideConfig(enabled=True),
-        context_window=64_000,
-    )
-    storage = create_session_storage("test_agent", config, runtime_paths, execution_identity=None)
-    session = _session(
-        "session-1",
-        runs=[
-            RunOutput(
-                run_id="run-1",
-                agent_id="test_agent",
-                status=RunStatus.completed,
-                metadata={
-                    "matrix_seen_event_ids": ["event-1", "event-2"],
-                    "matrix_response_event_id": "response-1",
-                },
-            ),
-            RunOutput(
-                run_id="run-2",
-                agent_id="test_agent",
-                status=RunStatus.completed,
-                metadata={
-                    "matrix_seen_event_ids": ["event-3"],
-                    "matrix_response_event_id": "response-2",
-                },
-            ),
-            RunOutput(
-                run_id="run-3",
-                agent_id="test_agent",
-                status=RunStatus.completed,
-                metadata={
-                    "matrix_seen_event_ids": ["event-4"],
-                    "matrix_response_event_id": "response-3",
-                },
-            ),
-            RunOutput(
-                run_id="run-4",
-                agent_id="test_agent",
-                status=RunStatus.completed,
-                metadata={
-                    "matrix_seen_event_ids": ["event-5"],
-                    "matrix_response_event_id": "response-4",
-                },
-            ),
-        ],
-    )
-    scope = HistoryScope(kind="agent", scope_id="test_agent")
-    set_force_compaction_state(session, scope, HistoryScopeState(), force=True)
-    seed_session(storage, session)
+def test_an_interrupted_record_over_a_completed_team_run_keeps_the_events_it_read(tmp_path: Path) -> None:
+    """A team turn that failed after its terminal save keeps the events it read in the record that replaces its run."""
+    team_scope = HistoryScope(kind="team", scope_id="team-123")
+    storage = create_state_storage("team_123", tmp_path / "seen", team_scope)
+    metadata = {"matrix_event_id": "$question", "matrix_seen_event_ids": ["$question", "$context"]}
+    completed = TeamRunRecord(run_id="team-run", team_id="team-123", status=RunStatus.completed, metadata=metadata)
+    session = seed_session(storage, _team_session("session-1", team_id="team-123", runs=[completed]))
 
-    with (
-        patch(
-            "mindroom.providers.model_loading.get_model_instance",
-            return_value=FakeModel(id="summary-model", provider="fake"),
+    persist_interrupted_replay_snapshot(
+        storage=storage,
+        session=session,
+        run_id="team-run",
+        snapshot=build_interrupted_replay_snapshot(
+            user_message="Question",
+            user_message_is_structured=False,
+            partial_text="Partial answer",
+            completed_tools=(),
+            interrupted_tools=(),
+            run_metadata=metadata,
         ),
-        patch(
-            "mindroom.history.compaction.generate_compaction_summary",
-            new=AsyncMock(
-                return_value=SessionSummary(summary="merged summary", updated_at=datetime.now(UTC)),
-            ),
-        ),
-    ):
-        await prepare_history_for_run_for_test(
-            agent=_agent(db=storage),
-            agent_name="test_agent",
-            full_prompt="Current prompt",
-            session_id="session-1",
-            runtime_paths=runtime_paths,
-            config=config,
-            execution_identity=None,
-            storage=storage,
-            session=session,
-        )
+    )
 
-    persisted = get_agent_session(storage, "session-1")
-    assert persisted is not None
-    assert persisted.runs == []
-    assert read_scope_seen_event_ids(storage, persisted, scope) == {
-        "event-1",
-        "event-2",
-        "event-3",
-        "event-4",
-        "event-5",
-        "response-1",
-        "response-2",
-        "response-3",
-        "response-4",
-    }
+    stored = storage.load_session("session-1")
+    assert stored is not None
+    assert [(run.run_id, run.status, is_interrupted_replay_run(run)) for run in stored.runs] == [
+        ("team-run", RunStatus.completed, True),
+    ]
+    assert read_scope_seen_event_ids(storage, stored) == {"$question", "$context"}

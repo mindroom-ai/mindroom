@@ -21,7 +21,7 @@ from mindroom.desktop.playwright_mcp import (
     PlaywrightActionOutcomeUnknownError,
     PlaywrightBrowserError,
     PlaywrightMCPBrowserProvider,
-    _mcp_calls,
+    _mcp_call,
     _provider_result,
     browser_action_requires_control,
 )
@@ -90,17 +90,17 @@ def test_provider_launches_pinned_extension_server_for_existing_profile(
 
 def test_browser_actions_map_to_high_level_playwright_mcp_tools() -> None:
     """Tab, navigation, snapshot, and screenshot actions avoid raw CDP calls."""
-    assert _mcp_calls("tabs", {})[0].tool_name == "browser_tabs"
-    assert _mcp_calls("open", {"targetUrl": "https://example.com"})[0].arguments == {
+    assert _mcp_call("tabs", {}).tool_name == "browser_tabs"
+    assert _mcp_call("open", {"targetUrl": "https://example.com"}).arguments == {
         "action": "new",
         "url": "https://example.com",
     }
-    snapshot = _mcp_calls("snapshot", {"selector": "main", "depth": 8, "maxChars": 4000})
-    assert snapshot[-1].tool_name == "browser_snapshot"
-    assert snapshot[-1].arguments == {"target": "main", "depth": 8}
-    screenshot = _mcp_calls("screenshot", {"ref": "e7", "type": "jpeg", "fullPage": False})
-    assert screenshot[-1].tool_name == "browser_take_screenshot"
-    assert screenshot[-1].arguments == {
+    snapshot = _mcp_call("snapshot", {"selector": "main", "depth": 8, "maxChars": 4000})
+    assert snapshot.tool_name == "browser_snapshot"
+    assert snapshot.arguments == {"target": "main", "depth": 8}
+    screenshot = _mcp_call("screenshot", {"ref": "e7", "type": "jpeg", "fullPage": False})
+    assert screenshot.tool_name == "browser_take_screenshot"
+    assert screenshot.arguments == {
         "element": "e7",
         "target": "e7",
         "type": "jpeg",
@@ -417,17 +417,7 @@ def test_mutable_playwright_tab_indices_are_rejected(action: str) -> None:
         parameters["targetUrl"] = "https://example.com/checkout"
 
     with pytest.raises(PlaywrightBrowserError, match="tab indices can change"):
-        _mcp_calls(action, parameters)
-
-
-def test_mutable_playwright_tab_index_inside_act_request_is_rejected() -> None:
-    """Nested act requests cannot bypass the mutable tab-index guard."""
-    parameters: dict[str, object] = {
-        "request": {"kind": "click", "ref": "e1", "targetId": "1"},
-    }
-
-    with pytest.raises(PlaywrightBrowserError, match="stable page identity"):
-        _mcp_calls("act", parameters)
+        _mcp_call(action, parameters)
 
 
 @pytest.mark.asyncio
@@ -446,6 +436,21 @@ async def test_status_is_lazy_until_extension_use(tmp_path: Path) -> None:
         "status": "ok",
     }
     assert provider.running is False
+
+
+@pytest.mark.asyncio
+async def test_status_of_a_running_extension_lists_its_tabs(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Once the extension runs, status asks it for its tabs without taking control."""
+    provider = PlaywrightMCPBrowserProvider(output_dir=tmp_path)
+    call_tool = AsyncMock(return_value=_text_result("- 0: (current) [Home](https://example.com/)"))
+    monkeypatch.setattr(provider, "_session", Mock(running=True))
+    monkeypatch.setattr(provider, "_call_tool", call_tool)
+
+    result = await provider.execute("status", {})
+
+    call_tool.assert_awaited_once_with("browser_tabs", {"action": "list"}, may_start=False)
+    assert result.payload["running"] is True
+    assert result.payload["result"] == "- 0: (current) [Home](https://example.com/)"
 
 
 @pytest.mark.asyncio
@@ -574,12 +579,3 @@ async def test_same_url_and_title_after_replacement_cannot_authorize_a_click(
     with pytest.raises(PlaywrightBrowserError, match="stable page identity"):
         await provider.execute("act", {"request": {"kind": "click", "ref": "e3"}})
     assert [call.args[0] for call in call_tool.await_args_list] == ["browser_tabs", "browser_tabs"]
-
-
-@pytest.mark.asyncio
-async def test_provider_reports_stable_targeting_limit_before_start(tmp_path: Path) -> None:
-    """Capability discovery truthfully bounds control before launching the extension."""
-    provider = PlaywrightMCPBrowserProvider(output_dir=tmp_path)
-    status = await provider.execute("status", {})
-    assert status.payload["stable_targeting"] is False
-    assert status.payload["supported_control_actions"] == ["start", "stop", "open"]

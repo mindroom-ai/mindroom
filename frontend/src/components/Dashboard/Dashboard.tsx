@@ -3,6 +3,7 @@ import { Link, useNavigate } from "react-router-dom";
 import { ArrowLeft, ArrowRight, Search } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { EntityAvatar } from "@/components/shared/EntityAvatar";
+import { pluralize } from "@/lib/utils";
 import { useConfigStore } from "@/store/configStore";
 import type { Room } from "@/types/config";
 import type { ScheduleTask } from "@/types/schedule";
@@ -169,6 +170,7 @@ function ComingUp({
 }) {
   const data = !schedules.isError ? schedules.data : undefined;
   const tasks = data ? upcomingSchedules(data.tasks) : [];
+  const unreadableRoomCount = data?.unreadableRoomCount ?? 0;
   return (
     <section className="home-upcoming" aria-labelledby="upcoming-heading">
       <div>
@@ -184,7 +186,7 @@ function ComingUp({
           <p className="home-section-empty" role="status">
             Loading schedules…
           </p>
-        ) : tasks.length === 0 ? (
+        ) : tasks.length === 0 && unreadableRoomCount === 0 ? (
           <p className="home-section-empty">Nothing scheduled</p>
         ) : (
           tasks.map(({ task, at }) => {
@@ -211,7 +213,7 @@ function ComingUp({
                       kind="room"
                       id={room?.id ?? task.room_id}
                       name={roomName}
-                      className="h-6 w-6 rounded-lg"
+                      className="h-6 w-6"
                     />
                     <span title={roomName}>{roomName}</span>
                   </div>
@@ -219,6 +221,12 @@ function ComingUp({
               </div>
             );
           })
+        )}
+        {unreadableRoomCount > 0 && (
+          <p className="home-section-empty" role="status">
+            Schedules in {pluralize(unreadableRoomCount, "room")} could not be
+            read
+          </p>
         )}
       </div>
       <SectionLink to="/schedules">All schedules</SectionLink>
@@ -280,7 +288,7 @@ function Home({
           Browse workspace
         </Button>
       </header>
-      <div className="home-day-surface">
+      <div className="home-day-surface glass-panel rounded-xl">
         <Today usage={data.usage} activity={data.activity} />
         <ComingUp schedules={data.schedules} rooms={rooms} />
       </div>
@@ -320,7 +328,7 @@ function Home({
                   kind="room"
                   id={room.id}
                   name={room.display_name}
-                  className="h-[52px] w-[52px] rounded-lg text-lg"
+                  className="h-[52px] w-[52px] text-lg"
                 />
                 <span className="home-room-body">
                   <span className="home-room-name" title={room.display_name}>
@@ -345,7 +353,7 @@ function Home({
                           kind={member.kind}
                           id={member.id}
                           name={member.name}
-                          className="h-[22px] w-[22px] rounded-full text-[8px] ring-2 ring-background"
+                          className="h-[22px] w-[22px] text-[11px] ring-2 ring-background"
                         />
                       ))}
                       {members.length > 4 && (
@@ -390,7 +398,7 @@ function Home({
                 kind="agent"
                 id={agent.id}
                 name={agent.display_name}
-                className="h-9 w-9 rounded-full"
+                className="h-9 w-9"
               />
               <span title={agent.display_name}>{agent.display_name}</span>
             </button>

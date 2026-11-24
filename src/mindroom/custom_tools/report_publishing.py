@@ -2,18 +2,19 @@
 
 from __future__ import annotations
 
-from typing import Any
+from functools import partial
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
 
-from agno.tools import Toolkit
-
+from mindroom.background_tasks import run_blocking_or_compensate, run_blocking_until_complete
 from mindroom.custom_tools.dynamic_workflow_context import (
     authorize_dynamic_workflow_run,
     dynamic_workflow_store_and_owner,
 )
-from mindroom.custom_tools.tool_payloads import custom_tool_payload
-from mindroom.custom_tools.toolkit_functions import JSON_OBJECT_SCHEMA, register_toolkit_functions
-from mindroom.dynamic_workflows.validation import DynamicWorkflowError
+from mindroom.custom_tools.tool_payloads import custom_tool_payload, tool_context_or_error
+from mindroom.dynamic_workflows.spec import DynamicWorkflowError
+from mindroom.dynamic_workflows.store import AGENT_SCOPE
+from mindroom.origins import configured_public_url, published_reports_require_sign_in
 from mindroom.report_publishing.store import (
     ARTIFACT_KIND_STATIC_SITE,
     PublishableReport,
@@ -21,100 +22,69 @@ from mindroom.report_publishing.store import (
     ReportPublishingError,
     ReportPublishingStore,
 )
-from mindroom.runtime_resolution import resolve_agent_runtime
-from mindroom.tool_system.runtime_context import (
-    ToolRuntimeContext,
-    build_execution_identity_from_runtime_context,
-    get_tool_runtime_context,
-)
+from mindroom.tool_system.authoring import Toolkit, tool
 from mindroom.workspaces import resolve_workspace_relative_path
 
-_DYNAMIC_WORKFLOW_RUN_SOURCE_KEYS = frozenset({"workflow_id", "run_id", "scope"})
+if TYPE_CHECKING:
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
+
+_DYNAMIC_WORKFLOW_RUN_SOURCE_KEYS = frozenset({"workflow_id", "run_id"})
 _STATIC_SITE_SOURCE_KEYS = frozenset({"path", "title"})
-
-
-_TOOL_DESCRIPTIONS = {
-    "publish_report": (
-        "Publish an authorized report source through a revocable public link. "
-        "Supports source_type dynamic_workflow_run and static_site."
-    ),
-    "revoke_public_report": "Revoke a previously published public report link.",
-}
-
-
-_TOOL_PARAMETERS: dict[str, dict[str, object]] = {
-    "publish_report": {
-        "type": "object",
-        "properties": {
-            "source_type": {"type": "string"},
-            "source": JSON_OBJECT_SCHEMA,
-            "confirm_public": {"type": "boolean"},
-        },
-        "required": ["source_type", "source", "confirm_public"],
-    },
-    "revoke_public_report": {
-        "type": "object",
-        "properties": {"slug": {"type": "string"}},
-        "required": ["slug"],
-    },
-}
 
 
 class ReportPublishingTools(Toolkit):
     """Tools that publish authorized report artifacts through revocable public links."""
 
     def __init__(self) -> None:
-        super().__init__(name="report_publishing", tools=[])
-        self._register_functions()
-
-    def _register_functions(self) -> None:
-        register_toolkit_functions(
-            self,
-            sync_entrypoints={
-                "publish_report": self.publish_report,
-                "revoke_public_report": self.revoke_public_report,
-            },
-            async_entrypoints={
-                "publish_report": self.apublish_report,
-                "revoke_public_report": self.arevoke_public_report,
-            },
-            descriptions=_TOOL_DESCRIPTIONS,
-            parameters=_TOOL_PARAMETERS,
-        )
+        super().__init__(name="report_publishing")
 
     @staticmethod
     def _payload(status: str, **fields: object) -> str:
         return custom_tool_payload("report_publishing", status, **fields)
 
-    @classmethod
-    def _context_error(cls) -> str:
-        return cls._payload(
-            "error",
-            message="Report Publishing tool context is unavailable in this runtime path.",
-        )
-
-    def publish_report(
+    @tool
+    async def publish_report(
         self,
         source_type: str,
         source: dict[str, Any],
         confirm_public: bool,
     ) -> str:
-        """Publish an authorized report artifact through a revocable public link."""
-        context = get_tool_runtime_context()
-        if context is None:
-            return self._context_error()
+        """Publish an authorized report source through a revocable link.
+
+        Args:
+            source_type: Either dynamic_workflow_run or static_site.
+            source: For dynamic_workflow_run, workflow_id and run_id of a completed run; for static_site, path
+                (workspace-relative, to a directory with index.html or to one HTML file) and title.
+            confirm_public: Must be true; until it is revoked, anyone with the link can open the report, or only
+                people signed in to this deployment where it requires sign-in (the result's who_can_open says which).
+
+        """
+        if isinstance(context := tool_context_or_error(self._payload, "Report Publishing"), str):
+            return context
         if not confirm_public:
             return self._payload(
                 "error",
                 source_type=source_type,
                 message="Set confirm_public to true to publish this report as a public link.",
             )
+        # Read before publishing, so a setting MindRoom does not know fails the call without leaving a link behind.
+        who_can_open = (
+            "people signed in to this deployment"
+            if published_reports_require_sign_in(context.runtime_paths)
+            else "anyone with the link"
+        )
         try:
-            publishable = _resolve_publishable_source(context, source_type, source)
-            report = ReportPublishingStore(context.runtime_paths.storage_root).publish_report(
-                source=publishable,
-                published_by=context.requester_id,
-                base_url=context.runtime_paths.env_value("MINDROOM_PUBLIC_URL"),
+            publishable = await run_blocking_until_complete(_resolve_publishable_source, context, source_type, source)
+            store = ReportPublishingStore(context.runtime_paths.storage_root)
+            # A cancelled call never shows its link, so its requester could neither use nor revoke it.
+            report = await run_blocking_or_compensate(
+                partial(
+                    store.publish_report,
+                    source=publishable,
+                    published_by=context.requester_id,
+                    base_url=configured_public_url(context.runtime_paths),
+                ),
+                lambda published: store.revoke_public_report(published.slug, revoked_by=context.requester_id),
             )
         except (DynamicWorkflowError, ReportPublishingError) as exc:
             return self._payload("error", source_type=source_type, message=str(exc))
@@ -126,18 +96,21 @@ class ReportPublishingTools(Toolkit):
             public_url=report.public_url,
             public_path=_public_path_for_report(report),
             published_at=report.published_at,
+            who_can_open=who_can_open,
         )
 
-    def revoke_public_report(self, slug: str) -> str:
+    @tool
+    async def revoke_public_report(self, slug: str) -> str:
         """Revoke a previously published public report link."""
-        context = get_tool_runtime_context()
-        if context is None:
-            return self._context_error()
+        if isinstance(context := tool_context_or_error(self._payload, "Report Publishing"), str):
+            return context
         try:
             store = ReportPublishingStore(context.runtime_paths.storage_root)
-            report = store.get_public_report(slug, include_revoked=True)
+            report = await run_blocking_until_complete(partial(store.get_public_report, slug, include_revoked=True))
             _authorize_public_report_for_context(context, report)
-            revoked = store.revoke_public_report(slug, revoked_by=context.requester_id)
+            revoked = await run_blocking_until_complete(
+                partial(store.revoke_public_report, slug, revoked_by=context.requester_id),
+            )
         except ReportPublishingError as exc:
             return self._payload("error", slug=slug, message=str(exc))
         return self._payload(
@@ -147,19 +120,6 @@ class ReportPublishingTools(Toolkit):
             source=revoked.source,
             revoked_at=revoked.revoked_at,
         )
-
-    async def apublish_report(
-        self,
-        source_type: str,
-        source: dict[str, Any],
-        confirm_public: bool,
-    ) -> str:
-        """Publish an authorized report artifact through a revocable public link."""
-        return self.publish_report(source_type, source, confirm_public)
-
-    async def arevoke_public_report(self, slug: str) -> str:
-        """Revoke a previously published public report link."""
-        return self.revoke_public_report(slug)
 
 
 def _resolve_publishable_source(
@@ -183,18 +143,13 @@ def _resolve_static_site_source(
     _reject_unsupported_source_fields(source, _STATIC_SITE_SOURCE_KEYS, "static_site source")
     source_path = _required_source_text(source, "path", context="static_site source")
     title = _required_source_text(source, "title", context="static_site source")
-    workspace = resolve_agent_runtime(
-        context.agent_name,
-        context.config,
-        context.runtime_paths,
-        execution_identity=build_execution_identity_from_runtime_context(context),
-    ).workspace
-    if workspace is None:
-        msg = "static_site publishing requires an agent workspace in this runtime path."
+    workspace_root = context.agent_workspace_root()
+    if not workspace_root.is_dir():
+        msg = "static_site publishing found no agent workspace yet; write the site into the workspace first."
         raise ReportPublishingError(msg)
     try:
         site_dir = resolve_workspace_relative_path(
-            workspace.root,
+            workspace_root,
             source_path,
             field_name="static_site source.path",
         )
@@ -207,7 +162,7 @@ def _resolve_static_site_source(
         title=title,
         requested_by=context.requester_id,
         artifact_kind=ARTIFACT_KIND_STATIC_SITE,
-        artifact_root=workspace.root,
+        artifact_root=workspace_root,
     )
 
 
@@ -218,11 +173,10 @@ def _resolve_dynamic_workflow_run_source(
     _reject_unsupported_source_fields(source, _DYNAMIC_WORKFLOW_RUN_SOURCE_KEYS, "dynamic_workflow_run source")
     workflow_id = _required_source_text(source, "workflow_id", context="dynamic_workflow_run source")
     run_id = _required_source_text(source, "run_id", context="dynamic_workflow_run source")
-    scope = _optional_source_text(source, "scope", default="agent", context="dynamic_workflow_run source")
-    store, owner_id = dynamic_workflow_store_and_owner(context, scope)
+    store, owner_id = dynamic_workflow_store_and_owner(context)
     run = store.get_workflow_run(
         workflow_id=workflow_id,
-        scope=scope,
+        scope=AGENT_SCOPE,
         owner_id=owner_id,
         run_id=run_id,
     )
@@ -235,7 +189,6 @@ def _resolve_dynamic_workflow_run_source(
         source={
             "workflow_id": workflow_id,
             "run_id": run_id,
-            "scope": scope,
         },
         artifact_path=store.run_report_html_artifact_path(run),
         title=store.run_report_title(run),
@@ -275,20 +228,6 @@ def _required_source_text(source: dict[str, object], key: str, *, context: str) 
         msg = f"{context} field '{key}' is missing."
         raise ReportPublishingError(msg)
     value = source[key]
-    if not isinstance(value, str) or not value.strip():
-        msg = f"{context} field '{key}' must be a non-empty string."
-        raise ReportPublishingError(msg)
-    return value.strip()
-
-
-def _optional_source_text(
-    source: dict[str, object],
-    key: str,
-    *,
-    default: str,
-    context: str,
-) -> str:
-    value = source.get(key, default)
     if not isinstance(value, str) or not value.strip():
         msg = f"{context} field '{key}' must be a non-empty string."
         raise ReportPublishingError(msg)

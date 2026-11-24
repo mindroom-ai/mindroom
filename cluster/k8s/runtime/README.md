@@ -21,6 +21,8 @@ Use this chart when MindRoom should run inside an existing platform.
 - [Control-Plane NetworkPolicy](#control-plane-networkpolicy)
 - [Worker Egress Proxy](#worker-egress-proxy)
 - [Background Script Gateway](#background-script-gateway)
+- [Egress Broker](#egress-broker)
+- [Tailnet SSH](#tailnet-ssh)
 - [Matrix Managed Account Authentication](#matrix-managed-account-authentication)
 - [Existing Platform Example](#existing-platform-example)
 - [Notes](#notes)
@@ -37,6 +39,9 @@ helm upgrade --install mindroom-runtime ./cluster/k8s/runtime \
 The default values render a self-contained Deployment, Service, ConfigMap, runtime PVC, and PostgreSQL event-journal StatefulSet.
 A real deployment should provide a useful config and Matrix settings.
 The dashboard and API are fully privileged, so the chart gives the primary a generated `MINDROOM_API_KEY`, and the install notes show how to read it.
+
+For a ready-to-copy multi-user deployment (dedicated Kubernetes workers, per-user personal agents, Agent Keys, and semantic file memory), start from [`values-multi-user.example.yaml`](values-multi-user.example.yaml) and its companion [`config-multi-user.example.yaml`](config-multi-user.example.yaml).
+Create the `mindroom-config` ConfigMap from the companion config, update the placeholder Matrix settings and Secrets, and install with `-f values-multi-user.yaml`.
 
 ## Rollout Progress Deadline
 
@@ -132,19 +137,20 @@ eventCache:
 ```
 
 When `config.create` is enabled and `config.data` is empty, the chart renders a minimal config whose `event_journal` section follows `eventCache`.
-When using `config.existingConfigMap` or custom `config.data`, keep that config's `event_journal` settings aligned with the chart values.
+When using `config.existingConfigMap` or custom `config.data`, keep that config's `event_journal` settings aligned with the chart values: for PostgreSQL, set `event_journal.backend: postgres` (`event_journal.database_url_env` already defaults to the chart-injected `MINDROOM_EVENT_CACHE_DATABASE_URL`).
 The runtime config rejects unknown top-level keys, so a `cache` section makes MindRoom refuse to start.
 
 ## Config Sources
 
 By default the chart keeps the existing ConfigMap behavior.
 Omit `config.source` or set `config.source: configMap` to mount a chart-created or existing ConfigMap at `config.mountPath`.
+Changing `config.existingConfigMap` to a different ConfigMap name updates the pod template and rolls the Deployment, whereas editing `config.data` or the contents of the same `config.existingConfigMap` does not roll the pod or hot-reload automatically because the ConfigMap is mounted with `subPath` and has no config-checksum pod annotation; run `kubectl rollout restart deployment/<fullname>` after `helm upgrade`.
 Set `config.source: file` when another init container or content bundle places `agent-config.yaml` on the runtime filesystem before MindRoom starts.
 In file mode, `config.path` must be an absolute container path.
 In file mode, the chart does not render or mount the runtime config ConfigMap.
 Dedicated Kubernetes workers receive the same config file path and do not receive worker ConfigMap settings.
 Nothing is mounted at that path: neither dedicated Kubernetes workers nor the `static_runner` sidecar mount the config file or its directory, and each request carries the allowlisted config fields they resolve.
-With `workers.backend: static_runner`, the chart rejects a config inside `agents`, `private_instances`, or `sandbox-runner` because the sidecar can write those directories.
+With `workers.backend: static_runner`, the chart rejects a config inside `agents`, `private_instances`, `shared_directories`, or `sandbox-runner` because the sidecar can write those directories.
 
 Use a content bundle as the source of truth for the runtime config:
 
@@ -227,10 +233,10 @@ Without the copy, agents fail to start with `The bound Matrix device store is mi
 
 `sessionStorage` gives agent and team session databases their own volume.
 The chart mounts it at `sessionStorage.mountPath` (default `/app/session_state`) and sets `MINDROOM_SESSION_STORAGE_PATH` to that path, so do not also set that variable in `env.extra`.
-`knowledgeStorage` gives shared knowledge-base indexes their own volume, mounted at `<storage.mountPath>/knowledge_db` where MindRoom stores them.
+`knowledgeStorage` gives knowledge-base indexes, private agents' indexes included, their own volume, mounted at `<storage.mountPath>/knowledge_db` where MindRoom stores them.
 Each block creates a `<fullname>-sessions` or `<fullname>-knowledge` PVC from `size`, `storageClassName`, and `accessModes`, or mounts `existingClaim` instead.
 Both volumes must be writable by the runtime user; `podSecurityContext.fsGroup` covers volume types that support ownership management.
-Use them to keep these SQLite and Chroma databases on fast `ReadWriteOnce` storage, sized on their own, when `storage` is `ReadWriteMany` network storage shared with dedicated workers.
+Use them to keep these SQLite databases on fast `ReadWriteOnce` storage, sized on their own, when `storage` is `ReadWriteMany` network storage shared with dedicated workers.
 
 ```yaml
 sessionStorage:
@@ -381,7 +387,7 @@ A hot install keeps the stored revision, so restarts preserve it until the next 
 ## Provider API Keys from Kubernetes Secrets
 
 The MindRoom runtime natively honors model-provider API key env vars such as `OPENAI_API_KEY` and `ANTHROPIC_API_KEY`.
-At startup it syncs each value into its credential service, which stores it as `<storage.mountPath>/credentials/<provider>_credentials.json`.
+It reads each value as that provider's shared credential and stores no copy of it.
 Use `providerCredentials` to bind those env vars to existing Kubernetes Secrets without writing any credential files yourself:
 
 ```yaml
@@ -398,13 +404,11 @@ Supported provider names are `anthropic`, `azure`, `openai`, `google`, `openrout
 Each entry renders only a `secretKeyRef` env var on the runtime container, so no secret material passes through ConfigMaps or appears in rendered manifests.
 The chart rejects entries whose env var is also set through `env.extra`, but variables arriving through `env.envFrom` cannot be collision-checked because Secret and ConfigMap keys are not visible at template time.
 If an `env.envFrom` source contains the same variable name, the container-level `env` entry rendered by `providerCredentials` takes precedence in Kubernetes.
-Because the runtime writes the credential files itself, this path also works with encrypted credential storage (`workers.sandbox.credentialsEncryptionKey`), where externally written plaintext JSON files would be refused.
+Because no credential file is involved, this path also works with encrypted credential storage (`workers.sandbox.credentialsEncryptionKey`), where externally written plaintext JSON files would be refused.
 
-Sync semantics follow the runtime's `_source` tracking:
-
-- Env-sourced credentials are refreshed on every startup, so rotating the Secret takes effect after a Deployment restart (env values from `secretKeyRef` are fixed at pod start).
-- Credentials saved through the dashboard (`_source: ui`) are never overwritten by env sync.
-- A pre-existing credential file without `_source: env`, for example one written manually or by a custom init container, is also left untouched; delete that file once when migrating to `providerCredentials`.
+- Rotating or removing the Secret takes effect after a Deployment restart (env values from `secretKeyRef` are fixed at pod start).
+- A credential saved for the same provider through the dashboard wins over the env var; deleting it there makes the env var apply again.
+- A pre-existing credential file, for example one written manually or by a custom init container, also wins over the env var; delete that file once when migrating to `providerCredentials`.
 
 Non-secret companion settings such as `OPENAI_BASE_URL` or `AZURE_OPENAI_ENDPOINT` are plain config and belong in `env.extra`.
 For credential services beyond the supported providers, the runtime accepts declared credential seeds through the `MINDROOM_CREDENTIAL_SEEDS_JSON` env var, whose JSON contains only env-var references while the secret values still arrive via `secretKeyRef` entries in `env.extra`:
@@ -424,15 +428,19 @@ env:
 ## Layering Values Files
 
 Helm replaces lists wholesale when it merges several values files, so an environment overlay cannot change one list entry without restating the whole list.
-`env.extra`, `env.envFrom`, `workers.kubernetes.agentVault.server.extraEnv`, `workers.kubernetes.agentVault.server.envFrom`, `extraVolumes`, and `extraVolumeMounts` therefore accept either a list or a map keyed by entry, which Helm merges key by key.
+`env.extra`, `env.envFrom`, `extraVolumes`, and `extraVolumeMounts` therefore accept either a list or a map keyed by entry, which Helm merges key by key.
+So do the NetworkPolicy rule lists `networkPolicy.apiIngressFrom`, `networkPolicy.extraIngress`, `networkPolicy.extraEgress`, and `egressProxy.networkPolicy.extraEgress`, as well as the `egressProxy.noProxy` hosts.
 
 - Map entries render sorted by key, so choose keys accordingly where order matters, such as `envFrom` precedence or `$(VAR)` references.
 - An entry's `name` defaults to its key; set `name` explicitly to mount one volume at several paths.
+- NetworkPolicy rule keys only identify the rule, and each `egressProxy.noProxy` map value is a host string.
+  Removing every entry of a rule list behaves like an empty list, so `apiIngressFrom` then admits every source to the API port.
+- `egressProxy.noProxy` defaults to the map `localhost`, `loopback-ipv4`, and `loopback-ipv6`, so a map adds hosts to those defaults while a list replaces them, with a Helm table warning.
 - A `null` entry removes an inherited entry, and a `null` field removes an inherited field, for example to replace `value` with `valueFrom`.
 - An env map entry may be a plain string as shorthand for `value`; quote numbers and booleans, which Kubernetes requires as strings anyway.
 - Use the same form for a field in every values file, because Helm replaces a list with a map, or a map with a list, wholesale.
 
-String env values in `env.extra`, `workers.kubernetes.agentVault.server.extraEnv`, and `workers.kubernetes.extraEnv` are rendered with `tpl`, as are `egressProxy.noProxy` entries.
+String env values in `env.extra` and `workers.kubernetes.extraEnv` are rendered with `tpl`, as are `egressProxy.noProxy` entries.
 Shared values can therefore reference the release namespace or other values instead of repeating environment-specific names.
 Write `{{ "{{" }}` for a literal `{{`.
 A `null` in `workers.kubernetes.extraEnv` removes an inherited or chart-injected worker variable.
@@ -560,6 +568,10 @@ Set `approvedEgress.manageRuntimeConfig: false` to skip that flag when the autho
 The proxy pod reads `MINDROOM_APPROVED_EGRESS_TOKEN` from `approvedEgress.token.existingSecret` when set, otherwise it reuses `workers.sandbox.proxyToken`.
 Pin `approvedEgress.image.tag` or `approvedEgress.image.digest` before enabling the feature.
 
+The proxy runs as one pod, so evicting it during a node drain or cluster-autoscaler scale-down interrupts worker egress until its replacement is ready.
+Set `approvedEgress.podDisruptionBudget.create: true` to refuse such evictions while the proxy is ready; an unready proxy can still be evicted.
+A drain of the proxy's node then waits until you remove the budget or restart the proxy Deployment, which the budget does not block.
+
 Use `egressProxy` when another chart or platform layer already manages the proxy:
 
 ```yaml
@@ -573,10 +585,7 @@ egressProxy:
     namespace: mindroom
     port: 3128
   noProxy:
-    - localhost
-    - 127.0.0.1
-    - ::1
-    - internal-api.mindroom.svc.cluster.local
+    internal-api: internal-api.mindroom.svc.cluster.local
   networkPolicy:
     create: true
     proxyPodSelector:
@@ -597,191 +606,6 @@ When `egressProxy.injectWorkerProxyEnv` is true, worker pods receive `HTTP_PROXY
 When `approvedEgress.enabled` is true, the chart automatically points worker proxy settings and the worker egress policy at the chart-managed proxy.
 When `egressProxy.networkPolicy.create` is true, workers can egress only to DNS, the selected proxy pods, and `egressProxy.networkPolicy.extraEgress`.
 For externally managed proxies, NetworkPolicy targets pods rather than Services, so `proxyPodSelector` must match the existing proxy Deployment labels.
-
-When Agent Vault is also enabled, keep approved egress as the first network hop.
-The proxy resolves dynamic `request_network_access` grants from the worker pod's source IP; if worker traffic goes to Agent Vault first, every request reaches Squid from the vault pod IP and worker identity cannot be resolved.
-Enable `approvedEgress.parentProxy` to route only token-bearing Agent Vault tool traffic through the vault parent after the allowlist/grant check:
-
-```yaml
-workers:
-  backend: kubernetes
-  kubernetes:
-    agentVault:
-      enabled: true
-      cliImage: infisical/agent-vault:<pinned>
-      ownerEmail: owner@example.test
-      server:
-        enabled: true
-      # Leave proxyUrl at the default; parentProxy makes workers use approved
-      # egress first and Squid forwards Proxy-Authorization traffic to the vault.
-
-approvedEgress:
-  enabled: true
-  image:
-    tag: v0.1.10
-  parentProxy:
-    enabled: true
-    host: agent-vault
-    port: 14322
-```
-
-With this setup, workers mint Agent Vault tokens through the API port (`14321`), workers proxy tool egress to the approved egress Service, Squid enforces allowlists and dynamic grants using the real worker IP, and Squid forwards requests carrying `Proxy-Authorization` to Agent Vault (`login=PASSTHRU`) for credential injection.
-Tokenless traffic egresses directly from Squid after the normal policy check.
-For signed URLs or other destinations that must skip parent-proxy credential injection, set `approvedEgress.parentProxy.bypassDomains`:
-
-```yaml
-approvedEgress:
-  parentProxy:
-    enabled: true
-    bypassDomains:
-      - downloads.example.test
-      - .objects.example.test
-```
-
-This list defaults to empty and applies only when chart-managed approved egress and its parent proxy are enabled.
-An entry without a leading dot matches that exact hostname; a leading dot matches the domain and its subdomains, following [Squid domain ACL syntax](https://www.squid-cache.org/Doc/config/acl/).
-Use ASCII domain names (Punycode for internationalized names), without URL schemes, ports, paths, `*` wildcards, or whitespace; invalid entries fail chart rendering.
-Matching uses the request hostname without reverse DNS lookups.
-Bypass destinations still require the normal allowlist or dynamic grant and remain subject to the proxy's destination and port restrictions.
-Other token-bearing requests continue through the configured parent.
-Changing the list changes the chart's Squid config checksum and rolls the proxy Deployment automatically.
-
-When `agentVault.accessTool.enabled` is set, self-service vault grants also keep `agentVault.ownerEmail` as an admin on each worker vault; the Kubernetes worker init container uses that owner account to mint and attach the proxy-role agent token.
-The chart rejects the unsafe default combination of chart-managed approved egress plus Agent Vault without `approvedEgress.parentProxy`, because that would be vault-first and break dynamic grants.
-
-### Agent Vault Server Environment
-
-Use `workers.kubernetes.agentVault.server.extraEnv` for raw Kubernetes `EnvVar` entries, including `valueFrom` Secret references.
-Use `server.envFrom` to import variables from existing Secrets or ConfigMaps.
-Both default to empty, accept the map form described in [Layering Values Files](#layering-values-files), and apply only to the chart-managed Agent Vault server.
-Keep sensitive values in Secrets and avoid duplicate environment variable names; use the dedicated master-password and SMTP settings for chart-managed variables.
-The chart rejects `extraEnv` entries that repeat the master-password variable or any SMTP variable emitted when `server.smtp.enabled` is true.
-
-```yaml
-workers:
-  kubernetes:
-    agentVault:
-      server:
-        enabled: true
-        image: registry.example.com/agent-vault@sha256:1111111111111111111111111111111111111111111111111111111111111111
-        extraEnv:
-          - name: AGENT_VAULT_ADDR
-            value: https://vault.example.com
-          - name: AGENT_VAULT_OAUTH_GITHUB_CLIENT_SECRET
-            valueFrom:
-              secretKeyRef:
-                name: vault-oauth
-                key: client-secret
-        envFrom:
-          - secretRef:
-              name: vault-extra-env
-          - configMapRef:
-              name: vault-settings
-```
-
-### Agent Vault Server NetworkPolicy
-
-The chart-managed Agent Vault server gets its own NetworkPolicy by default, because the API port can create vaults and agent tokens and the proxy port injects stored credentials.
-Ingress to the API port (`server.apiPort`) is limited to the in-chart clients that are enabled: dedicated workers when `agentVault.enabled` is true, the control plane when `accessTool.enabled` is true, the bootstrap Job, and the access-grants Job.
-Workers are matched like the worker NetworkPolicy and the runtime's own worker listing: the worker namespace, the generic worker labels, and `workers.kubernetes.extraLabels`.
-The selector matches any worker pod that carries all of those labels, so releases that share a worker namespace must each set a different value for the same `workers.kubernetes.extraLabels` key, for example `mindroom.ai/instance`.
-If one release's `extraLabels` are empty or a subset of another release's, its vault also admits the other release's workers.
-Ingress to the proxy port (`server.mitmPort`) is limited to the approved egress proxy when `approvedEgress.parentProxy.enabled` is true, or to dedicated workers when `approvedEgress` is disabled and workers use `agentVault.proxyUrl` directly.
-Egress is limited to DNS and, to any address, TCP `80` and `443` for proxied upstreams and OAuth providers and `server.smtp.port` when SMTP is enabled.
-When `egressProxy` or `approvedEgress` is enabled and `egressProxy.networkPolicy.create` is true (its default), vault DNS is limited to the same `egressProxy.networkPolicy.dns` destinations as worker DNS (default kube-dns in `kube-system`), and otherwise to port 53 on any address.
-Kubelet health probes are unaffected.
-
-Clients the chart does not render, such as an SSO proxy in front of the vault UI or an ingress controller, need `server.networkPolicy.extraIngress`.
-Destinations beyond the defaults, such as upstream services on other ports, need `server.networkPolicy.extraEgress`.
-Set `server.networkPolicy.create: false` to manage the vault policy yourself.
-
-```yaml
-workers:
-  kubernetes:
-    agentVault:
-      server:
-        enabled: true
-        networkPolicy:
-          extraIngress:
-            - from:
-                - podSelector:
-                    matchLabels:
-                      app.kubernetes.io/name: vault-ui-proxy
-              ports:
-                - protocol: TCP
-                  port: 14321
-```
-
-### Agent Vault Access Grants
-
-Agent Vault has two separate access questions.
-Runtime use is controlled by MindRoom worker scope and tool authorization.
-Raw secret visibility is controlled by Agent Vault vault membership.
-
-Use `worker_scope: user` or `worker_scope: user_agent` when each requester should manage and use their own credentials.
-Those requester-isolated workers can use the self-service `agent_vault_access` tool to grant the requester admin access to their own worker vault.
-
-Use `worker_scope: shared` when a shared agent should use a common service credential.
-In that model, all users who can invoke credential-capable tools on that shared agent may indirectly use the credentials through the worker proxy path.
-Only trusted maintainers should receive Agent Vault admin access, because admin access lets them view, edit, and manage the raw secret values in the vault.
-Access grants do not restrict who can cause a shared worker to use credentials at runtime.
-
-Set `workers.kubernetes.agentVault.accessGrants` to declaratively grant vault admin access without deployment-specific inline scripts:
-
-```yaml
-workers:
-  backend: kubernetes
-  kubernetes:
-    agentVault:
-      enabled: true
-      cliImage: infisical/agent-vault:<pinned>
-      ownerEmail: owner@example.test
-      accessGrants:
-        enabled: true
-        grants:
-          - email: maintainer@example.com
-            workerScope: shared
-            agent: example-agent
-            role: admin
-          - email: user@example.com
-            workerScope: user_agent
-            requester: "@user:example.com"
-            agent: example-agent
-            role: admin
-          - email: user@example.com
-            workerScope: user
-            requester: "@user:example.com"
-            role: admin
-```
-
-The chart renders no access-grant resources by default.
-When access grants are enabled and at least one grant is configured, the chart renders a Job that runs `python -m mindroom.agent_vault_access_grants apply` from the MindRoom image.
-The helper resolves worker keys and vault names through MindRoom's worker-routing code, creates or joins the vault when needed, and grants the configured email the `admin` role.
-The helper is idempotent, so running it again with the same grants changes nothing.
-If an email has not registered and verified in Agent Vault yet, the helper reports a warning and the grant can be applied again after registration.
-
-For `workerScope: shared`, `agent` is required and `requester` must be omitted.
-For `workerScope: user_agent`, both `requester` and `agent` are required.
-For `workerScope: user`, `requester` is required and `agent` must be omitted because the worker key is per-user, not per-agent.
-The initial supported role is `admin`.
-If your deployment sets `CUSTOMER_ID` or `ACCOUNT_ID` for tenant-specific worker keys, set `accessGrants.tenantId` or `accessGrants.accountId` to the same value.
-When `agentVault.bootstrap.enabled` is true, the bootstrap Job publishes the owner-role admin token Secret used by the access-grant Job.
-If `accessTool` and `accessGrants` use the same admin-token Secret name, configure the same key for both or use different Secret names.
-When bootstrap is disabled, provide `accessGrants.adminTokenSecret` yourself.
-
-`workers.kubernetes.agentVault.jobNaming` controls how the access-grant and bootstrap Jobs run again.
-With the default `fixed`, both Jobs keep stable names and the access-grant Job is a Helm `post-install,post-upgrade` hook, so `helm install` and `helm upgrade` replace and rerun it.
-The bootstrap Job is not a hook, so changing its pod template requires deleting the finished Job first, even with `helm upgrade`.
-Workflows that apply rendered manifests, such as `kubectl kustomize --enable-helm` followed by `kubectl apply`, ignore Helm hook annotations, and Job pod templates are immutable.
-With `fixed`, those workflows fail to apply a changed grant list or pod template until the old Job is deleted, and do not rerun an existing Job otherwise.
-Set `jobNaming: contentHash` for those workflows.
-The chart then drops the hook and appends a hash of each Job's rendered pod spec to the Job name.
-The access-grant Job's pod spec includes its grant config, so each access-grant Job applies the grants it was created for.
-Applying changed inputs creates a new Job, and applying unchanged inputs leaves the existing Job alone.
-In either mode, a chart upgrade that changes only the chart or app version keeps both Job names and pod templates, while changed inputs still get a new `contentHash` name.
-Finished Jobs are deleted after 24 hours by `ttlSecondsAfterFinished`, so the first apply after that runs the idempotent Job again.
-To rerun a Job with unchanged inputs, for example after a grant recipient registers, delete it by label and apply again with `kubectl delete job -l app.kubernetes.io/component=agent-vault-access-grants`.
-To remove grants ConfigMaps that older chart versions left in the namespace, run `kubectl delete configmap -l app.kubernetes.io/component=agent-vault-access-grants` once.
 
 ## Background Script Gateway
 
@@ -816,6 +640,119 @@ The isolation attestation relies on the chart's worker egress NetworkPolicy, so 
 Keep `egressProxy.networkPolicy.extraEgress` and the egress proxy allowlist from opening the control-plane API port or the main runtime Service to workers.
 The Service is separate from the main runtime Service so `service.type` never exposes the gateway port outside the cluster.
 See [Background Python Scripts](../../../docs/tools/background-scripts.md#worker-and-network-requirements) for the script tool, its gateway contract, and run lifecycle.
+
+## Egress Broker
+
+The egress broker lets agents call authenticated HTTP APIs from Kubernetes workers without the worker ever holding the credential.
+The primary runs the broker on its own port, workers send their traffic through it, and it injects the stored credential for the matching service.
+For configuration, secret management, and error codes, see [Agent Keys](../../../docs/deployment/egress-broker.md).
+
+The chart supports direct and chain modes:
+
+| Mode | Values | Worker to broker | Broker to internet |
+|---|---|---|---|
+| Direct | `egressBroker.enabled` | Worker pod to the `<fullname>-egress-broker` Service to the primary pod | Direct from the primary pod |
+| Direct with an operator proxy | `egressBroker.enabled` and `egressProxy.enabled` | Same, plus an additive worker egress NetworkPolicy for the broker port | Through the operator proxy only when the primary's env sets `HTTPS_PROXY`, `HTTP_PROXY`, and `NO_PROXY`; otherwise direct (see the warning below) |
+| Chain | `egressBroker.enabled` and `approvedEgress.enabled` | Worker to Squid (grant check by pod IP) to the broker as Squid's parent | Direct from the primary pod |
+
+> [!WARNING]
+> **Direct mode with `egressProxy` bypasses the operator proxy unless the primary uses it.**
+> The broker environment of each `shell` and `python` call of an agent with the `egress_credentials` tool replaces the `HTTP_PROXY` and `HTTPS_PROXY` that `egressProxy.injectWorkerProxyEnv` gives worker pods, so that traffic goes to the broker instead of the operator proxy.
+> The broker then dials from the primary pod: matched hosts always, and unmatched hosts too under the default `unmatched_hosts: passthrough`.
+> Unless the primary's own environment sets `HTTPS_PROXY`, `HTTP_PROXY`, and `NO_PROXY`, that traffic leaves the cluster directly instead of through the operator proxy.
+> Set the operator proxy on the primary through `env.extra`, or set `egress_broker.unmatched_hosts: deny` in the MindRoom config so only the configured services' hosts are reached directly.
+> The broker connects through the operator proxy to the IP address it validated, so the proxy must allow CONNECT to IP addresses on ports 80 and 443.
+> The chart does not enforce either setting yet.
+
+`egressProxy.noProxy` entries do not apply to brokered `shell` and `python` calls, so their requests to other internal hosts go to the broker (through Squid in chain mode), which refuses private addresses with 403 `destination_blocked`.
+
+Set `egressBroker.enabled` to have the primary serve that listener:
+
+```yaml
+workers:
+  backend: kubernetes
+
+egressBroker:
+  enabled: true
+  port: 8768
+  # Optional lifetime of the per-call worker tokens, in seconds.
+  tokenTtlSeconds: ""
+```
+
+The primary container then exposes an `egress-broker` port and gets `MINDROOM_EGRESS_BROKER_PORT`, `MINDROOM_EGRESS_BROKER_HOST=0.0.0.0`, and `MINDROOM_EGRESS_BROKER_URL`, plus `MINDROOM_EGRESS_BROKER_TOKEN_TTL_SECONDS` when `egressBroker.tokenTtlSeconds` is set.
+With `egressBroker.enabled: false` it gets `MINDROOM_EGRESS_BROKER_PORT=off` instead, because MindRoom otherwise starts a loopback broker for shell calls in the primary.
+The URL points workers at a `<fullname>-egress-broker` ClusterIP Service for that port.
+The Service is separate from the main runtime Service so `service.type` never exposes the broker port outside the cluster.
+Workers need no changes: each call carries its own token and CA certificate.
+Worker images must still come from a release that includes the broker; see [Worker images](../../../docs/deployment/egress-broker.md#worker-images).
+When `networkPolicy.create` is true, a `<fullname>-egress-broker` NetworkPolicy admits workers to that port on the control-plane pod.
+When the chart's worker egress NetworkPolicy exists (`egressProxy.enabled` with `egressProxy.networkPolicy.create=true`), a `<fullname>-egress-broker-workers` NetworkPolicy in the worker namespace adds egress from workers to the broker port on the control-plane pod.
+Without that policy workers already have unrestricted egress, so the chart adds no worker rule.
+If `networkPolicy.extraEgress` restricts the primary, allow TCP 80 and 443 to public addresses yourself, because the chart cannot infer that rule.
+The broker runs in the primary: a primary restart interrupts brokered connections in flight, and brokered TLS uses the primary's CPU, so leave room in its resource requests.
+
+With `approvedEgress.enabled` as well, workers keep the approved egress proxy (Squid) as their first hop, so Squid still enforces per-worker grants by pod IP.
+The chart then chains Squid to the broker Service and port: after the normal allowlist or grant check, requests that carry a token go to the broker and tokenless requests egress directly from Squid.
+`MINDROOM_EGRESS_BROKER_URL` is the Squid URL, the broker NetworkPolicy admits only the approved egress pods instead of workers, and no worker egress rule is added.
+Changing `egressBroker.port` rolls the Squid pod.
+
+For signed URLs or other destinations that must skip broker credential injection, set `approvedEgress.parentProxy.bypassDomains`:
+
+```yaml
+approvedEgress:
+  parentProxy:
+    bypassDomains:
+      - downloads.example.test
+      - .objects.example.test
+```
+
+This list defaults to empty and applies only when both `egressBroker` and chart-managed approved egress are enabled.
+An entry without a leading dot matches that exact hostname; a leading dot matches the domain and its subdomains, following [Squid domain ACL syntax](https://www.squid-cache.org/Doc/config/acl/).
+Use ASCII domain names (Punycode for internationalized names), without URL schemes, ports, paths, `*` wildcards, or whitespace; invalid entries fail chart rendering.
+Matching uses the request hostname without reverse DNS lookups.
+Bypass destinations still require the normal allowlist or dynamic grant and remain subject to the proxy's destination and port restrictions.
+Other token-bearing requests continue through the broker.
+Changing the list changes the chart's Squid config checksum and rolls the proxy Deployment automatically.
+
+`egressBroker.enabled` requires `workers.backend=kubernetes`, and `egressBroker.port` must differ from `runtime.apiPort` and `scriptGateway.port`.
+
+### Self-service for users
+
+With the broker on, users without dashboard access manage their own keys, services, account connections, and request log on the personal Connections page at `/connections/egress`; see [Connections pages](../../../docs/deployment/egress-broker.md#connections-pages).
+Users open it from MindRoom Chat (see [Connections portal](../../../docs/connections-portal.md)); to sign them in through a gateway instead, the page needs these settings:
+
+- **Trusted upstream auth.** The gateway in front of the runtime must authenticate users and sign a JWT.
+  Configure it with the `trustedUpstreamAuth` values, and set an HTTPS `MINDROOM_PUBLIC_URL` through `env.extra`, as below.
+- **Routing.** Forward `/connections`, `/connections/*`, `/api/connections`, `/api/connections/*`, and `/api/oauth/*` from the gateway to the runtime Service.
+  Leave `/api/oauth/<provider_id>/client-metadata.json` reachable without signing in, because the authorization server of a remote MCP server that [uses a client ID metadata document](../../../docs/mcp.md#oauth-client-registration) fetches it.
+  The chart creates no ingress.
+- **`MINDROOM_CONNECTIONS_AGENT`.** Set it to a private agent (`private.per: user` or `user_agent`), as in the example, whenever more than one user can sign in through the gateway.
+  Without it, every user the gateway admits gets full dashboard access, whatever `administrators` lists.
+
+```yaml
+trustedUpstreamAuth:
+  enabled: true
+  jwtHeader: X-Trusted-Jwt
+  jwksUrl: https://gateway.example.com/.well-known/jwks.json
+  jwtAudience: mindroom-dashboard
+  jwtIssuer: https://gateway.example.com
+  jwtEmailClaim: email
+  jwtUserIdClaim: sub
+  jwtMatrixUserIdClaim: matrix_user_id
+env:
+  extra:
+    MINDROOM_PUBLIC_URL: "https://assistant.example.org"
+    MINDROOM_CONNECTIONS_AGENT: personal
+```
+
+See [Trusted Upstream Browser Auth](../../../docs/deployment/trusted-upstream-auth.md) for every setting and what the chart checks, the Matrix identity options, and what users outside `administrators` can reach.
+Connecting accounts also needs the providers' [OAuth clients](../../../docs/oauth-framework.md#built-in-providers), and personal GitHub and Atlassian accounts need agents with worker scope `user` or `user_agent` unless the service sets `oauth_on_shared_workers`; see [Personal accounts and shared sandboxes](../../../docs/deployment/egress-broker.md#personal-accounts-and-shared-sandboxes).
+
+## Tailnet SSH
+
+Enable `tailnetSsh.enabled` with the Kubernetes worker backend and set `tailnetSsh.authKeySecret` to a release Secret containing `auth-key`.
+For GitOps or `helm template`, set `tailnetSsh.existingSecret` to a Secret holding the shared listener token (`tailnetSsh.key` defaults to `token`) so offline renders do not rotate it.
+See [Kubernetes Tailnet SSH](../../../docs/tailnet-ssh.md#kubernetes) for setup, release-scoped network policies, and upgrade notes, and [values.yaml](values.yaml) for all chart settings.
 
 ## Matrix Managed Account Authentication
 
@@ -901,9 +838,6 @@ workers:
 - The chart does not create ingress or a Matrix homeserver.
 - Set `networkPolicy.create: true` to restrict control-plane API ingress to known client pods.
 - Containers that run the runtime image default to `securityContext.runAsNonRoot: true`, which the kubelet enforces against the image's numeric uid 1000.
-  The chart-managed Agent Vault server and the bootstrap Job's `bootstrap-owner` container default to `runAsNonRoot: true` with `runAsUser: 65532`, because the `infisical/agent-vault` image names its user (`agentvault`) and the kubelet can only verify a numeric user.
-  A custom image that runs as root, or an Agent Vault image with a different uid, needs matching `securityContext` overrides.
-  The bootstrap Job's `publish-ca` container leaves out `runAsNonRoot` because `kubectlImage` may run as root, so add it to `workers.kubernetes.agentVault.bootstrap.kubectlSecurityContext` for a non-root image or a restricted Pod Security policy.
   The state-storage init container still runs as root for `chown` and `chmod`, and content bundles, the event journal PostgreSQL, and user-supplied containers use the security contexts you set for them.
 - The chart can create PostgreSQL for MindRoom's event journal, or use an external PostgreSQL URL from an existing Secret.
 - Set `workers.sandbox.proxyToken.existingSecret` or `workers.sandbox.proxyToken.value` when sandbox proxying is enabled.
@@ -917,7 +851,7 @@ workers:
 - Set `workers.sandbox.credentialsEncryptionKey.existingSecret` when encrypted credential storage is enabled so the primary runtime receives the Secret-backed key.
 - `workers.backend: static_runner` adds a sandbox-runner sidecar to the runtime pod.
   The sidecar never receives the credentials encryption key, and saved settings for each proxied tool reach it as per-call leases from the primary.
-  From the storage PVC it mounts only the `agents` and `private_instances` directories read-write over its own `sandbox-runner` directory, so agent workspaces persist while the credential store, Matrix state, and the primary's config stay out of reach.
+  From the storage PVC it mounts only the `agents`, `private_instances`, and `shared_directories` directories read-write over its own `sandbox-runner` directory, so agent workspaces and shared directories persist while the credential store, Matrix state, and the primary's config stay out of reach.
   It mounts neither the config ConfigMap nor a file-sourced config; each request carries the allowlisted config fields the runner resolves.
   An init container creates those directories as the runtime user.
 - `workers.backend: kubernetes` lets the runtime create dedicated worker Deployments and Services on demand.

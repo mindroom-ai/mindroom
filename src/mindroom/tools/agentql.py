@@ -71,6 +71,7 @@ def _install_agentql_playwright_stealth_compat(playwright_stealth: ModuleType) -
     config_fields=[
         ConfigField(
             name="api_key",
+            env=("AGENTQL_API_KEY",),
             label="API Key",
             type="password",
             required=False,
@@ -106,7 +107,7 @@ def _install_agentql_playwright_stealth_compat(playwright_stealth: ModuleType) -
         ),
     ],
     dependencies=["agentql", "playwright"],
-    docs_url="https://docs.agno.com/tools/toolkits/web_scrape/agentql",
+    docs_url="https://docs.mindroom.chat/tools/web-scraping-and-browser/#agentql",
     managed_init_args=(ToolManagedInitArg.RUNTIME_PATHS,),
     function_names=("custom_scrape_website", "scrape_website"),
 )

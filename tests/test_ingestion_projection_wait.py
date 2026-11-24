@@ -14,6 +14,7 @@ from nio import TimelineEventProvenance
 from nio.durable import RecordKind, SyncBatch, SyncRecord
 
 from mindroom.event_journal import DeliveryStage
+from mindroom.event_journal.identity import journal_principal_id
 from mindroom.event_journal.matrix_delivery import MatrixDeliveryWorker
 from mindroom.matrix.durable_ingestion import run_ingestion_pump
 from tests.test_bot_ready_hook import _agent_bot
@@ -41,7 +42,7 @@ SENDER = "@alice:example.org"
 
 
 async def _projection_case(store: EventJournalStore) -> tuple[PrincipalStore, dict[str, object], SyncBatch]:
-    principal_id = f"agent@{ACCOUNT_ID}"
+    principal_id = journal_principal_id("agent", ACCOUNT_ID)
     principal = store.principal(principal_id)
     await principal.load_or_create_ingestion_consumer(new_generation=CONSUMER_GENERATION)
     await principal.bind_ingestion_stream(generation=CONSUMER_GENERATION, stream_id=STREAM_ID)
@@ -99,7 +100,7 @@ async def test_pump_waits_for_projection_without_committing_or_spinning(  # noqa
 ) -> None:
     store = journal_database()
     principal, edit, batch = await _projection_case(store)
-    principal_id = f"agent@{ACCOUNT_ID}"
+    principal_id = journal_principal_id("agent", ACCOUNT_ID)
     session = _AdapterSession(batch)
     blocked = asyncio.Event()
     projected = asyncio.Event()
@@ -196,10 +197,7 @@ async def test_bot_projection_wait_reuses_recovery_and_shields_pump_cancellation
         await release.wait()
         return True
 
-    with (
-        patch.object(bot, "_recover_unacknowledged_matrix_deliveries", AsyncMock(side_effect=recover)),
-        patch.object(bot, "_refresh_agent_reply_memberships_if_needed", AsyncMock()) as refresh,
-    ):
+    with patch.object(bot, "_recover_unacknowledged_matrix_deliveries", AsyncMock(side_effect=recover)):
         bot._schedule_delivery_recovery()
         await asyncio.wait_for(entered.wait(), timeout=2)
         recovery_task = bot._delivery_recovery_task
@@ -214,7 +212,6 @@ async def test_bot_projection_wait_reuses_recovery_and_shields_pump_cancellation
             assert not recovery_task.done()
             release.set()
             await asyncio.wait_for(recovery_task, timeout=2)
-            refresh.assert_not_awaited()
         finally:
             release.set()
             waiting.cancel()
@@ -288,7 +285,7 @@ async def test_projected_reaction_settles_while_unrelated_outbox_debt_keeps_retr
             pumping.cancel()
             with suppress(asyncio.CancelledError):
                 await pumping
-            bot._sync_shutting_down = True
+            bot._runtime_view.begin_draining()
             bot._delivery_recovery_wake.set()
             if bot._delivery_recovery_task is not None:
                 await asyncio.wait_for(bot._delivery_recovery_task, timeout=2)
@@ -297,7 +294,7 @@ async def test_projected_reaction_settles_while_unrelated_outbox_debt_keeps_retr
 @pytest.mark.asyncio
 async def test_bot_projection_wait_during_shutdown_retains_owner_until_caller_cancels(tmp_path: Path) -> None:
     bot = _agent_bot(tmp_path)
-    bot._sync_shutting_down = True
+    bot._runtime_view.begin_draining()
     waiting = asyncio.create_task(bot._wait_for_delivery_projection())
     try:
         await asyncio.sleep(0)
@@ -335,7 +332,7 @@ async def test_projection_wait_consumes_prior_pass_without_resetting_active_back
             waiting.cancel()
             with suppress(asyncio.CancelledError):
                 await waiting
-            bot._sync_shutting_down = True
+            bot._runtime_view.begin_draining()
             bot._delivery_recovery_wake.set()
             if bot._delivery_recovery_task is not None:
                 await asyncio.wait_for(bot._delivery_recovery_task, timeout=2)
@@ -356,7 +353,7 @@ async def test_bot_projection_wait_consumes_last_recovery_wake_during_shutdown(t
         waiting = asyncio.create_task(bot._wait_for_delivery_projection())
         try:
             await asyncio.wait_for(entered.wait(), timeout=2)
-            bot._sync_shutting_down = True
+            bot._runtime_view.begin_draining()
             recovery_task = bot._delivery_recovery_task
             assert recovery_task is not None
             recovery_task.cancel()

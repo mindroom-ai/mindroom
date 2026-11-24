@@ -1,333 +1,184 @@
-"""Shared fakes for knowledge-index tests."""
+"""Shared helpers for knowledge-index tests."""
 
 from __future__ import annotations
 
-from itertools import count
-from pathlib import Path
-from threading import Lock
-from typing import TYPE_CHECKING, Any, ClassVar, cast
+import asyncio
+import json
+import sqlite3
+from contextlib import closing
+from dataclasses import replace
+from typing import TYPE_CHECKING, Any
 
 import pytest
-from agno.knowledge.document.base import Document
-from agno.knowledge.embedder.base import Embedder
 
-import mindroom.knowledge.read_proxy as knowledge_read_proxy
-import mindroom.knowledge.refresh_locks as knowledge_refresh_locks
+import mindroom.knowledge.manager as knowledge_manager
+import mindroom.knowledge.refresh_runner as knowledge_refresh_runner
 import mindroom.knowledge.registry as knowledge_registry
-import mindroom.knowledge.utils as knowledge_utils
 from mindroom.config.agent import AgentConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig
 from mindroom.config.main import Config
-from tests.conftest import bind_runtime_paths, test_runtime_paths
+from mindroom.knowledge.collections import open_collection
+from mindroom.knowledge.index_metadata import load_publication, new_publication, save_publication
+from mindroom.knowledge.read_protocol import SOURCE_DIGEST_KEY, SOURCE_MTIME_NS_KEY, SOURCE_PATH_KEY, SOURCE_SIZE_KEY
+from mindroom.knowledge.refresh_runner import _refresh_knowledge_binding
+from mindroom.knowledge.registry import published_index_storage_path
+from mindroom.knowledge.vector_store import CollectionMeta, StoredRow
+from tests.conftest import SETTLE_TIMEOUT_SECONDS, bind_runtime_paths, test_runtime_paths
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Sequence
+    from collections.abc import Callable, Iterator, Mapping, Sequence
+    from pathlib import Path
 
     from mindroom.config.knowledge import KnowledgeGitConfig
+    from mindroom.constants import RuntimePaths
+    from mindroom.knowledge.index_metadata import Publication
     from mindroom.knowledge.indexing_config import IndexingSettings
+    from mindroom.knowledge.manager import KnowledgeManager
+    from mindroom.knowledge.refresh_runner import _RefreshChildResult
+    from mindroom.knowledge.registry import PublishedIndexKey
+    from mindroom.knowledge.vector_store import KnowledgeCollection
+    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
-def validate_where_operands(where: dict[str, Any] | None) -> None:
-    """Reject the ``where`` shapes ChromaDB refuses before it reaches the store.
-
-    Chroma validates an empty ``$in`` operand and raises, so a fake that only
-    filtered records would answer "nothing matched" for a query production
-    cannot issue at all -- and would answer it most convincingly on an empty
-    collection, where no record is ever tested. Checking the operand rather
-    than the records is what makes that case visible.
-    """
-    if not where:
-        return
-    for condition in where.values():
-        if isinstance(condition, dict) and "$in" in condition and not condition["$in"]:
-            msg = "empty $in operand: ChromaDB rejects this before querying the store"
-            raise AssertionError(msg)
+def stored_rows(collection: KnowledgeCollection) -> list[dict[str, Any]]:
+    """Return a collection's rows in insertion order as ``{"id", "content", "metadata"}`` dicts."""
+    with closing(sqlite3.connect(collection.file)) as connection:
+        return [
+            {"id": row_id, "content": document, "metadata": json.loads(metadata)}
+            for row_id, document, metadata in connection.execute(
+                "SELECT id, document, metadata FROM chunks ORDER BY rowid",
+            )
+        ]
 
 
-def metadata_matches(metadata: dict[str, Any], key: str, condition: object) -> bool:
-    """Mirror the subset of ChromaDB ``where`` matching the indexer relies on.
-
-    Only the operators MindRoom actually issues are supported; anything else
-    raises so a new query shape cannot silently pass against the fake.
-    """
-    if isinstance(condition, dict):
-        if "$in" in condition:
-            return metadata.get(key) in condition["$in"]
-        if "$eq" in condition:
-            return metadata.get(key) == condition["$eq"]
-        msg = f"unsupported where condition: {condition!r}"
-        raise AssertionError(msg)
-    return metadata.get(key) == condition
+def row_paths(collection: KnowledgeCollection) -> set[str]:
+    """Return the source paths a collection holds rows for."""
+    return {row["metadata"][SOURCE_PATH_KEY] for row in stored_rows(collection)}
 
 
-def chroma_get_result(
+def published_collection(manager: KnowledgeManager) -> KnowledgeCollection:
+    """Return the collection the manager's base publishes."""
+    publication = load_publication(manager._base_storage_path)
+    assert publication is not None
+    assert publication.collection is not None
+    return open_collection(manager._collections, publication.collection)
+
+
+def publish(
+    key: PublishedIndexKey,
     *,
-    ids: list[str],
-    metadatas: list[dict[str, Any]],
-    include: Sequence[str],
-    documents: list[str] | None = None,
-    embeddings: list[list[float]] | None = None,
-) -> dict[str, Any]:
-    """Shape a Chroma ``get`` result, honoring ``include`` the way Chroma does.
+    collection: str | None,
+    settings: IndexingSettings | None = None,
+    indexed_count: int = 1,
+    source_signature: str = "source-signature",
+    published_revision: str | None = None,
+) -> Publication:
+    """Write a publication for ``key`` the way a refresh child does, and return it."""
+    publication = new_publication(
+        settings=key.indexing_settings if settings is None else settings,
+        collection=collection,
+        indexed_count=indexed_count,
+        source_signature=source_signature,
+        published_revision=published_revision,
+    )
+    save_publication(published_index_storage_path(key), publication)
+    return publication
 
-    Chroma omits whatever was not requested: ``include=[]`` returns
-    ``metadatas: None`` while still returning ids. That asymmetry is the whole
-    reason an existence probe must read ids, so a fake that returned metadatas
-    regardless would let a probe reading them pass in tests while reporting
-    "no vectors" for every file in production.
 
-    ``include`` is required rather than defaulted. Every production caller
-    passes it explicitly, and guessing a default here would model a shape
-    nothing exercises. Asking for a field the caller did not supply raises
-    rather than returning ``None``, so a fake that cannot serve a query shape
-    says so instead of looking like an empty store.
+def collection_meta(settings: Mapping[str, str] | None = None, **changes: Any) -> CollectionMeta:  # noqa: ANN401
+    """Return the state a test collection starts with: building, under ``settings``."""
+    meta = CollectionMeta(
+        settings=dict(settings or {}),
+        stage="building",
+        rebuild=False,
+        revision=None,
+        total_files=0,
+        created_at="2026-01-01T00:00:00+00:00",
+        updated_at="2026-01-01T00:00:00+00:00",
+    )
+    return replace(meta, **changes)
+
+
+def seed_collection(
+    collection: KnowledgeCollection,
+    rows: Sequence[Mapping[str, Any]],
+    *,
+    settings: Mapping[str, str] | None = None,
+) -> None:
+    """Replace a collection with ``rows`` (``content``, ``metadata`` and optional ``id``), each with a one-dimension vector.
+
+    Each source path is claimed at the signature its first row's metadata names, or ``(0, 0, "seeded")``.
     """
-    available: dict[str, list[Any] | None] = {
-        "metadatas": metadatas,
-        "documents": documents,
-        "embeddings": embeddings,
-    }
-    unsupported = set(include) - set(available)
-    if unsupported:
-        msg = f"unsupported include fields: {sorted(unsupported)}"
-        raise AssertionError(msg)
-    absent = [name for name in include if available[name] is None]
-    if absent:
-        msg = f"include asked for fields this fake was not given: {sorted(absent)}"
-        raise AssertionError(msg)
-    return {"ids": ids, **{name: (values if name in include else None) for name, values in available.items()}}
-
-
-_vector_row_ids = count()
-
-
-class _Collection:
-    def __init__(self, name: str) -> None:
-        self._name = name
-
-    def get(
-        self,
-        *,
-        include: Sequence[str],
-        limit: int | None = None,
-        offset: int = 0,
-        where: dict[str, object] | None = None,
-    ) -> dict[str, object]:
-        with _VectorDb.lock:
-            selected_all = list(_VectorDb.collections.get(self._name, []))
-        if where:
-            key, condition = next(iter(where.items()))
-            selected_all = [item for item in selected_all if metadata_matches(item["metadata"], key, condition)]
-        selected = selected_all[offset:] if limit is None else selected_all[offset : offset + limit]
-        return chroma_get_result(
-            ids=[str(item["id"]) for item in selected],
-            metadatas=[dict(item["metadata"]) for item in selected],
-            documents=[str(item["content"]) for item in selected],
-            embeddings=[list(cast("list[float]", item["embedding"])) for item in selected],
-            include=include,
+    collection.create(collection_meta(settings))
+    by_path: dict[str, list[StoredRow]] = {}
+    for index, row in enumerate(rows):
+        metadata = dict(row.get("metadata") or {})
+        metadata.setdefault(SOURCE_PATH_KEY, "seeded.md")
+        by_path.setdefault(metadata[SOURCE_PATH_KEY], []).append(
+            StoredRow(
+                id=str(row.get("id", f"seeded-{index}")),
+                document=str(row["content"]),
+                metadata=metadata,
+                embedding=[1.0],
+            ),
         )
-
-    def add(
-        self,
-        *,
-        ids: list[str],
-        embeddings: list[list[float]],
-        documents: list[str],
-        metadatas: list[dict[str, object]],
-    ) -> None:
-        if not ids:
-            # Chroma rejects an empty write rather than treating it as a no-op.
-            message = "Expected Embeddings to be non-empty list or numpy array, got [] in add."
-            raise ValueError(message)
-        with _VectorDb.lock:
-            _VectorDb.collections.setdefault(self._name, []).extend(
-                {
-                    "id": identifier,
-                    "content": document,
-                    "embedding": list(embedding),
-                    "metadata": dict(metadata),
-                }
-                for identifier, embedding, document, metadata in zip(
-                    ids,
-                    embeddings,
-                    documents,
-                    metadatas,
-                    strict=True,
-                )
-            )
-
-    def delete(self, *, where: dict[str, object]) -> None:
-        key, condition = next(iter(where.items()))
-        with _VectorDb.lock:
-            _VectorDb.collections[self._name] = [
-                item
-                for item in _VectorDb.collections.get(self._name, [])
-                if not metadata_matches(item["metadata"], key, condition)
-            ]
+    for relative_path, path_rows in by_path.items():
+        metadata = path_rows[0].metadata
+        signature = (
+            int(metadata.get(SOURCE_MTIME_NS_KEY, 0)),
+            int(metadata.get(SOURCE_SIZE_KEY, 0)),
+            str(metadata.get(SOURCE_DIGEST_KEY, "seeded")),
+        )
+        collection.write_file(relative_path, signature, path_rows)
 
 
-class _Client:
-    def get_collection(self, name: str) -> _Collection:
-        return _Collection(name)
+class _FakeEmbedder:
+    """Typed stand-in for the configured embedder; every chunk embeds to the same one-dimension vector."""
 
-    def list_collections(self) -> list[str]:
-        with _VectorDb.lock:
-            return sorted(_VectorDb.collections)
+    sends_batches = False
 
+    def embed(self, texts: Sequence[str], *, purpose: str) -> list[list[float]]:
+        _ = purpose
+        return [[1.0] for _text in texts]
 
-class _VectorDb:
-    collections: ClassVar[dict[str, list[dict[str, object]]]] = {}
-    lock: ClassVar[Lock] = Lock()
-
-    def __init__(self, *, collection: str, **_: object) -> None:
-        self.collection_name = collection
-        self.client = _Client()
-
-    def close(self) -> None:
-        """The in-memory fake has no external resources to release."""
-
-    def delete(self) -> bool:
-        with self.lock:
-            self.collections.pop(self.collection_name, None)
-        return True
-
-    def create(self) -> None:
-        with self.lock:
-            self.collections[self.collection_name] = []
-
-    def exists(self) -> bool:
-        with self.lock:
-            return self.collection_name in self.collections
-
-    def search(
-        self,
-        *,
-        query: str,
-        limit: int,
-        filters: dict[str, object] | list[object] | None = None,
-    ) -> list[Document]:
-        _ = (query, filters)
-        with self.lock:
-            items = list(self.collections.get(self.collection_name, []))
-        return [Document(content=str(item["content"]), meta_data=dict(item["metadata"])) for item in items[:limit]]
-
-    async def async_search(
-        self,
-        *,
-        query: str,
-        limit: int,
-        filters: dict[str, object] | list[object] | None = None,
-    ) -> list[Document]:
-        return self.search(query=query, limit=limit, filters=filters)
+    async def aembed(self, texts: Sequence[str], *, purpose: str) -> list[list[float]]:
+        return self.embed(texts, purpose=purpose)
 
 
-class _ReadProxy(_VectorDb):
-    def __init__(
-        self,
-        *,
-        collection_name: str,
-        path: str,
-        embedder: Embedder,
-        published_settings: IndexingSettings,
-    ) -> None:
-        self.published_settings = published_settings
-        super().__init__(collection=collection_name, path=path, embedder=embedder)
-
-
-class _Knowledge:
-    def __init__(self, vector_db: _VectorDb | None = None) -> None:
-        self.vector_db = vector_db
-
-    def insert(
-        self,
-        *,
-        path: str,
-        metadata: dict[str, object],
-        upsert: bool,
-        reader: object | None = None,
-    ) -> None:
-        _ = (upsert, reader)
-        with _VectorDb.lock:
-            _VectorDb.collections.setdefault(self.vector_db.collection_name, []).append(
-                {
-                    "id": f"row-{next(_vector_row_ids)}",
-                    "content": Path(path).read_text(encoding="utf-8"),
-                    "embedding": [1.0],
-                    "metadata": dict(metadata),
-                },
-            )
-
-    async def ainsert(
-        self,
-        *,
-        path: str,
-        metadata: dict[str, object],
-        upsert: bool,
-        reader: object | None = None,
-    ) -> None:
-        # Match the real Knowledge surface: ainsert delegates to insert.
-        self.insert(path=path, metadata=metadata, upsert=upsert, reader=reader)
-
-    def remove_vectors_by_metadata(self, metadata: dict[str, object]) -> bool:
-        with _VectorDb.lock:
-            items = _VectorDb.collections.get(self.vector_db.collection_name, [])
-            filtered = [
-                item for item in items if not all(item["metadata"].get(key) == value for key, value in metadata.items())
-            ]
-            _VectorDb.collections[self.vector_db.collection_name] = filtered
-        return len(filtered) != len(items)
-
-    def search(self, query: str, max_results: int | None = None) -> list[Document]:
-        return self.vector_db.search(query=query, limit=max_results or 5)
-
-
-class _FakeEmbedder(Embedder):
-    """Typed stand-in for the configured embedder; never issues requests."""
-
-    def get_embedding(self, text: str) -> list[float]:
-        _ = text
-        msg = "fake embedder must not be asked for vectors"
-        raise AssertionError(msg)
-
-    def get_embedding_and_usage(self, text: str) -> tuple[list[float], dict[str, object] | None]:
-        _ = text
-        msg = "fake embedder must not be asked for vectors"
-        raise AssertionError(msg)
+def install_knowledge_embedder(monkeypatch: pytest.MonkeyPatch, build: Callable[..., object]) -> None:
+    """Build every knowledge embedder with ``build``, and drop the read handles built before."""
+    monkeypatch.setattr(knowledge_manager, "create_configured_embedder", build)
+    monkeypatch.setattr(knowledge_registry, "create_configured_embedder", build)
+    knowledge_registry._published_indexes.clear()
 
 
 @pytest.fixture
 def patch_vector_store(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """Use an in-memory vector store for published knowledge index tests."""
-    _VectorDb.collections = {}
-    monkeypatch.setattr("mindroom.knowledge.manager.ChromaDb", _VectorDb)
-    monkeypatch.setattr("mindroom.knowledge.collections.ChromaDb", _VectorDb)
-    monkeypatch.setattr("mindroom.knowledge.manager.Knowledge", _Knowledge)
-    monkeypatch.setattr("mindroom.knowledge.collections.Knowledge", _Knowledge)
-    monkeypatch.setattr(
-        "mindroom.knowledge.manager.create_configured_embedder",
-        lambda *_args, **_kwargs: _FakeEmbedder(),
-    )
-    monkeypatch.setattr(knowledge_read_proxy, "ChromaReadProxy", _ReadProxy)
-    monkeypatch.setattr(
-        knowledge_read_proxy,
-        "collection_exists",
-        lambda _path, collection: _VectorDb(collection=collection).exists(),
-    )
-    monkeypatch.setattr("mindroom.knowledge.registry.StrictSearchKnowledge", _Knowledge)
-    monkeypatch.setattr(
-        "mindroom.knowledge.registry.create_configured_embedder",
-        lambda *_args, **_kwargs: _FakeEmbedder(),
-    )
-    knowledge_registry._published_indexes.clear()
-    knowledge_utils._refresh_scheduled_at.clear()
-    knowledge_refresh_locks._refresh_locks.clear()
-    knowledge_refresh_locks._active_refresh_counts.clear()
+    """Index and search with a fake embedder; vectors go to the real SQLite store under each test's storage root."""
+    install_knowledge_embedder(monkeypatch, lambda *_args, **_kwargs: _FakeEmbedder())
     yield
     knowledge_registry._published_indexes.clear()
-    knowledge_utils._refresh_scheduled_at.clear()
-    knowledge_refresh_locks._refresh_locks.clear()
-    knowledge_refresh_locks._active_refresh_counts.clear()
-    _VectorDb.collections = {}
+
+
+async def run_refresh_child_in_process(
+    key: PublishedIndexKey,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    execution_identity: ToolExecutionIdentity | None,
+    force_reindex: bool,
+) -> _RefreshChildResult:
+    """Run the refresh child's job in this process, reporting an exception as the child's entry point does."""
+    try:
+        return await _refresh_knowledge_binding(
+            key.base_id,
+            config=config,
+            runtime_paths=runtime_paths,
+            execution_identity=execution_identity,
+            force_reindex=force_reindex,
+        )
+    except Exception as exc:
+        return knowledge_refresh_runner._failed_child_result(exc)
 
 
 def _config(
@@ -336,6 +187,7 @@ def _config(
     bases: dict[str, Path],
     agent_bases: list[str],
     git_configs: dict[str, KnowledgeGitConfig] | None = None,
+    poll_intervals: dict[str, int] | None = None,
     watch: bool = False,
     modes: dict[str, str] | None = None,
     memory: dict[str, object] | None = None,
@@ -351,6 +203,7 @@ def _config(
                     path=str(path),
                     watch=watch,
                     git=(git_configs or {}).get(base_id),
+                    poll_interval_seconds=(poll_intervals or {}).get(base_id),
                     mode=(modes or {}).get(base_id, "semantic"),
                 )
                 for base_id, path in bases.items()
@@ -358,3 +211,13 @@ def _config(
         ),
         runtime_paths,
     )
+
+
+async def _wait_until(condition: Callable[[], object], failure: str) -> None:
+    """Poll `condition` until it holds, and fail with `failure` if the settle deadline passes first."""
+    try:
+        async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+            while not condition():  # noqa: ASYNC110 - the states polled here are plain attributes
+                await asyncio.sleep(0.01)
+    except TimeoutError:
+        pytest.fail(failure)

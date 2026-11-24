@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     config_fields=[
         ConfigField(
             name="api_key",
+            env=("BROWSERBASE_API_KEY",),
             label="API Key",
             type="password",
             required=False,
@@ -32,6 +33,7 @@ if TYPE_CHECKING:
         ),
         ConfigField(
             name="project_id",
+            env=("BROWSERBASE_PROJECT_ID",),
             label="Project ID",
             type="text",
             required=False,
@@ -39,6 +41,7 @@ if TYPE_CHECKING:
         ),
         ConfigField(
             name="base_url",
+            env=("BROWSERBASE_BASE_URL",),
             label="Base URL",
             type="url",
             required=False,
@@ -95,7 +98,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["browserbase", "playwright"],
-    docs_url="https://docs.agno.com/tools/toolkits/web_scrape/browserbase",
+    docs_url="https://docs.mindroom.chat/tools/web-scraping-and-browser/#browserbase",
     function_names=(
         "aclose_session",
         "aget_page_content",

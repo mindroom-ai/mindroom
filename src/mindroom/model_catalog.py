@@ -37,6 +37,8 @@ class ModelCatalogEntry(TypedDict):
     provider: str
     id: str
     icon_url: NotRequired[str]
+    reasoning_levels: NotRequired[list[str]]
+    reasoning_default: NotRequired[str]
 
 
 def _matrix_uri(value: str) -> bool:
@@ -147,6 +149,9 @@ class ModelCatalog:
             icon = await self._icon(model.icon, key)
             if icon is not None:
                 entry["icon_url"] = icon
+            if model.reasoning is not None:
+                entry["reasoning_levels"] = list(model.reasoning.levels)
+                entry["reasoning_default"] = model.reasoning.default
             entries.append(entry)
         serialized = json.dumps(entries, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
         return entries, hashlib.sha256(serialized).hexdigest()

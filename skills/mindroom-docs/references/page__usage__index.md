@@ -2,7 +2,7 @@
 
 MindRoom records content-free token usage for agent and team replies, realtime voice calls, and the [helper and internal AI work](#token-usage) listed below, plus call duration for GPT-Live voice calls.
 View it in the dashboard [Usage tab](#dashboard-usage-tab), fetch it over [HTTP](#usage-report-api) for reporting or cost tools, or let agents read it with the [`usage_stats`](#usage_stats) tool.
-Reports show retained usage, not estimated spend or a billing ledger.
+Reports show retained usage, not estimated spend or a billing ledger; to cap spend per user, see [Budgets](https://docs.mindroom.chat/budgets/).
 
 ## Dashboard Usage Tab
 
@@ -43,11 +43,14 @@ Helper work adds tokens without adding runs, including retries and rejected outp
 | `run` | Ordinary agent or team reply |
 | `compaction_summary` | Conversation compaction summaries |
 | `memory_auto_flush` | Background memory auto-flush extraction |
+| `memory_extraction` | Mem0 memory extraction from conversations, the `memory` tool, and voice-call transcripts, when its LLM provider reports tokens; a team's conversation memory is reported under `system:internal` |
 | `dynamic_workflow` | Dynamic Workflow `room_agent` participants; a `subagent` participant's tokens appear under its calling agent |
 | `claude_agent` | Each Claude Code turn run by the `claude_agent` tool, for its main conversation's responses but not the subagents it starts or requests Claude Code makes for itself, such as compaction summaries and session titles; it appears in totals but not in request rows |
 | `skill_learning` | Automatic [skill reviews](https://docs.mindroom.chat/skills/) |
+| `knowledge_graph` | Fact extraction for the [knowledge graph](https://docs.mindroom.chat/knowledge-graph/) |
+| `listening` | Silent turns of a [listening agent](https://docs.mindroom.chat/configuration/agents/#listening), which no requester asked for |
 | `realtime_voice` | Speech-model tokens of a realtime voice call, one request per response |
-| `routing`, `room_topic`, `schedule_parse`, `team_mode`, `thread_summary`, `voice_normalization`, `voice_transcription` | Internal AI work, reported under the entity `system:internal` |
+| `routing`, `room_topic`, `schedule_parse`, `team_mode`, `thread_summary`, `voice_dictation`, `voice_normalization`, `voice_transcription`, `call_transcript` | Internal AI work, reported under the entity `system:internal`; `voice_dictation` is streaming composer dictation, and `call_transcript` is the speech-to-text and notes of transcribed calls between people |
 
 Helpers are attributed to the conversation and requester that triggered them, and stay unattributed when no requester is known.
 `system:internal` usage has no human requester, appears only in organization reports, and transcription is counted only when the provider reports tokens.
@@ -65,6 +68,17 @@ Usage from session history that predates usage tracking is imported once at star
 `unavailable_sources` counts sources with missing, unreadable, or incomplete data; it is not a missing-token percentage.
 Because of these gaps, model, user, and daily rows do not necessarily sum to the top-level totals.
 Totals support cost estimates, but provider-specific charging rules and calls outside retained storage are not captured.
+
+## Reply Cost
+
+With [prices](https://docs.mindroom.chat/configuration/models/#model-config-fields) set on a model, each agent or team reply that uses it records its cost in USD, priced the same way as [budget spend](https://docs.mindroom.chat/budgets/#how-spend-is-counted).
+In MindRoom Chat, open **Reply details** from a reply's ⓘ button or message menu to see its cost and the conversation's cost up to that reply.
+A reply's cost covers every model call made within the reply, including team members on other models and [native compaction](https://docs.mindroom.chat/configuration/history/#native-compaction).
+Separate helper work, such as text compaction summaries, memory-backend extraction, and thread titles, is left out of it but still counts toward budgets.
+The subagents whose results the reply received, including the subagents those ran, have their cost recorded beside the reply's own; a background subagent counts on the reply that waited for or collected its result, and one whose result is never read counts on no reply.
+The conversation cost adds up the replies MindRoom Chat has loaded and reads "at least" while older messages are not loaded.
+A regenerated reply shows the cost of its latest run only.
+Replies on models without prices, and replies that report no token usage, show no cost.
 
 ## Usage Report API
 
@@ -103,7 +117,7 @@ Every completed report includes `schema_version: 1` and `generated_at`, the UTC 
 Each `breakdown` row has session `totals`, `session_count`, and `cumulative_model_breakdown`, plus `retained_run_totals`, `run_count`, and a `user_breakdown` showing which requesters used that agent or team.
 Requester totals sum to `retained_run_totals`, which can differ from the cumulative session `totals`.
 
-`cumulative_model_breakdown` comes from per-model totals stored with each session, so it includes compacted history still in retained sessions but has no dates or requesters.
+`cumulative_model_breakdown` splits each session's `totals` by the models that produced them, so it includes compacted history still in retained sessions but has no dates or requesters.
 A session using several models counts once in each model's `session_count`.
 
 ### Daily Rows
@@ -156,16 +170,17 @@ Counter values can change between reports as coverage improves.
 `GET /api/usage/me/private-agents` returns the signed-in user's usage across their own private agents, with the same rows as `get_my_private_usage()` but without `user_id` or `user_breakdown`.
 The only accepted query parameter is `include_daily` (default `false`); any other parameter returns `400` `Usage target overrides are not accepted`.
 
-The endpoint requires [strict JWT mode](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#strict-jwt-mode) with a verified Matrix identity, like the [Connections portal](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#connections-portal).
+The endpoint requires [trusted upstream auth](https://docs.mindroom.chat/deployment/trusted-upstream-auth/) with a [Matrix identity](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#matrix-identity).
+A [Connections portal](https://docs.mindroom.chat/connections-portal/) session from MindRoom Chat does not authorize it.
 Without it, requests fail with `403` `Personal APIs require trusted signed authentication` or `Personal APIs require a verified Matrix identity`; an API key alone cannot select a user.
 Any signed-in user can call it, and it grants no administrator or export access.
 
 ## Usage Export Service
 
-Strict JWT deployments can let a collector service call `GET /api/usage/export` without giving it a browser or administrator identity.
+Deployments with trusted upstream auth can let a collector service call `GET /api/usage/export` without giving it a browser or administrator identity.
 The route returns the same report, parameters, and polling behavior as [`GET /api/usage`](#usage-report-api).
 
-Configure [trusted-upstream strict JWT mode](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#strict-jwt-mode), including `MINDROOM_TRUSTED_UPSTREAM_USER_ID_HEADER`, then add a dedicated service audience and client ID:
+Configure [trusted upstream auth](https://docs.mindroom.chat/deployment/trusted-upstream-auth/#setup), then add a dedicated service audience and client ID:
 
 ```bash
 MINDROOM_USAGE_SERVICE_JWT_AUDIENCE=mindroom-usage-export
@@ -174,12 +189,13 @@ MINDROOM_USAGE_SERVICE_CLIENT_ID=usage-export-client.example.org
 
 The service sends its assertion in the trusted-upstream JWT header on every request, including polls.
 The assertion must be signed with `RS256` by the trusted-upstream issuer and JWKS, and contain valid `exp`, `iat`, `iss`, and `aud` claims, where `aud` is `MINDROOM_USAGE_SERVICE_JWT_AUDIENCE` rather than the browser audience.
-It must also contain `type=app`, `common_name` exactly equal to `MINDROOM_USAGE_SERVICE_CLIENT_ID`, and an empty `sub`.
+It must also contain `type=app` and `common_name` exactly equal to `MINDROOM_USAGE_SERVICE_CLIENT_ID`, and its `sub` must be empty or absent.
 
 | Status | Meaning |
 | --- | --- |
-| `503` `Usage export service authentication is not configured` | Trusted-upstream auth, a strict-JWT setting, or a service setting is missing |
-| `401` `Invalid usage service JWT` | Missing or invalid assertion |
+| `503` `Usage export service authentication is not configured` | Trusted upstream auth, one of its JWT settings, or a service setting is missing |
+| `401` `Invalid usage service JWT` | Invalid assertion; a `Service JWT rejected` or `Trusted upstream JWT rejected` warning in the MindRoom log names the failed check |
+| `401` `Missing trusted upstream JWT header: <header>` | The request carried no assertion |
 
 A service assertion authorizes only `/api/usage/export`, not `/api/usage`, personal usage, configuration, or other administrator routes.
 
@@ -203,6 +219,8 @@ agents:
     tools:
       - usage_stats
 ```
+
+`mindroom config init` and newly provisioned hosted instances give the starter Mind agent these self-service functions.
 
 Enable `get_all_usage()` with the per-agent `admin_scope` option (boolean, default `false`), which cannot be set in `defaults.tools`:
 

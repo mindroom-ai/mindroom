@@ -7,16 +7,7 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True, slots=True)
 class RefreshOutcome:
-    """What one ``KnowledgeManager.reindex_all`` call actually did.
-
-    Three outcomes are possible, so ``published`` and ``error`` are
-    independent facts rather than two views of one flag:
-
-    * **published** -- a candidate matching the source became the published
-      index.
-    * **no-op** -- the base builds no vectors (``mode`` is not ``semantic``),
-      so there was nothing to publish and nothing failed.
-    * **failed** -- the pass could not publish, and ``error`` says why.
+    """What one ``KnowledgeManager.reindex_all`` call actually did: it published, or it failed and says why.
 
     ``error`` is already credential-redacted and is safe to persist or show.
     """
@@ -25,6 +16,5 @@ class RefreshOutcome:
     indexed_count: int
     #: Whether this pass swapped a complete candidate in as the published index.
     published: bool
-    #: Why this refresh failed, or ``None`` when nothing failed. ``None`` does
-    #: not imply a publication -- a non-semantic base reports neither.
+    #: Why this refresh failed, or ``None`` when it published.
     error: str | None

@@ -3,15 +3,16 @@
 from __future__ import annotations
 
 import time
-from collections.abc import Sequence  # noqa: TC003
+from collections.abc import Mapping, Sequence  # noqa: TC003
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
-from mindroom.attachment_ids import merge_attachment_ids
-from mindroom.attachment_media import attachment_records_to_media, resolve_scoped_attachments
-from mindroom.attachments import (
+from mindroom.attachments.ids import merge_attachment_ids
+from mindroom.attachments.media import attachment_records_to_media, resolve_scoped_attachments
+from mindroom.attachments.storage import (
     format_attachments_prompt,
     format_voice_transcript_attachment_guidance,
+    parent_attachment_refs_in_history,
     parse_attachment_ids_from_thread_history,
     register_matrix_media_attachment,
     register_thread_history_media_attachments,
@@ -31,7 +32,9 @@ from mindroom.matrix.media import (
     is_image_message_event,
     is_matrix_media_dispatch_event,
 )
-from mindroom.matrix.message_content import is_v2_sidecar_text_preview
+from mindroom.matrix.message_content import resolve_event_source_content
+from mindroom.matrix.sidecar_content import holds_unresolved_sidecar
+from mindroom.matrix.thread_forks import fork_parent_scopes
 from mindroom.media_inputs import MediaInputs
 from mindroom.runtime_protocols import SupportsClientConfigMemberships  # noqa: TC001
 from mindroom.timing import emit_elapsed_timing
@@ -42,9 +45,9 @@ if TYPE_CHECKING:
 
     import nio
     import structlog
-    from agno.media import Image
 
     from mindroom.constants import RuntimePaths
+    from mindroom.llm.media import Image
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 
 
@@ -52,7 +55,7 @@ if TYPE_CHECKING:
 class TextNormalizationRequest:
     """One inbound text-like event to normalize."""
 
-    event: nio.RoomMessageFormatted | PreparedIngress
+    event: nio.RoomMessageFormatted | FileMessageEvent | PreparedIngress
 
 
 @dataclass(frozen=True)
@@ -189,7 +192,7 @@ class InboundTurnNormalizer:
                         },
                     },
                     server_timestamp=request.event.server_timestamp,
-                    source_kind_override=VOICE_SOURCE_KIND,
+                    payload_trusted=True,
                 ),
             )
 
@@ -222,32 +225,14 @@ class InboundTurnNormalizer:
                     server_timestamp=request.event.server_timestamp
                     if isinstance(request.event.server_timestamp, int)
                     else None,
-                    source_kind_override=VOICE_SOURCE_KIND,
+                    payload_trusted=True,
                 ),
             )
 
-    async def prepare_file_sidecar_text_event(
-        self,
-        event: FileMessageEvent,
-    ) -> PreparedIngress | None:
-        """Return a prepared text event when a file event is really a long-text preview."""
-        if not is_v2_sidecar_text_preview(event.source):
-            return None
-
-        resolved_source, body = await resolve_visible_event_source(
-            event.source,
-            self._client(),
-            fallback_body=event.body,
-            config=self.deps.runtime.config,
-            runtime_paths=self.deps.runtime_paths,
-        )
-        return PreparedIngress(
-            sender=event.sender,
-            event_id=event.event_id,
-            body=body,
-            source=resolved_source,
-            server_timestamp=event.server_timestamp if isinstance(event.server_timestamp, int) else None,
-        )
+    async def long_text_content(self, preview: Mapping[str, Any]) -> Mapping[str, Any]:
+        """Return the whole content a long-text preview stands for, or none of it while its file cannot be read."""
+        content = (await resolve_event_source_content({"content": dict(preview)}, self._client()))["content"]
+        return {} if holds_unresolved_sidecar(content) else content
 
     async def register_routed_attachment(
         self,
@@ -366,12 +351,28 @@ class InboundTurnNormalizer:
             else []
         )
         history_attachment_ids = parse_attachment_ids_from_thread_history(request.thread_history)
+        # A fork's turn may use the attachments of its parents' messages it shows, registered in those scopes.
+        parent_scopes = (
+            fork_parent_scopes(request.thread_history, request.media_thread_id, room_id=request.room_id)
+            if request.media_thread_id is not None
+            else frozenset()
+        )
+        parent_refs = (
+            parent_attachment_refs_in_history(
+                request.thread_history,
+                room_id=request.room_id,
+                parent_scopes=parent_scopes,
+            )
+            if parent_scopes
+            else ()
+        )
         history_media_attachment_ids = await register_thread_history_media_attachments(
             self._client(),
             self.deps.storage_path,
             room_id=request.room_id,
             thread_id=request.media_thread_id,
             thread_history=request.thread_history,
+            parent_scopes=parent_scopes,
         )
         trusted_current_attachment_ids = merge_attachment_ids(request.trusted_current_attachment_ids)
         attachment_ids = merge_attachment_ids(
@@ -379,6 +380,7 @@ class InboundTurnNormalizer:
             thread_attachment_ids,
             history_attachment_ids,
             history_media_attachment_ids,
+            [attachment_id for _, _, attachment_id in parent_refs],
         )
         scoped_attachment_ids = [
             attachment_id for attachment_id in attachment_ids if attachment_id not in trusted_current_attachment_ids
@@ -388,7 +390,20 @@ class InboundTurnNormalizer:
             scoped_attachment_ids,
             room_id=request.room_id,
             thread_id=request.media_thread_id,
+            parent_scopes=parent_scopes,
         )
+        if parent_scopes:
+            parent_ref_set = frozenset(parent_refs)
+            scoped_records = [
+                record
+                for record in scoped_records
+                if (record.room_id == request.room_id and record.thread_id == request.media_thread_id)
+                or (
+                    record.room_id is not None
+                    and record.thread_id is not None
+                    and (record.room_id, record.thread_id, record.attachment_id) in parent_ref_set
+                )
+            ]
         trusted_records = (
             resolve_scoped_attachments(self.deps.storage_path, trusted_current_attachment_ids)
             if trusted_current_attachment_ids

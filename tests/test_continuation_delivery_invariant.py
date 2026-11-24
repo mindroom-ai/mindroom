@@ -1,6 +1,6 @@
 """A turn that runs the model more than once still owes the room one answer.
 
-A dynamic-tool call makes the turn continue: the model runs again with a
+A model switch for the current response makes the turn continue: the model runs again with a
 continuation prompt, and only the last attempt has an answer worth showing.
 The outbox is where that has to hold, and it holds asymmetrically. An
 unattempted ``FINAL`` row is overwritten by whatever comes next, so an early
@@ -13,69 +13,59 @@ durable result forever.
 So these tests drive real multi-attempt turns through ``ResponseRunner``
 against the real journal-backed outbox and a homeserver that deduplicates by
 transaction ID, and watch the outbox calls interleaved with the model runs
-that caused them.
+that caused them. The model is the scripted provider; the switch is the real
+``thread_model`` tool.
 """
 
 from __future__ import annotations
 
-import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field, replace
-from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import nio
 import pytest
-from agno.models.message import Message
-from agno.models.response import ToolExecution
-from agno.run.agent import RunContentEvent, RunOutput, ToolCallCompletedEvent
-from agno.run.team import TeamRunOutput
 
-from mindroom.ai import _PreparedAgentRun
-from mindroom.dynamic_tool_continuation import DYNAMIC_TOOL_CONTINUATION_LIMIT
+from mindroom.config.models import ModelConfig
 from mindroom.event_journal import DeliveryStage
-from mindroom.history.types import PreparedHistoryState
-from mindroom.knowledge.utils import _KnowledgeResolution
-from tests.conftest import unwrap_extracted_collaborator
-from tests.identity_helpers import fixture_entity_matrix_id
+from mindroom.turn_continuation import TURN_CONTINUATION_LIMIT
+from tests.conftest import install_model_providers, unwrap_extracted_collaborator
+from tests.fakes.scripted_model import ScriptedModel, ScriptStep, answer, calls, tool_call
 from tests.response_runner_helpers import _bot, _plain_request, _target
-from tests.test_team_response import _make_test_agent, _make_test_team
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
     from pathlib import Path
 
-    from agno.team import Team as AgnoTeam
-
     from mindroom.bot import AgentBot
     from mindroom.delivery_gateway import DeliveryGateway
     from mindroom.event_journal import (
         DeliveryAcknowledgement,
+        FinalAnswerEnqueue,
         MatrixDelivery,
         MatrixDeliveryView,
         PermanentDeliveryFailure,
         ProjectedEvent,
-        TerminalTurnWrite,
     )
     from mindroom.event_journal.replies import PreparedReplyRow, ReplyRowEnqueue, ReplyRowRequest, ReplyStore
+    from mindroom.llm.provider import ModelRequest, StreamEvent
     from mindroom.response_runner import ResponseRunner
 
 pytestmark = pytest.mark.asyncio
 
 _SOURCE = "$event"
-_INTERMEDIATE = "Loading the tool now."
+# The switch needs a thread to persist its model in.
+_THREAD = "$thread"
+_INTERMEDIATE = "Switching models now."
 _ANSWER = "The real answer."
 
 
-def _load_tool_execution() -> ToolExecution:
-    """Return the dynamic-tool call that forces one more attempt."""
-    return ToolExecution(
-        tool_call_id="call-load",
-        tool_name="load_tool",
-        tool_args={"tool_name": "sleep"},
-        result=json.dumps({"status": "loaded", "tool": "dynamic_tools", "tool_name": "sleep"}),
-        stop_after_tool_call=True,
+def _switch(index: int, *, content: str | None) -> list[ScriptStep]:
+    """Return a turn that switches the current response to the ``large`` model, which forces one more attempt."""
+    return calls(
+        tool_call("switch_thread_model", f"call-switch-{index}", model_name="large", when="after-toolcall"),
+        content=content,
     )
 
 
@@ -133,7 +123,6 @@ class _WatchedOutbox:
         payload: Mapping[str, object],
         result: Mapping[str, object] | None = None,
         edits_event_id: str | None = None,
-        settle_source_event_ids: tuple[str, ...] = (),
         permanent_failure_reason: str | None = None,
     ) -> str | None:
         """Record intent, noting the stage on the timeline first."""
@@ -147,7 +136,33 @@ class _WatchedOutbox:
             payload=payload,
             result=result,
             edits_event_id=edits_event_id,
-            settle_source_event_ids=settle_source_event_ids,
+            permanent_failure_reason=permanent_failure_reason,
+        )
+
+    async def enqueue_final_answer(
+        self,
+        *,
+        delivery_id: str,
+        room_id: str,
+        thread_id: str | None,
+        payload: Mapping[str, object],
+        turn_key: str | None,
+        result: Mapping[str, object] | None = None,
+        event_type: str = "m.room.message",
+        edits_event_id: str | None = None,
+        permanent_failure_reason: str | None = None,
+    ) -> FinalAnswerEnqueue | None:
+        """Record a FINAL answer and its handoff, noting the stage on the timeline first."""
+        self.timeline.append(f"enqueue:{DeliveryStage.FINAL.value}")
+        return await self.inner.enqueue_final_answer(
+            delivery_id=delivery_id,
+            room_id=room_id,
+            thread_id=thread_id,
+            payload=payload,
+            turn_key=turn_key,
+            result=result,
+            event_type=event_type,
+            edits_event_id=edits_event_id,
             permanent_failure_reason=permanent_failure_reason,
         )
 
@@ -228,7 +243,7 @@ class _WatchedOutbox:
         stage: DeliveryStage,
         event_id: str,
         delivered_projections: tuple[ProjectedEvent, ...],
-        terminal_turn: TerminalTurnWrite | None = None,
+        terminal_response_event_id: str | None = None,
     ) -> DeliveryAcknowledgement:
         """Record the Matrix event one claimed delivery produced, and the turn it completes."""
         return await self.inner.acknowledge_matrix_delivery(
@@ -236,7 +251,7 @@ class _WatchedOutbox:
             stage=stage,
             event_id=event_id,
             delivered_projections=delivered_projections,
-            terminal_turn=terminal_turn,
+            terminal_response_event_id=terminal_response_event_id,
         )
 
     async def unacknowledged_matrix_deliveries(
@@ -282,6 +297,19 @@ def _visible_body(content: Mapping[str, object]) -> str:
 
 
 @dataclass
+class _AttemptingModel(ScriptedModel):
+    """The scripted provider, noting each attempt on the timeline: a request that starts a run, not one a tool answered."""
+
+    timeline: list[str] = field(default_factory=list)
+
+    async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
+        if request.messages[-1].role != "tool":
+            self.timeline.append("attempt")
+        async for event in super().stream(request):
+            yield event
+
+
+@dataclass
 class _Turn:
     """One turn driven against a real outbox and a deduplicating homeserver."""
 
@@ -296,7 +324,7 @@ class _Turn:
 
     @property
     def attempts(self) -> int:
-        """Return how many times the model actually ran."""
+        """Return how many attempts the turn ran."""
         return self.timeline.count("attempt")
 
     @property
@@ -322,20 +350,25 @@ def _last_answer(delivery: MatrixDelivery | None) -> str:
     return _visible_body(delivery.payload)
 
 
-def _watch(bot: AgentBot, *, streaming: bool) -> _Turn:
-    """Wire one test bot to a watched real outbox and a fake homeserver.
+def _watch(bot: AgentBot, monkeypatch: pytest.MonkeyPatch, turns: list[list[ScriptStep]], *, streaming: bool) -> _Turn:
+    """Wire one test bot to a watched real outbox, a fake homeserver, and the scripted model.
 
     The outbox goes in through the gateway's dependency record rather than by
     patching a method, so every production caller reaches the same store.
     Which driver runs is decided by the requester's presence, exactly as it is
     in production, so ``streaming`` sets that rather than short-circuiting the
-    decision.
+    decision. The agent gets the ``thread_model`` tool and a ``large`` model to
+    switch to; both models are the one scripted provider.
     """
+    bot.config.agents["general"].tools = ["thread_model"]
+    bot.config.models["large"] = ModelConfig(provider="openai", id="large-model")
     runner = unwrap_extracted_collaborator(bot._response_runner)
     gateway: DeliveryGateway = runner.deps.delivery_gateway
     timeline: list[str] = []
     outbox = _WatchedOutbox(inner=gateway.deps.outbox, timeline=timeline)
     object.__setattr__(gateway, "deps", replace(gateway.deps, outbox=outbox))
+    model = _AttemptingModel(turns, timeline=timeline)
+    install_model_providers(monkeypatch, {"default": model, "large": model})
 
     homeserver = _Homeserver()
     bot.client.room_send = AsyncMock(side_effect=homeserver.room_send)
@@ -346,103 +379,59 @@ def _watch(bot: AgentBot, *, streaming: bool) -> _Turn:
     return _Turn(runner=runner, outbox=outbox, homeserver=homeserver, timeline=timeline)
 
 
-def _model_agent() -> MagicMock:
-    """Return an agent stand-in the real preparation path can carry."""
-    agent = MagicMock()
-    agent.model = MagicMock()
-    agent.model.id = "test-model"
-    agent.add_history_to_context = False
-    return agent
-
-
-def _orchestrator_for(bot: AgentBot) -> SimpleNamespace:
-    """Return the orchestrator surface the team driver reads."""
-    return SimpleNamespace(
-        config=bot.config,
-        runtime_paths=bot.runtime_paths,
-        knowledge_managers={},
-        agent_bots={"general": SimpleNamespace(running=True)},
-        knowledge_refresh_scheduler=SimpleNamespace(
-            schedule_refresh=lambda _base_id: None,
-            is_refreshing=lambda _base_id: False,
-        ),
-        hook_matrix_admin=lambda: None,
-        hook_room_state_querier=lambda: None,
-        hook_room_state_putter=lambda: None,
-    )
-
-
-def _prepared(agent: object) -> _PreparedAgentRun:
-    """Return the minimal prepared run the agent drivers need."""
-    return _PreparedAgentRun(
-        agent=agent,  # type: ignore[arg-type]
-        messages=(Message(role="user", content="hello"),),
-        unseen_event_ids=[],
-        prepared_history=PreparedHistoryState(),
-        runtime_model_name="default",
-    )
-
-
-def _runs(timeline: list[str], outputs: list[RunOutput]) -> AsyncMock:
-    """Return a model stand-in that hands back *outputs*, one recorded run each."""
-    remaining = iter(outputs)
-
-    async def run(*_args: object, **_kwargs: object) -> RunOutput:
-        timeline.append("attempt")
-        return next(remaining)
-
-    return AsyncMock(side_effect=run)
-
-
-async def _run_blocking_agent_turn(tmp_path: Path, outputs: list[RunOutput]) -> _Turn:
-    """Drive one blocking agent turn whose model produces *outputs* in order."""
-    bot = _bot(tmp_path)
-    # Visible tool calls route the "non-streaming" agent turn through the
-    # collected-stream driver instead; the blocking driver is the one here.
-    bot.config.agents["general"].show_tool_calls = False
-    turn = _watch(bot, streaming=False)
-    agent = _model_agent()
-
-    with (
-        patch("mindroom.ai._prepare_agent_and_prompt", new=AsyncMock(return_value=_prepared(agent))),
-        patch("mindroom.ai.ai_runtime.cached_agent_run", new=_runs(turn.timeline, outputs)),
-    ):
-        await turn.runner.generate_response(_plain_request(_target()))
-    return turn
-
-
-def _one_continuation() -> list[RunOutput]:
-    """Return a dynamic-tool attempt, then the attempt that actually answers.
+def _one_continuation() -> list[list[ScriptStep]]:
+    """Return a model-switch attempt, then the attempt that actually answers.
 
     The first attempt says something of its own, so a driver that delivered it
     would produce a plausible-looking answer rather than an obvious blank --
     the failure a weaker assertion would let through.
     """
-    return [
-        RunOutput(run_id="run-1", content=_INTERMEDIATE, tools=[_load_tool_execution()]),
-        RunOutput(run_id="run-2", content=_ANSWER),
-    ]
+    return [_switch(1, content=_INTERMEDIATE), answer(_ANSWER)]
+
+
+async def _run_non_streaming_agent_turn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    turns: list[list[ScriptStep]],
+) -> _Turn:
+    """Drive one agent turn, delivered without streaming, whose model plays *turns* in order."""
+    bot = _bot(tmp_path)
+    bot.config.agents["general"].show_tool_calls = False
+    turn = _watch(bot, monkeypatch, turns, streaming=False)
+    await turn.runner.generate_response(_plain_request(_target(thread_id=_THREAD)))
+    return turn
 
 
 class TestAgentContinuation:
-    """The blocking agent driver: one answer, from the attempt that produced it."""
+    """An agent turn delivered without streaming: one answer, sent after its last attempt."""
 
-    async def test_one_final_delivery_carries_the_last_attempt(self, tmp_path: Path) -> None:
-        """Two attempts, one `FINAL`, and it holds what the second attempt said."""
-        turn = await _run_blocking_agent_turn(tmp_path, _one_continuation())
+    async def test_one_final_delivery_carries_the_last_attempt(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Two attempts, one `FINAL`, and it holds what the attempts streamed, ending with the second's answer.
 
-        assert turn.attempts == 2, "the dynamic-tool call did not force a second attempt"
+        The collected reply is the text the turn streamed, as a streamed reply shows it: the narration before the
+        tool call, once, then the answer a paragraph below it, where the hidden call sat.
+        """
+        turn = await _run_non_streaming_agent_turn(tmp_path, monkeypatch, _one_continuation())
+
+        assert turn.attempts == 2, "the model switch did not force a second attempt"
         assert turn.timeline.count("enqueue:final") == 1
         assert turn.timeline.count("claim:final") == 1
-        assert _last_answer(await turn.final()) == _ANSWER
+        assert _last_answer(await turn.final()) == f"{_INTERMEDIATE}\n\n{_ANSWER}"
         # A claim is what freezes the payload, so a claim taken while attempts
         # remain is the defect -- not merely an early enqueue.
         assert turn.final_claim_follows_every_attempt
-        assert not turn.room_showed(_INTERMEDIATE)
 
-    async def test_the_placeholder_is_sent_once_not_once_per_attempt(self, tmp_path: Path) -> None:
+    async def test_the_placeholder_is_sent_once_not_once_per_attempt(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         """The `INITIAL` stage belongs to the turn, not to an attempt."""
-        turn = await _run_blocking_agent_turn(tmp_path, _one_continuation())
+        turn = await _run_non_streaming_agent_turn(tmp_path, monkeypatch, _one_continuation())
 
         assert turn.attempts == 2
         assert turn.timeline.count("enqueue:initial") == 1
@@ -453,6 +442,7 @@ class TestAgentContinuation:
     async def test_exhausting_the_continuation_budget_still_delivers_one_final(
         self,
         tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
     ) -> None:
         """A turn that never converges answers with the limit message, once.
 
@@ -460,14 +450,11 @@ class TestAgentContinuation:
         an answer, so it is also where a second `FINAL` -- or one frozen from
         an earlier attempt -- would be easiest to miss.
         """
-        never_converges = [
-            RunOutput(run_id=f"run-{index}", content="", tools=[_load_tool_execution()])
-            for index in range(DYNAMIC_TOOL_CONTINUATION_LIMIT + 1)
-        ]
+        never_converges = [_switch(index, content=None) for index in range(TURN_CONTINUATION_LIMIT + 1)]
 
-        turn = await _run_blocking_agent_turn(tmp_path, never_converges)
+        turn = await _run_non_streaming_agent_turn(tmp_path, monkeypatch, never_converges)
 
-        assert turn.attempts == DYNAMIC_TOOL_CONTINUATION_LIMIT + 1
+        assert turn.attempts == TURN_CONTINUATION_LIMIT + 1
         assert turn.timeline.count("enqueue:final") == 1
         assert turn.timeline.count("claim:final") == 1
         assert turn.final_claim_follows_every_attempt
@@ -477,22 +464,11 @@ class TestAgentContinuation:
 class TestStreamedAgentContinuation:
     """The streamed turn's terminal edit is its one durable delivery."""
 
-    @staticmethod
-    def _streams(timeline: list[str]) -> MagicMock:
-        """Return an `arun` stand-in: narrate, load a tool, then answer."""
-
-        async def first() -> AsyncIterator[object]:
-            timeline.append("attempt")
-            yield RunContentEvent(content=_INTERMEDIATE)
-            yield ToolCallCompletedEvent(tool=_load_tool_execution())
-
-        async def second() -> AsyncIterator[object]:
-            timeline.append("attempt")
-            yield RunContentEvent(content=_ANSWER)
-
-        return MagicMock(side_effect=[first(), second()])
-
-    async def test_one_final_delivery_carries_the_last_attempt(self, tmp_path: Path) -> None:
+    async def test_one_final_delivery_carries_the_last_attempt(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         """The stream edits its placeholder once, after the last attempt.
 
         A streamed attempt writes into the visible message as it goes, so the
@@ -502,84 +478,18 @@ class TestStreamedAgentContinuation:
         outbox freezes and would then be the answer a reader is left with.
         """
         bot = _bot(tmp_path)
-        turn = _watch(bot, streaming=True)
-        agent = _model_agent()
-        agent.arun = self._streams(turn.timeline)
+        turn = _watch(bot, monkeypatch, _one_continuation(), streaming=True)
 
-        with patch("mindroom.ai._prepare_agent_and_prompt", new=AsyncMock(return_value=_prepared(agent))):
-            await turn.runner.generate_response(_plain_request(_target()))
+        await turn.runner.generate_response(_plain_request(_target(thread_id=_THREAD)))
 
-        assert turn.attempts == 2, "the dynamic-tool call did not force a second attempt"
+        assert turn.attempts == 2, "the model switch did not force a second attempt"
         assert turn.timeline.count("enqueue:final") == 1
         assert turn.timeline.count("claim:final") == 1
         assert turn.final_claim_follows_every_attempt
-        answer = _last_answer(await turn.final())
+        answer_body = _last_answer(await turn.final())
         # A streamed attempt's narration is already in the room when the tool
         # call supersedes it, and it stays there: the visible document
-        # accumulates across attempts while the recorder is reset, so the
-        # delivered answer is both attempts' text. That was investigated as a
-        # possible room-versus-history divergence and found not to be one --
-        # the projection stores this exact string, because the terminal edit
-        # carries it and the projection reduces what the room holds.
-        #
-        # Equality rather than `endswith` plus a count, to pin the whole
-        # string. Honest limit: no mutation was found that this kills and the
-        # weaker pair did not, because the reachable ways to change this value
-        # also change the narration's count. Prefixing `finalize`'s
-        # `text_to_send` does not reach it at all.
-        assert answer == _INTERMEDIATE + _ANSWER
-
-
-class TestTeamContinuation:
-    """The team driver continues the same way, and owes the same one answer."""
-
-    @staticmethod
-    def _team(timeline: list[str]) -> AgnoTeam:
-        """Return a team stand-in: one member dynamic-tool load, then the answer."""
-        remaining = iter(
-            [
-                TeamRunOutput(
-                    content=_INTERMEDIATE,
-                    member_responses=[RunOutput(agent_name="GeneralAgent", content="", tools=[_load_tool_execution()])],
-                ),
-                TeamRunOutput(content=_ANSWER),
-            ],
-        )
-
-        async def run(*_args: object, **_kwargs: object) -> TeamRunOutput:
-            timeline.append("attempt")
-            return next(remaining)
-
-        team = _make_test_team()
-        team.arun = AsyncMock(side_effect=run)
-        return team
-
-    async def test_one_final_delivery_carries_the_last_attempt(self, tmp_path: Path) -> None:
-        """A team turn that continues still enqueues exactly one `FINAL`."""
-        bot = _bot(tmp_path)
-        bot.config.agents["general"].show_tool_calls = False
-        bot.orchestrator = _orchestrator_for(bot)
-        turn = _watch(bot, streaming=False)
-        team = self._team(turn.timeline)
-
-        with (
-            patch("mindroom.teams.create_agent", return_value=_make_test_agent("GeneralAgent")),
-            patch("mindroom.teams.resolve_agent_knowledge_access", return_value=_KnowledgeResolution(knowledge=None)),
-            patch("mindroom.teams._create_team_instance", return_value=team),
-        ):
-            await turn.runner.generate_team_response_helper(
-                _plain_request(_target()),
-                team_agents=[fixture_entity_matrix_id("general", "localhost", bot.runtime_paths)],
-                team_mode="coordinate",
-            )
-
-        assert turn.attempts == 2, "the member dynamic-tool call did not force a second attempt"
-        assert turn.timeline.count("enqueue:final") == 1
-        assert turn.timeline.count("claim:final") == 1
-        assert turn.final_claim_follows_every_attempt
-        # The team renders its answer inside a consensus block, so the answer
-        # is looked for inside it -- and the superseded attempt's text is not.
-        answer = _last_answer(await turn.final())
-        assert _ANSWER in answer
-        assert _INTERMEDIATE not in answer
-        assert not turn.room_showed(_INTERMEDIATE)
+        # accumulates across attempts, so the delivered answer holds both
+        # attempts' text, each once.
+        assert answer_body.count(_INTERMEDIATE) == 1
+        assert answer_body.endswith(_ANSWER)

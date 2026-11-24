@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import base64
-import binascii
 import hashlib
 import json
 import re
@@ -12,26 +10,20 @@ import uuid
 from collections.abc import Iterable
 from typing import TYPE_CHECKING, Literal
 
-from cryptography.exceptions import UnsupportedAlgorithm
-from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
-from cryptography.hazmat.primitives.serialization import (
-    Encoding,
-    PublicFormat,
-    load_pem_public_key,
-    load_ssh_public_key,
-)
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from mindroom.authorization import administrators_pass_access
+from mindroom.config.external_trigger_policy import normalize_ed25519_public_key
 from mindroom.config.validation import non_empty_stripped
+from mindroom.delivery_replay import DeliveryReplayStore
 from mindroom.durable_write import write_json_file_durable
-from mindroom.entity_resolution import configured_routable_entity_names_for_room
+from mindroom.entity_resolution import configured_routable_entity_names_for_room, names_room
 from mindroom.entity_rooms import get_rooms_for_entity
 from mindroom.external_triggers.policy import is_external_trigger_administrator
-from mindroom.external_triggers.replay_store import ExternalTriggerReplayStore
 from mindroom.file_locks import advisory_file_lock
 from mindroom.matrix.identity import MatrixID
 from mindroom.matrix.state import resolve_room_id
-from mindroom.requester_identity import is_human_requester_id
+from mindroom.requester_identity import is_human_requester_id, resolve_human_requester_alias
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -41,7 +33,6 @@ if TYPE_CHECKING:
 
 _TRIGGER_ID_PATTERN = r"^[a-zA-Z0-9_-]+$"
 _TRIGGER_RECORDS_VERSION = 1
-_ED25519_PUBLIC_KEY_BYTES = 32
 _EXTERNAL_TRIGGER_STATE_DIR = "external_triggers"
 _TRIGGER_RECORDS_FILENAME = "triggers.json"
 
@@ -59,7 +50,7 @@ class ExternalTriggerTarget(BaseModel):
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
-    room_id: str = Field(description="Configured room key, room alias, or Matrix room ID")
+    room_id: str = Field(description="Configured room key, that room's full alias, or Matrix room ID")
     thread_id: str | None = Field(default=None, description="Optional Matrix thread event ID")
     agent: str = Field(description="Agent or team name to mention")
     new_thread: bool = Field(default=False, description="Whether the trigger starts a new thread")
@@ -238,7 +229,7 @@ class ExternalTriggerStore:
         self._root = runtime_paths.control_state_root / _EXTERNAL_TRIGGER_STATE_DIR
         self._store_path = self._root / _TRIGGER_RECORDS_FILENAME
         self._lock_path = self._root / f"{_TRIGGER_RECORDS_FILENAME}.lock"
-        self._replay_store = ExternalTriggerReplayStore(runtime_paths.control_state_root)
+        self._replay_store = external_trigger_replay_store(runtime_paths.control_state_root)
 
     @property
     def store_path(self) -> Path:
@@ -396,6 +387,14 @@ class ExternalTriggerStore:
         with advisory_file_lock(self._lock_path):
             records = self._read_records()
             record = self._require_owned_record(records, trigger_id, actor_user_id, config)
+            # A new key signs deliveries that run as the trigger's owner, which administrators may not do here.
+            actor = resolve_human_requester_alias(actor_user_id, config, self._runtime_paths)
+            owner = resolve_human_requester_alias(record.owner_user_id, config, self._runtime_paths)
+            if actor != owner and not administrators_pass_access(config, record.target.agent):
+                msg = (
+                    "only its owner can rotate the key of a trigger for a personal or created agent, or a team with one"
+                )
+                raise ExternalTriggerStoreError(msg)
             if record.auth != "ed25519":
                 msg = "only ed25519 trigger keys can be rotated"
                 raise ExternalTriggerStoreError(msg)
@@ -508,7 +507,7 @@ class ExternalTriggerStore:
         return record
 
     def _validate_record_against_config(self, record: ExternalTriggerRecord, config: Config) -> None:
-        _validate_owner(record.owner_user_id, config, self._runtime_paths)
+        require_human_owner(record.owner_user_id, config, self._runtime_paths)
         _validate_target(record, config, self._runtime_paths)
 
     def _read_records(self) -> _SerializedTriggerRecords:
@@ -540,81 +539,32 @@ class ExternalTriggerStore:
             raise ExternalTriggerStoreError(msg) from exc
 
 
+def external_trigger_replay_store(control_state_root: Path) -> DeliveryReplayStore:
+    """Return the replay store for external trigger deliveries, including the shared file older releases wrote."""
+    state_dir = control_state_root / _EXTERNAL_TRIGGER_STATE_DIR
+    return DeliveryReplayStore(root=state_dir / "replay", legacy_shared_file=state_dir / "replay.json")
+
+
 def _replay_scope(record: ExternalTriggerRecord) -> str:
     """Return the replay scope that one trigger's current signing key authenticates."""
     return f"{record.uid}:{record.auth_epoch}"
 
 
-def _validate_trigger_id(trigger_id: str) -> str:
+def _validate_trigger_id(trigger_id: str) -> None:
     """Validate one route-safe trigger id."""
     normalized = non_empty_stripped(trigger_id, field_name="trigger_id")
     if re.fullmatch(_TRIGGER_ID_PATTERN, normalized) is None:
         msg = "trigger_id must contain only ASCII letters, digits, underscore, or hyphen"
         raise ExternalTriggerStoreError(msg)
-    return normalized
 
 
 def _normalize_public_key(public_key: str) -> tuple[str, bytes]:
-    """Normalize one Ed25519 public key to canonical base64 of its raw 32 bytes.
-
-    Accepts raw base64 key bytes, OpenSSH single-line format
-    (``ssh-ed25519 <base64-blob> [comment]``), and PEM SubjectPublicKeyInfo.
-    """
+    """Normalize one Ed25519 public key to canonical base64 of its raw 32 bytes."""
     normalized_input = non_empty_stripped(public_key, field_name="public_key")
-    public_key_bytes = (
-        _public_key_bytes_from_pem(normalized_input)
-        or _public_key_bytes_from_openssh(normalized_input)
-        or _public_key_bytes_from_base64(normalized_input)
-    )
-    if public_key_bytes is None:
-        msg = (
-            "public_key must be an Ed25519 public key as raw base64 (32 key bytes), "
-            "OpenSSH single-line format ('ssh-ed25519 <base64> [comment]'), or PEM SubjectPublicKeyInfo"
-        )
-        raise ExternalTriggerStoreError(msg)
-    return base64.b64encode(public_key_bytes).decode("ascii"), public_key_bytes
-
-
-def _decode_strict_base64(value: str) -> bytes | None:
     try:
-        return base64.b64decode(value, validate=True)
-    except (binascii.Error, ValueError):
-        return None
-
-
-def _public_key_bytes_from_base64(value: str) -> bytes | None:
-    decoded = _decode_strict_base64(value)
-    return decoded if decoded is not None and len(decoded) == _ED25519_PUBLIC_KEY_BYTES else None
-
-
-def _public_key_bytes_from_openssh(value: str) -> bytes | None:
-    parts = value.split()
-    if len(parts) >= 2 and parts[0] == "ssh-ed25519":
-        encoded_key = value.encode("utf-8")
-    elif len(parts) == 1 and _decode_strict_base64(value) is not None:
-        # Accept the bare base64 blob printed as the second OpenSSH field.
-        encoded_key = f"ssh-ed25519 {value}".encode()
-    else:
-        return None
-    try:
-        key = load_ssh_public_key(encoded_key)
-    except (ValueError, UnsupportedAlgorithm):
-        return None
-    return _raw_ed25519_public_key_bytes(key)
-
-
-def _public_key_bytes_from_pem(value: str) -> bytes | None:
-    try:
-        key = load_pem_public_key(value.encode())
-    except (ValueError, UnsupportedAlgorithm):
-        return None
-    return _raw_ed25519_public_key_bytes(key)
-
-
-def _raw_ed25519_public_key_bytes(key: object) -> bytes | None:
-    if not isinstance(key, Ed25519PublicKey):
-        return None
-    return key.public_bytes(Encoding.Raw, PublicFormat.Raw)
+        return normalize_ed25519_public_key(normalized_input)
+    except ValueError as exc:
+        raise ExternalTriggerStoreError(str(exc)) from exc
 
 
 def public_key_fingerprint(public_key: str) -> str:
@@ -627,7 +577,7 @@ def _public_key_fingerprint_from_bytes(public_key_bytes: bytes) -> str:
     return f"sha256:{hashlib.sha256(public_key_bytes).hexdigest()}"
 
 
-def _validate_owner(owner_user_id: str, config: Config, runtime_paths: RuntimePaths) -> None:
+def require_human_owner(owner_user_id: str, config: Config, runtime_paths: RuntimePaths) -> None:
     """Require an external human owner, not a managed bot identity."""
     MatrixID.parse(owner_user_id)
     if not is_human_requester_id(owner_user_id, config, runtime_paths):
@@ -641,6 +591,10 @@ def _validate_target(record: ExternalTriggerRecord, config: Config, runtime_path
     if target.agent not in config.agents and target.agent not in config.teams:
         msg = f"external trigger target references unknown agent or team: {target.agent}"
         raise ExternalTriggerStoreError(msg)
+    # Delivery reads the room through MindRoom's record, so an alias it cannot map would never deliver.
+    if not names_room(config, target.room_id, runtime_paths):
+        msg = "external trigger target room must be a room key MindRoom manages, that room's full alias, or a ! room ID"
+        raise ExternalTriggerStoreError(msg)
     if target.room_id in get_rooms_for_entity(target.agent, config):
         return
     resolved_room_id = resolve_room_id(target.room_id, runtime_paths)
@@ -652,23 +606,24 @@ def _validate_target(record: ExternalTriggerRecord, config: Config, runtime_path
     )
     if target.agent in configured_entities:
         return
-    if _targets_private_current_room(record, config, runtime_paths):
+    # A room with configured responders answers only them, so another agent's trigger there would never be answered.
+    if not configured_entities and _targets_own_current_room(record, config, runtime_paths):
         return
     msg = "external trigger target room must already be configured for the target entity"
     raise ExternalTriggerStoreError(msg)
 
 
-def _targets_private_current_room(
+def _targets_own_current_room(
     record: ExternalTriggerRecord,
     config: Config,
     runtime_paths: RuntimePaths,
 ) -> bool:
-    """Allow private current-agent triggers for dynamic rooms created outside config."""
+    """Allow a private, personal, or created agent's own trigger for the dynamic room it was created in."""
     target = record.target
     if target.agent != record.created_by_agent_name:
         return False
     agent_config = config.agents.get(target.agent)
-    if agent_config is None or agent_config.private is None:
+    if agent_config is None or (agent_config.private is None and config.generated_agent(target.agent) is None):
         return False
     return _room_ids_match(target.room_id, record.created_in_room_id, runtime_paths)
 

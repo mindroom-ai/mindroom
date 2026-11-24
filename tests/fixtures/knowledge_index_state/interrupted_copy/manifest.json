@@ -1,0 +1,11 @@
+{
+  "base_id": "docs",
+  "description": "A candidate holding copied rows whose claims were never recorded.",
+  "docs": {
+    "a.md": "alpha one",
+    "b.md": "bravo one"
+  },
+  "knowledge_path": "/dev/shm/pytest-of-basnijholt/pytest-8778/test_interrupted_copy0/docs",
+  "storage_key": "docs_f64836b2",
+  "storage_root": "/dev/shm/pytest-of-basnijholt/pytest-8778/test_interrupted_copy0/mindroom_data"
+}

@@ -13,13 +13,25 @@ import pytest
 from nio.crypto import OlmDevice
 from nio.crypto.device import TrustState
 from PIL import Image
+from structlog.testing import capture_logs
 
-from mindroom.config.models import ModelConfig
-from mindroom.model_catalog_receiver import _MAX_USER_REQUESTS, _Receiver, register_model_catalog_receiver
-from mindroom.room_model_overrides import set_room_model_override
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
+from mindroom.config.access import ResponderAccessConfig
+from mindroom.config.agent import AgentConfig, TeamConfig
+from mindroom.config.main import Config
+from mindroom.config.models import ModelConfig, ReasoningConfig
+from mindroom.entity_resolution import entity_identity_registry
+from mindroom.model_catalog_receiver import (
+    _DEADLINE_SECONDS,
+    _MAX_USER_REQUESTS,
+    _Receiver,
+    register_model_catalog_receiver,
+)
+from mindroom.room_steward import room_poster
 from mindroom.thread_models import set_thread_model_override
-from tests.conftest import runtime_paths_for
-from tests.test_model_selection_scope import ROOM, USER, joined_response, picker_setup
+from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from tests.room_settings_helpers import set_room_model_override
+from tests.test_model_selection_scope import ROOM, USER, joined_response, picker_client, picker_setup, root_event
 from tests.test_olm_to_device import olm_transport
 
 if TYPE_CHECKING:
@@ -48,6 +60,11 @@ def device_request(user_id: str, device_id: str, request_id: str) -> nio.Authent
     return event
 
 
+def dropped(logs: list[dict]) -> list[str]:
+    """Return the reason of each logged drop, in order."""
+    return [entry["reason"] for entry in logs if entry["event"] == "model_catalog_dropped"]
+
+
 def known_devices(devices: dict[str, list[str]]) -> SimpleNamespace:
     """Register each user's devices with keys equal to their device IDs."""
     return SimpleNamespace(
@@ -68,10 +85,10 @@ def receiver_setup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple:
     current = [config]
     register_model_catalog_receiver(
         client=client,
-        agent_name="router",
         runtime_paths=paths,
         config_getter=lambda: current[0],
         membership_index=index,
+        answers_in_room=lambda _room_id: True,
         callback_wrapper=lambda callback: callback,
     )
     callback = client.add_to_device_callback.call_args.args[0]
@@ -82,14 +99,30 @@ def receiver_setup(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple:
 async def test_authenticated_catalog_reply_and_live_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Discovery returns exact allowlisted scope and current inherited model."""
     callback, client, current, sent, _, agent = receiver_setup(tmp_path, monkeypatch)
-    await callback(request())
+    with capture_logs() as logs:
+        await callback(request())
+    [answered] = logs
+    assert answered["event"] == "model_catalog_answered"
+    assert answered["log_level"] == "info"
+    assert answered["model_count"] == 1
+    assert answered["elapsed_ms"] >= 0
+    assert {key: answered[key] for key in ("sender", "sender_device_id", "request_id", "room_id", "thread_id")} == {
+        "sender": USER,
+        "sender_device_id": "REQUESTER",
+        "request_id": "request-1",
+        "room_id": ROOM,
+        "thread_id": "$root",
+    }
     reply = sent.call_args.kwargs
     assert reply["event_type"] == "io.mindroom.models.response"
     assert sent.call_args.args[1].device_id == "REQUESTER"
     content = reply["content"]
     assert content["agent_user_ids"] == [agent]
-    assert content["capabilities"] == ["model_selection"]
-    assert content["selection"] == {"override": None, "inherited": [{"entity": "helper", "model": "default"}]}
+    assert content["capabilities"] == ["model_selection", "thread_model_on_root"]
+    assert content["selection"] == {
+        "override": None,
+        "inherited": [{"entity": "helper", "user_id": agent, "model": "default", "source": "agent"}],
+    }
     assert content["request_id"] == "request-1"
     old_revision = content["catalog_revision"]
     current[0] = current[0].model_copy(deep=True)
@@ -98,6 +131,76 @@ async def test_authenticated_catalog_reply_and_live_config(tmp_path: Path, monke
     assert sent.call_args.kwargs["content"]["models"][0]["display_name"] == "Updated label"
     assert sent.call_args.kwargs["content"]["catalog_revision"] != old_revision
     client.verify_device.assert_not_called()
+
+
+@pytest.mark.parametrize("threaded", [False, True], ids=["room", "thread"])
+@pytest.mark.asyncio
+async def test_catalog_reads_only_the_scope_needed_for_delivery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    threaded: bool,
+) -> None:
+    """Probe a thread root on both sides of catalog preparation, before the final membership read."""
+    callback, client, current, sent, _, _ = receiver_setup(tmp_path, monkeypatch)
+    Image.new("RGB", (1, 1)).save(tmp_path / "icon.png")
+    current[0].models["default"].icon = "icon.png"
+    client.upload.return_value = (nio.UploadResponse("mxc://localhost/image"), None)
+    event = request()
+    if not threaded:
+        del event.source["content"]["thread_id"]
+
+    await callback(event)
+
+    sent.assert_awaited_once()
+    reads = [call[0] for call in client.mock_calls if call[0] in {"joined_members", "room_get_event", "upload"}]
+    root = ["room_get_event"] if threaded else []
+    assert reads == ["joined_members", *root, "upload", *root, "joined_members"]
+
+
+@pytest.mark.asyncio
+async def test_catalog_drops_when_the_root_read_changes_eligible_agents(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An agent added after the initial scope proof must not silently change the answer's scope."""
+    callback, client, current, sent, router, agent = receiver_setup(tmp_path, monkeypatch)
+    config = current[0]
+    config.agents["second"] = AgentConfig(display_name="Second", access=ResponderAccessConfig(users=[USER]))
+    paths = runtime_paths_for(config)
+    current[0] = bind_runtime_paths(config, paths)
+    second = entity_identity_registry(current[0], paths).current_id("second").full_id
+
+    async def fetch_root(*_args: str) -> nio.RoomGetEventResponse:
+        client.joined_members.return_value = joined_response(USER, router, agent, second)
+        return client.room_get_event.return_value
+
+    client.room_get_event.side_effect = fetch_root
+    with capture_logs() as logs:
+        await callback(request())
+    sent.assert_not_awaited()
+    assert dropped(logs) == ["scope_changed"]
+
+
+@pytest.mark.parametrize("root_read", [1, 2], ids=["initial-root", "handoff-root"])
+@pytest.mark.asyncio
+async def test_requester_departure_during_root_read_prevents_reply(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    root_read: int,
+) -> None:
+    """The final membership check must still catch a requester leaving during either root read."""
+    callback, client, _, sent, router, agent = receiver_setup(tmp_path, monkeypatch)
+
+    async def fetch_root(*_args: str) -> nio.RoomGetEventResponse:
+        if client.room_get_event.await_count == root_read:
+            client.joined_members.return_value = joined_response(router, agent)
+        return client.room_get_event.return_value
+
+    client.room_get_event.side_effect = fetch_root
+    with capture_logs() as logs:
+        await callback(request())
+    sent.assert_not_awaited()
+    assert dropped(logs) == ["not_joined"]
 
 
 @pytest.mark.parametrize(
@@ -120,24 +223,39 @@ async def test_malformed_requests_receive_nothing(
 ) -> None:
     """Unknown fields, bounds and optional-thread typing fail closed."""
     callback, client, _, sent, _, _ = receiver_setup(tmp_path, monkeypatch)
-    await callback(request(**changes))
+    with capture_logs() as logs:
+        await callback(request(**changes))
     sent.assert_not_awaited()
     client.joined_members.assert_not_awaited()
+    assert dropped(logs) == ["unparseable"]
+    assert "request_id" not in logs[0]
+
+
+@pytest.mark.asyncio
+async def test_other_to_device_types_are_not_logged(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Only model requests count as dropped; the router receives other to-device traffic too."""
+    callback, _, _, sent, _, _ = receiver_setup(tmp_path, monkeypatch)
+    event = request()
+    event.type = "m.room_key_request"
+    with capture_logs() as logs:
+        await callback(event)
+    sent.assert_not_awaited()
+    assert logs == []
 
 
 @pytest.mark.parametrize(
-    "denial",
+    ("denial", "reason"),
     [
-        "plaintext",
-        "blocked",
-        "deleted",
-        "historical_fingerprint",
-        "historical_curve",
-        "unknown_device",
-        "requester_left",
-        "agent_left",
-        "wrong_thread",
-        "wrong_room",
+        ("plaintext", None),
+        ("blocked", "unknown_sender_device"),
+        ("deleted", "unknown_sender_device"),
+        ("historical_fingerprint", "unknown_sender_device"),
+        ("historical_curve", "unknown_sender_device"),
+        ("unknown_device", "unknown_sender_device"),
+        ("requester_left", "not_joined"),
+        ("agent_left", "no_addressable_agent"),
+        ("wrong_thread", "thread_root_unreadable"),
+        ("wrong_room", "room_unavailable"),
     ],
 )
 @pytest.mark.asyncio
@@ -145,6 +263,7 @@ async def test_unauthorized_requests_receive_nothing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     denial: str,
+    reason: str | None,
 ) -> None:
     """Authenticated device and current real room/root access are both required."""
     callback, client, _, sent, router, agent = receiver_setup(tmp_path, monkeypatch)
@@ -169,8 +288,10 @@ async def test_unauthorized_requests_receive_nothing(
         event = request(thread_id="$other")
     else:
         event = request(room_id="!other:localhost")
-    await callback(event)
+    with capture_logs() as logs:
+        await callback(event)
     sent.assert_not_awaited()
+    assert dropped(logs) == ([] if reason is None else [reason])
 
 
 @pytest.mark.asyncio
@@ -185,8 +306,10 @@ async def test_departure_during_icon_upload_prevents_reply(tmp_path: Path, monke
         return nio.UploadResponse("mxc://localhost/image"), None
 
     client.upload.side_effect = upload
-    await callback(request())
+    with capture_logs() as logs:
+        await callback(request())
     sent.assert_not_awaited()
+    assert dropped(logs) == ["not_joined"]
 
 
 @pytest.mark.parametrize("large", ["count", "payload"])
@@ -202,8 +325,10 @@ async def test_limits_do_not_return_partial_catalog(
         str(i): ModelConfig(provider="openai", id="x" * (300 if large == "payload" else 1))
         for i in range(256 if large == "payload" else 257)
     }
-    await callback(request())
+    with capture_logs() as logs:
+        await callback(request())
     sent.assert_not_awaited()
+    assert dropped(logs) == ["response_too_large" if large == "payload" else "too_many_models"]
 
 
 @pytest.mark.asyncio
@@ -224,17 +349,50 @@ async def test_duplicates_and_capacity_are_bounded_before_task_queue(
 
     register_model_catalog_receiver(
         client=client,
-        agent_name="router",
+        runtime_paths=paths,
+        config_getter=lambda: config,
+        membership_index=index,
+        answers_in_room=lambda _room_id: True,
+        callback_wrapper=wrapper,
+    )
+    callback = client.add_to_device_callback.call_args.args[0]
+    with capture_logs() as logs:
+        await asyncio.gather(*(callback(request()) for _ in range(50)))
+    assert len(queued) == 1
+    assert dropped(logs) == ["duplicate_in_flight"] * 49
+    with capture_logs() as logs:
+        await asyncio.gather(*(callback(request(request_id=str(i))) for i in range(50)))
+    assert len(queued) == 4
+    assert dropped(logs) == ["rate_limited_user_inflight"] * 47
+
+
+@pytest.mark.asyncio
+async def test_shared_in_flight_pool_drop_is_logged(tmp_path: Path) -> None:
+    """A request beyond the shared in-flight pool logs the global limit as its reason."""
+    client, config, paths, index, _, _ = picker_setup(tmp_path)
+    users = [f"@user{i}:localhost" for i in range(9)]
+    client.olm = known_devices({user: ["DEVICE"] for user in users})
+
+    def wrapper(_callback: object) -> object:
+        async def enqueue(_event: object) -> None:
+            return None
+
+        return enqueue
+
+    register_model_catalog_receiver(
+        client=client,
+        answers_in_room=lambda _room_id: True,
         runtime_paths=paths,
         config_getter=lambda: config,
         membership_index=index,
         callback_wrapper=wrapper,
     )
     callback = client.add_to_device_callback.call_args.args[0]
-    await asyncio.gather(*(callback(request()) for _ in range(50)))
-    assert len(queued) == 1
-    await asyncio.gather(*(callback(request(request_id=str(i))) for i in range(50)))
-    assert len(queued) <= 8
+    with capture_logs() as logs:
+        for user in users:
+            await callback(device_request(user, "DEVICE", "same-id"))
+    assert dropped(logs) == ["rate_limited_global"]
+    assert logs[0]["sender"] == users[-1]
 
 
 @pytest.mark.asyncio
@@ -254,10 +412,10 @@ async def test_one_account_with_many_devices_leaves_capacity_for_other_users(tmp
 
     register_model_catalog_receiver(
         client=client,
-        agent_name="router",
         runtime_paths=paths,
         config_getter=lambda: config,
         membership_index=index,
+        answers_in_room=lambda _room_id: True,
         callback_wrapper=wrapper,
     )
     callback = client.add_to_device_callback.call_args.args[0]
@@ -266,7 +424,7 @@ async def test_one_account_with_many_devices_leaves_capacity_for_other_users(tmp
         await callback(device_request(USER, name, name))
     await callback(device_request(other, "OTHER", "other"))
 
-    assert [event.sender for event in queued].count(USER) < 8
+    assert [event.sender for event in queued].count(USER) == 4
     assert [event.sender for event in queued][-1] == other
 
 
@@ -297,10 +455,10 @@ async def test_completed_requests_from_many_devices_share_one_rate_window(
 
     register_model_catalog_receiver(
         client=client,
-        agent_name="router",
         runtime_paths=paths,
         config_getter=lambda: config,
         membership_index=index,
+        answers_in_room=lambda _room_id: True,
         callback_wrapper=wrapper,
     )
     callback = client.add_to_device_callback.call_args.args[0]
@@ -316,42 +474,83 @@ async def test_completed_requests_from_many_devices_share_one_rate_window(
 
 
 @pytest.mark.asyncio
-async def test_non_router_does_not_register(tmp_path: Path) -> None:
-    """Only the runtime router advertises discovery."""
-    client, config, paths, index, _, _ = picker_setup(tmp_path)
+async def test_agent_device_answers_discovery_in_room_without_owner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An agent answers discovery on its own device, so a room without the owner account has a catalog."""
+    _, config, paths, index, _, agent = picker_setup(tmp_path)
+    client = picker_client(config, paths, USER, account="helper")
+    device = OlmDevice(USER, "REQUESTER", {"ed25519": "fingerprint", "curve25519": "curve"})
+    client.olm = SimpleNamespace(device_store={USER: {"REQUESTER": device}})
+    sent = AsyncMock()
+    monkeypatch.setattr("mindroom.model_catalog_receiver.send_encrypted_to_device", sent)
     register_model_catalog_receiver(
         client=client,
-        agent_name="helper",
         runtime_paths=paths,
         config_getter=lambda: config,
         membership_index=index,
+        answers_in_room=lambda _room_id: True,
         callback_wrapper=lambda callback: callback,
     )
-    client.add_to_device_callback.assert_not_called()
+    await client.add_to_device_callback.call_args.args[0](request())
+    assert sent.call_args.kwargs["content"]["agent_user_ids"] == [agent]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("owner_joined", "answering"), [(True, "router"), (False, "helper")])
+async def test_one_device_per_room_answers_discovery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    owner_joined: bool,
+    answering: str,
+) -> None:
+    """A room has one catalog: its poster's, the owner account where joined, else the agent with the lowest ID."""
+    _, config, paths, index, router, agent = picker_setup(tmp_path)
+    accounts = ("router", "helper") if owner_joined else ("helper",)
+    members = (USER, agent, router) if owner_joined else (USER, agent)
+    sent = AsyncMock()
+    monkeypatch.setattr("mindroom.model_catalog_receiver.send_encrypted_to_device", sent)
+    bots = {}
+    for account in accounts:
+        client = picker_client(config, paths, *members, account=account)
+        device = OlmDevice(USER, "REQUESTER", {"ed25519": "fingerprint", "curve25519": "curve"})
+        client.olm = SimpleNamespace(device_store={USER: {"REQUESTER": device}})
+        bots[account] = SimpleNamespace(client=client, running=True)
+        register_model_catalog_receiver(
+            client=client,
+            runtime_paths=paths,
+            config_getter=lambda: config,
+            membership_index=index,
+            answers_in_room=lambda room_id, bot=bots[account]: room_poster(bots, room_id) is bot,
+            callback_wrapper=lambda callback: callback,
+        )
+    for bot in bots.values():
+        await bot.client.add_to_device_callback.call_args.args[0](request())
+
+    assert [call.args[0] for call in sent.call_args_list] == [bots[answering].client]
 
 
 @pytest.mark.asyncio
 async def test_room_inheritance_excludes_thread_override(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The reset explanation retains room model while actual override stays separate."""
-    callback, _, current, sent, _, _ = receiver_setup(tmp_path, monkeypatch)
+    callback, _, current, sent, _, agent = receiver_setup(tmp_path, monkeypatch)
     config = current[0]
     paths = runtime_paths_for(config)
     config.models["room"] = ModelConfig(provider="openai", id="room-model")
     config.models["thread"] = ModelConfig(provider="openai", id="thread-model")
-    set_room_model_override(paths, room_id=ROOM, model_name="room", set_by=USER)
+    set_room_model_override(paths, room_id=ROOM, model_name="room")
     set_thread_model_override(
         paths,
-        room_id=ROOM,
         thread_id="$root",
         model_name="thread",
-        set_by=USER,
         entity_names=("helper",),
         config=config,
     )
     await callback(request())
     assert sent.call_args.kwargs["content"]["selection"] == {
         "override": "thread",
-        "inherited": [{"entity": "helper", "model": "room"}],
+        "inherited": [{"entity": "helper", "user_id": agent, "model": "room", "source": "room"}],
     }
     del config.models["thread"]
     await callback(request(request_id="next"))
@@ -361,6 +560,99 @@ async def test_room_inheritance_excludes_thread_override(tmp_path: Path, monkeyp
     await callback(event)
     assert "thread_id" not in sent.call_args.kwargs["content"]
     assert sent.call_args.kwargs["content"]["selection"]["override"] is None
+
+
+@pytest.mark.asyncio
+async def test_inherited_model_from_room_models_config_names_its_source(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An authored `room_models` entry is reported apart from a saved room override and the entity's own model."""
+    callback, _, current, sent, _, agent = receiver_setup(tmp_path, monkeypatch)
+    config = current[0]
+    config.models["lobby"] = ModelConfig(provider="openai", id="lobby-model")
+    config.room_models[ROOM] = "lobby"
+
+    await callback(request())
+
+    assert sent.call_args.kwargs["content"]["selection"]["inherited"] == [
+        {"entity": "helper", "user_id": agent, "model": "lobby", "source": "room_config"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_inherited_team_and_stale_room_override_name_their_accounts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A team reports its own account and model; a saved room model that left the config falls back to each own."""
+    access = ResponderAccessConfig(users=[USER])
+    config = bind_runtime_paths(
+        Config(
+            agents={"helper": AgentConfig(display_name="Helper", access=access)},
+            teams={"crew": TeamConfig(display_name="Crew", role="Work", agents=["helper"], model="big", access=access)},
+            models={name: ModelConfig(provider="openai", id=f"{name}-model") for name in ("default", "big", "gone")},
+        ),
+        test_runtime_paths(tmp_path),
+    )
+    paths = runtime_paths_for(config)
+    registry = entity_identity_registry(config, paths)
+    agent, team = (registry.current_id(name).full_id for name in ("helper", "crew"))
+    client = picker_client(config, paths, USER, agent, team)
+    device = OlmDevice(USER, "REQUESTER", {"ed25519": "fingerprint", "curve25519": "curve"})
+    client.olm = SimpleNamespace(device_store={USER: {"REQUESTER": device}})
+    sent = AsyncMock()
+    monkeypatch.setattr("mindroom.model_catalog_receiver.send_encrypted_to_device", sent)
+    register_model_catalog_receiver(
+        client=client,
+        answers_in_room=lambda _room_id: True,
+        runtime_paths=paths,
+        config_getter=lambda: config,
+        membership_index=AgentReplyMembershipIndex(),
+        callback_wrapper=lambda callback: callback,
+    )
+    callback = client.add_to_device_callback.call_args.args[0]
+    set_room_model_override(paths, room_id=ROOM, model_name="gone")
+    del config.models["gone"]
+
+    await callback(request())
+
+    assert sent.call_args.kwargs["content"]["selection"]["inherited"] == [
+        {"entity": "crew", "user_id": team, "model": "big", "source": "agent"},
+        {"entity": "helper", "user_id": agent, "model": "default", "source": "agent"},
+    ]
+
+
+@pytest.mark.asyncio
+async def test_selection_reports_model_keys_and_their_reasoning_levels(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An override or inherited model at a level reports its catalog key and the level beside it."""
+    callback, _, current, sent, _, agent = receiver_setup(tmp_path, monkeypatch)
+    config = current[0]
+    paths = runtime_paths_for(config)
+    reasoning = ReasoningConfig(levels=["low", "high"], default="low")
+    config.models["room"] = ModelConfig(provider="openai", id="room-model", reasoning=reasoning)
+    config.models["thread"] = ModelConfig(provider="openai", id="thread-model", reasoning=reasoning)
+    set_room_model_override(paths, room_id=ROOM, model_name="room@high")
+    set_thread_model_override(
+        paths,
+        thread_id="$root",
+        model_name="thread@high",
+        entity_names=("helper",),
+        config=config,
+    )
+
+    await callback(request())
+
+    assert sent.call_args.kwargs["content"]["selection"] == {
+        "override": "thread",
+        "reasoning": "high",
+        "inherited": [
+            {"entity": "helper", "user_id": agent, "model": "room", "reasoning": "high", "source": "room"},
+        ],
+    }
 
 
 @pytest.mark.asyncio
@@ -375,10 +667,8 @@ async def test_selection_reports_only_an_override_governing_every_picker_entity(
     config.models["thread"] = ModelConfig(provider="openai", id="thread-model")
     set_thread_model_override(
         paths,
-        room_id=ROOM,
         thread_id="$root",
         model_name="thread",
-        set_by="@other:localhost",
         entity_names=("router", "restricted"),
         config=config,
     )
@@ -403,9 +693,73 @@ async def test_deadline_cancels_work_and_releases_capacity(tmp_path: Path, monke
 
     original = client.joined_members.return_value
     client.joined_members.side_effect = stalled
-    await callback(request())
+    with capture_logs() as logs:
+        await callback(request())
     assert cancelled.is_set()
     sent.assert_not_awaited()
+    assert len(logs) == 1
+    assert dropped(logs) == ["timeout"]
+    assert logs[0]["elapsed_ms"] >= 0
+    # The follow-up only proves released capacity, so give it the real deadline.
+    monkeypatch.setattr("mindroom.model_catalog_receiver._DEADLINE_SECONDS", _DEADLINE_SECONDS)
+    client.joined_members.side_effect = None
+    client.joined_members.return_value = original
+    await callback(request())
+    assert sent.await_count == 1
+
+
+@pytest.mark.parametrize("error", [TimeoutError(), RuntimeError("secret-sentinel")])
+@pytest.mark.asyncio
+async def test_work_error_logs_once_without_detail_and_releases_capacity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    error: Exception,
+) -> None:
+    """An error inside the work, even a TimeoutError before the deadline, logs one error warning."""
+    callback, _, _, sent, _, _ = receiver_setup(tmp_path, monkeypatch)
+    sent.side_effect = error
+    with capture_logs() as logs:
+        await callback(request())
+    assert len(logs) == 1
+    assert dropped(logs) == ["error"]
+    assert logs[0]["log_level"] == "warning"
+    assert logs[0]["error_type"] == type(error).__name__
+    assert logs[0]["request_id"] == "request-1"
+    assert "secret-sentinel" not in repr(logs)
+    sent.side_effect = None
+    # The same request id again: a leaked reservation would drop it as a duplicate.
+    with capture_logs() as logs:
+        await callback(request())
+    assert [entry["event"] for entry in logs] == ["model_catalog_answered"]
+    assert sent.await_count == 2
+
+
+@pytest.mark.asyncio
+async def test_cancelled_request_logs_once_and_releases_capacity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A task cancelled mid-request, as on shutdown, logs one drop, re-raises, and frees its slot."""
+    callback, client, _, sent, _, _ = receiver_setup(tmp_path, monkeypatch)
+    started = asyncio.Event()
+
+    async def stalled(*_args: object) -> None:
+        started.set()
+        await asyncio.Event().wait()
+
+    original = client.joined_members.return_value
+    client.joined_members.side_effect = stalled
+    with capture_logs() as logs:
+        task = asyncio.create_task(callback(request()))
+        await started.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+    sent.assert_not_awaited()
+    assert dropped(logs) == ["cancelled"]
+    assert len(logs) == 1
+    assert logs[0]["request_id"] == "request-1"
+    assert logs[0]["elapsed_ms"] >= 0
     client.joined_members.side_effect = None
     client.joined_members.return_value = original
     await callback(request())
@@ -416,9 +770,12 @@ async def test_deadline_cancels_work_and_releases_capacity(tmp_path: Path, monke
 async def test_rate_limit_survives_completed_requests(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Finishing each request cannot bypass the per-user request window."""
     callback, _, _, sent, _, _ = receiver_setup(tmp_path, monkeypatch)
-    for i in range(20):
-        await callback(request(request_id=str(i)))
+    with capture_logs() as logs:
+        for i in range(20):
+            await callback(request(request_id=str(i)))
     assert sent.await_count == 8
+    assert dropped(logs) == ["rate_limited_user_window"] * 12
+    assert [entry["event"] for entry in logs].count("model_catalog_answered") == 8
 
 
 @pytest.mark.asyncio
@@ -439,10 +796,10 @@ async def test_queued_request_cannot_repin_replaced_device(tmp_path: Path, monke
 
     register_model_catalog_receiver(
         client=client,
-        agent_name="router",
         runtime_paths=paths,
         config_getter=lambda: config,
         membership_index=index,
+        answers_in_room=lambda _room_id: True,
         callback_wrapper=wrapper,
     )
     await client.add_to_device_callback.call_args.args[0](request())
@@ -452,11 +809,13 @@ async def test_queued_request_cannot_repin_replaced_device(tmp_path: Path, monke
         {"ed25519": "replacement", "curve25519": "new-curve"},
     )
     callback, event = pending[0]
-    await callback(event)
+    with capture_logs() as logs:
+        await callback(event)
     sent.assert_not_awaited()
+    assert dropped(logs) == ["sender_device_changed"]
 
 
-@pytest.mark.parametrize("change", ["blocked", "left", "config"])
+@pytest.mark.parametrize("change", ["blocked", "left", "config", "redacted"])
 @pytest.mark.asyncio
 async def test_final_authorization_rechecks_after_selection_work(
     tmp_path: Path,
@@ -476,14 +835,29 @@ async def test_final_authorization_rechecks_after_selection_work(
             client.olm.device_store[USER]["REQUESTER"].trust_state = TrustState.blacklisted
         elif change == "left":
             client.joined_members.return_value = joined_response(router, agent)
+        elif change == "redacted":
+            redacted = root_event(
+                content={},
+                unsigned={"redacted_because": {"type": "m.room.redaction", "sender": USER, "content": {}}},
+            )
+            client.room_get_event.return_value = nio.RoomGetEventResponse.from_dict(redacted.source)
         else:
             current[0] = current[0].model_copy(deep=True)
         return result
 
     monkeypatch.setattr(asyncio, "to_thread", selection_work)
-    await callback(request())
+    with capture_logs() as logs:
+        await callback(request())
     assert prepared
     sent.assert_not_awaited()
+    assert dropped(logs) == [
+        {
+            "blocked": "sender_device_changed",
+            "left": "not_joined",
+            "config": "config_changed",
+            "redacted": "thread_root_unreadable",
+        }[change],
+    ]
 
 
 @pytest.mark.asyncio
@@ -500,17 +874,18 @@ async def test_config_reload_during_final_scope_await_prevents_delivery(
     async def joined_members(*_args: object) -> nio.JoinedMembersResponse:
         nonlocal membership_reads
         membership_reads += 1
-        # Each scope proof reads membership before and after the root event.
-        if membership_reads == 5:
+        if membership_reads == 2:
             await asyncio.sleep(0)
             current[0] = original_config.model_copy(deep=True)
         return membership
 
     client.joined_members.side_effect = joined_members
-    await callback(request())
-    assert membership_reads == 6
+    with capture_logs() as logs:
+        await callback(request())
+    assert membership_reads == 2
     assert current[0] is not original_config
     sent.assert_not_awaited()
+    assert dropped(logs) == ["config_changed"]
 
 
 @pytest.mark.asyncio
@@ -531,10 +906,10 @@ async def test_catalog_receiver_delivers_through_public_nio_transport(
         monkeypatch.setattr(client, "add_to_device_callback", registered)
         register_model_catalog_receiver(
             client=client,
-            agent_name="router",
             runtime_paths=paths,
             config_getter=lambda: config,
             membership_index=index,
+            answers_in_room=lambda _room_id: True,
             callback_wrapper=lambda callback: callback,
         )
         event = request()
@@ -545,7 +920,8 @@ async def test_catalog_receiver_delivers_through_public_nio_transport(
             peer_keys["keys"]["ed25519:DESKTOP"],
         )
         await registered.call_args.args[0](event)
-        assert scope_client.joined_members.await_count == 6
+        assert scope_client.joined_members.await_count == 2
+        assert scope_client.room_get_event.await_count == 2
         deliveries = [item for item in requests if "/sendToDevice/" in item["path"]]
         assert len(deliveries) == 1
         messages = deliveries[0]["body"]["messages"]

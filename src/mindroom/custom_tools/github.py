@@ -8,6 +8,7 @@ import threading
 from functools import wraps
 from html import unescape
 from typing import TYPE_CHECKING, Any, Protocol, cast
+from urllib.parse import urlsplit
 
 from agno.tools.github import GithubTools as AgnoGithubTools
 from github import Auth, Github, GithubException
@@ -27,7 +28,6 @@ from mindroom.oauth.client import active_oauth_credential_context
 from mindroom.oauth.credential_lifecycle import (
     OAuthCredentialContext,
     OAuthCredentialUnreadableError,
-    load_oauth_credentials_snapshot_if_readable_sync,
     oauth_credentials_usable,
     refresh_oauth_credentials_blocking,
 )
@@ -44,6 +44,7 @@ from mindroom.oauth.service import (
     OAUTH_RESET_REQUIRED_REASON,
     oauth_connection_required,
 )
+from mindroom.redaction import redact_sensitive_text
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -60,7 +61,8 @@ logger = get_logger(__name__)
 _PENDING_ACCESS_TOKEN = "mindroom-oauth-connection-pending"  # noqa: S105
 _SANITIZED_OAUTH_REFRESH_ERROR_MESSAGE = "OAuth credential refresh failed"
 _SANITIZED_GITHUB_PROVIDER_ERROR_MESSAGE = "GitHub request failed"
-# Fixed hints stand in for provider-controlled error text, which never reaches the agent.
+_GITHUB_PROVIDER_DETAIL_MAX_CHARS = 500
+# Fixed hints explain statuses GitHub also uses for hidden resources and rate limits.
 _GITHUB_PROVIDER_STATUS_HINTS = {
     403: "this GitHub connection lacks permission for the request, or GitHub rate-limited it",
     404: (
@@ -77,22 +79,87 @@ def _github_exception_status_code(exc: GithubException) -> int | None:
     return None
 
 
-def _github_provider_error_result(status_code: int | None) -> str:
-    if status_code is None:
-        return json.dumps({"error": _SANITIZED_GITHUB_PROVIDER_ERROR_MESSAGE})
-    message = f"{_SANITIZED_GITHUB_PROVIDER_ERROR_MESSAGE} with HTTP {status_code}"
-    hint = _GITHUB_PROVIDER_STATUS_HINTS.get(status_code)
-    if hint is not None:
-        message = f"{message}: {hint}"
+def _github_error_entry_text(error: object) -> str | None:
+    if isinstance(error, str):
+        return error
+    if not isinstance(error, dict):
+        return None
+    entry = cast("dict[str, object]", error)
+    labels = ", ".join(f"{key}: {entry[key]}" for key in ("field", "code") if isinstance(entry.get(key), str))
+    message = entry.get("message")
+    if not isinstance(message, str):
+        return labels
+    return f"{message} ({labels})" if labels else message
+
+
+def _github_exception_detail(exc: GithubException) -> str | None:
+    """Return GitHub's message and per-field errors as bounded, credential-redacted plain text."""
+    data = exc.data
+    if not isinstance(data, dict):
+        return None
+    errors = data.get("errors")
+    parts = [data.get("message"), *map(_github_error_entry_text, errors if isinstance(errors, list) else ())]
+    detail = " ".join("; ".join(part for part in parts if isinstance(part, str) and part).split())
+    return redact_sensitive_text(detail, max_length=_GITHUB_PROVIDER_DETAIL_MAX_CHARS) or None
+
+
+def _github_provider_error_result(status_code: int | None, detail: str | None) -> str:
+    message = _SANITIZED_GITHUB_PROVIDER_ERROR_MESSAGE
+    if status_code is not None:
+        message = f"{message} with HTTP {status_code}"
+        hint = _GITHUB_PROVIDER_STATUS_HINTS.get(status_code)
+        if hint is not None:
+            message = f"{message}: {hint}"
+    if detail is not None:
+        message = f"{message}. GitHub said: {detail}"
     return json.dumps({"error": message})
 
 
 def _record_github_provider_failure(exc: GithubException) -> None:
-    record_provider_failure(_github_exception_status_code(exc))
+    record_provider_failure(_github_exception_status_code(exc), _github_exception_detail(exc))
 
 
-class _GithubProviderFailureRequester(Requester):
-    """Capture typed provider failures before Agno serializes them."""
+def _without_injected_language_url(verb: str, url: str, data: object) -> object:
+    if verb != "GET" or not isinstance(data, dict) or not urlsplit(url).path.endswith("/languages"):
+        return data
+    languages = cast("dict[str, object]", data)
+    if languages.get("url") != url:
+        return data
+    return {language: count for language, count in languages.items() if language != "url"}
+
+
+class _MindRoomGithubRequester(Requester):
+    """Capture typed provider failures and keep raw payloads in the shapes Agno parses."""
+
+    # AGNO_COMPAT: GithubTools treats every get_languages() value as a byte count.
+    # Reason: PyGithub 2.9 adds the request URL as a "url" key to every GET dictionary
+    # response (PyGithub PR https://github.com/PyGithub/PyGithub/pull/3421), so
+    # get_repository_languages returns a non-language entry and get_repository_with_stats
+    # raises ValueError from int() on the URL, which its GithubException handler misses.
+    # Upstream issue: Tracking gap; upstream tracking has not been verified.
+    # Upstream PR: None identified.
+    # Remove when: Agno reads only numeric language entries or PyGithub's get_languages()
+    # stops returning the injected "url" key; both language tools must keep returning
+    # only language byte counts.
+    # Coverage: tests/test_github_oauth_tool.py::test_language_tools_drop_pygithub_injected_url_over_http.
+    def requestJsonAndCheck(  # noqa: N802
+        self,
+        verb: str,
+        url: str,
+        parameters: dict[str, Any] | None = None,
+        headers: dict[str, str] | None = None,
+        input: Any | None = None,  # noqa: A002, ANN401
+        follow_302_redirect: bool = False,
+    ) -> tuple[dict[str, Any], Any]:
+        response_headers, data = super().requestJsonAndCheck(
+            verb,
+            url,
+            parameters,
+            headers,
+            input,
+            follow_302_redirect,
+        )
+        return response_headers, _without_injected_language_url(verb, url, data)
 
     @classmethod
     def createException(  # noqa: N802
@@ -128,6 +195,7 @@ class _GithubProviderFailureRetry(GithubRetry):
 def _github_provider_failure_retry(retry: GithubRetry) -> _GithubProviderFailureRetry:
     return _GithubProviderFailureRetry(
         secondary_rate_wait=retry.secondary_rate_wait,
+        max_rate_limit_wait=retry.max_rate_limit_wait,
         total=retry.total,
         connect=retry.connect,
         read=retry.read,
@@ -159,7 +227,7 @@ def _install_github_provider_failure_capture(client: Github) -> Github:
     retry = requester_kwargs["retry"]
     if isinstance(retry, GithubRetry):
         requester_kwargs["retry"] = _github_provider_failure_retry(retry)
-    requester_owner._Github__requester = _GithubProviderFailureRequester(**requester_kwargs)
+    requester_owner._Github__requester = _MindRoomGithubRequester(**requester_kwargs)
     original_requester.close()
     return client
 
@@ -171,13 +239,13 @@ class _SanitizeGithubProviderLogFilter(logging.Filter):
         if record.name == "github.GithubRetry":
             record.msg = "GitHub provider retry detail suppressed"
             record.args = ()
-        elif record.exc_info is not None:
+        elif record.exc_info:
             _exception_type, exception, _traceback = record.exc_info
             if isinstance(exception, GithubException):
                 status_code = _github_exception_status_code(exception)
                 _record_github_provider_failure(exception)
-                record.msg = "GitHub provider request failed (error_type=GithubException, status_code=%s)"
-                record.args = (status_code if status_code is not None else "unknown",)
+                record.msg = "GitHub provider request failed (operation=%s, error_type=GithubException, status_code=%s)"
+                record.args = (record.funcName, status_code if status_code is not None else "unknown")
                 record.exc_info = None
                 record.exc_text = None
                 record.stack_info = None
@@ -217,8 +285,10 @@ def _normalized_access_token(value: object) -> str | None:
 
 
 def _sanitized_github_exception_result(exc: GithubException) -> str:
-    _record_github_provider_failure(exc)
-    return _github_provider_error_result(_github_exception_status_code(exc))
+    status_code = _github_exception_status_code(exc)
+    detail = _github_exception_detail(exc)
+    record_provider_failure(status_code, detail)
+    return _github_provider_error_result(status_code, detail)
 
 
 class GithubTools(AgnoGithubTools):
@@ -271,26 +341,12 @@ class GithubTools(AgnoGithubTools):
         self._worker_target = worker_target
         self._config = runtime_config
         self._oauth_provider = github_oauth_provider()
-        explicit_access_token = _normalized_access_token(access_token) or _normalized_access_token(
-            runtime_paths.env_value("GITHUB_ACCESS_TOKEN"),
-        )
+        explicit_access_token = _normalized_access_token(access_token)
         self._explicit_access_token = explicit_access_token
-        initial_access_token = explicit_access_token or self._stored_access_token() or _PENDING_ACCESS_TOKEN
-        super().__init__(access_token=initial_access_token, base_url=base_url, **kwargs)
+        # Stored tokens are not read here: the token and client are kept per thread, and each calling thread
+        # authenticates on its first call, so a stored token read here would serve only the thread building the agent.
+        super().__init__(access_token=explicit_access_token or _PENDING_ACCESS_TOKEN, base_url=base_url, **kwargs)
         self._wrap_oauth_function_entrypoints()
-
-    def _stored_access_token(self) -> str | None:
-        context = self._oauth_credential_context()
-        if self._oauth_provider.requester_scoped_credentials and context.worker_target is None:
-            return None
-        snapshot = load_oauth_credentials_snapshot_if_readable_sync(context)
-        if snapshot is None:
-            return None
-        credentials = snapshot.credentials
-        if credentials is None:
-            return None
-        token = credentials.get("token") or credentials.get("access_token")
-        return _normalized_access_token(token)
 
     def _oauth_credential_context(self) -> OAuthCredentialContext:
         return active_oauth_credential_context(
@@ -357,6 +413,7 @@ class GithubTools(AgnoGithubTools):
             def oauth_entrypoint(
                 *args: object,
                 _entrypoint: Callable[..., object] = entrypoint,
+                _tool_name: str = function.name,
                 **kwargs: object,
             ) -> object:
                 try:
@@ -370,6 +427,7 @@ class GithubTools(AgnoGithubTools):
                 logger.warning(
                     "github_tool_call_failed",
                     provider_id=self._oauth_provider.id,
+                    tool_name=_tool_name,
                     error_type="GithubException",
                     status_code=status_code,
                 )
@@ -380,7 +438,7 @@ class GithubTools(AgnoGithubTools):
                             self._connection_required(reason=OAUTH_ACCESS_REJECTED_REASON),
                         ),
                     )
-                return _github_provider_error_result(status_code)
+                return _github_provider_error_result(status_code, provider_failure.detail)
 
             function.entrypoint = oauth_entrypoint
             setattr(self, function.name, oauth_entrypoint)

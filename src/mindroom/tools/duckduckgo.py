@@ -94,7 +94,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["ddgs"],
-    docs_url="https://docs.agno.com/tools/toolkits/search/duckduckgo",
+    docs_url="https://docs.mindroom.chat/tools/web-search/#duckduckgo",
     function_names=("web_search", "search_news"),
 )
 def duckduckgo_tools() -> type[DuckDuckGoTools]:

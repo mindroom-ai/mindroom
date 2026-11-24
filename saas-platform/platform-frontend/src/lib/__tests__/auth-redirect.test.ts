@@ -8,7 +8,7 @@ describe('post-auth redirects', () => {
   it.each([
     'https://app.mindroom.chat/dashboard',
     'https://api.mindroom.chat/instance-sso/authorize?redirect_to=https%3A%2F%2F1.mindroom.chat%2F',
-    'https://api.mindroom.chat/matrix-oidc/authorize?client_id=mindroom-synapse',
+    'https://api.mindroom.chat/matrix-oidc/authorize?client_id=mindroom-matrix',
   ])('allows the platform app and API hosts (%s)', (target) => {
     expect(sanitizePostAuthRedirect(target, 'mindroom.chat')).toBe(target)
   })

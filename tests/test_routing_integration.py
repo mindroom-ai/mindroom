@@ -27,9 +27,9 @@ from tests.conftest import (
     runtime_paths_for,
     test_runtime_paths,
 )
+from tests.response_runner_helpers import streamed_answer
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
     from pathlib import Path
 
 
@@ -38,11 +38,11 @@ class TestRoutingIntegration:
 
     @pytest.mark.asyncio
     @patch("mindroom.response_runner.stream_agent_response")
-    @patch("mindroom.router_relay.suggest_responder_for_message")
+    @patch("mindroom.router.relay.suggest_responder_for_message")
     async def test_real_scenario_research_channel(
         self,
         mock_suggest_responder: AsyncMock,
-        mock_stream_agent_response: AsyncMock,
+        mock_stream_agent_response: MagicMock,
         tmp_path: Path,
     ) -> None:
         """Test the exact scenario reported: MindRoomResearch mentioned in research channel.
@@ -50,12 +50,10 @@ class TestRoutingIntegration:
         When a user mentions @MindRoomResearch, only that agent should respond.
         MindRoomNews should NOT respond or route.
         """
-
-        # Create generator for streaming response
-        async def streaming_generator() -> AsyncIterator[str]:
-            yield "I am MindRoomResearch and I can help with research tasks"
-
-        mock_stream_agent_response.return_value = streaming_generator()
+        reply = "I am MindRoomResearch and I can help with research tasks"
+        mock_ai_response = AsyncMock()
+        mock_stream_agent_response.side_effect = streamed_answer(mock_ai_response)
+        mock_ai_response.return_value = reply
 
         # Create agents
         research_agent = AgentMatrixUser(
@@ -91,31 +89,22 @@ class TestRoutingIntegration:
 
         research_bot = make_test_agent_bot(
             research_agent,
-            tmp_path,
             rooms=["!research:localhost"],
-            enable_streaming=True,
             config=config,
             runtime_paths=runtime_paths_for(config),
         )
 
         news_bot = make_test_agent_bot(
             news_agent,
-            tmp_path,
             config,
             runtime_paths_for(config),
             rooms=["!research:localhost"],
-            enable_streaming=True,
         )
 
         # Mock clients
         for bot in [research_bot, news_bot]:
             bot.client = make_matrix_client_mock(user_id=bot.matrix_id)
             install_runtime_journal_support(bot)
-
-            # Mock orchestrator
-            mock_orchestrator = MagicMock()
-            mock_orchestrator.current_config = config
-            bot.orchestrator = mock_orchestrator
 
             # Mock room_send for streaming
             mock_send = MagicMock()
@@ -150,13 +139,14 @@ class TestRoutingIntegration:
         await news_bot._on_message(mock_room, user_message)
         await drain_coalescing(research_bot, news_bot)
 
-        # Only research bot should respond (streaming makes 2 calls)
-        assert research_bot.client.room_send.call_count >= 1  # At least initial message
+        # Only the research bot should respond
+        assert research_bot.client.room_send.call_count >= 1
         assert news_bot.client.room_send.call_count == 0
 
         # Router should NOT have been called at all
         assert mock_suggest_responder.call_count == 0
 
-        # Verify the response was sent
+        # Verify the generated reply replaced the placeholder
+        assert mock_ai_response.await_count == 1
         last_call = research_bot.client.room_send.call_args_list[-1]
-        assert "body" in last_call[1]["content"]
+        assert last_call[1]["content"]["m.new_content"]["body"] == reply

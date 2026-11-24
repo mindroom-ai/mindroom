@@ -1,13 +1,14 @@
-"""Tests for managed-room encryption enablement, encryption commands, and store recovery."""
+"""Tests for managed-room encryption enablement, encryption commands, and olm store presence."""
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import nio
 import pytest
 from nio.store import SqliteStore
+from structlog.testing import capture_logs
 
 from mindroom.access_policy import resolve_room_policy
 from mindroom.commands.encryption_commands import handle_e2ee_command, handle_encrypt_command
@@ -15,11 +16,8 @@ from mindroom.commands.parsing import CommandType, command_parser
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.matrix import rooms as matrix_rooms
-from mindroom.matrix import state as matrix_state
 from mindroom.matrix.client_room_admin import create_room, ensure_room_encryption_enabled
 from mindroom.matrix.client_session import olm_store_dir, olm_store_exists
-from mindroom.matrix.rooms import _managed_room_should_be_encrypted
-from mindroom.matrix.users import AgentMatrixUser, login_agent_user
 from tests.conftest import bind_runtime_paths, runtime_paths_for
 
 if TYPE_CHECKING:
@@ -118,16 +116,20 @@ class TestEnsureRoomEncryptionEnabled:
         assert cached_room.encrypted is True
 
     @pytest.mark.asyncio
-    async def test_reports_failure_when_put_state_rejected(self) -> None:
-        """A rejected state change reports failure."""
+    @pytest.mark.parametrize(("errcode", "level"), [("M_FORBIDDEN", "warning"), ("M_UNKNOWN", "error")])
+    async def test_a_refusal_the_homeserver_states_is_no_error(self, errcode: str, level: str) -> None:
+        """An account without the power is refused as expected and told so; only another failure is an error."""
         client = AsyncMock(spec=nio.AsyncClient)
         client.room_get_state_event.return_value = _state_error("M_NOT_FOUND")
         client.room_put_state.return_value = nio.RoomPutStateError.from_dict(
-            {"errcode": "M_FORBIDDEN", "error": "no permission"},
+            {"errcode": errcode, "error": "refused"},
             "!room:localhost",
         )
 
-        assert await ensure_room_encryption_enabled(client, "!room:localhost") is False
+        with capture_logs() as logs:
+            assert await ensure_room_encryption_enabled(client, "!room:localhost") is False
+
+        assert [(log["event"], log["log_level"]) for log in logs] == [("matrix_room_encryption_enable_failed", level)]
 
 
 class TestManagedRoomEncryptionConfig:
@@ -136,12 +138,12 @@ class TestManagedRoomEncryptionConfig:
     def test_defaults_to_unencrypted(self) -> None:
         """Managed rooms stay unencrypted without configuration."""
         config = Config(rooms={"lobby": {}})
-        assert _managed_room_should_be_encrypted(resolve_room_policy(config, "lobby")) is False
+        assert resolve_room_policy(config, "lobby").encrypted is False
 
     def test_global_default_applies(self) -> None:
         """The global default encrypts all managed rooms."""
         config = Config(room_defaults={"encrypted": True}, rooms={"lobby": {}})
-        assert _managed_room_should_be_encrypted(resolve_room_policy(config, "lobby")) is True
+        assert resolve_room_policy(config, "lobby").encrypted is True
 
     def test_per_room_override_wins(self) -> None:
         """Per-room settings override the global default."""
@@ -149,8 +151,8 @@ class TestManagedRoomEncryptionConfig:
             room_defaults={"encrypted": True},
             rooms={"plain": {"encrypted": False}, "secure": {"encrypted": True}},
         )
-        assert _managed_room_should_be_encrypted(resolve_room_policy(config, "plain")) is False
-        assert _managed_room_should_be_encrypted(resolve_room_policy(config, "secure")) is True
+        assert resolve_room_policy(config, "plain").encrypted is False
+        assert resolve_room_policy(config, "secure").encrypted is True
 
 
 def _bound_config(tmp_path: Path, **config_data: object) -> Config:
@@ -180,16 +182,6 @@ class TestManagedRoomEncryptionReconcile:
             rooms={"lobby": {}},
         )
         mock_client = AsyncMock()
-        mock_client.homeserver = "https://example.com"
-        mock_client.rooms = {"!lobby:example.com": object()}
-        mock_client.room_resolve_alias.return_value = nio.RoomResolveAliasResponse(
-            room_alias="#lobby:example.com",
-            room_id="!lobby:example.com",
-            servers=["example.com"],
-        )
-
-        recorded_room = matrix_state.MatrixRoom(room_id="!lobby:example.com", alias="#lobby:example.com", name="Lobby")
-        monkeypatch.setattr(matrix_state, "load_rooms", lambda **_kwargs: {"lobby": recorded_room})
         monkeypatch.setattr(matrix_rooms, "ensure_room_name", AsyncMock(return_value=True))
         monkeypatch.setattr(matrix_rooms, "ensure_room_has_topic", AsyncMock())
         monkeypatch.setattr(matrix_rooms, "ensure_managed_room_power_levels", AsyncMock(return_value=True))
@@ -197,17 +189,7 @@ class TestManagedRoomEncryptionReconcile:
         enable_encryption = AsyncMock(return_value=True)
         monkeypatch.setattr(matrix_rooms, "ensure_room_encryption_enabled", enable_encryption)
 
-        room_id = await matrix_rooms._ensure_room_exists(
-            client=mock_client,
-            room_key="lobby",
-            config=config,
-            runtime_paths=runtime_paths_for(config),
-            room_policy=resolve_room_policy(config, "lobby"),
-            room_name="Lobby",
-            power_users=[],
-        )
-
-        assert room_id == "!lobby:example.com"
+        room_id = "!lobby:example.com"
         mock_client.user_id = "@router:example.com"
         mock_client.room_get_state.return_value = nio.RoomGetStateResponse(
             [
@@ -245,8 +227,6 @@ class TestManagedRoomEncryptionReconcile:
             status_code="M_NOT_FOUND",
         )
 
-        monkeypatch.setattr(matrix_state, "load_rooms", dict)
-        monkeypatch.setattr(matrix_rooms, "_add_room", MagicMock())
         monkeypatch.setattr(matrix_rooms, "generate_room_topic_ai", AsyncMock(return_value="topic"))
         monkeypatch.setattr(matrix_rooms, "_set_room_avatar", AsyncMock())
         monkeypatch.setattr(matrix_rooms, "_configure_managed_room_access", AsyncMock(return_value=True))
@@ -301,7 +281,7 @@ class TestEncryptCommand:
         )
 
         assert "irreversible" in response
-        assert "!encrypt confirm" in response
+        assert "/encrypt confirm" in response
         client.room_put_state.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -356,6 +336,104 @@ class TestEncryptCommand:
             ("@requester:localhost", "@sender:localhost"),
         )
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("written", "failure_reply"),
+        [
+            (nio.RoomPutStateResponse("$state", "!room:localhost"), ""),
+            # None is a room without a steward.
+            (None, "I need moderator rights in this room to enable encryption."),
+            (OSError("connection reset"), "❌ Failed to enable encryption. Run the command again to retry."),
+        ],
+    )
+    async def test_confirm_writes_through_the_room_steward(self, written: object, failure_reply: str) -> None:
+        """The answering agent enables encryption through the steward, and asks for rights where the room has none."""
+        client = AsyncMock(spec=nio.AsyncClient)
+        client.rooms = {"!room:localhost": nio.MatrixRoom("!room:localhost", "@mindroom_agent:localhost")}
+        client.room_get_state_event.return_value = _state_error("M_NOT_FOUND")
+        put_state = AsyncMock(side_effect=[written])
+
+        with patch(
+            "mindroom.commands.encryption_commands.room_admin_power_user",
+            new=AsyncMock(return_value="@requester:localhost"),
+        ):
+            response = await handle_encrypt_command(
+                "confirm",
+                client=client,
+                room_id="!room:localhost",
+                requester_user_id="@requester:localhost",
+                sender_user_id="@sender:localhost",
+                put_state=put_state,
+            )
+
+        put_state.assert_awaited_once_with(
+            "!room:localhost",
+            "m.room.encryption",
+            {"algorithm": "m.megolm.v1.aes-sha2"},
+        )
+        client.room_put_state.assert_not_awaited()
+        # The agent's own next sends are encrypted before its sync shows the change.
+        assert client.rooms["!room:localhost"].encrypted is (not failure_reply)
+        assert ("now enabled" in response) is (not failure_reply)
+        assert not failure_reply or response == failure_reply
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("errcode", "reason", "steward_may_write", "moderator_rights"),
+        [
+            # The steward lacks the power to write the state, which only moderator rights can fix.
+            ("M_FORBIDDEN", "You don't have permission to send m.room.encryption.", False, True),
+            # A server without encryption refuses a steward that holds the power; no rights would help.
+            ("M_FORBIDDEN", "Encryption is disabled on this homeserver.", True, False),
+            # Tuwunel's form: the errcode is already in the message and is shown once.
+            ("M_FORBIDDEN", "M_FORBIDDEN: Encryption is disabled on this homeserver.", True, False),
+            # The server says encryption is disabled: no rights would help, whatever power the steward holds.
+            ("M_FORBIDDEN", "Encryption is disabled on this homeserver.", False, False),
+            ("M_FORBIDDEN", "M_FORBIDDEN: Encryption has been disabled", False, False),
+            # A refusal without a reason is the steward's lack of power when it lacks the power.
+            ("M_FORBIDDEN", "", False, True),
+            ("M_UNKNOWN", "Internal server error.", False, False),
+        ],
+    )
+    async def test_confirm_reports_the_homeservers_refusal(
+        self,
+        errcode: str,
+        reason: str,
+        steward_may_write: bool,
+        moderator_rights: bool,
+    ) -> None:
+        """A refusal for lack of power asks for moderator rights and nothing else; any other quotes the homeserver."""
+        client = AsyncMock(spec=nio.AsyncClient)
+        client.rooms = {}
+        client.room_get_state_event.return_value = _state_error("M_NOT_FOUND")
+        refusal = nio.RoomPutStateError.from_dict({"errcode": errcode, "error": reason}, "!room:localhost")
+        admin_gate = AsyncMock(return_value="@requester:localhost")
+        may_write = Mock(return_value=steward_may_write)
+
+        with patch("mindroom.commands.encryption_commands.room_admin_power_user", new=admin_gate):
+            response = await handle_encrypt_command(
+                "confirm",
+                client=client,
+                room_id="!room:localhost",
+                requester_user_id="@requester:localhost",
+                sender_user_id="@sender:localhost",
+                put_state=AsyncMock(return_value=refusal),
+                steward_may_write_state=may_write,
+            )
+
+        shown = reason.removeprefix(f"{errcode}: ")
+        assert response == (
+            "I need moderator rights in this room to enable encryption."
+            if moderator_rights
+            else f"❌ Failed to enable encryption: {errcode}: {shown}"
+        )
+        # The steward's cached power decides only a refusal whose reason does not say encryption is disabled.
+        if errcode == "M_FORBIDDEN" and "disabled" not in reason:
+            may_write.assert_called_once_with("!room:localhost", "m.room.encryption")
+        else:
+            may_write.assert_not_called()
+        client.room_put_state.assert_not_awaited()
+
 
 class TestE2EECommand:
     """`!e2ee` diagnostics output."""
@@ -402,77 +480,8 @@ class TestCommandParsing:
         assert command.type == CommandType.E2EE
 
 
-class TestStoreLossFallback:
-    """Missing olm stores must trigger a fresh-device login instead of a wedged restore."""
-
-    @pytest.mark.asyncio
-    async def test_missing_store_skips_restore_and_logs_in_fresh(self, tmp_path: Path) -> None:
-        """A lost store must produce a fresh device."""
-        runtime_paths = _runtime_paths(tmp_path)
-        agent_user = AgentMatrixUser(
-            agent_name="assistant",
-            user_id="@mindroom_assistant:localhost",
-            display_name="Assistant",
-            password="pw",  # noqa: S106
-            device_id="LOSTDEVICE",
-            access_token="token",  # noqa: S106
-        )
-        fresh_client = AsyncMock(spec=nio.AsyncClient)
-        fresh_client.user_id = "@mindroom_assistant:localhost"
-        fresh_client.device_id = "NEWDEVICE"
-        fresh_client.access_token = "new-token"  # noqa: S105
-        fresh_client.olm = None
-
-        with (
-            patch("mindroom.matrix.users.restore_login", new=AsyncMock()) as mock_restore,
-            patch("mindroom.matrix.users.login", new=AsyncMock(return_value=fresh_client)) as mock_login,
-            patch("mindroom.matrix.users.ensure_agent_cross_signing", new=AsyncMock()) as mock_cross_signing,
-        ):
-            client = await login_agent_user("http://localhost:8008", agent_user, runtime_paths=runtime_paths)
-
-        mock_restore.assert_not_awaited()
-        mock_login.assert_awaited_once()
-        assert client is fresh_client
-        assert agent_user.device_id == "NEWDEVICE"
-        # The fresh device must be re-signed with the persisted cross-signing keys.
-        mock_cross_signing.assert_awaited_once_with(fresh_client, agent_user)
-
-    @pytest.mark.asyncio
-    async def test_present_store_restores_session(self, tmp_path: Path) -> None:
-        """An intact store restores the persisted session."""
-        runtime_paths = _runtime_paths(tmp_path)
-        user_id = "@mindroom_assistant:localhost"
-        store_dir = olm_store_dir(user_id, runtime_paths)
-        store_dir.mkdir(parents=True)
-        (store_dir / f"{user_id}_GOODDEVICE.db").write_bytes(b"")
-        assert olm_store_exists(user_id, "GOODDEVICE", runtime_paths)
-
-        agent_user = AgentMatrixUser(
-            agent_name="assistant",
-            user_id=user_id,
-            display_name="Assistant",
-            password="pw",  # noqa: S106
-            device_id="GOODDEVICE",
-            access_token="token",  # noqa: S106
-        )
-        restored_client = AsyncMock(spec=nio.AsyncClient)
-        restored_client.user_id = user_id
-        restored_client.device_id = "GOODDEVICE"
-        restored_client.access_token = "token"  # noqa: S105
-        restored_client.olm = None
-
-        with (
-            patch("mindroom.matrix.users.restore_login", new=AsyncMock(return_value=restored_client)) as mock_restore,
-            patch("mindroom.matrix.users.login", new=AsyncMock()) as mock_login,
-            patch("mindroom.matrix.users.ensure_agent_cross_signing", new=AsyncMock()) as mock_cross_signing,
-        ):
-            client = await login_agent_user("http://localhost:8008", agent_user, runtime_paths=runtime_paths)
-
-        mock_restore.assert_awaited_once()
-        mock_login.assert_not_awaited()
-        assert client is restored_client
-        # Every login path must bootstrap cross-signing for the session's device.
-        mock_cross_signing.assert_awaited_once_with(restored_client, agent_user)
+class TestOlmStorePresence:
+    """The owned login refuses a saved device whose store is gone, so the presence check must match nio's files."""
 
     def test_olm_store_exists_matches_real_nio_store_naming(self, tmp_path: Path) -> None:
         """The presence check must agree with the file nio actually creates."""

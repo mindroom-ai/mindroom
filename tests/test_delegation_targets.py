@@ -1,0 +1,195 @@
+"""Both delegation adapters read a call's arguments into its target through one resolver."""
+
+from __future__ import annotations
+
+from dataclasses import replace
+from typing import TYPE_CHECKING
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+from mindroom.config.agent import AgentConfig
+from mindroom.config.main import Config
+from mindroom.config.models import DefaultsConfig, ModelConfig
+from mindroom.custom_tools.delegate import DelegateTools
+from mindroom.delegation.lifecycle import prepare_child_turn
+from mindroom.delegation.sessions import reserve_subagent_turn
+from mindroom.delegation.state import CONTINUE_SUBAGENT, SubagentPersona
+from mindroom.delegation.targets import resolve_follow_up_target, resolve_fresh_target
+from mindroom.tool_system.runtime_context import tool_runtime_context
+from tests.delegation_helpers import _delegate_runtime_context, _runtime_paths
+from tests.test_delegation_direct_audit import _identity
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from mindroom.constants import RuntimePaths
+    from mindroom.delegation.state import DelegationChild
+
+
+def _config(tools: tuple[str, ...]) -> Config:
+    return Config(
+        agents={"leader": AgentConfig(display_name="Leader", tools=list(tools), delegate_to=["leader"])},
+        defaults=DefaultsConfig(tools=[]),
+        memory={"backend": "none"},
+        models={"default": ModelConfig(provider="openai", id="default-model")},
+    )
+
+
+def _retained(paths: RuntimePaths) -> DelegationChild:
+    """A started self-copy whose persona names the `file` toolkit."""
+    return prepare_child_turn(
+        "leader",
+        "leader",
+        "Read.",
+        owner=_identity(),
+        config=_config(("file",)),
+        runtime_paths=paths,
+        depth=0,
+        budget_monitor=None,
+        persona=SubagentPersona(source_kind="inline", source_name="", system_prompt="P", tools=("file",)),
+        model=None,
+        agent_mode="standard",
+        previous=None,
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "args",
+    [{"subagent_id": 7, "message": "Again"}, {"subagent_id": "a" * 32, "message": None}],
+)
+async def test_a_follow_up_with_arguments_of_the_wrong_type_is_refused(
+    tmp_path: Path,
+    args: dict[str, object],
+) -> None:
+    """A stored call whose arguments are not strings resolves to a refusal, never to a session lookup."""
+    result = await resolve_follow_up_target(
+        args,
+        owner=_identity(),
+        config=_config(("file",)),
+        runtime_paths=_runtime_paths(tmp_path),
+        depth=0,
+    )
+
+    assert result == "Cannot continue: subagent_id and message must be strings."
+
+
+@pytest.mark.asyncio
+async def test_a_resumed_follow_up_keeps_its_child_after_the_caller_lost_a_persona_tool(tmp_path: Path) -> None:
+    """The follow-up refusal is for a fresh follow-up; a resumed call continues the child it already started."""
+    paths = _runtime_paths(tmp_path)
+    retained = _retained(paths)
+    without_file = _config(())
+
+    with tool_runtime_context(_delegate_runtime_context(without_file, paths, execution_identity=_identity())):
+        target = await resolve_follow_up_target(
+            {"subagent_id": retained.subagent_id, "message": "Again"},
+            retained=retained,
+            owner=_identity(),
+            config=without_file,
+            runtime_paths=paths,
+            depth=0,
+        )
+
+    assert not isinstance(target, str), target
+    assert (target.agent_name, target.task, target.previous_child) == ("leader", "Again", retained)
+
+
+@pytest.mark.asyncio
+async def test_a_resumed_follow_up_naming_another_subagent_fails(tmp_path: Path) -> None:
+    """A stored call that names another subagent than the child it started is a corrupted wait, not a refusal."""
+    paths = _runtime_paths(tmp_path)
+
+    with pytest.raises(RuntimeError, match="no longer matches its retained requirement"):
+        await resolve_follow_up_target(
+            {"subagent_id": "b" * 32, "message": "Again"},
+            retained=_retained(paths),
+            owner=_identity(),
+            config=_config(("file",)),
+            runtime_paths=paths,
+            depth=0,
+        )
+
+
+@pytest.mark.parametrize(
+    ("args", "refusal"),
+    [
+        ({"task": "Read.", "minimal": "yes"}, "Cannot delegate: minimal must be a boolean or null."),
+        ({"task": 3}, "Cannot delegate: task must be a string and agent_name must be a string or null."),
+        # A call that names a title names something; only a call without the field runs untitled.
+        ({"task": "Read.", "title": "  \n "}, "Cannot delegate: title must name the task in a few words."),
+        ({"task": "Read.", "title": 3}, "Cannot delegate: title must name the task in a few words."),
+    ],
+)
+def test_a_fresh_call_with_arguments_of_the_wrong_type_is_refused(
+    tmp_path: Path,
+    args: dict[str, object],
+    refusal: str,
+) -> None:
+    """A stored call whose arguments have the wrong types resolves to a refusal before any persona is read."""
+    result = resolve_fresh_target(
+        args,
+        caller_name="leader",
+        config=_config(("file",)),
+        runtime_paths=_runtime_paths(tmp_path),
+        depth=0,
+        workspace_root=lambda: tmp_path,
+        cap=None,
+    )
+
+    assert result == refusal
+
+
+def test_a_fresh_call_stores_its_title_short_and_redacted(tmp_path: Path) -> None:
+    """The child records, persists, and hands its follow-ups the shown title, not the call's raw text."""
+    result = resolve_fresh_target(
+        {"task": "Read.", "title": "Measure cold start\n" * 500},
+        caller_name="leader",
+        config=_config(("file",)),
+        runtime_paths=_runtime_paths(tmp_path),
+        depth=0,
+        workspace_root=lambda: tmp_path,
+        cap=None,
+    )
+
+    assert not isinstance(result, str)
+    assert len(result.title) <= 80
+    assert result.title.startswith("Measure cold start Measure cold start")
+
+
+@pytest.mark.asyncio
+async def test_follow_up_target_resolves_unique_prefix_once_to_full_id(tmp_path: Path) -> None:
+    """A unique 8-char prefix resolves to the full 32-hex subagent ID for follow-up targets, resumes, and managed jobs."""
+    paths, config = _runtime_paths(tmp_path), _config(("file",))
+    context = _delegate_runtime_context(config, paths)
+    owner = context.execution_identity
+    assert owner is not None
+    retained = replace(_retained(paths), status="completed", result="First answer", persona=None)
+    await reserve_subagent_turn(retained, owner=owner, runtime_paths=paths)
+    prefix = retained.subagent_id[:8]
+    common = {"owner": owner, "config": config, "runtime_paths": paths, "depth": 0}
+
+    target = await resolve_follow_up_target({"subagent_id": prefix, "message": "Again"}, **common)
+    assert not isinstance(target, str)
+    assert target.previous_child is not None
+    assert target.previous_child.subagent_id == retained.subagent_id
+
+    resumed = await resolve_follow_up_target({"subagent_id": prefix, "message": "Again"}, retained=retained, **common)
+    assert not isinstance(resumed, str)
+    assert resumed.previous_child == retained
+    with pytest.raises(RuntimeError, match="no longer matches its retained requirement"):
+        await resolve_follow_up_target({"subagent_id": "b" * 8, "message": "Again"}, retained=retained, **common)
+
+    capture = MagicMock(return_value="captured")
+    toolkit = DelegateTools("leader", paths, config, tmp_path, execution_identity=owner)
+    with tool_runtime_context(context), patch("mindroom.custom_tools.delegate.delegation_call_job", capture):
+        result = await toolkit.managed_job(
+            CONTINUE_SUBAGENT,
+            {"subagent_id": prefix, "message": "Again"},
+            job_id="0" * 64,
+            runtime=object(),  # type: ignore[arg-type]
+        )
+    assert result == "captured"
+    assert capture.call_args.args[0].subagent_id == retained.subagent_id
+    assert capture.call_args.kwargs["arguments"]["subagent_id"] == retained.subagent_id

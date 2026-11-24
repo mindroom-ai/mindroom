@@ -3,28 +3,36 @@
 from __future__ import annotations
 
 import json
+from dataclasses import replace
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
-from agno.tools.function import ToolResult
-
-from mindroom.attachments import register_bytes_attachment
+from mindroom.attachments.storage import register_bytes_attachment
 from mindroom.tool_system.runtime_context import append_tool_runtime_attachment_id, get_tool_runtime_context
 
+if TYPE_CHECKING:
+    from mindroom.tool_system.tool_function import ToolValue
 
-def _retain_tool_media(result: object) -> object:  # noqa: PLR0911
-    """Keep delivered bytes for reuse; never resolve paths supplied by a worker."""
-    context = get_tool_runtime_context()
-    if not isinstance(result, ToolResult) or not result.images or context is None or context.storage_path is None:
-        return result
-    if len(result.images) != 1 or not isinstance(result.content, str):
-        return result
+
+def _ready_receipt(result: ToolValue) -> dict[str, Any] | None:
+    """Return the JSON receipt of a ready image view, or None when ``result`` is not one."""
     try:
-        metadata = json.loads(result.content)
-    except (ValueError, TypeError):
+        receipt = json.loads(result.content)
+    except ValueError:
+        return None
+    return receipt if isinstance(receipt, dict) and receipt.get("view_status") == "ready" else None
+
+
+def finalize_tool_media(result: ToolValue) -> ToolValue:
+    """Keep a ready image view's delivered bytes as an attachment for reuse; never resolve paths supplied by a worker.
+
+    The request pipeline marks the view unsupported for a model that cannot see images.
+    """
+    context = get_tool_runtime_context()
+    if context is None or context.storage_path is None or len(result.images) != 1:
         return result
-    if not isinstance(metadata, dict) or metadata.get("view_status") != "ready":
-        return result
-    if metadata.get("attachment_id"):
+    metadata = _ready_receipt(result)
+    if metadata is None or metadata.get("attachment_id"):
         return result
     image = result.images[0]
     if not isinstance(image.content, bytes) or image.mime_type not in {"image/png", "image/jpeg"}:
@@ -48,14 +56,4 @@ def _retain_tool_media(result: object) -> object:  # noqa: PLR0911
         append_tool_runtime_attachment_id(record.attachment_id)
         metadata["attachment_id"] = record.attachment_id
         metadata["attachment_is_viewed_copy"] = True
-    return ToolResult(content=json.dumps(metadata, sort_keys=True), images=result.images)
-
-
-def finalize_tool_media(result: object) -> object:
-    """Retain artifacts before reporting a known model-adapter limitation."""
-    context = get_tool_runtime_context()
-    if context is None:
-        return result
-    from mindroom.providers.media_fallback import guard_tool_image_result  # noqa: PLC0415
-
-    return guard_tool_image_result(_retain_tool_media(result), context=context)
+    return replace(result, content=json.dumps(metadata, sort_keys=True))

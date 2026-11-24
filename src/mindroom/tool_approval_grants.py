@@ -60,8 +60,21 @@ class ApprovalOperation:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class ApprovalGrantScope:
+    """The conversation, requester, and responder that a card's timed approval binds to."""
+
+    room_id: str
+    thread_id: str | None
+    requester_id: str
+    # The entity whose conversation asked, and the journal principal of its Matrix account.
+    entity_name: str
+    responder_principal_id: str
+    invoking_agent: str
+
+
 def grant_operation(config: Config, tool_name: str, arguments: dict[str, object]) -> ApprovalOperation | None:
-    """Bind a concrete tool operation, including generic MCP dispatch targets."""
+    """Bind a concrete tool operation, including generic MCP dispatch targets and `triggers` actions."""
     for server_id, server in config.mcp_servers.items():
         prefix = resolved_mcp_tool_prefix(server_id, server)
         if tool_name == f"{prefix}_call_tool":
@@ -69,6 +82,11 @@ def grant_operation(config: Config, tool_name: str, arguments: dict[str, object]
             if not isinstance(remote, str) or not remote.strip():
                 return None
             return ApprovalOperation(approval_binding(config), tool_name, server_id, remote)
+    if tool_name == "triggers":
+        action = arguments.get("action")
+        if not isinstance(action, str) or not action.strip():
+            return None
+        return ApprovalOperation(approval_binding(config), tool_name, "triggers", action.strip())
     return ApprovalOperation(approval_binding(config), tool_name)
 
 

@@ -1,7 +1,7 @@
 """Process-wide semantic embedder availability and active-client revision.
 
-The OpenAI-compatible embedder records a failure here before raising and
-records healthy on every validated response, so recovery is self-clearing the
+The OpenAI-compatible and Vertex AI embedders record a failure here before
+raising and record healthy on every validated response, so recovery is self-clearing the
 moment a real embedding request succeeds. Probes cover the paths passive
 recording cannot see: startup, config reload, and subprocess knowledge
 refreshes that never touch the main-process embedder.
@@ -15,14 +15,14 @@ from threading import Lock
 from typing import TYPE_CHECKING
 
 from mindroom.background_tasks import create_background_task
+from mindroom.config.resolution import memory_backend, memory_search
 from mindroom.embeddings.errors import EMBEDDER_EMPTY_VECTOR_DETAIL, describe_embedder_error
 from mindroom.logging_config import get_logger
 
 if TYPE_CHECKING:
-    from agno.knowledge.embedder.base import Embedder
-
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
+    from mindroom.embeddings.base import Embedder
 
 logger = get_logger(__name__)
 
@@ -85,28 +85,23 @@ def _reset_embedder_health_generation() -> EmbedderHealthRecorder:
         return EmbedderHealthRecorder(_health_generation)
 
 
-def handle_embedder_credential_change(
-    config: Config | None = None,
-    runtime_paths: RuntimePaths | None = None,
-) -> EmbedderHealthRecorder:
-    """Invalidate old writers and optionally probe the replacement credential."""
+def handle_embedder_credential_change(config: Config, runtime_paths: RuntimePaths) -> None:
+    """Invalidate old writers and probe the replacement credential."""
     health_recorder = _reset_embedder_health_generation()
-    if config is not None and runtime_paths is not None:
-        create_background_task(
-            check_embedder_health(
-                config,
-                runtime_paths,
-                reason="credential_change",
-                health_recorder=health_recorder,
-            ),
-            name="embedder_credential_change_health_check",
-        )
-    return health_recorder
+    create_background_task(
+        check_embedder_health(
+            config,
+            runtime_paths,
+            reason="credential_change",
+            health_recorder=health_recorder,
+        ),
+        name="embedder_credential_change_health_check",
+    )
 
 
 def embedder_in_use(config: Config) -> bool:
-    """Return whether the active config can send keyed embedder requests."""
-    return config.memory.embedder.provider == "openai" and semantic_embedder_configured(config)
+    """Return whether the active config can send embedder requests whose credentials can be rejected."""
+    return config.memory.embedder.provider in {"openai", "vertex_ai"} and semantic_embedder_configured(config)
 
 
 def semantic_embedder_configured(config: Config) -> bool:
@@ -116,8 +111,7 @@ def semantic_embedder_configured(config: Config) -> bool:
     if _memory_backend_uses_embedder(config.memory.backend, config.memory.search.mode):
         return True
     for agent_name in config.agents:
-        entity = config.resolve_entity(agent_name)
-        if _memory_backend_uses_embedder(entity.memory_backend, entity.memory_search.mode):
+        if _memory_backend_uses_embedder(memory_backend(config, agent_name), memory_search(config, agent_name).mode):
             return True
     return False
 
@@ -129,21 +123,27 @@ def _memory_backend_uses_embedder(backend: str, search_mode: str) -> bool:
 _PROBE_TIMEOUT_SECONDS = 10.0
 
 
-def _bound_probe_client_timeout(embedder: Embedder) -> None:
+def _bound_probe_client_timeout(embedder: Embedder, provider: str) -> None:
     """Cap the probe's SDK client so a stalled endpoint fails fast.
 
     The installed OpenAI SDK defaults allow a 600-second read timeout plus
-    retries, which would hang `mindroom doctor` and pin probe threads for
-    minutes; normal runtime embedding traffic keeps the SDK defaults.
+    retries, and the Vertex AI embedder a 60-second one plus retries, which
+    would hang `mindroom doctor` and pin probe threads for minutes; runtime
+    searches and memory keep those defaults, and only a knowledge
+    refresh, which retries itself, turns the OpenAI embedder's retries off.
+    google-genai loads only for a Vertex AI embedder.
     """
-    from mindroom.embeddings.openai_embedder import MindRoomOpenAIEmbedder  # noqa: PLC0415
+    from mindroom.embeddings.openai_embedder import OpenAIEmbedder  # noqa: PLC0415
 
-    if isinstance(embedder, MindRoomOpenAIEmbedder):
-        embedder.client_params = {
-            **(embedder.client_params or {}),
-            "timeout": _PROBE_TIMEOUT_SECONDS,
-            "max_retries": 0,
-        }
+    if isinstance(embedder, OpenAIEmbedder):
+        embedder.timeout = _PROBE_TIMEOUT_SECONDS
+        embedder.max_retries = 0
+    elif provider == "vertex_ai":
+        from mindroom.embeddings.vertex_ai_embedder import VertexAIEmbedder  # noqa: PLC0415
+
+        if isinstance(embedder, VertexAIEmbedder):
+            embedder.timeout = _PROBE_TIMEOUT_SECONDS
+            embedder.single_attempt = True
 
 
 def probe_embedder(
@@ -157,12 +157,9 @@ def probe_embedder(
     from mindroom.embeddings.factory import create_configured_embedder  # noqa: PLC0415
 
     try:
-        if health_recorder is None:
-            embedder = create_configured_embedder(config, runtime_paths)
-        else:
-            embedder = create_configured_embedder(config, runtime_paths, health_recorder=health_recorder)
-        _bound_probe_client_timeout(embedder)
-        vector = embedder.get_embedding(_PROBE_TEXT)
+        embedder = create_configured_embedder(config, runtime_paths, health_recorder=health_recorder)
+        _bound_probe_client_timeout(embedder, config.memory.embedder.provider)
+        vector = embedder.embed([_PROBE_TEXT], purpose="query")[0]
     except Exception as exc:
         return describe_embedder_error(exc)
     if not vector:

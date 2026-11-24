@@ -13,13 +13,14 @@ from typer.testing import CliRunner
 
 from mindroom.api.auth import dashboard_requires_credential
 from mindroom.cli.main import app
-from mindroom.cli.service import require_login_service, start_login_service
+from mindroom.cli.service import _confirm_action, require_login_service, start_login_service
 from mindroom.constants import PROVIDER_ENV_KEYS, RuntimePaths, resolve_primary_runtime_paths
 from mindroom.services.config import (
     InstallResult,
     ServiceActionResult,
     ServiceManager,
     ServiceStatus,
+    UninstallResult,
     build_service_command,
     find_uv,
     install_service_runtime,
@@ -42,6 +43,8 @@ from mindroom.services.systemd import _restart_service as _restart_systemd_servi
 from mindroom.services.systemd import _start_service as _start_systemd_service
 from mindroom.services.systemd import _stop_service as _stop_systemd_service
 from tests.conftest import normalize_console_output
+
+pytestmark = pytest.mark.usefixtures("wide_cli_consoles")
 
 runner = CliRunner()
 
@@ -963,6 +966,22 @@ def _shell_runtime(tmp_path: Path, **process_env: str) -> RuntimePaths:
     return resolve_primary_runtime_paths(config_path=config_path, process_env=process_env)
 
 
+@pytest.mark.parametrize(("typed", "expected"), [("\n", True), ("y\n", True), ("n\n", False)])
+def test_confirm_action_reads_the_answer(typed: str, expected: bool) -> None:
+    """Enter accepts, as the question's `[Y/n]` says, and `n` declines."""
+    with CliRunner().isolation(input=typed) as (_, _, output):
+        assert _confirm_action("Install?") is expected
+    assert b"Install? [Y/n]" in output.getvalue()
+
+
+def test_confirm_action_cancels_quietly_at_end_of_input() -> None:
+    """Closed input or Ctrl+C cancels the command without an error exit."""
+    with CliRunner().isolation(input="") as (_, _, output), pytest.raises(typer.Exit) as exit_info:
+        _confirm_action("Install?")
+    assert exit_info.value.exit_code == 0
+    assert b"Cancelled." in output.getvalue()
+
+
 @pytest.mark.parametrize(
     ("answers", "uv_installed", "install_result"),
     [
@@ -1081,6 +1100,56 @@ def test_service_install_keeps_the_shell_dashboard_key(
     service_runtime = resolve_primary_runtime_paths(config_path=runtime_paths.config_path, process_env={})
     assert service_runtime.env_value("MINDROOM_API_KEY") == key
     assert dashboard_requires_credential(service_runtime)
+
+
+@pytest.mark.parametrize("entry_point", ["run --service", "service install"])
+@pytest.mark.parametrize(
+    ("env_content", "shell_env", "error"),
+    [
+        (
+            "MINDROOM_BASE_URL=https://mindroom.example.org\n",
+            {},
+            "Error: MINDROOM_BASE_URL was removed; set MINDROOM_PUBLIC_URL",
+        ),
+        # Only this shell enables trusted upstream auth, and the service never sees it.
+        (
+            "MINDROOM_PUBLIC_URL=https://mindroom.example.org\nMINDROOM_DASHBOARD_URL=https://admin.example.org\n",
+            {"MINDROOM_TRUSTED_UPSTREAM_AUTH_ENABLED": "true"},
+            "Error: MINDROOM_DASHBOARD_URL requires trusted upstream auth",
+        ),
+    ],
+    ids=["retired-base-url", "shell-only-trusted-upstream"],
+)
+def test_service_install_refuses_dashboard_settings_the_service_cannot_start_with(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    entry_point: str,
+    env_content: str,
+    shell_env: dict[str, str],
+    error: str,
+) -> None:
+    """Dashboard settings the service would refuse fail the install with `mindroom run`'s error, not at service start."""
+    (tmp_path / ".env").write_text(env_content, encoding="utf-8")
+    runtime_paths = _shell_runtime(tmp_path, **shell_env)
+    manager = _login_service_manager()
+
+    if entry_point == "run --service":
+        with pytest.raises(typer.Exit) as exit_info:
+            start_login_service(runtime_paths, manager)
+        exit_code, output = exit_info.value.exit_code, capsys.readouterr().err
+    else:
+        monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(runtime_paths.config_path))
+        for name, value in shell_env.items():
+            monkeypatch.setenv(name, value)
+        with patch("mindroom.cli.service._get_service_manager", return_value=manager):
+            result = runner.invoke(app, ["service", "install", "-y"])
+        exit_code, output = result.exit_code, result.output
+
+    assert exit_code == 1
+    assert error in normalize_console_output(output)
+    manager.install_service.assert_not_called()
+    manager.install_runtime.assert_not_called()
 
 
 @pytest.mark.parametrize("entry_point", ["run --service", "service install"])
@@ -1227,3 +1296,110 @@ def test_require_login_service_refuses_a_machine_that_cannot_run_it(capsys: pyte
 
     assert exit_info.value.exit_code == 1
     assert "This machine cannot run a systemd user service." in capsys.readouterr().err
+
+
+def test_service_commands_print_paths_errors_and_logs_whole_on_one_line(
+    narrow_markup_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Each service line with a path, log line, or log command, and each error on stderr, prints whole on one line."""
+    text = str(narrow_markup_dir)
+    config_path = narrow_markup_dir / "config.yaml"
+    config_path.write_text("agents: {}\n", encoding="utf-8")
+    monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(config_path))
+    monkeypatch.delenv("MINDROOM_API_KEY", raising=False)
+    uv_path = narrow_markup_dir / "uv"
+    log_line = f"2026-11-08 [info] [/x] {text}"
+    manager = _login_service_manager(
+        install_result=InstallResult(success=False, message=f"Failed to start service: {text}"),
+    )
+    manager.check_uv_installed.return_value = (True, uv_path)
+    manager.get_service_status.return_value = ServiceStatus(installed=True, running=True, pid=42)
+    manager.get_recent_logs.return_value = [log_line]
+    manager.get_log_command.return_value = f"tail -f {text}/stdout.log"
+    manager.stop_service.return_value = ServiceActionResult(success=False, message=f"Cannot stop {text}")
+    manager.uninstall_service.return_value = UninstallResult(success=False, message=f"Cannot remove {text}")
+
+    def run(*args: str) -> tuple[list[str], list[str]]:
+        with patch("mindroom.cli.service._get_service_manager", return_value=manager):
+            result = runner.invoke(app, ["service", *args])
+        return result.stdout.splitlines(), result.stderr.splitlines()
+
+    installed, install_failed = run("install", "-y")
+    _, stop_failed = run("stop")
+    _, uninstall_failed = run("uninstall", "-y")
+    status, _ = run("status")
+    with patch("mindroom.cli.service.subprocess.run", side_effect=FileNotFoundError(2, "Not found", f"{text}/tail")):
+        _, follow_failed = run("logs")
+    dashboard_url = f"http://admin.example.org{text}"
+    (narrow_markup_dir / ".env").write_text(f"MINDROOM_DASHBOARD_URL={dashboard_url}\n", encoding="utf-8")
+    _, refused = run("install", "-y")
+    manager.check_uv_installed.return_value = (False, None)
+    manager.install_uv.return_value = (False, f"Failed to install uv: {text}")
+    _, uv_failed = run("install", "-y")
+    with patch("mindroom.cli.service._get_service_manager", side_effect=RuntimeError(f"No service manager for {text}")):
+        unsupported = runner.invoke(app, ["service", "status"]).stderr.splitlines()
+
+    assert f"  uv installed: {uv_path}" in installed
+    assert f"Error: Failed to start service: {text}" in install_failed
+    assert f"Error: Cannot stop {text}" in stop_failed
+    assert f"Error: Cannot remove {text}" in uninstall_failed
+    assert f"  {log_line[:120]}..." in status
+    assert f"Full logs: tail -f {text}/stdout.log" in status
+    assert f"Error: Failed to run log command: [Errno 2] Not found: '{text}/tail'" in follow_failed
+    assert any(line.startswith("Error: ") and f"'{dashboard_url}'" in line for line in refused), refused
+    assert f"Error: Failed to install uv: {text}" in uv_failed
+    assert f"Error: No service manager for {text}" in unsupported
+
+
+def test_login_service_prints_the_env_path_and_errors_whole_on_one_line(
+    narrow_markup_dir: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Handing `mindroom run` to the service names a markup-like, long `.env` path and each error whole on one line."""
+    text = str(narrow_markup_dir)
+    runtime_paths = _shell_runtime(narrow_markup_dir, OPENAI_API_KEY="sk-shell")
+    failing = _login_service_manager(install_result=InstallResult(success=False, message=f"Cannot start {text}"))
+
+    assert start_login_service(runtime_paths, _login_service_manager()) is True
+    output = capsys.readouterr().out.splitlines()
+    with pytest.raises(typer.Exit):
+        start_login_service(runtime_paths, failing)
+    failed = capsys.readouterr().err.splitlines()
+    dashboard_url = f"http://admin.example.org{text}"
+    (narrow_markup_dir / ".env").write_text(f"MINDROOM_DASHBOARD_URL={dashboard_url}\n", encoding="utf-8")
+    with pytest.raises(typer.Exit):
+        start_login_service(_shell_runtime(narrow_markup_dir), _login_service_manager())
+    refused = capsys.readouterr().err.splitlines()
+
+    assert f"Saved OPENAI_API_KEY from your shell to {runtime_paths.env_path} for the service." in output
+    assert f"Error: Cannot start {text}" in failed
+    assert any(line.startswith("Error: ") and f"'{dashboard_url}'" in line for line in refused), refused
+
+
+@pytest.mark.parametrize("log_dir", [True, False], ids=["log-folder", "log-command"])
+def test_installed_service_prints_its_log_location_whole_on_one_line(
+    narrow_markup_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    log_dir: bool,
+) -> None:
+    """The install summary shows a long, markup-like log folder or log command with an emoji code whole on one line."""
+    folder = narrow_markup_dir / ":fire:" / "logs"
+    config_path = narrow_markup_dir / "config.yaml"
+    config_path.write_text("agents: {}\n", encoding="utf-8")
+    monkeypatch.setenv("MINDROOM_CONFIG_PATH", str(config_path))
+    manager = _login_service_manager(
+        install_result=InstallResult(
+            success=True,
+            message="Installed and started",
+            log_dir=folder if log_dir else None,
+        ),
+    )
+    manager.get_log_command.return_value = f"tail -f {folder}/stdout.log"
+
+    with patch("mindroom.cli.service._get_service_manager", return_value=manager):
+        result = runner.invoke(app, ["service", "install", "-y"])
+
+    assert result.exit_code == 0, result.output
+    expected = f"View logs: {folder}/" if log_dir else f"View logs: tail -f {folder}/stdout.log"
+    assert expected in result.stdout.splitlines()

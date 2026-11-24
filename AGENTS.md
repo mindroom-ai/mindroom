@@ -46,7 +46,10 @@ MindRoom - AI agents that live in Matrix and work everywhere via bridges. The pr
 - Leave out implementation mechanics: locks, transactions, journals, caches, retries, internal IDs, module and class names, ordering internals, encoding details, and change history such as "previously" or "now".
   Also leave out hardening limits that normal use never reaches and behavior on rare failure, cancellation, recovery, and replay paths, unless a user would plausibly ask about them.
   Put an invariant contributors need in `docs/architecture/`, a code comment, or a test instead.
-  Every `docs/architecture/` page and every page outside the nav, such as `docs/dev/`, is for contributors and operators and may explain mechanisms; user docs name implementation details only when a documented procedure needs them.
+  User docs name implementation details only when a documented procedure needs them.
+- **Design and architecture documents** (`docs/architecture/` and the design records in `docs/dev/`) hold only what the code cannot show: reasons, decisions and rejected alternatives, assumptions, external constraints and wire contracts, refuted theories, evidence, limitations, invariant purposes, linked operator procedures, and open questions.
+  Do not describe what the code does there beyond the inventories this file requires, such as the code map, `security-posture.md`, the plaintext inventory in `matrix-event-journal-security.md`, and the Agno upstream map.
+  Name each dated record `docs/dev/YYYY-MM-DD-<title>.md` after its creation date.
 - Sentences like these fail the question test:
   - "An `index.json` larger than 8 MiB is rebuilt from the thread files on every pass that reaches its room." states a hardening limit normal use never reaches, with no effect a user sees.
   - "Restart recovery now checks the handled-turn ledger before replaying journal events." narrates a mechanism and its history; the outcome is "restarts do not produce duplicate replies".
@@ -82,7 +85,7 @@ Design migrations around that assumption rather than adding machinery to coordin
 - Keep current-format processing, transactions, locking, validation, authorization, and retries with the current storage or lifecycle owner.
   Small field defaults can stay with their model when extraction would only add indirection.
 - Each substantive legacy rule must have a nearby source comment whose first line is `# LEGACY_COMPAT: <short description of the legacy format>`.
-  Use one marker per documented rule, including small defaults and compatibility notes kept beside current owners, so `rg -n -F 'LEGACY_COMPAT:' --glob '*.py'` lists them across the repository.
+  Use one marker per documented rule, including small defaults and compatibility notes kept beside current owners, so `rg -n -F 'LEGACY_COMPAT:' --glob '*.{py,yaml}'` lists them across the repository.
   Follow the marker with these fields:
   - `Legacy format`: the old representation and the condition that selects this rule.
   - `Last legacy release`: the last stable MindRoom release whose native writer or typed model emitted that representation, plus the replacement release and format.
@@ -91,35 +94,29 @@ Design migrations around that assumption rather than adding machinery to coordin
 - Verify release provenance from history and tags.
   The last release that accepted old data is not the last native writer release.
   State unreleased, unversioned external input, no tagged native model, or schema-based recovery explicitly when no single release cutoff exists.
-- Keep the boundary map in `docs/architecture/migrations.md` aligned with changes; source comments own the exact provenance and test references.
+- Source comments own each rule's provenance and test references; `docs/architecture/migrations.md` holds only cross-cutting migration decisions and dependency-owned migrations.
 
 ### Agno Compatibility Policy
 
-- The goal is to identify Agno weaknesses, contribute focused upstream fixes or extension points, and remove local workarounds as those changes ship.
-  Judge an extraction by whether it makes that upstream work easier to understand, test, and retire.
-- Isolate substantive Agno monkey patches, copied SDK internals, private-API adapters, and upstream bug workarounds in `agno_compat_<subject>.py` beside their owning module.
-  Ordinary public-API usage and MindRoom's orchestration, approval, history, and storage policies remain with their current owners.
-  Tiny overrides may stay in a cohesive adapter when extraction would only add indirection, but require the same source comment.
-- Each distinct workaround must have a nearby source comment whose first line is `# AGNO_COMPAT: <short description of the upstream weakness>`.
-  Use one marker per independently removable workaround, including tiny overrides kept beside their owners, so `rg -n -F 'AGNO_COMPAT:' src/mindroom` lists each gap with a useful summary.
+- MindRoom owns its run loop, providers, storage, teams, history, tool schemas, and the tool authoring API its tools use (`tool_system/authoring.py`; tools return text or `ToolValue`); Agno stays only as the vendor tool library and the knowledge reader layer.
+  What stays Agno: vendor toolkits with MindRoom's overrides, Agno's `Toolkit`, `Function`, and `@tool` for them and for plugins built on them (the adapter reads their `ToolResult` once; `@tool` derives its own schema), and the knowledge readers and chunkers in `knowledge/readers.py`.
+- The agent loop sees tools only as `ToolFunction`, produced by `adapt_toolkit` and `toolkit_function` in `tool_system/agno_toolkits.py`; only it, vendor subclasses, and `oauth/agno_compat_google_auth.py` read Agno toolkits.
+  Only the modules `tests/test_agno_boundary.py` allows may import Agno; others use the adapter and MindRoom's types, never Agno's agent, team, model, run, storage, or learning layers.
+- The goal is to fix Agno weaknesses upstream and remove local workarounds as those fixes ship.
+  Isolate substantive workarounds in `agno_compat_<subject>.py` beside their owning module; a tiny override may stay in a cohesive adapter.
+- Mark each independently removable workaround with a nearby source comment whose first line is `# AGNO_COMPAT: <short description of the upstream weakness>`, so `rg -n -F 'AGNO_COMPAT:' src/mindroom` lists each gap.
   Follow the marker with these fields:
   - `Reason`: the concrete upstream behavior or missing extension point and its effect on MindRoom.
   - `Upstream issue`: a verified issue URL, or an explicit tracking gap and why the boundary is needed.
   - `Upstream PR`: a verified fix or API proposal URL when one exists; state when none is identified or the linked PR covers only part of the workaround.
   - `Remove when`: the exact upstream behavior that allows removal, including any MindRoom behavior that must remain.
   - `Coverage`: repository-relative regression test paths, preferably exact test node IDs.
-- Distinguish upstream bugs from missing public extension points and intentional application policy.
-  Never invent a tracking link or treat a related PR as a complete fix.
-  Separate removal conditions when one module handles multiple upstream gaps.
-- Treat an explicit tracking gap as unfinished upstream work.
-  Record the concrete failing behavior or required extension point in the inventory, search for existing tracking before opening a new item, and replace the gap with verified links when available.
-- For an upstream contribution, reduce the problem to an Agno-only reproducer and regression test where possible.
-  Keep MindRoom-specific policy out of the proposed fix and retain local integration coverage for the behavior MindRoom requires.
-- Keep patch installation explicit and idempotent, preserve optional-import boundaries, and retain version guards where private signatures or semantics require them.
-- Keep the weakness-to-upstream map and boundary inventory in `docs/architecture/agno-compatibility.md` aligned with contributions, extractions, and removals; source comments own exact upstream tracking and test references.
-- On each Agno upgrade, inspect these boundaries, verify which fixes the pinned release includes, and run their behavioral tests.
-  Remove a workaround only when the relevant tests pass without it; a merged PR alone is insufficient.
-  Retain regression coverage for behavior MindRoom still requires and update Tach boundaries with any extraction or removal.
+- Distinguish upstream bugs from missing extension points and MindRoom policy; never invent a tracking link or treat a related PR as a complete fix.
+  Treat a tracking gap as unfinished upstream work, and search for existing tracking before opening a new item.
+- For an upstream contribution, reduce the problem to an Agno-only reproducer, keep MindRoom policy out of the fix, and keep local coverage for the behavior MindRoom requires.
+- Keep the weakness-to-upstream map in `docs/architecture/agno-compatibility.md` aligned with the markers; source comments own exact upstream links and test references.
+- On each Agno upgrade, run `tests/tool_system/`, whose goldens pin vendor tool schemas and argument coercion, verify which fixes the pinned release includes, and run each marker's coverage.
+  Remove a workaround only when its tests pass without it; a merged PR alone is insufficient.
 
 ### Security Trust Model
 
@@ -163,7 +160,7 @@ Update that page in the same PR when a change alters the trust model or anything
 ### Running MindRoom Live
 
 - Use the `live-test` skill (`.claude/skills/live-test/`) to boot a local Matrix stack and backend, use a local OpenAI-compatible model server, create disposable Matrix accounts, talk to agents with Matty, and take dashboard or platform screenshots.
-- `docs/dev/ops/README.md` lists the main `just` recipes (`just --list` shows all), including the destructive `just local-matrix-reset`; read its warning before resetting.
+- `docs/dev/ops.md` lists the main `just` recipes (`just --list` shows all), including the destructive `just local-matrix-reset`; read its warning before resetting.
 - For hosted Matrix with pairing (`uvx mindroom config init --matrix-server mindroom.chat`, then `uvx mindroom run`), see `docs/getting-started.md` and `docs/deployment/hosted-matrix.md`.
 - SaaS platform deployment, staging values, release deploys, and Supabase migrations are documented in `docs/deployment/saas-platform.md`.
 - `docs/cli.md` documents every `mindroom` command, including `mindroom doctor`, `mindroom run --log-level DEBUG`, and `mindroom local-stack-setup`.
@@ -180,19 +177,18 @@ Update that page in the same PR when a change alters the trust model or anything
 
 ### Step 4: Testing & Quality
 
-- **Test Before Committing**: **NEVER** claim a task is complete without running `pytest` to ensure all tests pass.
-- **Test at the Owning Seam**: New behavior tests target the collaborator seam that owns the behavior (`ResponseRunner`, `DeliveryGateway`, `TurnPolicy`, `TurnController`, `CoalescingGate`, `IngressValidator`, `EditRegenerator`), not the `AgentBot`/`TeamBot` facade.
-  Fake collaborators through the conftest seam installers (`install_generate_response_mock`, `install_send_response_mock`, `replace_edit_regenerator_deps`) or the `*Deps` dataclasses, never by assigning mocks onto bot attributes.
-  A test needing more than 3 patches is a smell that it is testing through the wrong seam.
+- **Test at the Owning Seam**: New behavior tests target the collaborator seam that owns the behavior (`ResponseRunner`, `DeliveryGateway`, `TurnPolicy`, `TurnIngress`, `TurnDispatcher`, `CoalescingGate`, `IngressValidator`, `EditRegenerator`), not the `AgentBot` facade.
+  Fake collaborators through the conftest seam installers (`install_generate_response_mock`, `install_send_response_mock`, `replace_edit_regenerator_deps`, and `install_model_providers` for models) or the `*Deps` dataclasses, never by assigning mocks onto bot attributes.
+  A test needing more than 3 patches likely tests through the wrong seam.
   Genuinely end-to-end tests belong in the slim integration files (`test_multi_agent_bot.py`, `test_threading_error.py`), which stay small by design.
+- **Grid and Flow Tests**: A feature that adds a new kind of actor or room adds an actor × ingress-path grid test and at least one multi-step flow test asserting the end state, as in `tests/contacts/test_actor_paths.py` and `tests/contacts/test_scenarios.py`.
 - **NixOS Test Shell**: On NixOS hosts, enter the Node.js 24 dev shell with `nix-shell shell.nix` before running tests; without it, `uv run pytest` fails with `module 'mindroom' has no attribute 'bot'` because `libstdc++.so.6` is missing.
   If `<nixpkgs>` is unresolved, use `nix-shell -I nixpkgs=/nix/var/nix/profiles/per-user/root/channels/nixos shell.nix`.
   Inside it, run `uv run pytest tests/<file>.py -x -n 0 --no-cov -v`, `just test-backend`, or `just test-saas-backend`; recipe regression tests require `just`, which `shell.nix` and CI install.
-- **Run Pre-commit Hooks**: After `uv sync --all-extras`, run `uv run pre-commit run --all-files` before committing to enforce code style and quality.
+  Prefix core runs with `env -u TMPDIR -u TEMP -u TMP` and never set `TMPDIR` yourself: an exported `TMPDIR`, which `nix-shell` always sets, switches `pytest-shm` off and moves test temp files from `/dev/shm` to disk; the pytest header shows `shm: temp root /dev/shm` when it is on.
+- **Run Pre-commit Hooks**: After `uv sync --all-extras`, run `uv run pre-commit run --all-files` before committing.
 - **Update Tach Boundaries in the Same PR**: If your PR changes a Tach-governed boundary, update `tach.toml` in the same PR, follow the guidance in the comment at the top of that file, and run `uv run tach check --dependencies --interfaces`.
-- **Handle Linter Issues**:
-  - **False Positives**: The linter may incorrectly flag issues in `pyproject.toml`; these can be ignored.
-  - **Test-Related Errors**: If a pre-commit fix breaks a test (e.g., by removing an unused but necessary fixture), suppress the warning with a `# noqa: <error_code>` comment.
+- **Handle Linter Issues**: Ignore false positives in `pyproject.toml`; if a pre-commit fix breaks a test, such as by removing an unused but necessary fixture, suppress the warning with `# noqa: <error_code>`.
 
 ### Step 5: Refactoring
 
@@ -218,47 +214,48 @@ Coding model training data often lags recent releases, so never trust memorized 
 | Provider | Use | Preferred model | Model string to use |
 | --- | --- | --- | --- |
 | Anthropic | Balanced default | Claude Sonnet 5.5 | `claude-sonnet-5-5` |
-| Anthropic | Max intelligence | Claude Fable 5.1 | `claude-fable-5-1` |
+| Anthropic | Max intelligence | Claude Fable 5.2 | `claude-fable-5-2` |
 | Anthropic | Flagship default | Claude Opus 5.5 | `claude-opus-5-5` |
 | Anthropic | Fast / cheap | Claude Haiku 5.5 | `claude-haiku-5-5` |
-| OpenAI | Frontier default | GPT-6 Astra | `gpt-6-astra` |
-| OpenAI | Balanced | GPT-6.1 Sol | `gpt-6.1-sol` |
-| OpenAI | Fast / cheap | GPT-6 Luna | `gpt-6-luna` |
-| OpenAI Codex ChatGPT login | Default via Codex CLI | GPT-6.1 Sol | `gpt-6.1-sol` |
-| OpenAI Codex ChatGPT login | Frontier via Codex CLI | GPT-6 Astra | `gpt-6-astra` |
-| OpenAI Codex ChatGPT login | Fast / cheap via Codex CLI | GPT-6 Luna | `gpt-6-luna` |
-| DeepSeek (OpenRouter) | Fast / cheap | DeepSeek V4.1 Flash | `deepseek/deepseek-v4.1-flash` |
+| OpenAI | Frontier default | GPT-6.2 Astra | `gpt-6.2-astra` |
+| OpenAI | Balanced | GPT-6.2 Sol | `gpt-6.2-sol` |
+| OpenAI | Fast | GPT-6.1 Terra | `gpt-6.1-terra` |
+| OpenAI | Cheap / high-volume | GPT-6 Luna | `gpt-6-luna` |
+| OpenAI Codex ChatGPT login | Default via Codex CLI | GPT-6.2 Sol | `gpt-6.2-sol` |
+| OpenAI Codex ChatGPT login | Frontier via Codex CLI | GPT-6.2 Astra | `gpt-6.2-astra` |
+| OpenAI Codex ChatGPT login | Fast via Codex CLI | GPT-6.1 Terra | `gpt-6.1-terra` |
+| OpenAI Codex ChatGPT login | Cheap / high-volume via Codex CLI | GPT-6 Luna | `gpt-6-luna` |
+| DeepSeek (OpenRouter) | Fast / cheap | DeepSeek V4.1 Flash | `deepseek/deepseek-v4.1-flash-1017` |
 | Z.ai (OpenRouter) | Flagship | GLM-5.3 | `z-ai/glm-5.3` |
-| OpenAI | Image generation / editing | GPT Image 2.5 Sunburst | `gpt-image-2.5-sunburst` |
+| OpenAI | Image generation / editing | GPT Image 2.6 Sunburst | `gpt-image-2.6-sunburst` |
 | OpenAI | File transcription | GPT Transcribe | `gpt-transcribe` |
+| OpenAI | Full-duplex voice calls | GPT-Live-1.1 | `gpt-live-1.1` |
 | Google (Vertex AI) | Video generation | Veo 3.1 | `veo-3.1-generate-001` |
 | Qwen | Local 27B | Qwen3.8-27B | `qwen3.8:27b` (Ollama), `unsloth/Qwen3.8-27B-GGUF:UD-Q4_K_XL` (llama.cpp) |
-| Moonshot Kimi Code login | Frontier via Kimi Code CLI | Kimi K3 | `k3` |
-| Google (Gemini API) | Max intelligence | Gemini 3.1 Pro Preview | `gemini-3.1-pro-preview` |
-| Google (Gemini API) | Standard text / coding | Gemini 3.8 Flash | `gemini-3.8-flash` |
-| Google (Gemini API) | Fast / cheap text | Gemini 3.5 Flash-Lite | `gemini-3.5-flash-lite` |
-| Google (Gemini API) | Image generation / editing | Nano Banana 2 | `gemini-3.1-flash-image` |
+| Moonshot Kimi Code login | Frontier via Kimi Code CLI | Kimi K3.1 Pro | `k3.1-pro` |
+| Google (Gemini API) | Max intelligence | Gemini 4 Carbon | `gemini-4-carbon` |
+| Google (Gemini API) | Interactive frontier coding | Gemini 4 Neon | `gemini-4-neon` |
+| Google (Gemini API) | Standard text / coding | Gemini 4 Hydrogen | `gemini-4-hydrogen` |
+| Google (Gemini API) | Image generation / editing | Nano Banana 2.1 | `gemini-nano-banana-2.1` |
 | Google (Gemini API) | Embeddings for `google` | Gemini Embedding 2 | `gemini-embedding-2` |
 
-Model IDs were checked against provider catalogs on September 28, 2026, the Haiku row on October 7, 2026, and the Codex rows against the Codex model catalog on October 1, 2026.
-OpenRouter uses `anthropic/claude-fable-5.1`, Bedrock uses `anthropic.claude-fable-5-1`, and the direct Anthropic and Vertex APIs use `claude-fable-5-1`.
+Model IDs were checked against the provider and Codex model catalogs on November 23, 2026.
+OpenRouter uses `anthropic/claude-fable-5.2`, and the direct Anthropic and Vertex APIs use `claude-fable-5-2`.
+`bedrock_claude` (bedrock-mantle) uses `anthropic.claude-fable-5-1`: Bedrock serves Fable 5.2 only on `bedrock-runtime`.
 Likewise, OpenRouter uses `anthropic/claude-opus-5.5` and `anthropic/claude-sonnet-5.5`, and Bedrock uses `anthropic.claude-opus-5-5` and `anthropic.claude-sonnet-5-5`.
 For the direct DeepSeek API, prefer `deepseek-flash` for V4.1 Flash and `deepseek-v4-pro` for Pro; do not substitute the OpenRouter V4.1 ID on the direct API.
 The older `deepseek-v4-flash` name remains accepted as a [temporary compatibility route to V4.1 Flash](https://api-docs.deepseek.com/updates/#date-2026-09-10).
 
 For `anthropic`, prefer `claude-sonnet-5-5`, `claude-opus-5-5`, and `claude-haiku-5-5` unless you intentionally need a pinned snapshot ID.
-Use `claude-fable-5-1` when you need Anthropic's highest available capability.
-Claude Fable 5.1 is generally available on the direct Anthropic API and the documented cloud platforms.
 For `vertexai_claude`, use the current Vertex AI request name from the provider docs instead of assuming the Anthropic API ID carries over unchanged.
-Current Google Cloud docs list bare Vertex IDs for `claude-fable-5-1`, `claude-opus-5-5`, `claude-sonnet-5-5`, and `claude-haiku-5-5`.
+Current Google Cloud docs list bare Vertex IDs for `claude-fable-5-2`, `claude-opus-5-5`, `claude-sonnet-5-5`, and `claude-haiku-5-5`.
 Do not assume `@default` or dated `@...` suffixes are universally required for Vertex AI Claude.
-For Gemini API text and coding work, prefer `gemini-3.8-flash` as the standard stable model unless you intentionally need the cheaper `gemini-3.5-flash-lite` tier.
-Use `gemini-3.1-pro-preview` only when you need the highest Gemini API intelligence tier and accept a preview model.
+For Gemini API work, prefer `gemini-4-hydrogen` for everyday text and coding, `gemini-4-neon` for complex interactive coding, and `gemini-4-carbon` for long-horizon deep verification.
 The Google rows above are for the Gemini API / AI Studio `google` provider, not for Vertex AI.
 For `vertexai`, verify the current Vertex AI docs instead of assuming Gemini API names or defaults carry over unchanged.
-Current [Vertex AI image docs](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/capabilities/image-generation) document `gemini-3-pro-image`, `gemini-3.1-flash-image`, and `gemini-3.1-flash-lite-image`; choose the tier that fits the task.
+Current [Vertex AI image docs](https://docs.cloud.google.com/gemini-enterprise-agent-platform/models/capabilities/image-generation) document `gemini-nano-banana-2.1`, `gemini-3-pro-image`, `gemini-3.1-flash-image`, and `gemini-3.1-flash-lite-image`; `gemini-nano-banana-2.1` serves only the `global` location.
 For Google image work, use the official product name from the docs for the provider surface you are editing.
-Gemini API docs call `gemini-3.1-flash-image` Nano Banana 2, while Vertex AI docs use their own product naming and model tables.
+Gemini API docs call `gemini-nano-banana-2.1` Nano Banana 2.1, while Vertex AI docs use their own product naming and model tables.
 
 ## 5. Architecture
 
@@ -267,13 +264,13 @@ Gemini API docs call `gemini-3.1-flash-image` Nano Banana 2, while Vertex AI doc
 **MultiAgentOrchestrator** (`orchestrator.py`) is the heart of the system - it boots every configured entity (router, agents, teams), provisions Matrix users, and keeps sync loops alive with hot-reload support when `config.yaml` changes.
 
 **Entity types**:
-- `router`: Built-in traffic director that greets rooms and decides which agent or team should answer
+- `router`: The owner account: administers configured rooms, never answers; room stewards route
 - **Agents**: Single-specialty actors defined under `agents:` in `config.yaml`
 - **Teams**: Collaborative bundles of agents that coordinate or parallelize work
 
 **Code map**: `docs/architecture/code-map.md` holds the inbound turn pipeline, a one-line purpose for each key module under `src/mindroom/`, and where persistent state lives.
 Read it to locate code, and update its rows when you add, rename, or remove a key module.
-Turn handling is described in `docs/architecture/bot-runtime.md`, and minimal-mode ownership and recovery in `docs/architecture/agent-cli.md`.
+The reasons behind turn handling are in `docs/architecture/bot-runtime.md`, and minimal-mode ownership and recovery in `docs/architecture/agent-cli.md`.
 
 ### SaaS Platform (`saas-platform/`)
 - **Platform Backend**: Modular FastAPI app with routes in `saas-platform/platform-backend/src/backend/routes/`
@@ -299,7 +296,7 @@ Turn handling is described in `docs/architecture/bot-runtime.md`, and minimal-mo
 MindRoom also maintains related repositories under `github.com/mindroom-ai`, many of them cloned in the parent directory (`../`) of this dev environment:
 - `synapse` - Synapse fork with optional compact-edit collapsing for superseded `m.replace` events, advertised in `/versions` as `org.mindroom.compact_edits` (see `README.md` and `FORK_CHANGES.md`).
 - `mindroom-librechat` - LibreChat fork that renders MindRoom inline `<tool>` / `<tool-group>` tags as native `ToolCall` cards (see `README.md` and `.mindroom/fork-context.md` and `.mindroom/tool-tag-rendering.md`).
-- `mindroom-chat` - MindRoom Chat, the Cinny-based Matrix client for MindRoom on the web, iOS, and Android (see `README.md` and `FORK_CHANGES.md`).
+- `mindroom-chat` - MindRoom Chat, the Apache-2.0 Matrix client for MindRoom on the web, iOS, macOS, and Android, built on `matrix-js-sdk` (see `README.md`, `AGENTS.md`, and `docs/architecture.md`).
 - `mindroom-stack` - Docker Compose reference stack with the published MindRoom backend and frontend, a Tuwunel homeserver, and MindRoom Chat.
 
 ### Configuration Model
@@ -310,7 +307,7 @@ The authoritative config is `config.yaml`, loaded via Pydantic models in `src/mi
 ## 6. Releases
 
 Pushes to `main` publish a CalVer release automatically through `.github/workflows/calver-auto-release.yml`.
-Read the Releases section of `docs/dev/ops/README.md` before retrying a failed publication.
+Read the Releases section of `docs/dev/ops.md` before retrying a failed publication.
 
 # Important Instruction Reminders
 Do what has been asked; nothing more, nothing less.

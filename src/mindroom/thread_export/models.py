@@ -10,6 +10,7 @@ if TYPE_CHECKING:
     import nio
 
     from mindroom.agent_reply_membership import AgentReplyMembershipIndex
+    from mindroom.thread_export.execution import ExportedThreads
     from mindroom.thread_export.projected_history import ProjectedThreadReader
 
 
@@ -115,10 +116,10 @@ class ThreadExportAccumulator:
 
 @dataclass(frozen=True)
 class ThreadExportGroup:
-    """Rooms to read through one running entity."""
+    """Rooms to read through one running entity, or one room through its steward when ``entity_name`` is None."""
 
     rooms: tuple[ThreadExportRoom, ...]
-    entity_name: str
+    entity_name: str | None
 
 
 @dataclass(frozen=True)
@@ -129,6 +130,7 @@ class ThreadExportSource:
     thread titles people set, so exported summaries match that entity's thread listings.
     ``target_output_dirs=None`` preserves the all-target fan-out used by
     administrative exports; workspace sources name only their own targets.
+    ``exported`` holds what earlier passes wrote, so unchanged threads are skipped.
     """
 
     client: nio.AsyncClient
@@ -137,3 +139,4 @@ class ThreadExportSource:
     entity_name: str
     membership_index: AgentReplyMembershipIndex
     target_output_dirs: tuple[Path, ...] | None = None
+    exported: ExportedThreads | None = None

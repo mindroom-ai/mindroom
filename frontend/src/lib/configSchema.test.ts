@@ -70,6 +70,7 @@ const ROOT: JsonSchema = {
 const REFERENCES: ReferenceOptions = {
   model: ["sonnet", "haiku"],
   agent: ["helper"],
+  personal_room_agent: ["helper"],
   room: ["lobby"],
   tool: ["shell"],
 };
@@ -329,11 +330,13 @@ describe("automation entries", () => {
     expect(node.variants.map((variant) => variant.label)).toEqual([
       "Prompt curation",
       "Dreaming",
+      "Exploration",
       "Plugin automation",
     ]);
     expect(node.variants.map((variant) => variant.errorTag)).toEqual([
       "prompt_curation",
       "dreaming",
+      "exploration",
       "plugin",
     ]);
   });
@@ -346,7 +349,7 @@ describe("automation entries", () => {
         { name: "weekly_digest", cron: "0 9 * * 1" },
         REAL,
       ),
-    ).toBe(2);
+    ).toBe(3);
     expect(matchUnionVariant(node, {}, REAL)).toBe(-1);
   });
 

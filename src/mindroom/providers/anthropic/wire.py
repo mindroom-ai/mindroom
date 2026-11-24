@@ -1,0 +1,581 @@
+"""Claude Messages API wire format: messages and tools in, request blocks out, responses parsed back.
+
+The parser is the single place a finished response becomes an assistant ``Message``: it stores the response's
+blocks once, in the shape a later request sends them (``claude_blocks``), and reads the message's text, reasoning,
+and tool calls from those blocks. The formatter echoes a stored turn's blocks verbatim, because the API signs
+thinking blocks and verifies the sequence on replay; a turn without them is rebuilt from its message fields.
+"""
+
+from __future__ import annotations
+
+import base64
+import json
+import mimetypes
+from copy import deepcopy
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any
+
+from anthropic.types.beta import BetaMessage, BetaUsage
+
+from mindroom.llm.media import canonical_mime_type, file_text, image_format, is_text_mime_type
+from mindroom.llm.messages import Message, ToolResultView, stored_tool_call, system_texts, tool_result_view
+from mindroom.llm.usage import MessageMetrics, TokenCounts
+from mindroom.logging_config import get_logger
+from mindroom.model_defaults import (
+    CLAUDE_BEDROCK_UNCHECKED_THINKING_MODELS,
+    CLAUDE_NO_FORCED_TOOL_MODEL_PREFIXES,
+    CLAUDE_PREFIX_CHECKED_THINKING_MODELS,
+)
+from mindroom.providers.anthropic.repairs import replay_safe_blocks
+from mindroom.providers.anthropic.stored_turns import replayed_blocks
+from mindroom.providers.claude_wire_blocks import CLAUDE_BLOCKS_KEY, as_dict
+from mindroom.providers.media_files import read_media_bytes
+from mindroom.token_counting.counts import count, opaque_tokens
+from mindroom.token_counting.requests import MEDIA_ALLOWANCE_TOKENS, RequestParts
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
+
+    from anthropic.types import Message as AnthropicMessage
+    from anthropic.types import ToolUseBlock, Usage
+    from anthropic.types.beta import BetaToolUseBlock
+
+    from mindroom.llm.media import File, Image
+    from mindroom.llm.provider import StopReason, ToolSpec
+    from mindroom.providers.anthropic.settings import ClaudeRouteKind
+
+logger = get_logger(__name__)
+
+# Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
+# Models that support assistant message prefill. This is a closed set: prefill was deprecated starting with
+# Claude 4.6 and every later model rejects it, so a request to those models must end with a user turn.
+_PREFILL_SUPPORTED_PREFIXES = (
+    "claude-3-",
+    "claude-sonnet-4-0",
+    "claude-sonnet-4-1",
+    "claude-sonnet-4-2",
+    "claude-sonnet-4-5",
+    "claude-opus-4-0",
+    "claude-opus-4-1",
+    "claude-opus-4-2",
+    "claude-opus-4-5",
+    "claude-haiku-4-0",
+    "claude-haiku-4-1",
+    "claude-haiku-4-2",
+    "claude-haiku-4-5",
+)
+# Aliases like "claude-sonnet-4" point at a 4-0 release, which supports prefill; exact matches only, because
+# a prefix check would also match "claude-sonnet-4-6".
+_PREFILL_SUPPORTED_ALIASES = frozenset({"claude-sonnet-4", "claude-opus-4", "claude-haiku-4"})
+# Models without native structured outputs, another closed set: every later Claude model supports them.
+_NON_STRUCTURED_OUTPUT_PREFIXES = ("claude-3-",)
+_NON_STRUCTURED_OUTPUT_ALIASES = frozenset(
+    {
+        "claude-sonnet-4-20250514",
+        "claude-sonnet-4",
+        "claude-sonnet-4-0",
+        "claude-opus-4-20250514",
+        "claude-opus-4",
+        "claude-opus-4-0",
+    },
+)
+
+_TRAILING_USER_MESSAGE = "continue"
+_THINKING_BLOCK_TYPES = frozenset({"thinking", "redacted_thinking"})
+_IMAGE_MEDIA_TYPES = {
+    "jpeg": "image/jpeg",
+    "jpg": "image/jpeg",
+    "png": "image/png",
+    "gif": "image/gif",
+    "webp": "image/webp",
+}
+_STOP_REASONS: dict[str, StopReason] = {
+    "end_turn": "end",
+    "stop_sequence": "end",
+    "tool_use": "tool_use",
+    "max_tokens": "output_limit",
+    "model_context_window_exceeded": "output_limit",
+    "refusal": "refusal",
+    "pause_turn": "incomplete",
+}
+
+
+def _core_model_id(model_id: str) -> str:
+    """Strip the decorations that hide which Claude model an id names from the prefix and alias checks.
+
+    A gateway id such as ``anthropic/claude-opus-4-6`` (LiteLLM) loses its provider path, a Bedrock id such as
+    ``us.anthropic.claude-opus-4-6-v1:0`` its region and ``anthropic.`` prefix, and a Vertex AI id such as
+    ``claude-sonnet-4@20250514`` its snapshot. A Bedrock version suffix never changes a check, because every
+    prefix ends before it and no Bedrock id is a bare alias.
+    """
+    return model_id.rsplit("/", 1)[-1].rsplit("anthropic.", 1)[-1].split("@", 1)[0]
+
+
+def supports_prefill(model_id: str) -> bool:
+    """Return whether the model accepts a request that ends with an assistant turn."""
+    core_id = _core_model_id(model_id)
+    if not core_id.startswith("claude"):
+        return True
+    return core_id in _PREFILL_SUPPORTED_ALIASES or core_id.startswith(_PREFILL_SUPPORTED_PREFIXES)
+
+
+def supports_structured_outputs(model_id: str) -> bool:
+    """Return whether the direct API offers ``output_config.format`` for this model, read by its core id as prefill is."""
+    core_id = _core_model_id(model_id)
+    return core_id not in _NON_STRUCTURED_OUTPUT_ALIASES and not core_id.startswith(_NON_STRUCTURED_OUTPUT_PREFIXES)
+
+
+def supports_forced_tool_use(model_id: str, *, manual_thinking: bool) -> bool:
+    """Return whether the model accepts a request that forces one tool call, read by its core id as prefill is.
+
+    Manual extended thinking (``thinking.type: "enabled"``) rejects forced tool use on every model.
+    """
+    return not manual_thinking and not _core_model_id(model_id).startswith(CLAUDE_NO_FORCED_TOOL_MODEL_PREFIXES)
+
+
+def checks_thinking_prefix(model_id: str, route: ClaudeRouteKind) -> bool:
+    """Return whether the route rejects or drops this model's replayed thinking once the context before it changed."""
+    core_id = _core_model_id(model_id)
+    if route == "bedrock_claude" and core_id.startswith(CLAUDE_BEDROCK_UNCHECKED_THINKING_MODELS):
+        return False
+    return core_id.startswith(CLAUDE_PREFIX_CHECKED_THINKING_MODELS)
+
+
+def stop_reason_of(raw: str | None) -> StopReason | None:
+    """Map Claude's ``stop_reason`` onto the shared vocabulary; a reason this map does not know is incomplete."""
+    return None if raw is None else _STOP_REASONS.get(raw, "incomplete")
+
+
+@dataclass(frozen=True, slots=True)
+class FormattedConversation:
+    """The ``messages`` array and the system texts of one request, one per system message in order."""
+
+    messages: list[dict[str, Any]]
+    system: tuple[str, ...]
+
+
+def format_claude_messages(
+    messages: Sequence[Message],
+    *,
+    append_trailing_user_message: bool,
+    earlier_thinking: bool,
+    provider: str,
+) -> FormattedConversation:
+    """Turn the conversation into Claude's alternating ``user``/``assistant`` turns.
+
+    System messages are extracted, each its own system text. Consecutive same-role turns merge into one, dropping
+    the earlier assistant turn's thinking: the API verifies an assistant message's thinking sequence against one
+    original response. Without ``earlier_thinking``, the turns before the current tool loop replay without their
+    thinking (``_without_earlier_thinking``). A conversation that ends with an assistant turn gets a trailing
+    ``continue`` user turn when the model rejects prefill. Documents ask for no citations, which no MindRoom reply
+    shows. An attachment file that cannot be read raises ``InvalidRequest`` naming ``provider``.
+    """
+    turns: list[dict[str, Any]] = []
+    for message in messages:
+        if message.role == "system":
+            continue
+        if message.role == "user":
+            content = _user_blocks(message, provider)
+        elif message.role == "assistant":
+            content = replayed_blocks(message)
+            if not content:
+                continue
+        elif message.role == "tool":
+            content = [_tool_result_block(tool_result_view(message))]
+        else:
+            msg = f"Claude requests cannot carry a message with role {message.role!r}"
+            raise ValueError(msg)
+        turns.append({"role": "assistant" if message.role == "assistant" else "user", "content": content})
+    merged = _merged_turns(turns)
+    if not earlier_thinking:
+        merged = _merged_turns(_without_earlier_thinking(merged))
+    if append_trailing_user_message and merged and merged[-1]["role"] == "assistant":
+        merged.append({"role": "user", "content": [{"type": "text", "text": _TRAILING_USER_MESSAGE}]})
+    return FormattedConversation(messages=merged, system=system_texts(messages))
+
+
+def _merged_turns(turns: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Merge consecutive same-role turns; two assistant turns share one message only without the earlier thinking."""
+    merged: list[dict[str, Any]] = []
+    for turn in turns:
+        if merged and merged[-1]["role"] == turn["role"]:
+            previous = merged[-1]["content"]
+            if turn["role"] == "assistant":
+                previous = [block for block in previous if block.get("type") not in _THINKING_BLOCK_TYPES]
+            merged[-1] = {"role": turn["role"], "content": [*previous, *turn["content"]]}
+        else:
+            merged.append(turn)
+    return merged
+
+
+def _without_earlier_thinking(turns: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Leave the thinking out of the assistant turns before the current tool loop; a turn left empty goes too.
+
+    The loop starts after the last user turn without a tool result, where the API itself starts a new turn. The
+    API requires the loop's own thinking as received and allows leaving out every earlier turn's.
+    """
+    starts = [index for index, turn in enumerate(turns) if turn["role"] == "user" and not _answers_tool_calls(turn)]
+    start = starts[-1] if starts else 0
+    kept: list[dict[str, Any]] = []
+    for index, turn in enumerate(turns):
+        if index >= start or turn["role"] != "assistant":
+            kept.append(turn)
+            continue
+        content = [block for block in turn["content"] if block.get("type") not in _THINKING_BLOCK_TYPES]
+        if content:
+            kept.append({**turn, "content": content})
+    return kept
+
+
+def _answers_tool_calls(turn: dict[str, Any]) -> bool:
+    """Return whether a user turn carries tool results, which continue the tool loop instead of starting a turn."""
+    return any(block.get("type") == "tool_result" for block in turn["content"])
+
+
+def _user_blocks(message: Message, provider: str) -> list[Any]:
+    content = message.content or ""
+    blocks: list[Any] = [{"type": "text", "text": content}] if isinstance(content, str) else _without_citations(content)
+    media = [image_block(image, provider) for image in message.images or ()]
+    media += [_document_block(file, provider) for file in message.files or ()]
+    # Audio and video are not Claude inputs; the media fallback replaces them with a note before the request.
+    return blocks + [block for block in media if block is not None]
+
+
+def _without_citations(blocks: list[Any]) -> list[Any]:
+    """Return a user turn's blocks without the ``citations`` of their text, in search and tool results too.
+
+    API version 2026-10-21 rejects cited text in a user message; a document's or search result's citation setting
+    is no text block's and stays.
+    """
+    shaped: list[Any] = []
+    for item in blocks:
+        block = as_dict(item)
+        kind = None if block is None else block.get("type")
+        if block is not None and kind == "text" and isinstance(block.get("citations"), list):
+            shaped.append({key: value for key, value in block.items() if key != "citations"})
+        elif block is not None and kind in {"search_result", "tool_result"} and isinstance(block.get("content"), list):
+            shaped.append({**block, "content": _without_citations(block["content"])})
+        else:
+            shaped.append(item)
+    return shaped
+
+
+def _image_media_type(image: Image, data: bytes | None) -> str | None:
+    """Return the declared media type when Claude names it, else the one the bytes show.
+
+    A file name is not consulted: every image type Claude reads has a signature, and a name can disagree with it.
+    """
+    if image.mime_type in _IMAGE_MEDIA_TYPES.values():
+        return image.mime_type
+    if image.format and (media_type := _IMAGE_MEDIA_TYPES.get(image.format.lower())) is not None:
+        return media_type
+    detected = None if data is None else image_format(data)
+    return None if detected is None else _IMAGE_MEDIA_TYPES.get(detected)
+
+
+def image_block(image: Image, provider: str) -> dict[str, Any] | None:
+    """Return the base64 ``image`` block of ``image``, or None for one that is empty or of an unknown type."""
+    data = image.content
+    if data is None and image.filepath is not None:
+        data = read_media_bytes(image.filepath, media_id=image.id, kind="image", provider=provider)
+        if data is None:
+            # The file is empty, which its reader already logged.
+            return None
+    media_type = _image_media_type(image, data)
+    if data is None or media_type is None:
+        logger.warning("claude_image_type_unknown", image_id=image.id)
+        return None
+    return {
+        "type": "image",
+        "source": {"type": "base64", "media_type": media_type, "data": base64.b64encode(data).decode("utf-8")},
+    }
+
+
+def _document_block(file: File, provider: str) -> dict[str, Any] | None:
+    if file.filepath is not None:
+        data = read_media_bytes(file.filepath, media_id=file.id, kind="file", provider=provider)
+        if data is None:
+            # The file is empty, which its reader already logged.
+            return None
+        media_type = canonical_mime_type(file.mime_type) or mimetypes.guess_type(file.filepath)[0] or "application/pdf"
+    elif file.content is not None:
+        data = file.content.encode("utf-8") if isinstance(file.content, str) else file.content
+        media_type = canonical_mime_type(file.mime_type) or "application/pdf"
+    else:
+        return None
+    if is_text_mime_type(media_type):
+        # The text document source accepts only text/plain; other text types are sent as plain text.
+        source = {"type": "text", "media_type": "text/plain", "data": file_text(data)}
+    else:
+        # Any other type is a base64 document, which the API accepts for PDF only.
+        source = {"type": "base64", "media_type": media_type, "data": base64.b64encode(data).decode("utf-8")}
+    return {"type": "document", "source": source}
+
+
+def _tool_result_block(result: ToolResultView) -> dict[str, Any]:
+    """Return the ``tool_result`` block of one result; a failed call is marked ``is_error``, as the API documents."""
+    payload: str | list[Any] = result.content
+    # LEGACY_COMPAT: Tool results stored as a list of content blocks.
+    # Legacy format: a stored ``tool`` message whose ``content`` is a list, which only the Agno runtime's result
+    # writer produced.
+    # Last legacy release: v2026.10.498 ran that writer; v2026.10.499 replaced it with owned writers that store string
+    # content.
+    # Handling: each block is sent as stored, its text without citations, and any other item as a text block.
+    # Coverage: tests/providers/test_anthropic_family_replay.py::test_a_tool_result_stored_as_a_list_keeps_its_blocks,
+    # tests/providers/test_request_tokens.py::test_claude_counts_a_tool_result_stored_as_a_list_by_its_blocks
+    if isinstance(result.content, list):
+        payload = _without_citations(
+            [
+                block
+                if (block := as_dict(item)) is not None and block.get("type")
+                else {"type": "text", "text": str(item)}
+                for item in result.content
+            ],
+        )
+    tool_result: dict[str, Any] = {"type": "tool_result", "tool_use_id": result.call_id, "content": payload}
+    if result.is_error:
+        tool_result["is_error"] = True
+    return tool_result
+
+
+def _with_additional_properties_false(schema: Any) -> Any:  # noqa: ANN401
+    """Return the schema with ``additionalProperties: false`` on every object schema that lists properties.
+
+    Dict-shaped schemas use ``additionalProperties`` as their value schema and are left alone.
+    """
+    if not isinstance(schema, dict):
+        return schema
+    result = dict(schema)
+    if "properties" in result:
+        result["additionalProperties"] = False
+    for key, value in result.items():
+        if key == "properties" and isinstance(value, dict):
+            result[key] = {name: _with_additional_properties_false(item) for name, item in value.items()}
+        elif key == "items" and isinstance(value, dict):
+            result[key] = _with_additional_properties_false(value)
+        elif key in {"anyOf", "allOf", "oneOf"} and isinstance(value, list):
+            result[key] = [_with_additional_properties_false(item) for item in value]
+    return result
+
+
+# Block fields no model reads as sent, at any depth: ids, cache breakpoints, signatures, and ciphertext the provider
+# decrypts, such as a web search result's page (``_readable``).
+_TRANSPORT_BLOCK_FIELDS = frozenset(
+    {"id", "tool_use_id", "cache_control", "citations", "signature", "data", "encrypted_content", "encrypted_index"},
+)
+
+
+def claude_body_parts(
+    body: Mapping[str, Any],
+    messages: Sequence[Message],
+    parts: RequestParts,
+    *,
+    loaded: frozenset[str],
+    static: bool,
+) -> None:
+    """Add what a Claude request body built from ``messages`` gives its model to ``parts``.
+
+    System and message text count as text, and tool inputs, results, and definitions as JSON. With ``static`` the
+    system text and the offered tools count; a deferred tool counts once a tool search loaded it (``loaded``), as the
+    API loads it then. A replayed ``thinking`` or ``redacted_thinking`` block is ciphertext beside a summary, so each
+    answer whose thinking the body replays counts its reported output beyond its visible part, or its thinking text
+    when that is larger.
+    """
+    system = body.get("system") if static else None
+    if isinstance(system, str):
+        parts.text(system)
+    for block in system if isinstance(system, list) else ():
+        parts.text(block.get("text"))
+    replayed: set[str] = set()
+    for turn in body.get("messages") or ():
+        for block in turn["content"]:
+            _block_parts(block, parts, replayed)
+    for message in messages:
+        if message.role == "assistant":
+            _thinking_parts(message, parts, replayed)
+    for tool in body.get("tools") or ():
+        if tool.get("name") in loaded if tool.get("defer_loading") else static:
+            parts.value({key: value for key, value in tool.items() if key not in {"cache_control", "defer_loading"}})
+
+
+def _block_parts(block: Mapping[str, Any], parts: RequestParts, replayed: set[str]) -> None:
+    """Add one content block; the identity of a thinking block goes to ``replayed`` and its cost is the answer's."""
+    kind = block.get("type")
+    if kind in _THINKING_BLOCK_TYPES:
+        replayed.add(_thinking_identity(block))
+    elif kind == "text":
+        parts.text(block.get("text"))
+    elif kind in {"image", "document"}:
+        parts.cost(MEDIA_ALLOWANCE_TOKENS)
+    elif kind == "tool_result":
+        content = block.get("content")
+        if isinstance(content, str):
+            parts.text(content)
+        for nested in content if isinstance(content, list) else ():
+            _block_parts(nested, parts, replayed)
+    elif kind == "compaction":
+        parts.text(block.get("content"))
+    else:
+        parts.value(_readable(block, parts))
+
+
+def _readable(value: Any, parts: RequestParts) -> Any:  # noqa: ANN401 - any JSON value of a block
+    """Return ``value`` without its transport fields; ciphertext the model reads decrypted costs ``opaque_tokens``.
+
+    A tool call's ``input`` holds the model's own arguments, which it reads as sent.
+    """
+    if isinstance(value, dict):
+        if isinstance(ciphertext := value.get("encrypted_content"), str):
+            parts.cost(opaque_tokens(len(ciphertext)))
+        return {
+            key: item if key == "input" else _readable(item, parts)
+            for key, item in value.items()
+            if key not in _TRANSPORT_BLOCK_FIELDS
+        }
+    if isinstance(value, list):
+        return [_readable(item, parts) for item in value]
+    return value
+
+
+def _thinking_identity(block: Mapping[str, Any]) -> str:
+    return str(block.get("signature") or block.get("data") or block.get("thinking") or "")
+
+
+def _thinking_parts(message: Message, parts: RequestParts, replayed: set[str]) -> None:
+    blocks = replayed_blocks(message)
+    thinking = [block for block in blocks if block.get("type") in _THINKING_BLOCK_TYPES]
+    if not any(_thinking_identity(block) in replayed for block in thinking):
+        return
+    visible = RequestParts(parts.counter)
+    for block in blocks:
+        if block.get("type") not in _THINKING_BLOCK_TYPES:
+            _block_parts(block, visible, set())
+    text = "".join(str(block.get("thinking") or "") for block in thinking)
+    parts.cost(max(count(parts.counter, text), message.metrics.tokens.output_tokens - visible.counted()))
+
+
+# Claude answers a tool whose ``input_schema`` has one of these at its root with a 400 ("input_schema does not support
+# oneOf, allOf, or anyOf at the top level"), as an MCP tool whose input is a union has.
+_TOP_LEVEL_UNSUPPORTED_SCHEMA_KEYS = frozenset({"anyOf", "allOf", "oneOf"})
+
+
+def format_claude_tools(tools: Sequence[ToolSpec], *, strict_allowed: bool) -> list[dict[str, Any]]:
+    """Return the tool definitions in Claude's shape, sorted by name so the cached prefix stays byte-stable.
+
+    Each schema goes as authored, except that its root loses ``anyOf``, ``allOf``, and ``oneOf`` and is
+    ``type: object`` when it names no type, and a strict tool closes every object with ``additionalProperties: false``,
+    as strict tool use requires. A tool without a description sends none, and ``strict`` is sent only when it is True
+    and the route accepts it.
+    """
+    formatted: list[dict[str, Any]] = []
+    for tool in sorted(tools, key=lambda item: item.name):
+        strict = bool(tool.strict) and strict_allowed
+        parameters = {
+            key: deepcopy(value)
+            for key, value in tool.parameters.items()
+            if key not in _TOP_LEVEL_UNSUPPORTED_SCHEMA_KEYS
+        }
+        parameters.setdefault("type", "object")
+        definition: dict[str, Any] = {
+            "name": tool.name,
+            **({} if tool.description is None else {"description": tool.description}),
+            "input_schema": _with_additional_properties_false(parameters) if strict else parameters,
+        }
+        if strict:
+            definition["strict"] = True
+        formatted.append(definition)
+    return formatted
+
+
+def parse_claude_usage(usage: Usage | BetaUsage) -> MessageMetrics:
+    """Translate Claude usage into message metrics.
+
+    ``input_tokens`` excludes cache reads and writes, so ``total_tokens`` is input plus output. A compacted
+    response bills every iteration; the counters sum them while ``context`` keeps the final iteration's active
+    context, which history budgeting reads.
+    """
+    counts = TokenCounts(
+        input_tokens=usage.input_tokens or 0,
+        output_tokens=usage.output_tokens or 0,
+        cache_read_tokens=usage.cache_read_input_tokens or 0,
+        cache_write_tokens=usage.cache_creation_input_tokens or 0,
+    )
+    context = TokenCounts(
+        input_tokens=counts.input_tokens,
+        cache_read_tokens=counts.cache_read_tokens,
+        cache_write_tokens=counts.cache_write_tokens,
+    )
+    if isinstance(usage, BetaUsage) and usage.iterations:
+        iterations = usage.iterations
+        counts = TokenCounts(
+            input_tokens=sum(iteration.input_tokens for iteration in iterations),
+            output_tokens=sum(iteration.output_tokens for iteration in iterations),
+            cache_read_tokens=sum(iteration.cache_read_input_tokens for iteration in iterations),
+            cache_write_tokens=sum(iteration.cache_creation_input_tokens for iteration in iterations),
+        )
+        last = iterations[-1]
+        context = TokenCounts(
+            input_tokens=last.input_tokens,
+            cache_read_tokens=last.cache_read_input_tokens,
+            cache_write_tokens=last.cache_creation_input_tokens,
+        )
+    return MessageMetrics(tokens=counts.with_totals(), context=context)
+
+
+def tool_call_from_block(block: ToolUseBlock | BetaToolUseBlock) -> dict[str, Any]:
+    """Return a streamed ``tool_use`` block as the tool call its finished message stores."""
+    return _tool_call(block.model_dump())
+
+
+def _tool_call(block: dict[str, Any]) -> dict[str, Any]:
+    """Return a ``tool_use`` block as the stored tool-call dict; a cut-off block keeps the arguments that parsed."""
+    return stored_tool_call(block["id"], block["name"], json.dumps(block["input"]))
+
+
+def assistant_message_from_response(
+    response: AnthropicMessage | BetaMessage,
+    *,
+    record_context_management: bool,
+) -> Message:
+    """Build the assistant message of one finished response.
+
+    ``provider_data`` keeps the response's blocks under ``claude_blocks``, in order and in request shape
+    (``replay_safe_blocks``), and ``context_management`` when the model was configured with one. The message's text
+    joins the text blocks, its reasoning the thinking blocks, and its redacted reasoning the redacted thinking blocks;
+    every tool use becomes a tool call, including the calls of a response the output limit cut off. A block of a type
+    the SDK does not know keeps its own ``type``, so it is stored and replayed but read as none of these.
+    """
+    blocks = replay_safe_blocks([block.model_dump(exclude_none=True) for block in response.content])
+    texts = [block["text"] for block in blocks if block["type"] == "text"]
+    thinking = [block["thinking"] for block in blocks if block["type"] == "thinking"]
+    redacted = [block["data"] for block in blocks if block["type"] == "redacted_thinking"]
+    tool_calls = [_tool_call(block) for block in blocks if block["type"] == "tool_use"]
+    provider_data: dict[str, Any] = {CLAUDE_BLOCKS_KEY: blocks}
+    if record_context_management and isinstance(response, BetaMessage) and response.context_management is not None:
+        provider_data["context_management"] = response.context_management.model_dump()
+    return Message(
+        role="assistant",
+        content="".join(texts) or None,
+        reasoning_content="".join(thinking) if thinking else None,
+        redacted_reasoning_content="".join(redacted) if redacted else None,
+        tool_calls=tool_calls or None,
+        provider_data=provider_data,
+        metrics=parse_claude_usage(response.usage),
+    )
+
+
+__all__ = [
+    "FormattedConversation",
+    "assistant_message_from_response",
+    "checks_thinking_prefix",
+    "claude_body_parts",
+    "format_claude_messages",
+    "format_claude_tools",
+    "image_block",
+    "parse_claude_usage",
+    "stop_reason_of",
+    "supports_forced_tool_use",
+    "supports_prefill",
+    "supports_structured_outputs",
+    "tool_call_from_block",
+]

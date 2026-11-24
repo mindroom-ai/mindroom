@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 
+from mindroom.config.judgment import OpenAIDecisionsJudgmentConfig, TypeSafeJudgmentConfig
 from mindroom.config.schema_hints import dashboard_hint
+from mindroom.config.validation import CredentialServiceName  # noqa: TC001
 from mindroom.path_globs import validate_safe_relative_pattern
 
 KnowledgeBaseMode = Literal["semantic", "files"]
@@ -14,6 +16,81 @@ KnowledgeBaseMode = Literal["semantic", "files"]
 
 def _validate_relative_patterns(value: list[str], *, field_name: str) -> list[str]:
     return [validate_safe_relative_pattern(pattern, field_name=field_name) for pattern in value]
+
+
+class KnowledgeRerankerConfig(BaseModel):
+    """Reranker that reorders search results by how well each one answers the query."""
+
+    # The dashboard names this variant by its title, since its provider is one of several.
+    model_config = ConfigDict(extra="forbid", title="Cohere, Sentence Transformers or Vertex AI")
+
+    provider: Literal["cohere", "sentence_transformers", "vertex_ai"] = Field(
+        description=(
+            "'cohere' calls a Cohere-compatible rerank API (Cohere, Jina, vLLM, Infinity); "
+            "'sentence_transformers' runs a cross-encoder locally; "
+            "'vertex_ai' calls Google's Vertex AI ranking API with Application Default Credentials"
+        ),
+    )
+    model: str = Field(
+        description=(
+            "Rerank model, such as 'rerank-v3.5', 'BAAI/bge-reranker-v2-m3' or 'semantic-ranker-default@latest'"
+        ),
+    )
+    url: str | None = Field(
+        default=None,
+        description="Rerank endpoint for the 'cohere' provider; defaults to https://api.cohere.com/v2/rerank",
+    )
+    api_key: str | None = Field(
+        default=None,
+        description="API key for the 'cohere' provider; above credentials_service",
+        json_schema_extra=dashboard_hint(secret=True),
+    )
+    credentials_service: CredentialServiceName | None = Field(
+        default=None,
+        description="Credential service holding the 'cohere' provider's API key; defaults to 'cohere'",
+    )
+    threshold: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        allow_inf_nan=False,
+        description="Minimum score, from 0 to 1, of a memory recalled without being asked for (memory.search.rerank)",
+    )
+
+
+#: A judgment reranker's recall threshold: 0.3, the value the recall benchmark picked, not the judgment default 0.8.
+_RecallThreshold = Annotated[
+    float,
+    Field(
+        ge=0.0,
+        le=1.0,
+        allow_inf_nan=False,
+        description=(
+            "Minimum probability, from 0 to 1, of a memory recalled without being asked for; "
+            "0.3 is the value the recall benchmark picked"
+        ),
+    ),
+]
+
+
+class _TypeSafeRerankerConfig(TypeSafeJudgmentConfig):
+    """System One as the reranker: one probability per candidate, and recall keeps those at its threshold."""
+
+    threshold: _RecallThreshold = 0.3
+
+
+class _OpenAIDecisionsRerankerConfig(OpenAIDecisionsJudgmentConfig):
+    """OpenAI Decisions as the reranker: one probability per candidate, and recall keeps those at its threshold."""
+
+    threshold: _RecallThreshold = 0.3
+
+
+#: A judgment provider scores each candidate with its probability. As the reranker its ``threshold`` defaults to 0.3,
+#: not the 0.8 other judgment users keep.
+type RerankerConfig = Annotated[
+    KnowledgeRerankerConfig | _TypeSafeRerankerConfig | _OpenAIDecisionsRerankerConfig,
+    Field(discriminator="provider"),
+]
 
 
 class KnowledgeGitConfig(BaseModel):
@@ -67,6 +144,8 @@ class KnowledgeGitConfig(BaseModel):
 class KnowledgeBaseConfig(BaseModel):
     """Knowledge base configuration."""
 
+    model_config = ConfigDict(extra="forbid")
+
     mode: KnowledgeBaseMode = Field(
         default="semantic",
         description=(
@@ -81,7 +160,16 @@ class KnowledgeBaseConfig(BaseModel):
     path: str = Field(default="./knowledge_docs", description="Path to knowledge documents folder")
     watch: bool = Field(
         default=True,
-        description="When true, shared local folders watch filesystem changes and schedule background published-index refresh without blocking reads; when false, direct external file edits require explicit reindex or dashboard/API mutations",
+        description="When true, shared local folders watch filesystem changes and schedule background published-index refresh without blocking reads; when false, direct external file edits require explicit reindex or dashboard/API mutations unless poll_interval_seconds is set",
+    )
+    poll_interval_seconds: int | None = Field(
+        default=None,
+        ge=5,
+        description=(
+            "How often to schedule a background refresh for a local knowledge folder that another host writes to, "
+            "such as an NFS share, where filesystem watching never sees the writes; "
+            "unset means no polling; only for semantic mode, and Git-backed bases use git.poll_interval_seconds instead"
+        ),
     )
     require_content_before_publish: bool = Field(
         default=False,
@@ -96,6 +184,21 @@ class KnowledgeBaseConfig(BaseModel):
         default=0,
         ge=0,
         description="Number of overlapping characters between adjacent chunks",
+    )
+    chunk_context_model: str | None = Field(
+        default=None,
+        description=(
+            "Model that writes a short context for each chunk of a multi-chunk file before it is indexed "
+            "(contextual retrieval); costs one model call per chunk of each changed file"
+        ),
+        json_schema_extra=dashboard_hint(reference="model"),
+    )
+    chunk_strategy: Literal["fixed", "memory_entries"] = Field(
+        default="fixed",
+        description=(
+            "How text-like files are split into chunks: fixed splits at chunk_size characters, "
+            "memory_entries makes each memory entry or Markdown section its own chunk of at most chunk_size characters"
+        ),
     )
     include_extensions: list[str] | None = Field(
         default=None,
@@ -158,5 +261,23 @@ class KnowledgeBaseConfig(BaseModel):
         """Ensure chunk overlap is always smaller than chunk size."""
         if self.chunk_overlap >= self.chunk_size:
             msg = "chunk_overlap must be smaller than chunk_size"
+            raise ValueError(msg)
+        return self
+
+    @property
+    def effective_poll_interval_seconds(self) -> int | None:
+        """Return how often this base is polled in the background, or None when it is not polled."""
+        return self.poll_interval_seconds if self.git is None else self.git.poll_interval_seconds
+
+    @model_validator(mode="after")
+    def validate_poll_interval_is_local(self) -> KnowledgeBaseConfig:
+        """Reject the local poll interval on Git-backed bases, which have their own, and on files-mode bases, which have no index."""
+        if self.poll_interval_seconds is None:
+            return self
+        if self.git is not None:
+            msg = "poll_interval_seconds applies to local knowledge bases; use git.poll_interval_seconds for Git-backed bases"
+            raise ValueError(msg)
+        if self.mode == "files":
+            msg = "poll_interval_seconds applies to semantic local knowledge bases"
             raise ValueError(msg)
         return self

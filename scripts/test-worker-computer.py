@@ -16,7 +16,6 @@ import shutil
 import socket
 import threading
 from contextlib import asynccontextmanager, suppress
-from dataclasses import asdict
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 from urllib.parse import quote, urlsplit
@@ -24,36 +23,39 @@ from urllib.parse import quote, urlsplit
 import httpx
 import uvicorn
 import yaml
-from agno.tools.function import ToolResult
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from playwright.async_api import async_playwright
 from testing.worker_computer_matrix import create_matrix_fixture
-from testing.worker_computer_native import connect_viewer, docker_environment, native_json, native_tabs, shell_stdout
+from testing.worker_computer_native import connect_viewer, docker_environment, native_json, native_tabs
 
 from mindroom.api import computers, config_lifecycle
+from mindroom.api.app_state import ensure_app_state
 from mindroom.api.main import _RuntimeDashboardCorsMiddleware
 from mindroom.config.main import Config
 from mindroom.constants import resolve_primary_runtime_paths
+from mindroom.plugin_api import toolkit_functions
 from mindroom.tool_system.media_transport import decode_media_result
 from mindroom.tool_system.metadata import get_tool_by_name
-from mindroom.tool_system.runtime_context import WorkerRuntimeContext, worker_runtime_context
+from mindroom.tool_system.registry import builtin_tool_registry
+from mindroom.tool_system.runtime_context import detached_tool_scope
+from mindroom.tool_system.tool_function import ToolValue
+from mindroom.tool_system.worker_proxy_client import _read_execute_stream
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     build_agent_toolkit_worker_target,
     resolve_worker_key,
-    tool_execution_identity,
+    serialize_tool_execution_identity,
 )
 from mindroom.worker_computer.sessions import ComputerError, ComputerTarget
 from mindroom.workers.backends.docker_config import DockerWorkerBackendConfig
 from mindroom.workers.models import WorkerSpec
-from mindroom.workers.runtime import shutdown_primary_worker_manager
+from mindroom.workers.protocol import WORKER_PROTOCOL_VERSION, ExecuteRequest
+from mindroom.workers.runtime import bind_worker_launch_config_source, shutdown_primary_worker_manager
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
-
-    from playwright.async_api import Page
 
     from mindroom.workers.models import WorkerHandle
 
@@ -181,7 +183,7 @@ class Fixture:
             user,
             self.room,
             self.agent,
-            WorkerSpec(key, private_agent_names=frozenset(), mirrored_credential_services=frozenset()),
+            WorkerSpec(key, private_agent_names=frozenset(), mirror_grantable_credentials=False),
             "local-fixture",
         )
 
@@ -201,11 +203,33 @@ class Fixture:
                     raise ComputerError(403, "Fixture membership denied.")
         return self.target(requester)
 
+    def runner_request(
+        self,
+        tool: str,
+        function: str,
+        kwargs: dict[str, Any],
+        *,
+        user: str,
+        worker_key: str,
+    ) -> ExecuteRequest:
+        """Build the request a worker-routed call sends the runner, through the shared wire model."""
+        return ExecuteRequest(
+            protocol=WORKER_PROTOCOL_VERSION,
+            worker_key=worker_key,
+            worker_scope="user_agent",
+            routing_agent_name="writer",
+            execution_identity=serialize_tool_execution_identity(self.identity(user)),
+            private_agent_names=[],
+            tool_name=tool,
+            function_name=function,
+            kwargs=kwargs,
+            tool_config_overrides={"allow_private_networks": True} if tool in {"browser", "browser_mcp"} else {},
+        )
+
     async def reconcile_worker(self) -> WorkerHandle:
         """Exercise primary worker reconciliation before the next tool dispatch."""
         return await asyncio.to_thread(
             computers._resolve_worker,
-            self.config,
             self.paths,
             self.target(self.viewer),
             start=True,
@@ -222,7 +246,7 @@ class Fixture:
         """Send an actual validated runner request to the configured primary manager worker."""
         user = user or self.viewer
         target = self.target(user)
-        handle = await asyncio.to_thread(computers._resolve_worker, self.config, self.paths, target, start=False)
+        handle = await asyncio.to_thread(computers._resolve_worker, self.paths, target, start=False)
         container_id = await command("docker", "inspect", "--format", "{{.Id}}", handle.worker_id)
         if container_id not in self.container_ids:
             host_config = json.loads(
@@ -251,26 +275,25 @@ class Fixture:
         (self.args.output / "container-security.json").write_text(
             json.dumps(self.container_security, indent=2, sort_keys=True) + "\n",
         )
-        payload = {
-            "tool_name": tool,
-            "function_name": function,
-            "worker_key": target.spec.worker_key,
-            "worker_scope": "user_agent",
-            "routing_agent_name": "writer",
-            "execution_identity": asdict(self.identity(user)),
-            "private_agent_names": [],
-            "kwargs": kwargs,
-        }
-        if tool in {"browser", "browser_mcp"}:
-            payload["tool_config_overrides"] = {"allow_private_networks": True}
-        async with httpx.AsyncClient(timeout=100) as client:
-            response = await client.post(
-                handle.endpoint,
-                headers={"X-Mindroom-Sandbox-Token": handle.auth_token},
-                json=payload,
-            )
-            response.raise_for_status()
-            return response.json()
+        request = self.runner_request(tool, function, kwargs, user=user, worker_key=target.spec.worker_key)
+
+        def post() -> dict[str, Any]:
+            # The runner streams progress and keep-alive lines before the result line, as the primary reads it.
+            with (
+                httpx.Client(timeout=100) as client,
+                client.stream(
+                    "POST",
+                    handle.endpoint,
+                    headers={"X-Mindroom-Sandbox-Token": handle.auth_token},
+                    json=request.model_dump(mode="json"),
+                ) as response,
+            ):
+                response.raise_for_status()
+                result = _read_execute_stream(response, deadline=None, cancellation=None)
+            assert result is not None
+            return result
+
+        return await asyncio.to_thread(post)
 
     async def browser(self, **kwargs: Any) -> dict[str, Any]:  # noqa: ANN401, PLR0911 - fixture provider translation
         """Return the public tool result, failing on runner errors."""
@@ -304,12 +327,12 @@ class Fixture:
         assert body["ok"], body
         return json.loads(body["result"])
 
-    async def native(self, tool_function: str, **kwargs: Any) -> ToolResult:  # noqa: ANN401 - native tool JSON
+    async def native(self, tool_function: str, **kwargs: Any) -> ToolValue:  # noqa: ANN401 - native tool JSON
         """Call the actual native entrypoint and retain a bounded text transcript."""
         body = await self.execute("browser_mcp", tool_function, kwargs)
         assert body["ok"], body
         result = decode_media_result(body["result"])
-        assert isinstance(result, ToolResult), result
+        assert isinstance(result, ToolValue), result
         with (self.args.output / "native-transcript.jsonl").open("a") as transcript:
             transcript.write(
                 json.dumps({"function": tool_function, "arguments": kwargs, "text": result.content}) + "\n",
@@ -329,17 +352,18 @@ class Fixture:
             execution_identity=identity,
             runtime_paths=self.paths,
         )
-        with worker_runtime_context(WorkerRuntimeContext(self.paths, self.config)), tool_execution_identity(identity):
+        with detached_tool_scope(identity):
             toolkit = get_tool_by_name(
                 "browser_mcp",
                 self.paths,
+                tools=builtin_tool_registry(),
                 runtime_config=self.config,
                 tool_config_overrides={"allow_private_networks": True},
-                worker_tools_override=["browser_mcp", "shell"],
+                runs_in_worker=True,
                 worker_target=target,
             )
             try:
-                return await toolkit.async_functions[tool_function].entrypoint(**kwargs)
+                return await toolkit_functions(toolkit)[tool_function](**kwargs)
             except httpx.HTTPStatusError as error:
                 raise AssertionError(error.response.text) from error
 
@@ -354,14 +378,14 @@ class Fixture:
                 await asyncio.sleep(0.05)
         assert await self.evaluate("()=>window.uploadName") == "native-upload.txt"
         image = await self.primary_native("browser_take_screenshot", type="png", scale="css")
-        assert isinstance(image, ToolResult)
+        assert isinstance(image, ToolValue)
         assert image.images
         assert image.images[0].mime_type == "image/png"
         data = image.images[0].content
         assert isinstance(data, bytes)
         assert data.startswith(b"\x89PNG\r\n\x1a\n")
         text = await self.primary_native("browser_snapshot")
-        assert isinstance(text, ToolResult)
+        assert isinstance(text, ToolValue)
         assert "Remote text" in text.content
         named = await self.native("browser_take_screenshot", filename="browser/native.png", type="png", scale="css")
         assert not named.images
@@ -411,13 +435,17 @@ class Fixture:
         print(f"Exact fixture Matrix removed: {container_id}", flush=True)
 
     async def shell(self, args: list[str], *, background: bool = False, user: str | None = None) -> str:
-        """Run commands in the exact worker used by the browser."""
+        """Run commands in the exact worker used by the browser.
+
+        The shell tool has no background mode, so ``background`` detaches the command the way its
+        description prescribes, with ``nohup`` and silenced output so the call returns at once.
+        """
         kwargs: dict[str, Any] = {"args": args, "tail": 1000}
         if background:
-            kwargs["timeout"] = 0
+            kwargs["args"] = ["bash", "-c", 'nohup "$@" > /dev/null 2>&1 &', "bash", *args]
         body = await self.execute("shell", "run_shell_command", kwargs, user=user)
         assert body["ok"], body
-        return shell_stdout(body["result"])
+        return body["result"]
 
     async def prepare_page(self) -> dict[str, Any]:
         """Serve deterministic page/download content inside the worker loopback network."""
@@ -440,7 +468,7 @@ res.writeHead(200,{'Content-Type':'text/html'});res.end(HTML);
     @asynccontextmanager
     async def lifespan(self, app: FastAPI) -> AsyncIterator[None]:
         """Own only this run's manager, stream sessions and worker containers."""
-        state = config_lifecycle.ensure_app_state(app)
+        state = ensure_app_state(app)
         state.api_state = config_lifecycle.ApiState(
             threading.Lock(),
             config_lifecycle.ApiSnapshot(
@@ -451,47 +479,48 @@ res.writeHead(200,{'Content-Type':'text/html'});res.end(HTML);
             ),
         )
         state.computer_runtime = computers.ComputerRuntime(self.authorize, 1, self.config)
-        try:
-            if self.args.serve:
-                await asyncio.to_thread(
-                    computers._resolve_worker,
-                    self.config,
-                    self.paths,
-                    self.target(self.viewer),
-                    start=True,
-                )
-                await self.prepare_page()
-                metadata = {
-                    "api_origin": self.origin,
-                    "ui_origin": self.args.chat_origin,
-                    "homeserver": self.matrix["homeserver"],
-                    "room_id": self.room,
-                    "thread_id": self.matrix["thread_id"],
-                    "agent_user_id": self.agent,
-                    "viewer": self.matrix["users"]["computer_viewer"],
-                }
-                path = self.args.output / "chat-fixture.json"
-                path.touch(mode=0o600)
-                path.write_text(json.dumps(metadata, indent=2) + "\n")
-                print(f"Chat fixture ready: {path}", flush=True)
-            yield
-        finally:
-            # Uvicorn re-raises shutdown signals after lifespan exit, before main's
-            # outer finally can reliably run. Retire Matrix here, even if later
-            # worker shutdown waits on a local browser driver handshake.
+        # The fixture owns the applied config its computer workers launch from, until they are removed.
+        with bind_worker_launch_config_source(lambda: self.config):
             try:
-                await self.remove_owned_matrix()
+                if self.args.serve:
+                    await asyncio.to_thread(
+                        computers._resolve_worker,
+                        self.paths,
+                        self.target(self.viewer),
+                        start=True,
+                    )
+                    await self.prepare_page()
+                    metadata = {
+                        "api_origin": self.origin,
+                        "ui_origin": self.args.chat_origin,
+                        "homeserver": self.matrix["homeserver"],
+                        "room_id": self.room,
+                        "thread_id": self.matrix["thread_id"],
+                        "agent_user_id": self.agent,
+                        "viewer": self.matrix["users"]["computer_viewer"],
+                    }
+                    path = self.args.output / "chat-fixture.json"
+                    path.touch(mode=0o600)
+                    path.write_text(json.dumps(metadata, indent=2) + "\n")
+                    print(f"Chat fixture ready: {path}", flush=True)
+                yield
             finally:
-                if state.computer_sessions is not None:
-                    state.computer_sessions.close_all()
-                await asyncio.to_thread(shutdown_primary_worker_manager)
-                # Verify exact IDs, never delete by a name prefix or global prune.
-                remaining = set((await command("docker", "ps", "-aq", "--no-trunc")).splitlines())
-                for container_id in sorted(self.container_ids & remaining):
-                    await command("docker", "rm", "-f", container_id)
-                remaining = set((await command("docker", "ps", "-aq", "--no-trunc")).splitlines())
-                assert not self.container_ids & remaining
-                print("Exact fixture workers removed.", flush=True)
+                # Uvicorn re-raises shutdown signals after lifespan exit, before main's
+                # outer finally can reliably run. Retire Matrix here, even if later
+                # worker shutdown waits on a local browser driver handshake.
+                try:
+                    await self.remove_owned_matrix()
+                finally:
+                    if state.computer_sessions is not None:
+                        state.computer_sessions.close_all()
+                    await asyncio.to_thread(shutdown_primary_worker_manager)
+                    # Verify exact IDs, never delete by a name prefix or global prune.
+                    remaining = set((await command("docker", "ps", "-aq", "--no-trunc")).splitlines())
+                    for container_id in sorted(self.container_ids & remaining):
+                        await command("docker", "rm", "-f", container_id)
+                    remaining = set((await command("docker", "ps", "-aq", "--no-trunc")).splitlines())
+                    assert not self.container_ids & remaining
+                    print("Exact fixture workers removed.", flush=True)
 
     def app(self) -> FastAPI:
         """Expose actual public routes plus loopback-only fixture helpers."""
@@ -527,11 +556,6 @@ res.writeHead(200,{'Content-Type':'text/html'});res.end(HTML);
 def fixture_tab_index(tabs: list[dict[str, Any]]) -> int:
     """Find the fixture page after native tab controls change its index."""
     return next(tab["index"] for tab in tabs if tab["url"].split("?", 1)[0] == "http://127.0.0.1:8767/")
-
-
-async def connect(page: Page, session: dict[str, Any]) -> None:
-    """Wait for a real connected noVNC stream."""
-    await connect_viewer(page, session)
 
 
 async def exercise(fixture: Fixture) -> dict[str, Any]:  # noqa: PLR0915 - sequential acceptance scenario
@@ -647,7 +671,7 @@ with sync_playwright() as playwright:
             "()=>{document.querySelector('#shared-input').focus();localStorage.setItem('persist','yes');"
             "document.cookie='persist=yes;max-age=3600;path=/';}",
         )
-        await fixture.shell(["sh", "-c", "printf alice-only > isolation-marker.txt"])
+        await fixture.shell(["sh", "-c", "printf written-by-alice > shared-marker.txt"])
         await fixture.download("worker-shared-download-ok")
         result["download_read_through_shell"] = True
         await fixture.evaluate("()=>document.querySelector('#shared-input').focus()")
@@ -670,7 +694,7 @@ with sync_playwright() as playwright:
                     ),
                 )
                 await page.goto(fixture.origin)
-                await connect(page, session)
+                await connect_viewer(page, session)
                 await page.wait_for_function(framebuffer)
                 await page.evaluate("window.rfb.sendKey(120,'KeyX')")
                 await asyncio.sleep(0.2)
@@ -682,7 +706,6 @@ with sync_playwright() as playwright:
                 # The running worker and noVNC stream must survive that update.
                 before_worker = await asyncio.to_thread(
                     computers._resolve_worker,
-                    fixture.config,
                     fixture.paths,
                     fixture.target(fixture.viewer),
                     start=False,
@@ -776,7 +799,7 @@ with sync_playwright() as playwright:
                 (fixture.args.output / "agent-snapshot.json").write_text(json.dumps(snapshot, indent=2) + "\n")
                 result["agent_snapshot_sees_typed_text"] = True
                 result["takeover_and_release"] = True
-                await connect(page, session)
+                await connect_viewer(page, session)
                 await page.wait_for_function(framebuffer)
                 await page.screenshot(path=str(fixture.args.output / "typed-visible.png"))
 
@@ -801,14 +824,14 @@ with sync_playwright() as playwright:
                         targetUrl="http://127.0.0.1:8767/",
                     )
                     assert selected["targetId"] == opened["targetId"]
-                    await connect(page, session)
+                    await connect_viewer(page, session)
                     await page.wait_for_function(framebuffer)
                     await page.screenshot(path=str(fixture.args.output / (action + "-visible.png")))
                     result[action + "_visibly_selected"] = True
 
                 await page.evaluate("window.rfb.disconnect()")
                 await page.wait_for_function("window.probe.disconnected")
-                await connect(page, session)
+                await connect_viewer(page, session)
                 assert (await control("stop"))["state"] == "stopped"
                 await page.wait_for_function("window.probe.disconnected")
                 assert (await client.get(path, headers=headers)).status_code == 401
@@ -826,12 +849,10 @@ with sync_playwright() as playwright:
                 assert "Worker computer fixture" in json.dumps(await fixture.browser(action="snapshot"))
                 result["fresh_download_after_restart"] = True
                 await create("bob")
-                assert "isolated" in await fixture.shell(
-                    ["sh", "-c", "test ! -e isolation-marker.txt && printf isolated"],
-                    user=fixture.other,
-                )
+                # Each requester gets its own worker, but a non-private agent shares one workspace by design.
+                assert "written-by-alice" in await fixture.shell(["cat", "shared-marker.txt"], user=fixture.other)
                 assert len(fixture.container_ids) == 2
-                result["requester_isolation"] = True
+                result["requester_workers_share_workspace"] = True
                 assert not errors, errors
                 result["page_errors"] = errors
             except BaseException:

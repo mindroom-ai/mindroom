@@ -11,7 +11,7 @@ from google.api_core.exceptions import BadRequest, GoogleAPIError
 from mindroom.config.main import Config  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.credentials.manager import CredentialsManager  # noqa: TC001  # resolved by tool contract introspection
 from mindroom.custom_tools.google_service import GoogleCloudToolkit
-from mindroom.oauth.google_cloud import google_cloud_oauth_provider
+from mindroom.oauth.google import google_cloud_oauth_provider
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
@@ -182,6 +182,9 @@ class GoogleBigQueryTools(GoogleCloudToolkit):
             JSON with the table description and each column's name, type, mode and description.
 
         """
+        # google-cloud-bigquery 3.47 reads `project.dataset.a.b` as dataset `dataset.a`, so a dotted name is refused here.
+        if "." in table_id:
+            return json.dumps({"error": "Invalid table_id"})
         client = self._client()
         try:
             table = client.get_table(f"{self.project}.{self.dataset}.{table_id}")

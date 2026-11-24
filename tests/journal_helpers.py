@@ -4,13 +4,14 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING, cast
 
-from mindroom.event_journal import EventClass, EventKind, InboundEvent
+from mindroom.event_journal import EventClass, EventKind, InboundEvent, RoomMembershipPosition, journal
 from mindroom.matrix.journal_ingress import _inbound_event, _projected_event
 
 if TYPE_CHECKING:
     import nio
 
-    from mindroom.event_journal import AdmissionView
+    from mindroom.event_journal import PrincipalStore, RoomHistoryRecovery
+    from mindroom.event_journal.backend import Transaction
     from mindroom.journal_dispatch import JournalDispatcher
 
 
@@ -24,7 +25,7 @@ async def admit_dispatch_event(
     """Persist one fixture through the journal and wake its semantic dispatcher."""
     previous_room_for_id = dispatcher.room_for_id
     dispatcher.room_for_id = lambda room_id: room if room_id == room.room_id else previous_room_for_id(room_id)
-    store = cast("AdmissionView", dispatcher.store)
+    store = cast("PrincipalStore", dispatcher.store)
     await store.admit(
         _inbound_event(room.room_id, event, kind, event_class),
         _projected_event(room.room_id, event, kind, self_sender=room.own_user_id),
@@ -32,7 +33,7 @@ async def admit_dispatch_event(
     dispatcher.wake()
 
 
-async def admit_room_event(store: AdmissionView, room_id: str, event_id: str) -> None:
+async def admit_room_event(store: PrincipalStore, room_id: str, event_id: str) -> None:
     """Record that sync delivered one event in a room, as it does before any redaction of it arrives."""
     await store.admit(
         InboundEvent(
@@ -46,3 +47,23 @@ async def admit_room_event(store: AdmissionView, room_id: str, event_id: str) ->
             source={},
         ),
     )
+
+
+async def record_room_history_recovery(store: PrincipalStore, room_id: str) -> RoomHistoryRecovery | None:
+    """Record that a room's history could not be proven continuous, serialized with membership fencing as admission is."""
+    return await store._write(journal._record_room_history_recovery, room_id)
+
+
+def _membership_position(transaction: Transaction, principal_id: str, room_id: str) -> RoomMembershipPosition:
+    row = transaction.fetchone(
+        "SELECT membership_epoch, departure_fenced FROM room_membership WHERE principal_id = ? AND room_id = ?",
+        (principal_id, room_id),
+    )
+    if row is None:
+        return RoomMembershipPosition("leave", 0)
+    return RoomMembershipPosition("leave" if row["departure_fenced"] else "join", row["membership_epoch"])
+
+
+async def membership_position(store: PrincipalStore, room_id: str) -> RoomMembershipPosition:
+    """Return the journal tenure that owns this room's events and deliveries, as the membership row records it."""
+    return await store._read(_membership_position, room_id)

@@ -16,7 +16,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 import typer
 
-from mindroom.cli.config import console
+from mindroom.cli.config import console, print_literal
 from mindroom.constants import DEFAULT_MINDROOM_URL
 
 if TYPE_CHECKING:
@@ -101,29 +101,50 @@ def send(
         readable=True,
         help="Base64 raw Ed25519 private key file.",
     ),
-    kind: str = typer.Option(..., "--kind", help="Trigger payload kind."),
-    message: str = typer.Option(..., "--message", help="Trigger payload message."),
-    event_id: str | None = typer.Option(None, "--event-id", help="Optional idempotency event id."),
-    title: str | None = typer.Option(None, "--title", help="Optional trigger title."),
+    kind: str = typer.Option(..., "--kind", help="Trigger payload kind.", rich_help_panel="Payload"),
+    message: str = typer.Option(..., "--message", help="Trigger payload message.", rich_help_panel="Payload"),
+    event_id: str | None = typer.Option(
+        None,
+        "--event-id",
+        help="Optional idempotency event id.",
+        rich_help_panel="Payload",
+    ),
+    title: str | None = typer.Option(None, "--title", help="Optional trigger title.", rich_help_panel="Payload"),
     thread_key: str | None = typer.Option(
         None,
         "--thread-key",
         help="Optional key; deliveries sharing it land in one Matrix thread on new_thread triggers.",
+        rich_help_panel="Payload",
     ),
-    data_json: str | None = typer.Option(None, "--data-json", help="Optional JSON object for trigger data."),
-    timeout: float = typer.Option(_DEFAULT_TIMEOUT, "--timeout", help="HTTP request timeout in seconds."),
-    verify_tls: bool = typer.Option(True, "--verify-tls/--no-verify-tls", help="Verify TLS certificates."),
+    data_json: str | None = typer.Option(
+        None,
+        "--data-json",
+        help="Optional JSON object for trigger data.",
+        rich_help_panel="Payload",
+    ),
+    timeout: float = typer.Option(
+        _DEFAULT_TIMEOUT,
+        "--timeout",
+        help="HTTP request timeout in seconds.",
+        rich_help_panel="Connection",
+    ),
+    verify_tls: bool = typer.Option(
+        True,
+        "--verify-tls/--no-verify-tls",
+        help="Verify TLS certificates.",
+        rich_help_panel="Connection",
+    ),
     url: str = typer.Option(
         DEFAULT_MINDROOM_URL,
         "--url",
         envvar="MINDROOM_URL",
         help="MindRoom base URL.",
+        rich_help_panel="Connection",
     ),
     key_id: str = typer.Option(_DEFAULT_KEY_ID, "--key-id", help="Trigger signing key id."),
 ) -> None:
     """Send a signed external trigger request."""
     import httpx  # noqa: PLC0415
-    from rich.markup import escape  # noqa: PLC0415
 
     from mindroom.external_triggers.auth import sign_trigger_request  # noqa: PLC0415
 
@@ -159,12 +180,10 @@ def send(
         )
         response.raise_for_status()
     except httpx.HTTPStatusError as exc:
-        console.print(
-            f"[red]Error:[/red] external trigger request failed: {escape(_status_error_detail(exc.response))}",
-        )
+        print_literal("[red]Error:[/red] external trigger request failed: ", _status_error_detail(exc.response))
         raise typer.Exit(1) from exc
     except httpx.HTTPError as exc:
-        console.print(f"[red]Error:[/red] external trigger request failed: {escape(str(exc))}")
+        print_literal("[red]Error:[/red] external trigger request failed: ", exc)
         raise typer.Exit(1) from exc
     console.print_json(data=response.json())
 

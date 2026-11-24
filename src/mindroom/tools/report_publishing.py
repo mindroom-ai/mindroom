@@ -15,6 +15,7 @@ register_builtin_tool_metadata(
         file_access=ToolFileAccess.NONE,
         display_name="Report Publishing",
         description="Share reports through public links that you can revoke",
+        docs_url="https://docs.mindroom.chat/tools/agent-orchestration/#report_publishing",
         category=ToolCategory.PRODUCTIVITY,
         status=ToolStatus.AVAILABLE,
         setup_type=SetupType.NONE,

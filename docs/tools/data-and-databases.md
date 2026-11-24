@@ -16,7 +16,7 @@ Use it to pick a tool, configure its connection, and understand why a tool is un
 | [`redshift`](#redshift) | Amazon Redshift inspection, queries, and export | Host, database, user, password |
 | [`neo4j`](#neo4j) | Neo4j labels, relationship types, schema, and Cypher queries | URI, user, password |
 | [`duckdb`](#duckdb) | Local analytical SQL over Parquet, CSV, JSON, and S3 files, with exports and full-text search | None |
-| [`csv`](#csv) | SQL over pre-registered CSV files | Not configurable from `config.yaml`; use `duckdb` |
+| [`csv`](#csv) | Reading and querying a fixed list of CSV files | Paths of the CSV files |
 | [`pandas`](#pandas) | In-memory dataframes and dataframe methods | None |
 | [`google_bigquery`](#google_bigquery) | Tables and SQL in one BigQuery dataset | Project, dataset, location, Google Cloud connection or service account |
 | [`google_drive`](#google_drive) | Listing, searching, reading, downloading, uploading, and organizing Drive files | Google Drive OAuth |
@@ -30,7 +30,6 @@ Use it to pick a tool, configure its connection, and understand why a tool is un
 
 Tools that need a connection or account stay unavailable in the dashboard until their required fields or OAuth connection are stored.
 Options of type `password` in the tables below cannot be set inline in `config.yaml`; see [Security Restrictions](index.md#security-restrictions).
-`db_engine`, `tables`, `connection`, `init_commands`, `config`, `csvs`, `duckdb_connection`, `duckdb_kwargs`, and `obb` expect Python objects, lists, or mappings, so they cannot be set usefully from `config.yaml` or the dashboard.
 `sql`, `postgres`, `redshift`, `duckdb`, `csv`, and `pandas` can read or write local files that the agent's `file_access` setting does not confine, and `sql`, `duckdb`, and `pandas` always run in the primary runtime, so enable them only for agents you trust with what the MindRoom process can reach; see [File access](../architecture/security-posture.md#file-access).
 The Google Drive, Docs, and Sheets tools connect through per-service OAuth, and `google_bigquery` uses the Google Cloud connection; see [Google Services OAuth For Local Installs](../deployment/google-services-user-oauth.md) or [Google Services OAuth](../deployment/google-services-oauth.md) for custom and hosted setups.
 Missing Python dependencies install automatically on first use; see [Automatic Dependency Installation](index.md#automatic-dependency-installation).
@@ -52,8 +51,6 @@ For PostgreSQL or Redshift, the dedicated [`postgres`](#postgres) and [`redshift
 | `host` | `url` | `null` | Host for the assembled URL. |
 | `port` | `number` | `null` | Port for the assembled URL. |
 | `schema` | `text` | `null` | Database name in the assembled URL and schema for inspection. |
-| `db_engine` | `text` | `null` | Programmatic only: a live SQLAlchemy `Engine`. |
-| `tables` | `text` | `null` | Programmatic only: a table mapping that `list_tables()` returns instead of inspecting the database. |
 | `enable_list_tables` | `boolean` | `true` | Enable `list_tables()`. |
 | `enable_describe_table` | `boolean` | `true` | Enable `describe_table()`. |
 | `enable_run_sql_query` | `boolean` | `true` | Enable `run_sql_query()`. |
@@ -74,7 +71,6 @@ The connection is read-only, so queries cannot modify the database.
 | `user` | `text` | yes | `null` | Username. |
 | `password` | `password` | yes | `null` | Password. |
 | `table_schema` | `text` | no | `public` | Schema for table operations and the connection search path. |
-| `connection` | `text` | no | `null` | Programmatic only: an existing Psycopg connection. |
 
 ```yaml
 agents:
@@ -91,7 +87,9 @@ agents:
 
 `redshift` provides the same functions as [`postgres`](#postgres): `show_tables()`, `describe_table()`, `summarize_table()`, `inspect_query()`, `run_query()`, and `export_table_to_path()`.
 It authenticates with `user` and `password`, or with IAM through an AWS `profile` or explicit AWS keys when `iam: true`.
-Unset fields can fall back to the environment variables `REDSHIFT_HOST`, `REDSHIFT_DATABASE`, `REDSHIFT_DB_USER`, `REDSHIFT_CLUSTER_IDENTIFIER`, `AWS_REGION`, and `AWS_PROFILE`.
+Unset fields can fall back to the environment variables `REDSHIFT_HOST`, `REDSHIFT_DATABASE`, `REDSHIFT_DB_USER`, `REDSHIFT_CLUSTER_IDENTIFIER`, `AWS_REGION` (then `AWS_DEFAULT_REGION`), `AWS_PROFILE`, `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and `AWS_SESSION_TOKEN`.
+These are the standard AWS variables, so AWS values set for another client, such as [Amazon Bedrock Claude](../configuration/models.md#amazon-bedrock-claude), apply here too.
+With IAM, a `profile` wins over explicit AWS keys, so an `AWS_PROFILE` in the environment replaces keys saved for this tool.
 The dashboard treats `user` and `password` as required even when `iam` is enabled, so store values for both before the tool becomes available.
 
 | Option | Type | Required | Default | Notes |
@@ -130,9 +128,9 @@ Set `enable_run_cypher: false` to give an agent schema visibility without free-f
 
 | Option | Type | Required | Default | Notes |
 | --- | --- | --- | --- | --- |
-| `uri` | `url` | no | `null` | Connection URI such as `bolt://localhost:7687`; set it in practice. |
-| `user` | `text` | yes | `null` | Username. |
-| `password` | `password` | yes | `null` | Password. |
+| `uri` | `url` | no | `null` | Connection URI such as `bolt://localhost:7687`, or `NEO4J_URI`; set it in practice. |
+| `user` | `text` | yes | `null` | Username, or `NEO4J_USERNAME`. |
+| `password` | `password` | yes | `null` | Password, or `NEO4J_PASSWORD`. |
 | `database` | `text` | no | `null` | Target database. |
 | `enable_list_labels` | `boolean` | no | `true` | Enable `list_labels()`. |
 | `enable_list_relationships` | `boolean` | no | `true` | Enable `list_relationship_types()`. |
@@ -162,9 +160,7 @@ Without `db_path`, the database lives in memory and is not saved.
 | --- | --- | --- | --- |
 | `db_path` | `text` | `null` | Path to a persistent DuckDB database file. |
 | `read_only` | `boolean` | `false` | Open the database read-only. |
-| `connection` | `text` | `null` | Programmatic only: an existing DuckDB connection. |
-| `init_commands` | `text` | `null` | Programmatic only: a list of startup SQL commands. |
-| `config` | `text` | `null` | Programmatic only: a DuckDB config mapping. |
+| `init_commands` | `string[]` | `null` | SQL statements run in order when the tool opens its database, such as `INSTALL httpfs` and `LOAD httpfs`. |
 
 ```yaml
 agents:
@@ -182,16 +178,13 @@ export_table_to_path("orders", format="CSV", path="/tmp")
 
 ## [`csv`]
 
-`csv` provides `list_csv_files()`, `read_csv_file()`, `get_columns()`, and `query_csv_file()` over a pre-registered list of CSV files, each named by its filename stem.
-`config.yaml` and the dashboard accept `csvs` only as a string, so they cannot register a file list and the tool has no files to read; use [`duckdb`](#duckdb) to query CSV files.
+`csv` provides `list_csv_files()`, `read_csv_file()`, `get_columns()`, and `query_csv_file()` over the CSV files listed in `csvs`, each named by its filename stem.
 `query_csv_file()` runs only the first SQL statement it receives.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
-| `csvs` | `text` | `null` | Programmatic only: the list of CSV paths. |
+| `csvs` | `string[]` | `null` | Absolute paths of the CSV files the tool reads. |
 | `row_limit` | `number` | `null` | Default row cap for `read_csv_file()`. |
-| `duckdb_connection` | `text` | `null` | Programmatic only: an existing DuckDB connection. |
-| `duckdb_kwargs` | `text` | `null` | Programmatic only: DuckDB connection arguments. |
 | `enable_read_csv_file` | `boolean` | `true` | Enable `read_csv_file()`. |
 | `enable_list_csv_files` | `boolean` | `true` | Enable `list_csv_files()`. |
 | `enable_get_columns` | `boolean` | `true` | Enable `get_columns()`. |
@@ -252,9 +245,9 @@ agents:
 
 ## [`google_drive`]
 
-<video controls playsinline preload="metadata" aria-label="The agent compares two Drive documents and flags a stale number" style="width: 100%" poster="https://github.com/user-attachments/assets/21a9b571-0a54-47e6-8050-391ec757ba55" data-poster-light="https://github.com/user-attachments/assets/21a9b571-0a54-47e6-8050-391ec757ba55" data-poster-dark="https://github.com/user-attachments/assets/ce6ffe08-b3c1-4bdd-9d75-8e3abbea1e65">
-  <source src="https://github.com/user-attachments/assets/ffba1923-b463-4674-88af-5a862de1613f" type="video/mp4" media="(prefers-color-scheme: dark)">
-  <source src="https://github.com/user-attachments/assets/690273d3-7fee-4e49-a1b5-75e39be00d8b" type="video/mp4">
+<video controls playsinline preload="metadata" aria-label="The agent compares two Drive documents and flags a stale number" style="width: 100%" poster="https://github.com/user-attachments/assets/38ae5852-8273-4cd5-b05e-27e36c5ff157" data-poster-light="https://github.com/user-attachments/assets/38ae5852-8273-4cd5-b05e-27e36c5ff157" data-poster-dark="https://github.com/user-attachments/assets/08b198a5-3134-4b36-b688-4f431e87babf">
+  <source src="https://github.com/user-attachments/assets/e5d0d6c6-f406-425a-a22d-570f0f4f45d5" type="video/mp4" media="(prefers-color-scheme: dark)">
+  <source src="https://github.com/user-attachments/assets/ba7d6fcc-83e9-4a88-be2e-30ce9c8754e5" type="video/mp4">
 </video>
 
 `google_drive` works with files in the connected Google account, including shared drives the account can access.
@@ -263,31 +256,37 @@ agents:
 | --- | --- |
 | `google_drive_list_files()` | Lists recently modified files. |
 | `google_drive_search_files(query)` | Searches file metadata with a Drive query such as `name contains 'budget'`. |
-| `google_drive_read_file(file_id)` | Returns Google Workspace files as text, and plain-text files up to `max_read_size`; PDFs and Office files need a download and a reader for that format. |
-| `google_drive_download_file(file_id, export_format=None)` | Saves a file into `google-drive-downloads/` in the agent workspace, exporting Workspace files to a native format such as `.xlsx` for a whole spreadsheet, or to the MIME type in `export_format`, such as `application/pdf`. |
-| `google_drive_upload_file(local_path, folder_id=None, name=None, mime_type=None)` | Uploads a local file; relative paths start at the agent workspace. |
-| `google_drive_update_file(file_id, local_path, mime_type=None)` | Replaces the contents of an existing non-Workspace file. |
+| `google_drive_read_file(file_id)` | Returns Google Docs, Sheets, Slides, and Apps Script files as text, and plain-text files up to `max_read_size`. |
+| `google_drive_download_file(file_id, export_format=None)` | Saves a file into `google-drive-downloads/<file id>/` in the agent workspace and returns its path, size, and MIME type, exporting Workspace files to a native format such as `.xlsx` for a whole spreadsheet, or to the MIME type in `export_format`, such as `application/pdf`. |
+| `google_drive_upload_file(local_path, folder_id=None, name=None, mime_type=None, convert_to=None)` | Uploads a local file; relative paths start at the agent workspace. With `convert_to` set to `document`, `spreadsheet`, or `presentation`, Drive converts the file into a Google Doc, Sheet, or Slides file. |
+| `google_drive_update_file(file_id, local_path, mime_type=None)` | Replaces the contents of an existing file, which keeps its ID, link, and sharing. |
 | `google_drive_create_folder(name, parent_id=None)` | Creates a folder under the Drive root or a parent folder. |
 | `google_drive_move_file(file_id, new_parent_id, name=None)` | Moves a file and optionally renames it. |
 | `google_drive_trash_file(file_id)` | Moves a file to trash; the tool never deletes permanently. |
 
-Non-Workspace files over `max_read_size` return an error suggesting `google_drive_download_file` instead.
+Use `google_drive_read_file` to read a document or text file, and `google_drive_download_file` for binary files such as audio, video, images, PDFs, archives, and Office files, for Drawings, and for text files over `max_read_size`.
+Files with binary content, such as audio, video, images, PDFs, archives, and Office files, are never returned as text.
+When `google_drive_read_file` refuses a file and the agent has `google_drive_download_file`, the error suggests that function if it can save the file, and otherwise quotes the reason it would refuse the file too, such as a folder, a Google Vids file, or a size over `max_download_size`.
 Downloads larger than `max_download_size` are refused without leaving a partial file.
+Files with the same name never overwrite each other, downloading the same file again under the same name replaces its earlier copy, and characters such as `/` in a Drive name become `_` in the saved name.
+On an agent that is not `private`, every requester shares the agent workspace and can read what another person downloaded, so use a `private` agent when each person connects their own Google account.
 Uploads and content replacement read local files according to the agent's [`file_access`](../architecture/security-posture.md#file-access) setting.
-Downloads need an agent workspace; for an agent without one, `download_file` is ignored and a warning is logged.
-To change the content of a native Google Doc, use [`google_docs`](#google_docs).
+To make a formatted Google Doc, upload an HTML, Markdown, or Word file with `convert_to="document"`: Drive imports the formatting Google Docs supports, such as headings, tables, lists, and links.
+Replacing the contents of a Google Doc, Sheet, or Slides file converts the local file the same way and replaces the whole file, so formatting that is not in the local file is lost and comments on the replaced content lose their place.
+To change part of a Google Doc, use [`google_docs`](#google_docs).
 If the account is not connected, the tool returns an `OAuthConnectionRequired` result with a connect link; see [Google Services OAuth For Local Installs](../deployment/google-services-user-oauth.md#connect).
 A connection that granted only read-only Drive access keeps working for reads, while writes ask the user to reconnect; see [Scope Rationale](../deployment/google-services-oauth.md#scope-rationale).
+Set the `GOOGLE_CLOUD_QUOTA_PROJECT_ID` environment variable to charge Drive API quota and billing to that Google Cloud project.
 
 | Option | Type | Default | Notes |
 | --- | --- | --- | --- |
 | `list_files` | `boolean` | `true` | Enable file listing. |
 | `search_files` | `boolean` | `true` | Enable metadata search. |
 | `read_file` | `boolean` | `true` | Enable content reads. |
-| `download_file` | `boolean` | `false` | Enable downloads and exports into the agent workspace. |
+| `download_file` | `boolean` | `true` | Enable downloads and exports into the agent workspace. |
 | `write` | `boolean` | `true` | Enable upload, content replacement, folder creation, move or rename, and trash; `false` removes all of them. |
-| `max_read_size` | `number` | `10485760` | Largest non-Workspace file to read, in bytes. |
-| `max_download_size` | `number` | `104857600` | Largest file or export to download, in bytes. |
+| `max_read_size` | `number` | `10485760` | Largest non-Workspace file `google_drive_read_file` returns as text, in bytes. |
+| `max_download_size` | `number` | `104857600` | Largest file or export `google_drive_download_file` saves, in bytes. |
 
 To require a person to approve each Drive change, add [Tool Approval](../tool-approval.md) rules:
 
@@ -316,6 +315,7 @@ tool_approval:
 | `google_docs_get_document(document_id)` | Returns the full document structure and content, including every tab, paragraph, style, table, and list. |
 | `google_docs_insert_text(document_id, text, index=None, tab_id=None)` | Inserts text at a body index (1 is the first position), or appends to the end of the tab when `index` is omitted. |
 | `google_docs_replace_text(document_id, find_text, replace_text, match_case=False, tab_ids=None)` | Replaces every match across all tabs or the listed tabs and reports the count. |
+| `google_docs_batch_update(document_id, requests)` | Applies Google Docs API `batchUpdate` requests in order, all or none, for changes the text functions cannot make, such as tables, headings, styles, lists, links, and images. Requests can also delete content. |
 
 Each `document_id` accepts either a document ID or a full Google Docs URL.
 Every successful call returns the document's edit URL.
@@ -326,7 +326,7 @@ Before public production use, the Docs scope needs Google verification; see [Pro
 | --- | --- | --- | --- |
 | `create_document` | `boolean` | `true` | Enable document creation. |
 | `read_document` | `boolean` | `true` | Enable structure and content reads. |
-| `edit_document` | `boolean` | `true` | Enable text insertion and replacement. |
+| `edit_document` | `boolean` | `true` | Enable text insertion, text replacement, and batch updates. |
 
 ## [`google_sheets`]
 
@@ -366,7 +366,6 @@ Choose `openbb` over [`yfinance`](#yfinance) when you need to switch data provid
 | --- | --- | --- | --- |
 | `provider` | `text` | `yfinance` | One of `yfinance`, `benzinga`, `fmp`, `intrinio`, `polygon`, `tiingo`, or `tmx`. |
 | `openbb_pat` | `password` | `null` | OpenBB personal access token for premium providers. |
-| `obb` | `text` | `null` | Programmatic only: a configured OpenBB instance. |
 | `enable_get_stock_price` | `boolean` | `true` | Enable `get_stock_price()`. |
 | `enable_search_company_symbol` | `boolean` | `false` | Enable `search_company_symbol()`. |
 | `enable_get_company_news` | `boolean` | `false` | Enable `get_company_news()`. |

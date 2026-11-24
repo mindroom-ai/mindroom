@@ -8,42 +8,75 @@ import sqlite3
 from contextlib import asynccontextmanager, closing
 from dataclasses import replace
 from pathlib import Path
-from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock, Mock
+from typing import TYPE_CHECKING, cast
+from unittest.mock import AsyncMock, Mock
+from urllib.parse import parse_qs, unquote, urlparse
 from uuid import uuid4
 
 import nio
 import pytest
-from nio.durable import DurableSyncConfig, RecordKind, SyncBatch, SyncRecord
+from nio.durable import DurableSyncConfig, RecordKind, SlidingSyncConfig, SyncBatch, SyncRecord
 from nio.durable.transport import HttpError
 
+from mindroom import bot as bot_module
 from mindroom.background_tasks import run_coroutine_until_complete, wait_for_background_tasks
 from mindroom.bot import AgentBot
 from mindroom.bot_room_lifecycle import BotRoomLifecycle
 from mindroom.config.access import ResponderAccessConfig
+from mindroom.config.matrix import MatrixSyncConfig
 from mindroom.config.personal_rooms import PersonalRoomsConfig
 from mindroom.constants import ROUTER_AGENT_NAME
-from mindroom.event_journal import DeliveryStage, RoomMembershipPosition
+from mindroom.dispatch_callback_outcome import TurnDispatchOutcome
+from mindroom.event_journal import DeliveryStage, EventClass, EventKind, RoomMembershipPosition
+from mindroom.hooks import EVENT_BOT_READY, HookRegistry, hook
 from mindroom.matrix._owned_session import MatrixCredentials, open_owned_matrix_session
-from mindroom.matrix.client_session import create_authenticated_client
 from mindroom.matrix.durable_ingestion import consume_one_ingestion_batch
+from mindroom.matrix.event_types import ROOM_SETTINGS_EVENT_TYPE
 from mindroom.matrix.personal_rooms import PersonalRoomService
 from mindroom.matrix.state import MatrixState
-from mindroom.orchestrator import _MultiAgentOrchestrator
+from mindroom.orchestration import entity_fleet
+from mindroom.orchestration.thread_snooze_runtime import ThreadSnoozeRuntimeCoordinator
 from mindroom.personal_room_lifecycle import PersonalRoomTarget
+from mindroom.room_settings import MODEL, resolve_room_setting
 from mindroom.runtime_shutdown import ShutdownBudget
-from tests.bot_helpers import make_matrix_client_mock
+from mindroom.scheduling.runtime import ScheduledTaskRuntime
+from tests.access_schema_support import refresh_memberships
+from tests.bot_helpers import _hook_plugin, make_matrix_client_mock
+from tests.conftest import SETTLE_TIMEOUT_SECONDS, legacy_default_store_client, start_call_manager
+from tests.durable_sync_helpers import skip_crypto_maintenance
+from tests.journal_helpers import admit_dispatch_event, membership_position
+from tests.matrix_state_helpers import save_matrix_state
+from tests.room_settings_helpers import set_room_model_override
 from tests.test_bot_ready_hook import _agent_bot
-from tests.test_durable_ingestion_admission import ROOM, Session
+from tests.test_durable_ingestion_admission import ROOM, Session, message
 from tests.test_event_journal_store import admit, interactive_edit, interactive_prompt, projection
-from tests.test_room_invites import _handle_invite, _live_router_invite_scenario, _pending_room_invites
+from tests.test_room_invites import _INVITEE, _handle_invite, _live_invite_scenario, _pending_room_invites
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable
+    from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 
     from nio.durable import DurableSync
 
     from mindroom.event_journal.store import PrincipalStore
+    from tests.runtime_fakes import ReadyRuntime
+
+
+@pytest.fixture(autouse=True)
+def _no_server_state_publication(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These bots join through real Matrix clients pointed at no homeserver; the published server is tested elsewhere."""
+    monkeypatch.setattr(bot_module, "publish_server_state", AsyncMock())
+
+
+@pytest.fixture(autouse=True)
+def _no_scheduled_task_restore(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These rooms hold no scheduled tasks; restoring a joined room's schedules reads room state no homeserver serves."""
+    monkeypatch.setattr(ScheduledTaskRuntime, "restore_room", AsyncMock(return_value=0))
+
+
+@pytest.fixture(autouse=True)
+def _no_thread_snooze_restore(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These rooms hold no snoozes; restoring a joined room's snoozes reads room state no homeserver serves."""
+    monkeypatch.setattr(ThreadSnoozeRuntimeCoordinator, "restore_room", AsyncMock())
 
 
 @pytest.mark.asyncio
@@ -105,18 +138,122 @@ async def test_personal_room_reconciliation_does_not_delay_sync_ack(
         release.set()
         if preparation is not None:
             await preparation
-        await wait_for_background_tasks(timeout=2, owner=bot._runtime_view)
+        await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=bot._runtime_view)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("slow_side_effect", ["bot_ready_hook", "room_state_reconcile"])
+@pytest.mark.parametrize("agent_name", [ROUTER_AGENT_NAME, "code"])
+async def test_slow_first_frame_side_effect_does_not_delay_a_stewards_dispatch(  # noqa: PLR0915
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    slow_side_effect: str,
+    agent_name: str,
+) -> None:
+    """While a bot:ready hook or a room state reconcile runs, a steward, the owner account or an agent, dispatches.
+
+    It dispatches its waiting message and the next batch's.
+    """
+    bot = _agent_bot(tmp_path, agent_name=agent_name)
+    cast("ReadyRuntime", bot.orchestrator).steward = agent_name
+    # Access by listed users needs no grant refresh, so only the first frame's completion releases dispatch.
+    listed_users = ResponderAccessConfig(current_room_members=False, members_of_rooms=[], users=["@alice:localhost"])
+    bot.config.router.access = bot.config.agents["code"].access = listed_users
+    assert not bot.orchestrator.agent_reply_memberships.needs_refresh(bot.config)
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    entered = asyncio.Event()
+    release = asyncio.Event()
+    dispatched = asyncio.Event()
+    dispatched_ids: list[str] = []
+
+    @hook(EVENT_BOT_READY)
+    async def slow_ready(_ctx: object) -> None:
+        entered.set()
+        await release.wait()
+
+    async def slow_reconcile(_room_id: str, _only: set[str] | None) -> set[str]:
+        entered.set()
+        await release.wait()
+        return set()
+
+    if slow_side_effect == "bot_ready_hook":
+        bot.orchestrator.hook_registry_state.registry = HookRegistry.from_plugins(
+            [_hook_plugin("slow-ready", [slow_ready])],
+        )
+    else:
+        bot.steward_duties.mark_joined_for_room_state(ROOM)
+        monkeypatch.setattr(bot.steward_duties, "_reconcile_room_state", slow_reconcile)
+
+    async def on_message(_room: nio.MatrixRoom, event: nio.RoomMessageFormatted) -> TurnDispatchOutcome:
+        dispatched_ids.append(event.event_id)
+        dispatched.set()
+        return TurnDispatchOutcome.INTENTIONALLY_IGNORED
+
+    bot._journal_dispatcher.callbacks = replace(bot._journal_dispatcher.callbacks, on_message=on_message)
+    # A message an earlier batch of the first frame admitted waits for that frame to complete.
+    waiting = nio.RoomMessageText.from_dict(
+        {
+            "type": "m.room.message",
+            "event_id": "$voice:localhost",
+            "sender": "@alice:localhost",
+            "origin_server_ts": 1,
+            "content": {"msgtype": "m.text", "body": "hello"},
+        },
+    )
+    await admit_dispatch_event(
+        bot._journal_dispatcher,
+        nio.MatrixRoom(ROOM, bot.agent_user.user_id),
+        waiting,
+        EventKind.MESSAGE,
+        EventClass.ACTIONABLE,
+    )
+    batch = SyncBatch(uuid4(), 1, (), completes_sync=True)
+    next_batch = SyncBatch(batch.stream_id, 2, (message("$next:localhost"),), completes_sync=True)
+    principal = bot.journal_principal()
+    consumer = await principal.load_or_create_ingestion_consumer(new_generation=uuid4())
+    await principal.bind_ingestion_stream(generation=consumer.generation, stream_id=batch.stream_id)
+    session = Session(batch)
+
+    async def pump() -> None:
+        """Consume the first frame, then the batch behind it, waking the dispatcher as the pump does."""
+        for following in (next_batch, None):
+            await consume_one_ingestion_batch(
+                session,
+                principal,
+                account_id=bot.agent_user.user_id,
+                after_sync=bot._on_ingestion_frame_completion,
+            )
+            bot._journal_dispatcher.wake()
+            session.batch = following
+
+    frames = asyncio.create_task(pump())
+    try:
+        async with asyncio.timeout(2):
+            await entered.wait()
+            await dispatched.wait()
+            # Neither holds the frame's acknowledgement, so the batch behind it is admitted and dispatched as well.
+            await frames
+            while "$next:localhost" not in dispatched_ids:
+                dispatched.clear()
+                await dispatched.wait()
+        assert session.acked == [batch, next_batch]
+        assert not release.is_set()
+    finally:
+        release.set()
+        await frames
+        await bot._journal_dispatcher.stop()
+        await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=bot._runtime_view)
 
 
 @asynccontextmanager
-async def _owned_session(bot: AgentBot) -> AsyncIterator[DurableSync]:
+async def _owned_session(bot: AgentBot, config: DurableSyncConfig | None = None) -> AsyncIterator[DurableSync]:
     opened = await open_owned_matrix_session(
         "https://localhost",
         MatrixCredentials(bot.agent_user.user_id, "DEVICE", "token"),
         bot.runtime_paths,
         consumer_store=bot.journal_principal(),
         new_consumer_generation=uuid4(),
-        config=DurableSyncConfig(),
+        config=config or DurableSyncConfig(),
     )
     bot.client = opened.client
     bot._ingestion_session = opened.session
@@ -136,6 +273,59 @@ def _joined_frame(events: list[dict[str, object]]) -> bytes:
     ).encode()
 
 
+def _rooms_frame(next_batch: str, room_ids: Iterable[str]) -> bytes:
+    room = {"state": {"events": []}, "timeline": {"limited": False, "events": []}}
+    return json.dumps({"next_batch": next_batch, "rooms": {"join": dict.fromkeys(room_ids, room)}}).encode()
+
+
+@asynccontextmanager
+async def _syncing(
+    bot: AgentBot,
+    session: DurableSync,
+    *frames: bytes,
+    joined: Iterable[str] = (),
+    complete_state: asyncio.Event | None = None,
+) -> AsyncIterator[list[str]]:
+    """Run the real source and pump, answering each join with a sync that observes it.
+
+    Syncs answer with the given frames first, then each join's own frame. A
+    full-state sync with nothing queued answers with every joined room, once
+    `complete_state` is set. Yields the joins and leaves sent to Matrix, in order.
+    """
+    queued = list(frames)
+    rooms = set(joined)
+    memberships: list[str] = []
+
+    async def request(_method: str, path: str, *_args: object, **_kwargs: object) -> bytes:
+        if "/sync" in path:
+            if queued:
+                return queued.pop(0)
+            if "full_state=true" not in path:
+                await asyncio.Event().wait()
+            if complete_state is not None:
+                await complete_state.wait()
+            return _rooms_frame(f"complete-{len(memberships)}", rooms)
+        if "/join/" in path:
+            memberships.append("join")
+            room_id = unquote(path.partition("/join/")[2].partition("?")[0])
+            rooms.add(room_id)
+            queued.append(_rooms_frame(f"joined-{len(memberships)}", [room_id]))
+            return json.dumps({"room_id": room_id}).encode()
+        assert path.partition("?")[0].endswith("/leave")
+        memberships.append("leave")
+        rooms.discard(unquote(path.partition("/rooms/")[2].partition("/")[0]))
+        return b"{}"
+
+    session._transport.request = request
+    skip_crypto_maintenance(session)
+    sync = asyncio.create_task(bot.sync_forever())
+    try:
+        yield memberships
+    finally:
+        sync.cancel()
+        await asyncio.gather(sync, return_exceptions=True)
+
+
 async def _consume_frame(bot: AgentBot, session: DurableSync, frame: bytes) -> None:
     frames: asyncio.Queue[bytes] = asyncio.Queue()
     frames.put_nowait(frame)
@@ -144,11 +334,11 @@ async def _consume_frame(bot: AgentBot, session: DurableSync, frame: bytes) -> N
         return await frames.get()
 
     session._transport.request = request
-    session._maintain_crypto = AsyncMock()
+    skip_crypto_maintenance(session)
     runner = asyncio.create_task(session.run())
     completed = False
 
-    async def after_sync() -> None:
+    async def after_sync(_receipt_new: bool) -> None:
         nonlocal completed
         completed = True
 
@@ -190,7 +380,7 @@ async def _consume_repaired_frame(
     complete = False
     seen: list[SyncRecord] = []
 
-    async def after_sync() -> None:
+    async def after_sync(_receipt_new: bool) -> None:
         nonlocal complete
         complete = True
 
@@ -217,14 +407,77 @@ async def _consume_repaired_frame(
 
 
 @pytest.mark.asyncio
+async def test_replayed_completion_does_not_complete_the_first_sync(tmp_path: Path) -> None:
+    """A restart replays a completion the stopped process admitted; only a new response proves the bot caught up.
+
+    The same holds for a receive loop that restarts on a bot that already synced: its replay opens no observer.
+    """
+    bot = _agent_bot(tmp_path)
+    bot.client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
+    handle_bot_ready = AsyncMock()
+    bot.orchestrator.handle_bot_ready = handle_bot_ready
+    membership_sync = bot.orchestrator.agent_reply_membership_sync
+    membership_sync.observer_loop_started(bot.config, bot.matrix_id.full_id)
+    marker = SyncBatch(uuid4(), 1, (), completes_sync=True)
+    principal = bot.journal_principal()
+    consumer = await principal.load_or_create_ingestion_consumer(new_generation=uuid4())
+    await principal.bind_ingestion_stream(generation=consumer.generation, stream_id=marker.stream_id)
+    account = bot.agent_user.user_id
+
+    async def consume(session: Session) -> None:
+        await consume_one_ingestion_batch(
+            session,
+            principal,
+            account_id=account,
+            after_sync=bot._on_ingestion_frame_completion,
+        )
+        await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=bot._runtime_view)
+
+    # The stopped process admitted the marker; its acknowledgement was not yet durable when it was killed.
+    await consume_one_ingestion_batch(Session(marker), principal, account_id=account)
+    replayed = Session(marker)
+    try:
+        # The marker drains while the first new response is still outstanding.
+        await consume(replayed)
+        assert replayed.acked == [marker]
+        assert bot.seconds_since_last_sync_activity() is not None
+        assert not bot.first_sync_complete
+        assert not membership_sync.observer_is_open(bot.matrix_id.full_id)
+        handle_bot_ready.assert_not_awaited()
+
+        await consume(Session(SyncBatch(marker.stream_id, 2, (), completes_sync=True)))
+        assert bot.first_sync_complete
+        assert membership_sync.observer_is_open(bot.matrix_id.full_id)
+        handle_bot_ready.assert_awaited_once_with(bot)
+
+        # The receive loop admitted one more completion and ended before acknowledging it; its successor replays it.
+        unacknowledged = SyncBatch(marker.stream_id, 3, (), completes_sync=True)
+        await consume_one_ingestion_batch(Session(unacknowledged), principal, account_id=account)
+        membership_sync.observer_loop_started(bot.config, bot.matrix_id.full_id)
+        await consume(Session(unacknowledged))
+        assert bot.first_sync_complete
+        assert not membership_sync.observer_is_open(bot.matrix_id.full_id)
+
+        await consume(Session(SyncBatch(marker.stream_id, 4, (), completes_sync=True)))
+        assert membership_sync.observer_is_open(bot.matrix_id.full_id)
+    finally:
+        bot._sync_shutdown_budget = ShutdownBudget.start(0.01)
+        await bot.prepare_for_sync_shutdown()
+        await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=bot._runtime_view)
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("rejoined", [False, True])
-async def test_repaired_gap_fences_grants_until_authoritative_refresh(tmp_path: Path, rejoined: bool) -> None:
+async def test_repaired_gap_fences_grants_until_authoritative_refresh(
+    tmp_path: Path,
+    rejoined: bool,
+) -> None:
     """Recovered membership closes stale grants without granting from historical joins."""
     bot = _agent_bot(tmp_path, agent_name=ROUTER_AGENT_NAME)
     bot.config.router.access = ResponderAccessConfig(members_of_rooms=["grant"])
     state = MatrixState.load(runtime_paths=bot.runtime_paths)
     state.add_room("grant", ROOM, "#grant:localhost", "Grant")
-    state.save(runtime_paths=bot.runtime_paths)
+    save_matrix_state(state, bot.runtime_paths)
     sender = "@alice:localhost"
     join = {
         "type": "m.room.member",
@@ -246,7 +499,7 @@ async def test_repaired_gap_fences_grants_until_authoritative_refresh(tmp_path: 
     if rejoined:
         recovered.append({**join, "event_id": "$rejoin", "origin_server_ts": 3})
     index = bot._runtime_view.agent_reply_memberships
-    bot._schedule_reply_authorized_call_revocation = MagicMock()
+    call_manager = await start_call_manager(bot)
     async with _owned_session(bot) as session:
         await _consume_frame(bot, session, _joined_frame([join]))
         client = make_matrix_client_mock(user_id=bot.agent_user.user_id)
@@ -254,8 +507,12 @@ async def test_repaired_gap_fences_grants_until_authoritative_refresh(tmp_path: 
         control = nio.RoomMember(bot.agent_user.user_id, None, None)
         member = nio.RoomMember(sender, None, None)
         client.joined_members.return_value = nio.JoinedMembersResponse(members=[control, member], room_id=ROOM)
-        await index.refresh(bot.config, bot.runtime_paths, client)
+        await refresh_memberships(index, bot.config, bot.runtime_paths, client)
         assert index.is_allowed(sender, ["grant"], bot.config, bot.runtime_paths)
+        # Only an account whose receive loop has caught up observes rooms, so only its recovered events revoke.
+        membership_sync = bot.orchestrator.agent_reply_membership_sync
+        membership_sync.observer_loop_started(bot.config, bot.matrix_id.full_id)
+        membership_sync.observer_frame_settled(bot.matrix_id.full_id)
         frame = {
             "next_batch": "next2",
             "rooms": {
@@ -277,14 +534,15 @@ async def test_repaired_gap_fences_grants_until_authoritative_refresh(tmp_path: 
         assert [record.provenance for record in seen if record.source.get("event_id") == "$leave"] == [
             nio.TimelineEventProvenance.RECOVERED,
         ]
-        bot._schedule_reply_authorized_call_revocation.assert_called()
+        await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=bot._runtime_view)
+        call_manager.revoke_reply_authorization.assert_awaited()
         client.joined_members.return_value = nio.JoinedMembersResponse(
             members=[control, member] if rejoined else [control],
             room_id=ROOM,
         )
-        await bot._router_reply_membership_sync.refresh_if_needed(
+        await bot.orchestrator.agent_reply_membership_sync.refresh_if_needed(
             bot.config,
-            lambda: index.refresh(bot.config, bot.runtime_paths, client),
+            lambda: refresh_memberships(index, bot.config, bot.runtime_paths, client),
         )
         assert client.joined_members.await_count == 2
         assert index.is_allowed(sender, ["grant"], bot.config, bot.runtime_paths) is rejoined
@@ -294,20 +552,18 @@ async def test_repaired_gap_fences_grants_until_authoritative_refresh(tmp_path: 
 @pytest.mark.parametrize("status", [403, 429, 503])
 async def test_failed_durable_join_retains_pending_invitation(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
     status: int,
 ) -> None:
     """An ambiguous HTTP failure must retain both the invitation and decrypt fence."""
-    config, bot, room, event = _live_router_invite_scenario(tmp_path)
+    config, bot, room, event = _live_invite_scenario(tmp_path)
     bot.change_local_membership = AgentBot.change_local_membership.__get__(bot)
     bot._room_lifecycle.deps = replace(bot._room_lifecycle.deps, change_membership=bot.change_local_membership)
-    monkeypatch.setattr(bot._room_lifecycle, "_send_invite_welcome", AsyncMock())
     async with _owned_session(bot) as session:
         bot.client.invited_rooms[room.room_id] = room
         session._transport.request = AsyncMock(side_effect=HttpError(status))
         with pytest.raises(RuntimeError, match="Failed to join invited room"):
             await _handle_invite(bot, room, event)
-        assert room.room_id in _pending_room_invites(config, ROUTER_AGENT_NAME)
+        assert room.room_id in _pending_room_invites(config, _INVITEE)
         assert bot._room_lifecycle.decrypt_notice_is_fenced(room.room_id)
 
 
@@ -321,9 +577,9 @@ async def test_invite_authorization_is_rechecked_after_membership_waits(
     replacement: str | None,
 ) -> None:
     """A queued join cannot use an invitation withdrawn or replaced while it waited."""
-    config, bot, room, event = _live_router_invite_scenario(tmp_path)
+    config, bot, room, event = _live_invite_scenario(tmp_path)
     assert room.inviter is not None
-    config.router.accept_invites = [room.inviter]
+    config.agents[_INVITEE].accept_invites = [room.inviter]
     reached = asyncio.Event()
     release = asyncio.Event()
 
@@ -333,27 +589,20 @@ async def test_invite_authorization_is_rechecked_after_membership_waits(
         return await AgentBot.change_local_membership(bot, room_id, target, is_authorized=is_authorized)
 
     bot._room_lifecycle.deps = replace(bot._room_lifecycle.deps, change_membership=change)
-    monkeypatch.setattr(bot._room_lifecycle, "_send_invite_welcome", AsyncMock())
     async with _owned_session(bot) as session:
         bot.client.invited_rooms[room.room_id] = room
         request = AsyncMock(return_value=b"{}")
         session._transport.request = request
         if wait_at == "lock":
             await bot._local_membership_lock.acquire()
-        elif wait_at == "producer":
-
-            async def wait_for_producer() -> None:
-                reached.set()
-                await release.wait()
-
-            monkeypatch.setattr(session, "wait_for_membership_idle", wait_for_producer)
         else:
 
-            async def wait_for_admission() -> None:
+            async def wait_for_release() -> None:
                 reached.set()
                 await release.wait()
 
-            monkeypatch.setattr(session, "next_batch", wait_for_admission)
+            waiting = "wait_for_membership_idle" if wait_at == "producer" else "next_batch"
+            monkeypatch.setattr(session, waiting, wait_for_release)
         task = asyncio.create_task(_handle_invite(bot, room, event))
         try:
             await asyncio.wait_for(reached.wait(), 2)
@@ -366,7 +615,7 @@ async def test_invite_authorization_is_rechecked_after_membership_waits(
             release.set()
             await asyncio.wait_for(task, 2)
             request.assert_not_awaited()
-            assert room.room_id not in bot._room_lifecycle.invited_rooms
+            assert room.room_id not in bot._room_lifecycle.invited_room_ids()
             assert not bot._room_lifecycle.decrypt_notice_is_fenced(room.room_id)
         finally:
             release.set()
@@ -377,7 +626,7 @@ async def test_invite_authorization_is_rechecked_after_membership_waits(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failure_at", ["persistence", "welcome"])
+@pytest.mark.parametrize("failure_at", ["persistence", "room_setup"])
 @pytest.mark.parametrize("policy_allows_recovery", [True, False])
 async def test_joined_invitation_recovers_without_an_invite_cache(
     tmp_path: Path,
@@ -386,42 +635,41 @@ async def test_joined_invitation_recovers_without_an_invite_cache(
     policy_allows_recovery: bool,
 ) -> None:
     """An accepted join survives unfinished app work and startup room cleanup."""
-    config, bot, room, event = _live_router_invite_scenario(tmp_path)
+    config, bot, room, event = _live_invite_scenario(tmp_path)
     bot._room_lifecycle.deps = replace(
         bot._room_lifecycle.deps,
         change_membership=AgentBot.change_local_membership.__get__(bot),
     )
     failure = OSError("interrupted invitation completion")
     if failure_at == "persistence":
-        monkeypatch.setattr(bot._room_lifecycle, "_remember_invited_room", MagicMock(side_effect=failure))
+        monkeypatch.setattr(bot._room_lifecycle, "_remember_invited_room", AsyncMock(side_effect=failure))
     else:
-        monkeypatch.setattr(bot._room_lifecycle, "_send_invite_welcome", AsyncMock(side_effect=failure))
-    async with _owned_session(bot) as session:
+        monkeypatch.setattr(bot._room_lifecycle, "_room_joined", AsyncMock(side_effect=failure))
+    monkeypatch.setattr(bot, "_on_ingestion_frame_completion", AsyncMock())
+    async with _owned_session(bot) as session, _syncing(bot, session):
         bot.client.invited_rooms[room.room_id] = room
-        session._transport.request = AsyncMock(return_value=b"{}")
         with pytest.raises(OSError, match="interrupted invitation completion"):
             await _handle_invite(bot, room, event)
         assert room.room_id in bot.client.rooms
         assert room.room_id not in bot.client.invited_rooms
-        await consume_one_ingestion_batch(session, bot.journal_principal(), account_id=bot.agent_user.user_id)
 
-    config.router.accept_invites = policy_allows_recovery
+    config.agents[_INVITEE].accept_invites = policy_allows_recovery
     bot._room_lifecycle = BotRoomLifecycle(bot._room_lifecycle.deps)
-    welcome = AsyncMock()
-    monkeypatch.setattr(bot._room_lifecycle, "_send_invite_welcome", welcome)
+    room_setup = AsyncMock()
+    monkeypatch.setattr(bot._room_lifecycle, "_room_joined", room_setup)
     monkeypatch.setattr("mindroom.bot_room_lifecycle.get_joined_rooms", AsyncMock(return_value=[room.room_id]))
     async with _owned_session(bot) as session:
         request = AsyncMock()
         session._transport.request = request
         assert room.room_id in bot.client.rooms
         assert room.room_id not in bot.client.invited_rooms
-        # Startup computes cleanup before welcome admission opens.
+        # Startup computes cleanup before the invitation's room setup runs.
         assert await bot._room_lifecycle._rooms_to_leave() == ([] if policy_allows_recovery else [room.room_id])
-        welcome.assert_not_awaited()
+        room_setup.assert_not_awaited()
         await bot._room_lifecycle.reconcile_pending_invites()
-        assert (room.room_id in bot._room_lifecycle.invited_rooms) is policy_allows_recovery
-        assert welcome.await_count == int(policy_allows_recovery)
-        assert (room.room_id not in _pending_room_invites(config, ROUTER_AGENT_NAME)) is policy_allows_recovery
+        assert (room.room_id in bot._room_lifecycle.invited_room_ids()) is policy_allows_recovery
+        assert room_setup.await_count == int(policy_allows_recovery)
+        assert (room.room_id not in _pending_room_invites(config, _INVITEE)) is policy_allows_recovery
         request.assert_not_awaited()
 
 
@@ -430,23 +678,23 @@ async def test_invite_completion_keeps_a_replacement_pending_inviter(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Finishing one welcome must not erase a later invitation's durable work."""
-    config, bot, room, event = _live_router_invite_scenario(tmp_path)
+    """Finishing one invitation's room setup must not erase a later invitation's durable work."""
+    config, bot, room, event = _live_invite_scenario(tmp_path)
     bot._room_lifecycle.deps = replace(
         bot._room_lifecycle.deps,
         change_membership=AgentBot.change_local_membership.__get__(bot),
     )
     replacement = "@replacement:localhost"
 
-    async def welcome(_room_id: str, _sender: str) -> None:
-        await bot._room_lifecycle.record_pending_room_invite(room.room_id, replacement)
+    async def room_setup(_room_id: str) -> None:
+        await bot._room_lifecycle._record_pending_room_invite(room.room_id, replacement)
 
-    monkeypatch.setattr(bot._room_lifecycle, "_send_invite_welcome", welcome)
-    async with _owned_session(bot) as session:
+    monkeypatch.setattr(bot._room_lifecycle, "_room_joined", room_setup)
+    monkeypatch.setattr(bot, "_on_ingestion_frame_completion", AsyncMock())
+    async with _owned_session(bot) as session, _syncing(bot, session):
         bot.client.invited_rooms[room.room_id] = room
-        session._transport.request = AsyncMock(return_value=b"{}")
         await _handle_invite(bot, room, event)
-        assert _pending_room_invites(config, ROUTER_AGENT_NAME) == {room.room_id: replacement}
+        assert _pending_room_invites(config, _INVITEE) == {room.room_id: replacement}
 
 
 @pytest.mark.asyncio
@@ -535,7 +783,7 @@ async def test_quiesce_retains_projection_ownership_until_drain_or_timeout(  # n
             )
         recovery_attempted = asyncio.Event()
         release_recovery = asyncio.Event()
-        session._maintain_crypto = AsyncMock()
+        skip_crypto_maintenance(session)
 
         async def recover_projection() -> bool:
             recovery_attempted.set()
@@ -557,7 +805,7 @@ async def test_quiesce_retains_projection_ownership_until_drain_or_timeout(  # n
             assert source is not None
             if process_shutdown:
                 bot.begin_process_shutdown()
-            quiescing = asyncio.create_task(bot._quiesce_matrix_ingestion())
+            quiescing = asyncio.create_task(bot.quiesce_matrix_ingestion())
             await asyncio.sleep(0)
             release_recovery.set()
             await asyncio.wait_for(quiescing, timeout=1)
@@ -571,7 +819,7 @@ async def test_quiesce_retains_projection_ownership_until_drain_or_timeout(  # n
                 assert not sync.done()
         finally:
             release_recovery.set()
-            bot._sync_shutting_down = True
+            bot._runtime_view.begin_draining()
             bot._delivery_recovery_wake.set()
             sync.cancel()
             await asyncio.gather(sync, return_exceptions=True)
@@ -621,7 +869,7 @@ async def test_upgrade_keeps_old_history_silent_and_preserves_crypto(
         )
     bot = _agent_bot(tmp_path)
     principal = bot.journal_principal()
-    legacy = create_authenticated_client(
+    legacy = legacy_default_store_client(
         "https://localhost",
         bot.agent_user.user_id,
         "DEVICE",
@@ -665,8 +913,10 @@ async def test_upgrade_keeps_old_history_silent_and_preserves_crypto(
         assert [event.event_id for event in await principal.pending()] == ["$new-request"]
         await principal.settle("$new-request")
 
-    assert bot._own_journal is not None
-    await bot._own_journal.close()
+    # The process restarts: its runtime closes the journal every bot borrowed, and the next runtime reopens it.
+    opened_journal = cast("ReadyRuntime", bot.orchestrator)._open_journal
+    assert opened_journal is not None
+    await opened_journal.close()
     bot = _agent_bot(tmp_path)
     principal = bot.journal_principal()
     async with _owned_session(bot) as session:
@@ -707,15 +957,15 @@ async def test_startup_cleanup_leaves_room_before_first_membership_observation(
         assert bot.client is not None
         monkeypatch.setattr(bot.client, "joined_rooms", AsyncMock(return_value=nio.JoinedRoomsResponse(rooms=[ROOM])))
         session._transport.request = request
-        session._maintain_crypto = AsyncMock()
+        skip_crypto_maintenance(session)
         runner = asyncio.create_task(session.run())
         try:
             await asyncio.wait_for(first_poll.wait(), timeout=2)
-            await asyncio.wait_for(bot.leave_unconfigured_rooms(), timeout=2)
+            await asyncio.wait_for(bot._room_lifecycle.leave_unconfigured_rooms(), timeout=2)
             assert len(leave_requests) == 1
             facts = await consume_one_ingestion_batch(session, principal, account_id=bot.agent_user.user_id)
             assert facts is not None
-            assert await principal.membership_position(ROOM) == RoomMembershipPosition("leave", 0)
+            assert await membership_position(principal, ROOM) == RoomMembershipPosition("leave", 0)
             assert await principal.ingestion_membership_position(ROOM) == RoomMembershipPosition("leave", 0)
         finally:
             runner.cancel()
@@ -732,7 +982,7 @@ async def _retain_membership_before_admission(bot: AgentBot, retained: str) -> N
             frame["rooms"]["leave"] = frame["rooms"].pop("join")
             frame["next_batch"] = "departed"
         session._transport.request = AsyncMock(return_value=json.dumps(frame).encode())
-        session._maintain_crypto = AsyncMock()
+        skip_crypto_maintenance(session)
         runner = asyncio.create_task(session.run())
         try:
             await asyncio.wait_for(session.wait_for_work(), timeout=2)
@@ -770,23 +1020,81 @@ async def test_entity_removal_leaves_with_retained_input_before_closing_stores(
     async with _owned_session(bot) as session:
         assert bot.client is not None
         monkeypatch.setattr(bot.client, "joined_rooms", AsyncMock(return_value=nio.JoinedRoomsResponse(rooms=[ROOM])))
+        # The room's settings are read as the client, not through the transport, before an event of it is handled.
+        no_setting = nio.RoomGetStateEventError("Not found", "M_NOT_FOUND")
+        monkeypatch.setattr(bot.client, "room_get_state_event", AsyncMock(return_value=no_setting))
         session._transport.request = request
-        session._maintain_crypto = AsyncMock()
-        orchestrator = _MultiAgentOrchestrator(runtime_paths=bot.runtime_paths)
-        orchestrator.agent_bots[bot.agent_name] = bot
-        monkeypatch.setattr(orchestrator._approval_recovery, "reconcile_unavailable_entities", AsyncMock())
-        monkeypatch.setattr(orchestrator, "_shared_journal_store", lambda: MagicMock(end_entity_replies=AsyncMock()))
-        sync = asyncio.create_task(bot.sync_forever())
-        orchestrator._sync_tasks[bot.agent_name] = sync
+        skip_crypto_maintenance(session)
+        orchestrator = cast("ReadyRuntime", bot.orchestrator)
+        monkeypatch.setattr(
+            orchestrator._approval_recovery,
+            "reconcile_removed_entities",
+            AsyncMock(return_value=set()),
+        )
+        # Failing the removed agent's schedules reads room state this transport does not serve.
+        monkeypatch.setattr(orchestrator.scheduled_tasks, "fail_removed", AsyncMock())
+        sync_tasks: list[asyncio.Task[object]] = []
+
+        async def run_source(source_bot: AgentBot) -> None:
+            task = asyncio.current_task()
+            assert task is not None
+            sync_tasks.append(task)
+            await source_bot.sync_forever()
+
+        monkeypatch.setattr(entity_fleet, "sync_forever_with_restart", run_source)
+        orchestrator.fleet.start_sync([bot])
         try:
-            await asyncio.wait_for(orchestrator._remove_deleted_entities({bot.agent_name}), timeout=2)
+            await asyncio.wait_for(orchestrator.fleet.remove({bot.agent_name}), timeout=2)
             assert len(leaves) == 1
             assert bot.agent_name not in orchestrator.agent_bots
-            assert bot.agent_name not in orchestrator._sync_tasks
-            assert sync.done()
+            assert [task.done() for task in sync_tasks] == [True]
         finally:
-            sync.cancel()
-            await asyncio.gather(sync, return_exceptions=True)
+            for task in sync_tasks:
+                task.cancel()
+            await asyncio.gather(*sync_tasks, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_a_setting_event_in_the_sync_that_shows_the_bot_left_is_not_taken(tmp_path: Path) -> None:
+    """A room's last sync can hold an older setting event before the bot's own leave.
+
+    The source hands the setting on before the journal has the leave, when only its client knows the bot left. The
+    bot takes no setting then and does not read the room, which it would see as it left it.
+    """
+    bot = _agent_bot(tmp_path)
+    set_room_model_override(bot.runtime_paths, room_id=ROOM, model_name="new")
+    user_id = bot.agent_user.user_id
+    older = {
+        "type": ROOM_SETTINGS_EVENT_TYPE,
+        "state_key": "model",
+        "event_id": "$older",
+        "sender": "@admin:localhost",
+        "origin_server_ts": 1,
+        "content": {"value": "old"},
+    }
+    leave = {
+        "type": "m.room.member",
+        "state_key": user_id,
+        "event_id": "$leave",
+        "sender": user_id,
+        "origin_server_ts": 2,
+        "content": {"membership": "leave"},
+    }
+    left = {"state": {"events": []}, "timeline": {"limited": False, "events": [older, leave]}}
+    last_sync = json.dumps({"next_batch": "left", "rooms": {"leave": {ROOM: left}}}).encode()
+    async with _owned_session(bot) as session:
+        assert bot.client is not None
+        bot.client.add_event_callback(bot._on_room_state_event, nio.UnknownEvent)
+        as_it_left = nio.RoomGetStateEventResponse({"value": "old"}, ROOM_SETTINGS_EVENT_TYPE, "model", ROOM)
+        bot.client.room_get_state_event = AsyncMock(return_value=as_it_left)
+        await _consume_frame(bot, session, _joined_frame([]))
+
+        await _consume_frame(bot, session, last_sync)
+        await wait_for_background_tasks(timeout=SETTLE_TIMEOUT_SECONDS, owner=bot._runtime_view)
+
+        assert await bot.journal_principal().ingestion_membership_position(ROOM) == RoomMembershipPosition("leave", 1)
+        bot.client.room_get_state_event.assert_not_awaited()
+    assert resolve_room_setting(MODEL, bot.runtime_paths, ROOM) == "new"
 
 
 @pytest.mark.asyncio
@@ -850,27 +1158,15 @@ async def test_startup_reconciles_membership_saved_before_application_admission(
         return position
 
     monkeypatch.setattr(type(principal), "ingestion_membership_position", observe_position)
-    membership_requests: list[str] = []
-
-    async def request(_method: str, path: str, *_args: object, **_kwargs: object) -> bytes:
-        if "/sync" in path:
-            await asyncio.Event().wait()
-        action = "join" if "/join/" in path else path.partition("?")[0].rsplit("/", 1)[-1]
-        assert action in {"join", "leave"}
-        membership_requests.append(action)
-        return b"{}"
 
     async with _owned_session(bot) as session:
         assert bot.client is not None
         monkeypatch.setattr(bot.client, "joined_rooms", AsyncMock(return_value=nio.JoinedRoomsResponse(rooms=[ROOM])))
-        session._transport.request = request
-        session._maintain_crypto = AsyncMock()
         maintenance = asyncio.create_task(bot.ensure_rooms())
-        sync: asyncio.Task[None] | None = None
         try:
-            await asyncio.wait_for(position_read.wait(), timeout=2)
-            sync = asyncio.create_task(bot.sync_forever())
-            await asyncio.wait_for(maintenance, timeout=2)
+            await asyncio.wait_for(position_read.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
+            async with _syncing(bot, session) as membership_requests:
+                await asyncio.wait_for(maintenance, timeout=SETTLE_TIMEOUT_SECONDS)
             if target == "join":
                 configured_setup.assert_awaited_once_with(ROOM)
             else:
@@ -878,6 +1174,291 @@ async def test_startup_reconciles_membership_saved_before_application_admission(
             assert membership_requests == ([target] if target != retained else [])
         finally:
             maintenance.cancel()
-            if sync is not None:
-                sync.cancel()
-            await asyncio.gather(maintenance, *([sync] if sync is not None else []), return_exceptions=True)
+            await asyncio.gather(maintenance, return_exceptions=True)
+
+
+def _welcoming_router(tmp_path: Path) -> tuple[AgentBot, list[bool]]:
+    """Build a router configured for `ROOM` whose real room-setup joins record each startup welcome's outcome."""
+    bot = _agent_bot(tmp_path, agent_name=ROUTER_AGENT_NAME)
+    bot.rooms = [ROOM]
+    welcomed: list[bool] = []
+
+    async def welcome(room_id: str) -> None:
+        welcomed.append(await bot._room_lifecycle.send_welcome_message_if_empty(room_id))
+
+    bot._room_lifecycle.deps = replace(
+        bot._room_lifecycle.deps,
+        change_membership=AgentBot.change_local_membership.__get__(bot),
+        on_configured_room_joined=welcome,
+    )
+    return bot, welcomed
+
+
+def _empty_listed_room(client: nio.AsyncClient, monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
+    """Let Matrix list `ROOM` as joined and empty, and return the HTTP send that records the welcome."""
+    monkeypatch.setattr(client, "joined_rooms", AsyncMock(return_value=nio.JoinedRoomsResponse(rooms=[ROOM])))
+    monkeypatch.setattr(
+        client,
+        "room_messages",
+        AsyncMock(return_value=nio.RoomMessagesResponse(room_id=ROOM, chunk=[], start="", end=None)),
+    )
+    http_send = AsyncMock(return_value=nio.RoomSendResponse(event_id="$welcome", room_id=ROOM))
+    monkeypatch.setattr(client, "_send", http_send)
+    return http_send
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ordering", ["join_after_first_sync", "join_before_first_sync", "joined_before_startup"])
+async def test_startup_welcome_reaches_matrix_once_nio_accepts_sends_to_the_room(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ordering: str,
+) -> None:
+    """Nio refuses plaintext into a joined room until a sync delivers its complete state, so the welcome waits for it.
+
+    The router created the room, so Matrix lists it before the startup pass. The pass joins it after or before the
+    router's first sync, or finds it already joined from an incremental sync. A first sync under the production filter
+    and an incremental sync both leave the room's state incomplete until nio's next full-state sync.
+    """
+    bot, welcomed = _welcoming_router(tmp_path)
+    frames = {
+        "join_after_first_sync": [json.dumps({"next_batch": "initial"}).encode()],
+        "join_before_first_sync": [],
+        "joined_before_startup": [json.dumps({"next_batch": "initial"}).encode(), _rooms_frame("joined", [ROOM])],
+    }[ordering]
+    synced = asyncio.Semaphore(0)
+    monkeypatch.setattr(bot, "_on_ingestion_frame_completion", AsyncMock(side_effect=lambda _new: synced.release()))
+    config = DurableSyncConfig(sync_filter=bot_module._SYNC_FILTER) if ordering == "join_before_first_sync" else None
+    async with _owned_session(bot, config) as session:
+        assert bot.client is not None
+        http_send = _empty_listed_room(bot.client, monkeypatch)
+        # The room's complete state arrives only once the startup pass waits for it.
+        waiting = asyncio.Event()
+        wait_for_room_ready = session.wait_for_room_ready
+
+        async def observe_wait(room_id: str) -> bool:
+            waiting.set()
+            return await wait_for_room_ready(room_id)
+
+        monkeypatch.setattr(session, "wait_for_room_ready", observe_wait)
+        async with _syncing(bot, session, *frames, joined=[ROOM], complete_state=waiting) as memberships:
+            for _ in frames:
+                await asyncio.wait_for(synced.acquire(), timeout=SETTLE_TIMEOUT_SECONDS)
+            await asyncio.wait_for(bot._room_lifecycle.join_configured_rooms(), timeout=SETTLE_TIMEOUT_SECONDS)
+
+    assert memberships == ([] if ordering == "joined_before_startup" else ["join"])
+    assert welcomed == [True]
+    response_class, _method, _path, content, response_data = http_send.await_args_list[0].args
+    assert (response_class, response_data) == (nio.RoomSendResponse, (ROOM,))
+    assert "Welcome to MindRoom" in content
+
+
+def _sliding_homeserver(
+    user_id: str,
+    joined: list[str],
+    *,
+    listed_once: Iterable[str] = (),
+    delivered_with: list[set[str]] | None = None,
+    subscribed: asyncio.Event | None = None,
+    release: asyncio.Event | None = None,
+) -> Callable[..., Awaitable[bytes]]:
+    """Answer Sliding Sync as a server whose room list reaches no room: only subscriptions deliver a room's state.
+
+    A fresh connection answers with each subscribed room in `joined`, and `delivered_with` records the whole
+    subscription set of each such answer. The first answer also reports the `listed_once` rooms joined in a window
+    that is not initial, which leaves their state unestablished, as for a room leaving the list. Once `subscribed`
+    is given, it is set when a request subscribes a joined room, and that answer waits for `release`.
+    """
+    positions = 0
+    unlisted = list(listed_once)
+
+    async def request(_method: str, path: str, body: str | None = None, *_args: object, **_kwargs: object) -> bytes:
+        nonlocal positions
+        if "/messages?" in path:
+            query = parse_qs(urlparse(path).query)
+            return json.dumps({"start": query["from"][0], "end": None, "chunk": []}).encode()
+        if "/join/" in path:
+            joined.append(unquote(path.partition("/join/")[2].partition("?")[0]))
+            return json.dumps({"room_id": joined[-1]}).encode()
+        assert "/sync" in path
+        if "pos" in parse_qs(urlparse(path).query):
+            await asyncio.Event().wait()
+        subscriptions = set(json.loads(body or "{}").get("room_subscriptions", {}))
+        room_ids = [room_id for room_id in subscriptions if room_id in joined]
+        if room_ids and delivered_with is not None:
+            delivered_with.append(subscriptions)
+        if room_ids and subscribed is not None:
+            subscribed.set()
+            if release is not None:
+                await release.wait()
+        positions += 1
+        own_join = {
+            "type": "m.room.member",
+            "event_id": "$own-join",
+            "sender": user_id,
+            "state_key": user_id,
+            "origin_server_ts": 1,
+            "content": {"membership": "join"},
+        }
+        rooms = {
+            room_id: {
+                "initial": True,
+                "membership": "join",
+                "prev_batch": f"start-{positions}",
+                "timeline": [],
+                "required_state": [own_join],
+            }
+            for room_id in room_ids
+        }
+        rooms.update(
+            (room_id, {"initial": False, "membership": "join", "timeline": [], "required_state": [own_join]})
+            for room_id in unlisted
+        )
+        unlisted.clear()
+        return json.dumps({"pos": f"p{positions}", "rooms": rooms}).encode()
+
+    return request
+
+
+@asynccontextmanager
+async def _sliding_bot_syncing(
+    bot: AgentBot,
+    monkeypatch: pytest.MonkeyPatch,
+    request: Callable[..., Awaitable[bytes]],
+) -> AsyncIterator[nio.AsyncClient]:
+    """Run a Sliding source whose subscriptions start empty, as if every room were created after it opened."""
+    bot.config.matrix_sync = MatrixSyncConfig.model_construct(mode="sliding", sliding_timeline_limit=5)
+    synced = asyncio.Event()
+    monkeypatch.setattr(bot, "_on_ingestion_frame_completion", AsyncMock(side_effect=lambda _new: synced.set()))
+    async with _owned_session(bot, DurableSyncConfig(sliding=SlidingSyncConfig())) as session:
+        client = bot.client
+        assert client is not None
+        session._transport.request = request
+        skip_crypto_maintenance(session)
+        sync = asyncio.create_task(bot.sync_forever())
+        try:
+            await asyncio.wait_for(synced.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
+            yield client
+        finally:
+            sync.cancel()
+            await asyncio.gather(sync, return_exceptions=True)
+
+
+@pytest.mark.asyncio
+async def test_sliding_startup_welcome_reaches_a_joined_room_outside_discovery(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Sliding Sync sends a room's state only through its room list or a subscription, so a join subscribes the room.
+
+    The router's room list never reaches the room it created, and its subscriptions were set before the room
+    existed, so the room's state arrives only once the join subscribes it.
+    """
+    bot, welcomed = _welcoming_router(tmp_path)
+    joined: list[str] = []
+    async with _sliding_bot_syncing(bot, monkeypatch, _sliding_homeserver(bot.agent_user.user_id, joined)) as client:
+        http_send = _empty_listed_room(client, monkeypatch)
+        await asyncio.wait_for(bot._room_lifecycle.join_configured_rooms(), timeout=SETTLE_TIMEOUT_SECONDS)
+
+    assert joined == [ROOM]
+    assert welcomed == [True]
+    assert "Welcome to MindRoom" in http_send.await_args_list[0].args[3]
+
+
+@pytest.mark.asyncio
+async def test_sliding_join_of_an_unconfigured_room_keeps_it_subscribed_until_nio_can_send(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An invited or personal room is not configured, and room setup's own subscription refresh must not drop it first."""
+    bot = _agent_bot(tmp_path)
+    configured = "!configured:localhost"
+    bot.rooms = [configured]
+    monkeypatch.setattr(bot._room_lifecycle, "join_configured_rooms", AsyncMock())
+    monkeypatch.setattr(bot._room_lifecycle, "leave_unconfigured_rooms", AsyncMock())
+    joined: list[str] = []
+    delivered_with: list[set[str]] = []
+    subscribed = asyncio.Event()
+    release = asyncio.Event()
+    request = _sliding_homeserver(
+        bot.agent_user.user_id,
+        joined,
+        delivered_with=delivered_with,
+        subscribed=subscribed,
+        release=release,
+    )
+    async with _sliding_bot_syncing(bot, monkeypatch, request):
+        join = asyncio.create_task(AgentBot.change_local_membership(bot, ROOM, "join"))
+        try:
+            await asyncio.wait_for(subscribed.wait(), timeout=SETTLE_TIMEOUT_SECONDS)
+            # Room setup's refresh finishes while the join still waits for the room's state, and keeps the room.
+            await asyncio.wait_for(bot.ensure_rooms(), timeout=SETTLE_TIMEOUT_SECONDS)
+            release.set()
+            assert await asyncio.wait_for(join, timeout=SETTLE_TIMEOUT_SECONDS) is True
+            # Once nio can send to the joined room, room setup's refresh no longer subscribes it.
+            await bot.ensure_rooms()
+            session = bot._ingestion_session
+            assert session is not None
+            assert session._sliding is not None
+            assert set(session._sliding.config.room_subscriptions) == {configured}
+        finally:
+            join.cancel()
+            await asyncio.gather(join, return_exceptions=True)
+
+    assert joined == [ROOM]
+    # The configured room stays subscribed while the joined room's state is on its way.
+    assert delivered_with == [{configured, ROOM}]
+
+
+@pytest.mark.asyncio
+async def test_sliding_reported_join_outside_the_list_subscribes_the_room_nio_cannot_send_to(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A room nio reports joined but without its state, outside the room list, gets its state through a subscription.
+
+    That is a saved invited or personal room after a restart: no join is sent, and without the subscription its
+    room setup would wait on every start.
+    """
+    bot = _agent_bot(tmp_path)
+    bot.rooms = []
+    joined = [ROOM]
+    request = _sliding_homeserver(bot.agent_user.user_id, joined, listed_once=[ROOM])
+    async with _sliding_bot_syncing(bot, monkeypatch, request):
+        joining = AgentBot.change_local_membership(bot, ROOM, "join")
+        assert await asyncio.wait_for(joining, timeout=SETTLE_TIMEOUT_SECONDS) is True
+
+    assert joined == [ROOM]
+
+
+@pytest.mark.asyncio
+async def test_sliding_restart_after_an_interrupted_join_lets_later_membership_commands_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A join nio sent before a restart stays unobserved until a sync reports its room, which Sliding must subscribe.
+
+    The process stopped right after nio's join of an unconfigured room outside the room list, before anything
+    subscribed it. Every later membership command first waits for that join's observation.
+    """
+    bot = _agent_bot(tmp_path)
+    bot.rooms = []
+    joined: list[str] = []
+    request = _sliding_homeserver(bot.agent_user.user_id, joined)
+    async with _owned_session(bot, DurableSyncConfig(sliding=SlidingSyncConfig())) as session:
+        session._transport.request = request
+        assert await session.change_membership(
+            operation_id=uuid4(),
+            room_id=ROOM,
+            previous_membership=None,
+            previous_epoch=0,
+            current_membership="join",
+        )
+    assert joined == [ROOM]
+
+    other = "!other:example.org"
+    async with _sliding_bot_syncing(bot, monkeypatch, request):
+        joining = AgentBot.change_local_membership(bot, other, "join")
+        assert await asyncio.wait_for(joining, timeout=SETTLE_TIMEOUT_SECONDS) is True
+
+    assert joined == [ROOM, other]

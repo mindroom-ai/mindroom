@@ -6,6 +6,7 @@ import asyncio
 from typing import TYPE_CHECKING
 
 from mindroom.background_tasks import run_coroutine_until_complete
+from mindroom.browser.call_limit import HostCallTimeLimitError
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
@@ -42,6 +43,9 @@ class WorkerBrowserRuntime:
             self._binding = binding
             try:
                 return await execute()
+            except HostCallTimeLimitError:
+                # The toolkit already stopped this call and keeps the browser, whose other tabs still work.
+                raise
             except (TimeoutError, asyncio.CancelledError):
                 await run_coroutine_until_complete(self._close_browser())
                 raise

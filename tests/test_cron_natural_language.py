@@ -83,29 +83,49 @@ class TestCronNaturalLanguage:
 
         # On main, get_description is imported in mindroom.scheduling.tasks
         monkeypatch.setattr("mindroom.scheduling.tasks.get_description", boom)
-        assert schedule.to_natural_language("UTC").startswith("Cron: ")
+        assert schedule.to_natural_language("UTC") == "Cron: */5 * * * * (UTC)"
 
     def test_fixed_time_is_described_in_the_configured_timezone(self) -> None:
-        """A UTC cron reads as the user's own wall time, including across daylight saving time."""
+        """A UTC cron reads as the user's own wall time, including across daylight saving time, and names the zone."""
         schedule = CronSchedule(minute="0", hour="15", day="*", month="*", weekday="1-5")
         summer = datetime(2026, 9, 27, 12, 0, tzinfo=UTC)
         winter = datetime(2026, 12, 6, 12, 0, tzinfo=UTC)
-        assert schedule.to_natural_language("America/Los_Angeles", summer) == "At 08:00, Monday through Friday"
-        assert schedule.to_natural_language("America/Los_Angeles", winter) == "At 07:00, Monday through Friday"
+        assert (
+            schedule.to_natural_language("America/Los_Angeles", summer)
+            == "At 08:00, Monday through Friday (America/Los_Angeles)"
+        )
+        assert (
+            schedule.to_natural_language("America/Los_Angeles", winter)
+            == "At 07:00, Monday through Friday (America/Los_Angeles)"
+        )
+
+    def test_a_converted_daily_time_names_its_timezone(self) -> None:
+        """Midnight UTC is 09:00 in Tokyo, and the description says which 09:00 it means."""
+        now = datetime(2026, 10, 25, tzinfo=UTC)
+        assert CronSchedule(minute="0", hour="0").to_natural_language("Asia/Tokyo", now) == "At 09:00 (Asia/Tokyo)"
+        assert CronSchedule(minute="0", hour="9").to_natural_language("UTC", now) == "At 09:00 (UTC)"
 
     def test_weekdays_shift_when_the_local_time_crosses_midnight(self) -> None:
         """Saturday 01:00 UTC is Friday evening on the US west coast."""
         schedule = CronSchedule(minute="0", hour="1", day="*", month="*", weekday="6")
         now = datetime(2026, 9, 27, 12, 0, tzinfo=UTC)
-        assert schedule.to_natural_language("America/Los_Angeles", now) == "At 18:00, only on Friday"
+        assert (
+            schedule.to_natural_language("America/Los_Angeles", now) == "At 18:00, only on Friday (America/Los_Angeles)"
+        )
 
     def test_unconvertible_hour_patterns_are_marked_utc(self) -> None:
-        """Hour lists and day-of-month schedules that cross midnight keep UTC and say so."""
+        """Schedules left in UTC fields say UTC, never the zone they were asked to be shown in."""
         now = datetime(2026, 9, 27, 12, 0, tzinfo=UTC)
         assert CronSchedule(minute="0", hour="9,17").to_natural_language("America/Los_Angeles", now).endswith("(UTC)")
         monthly = CronSchedule(minute="0", hour="3", day="1")
         assert monthly.to_natural_language("America/Los_Angeles", now).endswith("(UTC)")
-        assert not CronSchedule(minute="*/5").to_natural_language("America/Los_Angeles", now).endswith("(UTC)")
+        assert CronSchedule(minute="*/5").to_natural_language("America/Los_Angeles", now) == "Every 5 minutes (UTC)"
+        # Minute 30 UTC is minute 0 in Kolkata, so naming Kolkata would point at the wrong half hour.
+        hourly = CronSchedule(minute="30", hour="*")
+        assert (
+            hourly.to_natural_language("Asia/Kolkata", datetime(2026, 10, 25, tzinfo=UTC))
+            == "At 30 minutes past the hour (UTC)"
+        )
 
 
 if __name__ == "__main__":

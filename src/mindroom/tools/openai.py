@@ -28,7 +28,7 @@ if TYPE_CHECKING:
     category=ToolCategory.DEVELOPMENT,
     status=ToolStatus.REQUIRES_CONFIG,
     setup_type=SetupType.API_KEY,
-    icon="SiOpenai",
+    icon="TbBrandOpenai",
     icon_color="text-green-600",
     config_fields=[
         ConfigField(
@@ -92,7 +92,7 @@ if TYPE_CHECKING:
             label="Text To Speech Format",
             type="text",
             required=False,
-            default="mp3",
+            default="wav",
         ),
         ConfigField(
             name="image_model",
@@ -125,7 +125,7 @@ if TYPE_CHECKING:
     ],
     managed_init_args=(ToolManagedInitArg.TOOL_OUTPUT_WORKSPACE_ROOT, ToolManagedInitArg.FILE_ACCESS),
     dependencies=["openai"],
-    docs_url="https://docs.agno.com/tools/toolkits/models/openai",
+    docs_url="https://docs.mindroom.chat/tools/ai-and-generation/#openai",
     function_names=("generate_image", "generate_speech", "transcribe_audio"),
 )
 def openai_tools() -> type[MindRoomOpenAITools]:

@@ -1,4 +1,5 @@
 import type { PROVIDERS } from "@/lib/providers";
+import { toolNames, type ToolEntry } from "@/lib/toolEntry";
 
 export type ProviderType = keyof typeof PROVIDERS;
 export type MemoryBackend = "mem0" | "file" | "none";
@@ -8,8 +9,23 @@ export type PrivateWorkerScope = Exclude<WorkerScope, "shared">;
 export type AgentPolicySource =
   "private.per" | "agent.worker_scope" | "defaults.worker_scope" | "unscoped";
 export type AgentPoliciesByAgent = Record<string, AgentPolicy>;
-export const DEFAULT_PRIVATE_KNOWLEDGE_PATH = "memory";
+const DEFAULT_PRIVATE_KNOWLEDGE_PATH = "memory";
 export const SHARED_CONTEXT_FILE_PLACEHOLDER = "SOUL.md";
+
+export interface ModelPricing {
+  input?: number; // USD per million uncached input tokens (required by the backend)
+  output?: number; // USD per million output tokens (required by the backend)
+  cache_read?: number | null; // Defaults to the input price
+  cache_write?: number | null; // Defaults to the input price
+}
+
+export interface BudgetsConfig {
+  monthly_limit_usd?: number | null; // Default cap per user; unset leaves users uncapped
+  fallback_model: string;
+}
+
+export type ReasoningLevel =
+  "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
 
 export interface ModelConfig {
   provider: ProviderType;
@@ -22,11 +38,12 @@ export interface ModelConfig {
   host?: string; // For ollama
   api_key?: string | null; // Model-specific key from config.yaml
   extra_kwargs?: Record<string, unknown>; // Additional provider-specific parameters
+  pricing?: ModelPricing | null; // Used to measure spend against budgets
+  reasoning?: { levels: ReasoningLevel[]; default: ReasoningLevel } | null; // `name@level` picks a level
 }
 
 export interface MemoryConfig {
   backend?: MemoryBackend;
-  team_reads_member_memory?: boolean;
   embedder: {
     provider: string;
     config: {
@@ -35,11 +52,6 @@ export interface MemoryConfig {
       host?: string;
       dimensions?: number;
     };
-  };
-  file?: {
-    path?: string | null;
-    max_entrypoint_lines?: number;
-    max_entrypoint_tokens?: number;
   };
   search?: {
     mode?: MemorySearchMode;
@@ -50,9 +62,7 @@ export interface MemoryConfig {
     enabled?: boolean;
     flush_interval_seconds?: number;
     idle_seconds?: number;
-    max_dirty_age_seconds?: number;
     stale_ttl_seconds?: number;
-    max_cross_session_reprioritize?: number;
     retry_cooldown_seconds?: number;
     max_retry_cooldown_seconds?: number;
     batch?: {
@@ -91,6 +101,7 @@ export interface KnowledgeBaseConfig {
   watch: boolean;
   chunk_size?: number;
   chunk_overlap?: number;
+  poll_interval_seconds?: number;
   git?: KnowledgeGitConfig;
 }
 
@@ -111,8 +122,6 @@ export interface AgentPrivateConfig {
   context_files?: string[] | null;
   knowledge?: AgentPrivateKnowledgeConfig | null;
 }
-
-export type LearningMode = "always" | "agentic";
 
 export type ThreadMode = "thread" | "room";
 
@@ -213,16 +222,31 @@ export function resolveEffectiveDefaultTools(
 ): string[] {
   const defaultTools = defaults?.tools;
   if (defaultTools !== undefined) {
-    return [...defaultTools];
+    return toolNames(defaultTools);
   }
   return [...DEFAULT_INHERITED_TOOLS];
+}
+
+/** The agent's own tool names, then the inherited defaults it does not opt out of. */
+export function resolveEffectiveAgentTools(
+  agent: Pick<Agent, "tools" | "include_default_tools">,
+  defaults: Config["defaults"] | null | undefined,
+): string[] {
+  return [
+    ...new Set([
+      ...toolNames(agent.tools),
+      ...(agent.include_default_tools === false
+        ? []
+        : resolveEffectiveDefaultTools(defaults)),
+    ]),
+  ];
 }
 
 export interface Agent {
   id: string; // The key in the agents object
   display_name: string;
   role: string;
-  tools: string[];
+  tools: ToolEntry[];
   include_default_tools?: boolean; // Whether to merge defaults.tools into this agent's tools
   skills: string[];
   instructions: string[];
@@ -232,8 +256,6 @@ export interface Agent {
   knowledge_bases?: string[];
   context_files?: string[]; // Workspace-relative files loaded into each freshly built agent instance
   markdown?: boolean; // Per-agent markdown override
-  learning?: boolean; // Defaults to true when omitted
-  learning_mode?: LearningMode; // Defaults to always when omitted
   memory_backend?: MemoryBackend; // Per-agent memory backend override (inherits memory.backend when omitted)
   compaction?: CompactionConfig | null; // Per-agent required-compaction overrides
   model?: string; // Reference to a model in the models section
@@ -246,7 +268,6 @@ export interface Agent {
   room_thread_modes?: Record<string, ThreadMode>; // Room-specific thread mode overrides
   num_history_runs?: number | null; // Number of prior runs to include as history
   num_history_messages?: number | null; // Max messages from history (mutually exclusive with num_history_runs)
-  compress_tool_results?: boolean; // Compress tool results in history
   max_tool_calls_from_history?: number | null; // Max tool call messages replayed from history
   max_tool_calls_per_turn?: number | null; // Max tool calls one turn may execute
   allow_self_config?: boolean; // Allow agent to modify its own configuration via a tool
@@ -260,7 +281,7 @@ export interface Team {
   rooms: string[];
   access?: ResponderAccessConfig;
   mode: "coordinate" | "collaborate";
-  model?: string | null; // Optional team-specific model; explicit null is invalid at runtime
+  model?: string; // Optional team-specific model
   compaction?: CompactionConfig | null; // Per-team required-compaction overrides
   num_history_runs?: number | null; // Number of prior scoped runs to include as team history
   num_history_messages?: number | null; // Max team-scoped history messages (mutually exclusive with num_history_runs)
@@ -268,9 +289,15 @@ export interface Team {
   max_tool_calls_per_turn?: number | null; // Max tool calls one turn may execute
 }
 
-export type TeamConfig = Omit<Team, "id" | "rooms"> & {
-  rooms?: string[];
-};
+// Authored agents and teams may omit these fields; the store fills them in on load.
+type AgentDefaultedField = "tools" | "skills" | "instructions" | "rooms";
+type TeamDefaultedField = "rooms" | "mode";
+
+export type AgentConfig = Omit<Agent, "id" | AgentDefaultedField> &
+  Partial<Pick<Agent, AgentDefaultedField>>;
+
+export type TeamConfig = Omit<Team, "id" | TeamDefaultedField> &
+  Partial<Pick<Team, TeamDefaultedField>>;
 
 export interface Room {
   id: string; // Room identifier
@@ -288,6 +315,7 @@ export interface RoomConfig {
   encrypted?: boolean;
   invite_users?: string[];
   admins?: string[];
+  reply_mode?: "auto" | "mentions";
 }
 
 export interface RoomDefaultsConfig {
@@ -312,6 +340,7 @@ export interface VoiceLLMConfig {
 
 export interface VoiceConfig {
   enabled: boolean;
+  dictation?: boolean | null;
   visible_router_echo: boolean;
   stt: VoiceSTTConfig;
   intelligence: VoiceLLMConfig;
@@ -319,25 +348,24 @@ export interface VoiceConfig {
 
 export interface Config {
   administrators?: string[];
+  authorization?: { aliases?: Record<string, string[]> }; // Bridge aliases per canonical Matrix user
+  budgets?: BudgetsConfig | null;
   memory: MemoryConfig;
   knowledge_bases?: Record<string, KnowledgeBaseConfig>;
   models: Record<string, ModelConfig>;
-  agents: Record<string, Omit<Agent, "id">>;
+  agents: Record<string, AgentConfig>;
   defaults?: {
     markdown: boolean;
-    learning?: boolean;
-    learning_mode?: LearningMode;
     compaction?: CompactionConfig;
     show_tool_calls?: boolean;
     worker_scope?: WorkerScope | null;
     worker_tools?: string[]; // Tool names to route through scoped workers by default for all agents
-    tools?: string[];
+    tools?: ToolEntry[];
     enable_streaming?: boolean;
     large_message_strategy?: "sidecar" | "split"; // Oversized message delivery strategy (defaults to sidecar)
     show_stop_button?: boolean;
     num_history_runs?: number | null;
     num_history_messages?: number | null;
-    compress_tool_results?: boolean;
     max_tool_calls_from_history?: number | null;
     max_tool_calls_per_turn?: number; // Default per-turn tool-call budget (1000)
     allow_self_config?: boolean;
@@ -350,6 +378,7 @@ export interface Config {
   room_defaults?: RoomDefaultsConfig; // Defaults for managed Matrix rooms
   room_models?: Record<string, string>; // Room-specific model overrides for teams
   teams?: Record<string, TeamConfig>; // Teams configuration
+  personal_agents?: Record<string, unknown>; // Templates that give each onboarded user their own agent
   voice?: VoiceConfig; // Voice configuration
 }
 
@@ -366,6 +395,13 @@ export interface AgentPolicy {
   private_agent_knowledge_enabled: boolean;
 }
 
+/** The path enabled private knowledge stores for an authored path. */
+export function enabledPrivateKnowledgePath(
+  path: string | null | undefined,
+): string {
+  return path?.trim() || DEFAULT_PRIVATE_KNOWLEDGE_PATH;
+}
+
 function normalizePrivateKnowledgeConfig(
   knowledge: AgentPrivateKnowledgeConfig | null | undefined,
 ): AgentPrivateKnowledgeConfig | null | undefined {
@@ -373,20 +409,17 @@ function normalizePrivateKnowledgeConfig(
     return knowledge;
   }
 
-  const trimmedPath = knowledge.path?.trim();
   if (knowledge.enabled === true) {
     return {
       ...knowledge,
-      path:
-        trimmedPath && trimmedPath.length > 0
-          ? trimmedPath
-          : DEFAULT_PRIVATE_KNOWLEDGE_PATH,
+      path: enabledPrivateKnowledgePath(knowledge.path),
     };
   }
 
+  const trimmedPath = knowledge.path?.trim();
   return {
     ...knowledge,
-    path: trimmedPath && trimmedPath.length > 0 ? trimmedPath : undefined,
+    path: trimmedPath || undefined,
   };
 }
 

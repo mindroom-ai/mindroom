@@ -81,7 +81,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["matplotlib"],
-    docs_url="https://docs.agno.com/tools/toolkits/others/visualization",
+    docs_url="https://docs.mindroom.chat/tools/execution-and-coding/#visualization",
     managed_init_args=(ToolManagedInitArg.TOOL_OUTPUT_WORKSPACE_ROOT,),
     function_names=(
         "create_bar_chart",

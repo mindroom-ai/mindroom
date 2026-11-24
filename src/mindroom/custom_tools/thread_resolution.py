@@ -2,12 +2,24 @@
 
 from __future__ import annotations
 
-from agno.tools import Toolkit
+from typing import TYPE_CHECKING
 
 from mindroom.custom_tools.attachment_helpers import resolve_current_room_thread_root
-from mindroom.custom_tools.tool_payloads import custom_tool_payload
-from mindroom.thread_tags import RESOLVED_THREAD_TAG, ThreadTagsError, remove_thread_tag, set_thread_tag
-from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
+from mindroom.custom_tools.tool_payloads import custom_tool_payload, tool_context_or_error
+from mindroom.logging_config import get_logger
+from mindroom.thread_tags import (
+    RESOLVED_THREAD_TAG,
+    SNOOZED_THREAD_TAG,
+    ThreadTagsError,
+    remove_thread_tag,
+    set_thread_tag,
+)
+from mindroom.tool_system.authoring import Toolkit
+
+if TYPE_CHECKING:
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
+
+logger = get_logger(__name__)
 
 
 class ThreadResolutionTools(Toolkit):
@@ -25,10 +37,9 @@ class ThreadResolutionTools(Toolkit):
 
     @classmethod
     async def _thread_context(cls, thread_id: str | None) -> tuple[ToolRuntimeContext, str] | str:
-        context = get_tool_runtime_context()
-        if context is None:
-            return cls._payload("error", message="Thread resolution tool context is unavailable in this runtime path.")
-        root_id, error = await resolve_current_room_thread_root(context, thread_id)
+        if isinstance(context := tool_context_or_error(cls._payload, "Thread resolution"), str):
+            return context
+        root_id, error = await resolve_current_room_thread_root(context, thread_id, allow_standalone_root=True)
         if error is not None:
             if thread_id is None:
                 return cls._payload("error", message=error)
@@ -49,7 +60,7 @@ class ThreadResolutionTools(Toolkit):
             return resolved
         context, thread_id = resolved
         try:
-            await set_thread_tag(
+            state = await set_thread_tag(
                 context.client,
                 context.room_id,
                 thread_id,
@@ -58,6 +69,8 @@ class ThreadResolutionTools(Toolkit):
             )
         except ThreadTagsError as exc:
             return self._payload("error", action="resolve", thread_id=thread_id, message=str(exc))
+        if state is not None and SNOOZED_THREAD_TAG in state.tags:
+            await self._end_snooze(context, thread_id)
         return self._payload(
             "ok",
             action="resolve",
@@ -65,6 +78,29 @@ class ThreadResolutionTools(Toolkit):
             thread_id=thread_id,
             resolved=True,
         )
+
+    @staticmethod
+    async def _end_snooze(context: ToolRuntimeContext, thread_id: str) -> None:
+        """Drop the snooze of a thread that was just resolved; the resolve stands if that fails."""
+        try:
+            state = await remove_thread_tag(
+                context.client,
+                context.room_id,
+                thread_id,
+                SNOOZED_THREAD_TAG,
+                requester_user_id=context.requester_id,
+            )
+        except ThreadTagsError as exc:
+            logger.warning(
+                "thread_resolution_snooze_not_removed",
+                room_id=context.room_id,
+                thread_id=thread_id,
+                error=str(exc),
+            )
+            return
+        # A snooze written again meanwhile survives the removal and must keep waking.
+        if context.orchestrator is not None and SNOOZED_THREAD_TAG not in state.tags:
+            context.orchestrator.thread_snooze.unsnoozed(context.room_id, thread_id)
 
     async def reopen_thread(self, thread_id: str | None = None) -> str:
         """Remove resolved state from the current or specified Matrix thread in the current room.
@@ -79,7 +115,7 @@ class ThreadResolutionTools(Toolkit):
             return resolved
         context, thread_id = resolved
         try:
-            await remove_thread_tag(
+            state = await remove_thread_tag(
                 context.client,
                 context.room_id,
                 thread_id,
@@ -93,5 +129,5 @@ class ThreadResolutionTools(Toolkit):
             action="reopen",
             room_id=context.room_id,
             thread_id=thread_id,
-            resolved=False,
+            resolved=RESOLVED_THREAD_TAG in state.tags,
         )

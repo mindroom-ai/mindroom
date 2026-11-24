@@ -1,0 +1,225 @@
+"""Rerank search hits with a Cohere-compatible rerank API, Vertex AI ranking, a local cross-encoder, or a judgment backend."""
+
+from __future__ import annotations
+
+import asyncio
+import functools
+import threading
+from concurrent.futures import Future, ThreadPoolExecutor
+from dataclasses import dataclass
+from typing import TYPE_CHECKING, Any, Protocol
+
+import httpx
+
+from mindroom.config.knowledge import KnowledgeRerankerConfig
+from mindroom.constants import runtime_env_path
+from mindroom.credentials.environment import get_secret_from_env
+from mindroom.credentials.sync import get_api_key_for_service
+from mindroom.embeddings.signatures import ensure_sentence_transformers_dependencies
+from mindroom.judgment.rerank import create_judgment_reranker
+from mindroom.providers.google_adc import load_ambient_google_credentials, load_google_application_credentials
+from mindroom.tool_system.dependencies import optional_dependency_environment
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+    from pathlib import Path
+
+    from mindroom.config.knowledge import RerankerConfig
+    from mindroom.constants import RuntimePaths
+
+_COHERE_RERANK_URL = "https://api.cohere.com/v2/rerank"
+_RERANK_TIMEOUT_SECONDS = 30.0
+_VERTEX_AI_RANK_URL = (
+    "https://discoveryengine.googleapis.com/v1/projects/{project}/locations/global"
+    "/rankingConfigs/default_ranking_config:rank"
+)
+#: Records per Vertex AI ranking request: Google bills each 100 as one query, and smaller requests answer sooner.
+_VERTEX_AI_RECORDS_PER_REQUEST = 100
+#: Runs every blocking reranker step: building a reranker, which may install the sentence-transformers extra, signing
+#: in to Google, and cross-encoder scoring, which is serialized anyway. A step that outlasts its caller's deadline then
+#: holds up later reranking only, never the shared default executor the rest of a reply needs.
+_rerank_thread = ThreadPoolExecutor(1, thread_name_prefix="knowledge-rerank")
+#: The latest build of each reranker config, so a build still running is awaited instead of started again.
+_builds: dict[str, Future[Reranker]] = {}
+
+
+class Reranker(Protocol):
+    """Scores how well each document answers a query; higher is better."""
+
+    async def ascore(self, query: str, documents: Sequence[str]) -> list[float]:
+        """Return one relevance score in [0, 1] per document, in the documents' order; ``-inf`` for one it could not judge.
+
+        Ordering never depends on the scale, but a recall threshold does: ``retrieve`` falls back to the hybrid
+        selection when a finite score outside [0, 1] meets a threshold. ``-inf`` ranks last and passes no threshold.
+        """
+        ...
+
+
+@dataclass(frozen=True)
+class _CohereReranker:
+    """Calls a rerank endpoint speaking Cohere's request and response shape."""
+
+    model: str
+    url: str
+    api_key: str | None
+
+    async def ascore(self, query: str, documents: Sequence[str]) -> list[float]:
+        headers = {"Authorization": f"Bearer {self.api_key}"} if self.api_key else {}
+        async with httpx.AsyncClient(timeout=_RERANK_TIMEOUT_SECONDS) as client:
+            response = await client.post(
+                self.url,
+                headers=headers,
+                json={"model": self.model, "query": query, "documents": list(documents), "top_n": len(documents)},
+            )
+        response.raise_for_status()
+        scores = [float("-inf")] * len(documents)
+        for result in response.json()["results"]:
+            scores[int(result["index"])] = float(result["relevance_score"])
+        return scores
+
+
+@dataclass(frozen=True)
+class _VertexAIReranker:
+    """Calls Google's Vertex AI ranking API with Google Cloud credentials, loaded on the first search."""
+
+    model: str
+    credentials_path: Path | None
+    project: str | None
+
+    async def ascore(self, query: str, documents: Sequence[str]) -> list[float]:
+        headers, project = await asyncio.get_running_loop().run_in_executor(
+            _rerank_thread,
+            _google_request_auth,
+            self.credentials_path,
+            self.project,
+        )
+        records = [{"id": str(index), "content": document} for index, document in enumerate(documents)]
+        async with httpx.AsyncClient(timeout=_RERANK_TIMEOUT_SECONDS) as client, asyncio.TaskGroup() as group:
+            requests = [
+                group.create_task(
+                    client.post(
+                        _VERTEX_AI_RANK_URL.format(project=project),
+                        headers=headers,
+                        json={
+                            "model": self.model,
+                            "query": query,
+                            "records": records[start : start + _VERTEX_AI_RECORDS_PER_REQUEST],
+                            "ignoreRecordDetailsInResponse": True,
+                        },
+                    ),
+                )
+                for start in range(0, len(records), _VERTEX_AI_RECORDS_PER_REQUEST)
+            ]
+        scores = [float("-inf")] * len(documents)
+        for request in requests:
+            response = request.result()
+            response.raise_for_status()
+            for record in response.json()["records"]:
+                # A zero score is left out of the response.
+                scores[int(record["id"])] = float(record.get("score", 0.0))
+        return scores
+
+
+@functools.cache
+def _google_credentials(credentials_path: Path | None) -> tuple[Any, str | None]:
+    """Load the runtime's Google credential file, or else Application Default Credentials, once per process.
+
+    Returns the credentials with the project they name; a service account key names its own, user credentials none.
+    """
+    if credentials_path is None:
+        return load_ambient_google_credentials()
+    credentials = load_google_application_credentials(str(credentials_path))
+    return credentials, getattr(credentials, "project_id", None)
+
+
+_google_credentials_lock = threading.Lock()
+
+
+def _google_request_auth(credentials_path: Path | None, project: str | None) -> tuple[dict[str, str], str]:
+    """Return the headers a ranking request signs with, such as its quota project, and the project it ranks in."""
+    credentials, credentials_project = _google_credentials(credentials_path)
+    project = project or credentials_project
+    if not project:
+        msg = "The vertex_ai reranker needs GOOGLE_CLOUD_PROJECT or Google credentials that name a project"
+        raise ValueError(msg)
+    headers: dict[str, str] = {}
+    with _google_credentials_lock:
+        if not credentials.valid:
+            import google.auth.transport.requests  # noqa: PLC0415
+
+            credentials.refresh(google.auth.transport.requests.Request())
+        credentials.apply(headers)
+    return headers, project
+
+
+#: Loaded ``sentence_transformers.CrossEncoder`` models by name.
+_cross_encoders: dict[str, Any] = {}
+_cross_encoder_lock = threading.Lock()
+#: Most tokens a query and document pair keeps: bge-reranker-v2-m3 takes 8192, and a batch that long needs tens of GiB.
+_CROSS_ENCODER_MAX_LENGTH = 1024
+
+
+@dataclass(frozen=True)
+class _CrossEncoderReranker:
+    """Scores query and document pairs with a sentence-transformers cross-encoder in process.
+
+    ``CrossEncoder.predict`` applies the model's activation, a sigmoid by default for a one-label model such as
+    ``BAAI/bge-reranker-v2-m3``, so its scores are already in [0, 1] and get no second sigmoid.
+    """
+
+    model: str
+
+    async def ascore(self, query: str, documents: Sequence[str]) -> list[float]:
+        # Scoring is serialized, so queued calls wait on their own thread, not in the shared default executor.
+        return await asyncio.get_running_loop().run_in_executor(_rerank_thread, self._score, query, documents)
+
+    def _score(self, query: str, documents: Sequence[str]) -> list[float]:
+        with _cross_encoder_lock:
+            encoder = _cross_encoders.get(self.model)
+            if encoder is None:
+                with optional_dependency_environment():
+                    from sentence_transformers import CrossEncoder  # noqa: PLC0415
+                    from sentence_transformers.util import get_device_name  # noqa: PLC0415
+
+                # SDPA attention on MPS keeps driver memory for every new input length until it runs out; eager does not.
+                model_kwargs = {"attn_implementation": "eager"} if get_device_name() == "mps" else None
+                encoder = CrossEncoder(self.model, model_kwargs=model_kwargs)
+                # Lower a long or unset limit only: raising a 512-token model's limit fails on long pairs.
+                if encoder.max_seq_length is None or encoder.max_seq_length > _CROSS_ENCODER_MAX_LENGTH:
+                    encoder.max_seq_length = _CROSS_ENCODER_MAX_LENGTH
+                _cross_encoders[self.model] = encoder
+            return [float(score) for score in encoder.predict([(query, document) for document in documents])]
+
+
+def _create_reranker(config: RerankerConfig, runtime_paths: RuntimePaths) -> Reranker:
+    """Build the configured reranker."""
+    if not isinstance(config, KnowledgeRerankerConfig):
+        reranker = create_judgment_reranker(config, runtime_paths)
+        if reranker is None:
+            msg = f"The {config.provider} reranker has no API key"
+            raise RuntimeError(msg)
+        return reranker
+    if config.provider == "sentence_transformers":
+        ensure_sentence_transformers_dependencies(runtime_paths)
+        return _CrossEncoderReranker(model=config.model)
+    if config.provider == "vertex_ai":
+        return _VertexAIReranker(
+            model=config.model,
+            credentials_path=runtime_env_path(runtime_paths, "GOOGLE_APPLICATION_CREDENTIALS"),
+            project=get_secret_from_env("GOOGLE_CLOUD_PROJECT", runtime_paths=runtime_paths),
+        )
+    api_key = config.api_key or get_api_key_for_service(config.credentials_service or "cohere", runtime_paths)
+    return _CohereReranker(model=config.model, url=config.url or _COHERE_RERANK_URL, api_key=api_key)
+
+
+async def build_reranker(config: RerankerConfig, runtime_paths: RuntimePaths) -> Reranker:
+    """Build the configured reranker on the reranker thread.
+
+    At most one build of a config is in flight: a caller that finds one running, such as a first install, waits for
+    it within its own deadline. A caller that gives up never cancels the build the others wait for.
+    """
+    key = config.model_dump_json()
+    build = _builds.get(key)
+    if build is None or build.done():
+        build = _builds[key] = _rerank_thread.submit(_create_reranker, config, runtime_paths)
+    return await asyncio.shield(asyncio.wrap_future(build))

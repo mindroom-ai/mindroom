@@ -8,6 +8,7 @@ from typing import Literal, Self
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from mindroom.config.schema_hints import dashboard_hint
+from mindroom.config.validation import OptionalNonBlankStr  # noqa: TC001
 
 MCPTransport = Literal["stdio", "sse", "streamable-http"]
 _MCPOAuthDiscoveryMode = Literal["auto", "manual"]
@@ -62,14 +63,17 @@ class MCPOAuthConfig(BaseModel):
 
     type: Literal["oauth"] = Field(description="Authentication scheme; OAuth is the only supported type")
     provider_id: str | None = Field(default=None, description="OAuth provider id; defaults to mcp_<server_id>")
-    display_name: str | None = Field(default=None, description="Human-readable OAuth provider name")
+    display_name: OptionalNonBlankStr = Field(default=None, description="Human-readable OAuth provider name")
     resource: str | None = Field(default=None, description="OAuth protected resource identifier")
     discovery: _MCPOAuthDiscoveryMode = Field(default="auto", description="OAuth metadata discovery mode")
     authorization_server: str | None = Field(default=None, description="Authorization server issuer/base URL")
     authorization_url: str | None = Field(default=None, description="Manual OAuth authorization endpoint")
     token_url: str | None = Field(default=None, description="Manual OAuth token endpoint")
     registration_url: str | None = Field(default=None, description="Dynamic client registration endpoint")
-    dynamic_client_registration: bool = Field(default=True, description="Whether dynamic registration may be used")
+    dynamic_client_registration: bool = Field(
+        default=True,
+        description="Whether a client may be obtained automatically, by dynamic registration or client ID metadata document",
+    )
     token_endpoint_auth_method: _MCPOAuthTokenEndpointAuthMethod = Field(
         default="none",
         description="OAuth token endpoint client authentication method",
@@ -84,12 +88,6 @@ class MCPOAuthConfig(BaseModel):
     )
     client_config_services: list[str] = Field(default_factory=list, description="Provider-specific client config")
     shared_client_config_services: list[str] = Field(default_factory=list, description="Shared client config services")
-
-    @field_validator("display_name")
-    @classmethod
-    def normalize_display_name(cls, value: str | None) -> str | None:
-        """Trim OAuth labels so blank names use the provider and catalog fallbacks."""
-        return (value.strip() or None) if value is not None else None
 
     @field_validator("provider_id")
     @classmethod
@@ -122,10 +120,19 @@ class MCPServerConfig(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     enabled: bool = Field(default=True, description="Whether the server is active")
-    display_name: str | None = Field(default=None, description="Human-readable tool name for the dashboard and catalog")
-    summary: str | None = Field(default=None, description="Short capability summary for the dashboard and tool catalog")
-    icon: str | None = Field(default=None, description="Optional dashboard icon name, such as SiConfluence or Calendar")
-    description: str | None = Field(
+    display_name: OptionalNonBlankStr = Field(
+        default=None,
+        description="Human-readable tool name for the dashboard and catalog",
+    )
+    summary: OptionalNonBlankStr = Field(
+        default=None,
+        description="Short capability summary for the dashboard and tool catalog",
+    )
+    icon: OptionalNonBlankStr = Field(
+        default=None,
+        description="Optional dashboard icon name, such as SiConfluence or Calendar",
+    )
+    description: OptionalNonBlankStr = Field(
         default=None,
         description="What the server provides; appended to the OAuth bridge tool descriptions shown to the model. Requires auth.",
     )
@@ -143,6 +150,13 @@ class MCPServerConfig(BaseModel):
         json_schema_extra=dashboard_hint(secret=True),
     )
     url: str | None = Field(default=None, description="Remote URL for SSE or streamable HTTP")
+    allow_private_network: bool = Field(
+        default=False,
+        description=(
+            "Let a remote server's URL reach private-network addresses (RFC 1918 or IPv6 unique-local), such as a "
+            "cluster-internal service; loopback, link-local and cloud metadata addresses stay blocked"
+        ),
+    )
     headers: dict[str, str] = Field(
         default_factory=dict,
         description="HTTP headers for remote transports",
@@ -156,14 +170,6 @@ class MCPServerConfig(BaseModel):
     call_timeout_seconds: float = Field(default=120.0, gt=0, description="Default call timeout")
     max_concurrent_calls: int = Field(default=1, ge=1, description="Maximum concurrent calls")
     auto_reconnect: bool = Field(default=True, description="Whether to reconnect automatically")
-
-    @field_validator("display_name", "summary", "description", "icon")
-    @classmethod
-    def normalize_display_metadata(cls, value: str | None) -> str | None:
-        """Trim optional display metadata and collapse blank values to None."""
-        if value is None:
-            return None
-        return value.strip() or None
 
     @field_validator("include_tools", "exclude_tools", mode="before")
     @classmethod
@@ -190,6 +196,9 @@ class MCPServerConfig(BaseModel):
             raise ValueError(msg)
         if self.headers:
             msg = "stdio MCP servers do not allow headers"
+            raise ValueError(msg)
+        if self.allow_private_network:
+            msg = "stdio MCP servers do not allow allow_private_network"
             raise ValueError(msg)
         if self.auth is not None:
             msg = "OAuth-backed MCP servers require remote HTTP transport"

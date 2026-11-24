@@ -4,16 +4,23 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from typing import Literal, Protocol, TypedDict, cast
+from typing import TYPE_CHECKING, Literal, Protocol, TypedDict, cast
+
+if TYPE_CHECKING:
+    from datetime import datetime
+
+    from mindroom.config.models import CompactionConfig
+    from mindroom.llm.provider import NativeCompactionReplay
+    from mindroom.session_storage.types import ConversationSession
 
 COMPACTION_SUMMARY_RETRY_FLOOR_TOKENS = 1_000
 
 _ScopeKind = Literal["agent", "team"]
 _HistoryMode = Literal["all", "runs", "messages"]
-_CompactionMode = Literal["auto", "manual"]
+CompactionMode = Literal["auto", "manual"]
 _CompactionDecisionMode = Literal["none", "required"]
 CompactionReplyOutcome = Literal["none", "success", "failed", "timeout"]
-_CompactionLifecycleStatus = Literal["success", "failed", "timeout"]
+CompactionLifecycleStatus = Literal["failed", "timeout"]
 CompactionAvailabilityReason = Literal[
     "no_context_window",
     "non_positive_summary_input_budget",
@@ -31,7 +38,7 @@ class _HistoryScopeMetadata(TypedDict):
 
 @dataclass(frozen=True)
 class HistoryScope:
-    """One logical persisted-history scope inside a stored Agno session."""
+    """One logical persisted-history scope inside a stored session."""
 
     kind: _ScopeKind
     scope_id: str
@@ -70,6 +77,11 @@ class HistoryScope:
         return cls(kind=cast("_ScopeKind", kind), scope_id=scope_id)
 
 
+def owner_scope(session: ConversationSession) -> HistoryScope:
+    """Return the history scope that owns ``session``: its kind and owner, which a load takes from its database's."""
+    return HistoryScope(kind=session.kind, scope_id=session.owner_id)
+
+
 @dataclass(frozen=True)
 class HistoryPolicy:
     """Authored raw-history selection policy for one run."""
@@ -79,53 +91,86 @@ class HistoryPolicy:
 
     @property
     def num_history_runs(self) -> int | None:
-        """Return the Agno run-replay limit for this policy."""
+        """Return the run-replay limit for this policy."""
         return self.limit if self.mode == "runs" else None
 
     @property
     def num_history_messages(self) -> int | None:
-        """Return the Agno message-replay limit for this policy."""
+        """Return the message-replay limit for this policy."""
         return self.limit if self.mode == "messages" else None
 
 
 @dataclass(frozen=True)
 class ResolvedHistorySettings:
-    """Resolved history selection policy and tool-call limits for one run."""
+    """Resolved history selection policy, tool-call limits, and text compaction config for one run.
+
+    ``has_authored_compaction_config`` tells whether the operator configured text compaction for the entity or its
+    defaults, rather than only inheriting the built-in config.
+    """
 
     policy: HistoryPolicy
     max_tool_calls_from_history: int | None
-    system_message_role: str = "system"
+    compaction_config: CompactionConfig
+    has_authored_compaction_config: bool
+
+    @property
+    def automatic_compaction(self) -> bool:
+        """Return whether compaction runs on its own before and during a reply; a manual request compacts regardless."""
+        return self.has_authored_compaction_config and self.compaction_config.enabled
+
+    @property
+    def replays_whole_history(self) -> bool:
+        """Return whether no authored run, message, or tool-call limit drops older history from replay."""
+        return self.policy.mode == "all" and self.max_tool_calls_from_history is None
+
+
+@dataclass(frozen=True)
+class ScopeSummary:
+    """A scope's latest compaction summary, which replays ahead of the scope's remaining runs."""
+
+    text: str
+    updated_at: datetime
+
+
+def replayed_summary_text(text: str | None) -> str | None:
+    """Return a stored summary as replay reads it: stripped, or None when it is missing or blank."""
+    return (text or "").strip() or None
 
 
 @dataclass(frozen=True)
 class HistoryScopeState:
     """Persisted compaction control state stored in session metadata.
 
-    Compaction history itself (summary generations and archived runs) lives in
-    the compaction archive owned by ``history/storage.py``.
+    Compaction history itself lives in the summary rows beside the runs table,
+    owned by ``session_storage/summary_rows.py``.
     """
 
     force_compact_before_next_run: bool = False
+
+    @property
+    def compaction_mode(self) -> CompactionMode:
+        """Return how a compaction of this scope is reported: manual when requested, else automatic."""
+        return "manual" if self.force_compact_before_next_run else "auto"
 
 
 @dataclass(frozen=True)
 class ResolvedHistoryExecutionPlan:
     """Single source of truth for history-budget policy in one run scope."""
 
-    authored_compaction_enabled: bool
+    automatic_compaction: bool
     text_compaction_available: bool
     explicit_compaction_model: bool
     compaction_model_name: str
-    compaction_context_window: int | None
     replay_window_tokens: int | None
     trigger_threshold_tokens: int | None
     reserve_tokens: int
-    static_prompt_tokens: int | None
-    replay_budget_tokens: int | None
+    # The whole-request sizes compaction acts at: the trigger, and the limit no request may exceed (the replay window
+    # minus the reserve); None without a replay window.
+    trigger_tokens: int | None
+    limit_tokens: int | None
     summary_input_budget_tokens: int | None
     compaction_timeout_seconds: float
     unavailable_reason: CompactionAvailabilityReason | None = None
-    hard_replay_budget_tokens: int | None = None
     compaction_fallback_model_name: str | None = None
     compaction_fallback_summary_input_budget_tokens: int | None = None
 
@@ -147,17 +192,17 @@ class CompactionDecision:
 
     mode: _CompactionDecisionMode
     reason: str
-    current_history_tokens: int | None = None
-    trigger_budget_tokens: int | None = None
-    hard_budget_tokens: int | None = None
-    fitted_replay_tokens: int | None = None
+    # The size of the reply's first request and the plan's trigger and limit it was compared with.
+    request_tokens: int | None = None
+    trigger_tokens: int | None = None
+    limit_tokens: int | None = None
 
 
 @dataclass(frozen=True)
 class CompactionLifecycleStart:
-    """Visible lifecycle notice payload emitted before foreground compaction."""
+    """Lifecycle payload reported before foreground compaction."""
 
-    mode: _CompactionMode
+    mode: CompactionMode
     session_id: str
     scope: str
     summary_model: str
@@ -169,10 +214,9 @@ class CompactionLifecycleStart:
 
 @dataclass(frozen=True)
 class CompactionLifecycleProgress:
-    """Visible lifecycle progress payload emitted after persisted compaction chunks."""
+    """Lifecycle progress payload reported after persisted compaction chunks."""
 
-    notice_event_id: str | None
-    mode: _CompactionMode
+    mode: CompactionMode
     session_id: str
     scope: str
     summary_model: str
@@ -184,6 +228,8 @@ class CompactionLifecycleProgress:
     runs_remaining: int
     threshold_tokens: int | None = None
     duration_ms: int | None = None
+    # The handle ``CompactionLifecycle.start`` returned: a notice's event id, or a reply-compaction entry id.
+    notice_event_id: str | None = None
 
     def to_notice_metadata(self) -> dict[str, object]:
         """Return serialized progress metadata for Matrix compaction messages."""
@@ -212,10 +258,10 @@ class CompactionLifecycleProgress:
         """Format a human-readable in-progress compaction notice."""
         body = (
             f"Compacting history... saved {self.compacted_run_count}/{self.runs_before} runs: "
-            f"{_format_exact_tokens(self.before_tokens)} -> {_format_exact_tokens(self.after_tokens)}"
+            f"{self.before_tokens:,} -> {self.after_tokens:,}"
         )
         if self.history_budget_tokens is not None:
-            body += f" / {_format_exact_tokens(self.history_budget_tokens)} history budget"
+            body += f" / {self.history_budget_tokens:,} history budget"
         if self.runs_remaining:
             body += f"\n   {self.runs_remaining} runs remaining"
         return body
@@ -223,45 +269,41 @@ class CompactionLifecycleProgress:
 
 @dataclass(frozen=True)
 class CompactionLifecycleFailure:
-    """Visible lifecycle notice payload emitted after failed foreground compaction."""
+    """Lifecycle payload reported after failed foreground compaction."""
 
+    # The handle ``CompactionLifecycle.start`` returned: a notice's event id, or a reply-compaction entry id.
     notice_event_id: str | None
-    mode: _CompactionMode
+    mode: CompactionMode
     session_id: str
     scope: str
     summary_model: str
-    status: _CompactionLifecycleStatus
+    status: CompactionLifecycleStatus
     duration_ms: int
     failure_reason: str
     history_budget_tokens: int | None
 
 
 class CompactionLifecycle(Protocol):
-    """Interface for ordered foreground compaction Matrix notice delivery."""
+    """Interface that reports a foreground compaction's lifecycle, as a notice or on the reply, in order."""
 
     async def start(self, event: CompactionLifecycleStart) -> str | None:
-        """Send the initial compaction notice and return its Matrix event id."""
+        """Report a compaction's start and return a handle its later events carry back, or ``None`` to get none."""
 
     async def complete_success(self, outcome: CompactionOutcome) -> None:
-        """Edit the lifecycle notice after successful compaction."""
+        """Report a successful compaction."""
 
     async def progress(self, event: CompactionLifecycleProgress) -> None:
-        """Edit the lifecycle notice after persisted compaction progress."""
+        """Report persisted compaction progress."""
 
     async def complete_failure(self, event: CompactionLifecycleFailure) -> None:
-        """Edit the lifecycle notice after failed compaction."""
-
-
-def _format_exact_tokens(tokens: int) -> str:
-    """Format token counts exactly with thousands separators."""
-    return f"{tokens:,}"
+        """Report a failed compaction."""
 
 
 @dataclass(frozen=True)
 class CompactionOutcome:
     """Completed compaction result used for lifecycle notices and tests."""
 
-    mode: _CompactionMode
+    mode: CompactionMode
     session_id: str
     scope: str
     summary: str
@@ -275,15 +317,15 @@ class CompactionOutcome:
     compacted_run_count: int
     compacted_at: str
     history_budget_tokens: int | None = None
+    # The handle ``CompactionLifecycle.start`` returned: a notice's event id, or a reply-compaction entry id.
     lifecycle_notice_event_id: str | None = None
     duration_ms: int | None = None
-    status: _CompactionLifecycleStatus = "success"
 
     def to_notice_metadata(self) -> dict[str, object]:
         """Return serialized notice metadata for Matrix compaction messages."""
         meta: dict[str, object] = {
             "version": 3,
-            "status": self.status,
+            "status": "success",
             "mode": self.mode,
             "session_id": self.session_id,
             "scope": self.scope,
@@ -309,23 +351,43 @@ class CompactionOutcome:
     def format_notice(self) -> str:
         """Format a human-readable compaction notice."""
         line1 = (
-            f"\U0001f4e6 Compacted {self.compacted_run_count} runs: "
-            f"{_format_exact_tokens(self.before_tokens)} \u2192 {_format_exact_tokens(self.after_tokens)}"
+            f"\U0001f4e6 Compacted {self.compacted_run_count} runs: {self.before_tokens:,} \u2192 {self.after_tokens:,}"
         )
         if self.history_budget_tokens is not None:
-            line1 += f" / {_format_exact_tokens(self.history_budget_tokens)} history budget"
+            line1 += f" / {self.history_budget_tokens:,} history budget"
         return line1
 
 
 @dataclass(frozen=True)
-class PreparedHistoryState:
-    """Prepared persisted-history state for one run."""
+class NativeHistory:
+    """What a run's requests carry for provider-managed history: the native compaction replay and portable replay.
 
-    compaction_outcomes: list[CompactionOutcome] = field(default_factory=list)
+    ``native_compaction`` is None when the provider compacts nothing for this run; ``portable_replay`` says the
+    request replays its history explicitly instead of continuing provider-stored state.
+    """
+
+    native_compaction: NativeCompactionReplay | None
+    portable_replay: bool
+
+    def without_native_compaction(self) -> NativeHistory:
+        """Return these settings with the provider's compaction turned off, keeping the replay policy."""
+        return NativeHistory(native_compaction=None, portable_replay=self.portable_replay)
+
+
+@dataclass(frozen=True, kw_only=True)
+class PreparedHistoryState:
+    """Prepared persisted-history state for one run.
+
+    ``native_history`` has no default, so a preparer states it: None when the provider route manages no history of
+    its own.
+    """
+
     replay_plan: ResolvedReplayPlan | None = None
     replays_persisted_history: bool = False
     compaction_decision: CompactionDecision = field(
         default_factory=lambda: CompactionDecision(mode="none", reason="unclassified"),
     )
     compaction_reply_outcome: CompactionReplyOutcome = "none"
+    # The size of the run's first request as preparation found it.
     prepared_context_tokens: int | None = None
+    native_history: NativeHistory | None

@@ -28,10 +28,12 @@ jobs:
       - name: Install pip-audit
         run: pip install pip-audit==2.10.1
       - name: Python dependency audit
-        # Audit the locked dependencies; a bare pip-audit checks only its own environment.
+        # Audit both locked dependency sets; a bare pip-audit checks only its own environment.
         run: |
           uv export --frozen --all-extras --no-hashes --no-emit-project --format requirements-txt --quiet -o "$RUNNER_TEMP/requirements.txt"
           pip-audit --disable-pip --no-deps -r "$RUNNER_TEMP/requirements.txt" || true
+          uv export --frozen --directory saas-platform/platform-backend --all-extras --no-hashes --no-emit-project --format requirements-txt --quiet -o "$RUNNER_TEMP/platform-backend-requirements.txt"
+          pip-audit --disable-pip --no-deps -r "$RUNNER_TEMP/platform-backend-requirements.txt" || true
       - name: Secret scan (gitleaks)
         run: |
           docker run --rm \

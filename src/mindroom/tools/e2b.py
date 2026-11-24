@@ -33,6 +33,7 @@ if TYPE_CHECKING:
     config_fields=[
         ConfigField(
             name="api_key",
+            env=("E2B_API_KEY",),
             label="API Key",
             type="password",
             required=False,
@@ -45,17 +46,10 @@ if TYPE_CHECKING:
             required=False,
             default=300,
         ),
-        ConfigField(
-            name="sandbox_options",
-            label="Sandbox Options",
-            type="text",
-            required=False,
-            default=None,
-        ),
     ],
     managed_init_args=(ToolManagedInitArg.TOOL_OUTPUT_WORKSPACE_ROOT, ToolManagedInitArg.FILE_ACCESS),
     dependencies=["e2b_code_interpreter"],
-    docs_url="https://docs.agno.com/tools/toolkits/others/e2b",
+    docs_url="https://docs.mindroom.chat/tools/automation-and-platforms/#e2b",
     function_names=(
         "download_chart_data",
         "download_file_from_sandbox",

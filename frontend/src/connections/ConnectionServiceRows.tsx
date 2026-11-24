@@ -1,18 +1,19 @@
 import { Fragment, useCallback, useEffect, useRef, useState } from "react";
-import { CheckCircle2, Loader2 } from "lucide-react";
+import { Loader2 } from "lucide-react";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import {
-  Dialog,
-  DialogContent,
-  DialogDescription,
-  DialogFooter,
-  DialogHeader,
-  DialogTitle,
-} from "@/components/ui/dialog";
+  disconnectDescription,
+  sharedAccountStatus,
+  sharedAgentNote,
+} from "./accountCopy";
+import { ConfirmDialog } from "./ConfirmDialog";
+import { servicesUsingAccount } from "./egressRowText";
 import { connectWithPopup, type OAuthAuthorization } from "./oauthPopup";
-import { requestConnection } from "./request";
-import { ToolName, ToolExposure } from "./ToolRow";
+import { errorText, requestConnection } from "./request";
+import { SharedAccountDialog } from "./SharedAccountDialog";
+import { STACKED, STACKED_CELL, STACKED_LABEL } from "./stackedTable";
+import { StatusLabel, ToolName, ToolExposure } from "./ToolRow";
 import type {
   AgentConnections,
   ConnectionService,
@@ -27,18 +28,26 @@ export function ConnectionServiceRows({
   mcp,
   refreshVersion,
   onConnectionChange,
+  onStatus,
 }: {
   agent: AgentConnections;
   service: ConnectionService;
   mcp: McpSelectionState;
   refreshVersion: number;
   onConnectionChange: () => void;
+  /** Told whether the account is connected each time its status loads. */
+  onStatus?: (
+    agentName: string,
+    provider: string,
+    status: ConnectionStatus,
+  ) => void;
 }) {
   const [status, setStatus] = useState<ConnectionStatus | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<"connect" | "disconnect" | null>(null);
   const [confirmOpen, setConfirmOpen] = useState(false);
+  const [sharedOpen, setSharedOpen] = useState(false);
   const statusRequest = useRef<AbortController | null>(null);
   const operation = useRef<AbortController | null>(null);
   const basePath = `/api/connections/agents/${encodeURIComponent(agent.agent_name)}/${encodeURIComponent(service.provider)}`;
@@ -54,7 +63,10 @@ export function ConnectionServiceRows({
         `${basePath}/status`,
         controller.signal,
       );
-      if (!controller.signal.aborted) setStatus(next);
+      if (!controller.signal.aborted) {
+        setStatus(next);
+        onStatus?.(agent.agent_name, service.provider, next);
+      }
     } catch {
       if (!controller.signal.aborted) {
         setStatus(null);
@@ -63,7 +75,7 @@ export function ConnectionServiceRows({
     } finally {
       if (!controller.signal.aborted) setLoading(false);
     }
-  }, [basePath]);
+  }, [basePath, agent.agent_name, service.provider, onStatus]);
 
   useEffect(() => {
     void loadStatus();
@@ -72,73 +84,97 @@ export function ConnectionServiceRows({
 
   useEffect(() => () => operation.current?.abort(), []);
 
-  const connect = async () => {
+  /** Runs connect or disconnect; one abandoned by leaving the page or by Cancel changes nothing. */
+  const run = async (
+    kind: "connect" | "disconnect",
+    failure: string,
+    action: (signal: AbortSignal) => Promise<unknown>,
+  ) => {
     const controller = new AbortController();
     operation.current = controller;
-    setBusy("connect");
+    setBusy(kind);
     setError(null);
     try {
-      await connectWithPopup(
-        service.provider,
-        () =>
-          requestConnection<OAuthAuthorization>(
-            `${basePath}/connect`,
-            controller.signal,
-            "POST",
-          ),
-        controller.signal,
-      );
+      await action(controller.signal);
       if (!controller.signal.aborted) onConnectionChange();
     } catch (cause) {
-      if (!controller.signal.aborted)
-        setError(
-          cause instanceof Error
-            ? cause.message
-            : "Could not connect. Try again.",
-        );
+      if (!controller.signal.aborted) setError(errorText(cause, failure));
     } finally {
       if (!controller.signal.aborted) setBusy(null);
     }
   };
 
-  const disconnect = async () => {
+  const connect = () => {
+    // A second click on Continue, while the first connect is under way, starts nothing.
+    if (busy !== null) return;
+    void run("connect", "Could not connect. Try again.", (signal) =>
+      connectWithPopup(
+        service.provider,
+        () =>
+          requestConnection<OAuthAuthorization>(
+            `${basePath}/connect`,
+            signal,
+            "POST",
+          ),
+        signal,
+        // A popup that closed after connecting is a connection, not a cancel.
+        async () =>
+          (
+            await requestConnection<ConnectionStatus>(
+              `${basePath}/status`,
+              signal,
+            )
+          ).connected,
+      ),
+    );
+  };
+
+  const disconnect = () => {
     setConfirmOpen(false);
-    setBusy("disconnect");
-    setError(null);
-    const controller = new AbortController();
-    operation.current = controller;
-    try {
-      await requestConnection(
-        `${basePath}/disconnect`,
-        controller.signal,
-        "POST",
-      );
-      if (!controller.signal.aborted) onConnectionChange();
-    } catch (cause) {
-      if (!controller.signal.aborted)
-        setError(
-          cause instanceof Error
-            ? cause.message
-            : "Could not disconnect. Try again.",
-        );
-    } finally {
-      if (!controller.signal.aborted) setBusy(null);
-    }
+    void run("disconnect", "Could not disconnect. Try again.", (signal) =>
+      requestConnection(`${basePath}/disconnect`, signal, "POST"),
+    );
   };
 
   const tools = agent.tools.filter(
     (tool) => tool.provider === service.provider,
   );
+  // Everything on this agent that stops working when the account goes: its
+  // services that sign in with the provider, then the tools, once each.
+  const users = [
+    ...servicesUsingAccount(agent.egress_services ?? [], service.provider),
+    ...tools.map((tool) => tool.display_name),
+  ];
+  // Everyone who uses a shared agent acts as its connected account, so everyone is told.
+  const sharedConnected =
+    service.is_shared && status?.connected === true && !status.reset_required;
+  const dependents = users.filter(
+    (name, index) =>
+      users.findIndex((other) => other.toLowerCase() === name.toLowerCase()) ===
+      index,
+  );
   return (
     <>
       {tools.map((tool, index) => (
         <Fragment key={tool.name}>
-          <tr className="border-t border-border/60">
-            <th scope="row" className="px-5 py-3 text-left font-normal">
+          {/* The Connection and Actions cells span the service's tools, so a line
+              between those tools would stop at them; only phones, where each
+              row is a card, separate them. */}
+          <tr
+            className={`${index === 0 ? "border-t" : "max-sm:border-t"} border-border/60 ${STACKED.row} max-sm:py-2`}
+          >
+            <th
+              scope="row"
+              className={`px-5 py-3 text-left font-normal ${STACKED_CELL} max-sm:px-4 max-sm:py-1`}
+            >
               <ToolName tool={tool} />
             </th>
             {index === 0 && (
-              <td rowSpan={tools.length} className="px-4 py-3 align-top">
+              <td
+                rowSpan={tools.length}
+                data-label="Connection"
+                className={`px-5 py-3 align-top ${STACKED_CELL} ${STACKED_LABEL} max-sm:px-4 max-sm:py-1`}
+              >
                 {loading ? (
                   <span
                     role="status"
@@ -153,24 +189,32 @@ export function ConnectionServiceRows({
                 ) : (
                   status && (
                     <>
-                      <span className="flex items-center gap-1.5 text-sm">
-                        {status.connected && (
-                          <CheckCircle2
-                            className="h-3.5 w-3.5 text-emerald-600 dark:text-emerald-400"
-                            aria-hidden="true"
-                          />
-                        )}
-                        {!service.can_manage
-                          ? status.connected
-                            ? "Shared connection configured"
-                            : "Shared connection unavailable"
-                          : status.reset_required
-                            ? "Reset required"
+                      <StatusLabel
+                        // Someone who cannot manage the account is told only whether it is there, and the dot says the same.
+                        tone={
+                          status.reset_required && service.can_manage
+                            ? "attention"
                             : status.connected
-                              ? "Connected"
-                              : "Not connected"}
-                      </span>
-                      {status.account_label && (
+                              ? "set"
+                              : "unset"
+                        }
+                      >
+                        {sharedConnected
+                          ? sharedAccountStatus(
+                              status.account_label,
+                              agent.agent_display_name,
+                            )
+                          : !service.can_manage
+                            ? status.connected
+                              ? "Shared connection configured"
+                              : "Shared connection unavailable"
+                            : status.reset_required
+                              ? "Reset required"
+                              : status.connected
+                                ? "Connected"
+                                : "Not connected"}
+                      </StatusLabel>
+                      {status.account_label && !sharedConnected && (
                         <p className="mt-1 max-w-56 break-all text-xs text-muted-foreground">
                           {status.account_label}
                         </p>
@@ -185,13 +229,16 @@ export function ConnectionServiceRows({
                 )}
               </td>
             )}
-            <td className="px-4 py-3">
+            <td
+              data-label="MCP gateway"
+              className={`px-4 py-3 ${STACKED_CELL} ${STACKED_LABEL} max-sm:py-1`}
+            >
               <ToolExposure agent={agent} tool={tool} mcp={mcp} />
             </td>
             {index === 0 && (
               <td
                 rowSpan={tools.length}
-                className="px-5 py-3 text-right align-top"
+                className={`px-5 py-3 text-right align-top ${STACKED_CELL} max-sm:px-4 max-sm:py-2 max-sm:text-left`}
               >
                 {!loading && !status && (
                   <Button variant="outline" onClick={() => void loadStatus()}>
@@ -200,17 +247,21 @@ export function ConnectionServiceRows({
                 )}
                 {!loading && status && !service.can_manage && (
                   <span className="text-xs text-muted-foreground">
-                    Managed by credential managers
+                    {sharedAgentNote(
+                      false,
+                      agent.managers,
+                      Array.isArray(agent.egress_services),
+                    )}
                   </span>
                 )}
                 {!loading && status && service.can_manage && (
-                  <div className="flex flex-wrap items-center justify-end gap-2">
+                  <div className="flex flex-wrap items-center gap-2 max-sm:justify-start sm:justify-end">
                     {status.reset_required ? (
                       <Button
                         size="sm"
                         variant="outline"
                         disabled={busy !== null}
-                        aria-label={`Reset ${service.display_name} connection`}
+                        aria-label={`Reset connection for ${service.display_name}`}
                         onClick={() => setConfirmOpen(true)}
                       >
                         Reset connection
@@ -220,7 +271,7 @@ export function ConnectionServiceRows({
                         size="sm"
                         variant="outline"
                         disabled={busy !== null}
-                        aria-label={`Disconnect ${service.display_name}`}
+                        aria-label={`Disconnect for ${service.display_name}`}
                         onClick={() => setConfirmOpen(true)}
                       >
                         Disconnect
@@ -228,9 +279,12 @@ export function ConnectionServiceRows({
                     ) : (
                       <Button
                         size="sm"
+                        variant="outline"
                         disabled={busy !== null || !status.can_connect}
                         aria-label={`Connect ${service.display_name}`}
-                        onClick={() => void connect()}
+                        onClick={() =>
+                          service.is_shared ? setSharedOpen(true) : connect()
+                        }
                       >
                         {busy === "connect" ? "Connecting…" : "Connect"}
                       </Button>
@@ -251,42 +305,37 @@ export function ConnectionServiceRows({
                       !status.can_connect &&
                       !status.reset_required && (
                         <p className="w-full text-sm text-muted-foreground">
-                          This service is not ready to connect yet.
+                          {status.service_account
+                            ? "This service uses a shared service account, so there is no account to connect here."
+                            : "This service needs its OAuth client saved in the MindRoom dashboard before it can connect."}
                         </p>
                       )}
                   </div>
                 )}
-                <Dialog open={confirmOpen} onOpenChange={setConfirmOpen}>
-                  <DialogContent>
-                    <DialogHeader>
-                      <DialogTitle>
-                        {status?.reset_required ? "Reset" : "Disconnect"}{" "}
-                        {service.display_name}?
-                      </DialogTitle>
-                      <DialogDescription>
-                        {service.is_shared
-                          ? `This removes the saved connection used by ${agent.agent_display_name}. Anyone using this connection will lose access until you connect again.`
-                          : "This removes your saved connection. Your assistant will lose access until you connect again."}
-                      </DialogDescription>
-                    </DialogHeader>
-                    <DialogFooter>
-                      <Button
-                        variant="outline"
-                        onClick={() => setConfirmOpen(false)}
-                      >
-                        Cancel
-                      </Button>
-                      <Button
-                        variant="destructive"
-                        onClick={() => void disconnect()}
-                      >
-                        {status?.reset_required
-                          ? "Reset connection"
-                          : "Disconnect"}
-                      </Button>
-                    </DialogFooter>
-                  </DialogContent>
-                </Dialog>
+                <SharedAccountDialog
+                  open={sharedOpen}
+                  agent={agent.agent_display_name}
+                  provider={service.display_name}
+                  onCancel={() => setSharedOpen(false)}
+                  onContinue={() => {
+                    setSharedOpen(false);
+                    connect();
+                  }}
+                />
+                <ConfirmDialog
+                  open={confirmOpen}
+                  title={`${status?.reset_required ? "Reset" : "Disconnect"} ${service.display_name}?`}
+                  description={disconnectDescription(
+                    service.display_name,
+                    agent.agent_display_name,
+                    dependents,
+                  )}
+                  confirmLabel={
+                    status?.reset_required ? "Reset connection" : "Disconnect"
+                  }
+                  onCancel={() => setConfirmOpen(false)}
+                  onConfirm={disconnect}
+                />
               </td>
             )}
           </tr>

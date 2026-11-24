@@ -29,4 +29,4 @@ export type {
   CheckboxListItem,
 } from "./CheckboxListField";
 
-export { sharedStyles, getSelectionStyles, getIconStyles } from "./styles";
+export { sharedStyles } from "./styles";

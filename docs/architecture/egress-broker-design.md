@@ -1,0 +1,143 @@
+---
+icon: lucide/scale
+---
+
+# Egress Broker Design Decisions
+
+This page records the decisions behind the [Agent Keys](../deployment/egress-broker.md) feature (the egress broker) that the code does not explain on its own, and why each was made.
+How to configure and run the broker is in the deployment guide; the trust model is in the [Security Model](security-posture.md).
+
+The guarantee everything below serves: worker code can use a credential through the broker but can never read it.
+
+## Architecture
+
+**Native broker in the primary process, not Agent Vault, mitmproxy, or Envoy.**
+The broker needs the credential store, the encryption key, the config, worker identity, and the existing Connections and dashboard UIs, which all live in the primary.
+Keeping Agent Vault meant a second service, a second credential store, and its own accounts and roles; mitmproxy brings a heavy, strictly pinned dependency tree and a separate process that would fetch secrets over an API.
+The cost is that MindRoom owns a TLS-intercepting proxy: TLS, HTTP parsing, and certificates are delegated to `ssl`, `h11`, and `cryptography`, and the roughly 1,700 lines of transport glue are hardened with a request-smuggling corpus, property-based fuzzing, and dial-guard cases.
+A human penetration test is still recommended before wide exposure.
+
+**Own thread and event loop.**
+Large brokered transfers, such as a git clone through a matched host, must not stall the bot's event loop.
+
+**TLS is intercepted only for hosts that have rules; every other host is tunneled blind.**
+Intercepting everything breaks clients that pin certificates and means decrypting traffic the broker has no reason to see.
+Blind tunnels keep the upstream's real certificate, so workers get a combined trust bundle (system roots plus the broker CA) instead of the broker CA alone.
+The broker CA is trusted only inside the worker's execution environment, never system-wide on the host.
+
+## Where a secret may go
+
+**The CONNECT target alone decides which credential is used.**
+The TLS server name and the `Host` header must match it, plain `http://` to a matched host is refused, and redirects are returned to the client instead of followed.
+Any of those would otherwise let a request carry one host's secret to another host.
+
+**A request only gets the credential of the service definition that routed it.**
+A service changed while the request waited for its secret, by a user-service save or a config change, may hold a key or account meant for other hosts, so the request gets a retryable 502 instead, and worker code cannot catch a key or account in the moment a service changes.
+
+**Ambiguous paths are refused, not normalized.**
+Path limits only hold if the broker and the upstream agree on what a path means.
+Dot segments at any decoding layer (including Unicode look-alikes), NUL, invalid UTF-8, raw `//`, and `\` are refused because servers normalize them differently.
+
+**Requests are rebuilt from what `h11` parsed, never copied byte for byte.**
+This stops bytes that another parser would read as a second request from reaching an upstream.
+Bodies are streamed rather than buffered, because buffering every body would cost memory and latency.
+
+**`TRACE` and `TRACK` are refused on hosts with rules.**
+They ask the server to echo the request, which would return the injected credential.
+
+**A user service's connected account only goes to its provider's hosts.**
+An OAuth token only works at its provider, so sending a GitHub or Google token anywhere else can only help someone who tricked the user into it.
+The allowed hosts come from the presets bound to each provider.
+
+**Every party's path limit must pass.**
+An operator's `restrict_to_rules` and a user's limit both apply to a request; a user can narrow the operator's services for their own scope but never widen them, and a `restrict_only` limit never selects a credential.
+This lets users restrict what an agent may do with an operator's key without gaining anything the operator did not grant.
+
+## Secrets and identity
+
+**Secrets are write-only.**
+No API, page, log, audit record, refusal, or agent tool ever returns a stored key or token.
+Anyone who could read a value back, including an agent with access to some API, would break the guarantee; credential managers can set and replace keys but not read them.
+
+**Worker tokens are stateless HMAC tokens minted per call, valid for 7 days by default.**
+There is no session table to store or clean up, long-running background commands keep working, and a leaked token stops working on its own.
+The trade-off is that a single token cannot be revoked, only all of them at once; see [Resetting broker state](../deployment/egress-broker.md#resetting-broker-state).
+
+**The proxy password is the fixed text `mindroom`.**
+Python `urllib` and Node `fetch` only send `Proxy-Authorization` when both the user name (the token) and the password are non-empty.
+The password is not a secret.
+
+**Agents opt in with the `egress_credentials` tool, not by having a shell.**
+Services with an `oauth_provider` reuse the scope's native OAuth connections with their full scopes, so if every `shell` or `python` agent used the broker, an agent whose native tools are read-only or ask for approval would get full access from its commands as soon as an account was connected.
+The tool already tells the agent about the broker, so listing it is the opt-in instead of a separate config field, and one rule decides for the sandbox proxy, the pages, and the request log, so they cannot disagree.
+A call without a configured agent gets no broker environment, because nothing shows that it opted in.
+
+**A shell that runs in the primary process gets the broker environment too; a primary `python` does not.**
+Operators who trust an agent with the primary, such as one with `worker_tools: []`, wanted its commands to use a stored key, for example a GitHub key to act as the owner, without copying it into the agent's environment.
+The guarantee above holds only for workers: a primary shell is already unconfined and can read the credential store and the primary's environment, so the broker adds convenience there and no new exposure.
+Each primary shell call gets a fresh token like a worker call, from the tool-call policy instead of the sandbox proxy, so the two never both apply to one call.
+It dials the bound listener on loopback, because the worker-facing URL, such as `host.docker.internal`, does not resolve on every host, and trusts the broker CA through files in the primary's storage, never through the primary's own process environment or system trust.
+Those files keep the certificates of the CA files the primary's own variables name, because they replace those variables for the command.
+A primary `python` runs inside the primary process, where no single call can get an environment of its own, so an agent whose only command tool it is still does not use the broker.
+
+**A connected account is used only after an explicit, per-service opt-in that states the approval bypass.**
+The tool opt-in says an agent may use Agent Keys, not that a user wants a connected account to work without the approvals of its native tools.
+Without a second opt-in, connecting a tool whose writes ask for approval silently gave the agent's commands the same account with its full scopes.
+So the broker reads a connection for a service only while an opt-in names that service and the connection's provider, for its token and for the status behind placeholders and the agent tool alike, and enabling one requires acknowledging that commands skip the tools' approvals.
+The egress pages still show whether an account is connected, through the Connections portal's own status reader, so a user can see what allowing it would use.
+The opt-in lives in the store of the connection it unlocks, and the broker and both APIs resolve that store through one function, so an opt-in cannot unlock another requester's or scope's account; a round-trip test per scope kind guards this.
+Requester-scoped providers get one opt-in per requester and service name, covering all of that requester's agents, because the account itself is the requester's.
+It names the provider, not the account: it covers whatever account of that provider the scope connects, a later connection made for the tools included, until someone stops it, and it does not apply while the service's `oauth_provider` names another provider.
+It does name the connection, the tools' or the service's own, so switching a service between the two never carries it across, even for a request routed while the switch is saved.
+Rejected: keeping connections already in use working after the upgrade, because that would silently keep the bypass this removes.
+
+**An opt-in carries an access level, read or read and write, and only a service that declares how its API reads offers read.**
+An opt-in otherwise hands the agent's commands the connection's full access, so a routine that only reads had to be granted writes or nothing.
+HTTP methods map onto reads and writes only for APIs that follow REST conventions, so a service offers read-only access only through its `read_only` declaration, whose `post_paths` name the endpoints that read with `POST`; `github` declares none, because git clone and fetch read with `POST` to `git-upload-pack`, which a path prefix cannot name.
+The broker checks the level right after the opt-in and before reading the connection, and refuses a WebSocket upgrade and any method-override header under read, since either can write whatever the method says; an entry stored as read on a service that later drops `read_only` gets no token at all, so it never fails open.
+An entry without a level reads as read and write, so existing opt-ins keep working unmigrated, and a stored API key is never limited, since a key is scoped where it is issued.
+The record is [Read-Only Access for Agent Keys Account Opt-Ins](../dev/2026-10-27-agent-keys-read-only-access-design.md).
+
+**A service of a user's own can have its own account, and a request picks such a service by naming it.**
+Agent Keys hands commands the scope's one connection per provider, the one the tools use, so a second account of a provider, such as a shared mailbox, had no place.
+The service's connection is the provider with only its stored name changed, so connecting, refreshing, allowing, and removing it reuse the per-service paths and the tools never see it; the broker offers no connect link for it, since the provider's link connects the tools' account.
+Such a service usually ties with an operator's service on host and path, and the operator's wins a tie, so a request picks it with `X-Agent-Keys-Service` rather than by a changed tie-break, which would move other requests onto a user's service unasked.
+Rejected: labelled accounts beside each provider connection, which made each account a second kind of thing to list, connect, allow, and remove.
+The record is [Separate Accounts for Agent Keys Services](../dev/2026-10-27-agent-keys-separate-accounts-design.md).
+
+**An administrator key is one key in the global store, and an agent list refuses other agents instead of hiding the service from them.**
+An administrator wanted to give every agent, personal agents included, one key that users can see is set but never change, so the dashboard writes it whichever scope is selected and the Connections page refuses it; a fallback key that a scope's own key overrides was rejected because users could then change which key their agent uses.
+An `agents` list keeps the service in every agent's routing and refuses the others with `agent_not_allowed`, because a per-agent operator config would reach every check that reads it and would send unlisted agents' requests out without a key under `passthrough`.
+Routing prefers a service that serves the requesting agent before rule specificity, so per-team services on the same hosts (one GitHub App service per team, replacing per-person tokens) each serve their own agents; the refusal remains for an agent no matching service serves.
+The record is [Administrator Keys and Agent Lists for Agent Keys Services](../dev/2026-10-29-agent-keys-admin-keys-design.md).
+
+**Requester-scoped accounts (GitHub, built-in Atlassian) are used only in a requester's own sandbox.**
+In a shared sandbox, every requester's commands run together, so one user's code could act with another's account.
+A shared sandbox can opt in with `oauth_on_shared_workers`, which only administrators can set.
+Even a personal worker shares the workspace folder on a non-private agent, so personal accounts and keys are only isolated on `private` agents.
+
+**A shared agent has one Google account, confirmed and visible to everyone who uses it.**
+Everyone acts as that account, so connecting it asks for confirmation and every user sees which account it is.
+
+**Configuration is trusted.**
+Whoever can write the `egress_broker` config, including agents with `config_manager`, can point a service at another host and so send its key there.
+User services can never take a config service's name, and a new one never inherits a key stored under its name, so users cannot do the same.
+An entry saved while no config service had its name is ignored once one does, and becomes active again with the key stored under that name when the config service is removed; under the trust model below, the entry and the key both come from people who may change each other's keys.
+
+**Credential managers of the same key scope trust each other.**
+A shared agent's credential managers and the administrators act for one team.
+Unscoped agents share one key store, so the managers of every unscoped agent form one group.
+They can set, replace, and redirect each other's keys and services, for example by pointing a user service with a key at another host.
+The boundary is elsewhere: agents and worker code never read a stored key, and users who are not credential managers or administrators cannot change keys or services.
+Protecting managers from each other cost recurring complexity, such as deleting a key when its service's rules changed or an entry when a config service's key was saved, for a threat the deployment does not have.
+Keys stay write-only in the UI for simplicity, not as a boundary between managers.
+
+## Visibility
+
+**Refusals carry a message the agent can relay, in several forms.**
+Different clients surface different parts of a response: JSON clients read the body, Python `urllib` shows the reason phrase, and git prints only a pkt-line `ERR`.
+Every form names who can fix the problem and where, and never includes a secret, token, query string, or connect link.
+
+**The request log stores metadata only.**
+Method, host, path without its query string, status, and refusal code are kept for 30 days.
+Users see their own requests; on shared or unscoped agents, credential managers and administrators see everyone's, because they are responsible for that agent's keys.

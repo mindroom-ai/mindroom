@@ -57,13 +57,21 @@ def test_local_model_keeps_agents_credentials_and_original_backup(tmp_path: Path
     assert env.read_text() == "OPENAI_API_KEY=existing-secret\n"
 
 
-@pytest.mark.parametrize("source", ["models: !include models.yaml\n", "models: []\n", "agents: [invalid]\n"])
-def test_invalid_or_composed_configuration_is_not_rewritten(tmp_path: Path, source: str) -> None:
-    """An unsupported document never leaves a partial write or backup."""
+@pytest.mark.parametrize(
+    ("source", "reason"),
+    [
+        ("models: !include models.yaml\n", "could not determine a constructor for the tag"),
+        ("models: []\n", "Configuration must contain a models mapping."),
+        ("agents: [invalid]\n", "agents: Input should be a valid dictionary"),
+    ],
+)
+def test_invalid_or_composed_configuration_is_not_rewritten(tmp_path: Path, source: str, reason: str) -> None:
+    """An unsupported document never leaves a partial write or backup, and the error names what is wrong."""
     path = tmp_path / "config.yaml"
     path.write_text(source)
     result = _configure(path)
     assert result.exit_code == 1
+    assert result.output.startswith(f"Local model configuration failed: {reason}")
     assert path.read_text() == source
     assert not path.with_name("config.yaml.before-local-model").exists()
 
@@ -76,3 +84,16 @@ def test_local_model_requires_loopback_endpoint(tmp_path: Path, url: str) -> Non
     result = _configure(path, "--base-url", url)
     assert result.exit_code == 1
     assert path.read_text() == "models: {}\n"
+
+
+def test_local_model_failure_prints_the_config_path_whole_on_one_line(narrow_markup_dir: Path) -> None:
+    """A failure that names a config path Rich would read as markup prints it whole on one line."""
+    path = narrow_markup_dir / "config.yaml"
+
+    result = _configure(path)
+
+    assert result.exit_code == 1
+    assert any(
+        line.startswith("Local model configuration failed: ") and line.endswith(f"'{path}'")
+        for line in result.output.splitlines()
+    ), result.output

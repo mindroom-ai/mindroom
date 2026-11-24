@@ -1,0 +1,2208 @@
+"""Agent turns on the owned loop, through ``ai.stream_agent_response`` and ``ai.ai_response``.
+
+The seam is ``run_agent`` fed by a scripted provider behind a real ``create_agent`` build: what a reply streams,
+what it stores, which tool-call policy runs around every call, and how it ends when it is paused, cancelled,
+failed, empty, or silent. The last tests drive the same turns through ``ResponseRunner``, the lifecycle owner, under
+which the turn driver writes the interrupted-turn record after the loop stored its own terminal record.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from dataclasses import dataclass, replace
+from types import SimpleNamespace
+from typing import TYPE_CHECKING, Any, ClassVar
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import nio
+import pytest
+from agno.tools import Toolkit
+from structlog.testing import capture_logs
+
+from mindroom import ai, loop_hooks, response_turn
+from mindroom.agent_loop.output_limit import CUT_OFF_TOOL_CALL_RESULT
+from mindroom.ai import ai_response, stream_agent_response
+from mindroom.ai_runtime import queued_message_signal_context
+from mindroom.approval.receipt_readers import approval_receipt_context
+from mindroom.budgets.pricing import format_cost_usd
+from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
+from mindroom.config.main import Config
+from mindroom.config.models import CompactionConfig, ModelConfig, ModelPricing
+from mindroom.constants import AI_RUN_METADATA_KEY
+from mindroom.dispatch_source import SILENT_SCHEDULE_SOURCE_KIND, ScheduledHistoryBudget
+from mindroom.entity_resolution import entity_identity_registry
+from mindroom.final_delivery import AwaitingApproval, Cancelled, Completed, FinalDeliveryOutcome
+from mindroom.history.interrupted_replay import is_interrupted_replay_run
+from mindroom.history.storage import new_scope_session
+from mindroom.history.turn_recorder import TurnRecorder
+from mindroom.history.types import CompactionOutcome, HistoryScope
+from mindroom.hooks import (
+    EVENT_TOOL_AFTER_CALL,
+    EVENT_TOOL_BEFORE_CALL,
+    HookBindings,
+    HookRegistry,
+    MessageEnvelope,
+    ToolAfterCallContext,
+    ToolBeforeCallContext,
+    hook,
+)
+from mindroom.llm.errors import MODEL_SAFEGUARD_REFUSAL_MESSAGE, ModelSafeguardRefusal, RateLimited
+from mindroom.llm.events import RunFinished
+from mindroom.llm.messages import QUEUED_MESSAGE_NOTICE_MARKER_KEY, Message, is_queued_notice_message, system_text
+from mindroom.llm.provider import (
+    Capabilities,
+    NativeCompactionReplay,
+    TextDelta,
+    ToolCallReady,
+    TurnCompleted,
+    UsageReported,
+)
+from mindroom.llm.runs import RunRecord, RunStatus
+from mindroom.llm.usage import MessageMetrics
+from mindroom.matrix.users import AgentMatrixUser
+from mindroom.message_target import MessageTarget
+from mindroom.native_compaction import replay_basis
+from mindroom.participation import ParticipationGate
+from mindroom.providers.identity import model_identity
+from mindroom.reply_turn.request import ResponseRequest
+from mindroom.response_sources import ResponseSources
+from mindroom.response_turn import ResponsePausedForApproval, TurnSinks
+from mindroom.session_storage.agent_storage import create_session_storage
+from mindroom.session_storage.types import ConversationSession
+from mindroom.skill_learning.capture import SkillReviewCapture
+from mindroom.thread_models import resolve_thread_model_override
+from mindroom.tool_jobs.instances import pin_background_tool_jobs
+from mindroom.tool_jobs.resources import execution_resources
+from mindroom.tool_jobs.runtime import register_background_runtime
+from mindroom.tool_system.call_record import recording_tool_calls
+from mindroom.tool_system.events import FailedReply
+from mindroom.tool_system.runtime_context import member_tool_scope, tool_runtime_context
+from mindroom.usage.storage import COMPACTED_REQUESTS_METADATA_KEY
+from tests.access_schema_support import with_current_room_member_access
+from tests.agent_tool_helpers import UnansweredCallTools, tool_policy
+from tests.approval_continuation_helpers import RECEIPT_CALLS, RECEIPT_TEXT
+from tests.authorization_helpers import make_test_tool_runtime_context
+from tests.bot_helpers import _hook_plugin, make_test_agent_bot, unique_room_send_responses
+from tests.conftest import (
+    TEST_PASSWORD,
+    bind_runtime_paths,
+    install_model_providers,
+    install_runtime_journal_support,
+    make_conversation_reader_mock,
+    make_matrix_client_mock,
+    make_relation_lookup,
+    make_turn_context,
+    make_visible_message,
+    message_origin,
+    patch_response_runner_module,
+    publish_hook_plugin,
+    seed_session,
+    test_runtime_paths,
+    unwrap_extracted_collaborator,
+)
+from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer, calls, tool_call, usage
+from tests.fakes.summary_model import summary_model
+from tests.history_helpers import RecordingCompactionLifecycle
+from tests.response_attempt_helpers import install_direct_response_admission
+from tests.response_runner_helpers import streamed_answer
+from tests.scripted_agent_helpers import (
+    ProcessCrash,
+    crash_after_first_terminal_store,
+    registered_toolkit,
+    streamed_text,
+)
+from tests.tool_job_helpers import tool_job_runtime
+from tests.usage_helpers import assert_counted_usage, counted_total, counted_usage, usage_rows
+
+if TYPE_CHECKING:
+    from collections.abc import AsyncIterator, Iterator, Mapping, Sequence
+    from pathlib import Path
+
+    from agno.run import RunContext as AgnoRunContext
+
+    from mindroom.constants import RuntimePaths
+    from mindroom.post_response_effects import ResponseOutcome
+    from mindroom.response_runner import ResponseRunner
+    from mindroom.session_storage.store import ConversationStore
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
+    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+
+ROOM_ID = "!room:localhost"
+THREAD_ID = "$thread:localhost"
+REQUESTER_ID = "@user:localhost"
+EVENT_ID = "$current:localhost"
+SESSION_ID = f"{ROOM_ID}:{THREAD_ID}"
+PROBE_TOOL = "agent_turn_probe"
+EXTERNAL_PROBE_TOOL = "agent_turn_external_probe"
+
+
+class _ProbeToolkit(Toolkit):
+    """Two functions the tests watch: one records its calls, one writes the shared session state."""
+
+    calls: ClassVar[list[str]] = []
+
+    def __init__(self) -> None:
+        super().__init__(name="probe", tools=[self.touch, self.remember])
+
+    async def touch(self, label: str) -> str:
+        """Record one call.
+
+        Args:
+            label: What to record.
+
+        """
+        type(self).calls.append(label)
+        return f"touched {label}"
+
+    async def remember(self, label: str, run_context: AgnoRunContext | None = None) -> str:
+        """Keep a label in the run's shared session state.
+
+        Args:
+            label: What to keep.
+            run_context: The run, supplied by the loop.
+
+        """
+        assert run_context is not None
+        run_context.session_state["remembered"] = label
+        return "remembered"
+
+
+class _ExternalProbeToolkit(UnansweredCallTools):
+    """The probe whose ``touch`` pauses for an answer from outside the loop, which nothing gives."""
+
+    unanswered = frozenset({"touch"})
+
+    def __init__(self) -> None:
+        super().__init__(name="probe", tools=[_ProbeToolkit().touch])
+
+
+@pytest.fixture
+def probe() -> Iterator[type[_ProbeToolkit]]:
+    """Register the probe toolkits for the test and restore the built-in tools afterwards."""
+    _ProbeToolkit.calls.clear()
+    with registered_toolkit(PROBE_TOOL, _ProbeToolkit), registered_toolkit(EXTERNAL_PROBE_TOOL, _ExternalProbeToolkit):
+        yield _ProbeToolkit
+
+
+@dataclass
+class _Reply:
+    """One agent reply's config, scripted model, recorder, and store."""
+
+    config: Config
+    runtime_paths: RuntimePaths
+    model: ScriptedModel
+    recorder: TurnRecorder
+    storage: ConversationStore
+    identity: ToolExecutionIdentity
+    runtime: ToolRuntimeContext
+
+
+def _reply(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    turns: Sequence[Sequence[ScriptStep]],
+    *,
+    tools: Sequence[str] = (PROBE_TOOL,),
+    approval_rules: Sequence[ApprovalRuleConfig] = (),
+    plugins: Sequence[object] = (),
+    max_tool_calls_per_turn: int | None = None,
+    context_window: int | None = None,
+    background_jobs: bool = False,
+) -> _Reply:
+    """Build the reply of a one-agent config whose model is the scripted provider.
+
+    A ``context_window`` turns on compaction with a ``summary`` model, which the test supplies; ``background_jobs``
+    lets calls become jobs, which needs the process's job runtime registered.
+    """
+    agent: dict[str, Any] = {"display_name": "Assistant", "role": "Answer questions.", "tools": list(tools)}
+    if max_tool_calls_per_turn is not None:
+        agent["max_tool_calls_per_turn"] = max_tool_calls_per_turn
+    authored: dict[str, Any] = {
+        "defaults": {"tools": []},
+        "agents": {"assistant": agent},
+        "memory": {"backend": "none"},
+        "models": {"default": {"provider": "openai", "id": "test-model", "extra_kwargs": {"api_key": "test-key"}}},
+        "timezone": "UTC",
+    }
+    if context_window is not None:
+        authored["models"]["default"]["context_window"] = context_window
+        authored["models"]["summary"] = {"provider": "openai", "id": "summary-model", "context_window": 100_000}
+        authored["defaults"]["compaction"] = {"model": "summary", "reserve_tokens": 500}
+    runtime_paths = test_runtime_paths(tmp_path)
+    config = bind_runtime_paths(Config.model_validate(authored), runtime_paths)
+    # An approval-gated call pauses the reply, which only a reply without background tool jobs does.
+    config.background_tool_jobs.enabled = background_jobs
+    if approval_rules:
+        config.tool_approval = ToolApprovalConfig(rules=list(approval_rules))
+    model = ScriptedModel([list(turn) for turn in turns])
+    install_model_providers(monkeypatch, {"default": model})
+    runtime = make_test_tool_runtime_context(
+        agent_name="assistant",
+        target=MessageTarget(
+            room_id=ROOM_ID,
+            source_thread_id=THREAD_ID,
+            resolved_thread_id=THREAD_ID,
+            reply_to_event_id=EVENT_ID,
+            session_id=SESSION_ID,
+        ),
+        requester_id=REQUESTER_ID,
+        client=SimpleNamespace(user_id="@mindroom_assistant:localhost"),
+        config=config,
+        runtime_paths=runtime_paths,
+        relations=make_relation_lookup(),
+        conversation_reader=make_conversation_reader_mock(),
+        correlation_id="correlation-1",
+        membership_turn_id=EVENT_ID,
+        # The turn's bot binds its plugins' hooks into the turn's context.
+        hooks=HookBindings(registry=HookRegistry.from_plugins(plugins)),
+    )
+    identity = runtime.execution_identity
+    storage = create_session_storage("assistant", config, runtime_paths, execution_identity=identity)
+    return _Reply(config, runtime_paths, model, TurnRecorder(user_message="Hello"), storage, identity, runtime)
+
+
+def _ctx(reply: _Reply, *, run_id: str = "run-1", **overrides: Any) -> ai.ResponseTurnContext:  # noqa: ANN401
+    """Return the reply's turn as the response runner builds it, its other inputs set by ``overrides``."""
+    return replace(
+        make_turn_context(
+            "assistant",
+            session_id=SESSION_ID,
+            run_id=run_id,
+            correlation_id="correlation-1",
+            reply_to_event_id=EVENT_ID,
+            room_id=ROOM_ID,
+            thread_id=THREAD_ID,
+            requester_id=REQUESTER_ID,
+        ),
+        execution_identity=reply.identity,
+        supports_native_tool_approval=True,
+        **overrides,
+    )
+
+
+async def _stream(
+    reply: _Reply,
+    *,
+    prompt: str = "Hello",
+    run_id: str = "run-1",
+    with_recorder: bool = True,
+    **turn_inputs: Any,  # noqa: ANN401
+) -> list[Any]:
+    """Stream one reply as the response runner does and return its chunks."""
+    with tool_runtime_context(reply.runtime):
+        return [
+            chunk
+            async for chunk in stream_agent_response(
+                _ctx(reply, run_id=run_id, prompt=prompt, **turn_inputs),
+                reply.runtime_paths,
+                reply.config,
+                sinks=TurnSinks(turn_recorder=reply.recorder if with_recorder else None),
+            )
+        ]
+
+
+async def _respond(reply: _Reply, *, prompt: str = "Hello", run_id: str = "run-1", **turn_inputs: Any) -> str:  # noqa: ANN401
+    """Run one reply collected into its text, as a reply delivered without streaming is."""
+    with tool_runtime_context(reply.runtime):
+        result = await ai_response(
+            _ctx(reply, run_id=run_id, prompt=prompt, **turn_inputs),
+            reply.runtime_paths,
+            reply.config,
+            sinks=TurnSinks(turn_recorder=reply.recorder),
+        )
+    return result.text
+
+
+def _stored(reply: _Reply, run_id: str = "run-1") -> RunRecord:
+    record = reply.storage.get_run(run_id)
+    assert isinstance(record, RunRecord), record
+    return record
+
+
+def _assert_counted_usage(reply: _Reply, expected: Sequence[tuple[int, int]]) -> None:
+    """Assert the reply's session counted the ``expected`` usage snapshots everywhere usage is read."""
+    assert_counted_usage(
+        reply.storage,
+        SESSION_ID,
+        expected,
+        config=reply.config,
+        runtime_paths=reply.runtime_paths,
+        model=reply.model.identity,
+        requester_id=REQUESTER_ID,
+    )
+
+
+def _switch_now(call_id: str) -> dict[str, Any]:
+    """Return a switch of the current response to the model it runs on, which ends the attempt for a continuation."""
+    return tool_call("switch_thread_model", call_id, model_name="default", when="after-toolcall")
+
+
+def _contents(messages: Sequence[Message]) -> list[tuple[str, object]]:
+    return [(message.role, message.content) for message in messages]
+
+
+def _raising(error: BaseException) -> Await:
+    async def raise_it() -> None:
+        raise error
+
+    return Await(raise_it)
+
+
+async def _cancel_current_task() -> None:
+    task = asyncio.current_task()
+    assert task is not None
+    task.cancel()
+    await asyncio.sleep(0)
+
+
+def _cut_off(call: dict[str, Any]) -> list[ScriptStep]:
+    """A response the output limit cut off while it requested ``call``."""
+    final = usage(5, 1)
+    return [
+        ToolCallReady(call),
+        UsageReported(final),
+        TurnCompleted(message=Message(role="assistant", tool_calls=[call], metrics=final), stop_reason="output_limit"),
+    ]
+
+
+class _QueuedState:
+    def __init__(self, *, pending: bool) -> None:
+        self.pending = pending
+
+    def has_interrupting_messages(self) -> bool:
+        return self.pending
+
+    def interrupting_snapshot(self) -> tuple[object, ...]:
+        return ("$pending",) if self.pending else ()
+
+    def queued_snapshot(self) -> tuple[object, ...]:
+        return ()
+
+    def requester_steer_snapshot(self) -> tuple[object, ...]:
+        return ()
+
+
+@pytest.mark.asyncio
+async def test_a_streamed_reply_runs_its_tool_calls_and_stores_one_completed_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    probe: type[_ProbeToolkit],
+) -> None:
+    """Tool events and text deltas stream in order, the run is stored once completed, and the recorder settles."""
+    reply = _reply(
+        tmp_path,
+        monkeypatch,
+        [calls(tool_call("touch", "call_1", label="a")), answer("The probe answered.", usage(20, 4))],
+    )
+
+    chunks = await _stream(reply)
+
+    assert probe.calls == ["a"]
+    assert [type(chunk).__name__ for chunk in chunks[:2]] == ["ToolStarted", "ToolCompleted"]
+    assert isinstance(chunks[-1], RunFinished)
+    assert "".join(streamed_text(chunks)) == "The probe answered."
+    assert len(reply.model.requests) == 2
+    assert reply.model.requests[1].messages[-1].role == "tool"
+    assert reply.model.requests[1].messages[-1].content == "touched a"
+    assert all(request.tool_choice is None for request in reply.model.requests)
+    record = _stored(reply)
+    assert record.status is RunStatus.completed
+    assert record.content == "The probe answered."
+    assert [tool.tool_name for tool in record.tools or []] == ["touch"]
+    assert record.metrics is not None
+    assert (record.metrics.tokens.input_tokens, record.metrics.tokens.output_tokens) == (20, 4)
+    assert reply.recorder.outcome == "completed"
+    assert reply.recorder.assistant_text == "The probe answered."
+    assert [tool.tool_name for tool in reply.recorder.completed_tools] == ["touch"]
+    assert reply.storage.load_session(SESSION_ID) is not None
+
+
+@pytest.mark.asyncio
+async def test_a_collected_reply_returns_the_streamed_text_with_its_tool_trace(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    probe: type[_ProbeToolkit],
+) -> None:
+    """A reply collected into one text keeps the tool calls where they streamed, before the answer that followed."""
+    reply = _reply(tmp_path, monkeypatch, [calls(tool_call("touch", "call_1", label="a")), answer("Done.")])
+
+    text = await _respond(reply)
+
+    assert text.strip() == "🔧 `touch` [1]\n\nDone."
+    assert probe.calls == ["a"]
+    assert _stored(reply).status is RunStatus.completed
+
+
+@pytest.mark.asyncio
+async def test_an_approval_gated_call_pauses_the_run_before_it_executes(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    probe: type[_ProbeToolkit],
+) -> None:
+    """A ``requires_confirmation`` tool never runs before approval: the run is stored paused on the call."""
+    reply = _reply(
+        tmp_path,
+        monkeypatch,
+        [calls(tool_call("touch", "call_1", label="dangerous"))],
+        approval_rules=[ApprovalRuleConfig(match="touch", action="require_approval")],
+    )
+
+    with pytest.raises(ResponsePausedForApproval) as raised:
+        await _respond(reply)
+
+    assert probe.calls == []
+    paused = raised.value.paused
+    assert paused.run_id == "run-1"
+    assert [(tool.tool_name, tool.requires_confirmation, tool.result) for tool in paused.tools] == [
+        ("touch", True, None),
+    ]
+    assert paused.toolkit_owners[("assistant", "touch")] == PROBE_TOOL
+    assert len(reply.model.requests) == 1
+    record = _stored(reply)
+    assert record.status is RunStatus.paused
+    assert [requirement.needs_confirmation for requirement in record.requirements or []] == [True]
+    assert reply.recorder.outcome == "suspended"
+
+
+@pytest.mark.asyncio
+async def test_a_pause_with_no_approval_to_ask_for_fails_the_reply(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    probe: type[_ProbeToolkit],
+) -> None:
+    """A run paused on an externally executed call that is not a delegation has nothing to resume it, so the reply fails.
+
+    The loop stores the ``PAUSED`` row; the turn driver records the failure on the turn recorder as an error and
+    writes it over the row, so the row no longer waits for an approval that never comes. The reply says why.
+    """
+    reply = _reply(
+        tmp_path,
+        monkeypatch,
+        [calls(tool_call("touch", "call_1", label="outside"))],
+        tools=(EXTERNAL_PROBE_TOOL,),
+    )
+    replaced = _runs_under_interrupted_records(monkeypatch, reply.storage)
+
+    text = await _respond(reply)
+
+    # Below the call it had shown, the reply ends with the failure's own paragraph.
+    assert text.split("\n\n")[-2:] == [
+        "🔧 `touch` [1] ⏳",
+        "[assistant] ⚠️ Error: agent run 'run-1' paused on ['touch'] without an approval to ask for",
+    ]
+    assert probe.calls == []
+    [paused] = replaced
+    assert paused.status is RunStatus.paused
+    assert [requirement.needs_external_execution for requirement in paused.requirements or []] == [True]
+    record = _stored(reply)
+    assert is_interrupted_replay_run(record)
+    assert not record.requirements
+    assert reply.recorder.outcome == "interrupted"
+    assert reply.recorder.original_status is RunStatus.error
+
+
+@pytest.mark.asyncio
+async def test_plugin_hooks_gate_and_observe_every_tool_call_and_the_call_is_recorded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    probe: type[_ProbeToolkit],
+) -> None:
+    """A before-call hook blocks a call the model requested, the after-call hook sees results, and calls are recorded."""
+    seen: list[tuple[str, object, bool]] = []
+    recorded: list[tuple[str, object]] = []
+
+    @hook(EVENT_TOOL_BEFORE_CALL)
+    async def block_b(ctx: ToolBeforeCallContext) -> None:
+        if ctx.arguments.get("label") == "b":
+            ctx.decline("b is off limits")
+
+    @hook(EVENT_TOOL_AFTER_CALL)
+    async def observe(ctx: ToolAfterCallContext) -> None:
+        seen.append((ctx.tool_name, ctx.result, ctx.blocked))
+
+    class _Recorder:
+        async def started(self, tool_name: str, args: Mapping[str, object]) -> str:
+            recorded.append(("started", (tool_name, dict(args))))
+            return tool_name
+
+        async def finished(self, call_id: str, tool_name: str, args: Mapping[str, object], result: object) -> None:
+            del tool_name, args
+            recorded.append(("finished", (call_id, result)))
+
+    reply = _reply(
+        tmp_path,
+        monkeypatch,
+        [
+            calls(tool_call("touch", "call_a", label="a"), tool_call("touch", "call_b", label="b")),
+            answer("Both handled."),
+        ],
+        plugins=[_hook_plugin("policy", [block_b, observe])],
+    )
+
+    with recording_tool_calls(_Recorder()):
+        chunks = await _stream(reply)
+
+    assert probe.calls == ["a"]
+    assert "".join(streamed_text(chunks)) == "Both handled."
+    results = {
+        message.tool_call_id: message.content for message in reply.model.requests[1].messages if message.role == "tool"
+    }
+    assert results["call_a"] == "touched a"
+    assert "[TOOL CALL DECLINED]" in str(results["call_b"])
+    assert "b is off limits" in str(results["call_b"])
+    assert {(name, blocked) for name, _result, blocked in seen} == {("touch", False), ("touch", True)}
+    assert [result for name, result, blocked in seen if not blocked] == ["touched a"]
+    assert ("started", ("touch", {"label": "a"})) in recorded
+    assert ("finished", ("touch", "touched a")) in recorded
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("with_recorder", [True, False])
+@pytest.mark.usefixtures("probe")
+async def test_a_stop_mid_stream_stores_the_cancelled_run_once_before_the_interrupted_record(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    with_recorder: bool,
+) -> None:
+    """The usage a cut-off request reported is counted once, on the cancelled run stored before the turn's record.
+
+    The turn driver writes the interrupted record once, over the cancelled run the loop stored first, whether or not
+    its caller passes a recorder.
+    """
+    reply = _reply(
+        tmp_path,
+        monkeypatch,
+        [[TextDelta("Partial "), UsageReported(usage(10, 2), final=False), Await(_cancel_current_task)]],
+    )
+    replaced = _runs_under_interrupted_records(monkeypatch, reply.storage)
+
+    task = asyncio.create_task(_stream(reply, with_recorder=with_recorder))
+    outcome = await asyncio.gather(task, return_exceptions=True)
+    assert isinstance(outcome[0], asyncio.CancelledError)
+
+    record = _stored(reply)
+    assert [(run.run_id, run.status) for run in replaced] == [("run-1", RunStatus.cancelled)]
+    assert record.metadata is not None
+    assert record.metadata["mindroom_original_status"] == "cancelled"
+    assert "Partial" in str(record.content)
+    if with_recorder:
+        assert reply.recorder.outcome == "interrupted"
+        assert reply.recorder.original_status is RunStatus.cancelled
+        assert reply.recorder.assistant_text == "Partial "
+    [row] = usage_rows(reply.storage, "run-1")
+    assert row["metrics"]["input_tokens"] == 10
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [True, False])
+@pytest.mark.usefixtures("probe")
+async def test_a_stopped_reply_records_the_text_and_tool_calls_it_had_shown(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    streaming: bool,
+) -> None:
+    """A blocking reply stopped mid-run records what its run had produced, as a streamed one does."""
+    reply = _reply(
+        tmp_path,
+        monkeypatch,
+        [
+            calls(tool_call("touch", "call_1", label="a")),
+            [TextDelta("Partial "), Await(_cancel_current_task)],
+        ],
+    )
+
+    task = asyncio.create_task(_stream(reply) if streaming else _respond(reply))
+    [outcome] = await asyncio.gather(task, return_exceptions=True)
+
+    assert isinstance(outcome, asyncio.CancelledError)
+    assert reply.recorder.outcome == "interrupted"
+    assert reply.recorder.original_status is RunStatus.cancelled
+    assert reply.recorder.assistant_text == "Partial "
+    assert [(tool.tool_name, tool.type) for tool in reply.recorder.completed_tools] == [
+        ("touch", "tool_call_completed"),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("probe")
+async def test_a_provider_error_stores_an_error_record_and_streams_the_friendly_text(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A failed request ends the reply with the user-facing error text; the run the loop stored says why it failed.
+
+    The turn's interrupted record then replaces that run, keeping that the turn ended in an error.
+    """
+    reply = _reply(tmp_path, monkeypatch, [[_raising(RateLimited("slow down", provider="openai"))]])
+    replaced = _runs_under_interrupted_records(monkeypatch, reply.storage)
+
+    chunks = await _stream(reply)
+
+    [text] = streamed_text(chunks)
+    assert "Rate limited" in text
+    [failed] = replaced
+    assert failed.status is RunStatus.error
+    assert (failed.content, failed.error) == (None, "slow down")
+    record = _stored(reply)
+    assert is_interrupted_replay_run(record)
+    assert (record.metadata or {})["mindroom_original_status"] == "error"
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("probe")
+async def test_an_error_record_never_repeats_an_earlier_answer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The interrupted-turn record of a failed reply holds only this reply's own text, not replayed history."""
+    reply = _reply(tmp_path, monkeypatch, [[_raising(RateLimited("slow down", provider="openai"))]])
+    earlier = RunRecord(
+        run_id="run-0",
+        session_id=SESSION_ID,
+        agent_id="assistant",
+        status=RunStatus.completed,
+        content="The image is one green pixel.",
+        messages=[
+            Message(role="user", content="What is this?"),
+            Message(role="assistant", content="The image is one green pixel."),
+        ],
+    )
+    session = new_scope_session(session_id=SESSION_ID, scope=HistoryScope(kind="agent", scope_id="assistant"))
+    session.runs = [earlier]
+    seed_session(reply.storage, session)
+    replaced = _runs_under_interrupted_records(monkeypatch, reply.storage)
+
+    text = await _respond(reply)
+
+    assert "Rate limited" in text
+    [failed] = replaced
+    assert failed.status is RunStatus.error
+    assert (failed.content, failed.error) == (None, "slow down")
+    assert all("green pixel" not in str(message.content) for message in failed.messages if message.role == "assistant")
+    record = _stored(reply)
+    assert all("green pixel" not in str(message.content) for message in record.messages if message.role == "assistant")
+    # The turn's own record keeps no partial text either: the earlier answer was history, not this reply's.
+    assert reply.recorder.outcome == "interrupted"
+    assert reply.recorder.original_status is RunStatus.error
+    assert reply.recorder.assistant_text == ""
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("probe")
+async def test_an_error_record_never_takes_an_earlier_reply_in_the_thread_for_its_own_text(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reply that fails on its first request records no partial text, though its input carries an earlier reply.
+
+    The thread's earlier reply reaches the run's input, and is stored with the run, as a thread message from the
+    agent, so the run holds no assistant message a model of it did not answer.
+    """
+    reply = _reply(tmp_path, monkeypatch, [[_raising(RateLimited("slow down", provider="openai"))]])
+    agent_id = entity_identity_registry(reply.config, reply.runtime_paths).current_ids["assistant"].full_id
+    thread_history = [
+        make_visible_message(sender=REQUESTER_ID, body="What is this?", event_id="$question:localhost"),
+        make_visible_message(sender=agent_id, body="The image is one green pixel.", event_id="$answer:localhost"),
+    ]
+
+    replaced = _runs_under_interrupted_records(monkeypatch, reply.storage)
+
+    text = await _respond(reply, thread_history=thread_history)
+
+    assert "Rate limited" in text
+    [failed] = replaced
+    assert [message.role for message in failed.messages if "green pixel" in str(message.content)] == ["user"]
+    assert not [message for message in failed.messages if message.role == "assistant"]
+    assert reply.recorder.outcome == "interrupted"
+    assert reply.recorder.assistant_text == ""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ending", ["completed", "stopped", "failed"])
+@pytest.mark.usefixtures("probe")
+async def test_the_next_turn_still_reads_the_thread_messages_a_reply_read_however_the_reply_ended(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ending: str,
+) -> None:
+    """What others posted before the agent was addressed reaches the next turn once, before the prompt it preceded.
+
+    A stopped or failed reply keeps the thread messages it read where a completed one keeps them.
+    """
+    first_reply = {
+        "completed": answer("Noted."),
+        "stopped": [TextDelta("Partial "), Await(_cancel_current_task)],
+        "failed": [_raising(RateLimited("slow down", provider="openai"))],
+    }[ending]
+    reply = _reply(tmp_path, monkeypatch, [first_reply, answer("Slot 7.")])
+    earlier = make_visible_message(
+        sender="@alice:localhost",
+        body="The deploy key is in vault slot 7.",
+        event_id="$alice:localhost",
+    )
+    current = make_visible_message(sender=REQUESTER_ID, body="Hello", event_id=EVENT_ID)
+    follow_up = make_visible_message(sender=REQUESTER_ID, body="Where is the key?", event_id="$follow-up:localhost")
+
+    first_turn = asyncio.create_task(_respond(reply, thread_history=[earlier, current]))
+    await asyncio.gather(first_turn, return_exceptions=True)
+    reply.recorder = TurnRecorder()
+    await _respond(
+        reply,
+        prompt="Where is the key?",
+        run_id="run-2",
+        reply_to_event_id="$follow-up:localhost",
+        thread_history=[earlier, current, follow_up],
+    )
+
+    sent = [str(message.content) for message in reply.model.requests[-1].messages]
+    mentions = [index for index, content in enumerate(sent) if "vault slot 7" in content]
+    first_prompt = next(index for index, content in enumerate(sent) if EVENT_ID in content)
+    assert len(mentions) == 1, sent
+    assert mentions[0] < first_prompt, sent
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("probe")
+async def test_a_reply_stopped_before_its_run_stored_anything_keeps_the_thread_messages_it_prepared(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Stop that lands before the reply's run starts storing still keeps the thread messages its metadata marks seen."""
+    reply = _reply(tmp_path, monkeypatch, [])
+
+    def stopped_before_it_stores(*_args: object, **_kwargs: object) -> AsyncIterator[object]:
+        async def events() -> AsyncIterator[object]:
+            raise asyncio.CancelledError
+            yield
+
+        return events()
+
+    monkeypatch.setattr(ai, "run_agent", stopped_before_it_stores)
+    earlier = make_visible_message(
+        sender="@alice:localhost",
+        body="The deploy key is in vault slot 7.",
+        event_id="$alice:localhost",
+    )
+    current = make_visible_message(sender=REQUESTER_ID, body="Hello", event_id=EVENT_ID)
+
+    first_turn = asyncio.create_task(_respond(reply, thread_history=[earlier, current]))
+    await asyncio.gather(first_turn, return_exceptions=True)
+
+    record = _stored(reply)
+    assert is_interrupted_replay_run(record)
+    assert ["vault slot 7" in str(message.content) for message in record.messages] == [True, False, False]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ending", ["completed", "stopped", "failed"])
+@pytest.mark.usefixtures("probe")
+async def test_thread_messages_a_mid_turn_fold_summarized_stay_out_of_the_next_turn_however_the_reply_ended(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ending: str,
+) -> None:
+    """Once a fold summarized the thread messages a reply read, the next turn reads its summary, not those messages.
+
+    The summary follows the reply's prompt, where the fold placed it.
+    """
+    second_reply = {
+        "completed": answer("Done."),
+        "stopped": [TextDelta("Partial "), Await(_cancel_current_task)],
+        "failed": [_raising(RateLimited("slow down", provider="openai"))],
+    }[ending]
+    reply = _reply(
+        tmp_path,
+        monkeypatch,
+        # The first response reports a request far over the 4,000-token window, so the second request compacts.
+        [calls(tool_call("touch", "call_1", label="a"), metrics=usage(1_000_000, 1)), second_reply, answer("Slot 7.")],
+        context_window=4000,
+    )
+    install_model_providers(monkeypatch, {"summary": summary_model("SUMMARY")})
+    earlier = make_visible_message(
+        sender="@alice:localhost",
+        body="The deploy key is in vault slot 7.",
+        event_id="$alice:localhost",
+    )
+    current = make_visible_message(sender=REQUESTER_ID, body="Hello", event_id=EVENT_ID)
+    follow_up = make_visible_message(sender=REQUESTER_ID, body="Where is the key?", event_id="$follow-up:localhost")
+
+    first_turn = asyncio.create_task(_respond(reply, thread_history=[earlier, current]))
+    await asyncio.gather(first_turn, return_exceptions=True)
+    assert any("vault slot 7" in str(message.content) for message in reply.model.requests[0].messages)
+    reply.recorder = TurnRecorder()
+    await _respond(
+        reply,
+        prompt="Where is the key?",
+        run_id="run-2",
+        reply_to_event_id="$follow-up:localhost",
+        thread_history=[earlier, current, follow_up],
+    )
+
+    sent = [str(message.content) for message in reply.model.requests[-1].messages]
+    assert not any("vault slot 7" in content for content in sent), sent
+    summaries = [index for index, content in enumerate(sent) if "SUMMARY" in content]
+    first_prompt = next(index for index, content in enumerate(sent) if EVENT_ID in content)
+    assert len(summaries) == 1, sent
+    assert summaries[0] == first_prompt + 1, sent
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("ending", ["completed", "stopped", "failed"])
+@pytest.mark.usefixtures("probe")
+async def test_the_next_turn_reads_a_run_local_fold_s_summary_in_place_of_what_it_folded_however_the_reply_ended(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    ending: str,
+) -> None:
+    """A scheduled reply whose history budget the thread message it read used up folds that message into its own run.
+
+    The run keeps the fold's summary in place of the message, and the next turn reads it so, however the reply ended.
+    """
+    second_reply = {
+        "completed": answer("Done."),
+        "stopped": [TextDelta("Partial "), Await(_cancel_current_task)],
+        "failed": [_raising(RateLimited("slow down", provider="openai"))],
+    }[ending]
+    reply = _reply(
+        tmp_path,
+        monkeypatch,
+        # The first response reports a request far over the 4,000-token window, so the second request compacts.
+        [calls(tool_call("touch", "call_1", label="a"), metrics=usage(1_000_000, 1)), second_reply, answer("Slot 7.")],
+        context_window=4000,
+    )
+    install_model_providers(monkeypatch, {"summary": summary_model("SUMMARY")})
+    earlier = make_visible_message(
+        sender="@alice:localhost",
+        body="The deploy key is in vault slot 7.",
+        event_id="$alice:localhost",
+    )
+    current = make_visible_message(sender=REQUESTER_ID, body="Hello", event_id=EVENT_ID)
+    follow_up = make_visible_message(sender=REQUESTER_ID, body="Where is the key?", event_id="$follow-up:localhost")
+    budget = ScheduledHistoryBudget(limit=1, source_event_id=EVENT_ID)
+
+    first_turn = asyncio.create_task(
+        _respond(reply, thread_history=[earlier, current], scheduled_history_budget=budget),
+    )
+    await asyncio.gather(first_turn, return_exceptions=True)
+    first, folded = ([str(message.content) for message in request.messages] for request in reply.model.requests[:2])
+    assert any("vault slot 7" in content for content in first)
+    assert not any("vault slot 7" in content for content in folded)
+    reply.recorder = TurnRecorder()
+    await _respond(
+        reply,
+        prompt="Where is the key?",
+        run_id="run-2",
+        reply_to_event_id="$follow-up:localhost",
+        thread_history=[earlier, current, follow_up],
+    )
+
+    sent = [str(message.content) for message in reply.model.requests[-1].messages]
+    assert not any("vault slot 7" in content for content in sent), sent
+    summaries = [index for index, content in enumerate(sent) if "SUMMARY" in content]
+    first_prompt = next(index for index, content in enumerate(sent) if EVENT_ID in content)
+    assert len(summaries) == 1, sent
+    assert summaries[0] > first_prompt, sent
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("probe")
+async def test_an_empty_reply_is_left_out_of_history_and_retried_once_under_a_run_id_of_its_own(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A completed run with nothing to show is never stored as a turn, and the turn tries again under a new run id.
+
+    The empty run's usage stays under the turn's run id. The retry's run is the turn's final run, which the turn's
+    record, its run metadata, and the attempt-start sink a delegated child publishes its run through all name.
+    """
+    reply = _reply(tmp_path, monkeypatch, [answer("", usage(100, 5)), answer("Second try.", usage(120, 9))])
+    run_metadata: dict[str, Any] = {}
+    started: list[str] = []
+    sinks = TurnSinks(
+        turn_recorder=reply.recorder,
+        run_metadata_collector=run_metadata,
+        on_attempt_start=lambda run_id, _model_name: started.append(run_id),
+    )
+
+    with tool_runtime_context(reply.runtime):
+        chunks = [
+            chunk async for chunk in stream_agent_response(_ctx(reply), reply.runtime_paths, reply.config, sinks=sinks)
+        ]
+
+    assert "".join(streamed_text(chunks)) == "Second try."
+    assert len(reply.model.requests) == 2
+    [record] = reply.storage.list_runs(SESSION_ID)
+    assert record.content == "Second try."
+    assert started == ["run-1", record.run_id]
+    assert (reply.recorder.outcome, reply.recorder.run_id) == ("completed", record.run_id)
+    assert run_metadata[AI_RUN_METADATA_KEY]["run_id"] == record.run_id
+    assert [row["metrics"]["input_tokens"] for row in usage_rows(reply.storage, "run-1")] == [100]
+    assert [row["metrics"]["input_tokens"] for row in usage_rows(reply.storage, record.run_id)] == [120]
+
+
+@pytest.mark.asyncio
+async def test_a_queued_message_is_announced_after_a_tool_batch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    probe: type[_ProbeToolkit],
+) -> None:
+    """When a newer human message waits, the request after a tool batch carries the queued-message notice."""
+    reply = _reply(tmp_path, monkeypatch, [calls(tool_call("touch", "call_1", label="a")), answer("Noted.")])
+
+    with queued_message_signal_context(_QueuedState(pending=True)):
+        chunks = await _stream(reply)
+
+    assert probe.calls == ["a"]
+    assert "".join(streamed_text(chunks)) == "Noted."
+    notice = reply.config.get_prompt("QUEUED_MESSAGE_NOTICE_TEXT")
+    assert reply.model.requests[1].messages[-1].content == notice
+    assert all(message.content != notice for message in reply.model.requests[0].messages)
+
+
+def _notice_markers(messages: Sequence[Message]) -> list[object]:
+    return [
+        (message.provider_data or {})[QUEUED_MESSAGE_NOTICE_MARKER_KEY]
+        for message in messages
+        if is_queued_notice_message(message)
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("probe")
+async def test_a_reply_stores_the_notice_its_model_saw_as_it_saw_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The run stores the notice where the model read it, and nothing rewrites it once the reply is delivered."""
+    reply = _reply(tmp_path, monkeypatch, [calls(tool_call("touch", "call_1", label="a")), answer("final answer")])
+
+    with queued_message_signal_context(_QueuedState(pending=True)):
+        result = "".join(streamed_text(await _stream(reply)))
+
+    assert result.startswith("final answer")
+    stored = _stored(reply).messages
+    assert _notice_markers(stored) == [True]
+    assert [message.role for message in stored] == ["user", "assistant", "tool", "user", "assistant"]
+
+
+@pytest.mark.asyncio
+async def test_a_model_switch_continuation_keeps_the_one_notice_the_run_it_continues_stored(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    probe: type[_ProbeToolkit],
+) -> None:
+    """The switched run stored the reply's notice, which the continuation replays; a later batch moves that copy last.
+
+    The copy stays replayed history, so the continuation stores no second notice. The queue empties before the switch,
+    since a run whose request carried the notice runs no further call, and refills while the continuation's first
+    request streams: that request ends without a notice, the copy sits before the switch, so its call runs.
+    """
+    queue = _QueuedState(pending=True)
+
+    async def queue_empties() -> None:
+        queue.pending = False
+
+    async def queue_refills() -> None:
+        queue.pending = True
+
+    reply = _reply(
+        tmp_path,
+        monkeypatch,
+        [
+            calls(tool_call("touch", "call_1", label="a")),
+            [Await(queue_empties), *calls(_switch_now("call_2"))],
+            [Await(queue_refills), *calls(tool_call("touch", "call_3", label="b"))],
+            answer("ok"),
+        ],
+        tools=(PROBE_TOOL, "thread_model"),
+    )
+    with_current_room_member_access(reply.config)
+
+    with queued_message_signal_context(queue):
+        await _stream(reply)
+
+    assert probe.calls == ["a", "b"]
+    *_, last = reply.model.requests
+    assert [message.from_history for message in last.messages if is_queued_notice_message(message)] == [True]
+    assert is_queued_notice_message(last.messages[-1])
+    session = reply.storage.load_session(SESSION_ID)
+    assert session is not None
+    assert [(run.run_id == "run-1", _notice_markers(run.messages)) for run in session.runs] == [
+        (True, [True]),
+        (False, []),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("probe")
+async def test_a_failed_reply_stores_no_notice(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The failed run the loop stored with its notice is replaced by the turn's interrupted record, which holds none."""
+    reply = _reply(
+        tmp_path,
+        monkeypatch,
+        [calls(tool_call("touch", "call_1", label="a")), [_raising(RateLimited("slow down", provider="openai"))]],
+    )
+
+    replaced = _runs_under_interrupted_records(monkeypatch, reply.storage)
+
+    with queued_message_signal_context(_QueuedState(pending=True)):
+        await _respond(reply)
+
+    [failed] = replaced
+    assert failed.status == RunStatus.error
+    assert _notice_markers(failed.messages) == [True]
+    assert _notice_markers(_stored(reply).messages) == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("probe")
+async def test_a_notice_an_earlier_release_stored_replays_as_it_is_stored(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Notices stored by earlier releases, one finalized after delivery and one a crashed reply left, replay unchanged.
+
+    Opening the scope rewrites neither row, and the model reads each as the user message it is.
+    """
+    reply = _reply(tmp_path, monkeypatch, [answer("final answer")])
+
+    def notice(marker: object, text: str) -> Message:
+        return Message(
+            role="user",
+            content=text,
+            provider_data={
+                QUEUED_MESSAGE_NOTICE_MARKER_KEY: marker,
+                "mindroom_queued_message_notice_response_turn_id": f"turn-{text}",
+            },
+        )
+
+    finalized = [
+        Message(role="user", content="First"),
+        notice("persisted", "Finalized"),
+        Message(role="assistant", content="Paused."),
+    ]
+    crash_left = [
+        Message(role="user", content="Second"),
+        notice(True, "Left"),
+        Message(role="assistant", content="Paused too."),
+    ]
+    seed_session(
+        reply.storage,
+        ConversationSession(
+            session_id=SESSION_ID,
+            kind="agent",
+            owner_id="assistant",
+            runs=[
+                RunRecord(run_id="run-a", agent_id="assistant", status=RunStatus.completed, messages=finalized),
+                RunRecord(run_id="run-b", agent_id="assistant", status=RunStatus.completed, messages=crash_left),
+            ],
+            created_at=1,
+        ),
+    )
+    stored_before = [_stored(reply, run_id).to_dict() for run_id in ("run-a", "run-b")]
+
+    assert await _respond(reply) == "final answer"
+
+    assert [_stored(reply, run_id).to_dict() for run_id in ("run-a", "run-b")] == stored_before
+    replayed = [message for message in reply.model.requests[0].messages if message.from_history]
+    assert _contents(replayed) == _contents([*finalized, *crash_left])
+    assert [message.content for message in replayed if is_queued_notice_message(message)] == ["Finalized", "Left"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("probe")
+async def test_a_reply_whose_preparation_fails_ends_with_a_failed_reply_that_carries_the_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The reply's last chunk is its failed reply, which carries the error it reports for readers such as the API."""
+    reply = _reply(tmp_path, monkeypatch, [answer("Done.")])
+    error = RuntimeError("history unavailable")
+
+    async def history_unavailable(*_args: object, **_kwargs: object) -> None:
+        raise error
+
+    monkeypatch.setattr(ai, "_prepare_agent_run_context", history_unavailable)
+
+    assert await _stream(reply) == [FailedReply("[assistant] ⚠️ Error: history unavailable", error)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("probe")
+async def test_a_silent_participation_decision_ends_the_reply_before_any_model_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reply that decides to stay silent sends only the decision request and leaves no run behind."""
+    reply = _reply(tmp_path, monkeypatch, [answer('{"action":"stay_silent","reason":"Humans are talking."}')])
+    gate = ParticipationGate()
+
+    result = await _respond(reply, participation=gate)
+
+    assert result == ""
+    assert gate.is_silent
+    assert gate.is_declined
+    [decision] = reply.model.requests
+    assert decision.tool_choice == "none"
+    assert reply.storage.list_runs(SESSION_ID) == []
+    assert reply.recorder.outcome == "skipped"
+
+
+_SILENT_DECISION = '{"action":"stay_silent","reason":"Humans are talking."}'
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("probe")
+@pytest.mark.parametrize("ending", ["empty", "declined"])
+async def test_a_crash_after_a_reply_that_is_no_turn_leaves_nothing_the_next_prompt_replays(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    ending: str,
+) -> None:
+    """An empty reply, or one its participation check declined, is never stored as a turn, so no crash leaves one."""
+    first = answer("") if ending == "empty" else answer(_SILENT_DECISION)
+    reply = _reply(tmp_path, monkeypatch, [first, answer("Next answer.")])
+    crash_after_first_terminal_store(monkeypatch)
+
+    with pytest.raises(ProcessCrash):
+        await _respond(reply, participation=ParticipationGate() if ending == "declined" else None)
+    reply.recorder = TurnRecorder(user_message="Next question")
+    result = await _respond(reply, prompt="Next question", run_id="run-2")
+
+    assert result == "Next answer."
+    assert [message for message in reply.model.requests[-1].messages if message.from_history] == []
+    assert [run.run_id for run in reply.storage.list_runs(SESSION_ID)] == ["run-2"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("probe")
+@pytest.mark.parametrize("ending", ["empty", "declined"])
+@pytest.mark.parametrize("run_id", ["run-1", None])
+async def test_a_reply_that_is_no_turn_still_counts_toward_usage_and_budgets(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    ending: str,
+    run_id: str | None,
+) -> None:
+    """Its tokens stay in the usage ledger, the usage report's session totals, and the requester's monthly spend."""
+    if ending == "empty":
+        script = [answer("", usage(100, 5)), answer("Recovered.", usage(120, 9))]
+        expected_snapshots, stored = [(100, 5), (120, 9)], ["Recovered."]
+    else:
+        script = [answer(_SILENT_DECISION, usage(80, 12))]
+        expected_snapshots, stored = [(80, 12)], []
+    reply = _reply(tmp_path, monkeypatch, script)
+
+    # With a turn run id or without one, an empty attempt's retry runs under a run id of its own.
+    await _respond(reply, run_id=run_id, participation=ParticipationGate() if ending == "declined" else None)
+
+    assert [run.content for run in reply.storage.list_runs(SESSION_ID)] == stored
+    _assert_counted_usage(reply, expected_snapshots)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("probe")
+async def test_an_approving_participation_decision_reuses_the_reply_prefix(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The decision request is the reply's exact messages plus the decision prompt, with tool selection disabled."""
+    reply = _reply(
+        tmp_path,
+        monkeypatch,
+        [answer('{"action":"respond","reason":"A direct question."}'), answer("Useful answer")],
+    )
+    gate = ParticipationGate(instructions="Offer concise technical help.")
+
+    result = await _respond(reply, participation=gate)
+
+    assert result == "Useful answer"
+    assert gate.approved
+    decision, answer_request = reply.model.requests
+    assert _contents(decision.messages[:-1]) == _contents(answer_request.messages)
+    assert decision.messages[-1].role == "user"
+    assert "Offer concise technical help." in str(decision.messages[-1].content)
+    assert decision.tools == answer_request.tools
+    assert decision.tool_choice == "none"
+    assert answer_request.tool_choice is None
+    record = _stored(reply)
+    assert record.content == "Useful answer"
+    # The decision prompt never enters the run's own history.
+    assert all("respond or stay_silent" not in str(message.content) for message in record.messages)
+    assert record.metrics is not None
+
+
+@pytest.mark.asyncio
+async def test_the_request_cap_ends_a_runaway_tool_loop_and_logs_the_pinned_event(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    probe: type[_ProbeToolkit],
+) -> None:
+    """Past the configured budget, calls are refused and the run completes after budget + 2 requests."""
+    reply = _reply(
+        tmp_path,
+        monkeypatch,
+        [calls(tool_call("touch", f"call_{index}", label=str(index)), content="Working. ") for index in range(3)],
+        max_tool_calls_per_turn=1,
+    )
+
+    with capture_logs() as logs:
+        chunks = await _stream(reply)
+
+    assert probe.calls == ["0"]
+    assert len(reply.model.requests) == 3
+    assert "".join(streamed_text(chunks)) == "Working. " * 3
+    assert _stored(reply).status is RunStatus.completed
+    assert [
+        (entry["entity"], entry["budget"], entry["model_requests"])
+        for entry in logs
+        if entry["event"] == "tool_call_limit_reached"
+    ] == [("assistant", 1, 3)]
+
+
+@pytest.mark.asyncio
+async def test_a_turn_that_reads_the_approval_receipt_keeps_it_for_its_run_which_stops_without_storing_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    probe: type[_ProbeToolkit],
+) -> None:
+    """The bound receipt follows the reading run's input in each of its requests.
+
+    The model switch stops that run, so it stores no turn context, and the turn's answer comes from a second attempt
+    without the receipt.
+    """
+    reply = _reply(
+        tmp_path,
+        monkeypatch,
+        [calls(tool_call("touch", "call_1", label="a")), calls(_switch_now("call_2")), answer("ok")],
+        tools=(PROBE_TOOL, "thread_model"),
+    )
+    with_current_room_member_access(reply.config)
+
+    with approval_receipt_context(RECEIPT_CALLS, run_id="run-1"):
+        await _stream(reply, run_id="run-1")
+
+    assert probe.calls == ["a"]
+    first, second, retried = reply.model.requests
+    assert (first.messages[-1].role, first.messages[-1].content) == ("user", RECEIPT_TEXT)
+    assert RECEIPT_TEXT not in system_text(first.messages)
+    assert second.messages[: len(first.messages)] == first.messages
+    assert all(RECEIPT_TEXT not in str(message.content) for message in retried.messages)
+    session = reply.storage.load_session(SESSION_ID)
+    assert session is not None
+    assert len(session.runs) == 2
+    assert all(RECEIPT_TEXT not in str(message.content) for run in session.runs for message in run.messages)
+
+
+@pytest.mark.asyncio
+async def test_a_later_attempt_of_a_turn_on_a_new_scope_replays_the_run_an_earlier_attempt_saved(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    probe: type[_ProbeToolkit],
+) -> None:
+    """The scope's first session stays with the turn, so the attempt after a model switch replays the first one's run.
+
+    The scope has no stored session when the turn starts; the second attempt's request carries both calls of the first.
+    """
+    reply = _reply(
+        tmp_path,
+        monkeypatch,
+        [calls(tool_call("touch", "call_1", label="a")), calls(_switch_now("call_2")), answer("ok")],
+        tools=(PROBE_TOOL, "thread_model"),
+    )
+    with_current_room_member_access(reply.config)
+
+    await _stream(reply)
+
+    assert probe.calls == ["a"]
+    *_, last = reply.model.requests
+    assert last.messages[-1].role == "user"
+    assert [message.tool_call_id for message in last.messages if message.role == "tool"] == ["call_1", "call_2"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("when", ["next-turn", "after-toolcall"])
+@pytest.mark.parametrize("max_tool_calls_per_turn", [1, None], ids=["refused_by_the_call_limit", "ran_and_failed"])
+async def test_a_rejected_model_switch_is_answered_in_the_run_that_made_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    probe: type[_ProbeToolkit],
+    max_tool_calls_per_turn: int | None,
+    when: str,
+) -> None:
+    """Whether the call limit refused the switch or the tool rejected its model, the model reads why and answers.
+
+    The turn runs one attempt and stores one run, and its last request carries the switch's result, not the prompt.
+    """
+    reply = _reply(
+        tmp_path,
+        monkeypatch,
+        [
+            calls(tool_call("touch", "call_1", label="a")),
+            calls(tool_call("switch_thread_model", "call_2", model_name="missing", when=when)),
+            answer("Done."),
+            answer("Started over."),
+        ],
+        tools=(PROBE_TOOL, "thread_model"),
+        max_tool_calls_per_turn=max_tool_calls_per_turn,
+    )
+
+    chunks = await _stream(reply)
+
+    assert probe.calls == ["a"]
+    *_, last = reply.model.requests
+    assert len(reply.model.requests) == 3
+    assert (last.messages[-1].role, last.messages[-1].tool_call_id) == ("tool", "call_2")
+    assert "".join(streamed_text(chunks)).endswith("Done.")
+    session = reply.storage.load_session(SESSION_ID)
+    assert session is not None
+    assert [run.run_id for run in session.runs] == ["run-1"]
+    # The refused switch is recorded as a failed call; the one that ran answered with the tool's own error payload.
+    assert [(tool.tool_name, tool.is_error) for tool in session.runs[0].tools or ()] == [
+        ("touch", False),
+        ("switch_thread_model", max_tool_calls_per_turn is not None),
+    ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("probe")
+async def test_a_next_turn_model_switch_is_answered_in_the_run_that_made_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A default switch builds no second attempt: the model reads its switch's result and answers on its own model.
+
+    The turn stores one run, which holds the prompt once, and the thread's next turn uses the new model.
+    """
+    reply = _reply(
+        tmp_path,
+        monkeypatch,
+        [calls(tool_call("switch_thread_model", "call-switch", model_name="large")), answer("Switched.")],
+        tools=(PROBE_TOOL, "thread_model"),
+    )
+    with_current_room_member_access(reply.config)
+    reply.config.models["large"] = ModelConfig(provider="openai", id="large-model")
+    large = ScriptedModel([])
+    install_model_providers(monkeypatch, {"large": large})
+
+    with patch.object(ai, "create_agent", wraps=ai.create_agent) as build:
+        chunks = await _stream(reply, prompt="Use the large model from now on.")
+
+    assert "".join(streamed_text(chunks)).endswith("Switched.")
+    assert build.call_count == 1
+    assert large.requests == []
+    _, second = reply.model.requests
+    assert (second.messages[-1].role, second.messages[-1].tool_call_id) == ("tool", "call-switch")
+    assert json.loads(str(second.messages[-1].content))["when"] == "next-turn"
+    session = reply.storage.load_session(SESSION_ID)
+    assert session is not None
+    assert [run.run_id for run in session.runs] == ["run-1"]
+    stored = [str(message.content) for message in session.runs[0].messages]
+    assert sum("Use the large model from now on." in content for content in stored) == 1
+    override = resolve_thread_model_override(reply.runtime_paths, THREAD_ID, config=reply.config)
+    assert override.active["assistant"] == "large"
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("probe")
+@pytest.mark.parametrize("collected", [False, True], ids=["streamed", "collected"])
+@pytest.mark.parametrize("ending", ["empty_retry", "model_switch"])
+async def test_a_reply_publishes_the_usage_and_cost_of_every_attempt_its_turn_ran(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    ending: str,
+    collected: bool,
+) -> None:
+    """The reply's usage and cost sum its attempts, an empty one and its retry or a model switch and its continuation.
+
+    They are what the usage ledger counts, each attempt priced at its own model, and the reply's first token is the
+    first attempt's. The model, the run, the status, and the context are those of the attempt that answered.
+    """
+    switch = tool_call("switch_thread_model", "call-switch", model_name="large", when="after-toolcall")
+    first_usage = usage(100, 5, time_to_first_token=0.5)
+    first = answer("", first_usage) if ending == "empty_retry" else calls(switch, metrics=first_usage)
+    final = answer("Answered.", usage(120, 9, time_to_first_token=0.25))
+    reply = _reply(
+        tmp_path,
+        monkeypatch,
+        [first, final] if ending == "empty_retry" else [first],
+        tools=(PROBE_TOOL, "thread_model"),
+    )
+    with_current_room_member_access(reply.config)
+    reply.config.models["default"].pricing = ModelPricing(input=2, output=10)
+    reply.config.models["default"].context_window = 1_000
+    reply.config.models["large"] = ModelConfig(
+        provider="openai",
+        id="large-model",
+        context_window=2_000,
+        pricing=ModelPricing(input=3, output=15),
+    )
+    # Each scripted model answers as the model its config names, whose prices the reply's cost reads.
+    reply.model.identity = model_identity(reply.config.models["default"])
+    large = ScriptedModel([final], identity=model_identity(reply.config.models["large"]))
+    install_model_providers(monkeypatch, {"large": large})
+    sinks = TurnSinks(turn_recorder=reply.recorder)
+
+    with tool_runtime_context(reply.runtime):
+        if collected:
+            result = await ai_response(_ctx(reply), reply.runtime_paths, reply.config, sinks=sinks)
+            published = result.run_metadata[AI_RUN_METADATA_KEY]
+        else:
+            run_metadata: dict[str, Any] = {}
+            stream = stream_agent_response(
+                _ctx(reply),
+                reply.runtime_paths,
+                reply.config,
+                sinks=replace(sinks, run_metadata_collector=run_metadata),
+            )
+            assert "".join(streamed_text([chunk async for chunk in stream])) == "Answered."
+            published = run_metadata[AI_RUN_METADATA_KEY]
+
+    assert sorted(counted_usage(reply.storage, SESSION_ID)) == [(100, 5), (120, 9)]
+    usage_published = published["usage"]
+    assert (usage_published["input_tokens"], usage_published["output_tokens"]) == counted_total(
+        reply.storage,
+        SESSION_ID,
+    )
+    assert (usage_published["total_tokens"], usage_published["time_to_first_token"]) == (234, "0.5")
+    # Each attempt is priced at its model's prices: 100/5 and 120/9 tokens at 2/10 or 3/15 dollars per million.
+    cost = 100 * 2 + 5 * 10 + (120 * 2 + 9 * 10 if ending == "empty_retry" else 120 * 3 + 9 * 15)
+    assert published["cost"] == {"usd": format_cost_usd(cost / 1_000_000)}
+    final_model, window = ("default", 1_000) if ending == "empty_retry" else ("large", 2_000)
+    assert published["model"]["config"] == final_model
+    assert published["context"] == {"input_tokens": 120, "window_tokens": window}
+    assert (published["run_id"], published["status"]) == (reply.recorder.run_id, "completed")
+    assert reply.recorder.run_id != "run-1"
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("probe")
+async def test_a_reply_publishes_the_usage_of_each_of_three_attempts(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A model switch whose continuation came back empty and was retried publishes all three attempts' usage."""
+    reply = _reply(
+        tmp_path,
+        monkeypatch,
+        [
+            calls(_switch_now("call-switch"), metrics=usage(100, 5)),
+            answer("", usage(40, 2)),
+            answer("Answered.", usage(120, 9)),
+        ],
+        tools=(PROBE_TOOL, "thread_model"),
+    )
+    with_current_room_member_access(reply.config)
+    run_metadata: dict[str, Any] = {}
+
+    with tool_runtime_context(reply.runtime):
+        stream = stream_agent_response(
+            _ctx(reply),
+            reply.runtime_paths,
+            reply.config,
+            sinks=TurnSinks(turn_recorder=reply.recorder, run_metadata_collector=run_metadata),
+        )
+        assert "".join(streamed_text([chunk async for chunk in stream])).endswith("Answered.")
+
+    assert len(reply.model.requests) == 3
+    assert sorted(counted_usage(reply.storage, SESSION_ID)) == [(40, 2), (100, 5), (120, 9)]
+    published = run_metadata[AI_RUN_METADATA_KEY]["usage"]
+    assert (published["input_tokens"], published["output_tokens"]) == counted_total(reply.storage, SESSION_ID)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("probe")
+async def test_a_reply_whose_continuation_failed_publishes_the_usage_of_the_attempt_before_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The failed attempt ends the turn, and the reply's usage still holds the switch's attempt, as the ledger does."""
+    reply = _reply(
+        tmp_path,
+        monkeypatch,
+        [
+            calls(_switch_now("call-switch"), metrics=usage(100, 5)),
+            [_raising(RateLimited("slow down", provider="openai"))],
+        ],
+        tools=(PROBE_TOOL, "thread_model"),
+    )
+    with_current_room_member_access(reply.config)
+
+    with tool_runtime_context(reply.runtime):
+        result = await ai_response(_ctx(reply), reply.runtime_paths, reply.config, sinks=TurnSinks())
+
+    assert result.failed is not None
+    published = result.run_metadata[AI_RUN_METADATA_KEY]
+    assert published["status"] == "error"
+    assert counted_total(reply.storage, SESSION_ID) == (100, 5)
+    assert (published["usage"]["input_tokens"], published["usage"]["output_tokens"]) == (100, 5)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("probe")
+async def test_the_hooks_of_a_reply_are_installed_in_their_documented_order(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Without a job actor, participation decides first, the receipt joins next, and compaction sizes the result.
+
+    The checkpoint then saves what is sent, and saves again before a tool batch runs. The rest of the hooks are
+    wired. A reply with a job actor projects its job definitions before participation. Before them all stands the
+    hook that publishes a delegated child's usage, which does nothing in a reply.
+    """
+    reply = _reply(tmp_path, monkeypatch, [answer('{"action":"respond","reason":"Yes."}'), answer("ok")])
+    captured: dict[str, Any] = {}
+    original = ai.run_agent
+
+    def capturing(spec: Any, run_input: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+        captured.update(kwargs)
+        return original(spec, run_input, **kwargs)
+
+    monkeypatch.setattr(ai, "run_agent", capturing)
+
+    await _stream(reply, participation=ParticipationGate(), skill_review_capture=SkillReviewCapture())
+
+    hooks = captured["hooks"]
+    assert [function.__qualname__.split(".")[0] for function in hooks.before_request] == [
+        "child_usage_hook",
+        "participation_hook",
+        "approval_receipt_hook",
+        "mid_turn_compaction_hook",
+        "checkpoint_hooks",
+    ]
+    assert hooks.before_dispatch.__qualname__.split(".")[0] == "checkpoint_hooks"
+    assert hooks.answer_tool_calls is not None
+    assert hooks.rewrite_tool_calls is None
+    # This agent offers no scheduler, so its calls run without the live-function binding step.
+    assert [middleware.__name__ for middleware in hooks.tool_middleware] == ["middleware"]
+    assert len(hooks.after_tool_batch) == 1
+    assert len(hooks.on_resume_entry) == 1
+    assert hooks.on_loop_end is not None
+    assert captured["request_template"].native_compaction is None
+
+
+@dataclass(frozen=True)
+class _NativeRoute:
+    """A route that compacts natively at the threshold it is given."""
+
+    def native_compaction_settings(
+        self,
+        *,
+        threshold: int | None,
+        history_generation: str,
+        allow_authored: bool,
+    ) -> NativeCompactionReplay | None:
+        del history_generation, allow_authored
+        return None if threshold is None else NativeCompactionReplay(route="route-a", threshold=threshold)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("probe")
+async def test_a_reply_on_a_natively_compacting_route_sends_the_native_history_its_preparation_chose(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The reply's request compacts on the provider at the configured threshold and replays its history explicitly."""
+    reply = _reply(tmp_path, monkeypatch, [answer("ok")])
+    reply.model.capabilities = Capabilities(native_compaction=True)
+    reply.model.native_history_route = _NativeRoute()
+    reply.config.models["default"].context_window = 200_000
+    reply.config.defaults.compaction = CompactionConfig(threshold_tokens=30_000)
+
+    await _stream(reply)
+
+    [request] = reply.model.requests
+    assert request.native_compaction == NativeCompactionReplay(
+        route="route-a",
+        threshold=30_000,
+        basis=replay_basis(None, []),
+    )
+    assert request.portable_replay is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("replays_history", [True, False])
+@pytest.mark.usefixtures("probe")
+async def test_mid_turn_compaction_folds_into_the_scope_only_when_the_turn_replays_its_history(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    replays_history: bool,
+) -> None:
+    """A reply that replays the scope's history binds its folds to the scope; one without replay compacts run-locally.
+
+    A scheduled turn whose history budget disabled replay deliberately carries no stored history, so a fold must not
+    append a scope summary row or inject the scope's summary into its request.
+    """
+    reply = _reply(tmp_path, monkeypatch, [answer("ok")])
+    bound: dict[str, Any] = {}
+    original = loop_hooks.mid_turn_compaction_hook
+
+    def capturing(**kwargs: Any) -> Any:  # noqa: ANN401
+        bound.update(kwargs)
+        return original(**kwargs)
+
+    monkeypatch.setattr(loop_hooks, "mid_turn_compaction_hook", capturing)
+    budget = None if replays_history else ScheduledHistoryBudget(limit=0, source_event_id=EVENT_ID)
+
+    chunks = await _stream(reply, scheduled_history_budget=budget)
+
+    assert "".join(streamed_text(chunks)) == "ok"
+    storage = bound["storage"]
+    assert storage.store is not None
+    assert storage.session is not None
+    assert storage.scope == HistoryScope(kind="agent", scope_id="assistant")
+    plan = bound["replay_plan"]
+    assert (plan is not None and plan.add_history_to_context) is replays_history
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("probe")
+async def test_a_reply_posts_its_mid_turn_compaction_notices_and_seeds_no_earlier_fold_records(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A fold during the reply reaches its notices and its turn recorder through the owned summarizer.
+
+    The run's metadata keeps what the turn seeded but none of the folded usage of the run it follows.
+    """
+    reply = _reply(
+        tmp_path,
+        monkeypatch,
+        # The first response reports a request far over the 4,000-token window, so the second request compacts.
+        [calls(tool_call("touch", "call_1", label="a"), metrics=usage(1_000_000, 1)), answer("done")],
+        context_window=4000,
+    )
+    summarizer = summary_model("SUMMARY")
+    install_model_providers(monkeypatch, {"summary": summarizer})
+    lifecycle = RecordingCompactionLifecycle()
+    seeded = {COMPACTED_REQUESTS_METADATA_KEY: [{"input_tokens": 10}], "room_topic": "kept"}
+
+    chunks = await _stream(reply, compaction_lifecycle=lifecycle, matrix_run_metadata=seeded)
+
+    assert "".join(streamed_text(chunks)) == "done"
+    assert len(summarizer.requests) == 1
+    assert any(isinstance(event, CompactionOutcome) for event in lifecycle.events)
+    # An interrupted record of this run would leave out the calls the fold summarized.
+    assert "call_1" in reply.recorder.folded_tool_call_ids
+    metadata = _stored(reply).metadata
+    assert metadata is not None
+    assert metadata["room_topic"] == "kept"
+    assert [request["metrics"]["input_tokens"] for request in metadata[COMPACTED_REQUESTS_METADATA_KEY]] == [1_000_000]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("probe")
+async def test_an_interrupted_record_leaves_out_the_calls_an_earlier_attempt_of_its_turn_folded(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The record of a turn cut short in a later attempt quotes no call a fold of an earlier attempt summarized.
+
+    The stored folds name the attempt that made them, so only the turn's recorder knows them once another attempt runs.
+    """
+    reply = _reply(
+        tmp_path,
+        monkeypatch,
+        [
+            # The first response reports a request far over the 4,000-token window, so the second request compacts.
+            calls(tool_call("touch", "call_1", label="FOLDED"), metrics=usage(1_000_000, 1)),
+            calls(_switch_now("call_2")),
+            [Await(_cancel_current_task)],
+        ],
+        tools=(PROBE_TOOL, "thread_model"),
+        context_window=4000,
+    )
+    install_model_providers(monkeypatch, {"summary": summary_model("SUMMARY")})
+
+    with pytest.raises(asyncio.CancelledError):
+        await _stream(reply)
+
+    [record] = [run for run in reply.storage.list_runs(SESSION_ID) if is_interrupted_replay_run(run)]
+    assert record.run_id != "run-1"
+    content = str(record.messages[-1].content)
+    assert "1 tool call(s) had finished" in content
+    assert "switch_thread_model" in content
+    assert "FOLDED" not in content
+
+
+@pytest.mark.asyncio
+async def test_a_cut_off_response_answers_its_calls_without_running_them(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    probe: type[_ProbeToolkit],
+) -> None:
+    """On any route, calls of a response the output limit cut off are answered, not run, and the model retries."""
+    reply = _reply(
+        tmp_path,
+        monkeypatch,
+        [_cut_off(tool_call("touch", "call_1", label="huge")), answer("Split into parts.")],
+    )
+
+    chunks = await _stream(reply)
+
+    assert probe.calls == []
+    assert "".join(streamed_text(chunks)) == "Split into parts."
+    answered = [message for message in reply.model.requests[1].messages if message.role == "tool"]
+    assert [(message.tool_call_id, message.content, message.tool_call_error) for message in answered] == [
+        ("call_1", CUT_OFF_TOOL_CALL_RESULT, True),
+    ]
+
+
+@pytest.mark.asyncio
+async def test_a_third_cut_off_response_fails_the_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    probe: type[_ProbeToolkit],
+) -> None:
+    """A model that keeps hitting its output limit ends the reply with an error instead of looping."""
+    reply = _reply(
+        tmp_path,
+        monkeypatch,
+        [_cut_off(tool_call("touch", f"call_{index}", label="huge")) for index in range(3)],
+    )
+    replaced = _runs_under_interrupted_records(monkeypatch, reply.storage)
+
+    chunks = await _stream(reply)
+
+    assert probe.calls == []
+    assert len(reply.model.requests) == 3
+    assert streamed_text(chunks)
+    [failed] = replaced
+    assert failed.status is RunStatus.error
+    assert "output limit" in str(failed.error)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("probe")
+async def test_a_safeguard_refusal_is_stored_and_reported_as_an_error(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A refused response fails the run with the refusal text the runtime recognizes."""
+    reply = _reply(
+        tmp_path,
+        monkeypatch,
+        [[_raising(ModelSafeguardRefusal(provider="anthropic", usage=MessageMetrics()))]],
+    )
+    replaced = _runs_under_interrupted_records(monkeypatch, reply.storage)
+
+    chunks = await _stream(reply)
+
+    assert streamed_text(chunks)
+    [failed] = replaced
+    assert failed.status is RunStatus.error
+    assert (failed.content, failed.error) == (None, MODEL_SAFEGUARD_REFUSAL_MESSAGE)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("probe")
+async def test_session_state_a_tool_changes_is_saved_with_the_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The shared ``session_state`` a tool writes lands on the stored session."""
+    reply = _reply(tmp_path, monkeypatch, [calls(tool_call("remember", "call_1", label="blue")), answer("Kept.")])
+
+    await _stream(reply)
+
+    session = reply.storage.load_session(SESSION_ID)
+    assert session is not None
+    assert session.session_state == {"remembered": "blue"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("probe")
+async def test_the_skill_review_capture_keeps_the_final_request(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A response that counts toward skill learning leaves its final request, ending in the model's answer."""
+    reply = _reply(tmp_path, monkeypatch, [calls(tool_call("touch", "call_1", label="a")), answer("Final answer.")])
+    capture = SkillReviewCapture()
+
+    await _stream(reply, skill_review_capture=capture)
+
+    assert capture.latest is not None
+    assert (capture.latest.run_id, capture.latest.model_name) == ("run-1", "default")
+    final = capture.latest.request.messages[-1]
+    assert (final.role, final.content) == ("assistant", "Final answer.")
+    assert {"remember", "touch"} <= {tool.name for tool in capture.latest.request.tools}
+
+
+def _runner(reply: _Reply) -> ResponseRunner:
+    """Build the agent's bot on the reply's config, with a mocked Matrix client, and return its response runner."""
+    with_current_room_member_access(reply.config)
+    agent_user = AgentMatrixUser(
+        agent_name="assistant",
+        password=TEST_PASSWORD,
+        display_name="Assistant",
+        user_id="@mindroom_assistant:localhost",
+    )
+    bot = make_test_agent_bot(agent_user, reply.config, reply.runtime_paths, rooms=[ROOM_ID])
+    install_direct_response_admission(bot)
+    bot.client = make_matrix_client_mock(user_id="@mindroom_assistant:localhost")
+    unique_room_send_responses(bot.client)
+    install_runtime_journal_support(bot)
+    return bot._response_runner
+
+
+def _request(prompt: str = "Hello", *, source_kind: str = "message") -> ResponseRequest:
+    """Return one admitted reply request for the thread the ``ai`` seam tests use, from a ``source_kind`` source."""
+    target = MessageTarget.resolve(room_id=ROOM_ID, thread_id=THREAD_ID, reply_to_event_id=EVENT_ID)
+    return ResponseRequest(
+        thread_history=[],
+        prompt=prompt,
+        user_id=REQUESTER_ID,
+        response_envelope=MessageEnvelope(
+            source_event_id=EVENT_ID,
+            target=target,
+            body=prompt,
+            attachment_ids=(),
+            mentioned_agents=(),
+            agent_name="assistant",
+            origin=message_origin(sender_id=REQUESTER_ID, requester_id=REQUESTER_ID, source_kind=source_kind),
+        ),
+        sources=ResponseSources(pending_event_ids=(EVENT_ID,), logical_source_event_ids=(EVENT_ID,)),
+    )
+
+
+async def _respond_through_runner(
+    runner: ResponseRunner,
+    request: ResponseRequest,
+    *,
+    streaming: bool,
+) -> tuple[FinalDeliveryOutcome, ResponseOutcome]:
+    """Run one reply through the runner's locked turn and return how its reply ended and what its turn reported."""
+    ended: list[tuple[FinalDeliveryOutcome, ResponseOutcome]] = []
+
+    async def record_ending(delivery: FinalDeliveryOutcome, outcome: ResponseOutcome, *_args: object) -> None:
+        ended.append((delivery, outcome))
+
+    with patch_response_runner_module(
+        should_use_streaming=AsyncMock(return_value=streaming),
+        apply_post_response_effects=AsyncMock(side_effect=record_ending),
+    ):
+        await runner.generate_response(request)
+    [result] = ended
+    return result
+
+
+def _runs_under_interrupted_records(monkeypatch: pytest.MonkeyPatch, storage: ConversationStore) -> list[RunRecord]:
+    """Record the run the loop stored that each interrupted-turn record the turn driver writes replaces."""
+    runs: list[RunRecord] = []
+    original = response_turn.persist_interrupted_replay_snapshot
+
+    def spy(**kwargs: Any) -> None:  # noqa: ANN401
+        stored = storage.get_run(kwargs["run_id"])
+        assert stored is not None, "the loop stores the run before the turn's interrupted record replaces it"
+        runs.append(stored)
+        original(**kwargs)
+
+    monkeypatch.setattr(response_turn, "persist_interrupted_replay_snapshot", spy)
+    return runs
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [True, False])
+@pytest.mark.usefixtures("probe")
+async def test_the_runner_delivers_an_empty_attempt_s_retry_as_the_turn_s_final_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    streaming: bool,
+) -> None:
+    """Through ``ResponseRunner``, whose turns name their runs, the reply and the turn's outcome name the retry's run.
+
+    Both attempts' usage counts: the retry's run does not replace the empty one's usage.
+    """
+    reply = _reply(tmp_path, monkeypatch, [answer("", usage(100, 5)), answer("Recovered.", usage(120, 9))])
+    runner = _runner(reply)
+
+    delivery, outcome = await _respond_through_runner(runner, _request(), streaming=streaming)
+
+    assert (delivery.ending, delivery.final_visible_body, outcome.run_succeeded) == (Completed(), "Recovered.", True)
+    [record] = reply.storage.list_runs(SESSION_ID)
+    assert record.content == "Recovered."
+    assert delivery.response_run_id == outcome.response_run_id == record.run_id
+    _assert_counted_usage(reply, [(100, 5), (120, 9)])
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [True, False])
+@pytest.mark.usefixtures("probe")
+async def test_the_runner_writes_the_interrupted_record_after_the_loop_stored_the_cancelled_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    streaming: bool,
+) -> None:
+    """Through ``ResponseRunner``, a stop mid-stream stores the ``CANCELLED`` run before the interrupted record.
+
+    The turn driver writes the interrupted-turn record over the cancelled run the loop stored, and the cut-off
+    request's usage counts once.
+    """
+    reply = _reply(
+        tmp_path,
+        monkeypatch,
+        [[TextDelta("Partial "), UsageReported(usage(10, 2), final=False), Await(_cancel_current_task)]],
+    )
+    runner = _runner(reply)
+    replaced = _runs_under_interrupted_records(monkeypatch, reply.storage)
+
+    task = asyncio.create_task(_respond_through_runner(runner, _request(), streaming=streaming))
+    [result] = await asyncio.gather(task, return_exceptions=True)
+
+    assert not isinstance(result, BaseException), result
+    delivery, outcome = result
+    assert delivery.ending == Cancelled("interrupted")
+    assert outcome.run_succeeded is False
+    run_id = outcome.response_run_id
+    assert run_id is not None
+    assert [(run.run_id, run.status) for run in replaced] == [(run_id, RunStatus.cancelled)]
+    record = reply.storage.get_run(run_id)
+    assert record is not None
+    assert record.metadata is not None
+    assert record.metadata["mindroom_original_status"] == "cancelled"
+    [row] = usage_rows(reply.storage, run_id)
+    assert row["metrics"]["input_tokens"] == 10
+
+
+@pytest.mark.asyncio
+async def test_the_runner_leaves_a_paused_run_as_the_loop_stored_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    probe: type[_ProbeToolkit],
+) -> None:
+    """Through ``ResponseRunner``, an approval pause reaches the suspension handler with its ``PAUSED`` row intact.
+
+    The turn driver writes no interrupted-turn record over a suspended turn.
+    """
+    reply = _reply(
+        tmp_path,
+        monkeypatch,
+        [calls(tool_call("touch", "call_1", label="dangerous"), metrics=usage(7, 1))],
+        approval_rules=[ApprovalRuleConfig(match="touch", action="require_approval")],
+    )
+    runner = unwrap_extracted_collaborator(_runner(reply))
+    replaced = _runs_under_interrupted_records(monkeypatch, reply.storage)
+    suspend = AsyncMock(
+        return_value=FinalDeliveryOutcome(ending=AwaitingApproval(), event_id=None, is_visible_response=False),
+    )
+
+    with (
+        patch.object(runner.approvals, "suspend_for_approval", new=suspend),
+        patch_response_runner_module(should_use_streaming=AsyncMock(return_value=False)),
+    ):
+        await runner.generate_response(_request())
+
+    assert probe.calls == []
+    assert replaced == []
+    paused = suspend.await_args.args[0]
+    record = reply.storage.get_run(paused.run_id)
+    assert record is not None
+    assert record.status is RunStatus.paused
+    assert [requirement.needs_confirmation for requirement in record.requirements or []] == [True]
+    [row] = usage_rows(reply.storage, paused.run_id)
+    assert row["metrics"]["input_tokens"] == 7
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [True, False])
+async def test_the_runner_records_the_failure_over_a_pause_with_no_approval_to_ask_for(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    probe: type[_ProbeToolkit],
+    streaming: bool,
+) -> None:
+    """Through ``ResponseRunner``, a pause nothing can resume fails the reply, and the failure lands over the ``PAUSED`` row.
+
+    The loop stores the pause; the lifecycle owner then records the failure over the row as its interrupted-turn
+    record, so it no longer waits for an approval that never comes. The reply says why, streamed or delivered whole.
+    """
+    reply = _reply(
+        tmp_path,
+        monkeypatch,
+        [calls(tool_call("touch", "call_1", label="outside"), metrics=usage(7, 1))],
+        tools=(EXTERNAL_PROBE_TOOL,),
+    )
+    runner = _runner(reply)
+    presence = MagicMock(spec=nio.PresenceGetResponse)
+    presence.presence = "online" if streaming else "offline"
+    presence.last_active_ago = 0
+    runner.deps.runtime.client.get_presence = AsyncMock(return_value=presence)
+
+    await runner.generate_response(_request())
+
+    content = runner.deps.runtime.client.room_send.await_args.kwargs["content"]
+    body = content.get("m.new_content", content)["body"]
+    assert body.startswith("[assistant] ⚠️ Error: agent run ")
+    assert body.endswith(" paused on ['touch'] without an approval to ask for")
+    assert probe.calls == []
+    session = reply.storage.load_session(SESSION_ID)
+    assert session is not None
+    [record] = session.runs
+    assert record.status is RunStatus.completed
+    assert record.metadata is not None
+    assert record.metadata["mindroom_original_status"] == "error"
+    assert record.metadata["mindroom_replay_state"] == "interrupted"
+    assert not record.requirements
+
+
+def _call_mirror(seen: list[tuple[str, bool, str | None]]) -> list[object]:
+    """Return before-call and after-call hooks that record whether each call's reply shows it, and its preview."""
+
+    @hook(EVENT_TOOL_BEFORE_CALL)
+    async def before(ctx: ToolBeforeCallContext) -> None:
+        seen.append(("before", ctx.shown, ctx.chat_preview()))
+
+    @hook(EVENT_TOOL_AFTER_CALL)
+    async def after(ctx: ToolAfterCallContext) -> None:
+        seen.append(("after", ctx.shown, ctx.chat_preview()))
+
+    return [before, after]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [True, False])
+@pytest.mark.parametrize("show_tool_calls", [True, False])
+@pytest.mark.usefixtures("probe")
+async def test_the_runner_tells_a_call_s_hooks_what_its_reply_shows_of_the_call(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    streaming: bool,
+    show_tool_calls: bool,
+) -> None:
+    """Through ``ResponseRunner``, a call's hooks read whether its reply shows it, and the preview its tool trace shows."""
+    seen: list[tuple[str, bool, str | None]] = []
+    reply = _reply(tmp_path, monkeypatch, [calls(tool_call("touch", "call-1", label="a")), answer("Touched.")])
+    reply.config.defaults.show_tool_calls = show_tool_calls
+    publish_hook_plugin(reply.config, reply.runtime_paths, "call-mirror", _call_mirror(seen))
+    runner = _runner(reply)
+
+    await _respond_through_runner(runner, _request(), streaming=streaming)
+
+    content = runner.deps.runtime.client.room_send.await_args.kwargs["content"]
+    trace = content.get("m.new_content", content).get("io.mindroom.tool_trace")
+    shown_previews = [] if trace is None else [event["args_preview"] for event in trace["events"]]
+    preview = "label=a" if show_tool_calls else None
+    assert shown_previews == ([preview] if show_tool_calls else [])
+    assert seen == [("before", show_tool_calls, preview), ("after", show_tool_calls, preview)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("probe")
+async def test_the_runner_tells_a_silent_scheduled_task_s_calls_hooks_that_they_are_hidden(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A silent scheduled task shows no progress and may post no answer, so its calls read as hidden."""
+    seen: list[tuple[str, bool, str | None]] = []
+    reply = _reply(tmp_path, monkeypatch, [calls(tool_call("touch", "call-1", label="a")), answer("Touched.")])
+    publish_hook_plugin(reply.config, reply.runtime_paths, "call-mirror", _call_mirror(seen))
+
+    await _respond_through_runner(_runner(reply), _request(source_kind=SILENT_SCHEDULE_SOURCE_KIND), streaming=False)
+
+    assert seen == [("before", False, None), ("after", False, None)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("show_tool_calls", "source_kind", "shown"),
+    [(True, "message", True), (False, "message", False), (True, SILENT_SCHEDULE_SOURCE_KIND, False)],
+)
+async def test_the_runner_tells_a_team_reply_s_calls_hooks_whether_the_reply_shows_them(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    show_tool_calls: bool,
+    source_kind: str,
+    shown: bool,
+) -> None:
+    """A member's call in a team's reply tells its hooks whether that reply shows it, as the turn's own calls do."""
+    seen: list[tuple[str, bool, str | None]] = []
+    reply = _reply(tmp_path, monkeypatch, [], tools=())
+    reply.config.defaults.show_tool_calls = show_tool_calls
+    publish_hook_plugin(reply.config, reply.runtime_paths, "call-mirror", _call_mirror(seen))
+    runner = _runner(reply)
+    policy = tool_policy(HookRegistry.empty())
+
+    async def touch(**kwargs: object) -> str:
+        return f"touched {kwargs['label']}"
+
+    async def touch_then_answer(*_args: object, **_kwargs: object) -> str:
+        # The member's call runs under the turn's context rebound to the member, as a team runs its members' calls.
+        with member_tool_scope("assistant", "default"):
+            await policy("touch", touch, {"label": "a"})
+        return "Touched."
+
+    with patch_response_runner_module(
+        team_response_stream=streamed_answer(touch_then_answer),
+        should_use_streaming=AsyncMock(return_value=False),
+        apply_post_response_effects=AsyncMock(),
+    ):
+        await runner.generate_team_response_helper(
+            _request(source_kind=source_kind),
+            member_names=["assistant"],
+            team_mode="coordinate",
+        )
+
+    preview = "label=a" if shown else None
+    assert seen == [("before", shown, preview), ("after", shown, preview)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("probe")
+async def test_the_next_reply_sizes_its_first_request_from_the_previous_answer_s_reported_size(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A reply's answer records the request it answered, so the next reply's check starts from its reported size.
+
+    The first answer reports a request far larger than the text, which only an anchored size can reach; the next
+    reply's request repeats it, with the same system prompt and tools, before the new turn.
+    """
+    reply = _reply(
+        tmp_path,
+        monkeypatch,
+        [answer("First answer.", usage(50_000, 5)), answer("Second answer.", usage(50_100, 5))],
+        context_window=128_000,
+    )
+
+    await _stream(reply, prompt="Hello", run_id="run-1")
+    await _stream(reply, prompt="And now?", run_id="run-2")
+
+    stored = _stored(reply, "run-2").metadata or {}
+    compaction = stored[AI_RUN_METADATA_KEY]["compaction"]
+    assert 50_000 < compaction["request_tokens"] < 50_500
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("probe")
+async def test_the_next_reply_anchors_on_the_tools_job_starts_offer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Where calls can become jobs, each request offers the wait budget, so the check before a reply sizes with it too."""
+    reply = _reply(
+        tmp_path,
+        monkeypatch,
+        [answer("First answer.", usage(50_000, 5)), answer("Second answer.", usage(50_100, 5))],
+        context_window=128_000,
+        background_jobs=True,
+    )
+    runtime = await tool_job_runtime(tmp_path)
+    pin_background_tool_jobs(reply.config, reply.runtime_paths)
+    register_background_runtime(reply.runtime_paths, runtime)
+    try:
+        async with execution_resources():
+            await _stream(reply, prompt="Hello", run_id="run-1")
+            await _stream(reply, prompt="And now?", run_id="run-2")
+    finally:
+        await runtime.shutdown()
+
+    offered = {tool.name: tool.parameters["properties"] for tool in reply.model.requests[1].tools}
+    assert "background_after" in offered["touch"]
+    stored = _stored(reply, "run-2").metadata or {}
+    compaction = stored[AI_RUN_METADATA_KEY]["compaction"]
+    assert 50_000 < compaction["request_tokens"] < 50_500

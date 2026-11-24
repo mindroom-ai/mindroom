@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, TypeGuard, cast
+from dataclasses import dataclass
+from typing import Any
 
 import nio
 
-from mindroom.attachments import parse_attachment_ids_from_event_source
+from mindroom.attachments.storage import parse_attachment_ids_from_event_source
 from mindroom.constants import (
     ORIGINAL_SENDER_KEY,
     SKIP_MENTIONS_KEY,
@@ -23,13 +23,7 @@ from mindroom.matrix.media import (
     is_matrix_media_dispatch_event,
     is_video_message_event,
 )
-
-if TYPE_CHECKING:
-    from collections.abc import Callable
-
-    from mindroom.coalescing.batch import CoalescingKey
-    from mindroom.message_target import ResponseLifecycleKey
-
+from mindroom.tool_system.events import body_without_tool_markers
 
 # Voice messages are normalized into PreparedIngress before coalescing, so
 # this contract only includes routed image/file/video events.
@@ -42,15 +36,13 @@ type DispatchEvent = _TextDispatchEvent | MediaDispatchEvent
 
 @dataclass(frozen=True)
 class PreparedIngress:
-    """Canonical prepared ingress value plus its per-source dispatch evidence.
+    """Canonical prepared ingress value: the normalized inbound text dispatch reads.
 
     The core value (sender/event_id/body/source) is the normalized inbound text
     for dispatch; raw Matrix media events are wrapped at enqueue with their
     caption as body and the protocol object retained on ``raw_event`` for
-    attachment registration and media planning. The remaining fields carry the
-    per-source evidence resolved at enqueue (effective requester, source kinds,
-    trust, discovery, and recovery metadata) so queue entries need no parallel
-    mutable fields.
+    attachment registration and media planning. Where the event came from is
+    classified once at admission and travels beside it as ``IngressFacts``.
     """
 
     sender: str
@@ -58,54 +50,16 @@ class PreparedIngress:
     body: str
     source: dict[str, Any]
     server_timestamp: int | float | None = None
-    source_kind_override: str | None = None
-    requester_user_id: str | None = None
-    # The sender wrote this reply for ``requester_user_id``, so it stays the message's speaker.
-    acts_for_requester: bool = False
-    source_kind: str | None = None
-    dispatch_policy_source_kind: str | None = None
-    hook_source: str | None = None
-    message_received_depth: int = 0
-    trust_internal_payload_metadata: bool = False
-    discovery_event_id: str | None = None
+    # Whether MindRoom wrote this payload itself, as voice it normalized. A managed sender's content is trusted
+    # through its facts instead.
+    payload_trusted: bool = False
+    # Set by the gate when the event queued behind its conversation's running response.
+    active_follow_up: bool = False
     turn_dispatch_recovery: bool = False
     raw_event: MediaDispatchEvent | None = None
     # Whom it mentions: ``None`` nobody, ``False`` this agent, ``True`` only other agents or people.
     # A message for another participant never shares a turn with messages for this agent.
     for_another_participant: bool | None = None
-
-
-@dataclass
-class PendingDispatchMetadata:
-    """Opaque metadata that must be closed if claimed work cannot dispatch."""
-
-    kind: str
-    payload: object
-    close: Callable[[], None]
-    target_key: ResponseLifecycleKey | None = None
-    _closed: bool = field(default=False, init=False, repr=False)
-
-    def finish_once(self, finish: Callable[[], None]) -> None:
-        """Finish the owned resource at most once across converging paths."""
-        if self._closed:
-            return
-        self._closed = True
-        finish()
-
-    def close_once(self) -> None:
-        """Release the owned resource at most once across converging cleanup paths."""
-        self.finish_once(self.close)
-
-
-@dataclass(frozen=True)
-class DispatchIngressMetadata:
-    """Trusted ingress source and policy metadata for one dispatch."""
-
-    source_kind: str
-    coalescing_key: CoalescingKey | None = None
-    dispatch_policy_source_kind: str | None = None
-    hook_source: str | None = None
-    message_received_depth: int = 0
 
 
 @dataclass(frozen=True)
@@ -121,34 +75,11 @@ class DispatchPayloadMetadata:
     skip_mentions: bool | None = None
 
 
-def event_content_dict(event: DispatchEvent) -> dict[str, object] | None:
-    """Return Matrix content from a dispatch event when it has mapping content."""
-    if not isinstance(event.source, dict):
-        return None
-    content = event.source.get("content")
-    if not isinstance(content, dict):
-        return None
-    return cast("dict[str, object]", content)
-
-
 def is_media_dispatch_event(event: DispatchEvent) -> bool:
     """Return whether one dispatch event is image, file, or video media, direct or wrapped."""
     if isinstance(event, PreparedIngress):
         return event.raw_event is not None
     return is_matrix_media_dispatch_event(event)
-
-
-def is_text_dispatch_event(event: DispatchEvent) -> TypeGuard[_TextDispatchEvent]:
-    """Return whether one dispatch event is a text-like utterance.
-
-    The runtime companion to ``_TextDispatchEvent``, which cannot be used with
-    ``isinstance`` directly. Every caller asking this question used to spell the
-    class list out, and each copy had to be widened separately -- which is how
-    `m.emote` came to be text in one place and media-ish in another.
-    """
-    return isinstance(event, nio.RoomMessageFormatted) or (
-        isinstance(event, PreparedIngress) and event.raw_event is None
-    )
 
 
 def dispatch_prompt_for_event(event: DispatchEvent) -> str:
@@ -162,7 +93,9 @@ def dispatch_prompt_for_event(event: DispatchEvent) -> str:
         return extract_media_caption(event, default="[Attached video]")
     if is_file_message_event(event):
         return extract_media_caption(event, default="[Attached file]")
-    return event.body
+    # A finished MindRoom reply can wake another agent; its tool display markers never reach a prompt.
+    content = event.source.get("content") if isinstance(event.source, dict) else None
+    return body_without_tool_markers(event.body, content) if isinstance(content, dict) else event.body
 
 
 def prepare_media_ingress(event: MediaDispatchEvent) -> PreparedIngress:

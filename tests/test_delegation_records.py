@@ -5,7 +5,6 @@ from __future__ import annotations
 import asyncio
 import fcntl
 import hashlib
-import importlib
 import io
 import json
 import os
@@ -19,26 +18,36 @@ import pytest
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
+from mindroom.delegation import records
+from mindroom.delegation.records import (
+    DelegationEvent,
+    DelegationMetadata,
+    DelegationRecordHandle,
+    DelegationRecordLimitError,
+    DelegationRecordLocator,
+    DelegationRecordOwner,
+)
 from mindroom.delegation.state import SubagentPersona
+from mindroom.private_storage.private_instance_identity import private_instances_for_agent
 from mindroom.redaction import REDACTED
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import test_runtime_paths
 
 if TYPE_CHECKING:
     from pathlib import Path
-    from types import ModuleType
 
 
-def _records_module() -> ModuleType:
-    return importlib.import_module("mindroom.delegation.records")
-
-
-async def _start(module: ModuleType, owner: object, **overrides: object) -> object:
+async def _start(
+    owner: DelegationRecordOwner,
+    metadata: DelegationMetadata | None = None,
+    *,
+    delegation_id: str = "delegation-123",
+) -> DelegationRecordHandle:
     return await owner.start(
-        _metadata(module),
+        metadata or _metadata(),
         caller_execution_identity=_identity("caller"),
         child_execution_identity=_identity("child"),
-        **overrides,
+        delegation_id=delegation_id,
     )
 
 
@@ -48,23 +57,27 @@ async def test_interrupted_event_publication_preserves_committed_log(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A failed flush must leave committed events readable for continuation and finish."""
-    module = _records_module()
-    owner = module.DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
-    handle = await _start(module, owner)
+    owner = DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
+    handle = await _start(owner)
     event_path = _record_dir(handle) / "events.jsonl"
     committed = event_path.read_bytes()
+    flushes: list[int] = []
 
-    def interrupted_flush(_fd: int) -> None:
+    def interrupted_flush(fd: int) -> None:
+        flushes.append(fd)
         message = "Interrupted durable write"
         raise OSError(message)
 
     with monkeypatch.context() as fault:
         fault.setattr(os, "fsync", interrupted_flush)
         with pytest.raises(OSError, match="Interrupted durable write"):
-            await owner.append_event(handle, module.DelegationEvent(kind="output", data={"content": "Résumé 🙂"}))
+            await owner.append_event(handle, DelegationEvent(kind="output", data={"content": "Résumé 🙂"}))
+    # The failed append's rollback is flushed too, so a power loss cannot bring the event back.
+    assert len(flushes) == 2
+    assert (handle.state_dir / "events.jsonl").read_bytes() == committed
     assert event_path.read_bytes() == committed
     reopened = await owner.reopen(handle.locator)
-    await owner.append_event(reopened, module.DelegationEvent(kind="output", data={"content": "Resumed"}))
+    await owner.append_event(reopened, DelegationEvent(kind="output", data={"content": "Resumed"}))
     await owner.finish(reopened, status="completed", output="Done")
     events = [json.loads(line) for line in event_path.read_text().splitlines()]
     assert [event["sequence"] for event in events] == [1, 2, 3]
@@ -73,34 +86,140 @@ async def test_interrupted_event_publication_preserves_committed_log(
 
 
 @pytest.mark.asyncio
-async def test_an_append_whose_state_never_committed_is_dropped(
+@pytest.mark.parametrize(
+    "torn",
+    [
+        b'{"sequence": 5, "kind": "out',
+        b'{"data": {}, "event_id": "torn", "kind": "output", "schema_version": 1, "sequence": 5, "status": null, '
+        b'"timestamp": "t"}',
+        b"\0" * 16 + b"\n",
+        b'{"sequence": 9}\n',
+    ],
+    ids=["partial", "no-newline", "zeros", "out-of-order"],
+)
+async def test_events_logged_after_the_state_snapshot_survive_a_restart_and_a_torn_line_does_not(
+    tmp_path: Path,
+    torn: bytes,
+) -> None:
+    """The event log is the commit point, so events past the state snapshot count, dedupe, and number on."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    owner = DelegationRecordOwner(_config(), runtime_paths)
+    handle = await _start(owner)
+    for index in range(3):
+        await owner.append_event(
+            handle,
+            DelegationEvent(kind="output", data={"content": f"part {index}"}, event_id=f"part-{index}"),
+        )
+    # Plain events rewrite neither the snapshot nor run.json, so these three live only in the logs.
+    assert _read_json(handle.state_dir / "state.json")["run"]["event_count"] == 1
+    assert _read_json(_record_dir(handle) / "run.json")["event_count"] == 1
+    with (handle.state_dir / "events.jsonl").open("ab") as log:
+        log.write(torn)
+
+    restarted = DelegationRecordOwner(_config(), runtime_paths)
+    reopened = await restarted.reopen(DelegationRecordLocator.from_dict(handle.locator.to_dict()))
+    assert await restarted.highest_event_index(reopened, "part-") == 2
+    await restarted.append_event(reopened, DelegationEvent(kind="output", data={"content": "x"}, event_id="part-1"))
+    await restarted.append_event(reopened, DelegationEvent(kind="output", data={"content": "after"}, event_id="after"))
+    await restarted.finish(reopened, status="completed", output="Done")
+
+    expected = ["delegation_started", "part-0", "part-1", "part-2", "after", "delegation_finished"]
+    for path in (handle.state_dir / "events.jsonl", _record_dir(handle) / "events.jsonl"):
+        events = _read_events(path)
+        assert [(event["sequence"], event["event_id"]) for event in events] == list(enumerate(expected, start=1))
+    assert _read_json(_record_dir(handle) / "run.json")["event_count"] == 6
+
+
+@pytest.mark.asyncio
+async def test_run_json_and_the_receipt_catch_up_every_32_events_and_256_kib(tmp_path: Path) -> None:
+    """A long run's views and snapshot lag its event log by fewer than 32 events and about 256 KiB."""
+    owner = DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
+    handle = await _start(owner)
+    for index in range(31):
+        await owner.append_event(handle, DelegationEvent(kind="output", data={"content": f"part {index}"}))
+
+    run = _read_json(_record_dir(handle) / "run.json")
+    assert run["event_count"] == 32
+    assert _read_json(_receipt_path(handle))["updated_at"] == run["updated_at"]
+    assert _read_json(handle.state_dir / "state.json")["run"]["event_count"] == 32
+
+    large = {f"field_{index}": "x" * 60_000 for index in range(5)}
+    await owner.append_event(handle, DelegationEvent(kind="output", data=large))
+    run = _read_json(_record_dir(handle) / "run.json")
+    assert run["event_count"] == 33
+    assert _read_json(_receipt_path(handle))["updated_at"] == run["updated_at"]
+    assert _read_json(handle.state_dir / "state.json")["run"]["event_count"] == 33
+
+
+@pytest.mark.asyncio
+async def test_a_failed_state_snapshot_still_exports_the_committed_events_artifact(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The state file is the commit point, so an event logged before a failed state write never counts."""
-    module = _records_module()
-    owner = module.DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
-    handle = await _start(module, owner)
-    commit_state = module.write_json_file_durable
+    """An event the log committed keeps its oversized value, which only the export holds, when its snapshot fails."""
+    owner = DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
+    handle = await _start(owner)
+    paused = DelegationEvent(kind="status", data={"result": "x" * 100_000}, status="paused", event_id="paused")
 
-    def interrupted_commit(*_args: object, **_kwargs: object) -> None:
-        message = "Interrupted state commit"
+    def failed_snapshot(*_args: object, **_kwargs: object) -> None:
+        message = "Interrupted snapshot"
         raise OSError(message)
 
     with monkeypatch.context() as fault:
-        fault.setattr(module, "write_json_file_durable", interrupted_commit)
-        with pytest.raises(OSError, match="Interrupted state commit"):
-            await owner.append_event(handle, module.DelegationEvent(kind="output", data={"content": "Lost"}))
-    assert module.write_json_file_durable is commit_state
-    assert len(_read_events(handle.state_dir / "events.jsonl")) == 2
+        fault.setattr(records, "write_json_file_durable", failed_snapshot)
+        with pytest.raises(OSError, match="Interrupted snapshot"):
+            await owner.append_event(handle, paused)
+    await owner.append_event(handle, paused)
+    await owner.finish(handle, status="completed", output="Done")
 
-    await owner.append_event(handle, module.DelegationEvent(kind="output", data={"content": "Kept"}))
+    event = _read_events(_record_dir(handle) / "events.jsonl")[1]
+    assert event["event_id"] == "paused"
+    artifact = _record_dir(handle) / event["data"]["result"]["artifact_path"]
+    assert hashlib.sha256(artifact.read_bytes()).hexdigest() == event["data"]["result"]["sha256"]
 
-    for path in (handle.state_dir / "events.jsonl", _record_dir(handle) / "events.jsonl"):
-        assert [(event["sequence"], event["data"]) for event in _read_events(path)] == [
-            (1, {}),
-            (2, {"content": "Kept"}),
-        ]
+
+@pytest.mark.asyncio
+async def test_a_replayed_event_repairs_an_event_export_a_crash_left_short(tmp_path: Path) -> None:
+    """An event the log committed before a crash cut its export short reaches the workspace log on its replay."""
+    owner = DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
+    handle = await _start(owner)
+    event_path = _record_dir(handle) / "events.jsonl"
+    before = event_path.read_bytes()
+    event = DelegationEvent(kind="tool_call", data={"tool_name": "lookup"}, event_id="call")
+    await owner.append_event(handle, event)
+    event_path.write_bytes(before)
+
+    await owner.append_event(handle, event)
+
+    assert event_path.read_bytes() == (handle.state_dir / "events.jsonl").read_bytes()
+    assert [entry["event_id"] for entry in _read_events(event_path)] == ["delegation_started", "call"]
+
+
+@pytest.mark.asyncio
+async def test_acknowledging_an_event_the_log_already_holds_flushes_the_log(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A writer that crashed before its fsync may have left the line unsynced, so a replay that finds it flushes it."""
+    owner = DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
+    handle = await _start(owner)
+    event = DelegationEvent(kind="output", data={"content": "once"}, event_id="once")
+    await owner.append_event(handle, event)
+    await owner.finish(handle, status="completed", output="Done")
+    log_inode = (handle.state_dir / "events.jsonl").stat().st_ino
+    flushed: list[int] = []
+    fsync = os.fsync
+
+    def spy_fsync(fd: int) -> None:
+        flushed.append(os.fstat(fd).st_ino)
+        fsync(fd)
+
+    monkeypatch.setattr(os, "fsync", spy_fsync)
+    await owner.append_event(handle, event)
+    assert flushed == [log_inode]
+    flushed.clear()
+    await owner.finish(handle, status="completed", output="Done")
+    assert log_inode in flushed
 
 
 @pytest.mark.asyncio
@@ -109,17 +228,16 @@ async def test_a_record_whose_event_log_filled_up_can_still_finish(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Events stop short of the log cap, so a long delegation's terminal event still fits and settles the record."""
-    module = _records_module()
-    owner = module.DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
-    handle = await _start(module, owner)
+    owner = DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
+    handle = await _start(owner)
     event_path = _record_dir(handle) / "events.jsonl"
-    monkeypatch.setattr(module, "_MAX_EVENT_LOG_BYTES", event_path.stat().st_size + (4 << 10))
+    monkeypatch.setattr(records, "_MAX_EVENT_LOG_BYTES", event_path.stat().st_size + (4 << 10))
 
     async def fill_the_log() -> None:
         for _ in range(8):
-            await owner.append_event(handle, module.DelegationEvent(kind="output", data={"content": "z" * 1024}))
+            await owner.append_event(handle, DelegationEvent(kind="output", data={"content": "z" * 1024}))
 
-    with pytest.raises(module.DelegationRecordLimitError, match="size limit"):
+    with pytest.raises(DelegationRecordLimitError, match="size limit"):
         await fill_the_log()
     await owner.finish(handle, status="completed", output="D" * 2048)
 
@@ -135,20 +253,19 @@ async def test_event_append_refuses_what_would_exceed_a_record_cap(
     limit: str,
 ) -> None:
     """An event above the line cap, or one that would push the log over its cap, is refused before it is written."""
-    module = _records_module()
-    owner = module.DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
-    handle = await _start(module, owner)
+    owner = DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
+    handle = await _start(owner)
     event_path = _record_dir(handle) / "events.jsonl"
     if limit == "line":
         # Each field stays below the artifact threshold, so together they exceed the line cap.
         data: dict[str, object] = {f"field_{index}": "x" * (60 << 10) for index in range(80)}
     else:
-        monkeypatch.setattr(module, "_MAX_EVENT_LOG_BYTES", event_path.stat().st_size + 64)
+        monkeypatch.setattr(records, "_MAX_EVENT_LOG_BYTES", event_path.stat().st_size + 64)
         data = {"content": "y" * 128}
     committed = event_path.read_bytes()
 
-    with pytest.raises(module.DelegationRecordLimitError, match="size limit"):
-        await owner.append_event(handle, module.DelegationEvent(kind="output", data=data))
+    with pytest.raises(DelegationRecordLimitError, match="size limit"):
+        await owner.append_event(handle, DelegationEvent(kind="output", data=data))
 
     assert event_path.read_bytes() == committed
     assert (handle.state_dir / "events.jsonl").read_bytes() == committed
@@ -162,15 +279,14 @@ async def test_a_record_that_reached_its_event_cap_can_still_finish(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Events stop one short of the event cap, so the terminal event always fits."""
-    module = _records_module()
-    monkeypatch.setattr(module, "_MAX_EVENTS", 4)
-    owner = module.DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
-    handle = await _start(module, owner)
+    monkeypatch.setattr(records, "_MAX_EVENTS", 4)
+    owner = DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
+    handle = await _start(owner)
     for index in range(2):
-        await owner.append_event(handle, module.DelegationEvent(kind="output", data={"content": f"part {index}"}))
+        await owner.append_event(handle, DelegationEvent(kind="output", data={"content": f"part {index}"}))
 
-    with pytest.raises(module.DelegationRecordLimitError, match="size limit"):
-        await owner.append_event(handle, module.DelegationEvent(kind="output", data={"content": "one too many"}))
+    with pytest.raises(DelegationRecordLimitError, match="size limit"):
+        await owner.append_event(handle, DelegationEvent(kind="output", data={"content": "one too many"}))
     await owner.finish(handle, status="completed", output="Done")
 
     events = _read_events(_record_dir(handle) / "events.jsonl")
@@ -181,22 +297,13 @@ async def test_a_record_that_reached_its_event_cap_can_still_finish(
 @pytest.mark.asyncio
 async def test_a_task_too_large_to_finish_is_refused_at_start(tmp_path: Path) -> None:
     """A new run.json keeps room for what finish adds, so a record never starts that could not finish."""
-    module = _records_module()
-    owner = module.DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
+    owner = DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
     near_cap = (4 << 20) - (64 << 10)
 
-    with pytest.raises(module.DelegationRecordLimitError):
-        await owner.start(
-            _metadata(module, task="t" * near_cap),
-            caller_execution_identity=_identity("caller"),
-            child_execution_identity=_identity("child"),
-        )
+    with pytest.raises(DelegationRecordLimitError):
+        await _start(owner, _metadata(task="t" * near_cap))
 
-    handle = await owner.start(
-        _metadata(module, task="t" * (near_cap - 4 * (64 << 10))),
-        caller_execution_identity=_identity("caller"),
-        child_execution_identity=_identity("child"),
-    )
+    handle = await _start(owner, _metadata(task="t" * (near_cap - 4 * (64 << 10))))
     large_inline = "v" * ((64 << 10) - 16)
     await owner.finish(handle, status="failed", output=large_inline, error=large_inline, usage={"note": large_inline})
     run = _read_json(_record_dir(handle) / "run.json")
@@ -207,16 +314,15 @@ async def test_a_task_too_large_to_finish_is_refused_at_start(tmp_path: Path) ->
 @pytest.mark.asyncio
 async def test_event_append_never_writes_through_a_hard_link(tmp_path: Path) -> None:
     """An event log hard-linked to a primary file by an older worker is replaced instead of appended to."""
-    module = _records_module()
-    owner = module.DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
-    handle = await _start(module, owner)
+    owner = DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
+    handle = await _start(owner)
     event_path = _record_dir(handle) / "events.jsonl"
     outside = tmp_path / "primary-owned.db"
     outside.write_bytes(event_path.read_bytes())
     event_path.unlink()
     os.link(outside, event_path)
 
-    await owner.append_event(handle, module.DelegationEvent(kind="output", data={"content": "More"}))
+    await owner.append_event(handle, DelegationEvent(kind="output", data={"content": "More"}))
 
     assert outside.read_bytes().count(b"\n") == 1
     assert event_path.stat().st_nlink == 1
@@ -226,14 +332,13 @@ async def test_event_append_never_writes_through_a_hard_link(tmp_path: Path) -> 
 @pytest.mark.asyncio
 async def test_a_lock_worker_code_holds_in_the_record_directory_never_stalls_record_writes(tmp_path: Path) -> None:
     """Worker code shares the record directory, so the primary never waits on a lock taken there."""
-    module = _records_module()
-    owner = module.DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
-    handle = await _start(module, owner)
+    owner = DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
+    handle = await _start(owner)
     failures: list[BaseException] = []
 
     def append() -> None:
         try:
-            owner._append_event(handle, module.DelegationEvent(kind="output", data={"content": "More"}))
+            owner._append_event(handle, DelegationEvent(kind="output", data={"content": "More"}))
         except BaseException as exc:
             failures.append(exc)
 
@@ -253,20 +358,20 @@ async def test_a_lock_worker_code_holds_in_the_record_directory_never_stalls_rec
 @pytest.mark.asyncio
 async def test_concurrent_appends_to_one_record_keep_one_gapless_sequence(tmp_path: Path) -> None:
     """Record writers still exclude each other without a lock file in the workspace."""
-    module = _records_module()
-    owner = module.DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
-    handle = await _start(module, owner)
+    owner = DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
+    handle = await _start(owner)
 
     await asyncio.gather(
         *(
-            owner.append_event(handle, module.DelegationEvent(kind="output", data={"content": f"part {index}"}))
+            owner.append_event(handle, DelegationEvent(kind="output", data={"content": f"part {index}"}))
             for index in range(8)
         ),
     )
 
     events = _read_events(_record_dir(handle) / "events.jsonl")
     assert [event["sequence"] for event in events] == list(range(1, 10))
-    assert _read_json(_record_dir(handle) / "run.json")["event_count"] == 9
+    await owner.finish(handle, status="completed", output="Done")
+    assert _read_json(_record_dir(handle) / "run.json")["event_count"] == 10
     assert not (_record_dir(handle) / ".record.lock").exists()
 
 
@@ -295,12 +400,11 @@ def _replace_with(path: Path, content: bytes) -> None:
 )
 async def test_an_edited_or_deleted_export_is_rewritten_from_the_primary_copy(tmp_path: Path, change: str) -> None:
     """Exports are only written, so any edit or deletion is replaced by the next write and the delegation settles."""
-    module = _records_module()
-    owner = module.DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
-    handle = await _start(module, owner)
+    owner = DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
+    handle = await _start(owner)
     await owner.append_event(
         handle,
-        module.DelegationEvent(kind="tool_call", data={"tool_name": "lookup"}, event_id="call"),
+        DelegationEvent(kind="tool_call", data={"tool_name": "lookup"}, event_id="call"),
     )
     record_dir = _record_dir(handle)
     event_path = record_dir / "events.jsonl"
@@ -327,13 +431,11 @@ async def test_an_edited_or_deleted_export_is_rewritten_from_the_primary_copy(tm
     else:
         (record_dir / "transcript.md").write_text("forged transcript\n", encoding="utf-8")
 
-    await owner.append_event(handle, module.DelegationEvent(kind="output", data={"content": "Next"}, event_id="next"))
+    await owner.append_event(handle, DelegationEvent(kind="output", data={"content": "Next"}, event_id="next"))
 
     primary_log = handle.state_dir / "events.jsonl"
     assert event_path.read_bytes() == primary_log.read_bytes()
     assert [event["event_id"] for event in _read_events(event_path)] == ["delegation_started", "call", "next"]
-    assert _read_json(record_dir / "run.json")["event_count"] == 3
-    assert _read_json(record_dir / "run.json")["status"] == "running"
 
     await owner.finish(handle, status="completed", output="Done")
 
@@ -353,9 +455,8 @@ async def test_an_edited_or_deleted_export_is_rewritten_from_the_primary_copy(tm
 @pytest.mark.asyncio
 async def test_the_primary_never_reads_a_workspace_export(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Every workspace file a record operation opens, it opens to write, whatever worker code left there."""
-    module = _records_module()
-    owner = module.DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
-    handle = await _start(module, owner)
+    owner = DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
+    handle = await _start(owner)
     workspace = str(handle.child_workspace)
     reads: list[str] = []
     os_open = os.open
@@ -373,7 +474,7 @@ async def test_the_primary_never_reads_a_workspace_export(tmp_path: Path, monkey
         return io_open(file, mode, *args, **kwargs)
 
     # A large value adds an artifact, and the replays take the deduplication and repeated-finish paths.
-    big = module.DelegationEvent(kind="output", data={"content": "x" * 100_000}, event_id="big")
+    big = DelegationEvent(kind="output", data={"content": "x" * 100_000}, event_id="big")
     monkeypatch.setattr(os, "open", spy_os_open)
     monkeypatch.setattr(io, "open", spy_io_open)
     await owner.reopen(handle.locator)
@@ -394,19 +495,18 @@ async def test_the_primary_never_reads_a_workspace_export(tmp_path: Path, monkey
 @pytest.mark.asyncio
 async def test_dedup_and_sequence_survive_a_restart_without_the_workspace_record(tmp_path: Path) -> None:
     """A restarted primary continues from its own copy, even after the child deleted every export."""
-    module = _records_module()
     runtime_paths = test_runtime_paths(tmp_path)
-    owner = module.DelegationRecordOwner(_config(), runtime_paths)
-    handle = await _start(module, owner, delegation_id="restarted")
-    replayed = module.DelegationEvent(kind="tool_result", data={"result": "kept once"}, event_id="tool:call-1:result")
+    owner = DelegationRecordOwner(_config(), runtime_paths)
+    handle = await _start(owner, delegation_id="restarted")
+    replayed = DelegationEvent(kind="tool_result", data={"result": "kept once"}, event_id="tool:call-1:result")
     await owner.append_event(handle, replayed)
     shutil.rmtree(_record_dir(handle))
     _receipt_path(handle).unlink()
 
-    restarted = module.DelegationRecordOwner(_config(), runtime_paths)
-    reopened = await restarted.reopen(module.DelegationRecordLocator.from_dict(handle.locator.to_dict()))
+    restarted = DelegationRecordOwner(_config(), runtime_paths)
+    reopened = await restarted.reopen(DelegationRecordLocator.from_dict(handle.locator.to_dict()))
     await restarted.append_event(reopened, replayed)
-    await restarted.append_event(reopened, module.DelegationEvent(kind="output", data={"content": "after restart"}))
+    await restarted.append_event(reopened, DelegationEvent(kind="output", data={"content": "after restart"}))
     await restarted.finish(reopened, status="completed", output="Done")
 
     events = _read_events(_record_dir(reopened) / "events.jsonl")
@@ -423,11 +523,10 @@ async def test_dedup_and_sequence_survive_a_restart_without_the_workspace_record
 
 @pytest.mark.asyncio
 async def test_a_record_started_before_primary_state_is_left_as_it_was(tmp_path: Path) -> None:
-    """A record with only workspace files settles without touching them; a record found nowhere stays missing."""
-    module = _records_module()
-    owner = module.DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
-    handle = await _start(module, owner, delegation_id="before-upgrade")
-    await owner.append_event(handle, module.DelegationEvent(kind="output", data={"content": "Before"}, status="paused"))
+    """A record with only workspace files is left as it was by every operation; a record found nowhere stays missing."""
+    owner = DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
+    handle = await _start(owner, delegation_id="before-upgrade")
+    await owner.append_event(handle, DelegationEvent(kind="output", data={"content": "Before"}, status="paused"))
     shutil.rmtree(handle.state_dir)
     exported = {path: path.read_bytes() for path in _record_dir(handle).rglob("*") if path.is_file()}
     receipt = _receipt_path(handle).read_bytes()
@@ -435,10 +534,11 @@ async def test_a_record_started_before_primary_state_is_left_as_it_was(tmp_path:
     reopened = await owner.reopen(handle.locator)
     await owner.append_event(
         reopened,
-        module.DelegationEvent(kind="output", data={"content": "After"}, event_id="after"),
+        DelegationEvent(kind="output", data={"content": "After"}, event_id="after"),
     )
     await owner.finish(reopened, status="completed", output="Done")
 
+    assert await owner.highest_event_index(reopened, "stream-") == 0
     assert {path: path.read_bytes() for path in _record_dir(handle).rglob("*") if path.is_file()} == exported
     assert _receipt_path(handle).read_bytes() == receipt
     assert not handle.state_dir.exists()
@@ -453,10 +553,9 @@ async def test_a_log_planted_where_a_new_record_starts_is_replaced(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A new record's exports come from its primary copy, so files planted where it will live are replaced."""
-    module = _records_module()
-    monkeypatch.setattr(module, "_utc_timestamp", lambda: "2026-09-28T00:00:00Z")
+    monkeypatch.setattr(records, "_utc_timestamp", lambda: "2026-09-28T00:00:00Z")
     runtime_paths = test_runtime_paths(tmp_path)
-    owner = module.DelegationRecordOwner(_config(), runtime_paths)
+    owner = DelegationRecordOwner(_config(), runtime_paths)
     record_dir = (
         runtime_paths.storage_root / "agents" / "child" / "workspace" / ".mindroom/delegations/2026-09-28/planted"
     )
@@ -465,7 +564,7 @@ async def test_a_log_planted_where_a_new_record_starts_is_replaced(
     (record_dir / "events.jsonl").write_text(planted * 3, encoding="utf-8")
     (record_dir / "run.json").write_text('{"status": "completed"}', encoding="utf-8")
 
-    handle = await _start(module, owner, delegation_id="planted")
+    handle = await _start(owner, delegation_id="planted")
 
     assert [event["kind"] for event in _read_events(record_dir / "events.jsonl")] == ["delegation_started"]
     assert (record_dir / "events.jsonl").read_bytes() == (handle.state_dir / "events.jsonl").read_bytes()
@@ -481,7 +580,7 @@ def _config(*, private_child: bool = False) -> Config:
             "caller": AgentConfig(display_name="Caller"),
             "child": child,
         },
-        models={"default": ModelConfig(provider="test", id="test-model")},
+        models={"default": ModelConfig(provider="openai", id="test-model")},
     )
 
 
@@ -497,7 +596,7 @@ def _identity(agent_name: str, requester_id: str = "@alice:localhost") -> ToolEx
     )
 
 
-def _metadata(module: ModuleType, **overrides: object) -> object:
+def _metadata(**overrides: object) -> DelegationMetadata:
     values = {
         "caller_agent_name": "caller",
         "child_agent_name": "child",
@@ -509,19 +608,25 @@ def _metadata(module: ModuleType, **overrides: object) -> object:
         "model_name": "test-model",
         "task": "Investigate the failure",
         "parent_delegation_id": None,
-        "subagent_id": None,
+        "subagent_id": "subagent-123",
         "previous_delegation_id": None,
     }
     values.update(overrides)
-    return module.DelegationMetadata(**values)
+    return DelegationMetadata(**values)
 
 
-def _record_dir(handle: object) -> Path:
+def _record_dir(handle: DelegationRecordHandle) -> Path:
     return handle.child_workspace / handle.scoped_path
 
 
-def _receipt_path(handle: object) -> Path:
-    return handle.caller_workspace / _records_module()._receipt_relative_path(handle.locator)
+def _receipt_path(handle: DelegationRecordHandle) -> Path:
+    locator = handle.locator
+    return (
+        handle.caller_workspace
+        / ".mindroom/delegation_receipts"
+        / locator.started_date
+        / f"{locator.delegation_id}.json"
+    )
 
 
 def _read_json(path: Path) -> dict[str, object]:
@@ -543,15 +648,10 @@ def _read_events(path: Path) -> list[dict[str, object]]:
 )
 async def test_unicode_separators_preserve_delegation_event_boundaries(tmp_path: Path, separator: str) -> None:
     """Unicode separators inside JSON strings must not split durable events."""
-    module = _records_module()
-    owner = module.DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
-    handle = await owner.start(
-        _metadata(module),
-        caller_execution_identity=_identity("caller"),
-        child_execution_identity=_identity("child"),
-    )
+    owner = DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
+    handle = await _start(owner)
     content = f"First{separator}second"
-    await owner.append_event(handle, module.DelegationEvent(kind="tool_result", data={"result": content}))
+    await owner.append_event(handle, DelegationEvent(kind="tool_result", data={"result": content}))
     event_path = _record_dir(handle) / "events.jsonl"
     committed = event_path.read_bytes()
     assert separator.encode("utf-8") in committed
@@ -574,16 +674,10 @@ async def test_unicode_separators_preserve_delegation_event_boundaries(tmp_path:
 @pytest.mark.asyncio
 async def test_start_writes_initial_record_and_restart_safe_parent_receipt(tmp_path: Path) -> None:
     """Removing any initial export or persisted locator identity must fail this test."""
-    module = _records_module()
     runtime_paths = test_runtime_paths(tmp_path)
-    owner = module.DelegationRecordOwner(_config(), runtime_paths)
+    owner = DelegationRecordOwner(_config(), runtime_paths)
 
-    handle = await owner.start(
-        _metadata(module),
-        caller_execution_identity=_identity("caller"),
-        child_execution_identity=_identity("child"),
-        delegation_id="delegation-123",
-    )
+    handle = await _start(owner)
 
     expected_scoped_path = ".mindroom/delegations"
     assert handle.locator.delegation_id == "delegation-123"
@@ -609,7 +703,7 @@ async def test_start_writes_initial_record_and_restart_safe_parent_receipt(tmp_p
         "parent_run_id": "parent-run",
         "parent_tool_call_id": "parent-call",
         "parent_delegation_id": None,
-        "subagent_id": None,
+        "subagent_id": "subagent-123",
         "previous_delegation_id": None,
         "source_room_id": "!room:localhost",
         "source_thread_id": "$thread",
@@ -642,7 +736,7 @@ async def test_start_writes_initial_record_and_restart_safe_parent_receipt(tmp_p
     assert expected_reference in handle.to_receipt()
 
     serialized = handle.locator.to_dict()
-    reopened = await owner.reopen(module.DelegationRecordLocator.from_dict(serialized))
+    reopened = await owner.reopen(DelegationRecordLocator.from_dict(serialized))
 
     assert _record_dir(reopened) == _record_dir(handle)
     assert _receipt_path(reopened) == _receipt_path(handle)
@@ -651,18 +745,12 @@ async def test_start_writes_initial_record_and_restart_safe_parent_receipt(tmp_p
 @pytest.mark.asyncio
 async def test_append_event_preserves_order_and_actual_tool_payloads(tmp_path: Path) -> None:
     """Replacing full tool payloads with previews or reordering events must fail this test."""
-    module = _records_module()
-    owner = module.DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
-    handle = await owner.start(
-        _metadata(module),
-        caller_execution_identity=_identity("caller"),
-        child_execution_identity=_identity("child"),
-        delegation_id="ordered-events",
-    )
+    owner = DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
+    handle = await _start(owner, delegation_id="ordered-events")
 
     await owner.append_event(
         handle,
-        module.DelegationEvent(
+        DelegationEvent(
             kind="tool_call",
             data={
                 "tool_call_id": "call-1",
@@ -673,7 +761,7 @@ async def test_append_event_preserves_order_and_actual_tool_payloads(tmp_path: P
     )
     await owner.append_event(
         handle,
-        module.DelegationEvent(
+        DelegationEvent(
             kind="tool_result",
             data={
                 "tool_call_id": "call-1",
@@ -693,8 +781,8 @@ async def test_append_event_preserves_order_and_actual_tool_payloads(tmp_path: P
         "tool_call_id": "call-1",
         "result": {"items": [{"name": "first"}, {"name": "second"}]},
     }
-    assert _read_json(_record_dir(handle) / "run.json")["event_count"] == 3
     await owner.finish(handle, status="completed", output="Done")
+    assert _read_json(_record_dir(handle) / "run.json")["event_count"] == 4
     transcript = (_record_dir(handle) / "transcript.md").read_text(encoding="utf-8")
     assert "Investigate the failure" in transcript
     assert transcript.index("tool_call") < transcript.index("tool_result") < transcript.index("delegation_finished")
@@ -703,19 +791,13 @@ async def test_append_event_preserves_order_and_actual_tool_payloads(tmp_path: P
 @pytest.mark.asyncio
 async def test_append_event_updates_paused_status_and_reopened_receipt(tmp_path: Path) -> None:
     """Losing an approval pause or its caller-visible state after reopen must fail this test."""
-    module = _records_module()
-    owner = module.DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
-    handle = await owner.start(
-        _metadata(module),
-        caller_execution_identity=_identity("caller"),
-        child_execution_identity=_identity("child"),
-        delegation_id="pause-resume",
-    )
-    reopened = await owner.reopen(module.DelegationRecordLocator.from_dict(handle.locator.to_dict()))
+    owner = DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
+    handle = await _start(owner, delegation_id="pause-resume")
+    reopened = await owner.reopen(DelegationRecordLocator.from_dict(handle.locator.to_dict()))
 
     await owner.append_event(
         reopened,
-        module.DelegationEvent(
+        DelegationEvent(
             kind="approval_requested",
             data={"tool_call_id": "pending-1", "tool_name": "shell", "arguments": {"command": "pwd"}},
             status="paused",
@@ -729,22 +811,16 @@ async def test_append_event_updates_paused_status_and_reopened_receipt(tmp_path:
 @pytest.mark.asyncio
 async def test_append_event_deduplicates_stable_event_id_after_reopen(tmp_path: Path) -> None:
     """Replaying an observed stream event after restart must not duplicate its audit entry."""
-    module = _records_module()
-    owner = module.DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
-    handle = await owner.start(
-        _metadata(module),
-        caller_execution_identity=_identity("caller"),
-        child_execution_identity=_identity("child"),
-        delegation_id="event-replay",
-    )
-    event = module.DelegationEvent(
+    owner = DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
+    handle = await _start(owner, delegation_id="event-replay")
+    event = DelegationEvent(
         kind="tool_result",
         data={"tool_call_id": "call-1", "result": "kept once"},
         event_id="tool:call-1:result",
     )
 
     await owner.append_event(handle, event)
-    reopened = await owner.reopen(module.DelegationRecordLocator.from_dict(handle.locator.to_dict()))
+    reopened = await owner.reopen(DelegationRecordLocator.from_dict(handle.locator.to_dict()))
     await owner.append_event(reopened, event)
 
     events = _read_events(_record_dir(handle) / "events.jsonl")
@@ -752,25 +828,20 @@ async def test_append_event_deduplicates_stable_event_id_after_reopen(tmp_path: 
         "delegation_started",
         "tool:call-1:result",
     ]
-    assert _read_json(_record_dir(handle) / "run.json")["event_count"] == 2
+    await owner.finish(reopened, status="completed", output="Done")
+    assert _read_json(_record_dir(handle) / "run.json")["event_count"] == 3
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("fresh_event", [False, True])
 async def test_event_append_repairs_views_after_interrupted_write(tmp_path: Path, fresh_event: bool) -> None:
-    """A replayed or fresh event must repair views left stale by interruption."""
-    module = _records_module()
-    owner = module.DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
-    handle = await owner.start(
-        _metadata(module),
-        caller_execution_identity=_identity("caller"),
-        child_execution_identity=_identity("child"),
-        delegation_id="event-repair",
-    )
+    """A replayed or fresh status change must repair views left stale by interruption."""
+    owner = DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
+    handle = await _start(owner, delegation_id="event-repair")
     run_path = _record_dir(handle) / "run.json"
     stale_run = run_path.read_bytes()
     stale_receipt = _receipt_path(handle).read_bytes()
-    event = module.DelegationEvent(
+    event = DelegationEvent(
         kind="approval_requested",
         data={"tool_call_id": "pending", "arguments": {"command": "pwd"}},
         status="paused",
@@ -781,7 +852,7 @@ async def test_event_append_repairs_views_after_interrupted_write(tmp_path: Path
     _receipt_path(handle).write_bytes(stale_receipt)
 
     if fresh_event:
-        event = module.DelegationEvent(kind="output", data={"content": "Still waiting"}, event_id="fresh-output")
+        event = DelegationEvent(kind="status", data={"status": "paused"}, status="paused", event_id="fresh-status")
     await owner.append_event(handle, event)
 
     assert _read_json(run_path)["event_count"] == 2 + fresh_event
@@ -794,14 +865,8 @@ async def test_event_append_repairs_views_after_interrupted_write(tmp_path: Path
 @pytest.mark.parametrize("reject_fresh_event", [False, True])
 async def test_repeated_finish_repairs_stale_terminal_views(tmp_path: Path, reject_fresh_event: bool) -> None:
     """Replaying finish must rebuild stale run, transcript, and receipt without a duplicate event."""
-    module = _records_module()
-    owner = module.DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
-    handle = await owner.start(
-        _metadata(module),
-        caller_execution_identity=_identity("caller"),
-        child_execution_identity=_identity("child"),
-        delegation_id="finish-repair",
-    )
+    owner = DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
+    handle = await _start(owner, delegation_id="finish-repair")
     run_path = _record_dir(handle) / "run.json"
     transcript_path = _record_dir(handle) / "transcript.md"
     stale_run = run_path.read_bytes()
@@ -815,7 +880,7 @@ async def test_repeated_finish_repairs_stale_terminal_views(tmp_path: Path, reje
         with pytest.raises(ValueError, match="already terminal"):
             await owner.append_event(
                 handle,
-                module.DelegationEvent(kind="output", data={"content": "late output"}, event_id="late-output"),
+                DelegationEvent(kind="output", data={"content": "late output"}, event_id="late-output"),
             )
     await owner.finish(handle, status="completed", output="durable result", usage={"output_tokens": 4})
 
@@ -833,9 +898,8 @@ async def test_repeated_finish_repairs_stale_terminal_views(tmp_path: Path, reje
 @pytest.mark.asyncio
 async def test_a_settled_record_keeps_its_first_terminal_outcome(tmp_path: Path) -> None:
     """A later finish with another terminal status, such as a stale cancellation, keeps the first outcome."""
-    module = _records_module()
-    owner = module.DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
-    handle = await _start(module, owner)
+    owner = DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
+    handle = await _start(owner)
     await owner.finish(handle, status="failed", error="Child failed")
 
     await owner.finish(handle, status="cancelled", error="Delegation cancelled.")
@@ -853,14 +917,8 @@ async def test_a_settled_record_keeps_its_first_terminal_outcome(tmp_path: Path)
 @pytest.mark.asyncio
 async def test_finish_persists_each_terminal_outcome(status: str, tmp_path: Path) -> None:
     """Dropping or conflating any terminal outcome must fail this test."""
-    module = _records_module()
-    owner = module.DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
-    handle = await owner.start(
-        _metadata(module),
-        caller_execution_identity=_identity("caller"),
-        child_execution_identity=_identity("child"),
-        delegation_id=f"terminal-{status}",
-    )
+    owner = DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
+    handle = await _start(owner, delegation_id=f"terminal-{status}")
     output = "Final delegated answer" if status == "completed" else None
     error = None if status == "completed" else f"Delegation {status}"
 
@@ -886,17 +944,11 @@ async def test_finish_persists_each_terminal_outcome(status: str, tmp_path: Path
 @pytest.mark.asyncio
 async def test_all_record_surfaces_redact_credentials(tmp_path: Path) -> None:
     """Writing a secret from metadata, arguments, results, or errors must fail this test."""
-    module = _records_module()
-    owner = module.DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
-    handle = await owner.start(
-        _metadata(module, task="Use api_key=sk-example-task-secret"),
-        caller_execution_identity=_identity("caller"),
-        child_execution_identity=_identity("child"),
-        delegation_id="redacted",
-    )
+    owner = DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
+    handle = await _start(owner, _metadata(task="Use api_key=sk-example-task-secret"), delegation_id="redacted")
     await owner.append_event(
         handle,
-        module.DelegationEvent(
+        DelegationEvent(
             kind="tool_result",
             data={
                 "arguments": {"api_key": "sk-example-argument-secret"},
@@ -925,19 +977,13 @@ async def test_all_record_surfaces_redact_credentials(tmp_path: Path) -> None:
 @pytest.mark.asyncio
 async def test_oversized_tool_output_is_preserved_as_redacted_artifact(tmp_path: Path) -> None:
     """Discarding or silently truncating a large tool result must fail this test."""
-    module = _records_module()
-    owner = module.DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
-    handle = await owner.start(
-        _metadata(module),
-        caller_execution_identity=_identity("caller"),
-        child_execution_identity=_identity("child"),
-        delegation_id="large-output",
-    )
+    owner = DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
+    handle = await _start(owner, delegation_id="large-output")
     large_output = "large-result-" + ("é" * 100_000)
 
     await owner.append_event(
         handle,
-        module.DelegationEvent(
+        DelegationEvent(
             kind="tool_result",
             data={"tool_call_id": "large-call", "result": large_output},
         ),
@@ -961,19 +1007,13 @@ async def test_oversized_tool_output_is_preserved_as_redacted_artifact(tmp_path:
 @pytest.mark.asyncio
 async def test_oversized_dict_artifact_hashes_exact_written_bytes(tmp_path: Path) -> None:
     """Artifact metadata must hash the serialized bytes on disk for mappings too."""
-    module = _records_module()
-    owner = module.DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
-    handle = await owner.start(
-        _metadata(module),
-        caller_execution_identity=_identity("caller"),
-        child_execution_identity=_identity("child"),
-        delegation_id="large-mapping",
-    )
+    owner = DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
+    handle = await _start(owner, delegation_id="large-mapping")
     large_output = {"z-last": "z" * 40_000, "a-first": "a" * 40_000}
 
     await owner.append_event(
         handle,
-        module.DelegationEvent(kind="tool_result", data={"result": large_output}),
+        DelegationEvent(kind="tool_result", data={"result": large_output}),
     )
 
     reference = _read_events(_record_dir(handle) / "events.jsonl")[-1]["data"]["result"]
@@ -985,15 +1025,9 @@ async def test_oversized_dict_artifact_hashes_exact_written_bytes(tmp_path: Path
 @pytest.mark.asyncio
 async def test_private_child_record_uses_requester_scope_and_caller_receipt(tmp_path: Path) -> None:
     """Routing a private child's record into shared state or another requester must fail this test."""
-    module = _records_module()
     runtime_paths = test_runtime_paths(tmp_path)
-    owner = module.DelegationRecordOwner(_config(private_child=True), runtime_paths)
-    handle = await owner.start(
-        _metadata(module),
-        caller_execution_identity=_identity("caller"),
-        child_execution_identity=_identity("child"),
-        delegation_id="private-child",
-    )
+    owner = DelegationRecordOwner(_config(private_child=True), runtime_paths)
+    handle = await _start(owner, delegation_id="private-child")
 
     assert _record_dir(handle).is_relative_to(runtime_paths.storage_root / "private_instances")
     assert handle.state_dir.is_relative_to(runtime_paths.storage_root / "tracking" / "private_instances")
@@ -1007,12 +1041,22 @@ async def test_private_child_record_uses_requester_scope_and_caller_receipt(tmp_
     wrong_identity["requester_id"] = "@bob:localhost"
     wrong_scope["child_execution_identity"] = wrong_identity
     with pytest.raises(FileNotFoundError):
-        await owner.reopen(module.DelegationRecordLocator.from_dict(wrong_scope))
+        await owner.reopen(DelegationRecordLocator.from_dict(wrong_scope))
+
+
+@pytest.mark.asyncio
+async def test_a_private_child_record_registers_the_child_instance_owner(tmp_path: Path) -> None:
+    """A delegation can write a private child's first data before the child runs; its owner record must come first."""
+    runtime_paths = test_runtime_paths(tmp_path)
+    owner = DelegationRecordOwner(_config(private_child=True), runtime_paths)
+    await _start(owner, delegation_id="first-child-data")
+
+    instances = private_instances_for_agent(runtime_paths.storage_root, "child", "user")
+    assert [instance.requester_id for instance in instances] == ["@alice:localhost"]
 
 
 def test_locator_rejects_malformed_present_execution_identity() -> None:
     """A malformed retained identity must never fall back to shared scope."""
-    module = _records_module()
     locator = {
         "delegation_id": "strict-identity",
         "started_date": "2026-09-14",
@@ -1023,33 +1067,28 @@ def test_locator_rejects_malformed_present_execution_identity() -> None:
     }
 
     with pytest.raises(TypeError, match="channel"):
-        module.DelegationRecordLocator.from_dict(locator)
+        DelegationRecordLocator.from_dict(locator)
 
 
 @pytest.mark.parametrize("leaf_name", ["run.json", "events.jsonl", "transcript.md", "receipt"])
 @pytest.mark.asyncio
 async def test_record_exports_never_follow_a_symlinked_leaf(leaf_name: str, tmp_path: Path) -> None:
     """An export replaced by a link is replaced in turn, never read or written through."""
-    module = _records_module()
-    owner = module.DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
-    handle = await owner.start(
-        _metadata(module),
-        caller_execution_identity=_identity("caller"),
-        child_execution_identity=_identity("child"),
-        delegation_id=f"symlink-{leaf_name.replace('.', 'dot')}",
-    )
+    owner = DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
+    handle = await _start(owner, delegation_id=f"symlink-{leaf_name.replace('.', 'dot')}")
     target = _receipt_path(handle) if leaf_name == "receipt" else _record_dir(handle) / leaf_name
     target.unlink(missing_ok=leaf_name == "transcript.md")
     outside = tmp_path / f"outside-{leaf_name.replace('.', 'dot')}"
     outside.write_text('{"victim": "victim-only note"}\n', encoding="utf-8")
     target.symlink_to(outside)
 
-    if leaf_name == "transcript.md":
+    # run.json, the receipt, and the transcript are rewritten when the record settles.
+    if leaf_name != "events.jsonl":
         await owner.finish(handle, status="completed", output="written")
     else:
         await owner.append_event(
             handle,
-            module.DelegationEvent(kind="output", event_id=f"symlink:{leaf_name}", data={"content": "written"}),
+            DelegationEvent(kind="output", event_id=f"symlink:{leaf_name}", data={"content": "written"}),
         )
 
     assert not target.is_symlink()
@@ -1070,21 +1109,15 @@ async def test_record_mutation_refuses_swapped_record_directories(
     swapped: str,
 ) -> None:
     """A record directory or ancestor swapped for a link is never written through, and a FIFO log is replaced."""
-    module = _records_module()
     runtime_paths = test_runtime_paths(tmp_path)
-    owner = module.DelegationRecordOwner(_config(), runtime_paths)
-    handle = await owner.start(
-        _metadata(module),
-        caller_execution_identity=_identity("caller"),
-        child_execution_identity=_identity("child"),
-        delegation_id=f"swap-{swapped.replace('_', '-')}",
-    )
+    owner = DelegationRecordOwner(_config(), runtime_paths)
+    handle = await _start(owner, delegation_id=f"swap-{swapped.replace('_', '-')}")
     victim = tmp_path / "victim-workspace" / "record"
     victim.mkdir(parents=True)
     (victim / "events.jsonl").write_text('{"victim": "victim-only note"}\n', encoding="utf-8")
     victim_tree = victim.parent
     before = {path: path.read_bytes() if path.is_file() else None for path in victim_tree.rglob("*")}
-    validated_handle = module.DelegationRecordOwner._validated_handle
+    validated_handle = DelegationRecordOwner._validated_handle
 
     def swap_after_validation(self: object, record_handle: object) -> object:
         # Worker code races the primary between path validation and the record I/O.
@@ -1101,8 +1134,8 @@ async def test_record_mutation_refuses_swapped_record_directories(
             os.mkfifo(_record_dir(handle) / "events.jsonl")
         return validated
 
-    monkeypatch.setattr(module.DelegationRecordOwner, "_validated_handle", swap_after_validation)
-    await owner.append_event(handle, module.DelegationEvent(kind="output", data={"content": "after"}))
+    monkeypatch.setattr(DelegationRecordOwner, "_validated_handle", swap_after_validation)
+    await owner.append_event(handle, DelegationEvent(kind="output", data={"content": "after"}))
 
     if swapped == "events_fifo":
         assert (_record_dir(handle) / "events.jsonl").read_bytes() == (handle.state_dir / "events.jsonl").read_bytes()
@@ -1114,9 +1147,8 @@ async def test_record_mutation_refuses_swapped_record_directories(
 @pytest.mark.asyncio
 async def test_an_export_worker_code_made_unwritable_never_fails_the_record(planted: str, tmp_path: Path) -> None:
     """A directory or link planted where an export goes skips that export, and events and finish still commit."""
-    module = _records_module()
-    owner = module.DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
-    handle = await _start(module, owner, delegation_id=f"planted-{planted.replace('.', '-').replace('_', '-')}")
+    owner = DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
+    handle = await _start(owner, delegation_id=f"planted-{planted.replace('.', '-').replace('_', '-')}")
     record_dir = _record_dir(handle)
     outside = tmp_path / "outside"
     outside.mkdir()
@@ -1129,7 +1161,7 @@ async def test_an_export_worker_code_made_unwritable_never_fails_the_record(plan
         target = _receipt_path(handle) if planted == "receipt" else record_dir / planted
         target.unlink(missing_ok=True)
         target.mkdir()
-    decision = module.DelegationEvent(
+    decision = DelegationEvent(
         kind="approval_decision",
         data={"tool_call_id": "gated", "approved": True, "reason": "x" * 100_000},
         status="running",
@@ -1151,16 +1183,15 @@ async def test_an_export_worker_code_made_unwritable_never_fails_the_record(plan
 @pytest.mark.asyncio
 async def test_self_delegation_creates_one_transcript_and_minimal_receipt(tmp_path: Path) -> None:
     """Creating a second transcript for a self-call must fail this test."""
-    module = _records_module()
     config = Config(
         agents={"caller": AgentConfig(display_name="Caller")},
-        models={"default": ModelConfig(provider="test", id="test-model")},
+        models={"default": ModelConfig(provider="openai", id="test-model")},
     )
     runtime_paths = test_runtime_paths(tmp_path)
-    owner = module.DelegationRecordOwner(config, runtime_paths)
+    owner = DelegationRecordOwner(config, runtime_paths)
     identity = _identity("caller")
     handle = await owner.start(
-        _metadata(module, child_agent_name="caller"),
+        _metadata(child_agent_name="caller"),
         caller_execution_identity=identity,
         child_execution_identity=identity,
         delegation_id="self-call",
@@ -1175,29 +1206,25 @@ async def test_self_delegation_creates_one_transcript_and_minimal_receipt(tmp_pa
         "delegation_id",
         "caller_agent_name",
         "child_agent_name",
+        "subagent_id",
         "status",
         "record_reference",
         "started_at",
         "updated_at",
         "finished_at",
     }
+    assert receipt["subagent_id"] == "subagent-123"
 
 
 @pytest.mark.asyncio
 async def test_run_json_records_persona_digest_and_transcript_shows_redacted_prompt(tmp_path: Path) -> None:
     """An authored child's record names its persona, its prompt digest, and the prompt with secrets redacted."""
-    module = _records_module()
-    owner = module.DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
+    owner = DelegationRecordOwner(_config(), test_runtime_paths(tmp_path))
     secret = "sk-" + "proj-" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6"
     prompt = f"You are a critic. Use key {secret} only for lookups."
     persona = SubagentPersona(source_kind="profile", source_name="critic", system_prompt=prompt, tools=("file",))
 
-    handle = await owner.start(
-        _metadata(module, persona=persona),
-        caller_execution_identity=_identity("caller"),
-        child_execution_identity=_identity("child"),
-        delegation_id="delegation-persona",
-    )
+    handle = await _start(owner, _metadata(persona=persona), delegation_id="delegation-persona")
     await owner.finish(handle, status="completed", output="Done")
 
     run = _read_json(_record_dir(handle) / "run.json")

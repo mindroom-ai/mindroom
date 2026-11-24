@@ -24,29 +24,16 @@ if TYPE_CHECKING:
     config_fields=[
         ConfigField(
             name="csvs",
-            label="Csvs",
-            type="text",
+            label="CSV Files",
+            type="string[]",
             required=False,
             default=None,
+            description="Paths of the CSV files the tool reads, each named by its filename stem.",
         ),
         ConfigField(
             name="row_limit",
             label="Row Limit",
             type="number",
-            required=False,
-            default=None,
-        ),
-        ConfigField(
-            name="duckdb_connection",
-            label="Duckdb Connection",
-            type="text",
-            required=False,
-            default=None,
-        ),
-        ConfigField(
-            name="duckdb_kwargs",
-            label="Duckdb Kwargs",
-            type="text",
             required=False,
             default=None,
         ),
@@ -87,7 +74,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["duckdb"],
-    docs_url="https://docs.agno.com/tools/toolkits/database/csv",
+    docs_url="https://docs.mindroom.chat/tools/data-and-databases/#csv",
     function_names=("get_columns", "list_csv_files", "query_csv_file", "read_csv_file"),
 )
 def csv_tools() -> type[CsvTools]:

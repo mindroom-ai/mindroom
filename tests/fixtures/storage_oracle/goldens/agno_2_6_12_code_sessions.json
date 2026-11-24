@@ -1,0 +1,22 @@
+{"objects":{
+"01c521714fd5":{"content":"a1","created_at":1788430272,"from_history":true,"id":"d8456f0d-78b8-458f-b1aa-6719c09f2cb5","role":"assistant","stop_after_tool_call":false},
+"1e5dacc16a8a":{"content":"a1","created_at":1788430272,"from_history":false,"id":"d8456f0d-78b8-458f-b1aa-6719c09f2cb5","role":"assistant","stop_after_tool_call":false},
+"3714834faa71":{"content":"q1","created_at":1788430272,"from_history":false,"id":"73d7902d-762c-453f-b175-d147080b7552","role":"user","stop_after_tool_call":false},
+"4680cbc3c5e0":{"content":"a2","created_at":1788430272,"from_history":false,"id":"0db3e4df-bcd5-4d39-87f5-e86da6224ca8","role":"assistant","stop_after_tool_call":false},
+"4cce9bd753f2":{"content":"q3","created_at":1788430272,"from_history":true,"id":"52b27593-4b91-4cb4-a76e-e6a533c22579","role":"user","stop_after_tool_call":false},
+"5b44281e0868":{"content":"probe","created_at":0,"from_history":false,"id":"probe","role":"user","stop_after_tool_call":false},
+"6f527c5d0725":{"content":"a2","created_at":1788430272,"from_history":true,"id":"0db3e4df-bcd5-4d39-87f5-e86da6224ca8","role":"assistant","stop_after_tool_call":false},
+"71caf2d4ce52":{"agent_id":"code","created_at":1700000002,"messages":[{"$":"fbf01a52792d"},{"$":"4680cbc3c5e0"}],"metrics":{"input_tokens":2,"output_tokens":2,"total_tokens":4},"run_id":"run-2","session_id":"session-1","status":"RUNNING","user_id":"@alice:example.test"},
+"907ca178fd53":{"created_at":1700000001,"metrics":{"input_tokens":1,"output_tokens":1,"total_tokens":2},"requests":[],"run_id":"run-1","user_id":"@alice:example.test"},
+"9770a0d09182":{"content":"q1","created_at":1788430272,"from_history":true,"id":"73d7902d-762c-453f-b175-d147080b7552","role":"user","stop_after_tool_call":false},
+"b6fa06f397b1":{"content":"q3","created_at":1788430272,"from_history":false,"id":"52b27593-4b91-4cb4-a76e-e6a533c22579","role":"user","stop_after_tool_call":false},
+"b75768c1c881":{"content":"a3","created_at":1788430272,"from_history":false,"id":"a5c506cb-ddd8-4247-b3a8-1df1e8cd201d","role":"assistant","stop_after_tool_call":false},
+"ba40d840bd55":{"content":"a3","created_at":1788430272,"from_history":true,"id":"a5c506cb-ddd8-4247-b3a8-1df1e8cd201d","role":"assistant","stop_after_tool_call":false},
+"c6230dff228a":{"agent_id":"code","created_at":1700000001,"messages":[{"$":"3714834faa71"},{"$":"1e5dacc16a8a"}],"metrics":{"input_tokens":1,"output_tokens":1,"total_tokens":2},"run_id":"run-1","session_id":"session-1","status":"RUNNING","user_id":"@alice:example.test"},
+"c6c9e15c1237":{"content":"q2","created_at":1788430272,"from_history":true,"id":"2b51814b-7b8d-4308-a3b6-39e4309c44d5","role":"user","stop_after_tool_call":false},
+"cab3b2391414":{"agent_id":"code","created_at":1700000003,"messages":[{"$":"b6fa06f397b1"},{"$":"b75768c1c881"}],"metrics":{"input_tokens":3,"output_tokens":3,"total_tokens":6},"run_id":"run-3","session_id":"session-1","status":"RUNNING","user_id":"@alice:example.test"},
+"de118e4e0732":{"created_at":1700000002,"metrics":{"input_tokens":2,"output_tokens":2,"total_tokens":4},"requests":[],"run_id":"run-2","user_id":"@alice:example.test"},
+"fbf01a52792d":{"content":"q2","created_at":1788430272,"from_history":false,"id":"2b51814b-7b8d-4308-a3b6-39e4309c44d5","role":"user","stop_after_tool_call":false},
+"fccbe0daa927":{"created_at":1700000003,"metrics":{"input_tokens":3,"output_tokens":3,"total_tokens":6},"requests":[],"run_id":"run-3","user_id":"@alice:example.test"}
+},
+"recording":{"sessions":{"session-1":{"observed":{"folded_tool_call_ids":{},"force_queued":false,"ledger":[["run-1",{"$":"907ca178fd53"}],["run-2",{"$":"de118e4e0732"}],["run-3",{"$":"fccbe0daa927"}]],"list_runs":[{"$":"c6230dff228a"},{"$":"71caf2d4ce52"},{"$":"cab3b2391414"}],"loaded_runs":[{"$":"c6230dff228a"},{"$":"71caf2d4ce52"},{"$":"cab3b2391414"}],"redaction_candidates":[],"request":[{"$":"9770a0d09182"},{"$":"01c521714fd5"},{"$":"c6c9e15c1237"},{"$":"6f527c5d0725"},{"$":"4cce9bd753f2"},{"$":"ba40d840bd55"},{"$":"5b44281e0868"}],"resume_requests":{},"row":{"created_at":1700000000,"session_data":"{\"session_state\": {}}","updated_at":1700000000,"user_id":"@alice:example.test"},"seen_event_ids":[],"session":{"created_at":1700000000,"kind":"agent","metadata":null,"owner_id":"code","session_state":{},"summary":null},"session_runs":[]},"run_ids":["run-1","run-2","run-3"],"scope":"agent:code"}},"storage_name":"code"}}

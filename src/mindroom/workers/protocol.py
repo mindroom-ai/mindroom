@@ -1,0 +1,238 @@
+"""The requests and responses the primary and its sandbox runners exchange, shared by both sides.
+
+Every model refuses fields it does not declare, and every request names the protocol it speaks, so a
+primary and a worker from different releases fail with an error instead of silently dropping what one
+of them added.
+"""
+
+from __future__ import annotations
+
+import operator
+from dataclasses import fields
+from typing import Annotated, Any, Literal
+
+from pydantic import (
+    AfterValidator,
+    BaseModel,
+    ConfigDict,
+    Field,
+    field_validator,
+)
+
+from mindroom.config.tool_aliases import canonical_tool_name
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope
+
+# 2: workers mount only agent workspaces and never write private-instance identity records.
+# 3: /execute streams progress and keep-alive lines before its result line, and job calls have no time limit.
+# 4: a shell call's set and removed variables apply over the worker's own environment and workspace script.
+# 5: a shell call's PATH directories go first on the command's PATH.
+# 6: requests and responses are these typed models, which refuse unknown fields, and each request names its
+#    protocol, so mixed releases fail instead of dropping fields; a request names its workspace in `base_dir`.
+# 7: a call's arguments arrive as the model sent them, and the worker validates and coerces them.
+# 8: a worker pinned to one subagent (`subagent=<id>` in its key) serves its normal worker's workspaces and credentials.
+# 9: so does a worker a reply's calls name (`named=<id>` in its key).
+# 10: a shell call with `stream_io` streams its command's raw output as frames before its result line, and
+#     /execute/{request_id}/stdin writes the command's stdin.
+# 11: a shell call with `sandbox` runs in sandbox mode: empty execution env, no workspace env hook, writable worker HOME.
+# 12: scoped shell calls carry `shell_scope_id`, report `shell_backgrounded`, and stop on /execute/shell-scope/kill.
+# A wire model change bumps this, except an opt-in field declared with ``exclude_if``;
+# `tests/test_worker_protocol_schema.py` pins each version's schema.
+WORKER_PROTOCOL_VERSION = 12
+
+FailureKind = Literal["tool", "worker"]
+
+
+class _WireModel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+_EXECUTION_IDENTITY_FIELDS = frozenset(field.name for field in fields(ToolExecutionIdentity))
+
+
+class WorkerRoute(_WireModel):
+    """Which worker a request reaches and on whose behalf, carried by every routed request.
+
+    ``execution_identity`` is written by ``serialize_tool_execution_identity`` and read back by
+    ``parse_tool_execution_identity_payload``. ``config_snapshot`` holds the live config fields runners resolve,
+    for runners that mount no config. ``base_dir`` is the calling agent's tool workspace, relative to the shared
+    storage root when the request names a worker, which the worker confines before acting in it.
+    """
+
+    protocol: int
+    worker_key: str | None = None
+    worker_scope: WorkerScope | None = None
+    routing_agent_name: str | None = None
+    execution_identity: dict[str, Any] | None = None
+    private_agent_names: list[str] | None = None
+    config_snapshot: dict[str, Any] | None = None
+    base_dir: str | None = None
+
+    @field_validator("execution_identity")
+    @classmethod
+    def _refuse_unknown_identity_fields(cls, identity: dict[str, Any] | None) -> dict[str, Any] | None:
+        # The identity crosses as its serialized dict, so a field this release does not know is refused here too.
+        if identity is not None and (unknown := sorted(set(identity) - _EXECUTION_IDENTITY_FIELDS)):
+            msg = f"unknown execution identity fields: {', '.join(unknown)}"
+            raise ValueError(msg)
+        return identity
+
+
+class CallEnvironment(_WireModel):
+    """How one shell call's own environment changes the worker's, beyond the values sent in ``execution_env``.
+
+    ``set_names`` are the ``execution_env`` variables the call set itself, from plugin hooks or a CLI grant, and
+    ``unset_names`` the variables its hooks removed; both apply over the worker's own environment and the
+    workspace's ``.mindroom/worker-env.sh``, except where the worker's own composition changed the name (its
+    protected names, HOME and its CA bundle). ``path_prepend`` holds the directories the
+    call puts first on the command's ``PATH``.
+    """
+
+    set_names: list[str] = Field(default_factory=list)
+    unset_names: list[str] = Field(default_factory=list)
+    path_prepend: list[str] = Field(default_factory=list)
+
+
+class ExecuteRequest(WorkerRoute):
+    """One tool call, with credentials by lease and the environment execution tools receive."""
+
+    tool_name: Annotated[str, AfterValidator(canonical_tool_name)]
+    function_name: str
+    args: list[Any] = Field(default_factory=list)
+    kwargs: dict[str, Any] = Field(default_factory=dict)
+    lease_id: str | None = None
+    tool_config_overrides: dict[str, Any] = Field(default_factory=dict)
+    tool_init_overrides: dict[str, Any] = Field(default_factory=dict)
+    execution_env: dict[str, str] = Field(default_factory=dict)
+    environment: CallEnvironment = Field(default_factory=CallEnvironment)
+    extra_env_passthrough: str | None = None
+    # Lets the primary stop this call through /execute/cancel when it stops waiting for it.
+    request_id: str | None = Field(default=None, max_length=64)
+    # A background job's call runs as long as its tool does, and its tools know they run as part of a job.
+    run_as_job: bool = False
+    # A shell call whose command's stdout and stderr stream as raw bytes while it runs, for `workers run`.
+    stream_io: bool = False
+    # A sandboxed named-worker call: strips call env, workspace env hook, and shared credentials, with writable HOME.
+    sandbox: bool = False
+    # Turn-scoped shell background owner ID for auto-backgrounding non-job shell calls.
+    shell_scope_id: str | None = Field(default=None, max_length=64)
+    # The caller stores the result itself: no size moves it to a workspace file, and the answer carries `metadata`.
+    structured_result: bool = Field(default=False, exclude_if=operator.not_)
+
+
+class SaveAttachmentRequest(WorkerRoute):
+    """Attachment bytes to write at one path inside the request's workspace."""
+
+    attachment_id: str
+    mindroom_output_path: str
+    bytes_b64: str
+    sha256: str
+    size_bytes: int
+
+
+class ViewFileRequest(WorkerRoute):
+    """One image path inside the request's workspace."""
+
+    path: str
+
+
+class LeaseRequest(_WireModel):
+    """Credentials for one upcoming tool call, held by the worker until the call consumes them."""
+
+    protocol: int
+    tool_name: Annotated[str, AfterValidator(canonical_tool_name)]
+    function_name: str
+    credential_overrides: dict[str, Any] = Field(default_factory=dict)
+    ttl_seconds: int
+    max_uses: int = 1
+
+
+class CancelRequest(_WireModel):
+    """Stop one execute request the primary no longer waits for."""
+
+    protocol: int
+    request_id: str = Field(max_length=64)
+
+
+class StdinRequest(_WireModel):
+    """The next bytes, base64, for the stdin of a streamed execute request's command; ``eof`` closes it after them.
+
+    ``seq`` counts a command's chunks from 0, so a chunk sent twice is written once.
+    """
+
+    protocol: int
+    seq: int = Field(ge=0)
+    b: str = ""
+    eof: bool = False
+
+
+class StdinResponse(_WireModel):
+    """Whether the command still takes stdin, answered once the chunk has left for it."""
+
+    open: bool
+
+
+class WorkerFailure(_WireModel):
+    """A request the worker refused or could not finish, and whether the worker itself is at fault."""
+
+    ok: Literal[False] = False
+    error: str
+    failure_kind: FailureKind
+
+
+class ExecuteResponse(_WireModel):
+    """The result of one tool call, or why it failed."""
+
+    ok: bool
+    result: Any | None = None
+    error: str | None = None
+    failure_kind: FailureKind | None = None
+    shell_backgrounded: bool = False
+    # What the tool reported about a structured result, such as a command's exit status.
+    metadata: dict[str, Any] | None = Field(default=None, exclude_if=operator.not_)
+
+
+class SaveAttachmentResponse(_WireModel):
+    """Where the bytes landed and the receipt the primary checks against what it sent."""
+
+    ok: bool
+    worker_path: str | None = None
+    size_bytes: int | None = None
+    sha256: str | None = None
+    error: str | None = None
+    failure_kind: FailureKind | None = None
+
+
+class ViewFileResponse(_WireModel):
+    """The bounded image a worker read, as an encoded media result."""
+
+    ok: bool
+    result: Any | None = None
+    error: str | None = None
+    failure_kind: FailureKind | None = None
+
+
+class LeaseResponse(_WireModel):
+    """The lease a later tool call names to receive its credentials."""
+
+    lease_id: str
+    expires_at: float
+    max_uses: int
+
+
+class CancelResponse(_WireModel):
+    """Whether the request was running when its cancel arrived."""
+
+    cancelled: bool
+
+
+class KillShellScopeRequest(_WireModel):
+    """Stop every auto-backgrounded shell process owned by one turn scope."""
+
+    protocol: int = WORKER_PROTOCOL_VERSION
+    shell_scope_id: str = Field(min_length=1, max_length=64)
+
+
+class KillShellScopeResponse(_WireModel):
+    """Acknowledgment that scoped shell processes were stopped."""
+
+    ok: bool = True

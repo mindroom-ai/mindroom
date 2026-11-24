@@ -1,9 +1,13 @@
-import { useEffect, useState } from "react";
 import { Brain } from "lucide-react";
 
-import type { Config as MindRoomConfig, MemoryBackend } from "@/types/config";
+import type {
+  Config as MindRoomConfig,
+  MemoryBackend,
+  MemorySearchMode,
+} from "@/types/config";
 import { EditorPanel } from "@/components/shared/EditorPanel";
 import { FieldGroup } from "@/components/shared/FieldGroup";
+import { ParsedInput } from "@/components/shared/ParsedInput";
 import { Input } from "@/components/ui/input";
 import {
   Select,
@@ -33,26 +37,12 @@ const DEFAULT_MODELS: Record<string, string> = {
   sentence_transformers: "sentence-transformers/all-MiniLM-L6-v2",
 };
 
-const DEFAULT_HOSTS: Record<string, string> = {
-  openai: "",
-  ollama: "http://localhost:11434",
-  sentence_transformers: "",
-};
-
-const MODEL_PLACEHOLDERS: Record<string, string> = {
-  openai: "e.g. text-embedding-3-small",
-  ollama: "e.g. nomic-embed-text",
-  sentence_transformers: "e.g. sentence-transformers/all-MiniLM-L6-v2",
-};
-
 type MemorySettings = MindRoomConfig["memory"];
 
 /** MemoryConfig keys this page renders by hand; More settings shows the rest. */
 const MEMORY_EDITOR_FIELDS = [
   "backend",
-  "team_reads_member_memory",
   "embedder",
-  "file",
   "search",
   "auto_flush",
 ] as const;
@@ -65,18 +55,12 @@ const EMBEDDER_EDITOR_FIELDS = [
 
 const DEFAULT_MEMORY_SETTINGS: MemorySettings = {
   backend: "mem0",
-  team_reads_member_memory: false,
   embedder: {
     provider: "openai",
     config: {
       model: "text-embedding-3-small",
       host: "",
     },
-  },
-  file: {
-    path: "",
-    max_entrypoint_lines: 200,
-    max_entrypoint_tokens: 50000,
   },
   search: {
     mode: "keyword",
@@ -85,11 +69,9 @@ const DEFAULT_MEMORY_SETTINGS: MemorySettings = {
   },
   auto_flush: {
     enabled: false,
-    flush_interval_seconds: 1800,
+    flush_interval_seconds: 300,
     idle_seconds: 120,
-    max_dirty_age_seconds: 600,
     stale_ttl_seconds: 86400,
-    max_cross_session_reprioritize: 5,
     retry_cooldown_seconds: 30,
     max_retry_cooldown_seconds: 300,
     batch: {
@@ -112,57 +94,39 @@ const DEFAULT_MEMORY_SETTINGS: MemorySettings = {
 function normalizeMemorySettings(
   memory: MindRoomConfig["memory"] | undefined,
 ): MemorySettings {
-  const merged: MemorySettings = {
+  return {
     ...DEFAULT_MEMORY_SETTINGS,
-    ...(memory || {}),
+    ...memory,
     embedder: {
       ...DEFAULT_MEMORY_SETTINGS.embedder,
-      ...(memory?.embedder || {}),
+      ...memory?.embedder,
       config: {
         ...DEFAULT_MEMORY_SETTINGS.embedder.config,
-        ...(memory?.embedder?.config || {}),
+        ...memory?.embedder?.config,
       },
-    },
-    file: {
-      ...DEFAULT_MEMORY_SETTINGS.file,
-      ...(memory?.file || {}),
     },
     search: {
       ...DEFAULT_MEMORY_SETTINGS.search,
-      ...(memory?.search || {}),
+      ...memory?.search,
     },
     auto_flush: {
       ...DEFAULT_MEMORY_SETTINGS.auto_flush,
-      ...(memory?.auto_flush || {}),
+      ...memory?.auto_flush,
       batch: {
         ...DEFAULT_MEMORY_SETTINGS.auto_flush?.batch,
-        ...(memory?.auto_flush?.batch || {}),
+        ...memory?.auto_flush?.batch,
       },
       extractor: {
         ...DEFAULT_MEMORY_SETTINGS.auto_flush?.extractor,
-        ...(memory?.auto_flush?.extractor || {}),
+        ...memory?.auto_flush?.extractor,
         include_memory_context: {
           ...DEFAULT_MEMORY_SETTINGS.auto_flush?.extractor
             ?.include_memory_context,
-          ...(memory?.auto_flush?.extractor?.include_memory_context || {}),
+          ...memory?.auto_flush?.extractor?.include_memory_context,
         },
       },
     },
   };
-
-  if (!merged.embedder.config.host) {
-    merged.embedder.config.host = DEFAULT_HOSTS[merged.embedder.provider] || "";
-  }
-  return merged;
-}
-
-function parseInteger(value: string, fallback: number): number {
-  const parsed = Number.parseInt(value, 10);
-  return Number.isNaN(parsed) ? fallback : parsed;
-}
-
-function parseBoolean(value: string): boolean {
-  return value === "true";
 }
 
 function parseIncludePatterns(value: string): string[] {
@@ -185,17 +149,40 @@ function providerHelperText(provider: string): string {
   return "Choose your embedding provider";
 }
 
-function shouldShowHostField(provider: string): boolean {
-  return provider !== "sentence_transformers";
-}
-
-function defaultEmbedderConfig(
-  provider: string,
-): MemorySettings["embedder"]["config"] {
-  return {
-    model: DEFAULT_MODELS[provider] || "",
-    host: DEFAULT_HOSTS[provider] || "",
-  };
+function NumberField({
+  id,
+  label,
+  helperText,
+  min,
+  value,
+  fallback,
+  onChange,
+}: {
+  id: string;
+  label: string;
+  helperText: string;
+  min: number;
+  value: number | undefined;
+  fallback: number;
+  onChange: (value: number) => void;
+}) {
+  return (
+    <FieldGroup label={label} helperText={helperText} htmlFor={id}>
+      <ParsedInput
+        id={id}
+        type="number"
+        min={min}
+        format={String}
+        value={value ?? fallback}
+        parse={(text) => {
+          const parsed = Number.parseInt(text, 10);
+          return Number.isNaN(parsed) ? fallback : parsed;
+        }}
+        onChange={onChange}
+        className="transition-colors hover:border-ring focus:border-ring"
+      />
+    </FieldGroup>
+  );
 }
 
 export function MemoryConfig() {
@@ -207,134 +194,60 @@ export function MemoryConfig() {
     isDirty,
     isLoading,
   } = useConfigStore();
-  const [localConfig, setLocalConfig] = useState<MemorySettings>(() =>
-    normalizeMemorySettings(config?.memory),
-  );
-
-  useEffect(() => {
-    setLocalConfig(normalizeMemorySettings(config?.memory));
-  }, [config]);
-
-  const applyMemoryConfig = (nextConfig: MemorySettings) => {
-    setLocalConfig(nextConfig);
-    updateMemoryConfig(nextConfig);
-  };
-
-  const handleBackendChange = (backend: MemoryBackend) => {
-    applyMemoryConfig({ ...localConfig, backend });
-  };
+  const memory = normalizeMemorySettings(config?.memory);
 
   const handleProviderChange = (provider: string) => {
-    applyMemoryConfig({
-      ...localConfig,
+    updateMemoryConfig({
+      ...memory,
       embedder: {
-        ...localConfig.embedder,
+        ...memory.embedder,
         provider,
-        config: defaultEmbedderConfig(provider),
+        // An empty host lets the runtime pick the server, such as OLLAMA_HOST for Ollama.
+        config: { model: DEFAULT_MODELS[provider] || "", host: "" },
       },
     });
   };
 
-  const handleModelChange = (model: string) => {
-    applyMemoryConfig({
-      ...localConfig,
+  const updateEmbedderConfig = (
+    updates: Partial<MemorySettings["embedder"]["config"]>,
+  ) => {
+    updateMemoryConfig({
+      ...memory,
       embedder: {
-        ...localConfig.embedder,
+        ...memory.embedder,
         config: {
-          ...localConfig.embedder.config,
-          model,
-        },
-      },
-    });
-  };
-
-  const handleHostChange = (host: string) => {
-    applyMemoryConfig({
-      ...localConfig,
-      embedder: {
-        ...localConfig.embedder,
-        config: {
-          ...localConfig.embedder.config,
-          host,
+          ...memory.embedder.config,
+          ...updates,
         },
       },
     });
   };
 
   const handleCredentialsServiceChange = (credentialsService: string) => {
-    const config = { ...localConfig.embedder.config };
+    const embedderConfig = { ...memory.embedder.config };
     const normalizedService = credentialsService.trim();
     if (normalizedService) {
-      config.credentials_service = normalizedService;
+      embedderConfig.credentials_service = normalizedService;
     } else {
-      delete config.credentials_service;
+      delete embedderConfig.credentials_service;
     }
-    applyMemoryConfig({
-      ...localConfig,
+    updateMemoryConfig({
+      ...memory,
       embedder: {
-        ...localConfig.embedder,
-        config,
+        ...memory.embedder,
+        config: embedderConfig,
       },
     });
   };
 
-  const handleFilePathChange = (path: string) => {
-    applyMemoryConfig({
-      ...localConfig,
-      file: {
-        ...localConfig.file,
-        path,
-      },
-    });
-  };
-
-  const handleSearchModeChange = (mode: "keyword" | "semantic") => {
-    applyMemoryConfig({
-      ...localConfig,
-      search: {
-        ...localConfig.search,
-        mode,
-      },
-    });
-  };
-
-  const handleSearchIncludeChange = (value: string) => {
-    applyMemoryConfig({
-      ...localConfig,
-      search: {
-        ...localConfig.search,
-        include: parseIncludePatterns(value),
-      },
-    });
-  };
-
-  const handleIncludeEntrypointChange = (include_entrypoint: boolean) => {
-    applyMemoryConfig({
-      ...localConfig,
-      search: {
-        ...localConfig.search,
-        include_entrypoint,
-      },
-    });
-  };
-
-  const handleAutoFlushEnabled = (enabled: boolean) => {
-    applyMemoryConfig({
-      ...localConfig,
-      auto_flush: {
-        ...localConfig.auto_flush,
-        enabled,
-      },
-    });
-  };
-
-  const updateAutoFlush = (
-    updates: Partial<NonNullable<MemorySettings["auto_flush"]>>,
+  const updateSection = <K extends "search" | "auto_flush">(
+    key: K,
+    updates: Partial<NonNullable<MemorySettings[K]>>,
   ) => {
-    applyMemoryConfig({
-      ...localConfig,
-      auto_flush: {
-        ...localConfig.auto_flush,
+    updateMemoryConfig({
+      ...memory,
+      [key]: {
+        ...memory[key],
         ...updates,
       },
     });
@@ -345,9 +258,9 @@ export function MemoryConfig() {
       NonNullable<NonNullable<MemorySettings["auto_flush"]>["batch"]>
     >,
   ) => {
-    updateAutoFlush({
+    updateSection("auto_flush", {
       batch: {
-        ...localConfig.auto_flush?.batch,
+        ...memory.auto_flush?.batch,
         ...updates,
       },
     });
@@ -358,9 +271,9 @@ export function MemoryConfig() {
       NonNullable<NonNullable<MemorySettings["auto_flush"]>["extractor"]>
     >,
   ) => {
-    updateAutoFlush({
+    updateSection("auto_flush", {
       extractor: {
-        ...localConfig.auto_flush?.extractor,
+        ...memory.auto_flush?.extractor,
         ...updates,
       },
     });
@@ -377,14 +290,10 @@ export function MemoryConfig() {
   ) => {
     updateAutoFlushExtractor({
       include_memory_context: {
-        ...localConfig.auto_flush?.extractor?.include_memory_context,
+        ...memory.auto_flush?.extractor?.include_memory_context,
         ...updates,
       },
     });
-  };
-
-  const handleSave = async () => {
-    return saveConfig();
   };
 
   return (
@@ -392,9 +301,8 @@ export function MemoryConfig() {
       icon={Brain}
       title="Memory Configuration"
       isDirty={isDirty}
-      onSave={handleSave}
+      onSave={saveConfig}
       onDelete={() => {}}
-      showActions={true}
       disableSave={isLoading}
       disableDelete={true}
       className="h-full"
@@ -415,9 +323,12 @@ export function MemoryConfig() {
             htmlFor="memory-backend"
           >
             <Select
-              value={localConfig.backend || "mem0"}
+              value={memory.backend || "mem0"}
               onValueChange={(value) =>
-                handleBackendChange(value as MemoryBackend)
+                updateMemoryConfig({
+                  ...memory,
+                  backend: value as MemoryBackend,
+                })
               }
             >
               <SelectTrigger
@@ -437,40 +348,13 @@ export function MemoryConfig() {
           </FieldGroup>
 
           <FieldGroup
-            label="Team Reads Member Memory"
-            helperText="Allow team-context memory reads to include member agent memories."
-            htmlFor="team-reads-member-memory"
-          >
-            <Select
-              value={String(localConfig.team_reads_member_memory ?? false)}
-              onValueChange={(value) =>
-                applyMemoryConfig({
-                  ...localConfig,
-                  team_reads_member_memory: parseBoolean(value),
-                })
-              }
-            >
-              <SelectTrigger
-                id="team-reads-member-memory"
-                className="transition-colors hover:border-ring"
-              >
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="true">Enabled</SelectItem>
-                <SelectItem value="false">Disabled</SelectItem>
-              </SelectContent>
-            </Select>
-          </FieldGroup>
-
-          <FieldGroup
             label="Embedder Provider"
-            helperText={providerHelperText(localConfig.embedder.provider)}
+            helperText={providerHelperText(memory.embedder.provider)}
             required
             htmlFor="provider"
           >
             <Select
-              value={localConfig.embedder.provider}
+              value={memory.embedder.provider}
               onValueChange={handleProviderChange}
             >
               <SelectTrigger
@@ -498,17 +382,18 @@ export function MemoryConfig() {
             <Input
               id="model"
               type="text"
-              value={localConfig.embedder.config.model}
-              onChange={(e) => handleModelChange(e.target.value)}
+              value={memory.embedder.config.model}
+              onChange={(e) => updateEmbedderConfig({ model: e.target.value })}
               placeholder={
-                MODEL_PLACEHOLDERS[localConfig.embedder.provider] ||
-                "Model name"
+                DEFAULT_MODELS[memory.embedder.provider]
+                  ? `e.g. ${DEFAULT_MODELS[memory.embedder.provider]}`
+                  : "Model name"
               }
               className="transition-colors hover:border-ring focus:border-ring"
             />
           </FieldGroup>
 
-          {localConfig.embedder.provider === "openai" && (
+          {memory.embedder.provider === "openai" && (
             <FieldGroup
               label="Credential Service"
               helperText="Bind this embedder to a credential service. Leave empty for the legacy embedder-to-openai fallback."
@@ -517,7 +402,7 @@ export function MemoryConfig() {
               <Input
                 id="credentials-service"
                 type="text"
-                value={localConfig.embedder.config.credentials_service || ""}
+                value={memory.embedder.config.credentials_service || ""}
                 onChange={(e) => handleCredentialsServiceChange(e.target.value)}
                 placeholder="embedder"
                 className="transition-colors hover:border-ring focus:border-ring"
@@ -525,28 +410,27 @@ export function MemoryConfig() {
             </FieldGroup>
           )}
 
-          {shouldShowHostField(localConfig.embedder.provider) && (
+          {memory.embedder.provider !== "sentence_transformers" && (
             <FieldGroup
               label={
-                localConfig.embedder.provider === "ollama"
+                memory.embedder.provider === "ollama"
                   ? "Ollama Host URL"
                   : "Base URL"
               }
               helperText={
-                localConfig.embedder.provider === "ollama"
-                  ? "The URL where your Ollama server is running"
-                  : "Leave empty for official OpenAI API, or set for OpenAI-compatible servers"
+                memory.embedder.provider === "ollama"
+                  ? "Empty uses OLLAMA_HOST, else http://localhost:11434. A configured OLLAMA_HOST also takes precedence over this URL."
+                  : "Empty uses OPENAI_BASE_URL, else the official OpenAI API. Set it for an OpenAI-compatible server."
               }
-              required={localConfig.embedder.provider === "ollama"}
               htmlFor="host"
             >
               <Input
                 id="host"
                 type="url"
-                value={localConfig.embedder.config.host || ""}
-                onChange={(e) => handleHostChange(e.target.value)}
+                value={memory.embedder.config.host || ""}
+                onChange={(e) => updateEmbedderConfig({ host: e.target.value })}
                 placeholder={
-                  localConfig.embedder.provider === "ollama"
+                  memory.embedder.provider === "ollama"
                     ? "http://localhost:11434"
                     : "https://api.openai.com/v1"
                 }
@@ -567,81 +451,17 @@ export function MemoryConfig() {
             }
           />
 
-          {localConfig.backend === "file" && (
+          {memory.backend === "file" && (
             <>
-              <FieldGroup
-                label="File Memory Path"
-                helperText="Directory containing MEMORY.md and daily files under memory/YYYY-MM-DD.md."
-                htmlFor="file-memory-path"
-              >
-                <Input
-                  id="file-memory-path"
-                  type="text"
-                  value={localConfig.file?.path || ""}
-                  onChange={(e) => handleFilePathChange(e.target.value)}
-                  placeholder="./mindroom_data/memory_files"
-                  className="transition-colors hover:border-ring focus:border-ring"
-                />
-              </FieldGroup>
-
-              <FieldGroup
-                label="Entrypoint Max Lines"
-                helperText="Maximum lines preloaded from the entrypoint file."
-                htmlFor="entrypoint-max-lines"
-              >
-                <Input
-                  id="entrypoint-max-lines"
-                  type="number"
-                  min={1}
-                  value={localConfig.file?.max_entrypoint_lines ?? 200}
-                  onChange={(e) =>
-                    applyMemoryConfig({
-                      ...localConfig,
-                      file: {
-                        ...localConfig.file,
-                        max_entrypoint_lines: parseInteger(e.target.value, 200),
-                      },
-                    })
-                  }
-                  className="transition-colors hover:border-ring focus:border-ring"
-                />
-              </FieldGroup>
-
-              <FieldGroup
-                label="Entrypoint Max Tokens"
-                helperText="Maximum estimated tokens (characters / 4) of whole lines preloaded from the entrypoint file."
-                htmlFor="entrypoint-max-tokens"
-              >
-                <Input
-                  id="entrypoint-max-tokens"
-                  type="number"
-                  min={1}
-                  value={localConfig.file?.max_entrypoint_tokens ?? 50000}
-                  onChange={(e) =>
-                    applyMemoryConfig({
-                      ...localConfig,
-                      file: {
-                        ...localConfig.file,
-                        max_entrypoint_tokens: parseInteger(
-                          e.target.value,
-                          50000,
-                        ),
-                      },
-                    })
-                  }
-                  className="transition-colors hover:border-ring focus:border-ring"
-                />
-              </FieldGroup>
-
               <FieldGroup
                 label="Search Mode"
                 helperText="Keyword search is exact text matching; semantic search uses the memory embedder."
                 htmlFor="memory-search-mode"
               >
                 <Select
-                  value={localConfig.search?.mode ?? "keyword"}
+                  value={memory.search?.mode ?? "keyword"}
                   onValueChange={(value) =>
-                    handleSearchModeChange(value as "keyword" | "semantic")
+                    updateSection("search", { mode: value as MemorySearchMode })
                   }
                 >
                   <SelectTrigger
@@ -662,11 +482,13 @@ export function MemoryConfig() {
                 helperText="Comma-separated root-relative globs for file-memory search."
                 htmlFor="memory-search-include"
               >
-                <Input
+                <ParsedInput
                   id="memory-search-include"
                   type="text"
-                  value={(localConfig.search?.include || []).join(", ")}
-                  onChange={(e) => handleSearchIncludeChange(e.target.value)}
+                  value={memory.search?.include || []}
+                  format={(patterns) => patterns.join(", ")}
+                  parse={parseIncludePatterns}
+                  onChange={(include) => updateSection("search", { include })}
                   placeholder="memory/**/*.md"
                   className="transition-colors hover:border-ring focus:border-ring"
                 />
@@ -678,11 +500,11 @@ export function MemoryConfig() {
                 htmlFor="memory-search-entrypoint"
               >
                 <Select
-                  value={String(
-                    localConfig.search?.include_entrypoint ?? false,
-                  )}
+                  value={String(memory.search?.include_entrypoint ?? false)}
                   onValueChange={(value) =>
-                    handleIncludeEntrypointChange(parseBoolean(value))
+                    updateSection("search", {
+                      include_entrypoint: value === "true",
+                    })
                   }
                 >
                   <SelectTrigger
@@ -700,13 +522,13 @@ export function MemoryConfig() {
 
               <FieldGroup
                 label="Auto Flush"
-                helperText="Automatically persist durable memory from dirty sessions."
+                helperText="Automatically save durable memories from the new turns of conversations."
                 htmlFor="auto-flush-enabled"
               >
                 <Select
-                  value={String(localConfig.auto_flush?.enabled ?? false)}
+                  value={String(memory.auto_flush?.enabled ?? false)}
                   onValueChange={(value) =>
-                    handleAutoFlushEnabled(parseBoolean(value))
+                    updateSection("auto_flush", { enabled: value === "true" })
                   }
                 >
                   <SelectTrigger
@@ -722,263 +544,131 @@ export function MemoryConfig() {
                 </Select>
               </FieldGroup>
 
-              <FieldGroup
+              <NumberField
+                id="flush-interval-seconds"
                 label="Flush Interval (seconds)"
-                helperText="Worker cycle interval for background flush processing."
-                htmlFor="flush-interval-seconds"
-              >
-                <Input
-                  id="flush-interval-seconds"
-                  type="number"
-                  min={5}
-                  value={localConfig.auto_flush?.flush_interval_seconds ?? 1800}
-                  onChange={(e) =>
-                    updateAutoFlush({
-                      flush_interval_seconds: parseInteger(
-                        e.target.value,
-                        1800,
-                      ),
-                    })
-                  }
-                  className="transition-colors hover:border-ring focus:border-ring"
-                />
-              </FieldGroup>
+                helperText="Time between background flush passes."
+                min={5}
+                value={memory.auto_flush?.flush_interval_seconds}
+                fallback={300}
+                onChange={(value) =>
+                  updateSection("auto_flush", { flush_interval_seconds: value })
+                }
+              />
 
-              <FieldGroup
+              <NumberField
+                id="idle-seconds"
                 label="Idle Seconds"
-                helperText="Minimum idle time before a dirty session is eligible."
-                htmlFor="idle-seconds"
-              >
-                <Input
-                  id="idle-seconds"
-                  type="number"
-                  min={0}
-                  value={localConfig.auto_flush?.idle_seconds ?? 120}
-                  onChange={(e) =>
-                    updateAutoFlush({
-                      idle_seconds: parseInteger(e.target.value, 120),
-                    })
-                  }
-                  className="transition-colors hover:border-ring focus:border-ring"
-                />
-              </FieldGroup>
+                helperText="How long a conversation must be quiet before its new turns are flushed."
+                min={0}
+                value={memory.auto_flush?.idle_seconds}
+                fallback={120}
+                onChange={(value) =>
+                  updateSection("auto_flush", { idle_seconds: value })
+                }
+              />
 
-              <FieldGroup
-                label="Max Dirty Age (seconds)"
-                helperText="Force flush eligibility after this dirty age."
-                htmlFor="max-dirty-age-seconds"
-              >
-                <Input
-                  id="max-dirty-age-seconds"
-                  type="number"
-                  min={1}
-                  value={localConfig.auto_flush?.max_dirty_age_seconds ?? 600}
-                  onChange={(e) =>
-                    updateAutoFlush({
-                      max_dirty_age_seconds: parseInteger(e.target.value, 600),
-                    })
-                  }
-                  className="transition-colors hover:border-ring focus:border-ring"
-                />
-              </FieldGroup>
-
-              <FieldGroup
+              <NumberField
+                id="stale-ttl-seconds"
                 label="Stale TTL (seconds)"
-                helperText="How long to keep inactive dirty-session state entries."
-                htmlFor="stale-ttl-seconds"
-              >
-                <Input
-                  id="stale-ttl-seconds"
-                  type="number"
-                  min={60}
-                  value={localConfig.auto_flush?.stale_ttl_seconds ?? 86400}
-                  onChange={(e) =>
-                    updateAutoFlush({
-                      stale_ttl_seconds: parseInteger(e.target.value, 86400),
-                    })
-                  }
-                  className="transition-colors hover:border-ring focus:border-ring"
-                />
-              </FieldGroup>
+                helperText="Give up on turns whose flush has kept failing for this long."
+                min={60}
+                value={memory.auto_flush?.stale_ttl_seconds}
+                fallback={86400}
+                onChange={(value) =>
+                  updateSection("auto_flush", { stale_ttl_seconds: value })
+                }
+              />
 
-              <FieldGroup
-                label="Cross-Session Reprioritize"
-                helperText="Number of same-agent dirty sessions to boost on incoming prompts."
-                htmlFor="max-cross-session-reprioritize"
-              >
-                <Input
-                  id="max-cross-session-reprioritize"
-                  type="number"
-                  min={0}
-                  value={
-                    localConfig.auto_flush?.max_cross_session_reprioritize ?? 5
-                  }
-                  onChange={(e) =>
-                    updateAutoFlush({
-                      max_cross_session_reprioritize: parseInteger(
-                        e.target.value,
-                        5,
-                      ),
-                    })
-                  }
-                  className="transition-colors hover:border-ring focus:border-ring"
-                />
-              </FieldGroup>
-
-              <FieldGroup
+              <NumberField
+                id="retry-cooldown-seconds"
                 label="Retry Cooldown (seconds)"
-                helperText="Base cooldown before retrying failed extraction."
-                htmlFor="retry-cooldown-seconds"
-              >
-                <Input
-                  id="retry-cooldown-seconds"
-                  type="number"
-                  min={1}
-                  value={localConfig.auto_flush?.retry_cooldown_seconds ?? 30}
-                  onChange={(e) =>
-                    updateAutoFlush({
-                      retry_cooldown_seconds: parseInteger(e.target.value, 30),
-                    })
-                  }
-                  className="transition-colors hover:border-ring focus:border-ring"
-                />
-              </FieldGroup>
+                helperText="Base cooldown before retrying a failed flush."
+                min={1}
+                value={memory.auto_flush?.retry_cooldown_seconds}
+                fallback={30}
+                onChange={(value) =>
+                  updateSection("auto_flush", { retry_cooldown_seconds: value })
+                }
+              />
 
-              <FieldGroup
+              <NumberField
+                id="max-retry-cooldown-seconds"
                 label="Max Retry Cooldown (seconds)"
                 helperText="Upper bound for retry cooldown backoff."
-                htmlFor="max-retry-cooldown-seconds"
-              >
-                <Input
-                  id="max-retry-cooldown-seconds"
-                  type="number"
-                  min={1}
-                  value={
-                    localConfig.auto_flush?.max_retry_cooldown_seconds ?? 300
-                  }
-                  onChange={(e) =>
-                    updateAutoFlush({
-                      max_retry_cooldown_seconds: parseInteger(
-                        e.target.value,
-                        300,
-                      ),
-                    })
-                  }
-                  className="transition-colors hover:border-ring focus:border-ring"
-                />
-              </FieldGroup>
+                min={1}
+                value={memory.auto_flush?.max_retry_cooldown_seconds}
+                fallback={300}
+                onChange={(value) =>
+                  updateSection("auto_flush", {
+                    max_retry_cooldown_seconds: value,
+                  })
+                }
+              />
 
-              <FieldGroup
+              <NumberField
+                id="max-sessions-per-cycle"
                 label="Batch: Max Sessions Per Cycle"
-                helperText="Upper bound of sessions processed in one flush iteration."
-                htmlFor="max-sessions-per-cycle"
-              >
-                <Input
-                  id="max-sessions-per-cycle"
-                  type="number"
-                  min={1}
-                  value={
-                    localConfig.auto_flush?.batch?.max_sessions_per_cycle ?? 10
-                  }
-                  onChange={(e) =>
-                    updateAutoFlushBatch({
-                      max_sessions_per_cycle: parseInteger(e.target.value, 10),
-                    })
-                  }
-                  className="transition-colors hover:border-ring focus:border-ring"
-                />
-              </FieldGroup>
+                helperText="Conversations flushed in one pass, across all agents."
+                min={1}
+                value={memory.auto_flush?.batch?.max_sessions_per_cycle}
+                fallback={10}
+                onChange={(value) =>
+                  updateAutoFlushBatch({ max_sessions_per_cycle: value })
+                }
+              />
 
-              <FieldGroup
+              <NumberField
+                id="max-sessions-per-agent"
                 label="Batch: Max Sessions Per Agent"
-                helperText="Per-agent cap for each flush iteration."
-                htmlFor="max-sessions-per-agent"
-              >
-                <Input
-                  id="max-sessions-per-agent"
-                  type="number"
-                  min={1}
-                  value={
-                    localConfig.auto_flush?.batch
-                      ?.max_sessions_per_agent_per_cycle ?? 3
-                  }
-                  onChange={(e) =>
-                    updateAutoFlushBatch({
-                      max_sessions_per_agent_per_cycle: parseInteger(
-                        e.target.value,
-                        3,
-                      ),
-                    })
-                  }
-                  className="transition-colors hover:border-ring focus:border-ring"
-                />
-              </FieldGroup>
+                helperText="Conversations of one agent or private instance flushed in one pass."
+                min={1}
+                value={
+                  memory.auto_flush?.batch?.max_sessions_per_agent_per_cycle
+                }
+                fallback={3}
+                onChange={(value) =>
+                  updateAutoFlushBatch({
+                    max_sessions_per_agent_per_cycle: value,
+                  })
+                }
+              />
 
-              <FieldGroup
+              <NumberField
+                id="max-messages-per-flush"
                 label="Extractor: Max Messages Per Flush"
-                helperText="How much recent chat is considered during one extraction."
-                htmlFor="max-messages-per-flush"
-              >
-                <Input
-                  id="max-messages-per-flush"
-                  type="number"
-                  min={1}
-                  value={
-                    localConfig.auto_flush?.extractor?.max_messages_per_flush ??
-                    20
-                  }
-                  onChange={(e) =>
-                    updateAutoFlushExtractor({
-                      max_messages_per_flush: parseInteger(e.target.value, 20),
-                    })
-                  }
-                  className="transition-colors hover:border-ring focus:border-ring"
-                />
-              </FieldGroup>
+                helperText="New messages read by one extraction; a longer backlog is read over later passes."
+                min={1}
+                value={memory.auto_flush?.extractor?.max_messages_per_flush}
+                fallback={20}
+                onChange={(value) =>
+                  updateAutoFlushExtractor({ max_messages_per_flush: value })
+                }
+              />
 
-              <FieldGroup
+              <NumberField
+                id="max-chars-per-flush"
                 label="Extractor: Max Chars Per Flush"
                 helperText="Character cap for chat excerpt passed to extraction."
-                htmlFor="max-chars-per-flush"
-              >
-                <Input
-                  id="max-chars-per-flush"
-                  type="number"
-                  min={1}
-                  value={
-                    localConfig.auto_flush?.extractor?.max_chars_per_flush ??
-                    12000
-                  }
-                  onChange={(e) =>
-                    updateAutoFlushExtractor({
-                      max_chars_per_flush: parseInteger(e.target.value, 12000),
-                    })
-                  }
-                  className="transition-colors hover:border-ring focus:border-ring"
-                />
-              </FieldGroup>
+                min={1}
+                value={memory.auto_flush?.extractor?.max_chars_per_flush}
+                fallback={12000}
+                onChange={(value) =>
+                  updateAutoFlushExtractor({ max_chars_per_flush: value })
+                }
+              />
 
-              <FieldGroup
+              <NumberField
+                id="max-extraction-seconds"
                 label="Extractor: Max Duration (seconds)"
                 helperText="Timeout for one extraction attempt."
-                htmlFor="max-extraction-seconds"
-              >
-                <Input
-                  id="max-extraction-seconds"
-                  type="number"
-                  min={1}
-                  value={
-                    localConfig.auto_flush?.extractor?.max_extraction_seconds ??
-                    30
-                  }
-                  onChange={(e) =>
-                    updateAutoFlushExtractor({
-                      max_extraction_seconds: parseInteger(e.target.value, 30),
-                    })
-                  }
-                  className="transition-colors hover:border-ring focus:border-ring"
-                />
-              </FieldGroup>
+                min={1}
+                value={memory.auto_flush?.extractor?.max_extraction_seconds}
+                fallback={30}
+                onChange={(value) =>
+                  updateAutoFlushExtractor({ max_extraction_seconds: value })
+                }
+              />
 
               <FieldGroup
                 label="Extractor: NO_REPLY Token"
@@ -989,8 +679,7 @@ export function MemoryConfig() {
                   id="no-reply-token"
                   type="text"
                   value={
-                    localConfig.auto_flush?.extractor?.no_reply_token ??
-                    "NO_REPLY"
+                    memory.auto_flush?.extractor?.no_reply_token ?? "NO_REPLY"
                   }
                   onChange={(e) =>
                     updateAutoFlushExtractor({
@@ -1001,49 +690,35 @@ export function MemoryConfig() {
                 />
               </FieldGroup>
 
-              <FieldGroup
+              <NumberField
+                id="memory-snippets"
                 label="Context: Memory Snippets"
                 helperText="How many existing memory snippets to include for dedupe context."
-                htmlFor="memory-snippets"
-              >
-                <Input
-                  id="memory-snippets"
-                  type="number"
-                  min={0}
-                  value={
-                    localConfig.auto_flush?.extractor?.include_memory_context
-                      ?.memory_snippets ?? 5
-                  }
-                  onChange={(e) =>
-                    updateAutoFlushExtractorContext({
-                      memory_snippets: parseInteger(e.target.value, 5),
-                    })
-                  }
-                  className="transition-colors hover:border-ring focus:border-ring"
-                />
-              </FieldGroup>
+                min={0}
+                value={
+                  memory.auto_flush?.extractor?.include_memory_context
+                    ?.memory_snippets
+                }
+                fallback={5}
+                onChange={(value) =>
+                  updateAutoFlushExtractorContext({ memory_snippets: value })
+                }
+              />
 
-              <FieldGroup
+              <NumberField
+                id="snippet-max-chars"
                 label="Context: Snippet Max Chars"
                 helperText="Character cap per included memory snippet."
-                htmlFor="snippet-max-chars"
-              >
-                <Input
-                  id="snippet-max-chars"
-                  type="number"
-                  min={1}
-                  value={
-                    localConfig.auto_flush?.extractor?.include_memory_context
-                      ?.snippet_max_chars ?? 400
-                  }
-                  onChange={(e) =>
-                    updateAutoFlushExtractorContext({
-                      snippet_max_chars: parseInteger(e.target.value, 400),
-                    })
-                  }
-                  className="transition-colors hover:border-ring focus:border-ring"
-                />
-              </FieldGroup>
+                min={1}
+                value={
+                  memory.auto_flush?.extractor?.include_memory_context
+                    ?.snippet_max_chars
+                }
+                fallback={400}
+                onChange={(value) =>
+                  updateAutoFlushExtractorContext({ snippet_max_chars: value })
+                }
+              />
             </>
           )}
 
@@ -1059,69 +734,62 @@ export function MemoryConfig() {
           />
         </div>
 
-        <div className="p-4 bg-muted/50 rounded-lg shadow-sm border border-border">
+        <div className="p-4 bg-muted/50 rounded-lg border border-border">
           <h3 className="text-sm font-medium mb-3">Current Configuration</h3>
           <div className="space-y-2 text-sm">
             <div className="flex justify-between">
               <span className="text-muted-foreground">Backend:</span>
               <span className="font-mono text-foreground">
-                {localConfig.backend || "mem0"}
+                {memory.backend || "mem0"}
               </span>
             </div>
-            {localConfig.embedder.config.credentials_service && (
+            {memory.embedder.config.credentials_service && (
               <div className="flex justify-between">
                 <span className="text-muted-foreground">
                   Credential Service:
                 </span>
                 <span className="font-mono text-foreground">
-                  {localConfig.embedder.config.credentials_service}
+                  {memory.embedder.config.credentials_service}
                 </span>
               </div>
             )}
             <div className="flex justify-between">
               <span className="text-muted-foreground">Provider:</span>
               <span className="font-mono text-foreground">
-                {localConfig.embedder.provider}
-              </span>
-            </div>
-            <div className="flex justify-between">
-              <span className="text-muted-foreground">Team Reads Members:</span>
-              <span className="font-mono text-foreground">
-                {localConfig.team_reads_member_memory ? "enabled" : "disabled"}
+                {memory.embedder.provider}
               </span>
             </div>
             <div className="flex justify-between">
               <span className="text-muted-foreground">Model:</span>
               <span className="font-mono text-foreground">
-                {localConfig.embedder.config.model}
+                {memory.embedder.config.model}
               </span>
             </div>
-            {localConfig.backend === "file" && (
+            {memory.backend === "file" && (
               <>
                 <div className="flex justify-between">
                   <span className="text-muted-foreground">Auto Flush:</span>
                   <span className="font-mono text-foreground">
-                    {localConfig.auto_flush?.enabled ? "enabled" : "disabled"}
+                    {memory.auto_flush?.enabled ? "enabled" : "disabled"}
                   </span>
                 </div>
                 <div className="flex justify-between">
                   <span className="text-muted-foreground">Batch Size:</span>
                   <span className="font-mono text-foreground">
-                    {localConfig.auto_flush?.batch?.max_sessions_per_cycle ||
-                      10}
+                    {memory.auto_flush?.batch?.max_sessions_per_cycle || 10}
                   </span>
                 </div>
               </>
             )}
-            {localConfig.embedder.config.host && (
+            {memory.embedder.config.host && (
               <div className="flex justify-between">
                 <span className="text-muted-foreground">
-                  {localConfig.embedder.provider === "ollama"
+                  {memory.embedder.provider === "ollama"
                     ? "Host:"
                     : "Base URL:"}
                 </span>
                 <span className="font-mono text-foreground">
-                  {localConfig.embedder.config.host}
+                  {memory.embedder.config.host}
                 </span>
               </div>
             )}

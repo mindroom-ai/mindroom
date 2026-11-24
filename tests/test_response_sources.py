@@ -7,9 +7,9 @@ from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-from agno.models.response import ToolExecution
 
 from mindroom.constants import MATRIX_SOURCE_EVENT_IDS_METADATA_KEY
+from mindroom.llm.runs import RunRequirement, ToolExecution
 from mindroom.response_sources import ResponseSources
 from mindroom.response_turn import PausedAttempt
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity
@@ -41,11 +41,26 @@ def test_response_source_values_are_validated_and_immutable() -> None:
         )
 
 
+def test_a_turn_names_its_reply_rows_by_all_its_messages_in_a_short_name() -> None:
+    """A one-message turn's rows keep its message's name; a coalesced turn's name differs from each of its messages'."""
+    single = ResponseSources(("$newest",), ("$newest",))
+    pair = ResponseSources(("$newest", "$older"), ("$older", "$newest"))
+    other_pair = ResponseSources(("$newest", "$other"), ("$other", "$newest"))
+    many = tuple(f"${index:043d}" for index in range(500))
+    flood = ResponseSources(many, many)
+
+    assert single.delivery_id == "$newest"
+    assert pair.delivery_id.startswith("$newest+")
+    assert len({single.delivery_id, pair.delivery_id, other_pair.delivery_id}) == 3
+    # The outbox keys rows by this name, so it stays short however many messages coalesced.
+    assert len(flood.delivery_id) < 100
+
+
 @pytest.mark.asyncio
 async def test_explicit_edit_sources_ignore_unrelated_model_metadata(tmp_path: Path) -> None:
     """Approval suspension persists only the pending edit selected by the producer."""
     runner = unwrap_extracted_collaborator(_bot(tmp_path)._response_runner)
-    principal = runner.deps.approval_store
+    principal = runner.deps.replies.store
     await _admit_approval_source(principal, event_id="$edit")
     await _admit_approval_source(principal, event_id="$settled")
     await principal.settle_many(("$settled",))
@@ -64,7 +79,11 @@ async def test_explicit_edit_sources_ignore_unrelated_model_metadata(tmp_path: P
         PausedAttempt(
             session_id="session-1",
             run_id="run-paused",
-            tools=(ToolExecution(tool_call_id="call-1", tool_name="read_document", requires_confirmation=True),),
+            requirements=(
+                RunRequirement(
+                    ToolExecution(tool_call_id="call-1", tool_name="read_document", requires_confirmation=True),
+                ),
+            ),
             toolkit_owners={("general", "read_document"): "test_toolkit"},
         ),
     )
@@ -79,12 +98,12 @@ async def test_explicit_edit_sources_ignore_unrelated_model_metadata(tmp_path: P
     )
 
     with (
-        patch("mindroom.response_runner.uuid4", return_value=MagicMock(hex="approval-explicit-edit")),
+        patch("mindroom.approval.continuation_runner.uuid4", return_value=MagicMock(hex="approval-explicit-edit")),
         patch("mindroom.approval.response.resolve_tool_approval_approver", return_value="@user:localhost"),
         patch("mindroom.approval.response.evaluate_tool_approval", new=AsyncMock(return_value=(True, 60.0))),
     ):
         async with _in_reply_span(runner, request, placeholder_event_id=None):
-            await runner._suspend_for_approval(
+            await runner.approvals.suspend_for_approval(
                 paused,
                 request=request,
                 target=request.response_envelope.target,
@@ -94,15 +113,15 @@ async def test_explicit_edit_sources_ignore_unrelated_model_metadata(tmp_path: P
                 show_tool_calls=True,
             )
 
-    continuation = await principal.approval_continuation("approval-explicit-edit")
+    continuation = await principal.approvals.approval_continuation("approval-explicit-edit")
     assert continuation is not None
     assert continuation.source_event_ids == ("$edit",)
     assert continuation.sources == request.sources
-    resumed = runner._approval_response_request(
+    resumed = runner.approvals.approval_response_request(
         continuation,
         target=request.response_envelope.target,
     )
     assert resumed.sources == request.sources
-    assert await principal.approval_continuation_for_source("$settled") is None
+    assert await principal.approvals.approval_continuation_for_source("$settled") is None
     assert await principal.is_pending("$edit")
     assert not await principal.is_pending("$settled")

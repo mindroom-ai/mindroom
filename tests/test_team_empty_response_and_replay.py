@@ -1,531 +1,784 @@
-"""Tests for the team empty-run guard."""
+"""The team empty-run guard, quiet scheduled replies, and what a failed team turn records for replay.
+
+An empty completed attempt is never stored and is retried once, sharing the turn's continuation budget; a second empty
+attempt answers with the shared notice. A collected reply is the streamed document: a tool-only reply shows only its
+shown tool calls, and a member's text stays two paragraphs across a hidden call. Providers are scripted at the team
+runtime seam (``tests/team_turn_helpers.py``).
+"""
+# ruff: noqa: D103
 
 from __future__ import annotations
 
+import asyncio
+import functools
 import time
-from dataclasses import replace
-from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock, patch
+from contextlib import suppress
+from typing import TYPE_CHECKING, Any
+from unittest.mock import patch
 
 import pytest
-from agno.models.message import Message
-from agno.models.response import ToolExecution
-from agno.run.agent import RunContentEvent as AgentRunContentEvent
-from agno.run.agent import RunOutput
-from agno.run.base import RunStatus
-from agno.run.team import RunErrorEvent as TeamRunErrorEvent
-from agno.run.team import TeamRunOutput
 
-from mindroom import ai_runtime, teams
-from mindroom.constants import SILENT_SCHEDULE_NO_REPLY_TOKEN
-from mindroom.dynamic_tool_continuation import DYNAMIC_TOOL_CONTINUATION_LIMIT
-from mindroom.history.turn_recorder import TurnRecorder
-from mindroom.knowledge.utils import _KnowledgeResolution
-from mindroom.teams import TeamMode, team_response, team_response_stream
+from mindroom import ai_runtime
+from mindroom.agents import create_agent
+from mindroom.ai_run_metadata import prior_usage_by_run
+from mindroom.budgets.pricing import format_cost_usd
+from mindroom.cancellation import request_task_cancel
+from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
+from mindroom.config.models import ModelPricing
+from mindroom.constants import (
+    AI_RUN_METADATA_KEY,
+    CONTINUED_RUNS_METADATA_KEY,
+    SILENT_SCHEDULE_NO_REPLY_TOKEN,
+    SUBAGENT_COST_RUN_METADATA_KEY,
+    SUBAGENT_RECEIPTS_RUN_METADATA_KEY,
+)
+from mindroom.delegation.cost import receive_subagent_cost, stored_receipts
+from mindroom.history.run_checkpoint import INTERRUPTED_CALL_RESULT, recover_interrupted_turn
+from mindroom.llm.errors import ProviderError
+from mindroom.llm.messages import Message
+from mindroom.llm.runs import RunStatus, TeamRunRecord
+from mindroom.providers.identity import model_identity
+from mindroom.response_turn import CompletedApprovalRun, ResponsePausedForApproval, build_matrix_run_metadata
 from mindroom.timing import DispatchPipelineTiming
-from tests.conftest import make_turn_context, runtime_paths_for
-from tests.identity_helpers import entity_ids
-from tests.test_team_dynamic_continuation import _dynamic_tool_team_output
-from tests.test_team_response import _build_test_config, _make_test_agent, _make_test_team
+from mindroom.turn_continuation import TURN_CONTINUATION_LIMIT
+from tests.conftest import seed_session
+from tests.delegation_helpers import replay_run_metadata
+from tests.fakes.scripted_model import Await, ScriptedModel, ScriptStep, answer, calls, tool_call, usage
+from tests.history_helpers import _completed_team_run, _team_session
+from tests.scripted_agent_helpers import ProcessCrash, crash_after_first_terminal_store
+from tests.team_turn_helpers import (
+    EVENT_ID,
+    PROBE_TOOL,
+    REQUESTER_ID,
+    ROOM_ID,
+    SESSION_ID,
+    ProbeToolkit,
+    TeamTurn,
+    authored_team_config,
+    build_team_turn,
+    delegate,
+    member_approval,
+    registered_probe,
+)
+from tests.usage_helpers import assert_counted_usage, counted_total
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator
-    from contextlib import AbstractContextManager
+    from collections.abc import Iterator, Sequence
+    from pathlib import Path
 
-    from agno.team import Team as AgnoTeam
+    from mindroom.llm.usage import MessageMetrics
+    from mindroom.tool_system.events import ToolTraceEntry
 
-
-def _make_orchestrator() -> tuple[MagicMock, object]:
-    config = _build_test_config()
-    orchestrator = MagicMock()
-    orchestrator.config = config
-    orchestrator.runtime_paths = runtime_paths_for(config)
-    orchestrator.knowledge_managers = {}
-    orchestrator.agent_bots = {"general": MagicMock()}
-    return orchestrator, config
+HEADER = "🤝 **Team Response** (GeneralAgent):\n\n"
 
 
-def _team_patches(mock_team: AgnoTeam) -> list[AbstractContextManager[object]]:
-    fake_agent = _make_test_agent("GeneralAgent")
-    return [
-        patch("mindroom.teams.create_agent", return_value=fake_agent),
-        patch("mindroom.teams.resolve_agent_knowledge_access", return_value=_KnowledgeResolution(knowledge=None)),
-        patch("mindroom.teams._create_team_instance", return_value=mock_team),
-    ]
+@pytest.fixture(autouse=True)
+def probe() -> Iterator[type[ProbeToolkit]]:
+    """Register the probe toolkit the member's config names."""
+    with registered_probe() as toolkit:
+        yield toolkit
 
 
-def _empty_team_run(run_id: str) -> TeamRunOutput:
-    output = TeamRunOutput(content="", run_id=run_id, session_id="session-1")
-    output.status = RunStatus.completed
-    return output
+def _team(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    leader: Sequence[Sequence[ScriptStep]] = (),
+    general: Sequence[Sequence[ScriptStep]] = (),
+    large: Sequence[Sequence[ScriptStep]] = (),
+) -> TeamTurn:
+    """Build the ad hoc team of ``general`` on ``general-model``, led on ``default``, which may switch to ``large``.
+
+    A switch for the current response moves the leader and the member to ``large``, which serves both their requests.
+    """
+    authored = authored_team_config(
+        {
+            "general": {
+                "display_name": "GeneralAgent",
+                "role": "Answers.",
+                "model": "general-model",
+                "tools": ["thread_model", PROBE_TOOL],
+            },
+        },
+        models=("default", "general-model", "large"),
+    )
+    return build_team_turn(
+        tmp_path,
+        monkeypatch,
+        authored,
+        members=("general",),
+        scripts={"default": leader, "general-model": general, "large": large},
+    )
 
 
-def _completed_team_run(content: str) -> TeamRunOutput:
-    output = TeamRunOutput(content=content, run_id="team-run-final", session_id="session-1")
-    output.status = RunStatus.completed
-    return output
+def _team_run_ids(team: TeamTurn) -> list[str]:
+    session = team.storage.load_session(SESSION_ID)
+    assert session is not None
+    return [run.run_id for run in session.runs if isinstance(run, TeamRunRecord)]
 
 
-@pytest.mark.asyncio
-async def test_team_response_retries_once_after_empty_completed_run() -> None:
-    """One empty completed team run is discarded and retried before answering."""
-    orchestrator, _config = _make_orchestrator()
-    timing = DispatchPipelineTiming(source_event_id="$event", room_id="!room:localhost")
-    mock_team = _make_test_team()
-    mock_team.arun = AsyncMock(side_effect=[_empty_team_run("team-run-1"), _completed_team_run("Recovered answer")])
-
-    patches = _team_patches(mock_team)
-    with patches[0], patches[1], patches[2]:
-        response = await team_response(
-            agent_names=["general"],
-            mode=TeamMode.COORDINATE,
-            message="Say something.",
-            turn_recorder=TurnRecorder(user_message="Say something."),
-            orchestrator=orchestrator,
-            execution_identity=None,
-            ctx=make_turn_context(session_id="session-1"),
-            pipeline_timing=timing,
-        )
-
-    assert "Recovered answer" in response
-    assert mock_team.arun.await_count == 2
-    assert 0 < timing.marks["first_model_request_sent"] < timing.marks["model_request_sent"]
+def _switch_now(metrics: MessageMetrics | None = None) -> list[ScriptStep]:
+    """Return the member's switch of the current response to ``large``, which ends the attempt for a continuation."""
+    switch = tool_call("switch_thread_model", "call-switch", model_name="large", when="after-toolcall")
+    return calls(switch, metrics=metrics)
 
 
-@pytest.mark.asyncio
-async def test_quiet_team_response_returns_no_reply_without_visible_team_chrome() -> None:
-    """A silent schedule acknowledgment must reach final delivery as the exact token."""
-    orchestrator, _config = _make_orchestrator()
-    mock_team = _make_test_team()
-    mock_team.arun = AsyncMock(return_value=_completed_team_run(SILENT_SCHEDULE_NO_REPLY_TOKEN))
-    recorder = TurnRecorder(user_message="Check for updates.")
+def _failing(message: str) -> list[ScriptStep]:
+    async def fail() -> None:
+        raise ProviderError(message, provider="Synthetic")
 
-    patches = _team_patches(mock_team)
-    with patches[0], patches[1], patches[2]:
-        response = await team_response(
-            agent_names=["general"],
-            mode=TeamMode.COORDINATE,
-            message="Check for updates.",
-            turn_recorder=recorder,
-            orchestrator=orchestrator,
-            execution_identity=None,
-            ctx=replace(make_turn_context(session_id="session-1"), allow_no_report_response=True),
-        )
-
-    assert response == SILENT_SCHEDULE_NO_REPLY_TOKEN
-    assert recorder.assistant_text == SILENT_SCHEDULE_NO_REPLY_TOKEN
+    return [Await(fail)]
 
 
 @pytest.mark.asyncio
-async def test_quiet_team_response_preserves_member_finding_when_leader_returns_no_reply() -> None:
-    """A leader acknowledgment must not hide a finding contributed by a team member."""
-    orchestrator, _config = _make_orchestrator()
-    mock_team = _make_test_team()
-    team_run = _completed_team_run(SILENT_SCHEDULE_NO_REPLY_TOKEN)
-    team_run.member_responses = [RunOutput(agent_name="GeneralAgent", content="Queue depth is elevated.")]
-    mock_team.arun = AsyncMock(return_value=team_run)
-    recorder = TurnRecorder(user_message="Check for updates.")
-
-    patches = _team_patches(mock_team)
-    with patches[0], patches[1], patches[2]:
-        response = await team_response(
-            agent_names=["general"],
-            mode=TeamMode.COORDINATE,
-            message="Check for updates.",
-            turn_recorder=recorder,
-            orchestrator=orchestrator,
-            execution_identity=None,
-            ctx=replace(make_turn_context(session_id="session-1"), allow_no_report_response=True),
-        )
-
-    assert "Queue depth is elevated." in response
-    assert response != SILENT_SCHEDULE_NO_REPLY_TOKEN
-    assert recorder.assistant_text == response
-
-
-@pytest.mark.asyncio
-async def test_team_response_returns_fallback_notice_when_retry_is_also_empty() -> None:
-    """A second empty completed team run surfaces the shared fallback notice."""
-    orchestrator, _config = _make_orchestrator()
-    mock_team = _make_test_team()
-    mock_team.arun = AsyncMock(side_effect=[_empty_team_run("team-run-1"), _empty_team_run("team-run-2")])
-    recorder = TurnRecorder(user_message="Say something.")
-
-    patches = _team_patches(mock_team)
-    with patches[0], patches[1], patches[2]:
-        response = await team_response(
-            agent_names=["general"],
-            mode=TeamMode.COORDINATE,
-            message="Say something.",
-            turn_recorder=recorder,
-            orchestrator=orchestrator,
-            execution_identity=None,
-            ctx=make_turn_context(session_id="session-1"),
-        )
-
-    assert response == ai_runtime.EMPTY_RESPONSE_NOTICE
-    assert mock_team.arun.await_count == 2
-    # The fallback notice stays out of the recorded turn.
-    assert recorder.outcome == "completed"
-    assert recorder.assistant_text == ""
-
-
-@pytest.mark.asyncio
-async def test_team_response_stream_yields_fallback_notice_when_retry_is_also_empty(
+async def test_an_empty_completed_attempt_is_left_out_of_history_and_retried_once_under_a_run_id_of_its_own(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The streaming empty-run guard retries once, then yields the notice chunk."""
-    orchestrator, config = _make_orchestrator()
-    timing = DispatchPipelineTiming(source_event_id="$event", room_id="!room:localhost")
-    context_prepared_at: list[float] = []
-    render_input = teams._team_run_input_text
+    """The empty run is never stored; the retry is a fresh model request the pipeline timing marks.
 
-    def render(run_input: str | list[Message]) -> str:
-        result = render_input(run_input)
-        context_prepared_at.append(time.perf_counter())
-        return result
+    The retry's run is the turn's final run, which the turn's record and its run metadata name.
+    """
+    team = _team(tmp_path, monkeypatch, leader=[answer(""), answer("Recovered answer")])
+    timing = DispatchPipelineTiming(source_event_id=EVENT_ID, room_id=ROOM_ID)
+    run_metadata: dict[str, Any] = {}
 
-    monkeypatch.setattr(teams, "_team_run_input_text", render)
+    text = await team.respond(pipeline_timing=timing, run_metadata_collector=run_metadata)
 
-    async def empty_stream(run_id: str) -> AsyncIterator[object]:
-        yield _empty_team_run(run_id)
-
-    mock_team = _make_test_team()
-    mock_team.arun = MagicMock(side_effect=[empty_stream("team-run-1"), empty_stream("team-run-2")])
-
-    patches = _team_patches(mock_team)
-    with patches[0], patches[1], patches[2]:
-        chunks = [
-            chunk
-            async for chunk in team_response_stream(
-                agent_ids=[entity_ids(config, runtime_paths_for(config))["general"]],
-                mode=TeamMode.COORDINATE,
-                message="Say something.",
-                turn_recorder=TurnRecorder(user_message="Say something."),
-                orchestrator=orchestrator,
-                execution_identity=None,
-                ctx=make_turn_context(session_id="session-1"),
-                pipeline_timing=timing,
-            )
-        ]
-
-    assert mock_team.arun.call_count == 2
-    assert context_prepared_at[0] <= timing.marks["first_model_request_sent"]
-    assert context_prepared_at[-1] <= timing.marks["model_request_sent"]
+    assert text.endswith("Recovered answer")
+    assert len(team.models["default"].requests) == 2
+    [run_id] = _team_run_ids(team)
+    assert run_id != "run-1"
+    assert (team.recorder.outcome, team.recorder.run_id) == ("completed", run_id)
+    assert run_metadata[AI_RUN_METADATA_KEY]["run_id"] == run_id
     assert 0 < timing.marks["first_model_request_sent"] < timing.marks["model_request_sent"]
-    rendered = "".join(chunk.content if hasattr(chunk, "content") else str(chunk) for chunk in chunks)
-    assert ai_runtime.EMPTY_RESPONSE_NOTICE in rendered
-    # The discarded attempts' fallback documents must not leak ahead of the notice.
-    assert "No team response generated." not in rendered
 
 
 @pytest.mark.asyncio
-async def test_team_response_stream_empty_event_stream_retries_then_notices() -> None:
-    """A stream that ends with no events at all still triggers the empty-run guard.
+async def test_an_empty_attempt_s_retry_leaves_its_usage_in_the_ledger_the_totals_and_the_budget(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Under the turn's run id, the retry's run does not replace the empty run's usage: both attempts count.
 
-    Real Agno team streams never emit a terminal run output object, so the
-    guard must fire from the plain end-of-stream resolution.
+    They count in the usage ledger, the session totals, the usage report, and the requester's monthly spend.
     """
-    orchestrator, config = _make_orchestrator()
+    team = _team(tmp_path, monkeypatch, leader=[answer("", usage(100, 5)), answer("Recovered answer", usage(120, 9))])
 
-    async def silent_stream() -> AsyncIterator[object]:
-        return
-        yield  # pragma: no cover - makes this an async generator
+    await team.respond()
 
-    mock_team = _make_test_team()
-    mock_team.arun = MagicMock(side_effect=[silent_stream(), silent_stream()])
-    recorder = TurnRecorder(user_message="Say something.")
-
-    patches = _team_patches(mock_team)
-    with patches[0], patches[1], patches[2]:
-        chunks = [
-            chunk
-            async for chunk in team_response_stream(
-                agent_ids=[entity_ids(config, runtime_paths_for(config))["general"]],
-                mode=TeamMode.COORDINATE,
-                message="Say something.",
-                turn_recorder=recorder,
-                orchestrator=orchestrator,
-                execution_identity=None,
-                ctx=make_turn_context(session_id="session-1"),
-            )
-        ]
-
-    assert mock_team.arun.call_count == 2
-    rendered = "".join(chunk.content if hasattr(chunk, "content") else str(chunk) for chunk in chunks)
-    assert ai_runtime.EMPTY_RESPONSE_NOTICE in rendered
-    assert recorder.outcome == "completed"
-    assert recorder.assistant_text == ""
-
-
-@pytest.mark.asyncio
-async def test_team_response_discards_whitespace_only_completed_run() -> None:
-    """Whitespace-only completed content triggers the empty-run guard."""
-    orchestrator, _config = _make_orchestrator()
-    whitespace_run = TeamRunOutput(content="\n\n  ", run_id="team-run-1", session_id="session-1")
-    whitespace_run.status = RunStatus.completed
-    mock_team = _make_test_team()
-    mock_team.arun = AsyncMock(side_effect=[whitespace_run, _completed_team_run("Recovered answer")])
-
-    patches = _team_patches(mock_team)
-    with patches[0], patches[1], patches[2]:
-        response = await team_response(
-            agent_names=["general"],
-            mode=TeamMode.COORDINATE,
-            message="Say something.",
-            turn_recorder=TurnRecorder(user_message="Say something."),
-            orchestrator=orchestrator,
-            execution_identity=None,
-            ctx=make_turn_context(session_id="session-1"),
-        )
-
-    assert "Recovered answer" in response
-    assert mock_team.arun.await_count == 2
-
-
-@pytest.mark.asyncio
-async def test_team_response_ignores_history_messages_for_empty_detection() -> None:
-    """Session-history assistant messages folded into run messages are not output.
-
-    Agno copies prior turns into ``response.messages`` with
-    ``from_history=True``; counting them as visible output made the guard
-    dead after the first turn of a session and recycled old text as the
-    reply.
-    """
-    orchestrator, _config = _make_orchestrator()
-    history_only_run = TeamRunOutput(
-        content=None,
-        run_id="team-run-1",
-        session_id="session-1",
-        messages=[Message(role="assistant", content="Previous turn answer", from_history=True)],
+    assert_counted_usage(
+        team.storage,
+        SESSION_ID,
+        [(100, 5), (120, 9)],
+        config=team.config,
+        runtime_paths=team.runtime_paths,
+        model=team.models["default"].identity,
+        requester_id=REQUESTER_ID,
     )
-    history_only_run.status = RunStatus.completed
-    mock_team = _make_test_team()
-    mock_team.arun = AsyncMock(side_effect=[history_only_run, _completed_team_run("Recovered answer")])
-
-    patches = _team_patches(mock_team)
-    with patches[0], patches[1], patches[2]:
-        response = await team_response(
-            agent_names=["general"],
-            mode=TeamMode.COORDINATE,
-            message="Say something.",
-            turn_recorder=TurnRecorder(user_message="Say something."),
-            orchestrator=orchestrator,
-            execution_identity=None,
-            ctx=make_turn_context(session_id="session-1"),
-        )
-
-    assert "Recovered answer" in response
-    assert "Previous turn answer" not in response
-    assert mock_team.arun.await_count == 2
 
 
 @pytest.mark.asyncio
-async def test_team_empty_retry_shares_budget_with_dynamic_continuations() -> None:
-    """One empty retry plus dynamic-tool continuations stay within the shared budget."""
-    orchestrator, _config = _make_orchestrator()
-    mock_team = _make_test_team()
-    mock_team.arun = AsyncMock(
-        side_effect=[
-            _empty_team_run("team-run-1"),
-            *[_dynamic_tool_team_output() for _ in range(DYNAMIC_TOOL_CONTINUATION_LIMIT)],
+@pytest.mark.parametrize("stream", [True, False], ids=["streamed", "collected"])
+@pytest.mark.parametrize("ending", ["empty_retry", "model_switch"])
+async def test_a_team_reply_publishes_the_usage_and_cost_of_every_attempt_its_turn_ran(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    ending: str,
+    stream: bool,
+) -> None:
+    """The reply's usage and cost sum its attempts, an empty one and its retry or a member's switch and the continuation.
+
+    They are what the usage ledger counts, the leader's and the member's. The run is the attempt that answered.
+    """
+    if ending == "empty_retry":
+        team = _team(tmp_path, monkeypatch, leader=[answer("", usage(100, 5)), answer("Recovered.", usage(120, 9))])
+    else:
+        team = _team(
+            tmp_path,
+            monkeypatch,
+            leader=[delegate("call-team", "general", "Go"), answer("Asked.", usage(60, 6))],
+            general=[_switch_now(metrics=usage(30, 3))],
+            large=[answer("Done.", usage(120, 9))],
+        )
+    # Every scripted model answers as the model its config names, one model for all, which the leader's prices price.
+    for name, model in team.models.items():
+        model.identity = model_identity(team.config.models[name])
+    team.config.models["default"].pricing = ModelPricing(input=2, output=10)
+    run_metadata: dict[str, Any] = {}
+
+    await team.reply(stream=stream, run_metadata_collector=run_metadata)
+
+    published = run_metadata[AI_RUN_METADATA_KEY]
+    input_tokens, output_tokens = counted_total(team.storage, SESSION_ID)
+    assert (input_tokens, output_tokens) == ((220, 14) if ending == "empty_retry" else (250, 22))
+    assert (published["usage"]["input_tokens"], published["usage"]["output_tokens"]) == (input_tokens, output_tokens)
+    assert published["cost"] == {"usd": format_cost_usd((input_tokens * 2 + output_tokens * 10) / 1_000_000)}
+    [*_, final_run_id] = _team_run_ids(team)
+    assert (published["run_id"], published["status"]) == (final_run_id, "completed")
+    assert final_run_id != "run-1"
+
+
+@pytest.mark.asyncio
+async def test_a_team_reply_whose_continuation_failed_publishes_the_usage_of_the_attempt_before_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The failed attempt ends the turn, and the reply's usage still holds the switch's attempt, as the ledger does."""
+    team = _team(
+        tmp_path,
+        monkeypatch,
+        leader=[delegate("call-team", "general", "Go"), answer("Asked.", usage(60, 6))],
+        general=[_switch_now(metrics=usage(30, 3))],
+        large=[_failing("Leader failed")],
+    )
+    run_metadata: dict[str, Any] = {}
+
+    text = await team.respond(run_metadata_collector=run_metadata)
+
+    assert "Leader failed" in text
+    published = run_metadata[AI_RUN_METADATA_KEY]
+    assert published["status"] == "error"
+    assert counted_total(team.storage, SESSION_ID) == (130, 13)
+    assert (published["usage"]["input_tokens"], published["usage"]["output_tokens"]) == (130, 13)
+
+
+@pytest.mark.asyncio
+async def test_an_approved_team_reply_publishes_the_usage_of_the_empty_attempt_retried_before_its_pause(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The resumed team reply publishes what the ledger counts: the empty attempt, then the paused run's both legs.
+
+    The resume reads the paused team run from storage alone, as after a restart.
+    """
+    team = _team(
+        tmp_path,
+        monkeypatch,
+        leader=[answer("", usage(100, 5)), delegate("call-team", "general", "Touch it")],
+        general=[calls(tool_call("touch", "call-touch", label="dangerous"), metrics=usage(10, 1))],
+    )
+    team.config.background_tool_jobs.enabled = False
+    team.config.tool_approval = ToolApprovalConfig(rules=[ApprovalRuleConfig(match="touch", action="require_approval")])
+    with pytest.raises(ResponsePausedForApproval) as raised:
+        await team.stream(show_tool_calls=False)
+    team.models["default"] = ScriptedModel([answer("The member touched it.", usage(50, 5))])
+    team.models["general-model"] = ScriptedModel([answer("Touched.", usage(5, 1))])
+
+    result = await team.resume(
+        raised.value.paused,
+        approved=True,
+        approvals=(member_approval("call-touch", "dangerous", agent="general"),),
+    )
+
+    assert isinstance(result, CompletedApprovalRun)
+    published = result.metadata_content[AI_RUN_METADATA_KEY]["usage"]
+    assert counted_total(team.storage, SESSION_ID) == (205, 16)
+    assert (published["input_tokens"], published["output_tokens"]) == (205, 16)
+
+
+@pytest.mark.asyncio
+async def test_a_crash_after_an_empty_team_attempt_leaves_nothing_the_next_prompt_replays(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The empty team run is never stored as a turn, so a crash right after its store leaves none behind."""
+    team = _team(tmp_path, monkeypatch, leader=[answer(""), answer("Next answer.")])
+    crash_after_first_terminal_store(monkeypatch)
+
+    with pytest.raises(ProcessCrash):
+        await team.respond()
+    text = await team.respond(message="Next question", ctx=team.ctx(run_id="run-2"))
+
+    assert text.endswith("Next answer.")
+    assert [message for message in team.models["default"].requests[-1].messages if message.from_history] == []
+    assert _team_run_ids(team) == ["run-2"]
+
+
+@pytest.mark.asyncio
+async def test_a_team_turn_a_restart_cut_short_carries_its_members_usage_and_receipts_to_its_replay(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    probe: type[ProbeToolkit],
+) -> None:
+    """A member's row holds what the member used and received, which the leader's last checkpoint may predate.
+
+    The replay starts from the leader's run and its stored member runs: one usage for the team run, under the
+    leader's run id, as the turn's own usage counts them, and every receipt a member's row holds.
+    """
+    request = usage(100, 10)
+    team = _team(
+        tmp_path,
+        monkeypatch,
+        leader=[
+            delegate("call-1", "general", "Help"),
+            delegate("call-2", "general", "Dig"),
+            answer("Team answer.", request),
+        ],
+        general=[
+            calls(tool_call("touch", "call-paid", label="paid"), metrics=request),
+            answer("Helped.", request),
+            calls(tool_call("touch", "call-touch", label="dig", wait=True), metrics=request),
+            answer("Dug.", request),
+        ],
+    )
+    touch = ProbeToolkit.touch
+
+    @functools.wraps(touch)
+    async def paid_touch(self: ProbeToolkit, label: str, wait: bool = False) -> str:
+        if label == "paid":
+            receive_subagent_cost("member-job", 0.6)
+        return await touch(self, label, wait)
+
+    monkeypatch.setattr(ProbeToolkit, "touch", paid_touch)
+    turn = asyncio.create_task(team.respond(ctx=team.ctx(matrix_run_metadata=build_matrix_run_metadata(EVENT_ID, []))))
+    await asyncio.wait_for(probe.waiting.wait(), 10)
+    request_task_cancel(turn, process_shutdown=True)
+    with suppress(asyncio.CancelledError):
+        await turn
+    leader, members = team.stored_runs()
+    # The crash came before the leader's next checkpoint: its row never stored what the first member received.
+    cleared = {SUBAGENT_RECEIPTS_RUN_METADATA_KEY: None, SUBAGENT_COST_RUN_METADATA_KEY: None}
+    assert team.storage.patch_run_metadata(SESSION_ID, leader.run_id, cleared)
+    spent = [run.metrics.tokens.input_tokens for run in (leader, *members) if run.metrics is not None]
+
+    recovered = replay_run_metadata(
+        recover_interrupted_turn(team.storage, SESSION_ID, team.scope, {EVENT_ID}, natively=True),
+        {},
+    )
+
+    assert recovered[CONTINUED_RUNS_METADATA_KEY] == [leader.run_id]
+    assert stored_receipts(recovered) == {"member-job": 0.6}
+    [(run_id, carried)] = prior_usage_by_run(recovered).items()
+    assert run_id == leader.run_id
+    # The leader's two requests and the members' three: no member row is left out, and none counts twice.
+    assert carried.tokens.input_tokens == sum(spent) == 2 * 40 + 3 * 100
+    assert carried.duration == (leader.metrics.duration if leader.metrics is not None else None)
+
+    # The replay's reply reports the cut-short attempt's usage with its own, and its runs hold what it received.
+    run_metadata: dict[str, Any] = {}
+    continued = {**build_matrix_run_metadata(EVENT_ID, []), **recovered}
+    text = await team.respond(
+        ctx=team.ctx(run_id="run-2", matrix_run_metadata=continued),
+        run_metadata_collector=run_metadata,
+    )
+    assert text.endswith("Team answer.")
+    assert run_metadata[AI_RUN_METADATA_KEY]["usage"]["input_tokens"] == sum(spent) + 100
+    assert stored_receipts(team.stored_runs(run_id="run-2")[0].metadata) == {"member-job": 0.6}
+
+
+@pytest.mark.asyncio
+async def test_a_leader_cut_short_mid_delegation_recovers_as_a_turn_of_its_own_calls(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    probe: type[ProbeToolkit],
+) -> None:
+    """The leader's checkpoint holds its finished delegation; recovery answers the one running, and both replay."""
+    team = _team(
+        tmp_path,
+        monkeypatch,
+        leader=[delegate("call-1", "general", "Help"), delegate("call-2", "general", "Dig"), answer("Next answer.")],
+        general=[answer("Helped."), calls(tool_call("touch", "call-touch", label="dig", wait=True))],
+    )
+    turn = asyncio.create_task(team.respond(ctx=team.ctx(matrix_run_metadata=build_matrix_run_metadata(EVENT_ID, []))))
+    await asyncio.wait_for(probe.waiting.wait(), 10)
+    checkpoint, _members = team.stored_runs()
+    assert checkpoint.status is RunStatus.cancelled
+    assert [message.role for message in checkpoint.messages] == ["user", "assistant", "tool", "assistant"]
+    # A restart stops the turn, which stores no interrupted record for a turn its replay continues.
+    request_task_cancel(turn, process_shutdown=True)
+    with suppress(asyncio.CancelledError):
+        await turn
+
+    assert recover_interrupted_turn(team.storage, SESSION_ID, team.scope, {EVENT_ID}, natively=True).attempts
+    text = await team.respond(message="Next question", ctx=team.ctx(run_id="run-2"))
+
+    assert text.endswith("Next answer.")
+    replayed = [message for message in team.models["default"].requests[-1].messages if message.from_history]
+    assert [(message.role, message.tool_call_id) for message in replayed] == [
+        ("user", None),
+        ("assistant", None),
+        ("tool", "call-1"),
+        ("assistant", None),
+        ("tool", "call-2"),
+    ]
+    assert "Helped." in str(replayed[2].content)
+    assert replayed[4].content == INTERRUPTED_CALL_RESULT
+
+
+@pytest.mark.asyncio
+async def test_the_empty_retry_builds_only_the_members_it_delegates_to(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The empty attempt delegated to no member, so only the retry, which delegates, builds one."""
+    team = _team(
+        tmp_path,
+        monkeypatch,
+        leader=[answer(""), delegate("call-general", "general", "Help"), answer("Recovered answer")],
+        general=[answer("Helped.")],
+    )
+
+    with patch("mindroom.teams.members.create_agent", wraps=create_agent) as build:
+        text = await team.respond()
+
+    assert text.endswith("Recovered answer")
+    assert [call.args[0] for call in build.call_args_list] == ["general"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("empty", ["", "\n\n  "])
+async def test_a_second_empty_attempt_answers_with_the_shared_notice_and_records_no_text(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    empty: str,
+) -> None:
+    """Whitespace is no answer either; neither attempt's fallback document leaks ahead of the notice."""
+    request_times: list[float] = []
+
+    async def note_request() -> None:
+        request_times.append(time.perf_counter())
+
+    team = _team(
+        tmp_path,
+        monkeypatch,
+        leader=[[Await(note_request), *answer(empty)], [Await(note_request), *answer(empty)]],
+    )
+    timing = DispatchPipelineTiming(source_event_id=EVENT_ID, room_id=ROOM_ID)
+
+    text = await team.respond(pipeline_timing=timing)
+
+    assert text == ai_runtime.EMPTY_RESPONSE_NOTICE
+    assert len(team.models["default"].requests) == 2
+    # Neither empty run was stored, so no later turn replays an answer that ended immediately.
+    assert _team_run_ids(team) == []
+    # Each attempt's model request is marked once its context is ready, before the provider received it.
+    assert timing.marks["first_model_request_sent"] <= request_times[0]
+    assert timing.marks["model_request_sent"] <= request_times[1]
+    assert team.recorder.outcome == "completed"
+    assert team.recorder.assistant_text == ""
+
+
+@pytest.mark.asyncio
+async def test_stored_history_does_not_count_as_an_attempt_s_answer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An attempt replaying an earlier answer, but writing none, is still empty, and the earlier text is not the reply."""
+    team = _team(tmp_path, monkeypatch, leader=[answer(""), answer("Recovered answer")])
+    seed_session(
+        team.storage,
+        _team_session(
+            SESSION_ID,
+            team_id=team.scope.scope_id,
+            runs=[
+                _completed_team_run(
+                    "run-earlier",
+                    team_id=team.scope.scope_id,
+                    messages=[
+                        Message(role="user", content="Earlier question"),
+                        Message(role="assistant", content="Previous turn answer"),
+                    ],
+                ),
+            ],
+        ),
+    )
+
+    text = await team.respond()
+
+    assert text.endswith("Recovered answer")
+    assert "Previous turn answer" not in text
+    assert "Previous turn answer" in str(team.models["default"].requests[0].messages[3].content)
+    assert len(team.models["default"].requests) == 2
+
+
+@pytest.mark.asyncio
+async def test_the_empty_retry_shares_the_turn_s_budget_with_model_switch_continuations(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """One empty attempt plus the continuations a member's switches start settle on the limit message."""
+    team = _team(
+        tmp_path,
+        monkeypatch,
+        leader=[answer(""), delegate("call-team", "general", "Go"), answer("")],
+        general=[_switch_now()],
+        # After the first switch, the leader and its member both run on ``large`` and switch again.
+        large=[
+            step
+            for _ in range(TURN_CONTINUATION_LIMIT - 1)
+            for step in (delegate("call-team", "general", "Go"), _switch_now(), answer(""))
         ],
     )
 
-    patches = _team_patches(mock_team)
-    with patches[0], patches[1], patches[2]:
-        response = await team_response(
-            agent_names=["general"],
-            mode=TeamMode.COORDINATE,
-            message="Keep loading tools.",
-            turn_recorder=TurnRecorder(user_message="Keep loading tools."),
-            orchestrator=orchestrator,
-            execution_identity=None,
-            ctx=make_turn_context(session_id="session-1"),
-        )
+    text = await team.respond(message="Keep switching models.")
 
-    # The empty retry borrows one continuation slot: 1 discarded empty run
-    # plus LIMIT dynamic-tool runs, settling on the limit message.
-    assert mock_team.arun.await_count == DYNAMIC_TOOL_CONTINUATION_LIMIT + 1
-    assert "did not produce a final answer" in response
+    assert len(team.models["default"].requests) == 3
+    assert len(team.models["large"].requests) == 3 * (TURN_CONTINUATION_LIMIT - 1)
+    assert "did not produce a final answer" in text
 
 
 @pytest.mark.asyncio
-async def test_team_response_records_empty_replayable_text_for_tool_only_run() -> None:
-    """A tool-only blocking run keeps the fallback placeholder out of the recorded turn."""
-    orchestrator, _config = _make_orchestrator()
-    mock_team = _make_test_team()
-    tool_only_run = TeamRunOutput(
-        content="",
-        run_id="team-run-1",
-        session_id="session-1",
-        member_responses=[
-            RunOutput(
-                agent_name="GeneralAgent",
-                content="",
-                tools=[
-                    ToolExecution(
-                        tool_call_id="call-1",
-                        tool_name="get_time",
-                        tool_args={},
-                        result="noon",
-                    ),
-                ],
-            ),
-        ],
+async def test_a_later_attempt_of_a_team_turn_on_a_new_scope_replays_the_run_an_earlier_attempt_saved(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The scope's first session stays with the turn, so the attempt after a member's switch replays the first run.
+
+    The scope has no stored session when the turn starts; the second attempt's leader request carries the first
+    attempt's delegation.
+    """
+    team = _team(
+        tmp_path,
+        monkeypatch,
+        leader=[delegate("call-team", "general", "Go"), answer("Asked.")],
+        general=[_switch_now()],
+        large=[answer("Done.")],
     )
-    tool_only_run.status = RunStatus.completed
-    mock_team.arun = AsyncMock(return_value=tool_only_run)
-    recorder = TurnRecorder(user_message="Run the tool.")
 
-    patches = _team_patches(mock_team)
-    with patches[0], patches[1], patches[2]:
-        response = await team_response(
-            agent_names=["general"],
-            mode=TeamMode.COORDINATE,
-            message="Run the tool.",
-            turn_recorder=recorder,
-            orchestrator=orchestrator,
-            execution_identity=None,
-            ctx=make_turn_context(session_id="session-1"),
+    text = await team.respond()
+
+    assert text.endswith("Done.")
+    [last] = team.models["large"].requests
+    assert [message.tool_call_id for message in last.messages if message.role == "tool"] == ["call-team"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("show_tool_calls", [True, False])
+async def test_a_tool_only_team_reply_shows_the_fallback_document_but_records_no_text(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    show_tool_calls: bool,
+) -> None:
+    """A reply that shows nothing ends with the fallback line, display chrome rather than an answer to replay.
+
+    The attempt ran tools, so it is not retried; a reply that shows its tool calls shows them instead of the line.
+    """
+    team = _team(
+        tmp_path,
+        monkeypatch,
+        leader=[delegate("call-team", "general", "Run the tool"), answer("")],
+        general=[calls(tool_call("touch", "call-touch", label="noon")), answer("")],
+    )
+    tool_trace: list[ToolTraceEntry] = []
+
+    text = await team.respond(message="Run the tool.", show_tool_calls=show_tool_calls, tool_trace=tool_trace)
+
+    if show_tool_calls:
+        assert text.startswith("🤝 **Team Response** (GeneralAgent):\n\n**GeneralAgent**:\n\n🔧 `touch` [1]")
+        assert [entry.tool_name for entry in tool_trace] == ["touch", "delegate_task_to_member"]
+    else:
+        assert text == HEADER + "No team response generated."
+    assert len(team.models["default"].requests) == 2
+    assert team.recorder.outcome == "completed"
+    assert team.recorder.assistant_text == ""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("show_tool_calls", [True, False])
+async def test_a_quiet_scheduled_team_reply_that_only_ran_tools_reports_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    show_tool_calls: bool,
+) -> None:
+    """A quiet schedule whose runs called tools but wrote nothing ends with an empty reply, which delivery suppresses.
+
+    The tool calls it showed are not an answer, so the empty final text replaces the document they built; the trace
+    stays with the reply.
+    """
+    team = _team(
+        tmp_path,
+        monkeypatch,
+        leader=[delegate("call-team", "general", "Run the tool"), answer("")],
+        general=[calls(tool_call("touch", "call-touch", label="noon")), answer("")],
+    )
+    tool_trace: list[ToolTraceEntry] = []
+
+    text = await team.respond(
+        ctx=team.ctx(allow_no_report_response=True),
+        message="Run the tool.",
+        show_tool_calls=show_tool_calls,
+        tool_trace=tool_trace,
+    )
+
+    assert text == ""
+    assert [entry.tool_name for entry in tool_trace] == (
+        ["touch", "delegate_task_to_member"] if show_tool_calls else []
+    )
+    assert team.recorder.outcome == "completed"
+    assert team.recorder.assistant_text == ""
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "member_finding",
+    # A finding shaped like a tool marker is the member's own text: its calls are hidden, so no marker is chrome.
+    [None, SILENT_SCHEDULE_NO_REPLY_TOKEN, "Queue depth is elevated.", "🔧 `reported_finding` [1]"],
+)
+async def test_a_quiet_scheduled_team_reply_is_the_no_reply_token_unless_a_member_found_something(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    member_finding: str | None,
+) -> None:
+    """The leader's acknowledgment reaches delivery without team chrome, but cannot hide a member's finding.
+
+    A member that answers the token found nothing either. A document with a finding drops the leader's token, so
+    delivery shows it.
+    """
+    leader = (
+        [answer(SILENT_SCHEDULE_NO_REPLY_TOKEN)]
+        if member_finding is None
+        else [delegate("call-team", "general", "Check"), answer(SILENT_SCHEDULE_NO_REPLY_TOKEN)]
+    )
+    team = _team(tmp_path, monkeypatch, leader=leader, general=[answer(member_finding or "")])
+
+    text = await team.respond(
+        ctx=team.ctx(allow_no_report_response=True),
+        message="Check for updates.",
+        show_tool_calls=False,
+    )
+
+    assert team.recorder.outcome == "completed"
+    if member_finding in {None, SILENT_SCHEDULE_NO_REPLY_TOKEN}:
+        assert text == SILENT_SCHEDULE_NO_REPLY_TOKEN
+    else:
+        # A contribution that opens with a marker-shaped line starts its own paragraph.
+        separator = "\n\n" if member_finding.startswith("🔧") else " "
+        assert (
+            text == f"{HEADER}**GeneralAgent**:{separator}{member_finding}"
+            "\n\n\n*No team consensus - showing individual responses only*"
         )
-
-    # The visible response keeps the display chrome; the recorded turn does not
-    # replay it (matches the streaming path's event_has_visible guard).
-    assert "No team response generated." in response
-    assert recorder.outcome == "completed"
-    assert recorder.assistant_text == ""
+    # The turn records what it delivered: the bare token, or the document that carries the finding.
+    assert team.recorder.assistant_text == text
 
 
 @pytest.mark.asyncio
-async def test_team_response_stream_records_interrupted_turn_when_stream_errors() -> None:
-    """A mid-stream team error with partial output marks the recorder interrupted."""
-    orchestrator, config = _make_orchestrator()
+async def test_a_quiet_team_member_s_earlier_finding_stays_after_its_later_run_reports_nothing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A member asked twice reports in one run and answers the token in the next: its finding stays, without the token."""
+    leader = [
+        delegate("call-1", "general", "Check the disk"),
+        delegate("call-2", "general", "Check the queue"),
+        answer(SILENT_SCHEDULE_NO_REPLY_TOKEN),
+    ]
+    team = _team(
+        tmp_path,
+        monkeypatch,
+        leader=leader,
+        general=[answer("Disk almost full."), answer(SILENT_SCHEDULE_NO_REPLY_TOKEN)],
+    )
 
-    async def stream() -> AsyncIterator[object]:
-        yield AgentRunContentEvent(agent_id="general", agent_name="GeneralAgent", content="Member answer")
-        yield TeamRunErrorEvent(content="provider exploded")
+    text = await team.respond(
+        ctx=team.ctx(allow_no_report_response=True),
+        message="Check for updates.",
+        show_tool_calls=False,
+    )
 
-    mock_team = _make_test_team()
-    mock_team.arun = MagicMock(return_value=stream())
-    recorder = TurnRecorder(user_message="Analyze this.")
-
-    patches = _team_patches(mock_team)
-    with patches[0], patches[1], patches[2]:
-        chunks = [
-            chunk
-            async for chunk in team_response_stream(
-                agent_ids=[entity_ids(config, runtime_paths_for(config))["general"]],
-                mode=TeamMode.COORDINATE,
-                message="Analyze this.",
-                turn_recorder=recorder,
-                orchestrator=orchestrator,
-                execution_identity=None,
-                ctx=make_turn_context(session_id="session-1"),
-            )
-        ]
-
-    rendered = "".join(chunk.content if hasattr(chunk, "content") else str(chunk) for chunk in chunks)
-    assert "error" in rendered.lower()
-    assert recorder.outcome == "interrupted"
-    assert "Member answer" in recorder.assistant_text
+    assert (
+        text
+        == f"{HEADER}**GeneralAgent**: Disk almost full.\n\n\n*No team consensus - showing individual responses only*"
+    )
 
 
 @pytest.mark.asyncio
-async def test_team_response_stream_records_interrupted_turn_on_errored_run_output() -> None:
-    """A terminal errored run output after partial output marks the recorder interrupted."""
-    orchestrator, config = _make_orchestrator()
-    errored_run = TeamRunOutput(content="", run_id="team-run-1", session_id="session-1")
-    errored_run.status = RunStatus.error
+# A leader that writes nothing answers nothing, which never falls back to the no-reply document.
+@pytest.mark.parametrize("final", [SILENT_SCHEDULE_NO_REPLY_TOKEN, ""])
+async def test_a_quiet_team_resume_reads_only_its_own_member_runs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    final: str,
+) -> None:
+    """An earlier turn's member finding in the same session does not make a quiet resume that found nothing report."""
+    team = _team(
+        tmp_path,
+        monkeypatch,
+        leader=[
+            delegate("call-1", "general", "Check"),
+            answer("Old answer."),
+            delegate("call-team", "general", "Touch"),
+        ],
+        general=[answer("Old finding."), calls(tool_call("touch", "call-touch", label="dangerous"))],
+    )
+    await team.respond(message="Earlier check.", show_tool_calls=False)
+    team.config.background_tool_jobs.enabled = False
+    team.config.tool_approval = ToolApprovalConfig(rules=[ApprovalRuleConfig(match="touch", action="require_approval")])
+    with pytest.raises(ResponsePausedForApproval) as raised:
+        await team.stream(ctx=team.ctx(run_id="run-2", allow_no_report_response=True), show_tool_calls=False)
+    team.models["default"] = ScriptedModel([answer(final)])
+    team.models["general-model"] = ScriptedModel([answer(final)])
 
-    async def stream() -> AsyncIterator[object]:
-        yield AgentRunContentEvent(agent_id="general", agent_name="GeneralAgent", content="Member answer")
-        yield errored_run
+    result = await team.resume(
+        raised.value.paused,
+        approved=True,
+        approvals=(member_approval("call-touch", "dangerous", agent="general"),),
+        quiet=True,
+    )
 
-    mock_team = _make_test_team()
-    mock_team.arun = MagicMock(return_value=stream())
-    recorder = TurnRecorder(user_message="Analyze this.")
-
-    patches = _team_patches(mock_team)
-    with patches[0], patches[1], patches[2]:
-        _ = [
-            chunk
-            async for chunk in team_response_stream(
-                agent_ids=[entity_ids(config, runtime_paths_for(config))["general"]],
-                mode=TeamMode.COORDINATE,
-                message="Analyze this.",
-                turn_recorder=recorder,
-                orchestrator=orchestrator,
-                execution_identity=None,
-                ctx=make_turn_context(session_id="session-1"),
-            )
-        ]
-
-    assert recorder.outcome == "interrupted"
-    assert "Member answer" in recorder.assistant_text
-
-
-@pytest.mark.asyncio
-async def test_team_response_stream_records_error_without_partial_output() -> None:
-    """A team error with no partial work still records one replay carrier."""
-    orchestrator, config = _make_orchestrator()
-
-    async def stream() -> AsyncIterator[object]:
-        yield TeamRunErrorEvent(content="provider exploded")
-
-    mock_team = _make_test_team()
-    mock_team.arun = MagicMock(return_value=stream())
-    recorder = TurnRecorder(user_message="Analyze this.")
-
-    patches = _team_patches(mock_team)
-    with patches[0], patches[1], patches[2]:
-        _ = [
-            chunk
-            async for chunk in team_response_stream(
-                agent_ids=[entity_ids(config, runtime_paths_for(config))["general"]],
-                mode=TeamMode.COORDINATE,
-                message="Analyze this.",
-                turn_recorder=recorder,
-                orchestrator=orchestrator,
-                execution_identity=None,
-                ctx=make_turn_context(session_id="session-1"),
-            )
-        ]
-
-    assert recorder.outcome == "interrupted"
+    assert isinstance(result, CompletedApprovalRun)
+    assert result.response_text == final
 
 
 @pytest.mark.asyncio
-async def test_team_response_stream_records_interrupted_turn_when_stream_raises() -> None:
-    """A raw exception from the model stream records partial work interrupted."""
-    orchestrator, config = _make_orchestrator()
+async def test_a_member_reply_split_by_a_hidden_tool_call_keeps_two_paragraphs(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The member's text before and after its tool call reads as two paragraphs."""
+    team = _team(
+        tmp_path,
+        monkeypatch,
+        leader=[delegate("call-team", "general", "Check"), answer("Checked.")],
+        general=[calls(tool_call("touch", "call-touch", label="noon"), content="Let me check."), answer("Done.")],
+    )
 
-    stream_error = "transport died"
+    text = await team.respond(message="Check.", show_tool_calls=False)
 
-    async def stream() -> AsyncIterator[object]:
-        yield AgentRunContentEvent(agent_id="general", agent_name="GeneralAgent", content="Member answer")
-        raise RuntimeError(stream_error)
+    assert text == f"{HEADER}**GeneralAgent**: Let me check.\n\nDone.\n\n\n**Team Consensus**:\n\nChecked."
+    assert team.recorder.assistant_text == text
 
-    mock_team = _make_test_team()
-    mock_team.arun = MagicMock(return_value=stream())
-    recorder = TurnRecorder(user_message="Analyze this.")
 
-    patches = _team_patches(mock_team)
-    with patches[0], patches[1], patches[2]:
-        chunks = [
-            chunk
-            async for chunk in team_response_stream(
-                agent_ids=[entity_ids(config, runtime_paths_for(config))["general"]],
-                mode=TeamMode.COORDINATE,
-                message="Analyze this.",
-                turn_recorder=recorder,
-                orchestrator=orchestrator,
-                execution_identity=None,
-                ctx=make_turn_context(session_id="session-1"),
-            )
-        ]
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error",
+    [ProviderError("provider exploded", provider="Synthetic"), RuntimeError("transport died")],
+)
+async def test_a_team_turn_failing_after_a_member_answered_records_the_answer_interrupted(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    error: Exception,
+) -> None:
+    async def fail() -> None:
+        raise error
 
-    rendered = "".join(chunk.content if hasattr(chunk, "content") else str(chunk) for chunk in chunks)
-    assert "transport died" in rendered
-    assert recorder.outcome == "interrupted"
-    assert "Member answer" in recorder.assistant_text
+    team = _team(
+        tmp_path,
+        monkeypatch,
+        leader=[delegate("call-team", "general", "Analyze"), [Await(fail)]],
+        general=[answer("Member answer")],
+    )
+
+    text = await team.respond()
+
+    assert str(error) in text
+    assert team.recorder.outcome == "interrupted"
+    assert "Member answer" in team.recorder.assistant_text
+
+
+@pytest.mark.asyncio
+async def test_a_team_turn_failing_before_any_output_still_records_the_turn(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    team = _team(tmp_path, monkeypatch, leader=[_failing("provider exploded")])
+
+    text = await team.respond()
+
+    assert "provider exploded" in text
+    assert team.recorder.outcome == "interrupted"

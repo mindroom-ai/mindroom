@@ -12,23 +12,23 @@ from mindroom.event_journal import DepartureSource
 from mindroom.matrix.durable_ingestion import validate_ingestion_batch
 
 if TYPE_CHECKING:
-    from mindroom.event_journal import PrincipalStore
+    from mindroom.event_journal import IngestionBatchAdmission, PrincipalStore
 
 
-async def admit_room_membership(
+async def room_membership_admission(
     principal: PrincipalStore,
     room_id: str,
     membership: Literal["join", "leave"],
     *,
     source: DepartureSource = DepartureSource.REPORTED,
-) -> int:
-    """Admit a membership transition and return its journal ownership epoch."""
+) -> IngestionBatchAdmission | None:
+    """Build the one write of a membership transition; None when the room is already there."""
     position = await principal.ingestion_membership_position(room_id)
     if position is None and membership == "leave":
         await admit_room_membership(principal, room_id, "join")
         position = await principal.ingestion_membership_position(room_id)
     if position is not None and position.membership == membership:
-        return await principal.membership_epoch(room_id)
+        return None
 
     consumer = await principal.load_or_create_ingestion_consumer(new_generation=uuid4())
     if consumer.stream_id is None:
@@ -58,5 +58,18 @@ async def admit_room_membership(
         ),
     )
     batch = SyncBatch(consumer.stream_id, int(sequence["next_sequence"]), (record,))
-    await principal.admit_ingestion_batch(validate_ingestion_batch(batch, account_id="@fixture:example.org"))
+    return validate_ingestion_batch(batch, account_id="@fixture:example.org")
+
+
+async def admit_room_membership(
+    principal: PrincipalStore,
+    room_id: str,
+    membership: Literal["join", "leave"],
+    *,
+    source: DepartureSource = DepartureSource.REPORTED,
+) -> int:
+    """Admit a membership transition and return its journal ownership epoch."""
+    admission = await room_membership_admission(principal, room_id, membership, source=source)
+    if admission is not None:
+        await principal.admit_ingestion_batch(admission)
     return await principal.membership_epoch(room_id)

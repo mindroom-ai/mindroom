@@ -5,20 +5,28 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import pytest
+import tiktoken
 
 from mindroom.automations.prompt_curation import (
     _curation_notice,
     _curation_prompt,
     _CurationPlan,
     _plan_curation,
+    _stable_counter,
     _verify_curation,
 )
-from mindroom.config.agent import AgentConfig
+from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.automations import PromptCurationAutomation
 from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
 from mindroom.constants import resolve_runtime_paths
+from mindroom.llm.provider import ModelIdentity, TokenCounter
 from mindroom.runtime_resolution import resolve_agent_runtime
+from mindroom.token_counting import families
+from mindroom.token_counting.counts import count
+from mindroom.token_counting.families import counter_for_model
+from mindroom.tool_system.worker_routing import build_requester_execution_identity
+from tests.fakes.token_counter import fake_token_counter
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -42,7 +50,7 @@ def _setup(tmp_path: Path, **settings: object) -> tuple[Config, PromptCurationAu
     )
     config = Config(agents={"mind": agent}, router=RouterConfig(model="default"))
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
-    root = resolve_agent_runtime("mind", config, paths, None, create=True).file_memory_root
+    root = resolve_agent_runtime("mind", config, paths, None, create=True).workspace.file_memory_path
     assert root is not None
     root.mkdir(parents=True, exist_ok=True)
     (root / "MEMORY.md").write_text(MEMORY, encoding="utf-8")
@@ -55,8 +63,7 @@ def _setup(tmp_path: Path, **settings: object) -> tuple[Config, PromptCurationAu
 
 def _plan(tmp_path: Path, **settings: object) -> tuple[_CurationPlan, Config, Path]:
     config, automation, root = _setup(tmp_path, **settings)
-    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
-    plan = _plan_curation(config, paths, "mind", automation)
+    plan = _plan_curation(config, root, "mind", automation, fake_token_counter())
     assert plan is not None
     return plan, config, root
 
@@ -65,13 +72,78 @@ def _snapshot(root: Path) -> dict[str, bytes]:
     return {str(path.relative_to(root)): path.read_bytes() for path in sorted(root.rglob("*")) if path.is_file()}
 
 
+def test_the_files_are_measured_as_the_agent_s_model_estimates_them(tmp_path: Path) -> None:
+    """A model whose estimate is twice the quarter token reaches the trigger with half the text."""
+    config, automation, root = _setup(tmp_path, trigger_tokens=2_000)
+    assert _plan_curation(config, root, "mind", automation, fake_token_counter()) is None
+
+    counter = TokenCounter(estimate=lambda text: len(text) // 2)
+    plan = _plan_curation(config, root, "mind", automation, counter)
+
+    assert plan is not None
+    assert plan.curated["MEMORY.md"] == len(MEMORY) // 2
+
+
+def test_curation_plans_without_the_vocabulary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An installation that cannot load o200k_base still plans a cut, on the stand-in estimate."""
+
+    def offline(_name: str) -> object:
+        msg = "no network"
+        raise OSError(msg)
+
+    monkeypatch.setitem(families._encoders, "o200k_base", families._Encoder())
+    monkeypatch.setattr(tiktoken, "get_encoding", offline)
+    config, automation, root = _setup(tmp_path)
+    counter = counter_for_model(ModelIdentity(id="claude-opus-5-5", provider="anthropic"))
+
+    plan = _plan_curation(config, root, "mind", automation, counter)
+
+    assert plan is not None
+    assert plan.curated["MEMORY.md"] == -(-len(MEMORY) // 4)
+
+
+def test_curation_keeps_the_stand_in_while_the_model_s_own_encoding_loads() -> None:
+    """Plan and verify compare sizes on one basis, even when the model's own encoding loads between them.
+
+    o200k_base loads before planning, but an older OpenAI model counts with cl100k_base, which may still be loading.
+    """
+    loaded = [False]
+    counter = TokenCounter(estimate=lambda text: len(text) if loaded[0] else None)
+
+    stable = _stable_counter(counter)
+    loaded[0] = True
+
+    assert count(stable, "abcdefgh") == 2
+
+
+def test_curation_counts_with_the_model_s_own_encoding_before_any_reply(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An older OpenAI model counts with cl100k_base, which curation loads rather than plan on the stand-in's bytes.
+
+    Its background load may have started on an earlier count and not finished.
+    """
+
+    class _OneTokenPerCharacter:
+        def encode(self, text: str, *, disallowed_special: tuple[str, ...]) -> list[str]:  # noqa: ARG002
+            return list(text)
+
+    real_get_encoding = tiktoken.get_encoding
+    monkeypatch.setitem(families._encoders, "cl100k_base", families._Encoder(started=True))
+    monkeypatch.setattr(
+        tiktoken,
+        "get_encoding",
+        lambda name: _OneTokenPerCharacter() if name == "cl100k_base" else real_get_encoding(name),
+    )
+    counter = counter_for_model(ModelIdentity(id="gpt-4", provider="openai"), local_encoder=True)
+
+    assert count(_stable_counter(counter), "hello world") == 11
+
+
 def test_files_under_the_trigger_ask_for_nothing(tmp_path: Path) -> None:
     """Small prompt files post no prompt."""
     config, automation, root = _setup(tmp_path)
     (root / "MEMORY.md").write_text("# Memory\n- Prefers terse replies.\n", encoding="utf-8")
-    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
 
-    assert _plan_curation(config, paths, "mind", automation) is None
+    assert _plan_curation(config, root, "mind", automation, fake_token_counter()) is None
 
 
 def test_the_plan_covers_memory_and_every_context_file_with_a_gradual_band(tmp_path: Path) -> None:
@@ -91,18 +163,61 @@ def test_the_band_is_the_configured_reductions_of_the_measured_size(tmp_path: Pa
     assert (plan.upper_tokens, plan.floor_tokens) == (1034, 969)
 
 
+def test_memory_past_its_preload_limit_asks_for_a_cut_under_the_token_trigger(tmp_path: Path) -> None:
+    """The end of a file over max_preload_file_chars never reaches the prompt, so it triggers a pass on its own."""
+    config, automation, root = _setup(tmp_path, trigger_tokens=10_000)
+    config.defaults.max_preload_file_chars = len(MEMORY)
+    assert _plan_curation(config, root, "mind", automation, fake_token_counter()) is None
+    config.defaults.max_preload_file_chars = len(MEMORY) - 1
+
+    plan = _plan_curation(config, root, "mind", automation, fake_token_counter())
+
+    assert plan is not None
+    assert (plan.measured_tokens, plan.over_limit) == (1292, ("MEMORY.md",))
+    assert (plan.upper_tokens, plan.floor_tokens) == (1163, 1098)
+    prompt = _curation_prompt(config, plan)
+    limit = len(MEMORY) - 1
+    assert f"up to its first {limit} characters; files over that limit: MEMORY.md." in prompt
+    assert f"If a file is over the {limit}-character limit, take content out of it first" in prompt
+
+
+def test_a_context_file_past_its_preload_limit_asks_for_a_cut(tmp_path: Path) -> None:
+    """Every preloaded file has the same limit, so a context file over it triggers a pass too."""
+    config, automation, root = _setup(tmp_path, trigger_tokens=10_000)
+    config.defaults.max_preload_file_chars = len(SOUL) - 2
+
+    plan = _plan_curation(config, root, "mind", automation, fake_token_counter())
+
+    assert plan is not None
+    assert plan.over_limit == ("MEMORY.md", "SOUL.md")
+    assert "files over that limit: MEMORY.md, SOUL.md." in _curation_prompt(config, plan)
+
+
 def test_the_prompt_states_the_exact_numbers_and_the_git_step(tmp_path: Path) -> None:
     """The visible prompt names every file, the band, the per-file cap, committing first, and the re-check."""
     plan, config, _root = _plan(tmp_path)
 
     prompt = _curation_prompt(config, plan)
 
-    assert "total 1292 tokens, over the 1000-token limit" in prompt
+    assert (
+        "total 1292 tokens (limit 1000). Each reaches your prompt only up to its first 30000 characters; "
+        "files over that limit: none." in prompt
+    )
     assert "MEMORY.md (1286 tokens), SOUL.md (4 tokens), USER.md (2 tokens)" in prompt
     assert "at most 1163 tokens in total, but not below 1098" in prompt
     assert "shrink by more than 25%" in prompt
     assert "git init" in prompt
     assert "asks you to re-check" in prompt
+
+
+def test_the_prompt_asks_to_fold_corrections_into_the_entries_they_correct(tmp_path: Path) -> None:
+    """A later correction rewrites the earlier entry instead of both surviving, or moving on to memory/."""
+    plan, config, _root = _plan(tmp_path)
+
+    prompt = _curation_prompt(config, plan)
+
+    assert "rewrite the earlier entry to the corrected fact and delete the separate correction" in prompt
+    assert "except to apply a correction" in prompt
 
 
 def test_an_untouched_workspace_is_reported_unchanged(tmp_path: Path) -> None:
@@ -127,6 +242,37 @@ def test_moving_a_section_into_memory_within_bounds_is_accepted(tmp_path: Path) 
 
     assert (result.changed, result.findings) == (True, ())
     assert _curation_notice(config, plan, result) == "✅ Prompt files condensed from 1292 to 1139 tokens."
+
+
+@pytest.mark.parametrize(
+    ("pointer", "findings"),
+    [
+        (POINTER, ()),
+        (
+            "## Topic 3\n" + "z" * (len(SECTIONS[3]) - 12) + "\n",
+            (
+                "the files did not shrink (1292 tokens)",
+                "MEMORY.md is over the 1000-character prompt limit and did not get shorter",
+            ),
+        ),
+    ],
+)
+def test_a_pass_over_the_preload_limit_must_shorten_the_file(
+    tmp_path: Path,
+    pointer: str,
+    findings: tuple[str, ...],
+) -> None:
+    """A pass that leaves a file over its limit as long as it was keeps the same text out of the prompt."""
+    config, automation, root = _setup(tmp_path, trigger_tokens=10_000)
+    config.defaults.max_preload_file_chars = 1000
+    plan = _plan_curation(config, root, "mind", automation, fake_token_counter())
+    assert plan is not None
+    (root / "memory" / "topics.md").write_text(SECTIONS[3], encoding="utf-8")
+    (root / "MEMORY.md").write_text(MEMORY.replace(SECTIONS[3], pointer), encoding="utf-8")
+
+    result = _verify_curation(plan)
+
+    assert (result.changed, result.findings) == (True, findings)
 
 
 def _over_cut(root: Path) -> None:
@@ -224,10 +370,9 @@ def test_a_planted_link_stops_the_check(tmp_path: Path) -> None:
     outside.write_text("secret\n", encoding="utf-8")
     (root / "USER.md").unlink()
     (root / "USER.md").symlink_to(outside)
-    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
 
     with pytest.raises((OSError, ValueError)):
-        _plan_curation(config, paths, "mind", automation)
+        _plan_curation(config, root, "mind", automation, fake_token_counter())
 
 
 ARCHIVE = "# Projects\n" + "Archived project detail. " * 80 + "\n"
@@ -236,8 +381,7 @@ ARCHIVE = "# Projects\n" + "Archived project detail. " * 80 + "\n"
 def _plan_with_archive(tmp_path: Path) -> tuple[_CurationPlan, Path]:
     config, automation, root = _setup(tmp_path)
     (root / "memory" / "projects.md").write_text(ARCHIVE, encoding="utf-8")
-    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
-    plan = _plan_curation(config, paths, "mind", automation)
+    plan = _plan_curation(config, root, "mind", automation, fake_token_counter())
     assert plan is not None
     return plan, root
 
@@ -273,8 +417,7 @@ def test_an_archive_already_past_the_read_cap_does_not_hide_deleted_detail(tmp_p
     """The loss baseline counts a topic file that was past 1 MiB at fire time, so it cannot pass as moved detail."""
     config, automation, root = _setup(tmp_path)
     (root / "memory" / "big.md").write_text("Old detail.\n" * 100_000, encoding="utf-8")
-    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
-    plan = _plan_curation(config, paths, "mind", automation)
+    plan = _plan_curation(config, root, "mind", automation, fake_token_counter())
     assert plan is not None
     _delete_without_moving(root)
 
@@ -290,11 +433,27 @@ def test_a_context_file_under_memory_is_counted_once(tmp_path: Path) -> None:
     (root / "memory" / "context.md").write_text(context, encoding="utf-8")
     (root / "MEMORY.md").write_text("# Memory\n", encoding="utf-8")
     config.agents["mind"].context_files = ["memory/context.md"]
-    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
-    plan = _plan_curation(config, paths, "mind", automation)
+    plan = _plan_curation(config, root, "mind", automation, fake_token_counter())
     assert plan is not None
     (root / "memory" / "topics.md").write_text(SECTIONS[3], encoding="utf-8")
     (root / "memory" / "context.md").write_text(context.replace(SECTIONS[3], POINTER), encoding="utf-8")
+
+    result = _verify_curation(plan)
+
+    assert (result.changed, result.findings) == (True, ())
+
+
+def test_folding_a_correction_into_the_entry_it_corrects_is_accepted(tmp_path: Path) -> None:
+    """Rewriting the earlier entry and dropping the correction note deletes the note, well within the loss allowance."""
+    config, automation, root = _setup(tmp_path)
+    earlier = "- The project database is Postgres 14.\n"
+    correction = "- Correction: the project database is Postgres 16, not 14.\n"
+    (root / "MEMORY.md").write_text(MEMORY + earlier + correction, encoding="utf-8")
+    plan = _plan_curation(config, root, "mind", automation, fake_token_counter())
+    assert plan is not None
+    (root / "memory" / "topics.md").write_text(SECTIONS[3], encoding="utf-8")
+    folded = MEMORY.replace(SECTIONS[3], POINTER) + earlier.replace("14", "16")
+    (root / "MEMORY.md").write_text(folded, encoding="utf-8")
 
     result = _verify_curation(plan)
 
@@ -310,3 +469,30 @@ def test_reorganizing_an_archive_without_losing_content_is_accepted(tmp_path: Pa
     result = _verify_curation(plan)
 
     assert (result.changed, result.findings) == (True, ())
+
+
+def test_a_private_instance_curates_its_own_context_files_not_the_shared_ones(tmp_path: Path) -> None:
+    """A private agent's agent-level context files load from the workspace every requester shares, so no one run cuts them."""
+    automation = PromptCurationAutomation(trigger_tokens=1_000)
+    agent = AgentConfig(
+        display_name="Mind",
+        memory_backend="file",
+        context_files=["SHARED.md"],
+        private=AgentPrivateConfig(per="user_agent", context_files=["SOUL.md"]),
+    )
+    config = Config(agents={"mind": agent}, router=RouterConfig(model="default"))
+    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
+    identity = build_requester_execution_identity(
+        agent_name="mind",
+        runtime_paths=paths,
+        requester_id="@alice:example.test",
+    )
+    root = resolve_agent_runtime("mind", config, paths, identity, create=True).workspace.file_memory_path
+    assert root is not None
+    for name, text in (("MEMORY.md", MEMORY), ("SOUL.md", SOUL), ("SHARED.md", MEMORY)):
+        (root / name).write_text(text, encoding="utf-8")
+
+    plan = _plan_curation(config, root, "mind", automation, fake_token_counter())
+
+    assert plan is not None
+    assert list(plan.curated) == ["MEMORY.md", "SOUL.md"]

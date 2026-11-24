@@ -1,13 +1,16 @@
 """Tests for the MindRoom Gemini media toolkit."""
 
+import base64
 from types import SimpleNamespace
 from unittest.mock import Mock
 
 import agno.tools.models.gemini as agno_gemini
-from agno.agent import Agent
+import httpx
 from google.genai import types
 
 from mindroom.custom_tools.gemini_media import MindRoomGeminiTools
+from mindroom.tool_system.agno_toolkits import ToolCallActor
+from tests.agent_tool_helpers import toolkit_offers
 
 
 def test_generate_image_uses_gemini_content_generation(monkeypatch) -> None:  # noqa: ANN001
@@ -31,7 +34,7 @@ def test_generate_image_uses_gemini_content_generation(monkeypatch) -> None:  # 
         enable_generate_video=False,
     )
 
-    result = toolkit.generate_image(Mock(spec=Agent), "A geometric Matrix room")
+    result = toolkit.generate_image(ToolCallActor(session_state={}), "A geometric Matrix room")
 
     assert result.images is not None
     assert len(result.images) == 1
@@ -40,3 +43,44 @@ def test_generate_image_uses_gemini_content_generation(monkeypatch) -> None:  # 
     assert kwargs["model"] == "gemini-3.1-flash-image"
     assert kwargs["contents"] == "A geometric Matrix room"
     assert kwargs["config"].response_modalities == ["IMAGE"]
+
+
+def test_generate_image_offers_the_model_its_prompt(monkeypatch) -> None:  # noqa: ANN001
+    """The schema asks for the prompt and the docstring describes it, though `Agent` is imported for type checking only."""
+    monkeypatch.setattr(agno_gemini, "Client", lambda **_kwargs: SimpleNamespace())
+    toolkit = MindRoomGeminiTools(api_key="test-key", enable_generate_video=False)
+
+    function = toolkit_offers(toolkit, "generate_image")
+
+    assert function.description == "Generate an image through the Gemini content-generation API."
+    assert function.parameters == {
+        "type": "object",
+        "properties": {"prompt": {"type": "string"}},
+        "required": ["prompt"],
+    }
+    assert function.injected_params == {"agent": "actor"}
+
+
+def test_generate_image_keeps_the_gemini_api_on_v1beta(monkeypatch) -> None:  # noqa: ANN001
+    """google-genai 3 defaults the Gemini API to v1, which lacks preview image models, so image requests stay on v1beta."""
+    sent: list[httpx.Request] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        sent.append(request)
+        part = {"inlineData": {"data": base64.b64encode(b"image-bytes").decode(), "mimeType": "image/png"}}
+        return httpx.Response(200, json={"candidates": [{"content": {"role": "model", "parts": [part]}}]})
+
+    real_client = agno_gemini.Client
+    http_client = httpx.Client(transport=httpx.MockTransport(respond))
+    monkeypatch.setattr(
+        agno_gemini,
+        "Client",
+        lambda **kwargs: real_client(**kwargs, http_options=types.HttpOptions(httpx_client=http_client)),
+    )
+    toolkit = MindRoomGeminiTools(api_key="test-key", enable_generate_video=False)
+
+    result = toolkit.generate_image(ToolCallActor(session_state={}), "A geometric Matrix room")
+
+    assert result.images is not None
+    assert result.images[0].content == b"image-bytes"
+    assert [request.url.path for request in sent] == [f"/v1beta/models/{toolkit.image_model}:generateContent"]

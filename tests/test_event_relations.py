@@ -115,12 +115,13 @@ class TestEventRelations:
         assert info.is_edit is False
         assert info.is_reaction is False
 
-    def test_analyze_standalone_reply(self) -> None:
-        """Test that standalone replies (rich replies) are properly detected."""
+    @pytest.mark.parametrize("reply_key", ["m.in_reply_to", "io.mindroom.in_reply_to"])
+    def test_analyze_standalone_reply(self, reply_key: str) -> None:
+        """Standalone replies are detected alike whether clients quote them or not."""
         event_source = {
             "content": {
                 "m.relates_to": {
-                    "m.in_reply_to": {
+                    reply_key: {
                         "event_id": "$reply_to_xyz",
                     },
                 },
@@ -214,12 +215,6 @@ class TestEventRelations:
             assert thread_root(content) is None
             assert replacement_target(content) is None
 
-        edit_content = {
-            "m.relates_to": {"rel_type": "m.replace", "event_id": "$original:localhost"},
-            "m.new_content": {"m.relates_to": {"rel_type": "m.thread", "event_id": malformed_target}},
-        }
-        assert EventInfo.from_event({"type": "m.room.message", "content": edit_content}).thread_id_from_edit is None
-
     def test_reply_to_event_id_from_content_extracts_only_string_reply_targets(self) -> None:
         """Reply target extraction should share the Matrix relation traversal."""
         assert (
@@ -227,6 +222,18 @@ class TestEventRelations:
                 {"m.relates_to": {"m.in_reply_to": {"event_id": "$target:localhost"}}},
             )
             == "$target:localhost"
+        )
+
+        assert (
+            reply_to_event_id_from_content(
+                {
+                    "m.relates_to": {
+                        "m.in_reply_to": {"event_id": "$quoted:localhost"},
+                        "io.mindroom.in_reply_to": {"event_id": "$unquoted:localhost"},
+                    },
+                },
+            )
+            == "$quoted:localhost"
         )
 
         assert reply_to_event_id_from_content(None) is None

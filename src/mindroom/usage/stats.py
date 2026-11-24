@@ -1,18 +1,17 @@
-"""Read-only aggregation of retained Agno token usage."""
+"""Read-only aggregation of retained token usage."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, replace
+from dataclasses import asdict, dataclass, replace
 from dataclasses import field as dataclass_field
 from datetime import UTC, datetime
 from functools import cache
 from typing import TYPE_CHECKING, Literal
 
+from mindroom.llm.usage import TokenCounts
 from mindroom.requester_identity import resolve_human_requester_alias
 from mindroom.usage.legacy_usage_storage import legacy_request_model
 from mindroom.usage.stats_storage import (
-    TOKEN_FIELDS,
-    UsageModelMetrics,
     UsageRunNode,
     UsageSessionRow,
     UsageStorageDiagnostic,
@@ -22,10 +21,10 @@ from mindroom.usage.stats_storage import (
     discover_self_usage_sources,
     iter_usage_storage_rows,
 )
-from mindroom.usage.storage import SYSTEM_USAGE_ENTITY
+from mindroom.usage.storage import SYSTEM_USAGE_ENTITY, stored_token_counts
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Mapping
+    from collections.abc import Callable, Iterable, Mapping
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -33,7 +32,6 @@ if TYPE_CHECKING:
     from mindroom.usage.storage import UsageKind
 
 __all__ = [
-    "TokenTotals",
     "UsageBreakdownRow",
     "UsageCoverage",
     "UsageCumulativeModelBreakdownRow",
@@ -46,15 +44,17 @@ __all__ = [
     "UsageVoiceBreakdownRow",
     "collect_admin_usage",
     "collect_private_usage",
+    "collect_requester_daily_usage",
     "collect_self_usage",
 ]
 
 type _Scope = Literal["self", "admin"]
-type _ModelUsageEntry = tuple[UsageRunNode, TokenTotals, Mapping[tuple[str, str], TokenTotals]]
+type _ModelUsageEntry = tuple[UsageRunNode, TokenCounts, Mapping[tuple[str, str], TokenCounts]]
 
 _COVERAGE_NOTE = (
     "Shared self totals use requester-attributed retained agent runs. "
-    "Private self and admin totals use Agno session aggregates, including team members. "
+    "Private self and admin totals sum each session's usage snapshots: runs, team members, helpers, "
+    "and usage stored before per-run snapshots. "
     "Compaction, memory auto-flush and embedded workflow helpers add tokens without increasing run_count. "
     "Usage snapshots survive compaction and regeneration. Deleted sessions are unavailable."
 )
@@ -67,10 +67,10 @@ _MODEL_COVERAGE_NOTE = (
     "and unavailable member detail."
 )
 _CUMULATIVE_MODEL_COVERAGE_NOTE = (
-    "Cumulative model breakdown uses retained session model details plus independently recorded helper usage. "
+    "Cumulative model breakdown attributes retained sessions' totals by each usage snapshot's model details. "
     "Missing, unusable, or unreconciled attribution is grouped as unknown. "
-    "Compacted history still present in retained sessions is included; deleted sessions and dates or requester "
-    "attribution absent from session aggregates are unavailable."
+    "Compacted history still present in retained sessions is included; deleted sessions, and dates or requester "
+    "attribution of usage stored before per-run snapshots, are unavailable."
 )
 _USER_COVERAGE_NOTE = (
     "User breakdown uses requester-attributed retained top-level runs, team members, and helper usage, "
@@ -89,7 +89,7 @@ _DAILY_COVERAGE_NOTE = (
     "and unavailable member detail. Deleted sessions are unavailable."
 )
 _PRIVATE_COVERAGE_NOTE = (
-    "Private-agent totals use session aggregates, attributed to a validated private-instance owner "
+    "Private-agent totals sum session usage snapshots, attributed to a validated private-instance owner "
     "or the session's recorded requester. Retained-run totals, models, and days use recorded run requesters "
     "with the private owner as fallback for ordinary runs. Summary requester attribution remains explicit. "
     "A null user_id means attribution is unavailable. "
@@ -114,57 +114,14 @@ _VOICE_COVERAGE_NOTE = (
 
 
 @dataclass(frozen=True, slots=True)
-class TokenTotals:
-    """Token counters retained by Agno."""
-
-    input_tokens: int = 0
-    output_tokens: int = 0
-    total_tokens: int = 0
-    cache_read_tokens: int = 0
-    cache_write_tokens: int = 0
-    reasoning_tokens: int = 0
-    audio_input_tokens: int = 0
-    audio_output_tokens: int = 0
-    audio_total_tokens: int = 0
-
-    def to_dict(self) -> dict[str, int]:
-        """Return the public token counters."""
-        return {
-            "input_tokens": self.input_tokens,
-            "output_tokens": self.output_tokens,
-            "total_tokens": self.total_tokens,
-            "cache_read_tokens": self.cache_read_tokens,
-            "cache_write_tokens": self.cache_write_tokens,
-            "reasoning_tokens": self.reasoning_tokens,
-            "audio_input_tokens": self.audio_input_tokens,
-            "audio_output_tokens": self.audio_output_tokens,
-            "audio_total_tokens": self.audio_total_tokens,
-        }
-
-    def plus(self, other: TokenTotals) -> TokenTotals:
-        """Add another aggregate's counters."""
-        return TokenTotals(
-            input_tokens=self.input_tokens + other.input_tokens,
-            output_tokens=self.output_tokens + other.output_tokens,
-            total_tokens=self.total_tokens + other.total_tokens,
-            cache_read_tokens=self.cache_read_tokens + other.cache_read_tokens,
-            cache_write_tokens=self.cache_write_tokens + other.cache_write_tokens,
-            reasoning_tokens=self.reasoning_tokens + other.reasoning_tokens,
-            audio_input_tokens=self.audio_input_tokens + other.audio_input_tokens,
-            audio_output_tokens=self.audio_output_tokens + other.audio_output_tokens,
-            audio_total_tokens=self.audio_total_tokens + other.audio_total_tokens,
-        )
-
-
-@dataclass(frozen=True, slots=True)
 class UsageBreakdownRow:
     """One retained entity in an admin report."""
 
     key: str
-    totals: TokenTotals
+    totals: TokenCounts
     session_count: int
     cumulative_model_breakdown: tuple[UsageCumulativeModelBreakdownRow, ...]
-    retained_run_totals: TokenTotals
+    retained_run_totals: TokenCounts
     run_count: int
     user_breakdown: tuple[UsageUserBreakdownRow, ...]
 
@@ -192,11 +149,7 @@ class UsageCoverage:
 
     def to_dict(self) -> dict[str, object]:
         """Return coverage without implying billing completeness."""
-        return {
-            "scanned_sources": self.scanned_sources,
-            "unavailable_sources": self.unavailable_sources,
-            "note": self.note,
-        }
+        return asdict(self)
 
 
 @dataclass(frozen=True, slots=True)
@@ -205,7 +158,7 @@ class UsageModelBreakdownRow:
 
     model_provider: str
     model: str
-    totals: TokenTotals
+    totals: TokenCounts
     run_count: int
 
     def to_dict(self) -> dict[str, object]:
@@ -224,7 +177,7 @@ class UsageCumulativeModelBreakdownRow:
 
     model_provider: str
     model: str
-    totals: TokenTotals
+    totals: TokenCounts
     session_count: int
 
     def to_dict(self) -> dict[str, object]:
@@ -242,7 +195,7 @@ class UsageUserBreakdownRow:
     """Retained usage for one canonical requester and their models."""
 
     user_id: str | None
-    totals: TokenTotals
+    totals: TokenCounts
     run_count: int
     model_breakdown: tuple[UsageModelBreakdownRow, ...]
     daily_breakdown: tuple[UsageDailyBreakdownRow, ...] | None = None
@@ -265,7 +218,7 @@ class UsageDailyBreakdownRow:
     """Retained usage for one UTC calendar date."""
 
     date: str
-    totals: TokenTotals
+    totals: TokenCounts
     run_count: int
     model_breakdown: tuple[UsageModelBreakdownRow, ...]
 
@@ -285,10 +238,10 @@ class UsagePrivateAgentBreakdownRow:
 
     agent_name: str
     user_id: str | None
-    totals: TokenTotals
+    totals: TokenCounts
     session_count: int
     cumulative_model_breakdown: tuple[UsageCumulativeModelBreakdownRow, ...]
-    retained_run_totals: TokenTotals
+    retained_run_totals: TokenCounts
     run_count: int
     model_breakdown: tuple[UsageModelBreakdownRow, ...]
     daily_breakdown: tuple[UsageDailyBreakdownRow, ...] | None
@@ -321,7 +274,7 @@ class UsageRequestBreakdownRow:
     model: str
     kind: UsageKind
     created_at: int | float
-    totals: TokenTotals
+    totals: TokenCounts
 
     def to_dict(self) -> dict[str, object]:
         """Return the administrator-only request facts for external pricing."""
@@ -366,7 +319,7 @@ class UsageReport:
     """Content-free retained token usage, with optional request detail."""
 
     scope: _Scope
-    totals: TokenTotals
+    totals: TokenCounts
     session_count: int
     breakdown: tuple[UsageBreakdownRow, ...]
     coverage: UsageCoverage
@@ -420,17 +373,17 @@ class UsageReport:
 
 @dataclass(slots=True)
 class _Aggregate:
-    totals: TokenTotals = TokenTotals()
+    totals: TokenCounts = dataclass_field(default_factory=TokenCounts)
     count: int = 0
 
-    def add(self, totals: TokenTotals, *, count: int = 1) -> None:
-        self.totals = self.totals.plus(totals)
+    def add(self, totals: TokenCounts, *, count: int = 1) -> None:
+        self.totals += totals
         self.count += count
 
 
 @dataclass(slots=True)
 class _UsageAccumulator:
-    total: TokenTotals = TokenTotals()
+    total: TokenCounts = dataclass_field(default_factory=TokenCounts)
     sessions: set[tuple[str, str]] = dataclass_field(default_factory=set)
     buckets: dict[str, _Aggregate] = dataclass_field(default_factory=dict)
     cumulative_model_buckets: dict[tuple[str, str], _Aggregate] = dataclass_field(default_factory=dict)
@@ -450,12 +403,12 @@ class _UsageAccumulator:
         expected_requester: str | None,
     ) -> None:
         uses_runs = scope == "self" and not row.source.requester_isolated
-        if (uses_runs and (not row.runs_available or _has_unattributed_helper(row))) or (
-            not uses_runs and not row.session_metrics_available
-        ):
+        if uses_runs and (not row.runs_available or _has_unattributed_helper(row)):
             self.unavailable_sources.add(row.source.path_label)
-            if not uses_runs:
-                self.cumulative_model_unavailable_sources.add(row.source.path_label)
+        elif not uses_runs and (not row.totals_available or not row.runs_available or _has_uncountable_row(row)):
+            self.unavailable_sources.add(row.source.path_label)
+            self.cumulative_model_unavailable_sources.add(row.source.path_label)
+            if not row.totals_available:
                 return
         try:
             if scope == "self":
@@ -470,19 +423,19 @@ class _UsageAccumulator:
                 entity_id = _admin_entity_id(row)
                 row_totals = _session_totals(row) if entity_id is not None else None
         except ValueError:
+            # Only run rows of a shared agent's self report can be unreadable here; session totals skip what they
+            # cannot count.
             self.unavailable_sources.add(row.source.path_label)
-            if not uses_runs:
-                self.cumulative_model_unavailable_sources.add(row.source.path_label)
             return
         if row_totals is None:
             return
-        self.total = self.total.plus(row_totals)
+        self.total += row_totals
         is_system = row.source.scope == "system"
         if not is_system:
             self.sessions.add((row.source.path_label, row.row_key))
-        models: Mapping[tuple[str, str], TokenTotals] = {}
+        models: Mapping[tuple[str, str], TokenCounts] = {}
         if not uses_runs:
-            models = self._add_cumulative_models(row, row_totals)
+            models = self._add_cumulative_models(row)
         if entity_id is not None:
             self.buckets.setdefault(entity_id, _Aggregate()).add(row_totals, count=0 if is_system else 1)
             _add_model_totals(
@@ -491,16 +444,9 @@ class _UsageAccumulator:
                 count=0 if is_system else 1,
             )
 
-    def _add_cumulative_models(
-        self,
-        row: UsageSessionRow,
-        row_totals: TokenTotals,
-    ) -> Mapping[tuple[str, str], TokenTotals]:
-        models = _session_model_totals(row, row_totals)
-        if models is None:
-            models = {("unknown", "unknown"): row_totals}
-            self.cumulative_model_unavailable_sources.add(row.source.path_label)
-        elif any("unknown" in key for key in models):
+    def _add_cumulative_models(self, row: UsageSessionRow) -> Mapping[tuple[str, str], TokenCounts]:
+        models = _session_model_totals(row)
+        if any("unknown" in key for key in models):
             self.cumulative_model_unavailable_sources.add(row.source.path_label)
         _add_model_totals(self.cumulative_model_buckets, models, count=0 if row.source.scope == "system" else 1)
         return models
@@ -515,8 +461,8 @@ class _DailyUsageAccumulator:
     def add_run(
         self,
         run: UsageRunNode,
-        totals: TokenTotals,
-        models: Mapping[tuple[str, str], TokenTotals],
+        totals: TokenCounts,
+        models: Mapping[tuple[str, str], TokenCounts],
         *,
         source_path: str,
     ) -> None:
@@ -549,8 +495,8 @@ class _DailyUsageAccumulator:
     def _add(
         self,
         date: str,
-        totals: TokenTotals,
-        models: Mapping[tuple[str, str], TokenTotals],
+        totals: TokenCounts,
+        models: Mapping[tuple[str, str], TokenCounts],
         *,
         count: int,
         model_count: int,
@@ -587,10 +533,10 @@ class _RequestUsageAccumulator:
         if entity is None or session_key in self.seen_sessions:
             return
         self.seen_sessions.add(session_key)
-        retained = TokenTotals()
+        if any(run.kind == "pre_ledger" for run in row.runs):
+            # Usage stored before per-run snapshots has no request detail.
+            self.unavailable_sources.add(row.source.path_label)
         for run, totals, models in entries:
-            if run.kind == "run":
-                retained = retained.plus(totals)
             requests = _reconciled_request_totals(run, totals, models)
             if requests is None:
                 self.unavailable_sources.add(row.source.path_label)
@@ -607,13 +553,6 @@ class _RequestUsageAccumulator:
                     )
                     for created_at, (provider, model), request_totals in requests
                 )
-        try:
-            session_totals = _metrics_totals(row.session_metrics) or TokenTotals()
-        except ValueError:
-            self.unavailable_sources.add(row.source.path_label)
-            return
-        if row.source.scope != "system" and (not row.session_metrics_available or retained != session_totals):
-            self.unavailable_sources.add(row.source.path_label)
 
     def rows(self) -> tuple[UsageRequestBreakdownRow, ...]:
         """Return stable chronological request facts without exposing storage ordering."""
@@ -634,15 +573,15 @@ class _RequestUsageAccumulator:
 
 def _reconciled_request_totals(
     run: UsageRunNode,
-    totals: TokenTotals,
-    models: Mapping[tuple[str, str], TokenTotals],
-) -> list[tuple[int | float, tuple[str, str], TokenTotals]] | None:
+    totals: TokenCounts,
+    models: Mapping[tuple[str, str], TokenCounts],
+) -> list[tuple[int | float, tuple[str, str], TokenCounts]] | None:
     """Require complete request counters to match the run and each known model."""
     if not run.requests or not models or any("unknown" in key for key in models):
         return None
-    combined = TokenTotals()
-    by_model: dict[tuple[str, str], TokenTotals] = {}
-    requests: list[tuple[int | float, tuple[str, str], TokenTotals]] = []
+    combined = TokenCounts()
+    by_model: dict[tuple[str, str], TokenCounts] = {}
+    requests: list[tuple[int | float, tuple[str, str], TokenCounts]] = []
     try:
         for request in run.requests:
             if request.model_provider is None and request.model is None:
@@ -653,12 +592,12 @@ def _reconciled_request_totals(
                 return None
             if model_key is None:
                 return None
-            request_totals = _metrics_totals(request.metrics)
+            request_totals = stored_token_counts(request.metrics)
             if request_totals is None:
                 return None
             datetime.fromtimestamp(request.created_at, tz=UTC)
-            combined = combined.plus(request_totals)
-            by_model[model_key] = by_model.get(model_key, TokenTotals()).plus(request_totals)
+            combined += request_totals
+            by_model[model_key] = by_model.get(model_key, TokenCounts()) + request_totals
             requests.append((request.created_at, model_key, request_totals))
     except (OverflowError, OSError, ValueError):
         return None
@@ -684,41 +623,23 @@ class _ModelUsageAccumulator:
         expected_agent: str | None,
         expected_requester: str | None,
     ) -> list[_ModelUsageEntry]:
-        if not row.runs_available or (
-            scope == "self" and not row.source.requester_isolated and _has_unattributed_helper(row)
-        ):
-            self.unavailable_sources.add(row.source.path_label)
-        try:
-            entries = _model_entries_for_row(
-                row,
-                scope=scope,
-                expected_agent=expected_agent,
-                expected_requester=expected_requester,
-                unavailable_sources=self.unavailable_sources,
-            )
-        except ValueError:
-            self.unavailable_sources.add(row.source.path_label)
-            return []
-        accepted: list[_ModelUsageEntry] = []
-        for run, totals in entries:
-            if run.run_id is not None:
-                identity = (row.source.path_label, row.row_key, run.run_id)
-                if identity in self.seen_runs:
-                    continue
-                self.seen_runs.add(identity)
-            models = _run_model_totals(run, totals)
-            if models is None:
-                self.unavailable_sources.add(row.source.path_label)
-                models = {("unknown", "unknown"): totals}
+        entries = _admitted_runs(
+            row,
+            scope=scope,
+            expected_agent=expected_agent,
+            expected_requester=expected_requester,
+            seen_runs=self.seen_runs,
+            unavailable_sources=self.unavailable_sources,
+        )
+        for run, totals, models in entries:
             self.add_run(run, totals, models, scope=scope, source_path=row.source.path_label)
-            accepted.append((run, totals, models))
-        return accepted
+        return entries
 
     def add_run(
         self,
         run: UsageRunNode,
-        totals: TokenTotals,
-        models: Mapping[tuple[str, str], TokenTotals],
+        totals: TokenCounts,
+        models: Mapping[tuple[str, str], TokenCounts],
         *,
         scope: _Scope,
         source_path: str,
@@ -738,6 +659,46 @@ class _ModelUsageAccumulator:
                     models,
                     source_path=source_path,
                 )
+
+
+def _admitted_runs(
+    row: UsageSessionRow,
+    *,
+    scope: _Scope,
+    expected_agent: str | None,
+    expected_requester: str | None,
+    seen_runs: set[tuple[str, str, str]],
+    unavailable_sources: set[str],
+) -> list[_ModelUsageEntry]:
+    """Return the row's countable runs not seen before with their per-model totals, and record unusable sources."""
+    if not row.runs_available or (
+        scope == "self" and not row.source.requester_isolated and _has_unattributed_helper(row)
+    ):
+        unavailable_sources.add(row.source.path_label)
+    try:
+        entries = _model_entries_for_row(
+            row,
+            scope=scope,
+            expected_agent=expected_agent,
+            expected_requester=expected_requester,
+            unavailable_sources=unavailable_sources,
+        )
+    except ValueError:
+        unavailable_sources.add(row.source.path_label)
+        return []
+    accepted: list[_ModelUsageEntry] = []
+    for run, totals in entries:
+        if run.run_id is not None:
+            identity = (row.source.path_label, row.row_key, run.run_id)
+            if identity in seen_runs:
+                continue
+            seen_runs.add(identity)
+        models = _run_model_totals(run, totals)
+        if models is None:
+            unavailable_sources.add(row.source.path_label)
+            models = {("unknown", "unknown"): totals}
+        accepted.append((run, totals, models))
+    return accepted
 
 
 @dataclass(slots=True)
@@ -876,8 +837,12 @@ def collect_admin_usage(
     runtime_paths: RuntimePaths,
     include_daily: bool = False,
     include_requests: bool = False,
+    since: float | None = None,
 ) -> UsageReport:
-    """Collect retained session aggregates across configured agents and stored teams."""
+    """Collect retained session usage across configured agents and stored teams.
+
+    ``since`` limits the report to usage rows last updated at or after that epoch time.
+    """
     return _collect_usage(
         sources=discover_admin_usage_sources(config=config, runtime_paths=runtime_paths),
         config=config,
@@ -887,6 +852,56 @@ def collect_admin_usage(
         expected_requester=None,
         include_daily=include_daily,
         include_requests=include_requests,
+        since=since,
+    )
+
+
+def collect_requester_daily_usage(
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    since: float,
+) -> tuple[dict[str | None, tuple[UsageDailyBreakdownRow, ...]], UsageCoverage]:
+    """Collect each canonical requester's daily usage by model across admin sources, with the scan's daily coverage.
+
+    The rows and coverage equal the ``user_breakdown`` daily rows and the ``daily_coverage`` of
+    ``collect_admin_usage(include_daily=True, since=since)``, without computing the report's other views.
+    """
+    canonical_requester = _canonical_requester_resolver(config, runtime_paths)
+    scanned_sources: set[str] = set()
+    seen_runs: set[tuple[str, str, str]] = set()
+    unavailable_sources: set[str] = set()
+    requester_days: dict[str | None, _DailyUsageAccumulator] = {}
+    for discovered in discover_admin_usage_sources(config=config, runtime_paths=runtime_paths):
+        if isinstance(discovered, UsageStorageDiagnostic):
+            unavailable_sources.add(discovered.path_label)
+            continue
+        scanned_sources.add(discovered.path_label)
+        for item in iter_usage_storage_rows(discovered, since=since):
+            if isinstance(item, UsageStorageDiagnostic):
+                unavailable_sources.add(item.path_label)
+                continue
+            row = _canonical_row(item, canonical_requester)
+            for run, totals, models in _admitted_runs(
+                row,
+                scope="admin",
+                expected_agent=None,
+                expected_requester=None,
+                seen_runs=seen_runs,
+                unavailable_sources=unavailable_sources,
+            ):
+                requester_days.setdefault(run.requester_id, _DailyUsageAccumulator()).add_run(
+                    run,
+                    totals,
+                    models,
+                    source_path=row.source.path_label,
+                )
+    # The report's days and these requesters' days together take the same admitted runs, so they miss the same sources.
+    for days in requester_days.values():
+        unavailable_sources |= days.unavailable_sources
+    return (
+        {requester_id: days.rows() for requester_id, days in requester_days.items()},
+        UsageCoverage(len(scanned_sources), len(unavailable_sources), _DAILY_COVERAGE_NOTE),
     )
 
 
@@ -900,11 +915,9 @@ def _collect_usage(
     expected_requester: str | None,
     include_daily: bool,
     include_requests: bool = False,
+    since: float | None = None,
 ) -> UsageReport:
-    @cache
-    def canonical_requester(requester_id: str) -> str:
-        return resolve_human_requester_alias(requester_id, config, runtime_paths)
-
+    canonical_requester = _canonical_requester_resolver(config, runtime_paths)
     usage = _UsageAccumulator()
     daily_usage = _DailyUsageAccumulator() if include_daily else None
     request_usage = _RequestUsageAccumulator(enabled=include_requests and scope == "admin")
@@ -926,8 +939,7 @@ def _collect_usage(
         scanned_sources.add(source.path_label)
         if source.scope == "private_agent":
             private_usage.sources.add(source.path_label)
-        mode = "runs" if scope == "self" and not source.requester_isolated else "both"
-        for item in iter_usage_storage_rows(source, mode=mode):
+        for item in iter_usage_storage_rows(source, since=since):
             if isinstance(item, UsageStorageDiagnostic):
                 voice_unavailable.add(item.path_label)
                 usage.unavailable_sources.add(item.path_label)
@@ -935,21 +947,7 @@ def _collect_usage(
                 model_usage.unavailable_sources.add(item.path_label)
                 private_usage.mark_unavailable(source)
                 continue
-            owner = canonical_requester(item.source.owner_id) if item.source.owner_id is not None else None
-            row = replace(
-                item,
-                source=replace(item.source, owner_id=owner),
-                requester_id=canonical_requester(item.requester_id) if item.requester_id is not None else None,
-                runs=tuple(
-                    replace(
-                        run,
-                        requester_id=canonical_requester(run.requester_id)
-                        if run.requester_id
-                        else _run_requester(run, owner),
-                    )
-                    for run in item.runs
-                ),
-            )
+            row = _canonical_row(item, canonical_requester)
             usage.add_row(
                 row,
                 scope=scope,
@@ -1018,6 +1016,33 @@ def _collect_usage(
         )
         if request_usage.enabled
         else None,
+    )
+
+
+def _canonical_requester_resolver(config: Config, runtime_paths: RuntimePaths) -> Callable[[str], str]:
+    """Return a resolver of bridge aliases to canonical requesters that resolves each requester once per scan."""
+
+    @cache
+    def canonical_requester(requester_id: str) -> str:
+        return resolve_human_requester_alias(requester_id, config, runtime_paths)
+
+    return canonical_requester
+
+
+def _canonical_row(item: UsageSessionRow, canonical_requester: Callable[[str], str]) -> UsageSessionRow:
+    """Return the row with its owner and requesters as canonical users; an ordinary run without one takes the owner."""
+    owner = canonical_requester(item.source.owner_id) if item.source.owner_id is not None else None
+    return replace(
+        item,
+        source=replace(item.source, owner_id=owner),
+        requester_id=canonical_requester(item.requester_id) if item.requester_id is not None else None,
+        runs=tuple(
+            replace(
+                run,
+                requester_id=canonical_requester(run.requester_id) if run.requester_id else _run_requester(run, owner),
+            )
+            for run in item.runs
+        ),
     )
 
 
@@ -1107,20 +1132,10 @@ def _user_breakdown(usage: _ModelUsageAccumulator) -> tuple[UsageUserBreakdownRo
     return tuple(sorted(rows, key=lambda row: (-row.totals.total_tokens, row.user_id or "")))
 
 
-def _model_breakdown(
-    buckets: Mapping[tuple[str, str], _Aggregate],
-) -> tuple[UsageModelBreakdownRow, ...]:
+def _model_breakdown(buckets: Mapping[tuple[str, str], _Aggregate]) -> tuple[UsageModelBreakdownRow, ...]:
     return tuple(
-        UsageModelBreakdownRow(
-            model_provider=key[0],
-            model=key[1],
-            totals=aggregate.totals,
-            run_count=aggregate.count,
-        )
-        for key, aggregate in sorted(
-            buckets.items(),
-            key=lambda item: (-item[1].totals.total_tokens, item[0]),
-        )
+        UsageModelBreakdownRow(provider, model, aggregate.totals, aggregate.count)
+        for (provider, model), aggregate in _largest_first(buckets)
     )
 
 
@@ -1128,22 +1143,18 @@ def _cumulative_model_breakdown(
     buckets: Mapping[tuple[str, str], _Aggregate],
 ) -> tuple[UsageCumulativeModelBreakdownRow, ...]:
     return tuple(
-        UsageCumulativeModelBreakdownRow(
-            model_provider=key[0],
-            model=key[1],
-            totals=aggregate.totals,
-            session_count=aggregate.count,
-        )
-        for key, aggregate in sorted(
-            buckets.items(),
-            key=lambda item: (-item[1].totals.total_tokens, item[0]),
-        )
+        UsageCumulativeModelBreakdownRow(provider, model, aggregate.totals, aggregate.count)
+        for (provider, model), aggregate in _largest_first(buckets)
     )
+
+
+def _largest_first(buckets: Mapping[tuple[str, str], _Aggregate]) -> list[tuple[tuple[str, str], _Aggregate]]:
+    return sorted(buckets.items(), key=lambda item: (-item[1].totals.total_tokens, item[0]))
 
 
 def _add_model_totals(
     buckets: dict[tuple[str, str], _Aggregate],
-    models: Mapping[tuple[str, str], TokenTotals],
+    models: Mapping[tuple[str, str], TokenCounts],
     *,
     count: int = 1,
 ) -> None:
@@ -1151,71 +1162,44 @@ def _add_model_totals(
         buckets.setdefault(key, _Aggregate()).add(totals, count=count)
 
 
-def _run_model_totals(run: UsageRunNode, totals: TokenTotals) -> dict[tuple[str, str], TokenTotals] | None:
+def _run_model_totals(run: UsageRunNode, totals: TokenCounts) -> dict[tuple[str, str], TokenCounts] | None:
     """Use detailed attribution only when it accounts for the run's token counters."""
     if run.model_metrics is None:
         return None
     if not run.model_metrics:
         return {(run.model_provider or "unknown", run.model or "unknown"): totals}
-    return _detailed_model_totals(run.model_metrics, totals)
+    models: dict[tuple[str, str], TokenCounts] = {}
+    try:
+        for entry in run.model_metrics:
+            model_totals = stored_token_counts(entry.metrics)
+            # A run also records a model whose requests reported no usage, as an entry without counters.
+            if model_totals is None:
+                continue
+            key = (entry.model_provider or "unknown", entry.model or "unknown")
+            models[key] = models.get(key, TokenCounts()) + model_totals
+    except ValueError:
+        return None
+    return models if models and sum(models.values(), TokenCounts()) == totals else None
 
 
-def _session_totals(row: UsageSessionRow) -> TokenTotals | None:
-    """Independent helpers are not part of Agno's session counters; add them exactly once."""
-    totals = _metrics_totals(row.session_metrics)
+def _session_totals(row: UsageSessionRow) -> TokenCounts | None:
+    """Return the session's totals: the sum of its usage snapshots, its runs', helpers', and pre-ledger usage."""
+    totals = None
     for run in row.runs:
-        if run.kind != "run" and (helper_totals := _metrics_totals(run.metrics)) is not None:
-            totals = (totals or TokenTotals()).plus(helper_totals)
+        if (run_totals := _counters(run)) is not None:
+            totals = (totals or TokenCounts()) + run_totals
     return totals
 
 
-def _session_model_totals(
-    row: UsageSessionRow,
-    totals: TokenTotals,
-) -> dict[tuple[str, str], TokenTotals] | None:
-    """Reconcile session model detail, then add independently recorded helper usage."""
-    base_totals = _metrics_totals(row.session_metrics)
-    models = (
-        _detailed_model_totals(row.session_model_metrics, base_totals, require_usable_entries=True)
-        if row.session_model_metrics and base_totals is not None
-        else None
-    )
-    if models is None:
-        models = {("unknown", "unknown"): base_totals} if base_totals is not None else {}
+def _session_model_totals(row: UsageSessionRow) -> dict[tuple[str, str], TokenCounts]:
+    """Return the session's totals by model: each usage snapshot's models, or ``unknown`` when it has none usable."""
+    models: dict[tuple[str, str], TokenCounts] = {}
     for run in row.runs:
-        if run.kind == "run" or (helper_totals := _metrics_totals(run.metrics)) is None:
+        if (run_totals := _counters(run)) is None:
             continue
-        helper_models = _run_model_totals(run, helper_totals) or {("unknown", "unknown"): helper_totals}
-        for key, value in helper_models.items():
-            models[key] = models.get(key, TokenTotals()).plus(value)
-    combined = TokenTotals()
-    for value in models.values():
-        combined = combined.plus(value)
-    return models if models and combined == totals else None
-
-
-def _detailed_model_totals(
-    model_metrics: tuple[UsageModelMetrics, ...],
-    totals: TokenTotals,
-    *,
-    require_usable_entries: bool = False,
-) -> dict[tuple[str, str], TokenTotals] | None:
-    models: dict[tuple[str, str], TokenTotals] = {}
-    combined = TokenTotals()
-    try:
-        for entry in model_metrics:
-            model_totals = _metrics_totals(entry.metrics)
-            # Agno also records a model whose requests reported no usage, as an entry without counters.
-            if model_totals is None:
-                continue
-            if require_usable_entries and (entry.model_provider is None or entry.model is None):
-                return None
-            key = (entry.model_provider or "unknown", entry.model or "unknown")
-            models[key] = models.get(key, TokenTotals()).plus(model_totals)
-            combined = combined.plus(model_totals)
-    except ValueError:
-        return None
-    return models if models and combined == totals else None
+        for key, value in (_run_model_totals(run, run_totals) or {("unknown", "unknown"): run_totals}).items():
+            models[key] = models.get(key, TokenCounts()) + value
+    return models
 
 
 def _run_requester(run: UsageRunNode, owner: str | None) -> str | None:
@@ -1224,7 +1208,7 @@ def _run_requester(run: UsageRunNode, owner: str | None) -> str | None:
 
 
 def _has_unattributed_helper(row: UsageSessionRow) -> bool:
-    return any(run.kind != "run" and run.requester_id is None for run in row.runs)
+    return any(run.kind not in {"run", "pre_ledger"} and run.requester_id is None for run in row.runs)
 
 
 def _model_entries_for_row(
@@ -1234,21 +1218,22 @@ def _model_entries_for_row(
     expected_agent: str | None,
     expected_requester: str | None,
     unavailable_sources: set[str],
-) -> list[tuple[UsageRunNode, TokenTotals]]:
+) -> list[tuple[UsageRunNode, TokenCounts]]:
     if scope == "admin" and _admin_entity_id(row) is None:
         return []
     if scope == "self" and not _self_source_allowed(row.source, expected_agent):
         return []
 
-    entries: list[tuple[UsageRunNode, TokenTotals]] = []
-    for run in row.runs:
+    entries: list[tuple[UsageRunNode, TokenCounts]] = []
+    # A pre-ledger baseline counts only in a session's cumulative totals: it has no requester, date, or request.
+    for run in (run for run in row.runs if run.kind != "pre_ledger"):
         if scope == "self" and not row.source.requester_isolated:
             if run.requester_id is None and run.kind == "run":
                 raise ValueError
             if run.requester_id != expected_requester:
                 continue
         try:
-            totals = _metrics_totals(run.metrics)
+            totals = stored_token_counts(run.metrics)
         except ValueError:
             if scope == "self" and not row.source.requester_isolated:
                 raise
@@ -1265,19 +1250,19 @@ def _self_row_totals(
     expected_agent: str | None,
     expected_requester: str | None,
     seen_runs: set[tuple[str, str, str]],
-) -> TokenTotals | None:
+) -> TokenCounts | None:
     if not _self_source_allowed(row.source, expected_agent):
         return None
     if row.source.requester_isolated:
         return _session_totals(row)
-    total = TokenTotals()
+    total = TokenCounts()
     accepted = False
     for run in row.runs:
         if run.requester_id is None and run.kind == "run":
             raise ValueError
         if run.requester_id != expected_requester:
             continue
-        run_totals = _metrics_totals(run.metrics)
+        run_totals = stored_token_counts(run.metrics)
         if run_totals is None:
             continue
         if run.run_id is not None:
@@ -1285,7 +1270,7 @@ def _self_row_totals(
             if identity in seen_runs:
                 continue
             seen_runs.add(identity)
-        total = total.plus(run_totals)
+        total += run_totals
         accepted = True
     return total if accepted else None
 
@@ -1307,32 +1292,14 @@ def _admin_entity_id(row: UsageSessionRow) -> str | None:
     return row.entity_id if row.entity_kind == "team" else None
 
 
-def _metrics_totals(metrics: Mapping[str, object]) -> TokenTotals | None:
-    if not any(metrics.get(field) is not None for field in TOKEN_FIELDS):
-        return None
-    values: dict[str, int] = {}
-    for field in TOKEN_FIELDS:
-        value = _token_value(metrics.get(field))
-        if value is None:
-            raise ValueError
-        values[field] = value
-    return TokenTotals(**values)
+def _has_uncountable_row(row: UsageSessionRow) -> bool:
+    """Return whether a snapshot of the session holds counters that are not counts, which its totals leave out."""
+    return any(run.metrics and _counters(run) is None for run in row.runs)
 
 
-def _token_value(value: object) -> int | None:
-    if value is None:
-        return 0
-    if isinstance(value, bool):
+def _counters(run: UsageRunNode) -> TokenCounts | None:
+    """Return a snapshot's token counters, or None when it has none or they are not counts."""
+    try:
+        return stored_token_counts(run.metrics)
+    except ValueError:
         return None
-    if isinstance(value, int):
-        parsed = value
-    elif isinstance(value, float) and value.is_integer():
-        parsed = int(value)
-    elif isinstance(value, str) and len(value) <= 32:
-        try:
-            parsed = int(value)
-        except ValueError:
-            return None
-    else:
-        return None
-    return parsed if parsed >= 0 else None

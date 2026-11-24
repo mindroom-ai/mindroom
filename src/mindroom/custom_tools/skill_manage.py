@@ -8,9 +8,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from agno.tools import Toolkit
-
 from mindroom.skill_learning.tools import SkillAction, SkillChange, manage_skill_in_chat
+from mindroom.tool_system.authoring import Toolkit
 
 if TYPE_CHECKING:
     from pathlib import Path

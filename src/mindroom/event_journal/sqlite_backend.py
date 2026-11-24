@@ -16,20 +16,16 @@ from __future__ import annotations
 import asyncio
 import sqlite3
 import threading
-import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
 from mindroom.file_locks import release_file_lock, try_exclusive_file_lock
 from mindroom.logging_config import get_logger
+from mindroom.sqlite_utils import enter_wal
 
-from .legacy_response_attempts import upgrade_continuation_identity
-from .legacy_schema import (
-    upgrade_legacy_journal,
-    upgrade_outbox_reply_rows,
-)
 from .offloading import ThreadOffload, settled
-from .schema import OUTBOX_TABLE, SQLITE_DIALECT, render, schema_statements
+from .schema import SQLITE_DIALECT, SchemaDialect, render
+from .upgrades import upgrade_schema
 from .write_queue import CLOSED_MESSAGE, WriteOutcome, WriteQueue
 
 if TYPE_CHECKING:
@@ -37,16 +33,12 @@ if TYPE_CHECKING:
     from pathlib import Path
     from typing import TextIO
 
-    from .backend import Operation, Row
+    from .backend import Operation, PublishSignals, Row
 
 
 logger = get_logger(__name__)
 
 _BUSY_TIMEOUT_MILLISECONDS = 10_000
-# How long to wait between attempts at the one statement SQLite's own busy
-# handler will not retry. Short enough that a contended open is not noticeably
-# slower than an uncontended one, long enough not to spin.
-_WAL_RETRY_SECONDS = 0.05
 # The first SQLite release with a built-in ``octet_length``.
 _OCTET_LENGTH_VERSION = (3, 43, 0)
 
@@ -56,6 +48,7 @@ class _SqliteTransaction:
     """Statement execution against one open SQLite connection."""
 
     connection: sqlite3.Connection
+    signals: list[object] = field(default_factory=list)
 
     def execute(self, sql: str, params: Sequence[Any] = ()) -> None:
         """Run one statement."""
@@ -69,38 +62,29 @@ class _SqliteTransaction:
         """Run one query and return every row."""
         return tuple(self.connection.execute(render(sql, SQLITE_DIALECT), tuple(params)).fetchall())
 
+    def signal(self, value: object) -> None:
+        """Record what this operation's commit tells in-process listeners."""
+        self.signals.append(value)
 
-def _enter_wal(connection: sqlite3.Connection) -> None:
-    """Put one connection into WAL, waiting out a lock another process holds.
 
-    ``busy_timeout`` bounds every contention this file can meet except this
-    one. Entering WAL is a journal-mode change, and SQLite answers a mode
-    change it cannot lock with ``SQLITE_BUSY`` straight away rather than
-    calling the busy handler -- so the single statement here that can block on
-    another process was the single statement with no timeout at all, and it
-    failed on the spot instead of after ten seconds.
+@dataclass(frozen=True, slots=True)
+class _SqliteSchemaInspector:
+    """What the SQLite schema transaction currently holds."""
 
-    Only ever reachable across processes, and only while the database was
-    still being made: one already in WAL stays in it, and re-entering locks
-    nothing. So a second opener met this exactly once, on the first open of a
-    new journal -- an export pass starting while the bot was still creating the
-    database it meant to read.
+    connection: sqlite3.Connection
+    dialect: SchemaDialect = SQLITE_DIALECT
 
-    Bounded by the same ten seconds as everything else, because a wait that
-    cannot fail is not a bound. Past it the refusal is the caller's to see, and
-    so is any refusal that was never about a lock: retrying one of those would
-    turn an unopenable database into the same error ten seconds later.
-    """
-    deadline = time.monotonic() + _BUSY_TIMEOUT_MILLISECONDS / 1000
-    while True:
-        try:
-            connection.execute("PRAGMA journal_mode = WAL")
-        except sqlite3.OperationalError as error:
-            if error.sqlite_errorcode != sqlite3.SQLITE_BUSY or time.monotonic() >= deadline:
-                raise
-            time.sleep(_WAL_RETRY_SECONDS)
-        else:
-            return
+    def tables(self) -> frozenset[str]:
+        """Return the names of every table."""
+        return frozenset(
+            str(row[0]) for row in self.connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
+        )
+
+    def columns(self, table: str) -> frozenset[str]:
+        """Return the column names of one table, empty when it does not exist."""
+        return frozenset(
+            str(row[0]) for row in self.connection.execute("SELECT name FROM pragma_table_info(?)", (table,))
+        )
 
 
 def _octet_length(value: str | bytes | None) -> int | None:
@@ -126,7 +110,7 @@ def _configure(connection: sqlite3.Connection, *, synchronous: str) -> None:
         # This stand-in loads each value to measure it, as ``length`` would.
         connection.create_function("octet_length", 1, _octet_length, deterministic=True)
     connection.execute(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MILLISECONDS}")
-    _enter_wal(connection)
+    enter_wal(connection, timeout_seconds=_BUSY_TIMEOUT_MILLISECONDS / 1000)
     connection.execute(f"PRAGMA synchronous = {synchronous}")
     connection.execute("PRAGMA foreign_keys = ON")
 
@@ -154,8 +138,8 @@ class SqliteBackend:
     )
 
     @classmethod
-    def open(cls, database_path: Path) -> SqliteBackend:
-        """Create the schema and connect.
+    def open(cls, database_path: Path, *, publish: PublishSignals) -> SqliteBackend:
+        """Create the schema and connect; ``publish`` receives what each committed write signalled.
 
         Synchronous, because a bot builds its collaborators before it has an
         event loop. The writer task is created on the first write instead, so
@@ -169,10 +153,23 @@ class SqliteBackend:
             apply=backend._apply,
             offload=backend._offload,
             task_name=f"event_journal_sqlite_writer_{database_path.name}",
+            publish=publish,
         )
         return backend
 
     def _connect_writer(self) -> sqlite3.Connection:
+        upgrading = self._writer_connection()
+        try:
+            upgrading.execute("BEGIN IMMEDIATE")
+            upgrade_schema(_SqliteTransaction(upgrading), _SqliteSchemaInspector(upgrading))
+            upgrading.execute("COMMIT")
+        finally:
+            upgrading.close()
+        # An upgrade can leave planner state on its connection, such as the row counts a conversion's statistics
+        # recorded, so the runtime writes through a connection that loads the committed schema afresh.
+        return self._writer_connection()
+
+    def _writer_connection(self) -> sqlite3.Connection:
         # The writer runs on whichever owned-pool thread is free, so the
         # connection has to outlive its creating thread. Only ever one write is
         # in flight, because a single task drains the queue.
@@ -187,31 +184,6 @@ class SqliteBackend:
         # FULL makes the application commit durable before acknowledgement.
         # Readers commit nothing, so this is the writer's cost alone.
         _configure(connection, synchronous="FULL")
-        connection.execute("BEGIN IMMEDIATE")
-        try:
-            existing_tables = frozenset(
-                str(row[0]) for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
-            )
-            upgrade_legacy_journal(_SqliteTransaction(connection), existing_tables)
-            outbox_columns = frozenset(
-                str(row[1]) for row in connection.execute("PRAGMA table_info(matrix_delivery_outbox)")
-            )
-            upgrade_outbox_reply_rows(
-                _SqliteTransaction(connection),
-                outbox_columns,
-                outbox_table_ddl=OUTBOX_TABLE,
-                sqlite=True,
-            )
-            continuation_columns = frozenset(
-                str(row[1]) for row in connection.execute("PRAGMA table_info(approval_continuations)")
-            )
-            upgrade_continuation_identity(_SqliteTransaction(connection), existing_tables, continuation_columns)
-            for statement in schema_statements(SQLITE_DIALECT):
-                connection.execute(statement)
-            connection.execute("COMMIT")
-        except BaseException:
-            connection.close()
-            raise
         return connection
 
     def _reader(self) -> sqlite3.Connection:
@@ -246,8 +218,9 @@ class SqliteBackend:
 
     def _apply_one(self, operation: Operation[Any]) -> WriteOutcome:
         self._writer.execute("SAVEPOINT journal_write")
+        transaction = _SqliteTransaction(self._writer)
         try:
-            result = operation(_SqliteTransaction(self._writer))
+            result = operation(transaction)
         except Exception as error:
             if not self._writer.in_transaction:
                 # The error took the whole transaction, and the batch with it.
@@ -256,7 +229,7 @@ class SqliteBackend:
             self._writer.execute("RELEASE journal_write")
             return WriteOutcome(error=error)
         self._writer.execute("RELEASE journal_write")
-        return WriteOutcome(result=result)
+        return WriteOutcome(result=result, signals=tuple(transaction.signals))
 
     async def write[T](self, operation: Operation[T]) -> T:
         """Queue one operation for the writer task and await its commit."""
@@ -278,17 +251,18 @@ class SqliteBackend:
             raise RuntimeError(CLOSED_MESSAGE)
 
         def apply() -> T:
-            connection = self._reader()
-            connection.execute("BEGIN")
-            try:
-                return operation(_SqliteTransaction(connection))
-            finally:
-                connection.execute("ROLLBACK")
+            return self._apply_read(operation)
 
         return await self._recovery_offload.run(apply)
 
     def _apply_read[T](self, operation: Operation[T]) -> T:
-        return operation(_SqliteTransaction(self._reader()))
+        """Run one read in a transaction, so all its statements see the snapshot its first one took."""
+        connection = self._reader()
+        connection.execute("BEGIN")
+        try:
+            return operation(_SqliteTransaction(connection))
+        finally:
+            connection.execute("ROLLBACK")
 
     async def close(self) -> None:
         """Close admission once and await the one owned connection teardown.
@@ -319,8 +293,11 @@ class SqliteBackend:
             )
         return self._hold is not None
 
-    async def still_held(self) -> bool:
-        """Return whether this runtime holds the database; an open descriptor holds it until close."""
+    async def still_usable(self) -> bool:
+        """Return whether this runtime holds the database; an open descriptor holds it until close.
+
+        A local file's connections cannot be lost, so holding the database is all that keeps the journal usable.
+        """
         return self._hold is not None
 
     async def _finish_close(self) -> None:

@@ -5,18 +5,17 @@ This directory contains utility scripts for MindRoom self-hosting.
 ## Available Scripts
 
 ### 🧪 Testing
-- **`testing/benchmark_matrix_throughput.py`** - Benchmark Matrix message throughput performance
 - **`testing/benchmark_tool_call_overhead.py`** - Benchmark synthetic tool-call bridge overhead
 - **`testing/fuzz_live_matrix.py`** - Replay concurrent Matrix mutations through disposable Tuwunel and MindRoom stacks
 
 ### 🔧 Utilities
 - **`utilities/repair_nested_sidecars.py`** - Repair an explicitly selected legacy nested-attachment edit through Matrix
+- **`utilities/create_server_emoji_room.py`** - Create the room that shares custom emoji with everyone on a homeserver
+- **`utilities/import_slack_emoji.py`** - Import a Slack workspace's custom emoji into that room
 - **`utilities/cleanup_agent_edits.sh`** - Clean up agent-edited files in Matrix database
 - **`utilities/cleanup_agent_edits_docker.sh`** - Clean up agent edits in Docker environment
 - **`utilities/cleanup_agent_edits.py`** - Python version of cleanup script with more options
 - **`utilities/forward-ports.sh`** - Forward ports from remote servers for local testing
-- **`utilities/rewrite_git_commits_ai.py`** - Rewrite git commit messages with AI
-- **`utilities/rewrite_git_history_apply.py`** - Apply git history rewrites
 
 ## For SaaS Platform Scripts
 
@@ -56,11 +55,6 @@ POSTGRES_CONTAINER=mindroom-postgres ./scripts/utilities/cleanup_agent_edits_doc
 ```
 
 For another Docker deployment, set `POSTGRES_CONTAINER` to its PostgreSQL container name.
-
-### Benchmark Matrix performance
-```bash
-./scripts/testing/benchmark_matrix_throughput.py
-```
 
 ### Benchmark tool-call overhead
 ```bash
@@ -138,10 +132,11 @@ The run fails if the child ignores the signal until the harness has to kill it, 
 - `crash_mindroom` sends SIGKILL, so nothing drains and every committed, unsettled obligation is owed to durable recovery.
   There is no shutdown verdict to check here; each interrupted source must have exact response attribution or independently proven deliberate supersession.
 
-Supersession requires an exact positive replay-guard log, a matching admitted and settled principal-scoped journal source, and its named newer same-requester/thread source anchored in completed durable generation with a canonical visible response covering its current marker.
+Supersession requires an exact positive replay-guard log, a matching admitted and settled principal-scoped journal source, and its named newer same-requester/thread source anchored in completed durable generation with a canonical visible response whose model call saw one of that source's revisions; the source-revision audit checks which revision.
 An old visible reply must retain exact durable attribution and terminal restart-interruption metadata; superseded work is counted separately from completed generation and cannot waive delivery, edit, redaction, or source-revision debt.
 No router message ever resumes interrupted work: replay continues an interrupted reply in that same Matrix message, and an agent reply to any event other than a required source fails the reply invariant.
 `ledger_superseded_sources` and `superseded_interrupted_bodies` count superseded outcomes separately, while `completed_final_bodies` counts completed responses and the original generation remains unchanged.
+`dropped_interrupted_regenerations` counts replies left on a regeneration a restart cut short, whose edit MindRoom then declined because a later message followed.
 
 A run whose interruptions all found an idle journal fails instead of reporting the count as coverage.
 `restarts`, `crashes`, and `interruptions_with_work_outstanding` are all in the result JSON, and the third must equal the sum of the first two.
@@ -266,7 +261,7 @@ OPENAI_API_KEY_FILE=/path/to/openai_api_key uv run mindroom avatars generate
 uv run mindroom avatars sync
 ```
 
-Avatar prompts use `gpt-6-astra`, while `gpt-image-2.5-sunburst` renders the final 1024x1024 high-quality PNG files.
+Avatar prompts use `gpt-6.2-astra`, while `gpt-image-2.6-sunburst` renders the final 1024x1024 high-quality PNG files.
 The shared credential can instead be supplied directly through `OPENAI_API_KEY`.
 
 ## Requirements

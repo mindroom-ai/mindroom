@@ -4,25 +4,19 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.tool_system.agent_tools import resolve_agent_tools
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
+    from mindroom.tool_system.registry import ToolRegistry
 
 __all__ = ["describe_agent"]
 
 _MAX_INSTRUCTION_LENGTH = 100
 
 
-def describe_agent(agent_name: str, config: Config) -> str:
+def describe_agent(agent_name: str, config: Config, tools: ToolRegistry) -> str:
     """Generate a description of an agent or team based on its configuration."""
-    if agent_name == ROUTER_AGENT_NAME:
-        return (
-            "router\n"
-            "  - Route messages to the most appropriate agent based on context and expertise.\n"
-            "  - Analyzes incoming messages and determines which agent is best suited to respond."
-        )
-
     if agent_name in config.teams:
         team_config = config.teams[agent_name]
         parts = [f"{agent_name}"]
@@ -40,7 +34,7 @@ def describe_agent(agent_name: str, config: Config) -> str:
     if agent_config.role:
         parts.append(f"- {agent_config.role}")
 
-    effective_tools = config.resolve_entity(agent_name).available_tools
+    effective_tools = resolve_agent_tools(config, agent_name, tools).tool_names
     if effective_tools:
         parts.append(f"- Tools: {', '.join(effective_tools)}")
 

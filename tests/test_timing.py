@@ -367,6 +367,7 @@ def _timing_probe_labels(
     env["MINDROOM_TIMING"] = "1"
     script = textwrap.dedent(
         f"""
+        import asyncio
         import json
         from unittest.mock import Mock, patch
 
@@ -397,12 +398,12 @@ def _timing_probe_labels(
     return json.loads(result.stdout.strip().splitlines()[-1])
 
 
-def test_load_agent_model_instance_preserves_prompt_assembly_subspan() -> None:
-    """Agent model init should keep its dedicated system-prompt timing label."""
+def test_build_agent_model_provider_preserves_prompt_assembly_subspan() -> None:
+    """Agent model provider construction should keep its dedicated system-prompt timing label."""
     labels = _timing_probe_labels(
         module_name="mindroom.agents",
-        call_expression='target_module._load_agent_model_instance(object(), object(), "agent-model")',
-        patch_target="mindroom.agents.model_loading.get_model_instance",
+        call_expression='target_module._build_agent_model_provider(object(), object(), "agent-model", None)',
+        patch_target="mindroom.providers.registry.build_model_provider",
     )
     assert labels == ["system_prompt_assembly.agent_create.model_instance"]
 
@@ -410,11 +411,28 @@ def test_load_agent_model_instance_preserves_prompt_assembly_subspan() -> None:
 def test_load_compaction_model_preserves_history_prepare_subspan() -> None:
     """History compaction model init should keep its dedicated timing label."""
     labels = _timing_probe_labels(
-        module_name="mindroom.history.runtime",
+        module_name="mindroom.history.compaction",
         call_expression='target_module._load_compaction_model(object(), object(), "compaction-model")',
-        patch_target="mindroom.history.runtime.model_loading.get_model_instance",
+        patch_target="mindroom.providers.registry.build_model_provider",
     )
     assert labels == ["system_prompt_assembly.history_prepare.compaction_model_init"]
+
+
+def test_team_history_preparation_logs_the_history_prepare_label() -> None:
+    """A team turn's history preparation counts toward the same parent label as an agent turn's."""
+    labels = _timing_probe_labels(
+        module_name="mindroom.execution_preparation",
+        call_expression=(
+            "with patch('mindroom.execution_preparation.resolve_entity_preparation_inputs'): "
+            "asyncio.run(target_module.prepare_bound_team_run_context(Mock(), scope_context=Mock(), "
+            "leader_system_messages=(), leader_tools=(), model=Mock(), prompt='', thread_history=None, "
+            "runtime_paths=Mock(), config=Mock(), timezone='UTC', "
+            "history_settings=Mock(compaction_config=Mock(replay_window_tokens=None)), "
+            "active_model_name='team-model', active_context_window=None))"
+        ),
+        patch_target="mindroom.execution_preparation._prepare_execution_context_common",
+    )
+    assert labels == ["system_prompt_assembly.history_prepare"]
 
 
 def test_dispatch_pipeline_summary_emits_additive_segments_and_diagnostics() -> None:

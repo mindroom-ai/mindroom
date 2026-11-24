@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     config_fields=[
         ConfigField(
             name="api_key",
+            env=("CALCOM_API_KEY",),
             label="API Key",
             type="password",
             required=False,
@@ -31,6 +32,7 @@ if TYPE_CHECKING:
         ),
         ConfigField(
             name="event_type_id",
+            env=("CALCOM_EVENT_TYPE_ID",),
             label="Event Type ID",
             type="number",
             required=False,
@@ -94,7 +96,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["requests", "pytz"],
-    docs_url="https://docs.agno.com/tools/toolkits/others/calcom",
+    docs_url="https://docs.mindroom.chat/tools/calendar-and-scheduling/#cal_com",
     function_names=(
         "cancel_booking",
         "create_booking",

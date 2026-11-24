@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import re
 from string import Formatter
+from typing import TYPE_CHECKING
 
 from mindroom.prompts import PROMPT_TEMPLATE_FIELDS
 
+if TYPE_CHECKING:
+    from collections.abc import Mapping
+
 __all__ = [
     "PromptTemplateError",
-    "build_agent_identity_context",
+    "openai_compat_identity",
     "render_prompt_template",
     "validate_prompt_template_fields",
 ]
@@ -90,25 +94,23 @@ def render_prompt_template(template: str, **kwargs: object) -> str:
     return "".join(rendered_parts)
 
 
-def build_agent_identity_context(
+def openai_compat_identity(
+    prompts: Mapping[str, str],
     *,
-    display_name: str,
-    matrix_id: str,
-    model_provider: str,
-    model_id: str,
-    identity_context_template: str,
-    openai_compat_history_guidance: str,
-    include_openai_compat_guidance: bool = False,
+    openai_identity: str,
+    matrix_identity: str,
+    openai_prompt_name: str,
+    matrix_prompt_name: str,
 ) -> str:
-    """Render the shared identity prompt with optional OpenAI-compatible guidance."""
-    return render_prompt_template(
-        identity_context_template,
-        display_name=display_name,
-        matrix_id=matrix_id,
-        model_provider=model_provider,
-        model_id=model_id,
-        openai_compat_history_guidance=(openai_compat_history_guidance if include_openai_compat_guidance else ""),
-    )
+    """Return an agent's or team leader's identity outside Matrix, from its two rendered identities.
+
+    It is ``openai_identity``, opened by ``matrix_identity`` and one blank line when the operator overrides the Matrix
+    template ``matrix_prompt_name`` in ``prompts`` but not the non-Matrix template ``openai_prompt_name``, so their
+    authored identity still applies outside Matrix, whatever whitespace it ends with.
+    """
+    if matrix_prompt_name in prompts and openai_prompt_name not in prompts:
+        return f"{matrix_identity.rstrip()}\n\n{openai_identity}"
+    return openai_identity
 
 
 def validate_prompt_template_fields(prompt_name: str, prompt_text: str) -> None:

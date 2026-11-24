@@ -2,20 +2,25 @@
 
 from __future__ import annotations
 
-from typing import Literal
-
-from agno.tools import Toolkit
+from dataclasses import replace
+from typing import TYPE_CHECKING, Literal
 
 from mindroom.authorization import addressable_responder_names
-from mindroom.custom_tools.tool_payloads import custom_tool_payload
+from mindroom.config.models import unsupported_level_message
+from mindroom.custom_tools.tool_payloads import custom_tool_payload, tool_context_or_error
 from mindroom.thread_models import (
+    THREAD_MODEL_STORAGE_ERROR,
     clear_thread_model_override,
     resolve_thread_model_override,
     set_thread_model_override,
 )
-from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
+from mindroom.tool_system.authoring import Toolkit
+from mindroom.tool_system.tool_function import ToolOutcome
+from mindroom.turn_model import ModelScope, TurnBudget, resolve_turn_model
 
-_MODEL_SWITCH_WHENS = ("after-toolcall", "next-turn")
+if TYPE_CHECKING:
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
+    from mindroom.tool_system.tool_function import ToolFunction
 
 
 class ThreadModelTools(Toolkit):
@@ -26,9 +31,12 @@ class ThreadModelTools(Toolkit):
             name="thread_model",
             tools=[self.list_models, self.get_thread_model, self.switch_thread_model, self.reset_thread_model],
         )
-        # Toolkit's stop-after list also exposes the raw result as assistant text.
-        # The continuation owns final delivery, so only enable the control boundary.
-        self.async_functions["switch_thread_model"].stop_after_tool_call = True
+
+    def offered_function(self, function: ToolFunction) -> ToolFunction:
+        """Mark the model switch as able to stop the run, which a switch for the current response does."""
+        if function.name == "switch_thread_model":
+            return replace(function, may_stop_run=True)
+        return function
 
     @staticmethod
     def _payload(status: str, **kwargs: object) -> str:
@@ -36,9 +44,8 @@ class ThreadModelTools(Toolkit):
 
     @classmethod
     def _thread_context(cls) -> tuple[ToolRuntimeContext, str] | str:
-        context = get_tool_runtime_context()
-        if context is None:
-            return cls._payload("error", message="Thread model tool context is unavailable in this runtime path.")
+        if isinstance(context := tool_context_or_error(cls._payload, "Thread model"), str):
+            return context
         if context.resolved_thread_id is None:
             return cls._payload("error", message="Thread model switching requires an active thread context.")
         return context, context.resolved_thread_id
@@ -55,9 +62,8 @@ class ThreadModelTools(Toolkit):
 
     async def list_models(self) -> str:
         """List the configured model aliases available for selection."""
-        context = get_tool_runtime_context()
-        if context is None:
-            return self._payload("error", message="Thread model tool context is unavailable in this runtime path.")
+        if isinstance(context := tool_context_or_error(self._payload, "Thread model"), str):
+            return context
         return self._payload(
             "ok",
             action="list",
@@ -66,6 +72,7 @@ class ThreadModelTools(Toolkit):
                     "name": name,
                     "provider": model.provider,
                     "model_id": model.id,
+                    **({"reasoning": model.reasoning.model_dump()} if model.reasoning else {}),
                 }
                 for name, model in sorted(context.config.models.items())
             ],
@@ -98,7 +105,7 @@ class ThreadModelTools(Toolkit):
         self,
         model_name: str,
         when: Literal["after-toolcall", "next-turn"] = "next-turn",
-    ) -> str:
+    ) -> str | ToolOutcome:
         """Switch the model that the agents and teams the requester may address use in the current thread.
 
         The override persists for this thread until reset. It can take effect
@@ -106,7 +113,8 @@ class ThreadModelTools(Toolkit):
 
         Args:
             model_name: Configured model name from the `models:` section of
-                config.yaml (for example "default" or "opus").
+                config.yaml (for example "default" or "opus"), or `name@level`
+                for one of the reasoning levels `list_models` shows (for example "sol@high").
             when: Whether the current response continues with the new model or
                 the change starts on the next turn.
 
@@ -115,30 +123,78 @@ class ThreadModelTools(Toolkit):
         if isinstance(resolved, str):
             return resolved
         context, thread_id = resolved
-        if when not in _MODEL_SWITCH_WHENS:
+        # The turn runs on its own config while live reloads move on: a model removed since must not be saved for
+        # later turns, and this turn cannot continue on one added since.
+        current = context.current_config
+        switchable = context.config.models.keys() & current.models.keys()
+        if model_name not in context.config.models or model_name not in current.models:
+            reason = unsupported_level_message(current.models, model_name)
             return self._payload(
                 "error",
                 action="switch",
-                message=f"Unknown switch timing '{when}'.",
-                available_when=list(_MODEL_SWITCH_WHENS),
+                message=f"{reason}." if reason else f"Unknown model '{model_name}'.",
+                available_models=sorted(switchable),
             )
-        if model_name not in context.config.models:
-            return self._payload(
-                "error",
-                action="switch",
-                message=f"Unknown model '{model_name}'.",
-                available_models=sorted(context.config.models),
+        entity_names = self._addressable_entities(context)
+        try:
+            set_thread_model_override(
+                context.runtime_paths,
+                thread_id=thread_id,
+                model_name=model_name,
+                entity_names=entity_names,
+                config=context.config,
             )
-        set_thread_model_override(
+        except OSError:
+            return self._payload("error", action="switch", message=THREAD_MODEL_STORAGE_ERROR)
+        # A switch reads the config it takes effect in: the turn's own for the current response, the current one for
+        # later turns.
+        config = context.config if when == "after-toolcall" else current
+        budgeted_model_name = resolve_turn_model(
+            config,
             context.runtime_paths,
-            thread_id=thread_id,
-            model_name=model_name,
-            room_id=context.room_id,
-            set_by=context.requester_id,
-            entity_names=self._addressable_entities(context),
-            config=context.config,
-        )
-        model = context.config.models[model_name]
+            ModelScope(entity=context.agent_name, explicit=model_name),
+            # Only a switch for the current response chooses a reply model now.
+            TurnBudget(
+                monitor=context.budget_monitor,
+                requester_id=context.requester_id,
+                log_fallback=when == "after-toolcall",
+            ),
+        ).model_name
+        if when == "after-toolcall":
+            fields: dict[str, object] = {
+                "note": "The current response will continue with the new model after this tool call.",
+            }
+            if budgeted_model_name != model_name:
+                fields = {
+                    "requested_model": model_name,
+                    "note": (
+                        f"The requester's monthly budget is used up, so the current response continues with "
+                        f"`{budgeted_model_name}`; `{model_name}` stays selected for this thread."
+                    ),
+                }
+            model = context.config.models[budgeted_model_name]
+            # Only this switch stops the run: the turn continues the response on the model it names.
+            return ToolOutcome(
+                content=self._payload(
+                    "ok",
+                    action="switch",
+                    thread_id=thread_id,
+                    model=budgeted_model_name,
+                    provider=model.provider,
+                    model_id=model.id,
+                    when=when,
+                    **fields,
+                ),
+                stop_after_call=True,
+            )
+        if budgeted_model_name != model_name:
+            note = (
+                "The new model applies from the next message in this thread, but the requester's monthly budget "
+                f"is used up, so replies use `{budgeted_model_name}` until it resets."
+            )
+        else:
+            note = "The new model applies from the next message in this thread."
+        model = config.models[model_name]
         return self._payload(
             "ok",
             action="switch",
@@ -147,11 +203,7 @@ class ThreadModelTools(Toolkit):
             provider=model.provider,
             model_id=model.id,
             when=when,
-            note=(
-                "The current response will continue with the new model after this tool call."
-                if when == "after-toolcall"
-                else "The new model applies from the next message in this thread."
-            ),
+            note=note,
         )
 
     async def reset_thread_model(self) -> str:
@@ -160,12 +212,16 @@ class ThreadModelTools(Toolkit):
         if isinstance(resolved, str):
             return resolved
         context, thread_id = resolved
-        cleared = clear_thread_model_override(
-            context.runtime_paths,
-            thread_id,
-            entity_names=self._addressable_entities(context),
-            config=context.config,
-        )
+        entity_names = self._addressable_entities(context)
+        try:
+            cleared = clear_thread_model_override(
+                context.runtime_paths,
+                thread_id,
+                entity_names=entity_names,
+                config=context.config,
+            )
+        except OSError:
+            return self._payload("error", action="reset", message=THREAD_MODEL_STORAGE_ERROR)
         return self._payload(
             "ok",
             action="reset",

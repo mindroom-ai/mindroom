@@ -52,7 +52,7 @@ class MindRoomGroqTools(GroqTools):
         )
 
     # AGNO_COMPAT: GroqTools opens any existing model-chosen path by name before treating the source as a URL.
-    # Reason: Agno 3.0.9 reads the whole file whenever Path(audio_source).exists() in whichever process
+    # Reason: Agno 3.2.1 reads the whole file whenever Path(audio_source).exists() in whichever process
     # runs the toolkit, so a prompt could upload any file that process can read, or read a device
     # without end, whatever the agent's file_access.
     # Upstream issue: Tracking gap; upstream tracking has not been verified.

@@ -16,6 +16,8 @@ if TYPE_CHECKING:
 
 type _Params = Sequence[Any]
 type Row = Mapping[str, Any]
+# Receives, on the writer's loop, the signals of every operation in one committed batch, in batch order.
+type PublishSignals = Callable[[Sequence[object]], None]
 
 
 class Transaction(Protocol):
@@ -33,6 +35,13 @@ class Transaction(Protocol):
         """Run one query and return every row."""
         ...
 
+    def signal(self, value: object) -> None:
+        """Record what this operation's commit tells in-process listeners; an operation that rolls back tells nothing.
+
+        Only a write publishes what it records, once its batch commits; a read or the schema transaction drops it.
+        """
+        ...
+
 
 type Operation[T] = Callable[[Transaction], T]
 
@@ -45,7 +54,7 @@ class Backend(Protocol):
         ...
 
     async def read[T](self, operation: Operation[T]) -> T:
-        """Run one operation in a read transaction."""
+        """Run one operation in a read transaction, against one snapshot of committed state."""
         ...
 
     async def recovery_read[T](self, operation: Operation[T]) -> T:
@@ -56,8 +65,8 @@ class Backend(Protocol):
         """Claim the journal named ``identity`` for this runtime until close; ``False`` when another runtime holds it."""
         ...
 
-    async def still_held(self) -> bool:
-        """Return whether the claim ``hold_exclusively`` took still holds."""
+    async def still_usable(self) -> bool:
+        """Return whether the claim ``hold_exclusively`` took still holds and the journal can still be used."""
         ...
 
     async def close(self) -> None:

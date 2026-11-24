@@ -80,7 +80,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["baidusearch", "pycountry"],
-    docs_url="https://docs.agno.com/tools/toolkits/search/baidusearch",
+    docs_url="https://docs.mindroom.chat/tools/web-search/#baidusearch",
     function_names=("baidu_search",),
 )
 def baidusearch_tools() -> type[BaiduSearchTools]:

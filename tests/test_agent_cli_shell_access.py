@@ -26,9 +26,10 @@ from mindroom.config.agent import AgentConfig
 from mindroom.constants import resolve_primary_runtime_paths
 from mindroom.runtime_state import clear_api_server_address, set_api_server_address
 from mindroom.tool_system.metadata import get_tool_by_name
-from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context, tool_runtime_context
+from mindroom.tool_system.registry import builtin_tool_registry
+from mindroom.tool_system.runtime_context import tool_runtime_context
 from tests.identity_helpers import persist_entity_accounts
-from tests.minimal_agent_fixtures import ScriptedProvider
+from tests.minimal_agent_fixtures import ScriptedProvider, offered_tools
 from tests.test_agent_cli_authority import _runtime_context, _turn_context
 
 if TYPE_CHECKING:
@@ -88,7 +89,6 @@ async def test_local_minimal_bash_runs_the_real_cli_against_the_running_api(
             "calculator",
         ],
         memory_backend="file",
-        learning=False,
     )
     runtime = replace(
         runtime,
@@ -106,17 +106,21 @@ async def test_local_minimal_bash_runs_the_real_cli_against_the_running_api(
 
     with tool_runtime_context(runtime):
         result = await ai.ai_response(
-            replace(_turn_context(), agent_mode="minimal", run_id=None),
-            prompt="List your tools",
-            runtime_paths=runtime.runtime_paths,
-            config=runtime.config,
-            execution_identity=build_execution_identity_from_runtime_context(runtime),
-            supports_native_tool_approval=True,
+            replace(
+                _turn_context(),
+                agent_mode="minimal",
+                run_id=None,
+                prompt="List your tools",
+                execution_identity=runtime.execution_identity,
+                supports_native_tool_approval=True,
+            ),
+            runtime.runtime_paths,
+            runtime.config,
         )
 
-    assert "done" in result
-    assert [tool["function"]["name"] for tool in provider.requests[0]["tools"]] == ["bash"]
-    output = next(str(message["content"]) for message in provider.requests[1]["messages"] if message["role"] == "tool")
+    assert "done" in result.text
+    assert offered_tools(provider.requests[0]) == ["bash"]
+    output = next(message.get_content_string() for message in provider.requests[1].messages if message.role == "tool")
     assert '"toolkit":"calculator"' in output.replace(" ", ""), output
     # The agent's own shell settings still apply, like in its ordinary local shell.
     assert "pass=visible" in output, output
@@ -228,6 +232,23 @@ def test_worker_shells_use_only_this_primarys_isolated_gateway_listener(
     assert [problem.split("`")[1] for problem in problems] == ["MINDROOM_AGENT_CLI_PRIMARY_URL"]
 
 
+@pytest.mark.usefixtures("api_address", "real_shell_refusal")
+@pytest.mark.parametrize("allowed", [False, True])
+def test_minimal_bash_without_a_worker_needs_the_shell_allowed_there(tmp_path: Path, *, allowed: bool) -> None:
+    """A shell in MindRoom's own process refuses its commands unless `defaults.allow_shell_without_worker` is on."""
+    runtime = _runtime_context(tmp_path)
+    runtime.config.defaults.allow_shell_without_worker = allowed
+
+    assert minimal_shell_problems(runtime.config, runtime.runtime_paths, "helper") == (
+        []
+        if allowed
+        else [
+            "Route `shell` to a worker or set `defaults.allow_shell_without_worker: true`, "
+            "because the shell refuses commands in MindRoom's own process.",
+        ]
+    )
+
+
 @pytest.mark.parametrize("worker", [False, True], ids=["local", "worker"])
 def test_minimal_bash_needs_the_running_api(tmp_path: Path, *, worker: bool) -> None:
     """Only this process's API serves the grants, wherever the shell runs, even with an explicit URL."""
@@ -268,9 +289,14 @@ async def test_local_launcher_directory_with_a_comma_stays_on_path(tmp_path: Pat
     """A comma in the storage path does not split the launcher directory into separate PATH entries."""
     runtime = _runtime_context(tmp_path / "Smith, John")
     shell_env = agent_cli_shell_env(runtime.config, runtime.runtime_paths, "helper", "grant")
-    shell = get_tool_by_name("shell", runtime.runtime_paths, disable_sandbox_proxy=True, worker_target=None)
-    run = shell.async_functions["run_shell_command"].entrypoint
-    assert run is not None
+    shell = get_tool_by_name(
+        "shell",
+        runtime.runtime_paths,
+        runs_in_worker=False,
+        worker_target=None,
+        tools=builtin_tool_registry(),
+    )
+    run = shell.functions["run_shell_command"]
 
     with bound_agent_cli_shell_env(shell_env, window="bash"):
         output = await run("command -v mindroom-agent")

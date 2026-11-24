@@ -1,21 +1,17 @@
 """Tests for the Google Drive OAuth-backed tool."""
 
-# ruff: noqa: D102, D103, TC003
+# ruff: noqa: D103, TC003
 
 from __future__ import annotations
 
+import hashlib
 import json
-from collections.abc import AsyncIterator, Iterator, Mapping
+from collections.abc import Mapping
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
 import pytest
-from agno.agent import Agent
-from agno.agent._tools import parse_tools
-from agno.models.base import Model
-from agno.models.response import ModelResponse
-from agno.tools.function import Function
 from google.oauth2.credentials import Credentials as GoogleOAuthCredentials
 
 import mindroom.custom_tools.google_drive as google_drive_module
@@ -25,13 +21,21 @@ from mindroom.approval.tool_approval import tool_may_require_approval
 from mindroom.config.main import Config
 from mindroom.credentials.manager import CredentialsManager, get_runtime_credentials_manager
 from mindroom.custom_tools.google_drive import GoogleDriveTools
-from mindroom.oauth.google_drive import _GOOGLE_DRIVE_OAUTH_SCOPES, GOOGLE_DRIVE_READ_OAUTH_SCOPES
+from mindroom.oauth.google import GOOGLE_DRIVE_READ_OAUTH_SCOPES, google_oauth_provider
+from mindroom.tool_system.agno_toolkits import (
+    adapt_toolkit,
+    configure_toolkit_functions,
+    rename_toolkit_functions,
+    toolkit_function_names,
+)
 from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tool_system.worker_routing import ToolExecutionIdentity, resolve_worker_target
+from tests.agent_tool_helpers import toolkit_offers
 from tests.oauth_test_utils import publish_oauth_credentials
 
 if TYPE_CHECKING:
-    from typing import BinaryIO
+    from typing import BinaryIO, Literal
 
     from mindroom.config.models import FileAccess
 
@@ -48,34 +52,9 @@ def _save_oauth_credentials(
     )
 
 
-class MinimalModel(Model):
-    """Minimal model surface for Agno tool parsing tests."""
-
-    def invoke(self, *_args: object, **_kwargs: object) -> ModelResponse:
-        return ModelResponse(content="ok")
-
-    async def ainvoke(self, *_args: object, **_kwargs: object) -> ModelResponse:
-        return ModelResponse(content="ok")
-
-    def invoke_stream(self, *_args: object, **_kwargs: object) -> Iterator[ModelResponse]:
-        yield ModelResponse(content="ok")
-
-    async def ainvoke_stream(self, *_args: object, **_kwargs: object) -> AsyncIterator[ModelResponse]:
-        yield ModelResponse(content="ok")
-
-    def _parse_provider_response(self, response: ModelResponse, *_args: object, **_kwargs: object) -> ModelResponse:
-        return response
-
-    def _parse_provider_response_delta(
-        self,
-        response: ModelResponse,
-        *_args: object,
-        **_kwargs: object,
-    ) -> ModelResponse:
-        return response
-
-
 _DOCX_MIME_TYPE = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+_M4A_HEADER = b"\x00\x00\x00\x20ftypM4A \x00\x00\x02\x00M4A isommp42\x00\x00\x00\x08free"
+_MIB = 1024 * 1024
 
 
 class _FakeDriveRequest:
@@ -157,7 +136,8 @@ def _valid_credentials() -> GoogleOAuthCredentials:
 
 
 class _FakeMediaIoBaseDownload:
-    def __init__(self, file_handle: object, request: _FakeDriveRequest) -> None:
+    def __init__(self, file_handle: object, request: _FakeDriveRequest, chunksize: int) -> None:
+        assert chunksize <= 8 * 1024 * 1024
         self._file_handle = file_handle
         self._media_content = request.media_content
         self._done = False
@@ -196,6 +176,10 @@ def _google_drive_download_tool(
     service = _FakeDriveService()
     tool.service = service
     return tool, service
+
+
+def _saved_path(root: Path, name: str, file_id: str = "shared-drive-file-id") -> Path:
+    return root / "google-drive-downloads" / file_id / name
 
 
 def _google_drive_write_tool(
@@ -289,17 +273,14 @@ def test_google_drive_model_functions_do_not_collide_with_local_file_tools(tmp_p
             runtime_paths,
             credentials_manager=credentials_manager,
             worker_target=None,
-            disable_sandbox_proxy=True,
+            runs_in_worker=False,
+            tools=builtin_tool_registry(),
         )
-        for tool_name in ("file", "coding", "google_drive")
+        for tool_name in ("filesystem", "google_drive")
     ]
-    model = MinimalModel(id="fake-model", provider="fake")
-    agent = Agent(id="code", model=model)
+    function_names = {function.name for toolkit in toolkits for function in adapt_toolkit(toolkit).functions}
 
-    parsed_tools = parse_tools(agent, toolkits, model, async_mode=True)
-    function_names = {function.name for function in parsed_tools if isinstance(function, Function)}
-
-    assert {"read_file", "list_files", "search_files"} <= function_names
+    assert {"read_file", "ls", "find_files"} <= function_names
     assert {
         "google_drive_list_files",
         "google_drive_search_files",
@@ -319,18 +300,20 @@ def test_google_drive_write_config_defaults_enabled_and_can_disable(tmp_path: Pa
         "google_drive",
         runtime_paths,
         credentials_manager=credentials_manager,
-        disable_sandbox_proxy=True,
+        runs_in_worker=False,
         tool_output_workspace_root=tmp_path,
         worker_target=None,
+        tools=builtin_tool_registry(),
     )
     disabled_tool = get_tool_by_name(
         "google_drive",
         runtime_paths,
         credentials_manager=credentials_manager,
         tool_config_overrides={"write": False},
-        disable_sandbox_proxy=True,
+        runs_in_worker=False,
         tool_output_workspace_root=tmp_path,
         worker_target=None,
+        tools=builtin_tool_registry(),
     )
     write_functions = {
         "google_drive_upload_file",
@@ -365,37 +348,55 @@ def test_google_drive_write_functions_can_require_approval() -> None:
     assert all(tool_may_require_approval(config, name) for name in write_functions)
 
 
-def test_google_drive_download_uses_namespaced_model_function(tmp_path: Path) -> None:
+def test_google_drive_download_is_offered_by_default_under_its_namespaced_name(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths_with_google_drive_client(tmp_path)
     tool = get_tool_by_name(
         "google_drive",
         runtime_paths,
         credentials_manager=CredentialsManager(tmp_path / "credentials"),
-        tool_config_overrides={"download_file": True},
-        disable_sandbox_proxy=True,
+        runs_in_worker=False,
         tool_output_workspace_root=tmp_path,
         worker_target=None,
+        tools=builtin_tool_registry(),
     )
 
     assert "google_drive_download_file" in tool.functions
     assert "download_file" not in tool.functions
-    assert tool.download_dir == tmp_path / "google-drive-downloads"
 
 
-def test_google_drive_download_disabled_without_workspace(tmp_path: Path) -> None:
+@pytest.mark.parametrize("overrides", [pytest.param({}, id="default"), pytest.param({"download_file": True}, id="on")])
+def test_google_drive_download_disabled_without_workspace(tmp_path: Path, overrides: dict[str, object]) -> None:
     runtime_paths = _runtime_paths_with_google_drive_client(tmp_path)
     tool = get_tool_by_name(
         "google_drive",
         runtime_paths,
         credentials_manager=CredentialsManager(tmp_path / "credentials"),
-        tool_config_overrides={"download_file": True},
-        disable_sandbox_proxy=True,
+        tool_config_overrides=overrides,
+        runs_in_worker=False,
         tool_output_workspace_root=None,
         worker_target=None,
+        tools=builtin_tool_registry(),
     )
 
     assert "google_drive_download_file" not in tool.functions
     assert "google_drive_list_files" in tool.functions
+
+
+def test_google_drive_download_can_be_disabled(tmp_path: Path) -> None:
+    runtime_paths = _runtime_paths_with_google_drive_client(tmp_path)
+    tool = get_tool_by_name(
+        "google_drive",
+        runtime_paths,
+        credentials_manager=CredentialsManager(tmp_path / "credentials"),
+        tool_config_overrides={"download_file": False},
+        runs_in_worker=False,
+        tool_output_workspace_root=tmp_path,
+        worker_target=None,
+        tools=builtin_tool_registry(),
+    )
+
+    assert "google_drive_download_file" not in tool.functions
+    assert "google_drive_read_file" in tool.functions
 
 
 def test_google_drive_download_confines_truthy_non_bool_flag(tmp_path: Path) -> None:
@@ -409,7 +410,6 @@ def test_google_drive_download_confines_truthy_non_bool_flag(tmp_path: Path) -> 
     )
 
     assert "google_drive_download_file" in tool.functions
-    assert tool.download_dir == tmp_path / "google-drive-downloads"
 
 
 def test_google_drive_connect_instruction_uses_redirect_uri_public_origin(tmp_path: Path) -> None:
@@ -560,6 +560,7 @@ def test_google_drive_readonly_grant_keeps_reads_and_requires_reconnect_for_writ
         credentials_manager=credentials_manager,
         worker_target=None,
     )
+    tool._authenticate()
     service = _FakeDriveService()
     tool.service = service
 
@@ -626,7 +627,7 @@ def test_google_drive_rejects_stored_token_disallowed_by_new_identity_policy(tmp
         {
             "token": "access-token",
             "refresh_token": "refresh-token",
-            "scopes": list(_GOOGLE_DRIVE_OAUTH_SCOPES),
+            "scopes": list(google_oauth_provider("google_drive").scopes),
             "_source": "oauth",
             "_oauth_provider": "google_drive",
             "_oauth_claims": {"email": "alice@blocked.example", "email_verified": True},
@@ -659,7 +660,7 @@ def test_google_drive_rejects_stored_token_missing_claims_when_identity_policy_c
         {
             "token": "access-token",
             "refresh_token": "refresh-token",
-            "scopes": list(_GOOGLE_DRIVE_OAUTH_SCOPES),
+            "scopes": list(google_oauth_provider("google_drive").scopes),
             "_source": "oauth",
             "_oauth_provider": "google_drive",
         },
@@ -688,7 +689,7 @@ def test_google_drive_stored_token_without_client_config_connects_on_invocation(
         {
             "token": "access-token",
             "refresh_token": "refresh-token",
-            "scopes": list(_GOOGLE_DRIVE_OAUTH_SCOPES),
+            "scopes": list(google_oauth_provider("google_drive").scopes),
             "_source": "oauth",
         },
     )
@@ -698,7 +699,8 @@ def test_google_drive_stored_token_without_client_config_connects_on_invocation(
         runtime_paths,
         credentials_manager=credentials_manager,
         worker_target=None,
-        disable_sandbox_proxy=True,
+        runs_in_worker=False,
+        tools=builtin_tool_registry(),
     )
     assert isinstance(tool, GoogleDriveTools)
 
@@ -721,7 +723,7 @@ def test_google_drive_mismatched_client_id_connects_on_invocation(tmp_path: Path
             "token": "access-token",
             "refresh_token": "refresh-token",
             "client_id": "old-client-id",
-            "scopes": list(_GOOGLE_DRIVE_OAUTH_SCOPES),
+            "scopes": list(google_oauth_provider("google_drive").scopes),
             "_source": "oauth",
         },
     )
@@ -731,7 +733,8 @@ def test_google_drive_mismatched_client_id_connects_on_invocation(tmp_path: Path
         runtime_paths,
         credentials_manager=credentials_manager,
         worker_target=None,
-        disable_sandbox_proxy=True,
+        runs_in_worker=False,
+        tools=builtin_tool_registry(),
     )
     assert isinstance(tool, GoogleDriveTools)
 
@@ -757,7 +760,8 @@ def test_google_drive_saved_numeric_config_is_coerced_before_tool_init(tmp_path:
         runtime_paths,
         credentials_manager=credentials_manager,
         worker_target=None,
-        disable_sandbox_proxy=True,
+        runs_in_worker=False,
+        tools=builtin_tool_registry(),
     )
 
     assert isinstance(tool, GoogleDriveTools)
@@ -780,7 +784,8 @@ def test_google_drive_blank_numeric_config_uses_tool_default(tmp_path: Path) -> 
         runtime_paths,
         credentials_manager=credentials_manager,
         worker_target=None,
-        disable_sandbox_proxy=True,
+        runs_in_worker=False,
+        tools=builtin_tool_registry(),
     )
 
     assert isinstance(tool, GoogleDriveTools)
@@ -867,7 +872,7 @@ def test_google_drive_upload_rejects_workspace_escape(
     assert service.files_resource.create_kwargs is None
 
 
-def test_google_drive_update_replaces_binary_file_content(
+def test_google_drive_update_replaces_file_content(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -875,20 +880,10 @@ def test_google_drive_update_replaces_binary_file_content(
     replacement = workspace_root / "reports" / "plan.md"
     replacement.parent.mkdir()
     replacement.write_text("revised plan")
-    service.files_resource.file_metadata = {
-        "id": "file-id",
-        "name": "plan.md",
-        "mimeType": "text/markdown",
-    }
 
     result = json.loads(tool.update_file("file-id", "reports/plan.md"))
 
     assert result == {"id": "file-id"}
-    assert service.files_resource.get_kwargs == {
-        "fileId": "file-id",
-        "fields": "id,name,mimeType",
-        "supportsAllDrives": True,
-    }
     assert service.files_resource.update_kwargs is not None
     media = service.files_resource.update_kwargs["media_body"]
     assert isinstance(media, _FakeMediaIoBaseUpload)
@@ -903,26 +898,114 @@ def test_google_drive_update_replaces_binary_file_content(
     }
 
 
-def test_google_drive_update_rejects_google_workspace_file(
+@pytest.mark.parametrize(
+    ("name", "mime_type"),
+    [
+        ("report.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
+        ("rows.csv.gz", "application/octet-stream"),
+    ],
+)
+def test_google_drive_upload_and_update_type_a_file_by_its_name(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    mime_type: str,
+) -> None:
+    """A Word file is typed as Word on every host, and a compressed file by no type its inner name names."""
+    tool, service, workspace_root = _google_drive_write_tool(tmp_path, monkeypatch)
+    (workspace_root / name).write_bytes(b"PK\x03\x04")
+    service.files_resource.file_metadata = {"id": "file-id", "name": name, "mimeType": mime_type}
+
+    tool.upload_file(name)
+    tool.update_file("file-id", name)
+
+    assert service.files_resource.create_kwargs is not None
+    assert service.files_resource.update_kwargs is not None
+    assert service.files_resource.create_kwargs["media_body"].mimetype == mime_type
+    assert service.files_resource.update_kwargs["media_body"].mimetype == mime_type
+
+
+@pytest.mark.parametrize(
+    ("convert_to", "mime_type"),
+    [
+        ("document", "application/vnd.google-apps.document"),
+        ("spreadsheet", "application/vnd.google-apps.spreadsheet"),
+        ("presentation", "application/vnd.google-apps.presentation"),
+    ],
+)
+def test_google_drive_upload_converts_a_file_to_a_google_workspace_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    convert_to: Literal["document", "spreadsheet", "presentation"],
+    mime_type: str,
+) -> None:
+    """Drive converts the file it is sent into the Workspace type the upload names, under the file's name less its extension."""
+    tool, service, workspace_root = _google_drive_write_tool(tmp_path, monkeypatch)
+    (workspace_root / "launch.plan.html").write_text("<h1>Plan</h1><table><tr><td>cell</td></tr></table>")
+
+    tool.upload_file("launch.plan.html", folder_id="folder-id", convert_to=convert_to)
+
+    assert service.files_resource.create_kwargs is not None
+    assert service.files_resource.create_kwargs["body"] == {
+        "name": "launch.plan",
+        "parents": ["folder-id"],
+        "mimeType": mime_type,
+    }
+    assert service.files_resource.create_kwargs["media_body"].mimetype == "text/html"
+
+
+def test_google_drive_converting_upload_keeps_a_given_name(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     tool, service, workspace_root = _google_drive_write_tool(tmp_path, monkeypatch)
-    replacement = workspace_root / "plan.txt"
-    replacement.write_text("revised plan")
-    service.files_resource.file_metadata = {
-        "id": "file-id",
-        "name": "Plan",
+    (workspace_root / "plan.md").write_text("# Plan")
+
+    tool.upload_file("plan.md", name="Launch plan v1.2", convert_to="document")
+
+    assert service.files_resource.create_kwargs is not None
+    assert service.files_resource.create_kwargs["body"] == {
+        "name": "Launch plan v1.2",
         "mimeType": "application/vnd.google-apps.document",
     }
+    assert service.files_resource.create_kwargs["media_body"].mimetype == "text/markdown"
 
-    result = json.loads(tool.update_file("file-id", "plan.txt"))
 
-    assert result["error"] == (
-        "Google Drive content replacement only supports binary files; "
-        "application/vnd.google-apps.document requires its Google Workspace API"
-    )
-    assert service.files_resource.update_kwargs is None
+def test_google_drive_upload_schema_offers_only_the_workspace_types_drive_converts_to(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tool, _service, _workspace_root = _google_drive_write_tool(tmp_path, monkeypatch)
+
+    parameters = dict(toolkit_offers(tool, "google_drive_upload_file").parameters)
+
+    assert parameters["properties"]["convert_to"]["enum"] == ["document", "spreadsheet", "presentation"]
+    assert "convert_to" not in parameters["required"]
+
+
+def test_google_drive_update_replaces_a_google_doc_with_the_converted_file(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Google Doc is sent its new contents as any file is, without first asking Drive what kind of file it is."""
+    tool, service, workspace_root = _google_drive_write_tool(tmp_path, monkeypatch)
+    replacement = workspace_root / "plan.html"
+    replacement.write_text("<h1>Revised plan</h1>")
+
+    result = json.loads(tool.update_file("file-id", "plan.html"))
+
+    assert result == {"id": "file-id"}
+    assert service.files_resource.get_kwargs is None
+    assert service.files_resource.update_kwargs is not None
+    media = service.files_resource.update_kwargs["media_body"]
+    assert media.content == replacement.read_bytes()
+    assert media.mimetype == "text/html"
+    assert service.files_resource.update_kwargs == {
+        "fileId": "file-id",
+        "media_body": media,
+        "fields": "id,name,mimeType,modifiedTime,size,parents,trashed,webViewLink",
+        "supportsAllDrives": True,
+    }
 
 
 def test_google_drive_upload_rejects_absolute_workspace_escape(
@@ -1101,6 +1184,7 @@ def test_google_drive_read_media_supports_shared_drive_files(tmp_path: Path) -> 
             b"%PDF-1.4\n1 0 obj\n<< /Length 44 >>\nstream\nBT /F1 12 Tf (Hello) Tj ET\nendstream",
         ),
         ("report.docx", _DOCX_MIME_TYPE, b"PK\x03\x04\x14\x00\x06\x00\x08\x00[Content_Types].xml"),
+        ("voice memo.m4a", "audio/mp4", _M4A_HEADER),
     ],
 )
 def test_google_drive_read_refuses_binary_content_and_names_enabled_download_function(
@@ -1120,12 +1204,35 @@ def test_google_drive_read_refuses_binary_content_and_names_enabled_download_fun
     assert "content" not in result
 
 
+def test_google_drive_read_names_no_download_function_its_filters_leave_out(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Drive toolkit whose function filters leave out the download function names none when it refuses a read."""
+    tool, service = _google_drive_download_tool(tmp_path, monkeypatch)
+    assert "google_drive_download_file" in toolkit_function_names(tool)
+    offered = [name for name in toolkit_function_names(tool) if name != "google_drive_download_file"]
+    configure_toolkit_functions(tool, offered=offered)
+    content = b"%PDF-1.7\n%\xe2\xe3\xcf\xd3\n1 0 obj\nstream\nx\x9c\x00\x01"
+    service.files_resource.file_metadata = {
+        "name": "report.pdf",
+        "mimeType": "application/pdf",
+        "size": str(len(content)),
+    }
+    tool._download_bytes = lambda _request: content
+
+    result = json.loads(tool.read_file("shared-drive-file-id"))
+
+    assert result["error"] == "Cannot read application/pdf as text."
+
+
 @pytest.mark.parametrize(
     ("name", "mime_type", "content", "text"),
     [
         ("config.yaml", "application/octet-stream", "name: été".encode(), "name: été"),
         ("people.csv", "text/csv", "name\nMüller\n".encode("cp1252"), "name\nM\ufffdller\n"),
         ("people.xml", "application/xml", "<n>Müller</n>".encode("latin-1"), "<n>M\ufffdller</n>"),
+        ("app.ts", "video/mp2t", b"export const x = 1;\n", "export const x = 1;\n"),
     ],
 )
 def test_google_drive_read_returns_text_without_nul_bytes(
@@ -1151,7 +1258,57 @@ def test_google_drive_read_returns_text_without_nul_bytes(
     assert result["content"] == text
 
 
-def test_google_drive_large_file_error_names_exposed_download_function(tmp_path: Path) -> None:
+def test_google_drive_read_returns_markdown_file_as_text(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A small text file reads exactly as before downloads existed, whether or not the download function is offered."""
+    tool, service = _google_drive_download_tool(tmp_path, monkeypatch)
+    content = "# Notes\n\n- ship it\n"
+    metadata = {
+        "name": "notes.md",
+        "mimeType": "text/markdown",
+        "size": str(len(content)),
+        "webViewLink": "https://drive.google.com/file/d/example",
+    }
+    service.files_resource.file_metadata = metadata
+    tool._download_bytes = lambda _request: content.encode()
+
+    result = tool.read_file("notes-file-id")
+
+    assert json.loads(result) == {
+        "file": {"id": "notes-file-id", **metadata},
+        "content": content,
+        "contentLength": len(content),
+        "exportMimeType": None,
+    }
+    assert list(tmp_path.glob("google-drive-downloads*")) == []
+
+
+@pytest.mark.parametrize(
+    ("name", "mime_type"),
+    [
+        ("voice memo.m4a", "audio/mp4"),
+        ("demo.mp4", "video/mp4"),
+        ("photo.png", "image/png"),
+        ("backup.zip", "application/zip"),
+        ("scan.pdf", "application/pdf"),
+    ],
+)
+def test_google_drive_read_refuses_large_binary_type_as_binary_without_fetching_it(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    mime_type: str,
+) -> None:
+    """A binary type over max_read_size gets the advice to download it, not the size error, and nothing is fetched."""
+    tool, service = _google_drive_download_tool(tmp_path, monkeypatch)
+    service.files_resource.file_metadata = {"name": name, "mimeType": mime_type, "size": "15449105"}
+
+    result = json.loads(tool.read_file("binary-file-id"))
+
+    assert result["error"] == f"Cannot read {mime_type} as text. Use google_drive_download_file instead."
+    assert service.files_resource.get_media_kwargs is None
+
+
+def test_google_drive_large_file_error_names_no_download_function_when_none_is_offered(tmp_path: Path) -> None:
     runtime_paths = _runtime_paths_with_google_drive_client(tmp_path)
     tool = GoogleDriveTools(
         runtime_paths=runtime_paths,
@@ -1174,19 +1331,99 @@ def test_google_drive_large_file_error_names_exposed_download_function(tmp_path:
     assert service.files_resource.get_media_kwargs is None
 
 
-def test_google_drive_read_error_names_enabled_download_function(
+@pytest.mark.parametrize(
+    ("metadata", "refusal", "download_error"),
+    [
+        pytest.param(
+            {"name": "Architecture", "mimeType": "application/vnd.google-apps.drawing"},
+            "Cannot read application/vnd.google-apps.drawing as text.",
+            None,
+            id="drawing",
+        ),
+        pytest.param(
+            {"name": "Q3 plans", "mimeType": "application/vnd.google-apps.folder"},
+            "Cannot read application/vnd.google-apps.folder as text.",
+            "Unsupported Workspace file type for download: application/vnd.google-apps.folder",
+            id="folder",
+        ),
+        pytest.param(
+            {"name": "Launch video", "mimeType": "application/vnd.google-apps.vid"},
+            "Cannot read application/vnd.google-apps.vid as text.",
+            "Unsupported Workspace file type for download: application/vnd.google-apps.vid",
+            id="vids",
+        ),
+        pytest.param(
+            {"name": "Budget 2025/26.pdf", "mimeType": "application/pdf", "size": "9"},
+            "Cannot read application/pdf as text.",
+            None,
+            id="slash-in-name",
+        ),
+        pytest.param(
+            {"name": "export.csv", "mimeType": "text/csv", "size": str(50 * _MIB)},
+            f"File is {50 * _MIB} bytes, exceeds max_read_size ({10 * _MIB}).",
+            None,
+            id="over-read-size",
+        ),
+        pytest.param(
+            {"name": "diagram.svg", "mimeType": "image/svg+xml", "size": str(50 * _MIB)},
+            f"File is {50 * _MIB} bytes, exceeds max_read_size ({10 * _MIB}).",
+            None,
+            id="over-read-size-svg",
+        ),
+        pytest.param(
+            {"name": "recording.mp4", "mimeType": "video/mp4", "size": str(150 * _MIB)},
+            "Cannot read video/mp4 as text.",
+            f"File is {150 * _MIB} bytes, exceeds max_download_size ({100 * _MIB}). "
+            "Raise the google_drive max_download_size setting to download it.",
+            id="over-download-size",
+        ),
+    ],
+)
+@pytest.mark.parametrize("prefix", [pytest.param("", id="default"), pytest.param("work_", id="workspace")])
+def test_google_drive_read_refusal_advises_download_only_for_files_the_download_saves(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    metadata: dict[str, object],
+    refusal: str,
+    download_error: str | None,
+    prefix: str,
+) -> None:
+    """A refused read names the download function, as offered, only for a file it saves, else gives its refusal."""
+    tool, service = _google_drive_download_tool(tmp_path, monkeypatch)
+    if prefix:
+        # An additional Google workspace's tool renames every function of its toolkit this way.
+        rename_toolkit_functions(tool, {name: f"{prefix}{name}" for name in toolkit_function_names(tool)})
+    service.files_resource.file_metadata = metadata
+    tool._download_bytes = lambda _request: b"%PDF-1.7\n"
+
+    result = json.loads(tool.read_file("shared-drive-file-id"))
+
+    download_function = f"{prefix}google_drive_download_file"
+    if download_error is None:
+        assert result["error"] == f"{refusal} Use {download_function} instead."
+    else:
+        assert result["error"] == f"{refusal} {download_function} would refuse it too: {download_error}"
+    assert json.loads(tool.download_file("shared-drive-file-id")).get("error") == download_error
+
+
+def test_google_drive_download_exports_a_workspace_type_without_a_default_export_to_a_requested_format(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """An explicit export format reaches Drive for a Workspace type that has no default download export."""
     tool, service = _google_drive_download_tool(tmp_path, monkeypatch)
+    service.files_resource.file_metadata = {"name": "Whiteboard", "mimeType": "application/vnd.google-apps.jam"}
 
-    result = json.loads(tool.read_file("shared-drive-folder-id"))
+    result = json.loads(tool.download_file("shared-drive-file-id", export_format="application/pdf"))
 
-    assert (
-        result["error"]
-        == "Cannot read application/vnd.google-apps.folder as text. Use google_drive_download_file instead."
-    )
-    assert service.files_resource.get_media_kwargs is None
+    assert result["status"] == "exported"
+    assert result["mimeType"] == "application/pdf"
+    assert result["originalMimeType"] == "application/vnd.google-apps.jam"
+    assert Path(result["path"]) == _saved_path(tmp_path, "Whiteboard.pdf")
+    assert service.files_resource.export_media_kwargs == {
+        "fileId": "shared-drive-file-id",
+        "mimeType": "application/pdf",
+    }
 
 
 def test_google_drive_download_media_supports_shared_drive_files(
@@ -1203,13 +1440,121 @@ def test_google_drive_download_media_supports_shared_drive_files(
     result = json.loads(tool.download_file("shared-drive-file-id"))
 
     assert result["status"] == "downloaded"
-    assert Path(result["path"]) == tmp_path / "google-drive-downloads" / "notes.txt"
-    assert (tmp_path / "google-drive-downloads" / "notes.txt").read_text() == "hello"
+    assert Path(result["path"]) == _saved_path(tmp_path, "notes.txt")
+    assert _saved_path(tmp_path, "notes.txt").read_text() == "hello"
     assert service.files_resource.get_media_kwargs == {
         "fileId": "shared-drive-file-id",
         "supportsAllDrives": True,
     }
     assert service.files_resource.export_media_kwargs is None
+
+
+def test_google_drive_download_saves_binary_file_and_reports_its_size_and_type(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A 15 MB recording, over max_read_size but within max_download_size, lands byte for byte in the workspace."""
+    tool, service = _google_drive_download_tool(tmp_path, monkeypatch)
+    content = (_M4A_HEADER + bytes(range(256)) * 60_350)[:15_449_105]
+    service.files_resource.file_metadata = {
+        "name": "voice memo.m4a",
+        "mimeType": "audio/mp4",
+        "size": str(len(content)),
+    }
+    service.files_resource.media_content = content
+
+    result = json.loads(tool.download_file("recording-file-id"))
+
+    saved = _saved_path(tmp_path, "voice memo.m4a", "recording-file-id")
+    assert result == {
+        "fileId": "recording-file-id",
+        "name": "voice memo.m4a",
+        "path": str(saved),
+        "size": 15_449_105,
+        "mimeType": "audio/mp4",
+        "status": "downloaded",
+    }
+    assert hashlib.sha256(saved.read_bytes()).hexdigest() == hashlib.sha256(content).hexdigest()
+
+
+def test_google_drive_download_refuses_file_over_default_max_download_size(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tool, service = _google_drive_download_tool(tmp_path, monkeypatch)
+    service.files_resource.file_metadata = {"name": "lecture.mp4", "mimeType": "video/mp4", "size": str(150 * _MIB)}
+
+    result = json.loads(tool.download_file("lecture-file-id"))
+
+    assert result["error"] == (
+        f"File is {150 * _MIB} bytes, exceeds max_download_size ({100 * _MIB}). "
+        "Raise the google_drive max_download_size setting to download it."
+    )
+    assert service.files_resource.get_media_kwargs is None
+    assert not (tmp_path / "google-drive-downloads").exists()
+
+
+def test_google_drive_downloads_of_files_with_the_same_name_do_not_overwrite_each_other(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tool, service = _google_drive_download_tool(tmp_path, monkeypatch)
+    service.files_resource.file_metadata = {"name": "recording.m4a", "mimeType": "audio/mp4"}
+    paths = []
+    for file_id, content in (("first-file-id", b"first"), ("second-file-id", b"second")):
+        service.files_resource.media_content = content
+        paths.append(Path(json.loads(tool.download_file(file_id))["path"]))
+
+    assert paths == [
+        _saved_path(tmp_path, "recording.m4a", "first-file-id"),
+        _saved_path(tmp_path, "recording.m4a", "second-file-id"),
+    ]
+    assert [path.read_bytes() for path in paths] == [b"first", b"second"]
+
+
+def test_google_drive_download_of_the_same_file_again_replaces_its_copy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tool, service = _google_drive_download_tool(tmp_path, monkeypatch)
+    service.files_resource.file_metadata = {"name": "recording.m4a", "mimeType": "audio/mp4"}
+    for content in (b"old", b"new"):
+        service.files_resource.media_content = content
+        result = json.loads(tool.download_file("recording-file-id"))
+
+    saved = _saved_path(tmp_path, "recording.m4a", "recording-file-id")
+    assert Path(result["path"]) == saved
+    assert saved.read_bytes() == b"new"
+    assert list(saved.parent.iterdir()) == [saved]
+
+
+@pytest.mark.parametrize(
+    ("name", "mime_type", "extension"),
+    [
+        pytest.param("Weekly sync " + "x" * 300 + ".m4a", "audio/mp4", ".m4a", id="ascii"),
+        pytest.param("会议记录" * 30 + ".m4a", "audio/mp4", ".m4a", id="cjk"),
+        pytest.param("Plan v1.2 " + "x" * 300, "application/vnd.google-apps.document", ".docx", id="dot-in-title"),
+    ],
+)
+def test_google_drive_download_shortens_a_name_too_long_for_the_file_system(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    mime_type: str,
+    extension: str,
+) -> None:
+    tool, service = _google_drive_download_tool(tmp_path, monkeypatch)
+    service.files_resource.file_metadata = {"name": name, "mimeType": mime_type}
+
+    result = json.loads(tool.download_file("recording-file-id"))
+
+    saved = Path(result["path"])
+    assert result["name"] == name
+    assert saved.parent == tmp_path / "google-drive-downloads" / "recording-file-id"
+    assert saved.name.endswith(extension)
+    assert name.startswith(saved.name.removesuffix(extension))
+    assert len(saved.name.encode()) <= 200 + len(extension)
+    assert saved.read_bytes() == b"hello"
 
 
 def test_google_drive_download_returns_absolute_path_for_relative_workspace(
@@ -1225,64 +1570,40 @@ def test_google_drive_download_returns_absolute_path_for_relative_workspace(
     result = json.loads(tool.download_file("shared-drive-file-id"))
 
     assert result["status"] == "downloaded"
-    assert Path(result["path"]) == tmp_path / "workspace" / "google-drive-downloads" / "notes.txt"
+    assert Path(result["path"]) == _saved_path(tmp_path / "workspace", "notes.txt")
     assert Path(result["path"]).read_bytes() == b"hello"
 
 
-def test_google_drive_download_rejects_parent_directory_traversal(
+@pytest.mark.parametrize(
+    ("name", "saved_name"),
+    [
+        ("../../etc/passwd", ".._.._etc_passwd"),
+        ("/etc/passwd", "_etc_passwd"),
+        ("folder\\notes.txt", "folder_notes.txt"),
+        ("C:\\notes.txt", "C:_notes.txt"),
+        ("line\nbreak\x00.txt", "line_break_.txt"),
+        ("..", "file"),
+        (" ", "file"),
+    ],
+)
+def test_google_drive_download_sanitizes_filename_into_its_download_directory(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    saved_name: str,
 ) -> None:
-    tool, service = _google_drive_download_tool(tmp_path, monkeypatch, download_dir=tmp_path / "downloads")
-    service.files_resource.file_metadata = {
-        "name": "../escape.txt",
-        "mimeType": "text/plain",
-        "webViewLink": "https://drive.google.com/file/d/example",
-    }
-    outside_path = tmp_path / "escape.txt"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    tool, service = _google_drive_download_tool(tmp_path, monkeypatch, download_dir=workspace)
+    service.files_resource.file_metadata = {"name": name, "mimeType": "text/plain"}
 
     result = json.loads(tool.download_file("shared-drive-file-id"))
 
-    assert result["error"] == "Unsafe Google Drive filename: ../escape.txt"
-    assert not outside_path.exists()
-    assert service.files_resource.get_media_kwargs is None
-
-
-def test_google_drive_download_rejects_absolute_paths(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    tool, service = _google_drive_download_tool(tmp_path, monkeypatch, download_dir=tmp_path / "downloads")
-    outside_path = tmp_path / "absolute.txt"
-    service.files_resource.file_metadata = {
-        "name": str(outside_path),
-        "mimeType": "text/plain",
-        "webViewLink": "https://drive.google.com/file/d/example",
-    }
-
-    result = json.loads(tool.download_file("shared-drive-file-id"))
-
-    assert result["error"] == f"Unsafe Google Drive filename: {outside_path}"
-    assert not outside_path.exists()
-    assert service.files_resource.get_media_kwargs is None
-
-
-def test_google_drive_download_rejects_windows_separators(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    tool, service = _google_drive_download_tool(tmp_path, monkeypatch, download_dir=tmp_path / "downloads")
-    service.files_resource.file_metadata = {
-        "name": "folder\\notes.txt",
-        "mimeType": "text/plain",
-        "webViewLink": "https://drive.google.com/file/d/example",
-    }
-
-    result = json.loads(tool.download_file("shared-drive-file-id"))
-
-    assert result["error"] == "Unsafe Google Drive filename: folder\\notes.txt"
-    assert not (tmp_path / "downloads" / "folder\\notes.txt").exists()
-    assert service.files_resource.get_media_kwargs is None
+    assert Path(result["path"]) == _saved_path(workspace, saved_name)
+    assert result["name"] == name
+    assert _saved_path(workspace, saved_name).read_bytes() == b"hello"
+    saved_files = [path for path in tmp_path.rglob("*") if path.is_file() and "credentials" not in path.parts]
+    assert [path for path in saved_files if workspace not in path.parents] == []
 
 
 def test_google_drive_download_rejects_missing_filename_metadata(
@@ -1303,16 +1624,24 @@ def test_google_drive_download_rejects_missing_filename_metadata(
     assert service.files_resource.export_media_kwargs is None
 
 
+@pytest.mark.parametrize("linked", ["file", "file-directory"])
 def test_google_drive_download_rejects_symlink_escape(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    linked: str,
 ) -> None:
     download_dir = tmp_path / "downloads"
-    target_dir = download_dir / "google-drive-downloads"
-    target_dir.mkdir(parents=True)
-    outside_path = tmp_path / "outside.txt"
+    target_dir = download_dir / "google-drive-downloads" / "shared-drive-file-id"
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    outside_path = outside_dir / "notes.txt"
     outside_path.write_text("outside")
-    (target_dir / "notes.txt").symlink_to(outside_path)
+    if linked == "file":
+        target_dir.mkdir(parents=True)
+        (target_dir / "notes.txt").symlink_to(outside_path)
+    else:
+        target_dir.parent.mkdir(parents=True)
+        target_dir.symlink_to(outside_dir, target_is_directory=True)
     tool, service = _google_drive_download_tool(tmp_path, monkeypatch, download_dir=download_dir)
     service.files_resource.file_metadata = {
         "name": "notes.txt",
@@ -1322,7 +1651,7 @@ def test_google_drive_download_rejects_symlink_escape(
 
     result = json.loads(tool.download_file("shared-drive-file-id"))
 
-    assert result["error"] == "Google Drive download target escapes the download directory"
+    assert result["error"] == "A link in the google-drive-downloads path blocks this download"
     assert outside_path.read_text() == "outside"
     assert service.files_resource.get_media_kwargs is None
     assert service.files_resource.export_media_kwargs is None
@@ -1383,9 +1712,10 @@ def test_google_drive_download_pins_directory_during_request_creation(
 
     result = json.loads(tool.download_file("shared-drive-file-id"))
 
+    saved_name = "notes.txt" if mime_type == "text/plain" else "notes.txt.docx"
     assert outside_file.read_bytes() == b"outside"
     assert "error" not in result
-    assert (original_root / "notes.txt").read_bytes() == b"hello"
+    assert (original_root / "shared-drive-file-id" / saved_name).read_bytes() == b"hello"
 
 
 def test_google_drive_download_failure_preserves_existing_file_and_cleans_partial_download(
@@ -1394,8 +1724,8 @@ def test_google_drive_download_failure_preserves_existing_file_and_cleans_partia
 ) -> None:
     tool, service = _google_drive_download_tool(tmp_path, monkeypatch)
     service.files_resource.file_metadata = {"name": "notes.txt", "mimeType": "text/plain"}
-    download_root = tmp_path / "google-drive-downloads"
-    download_root.mkdir()
+    download_root = tmp_path / "google-drive-downloads" / "shared-drive-file-id"
+    download_root.mkdir(parents=True)
     existing_file = download_root / "notes.txt"
     existing_file.write_bytes(b"original")
 
@@ -1423,7 +1753,9 @@ def test_google_drive_download_refuses_file_larger_than_max_download_size(
 
     result = json.loads(tool.download_file("shared-drive-file-id"))
 
-    assert result["error"] == "File is 5 bytes, exceeds max_download_size (4)."
+    assert result["error"] == (
+        "File is 5 bytes, exceeds max_download_size (4). Raise the google_drive max_download_size setting to download it."
+    )
     assert "size" in str(service.files_resource.get_kwargs["fields"]).split(",")
     assert service.files_resource.get_media_kwargs is None
     assert not (tmp_path / "google-drive-downloads").exists()
@@ -1450,18 +1782,24 @@ def test_google_drive_download_stops_writing_past_max_download_size(
 
     result = json.loads(tool.download_file("shared-drive-file-id"))
 
-    assert result["error"] == "Google Drive download exceeds max_download_size (8 bytes)"
+    assert result["error"] == (
+        "Google Drive download exceeds max_download_size (8 bytes). "
+        "Raise the google_drive max_download_size setting to download it."
+    )
     assert len(chunks_written) <= 1
-    assert list((tmp_path / "google-drive-downloads").iterdir()) == []
+    assert [path for path in (tmp_path / "google-drive-downloads").rglob("*") if not path.is_dir()] == []
 
 
+@pytest.mark.parametrize(("name", "saved_name"), [("proposal", "proposal.docx"), ("Plan v1.2", "Plan v1.2.docx")])
 def test_google_drive_download_adds_export_extension_inside_download_dir(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    name: str,
+    saved_name: str,
 ) -> None:
     tool, service = _google_drive_download_tool(tmp_path, monkeypatch)
     service.files_resource.file_metadata = {
-        "name": "proposal",
+        "name": name,
         "mimeType": "application/vnd.google-apps.document",
         "webViewLink": "https://drive.google.com/document/d/example",
     }
@@ -1470,8 +1808,9 @@ def test_google_drive_download_adds_export_extension_inside_download_dir(
     result = json.loads(tool.download_file("shared-drive-file-id"))
 
     assert result["status"] == "exported"
-    assert Path(result["path"]) == tmp_path / "google-drive-downloads" / "proposal.docx"
-    assert (tmp_path / "google-drive-downloads" / "proposal.docx").read_bytes() == b"docx"
+    assert result["size"] == 4
+    assert Path(result["path"]) == _saved_path(tmp_path, saved_name)
+    assert _saved_path(tmp_path, saved_name).read_bytes() == b"docx"
     assert service.files_resource.export_media_kwargs == {
         "fileId": "shared-drive-file-id",
         "mimeType": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
@@ -1494,8 +1833,8 @@ def test_google_drive_download_exports_complete_spreadsheet_as_xlsx(
     result = json.loads(tool.download_file("shared-drive-file-id"))
 
     assert result["status"] == "exported"
-    assert Path(result["path"]) == tmp_path / "google-drive-downloads" / "hardware-baseline.xlsx"
-    assert (tmp_path / "google-drive-downloads" / "hardware-baseline.xlsx").read_bytes() == b"xlsx workbook"
+    assert Path(result["path"]) == _saved_path(tmp_path, "hardware-baseline.xlsx")
+    assert _saved_path(tmp_path, "hardware-baseline.xlsx").read_bytes() == b"xlsx workbook"
     assert service.files_resource.export_media_kwargs == {
         "fileId": "shared-drive-file-id",
         "mimeType": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
@@ -1518,9 +1857,9 @@ def test_google_drive_download_preserves_existing_export_extension(
     result = json.loads(tool.download_file("shared-drive-file-id"))
 
     assert result["status"] == "exported"
-    assert Path(result["path"]) == tmp_path / "google-drive-downloads" / "proposal.docx"
-    assert (tmp_path / "google-drive-downloads" / "proposal.docx").read_bytes() == b"docx"
-    assert not (tmp_path / "google-drive-downloads" / "proposal.docx.docx").exists()
+    assert Path(result["path"]) == _saved_path(tmp_path, "proposal.docx")
+    assert _saved_path(tmp_path, "proposal.docx").read_bytes() == b"docx"
+    assert not _saved_path(tmp_path, "proposal.docx.docx").exists()
     assert service.files_resource.export_media_kwargs == {
         "fileId": "shared-drive-file-id",
         "mimeType": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",

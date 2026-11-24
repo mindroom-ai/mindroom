@@ -25,6 +25,7 @@ ONE_INSTANCE = MIGRATIONS_DIR / "007_one_instance_per_subscription.sql"
 ACTIVE_ADMIN = MIGRATIONS_DIR / "008_require_active_admin.sql"
 DROP_SUBSCRIPTION_LIMITS = MIGRATIONS_DIR / "009_drop_subscription_limits.sql"
 DROP_USAGE_METRICS = MIGRATIONS_DIR / "010_drop_usage_metrics.sql"
+SUBSCRIPTION_PRICE = MIGRATIONS_DIR / "011_subscription_price.sql"
 
 SUPABASE_STANDINS = """
 DO $$ BEGIN
@@ -302,3 +303,27 @@ def test_010_drops_the_usage_metrics_table(postgres: Postgres) -> None:
     assert postgres.apply("usage", DROP_USAGE_METRICS).returncode == 0
 
     assert postgres.value("usage", "SELECT to_regclass('usage_metrics') IS NULL") == "t"
+
+
+@pytest.mark.parametrize("upgrade", [False, True], ids=["fresh", "upgrade"])
+def test_subscriptions_record_a_monthly_or_yearly_price(postgres: Postgres, upgrade: bool) -> None:  # noqa: FBT001
+    database = "price_upgrade" if upgrade else "price_fresh"
+    postgres.create_database(database)
+    assert postgres.apply(database, BASELINE).returncode == 0
+    subscription = f"""
+        INSERT INTO auth.users (id, email) VALUES ('{ACCOUNT_A}', 'a@example.com');
+        INSERT INTO subscriptions (account_id, tier, status) VALUES ('{ACCOUNT_A}', 'byok', 'active');
+    """
+    if upgrade:
+        old_schema = "ALTER TABLE subscriptions DROP COLUMN billing_cycle, DROP COLUMN price_cents;"  # Before 011.
+        assert postgres.run(database, old_schema + subscription).returncode == 0
+        assert postgres.apply(database, SUBSCRIPTION_PRICE).returncode == 0
+    else:
+        assert postgres.run(database, subscription).returncode == 0
+
+    stored = f"SELECT tier, billing_cycle, price_cents FROM subscriptions WHERE account_id = '{ACCOUNT_A}'"
+    assert postgres.value(database, stored) == "byok||"
+    record = "UPDATE subscriptions SET billing_cycle = 'yearly', price_cents = 9600"
+    assert postgres.run(database, record).returncode == 0
+    assert postgres.value(database, stored) == "byok|yearly|9600"
+    assert postgres.run(database, "UPDATE subscriptions SET billing_cycle = 'annual'").returncode != 0

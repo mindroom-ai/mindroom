@@ -6,6 +6,8 @@ metadata:
   labels:
     {{- include "mindroom-client.labels" . | nindent 4 }}
 data:
+  nginx.conf: |
+{{ include "mindroom-client.mainNginxConf" . | indent 4 }}
   {{ .Values.nginx.key }}: |
 {{ include "mindroom-client.defaultNginxConf" . | indent 4 }}
   {{- if .Values.rootServiceWorkerCleanup.enabled }}

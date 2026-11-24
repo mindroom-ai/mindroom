@@ -2,75 +2,69 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Literal
+from dataclasses import replace
+from typing import TYPE_CHECKING
 
-from agno.tools.function import FunctionCall, ToolResult  # noqa: TC002 - Agno injected annotations
-from agno.tools.toolkit import Toolkit
-
-from mindroom.agno_compat_prepared_tools import BashPresentationFunction
-from mindroom.shell.execution import DEFAULT_RUN_TIMEOUT_SECONDS
+from mindroom.agent_cli.shell_contract import SHELL_FUNCTION
+from mindroom.tool_system.agno_toolkits import adapt_callable
+from mindroom.tool_system.invocation import current_tool_call
 from mindroom.tool_system.tool_access import ToolKey
+from mindroom.tool_system.tool_function import AdaptedToolkit, ToolValue  # The schema reads it from module globals.
+from mindroom.tool_system.tool_schema import closed_parameters
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
-    from agno.tools.function import Function
+
+__all__ = ["minimal_bash_toolkit"]
 
 
-__all__ = ["MinimalBashTools"]
+def minimal_bash_toolkit(
+    execute: Callable[[ToolKey, dict[str, object], str], Awaitable[str | ToolValue]] | None = None,
+) -> AdaptedToolkit:
+    """Project the agent's shell function into one provider-visible Bash function.
 
-
-class MinimalBashTools(Toolkit):
-    """Project only effective shell functions into one provider-visible function.
-
-    The required execution owner retains the canonical prepared FunctionCall,
-    approval state, hooks, operation mutex and dispatch-window lifetimes. There
-    is intentionally no raw-worker or ordinary-proxy fallback here.
+    The required execution owner retains the canonical prepared call, approval
+    state, hooks, operation mutex and dispatch-window lifetimes. There is
+    intentionally no raw-worker or ordinary-proxy fallback here.
     """
 
-    def __init__(
-        self,
-        *,
-        execute: Callable[[ToolKey, dict[str, object], FunctionCall], Awaitable[str | ToolResult]] | None = None,
-        on_prepare: Callable[[Function], None] | None = None,
-    ) -> None:
-        self._execute = execute
-        super().__init__(name="minimal_bash", tools=[])
-        function = BashPresentationFunction.from_callable(self.bash)
-        assert isinstance(function, BashPresentationFunction)
-        function.bind_preparation(on_prepare)
-        self.async_functions["bash"] = function
-        self.functions["bash"] = function
-
     async def bash(
-        self,
-        operation: Literal["run", "poll", "stop"] = "run",
-        command: str | None = None,
-        handle: str | None = None,
-        timeout: int = DEFAULT_RUN_TIMEOUT_SECONDS,  # noqa: ASYNC109
+        command: str,
+        timeout: int | None = None,  # noqa: ASYNC109
         tail: int = 100,
-        fc: FunctionCall | None = None,
-    ) -> str | ToolResult:
-        """Run Bash, poll its background handle, or stop an owned command."""
-        arguments: dict[str, object]
-        if operation == "run":
-            if not isinstance(command, str) or not command.strip() or handle is not None:
-                msg = "run requires command and forbids handle"
-                raise ValueError(msg)
-            name = "run_shell_command"
-            arguments = {"args": command, "timeout": timeout, "tail": tail}
-        elif operation in {"poll", "stop"}:
-            if not isinstance(handle, str) or not handle or command is not None:
-                msg = "poll/stop require handle and forbid command"
-                raise ValueError(msg)
-            name = "check_shell_command" if operation == "poll" else "kill_shell_command"
-            arguments = {"handle": handle}
-            if operation == "stop":
-                arguments["force"] = False
-        else:
-            msg = "Unsupported Bash operation"
+    ) -> str | ToolValue:
+        """Run a Bash command and return its output.
+
+        By default the call waits at most 120 seconds in the foreground. A command still running after 120 seconds
+        (with ``timeout`` omitted or > 120) moves to the background and returns its PID, live log path, and
+        wait/stop commands; it stops automatically after ``timeout`` (if set) or when the turn ends, and cannot make
+        new ``mindroom-agent`` CLI calls after handoff. Start servers or work meant to outlive the turn detached with
+        ``nohup cmd > out.log 2>&1 &`` and read the log in later commands. Wait for something inside one command,
+        such as ``until <check>; do sleep 10; done`` with a ``timeout``, not with repeated ``sleep`` calls: every
+        call is a model turn.
+
+        Args:
+            command: The Bash command to run.
+            timeout: Seconds after which the command and every process it started are stopped. Values <= 120 stop
+                the command inline and return the output so far; null or > 120 moves it to the background after 120
+                seconds and stops it after ``timeout`` (if set) or when the turn ends.
+            tail: The number of output lines to return.
+
+        """
+        if not command.strip():
+            msg = "Bash requires a command"
             raise ValueError(msg)
-        if self._execute is None or fc is None:
+        arguments: dict[str, object] = {"args": command, "tail": tail}
+        if timeout is not None:
+            arguments["timeout"] = timeout
+        call = current_tool_call()
+        call_id = call.context.call_id if call is not None else None
+        if execute is None or not call_id:
             msg = "Bash requires an active response owner"
             raise RuntimeError(msg)
-        return await self._execute(ToolKey("shell", name), arguments, fc)
+        return await execute(ToolKey("shell", SHELL_FUNCTION), arguments, call_id)
+
+    function = adapt_callable(bash)
+    function = replace(function, parameters=closed_parameters(bash, function.parameters))
+    return AdaptedToolkit(name="minimal_bash", functions=(function,), instructions=None)

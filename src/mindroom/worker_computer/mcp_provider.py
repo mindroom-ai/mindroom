@@ -15,7 +15,7 @@ from mcp.client.stdio import get_default_environment
 
 from mindroom.browser.playwright_mcp_session import PlaywrightMCPSession
 from mindroom.browser.profile_locks import clear_stale_singleton_locks
-from mindroom.mcp.results import tool_result_from_call_result
+from mindroom.mcp.results import tool_value_from_call_result
 from mindroom.media_delivery import image_result
 from mindroom.path_confinement import open_directory_within_root, resolve_path_within_root
 from mindroom.worker_computer.browser_bundle import (
@@ -29,9 +29,9 @@ from mindroom.worker_computer.browser_proxy import RELAY_ONLY_PROXY_BYPASS, Brow
 from mindroom.worker_computer.mcp_catalog import browser_mcp_catalog, verify_browser_mcp_catalog
 
 if TYPE_CHECKING:
-    from agno.tools.function import ToolResult
     from mcp.types import CallToolResult
 
+    from mindroom.tool_system.tool_function import ToolValue
     from mindroom.worker_computer.browser_proxy import BrowserEgress
 
 
@@ -105,7 +105,7 @@ class WorkerBrowserMCP:
             cwd=str(self._workspace),
         )
 
-    async def execute(self, function_name: str, arguments: dict[str, object]) -> ToolResult:
+    async def execute(self, function_name: str, arguments: dict[str, object]) -> ToolValue:
         """Validate catalog and install initial context guard before any native call."""
         if function_name not in browser_mcp_catalog():
             msg = "Unsupported native browser MCP function."
@@ -125,7 +125,7 @@ class WorkerBrowserMCP:
                 tools = await self._session.list_tools()
                 verify_browser_mcp_catalog([tool.model_dump(by_alias=True) for tool in tools])
                 bootstrap = await self._session.call_tool("browser_tabs", {"action": "list"})
-                tool_result_from_call_result("browser_mcp", bootstrap)
+                tool_value_from_call_result("browser_mcp", bootstrap)
                 self._ready = True
             assert self._session is not None
             result = await self._session.call_tool(function_name, arguments)
@@ -134,11 +134,11 @@ class WorkerBrowserMCP:
             raise
         if inline_screenshot:
             return await asyncio.to_thread(self._inline_screenshot_result, output, result)
-        return tool_result_from_call_result("browser_mcp", result)
+        return tool_value_from_call_result("browser_mcp", result)
 
-    def _inline_screenshot_result(self, output: Path, result: CallToolResult) -> ToolResult:
+    def _inline_screenshot_result(self, output: Path, result: CallToolResult) -> ToolValue:
         """Decode, retain, and bound one inline capture away from browser control."""
-        converted = tool_result_from_call_result("browser_mcp", result)
+        converted = tool_value_from_call_result("browser_mcp", result)
         metadata: dict[str, object] = {"result": converted.content}
         if not converted.images:
             return image_result(b"", metadata=metadata)
@@ -217,7 +217,7 @@ class WorkerBrowserMCP:
             try:
                 path = resolve_path_within_root(self._workspace, value, symlinks="internal", strict=True)
                 allowed = path.is_file()
-            except (OSError, RuntimeError, ValueError) as exc:
+            except (OSError, ValueError) as exc:
                 raise ValueError(msg) from exc
             if not allowed:
                 raise ValueError(msg)
@@ -243,13 +243,12 @@ class WorkerBrowserMCP:
         msg = "Native browser output must stay within the worker workspace and have the expected file type."
         try:
             canonical = resolve_path_within_root(self._workspace, path, symlinks="internal")
-            # stat still reports symlink loops and invalid parents on Python
-            # versions where non-strict resolve suppresses those errors.
+            # Non-strict resolve suppresses symlink loops and invalid parents; stat still reports them.
             try:
                 mode = canonical.stat().st_mode
             except FileNotFoundError:
                 mode = None
-        except (OSError, RuntimeError, ValueError) as exc:
+        except (OSError, ValueError) as exc:
             raise ValueError(msg) from exc
         if mode is not None and not (stat.S_ISDIR(mode) if directory else stat.S_ISREG(mode)):
             raise ValueError(msg)

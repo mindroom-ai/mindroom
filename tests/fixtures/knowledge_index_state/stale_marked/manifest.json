@@ -1,0 +1,10 @@
+{
+  "base_id": "docs",
+  "description": "Published base a watcher marked stale while a refresh was pending.",
+  "docs": {
+    "a.md": "alpha one"
+  },
+  "knowledge_path": "/dev/shm/pytest-of-basnijholt/pytest-8778/test_stale_marked0/docs",
+  "storage_key": "docs_e9ea4567",
+  "storage_root": "/dev/shm/pytest-of-basnijholt/pytest-8778/test_stale_marked0/mindroom_data"
+}

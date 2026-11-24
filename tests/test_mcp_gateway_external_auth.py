@@ -5,9 +5,11 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import sys
 import time
 from dataclasses import replace
-from json.scanner import py_make_scanner  # ty: ignore[unresolved-import] -- stdlib Python scanner is absent from stubs
+from functools import partial
+from json.scanner import py_make_scanner  # ty: ignore[missing-module-member] -- absent from stdlib stubs
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 
@@ -459,6 +461,7 @@ async def test_deeply_nested_payload_is_invalid_credential(
     settings: ExternalAuthSettings,
     signing_key: rsa.RSAPrivateKey,
     monkeypatch: pytest.MonkeyPatch,
+    request: pytest.FixtureRequest,
     parser: str,
 ) -> None:
     """Bounded but excessively nested signed JSON cannot escape credential rejection."""
@@ -467,6 +470,10 @@ async def test_deeply_nested_payload_is_invalid_credential(
     token = PyJWS().encode(payload, signing_key, algorithm="RS256", headers={"kid": "key-1"})
     assert len(token) <= 16384
     if parser == "python":
+        # Some dependencies, such as elevenlabs, raise the process-wide recursion limit when imported,
+        # so pin CPython's default to keep this payload deeper than the limit in any test order.
+        request.addfinalizer(partial(sys.setrecursionlimit, sys.getrecursionlimit()))
+        sys.setrecursionlimit(1000)
         decoder = json.JSONDecoder()
         decoder.scan_once = py_make_scanner(decoder)
         with pytest.raises(RecursionError):
@@ -476,4 +483,8 @@ async def test_deeply_nested_payload_is_invalid_credential(
         await verifier.verify(_request(token))
     assert error.value.status_code == 401
     if parser == "python":
-        assert isinstance(error.value.__cause__, RecursionError)
+        # PyJWT 2.15 wraps the RecursionError in its DecodeError; 2.14 raises it as is.
+        cause = error.value.__cause__
+        if isinstance(cause, jwt.DecodeError):
+            cause = cause.__cause__
+        assert isinstance(cause, RecursionError)

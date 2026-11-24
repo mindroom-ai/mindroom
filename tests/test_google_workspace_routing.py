@@ -9,9 +9,10 @@ import pytest
 
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
-from mindroom.tool_system.catalog import TOOL_METADATA, get_tool_by_name
-from mindroom.tool_system.plugins import isolated_plugin_runtime
-from mindroom.tool_system.sandbox_proxy import sandbox_proxy_enabled_for_tool
+from mindroom.tool_system.catalog import get_tool_by_name
+from mindroom.tool_system.sandbox_proxy import tool_placement
+from tests.agent_tool_helpers import toolkit_offers
+from tests.conftest import publish_test_plugins
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -85,25 +86,19 @@ def test_workspace_tools_stay_in_primary_runtime(
     worker_tools = None if routing == "all" else [tool_name]
     monkeypatch.setattr("mindroom.tool_system.sandbox_proxy.httpx.Client", _ForbiddenProxyClient)
 
-    with isolated_plugin_runtime(config, paths):
-        metadata = TOOL_METADATA[tool_name]
-        assert metadata.requires_primary_runtime is True
-        assert (
-            sandbox_proxy_enabled_for_tool(
-                tool_name,
-                runtime_paths=paths,
-                worker_tools_override=worker_tools,
-            )
-            is False
-        )
+    plugins = publish_test_plugins(config, paths)
+    metadata = plugins.tools.entries[tool_name]
+    assert metadata.requires_primary_runtime is True
+    runs_in_worker = tool_placement(paths, plugins.tools).runs_in_worker(tool_name, worker_tools)
+    assert runs_in_worker is False
 
-        tool = get_tool_by_name(
-            tool_name,
-            paths,
-            worker_tools_override=worker_tools,
-            worker_target=None,
-        )
-        function_name, kwargs = _SERVICE_CALLS[service]
-        function = tool.functions[function_name]
-        result = json.loads(function.entrypoint(**kwargs))
-        assert result["oauth_connection_required"] is True
+    tool = get_tool_by_name(
+        tool_name,
+        paths,
+        runs_in_worker=runs_in_worker,
+        worker_target=None,
+        tools=plugins.tools,
+    )
+    function_name, kwargs = _SERVICE_CALLS[service]
+    result = json.loads(toolkit_offers(tool, function_name).entrypoint(**kwargs))
+    assert result["oauth_connection_required"] is True

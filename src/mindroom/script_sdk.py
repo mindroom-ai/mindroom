@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import hashlib
+import http.client
 import json
 import math
 import os
@@ -15,14 +15,18 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import cast
 
+from mindroom.script_runs.launch_contract import (
+    GATEWAY_URL_ENV,
+    MAX_TOKEN_BYTES,
+    RUN_ID_ENV,
+    TOKEN_PATH_ENV,
+    digest_arguments,
+)
+
 __all__ = ["MindRoomToolCallError", "MindRoomTools"]
 
-_GATEWAY_URL_ENV = "MINDROOM_SCRIPT_GATEWAY_URL"
-_RUN_ID_ENV = "MINDROOM_SCRIPT_RUN_ID"
-_TOKEN_PATH_ENV = "MINDROOM_SCRIPT_TOKEN_PATH"  # noqa: S105 - this names a path, not a token.
 _DEFAULT_HTTP_TIMEOUT_SECONDS = 15.0
 _DEFAULT_POLL_INTERVAL_SECONDS = 0.5
-_MAX_TOKEN_BYTES = 4096
 _TRANSPORT_ERROR = "The background tool gateway transport failed after dispatch may have been accepted."
 _INVALID_RECEIPT_ERROR = "The background tool gateway returned an invalid receipt."
 _CONFLICTING_RECEIPT_ERROR = "The stable call ID belongs to a different tool request."
@@ -32,7 +36,12 @@ _CAPABILITY_INVALID_MESSAGE = "The MindRoom script capability token is invalid."
 
 
 class MindRoomToolCallError(RuntimeError):
-    """Stable framework or transport failure returned by the script gateway."""
+    """Stable framework or transport failure returned by the script gateway.
+
+    `state` is the terminal receipt's state, `failed` or `indeterminate`; `rejected` when the arguments or every
+    submission were refused, so the call never ran; or None when the call may have been accepted but no receipt
+    settled it.
+    """
 
     def __init__(
         self,
@@ -41,11 +50,13 @@ class MindRoomToolCallError(RuntimeError):
         kind: str,
         retryable: bool,
         call_id: str,
+        state: str | None = None,
     ) -> None:
         super().__init__(message)
         self.kind = kind
         self.retryable = retryable
         self.call_id = call_id
+        self.state = state
 
     @classmethod
     def from_receipt(cls, receipt: _Receipt) -> MindRoomToolCallError:
@@ -59,16 +70,13 @@ class MindRoomToolCallError(RuntimeError):
             kind=str(kind or receipt.state),
             retryable=retryable is True,
             call_id=receipt.call_id,
+            state=receipt.state,
         )
 
 
 @dataclass(frozen=True, slots=True)
 class _Receipt:
-    run_id: str
     call_id: str
-    toolkit_name: str
-    function_name: str
-    arguments_digest: str
     state: str
     result: object | None
     error: object | None
@@ -86,22 +94,24 @@ class MindRoomTools:
         if not math.isfinite(poll_interval_seconds) or poll_interval_seconds <= 0:
             msg = "poll_interval_seconds must be positive."
             raise ValueError(msg)
-        self._gateway_url = _required_env(_GATEWAY_URL_ENV).rstrip("/")
+        self._gateway_url = _required_env(GATEWAY_URL_ENV).rstrip("/")
         parsed_gateway = urllib.parse.urlsplit(self._gateway_url)
         if parsed_gateway.scheme not in {"http", "https"} or not parsed_gateway.netloc:
-            msg = "MINDROOM_SCRIPT_GATEWAY_URL must be an HTTP(S) URL."
+            msg = f"{GATEWAY_URL_ENV} must be an HTTP(S) URL."
             raise RuntimeError(msg)
-        self._run_id = _required_env(_RUN_ID_ENV)
-        self._token = _read_token(Path(_required_env(_TOKEN_PATH_ENV)))
+        self._run_id = _required_env(RUN_ID_ENV)
+        self._token = _read_token(Path(_required_env(TOKEN_PATH_ENV)))
         self._http_timeout_seconds = http_timeout_seconds
         self._poll_interval_seconds = poll_interval_seconds
 
-    def call(self, toolkit_name: str, function_name: str, **arguments: object) -> object:
+    def call(self, toolkit_name: str, function_name: str, /, **arguments: object) -> object:
         """Execute one logical governed call and poll only its stable call ID."""
         call_id = uuid.uuid4().hex
         wire_arguments = _json_wire_arguments(arguments, call_id=call_id)
-        arguments_digest = _digest_arguments(wire_arguments)
+        arguments_digest = digest_arguments(wire_arguments)
         receipt: _Receipt | None = None
+        # Only a 4xx answer proves the gateway did not record a submission.
+        maybe_accepted = False
         while receipt is None:
             try:
                 receipt = self._submit(
@@ -112,7 +122,10 @@ class MindRoomTools:
                     arguments_digest=arguments_digest,
                 )
             except MindRoomToolCallError as exc:
+                maybe_accepted = maybe_accepted or exc.kind not in {"request_rejected", "rate_limited"}
                 if not exc.retryable:
+                    if not maybe_accepted:
+                        exc.state = "rejected"
                     raise
                 time.sleep(self._poll_interval_seconds)
 
@@ -198,7 +211,7 @@ class MindRoomTools:
                 payload = json.loads(response.read())
         except urllib.error.HTTPError as exc:
             raise _http_error(exc, call_id=call_id) from exc
-        except (urllib.error.URLError, TimeoutError, OSError) as exc:
+        except (urllib.error.URLError, TimeoutError, OSError, http.client.HTTPException) as exc:
             raise MindRoomToolCallError(
                 _TRANSPORT_ERROR,
                 kind="transport",
@@ -206,12 +219,7 @@ class MindRoomTools:
                 call_id=call_id,
             ) from exc
         except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-            raise MindRoomToolCallError(
-                _INVALID_RECEIPT_ERROR,
-                kind="invalid_response",
-                retryable=False,
-                call_id=call_id,
-            ) from exc
+            raise _invalid_receipt(call_id) from exc
         return _parse_receipt(
             payload,
             expected_run_id=self._run_id,
@@ -233,23 +241,12 @@ def _required_env(name: str) -> str:
 def _read_token(path: Path) -> str:
     if not path.is_file():
         raise RuntimeError(_CAPABILITY_UNAVAILABLE_MESSAGE)
-    if path.stat().st_size > _MAX_TOKEN_BYTES:
+    if path.stat().st_size > MAX_TOKEN_BYTES:
         raise RuntimeError(_CAPABILITY_INVALID_MESSAGE)
     token = path.read_text(encoding="utf-8").strip()
     if not token:
         raise RuntimeError(_CAPABILITY_INVALID_MESSAGE)
     return token
-
-
-def _digest_arguments(arguments: dict[str, object]) -> str:
-    encoded = json.dumps(
-        arguments,
-        allow_nan=False,
-        ensure_ascii=False,
-        separators=(",", ":"),
-        sort_keys=True,
-    ).encode()
-    return hashlib.sha256(encoded).hexdigest()
 
 
 def _json_wire_arguments(arguments: dict[str, object], *, call_id: str) -> dict[str, object]:
@@ -268,6 +265,8 @@ def _json_wire_arguments(arguments: dict[str, object], *, call_id: str) -> dict[
             kind="invalid_arguments",
             retryable=False,
             call_id=call_id,
+            # Raised before any submission, so the call never ran.
+            state="rejected",
         ) from None
     return cast("dict[str, object]", wire_arguments)
 
@@ -293,12 +292,7 @@ def _parse_receipt(
     expected_arguments_digest: str,
 ) -> _Receipt:
     if not isinstance(value, dict):
-        raise MindRoomToolCallError(
-            _INVALID_RECEIPT_ERROR,
-            kind="invalid_response",
-            retryable=False,
-            call_id=expected_call_id,
-        )
+        raise _invalid_receipt(expected_call_id)
     payload = cast("dict[str, object]", value)
     run_id = payload.get("run_id")
     call_id = payload.get("call_id")
@@ -318,12 +312,7 @@ def _parse_receipt(
             "indeterminate",
         }
     ):
-        raise MindRoomToolCallError(
-            _INVALID_RECEIPT_ERROR,
-            kind="invalid_response",
-            retryable=False,
-            call_id=expected_call_id,
-        )
+        raise _invalid_receipt(expected_call_id)
     if (
         toolkit_name != expected_toolkit_name
         or function_name != expected_function_name
@@ -336,14 +325,19 @@ def _parse_receipt(
             call_id=expected_call_id,
         )
     return _Receipt(
-        run_id=expected_run_id,
         call_id=expected_call_id,
-        toolkit_name=expected_toolkit_name,
-        function_name=expected_function_name,
-        arguments_digest=expected_arguments_digest,
         state=state,
         result=payload.get("result"),
         error=payload.get("error"),
+    )
+
+
+def _invalid_receipt(call_id: str) -> MindRoomToolCallError:
+    return MindRoomToolCallError(
+        _INVALID_RECEIPT_ERROR,
+        kind="invalid_response",
+        retryable=False,
+        call_id=call_id,
     )
 
 
@@ -352,7 +346,7 @@ def _http_error(exc: urllib.error.HTTPError, *, call_id: str) -> MindRoomToolCal
     retryable = rate_limited or exc.code >= 500
     try:
         payload = json.loads(exc.read())
-    except (json.JSONDecodeError, UnicodeDecodeError):
+    except (json.JSONDecodeError, UnicodeDecodeError, OSError, http.client.HTTPException):
         payload = {}
     detail = payload.get("detail") if isinstance(payload, dict) else None
     return MindRoomToolCallError(

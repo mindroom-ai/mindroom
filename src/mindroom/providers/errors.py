@@ -1,0 +1,400 @@
+# Adapted from Agno (https://github.com/agno-agi/agno), Copyright 2025-2026 Agno Inc., Apache License 2.0; modified by MindRoom.
+"""Map provider failures to the normalized provider errors, which alone decide retries and the user's reply.
+
+Every adapter hands a transport or sign-in failure to ``provider_failure`` and a failed response, an HTTP status
+or an error event inside a stream, to ``classify_provider_error``, so the retry stages, the media fallback, and the
+error reply see one rule with one precedence.
+"""
+
+from __future__ import annotations
+
+import re
+from datetime import UTC, datetime
+from email.utils import parsedate_to_datetime
+from typing import TYPE_CHECKING, Any, cast
+
+import httpx
+
+from mindroom.failure_text import failure_text
+from mindroom.llm.errors import (
+    MISSING_API_KEY,
+    QUOTA_EXHAUSTED,
+    TOKENS_PER_MINUTE,
+    TRANSPORT_TIMEOUT,
+    AuthenticationFailed,
+    ContextWindowExceeded,
+    InvalidRequest,
+    ProviderError,
+    ProviderUnavailable,
+    RateLimited,
+)
+from mindroom.llm.messages import media_items
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator, Mapping, Sequence
+
+    from mindroom.llm.messages import Message
+    from mindroom.llm.provider import MediaKind
+
+__all__ = [
+    "CliLoginError",
+    "classify_provider_error",
+    "media_ids",
+    "missing_api_key_error",
+    "part_at",
+    "path_tokens",
+    "provider_failure",
+    "retry_after_seconds",
+]
+
+_RATE_LIMIT_STATUS = 429
+_UNAUTHORIZED_STATUS = 401
+# Payment Required, which OpenRouter and DeepSeek send for an account or key without credit, Gemini for used-up prepaid
+# credit, and Anthropic for a billing or payment problem: no retry passes until the account's billing changes. OpenRouter
+# also sends one with a ``Retry-After`` header when the requests it is still settling fill a low balance's in-flight
+# spending budget, which a wait can let through; that one is final too.
+_PAYMENT_REQUIRED_STATUS = 402
+# Statuses after which an unchanged request can succeed, the ones the OpenAI and Claude SDKs retried: a request
+# timeout, OpenAI's transient conflict (409), and every server error, among them Anthropic's overloaded model (529),
+# which the error message reports as temporary unavailability rather than a rate limit, and a CDN's origin failures
+# (520 to 524) in front of a custom endpoint.
+_TRANSIENT_CLIENT_STATUSES = frozenset({408, 409})
+_SERVER_ERROR_RANGE = range(500, 600)
+_INVALID_REQUEST_STATUSES = frozenset({400, 404, 413, 422})
+_HTTP_CLIENT_ERROR_RANGE = range(400, 500)
+# The names providers give a throttled request: Anthropic's error type and the Responses code.
+_RATE_LIMIT_NAMES = frozenset({"rate_limit_error", "rate_limit_exceeded"})
+# The names of a refusal that only a change to the account's billing or limits lets through, whatever its status.
+# OpenAI's codes: prepaid credit used up, a reached organization or project spend limit, and a reached OpenAI-assigned
+# usage limit, besides ``insufficient_quota``, the older code of an account without credit and still the error type of
+# the others.
+# Moonshot's error type, which it sends without a code, for an account whose balance or token quota ran out or that was
+# disabled. Anthropic's error type for a problem with the organization's billing or payment details, which it sends
+# with a 402, and the ``details.error_code`` of its 429 ``rate_limit_error`` once the organization reached its usage
+# tier's monthly spend cap, which carries no ``retry-after``.
+# Z.ai's business codes, which it sends with a 429 like a rate limit, for an account without balance or resource
+# package (1113), an expired GLM Coding Plan (1309), and an expired enterprise package (1314); its codes for a usage
+# limit, extra usage included, name the time the limit resets, so they stay rate limits.
+_QUOTA_EXHAUSTED_NAMES = frozenset(
+    {
+        "insufficient_quota",
+        "credit_balance_exhausted",
+        "organization_spend_limit_exceeded",
+        "project_spend_limit_exceeded",
+        "organization_usage_limit_exceeded",
+        "exceeded_current_quota_error",
+        "billing_error",
+        "enforced_spend_limit_reached",
+        "1113",
+        "1309",
+        "1314",
+    },
+)
+# How providers word a refusal their account's billing causes when they send no billing name, which no retry passes
+# until the credit or the limit changes. Anthropic's 400 ``invalid_request_error``: "Your credit balance is too low to
+# access the Anthropic API. Please go to Plans & Billing to upgrade or purchase credits." for an organization without
+# prepaid credit, and a message that begins "You have reached your specified API usage limits" or "You have reached
+# your specified workspace API usage limits" for a spend limit the organization or a workspace set. Gemini's 429
+# ``RESOURCE_EXHAUSTED``, which it also sends for a rate limit: "Your prepayment credits are depleted. Please go to AI
+# Studio at https://ai.studio/projects to manage your project and billing." and "Your project has exceeded its monthly
+# spending cap.", or "Your billing account has ..." for the billing account's cap. OpenRouter's 403 for a key that
+# reached the credit limit set on it: "Key limit exceeded (monthly limit). Manage it using ...".
+_QUOTA_EXHAUSTED_WORDING = (
+    "credit balance is too low",
+    "you have reached your specified",
+    "prepayment credits are depleted",
+    "exceeded its monthly spending cap",
+    "key limit exceeded",
+)
+# The name Anthropic gives rejected credentials, with or without its 401 status.
+_AUTHENTICATION_ERROR_TYPE = "authentication_error"
+# Anthropic reports an overloaded model with this error type, with or without a 529 status.
+_OVERLOADED_ERROR_TYPE = "overloaded_error"
+# Wording providers (Anthropic, OpenAI Codex) use when overloaded without a transient status or error type.
+_OVERLOADED_WORDING = (_OVERLOADED_ERROR_TYPE, "currently overloaded")
+# The names providers give a transient failure: Anthropic's error types, where ``timeout_error`` is a gateway
+# timeout, the types OpenAI-compatible servers send, and the Responses codes.
+_TRANSIENT_NAMES = frozenset(
+    {
+        "overloaded",
+        _OVERLOADED_ERROR_TYPE,
+        "server_error",
+        "internal_server_error",
+        "api_error",
+        "timeout_error",
+        "vector_store_timeout",
+    },
+)
+
+
+# Wording of a rejection that names the credentials without a 401 status, such as Gemini's 400 "API key not valid",
+# Anthropic's 403 permission error that names the API key, and a 403 "not authorized": an API key, or a word of the
+# auth family in either spelling. Each is a whole word of the lowercased text, one not inside a longer run of letters or
+# digits, so ``invalid_auth`` holds ``auth`` while an ``author`` property, an ``authority``, or ``oauth`` holds none.
+_CREDENTIAL_WORDING = re.compile(
+    r"(?<![a-z0-9])(?:(?:un)?auth(?:enticat[a-z]*|ori[sz][a-z]*)?|api[ _]?keys?)(?![a-z0-9])",
+)
+
+# How OpenAI words the 429 of a request larger than the account's tokens-per-minute limit, which it sends with the
+# ``rate_limit_exceeded`` code: "Request too large for gpt-4o in organization org-... on tokens per min (TPM): Limit
+# 30000, Requested 50000." Waiting never lets such a request through; only a smaller one passes.
+_REQUEST_TOO_LARGE = "request too large"
+
+# Wording providers use when a request does not fit the model's context window, such as the payload-size wording of
+# OpenAI-compatible servers and Anthropic, older Claude models' "input length and `max_tokens` exceed context limit",
+# llama.cpp's "the request exceeds the available context size", Vertex AI's "Unable to submit request because the
+# input token count is 106244 but model only supports up to 65536.", whose "only supports up to" alone also names
+# other limits, such as a number of images, and Bedrock's ValidationException "Input is too long for requested model."
+# for input and requested output tokens above the model's quota. A bare ``max_tokens`` is too broad to count.
+_CONTEXT_WINDOW_MARKERS = (
+    "context_length_exceeded",
+    "context window",
+    "context length",
+    "context limit",
+    "maximum context length",
+    "maximum number of tokens",
+    "token limit",
+    "too many tokens",
+    "payload too large",
+    "content_too_large",
+    _REQUEST_TOO_LARGE,
+    "input too long",
+    "prompt is too long",
+    "prompt too long",
+    "exceeds the model",
+    "available context size",
+    "because the input token count is",
+    "input is too long for requested model",
+)
+# How a llama.cpp server words the 500 of an input it must take in one physical batch, such as an embedding, that is
+# larger than that batch: "input (9000 tokens) is too large to process. increase the physical batch size (current batch
+# size: 512)". Only a smaller input passes, though the status is a server error's.
+_PHYSICAL_BATCH_TOO_SMALL = "too large to process. increase the physical batch size"
+
+
+class CliLoginError(ValueError):
+    """A CLI's saved OAuth login, such as Codex's or Kimi Code's, could not lend a usable token.
+
+    ``status_code`` is the HTTP status of a token refresh the login server answered with an error.
+    """
+
+    def __init__(self, message: str, *, status_code: int | None = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+
+
+def _is_context_window_error(lowered: str, *, code: str | None) -> bool:
+    """Return whether an error's code or lowercased wording says the request does not fit the context window."""
+    return code == "context_length_exceeded" or any(marker in lowered for marker in _CONTEXT_WINDOW_MARKERS)
+
+
+def classify_provider_error(  # noqa: PLR0911 - one return per rule
+    message: str,
+    *,
+    provider: str,
+    status_code: int | None = None,
+    code: str | None = None,
+    error_type: str | None = None,
+    retry_after_seconds: float | None = None,
+) -> ProviderError:
+    """Return the normalized error of one failed provider response; the first rule that matches decides.
+
+    ``status_code`` is the HTTP status. An error event inside a stream that already succeeded has none, and a
+    numeric ``code``, as OpenAI-compatible servers send in one, counts as its status. ``code`` and ``error_type``
+    name the failure as the provider does, such as ``rate_limit_error`` or ``server_error``; the error keeps ``code``
+    as its ``provider_code``. ``retry_after_seconds`` is the response's ``Retry-After`` hint.
+
+    1. A 429 status, or a rate-limit name on an event without a status, is ``RateLimited``, unless its wording says the
+       request alone is larger than the account's tokens-per-minute limit, which makes it ``ContextWindowExceeded``
+       marked ``TOKENS_PER_MINUTE``: only a smaller request passes. A rate-limit name with that wording decides on any
+       status, as Groq sends it with a 413; otherwise a status other than 429 outranks a rate-limit name.
+    2. A transient status, 408, 409, or any 5xx, is ``ProviderUnavailable``, unless its wording is llama.cpp's for an
+       input larger than the server's physical batch, which makes it ``ContextWindowExceeded``: only a smaller input
+       passes.
+    3. A 401 status or Anthropic's ``authentication_error`` is ``AuthenticationFailed``.
+    4. Wording or a code that names the context window, on a client error or an event without a status, is
+       ``ContextWindowExceeded``: a retry cannot make the request fit. A 5xx that mentions it stays transient.
+    5. A transient name, or Anthropic's overloaded wording, is ``ProviderUnavailable``, unless the status is a client
+       error, which outranks the name a server gives it: Ollama's OpenAI-compatible endpoint names every status but
+       400 and 404 ``api_error``.
+    6. Wording that names the credentials, on a client error or an event without a status, is
+       ``AuthenticationFailed``.
+    7. An invalid-request status is ``InvalidRequest``.
+    8. Anything else, such as a 403 or an unknown status, is a final ``ProviderError``.
+
+    A 402 status, or a name or wording that says the account has no credit left or reached its monthly spend or usage
+    limit, outranks every rule: it is a final ``ProviderError`` marked ``QUOTA_EXHAUSTED``, since only a change to the
+    account's billing lets it through, except OpenRouter's in-flight-budget 402, which stays final too.
+    """
+    status = status_code if status_code is not None else (int(code) if code is not None and code.isdecimal() else None)
+    names = {code, error_type}
+    lowered = message.casefold()
+    client_side = status is None or status in _HTTP_CLIENT_ERROR_RANGE
+
+    def typed(kind: type[ProviderError], *, marker: str | None = None) -> ProviderError:
+        return kind(
+            message,
+            provider=provider,
+            status_code=status_code,
+            code=marker,
+            provider_code=code,
+            retry_after_seconds=retry_after_seconds,
+        )
+
+    if (
+        status == _PAYMENT_REQUIRED_STATUS
+        or names & _QUOTA_EXHAUSTED_NAMES
+        or any(wording in lowered for wording in _QUOTA_EXHAUSTED_WORDING)
+    ):
+        return typed(ProviderError, marker=QUOTA_EXHAUSTED)
+    over_tokens_per_minute = _REQUEST_TOO_LARGE in lowered
+    if status == _RATE_LIMIT_STATUS or (names & _RATE_LIMIT_NAMES and (status is None or over_tokens_per_minute)):
+        return typed(ContextWindowExceeded, marker=TOKENS_PER_MINUTE) if over_tokens_per_minute else typed(RateLimited)
+    if status in _TRANSIENT_CLIENT_STATUSES or status in _SERVER_ERROR_RANGE:
+        too_large = _PHYSICAL_BATCH_TOO_SMALL in lowered
+        return typed(ContextWindowExceeded) if too_large else typed(ProviderUnavailable)
+    if status == _UNAUTHORIZED_STATUS or _AUTHENTICATION_ERROR_TYPE in names:
+        return typed(AuthenticationFailed)
+    if client_side and _is_context_window_error(lowered, code=code):
+        return typed(ContextWindowExceeded)
+    if (
+        names & _TRANSIENT_NAMES or any(wording in lowered for wording in _OVERLOADED_WORDING)
+    ) and status not in _HTTP_CLIENT_ERROR_RANGE:
+        return typed(ProviderUnavailable)
+    if client_side and _CREDENTIAL_WORDING.search(lowered):
+        return typed(AuthenticationFailed)
+    if status in _INVALID_REQUEST_STATUSES:
+        return typed(InvalidRequest)
+    return typed(ProviderError)
+
+
+def retry_after_seconds(headers: Mapping[str, str], *, now: datetime | None = None) -> float | None:
+    """Return a response's ``Retry-After`` hint in seconds, read as the SDKs read it.
+
+    Azure's ``retry-after-ms`` wins, then a number of seconds in ``Retry-After``, then an HTTP date there, counted from
+    ``now``. A negative number is no hint, and a date already past is no wait. Header names match in any case.
+    """
+    by_name = {name.casefold(): value for name, value in headers.items()}
+    for name, divisor in (("retry-after-ms", 1000.0), ("retry-after", 1.0)):
+        raw_value = by_name.get(name)
+        if raw_value is None:
+            continue
+        try:
+            seconds = float(raw_value.strip()) / divisor
+        except ValueError:
+            continue
+        return seconds if seconds >= 0 else None
+    return _seconds_until(by_name.get("retry-after"), now=now)
+
+
+def _seconds_until(http_date: str | None, *, now: datetime | None) -> float | None:
+    """Return the seconds from ``now`` until an HTTP date, zero for one already past, or None for no date."""
+    if http_date is None:
+        return None
+    try:
+        when = parsedate_to_datetime(http_date)
+    except (TypeError, ValueError):
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=UTC)
+    return max((when - (now or datetime.now(UTC))).total_seconds(), 0.0)
+
+
+def missing_api_key_error(env_var: str, *, provider: str) -> AuthenticationFailed:
+    """Return the error for a route that has no API key, which the reply turns into how to connect one."""
+    message = f"{env_var} not set. Please set the {env_var} environment variable."
+    return AuthenticationFailed(message, provider=provider, status_code=401, code=MISSING_API_KEY)
+
+
+def provider_failure(error: BaseException, *, provider: str) -> ProviderError | None:
+    """Return the normalized error a transport or sign-in failure is, or None for the adapter's own mapping.
+
+    The error and every cause it shows count, so a network failure that an SDK, the Google auth library, or a CLI
+    login refresh wrapped in an error of its own is still the retryable failure it is: a refused or reset
+    connection, a timeout, an HTTP client or aiohttp transport error, or a Google token endpoint that could not be
+    reached or answered with a retryable error. A CLI login server that answered its token refresh with a status
+    ``classify_provider_error`` calls retryable, such as a 503 or a 429, is that failure. Google credentials the
+    token endpoint rejected, such as a deleted service-account key, are an authentication failure; credentials that
+    cannot be found or loaded stay a configuration error, and any other CLI login failure is the adapter's to map.
+    """
+    import aiohttp  # noqa: PLC0415 - google-genai's transport, loaded only once a request fails
+    import httpx2  # noqa: PLC0415 - the OpenAI and Claude SDKs' transport, loaded only once a request fails
+    from google.auth import exceptions as google_auth  # noqa: PLC0415 - loaded only once a request fails
+
+    chain = list(_visible_chain(error))
+    transport = (
+        httpx.TransportError,
+        httpx2.TransportError,
+        ConnectionError,
+        TimeoutError,
+        aiohttp.ClientError,
+        google_auth.TransportError,
+    )
+    if any(
+        isinstance(cause, transport) or (isinstance(cause, google_auth.RefreshError) and cause.retryable)
+        for cause in chain
+    ):
+        # A timeout as either HTTP client raises it, or as aiohttp and the socket layer raise it: the OpenAI and
+        # Claude SDKs send through httpx2, the Gemini and Ollama SDKs and the CLI login refreshes through httpx.
+        timeouts = (httpx.TimeoutException, httpx2.TimeoutException, TimeoutError)
+        timed_out = any(isinstance(cause, timeouts) for cause in chain)
+        code = TRANSPORT_TIMEOUT if timed_out else "connection_error"
+        return ProviderUnavailable(failure_text(error), provider=provider, code=code)
+    if any(isinstance(cause, google_auth.RefreshError) for cause in chain):
+        return AuthenticationFailed(f"Google credentials were rejected: {error}", provider=provider, status_code=401)
+    for cause in chain:
+        if isinstance(cause, CliLoginError) and cause.status_code is not None:
+            failure = classify_provider_error(str(cause), provider=provider, status_code=cause.status_code)
+            return failure if failure.retryable else None
+    return None
+
+
+# --- The attachments a rejection names ---------------------------------------------------------------------------
+# An adapter reads its rejection's body for the media items it points to (``ProviderError.rejected_media``). The body
+# is the provider's, so these helpers accept any value and fail to nothing: a rejection they cannot read names no
+# attachment, and the media fallback then leaves out all of the request's media, as it does for any other rejection.
+
+# One step of a request-body path, a field name or an index short enough to read as a number.
+_PATH_STEP = re.compile(r"[A-Za-z_][A-Za-z0-9_]*|[0-9]{1,9}")
+
+
+def path_tokens(path: str) -> list[str | int]:
+    """Return the steps of a request-body path, field names as text and indexes as numbers.
+
+    Providers write a path as ``messages[3].content[2].file`` or as ``messages.3.content.2.image``; both read alike.
+    """
+    return [int(step) if step.isdigit() else step for step in _PATH_STEP.findall(path)]
+
+
+def part_at(body: object, tokens: Sequence[str | int]) -> Mapping[str, Any] | None:
+    """Return the deepest object with a text ``type`` that ``tokens`` lead through in ``body``, the part a path names.
+
+    The walk stops at the first step ``body`` does not have, and None means the path reaches no typed part.
+    """
+    part: Mapping[str, Any] | None = None
+    current = body
+    for token in tokens:
+        if isinstance(token, int) and isinstance(current, list) and token < len(current):
+            current = cast("list[object]", current)[token]
+        elif isinstance(token, str) and isinstance(current, dict) and token in current:
+            current = cast("dict[str, object]", current)[token]
+        else:
+            break
+        if isinstance(current, dict) and isinstance((fields := cast("dict[str, Any]", current)).get("type"), str):
+            part = fields
+    return part
+
+
+def media_ids(messages: Sequence[Message], kind: MediaKind) -> frozenset[str]:
+    """Return the ids of every ``kind`` media item in ``messages``, for a rejection that names the kind alone."""
+    return frozenset(item.id for message in messages for item_kind, item in media_items(message) if item_kind == kind)
+
+
+def _visible_chain(error: BaseException) -> Iterator[BaseException]:
+    """Yield the error and each cause it shows, explicit or implicit, once; a suppressed context ends the chain."""
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        yield current
+        current = current.__cause__ or (None if current.__suppress_context__ else current.__context__)

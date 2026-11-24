@@ -15,37 +15,44 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from mindroom.runtime_env_policy import SANDBOX_RUNTIME_ENV_BY_KEY
-from mindroom.tool_system.worker_routing import worker_dir_name
+from mindroom.tool_system.worker_routing import worker_dir_name, worker_log_id
 from mindroom.workers.backend import (
     WorkerBackend,
+    WorkerBackendDefaults,
     WorkerBackendError,
     effective_idle_status,
     filter_and_sort_worker_handles,
 )
 from mindroom.workers.backends._lifecycle import (
+    DEFAULT_IDLE_TIMEOUT_SECONDS,
+    WorkerLifecycleState,
+    WorkerLocks,
     initial_worker_lifecycle_state,
     mark_worker_failed,
     mark_worker_idle,
     mark_worker_ready,
     prepare_worker_ensure_lifecycle,
-    read_lifecycle_state,
     touch_worker_lifecycle,
-    write_lifecycle_state,
+    worker_handle,
 )
 from mindroom.workers.backends._metadata_store import (
     list_worker_state_paths,
     load_worker_metadata,
     save_worker_metadata,
 )
-from mindroom.workers.models import ProgressSink, WorkerHandle, WorkerSpec, WorkerStatus
+from mindroom.workers.models import (
+    SANDBOX_RUNNER_API_ROOT,
+    ProgressSink,
+    WorkerHandle,
+    WorkerSpec,
+    WorkerStatus,
+    normalize_sandbox_runner_api_root,
+)
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
 
-_DEFAULT_IDLE_TIMEOUT_SECONDS = 1800.0
-_DEFAULT_WORKER_API_ROOT = "/api/sandbox-runner"
-_SHARED_INITIALIZATION_LOCK = threading.Lock()
-_SHARED_INITIALIZATION_LOCKS: dict[str, threading.Lock] = {}
+_WORKER_INITIALIZATION_LOCKS = WorkerLocks()
 
 
 @dataclass(frozen=True)
@@ -75,13 +82,7 @@ class _LocalWorkerMetadata:
     worker_key: str
     endpoint: str
     backend_name: str
-    created_at: float
-    last_used_at: float
-    status: WorkerStatus
-    last_started_at: float | None = None
-    startup_count: int = 0
-    failure_count: int = 0
-    failure_reason: str | None = None
+    lifecycle: WorkerLifecycleState
 
 
 def _default_worker_root(runtime_paths: RuntimePaths) -> Path:
@@ -89,31 +90,17 @@ def _default_worker_root(runtime_paths: RuntimePaths) -> Path:
 
 
 def _read_idle_timeout_seconds(runtime_paths: RuntimePaths) -> float:
-    raw_timeout = runtime_paths.env_value(
-        SANDBOX_RUNTIME_ENV_BY_KEY["worker_idle_timeout_seconds"],
-        default=str(_DEFAULT_IDLE_TIMEOUT_SECONDS),
-    ) or str(_DEFAULT_IDLE_TIMEOUT_SECONDS)
+    raw_timeout = runtime_paths.env_value(SANDBOX_RUNTIME_ENV_BY_KEY["worker_idle_timeout_seconds"])
     try:
-        timeout = float(raw_timeout)
+        timeout = float(raw_timeout or DEFAULT_IDLE_TIMEOUT_SECONDS)
     except ValueError:
-        timeout = _DEFAULT_IDLE_TIMEOUT_SECONDS
+        timeout = DEFAULT_IDLE_TIMEOUT_SECONDS
     return max(1.0, timeout)
 
 
-def _normalize_worker_api_root(raw_endpoint: str) -> str:
-    normalized = raw_endpoint.strip() or _DEFAULT_WORKER_API_ROOT
-    normalized = normalized.rstrip("/")
-    if normalized.endswith("/execute"):
-        normalized = normalized.removesuffix("/execute")
-    return normalized or _DEFAULT_WORKER_API_ROOT
-
-
 def _read_worker_api_root(runtime_paths: RuntimePaths) -> str:
-    raw_api_root = runtime_paths.env_value(
-        SANDBOX_RUNTIME_ENV_BY_KEY["worker_endpoint"],
-        default=_DEFAULT_WORKER_API_ROOT,
-    )
-    return _normalize_worker_api_root(raw_api_root or _DEFAULT_WORKER_API_ROOT)
+    raw_api_root = runtime_paths.env_value(SANDBOX_RUNTIME_ENV_BY_KEY["worker_endpoint"]) or ""
+    return normalize_sandbox_runner_api_root(raw_api_root) or SANDBOX_RUNNER_API_ROOT
 
 
 def local_worker_state_paths_for_root(state_root: Path) -> LocalWorkerStatePaths:
@@ -140,7 +127,7 @@ def local_worker_state_paths_from_handle(handle: WorkerHandle) -> LocalWorkerSta
     """Resolve local runtime paths from a local worker handle."""
     state_root = handle.debug_metadata.get("state_root")
     if state_root is None:
-        msg = f"Worker '{handle.worker_key}' does not expose local state metadata."
+        msg = f"Worker '{worker_log_id(handle.worker_key)}' does not expose local state metadata."
         raise WorkerBackendError(msg)
     return local_worker_state_paths_for_root(Path(state_root))
 
@@ -152,14 +139,14 @@ def _ensure_local_worker_directories(paths: LocalWorkerStatePaths) -> None:
     paths.metadata_dir.mkdir(parents=True, exist_ok=True)
 
 
-def _ensure_local_worker_state(paths: LocalWorkerStatePaths) -> None:
+def _ensure_local_worker_state(paths: LocalWorkerStatePaths, venv_timeout_seconds: float | None = None) -> None:
     """Create the persistent directories and venv for one worker runtime root."""
     _ensure_local_worker_directories(paths)
     if (paths.venv_dir / "bin" / "python").exists():
         return
 
     try:
-        _create_local_worker_venv(paths.venv_dir)
+        _create_local_worker_venv(paths.venv_dir, venv_timeout_seconds)
     except Exception:
         # Creation writes the interpreter before seeding pip. A failed seed must
         # leave the next request able to retry without deleting user packages.
@@ -167,14 +154,17 @@ def _ensure_local_worker_state(paths: LocalWorkerStatePaths) -> None:
         raise
 
 
-def _create_local_worker_venv(venv_dir: Path) -> None:
+def _create_local_worker_venv(venv_dir: Path, timeout_seconds: float | None = None) -> None:
     """Seed pip from the interpreter's bundled wheel without index access."""
     uv_path = shutil.which("uv")
     bundled_pip_dir = Path(sysconfig.get_path("stdlib")) / "ensurepip" / "_bundled"
     if uv_path is None or not any(bundled_pip_dir.glob("pip-*.whl")):
+        if timeout_seconds is not None:
+            msg = "Only uv with a bundled pip creates a worker environment within a time limit."
+            raise WorkerBackendError(msg)
         venv.EnvBuilder(with_pip=True, system_site_packages=True).create(venv_dir)
         return
-    _create_uv_worker_venv(venv_dir, uv_path=uv_path, bundled_pip_dir=bundled_pip_dir)
+    _create_uv_worker_venv(venv_dir, uv_path=uv_path, bundled_pip_dir=bundled_pip_dir, timeout_seconds=timeout_seconds)
 
 
 def _ensure_local_script_worker_state(paths: LocalWorkerStatePaths) -> None:
@@ -195,6 +185,7 @@ def _create_uv_worker_venv(
     *,
     uv_path: str,
     bundled_pip_dir: Path | None = None,
+    timeout_seconds: float | None = None,
 ) -> None:
     """Create a worker environment with optional offline pip seeding."""
     env = dict(os.environ)
@@ -229,36 +220,31 @@ def _create_uv_worker_venv(
         ],
         check=True,
         env=env,
+        timeout=timeout_seconds,
     )
 
 
-def ensure_local_worker_state_locked(paths: LocalWorkerStatePaths) -> None:
-    """Create one worker runtime root under a shared per-worker initialization lock."""
-    with _shared_worker_initialization_lock(paths):
-        _ensure_local_worker_state(paths)
+def ensure_local_worker_state_locked(paths: LocalWorkerStatePaths, venv_timeout_seconds: float | None = None) -> None:
+    """Create one worker runtime root under a shared per-worker initialization lock.
+
+    ``venv_timeout_seconds`` ends a venv creation that is stuck, so that a later request creates it again.
+    """
+    with _worker_initialization_lock(paths):
+        _ensure_local_worker_state(paths, venv_timeout_seconds)
 
 
 def ensure_local_script_worker_state_locked(paths: LocalWorkerStatePaths) -> None:
     """Create run-scoped worker state under the shared initialization lock."""
-    with _shared_worker_initialization_lock(paths):
+    with _worker_initialization_lock(paths):
         _ensure_local_script_worker_state(paths)
 
 
-def _shared_worker_initialization_lock(paths: LocalWorkerStatePaths) -> threading.Lock:
-    return _shared_worker_initialization_lock_for_root(paths.root)
+def _worker_initialization_lock(paths: LocalWorkerStatePaths) -> threading.Lock:
+    """Return the process-wide lock that serializes one worker root's initialization."""
+    return _WORKER_INITIALIZATION_LOCKS.for_key(str(paths.root))
 
 
-def _shared_worker_initialization_lock_for_root(state_root: Path) -> threading.Lock:
-    lock_key = str(state_root)
-    with _SHARED_INITIALIZATION_LOCK:
-        worker_lock = _SHARED_INITIALIZATION_LOCKS.get(lock_key)
-        if worker_lock is None:
-            worker_lock = threading.Lock()
-            _SHARED_INITIALIZATION_LOCKS[lock_key] = worker_lock
-    return worker_lock
-
-
-class _LocalWorkerBackend:
+class _LocalWorkerBackend(WorkerBackendDefaults):
     """Persistent local worker backend used by the sandbox runner."""
 
     backend_name = "local_sandbox_runner"
@@ -272,7 +258,7 @@ class _LocalWorkerBackend:
         idle_timeout_seconds: float,
     ) -> None:
         self.worker_root = worker_root.expanduser().resolve()
-        self.api_root = _normalize_worker_api_root(api_root)
+        self.api_root = api_root
         self.idle_timeout_seconds = max(1.0, idle_timeout_seconds)
         self.worker_root.mkdir(parents=True, exist_ok=True)
         self._lock = threading.Lock()
@@ -292,32 +278,27 @@ class _LocalWorkerBackend:
         del progress_sink
         timestamp = time.time() if now is None else now
         paths = _local_worker_state_paths(spec.worker_key, worker_root=self.worker_root)
-        worker_lock = self._worker_lock(paths)
-
-        with worker_lock:
+        with _worker_initialization_lock(paths):
             with self._lock:
                 metadata = self._load_metadata(paths) or self._default_metadata(spec.worker_key, timestamp)
                 should_restart = self._effective_status(metadata, timestamp) != "ready"
-                write_lifecycle_state(
-                    metadata,
-                    prepare_worker_ensure_lifecycle(
-                        read_lifecycle_state(metadata),
-                        now=timestamp,
-                        should_restart=should_restart,
-                    ),
+                metadata.lifecycle = prepare_worker_ensure_lifecycle(
+                    metadata.lifecycle,
+                    now=timestamp,
+                    should_restart=should_restart,
                 )
                 self._save_metadata(paths, metadata)
 
             try:
-                self._ensure_worker_state(paths)
+                _ensure_local_worker_state(paths)
             except Exception as exc:
-                failure_reason = f"Failed to initialize worker '{spec.worker_key}': {exc}"
+                failure_reason = f"Failed to initialize worker '{worker_log_id(spec.worker_key)}': {exc}"
                 with self._lock:
                     self._record_failure_locked(paths, spec.worker_key, failure_reason, now=timestamp)
                 raise WorkerBackendError(failure_reason) from exc
 
             with self._lock:
-                write_lifecycle_state(metadata, mark_worker_ready(read_lifecycle_state(metadata), now=timestamp))
+                metadata.lifecycle = mark_worker_ready(metadata.lifecycle, now=timestamp)
                 self._save_metadata(paths, metadata)
                 return self._to_handle(metadata, paths, now=timestamp)
 
@@ -325,12 +306,11 @@ class _LocalWorkerBackend:
         """Refresh last-used bookkeeping for one local worker."""
         timestamp = time.time() if now is None else now
         paths = _local_worker_state_paths(worker_key, worker_root=self.worker_root)
-        worker_lock = self._worker_lock(paths)
-        with worker_lock, self._lock:
+        with _worker_initialization_lock(paths), self._lock:
             metadata = self._load_metadata(paths)
             if metadata is None:
                 return None
-            write_lifecycle_state(metadata, touch_worker_lifecycle(read_lifecycle_state(metadata), now=timestamp))
+            metadata.lifecycle = touch_worker_lifecycle(metadata.lifecycle, now=timestamp)
             self._save_metadata(paths, metadata)
             return self._to_handle(metadata, paths, now=timestamp)
 
@@ -356,8 +336,8 @@ class _LocalWorkerBackend:
                 metadata = self._load_metadata(paths)
                 if metadata is None:
                     continue
-                if metadata.status == "ready" and self._effective_status(metadata, timestamp) == "idle":
-                    write_lifecycle_state(metadata, mark_worker_idle(read_lifecycle_state(metadata)))
+                if metadata.lifecycle.status == "ready" and self._effective_status(metadata, timestamp) == "idle":
+                    metadata.lifecycle = mark_worker_idle(metadata.lifecycle)
                     self._save_metadata(paths, metadata)
                     cleaned_workers.append(self._to_handle(metadata, paths, now=timestamp))
 
@@ -370,33 +350,23 @@ class _LocalWorkerBackend:
         *,
         now: float | None = None,
         startup_count: int | None = None,
+        incarnation: str | None = None,
     ) -> WorkerHandle:
         """Persist one local worker failure."""
-        del startup_count  # This backend never replaces a worker behind an in-flight request.
+        del startup_count, incarnation  # This backend never replaces a worker behind an in-flight request.
         timestamp = time.time() if now is None else now
         paths = _local_worker_state_paths(worker_key, worker_root=self.worker_root)
-        worker_lock = self._worker_lock(paths)
-
-        with worker_lock, self._lock:
+        with _worker_initialization_lock(paths), self._lock:
             return self._record_failure_locked(paths, worker_key, failure_reason, now=timestamp)
 
-    def _worker_lock(self, paths: LocalWorkerStatePaths) -> threading.Lock:
-        return _shared_worker_initialization_lock(paths)
-
     def _default_metadata(self, worker_key: str, now: float) -> _LocalWorkerMetadata:
-        lifecycle = initial_worker_lifecycle_state(now=now)
         return _LocalWorkerMetadata(
             worker_id=worker_dir_name(worker_key),
             worker_key=worker_key,
             endpoint=f"{self.api_root}/execute",
             backend_name=self.backend_name,
-            created_at=lifecycle.created_at,
-            last_used_at=lifecycle.last_used_at,
-            status=lifecycle.status,
+            lifecycle=initial_worker_lifecycle_state(now=now),
         )
-
-    def _ensure_worker_state(self, paths: LocalWorkerStatePaths) -> None:
-        _ensure_local_worker_state(paths)
 
     def _metadata_paths(self) -> list[LocalWorkerStatePaths]:
         return list_worker_state_paths(
@@ -411,7 +381,8 @@ class _LocalWorkerBackend:
         save_worker_metadata(paths, metadata)
 
     def _effective_status(self, metadata: _LocalWorkerMetadata, now: float) -> WorkerStatus:
-        return effective_idle_status(metadata.status, metadata.last_used_at, self.idle_timeout_seconds, now)
+        lifecycle = metadata.lifecycle
+        return effective_idle_status(lifecycle.status, lifecycle.last_used_at, self.idle_timeout_seconds, now)
 
     def _record_failure_locked(
         self,
@@ -422,28 +393,19 @@ class _LocalWorkerBackend:
         now: float,
     ) -> WorkerHandle:
         metadata = self._load_metadata(paths) or self._default_metadata(worker_key, now)
-        write_lifecycle_state(
-            metadata,
-            mark_worker_failed(read_lifecycle_state(metadata), now=now, failure_reason=failure_reason),
-        )
+        metadata.lifecycle = mark_worker_failed(metadata.lifecycle, now=now, failure_reason=failure_reason)
         self._save_metadata(paths, metadata)
         return self._to_handle(metadata, paths, now=now)
 
     def _to_handle(self, metadata: _LocalWorkerMetadata, paths: LocalWorkerStatePaths, *, now: float) -> WorkerHandle:
-        return WorkerHandle(
+        return worker_handle(
             worker_id=metadata.worker_id,
             worker_key=metadata.worker_key,
+            lifecycle=metadata.lifecycle,
             endpoint=metadata.endpoint,
             auth_token=None,
             status=self._effective_status(metadata, now),
             backend_name=metadata.backend_name,
-            last_used_at=metadata.last_used_at,
-            created_at=metadata.created_at,
-            last_started_at=metadata.last_started_at,
-            expires_at=None,
-            startup_count=metadata.startup_count,
-            failure_count=metadata.failure_count,
-            failure_reason=metadata.failure_reason,
             debug_metadata={
                 "api_root": self.api_root,
                 "state_root": str(paths.root),

@@ -1,0 +1,28 @@
+{
+ "scenario": {
+  "actions": [
+   {
+    "op": "reopen"
+   }
+  ],
+  "ids": [
+   "$m1",
+   "$r1"
+  ],
+  "input": "unversioned_ledger"
+ },
+ "steps": [
+  {
+   "action": null,
+   "changes": {},
+   "outcome": null
+  },
+  {
+   "action": {
+    "op": "reopen"
+   },
+   "changes": {},
+   "outcome": "ok"
+  }
+ ]
+}

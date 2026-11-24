@@ -24,6 +24,7 @@ if TYPE_CHECKING:
     config_fields=[
         ConfigField(
             name="api_key",
+            env=("SERPER_API_KEY",),
             label="API Key",
             type="password",
             required=False,
@@ -101,7 +102,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["requests"],
-    docs_url="https://docs.agno.com/tools/toolkits/search/serper",
+    docs_url="https://docs.mindroom.chat/tools/web-search/#serper",
     function_names=("scrape_webpage", "search_news", "search_scholar", "search_web"),
 )
 def serper_tools() -> type[SerperTools]:

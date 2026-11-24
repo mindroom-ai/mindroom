@@ -6,46 +6,30 @@ import asyncio
 from copy import deepcopy
 from dataclasses import dataclass, replace
 from functools import partial
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
-from agno.db.base import SessionType
-from agno.run.agent import (
-    RunCompletedEvent,
-    RunContentEvent,
-    RunErrorEvent,
-    RunOutput,
-    ToolCallCompletedEvent,
-    ToolCallStartedEvent,
-)
-from agno.run.base import RunStatus
-from agno.session.agent import AgentSession
-
-from mindroom import ai_runtime
 from mindroom.agent_cli.approval import CliApprovalCall
 from mindroom.agent_cli.cli_approval_recovery import CliFollowUpTurn, continue_cli_approval
-from mindroom.agent_cli.minimal_agent import MinimalAgent
-from mindroom.agent_storage import create_session_storage
+from mindroom.agent_loop.build import tool_owners_by_agent
 from mindroom.agents import create_agent
-from mindroom.ai import collect_streamed_response_content, run_delegated_child_response, stream_agent_response
-from mindroom.ai_run_metadata import build_ai_run_metadata_content
-from mindroom.approval.receipt import install_approval_receipt_hooks
+from mindroom.ai import agent_run_metadata_content, run_delegated_child_response, stream_agent_response
+from mindroom.ai_run_metadata import model_payload, prior_usage_by_run
+from mindroom.approval.receipt_readers import add_approval_receipt_reader
+from mindroom.approval.resume import ResumeRunner
 from mindroom.approval.tool_owners import (
-    approval_denial_context,
-    approved_executions_context,
     authorize_prepared_tool_call,
     required_approval_tool_names,
-    toolkit_owners_for_agents,
     validate_approval_tool_owners,
 )
-from mindroom.delegation.execution import drive_delegation_stream, has_delegation_state
-from mindroom.delegation.state import DelegationState
-from mindroom.error_handling import run_error_event_text
+from mindroom.delegation.cost import SubagentCost, receiving_subagent_cost, stored_receipts
+from mindroom.delegation.execution import answered_delegation_calls, drive_delegation_stream, resume_from_approval
 from mindroom.helper_usage import helper_usage_context
-from mindroom.history.native import restore_native_history
-from mindroom.history.session_context import ScopeSessionContext, close_agent_runtime_state_dbs
+from mindroom.history.session_context import ScopeSessionContext
 from mindroom.history.types import HistoryScope
-from mindroom.matrix.typing import typing_indicator
+from mindroom.llm.events import TextDelta, ToolCompleted, ToolProgress, ToolStarted
+from mindroom.llm.runs import RunRecord, RunStatus
+from mindroom.reply_scope import current_reply_event_id, current_span, current_span_stopped
 from mindroom.response_turn import (
     CompletedApprovalRun,
     CompletedAttempt,
@@ -53,182 +37,207 @@ from mindroom.response_turn import (
     PausedAttempt,
     ResponsePausedForApproval,
     ResponseTurnContext,
-    ResumedAttempt,
-    apply_local_approval_decisions,
+    TurnResume,
+    TurnSinks,
+    collect_streamed_response_content,
+    own_approved_calls,
+    pause_without_approval_error,
     paused_attempt_from_response,
+    pending_approval_requirements,
 )
-from mindroom.tool_system.events import CollectedStreamPresentation
-from mindroom.tool_system.runtime_context import (
-    ToolRuntimeModelBinding,
-    runtime_context_from_dispatch_context,
-)
-from mindroom.tool_system.worker_routing import run_with_tool_execution_identity
+from mindroom.run_storage import TerminalRecord, scope_run_storage
+from mindroom.session_storage.agent_storage import create_session_storage
+from mindroom.session_storage.lanes import run_session_storage_operation
+from mindroom.tool_jobs.consumption import finalize_consumption, set_consumption_storage
+from mindroom.tool_jobs.execution_scope import owned_tool_execution
+from mindroom.tool_jobs.settings import background_tool_jobs_enabled
+from mindroom.tool_system.context_bound_streams import closing_async_stream
+from mindroom.tool_system.events import CollectedStreamPresentation, with_stored_calls
+from mindroom.tool_system.runtime_context import tool_runtime_context
+from mindroom.turn_model import ModelScope, resolve_turn_model
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Callable, Mapping
+    from collections.abc import AsyncIterator, Callable
 
-    import nio
-    from agno.agent import Agent
-    from agno.knowledge.knowledge import Knowledge
-    from agno.models.response import ToolExecution
-    from agno.run.requirement import RunRequirement
-
+    from mindroom.agent_loop.build import AgentBuild
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
     from mindroom.event_journal import ApprovalContinuation
+    from mindroom.hooks import EnrichmentItem
     from mindroom.knowledge.refresh_scheduler import KnowledgeRefreshScheduler
+    from mindroom.knowledge.search import AgentKnowledge
     from mindroom.knowledge.utils import KnowledgeAccessSupport
+    from mindroom.llm.events import RunEvent
+    from mindroom.llm.runs import ToolExecution
     from mindroom.media_inputs import MediaInputs
+    from mindroom.run_storage import RunStorage
     from mindroom.streaming import ProgressPublisher
     from mindroom.tool_system.events import ToolTraceEntry
-    from mindroom.tool_system.runtime_context import ToolDispatchContext, ToolRuntimeSupport
-    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
+    from mindroom.turn_model import TurnModel
 
 
 @dataclass(frozen=True)
 class _CollectedAgentContinuation:
     """Provider facts awaiting settlement by the shared response lifecycle."""
 
-    response: RunOutput
+    response: RunRecord
     tool_executions: tuple[ToolExecution, ...]
     terminal_content: str
     has_visible_content: bool
 
 
-async def _collect_agent_continuation(  # noqa: C901
-    events: AsyncIterator[object],
+async def _collect_agent_continuation(
+    events: AsyncIterator[RunEvent],
     presentation: CollectedStreamPresentation,
     *,
+    run_id: str,
     progress: ProgressPublisher | None,
 ) -> _CollectedAgentContinuation:
-    """Collect ordered events while leaving terminal fallback text for lifecycle settlement."""
-    response: RunOutput | None = None
-    error_event: RunErrorEvent | None = None
-    terminal_content: str | None = None
+    """Collect ordered events of run ``run_id`` while leaving terminal fallback text for lifecycle settlement.
+
+    A failure of the resumed run propagates as its exception once the stream has reported it, and a failure while
+    the events are presented closes the stream before it propagates.
+    """
+    finished = TerminalRecord(RunRecord)
     saw_content_delta = False
-    current_tools: list[ToolExecution] = []
+    completed_ids: set[str] = set()
     await presentation.publish(progress)
-    async for event in events:
-        if isinstance(event, RunOutput):
-            response = event
-        elif isinstance(event, RunErrorEvent):
-            # Drain the producer so Agno can finish persistence and cleanup.
-            error_event = event
-        elif isinstance(event, RunContentEvent):
-            presentation.append_text(event.content)
-            saw_content_delta = saw_content_delta or bool(event.content)
-            await presentation.publish(progress)
-        elif isinstance(event, RunCompletedEvent) and event.content is not None:
-            terminal_content = str(event.content)
-        elif isinstance(event, ToolCallStartedEvent):
-            presentation.start_tool(event.tool)
-            await presentation.publish(progress)
-        elif isinstance(event, ToolCallCompletedEvent):
-            presentation.complete_tool(event.tool)
-            if event.tool is not None and event.parent_run_id is None:
-                current_tools.append(event.tool)
-            await presentation.publish(progress)
-    if error_event is not None and (response is None or response.status == RunStatus.error):
-        raise RuntimeError(run_error_event_text(error_event))
-    if response is None:
-        msg = "Agent continuation did not yield its final run"
-        raise RuntimeError(msg)
-    # Child approval results are also projected into the root presentation.
-    # Only calls owned by the parent run can change its next tool schema.
-    parent_call_ids = {tool.tool_call_id for tool in response.tools or ()}
-    current_tools = [tool for tool in current_tools if tool.tool_call_id in parent_call_ids]
+    async with closing_async_stream(events):
+        async for event in events:
+            if finished.collect(event):
+                continue
+            if isinstance(event, TextDelta):
+                presentation.append_text(event.text)
+                saw_content_delta = saw_content_delta or bool(event.text)
+                await presentation.publish(progress)
+            elif isinstance(event, ToolStarted):
+                presentation.start_tool(event.call)
+                await presentation.publish(progress)
+            elif isinstance(event, ToolCompleted):
+                presentation.complete_tool(event.call)
+                completed_ids.add(event.call.tool_call_id)
+                await presentation.publish(progress)
+            elif isinstance(event, ToolProgress):
+                presentation.show_tool_progress(event.tool_call_id, event.text)
+                await presentation.publish(progress)
+    response = finished.terminal(run_id)
+    # The run's own calls this continuation completed; child approval results are projected into the root
+    # presentation too, but only the parent run's calls can continue its turn.
+    completed = tuple(tool for tool in response.tools or () if tool.tool_call_id in completed_ids)
     _reconcile_agent_tools(presentation, response)
+    # A run that completed without streaming its text hands the text it wrote since the resume over for the lifecycle
+    # to append; the reply it continues already shows what it wrote before the pause.
+    hands_over_text = response.status is RunStatus.completed and not saw_content_delta
     return _CollectedAgentContinuation(
         response=response,
-        tool_executions=tuple(current_tools),
-        terminal_content=terminal_content if terminal_content and not saw_content_delta else "",
+        tool_executions=completed,
+        terminal_content=(response.new_handover_content or "") if hands_over_text else "",
         has_visible_content=saw_content_delta,
     )
 
 
-def _reconcile_agent_tools(presentation: CollectedStreamPresentation, response: RunOutput) -> None:
+def _reconcile_agent_tools(presentation: CollectedStreamPresentation, response: RunRecord) -> None:
     """Retain exact delegated approval anchors alongside the parent's own tools."""
     paused = paused_attempt_from_response(
         response,
-        fallback_session_id=response.session_id,
-        fallback_run_id=response.run_id,
         toolkit_owners={},
     )
     if paused is not None:
         for tool in paused.tools:
-            presentation.start_tool(tool)
+            presentation.start_tool(tool.call)
+    completed_call_ids = {
+        entry.tool_call_id for entry in presentation.tool_tracker.completed_tools if entry.tool_call_id is not None
+    }
+    # A delegation answered on an earlier entry no longer waits, though its stored call still names the pause.
+    answered = answered_delegation_calls(response)
     for tool in response.tools or ():
-        if tool.is_paused:
-            presentation.start_tool(tool)
-        else:
-            presentation.complete_tool(tool)
+        # An agent's own calls name no member.
+        if tool.is_paused and (None, tool.tool_call_id) not in answered:
+            presentation.start_tool(tool.call)
+        elif tool.tool_call_id not in completed_call_ids:
+            # Repeated terminal completions must not match older public slots by name.
+            presentation.complete_tool(tool.call)
+
+
+def note_reply_model(config: Config, model_name: str) -> None:
+    """Name the model the current span's reply runs on, which its live writes and error notes carry."""
+    if (handle := current_span()) is not None:
+        handle.reply_model = model_payload(config, model_name)
+
+
+def continuation_model(config: Config, runtime_paths: RuntimePaths, continuation: ApprovalContinuation) -> TurnModel:
+    """Return the model a paused run resumes on: the one it ran, else the one its room and thread choose now."""
+    return resolve_turn_model(
+        config,
+        runtime_paths,
+        ModelScope(
+            entity=continuation.entity_name,
+            room_id=continuation.room_id,
+            thread_id=continuation.thread_id,
+            explicit=continuation.runtime_model_name,
+        ),
+        None,
+    )
 
 
 async def _continue_persisted_agent(
-    agent: Agent,
+    build: AgentBuild,
     continuation: ApprovalContinuation,
-    persisted: RunOutput,
-    requirements: list[RunRequirement],
+    persisted: RunRecord,
     *,
+    storage: RunStorage,
     paused_answer: PausedAnswer,
     config: Config,
     runtime_paths: RuntimePaths,
-    execution_identity: ToolExecutionIdentity,
     refresh_scheduler: KnowledgeRefreshScheduler | None,
-    decisions: dict[str, bool],
-    denial_reasons: dict[str, str | None],
-    knowledge: Knowledge | None,
+    knowledge: AgentKnowledge | None,
     tool_trace_collector: list[ToolTraceEntry],
-    run_id_callback: Callable[[str], None] | None,
-    tool_dispatch: ToolDispatchContext,
+    tool_context: ToolRuntimeContext,
     progress: ProgressPublisher | None,
+    model_name: str,
+    system_enrichment_items: tuple[EnrichmentItem, ...],
+    quiet: bool,
+    subagent_cost: SubagentCost,
 ) -> CompletedApprovalRun | PausedAttempt:
-    """Resume a persisted agent with event streaming so presentation order is retained."""
+    """Resume a persisted agent with event streaming so presentation order is retained.
 
-    async def persisted_event() -> AsyncIterator[RunOutput]:
-        yield persisted
-
-    delegated = has_delegation_state(persisted)
-    native_events = (
-        persisted_event()
-        if delegated
-        else agent.acontinue_run(
-            run_id=continuation.run_id,
-            requirements=requirements,
-            session_id=continuation.session_id,
-            user_id=continuation.requester_id,
-            metadata=deepcopy(persisted.metadata),
-            stream=True,
-            stream_events=True,
-            yield_run_output=True,
-        )
+    ``subagent_cost`` collects what the resumed turn's subagents cost, and its reply reports it.
+    """
+    runner = ResumeRunner(
+        build=build,
+        config=config,
+        runtime_paths=runtime_paths,
+        model_name=model_name,
+        storage=storage,
+        user_id=continuation.requester_id,
+        steering=True,
     )
+    native_events, driver_calls = resume_from_approval(persisted, continuation.calls, runner)
     events = drive_delegation_stream(
-        agent,
-        cast("AsyncIterator[object]", native_events),
+        native_events,
+        record_type=RunRecord,
+        continue_parent=runner,
         run_child=run_delegated_child_response,
         agent_name=continuation.entity_name,
         config=config,
         runtime_paths=runtime_paths,
-        execution_identity=execution_identity,
+        execution_identity=tool_context.execution_identity,
         refresh_scheduler=refresh_scheduler,
-        decisions=decisions if delegated else None,
-        denial_reasons=denial_reasons if delegated else None,
-        approval_calls=continuation.calls if delegated else (),
+        approval_calls=driver_calls,
     )
     presentation = CollectedStreamPresentation(
         show_tool_calls=continuation.show_tool_calls,
         response_text=paused_answer.text,
-        tool_trace=list(paused_answer.tool_trace),
+        # The calls before the pause stay whole, so a stop later in the turn replays them as a finished turn would.
+        tool_trace=with_stored_calls(paused_answer.tool_trace, persisted.tools or ()),
         track_hidden_tools=True,
     )
-    collected = await _collect_agent_continuation(events, presentation, progress=progress)
+    collected = await _collect_agent_continuation(events, presentation, run_id=continuation.run_id, progress=progress)
     response = collected.response
     paused = paused_attempt_from_response(
         response,
-        fallback_session_id=continuation.session_id,
-        fallback_run_id=continuation.run_id,
-        toolkit_owners=toolkit_owners_for_agents([agent]),
+        toolkit_owners=tool_owners_by_agent(build),
     )
     if paused is not None:
         return replace(
@@ -238,49 +247,52 @@ async def _continue_persisted_agent(
             continuation_count=continuation.continuation_count,
             runtime_model_name=continuation.runtime_model_name,
         )
-    if response.status != RunStatus.completed:
-        raise RuntimeError(str(response.content or "Approval continuation did not complete"))
-    model_name = continuation.runtime_model_name or config.resolve_entity(continuation.entity_name).model_name
+    if response.status is not RunStatus.completed:
+        # Paused on a call no approval asks about and no delegation answers, such as a plugin's externally executed
+        # call: nothing can resume it, so the resume fails naming that call, as a live turn does.
+        raise pause_without_approval_error(response, entity_label="agent")
+    # The usage of the turn's attempts before the paused run, which its record carries across the pause.
+    spent = prior_usage_by_run(persisted.metadata)
     attempt = CompletedAttempt(
         response_text=collected.terminal_content
-        or (str(response.content or "Tool approval continuation completed") if not presentation.final_text() else ""),
-        replayable_text=presentation.final_text(),
+        or ("" if presentation.final_text() else "Tool approval continuation completed"),
+        # Text the run handed over whole is its answer too, which a quiet turn must not read as reporting nothing.
+        replayable_text=presentation.final_text() or collected.terminal_content,
         has_visible_content=collected.has_visible_content,
-        session_id=response.session_id or continuation.session_id,
         run_id=response.run_id,
-        attempt_run_id=response.run_id or continuation.run_id,
-        runtime_model_name=model_name,
+        attempt_run_id=response.run_id,
+        usage=response.metrics,
         status=response.status,
         tool_executions=collected.tool_executions,
         completed_tools=tuple(presentation.tool_trace),
-        metadata_content=build_ai_run_metadata_content(
-            config=config,
+        build_run_metadata=partial(
+            agent_run_metadata_content,
+            config,
+            response,
             model_name=model_name,
             run_id=response.run_id,
-            session_id=response.session_id or continuation.session_id,
+            session_id=continuation.session_id,
             status=response.status,
-            model=response.model,
-            model_provider=response.model_provider,
-            metrics=response.metrics,
-            context_metrics=response.metrics,
-            tool_count=len(response.tools or ()),
+            # An approval resume prepares no history of its own.
+            prepared_history=None,
+            prior_usage=tuple(spent.values()),
         ),
     )
     return await _stream_continuation_turn(
         _continuation_turn_context(continuation, model_name=model_name, metadata=response.metadata),
         presentation,
         prompt=continuation.request_body,
-        show_tool_calls=continuation.show_tool_calls,
-        resumed_attempt=ResumedAttempt(attempt, continuation_count=continuation.continuation_count),
+        resume=TurnResume(attempt, continuation_count=continuation.continuation_count, prior_usage=spent),
         config=config,
         runtime_paths=runtime_paths,
-        execution_identity=execution_identity,
         knowledge=knowledge,
         refresh_scheduler=refresh_scheduler,
         tool_trace_collector=tool_trace_collector,
-        run_id_callback=run_id_callback,
-        tool_dispatch=tool_dispatch,
+        tool_context=tool_context,
         progress=progress,
+        system_enrichment_items=system_enrichment_items,
+        quiet=quiet,
+        subagent_cost=subagent_cost,
     )
 
 
@@ -296,7 +308,7 @@ def _continuation_turn_context(
         session_id=continuation.session_id,
         run_id=continuation.run_id,
         correlation_id=continuation.correlation_id or uuid4().hex,
-        reply_to_event_id=continuation.sources.logical_source_event_ids[-1],
+        reply_to_event_id=continuation.reply_to_event_id,
         room_id=continuation.room_id,
         thread_id=continuation.thread_id,
         requester_id=continuation.requester_id,
@@ -311,46 +323,63 @@ async def _stream_continuation_turn(
     presentation: CollectedStreamPresentation,
     *,
     prompt: str,
-    show_tool_calls: bool,
     config: Config,
     runtime_paths: RuntimePaths,
-    execution_identity: ToolExecutionIdentity,
-    knowledge: Knowledge | None,
+    knowledge: AgentKnowledge | None,
     refresh_scheduler: KnowledgeRefreshScheduler | None,
     tool_trace_collector: list[ToolTraceEntry],
-    run_id_callback: Callable[[str], None] | None,
-    tool_dispatch: ToolDispatchContext,
+    tool_context: ToolRuntimeContext,
     progress: ProgressPublisher | None,
-    resumed_attempt: ResumedAttempt | None = None,
-    reusable_agent: Agent | None = None,
-    initial_continuation_count: int = 0,
+    resume: TurnResume,
+    system_enrichment_items: tuple[EnrichmentItem, ...],
+    quiet: bool,
+    subagent_cost: SubagentCost,
+    reusable_build: AgentBuild | None = None,
     delegation_depth: int = 0,
     media: MediaInputs | None = None,
 ) -> CompletedApprovalRun | PausedAttempt:
-    """Stream resumed work and any fresh attempts into the continued reply through the shared response driver."""
-    tool_context = runtime_context_from_dispatch_context(tool_dispatch)
+    """Stream resumed work and any fresh attempts into the continued reply through the shared response driver.
+
+    The reply shows tool calls when ``presentation`` does. A recovered CLI call runs without a model request, so its
+    follow-up, the turn whose ``resume`` restores no attempt, reads the approval receipt in its first attempt's run; a
+    resumed run already read it. A resumed run keeps its stored system prompt; each fresh attempt renders
+    ``system_enrichment_items`` into its own. A ``quiet`` turn may end without an answer, as its turn could. A fresh
+    attempt the reply's user stops is stored as any reply's stopped run is, linked to the reply it continues.
+    """
+    if resume.attempt is None:
+        run_id = str(uuid4())
+        ctx = replace(ctx, run_id=run_id)
+        add_approval_receipt_reader(run_id)
     run_metadata: dict[str, Any] = {}
     completed: list[CompletedAttempt] = []
     stream = stream_agent_response(
-        ctx,
-        prompt=prompt,
-        runtime_paths=runtime_paths,
-        config=config,
-        knowledge=knowledge,
-        execution_identity=execution_identity,
-        refresh_scheduler=refresh_scheduler,
-        run_id_callback=run_id_callback,
-        run_metadata_collector=run_metadata,
-        show_tool_calls=show_tool_calls,
-        tool_function_filter=tool_context.tool_function_filter if tool_context is not None else None,
-        supports_native_tool_approval=True,
-        attempt_model_runtime=ToolRuntimeModelBinding(),
-        reusable_agent=reusable_agent,
-        resumed_attempt=resumed_attempt,
-        initial_continuation_count=initial_continuation_count,
-        delegation_depth=delegation_depth,
-        media=media,
-        on_completed=completed.append,
+        replace(
+            ctx,
+            prompt=prompt,
+            media=media,
+            system_enrichment_items=system_enrichment_items,
+            allow_no_report_response=quiet,
+            show_tool_calls=presentation.show_tool_calls,
+            execution_identity=tool_context.execution_identity,
+            refresh_scheduler=refresh_scheduler,
+            knowledge=knowledge,
+            tool_function_filter=tool_context.tool_function_filter,
+            delegation_depth=delegation_depth,
+            supports_native_tool_approval=True,
+            reusable_build=reusable_build,
+        ),
+        runtime_paths,
+        config,
+        sinks=TurnSinks(
+            run_metadata_collector=run_metadata,
+            on_completed=completed.append,
+            on_model_resolved=partial(note_reply_model, config),
+            active_model=lambda: span_handle.reply_model if (span_handle := current_span()) is not None else None,
+            subagent_cost=subagent_cost,
+            response_event_id=current_reply_event_id,
+            stopped_by_user=current_span_stopped,
+        ),
+        resume=resume,
     )
     try:
         response_text, tool_trace = await collect_streamed_response_content(
@@ -366,9 +395,10 @@ async def _stream_continuation_turn(
             response_text=error.presentation.response_text,
             tool_trace=error.presentation.tool_trace,
         )
-    if not completed or completed[-1].status != RunStatus.completed:
+    # A quiet turn's empty attempt reports nothing, which completes the turn.
+    if not completed or (completed[-1].status is not RunStatus.completed and not (quiet and completed[-1].is_empty)):
         raise RuntimeError(response_text or "Approval continuation did not complete")
-    if show_tool_calls:
+    if presentation.show_tool_calls:
         tool_trace_collector.extend(tool_trace)
     return CompletedApprovalRun(response_text=response_text, metadata_content=run_metadata)
 
@@ -379,31 +409,31 @@ class AgentApprovalExecution:
 
     config: Callable[[], Config]
     runtime_paths: RuntimePaths
-    client: Callable[[], nio.AsyncClient]
-    tool_runtime: ToolRuntimeSupport
     knowledge_access: KnowledgeAccessSupport
     refresh_scheduler: Callable[[], KnowledgeRefreshScheduler | None]
 
-    async def continue_run(  # noqa: PLR0915 - native and CLI approvals share one reconstruction owner
+    @owned_tool_execution(
+        enabled=lambda self, *_args, **_kwargs: background_tool_jobs_enabled(self.config(), self.runtime_paths),
+    )
+    async def continue_run(
         self,
         continuation: ApprovalContinuation,
         *,
         paused_answer: PausedAnswer,
-        execution_identity: ToolExecutionIdentity,
-        tool_dispatch: ToolDispatchContext,
-        decisions: dict[str, bool],
-        denial_reasons: dict[str, str | None],
+        tool_context: ToolRuntimeContext,
         tool_trace_collector: list[ToolTraceEntry],
-        typing_log_context: Mapping[str, object],
         progress: ProgressPublisher | None,
-        run_id_callback: Callable[[str], None] | None = None,
+        system_enrichment_items: tuple[EnrichmentItem, ...],
+        quiet: bool,
     ) -> CompletedApprovalRun | PausedAttempt:
-        """Apply exact decisions and continue the matching persisted Agno run.
+        """Apply exact decisions and continue the matching persisted paused run under ``tool_context``'s identity.
 
         ``progress``, when given, shows the resumed presentation live in the
-        reply being continued; the terminal delivery stays with the caller.
+        reply being continued; the terminal delivery stays with the caller. A
+        ``quiet`` turn's fresh attempts may end without an answer.
         """
         config = self.config()
+        execution_identity = tool_context.execution_identity
         cli_call = CliApprovalCall.from_dict(continuation.cli_call) if continuation.cli_call is not None else None
         if continuation.entity_name not in config.agents:
             msg = f"Agent {continuation.entity_name!r} is no longer configured"
@@ -421,194 +451,145 @@ class AgentApprovalExecution:
             self.runtime_paths,
             execution_identity,
         )
-        history_storage = await asyncio.to_thread(storage_factory)
+        store, session, persisted = await run_session_storage_operation(
+            storage_factory,
+            lambda opened: (opened, opened.load_session(continuation.session_id), opened.get_run(continuation.run_id)),
+        )
+        set_consumption_storage(storage_factory)
+        if (
+            session is None
+            or not isinstance(persisted, RunRecord)
+            or persisted.session_id != continuation.session_id
+            or (cli_call is None and persisted.status is not RunStatus.paused)
+        ):
+            msg = f"Paused run {continuation.run_id!r} is no longer available"
+            raise RuntimeError(msg)
+        approved_calls = own_approved_calls(persisted, continuation.calls)
+        # Generated CLI functions have no configured toolkit to restore.
+        # Their exact current binding is checked by continue_cli_approval
+        # and authorize_prepared_tool_call after this agent is rebuilt.
+        toolkit_calls = tuple(
+            call
+            for call in approved_calls
+            if not (
+                cli_call is not None
+                and call.invoking_agent == continuation.entity_name
+                and call.toolkit_name == "agent"
+            )
+        )
+        required_tool_names = await required_approval_tool_names(
+            continuation.entity_name,
+            toolkit_calls,
+            config=config,
+            runtime_paths=self.runtime_paths,
+            tools=tool_context.plugins.tools,
+            execution_identity=execution_identity,
+            delegation_depth=cli_call.delegation_depth if cli_call is not None else 0,
+        )
+        # The build and the resumed run use one model, even if a room or thread override changes meanwhile.
+        model = continuation_model(config, self.runtime_paths, continuation)
+        # A continuation stored without its model learns it here, before the resume shows any progress.
+        note_reply_model(config, model.model_name)
+        build = await asyncio.to_thread(
+            create_agent,
+            continuation.entity_name,
+            config,
+            self.runtime_paths,
+            execution_identity,
+            model=model,
+            knowledge=knowledge,
+            # The turn's capture, so the rebuilt tools and the tool hooks around them come from one generation.
+            plugins=tool_context.plugins,
+            refresh_scheduler=self.refresh_scheduler(),
+            supports_native_tool_approval=True,
+            required_tool_names=required_tool_names,
+            agent_mode=(
+                "minimal"
+                if cli_call is not None or (persisted.metadata or {}).get("agent_mode") == "minimal"
+                else "standard"
+            ),
+            delegation_depth=cli_call.delegation_depth if cli_call is not None else 0,
+        )
+        scope_context = ScopeSessionContext(
+            scope=HistoryScope(kind="agent", scope_id=continuation.entity_name),
+            storage=store,
+            session=session,
+            session_id=continuation.session_id,
+            storage_factory=storage_factory,
+        )
+        storage = scope_run_storage(scope_context)
+        # The resumed turn goes on from what its subagents had cost before the pause.
+        subagent_cost = SubagentCost(stored_receipts(persisted.metadata))
         try:
-            session = await asyncio.to_thread(
-                history_storage.get_session,
-                session_id=continuation.session_id,
-                session_type=SessionType.AGENT,
-                user_id=continuation.requester_id,
-            )
-            persisted = session.get_run(continuation.run_id) if isinstance(session, AgentSession) else None
-            if not isinstance(persisted, RunOutput) or (cli_call is None and persisted.status != RunStatus.paused):
-                msg = f"Paused run {continuation.run_id!r} is no longer available"
-                raise RuntimeError(msg)  # noqa: TRY301 - the preparation guard owns storage cleanup
-            delegation = DelegationState.from_metadata(persisted.metadata)
-            local_calls = () if delegation.pending_child_id is not None else continuation.calls
-            approved_calls = tuple(call for call in local_calls if decisions.get(call.tool_call_id))
-            # Generated CLI functions have no configured toolkit to restore.
-            # Their exact current binding is checked by continue_cli_approval
-            # and authorize_prepared_tool_call after this Agent is rebuilt.
-            toolkit_calls = tuple(
-                call
-                for call in approved_calls
-                if not (
-                    cli_call is not None
-                    and call.invoking_agent == continuation.entity_name
-                    and call.toolkit_name == "agent"
-                )
-            )
-            required_tool_names = await required_approval_tool_names(
-                continuation.entity_name,
-                toolkit_calls,
-                config=config,
-                runtime_paths=self.runtime_paths,
-                execution_identity=execution_identity,
-            )
-            agent = await asyncio.to_thread(
-                create_agent,
-                continuation.entity_name,
-                config,
-                self.runtime_paths,
-                execution_identity,
-                session_id=continuation.session_id,
-                history_storage=history_storage,
-                active_model_name=continuation.runtime_model_name,
-                knowledge=knowledge,
-                refresh_scheduler=self.refresh_scheduler(),
-                dynamic_tool_continuation=True,
-                supports_native_tool_approval=True,
-                required_tool_names=required_tool_names,
-                agent_mode=(
-                    "minimal"
-                    if cli_call is not None or (persisted.metadata or {}).get("agent_mode") == "minimal"
-                    else "standard"
-                ),
-                delegation_depth=cli_call.delegation_depth if cli_call is not None else 0,
-            )
-        except BaseException:
-            history_storage.close()
-            raise
-        try:
-            if agent.model is not None:
-                ai_runtime.install_queued_message_notice_hook(
-                    agent.model,
-                    notice_text=config.get_prompt("QUEUED_MESSAGE_NOTICE_TEXT"),
-                )
-                install_approval_receipt_hooks(agent.model, agent.fallback_config)
-            restore_native_history(agent.model, persisted_run=persisted, session=cast("AgentSession", session))
-            scope_context = ScopeSessionContext(
-                scope=HistoryScope(kind="agent", scope_id=continuation.entity_name),
-                storage=history_storage,
-                session=cast("AgentSession", session),
-                session_id=continuation.session_id,
-                storage_factory=storage_factory,
-            )
-            async with typing_indicator(
-                self.client(),
-                continuation.room_id,
-                log_context=typing_log_context,
-            ):
-                with helper_usage_context(scope_context):
-                    if cli_call is not None:
-                        assert isinstance(agent, MinimalAgent)
-                        runtime_context = runtime_context_from_dispatch_context(tool_dispatch)
-                        if runtime_context is None:
-                            msg = "CLI approval recovery requires its authenticated runtime context"
-                            raise RuntimeError(msg)
-                        expected_worker_target = runtime_context.resolve_worker_target()
-
-                        async def recover_cli_call() -> CompletedApprovalRun | PausedAttempt:
-                            recovered = await continue_cli_approval(
-                                agent,
-                                continuation,
-                                cli_call,
-                                persisted,
-                                cast("AgentSession", session),
-                                paused_answer=paused_answer,
-                                runtime_context=runtime_context,
-                                decisions=decisions,
-                                denial_reasons=denial_reasons,
-                                tool_trace_collector=tool_trace_collector,
-                                refresh_scheduler=self.refresh_scheduler(),
-                                authorize=lambda binding: authorize_prepared_tool_call(
-                                    binding,
-                                    expected_worker_target=expected_worker_target,
-                                ),
-                                progress=progress,
-                            )
-                            if not isinstance(recovered, CliFollowUpTurn):
-                                return recovered
-                            return await _stream_continuation_turn(
-                                recovered.ctx,
-                                recovered.presentation,
-                                prompt=recovered.prompt,
-                                show_tool_calls=continuation.show_tool_calls,
-                                reusable_agent=recovered.reusable_agent,
-                                initial_continuation_count=recovered.initial_continuation_count,
-                                delegation_depth=recovered.delegation_depth,
-                                media=recovered.media,
-                                config=config,
-                                runtime_paths=self.runtime_paths,
-                                execution_identity=execution_identity,
-                                knowledge=knowledge,
-                                refresh_scheduler=self.refresh_scheduler(),
-                                tool_trace_collector=tool_trace_collector,
-                                run_id_callback=run_id_callback,
-                                tool_dispatch=tool_dispatch,
-                                progress=progress,
-                            )
-
-                        return await self.tool_runtime.run_in_context(
-                            tool_context=runtime_context,
-                            operation=lambda: run_with_tool_execution_identity(
-                                tool_dispatch.execution_identity,
-                                operation=recover_cli_call,
+            with helper_usage_context(scope_context):
+                if cli_call is not None:
+                    expected_worker_target = tool_context.resolve_worker_target()
+                    with tool_runtime_context(tool_context), receiving_subagent_cost(subagent_cost):
+                        recovered = await continue_cli_approval(
+                            build,
+                            continuation,
+                            cli_call,
+                            persisted,
+                            storage,
+                            paused_answer=paused_answer,
+                            runtime_context=tool_context,
+                            tool_trace_collector=tool_trace_collector,
+                            refresh_scheduler=self.refresh_scheduler(),
+                            authorize=lambda binding: authorize_prepared_tool_call(
+                                binding,
+                                expected_worker_target=expected_worker_target,
                             ),
+                            progress=progress,
                         )
-                    requirements = apply_local_approval_decisions(
+                        if not isinstance(recovered, CliFollowUpTurn):
+                            return recovered
+                        return await _stream_continuation_turn(
+                            recovered.ctx,
+                            recovered.presentation,
+                            prompt=recovered.prompt,
+                            reusable_build=recovered.reusable_build,
+                            resume=TurnResume(
+                                continuation_count=recovered.initial_continuation_count,
+                                prior_usage=prior_usage_by_run(persisted.metadata),
+                            ),
+                            delegation_depth=recovered.delegation_depth,
+                            media=recovered.media,
+                            config=config,
+                            runtime_paths=self.runtime_paths,
+                            knowledge=knowledge,
+                            refresh_scheduler=self.refresh_scheduler(),
+                            tool_trace_collector=tool_trace_collector,
+                            tool_context=tool_context,
+                            progress=progress,
+                            system_enrichment_items=system_enrichment_items,
+                            quiet=quiet,
+                            subagent_cost=subagent_cost,
+                        )
+                # The resume itself refuses decisions that do not cover the waiting calls exactly; this binds each
+                # approval to the toolkit it was granted for before the agent's tools are reached.
+                validate_approval_tool_owners(
+                    tool_owners_by_agent(build),
+                    approved_calls,
+                    pending_approval_requirements(persisted),
+                )
+                with tool_runtime_context(tool_context), receiving_subagent_cost(subagent_cost):
+                    return await _continue_persisted_agent(
+                        build,
+                        continuation,
                         persisted,
-                        decisions=decisions,
-                        denial_reasons=denial_reasons,
+                        storage=storage,
+                        paused_answer=paused_answer,
+                        config=config,
+                        runtime_paths=self.runtime_paths,
+                        refresh_scheduler=self.refresh_scheduler(),
+                        knowledge=knowledge,
+                        tool_trace_collector=tool_trace_collector,
+                        tool_context=tool_context,
+                        progress=progress,
+                        model_name=model.model_name,
+                        system_enrichment_items=system_enrichment_items,
+                        quiet=quiet,
+                        subagent_cost=subagent_cost,
                     )
-                    validate_approval_tool_owners([agent], approved_calls, requirements)
-
-                    with (
-                        approved_executions_context(agent, {continuation.run_id: approved_calls}),
-                        approval_denial_context(
-                            agent,
-                            {
-                                continuation.run_id: tuple(
-                                    call for call in local_calls if not decisions.get(call.tool_call_id)
-                                ),
-                            },
-                        ),
-                    ):
-                        result = await self.tool_runtime.run_in_context(
-                            tool_context=runtime_context_from_dispatch_context(tool_dispatch),
-                            operation=lambda: run_with_tool_execution_identity(
-                                tool_dispatch.execution_identity,
-                                operation=lambda: _continue_persisted_agent(
-                                    agent,
-                                    continuation,
-                                    persisted,
-                                    requirements,
-                                    paused_answer=paused_answer,
-                                    config=config,
-                                    runtime_paths=self.runtime_paths,
-                                    execution_identity=execution_identity,
-                                    refresh_scheduler=self.refresh_scheduler(),
-                                    decisions=decisions,
-                                    denial_reasons=denial_reasons,
-                                    knowledge=knowledge,
-                                    tool_trace_collector=tool_trace_collector,
-                                    run_id_callback=run_id_callback,
-                                    tool_dispatch=tool_dispatch,
-                                    progress=progress,
-                                ),
-                            ),
-                        )
         finally:
-            try:
-                ai_runtime.register_queued_notice_storage(
-                    storage_factory=storage_factory,
-                    session_id=continuation.session_id,
-                    session_type=SessionType.AGENT,
-                    entity_name=continuation.entity_name,
-                )
-            finally:
-                try:
-                    close_agent_runtime_state_dbs(agent, shared_scope_storage=history_storage)
-                finally:
-                    history_storage.close()
-        return result
+            await finalize_consumption()

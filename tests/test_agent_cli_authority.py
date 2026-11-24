@@ -3,31 +3,54 @@
 
 from __future__ import annotations
 
+import weakref
 from dataclasses import replace
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock
+from uuid import uuid4
 
 import pytest
 from pydantic import ValidationError
 
+from mindroom.agent_cli.lifetime import response_cli_lifetime
 from mindroom.agent_cli.protocol import ToolCallOperation, ToolCallReceipt, parse_operation
+from mindroom.agent_cli.response_owner import bind_response_owner
 from mindroom.agent_cli.session import (
+    CONFIG_RELOAD_CALL,
     CliAuthenticationError,
     TurnToolBridge,
     cli_turn_owner,
 )
+from mindroom.agent_loop.spec import RunContext
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import DefaultsConfig, ModelConfig
 from mindroom.constants import RuntimePaths
 from mindroom.message_target import MessageTarget
 from mindroom.response_turn import ResponseTurnContext
+from mindroom.session_storage.types import ConversationSession
+from mindroom.tool_system.agent_tool_calls import PreparedAgentToolCatalog
+from mindroom.tool_system.output_files import ToolOutputFilePolicy
 from tests.authorization_helpers import make_test_tool_runtime_context
-from tests.conftest import bind_runtime_paths, make_conversation_reader_mock, make_relation_lookup, runtime_paths_for
+from tests.conftest import (
+    bind_runtime_paths,
+    gc_paused,
+    make_conversation_reader_mock,
+    make_relation_lookup,
+    runtime_paths_for,
+)
+from tests.minimal_agent_fixtures import (  # noqa: F401 - agent_cli_api is a pytest fixture
+    agent_cli_api,
+    settled_receipt,
+)
+from tests.runtime_fakes import ready_runtime
 
 if TYPE_CHECKING:
     from pathlib import Path
 
+    from mindroom.agent_cli.lifetime import CliTurnLifetime
+    from mindroom.agent_cli.turn import LiveTurnTools
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 
@@ -83,6 +106,36 @@ def _turn_context() -> ResponseTurnContext:
     )
 
 
+def _catalog(runtime: ToolRuntimeContext) -> PreparedAgentToolCatalog:
+    session = ConversationSession(session_id="session-1", kind="agent", owner_id="helper")
+    return PreparedAgentToolCatalog(
+        run=RunContext(run_id="generation-1", user_id=runtime.requester_id, session=session),
+        runtime_context=runtime,
+        store=None,
+        middleware=(),
+        max_tool_calls_per_turn=None,
+    )
+
+
+def _bound_owner(
+    catalog: PreparedAgentToolCatalog,
+    lifetime: CliTurnLifetime,
+    tmp_path: Path,
+    *,
+    reload_ends_run: bool = False,
+) -> LiveTurnTools:
+    return bind_response_owner(
+        catalog,
+        lifetime=lifetime,
+        response_context=_turn_context(),
+        context_documents={},
+        output_file_policy=ToolOutputFilePolicy(tmp_path / "workspace"),
+        delegation_depth=0,
+        refresh_scheduler=None,
+        reload_ends_run=reload_ends_run,
+    )
+
+
 def test_owner_factory_binds_exact_runtime_and_turn_identity(tmp_path: Path) -> None:
     owner = cli_turn_owner(_runtime_context(tmp_path), _turn_context())
 
@@ -90,6 +143,63 @@ def test_owner_factory_binds_exact_runtime_and_turn_identity(tmp_path: Path) -> 
     assert owner.generation == "generation-1"
     assert owner.execution_identity.agent_name == "helper"
     assert owner.execution_identity.requester_id == "@alice:example.test"
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("agent_cli_api")
+@pytest.mark.parametrize("reload_ends_run", [False, True], ids=["standard", "minimal"])
+async def test_a_reload_that_changed_the_agents_tools_refuses_a_cli_call_before_binding_its_toolkit(
+    tmp_path: Path,
+    reload_ends_run: bool,
+) -> None:
+    """A catalog a reload invalidated builds no toolkit for a CLI call; the call fails as unavailable.
+
+    Only a minimal turn's refusal also reports the control call that stops its run.
+    """
+    runtime = _runtime_context(tmp_path)
+    current = runtime.config.model_copy(deep=True)
+    current.agents["helper"].tools = ["calculator"]
+    runtime = replace(
+        runtime,
+        orchestrator=ready_runtime(runtime.config, runtime.runtime_paths),
+        config_provider=lambda: current,
+    )
+    catalog = _catalog(runtime)
+    catalog.bind = AsyncMock()
+    async with response_cli_lifetime() as lifetime:
+        owner = _bound_owner(catalog, lifetime, tmp_path, reload_ends_run=reload_ends_run)
+        async with owner._window("bash"):
+            receipt = await owner.operation(
+                window="bash",
+                operation=ToolCallOperation(
+                    operation="tools.call",
+                    call_id=uuid4(),
+                    toolkit="calculator",
+                    function="add",
+                ),
+            )
+            receipt = await settled_receipt(owner, receipt["call_id"])
+
+    assert receipt["status"] == "failed"
+    assert "This MindRoom call did not run: the configuration was reloaded" in receipt["outcome"]
+    # No receipt says the turn stopped; only a minimal turn's refusal stops its run.
+    assert "turn stopped" not in receipt["outcome"]
+    assert [call.tool_name for call in owner.control_calls] == ([CONFIG_RELOAD_CALL] if reload_ends_run else [])
+    catalog.bind.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("agent_cli_api")
+async def test_a_closed_response_owner_is_freed_without_a_garbage_collection(tmp_path: Path) -> None:
+    """The owner's authorization holds no reference cycle, so once its response ends the owner and its catalog go."""
+    runtime = _runtime_context(tmp_path)
+    catalog = _catalog(replace(runtime, orchestrator=ready_runtime(runtime.config, runtime.runtime_paths)))
+    async with response_cli_lifetime() as lifetime:
+        owner = _bound_owner(catalog, lifetime, tmp_path)
+    released = [weakref.ref(owner), weakref.ref(catalog)]
+    with gc_paused():
+        del owner, catalog
+        assert [reference() for reference in released] == [None, None]
 
 
 @pytest.mark.parametrize(

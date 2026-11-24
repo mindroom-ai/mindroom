@@ -14,10 +14,6 @@ proves. Its thread is not one of those things, so it is reported as unknown rath
 Invariant: a replacement never places anything. Applying ``m.new_content`` keeps the original
 event's relation and ignores every ``m.relates_to`` inside the replacement, so a thread named there
 is a claim: it neither moves a message that was read nor places one that was reconstructed.
-
-Invariant: nor does that claim admit anything. A read scoped to one thread contains no
-reconstruction of a message it never saw, because the claim is the only thing that could have put
-one there - reporting the placement as unknown does not undo publishing the text into the thread.
 """
 
 from __future__ import annotations
@@ -28,17 +24,19 @@ from unittest.mock import AsyncMock
 import pytest
 
 from mindroom.matrix.client_visible_messages import (
+    EditCandidates,
     ResolvedVisibleMessage,
-    ThreadEditCandidates,
     apply_latest_edits_to_messages,
     bundled_replacement_candidates,
     is_visible_room_message,
 )
+from mindroom.matrix.conversation_reads import ConversationReader, complete_thread_history
 from mindroom.matrix.event_info import EventInfo
-from mindroom.matrix.room_history_reads import bundled_replacement_source
+from tests.test_conversation_hydration import ROOM, FakeClient, admit_all, hydrator, raw
 from tests.threading_helpers import _emote_event, _image_event, _text_event
 
 if TYPE_CHECKING:
+    from mindroom.event_journal import EventJournalStore
     from mindroom.matrix.message_content import VisibleRoomMessage
 
 _AUTHOR = "@author:localhost"
@@ -59,7 +57,7 @@ def _original_message(*, sender: str = _AUTHOR, body: str = "original") -> Resol
     )
 
 
-def _record(candidates: ThreadEditCandidates, event: VisibleRoomMessage) -> None:
+def _record(candidates: EditCandidates, event: VisibleRoomMessage) -> None:
     # The pool gate is asserted rather than assumed. `record` itself type-checks
     # nothing, so every caller in production decides membership first with
     # `is_visible_room_message`; a fixture that skipped that would be able to
@@ -70,16 +68,13 @@ def _record(candidates: ThreadEditCandidates, event: VisibleRoomMessage) -> None
 
 
 async def _apply(
-    candidates: ThreadEditCandidates,
+    candidates: EditCandidates,
     messages: dict[str, ResolvedVisibleMessage],
-    *,
-    synthesize_unseen_originals: bool = True,
 ) -> None:
     await apply_latest_edits_to_messages(
         AsyncMock(),
         messages_by_event_id=messages,
         edit_candidates=candidates,
-        synthesize_unseen_originals=synthesize_unseen_originals,
         trusted_sender_ids=(_AUTHOR, _IMPOSTOR),
     )
 
@@ -90,7 +85,7 @@ class TestReplacementSenderRule:
     @pytest.mark.asyncio
     async def test_foreign_replacement_does_not_rewrite_another_members_message(self) -> None:
         """A room member cannot rewrite someone else's message as the agent reads it."""
-        candidates = ThreadEditCandidates()
+        candidates = EditCandidates()
         _record(
             candidates,
             _text_event(
@@ -116,7 +111,7 @@ class TestReplacementSenderRule:
         Keeping a single global newest candidate would drop the author's edit on the floor the
         moment anyone else sent a later replacement for the same event.
         """
-        candidates = ThreadEditCandidates()
+        candidates = EditCandidates()
         _record(
             candidates,
             _text_event(
@@ -149,7 +144,7 @@ class TestReplacementSenderRule:
     @pytest.mark.asyncio
     async def test_synthesized_missing_original_keeps_the_editors_own_sender(self) -> None:
         """An unseen original cannot be impersonated: the synthesized message is the editor's."""
-        candidates = ThreadEditCandidates()
+        candidates = EditCandidates()
         _record(
             candidates,
             _text_event(
@@ -173,46 +168,21 @@ class TestSynthesizedMessagePlacement:
     """Where a message reconstructed from a replacement alone is said to live."""
 
     @pytest.mark.asyncio
-    async def test_silent_edit_leaves_the_synthesized_placement_unknown(self) -> None:
-        """An edit that says nothing about a thread must not place the message in the room.
+    @pytest.mark.parametrize("new_thread_id", [None, "$root"], ids=["silent-edit", "edit-naming-a-thread"])
+    async def test_an_edit_alone_leaves_the_synthesized_placement_unknown(self, new_thread_id: str | None) -> None:
+        """An edit, whether or not it names a thread, must not place the message it reconstructs.
 
         A replacement inherits the original's ``m.relates_to`` instead of restating it, so a
         threaded reply's edit carries no thread and neither does the window once the original has
         scrolled out of it. Reporting ``thread_id=None`` there tells a reader the reply was posted
         at room level, and the reader answers it in the room rather than in its thread.
-        """
-        candidates = ThreadEditCandidates()
-        _record(
-            candidates,
-            _text_event(
-                event_id="$edit",
-                body="* final answer",
-                new_body="final answer",
-                sender=_AUTHOR,
-                server_timestamp=2_000,
-                replacement_of=_ORIGINAL_ID,
-            ),
-        )
-        messages: dict[str, ResolvedVisibleMessage] = {}
-
-        await _apply(candidates, messages)
-
-        synthesized = messages[_ORIGINAL_ID]
-        assert "thread_id" not in synthesized.to_dict()
-        assert synthesized.to_dict()["thread_id_unknown"] is True
-        assert synthesized.thread_id_known is False
-        assert synthesized.thread_id is None
-
-    @pytest.mark.asyncio
-    async def test_edit_that_names_a_thread_still_leaves_the_synthesized_placement_unknown(self) -> None:
-        """An edit that does name a thread has still not proven where its original lives.
 
         Applying ``m.new_content`` keeps the original event's relation and ignores every
         ``m.relates_to`` written inside the replacement, so a thread named there is a claim no rule
         turns into a fact. Believing it lets anyone who can send an edit file the message it
         reconstructs under a thread of their choosing.
         """
-        candidates = ThreadEditCandidates()
+        candidates = EditCandidates()
         _record(
             candidates,
             _text_event(
@@ -222,7 +192,7 @@ class TestSynthesizedMessagePlacement:
                 sender=_AUTHOR,
                 server_timestamp=2_000,
                 replacement_of=_ORIGINAL_ID,
-                new_thread_id="$root",
+                new_thread_id=new_thread_id,
             ),
         )
         messages: dict[str, ResolvedVisibleMessage] = {}
@@ -238,7 +208,7 @@ class TestSynthesizedMessagePlacement:
     @pytest.mark.asyncio
     async def test_message_read_with_its_edit_keeps_its_own_thread_and_position(self) -> None:
         """A message that was read is placed by itself, whatever its edit does or does not say."""
-        candidates = ThreadEditCandidates()
+        candidates = EditCandidates()
         _record(
             candidates,
             _text_event(
@@ -269,7 +239,7 @@ class TestSynthesizedMessagePlacement:
         either a client bug or an attempt to drag a conversation somewhere its participants cannot
         see it, and both answers are the same: leave the message where its own event put it.
         """
-        candidates = ThreadEditCandidates()
+        candidates = EditCandidates()
         _record(
             candidates,
             _text_event(
@@ -294,7 +264,7 @@ class TestSynthesizedMessagePlacement:
     @pytest.mark.asyncio
     async def test_edit_naming_a_thread_does_not_file_a_room_level_message_into_it(self) -> None:
         """A room-level message stays at room level however its edit is decorated."""
-        candidates = ThreadEditCandidates()
+        candidates = EditCandidates()
         _record(
             candidates,
             _text_event(
@@ -314,62 +284,6 @@ class TestSynthesizedMessagePlacement:
         assert messages[_ORIGINAL_ID].to_dict()["thread_id"] is None
         assert messages[_ORIGINAL_ID].thread_id_known is True
         assert messages[_ORIGINAL_ID].body == "final answer"
-
-
-class TestThreadScopedAdmission:
-    """Which reconstructions a thread-scoped read is allowed to contain at all."""
-
-    @pytest.mark.asyncio
-    async def test_thread_scoped_read_drops_an_edit_whose_original_it_never_saw(self) -> None:
-        """A thread read must not admit a message the replacement is the only evidence for.
-
-        The one thing that could put this reconstruction in a thread is the replacement's own
-        claim, and Matrix ignores every ``m.relates_to`` inside ``m.new_content``. Marking the
-        result's placement unknown is not enough on its own: it is already inside the answer to
-        "what is in this thread", which is where the injected text becomes visible.
-        """
-        candidates = ThreadEditCandidates()
-        _record(
-            candidates,
-            _text_event(
-                event_id="$injection",
-                body="* injected",
-                new_body="injected",
-                sender=_IMPOSTOR,
-                server_timestamp=2_000,
-                replacement_of=_ORIGINAL_ID,
-                new_thread_id="$victim-thread",
-            ),
-        )
-        messages: dict[str, ResolvedVisibleMessage] = {}
-
-        await _apply(candidates, messages, synthesize_unseen_originals=False)
-
-        assert messages == {}
-
-    @pytest.mark.asyncio
-    async def test_thread_scoped_read_still_applies_an_edit_to_a_message_it_did_see(self) -> None:
-        """Refusing unseen originals must not stop a thread read from folding real edits in."""
-        candidates = ThreadEditCandidates()
-        _record(
-            candidates,
-            _text_event(
-                event_id="$edit",
-                body="* final answer",
-                new_body="final answer",
-                sender=_AUTHOR,
-                server_timestamp=2_000,
-                replacement_of=_ORIGINAL_ID,
-            ),
-        )
-        original = _original_message()
-        original.thread_id = "$root"
-        messages = {_ORIGINAL_ID: original}
-
-        await _apply(candidates, messages, synthesize_unseen_originals=False)
-
-        assert messages[_ORIGINAL_ID].body == "final answer"
-        assert messages[_ORIGINAL_ID].to_dict()["thread_id"] == "$root"
 
 
 class TestReplacementWinnerSelection:
@@ -397,7 +311,7 @@ class TestReplacementWinnerSelection:
                 replacement_of=_ORIGINAL_ID,
             ),
         ]
-        candidates = ThreadEditCandidates()
+        candidates = EditCandidates()
         for event in reversed(events) if reversed_arrival else events:
             _record(candidates, event)
         messages = {_ORIGINAL_ID: _original_message()}
@@ -427,7 +341,7 @@ class TestReplacementWinnerSelection:
             server_timestamp=4_000,
             replacement_of=_ORIGINAL_ID,
         )
-        candidates = ThreadEditCandidates()
+        candidates = EditCandidates()
         for event in [duplicate, older, duplicate] if reversed_arrival else [older, duplicate, duplicate]:
             _record(candidates, event)
         messages = {_ORIGINAL_ID: _original_message()}
@@ -458,13 +372,13 @@ class TestReplacementWinnerSelection:
         )
 
         forward: dict[str, ResolvedVisibleMessage] = {_ORIGINAL_ID: _original_message()}
-        forward_candidates = ThreadEditCandidates()
+        forward_candidates = EditCandidates()
         _record(forward_candidates, first_payload)
         _record(forward_candidates, second_payload)
         await _apply(forward_candidates, forward)
 
         backward: dict[str, ResolvedVisibleMessage] = {_ORIGINAL_ID: _original_message()}
-        backward_candidates = ThreadEditCandidates()
+        backward_candidates = EditCandidates()
         _record(backward_candidates, second_payload)
         _record(backward_candidates, first_payload)
         await _apply(backward_candidates, backward)
@@ -483,7 +397,7 @@ class TestReplacementWinnerSelection:
             replacement_of=_ORIGINAL_ID,
         )
         malformed.source["content"].pop("m.new_content")
-        candidates = ThreadEditCandidates()
+        candidates = EditCandidates()
         _record(candidates, malformed)
         messages = {_ORIGINAL_ID: _original_message()}
 
@@ -515,8 +429,8 @@ class TestEveryMsgtypeWithABodyRanksTogether:
 
     @pytest.mark.asyncio
     async def test_the_newest_replacement_wins_even_when_it_is_an_emote(self) -> None:
-        """The stale text edit used to win because the newer emote was invisible."""
-        candidates = ThreadEditCandidates()
+        """A newer emote replacement outranks an older text one."""
+        candidates = EditCandidates()
         _record(
             candidates,
             _text_event(
@@ -550,11 +464,10 @@ class TestEveryMsgtypeWithABodyRanksTogether:
     async def test_an_older_emote_replacement_does_not_outrank_a_newer_text_one(self) -> None:
         """Admitting emotes to the pool must not promote them within it.
 
-        This is the half of the widening that has to change nothing. If it did,
-        every already-collapsed conversation containing one emote edit would
-        start reading at an older revision than it does today.
+        The msgtype carries no privilege in the ranking, so an older emote edit
+        never displaces a newer text revision.
         """
-        candidates = ThreadEditCandidates()
+        candidates = EditCandidates()
         _record(
             candidates,
             _emote_event(
@@ -586,8 +499,8 @@ class TestEveryMsgtypeWithABodyRanksTogether:
 
     @pytest.mark.asyncio
     async def test_the_newest_replacement_wins_even_when_it_is_a_picture(self) -> None:
-        """The stale text edit used to win because the newer caption edit was invisible."""
-        candidates = ThreadEditCandidates()
+        """A newer caption replacement outranks an older text one."""
+        candidates = EditCandidates()
         _record(
             candidates,
             _text_event(
@@ -625,11 +538,10 @@ class TestEveryMsgtypeWithABodyRanksTogether:
     async def test_an_older_picture_replacement_does_not_outrank_a_newer_text_one(self) -> None:
         """Admitting media to the pool must not promote it within the pool.
 
-        This is the half of the widening that has to change nothing. If it did,
-        every already-collapsed conversation containing one caption edit would
-        start reading at an older revision than it does today.
+        The msgtype carries no privilege in the ranking, so an older caption edit
+        never displaces a newer text revision.
         """
-        candidates = ThreadEditCandidates()
+        candidates = EditCandidates()
         _record(
             candidates,
             _image_event(
@@ -662,7 +574,7 @@ class TestEveryMsgtypeWithABodyRanksTogether:
 
 
 class TestBundledReplacementPrecedence:
-    """Every reader of a bundled `m.replace` has to pick the same candidate."""
+    """A bundled `m.replace` is read as the candidate that claims to be the newest."""
 
     @staticmethod
     def _bundled(*, under_unsigned: bool) -> dict[str, object]:
@@ -713,19 +625,51 @@ class TestBundledReplacementPrecedence:
 
         assert [candidate["event_id"] for candidate in candidates[:2]] == ["$newest", "$stale"]
 
-    @pytest.mark.parametrize("under_unsigned", [True, False])
-    def test_history_reconstruction_picks_what_a_preview_would_show(self, *, under_unsigned: bool) -> None:
-        """The two readers used to disagree, so one message read two ways.
 
-        History searched `unsigned` alone and preferred `event`; a preview
-        searched both containers and preferred `latest_event`. A source with
-        both keys therefore showed one body in a thread preview and another in
-        the history rebuilt beside it.
+class TestTheProjectionShowsWhatTheRoomPublished:
+    """A thread read from the conversation projection, the reader tools and turns share."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("admitted_live", [False, True])
+    async def test_new_content_on_a_message_that_replaces_nothing_is_not_its_body(
+        self,
+        journal_store: EventJournalStore,
+        *,
+        admitted_live: bool,
+    ) -> None:
+        """`m.new_content` on an event with no `m.replace` relation is not a body.
+
+        Any sender can ship a second body inside a message that revises nothing.
+        A read that showed it would hand a model a message disagreeing with the
+        body the room displays, whether the thread arrived by sync or by a walk.
         """
-        source = self._bundled(under_unsigned=under_unsigned)
+        principal = journal_store.principal("agent@general")
+        picture = {"url": "mxc://example.org/picture", "info": {"mimetype": "image/png", "w": 8, "h": 8}}
+        root = raw("$root", "the question", ts=1_000)
+        image = {
+            "event_id": "$image",
+            "sender": _IMPOSTOR,
+            "origin_server_ts": 2_000,
+            "type": "m.room.message",
+            "content": {
+                "msgtype": "m.image",
+                "body": "the caption the room shows",
+                **picture,
+                "m.new_content": {"msgtype": "m.image", "body": "a body nothing published", **picture},
+                "m.relates_to": {"rel_type": "m.thread", "event_id": "$root"},
+            },
+        }
+        if admitted_live:
+            await admit_all(principal, [root, image])
+        client = FakeClient(events={"$root": root, "$image": image}, relations={"$root": [image]})
 
-        chosen = bundled_replacement_source(source)
+        history = await complete_thread_history(
+            ConversationReader(store=principal, hydrator=hydrator(principal, client)),
+            ROOM,
+            "$root",
+        )
 
-        assert chosen is not None
-        assert chosen["event_id"] == "$newest"
-        assert chosen == bundled_replacement_candidates(source)[0]
+        picture_message = next(message for message in history if message.event_id == "$image")
+        assert picture_message.body == "the caption the room shows"
+        assert picture_message.content["body"] == "the caption the room shows"
+        assert picture_message.latest_event_id == "$image", "nothing was replaced, so nothing is a later revision"

@@ -17,7 +17,7 @@ if TYPE_CHECKING:
     requires_primary_runtime=True,
     display_name="Mem0 Memory",
     description="Persistent memory system that stores, retrieves, searches, and manages user memories and context",
-    category=ToolCategory.PRODUCTIVITY,  # Database tools → Productivity
+    category=ToolCategory.PRODUCTIVITY,
     status=ToolStatus.REQUIRES_CONFIG,  # Requires API key for cloud usage
     setup_type=SetupType.API_KEY,  # Optional API key for cloud usage
     icon="Brain",
@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     config_fields=[
         ConfigField(
             name="api_key",
+            env=("MEM0_API_KEY",),
             label="API Key",
             type="password",
             required=False,
@@ -39,6 +40,7 @@ if TYPE_CHECKING:
         ),
         ConfigField(
             name="org_id",
+            env=("MEM0_ORG_ID",),
             label="Org ID",
             type="text",
             required=False,
@@ -46,6 +48,7 @@ if TYPE_CHECKING:
         ),
         ConfigField(
             name="project_id",
+            env=("MEM0_PROJECT_ID",),
             label="Project ID",
             type="text",
             required=False,
@@ -95,11 +98,11 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["mem0ai"],  # Already in pyproject.toml
-    docs_url="https://docs.agno.com/tools/toolkits/database/mem0",
+    docs_url="https://docs.mindroom.chat/tools/memory-and-storage/#mem0",
     function_names=("add_memory", "delete_all_memories", "get_all_memories", "search_memory"),
 )
 def mem0_tools() -> type[Mem0Tools]:
     """Return Mem0 memory tools for persistent memory management."""
-    from agno.tools.mem0 import Mem0Tools
+    from mindroom.tools.agno_compat_mem0 import UserFilterMem0Tools
 
-    return Mem0Tools
+    return UserFilterMem0Tools

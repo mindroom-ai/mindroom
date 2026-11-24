@@ -1,6 +1,9 @@
+import { PlausibleAnalytics } from '@/components/PlausibleAnalytics'
+
 export default function TermsPage() {
   return (
     <main className="max-w-3xl px-6 py-12 mx-auto space-y-6">
+      <PlausibleAnalytics />
       <header className="space-y-2">
         <p className="text-sm text-muted-foreground">Last updated: September 20, 2025</p>
         <h1 className="text-3xl font-semibold">MindRoom Terms of Service</h1>

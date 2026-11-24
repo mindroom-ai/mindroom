@@ -15,26 +15,24 @@ import pytest
 from typer.testing import CliRunner
 
 from mindroom import constants as constants_mod
+from mindroom.api import startup_probes
+from mindroom.api.startup_probes import serve_startup_probes
 from mindroom.cli import main as main_module
-from mindroom.cli import pairing_probes
 from mindroom.cli.config import activate_cli_runtime
 from mindroom.cli.main import app
-from mindroom.cli.pairing_probes import serve_pairing_probes
 from mindroom.config.main import Config
-from mindroom.config.matrix import MindRoomUserConfig
 from mindroom.entity_resolution import mindroom_user_id
 from mindroom.matrix.state import MatrixState
-from mindroom.matrix.users import INTERNAL_USER_ACCOUNT_KEY, _register_user
-from mindroom.orchestrator import _MultiAgentOrchestrator
+from mindroom.matrix.users import _register_user
+from mindroom.startup_errors import PermanentStartupError
 from tests.conftest import TEST_ACCESS_TOKEN, TEST_PASSWORD
+from tests.matrix_state_helpers import save_matrix_state
 
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
 
 runner = CliRunner()
-DEFAULT_INTERNAL_USERNAME = MindRoomUserConfig().username
-DEFAULT_INTERNAL_DISPLAY_NAME = MindRoomUserConfig().display_name
 
 
 def _runtime_paths(tmp_path: Path) -> constants_mod.RuntimePaths:
@@ -80,7 +78,6 @@ class TestUserAccountManagement:
             device_id="TEST_DEVICE",
             access_token=TEST_ACCESS_TOKEN,
         )
-        mock_client.set_displayname.return_value = AsyncMock()
 
         runtime_paths = _runtime_paths(tmp_path)
         with patch("mindroom.matrix.users.matrix_client", return_value=mock_context):
@@ -122,7 +119,6 @@ class TestUserAccountManagement:
             device_id="TEST_DEVICE",
             access_token=TEST_ACCESS_TOKEN,
         )
-        mock_client.set_displayname.return_value = AsyncMock()
 
         runtime_paths = _runtime_paths(tmp_path)
         with patch("mindroom.matrix.users.matrix_client", return_value=mock_context):
@@ -142,203 +138,6 @@ class TestUserAccountManagement:
             mock_client.login.assert_called_once_with("test_password")
             mock_client.set_displayname.assert_called_once_with("Existing User")
 
-    @pytest.mark.asyncio
-    async def test_ensure_user_account_creates_new(
-        self,
-        tmp_path: Path,
-        mock_matrix_client: tuple[MagicMock, AsyncMock],
-    ) -> None:
-        """Test ensuring user account when none exists."""
-        mock_context, mock_client = mock_matrix_client
-
-        # Setup mocks for successful registration
-        mock_client.register.return_value = nio.RegisterResponse(
-            user_id=f"@{DEFAULT_INTERNAL_USERNAME}_test:localhost",
-            device_id="TEST_DEVICE",
-            access_token=TEST_ACCESS_TOKEN,
-        )
-        mock_client.login.return_value = nio.LoginResponse(
-            user_id=f"@{DEFAULT_INTERNAL_USERNAME}_test:localhost",
-            device_id="TEST_DEVICE",
-            access_token=TEST_ACCESS_TOKEN,
-        )
-        mock_client.set_displayname.return_value = AsyncMock()
-
-        with (
-            patch("mindroom.matrix.users.matrix_client", return_value=mock_context),
-            patch("mindroom.constants.runtime_matrix_homeserver", return_value="http://localhost:8008"),
-        ):
-            runtime_paths = _runtime_paths(tmp_path)
-            orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
-            _config = Config(
-                mindroom_user={"username": DEFAULT_INTERNAL_USERNAME, "display_name": DEFAULT_INTERNAL_DISPLAY_NAME},
-            )
-            await orchestrator._ensure_user_account(_config)
-
-            # Check that user was created
-            state = MatrixState.load(runtime_paths=runtime_paths)
-
-            assert INTERNAL_USER_ACCOUNT_KEY in state.accounts
-            assert state.accounts[INTERNAL_USER_ACCOUNT_KEY].username == f"{DEFAULT_INTERNAL_USERNAME}_test"
-            generated_password = state.accounts[INTERNAL_USER_ACCOUNT_KEY].password
-            assert generated_password
-            assert generated_password != "user_secure_password"  # noqa: S105
-
-            # Verify registration was called
-            mock_client.register.assert_called_once()
-            mock_client.set_displayname.assert_called_once_with(DEFAULT_INTERNAL_DISPLAY_NAME)
-
-    @pytest.mark.asyncio
-    async def test_ensure_user_account_logs_in_with_existing_credentials(
-        self,
-        tmp_path: Path,
-        mock_matrix_client: tuple[MagicMock, AsyncMock],
-    ) -> None:
-        """Existing stored credentials should be reused without re-registration."""
-        mock_context, mock_client = mock_matrix_client
-
-        # Create existing config with internal user account
-        state = MatrixState()
-        state.add_account(INTERNAL_USER_ACCOUNT_KEY, DEFAULT_INTERNAL_USERNAME, "existing_password")
-
-        runtime_paths = _runtime_paths(tmp_path)
-        state.save(runtime_paths=runtime_paths)
-
-        with (
-            patch("mindroom.matrix.users.matrix_client", return_value=mock_context),
-            patch("mindroom.constants.runtime_matrix_homeserver", return_value="http://localhost:8008"),
-        ):
-            orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
-            _config = Config(
-                mindroom_user={
-                    "username": DEFAULT_INTERNAL_USERNAME,
-                    "display_name": DEFAULT_INTERNAL_DISPLAY_NAME,
-                },
-            )
-            await orchestrator._ensure_user_account(_config)
-
-            # Should use existing account
-            result_config = MatrixState.load(runtime_paths=runtime_paths)
-            assert result_config.accounts[INTERNAL_USER_ACCOUNT_KEY].username == DEFAULT_INTERNAL_USERNAME
-            assert result_config.accounts[INTERNAL_USER_ACCOUNT_KEY].password == "existing_password"  # noqa: S105
-
-            mock_client.register.assert_not_called()
-            mock_client.login.assert_not_called()
-            mock_client.set_displayname.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_ensure_user_account_recreates_account_when_stored_login_fails(
-        self,
-        tmp_path: Path,
-        mock_matrix_client: tuple[MagicMock, AsyncMock],
-    ) -> None:
-        """Stored credentials should be preserved until an explicit login happens."""
-        mock_context, mock_client = mock_matrix_client
-
-        # Create existing config with invalid credentials
-        state = MatrixState()
-        state.add_account(INTERNAL_USER_ACCOUNT_KEY, DEFAULT_INTERNAL_USERNAME, "wrong_password")
-
-        runtime_paths = _runtime_paths(tmp_path)
-        state.save(runtime_paths=runtime_paths)
-
-        with (
-            patch("mindroom.matrix.users.matrix_client", return_value=mock_context),
-            patch("mindroom.constants.runtime_matrix_homeserver", return_value="http://localhost:8008"),
-        ):
-            orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
-            _config = Config(
-                mindroom_user={
-                    "username": DEFAULT_INTERNAL_USERNAME,
-                    "display_name": DEFAULT_INTERNAL_DISPLAY_NAME,
-                },
-            )
-            await orchestrator._ensure_user_account(_config)
-
-            # Should have kept the existing account credentials
-            # (create_agent_user doesn't regenerate passwords on login failure)
-            result_config = MatrixState.load(runtime_paths=runtime_paths)
-            assert INTERNAL_USER_ACCOUNT_KEY in result_config.accounts
-            assert result_config.accounts[INTERNAL_USER_ACCOUNT_KEY].username == DEFAULT_INTERNAL_USERNAME
-            assert result_config.accounts[INTERNAL_USER_ACCOUNT_KEY].password == "wrong_password"  # noqa: S105
-
-            mock_client.login.assert_not_called()
-            mock_client.register.assert_not_called()
-            mock_client.set_displayname.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_ensure_user_account_uses_configured_identity(
-        self,
-        tmp_path: Path,
-        mock_matrix_client: tuple[MagicMock, AsyncMock],
-    ) -> None:
-        """Test ensuring user account uses configured username and display name."""
-        mock_context, mock_client = mock_matrix_client
-        custom_config = Config(mindroom_user={"username": "alice", "display_name": "Alice Smith"})
-
-        mock_client.register.return_value = nio.RegisterResponse(
-            user_id="@alice:localhost",
-            device_id="TEST_DEVICE",
-            access_token=TEST_ACCESS_TOKEN,
-        )
-        mock_client.set_displayname.return_value = AsyncMock()
-
-        with (
-            patch("mindroom.matrix.users.matrix_client", return_value=mock_context),
-            patch("mindroom.constants.runtime_matrix_homeserver", return_value="http://localhost:8008"),
-        ):
-            runtime_paths = _runtime_paths(tmp_path)
-            orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
-            await orchestrator._ensure_user_account(custom_config)
-
-            state = MatrixState.load(runtime_paths=runtime_paths)
-            assert state.accounts[INTERNAL_USER_ACCOUNT_KEY].username == "alice"
-            generated_password = state.accounts[INTERNAL_USER_ACCOUNT_KEY].password
-            assert generated_password
-            assert generated_password != "user_secure_password"  # noqa: S105
-            mock_client.register.assert_called_once()
-            register_call_kwargs = mock_client.register.call_args.kwargs
-            assert register_call_kwargs["username"] == "alice"
-            assert register_call_kwargs["password"] == generated_password
-            assert register_call_kwargs["device_name"] == "mindroom_agent"
-            mock_client.set_displayname.assert_called_once_with("Alice Smith")
-
-    @pytest.mark.asyncio
-    async def test_ensure_user_account_uses_existing_persisted_identity(
-        self,
-        tmp_path: Path,
-        mock_matrix_client: tuple[MagicMock, AsyncMock],
-    ) -> None:
-        """Internal user config username is only a proposal when no account exists yet."""
-        mock_context, mock_client = mock_matrix_client
-        state = MatrixState()
-        state.add_account(
-            INTERNAL_USER_ACCOUNT_KEY,
-            "actual_mindroom_user",
-            "existing_password",
-            requested_username="alice",
-            domain="matrix.example",
-        )
-
-        custom_config = Config(mindroom_user={"username": "alice", "display_name": "Alice Smith"})
-
-        runtime_paths = _runtime_paths(tmp_path)
-        state.save(runtime_paths=runtime_paths)
-        with (
-            patch("mindroom.matrix.users.matrix_client", return_value=mock_context),
-            patch("mindroom.constants.runtime_matrix_homeserver", return_value="http://localhost:8008"),
-        ):
-            orchestrator = _MultiAgentOrchestrator(runtime_paths=runtime_paths)
-
-            await orchestrator._ensure_user_account(custom_config)
-
-        persisted_state = MatrixState.load(runtime_paths=runtime_paths)
-        account = persisted_state.accounts[INTERNAL_USER_ACCOUNT_KEY]
-        assert account.username == "actual_mindroom_user"
-        assert account.domain == "matrix.example"
-        assert mindroom_user_id(custom_config, runtime_paths) == "@actual_mindroom_user:matrix.example"
-        mock_client.register.assert_not_called()
-
 
 def test_mindroom_user_username_normalizes_single_leading_at() -> None:
     """Config should accept a single leading @ and normalize it to localpart form."""
@@ -354,7 +153,7 @@ def test_mindroom_user_username_rejects_multiple_at() -> None:
 
 def test_mindroom_user_username_rejects_invalid_characters() -> None:
     """Config should reject localparts containing disallowed characters."""
-    with pytest.raises(ValueError, match="contains invalid characters"):
+    with pytest.raises(ValueError, match=r"mindroom_user\.username must be a Matrix localpart"):
         Config(mindroom_user={"username": "alice smith", "display_name": "Alice"})
 
 
@@ -363,7 +162,7 @@ def test_mindroom_user_username_rejects_persisted_router_collision(tmp_path: Pat
     runtime_paths = _runtime_paths(tmp_path)
     state = MatrixState.load(runtime_paths=runtime_paths)
     state.add_account("agent_router", "mindroom_router", TEST_PASSWORD, domain="localhost")
-    state.save(runtime_paths=runtime_paths)
+    save_matrix_state(state, runtime_paths)
 
     with pytest.raises(ValueError, match="conflicts with router 'router'"):
         Config.model_validate(
@@ -398,7 +197,7 @@ def test_mindroom_user_username_rejects_persisted_agent_username_collision(tmp_p
     runtime_paths = _runtime_paths(tmp_path)
     state = MatrixState.load(runtime_paths=runtime_paths)
     state.add_account("agent_assistant", "actual_assistant", TEST_PASSWORD, domain="localhost")
-    state.save(runtime_paths=runtime_paths)
+    save_matrix_state(state, runtime_paths)
 
     with pytest.raises(ValueError, match="conflicts with agent 'assistant'"):
         Config.model_validate(
@@ -421,7 +220,7 @@ def test_mindroom_user_username_allows_prepared_agent_proposal_name(tmp_path: Pa
     runtime_paths = _runtime_paths(tmp_path)
     state = MatrixState.load(runtime_paths=runtime_paths)
     state.add_account("agent_assistant", "actual_assistant", TEST_PASSWORD, domain="localhost")
-    state.save(runtime_paths=runtime_paths)
+    save_matrix_state(state, runtime_paths)
 
     config = Config.model_validate(
         {
@@ -497,26 +296,36 @@ def test_agent_and_team_names_reject_internal_entity_name(section: str, entity_n
         Config(**config_data)
 
 
-def test_run_pairs_when_hosted_without_credentials(tmp_path: Path) -> None:
-    """Run command initiates pairing when MINDROOM_PROVISIONING_URL is set without credentials."""
+@pytest.mark.parametrize("env_content", [None, "MINDROOM_PROVISIONING_URL=https://mindroom.chat\n"])
+def test_run_pairs_when_hosted_without_credentials(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    env_content: str | None,
+) -> None:
+    """An existing config pairs with hosted Matrix whether hosted defaults are explicit or implicit."""
+    monkeypatch.delenv("MATRIX_HOMESERVER", raising=False)
     config_path = tmp_path / "config.yaml"
     config_path.write_text("agents: {}\nmodels: {}\nrouter:\n  model: default\n", encoding="utf-8")
     env_path = tmp_path / ".env"
-    env_path.write_text("MINDROOM_PROVISIONING_URL=https://mindroom.chat\n", encoding="utf-8")
+    if env_content is not None:
+        env_path.write_text(env_content, encoding="utf-8")
 
     pair_called = []
 
-    def fake_pair_local_install(runtime_paths: constants_mod.RuntimePaths, **_kwargs: object) -> None:  # noqa: ARG001
+    def fake_pair_local_install(runtime_paths: constants_mod.RuntimePaths, **_kwargs: object) -> None:
+        assert constants_mod.runtime_matrix_homeserver(runtime_paths) == "https://mindroom.chat"
         pair_called.append(True)
         # Write credentials to .env to simulate successful pairing
-        env_content = env_path.read_text(encoding="utf-8")
-        env_content += "\nMINDROOM_LOCAL_CLIENT_ID=test_id\nMINDROOM_LOCAL_CLIENT_SECRET=test_secret\n"
-        env_path.write_text(env_content, encoding="utf-8")
+        env_path.write_text(
+            (env_content or "") + "\nMINDROOM_LOCAL_CLIENT_ID=test_id\nMINDROOM_LOCAL_CLIENT_SECRET=test_secret\n",
+            encoding="utf-8",
+        )
 
     seen_credentials = []
 
     async def fake_run(*, config_path: Path | None, storage_path: Path | None, **_kwargs: object) -> None:
         runtime_paths = activate_cli_runtime(config_path, storage_path=storage_path)
+        assert constants_mod.runtime_matrix_homeserver(runtime_paths) == "https://mindroom.chat"
         seen_credentials.append(
             (
                 runtime_paths.env_value("MINDROOM_LOCAL_CLIENT_ID"),
@@ -609,11 +418,14 @@ def _require_ipv6_loopback() -> None:
         pytest.skip("IPv6 loopback is unavailable")
 
 
+_PAIRING = "Waiting for local pairing approval"
+
+
 def _probe_status(host: str, port: int) -> int:
     return httpx.get(f"http://{host}:{port}/api/health", trust_env=False).status_code
 
 
-def test_pairing_probes_answer_on_every_localhost_address() -> None:
+def test_startup_probes_answer_on_every_localhost_address() -> None:
     """Like the real API server, `localhost` probes answer on both loopbacks, and a taken IPv4 loopback fails early."""
     _require_ipv6_loopback()
     families = {info[0] for info in socket.getaddrinfo("localhost", None, type=socket.SOCK_STREAM)}
@@ -621,7 +433,7 @@ def test_pairing_probes_answer_on_every_localhost_address() -> None:
         pytest.skip("localhost does not resolve to both loopbacks")
     port = _unused_local_port()
 
-    with serve_pairing_probes("localhost", port):
+    with serve_startup_probes("localhost", port, detail=_PAIRING):
         assert _probe_status("127.0.0.1", port) == 200
         assert _probe_status("[::1]", port) == 200
 
@@ -639,8 +451,8 @@ def test_pairing_probes_answer_on_every_localhost_address() -> None:
         occupied.bind(second_address)
         occupied.listen()
         with (
-            pytest.raises(OSError, match=re.escape(f"localhost:{port} (Address already in use)")),
-            serve_pairing_probes("localhost", port),
+            pytest.raises(PermanentStartupError, match=re.escape(f"localhost:{port} (Address already in use)")),
+            serve_startup_probes("localhost", port, detail=_PAIRING),
         ):
             pass
     # The first listener is released again after the failure.
@@ -650,7 +462,7 @@ def test_pairing_probes_answer_on_every_localhost_address() -> None:
         released.listen()
 
 
-def test_pairing_probes_skip_an_unconfigured_ipv6_loopback(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_startup_probes_skip_an_unconfigured_ipv6_loopback(monkeypatch: pytest.MonkeyPatch) -> None:
     """Like the real API server, a `::1` that IPv6-disabled hosts cannot bind is skipped while IPv4 still answers."""
     port = _unused_local_port()
     resolved = {
@@ -666,31 +478,34 @@ def test_pairing_probes_skip_an_unconfigured_ipv6_loopback(monkeypatch: pytest.M
         "getaddrinfo",
         lambda host, *args, **kwargs: resolved.get(host) or real_getaddrinfo(host, *args, **kwargs),
     )
-    real_server_bind = pairing_probes._ProbeServer.server_bind
+    real_server_bind = startup_probes._ProbeServer.server_bind
 
-    def server_bind(server: pairing_probes._ProbeServer) -> None:
+    def server_bind(server: startup_probes._ProbeServer) -> None:
         if server.address_family == socket.AF_INET6:
             raise OSError(errno.EADDRNOTAVAIL, "Cannot assign requested address")
         real_server_bind(server)
 
-    monkeypatch.setattr(pairing_probes._ProbeServer, "server_bind", server_bind)
+    monkeypatch.setattr(startup_probes._ProbeServer, "server_bind", server_bind)
 
-    with serve_pairing_probes("dual-stack.test", port):
+    with serve_startup_probes("dual-stack.test", port, detail=_PAIRING):
         assert _probe_status("127.0.0.1", port) == 200
 
     with (
-        pytest.raises(OSError, match=re.escape(f"ipv6-only.test:{port} (could not bind on any resolved address)")),
-        serve_pairing_probes("ipv6-only.test", port),
+        pytest.raises(
+            PermanentStartupError,
+            match=re.escape(f"ipv6-only.test:{port} (could not bind on any resolved address)"),
+        ),
+        serve_startup_probes("ipv6-only.test", port, detail=_PAIRING),
     ):
         pass
 
 
-def test_pairing_probes_on_ipv6_wildcard_leave_ipv4_alone() -> None:
+def test_startup_probes_on_ipv6_wildcard_leave_ipv4_alone() -> None:
     """Like the real API server, `::` binds IPv6 only, so an IPv4 listener on the same port does not block pairing."""
     _require_ipv6_loopback()
     port = _unused_local_port()
 
-    with serve_pairing_probes("::", port):
+    with serve_startup_probes("::", port, detail=_PAIRING):
         assert _probe_status("[::1]", port) == 200
         with pytest.raises(httpx.ConnectError):
             _probe_status("127.0.0.1", port)
@@ -699,7 +514,7 @@ def test_pairing_probes_on_ipv6_wildcard_leave_ipv4_alone() -> None:
         ipv4_listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         ipv4_listener.bind(("0.0.0.0", port))  # noqa: S104
         ipv4_listener.listen()
-        with serve_pairing_probes("::", port):
+        with serve_startup_probes("::", port, detail=_PAIRING):
             assert _probe_status("[::1]", port) == 200
 
 

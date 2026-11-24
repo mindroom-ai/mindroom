@@ -7,7 +7,6 @@ import asyncio
 import json
 from contextlib import suppress
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock
 from uuid import uuid4
 
 import nio
@@ -15,6 +14,7 @@ import pytest
 from nio.durable import DurableSync, SyncBatch, open_durable_sync
 
 from mindroom.matrix.durable_ingestion import consume_one_ingestion_batch
+from tests.durable_sync_helpers import skip_crypto_maintenance
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -80,7 +80,7 @@ async def test_real_owned_batch_replays_after_admission_before_nio_ack(  # noqa:
         return body
 
     session._transport.request = request
-    session._maintain_crypto = AsyncMock()
+    skip_crypto_maintenance(session)
     runner = asyncio.create_task(session.run())
     real_ack = session.ack
     crashed_batch = None

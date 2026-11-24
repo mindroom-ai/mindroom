@@ -2,36 +2,29 @@
 
 from __future__ import annotations
 
-from copy import copy
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
+from functools import partial
 from typing import TYPE_CHECKING
 
-from agno.db.base import SessionType
-from agno.run.agent import RunOutput
-from agno.run.team import TeamRunOutput
-
-from mindroom.agent_storage import (
-    create_session_storage,
-    get_agent_session,
-    get_team_session,
-    run_session_storage_operation,
-    save_runs,
-)
-from mindroom.constants import MATRIX_RESPONSE_EVENT_ID_METADATA_KEY
-from mindroom.entity_resolution import entity_identity_registry
-from mindroom.history.session_context import create_scope_session_storage
-from mindroom.history.team_scope import ad_hoc_team_scope_id
+from mindroom.history.run_checkpoint import link_response_event, recover_interrupted_turn
+from mindroom.history.session_context import create_scope_session_storage, resolve_bound_team_scope
 from mindroom.history.types import HistoryScope
+from mindroom.hooks import EVENT_SESSION_STARTED, SessionHookContext, emit
 from mindroom.runtime_protocols import SupportsConfig  # noqa: TC001
+from mindroom.session_storage.lanes import run_session_storage_operation
+from mindroom.session_storage.store import watch_session_row
+from mindroom.tool_system.runtime_context import scope_hook_context_kwargs
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import AsyncIterator, Collection, Sequence
 
     import structlog
-    from agno.db.base import BaseDb
 
     from mindroom.constants import RuntimePaths
-    from mindroom.matrix.identity import MatrixID
+    from mindroom.history.run_checkpoint import InterruptedTurn
+    from mindroom.session_storage.store import ConversationStore
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
@@ -43,6 +36,47 @@ class ConversationStateWriterDeps:
     logger: structlog.stdlib.BoundLogger
     runtime_paths: RuntimePaths
     agent_name: str
+
+
+@dataclass(frozen=True)
+class ReplySession:
+    """The stored session one reply writes: its history scope, and the context the reply's tools run in."""
+
+    scope: HistoryScope
+    tool_context: ToolRuntimeContext
+
+
+@asynccontextmanager
+async def session_started_on_creation(
+    reply: ReplySession | None,
+    *,
+    correlation_id: str,
+) -> AsyncIterator[None]:
+    """Run one reply, then emit ``session:started`` once if a write the reply made created its session's row.
+
+    A write counts once it commits, in this block or in a task or thread the block starts, whichever writer made it:
+    the run's save, an interrupted turn's record, a fold, or a helper's usage. The store is never read for this, and
+    nothing is watched without a reply or while no ``session:started`` hook is registered. A block that
+    raises emits nothing.
+    """
+    if reply is None or not reply.tool_context.hooks.registry.has_hooks(EVENT_SESSION_STARTED):
+        yield
+        return
+    context = reply.tool_context
+    with watch_session_row(reply.scope, context.session_id) as watch:
+        yield
+    if not watch.created:
+        return
+    hook_context = SessionHookContext(
+        **scope_hook_context_kwargs(
+            context,
+            event_name=EVENT_SESSION_STARTED,
+            correlation_id=correlation_id,
+            scope=reply.scope,
+            session_id=context.session_id,
+        ),
+    )
+    await emit(context.hooks.registry, EVENT_SESSION_STARTED, hook_context)
 
 
 @dataclass
@@ -57,112 +91,66 @@ class ConversationStateWriter:
             return HistoryScope(kind="team", scope_id=self.deps.agent_name)
         return HistoryScope(kind="agent", scope_id=self.deps.agent_name)
 
-    def session_type_for_scope(self, scope: HistoryScope) -> SessionType:
-        """Return the Agno session type used by one persisted history scope."""
-        return SessionType.TEAM if scope.kind == "team" else SessionType.AGENT
-
     def team_history_scope(
         self,
-        team_agents: list[MatrixID],
+        member_names: Sequence[str],
         *,
-        requester_user_id: str | None = None,
+        requester_user_id: str | None,
     ) -> HistoryScope:
-        """Return the persisted team-history scope for one team response."""
-        config = self.deps.runtime.config
-        if self.deps.agent_name in config.teams:
-            return HistoryScope(kind="team", scope_id=self.deps.agent_name)
-        registry = entity_identity_registry(config, self.deps.runtime_paths)
-        member_names: list[str] = []
-        for matrix_id in team_agents:
-            member_name = registry.current_entity_name_for_user_id(matrix_id.full_id) or matrix_id.username
-            member_names.append(member_name)
-        scope_id = (
-            ad_hoc_team_scope_id(
-                member_names,
-                config.agents,
-                requester_user_id=requester_user_id,
-                missing_requester_message="Private ad hoc team history scope requires requester_user_id",
-            )
-            or "team_"
+        """Return the persisted history scope of one team response: this bot's configured team's, else its members'."""
+        return resolve_bound_team_scope(
+            member_names=member_names,
+            config=self.deps.runtime.config,
+            team_name=self.deps.agent_name,
+            requester_user_id=requester_user_id,
         )
-        return HistoryScope(kind="team", scope_id=scope_id)
 
     def create_storage(
         self,
         execution_identity: ToolExecutionIdentity | None,
         *,
         scope: HistoryScope | None = None,
-    ) -> BaseDb:
-        """Create storage for one exact persisted history scope."""
-        config = self.deps.runtime.config
-        normalized_scope = (
-            self.history_scope() if scope is None else HistoryScope(kind=scope.kind, scope_id=scope.scope_id)
-        )
-        if (
-            normalized_scope == self.history_scope()
-            and self.session_type_for_scope(normalized_scope) is SessionType.AGENT
-        ):
-            return create_session_storage(
-                agent_name=self.deps.agent_name,
-                config=config,
-                runtime_paths=self.deps.runtime_paths,
-                execution_identity=execution_identity,
-            )
+    ) -> ConversationStore:
+        """Open the conversation store of one exact persisted history scope."""
         return create_scope_session_storage(
-            agent_name=normalized_scope.scope_id if normalized_scope.kind == "agent" else self.deps.agent_name,
-            scope=normalized_scope,
-            config=config,
+            scope=self.history_scope() if scope is None else scope,
+            config=self.deps.runtime.config,
             runtime_paths=self.deps.runtime_paths,
             execution_identity=execution_identity,
         )
 
-    def _persist_response_event_id_in_session_run(
-        self,
-        *,
-        storage: BaseDb,
-        session_id: str,
-        session_type: SessionType,
-        run_id: str,
-        response_event_id: str,
-    ) -> None:
-        """Persist Matrix response linkage onto the run that produced it."""
-        session = (
-            get_team_session(storage, session_id)
-            if session_type is SessionType.TEAM
-            else get_agent_session(storage, session_id)
-        )
-        if session is None or not session.runs:
-            return
-        for run in session.runs:
-            if not isinstance(run, (RunOutput, TeamRunOutput)) or run.run_id != run_id:
-                continue
-            metadata = dict(run.metadata or {})
-            if metadata.get(MATRIX_RESPONSE_EVENT_ID_METADATA_KEY) == response_event_id:
-                return
-            metadata[MATRIX_RESPONSE_EVENT_ID_METADATA_KEY] = response_event_id
-            linked_run = copy(run)
-            linked_run.metadata = metadata
-            save_runs(storage, session, [linked_run])
-            return
-
     async def apersist_response_event_id_in_session_run(
         self,
         *,
-        create_storage: Callable[[], BaseDb],
+        execution_identity: ToolExecutionIdentity | None,
+        scope: HistoryScope,
         session_id: str,
-        session_type: SessionType,
         run_id: str,
         response_event_id: str,
     ) -> None:
-        """Persist response linkage off-loop in the session target's FIFO lane."""
+        """Link the run that produced a Matrix response to it, and the recovered runs that run continued.
 
-        def persist(storage: BaseDb) -> None:
-            self._persist_response_event_id_in_session_run(
-                storage=storage,
-                session_id=session_id,
-                session_type=session_type,
-                run_id=run_id,
-                response_event_id=response_event_id,
-            )
+        Runs off-loop in the session target's FIFO lane (``link_response_event``).
+        """
+        await run_session_storage_operation(
+            partial(self.create_storage, execution_identity, scope=scope),
+            lambda storage: link_response_event(storage, session_id, run_id, response_event_id),
+        )
 
-        await run_session_storage_operation(create_storage, persist)
+    async def recover_interrupted_turn(
+        self,
+        *,
+        execution_identity: ToolExecutionIdentity | None,
+        scope: HistoryScope,
+        session_id: str,
+        event_ids: Collection[str],
+        natively: bool,
+    ) -> InterruptedTurn:
+        """Recover the runs a restart cut short while they answered ``event_ids`` (``recover_interrupted_turn``).
+
+        Returns the attempts their replay continues, off-loop in the session target's FIFO lane.
+        """
+        return await run_session_storage_operation(
+            partial(self.create_storage, execution_identity, scope=scope),
+            lambda storage: recover_interrupted_turn(storage, session_id, scope, event_ids, natively=natively),
+        )

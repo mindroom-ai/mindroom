@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import socket
-import threading
 from typing import get_type_hints
 
 import httpx
@@ -14,12 +13,11 @@ import pytest
 from mindroom.server_fetch_httpx2 import ServerFetchAsyncHTTPX2Transport
 from mindroom.server_fetch_url import (
     ServerFetchAsyncHTTPTransport,
-    ServerFetchHTTPTransport,
     ServerFetchUrlError,
-    validate_server_fetch_redirect_url,
     validate_server_fetch_url,
     validated_connect_addresses,
 )
+from tests.conftest import loop_runs_while_blocked
 
 
 def _addrinfo(ip_address: str) -> list[tuple[int, int, int, str, tuple[str, int]]]:
@@ -29,7 +27,7 @@ def _addrinfo(ip_address: str) -> list[tuple[int, int, int, str, tuple[str, int]
 
 @pytest.mark.parametrize(
     "transport_cls",
-    [ServerFetchHTTPTransport, ServerFetchAsyncHTTPTransport, ServerFetchAsyncHTTPX2Transport],
+    [ServerFetchAsyncHTTPTransport, ServerFetchAsyncHTTPX2Transport],
 )
 def test_server_fetch_transport_type_hints_resolve_at_runtime(transport_cls: type[object]) -> None:
     """Transport constructor annotations should support runtime type inspection."""
@@ -250,14 +248,6 @@ def test_platform_agent_endpoints_are_metadata_addresses(host: str, *, allow_pri
         assert exc_info.value.reason == "metadata_address"
 
     with pytest.raises(ServerFetchUrlError) as exc_info:
-        validate_server_fetch_redirect_url(
-            "https://example.com/start",
-            f"http://{host}/",
-            allow_private_networks=allow_private_networks,
-        )
-    assert exc_info.value.reason == "metadata_address"
-
-    with pytest.raises(ServerFetchUrlError) as exc_info:
         validated_connect_addresses(host.strip("[]"), port=80, allow_private_networks=allow_private_networks)
     assert exc_info.value.reason == "metadata_address"
 
@@ -319,30 +309,18 @@ def test_validate_server_fetch_url_blocks_link_local_dns_when_private_is_enabled
     assert exc_info.value.reason == "blocked_address"
 
 
-def test_validate_server_fetch_redirect_url_rejects_internal_absolute_redirect() -> None:
-    """Redirect targets should get the same server-side fetch URL validation."""
-    with pytest.raises(ServerFetchUrlError) as exc_info:
-        validate_server_fetch_redirect_url("https://example.com/start", "http://127.0.0.1/admin")
-
-    assert exc_info.value.reason == "private_address"
-
-
-def test_server_fetch_http_transport_rejects_private_request_url_without_network() -> None:
-    """The HTTPX transport should deny unsafe request URLs before opening a socket."""
-    transport = ServerFetchHTTPTransport()
-    request = httpx.Request("GET", "http://127.0.0.1/admin")
-
-    with pytest.raises(ServerFetchUrlError) as exc_info:
-        transport.handle_request(request)
-
-    assert exc_info.value.reason == "private_address"
-
-
 @pytest.mark.asyncio
-async def test_httpx2_transport_rejects_private_request_url_without_network() -> None:
-    """The httpx2 transport handed to the MCP SDK should deny unsafe request URLs before opening a socket."""
-    transport = ServerFetchAsyncHTTPX2Transport()
-    request = httpx2.Request("GET", "http://127.0.0.1/admin")
+@pytest.mark.parametrize(
+    ("transport_cls", "request_cls"),
+    [(ServerFetchAsyncHTTPTransport, httpx.Request), (ServerFetchAsyncHTTPX2Transport, httpx2.Request)],
+)
+async def test_transport_rejects_private_request_url_without_network(
+    transport_cls: type[ServerFetchAsyncHTTPTransport | ServerFetchAsyncHTTPX2Transport],
+    request_cls: type[httpx.Request | httpx2.Request],
+) -> None:
+    """The HTTPX transport, and the httpx2 one handed to the MCP SDK, deny unsafe request URLs before opening a socket."""
+    transport = transport_cls()
+    request = request_cls("GET", "http://127.0.0.1/admin")
 
     with pytest.raises(ServerFetchUrlError) as exc_info:
         await transport.handle_async_request(request)
@@ -385,13 +363,10 @@ async def test_async_transport_resolves_the_dialed_host_off_the_event_loop(
 ) -> None:
     """A slow DNS lookup for one connection must not stall other work on the event loop."""
     loop = asyncio.get_running_loop()
-    loop_kept_running = threading.Event()
     lookup_saw_loop_running: list[bool] = []
 
     def slow_getaddrinfo(*_args: object, **_kwargs: object) -> list[tuple[int, int, int, str, tuple[str, int]]]:
-        # The loop runs this callback during the lookup only when the lookup leaves the loop free.
-        loop.call_soon_threadsafe(loop_kept_running.set)
-        lookup_saw_loop_running.append(loop_kept_running.wait(timeout=2))
+        lookup_saw_loop_running.append(loop_runs_while_blocked(loop))
         raise socket.gaierror
 
     monkeypatch.setattr("mindroom.server_fetch_url.socket.getaddrinfo", slow_getaddrinfo)

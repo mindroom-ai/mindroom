@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
 from backend.deps import ensure_supabase
+from backend.utils.paging import select_all_pages
 
 if TYPE_CHECKING:
     from supabase import Client
@@ -47,8 +48,8 @@ def get_instances_for_account(sb: Client, account_id: str, *, newest_first: bool
 
 
 def list_instances(sb: Client, columns: str = "*") -> list[dict[str, Any]]:
-    """Return all instance rows, optionally restricted to a column subset."""
-    return sb.table("instances").select(columns).execute().data or []
+    """Return every instance row in instance_id order, paged past PostgREST's row limit."""
+    return select_all_pages(lambda: sb.table("instances").select(columns).order("instance_id"))
 
 
 def create_instance(sb: Client, fields: dict[str, Any]) -> dict[str, Any] | None:

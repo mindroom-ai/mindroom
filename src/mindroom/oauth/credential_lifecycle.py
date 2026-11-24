@@ -11,9 +11,10 @@ import time
 from concurrent.futures import Future as ConcurrentFuture
 from contextvars import ContextVar, copy_context
 from dataclasses import dataclass, replace
-from typing import TYPE_CHECKING, Any, NoReturn, cast
+from typing import TYPE_CHECKING, Any, Literal, NoReturn, cast
 
 import httpx
+import httpx2
 from requests import exceptions as requests_exceptions
 
 from mindroom.background_tasks import run_coroutine_until_complete, wait_for_future_until_complete
@@ -23,12 +24,14 @@ from mindroom.oauth.credential_store import (
     OAuthCredentialUnreadableError,
     oauth_credential_reader,
     oauth_credential_transaction,
+    oauth_credentials_may_exist,
 )
 from mindroom.oauth.providers import (
     OAuthClaimValidationError,
     OAuthProviderError,
     OAuthRefreshRejectedError,
     OAuthTokenEndpointChangedError,
+    OAuthTokenResponseBodyError,
     OAuthTokenResult,
     is_terminal_oauth_refresh_error_code,
 )
@@ -36,7 +39,7 @@ from mindroom.requester_identity import resolve_human_requester_alias
 from mindroom.tool_system.worker_routing import resolve_worker_target
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Collection, Coroutine, Mapping
+    from collections.abc import Awaitable, Callable, Collection, Coroutine, Mapping, Sequence
 
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
@@ -48,7 +51,16 @@ _OAUTH_ACCESS_TOKEN_EXPIRY_SKEW_SECONDS = 60
 _OAUTH_REFRESH_FAILED_MESSAGE = "OAuth credential refresh failed"
 _OAUTH_TRANSACTION_REENTRY_MESSAGE = "OAuth provider adapters cannot re-enter the credential lifecycle"
 _UNRECOGNIZED_OAUTH_ERROR_CODE = "unrecognized"
+# Authlib's token client raises httpx2 errors, endpoint discovery httpx errors, and Google's refresh requests errors.
 _OAUTH_REFRESH_TRANSPORT_ERRORS = (
+    (httpx2.ConnectTimeout, "timeout"),
+    (httpx2.ReadTimeout, "timeout"),
+    (httpx2.WriteTimeout, "timeout"),
+    (httpx2.PoolTimeout, "timeout"),
+    (httpx2.TimeoutException, "timeout"),
+    (httpx2.NetworkError, "network"),
+    (httpx2.HTTPStatusError, "http_status"),
+    (httpx2.HTTPError, "transport"),
     (httpx.ConnectTimeout, "timeout"),
     (httpx.ReadTimeout, "timeout"),
     (httpx.WriteTimeout, "timeout"),
@@ -60,6 +72,7 @@ _OAUTH_REFRESH_TRANSPORT_ERRORS = (
     (TimeoutError, "timeout"),
     (json.JSONDecodeError, "invalid_response"),
     (UnicodeDecodeError, "invalid_response"),
+    (OAuthTokenResponseBodyError, "invalid_response"),
     (requests_exceptions.ConnectTimeout, "timeout"),
     (requests_exceptions.ReadTimeout, "timeout"),
     (requests_exceptions.Timeout, "timeout"),
@@ -396,23 +409,23 @@ def load_oauth_credentials_snapshot_sync(context: OAuthCredentialContext) -> OAu
     return _run_oauth_transaction_sync(_load_oauth_credentials_snapshot_read(context))
 
 
-def load_oauth_credentials_snapshot_if_readable_sync(
-    context: OAuthCredentialContext,
-) -> OAuthCredentialsSnapshot | None:
-    """Load a client-construction snapshot, treating unreadable state as unavailable."""
-    try:
-        return load_oauth_credentials_snapshot_sync(context)
-    except OAuthCredentialUnreadableError:
-        return None
-
-
 async def load_oauth_credentials_snapshot(context: OAuthCredentialContext) -> OAuthCredentialsSnapshot:
     """Load the last committed credentials without waiting for provider I/O."""
     return await _run_cancellable_oauth_transaction(lambda: _load_oauth_credentials_snapshot_read(context))
 
 
-async def load_oauth_credentials_status(context: OAuthCredentialContext) -> OAuthCredentialsStatus:
-    """Load credentials or classify an unreadable payload as requiring reset."""
+async def load_oauth_credentials_status(
+    context: OAuthCredentialContext,
+    *,
+    create_store: bool = True,
+) -> OAuthCredentialsStatus:
+    """Load credentials or classify an unreadable payload as requiring reset.
+
+    `create_store=False` reads a scope without a store as having no credentials instead of creating an empty store,
+    so a listing of many scopes writes nothing, except for a scope whose legacy tokens its new store adopts.
+    """
+    if not create_store and not await asyncio.to_thread(oauth_credentials_may_exist, context):
+        return OAuthCredentialsStatus(credentials=None, reset_required=False)
     try:
         snapshot = await load_oauth_credentials_snapshot(context)
     except OAuthCredentialUnreadableError:
@@ -596,21 +609,55 @@ async def _exchange_and_store_oauth_credentials_locked(
     token_url: str,
     transaction: OAuthCredentialTransaction,
 ) -> dict[str, Any]:
+    result = await _exchange_oauth_code(
+        context.provider,
+        context.runtime_paths,
+        code,
+        code_verifier,
+        token_url=token_url,
+    )
+    safe_result = await _safe_token_result(context.provider, result, context.runtime_paths)
+    return await _publish_connection_locked(transaction, safe_result.token_data)
+
+
+async def _exchange_oauth_code(
+    provider: OAuthProvider,
+    runtime_paths: RuntimePaths,
+    code: str,
+    code_verifier: str | None,
+    *,
+    token_url: str,
+) -> OAuthTokenResult:
+    """Exchange one code at its authorization-bound token endpoint under the adapter re-entry guard."""
     adapter_scope = _oauth_provider_adapter_active.set(True)
     try:
-        result = await context.provider.exchange_code(
-            code,
-            context.runtime_paths,
-            token_url=token_url,
-            code_verifier=code_verifier,
-        )
-        await asyncio.to_thread(context.provider.validate_claims, result, context.runtime_paths)
-        safe_result = context.provider.token_result_with_safe_claims(result)
+        return await provider.exchange_code(code, runtime_paths, token_url=token_url, code_verifier=code_verifier)
     finally:
         _oauth_provider_adapter_active.reset(adapter_scope)
+
+
+async def _safe_token_result(
+    provider: OAuthProvider,
+    result: OAuthTokenResult,
+    runtime_paths: RuntimePaths,
+) -> OAuthTokenResult:
+    """Apply the provider's account rules and keep only what may be stored, under the adapter re-entry guard."""
+    adapter_scope = _oauth_provider_adapter_active.set(True)
+    try:
+        await asyncio.to_thread(provider.validate_claims, result, runtime_paths)
+        return provider.token_result_with_safe_claims(result)
+    finally:
+        _oauth_provider_adapter_active.reset(adapter_scope)
+
+
+async def _publish_connection_locked(
+    transaction: OAuthCredentialTransaction,
+    safe_token_data: dict[str, Any],
+) -> dict[str, Any]:
+    """Publish a new connection, keeping the stored refresh token the grant omits, and commit."""
     token_data = _token_data_preserving_refresh_token(
         (await transaction.snapshot()).credentials,
-        safe_result.token_data,
+        safe_token_data,
     )
     published = await transaction.publish(
         token_data,
@@ -618,6 +665,78 @@ async def _exchange_and_store_oauth_credentials_locked(
     )
     await transaction.commit()
     return published.credentials or {}
+
+
+OAuthGroupSkipReason = Literal["changed", "account_not_allowed", "scopes_not_granted"]
+
+
+@dataclass(frozen=True, slots=True)
+class OAuthGroupMember:
+    """One consent group member and the connection generation it had when the shared sign-in started."""
+
+    context: OAuthCredentialContext
+    expected_connection_generation: str
+
+
+@dataclass(frozen=True, slots=True)
+class OAuthGroupConnectResult:
+    """Provider IDs a shared sign-in connected or skipped, in member order."""
+
+    connected: tuple[str, ...]
+    skipped: tuple[tuple[str, OAuthGroupSkipReason], ...]
+
+
+async def exchange_and_store_oauth_group_credentials(
+    lead: OAuthProvider,
+    members: Sequence[OAuthGroupMember],
+    code: str,
+    code_verifier: str | None,
+    *,
+    token_url: str,
+) -> OAuthGroupConnectResult:
+    """Exchange one code at the lead's token endpoint and store the grant for each member that can take it.
+
+    The exchange runs outside every member transaction, so no credential lock is held across provider I/O.
+    Each member is stored in its own transaction and skipped, never failed, when it cannot take the grant.
+    """
+    result = await _exchange_oauth_code(
+        lead,
+        members[0].context.runtime_paths,
+        code,
+        code_verifier,
+        token_url=token_url,
+    )
+    connected: list[str] = []
+    skipped: list[tuple[str, OAuthGroupSkipReason]] = []
+    for member in members:
+        provider_id = member.context.provider.id
+        skip_reason = await _run_oauth_transaction(_store_oauth_group_member(member, result))
+        if skip_reason is None:
+            connected.append(provider_id)
+        else:
+            logger.info("oauth_group_member_skipped", provider_id=provider_id, reason=skip_reason)
+            skipped.append((provider_id, skip_reason))
+    return OAuthGroupConnectResult(connected=tuple(connected), skipped=tuple(skipped))
+
+
+async def _store_oauth_group_member(
+    member: OAuthGroupMember,
+    result: OAuthTokenResult,
+) -> OAuthGroupSkipReason | None:
+    """Store one shared grant for a member, or return why it was skipped."""
+    context = member.context
+    provider = context.provider
+    async with oauth_credential_transaction(context) as transaction:
+        if (await transaction.generations()).connection_generation != member.expected_connection_generation:
+            return "changed"
+        try:
+            safe_result = await _safe_token_result(provider, result, context.runtime_paths)
+        except OAuthClaimValidationError:
+            return "account_not_allowed"
+        if not oauth_credentials_have_required_scopes(provider, safe_result.token_data):
+            return "scopes_not_granted"
+        await _publish_connection_locked(transaction, safe_result.token_data)
+    return None
 
 
 async def reset_oauth_credentials(
@@ -633,6 +752,13 @@ async def reset_oauth_credentials(
             operation_id=operation_id,
             expected_connection_generation=expected_connection_generation,
         ),
+    )
+
+
+def reset_oauth_credentials_blocking(context: OAuthCredentialContext) -> bool:
+    """Delete one credential from a synchronous caller; return whether one was stored."""
+    return _run_oauth_transaction_sync(
+        _reset_oauth_credentials_transaction(context, operation_id=None, expected_connection_generation=None),
     )
 
 
@@ -799,7 +925,7 @@ def _oauth_refresh_failure_diagnostics(exc: BaseException) -> dict[str, str | in
                 "transport_error_category": category,
                 "transport_error_type": error_type.__name__,
             }
-            if isinstance(cause, httpx.HTTPStatusError | requests_exceptions.HTTPError):
+            if isinstance(cause, httpx2.HTTPStatusError | httpx.HTTPStatusError | requests_exceptions.HTTPError):
                 try:
                     response = cause.response
                     status_code = response.status_code if response is not None else None
@@ -871,11 +997,15 @@ def oauth_credentials_usable(
     now: float | None = None,
     scope_validator: Callable[[dict[str, Any]], bool] | None = None,
 ) -> bool:
-    """Return whether stored OAuth credentials can currently authenticate provider calls."""
-    client_config = provider.client_config(runtime_paths)
-    if not credentials or client_config is None:
+    """Return whether stored OAuth credentials can currently authenticate provider calls.
+
+    Without credentials it reads nothing: the client config is a credential file read, which listings of many scopes
+    that never connected would otherwise repeat on the event loop.
+    """
+    if not credentials:
         return False
-    if not oauth_credentials_match_client_id(client_config, credentials):
+    client_config = provider.client_config(runtime_paths)
+    if client_config is None or not oauth_credentials_match_client_id(client_config, credentials):
         return False
     if not (
         scope_validator(credentials)
@@ -976,6 +1106,11 @@ def oauth_verified_claim(credentials: dict[str, Any], key: str) -> str | None:
         return None
     value = claims.get(key)
     return value if isinstance(value, str) and value else None
+
+
+def oauth_account_label(credentials: dict[str, Any]) -> str | None:
+    """Return how a connected account is shown: its verified email, else its verified login (GitHub)."""
+    return oauth_verified_claim(credentials, "email") or oauth_verified_claim(credentials, "login")
 
 
 def _same_external_identity(existing_credentials: dict[str, Any] | None, token_data: dict[str, Any]) -> bool:

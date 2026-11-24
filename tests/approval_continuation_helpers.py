@@ -2,33 +2,103 @@
 
 from __future__ import annotations
 
+import re
 import time
 from contextlib import asynccontextmanager
+from dataclasses import replace
+from itertools import pairwise
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 from mindroom import reply_lifecycle as rl
+from mindroom.approval.receipt import build_approval_receipt
+from mindroom.event_journal import EventClass, EventKind, InboundEvent
+from mindroom.event_journal.approval_calls import ApprovalCall, ApprovalDecision
 from mindroom.event_journal.approval_continuations import ApprovalAdvance, ApprovalContinuation
 from mindroom.event_journal.replies import PreparedReplyRow, ReplyRowRequest
 from mindroom.reply_presentation import Presentation, Segment, encode_presentation
 from mindroom.response_sources import ResponseSources
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 from tests.conftest import message_origin, unwrap_extracted_collaborator
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Mapping
+    from collections.abc import AsyncIterator, Iterable, Mapping, Sequence
 
+    from mindroom.approval.continuation_runner import ApprovalContinuationRunner
     from mindroom.bot import AgentBot
     from mindroom.event_journal import PrincipalStore
-    from mindroom.event_journal.approval_continuations import ApprovalCall
+    from mindroom.llm.provider import ModelRequest
+    from mindroom.message_target import MessageTarget
+
+# The decided calls of a receipt that a test binds only to see which requests carry it, and its text.
+RECEIPT_CALLS = (
+    ApprovalCall(
+        tool_call_id="call-receipt",
+        tool_name="publish_report",
+        invoking_agent="agent",
+        expires_at_ns=1,
+        decision=ApprovalDecision.APPROVED,
+        human_approval_required=True,
+    ),
+)
+RECEIPT_TEXT = build_approval_receipt(RECEIPT_CALLS)
+# Every receipt opens with this line; the model sees it as a message of its own.
+_RECEIPT_HEADER = RECEIPT_TEXT.splitlines()[0]
+
+
+def receipts(request: ModelRequest) -> list[str]:
+    """Return each approval receipt ``request`` carries, in order, checking each is a user message of turn context."""
+    found = [message for message in request.messages if str(message.content).startswith(_RECEIPT_HEADER)]
+    assert all(message.role == "user" and not message.add_to_agent_memory for message in found)
+    assert all(_RECEIPT_HEADER not in str(message.content) for message in request.messages if message not in found)
+    return [str(message.content) for message in found]
+
+
+def carries_approval_receipt(request: ModelRequest) -> bool:
+    """Return whether ``request`` carries an approval receipt."""
+    return bool(receipts(request))
+
+
+def receipt_call_ids(request: ModelRequest) -> list[str]:
+    """Return the tool call ids the newest approval receipt in ``request`` names, in its order."""
+    return re.findall(r"tool call id `([^`]+)`", receipts(request)[-1])
+
+
+def repeats_each_request(requests: Sequence[ModelRequest]) -> bool:
+    """Return whether each request sends the one before it unchanged, then the assistant turn that answered it.
+
+    A resume or a continuation after a delegation rebuilds its request from the paused run, so this holds across them.
+    """
+    return all(
+        later.messages[: len(earlier.messages)] == earlier.messages
+        and later.messages[len(earlier.messages)].role == "assistant"
+        for earlier, later in pairwise(requests)
+    )
+
+
+def request_call_ids(request: ModelRequest) -> list[str]:
+    """Return the ids of the tool calls the assistant messages of ``request`` hold, in order."""
+    return [call["id"] for message in request.messages for call in message.tool_calls or ()]
 
 
 def approval_continuation(**changes: Any) -> ApprovalContinuation:  # noqa: ANN401
     """Return a ready continuation of one user's message in ``!room:localhost``, with ``changes`` applied.
 
-    Its origin is the requester's own message unless ``changes`` names one.
+    Its origin is the requester's own message, and its run executed as the requester's Matrix turn with ``general``,
+    unless ``changes`` names others.
     """
     requester_id = changes.get("requester_id", "@user:localhost")
+    sources = changes.get("sources", ResponseSources(("$source",), ("$source",)))
     defaults: dict[str, Any] = {
+        "execution_identity": ToolExecutionIdentity(
+            channel="matrix",
+            agent_name=changes.get("entity_name", "general"),
+            requester_id=requester_id,
+            room_id=changes.get("room_id", "!room:localhost"),
+            thread_id=changes.get("thread_id", "$thread"),
+            resolved_thread_id=changes.get("thread_id", "$thread"),
+            session_id=changes.get("session_id", "session-1"),
+        ),
         "approval_id": "approval",
         "run_id": "run-1",
         "session_id": "session-1",
@@ -39,11 +109,48 @@ def approval_continuation(**changes: Any) -> ApprovalContinuation:  # noqa: ANN4
         "requester_id": requester_id,
         "origin": message_origin(sender_id=requester_id),
         "response_event_id": "$waiting",
-        "sources": ResponseSources(("$source",), ("$source",)),
+        "sources": sources,
+        # The paused span's rows are named by its turn's messages, as a response names them.
+        "final_delivery_id": sources.delivery_id,
         "calls": (),
         "state": "ready",
+        "turn_id": "turn-paused",
     }
     return ApprovalContinuation(**(defaults | changes))
+
+
+def decided_calls(
+    calls: Iterable[ApprovalCall],
+    decisions: Mapping[str, bool],
+    reasons: Mapping[str, str | None] | None = None,
+) -> tuple[ApprovalCall, ...]:
+    """Return ``calls`` as the requester decided them: each approved or denied by ``decisions``, with its reason."""
+    return tuple(
+        replace(
+            call,
+            decision=ApprovalDecision.APPROVED if decisions[call.tool_call_id] else ApprovalDecision.DENIED,
+            reason=(reasons or {}).get(call.tool_call_id),
+        )
+        for call in calls
+    )
+
+
+def answered_calls(call_ids: Iterable[str], *, approved: bool, reason: str | None = None) -> tuple[ApprovalCall, ...]:
+    """Return the calls a claimed approval holds for ``call_ids``: all approved, or all denied with ``reason``.
+
+    They carry only what applying a decision to a paused requirement reads: the call id, decision, and reason.
+    """
+    return tuple(
+        ApprovalCall(
+            tool_call_id=call_id,
+            tool_name="",
+            invoking_agent="",
+            expires_at_ns=0,
+            decision=ApprovalDecision.APPROVED if approved else ApprovalDecision.DENIED,
+            reason=None if approved else reason,
+        )
+        for call_id in call_ids
+    )
 
 
 async def continuation_claim(
@@ -55,7 +162,7 @@ async def continuation_claim(
     """Return the claim of a span for a continuation's sources and reply, as the bot instance ``generation`` makes it."""
     return rl.ClaimRequest(
         span_id=uuid4().hex,
-        delivery_id=continuation.source_event_ids[0],
+        delivery_id=continuation.final_delivery_id,
         sources=continuation.sources,
         bot_generation=generation,
         now_ns=time.time_ns(),
@@ -78,12 +185,12 @@ async def claim_continuation(
 
     Any other instance that owned the principal's replies owns them again afterwards, as after a takeover.
     """
-    continuation = await principal.approval_continuation(approval_id)
+    continuation = await principal.approvals.approval_continuation(approval_id)
     if continuation is None:
         return None
     owner = await principal.replies.active_generation()
     await principal.replies.write_generation(runtime_generation)
-    claimed, _applied = await principal.claim_approval_resume(
+    claimed, _applied = await principal.approvals.claim_approval_resume(
         approval_id,
         claim=await continuation_claim(principal, continuation, generation=runtime_generation),
     )
@@ -100,9 +207,9 @@ async def resumed_approval(bot: AgentBot, continuation: ApprovalContinuation) ->
     continuation runs as the span's attempt for as long as the context is open.
     """
     runner = unwrap_extracted_collaborator(bot._response_runner)
-    await bot._reply_runtime.start()
+    await bot._take_over_replies()
     async with runner.deps.replies.span_scope() as slot:
-        claimed = await runner._claim_owned_approval(continuation, slot=slot)
+        claimed = await runner.approvals._claim_owned_approval(continuation, slot=slot)
         assert claimed is not None
         assert slot.handle is not None
         yield claimed
@@ -121,8 +228,8 @@ async def advance_continuation(
     cli_call: dict[str, object] | None = None,
     continuation_count: int | None = None,
 ) -> ApprovalContinuation | None:
-    """Replace one claimed generation with the next exact Agno pause, pausing the resume that ran it."""
-    current = await principal.approval_continuation(approval_id)
+    """Advance one claimed generation to its run's next pause on ``calls``, pausing the resume that ran it."""
+    current = await principal.approvals.approval_continuation(approval_id)
     assert current is not None
     assert current.span_id is not None
     paused = await principal.replies.span(current.span_id)
@@ -130,7 +237,7 @@ async def advance_continuation(
     reply = await principal.replies.load(paused.reply_id)
     assert reply is not None
     assert reply.current_span_id is not None
-    enqueued = await principal.pause_for_approval(
+    enqueued = await principal.approvals.pause_for_approval(
         ApprovalAdvance(
             approval_id=approval_id,
             claimant_generation=claimant_generation,
@@ -157,7 +264,7 @@ async def advance_continuation(
     )
     if enqueued is None or not enqueued.transition.applied:
         return None
-    return await principal.approval_continuation(approval_id)
+    return await principal.approvals.approval_continuation(approval_id)
 
 
 async def freeze_resume_final(
@@ -191,3 +298,30 @@ async def freeze_resume_final(
         ),
     )
     assert enqueued is not None
+
+
+async def admit_approval_source(store: PrincipalStore) -> None:
+    """Admit the message ``$source`` in ``$thread`` that the tests' paused replies answer."""
+    await store.admit(
+        InboundEvent(
+            event_id="$source",
+            room_id="!room:localhost",
+            thread_id="$thread",
+            kind=EventKind.MESSAGE,
+            event_class=EventClass.ACTIONABLE,
+            sender="@user:localhost",
+            origin_server_ts=1,
+            source={"event_id": "$source", "content": {"body": "run it"}},
+        ),
+    )
+
+
+async def dispatch_approval(
+    approvals: ApprovalContinuationRunner,
+    owned: ApprovalContinuation,
+    *,
+    target: MessageTarget,
+) -> None:
+    """Run the owning bot's source worker on a paused reply's source, as a woken source's dispatch does."""
+    request = approvals.approval_response_request(owned, target=target)
+    await approvals.run_owned_approvals(owned, request=request, target=target)

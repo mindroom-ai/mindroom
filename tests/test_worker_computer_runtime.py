@@ -4,12 +4,20 @@ import asyncio
 import os
 import stat
 from pathlib import Path
+from xml.etree import ElementTree as ET
 
 import pytest
 
+import mindroom.worker_computer
 from mindroom.worker_computer.display import WorkerDisplay
 from mindroom.worker_computer.protocol import BrowserSession
 from mindroom.worker_computer.runtime import ComputerControlError, WorkerComputerRuntime
+
+OPENBOX_CONFIG = Path(mindroom.worker_computer.__file__).with_name("openbox_rc.xml")
+
+
+async def unused(*_args: object, **_kwargs: object) -> None:
+    """Stand in for a coroutine whose work a test does not need."""
 
 
 class FakeDisplay:
@@ -252,9 +260,40 @@ async def test_display_long_socket_root_uses_private_bounded_owned_directory(
             await server.wait_closed()
 
 
+def test_openbox_config_has_no_menu_or_program_binding() -> None:
+    """The desktop opens no menu and starts no program from a key or mouse binding."""
+    root = ET.parse(OPENBOX_CONFIG).getroot()  # noqa: S314 - the shipped package file
+    assert root.tag == "{http://openbox.org/3.4/rc}openbox_config", "Openbox ignores any other root"
+    local_names = {element.tag.rpartition("}")[2] for element in root.iter()}
+    assert "menu" not in local_names
+    actions = {element.get("name") for element in root.iter("{http://openbox.org/3.4/rc}action")}
+    assert not actions & {"Execute", "ShowMenu"}
+
+
+@pytest.mark.asyncio
+async def test_display_starts_openbox_with_shipped_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The window manager runs with MindRoom's config, not the stock one."""
+    real_spawn = asyncio.create_subprocess_exec
+    commands = []
+
+    async def spawn(*args: str, **_kwargs: object) -> asyncio.subprocess.Process:
+        commands.append(args)
+        return await real_spawn("sleep", "60")
+
+    monkeypatch.setattr("mindroom.worker_computer.display.shutil.which", lambda _name: "/display")
+    monkeypatch.setattr("mindroom.worker_computer.display.asyncio.create_subprocess_exec", spawn)
+    monkeypatch.setattr(WorkerDisplay, "_wait_ready", unused)
+    display = WorkerDisplay(tmp_path)
+    try:
+        await display.start()
+    finally:
+        await display.close()
+    assert commands[1] == ("openbox", "--sm-disable", "--config-file", str(OPENBOX_CONFIG))
+
+
 @pytest.mark.asyncio
 async def test_timed_out_action_invalidates_uncertain_browser_state() -> None:
-    """A timed-out navigation cannot leave a live computer with uncertain page state."""
+    """An action stopped by a timeout other than the browser call's own limit stops the computer and its browser."""
     runtime = WorkerComputerRuntime(FakeDisplay())
     generation = (await runtime.ensure_started())["generation"]
 
@@ -425,3 +464,21 @@ async def test_runtime_retries_failed_browser_cleanup_before_restart() -> None:
         await runtime.ensure_started()
         await runtime.close()
     assert not resources
+
+
+@pytest.mark.asyncio
+async def test_agent_page_is_the_browser_s_page_only_while_the_computer_is_ready() -> None:
+    """The bridge reaches the agent's page only while the Computer runs that browser on a live display."""
+    display = FakeDisplay()
+    runtime = WorkerComputerRuntime(display)
+    page = object()
+
+    assert runtime.agent_page() is None
+    await runtime.run_browser_call("browser", lambda _display: BrowserSession(unused, unused, lambda: page), [], {})
+    assert runtime.agent_page() is page
+    display.alive = False
+    assert runtime.agent_page() is None
+    await runtime.stop()
+    await runtime.run_browser_call("browser_mcp", lambda _display: BrowserSession(unused, unused), [], {})
+    assert runtime.agent_page() is None
+    await runtime.close()

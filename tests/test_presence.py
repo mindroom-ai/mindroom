@@ -2,8 +2,7 @@
 
 from __future__ import annotations
 
-from types import SimpleNamespace
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock
 
 import nio
 import pytest
@@ -13,12 +12,8 @@ from mindroom.config.calls import CallsConfig, RealtimeCallProfile
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.constants import ROUTER_AGENT_NAME
-from mindroom.matrix.presence import (
-    build_agent_status_message,
-    is_user_online,
-    set_presence_status,
-    should_use_streaming,
-)
+from mindroom.matrix.presence import build_agent_status_message, set_presence_status
+from mindroom.tool_system.registry import builtin_tool_registry
 
 
 class TestSetPresenceStatus:
@@ -50,17 +45,16 @@ class TestSetPresenceStatus:
 class TestBuildAgentStatusMessage:
     """Test the build_agent_status_message function."""
 
-    def test_router_agent_status(self) -> None:
-        """Test building status message for router agent."""
+    def test_owner_account_status_names_only_its_model(self) -> None:
+        """The owner account answers nobody, so its status carries no role line."""
         config = Config(
             router={"model": "gpt-6-astra"},
             models={"gpt-6-astra": ModelConfig(provider="openai", id="gpt-6-astra")},
         )
 
-        status = build_agent_status_message(ROUTER_AGENT_NAME, config)
+        status = build_agent_status_message(ROUTER_AGENT_NAME, config, builtin_tool_registry())
 
-        assert "🤖 Model: openai/gpt-6-astra" in status
-        assert "📍 Routes messages to appropriate agents or teams" in status
+        assert status == "🤖 Model: openai/gpt-6-astra"
 
     def test_regular_agent_status_with_tools(self) -> None:
         """Test building status message for regular agent with tools."""
@@ -69,7 +63,7 @@ class TestBuildAgentStatusMessage:
                 "researcher": AgentConfig(
                     display_name="Research Agent",
                     role="Research specialist focused on finding information",
-                    tools=["web_search", "arxiv", "wikipedia", "news"],
+                    tools=["duckduckgo", "arxiv", "wikipedia", "website"],
                     model="claude",
                 ),
             },
@@ -77,7 +71,7 @@ class TestBuildAgentStatusMessage:
             defaults={"tools": []},
         )
 
-        status = build_agent_status_message("researcher", config)
+        status = build_agent_status_message("researcher", config, builtin_tool_registry())
 
         assert "🤖 Model: anthropic/claude-opus-5" in status
         assert "💼 Research specialist focused on finding information" in status
@@ -97,7 +91,7 @@ class TestBuildAgentStatusMessage:
             defaults={"tools": []},
         )
 
-        status = build_agent_status_message("assistant", config)
+        status = build_agent_status_message("assistant", config, builtin_tool_registry())
 
         assert "🤖 Model: ollama/llama3" in status
         assert "💼 General purpose assistant" in status
@@ -127,10 +121,11 @@ class TestBuildAgentStatusMessage:
         assert "📞 Voice calls" in build_agent_status_message(
             "voice",
             config,
+            builtin_tool_registry(),
             voice_calls_available=True,
         ).split(" | ")
-        assert "📞 Voice calls" not in build_agent_status_message("voice", config).split(" | ")
-        assert "📞 Voice calls" not in build_agent_status_message("text", config).split(" | ")
+        assert "📞 Voice calls" not in build_agent_status_message("voice", config, builtin_tool_registry()).split(" | ")
+        assert "📞 Voice calls" not in build_agent_status_message("text", config, builtin_tool_registry()).split(" | ")
 
     def test_team_agent_status(self) -> None:
         """Test building status message for team agent."""
@@ -154,7 +149,7 @@ class TestBuildAgentStatusMessage:
             models={"gpt-6-astra": ModelConfig(provider="openai", id="gpt-6-astra")},
         )
 
-        status = build_agent_status_message("research_team", config)
+        status = build_agent_status_message("research_team", config, builtin_tool_registry())
 
         assert "🤖 Model: openai/gpt-6-astra" in status
         assert "👥 Collaborative research team" in status
@@ -168,23 +163,23 @@ class TestBuildAgentStatusMessage:
                 "agent": AgentConfig(
                     display_name="Agent",
                     role="A" * 200,  # Very long role (truncated to 100 chars internally)
-                    tools=["tool1", "tool2", "tool3", "tool4", "tool5", "tool6", "tool7", "tool8"],
+                    tools=["arxiv", "wikipedia", "duckduckgo", "calculator", "shell", "file", "website", "github"],
                     model="very_long_model_name",
                 ),
             },
             models={
                 "very_long_model_name": ModelConfig(
-                    provider="provider",
+                    provider="openrouter",
                     id="model_id",
                 ),
             },
             defaults={"tools": []},
         )
 
-        status = build_agent_status_message("agent", config)
+        status = build_agent_status_message("agent", config, builtin_tool_registry())
 
         # Just verify it builds without error and includes expected parts
-        assert "Model: provider/model_id" in status
+        assert "Model: openrouter/model_id" in status
         assert "A" * 100 in status  # Role truncated to 100 chars
         assert "8 tools available" in status
 
@@ -199,7 +194,7 @@ class TestBuildAgentStatusMessage:
             },
         )
 
-        status = build_agent_status_message("agent", config)
+        status = build_agent_status_message("agent", config, builtin_tool_registry())
 
         assert "🤖 Model: unknown_model" in status
 
@@ -218,7 +213,7 @@ class TestBuildAgentStatusMessage:
             defaults={"tools": ["scheduler", "calculator"]},
         )
 
-        status = build_agent_status_message("assistant", config)
+        status = build_agent_status_message("assistant", config, builtin_tool_registry())
 
         assert "🔧 2 tools available" in status
 
@@ -238,185 +233,6 @@ class TestBuildAgentStatusMessage:
             defaults={"tools": ["scheduler", "calculator"]},
         )
 
-        status = build_agent_status_message("assistant", config)
+        status = build_agent_status_message("assistant", config, builtin_tool_registry())
 
         assert "🔧" not in status
-
-
-class TestIsUserOnline:
-    """Test the is_user_online function."""
-
-    @pytest.mark.asyncio
-    async def test_user_online(self) -> None:
-        """Test detecting online user."""
-        mock_client = AsyncMock()
-        mock_response = MagicMock()
-        mock_response.presence = "online"
-        mock_response.last_active_ago = None
-        mock_client.get_presence.return_value = mock_response
-
-        result = await is_user_online(mock_client, "@user:example.com")
-
-        assert result is True
-        mock_client.get_presence.assert_called_once_with("@user:example.com")
-
-    @pytest.mark.asyncio
-    async def test_user_unavailable_considered_online(self) -> None:
-        """Test that 'unavailable' status is considered online for streaming."""
-        mock_client = AsyncMock()
-        mock_response = MagicMock()
-        mock_response.presence = "unavailable"  # Idle but client open
-        mock_response.last_active_ago = 300000  # 5 minutes
-        mock_client.get_presence.return_value = mock_response
-
-        result = await is_user_online(mock_client, "@user:example.com")
-
-        assert result is True
-
-    @pytest.mark.asyncio
-    async def test_user_offline(self) -> None:
-        """Test detecting offline user."""
-        mock_client = AsyncMock()
-        mock_response = MagicMock()
-        mock_response.presence = "offline"
-        mock_response.last_active_ago = 3600000  # 1 hour
-        mock_client.get_presence.return_value = mock_response
-
-        result = await is_user_online(mock_client, "@user:example.com")
-
-        assert result is False
-
-    @pytest.mark.asyncio
-    async def test_presence_error(self) -> None:
-        """Test handling presence API error."""
-        mock_client = AsyncMock()
-        mock_response = nio.PresenceGetError(message="Not found")
-        mock_client.get_presence.return_value = mock_response
-
-        result = await is_user_online(mock_client, "@user:example.com")
-
-        assert result is False
-
-    @pytest.mark.asyncio
-    async def test_presence_exception(self) -> None:
-        """Test handling exception during presence check."""
-        mock_client = AsyncMock()
-        mock_client.get_presence.side_effect = Exception("Network error")
-
-        result = await is_user_online(mock_client, "@user:example.com")
-
-        assert result is False  # Defaults to False on error
-
-    @pytest.mark.asyncio
-    async def test_room_cache_hit_returns_without_presence_lookup(self) -> None:
-        """Room-specific cache hit should short-circuit before hitting the API."""
-        mock_client = SimpleNamespace(
-            rooms={
-                "!room:example.com": SimpleNamespace(
-                    room_id="!room:example.com",
-                    users={"@user:example.com": SimpleNamespace(presence="online", last_active_ago=0)},
-                ),
-            },
-            get_presence=AsyncMock(),
-        )
-
-        result = await is_user_online(mock_client, "@user:example.com", room_id="!room:example.com")
-
-        assert result is True
-        mock_client.get_presence.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_all_room_cache_hit_returns_without_presence_lookup(self) -> None:
-        """Global cache scan should return early when any cached room marks the user online."""
-        mock_client = SimpleNamespace(
-            rooms={
-                "!room-a:example.com": SimpleNamespace(
-                    room_id="!room-a:example.com",
-                    users={"@user:example.com": SimpleNamespace(presence="offline", last_active_ago=3600000)},
-                ),
-                "!room-b:example.com": SimpleNamespace(
-                    room_id="!room-b:example.com",
-                    users={"@user:example.com": SimpleNamespace(presence="unavailable", last_active_ago=300000)},
-                ),
-            },
-            get_presence=AsyncMock(),
-        )
-
-        result = await is_user_online(mock_client, "@user:example.com")
-
-        assert result is True
-        mock_client.get_presence.assert_not_called()
-
-
-class TestShouldUseStreaming:
-    """Test the should_use_streaming function."""
-
-    @pytest.mark.asyncio
-    async def test_streaming_disabled_globally(self) -> None:
-        """Test that streaming is disabled when enable_streaming is False."""
-        mock_client = AsyncMock()
-
-        result = await should_use_streaming(
-            mock_client,
-            "!room:example.com",
-            "@user:example.com",
-            enable_streaming=False,
-        )
-
-        assert result is False
-        mock_client.get_presence.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_streaming_no_requester(self) -> None:
-        """Test defaulting to streaming when no requester specified."""
-        mock_client = AsyncMock()
-
-        result = await should_use_streaming(
-            mock_client,
-            "!room:example.com",
-            None,
-            enable_streaming=True,
-        )
-
-        assert result is True
-        mock_client.get_presence.assert_not_called()
-
-    @pytest.mark.asyncio
-    async def test_streaming_user_online(self) -> None:
-        """Test enabling streaming when user is online."""
-        mock_client = AsyncMock()
-
-        with patch("mindroom.matrix.presence.is_user_online", return_value=True) as mock_is_online:
-            result = await should_use_streaming(
-                mock_client,
-                "!room:example.com",
-                "@user:example.com",
-                enable_streaming=True,
-            )
-
-        assert result is True
-        mock_is_online.assert_called_once_with(
-            mock_client,
-            "@user:example.com",
-            room_id="!room:example.com",
-        )
-
-    @pytest.mark.asyncio
-    async def test_streaming_user_offline(self) -> None:
-        """Test disabling streaming when user is offline."""
-        mock_client = AsyncMock()
-
-        with patch("mindroom.matrix.presence.is_user_online", return_value=False) as mock_is_online:
-            result = await should_use_streaming(
-                mock_client,
-                "!room:example.com",
-                "@user:example.com",
-                enable_streaming=True,
-            )
-
-        assert result is False
-        mock_is_online.assert_called_once_with(
-            mock_client,
-            "@user:example.com",
-            room_id="!room:example.com",
-        )

@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import math
 
+from mindroom.json_utils import object_with_unique_keys
+
 MAX_ENVELOPE_BYTES = 64 * 1024
 
 
@@ -18,16 +20,6 @@ def canonical_json(value: object) -> str:
         msg = "Agent CLI payload must be strict JSON within 64 KiB"
         raise ValueError(msg) from exc
     return encoded
-
-
-def _object(pairs: list[tuple[str, object]]) -> dict[str, object]:
-    result: dict[str, object] = {}
-    for key, value in pairs:
-        if key in result:
-            msg = "Duplicate JSON key"
-            raise ValueError(msg)
-        result[key] = value
-    return result
 
 
 def _number(value: str) -> float:
@@ -44,7 +36,12 @@ def read_json(payload: str | bytes) -> object:
         raw = payload.encode("utf-8") if isinstance(payload, str) else payload
         if len(raw) > MAX_ENVELOPE_BYTES:
             raise ValueError  # noqa: TRY301 - All wire errors share the bounded error contract.
-        return json.loads(raw.decode("utf-8"), object_pairs_hook=_object, parse_constant=_number, parse_float=_number)
+        return json.loads(
+            raw.decode("utf-8"),
+            object_pairs_hook=object_with_unique_keys,
+            parse_constant=_number,
+            parse_float=_number,
+        )
     except (ValueError, UnicodeError, RecursionError) as exc:
         msg = "Agent CLI payload must be strict JSON within 64 KiB"
         raise ValueError(msg) from exc

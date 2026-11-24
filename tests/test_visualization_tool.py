@@ -9,7 +9,9 @@ import pytest
 
 from mindroom.credentials.manager import CredentialsManager
 from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.registry import builtin_tool_registry
 from mindroom.tools.visualization import visualization_tools
+from tests.agent_tool_helpers import toolkit_offers
 from tests.conftest import test_runtime_paths
 
 if TYPE_CHECKING:
@@ -96,19 +98,17 @@ def test_registry_injects_the_workspace_and_keeps_chart_schemas(
         "visualization",
         test_runtime_paths(tmp_path / "runtime"),
         credentials_manager=CredentialsManager(tmp_path / "credentials"),
-        disable_sandbox_proxy=True,
+        runs_in_worker=False,
         tool_output_workspace_root=workspace,
         worker_target=None,
+        tools=builtin_tool_registry(),
     )
-    function = toolkit.functions["create_bar_chart"]
-    function.process_entrypoint()
-    schema = function.to_dict()
-    assert function.entrypoint is not None
+    function = toolkit_offers(toolkit, "create_bar_chart")
 
     result = json.loads(function.entrypoint(data={"a": 1}, filename="bar.png"))
 
-    assert schema["description"] == "Create a bar chart from the provided data."
-    assert {"data", "title", "x_label", "y_label", "filename"} <= set(schema["parameters"]["properties"])
+    assert function.description == "Create a bar chart from the provided data."
+    assert {"data", "title", "x_label", "y_label", "filename"} <= set(function.parameters["properties"])
     assert result["file_path"] == str(workspace / "charts" / "bar.png")
     assert (workspace / "charts" / "bar.png").read_bytes().startswith(_PNG_SIGNATURE)
 

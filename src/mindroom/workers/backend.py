@@ -7,11 +7,20 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 from mindroom.workers.models import WorkerMaintenanceResult
 
 if TYPE_CHECKING:
-    from mindroom.workers.models import ProgressSink, WorkerHandle, WorkerSpec, WorkerStatus
+    from mindroom.workers.models import ProgressSink, WorkerHandle, WorkerLaunchConfig, WorkerSpec, WorkerStatus
 
 
 class WorkerBackendError(RuntimeError):
     """Raised when a worker backend cannot satisfy a request."""
+
+
+class WorkerStartTimeoutError(WorkerBackendError):
+    """Raised when a starting worker does not become ready within its backend's ready timeout."""
+
+
+def mirrored_credential_services(spec: WorkerSpec, launch: WorkerLaunchConfig) -> frozenset[str]:
+    """Return the shared credential services mirrored into the spec's dedicated worker launched from ``launch``."""
+    return launch.grantable_credentials if spec.mirror_grantable_credentials and spec.sandbox is None else frozenset()
 
 
 def effective_idle_status(
@@ -34,7 +43,32 @@ def filter_and_sort_worker_handles(handles: list[WorkerHandle], include_idle: bo
     return sorted(filtered_handles, key=lambda handle: handle.last_used_at, reverse=True)
 
 
-class WorkerBackend(Protocol):
+class WorkerBackendDefaults(Protocol):
+    """Shared defaults for backends without named workers."""
+
+    # Deployment-wide limit across all agents and requesters; zero disables named workers.
+    named_workers_max: int = 0
+
+    def has_named_worker(self, _worker_key: str, /) -> bool:
+        """Check whether one named worker exists and is not being removed."""
+        return False
+
+    def named_worker_keys(self) -> frozenset[str]:
+        """List existing named workers, running or stopped, that are not being removed."""
+        return frozenset()
+
+
+@runtime_checkable
+class RetiringWorkerBackend(Protocol):
+    """Backend supporting exact worker retirement."""
+
+    cleanup_locator: str | None
+
+    def retire_worker(self, worker_key: str) -> None:
+        """Destructively retire one exact worker and its backend-owned state."""
+
+
+class WorkerBackend(WorkerBackendDefaults, Protocol):
     """Backend contract for realizing persistent workers."""
 
     backend_name: str
@@ -69,8 +103,12 @@ class WorkerBackend(Protocol):
         *,
         now: float | None = None,
         startup_count: int | None = None,
+        incarnation: str | None = None,
     ) -> WorkerHandle:
-        """Persist a worker failure; one from a start the backend has since replaced may be ignored."""
+        """Persist a worker failure; one from a start or incarnation the backend has since replaced may be ignored.
+
+        ``startup_count`` and ``incarnation`` are those of the handle the failed request used.
+        """
 
 
 @runtime_checkable

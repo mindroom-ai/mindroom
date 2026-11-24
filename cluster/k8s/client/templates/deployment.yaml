@@ -113,20 +113,32 @@ spec:
             {{- toYaml . | nindent 12 }}
           {{- end }}
           volumeMounts:
-            # /usr/share/nginx/html is a symlink to /app in the client image,
-            # so the nginx aliases under html/ resolve to these mounts.
+            # The chart's nginx config reads these files from /usr/share/nginx/html.
+            # Images that link that path to /app still get these mounts.
             - name: config
-              mountPath: /app/config.json
+              mountPath: /usr/share/nginx/html/config.json
               subPath: {{ .Values.config.key }}
               readOnly: true
+            {{- if $nginxManaged }}
+            - name: nginx-config
+              mountPath: /etc/nginx/nginx.conf
+              subPath: nginx.conf
+              readOnly: true
+            {{- end }}
             - name: nginx-config
               mountPath: /etc/nginx/conf.d/default.conf
               subPath: {{ .Values.nginx.key }}
               readOnly: true
             {{- if .Values.rootServiceWorkerCleanup.enabled }}
             - name: nginx-config
-              mountPath: /app/root-cleanup-sw.js
+              mountPath: /usr/share/nginx/html/root-cleanup-sw.js
               subPath: {{ .Values.nginx.cleanupWorkerKey }}
+              readOnly: true
+            {{- end }}
+            {{- if .Values.notices.existingConfigMap }}
+            # No subPath, so the kubelet propagates ConfigMap edits to the pod.
+            - name: notices
+              mountPath: /opt/mindroom/notices
               readOnly: true
             {{- end }}
             - name: nginx-cache
@@ -140,6 +152,12 @@ spec:
         - name: nginx-config
           configMap:
             name: {{ include "mindroom-client.nginxConfigMapName" . }}
+        {{- with .Values.notices.existingConfigMap }}
+        - name: notices
+          configMap:
+            name: {{ . | quote }}
+            optional: true
+        {{- end }}
         - name: nginx-cache
           emptyDir: {}
         - name: nginx-run

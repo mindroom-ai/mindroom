@@ -1,0 +1,345 @@
+{
+ "scenario": {
+  "actions": [
+   {
+    "op": "pending",
+    "room": "a",
+    "sources": [
+     "$m5"
+    ]
+   },
+   {
+    "op": "pending",
+    "room": "a",
+    "sources": [
+     "$m5"
+    ]
+   },
+   {
+    "op": "final_ack",
+    "response": "$r2",
+    "turn": "$m2"
+   },
+   {
+    "op": "pending",
+    "room": "a",
+    "sources": [
+     "$m3",
+     "$m4"
+    ]
+   },
+   {
+    "op": "cleanup"
+   },
+   {
+    "op": "reopen"
+   }
+  ],
+  "ids": [
+   "$m1",
+   "$m2",
+   "$m3",
+   "$m4",
+   "$m5",
+   "$m6",
+   "$m7",
+   "$r1",
+   "$r2",
+   "$r3",
+   "$r6",
+   "$thread-a"
+  ],
+  "input": "coalesced_rows_disagree"
+ },
+ "steps": [
+  {
+   "action": null,
+   "changes": {
+    "is_handled": {
+     "$m1": true,
+     "$m3": true,
+     "$m6": true
+    },
+    "pending_intent": {
+     "$m2": true,
+     "$m5": true
+    },
+    "record_for_response": {
+     "$r1": {
+      "anchor": "$m2",
+      "completed": true,
+      "history_scope": "agent:agent",
+      "requester": "@alice:example.org",
+      "response": "$r1",
+      "response_owner": "agent",
+      "sources": [
+       "$m1",
+       "$m2"
+      ],
+      "target": {
+       "reply_to_event_id": null,
+       "resolved_thread_id": "$thread-a",
+       "room_id": "!a:example.org",
+       "session_id": "!a:example.org:$thread-a",
+       "source_thread_id": "$thread-a"
+      }
+     },
+     "$r3": {
+      "anchor": "$m4",
+      "completed": true,
+      "history_scope": "agent:agent",
+      "requester": "@alice:example.org",
+      "response": "$r3",
+      "response_owner": "agent",
+      "sources": [
+       "$m3",
+       "$m4"
+      ],
+      "target": {
+       "reply_to_event_id": null,
+       "resolved_thread_id": "$thread-a",
+       "room_id": "!a:example.org",
+       "session_id": "!a:example.org:$thread-a",
+       "source_thread_id": "$thread-a"
+      }
+     },
+     "$r6": {
+      "anchor": "$m7",
+      "completed": true,
+      "history_scope": "agent:agent",
+      "requester": "@alice:example.org",
+      "response": "$r6",
+      "response_owner": "agent",
+      "sources": [
+       "$m6",
+       "$m7"
+      ],
+      "target": {
+       "reply_to_event_id": null,
+       "resolved_thread_id": "$thread-a",
+       "room_id": "!a:example.org",
+       "session_id": "!a:example.org:$thread-a",
+       "source_thread_id": "$thread-a"
+      }
+     }
+    },
+    "turn_record": {
+     "$m1": {
+      "anchor": "$m2",
+      "completed": true,
+      "history_scope": "agent:agent",
+      "requester": "@alice:example.org",
+      "response": "$r1",
+      "response_owner": "agent",
+      "sources": [
+       "$m1",
+       "$m2"
+      ],
+      "target": {
+       "reply_to_event_id": null,
+       "resolved_thread_id": "$thread-a",
+       "room_id": "!a:example.org",
+       "session_id": "!a:example.org:$thread-a",
+       "source_thread_id": "$thread-a"
+      }
+     },
+     "$m2": {
+      "anchor": "$m2",
+      "completed": false,
+      "history_scope": "agent:agent",
+      "requester": "@alice:example.org",
+      "response_owner": "agent",
+      "sources": [
+       "$m1",
+       "$m2"
+      ],
+      "target": {
+       "reply_to_event_id": null,
+       "resolved_thread_id": "$thread-a",
+       "room_id": "!a:example.org",
+       "session_id": "!a:example.org:$thread-a",
+       "source_thread_id": "$thread-a"
+      }
+     },
+     "$m3": {
+      "anchor": "$m4",
+      "completed": true,
+      "history_scope": "agent:agent",
+      "requester": "@alice:example.org",
+      "response": "$r3",
+      "response_owner": "agent",
+      "sources": [
+       "$m3",
+       "$m4"
+      ],
+      "target": {
+       "reply_to_event_id": null,
+       "resolved_thread_id": "$thread-a",
+       "room_id": "!a:example.org",
+       "session_id": "!a:example.org:$thread-a",
+       "source_thread_id": "$thread-a"
+      }
+     },
+     "$m5": {
+      "anchor": "$m6",
+      "completed": false,
+      "history_scope": "agent:agent",
+      "requester": "@alice:example.org",
+      "response_owner": "agent",
+      "sources": [
+       "$m5",
+       "$m6"
+      ],
+      "target": {
+       "reply_to_event_id": null,
+       "resolved_thread_id": "$thread-a",
+       "room_id": "!a:example.org",
+       "session_id": "!a:example.org:$thread-a",
+       "source_thread_id": "$thread-a"
+      }
+     },
+     "$m6": {
+      "anchor": "$m7",
+      "completed": true,
+      "history_scope": "agent:agent",
+      "requester": "@alice:example.org",
+      "response": "$r6",
+      "response_owner": "agent",
+      "sources": [
+       "$m6",
+       "$m7"
+      ],
+      "target": {
+       "reply_to_event_id": null,
+       "resolved_thread_id": "$thread-a",
+       "room_id": "!a:example.org",
+       "session_id": "!a:example.org:$thread-a",
+       "source_thread_id": "$thread-a"
+      }
+     }
+    }
+   },
+   "outcome": null
+  },
+  {
+   "action": {
+    "op": "pending",
+    "room": "a",
+    "sources": [
+     "$m5"
+    ]
+   },
+   "changes": {},
+   "outcome": {
+    "error": "RuntimeError",
+    "message": "Canonical turn ownership changed while acquiring source rows"
+   }
+  },
+  {
+   "action": {
+    "op": "pending",
+    "room": "a",
+    "sources": [
+     "$m5"
+    ]
+   },
+   "changes": {},
+   "outcome": {
+    "error": "RuntimeError",
+    "message": "Canonical turn ownership changed while acquiring source rows"
+   }
+  },
+  {
+   "action": {
+    "op": "final_ack",
+    "response": "$r2",
+    "turn": "$m2"
+   },
+   "changes": {
+    "is_handled": {
+     "$m2": true
+    },
+    "pending_intent": {
+     "$m2": null
+    },
+    "turn_record": {
+     "$m2": {
+      "anchor": "$m2",
+      "completed": true,
+      "history_scope": "agent:agent",
+      "requester": "@alice:example.org",
+      "response": "$r1",
+      "response_owner": "agent",
+      "sources": [
+       "$m1",
+       "$m2"
+      ],
+      "target": {
+       "reply_to_event_id": null,
+       "resolved_thread_id": "$thread-a",
+       "room_id": "!a:example.org",
+       "session_id": "!a:example.org:$thread-a",
+       "source_thread_id": "$thread-a"
+      }
+     }
+    }
+   },
+   "outcome": {
+    "committed": true,
+    "prepared": true,
+    "settled": "$r2"
+   }
+  },
+  {
+   "action": {
+    "op": "pending",
+    "room": "a",
+    "sources": [
+     "$m3",
+     "$m4"
+    ]
+   },
+   "changes": {
+    "is_handled": {
+     "$m4": true
+    },
+    "turn_record": {
+     "$m4": {
+      "anchor": "$m4",
+      "completed": true,
+      "history_scope": "agent:agent",
+      "requester": "@alice:example.org",
+      "response": "$r3",
+      "response_owner": "agent",
+      "sources": [
+       "$m3",
+       "$m4"
+      ],
+      "target": {
+       "reply_to_event_id": null,
+       "resolved_thread_id": "$thread-a",
+       "room_id": "!a:example.org",
+       "session_id": "!a:example.org:$thread-a",
+       "source_thread_id": "$thread-a"
+      }
+     }
+    }
+   },
+   "outcome": "already_completed"
+  },
+  {
+   "action": {
+    "op": "cleanup"
+   },
+   "changes": {},
+   "outcome": "ok"
+  },
+  {
+   "action": {
+    "op": "reopen"
+   },
+   "changes": {},
+   "outcome": "ok"
+  }
+ ]
+}

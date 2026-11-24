@@ -1,0 +1,520 @@
+"""The error classification, ``extra_kwargs`` parsing, and turn timing every provider family shares."""
+
+from __future__ import annotations
+
+import time
+from dataclasses import dataclass
+from datetime import UTC, datetime
+from typing import Any
+
+import httpx
+import pytest
+
+from mindroom.llm.errors import (
+    QUOTA_EXHAUSTED,
+    TOKENS_PER_MINUTE,
+    TRANSPORT_TIMEOUT,
+    AuthenticationFailed,
+    ContextWindowExceeded,
+    InvalidRequest,
+    ProviderError,
+    ProviderUnavailable,
+    RateLimited,
+)
+from mindroom.llm.messages import Message, model_provenance
+from mindroom.llm.provider import (
+    ModelIdentity,
+    ReasoningDelta,
+    StreamProgress,
+    TextDelta,
+    ToolCallReady,
+    TurnCompleted,
+    UsageReported,
+)
+from mindroom.llm.usage import MessageMetrics, TokenCounts
+from mindroom.providers.assistant_turn import TurnTimer, finished_turn, stamp_finished_turn
+from mindroom.providers.errors import classify_provider_error, provider_failure, retry_after_seconds
+from mindroom.providers.extra_kwargs import settings_from_extra_kwargs
+
+# OpenAI's 429 for a request larger than the account's tokens-per-minute limit.
+_REQUEST_TOO_LARGE = (
+    "Request too large for gpt-6-astra in organization org-test on tokens per min (TPM): Limit 30000, "
+    "Requested 50000. The input or output tokens must be reduced in order to run successfully."
+)
+
+
+@pytest.mark.parametrize(
+    ("status", "message", "code", "expected", "retryable"),
+    [
+        (429, "slow down", None, RateLimited, True),
+        # Context-window wording on a 429 other than "Request too large" is still a rate limit, such as Bedrock's.
+        (429, "Too many tokens, please wait before trying again.", None, RateLimited, True),
+        (429, "Rate limit reached for gpt-6-astra on tokens per min (TPM).", "rate_limit_exceeded", RateLimited, True),
+        (529, "Overloaded", None, ProviderUnavailable, True),
+        (503, "overloaded_error: the model is busy", None, ProviderUnavailable, True),
+        (400, "The input token count exceeds the maximum number of tokens allowed", None, ContextWindowExceeded, False),
+        (400, "too long", "context_length_exceeded", ContextWindowExceeded, False),
+        (None, "prompt is too long", None, ContextWindowExceeded, False),
+        (500, "context window service unavailable", None, ProviderUnavailable, True),
+        # llama.cpp sends an input larger than its physical batch, such as an embedding, with a 500.
+        (
+            500,
+            "input (9000 tokens) is too large to process. increase the physical batch size (current batch size: 512)",
+            None,
+            ContextWindowExceeded,
+            False,
+        ),
+        (503, "The model is overloaded", None, ProviderUnavailable, True),
+        (409, "conflict", None, ProviderUnavailable, True),
+        (400, "Invalid JSON payload received.", None, InvalidRequest, False),
+        (404, "model not found", None, InvalidRequest, False),
+        (413, "payload", None, InvalidRequest, False),
+        # A client-error status outranks a transient name, which Ollama's OpenAI-compatible endpoint gives every status
+        # but 400 and 404.
+        (413, "request body must not exceed 32 MiB", "api_error", InvalidRequest, False),
+        (403, "Forbidden", "api_error", ProviderError, False),
+        (401, "invalid api key", None, AuthenticationFailed, False),
+        (403, "Permission denied", None, ProviderError, False),
+        (
+            403,
+            "Your API key does not have permission to use the specified resource.",
+            None,
+            AuthenticationFailed,
+            False,
+        ),
+        (400, "API key not valid. Please pass a valid API key.", None, AuthenticationFailed, False),
+        (503, "authentication service overloaded", None, ProviderUnavailable, True),
+        (520, "origin error", None, ProviderUnavailable, True),
+        (524, "A timeout occurred", None, ProviderUnavailable, True),
+        (501, "not implemented", None, ProviderUnavailable, True),
+        (418, "teapot", None, ProviderError, False),
+    ],
+)
+def test_statuses_and_wording_classify_the_same_for_every_family(
+    status: int | None,
+    message: str,
+    code: str | None,
+    expected: type[ProviderError],
+    retryable: bool,
+) -> None:
+    """One rule decides retryability, context-window failures, and invalid requests for every adapter."""
+    error = classify_provider_error(message, provider="Test", status_code=status, code=code)
+
+    assert type(error) is expected
+    assert (error.retryable, error.status_code, error.provider_code, error.provider) == (
+        retryable,
+        status,
+        code,
+        "Test",
+    )
+    assert error.code is None
+    assert str(error) == message
+
+
+@pytest.mark.parametrize(
+    ("headers", "seconds"),
+    [
+        ({"retry-after": "2.5"}, 2.5),
+        ({"Retry-After": " 7 "}, 7.0),
+        ({"retry-after-ms": "30000", "retry-after": "1"}, 30.0),
+        ({"Retry-After-Ms": "250"}, 0.25),
+        ({"retry-after-ms": "soon", "retry-after": "4"}, 4.0),
+        ({"retry-after": "0"}, 0.0),
+        ({"retry-after": "-1"}, None),
+        ({"retry-after": "Wed, 21 Oct 2026 07:28:00 GMT"}, 30.0),
+        ({"Retry-After": "Wed, 21 Oct 2026 07:27:00 GMT"}, 0.0),
+        ({"retry-after": "next Tuesday"}, None),
+        ({}, None),
+    ],
+)
+def test_a_retry_after_header_is_read_as_the_sdks_read_it(headers: dict[str, str], seconds: float | None) -> None:
+    """Azure's ``retry-after-ms`` wins, an HTTP date counts the seconds until it, and an unreadable value is no hint."""
+    now = datetime(2026, 10, 21, 7, 27, 30, tzinfo=UTC)
+    assert retry_after_seconds(headers, now=now) == seconds
+
+
+@pytest.mark.parametrize("status", [429, 413, None])
+def test_a_request_above_the_tokens_per_minute_limit_is_too_large_not_rate_limited(status: int | None) -> None:
+    """Only a smaller request passes, and the marker keeps its reply from blaming the context window.
+
+    Groq sends it with a 413 and the same ``rate_limit_exceeded`` code.
+    """
+    error = classify_provider_error(_REQUEST_TOO_LARGE, provider="Test", status_code=status, code="rate_limit_exceeded")
+
+    assert (type(error), error.retryable, error.code, error.provider_code, error.status_code) == (
+        ContextWindowExceeded,
+        False,
+        TOKENS_PER_MINUTE,
+        "rate_limit_exceeded",
+        status,
+    )
+
+
+def test_a_code_the_provider_sent_never_reads_as_a_mindroom_marker() -> None:
+    """A server that names its failure ``timeout`` sent no transport timeout, which only MindRoom's marker reports."""
+    error = classify_provider_error("upstream busy", provider="Test", status_code=500, code=TRANSPORT_TIMEOUT)
+
+    assert (type(error), error.code, error.provider_code) == (ProviderUnavailable, None, TRANSPORT_TIMEOUT)
+
+
+@pytest.mark.parametrize(
+    ("status", "code", "error_type"),
+    [
+        (429, "insufficient_quota", "insufficient_quota"),
+        (429, "credit_balance_exhausted", None),
+        (429, "organization_spend_limit_exceeded", None),
+        (429, "project_spend_limit_exceeded", None),
+        (429, "organization_usage_limit_exceeded", None),
+        (None, "insufficient_quota", None),
+        (None, None, "insufficient_quota"),
+    ],
+)
+def test_an_account_out_of_credit_or_past_its_limits_fails_at_once(
+    status: int | None,
+    code: str | None,
+    error_type: str | None,
+) -> None:
+    """No wait lets the request through until the account's billing or limits change, so the error is final."""
+    message = "You exceeded your current quota, please check your plan and billing details."
+    error = classify_provider_error(message, provider="Test", status_code=status, code=code, error_type=error_type)
+
+    assert (type(error), error.retryable, error.code, error.provider_code) == (
+        ProviderError,
+        False,
+        QUOTA_EXHAUSTED,
+        code,
+    )
+    assert (str(error), error.status_code) == (message, status)
+
+
+@pytest.mark.parametrize(
+    ("message", "status", "code", "error_type"),
+    [
+        # OpenRouter's account or API key without credit, whose code is the status, on an HTTP error and on an error
+        # event inside a stream.
+        ("Insufficient credits. Add more using https://openrouter.ai/credits", 402, "402", None),
+        ("Insufficient credits. Add more using https://openrouter.ai/credits", None, "402", None),
+        # The status outranks wording that names the credentials, as OpenRouter's error docs word its 402.
+        ("Your account or API key has insufficient credits. Add more credits and retry the request.", 402, "402", None),
+        # DeepSeek's account without balance, whose type and code name no billing failure.
+        ("Insufficient Balance", 402, "invalid_request_error", "unknown_error"),
+    ],
+)
+def test_a_payment_required_status_fails_at_once_as_a_billing_stop(
+    message: str,
+    status: int | None,
+    code: str | None,
+    error_type: str | None,
+) -> None:
+    """Every provider that sends a 402 means the account cannot pay for the request, which no retry changes."""
+    error = classify_provider_error(message, provider="Test", status_code=status, code=code, error_type=error_type)
+
+    assert (type(error), error.retryable, error.code, error.provider_code, str(error)) == (
+        ProviderError,
+        False,
+        QUOTA_EXHAUSTED,
+        code,
+        message,
+    )
+
+
+@pytest.mark.parametrize(
+    ("code", "message", "expected", "marker"),
+    [
+        ("1113", "Insufficient balance or no resource package. Please recharge.", ProviderError, QUOTA_EXHAUSTED),
+        (
+            "1309",
+            "Your GLM Coding Plan package has expired and is temporarily unavailable. You can resume using it after "
+            "renewing the subscription on the official website. https://z.ai/subscribe",
+            ProviderError,
+            QUOTA_EXHAUSTED,
+        ),
+        (
+            "1314",
+            "Your enterprise package has expired. Please contact your enterprise administrator.",
+            ProviderError,
+            QUOTA_EXHAUSTED,
+        ),
+        # A limit that resets stays a rate limit, even once no balance or spend limit is left for extra usage.
+        (
+            "1316",
+            "Usage limit reached for the past 5 hours. Insufficient balance for extra usage. Resets at 2026-10-29 18:00:00.",
+            RateLimited,
+            None,
+        ),
+        (
+            "1321",
+            "Usage limit reached for the past 7 days. Extra usage is not available due to monthly spend limit. Resets at "
+            "2026-11-02 09:00:00.",
+            RateLimited,
+            None,
+        ),
+        ("1302", "Rate limit reached for requests", RateLimited, None),
+    ],
+)
+def test_a_z_ai_429_fails_at_once_only_when_its_code_says_the_account_cannot_pay(
+    code: str,
+    message: str,
+    expected: type[ProviderError],
+    marker: str | None,
+) -> None:
+    """Z.ai sends every refusal of its account with a 429, and only its business code tells which a wait lets through."""
+    error = classify_provider_error(message, provider="ZAI", status_code=429, code=code)
+
+    assert (type(error), error.code, error.provider_code) == (expected, marker, code)
+
+
+@pytest.mark.parametrize(
+    ("message", "code", "error_type", "expected"),
+    [
+        ("Slow down", None, "rate_limit_error", RateLimited),
+        ("Slow down", "rate_limit_exceeded", None, RateLimited),
+        ("Rate limit exceeded: free-models-per-min", "429", None, RateLimited),
+        ("Slow down", "529", None, ProviderUnavailable),
+        ("An error occurred.", "server_error", None, ProviderUnavailable),
+        ("Unexpected upstream failure", None, "api_error", ProviderUnavailable),
+        ("Overloaded", None, "overloaded_error", ProviderUnavailable),
+        ("Our servers are currently overloaded. Please try again later.", None, None, ProviderUnavailable),
+        # A retry cannot make the request fit, so the context window outranks a transient name, not a status.
+        ("This model's maximum context length is 128000 tokens.", None, "api_error", ContextWindowExceeded),
+        ("This model's maximum context length is 128000 tokens.", "503", None, ProviderUnavailable),
+        (
+            "{'type': 'error', 'error': {'type': 'authentication_error', 'message': 'invalid x-api-key'}}",
+            None,
+            "authentication_error",
+            AuthenticationFailed,
+        ),
+        ("invalid x-api-key", None, "authentication_error", AuthenticationFailed),
+        ("Bad block", None, "invalid_request_error", ProviderError),
+        ("An error occurred.", "invalid_prompt", None, ProviderError),
+        # Only whole words of the auth family name the credentials.
+        ("Not authorized to invoke this model", None, "invalid_request_error", AuthenticationFailed),
+        ("'author' is not of type 'string'", None, "invalid_request_error", ProviderError),
+        ("The oauth2 scope list is empty", None, "invalid_request_error", ProviderError),
+        ("The token authority is unknown", None, "invalid_request_error", ProviderError),
+        ("invalid_auth: the access token was revoked", None, "invalid_request_error", AuthenticationFailed),
+        ("Unauthorised to invoke this model", None, "invalid_request_error", AuthenticationFailed),
+    ],
+)
+def test_an_error_event_without_a_status_is_classified_by_its_name_and_wording(
+    message: str,
+    code: str | None,
+    error_type: str | None,
+    expected: type[ProviderError],
+) -> None:
+    """An event inside a stream that already succeeded follows the same precedence as an HTTP error."""
+    error = classify_provider_error(message, provider="Test", code=code, error_type=error_type)
+
+    assert type(error) is expected
+    assert (error.status_code, error.code, error.provider_code) == (None, None, code)
+
+
+@pytest.mark.parametrize(
+    ("message", "code", "expected"),
+    [
+        ("x", "context_length_exceeded", ContextWindowExceeded),
+        ("Request too large for gpt-6-astra", None, ContextWindowExceeded),
+        ("This request would exceed the context window", None, ContextWindowExceeded),
+        ("input length and `max_tokens` exceed context limit: 197000 + 8192 > 200000", None, ContextWindowExceeded),
+        ("the request exceeds the available context size, try increasing it", None, ContextWindowExceeded),
+        (
+            "Unable to submit request because the input token count is 106244 but model only supports up to 65536.",
+            None,
+            ContextWindowExceeded,
+        ),
+        # Bedrock's ValidationException for input and requested output tokens above the model's quota.
+        ("Input is too long for requested model.", None, ContextWindowExceeded),
+        # Neither Vertex AI's empty-text rejection, which opens the same way, nor an invented limit that closes the same
+        # way is about the window.
+        ("Unable to submit request because it has an empty text parameter.", None, InvalidRequest),
+        ("This model only supports up to 3 images per request.", None, InvalidRequest),
+        ("max_tokens must be positive", None, InvalidRequest),
+        ("The context size of a slot must be a positive number", None, InvalidRequest),
+    ],
+)
+def test_context_window_detection_reads_the_code_and_the_wording(
+    message: str,
+    code: str | None,
+    expected: type[ProviderError],
+) -> None:
+    """The shared markers cover the wording every provider uses for an input that does not fit."""
+    assert type(classify_provider_error(message, provider="Test", status_code=400, code=code)) is expected
+
+
+def test_transport_failures_are_retryable_connection_errors() -> None:
+    """A failure before any response is retryable and names its cause."""
+    error = provider_failure(httpx.ConnectError("connection refused"), provider="Test")
+
+    assert type(error) is ProviderUnavailable
+    assert (error.retryable, error.status_code, error.code, str(error)) == (
+        True,
+        None,
+        "connection_error",
+        "connection refused",
+    )
+    read_error = provider_failure(httpx.ReadError(""), provider="Test")
+    assert read_error is not None
+    assert str(read_error) == "ReadError"
+
+
+class _LoginRefreshError(Exception):
+    """A login helper's own error, as a CLI login refresh raises it."""
+
+
+def _wrapped(cause: Exception, *, suppress: bool = False) -> _LoginRefreshError:
+    """Return a login helper's error raised ``from cause``, or ``from None`` with ``cause`` as its context."""
+    wrapped = _LoginRefreshError(f"refresh failed: {cause}")
+    if suppress:
+        wrapped.__context__ = cause
+        wrapped.__suppress_context__ = True
+    else:
+        wrapped.__cause__ = cause
+    return wrapped
+
+
+@pytest.mark.parametrize(
+    ("error", "code"),
+    [
+        (_wrapped(httpx.ConnectError("connection refused")), "connection_error"),
+        (_wrapped(httpx.ReadTimeout("timed out")), TRANSPORT_TIMEOUT),
+        (_wrapped(ConnectionResetError(104, "reset")), "connection_error"),
+        (_wrapped(_wrapped(TimeoutError())), TRANSPORT_TIMEOUT),
+    ],
+    ids=["refused", "read-timeout", "reset", "nested-timeout"],
+)
+def test_a_transport_failure_wrapped_in_another_error_is_still_retryable(error: Exception, code: str) -> None:
+    """The cause chain decides, so an SDK or login helper that wraps a network failure keeps it transient."""
+    failure = provider_failure(error, provider="Test")
+
+    assert type(failure) is ProviderUnavailable
+    assert (failure.code, str(failure)) == (code, str(error))
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        _wrapped(httpx.ConnectError("connection refused"), suppress=True),
+        ValueError("invalid literal"),
+        OSError("disk full"),
+    ],
+    ids=["suppressed-cause", "unrelated", "bare-os-error"],
+)
+def test_only_a_transport_failure_is_normalized_as_one(error: Exception) -> None:
+    """A suppressed cause, or an error with no network failure behind it, is left to the adapter's own mapping."""
+    assert provider_failure(error, provider="Test") is None
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        pytest.param(httpx.ReadTimeout(""), id="http-read"),
+        pytest.param(httpx.PoolTimeout(""), id="http-pool"),
+        pytest.param(TimeoutError(), id="socket"),
+    ],
+)
+def test_transport_timeouts_carry_the_timeout_code(failure: Exception) -> None:
+    """A timeout before any response is retryable and says it timed out by its code, whatever its text."""
+    error = provider_failure(failure, provider="Test")
+
+    assert type(error) is ProviderUnavailable
+    assert (error.retryable, error.code) == (True, TRANSPORT_TIMEOUT)
+
+
+@dataclass(frozen=True, slots=True, kw_only=True)
+class _Settings:
+    api_key: str | None = None
+    timeout: float | None = None
+    client_params: dict[str, Any] | None = None
+    stop: list[str] | None = None
+
+
+def test_unknown_extra_kwargs_fail_with_the_accepted_keys() -> None:
+    """Unknown keys fail at construction and the message lists what the settings type takes."""
+    with pytest.raises(
+        ValueError,
+        match=r"Unsupported extra_kwargs for provider 'test': retries, zzz; remove or correct them\. Accepted keys: ",
+    ) as info:
+        settings_from_extra_kwargs(_Settings, {"zzz": 1, "retries": 2, "timeout": 3}, provider="test")
+
+    assert str(info.value).endswith("Accepted keys: api_key, client_params, stop, timeout")
+
+
+def test_accepted_keys_narrow_the_declared_fields_per_route() -> None:
+    """A route may accept a subset of a shared settings type; keys outside it fail like undeclared ones."""
+    with pytest.raises(ValueError, match="timeout") as info:
+        settings_from_extra_kwargs(_Settings, {"timeout": 3}, provider="test", accepted={"api_key", "unknown"})
+
+    assert str(info.value).endswith("Accepted keys: api_key")
+    assert settings_from_extra_kwargs(_Settings, {"api_key": "k"}, provider="test", accepted={"api_key"}).api_key == "k"
+
+
+def test_authored_containers_are_copied_and_opaque_values_kept() -> None:
+    """Request building may mutate the parsed settings without touching the config; credentials pass through."""
+    transport = httpx.MockTransport(lambda _request: httpx.Response(200))
+    authored = {"client_params": {"transport": transport, "headers": {"a": "b"}}, "stop": ["x"]}
+
+    settings = settings_from_extra_kwargs(_Settings, authored, provider="test")
+
+    assert settings.client_params is not None
+    assert settings.client_params["transport"] is transport
+    assert settings.client_params["headers"] == {"a": "b"}
+    assert settings.client_params["headers"] is not authored["client_params"]["headers"]
+    assert settings.stop == ["x"]
+    assert settings.stop is not authored["stop"]
+    assert settings_from_extra_kwargs(_Settings, None, provider="test") == _Settings()
+
+
+_CALL = {"id": "call_1", "type": "function", "function": {"name": "lookup", "arguments": "{}"}}
+
+
+@pytest.mark.parametrize(
+    "output",
+    [TextDelta("Hi"), ReasoningDelta("Hmm"), ToolCallReady(_CALL)],
+    ids=["text", "reasoning", "tool_call"],
+)
+def test_a_turn_is_timed_from_its_first_output(output: TextDelta | ReasoningDelta | ToolCallReady) -> None:
+    """Text, reasoning, and a complete tool call are output; usage, progress, and later output leave the time alone.
+
+    A provider chunk without events passes on as progress.
+    """
+    timer = TurnTimer()
+    usage = UsageReported(MessageMetrics(), final=False)
+
+    assert [*timer.chunk([usage]), *timer.chunk([])] == [usage, StreamProgress()]
+    assert timer.first_output_at is None
+    assert list(timer.chunk([output])) == [output]
+    first_output_at = timer.first_output_at
+    assert first_output_at is not None
+    assert timer.output(TextDelta("more")) == TextDelta("more")
+    message = Message(role="assistant", content="Hi")
+    stamp_finished_turn(message, ModelIdentity(id="m", provider="P"), timer)
+
+    assert timer.first_output_at == first_output_at
+    assert message.metrics.time_to_first_token == first_output_at - timer.started
+    assert 0 <= message.metrics.time_to_first_token <= message.metrics.duration <= time.monotonic() - timer.started
+    assert message.provider_data == model_provenance("m", "P")
+
+
+@pytest.mark.parametrize(
+    ("usage", "reported"),
+    [(None, False), (MessageMetrics(), False), (MessageMetrics(tokens=TokenCounts(output_tokens=3)), True)],
+    ids=["no-usage", "zero-counters", "counters"],
+)
+def test_a_finished_turn_reports_usage_only_when_a_counter_is_not_zero(
+    usage: MessageMetrics | None,
+    reported: bool,
+) -> None:
+    """A usage report whose counters are all zero is one the provider did not make, so the turn ends without one."""
+    events = finished_turn(
+        ModelIdentity(id="m", provider="P"),
+        TurnTimer(),
+        content="Hi",
+        tool_calls=(),
+        usage=usage,
+        stop_reason="end",
+    )
+
+    completed = events[-1]
+    assert isinstance(completed, TurnCompleted)
+    assert completed.message.metrics.duration is not None
+    assert events[:-1] == ([UsageReported(completed.message.metrics)] if reported else [])

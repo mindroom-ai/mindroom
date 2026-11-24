@@ -7,25 +7,44 @@ import json
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, cast
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
+import aiohttp
 import pytest
+import tiktoken
 
+from mindroom import background_tasks, requester_identity
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.automations import automation
 from mindroom.automations import runner as runner_module
 from mindroom.automations.registry import AutomationDefinition, compile_automations
 from mindroom.automations.runner import AutomationRunner
 from mindroom.automations.steps import Ask, AutomationContext, Done
-from mindroom.automations.threads import automation_threads
+from mindroom.automations.threads import automation_threads, automations_tracking_root
 from mindroom.background_tasks import wait_for_background_tasks
-from mindroom.config.agent import AgentConfig
+from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.automations import DreamingAutomation, PluginAutomation, PromptCurationAutomation
 from mindroom.config.main import Config
 from mindroom.config.models import RouterConfig
 from mindroom.config.plugin import PluginEntryConfig
-from mindroom.constants import ORIGINAL_SENDER_KEY, PER_FIRE_THREAD_ROOT_KEY, SCHEDULED_MODEL_KEY, resolve_runtime_paths
+from mindroom.constants import (
+    ORIGINAL_SENDER_KEY,
+    PER_FIRE_THREAD_ROOT_KEY,
+    SCHEDULED_MODEL_KEY,
+    SKIP_MENTIONS_KEY,
+    primary_records_dir,
+    resolve_runtime_paths,
+)
+from mindroom.entity_resolution import entity_identity_registry
+from mindroom.hooks.sender import build_hook_message_sender
+from mindroom.matrix.personal_room_store import PersonalRoomRecord, personal_room_record_path, write_personal_room
 from mindroom.runtime_resolution import resolve_agent_runtime
 from mindroom.thread_tags import ThreadTagsError
+from mindroom.token_counting import families
+from mindroom.tool_system.worker_routing import build_requester_execution_identity
+from tests.conftest import SETTLE_TIMEOUT_SECONDS, delivered_matrix_side_effect
+from tests.fakes.token_counter import fake_token_counter
+from tests.identity_helpers import persist_entity_accounts
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -47,14 +66,37 @@ NOON = datetime(2026, 10, 5, 12, 0, tzinfo=UTC)
 DAY_LATER = NOON + timedelta(days=1)
 
 
+@pytest.fixture(autouse=True)
+def _fake_agent_model_counter(monkeypatch: pytest.MonkeyPatch) -> None:
+    """These configs authored no model, so prompt_curation counts the files with a fake counter."""
+    monkeypatch.setattr(
+        "mindroom.automations.prompt_curation.model_token_counter",
+        lambda *_args, **_kwargs: fake_token_counter(),
+    )
+
+
+@pytest.fixture(autouse=True)
+def set_tag(monkeypatch: pytest.MonkeyPatch) -> AsyncMock:
+    """Thread tags are room state, so every test records the runner's tag writes instead."""
+    recorder = AsyncMock()
+    monkeypatch.setattr(runner_module, "set_thread_tag", recorder)
+    return recorder
+
+
 @dataclass
 class _Bot:
     """The agent bot as the runner sees it, recording every hook message it sends."""
 
     sent: list[dict[str, Any]] = field(default_factory=list)
     client: Any = field(default_factory=lambda: MagicMock(user_id="@mindroom_mind:example.test"))
+    conversation_reader: Any = field(default_factory=MagicMock)
 
-    async def _hook_send_message(
+    @property
+    def hook_context(self) -> _Bot:
+        """The bot's hook support, whose sender is this recorder."""
+        return self
+
+    async def send_message(
         self,
         room_id: str,
         body: str,
@@ -93,7 +135,7 @@ def _setup(
     )
     config = Config(agents={"mind": agent}, router=RouterConfig(model="default"))
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
-    root = resolve_agent_runtime("mind", config, paths, None, create=True).file_memory_root
+    root = resolve_agent_runtime("mind", config, paths, None, create=True).workspace.file_memory_path
     if root is not None:
         root.mkdir(parents=True, exist_ok=True)
         (root / "MEMORY.md").write_text(memory, encoding="utf-8")
@@ -103,6 +145,7 @@ def _setup(
         config_provider=lambda: config,
         bot_provider=lambda name: cast("AgentBot", bot) if name == "mind" else None,
         definition_provider=compile_automations([]).get,
+        agent_reply_memberships=AgentReplyMembershipIndex(),
     )
     return config, paths, runner, bot
 
@@ -114,7 +157,7 @@ def _use_check(runner: AutomationRunner, check: Callable[[AutomationContext], As
 
 async def _tick(runner: AutomationRunner, now: datetime) -> None:
     await runner._tick(now)
-    assert await wait_for_background_tasks(5)
+    assert await wait_for_background_tasks(SETTLE_TIMEOUT_SECONDS)
 
 
 @pytest.mark.asyncio
@@ -139,6 +182,20 @@ async def test_a_due_check_posts_a_visible_prompt_that_the_agent_answers(tmp_pat
 
 
 @pytest.mark.asyncio
+async def test_an_agent_timezone_sets_when_its_automations_are_due(tmp_path: Path) -> None:
+    """The default 04:00 check runs at 04:00 in the agent's own timezone, not the install's."""
+    config, _paths, runner, bot = _setup(tmp_path)
+    config.timezone = "America/Los_Angeles"
+    config.agents["mind"].timezone = "Europe/Amsterdam"
+
+    await _tick(runner, NOON)
+    # 04:00 in Amsterdam is still 19:00 the evening before in Los Angeles.
+    await _tick(runner, datetime(2026, 10, 6, 2, 0, tzinfo=UTC))
+
+    assert len(bot.sent) == 1
+
+
+@pytest.mark.asyncio
 async def test_the_internal_user_is_the_prompts_requester(tmp_path: Path) -> None:
     """Like a todo poke without a human, the prompt runs as MindRoom's internal user."""
     _config, _paths, runner, bot = _setup(tmp_path)
@@ -151,6 +208,37 @@ async def test_the_internal_user_is_the_prompts_requester(tmp_path: Path) -> Non
         ORIGINAL_SENDER_KEY: "@mindroom_user:example.test",
         PER_FIRE_THREAD_ROOT_KEY: True,
     }
+
+
+@pytest.mark.asyncio
+async def test_a_tick_that_raises_is_logged_and_the_loop_runs_again(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A crashed pass is logged and the schedule loop restarts instead of staying dead until the next reload."""
+    config, _paths, runner, _bot = _setup(tmp_path)
+    monkeypatch.setattr(background_tasks, "retry_delay_seconds", lambda *_args, **_kwargs: 0.0)
+    logger = MagicMock()
+    monkeypatch.setattr(background_tasks, "logger", logger)
+    ticks: list[datetime] = []
+    ticked_again = asyncio.Event()
+
+    async def tick(now: datetime) -> None:
+        ticks.append(now)
+        if len(ticks) == 1:
+            msg = "tick failed"
+            raise RuntimeError(msg)
+        ticked_again.set()
+
+    monkeypatch.setattr(runner, "_tick", tick)
+    await runner.sync(config)
+    try:
+        await asyncio.wait_for(ticked_again.wait(), SETTLE_TIMEOUT_SECONDS)
+    finally:
+        await runner.stop()
+
+    logger.exception.assert_called_once()
+    assert logger.exception.call_args.kwargs == {"task_name": "automation_runner"}
 
 
 @pytest.mark.asyncio
@@ -186,9 +274,9 @@ async def test_the_finished_response_triggers_verify_and_a_notice_in_the_prompt_
     await _tick(runner, DAY_LATER)
 
     runner.response_finished(["$unrelated", "$event1"])
-    assert await wait_for_background_tasks(5)
+    assert await wait_for_background_tasks(SETTLE_TIMEOUT_SECONDS)
     runner.response_finished(["$event1"])
-    assert await wait_for_background_tasks(5)
+    assert await wait_for_background_tasks(SETTLE_TIMEOUT_SECONDS)
 
     assert bot.sent[1:] == [
         {
@@ -196,7 +284,7 @@ async def test_the_finished_response_triggers_verify_and_a_notice_in_the_prompt_
             "body": "Prompt maintenance changed nothing; the files stay at 1286 tokens.",
             "thread_id": "$event1",
             "source_hook": "automation/prompt_curation",
-            "extra_content": None,
+            "extra_content": {SKIP_MENTIONS_KEY: True},
             "trigger_dispatch": False,
         },
     ]
@@ -209,13 +297,13 @@ async def test_a_run_outside_the_bounds_gets_one_recheck_the_agent_answers(tmp_p
     await _tick(runner, NOON)
     with patch("mindroom.automations.runner.mindroom_user_id", return_value="@mindroom_user:example.test"):
         await _tick(runner, DAY_LATER)
-        root = resolve_agent_runtime("mind", config, paths, None).file_memory_root
+        root = resolve_agent_runtime("mind", config, paths, None).workspace.file_memory_path
         assert root is not None
         (root / "MEMORY.md").write_text("# Memory\n", encoding="utf-8")
         runner.response_finished(["$event1"])
-        assert await wait_for_background_tasks(5)
+        assert await wait_for_background_tasks(SETTLE_TIMEOUT_SECONDS)
     runner.response_finished(["$event2"])
-    assert await wait_for_background_tasks(5)
+    assert await wait_for_background_tasks(SETTLE_TIMEOUT_SECONDS)
 
     assert len(bot.sent) == 2
     recheck = bot.sent[1]
@@ -233,54 +321,56 @@ async def _finish_run(runner: AutomationRunner, config: Config, paths: RuntimePa
     await _tick(runner, NOON)
     await _tick(runner, DAY_LATER)
     if memory is not None:
-        root = resolve_agent_runtime("mind", config, paths, None).file_memory_root
+        root = resolve_agent_runtime("mind", config, paths, None).workspace.file_memory_path
         assert root is not None
         (root / "memory").mkdir(exist_ok=True)
         moved = MEMORY.split("## Topic 7\n")[1]
         (root / "memory" / "topics.md").write_text(moved, encoding="utf-8")
         (root / "MEMORY.md").write_text(memory, encoding="utf-8")
     runner.response_finished(["$event1"])
-    assert await wait_for_background_tasks(5)
+    assert await wait_for_background_tasks(SETTLE_TIMEOUT_SECONDS)
 
 
 @pytest.mark.asyncio
-async def test_a_run_within_the_bounds_resolves_its_thread(tmp_path: Path) -> None:
-    """The bot tags the prompt's thread resolved after the plain notice."""
+async def test_a_run_within_the_bounds_resolves_its_thread(tmp_path: Path, set_tag: AsyncMock) -> None:
+    """The bot tags the prompt's thread as an automation's when it starts, and resolved after the plain notice."""
     config, paths, runner, bot = _setup(tmp_path)
-    set_tag = AsyncMock()
-    with patch.object(runner_module, "set_thread_tag", set_tag):
-        await _finish_run(runner, config, paths, CONDENSED)
+    await _finish_run(runner, config, paths, CONDENSED)
 
     assert bot.sent[1]["body"].startswith("✅ Prompt files condensed from 1286 to ")
-    set_tag.assert_awaited_once_with(bot.client, ROOM, "$event1", "resolved", set_by="@mindroom_mind:example.test")
+    assert set_tag.await_args_list == [
+        call(bot.client, ROOM, "$event1", tag, set_by="@mindroom_mind:example.test")
+        for tag in ("automation", "resolved")
+    ]
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("memory", [None, "# Memory\n"], ids=["unchanged", "recheck"])
-async def test_an_unchanged_run_or_a_recheck_leaves_the_thread_open(tmp_path: Path, memory: str | None) -> None:
+async def test_an_unchanged_run_or_a_recheck_leaves_the_thread_open(
+    tmp_path: Path,
+    memory: str | None,
+    set_tag: AsyncMock,
+) -> None:
     """Only a run that changed the files within the bounds resolves its thread."""
     config, paths, runner, _bot = _setup(tmp_path)
-    set_tag = AsyncMock()
-    with patch.object(runner_module, "set_thread_tag", set_tag):
-        await _finish_run(runner, config, paths, memory)
+    await _finish_run(runner, config, paths, memory)
 
-    set_tag.assert_not_awaited()
+    assert [tag_call.args[3] for tag_call in set_tag.await_args_list] == ["automation"]
 
 
 @pytest.mark.asyncio
-async def test_a_thread_the_bot_cannot_tag_still_gets_its_notice(tmp_path: Path) -> None:
+async def test_a_thread_the_bot_cannot_tag_still_gets_its_notice(tmp_path: Path, set_tag: AsyncMock) -> None:
     """A missing power level for thread tags is logged, not raised."""
     config, paths, runner, bot = _setup(tmp_path)
-    set_tag = AsyncMock(side_effect=ThreadTagsError("power too low"))
-    with (
-        patch.object(runner_module, "set_thread_tag", set_tag),
-        patch.object(runner_module.logger, "warning") as warning,
-    ):
+    set_tag.side_effect = ThreadTagsError("power too low")
+    with patch.object(runner_module.logger, "warning") as warning:
         await _finish_run(runner, config, paths, CONDENSED)
 
-    set_tag.assert_awaited_once()
     assert bot.sent[1]["body"].startswith("✅ ")
-    warning.assert_called_once_with("Automation could not resolve its thread", agent="mind", error="power too low")
+    assert warning.call_args_list == [
+        call("Automation could not tag its thread", agent="mind", requester=None, tag=tag, error="power too low")
+        for tag in ("automation", "resolved")
+    ]
 
 
 @pytest.mark.asyncio
@@ -290,11 +380,11 @@ async def test_a_configured_model_runs_the_prompt_and_its_recheck(tmp_path: Path
     config.agents["mind"].automations = [PromptCurationAutomation(trigger_tokens=1_000, model="large")]
     await _tick(runner, NOON)
     await _tick(runner, DAY_LATER)
-    root = resolve_agent_runtime("mind", config, paths, None).file_memory_root
+    root = resolve_agent_runtime("mind", config, paths, None).workspace.file_memory_path
     assert root is not None
     (root / "MEMORY.md").write_text("# Memory\n", encoding="utf-8")
     runner.response_finished(["$event1"])
-    assert await wait_for_background_tasks(5)
+    assert await wait_for_background_tasks(SETTLE_TIMEOUT_SECONDS)
 
     assert [message["extra_content"] for message in bot.sent] == [
         {SCHEDULED_MODEL_KEY: "large", PER_FIRE_THREAD_ROOT_KEY: True},
@@ -325,7 +415,7 @@ async def test_the_fallback_hour_starts_when_the_prompt_is_delivered(tmp_path: P
         offset = timedelta(0)
 
         @classmethod
-        def now(cls, tz: tzinfo | None = None) -> datetime:
+        def now(cls, tz: tzinfo | None = None) -> datetime:  # ty: ignore[incompatible-method-override]  # test clock
             return datetime.now(tz) + cls.offset
 
     def slow(_ctx: AutomationContext) -> Ask | None:
@@ -354,7 +444,7 @@ async def test_no_new_prompt_while_the_last_one_awaits_verify(tmp_path: Path) ->
     assert len(bot.sent) == 1
 
     runner.response_finished(["$event1"])
-    assert await wait_for_background_tasks(5)
+    assert await wait_for_background_tasks(SETTLE_TIMEOUT_SECONDS)
     await _tick(runner, NOON + timedelta(minutes=3))
 
     assert [message["thread_id"] for message in bot.sent] == [None, "$event1", None]
@@ -366,13 +456,13 @@ async def test_the_automation_is_free_once_its_chain_ends(tmp_path: Path) -> Non
     _config, _paths, runner, _bot = _setup(tmp_path)
     await _tick(runner, NOON)
     await _tick(runner, DAY_LATER)
-    assert "mind" in runner._active
+    assert ("mind", None) in runner._active
 
     runner.response_finished(["$event1"])
-    assert "mind" in runner._active
-    assert await wait_for_background_tasks(5)
+    assert ("mind", None) in runner._active
+    assert await wait_for_background_tasks(SETTLE_TIMEOUT_SECONDS)
 
-    assert "mind" not in runner._active
+    assert ("mind", None) not in runner._active
 
 
 @pytest.mark.asyncio
@@ -410,6 +500,28 @@ async def test_disabling_an_automation_on_reload_stops_it(tmp_path: Path) -> Non
 
 
 @pytest.mark.asyncio
+async def test_prompt_curation_still_asks_when_its_token_vocabulary_cannot_load(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An installation without network access and without a cached vocabulary sizes the files by the stand-in."""
+
+    def offline(_name: str) -> object:
+        msg = "no network"
+        raise OSError(msg)
+
+    monkeypatch.setattr(families, "_encoders", {})
+    monkeypatch.setattr(tiktoken, "get_encoding", offline)
+    _config, _paths, runner, bot = _setup(tmp_path)
+
+    await _tick(runner, NOON)
+    await _tick(runner, DAY_LATER)
+
+    (prompt,) = bot.sent
+    assert prompt["body"].startswith("@mind 🧹 Prompt maintenance: the files loaded into every one of your prompts")
+
+
+@pytest.mark.asyncio
 async def test_a_check_that_cannot_read_its_files_posts_a_visible_notice(tmp_path: Path) -> None:
     """A failed check tells the room instead of only logging, and ends the chain."""
     _config, _paths, runner, bot = _setup(tmp_path)
@@ -426,7 +538,36 @@ async def test_a_check_that_cannot_read_its_files_posts_a_visible_notice(tmp_pat
     assert notice["body"] == "⚠️ The prompt_curation automation could not run: MEMORY.md is not valid UTF-8"
     assert notice["thread_id"] is None
     assert notice["trigger_dispatch"] is False
-    assert "mind" not in runner._active
+    assert ("mind", None) not in runner._active
+
+
+@pytest.mark.asyncio
+async def test_a_notice_echoing_an_agent_mention_is_posted_with_mentions_ignored(tmp_path: Path) -> None:
+    """A notice can repeat text that names an agent, so the posted message tells agents to ignore its mentions."""
+    config, paths, runner, bot = _setup(tmp_path)
+    persist_entity_accounts(config, paths)
+    await _tick(runner, NOON)
+
+    def unreadable(_ctx: AutomationContext) -> Ask | None:
+        msg = "ask @mind about MEMORY.md"
+        raise ValueError(msg)
+
+    # Post through the real hook sender, as the agent bot does.
+    post = build_hook_message_sender(bot.client, config, paths, conversation_reader=AsyncMock())
+
+    _use_check(runner, unreadable)
+    with (
+        patch.object(bot, "send_message", new=post),
+        patch(
+            "mindroom.hooks.sender.send_matrix_message",
+            new=AsyncMock(side_effect=delivered_matrix_side_effect("$notice")),
+        ) as send,
+    ):
+        await _tick(runner, DAY_LATER)
+
+    content = send.await_args.args[2]
+    assert content["m.mentions"] == {"user_ids": [entity_identity_registry(config, paths).current_id("mind").full_id]}
+    assert content[SKIP_MENTIONS_KEY] is True
 
 
 @pytest.mark.asyncio
@@ -442,13 +583,13 @@ async def test_a_step_that_fails_posts_a_notice_in_its_thread_and_ends_the_chain
     await _tick(runner, NOON)
     await _tick(runner, DAY_LATER)
     runner.response_finished(["$event1"])
-    assert await wait_for_background_tasks(5)
+    assert await wait_for_background_tasks(SETTLE_TIMEOUT_SECONDS)
 
     assert [(message["body"], message["thread_id"]) for message in bot.sent] == [
         ("@mind Do the work", None),
         ("⚠️ The prompt_curation automation could not finish: memory/ is a link", "$event1"),
     ]
-    assert "mind" not in runner._active
+    assert ("mind", None) not in runner._active
 
 
 @pytest.mark.asyncio
@@ -465,17 +606,67 @@ async def test_a_new_thread_step_starts_its_own_thread_and_done_resolves_every_l
         await _tick(runner, NOON)
         await _tick(runner, DAY_LATER)
         runner.response_finished(["$event1"])
-        assert await wait_for_background_tasks(5)
+        assert await wait_for_background_tasks(SETTLE_TIMEOUT_SECONDS)
         runner.response_finished(["$event2"])
-        assert await wait_for_background_tasks(5)
+        assert await wait_for_background_tasks(SETTLE_TIMEOUT_SECONDS)
 
     assert [(message["body"], message["thread_id"]) for message in bot.sent] == [
         ("@mind Draft it", None),
         ("@mind Review it", None),
         ("All done", "$event2"),
     ]
-    assert [call.args[2] for call in set_tag.await_args_list] == ["$event1", "$event2"]
+    assert [tag_call.args[2:4] for tag_call in set_tag.await_args_list] == [
+        ("$event1", "automation"),
+        ("$event2", "automation"),
+        ("$event1", "resolved"),
+        ("$event2", "resolved"),
+    ]
     assert loops == [asyncio.get_running_loop()]
+
+
+@pytest.mark.asyncio
+async def test_an_ask_with_a_summary_pins_it_as_its_threads_title(tmp_path: Path) -> None:
+    """The summary is written as the pinned title of the thread the prompt starts, so no generated one replaces it."""
+    config, paths, runner, bot = _setup(tmp_path)
+    _use_check(runner, lambda _ctx: Ask("Do the work", new_thread=True, summary="Weekly digest"))
+    with patch.object(runner_module, "set_manual_thread_summary", new=AsyncMock()) as set_summary:
+        await _tick(runner, NOON)
+        await _tick(runner, DAY_LATER)
+
+    set_summary.assert_awaited_once_with(
+        bot.client,
+        ROOM,
+        "$event1",
+        "Weekly digest",
+        config=config,
+        runtime_paths=paths,
+        conversation_reader=bot.conversation_reader,
+        entity_name="mind",
+        membership_index=runner.agent_reply_memberships,
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_failed_tag_request_still_titles_the_thread_and_keeps_the_run(
+    tmp_path: Path,
+    set_tag: AsyncMock,
+) -> None:
+    """A transport error while tagging is logged; the prompt keeps its title and its pending run."""
+    _config, _paths, runner, _bot = _setup(tmp_path)
+    set_tag.side_effect = aiohttp.ClientPayloadError("truncated state response")
+    _use_check(runner, lambda _ctx: Ask("Do the work", new_thread=True, summary="Weekly digest"))
+    with patch.object(runner_module, "set_manual_thread_summary", new=AsyncMock()) as set_summary:
+        await _tick(runner, NOON)
+        await _tick(runner, DAY_LATER)
+
+    set_summary.assert_awaited_once()
+    assert ("mind", None) in runner._active
+
+
+def test_only_an_ask_that_starts_a_thread_can_title_it() -> None:
+    """A follow-up in the current thread cannot set a summary, so it never races the title the thread started with."""
+    with pytest.raises(ValueError, match="new_thread=True"):
+        Ask("Follow up", new_thread=False, summary="Second")
 
 
 @pytest.mark.asyncio
@@ -489,7 +680,7 @@ async def test_dreaming_runs_its_dream_and_review_through_the_runner(tmp_path: P
     )
     config = Config(agents={"mind": agent}, router=RouterConfig(model="default"))
     paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
-    root = resolve_agent_runtime("mind", config, paths, None, create=True).file_memory_root
+    root = resolve_agent_runtime("mind", config, paths, None, create=True).workspace.file_memory_path
     assert root is not None
     (root / "memory").mkdir(parents=True)
     (root / "memory" / "people.md").write_text("- Sam lives in Delft.\n", encoding="utf-8")
@@ -504,6 +695,7 @@ async def test_dreaming_runs_its_dream_and_review_through_the_runner(tmp_path: P
         config_provider=lambda: config,
         bot_provider=lambda name: cast("AgentBot", bot) if name == "mind" else None,
         definition_provider=compile_automations([]).get,
+        agent_reply_memberships=AgentReplyMembershipIndex(),
     )
 
     with patch.object(runner_module, "set_thread_tag", new=AsyncMock()) as set_tag:
@@ -513,10 +705,10 @@ async def test_dreaming_runs_its_dream_and_review_through_the_runner(tmp_path: P
         (run_dir / "staging/memory/people.md").write_text("- Sam lives in Utrecht.\n", encoding="utf-8")
         (run_dir / "report.md").write_text("Moved Sam.\nDREAM: DONE\n", encoding="utf-8")
         runner.response_finished(["$event1"])
-        assert await wait_for_background_tasks(5)
+        assert await wait_for_background_tasks(SETTLE_TIMEOUT_SECONDS)
         (run_dir / "verdict.md").write_text("Checked.\nVERDICT: APPROVE\n", encoding="utf-8")
         runner.response_finished(["$event2"])
-        assert await wait_for_background_tasks(5)
+        assert await wait_for_background_tasks(SETTLE_TIMEOUT_SECONDS)
 
     dream, review, notice = bot.sent
     assert dream["body"].startswith("@mind 🌙 Dreaming: reconcile your memory")
@@ -524,10 +716,15 @@ async def test_dreaming_runs_its_dream_and_review_through_the_runner(tmp_path: P
     assert notice["body"] == "✅ Dreaming applied the reviewed proposal (files written: 1, removed: 0)."
     assert [message["thread_id"] for message in bot.sent] == [None, None, "$event2"]
     assert (root / "memory" / "people.md").read_text(encoding="utf-8") == "- Sam lives in Utrecht.\n"
-    assert [call.args[2] for call in set_tag.await_args_list] == ["$event1", "$event2"]
+    assert [tag_call.args[2:4] for tag_call in set_tag.await_args_list] == [
+        ("$event1", "automation"),
+        ("$event2", "automation"),
+        ("$event1", "resolved"),
+        ("$event2", "resolved"),
+    ]
     threads = json.loads((tmp_path / "tracking/automations/threads.json").read_text(encoding="utf-8"))
     assert threads == ["$event1", "$event2"]
-    assert "mind" not in runner._active
+    assert ("mind", None) not in runner._active
 
 
 @pytest.mark.asyncio
@@ -538,7 +735,7 @@ async def test_one_agents_automations_never_overlap(tmp_path: Path) -> None:
         DreamingAutomation(cron="0 4 * * *"),
         PromptCurationAutomation(trigger_tokens=1_000),
     ]
-    root = resolve_agent_runtime("mind", config, paths, None).file_memory_root
+    root = resolve_agent_runtime("mind", config, paths, None).workspace.file_memory_path
     assert root is not None
     (root / "thread_exports" / "room").mkdir(parents=True)
     (root / "thread_exports" / "room" / "thread.yaml").write_text("messages: [hello]\n", encoding="utf-8")
@@ -552,7 +749,7 @@ async def test_one_agents_automations_never_overlap(tmp_path: Path) -> None:
     (run_dir / "report.md").write_text("Nothing to change.\nDREAM: DONE\n", encoding="utf-8")
     with patch.object(runner_module, "set_thread_tag", new=AsyncMock()):
         runner.response_finished(["$event1"])
-        assert await wait_for_background_tasks(5)
+        assert await wait_for_background_tasks(SETTLE_TIMEOUT_SECONDS)
     await _tick(runner, DAY_LATER + timedelta(minutes=1))
 
     assert bot.sent[1]["body"].startswith("Dreaming changed nothing")
@@ -594,15 +791,18 @@ async def test_a_plugin_automation_runs_its_chain_through_the_runner(tmp_path: P
         await _tick(runner, NOON)
         await _tick(runner, DAY_LATER)
         runner.response_finished(["$event1"])
-        assert await wait_for_background_tasks(5)
+        assert await wait_for_background_tasks(SETTLE_TIMEOUT_SECONDS)
 
     assert seen == [({"target": "digest.md"}, {"api": "x"})]
     assert [(m["body"], m["source_hook"]) for m in bot.sent] == [
         ("@mind Write the digest", "automation/weekly_digest"),
         ("Digest written", "automation/weekly_digest"),
     ]
-    assert [call.args[2] for call in set_tag.await_args_list] == ["$event1"]
-    assert "mind" not in runner._active
+    assert [tag_call.args[2:4] for tag_call in set_tag.await_args_list] == [
+        ("$event1", "automation"),
+        ("$event1", "resolved"),
+    ]
+    assert ("mind", None) not in runner._active
 
 
 @pytest.mark.asyncio
@@ -614,7 +814,7 @@ async def test_an_entry_no_loaded_plugin_provides_is_skipped(tmp_path: Path) -> 
     await _tick(runner, DAY_LATER)
 
     assert bot.sent == []
-    assert "mind" not in runner._active
+    assert ("mind", None) not in runner._active
     assert runner._next_due["mind:weekly_digest"][1] == DAY_LATER + timedelta(days=1)
 
 
@@ -650,7 +850,7 @@ async def test_a_reload_between_steps_keeps_the_running_chain(tmp_path: Path) ->
     ).get
     await _tick(runner, DAY_LATER + timedelta(minutes=1))
     runner.response_finished(["$event1"])
-    assert await wait_for_background_tasks(5)
+    assert await wait_for_background_tasks(SETTLE_TIMEOUT_SECONDS)
     await _tick(runner, DAY_LATER + timedelta(days=1))
 
     assert runner._next_due["mind:weekly_digest"][1] == due[1] + timedelta(days=1)
@@ -679,3 +879,229 @@ async def test_a_check_cannot_change_nested_options_or_settings_for_later_runs(t
     assert seen == [["a.md"], ["a.md"]]
     assert entry.options == {"targets": ["a.md"]}
     assert runner.definition_provider("weekly_digest").settings == {"tags": []}
+
+
+ALICE = "@alice:example.test"
+BOB = "@bob:example.test"
+ALICE_ROOM = "!alice-personal:example.test"
+BOB_ROOM = "!bob-personal:example.test"
+
+
+def _private_setup(
+    tmp_path: Path,
+    memories: dict[str, str],
+    *,
+    personal_rooms: dict[str, str] | None = None,
+    access_users: list[str] | None = None,
+) -> tuple[Config, RuntimePaths, AutomationRunner, _Bot, dict[str, Path]]:
+    """A private `mind` that owns personal rooms, with one private instance and personal room per requester."""
+    agent = AgentConfig(
+        display_name="Mind",
+        memory_backend="file",
+        private=AgentPrivateConfig(per="user_agent"),
+        access={"users": list(memories) if access_users is None else access_users},
+        automations=[PromptCurationAutomation(trigger_tokens=1_000)],
+    )
+    config = Config(
+        agents={"mind": agent},
+        rooms={"lobby": {}},
+        personal_rooms={"agent": "mind", "onboarding_rooms": ["lobby"]},
+        router=RouterConfig(model="default"),
+    )
+    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path)
+    rooms = {ALICE: ALICE_ROOM, BOB: BOB_ROOM} if personal_rooms is None else personal_rooms
+    roots: dict[str, Path] = {}
+    for requester, memory in memories.items():
+        identity = build_requester_execution_identity(agent_name="mind", runtime_paths=paths, requester_id=requester)
+        root = resolve_agent_runtime("mind", config, paths, identity, create=True).workspace.file_memory_path
+        assert root is not None
+        (root / "MEMORY.md").write_text(memory, encoding="utf-8")
+        roots[requester] = root
+        if requester in rooms:
+            record = PersonalRoomRecord(
+                user_id=requester,
+                alias=f"#personal-{requester[1:].split(':')[0]}:example.test",
+                source_room_id="!lobby:example.test",
+                room_id=rooms[requester],
+            )
+            write_personal_room(personal_room_record_path(paths, "mind", requester), record)
+    bot = _Bot()
+    runner = AutomationRunner(
+        runtime_paths=paths,
+        config_provider=lambda: config,
+        bot_provider=lambda name: cast("AgentBot", bot) if name == "mind" else None,
+        definition_provider=compile_automations([]).get,
+        agent_reply_memberships=AgentReplyMembershipIndex(),
+    )
+    return config, paths, runner, bot, roots
+
+
+@pytest.mark.asyncio
+async def test_a_private_agent_maintains_each_requesters_own_files_in_their_personal_room(tmp_path: Path) -> None:
+    """The check measures each requester's own MEMORY.md, and the prompt and re-check run as that requester."""
+    _config, _paths, runner, bot, roots = _private_setup(tmp_path, {ALICE: MEMORY, BOB: "# Memory\n- Short.\n"})
+
+    await _tick(runner, NOON)
+    await _tick(runner, DAY_LATER)
+    (roots[ALICE] / "MEMORY.md").write_text("# Memory\n", encoding="utf-8")
+    runner.response_finished(["$event1"])
+    assert await wait_for_background_tasks(SETTLE_TIMEOUT_SECONDS)
+
+    prompt, recheck = bot.sent
+    assert prompt["room_id"] == ALICE_ROOM
+    assert prompt["body"].startswith(
+        "@mind 🧹 Prompt maintenance: the files loaded into every one of your prompts total 1286",
+    )
+    assert prompt["extra_content"] == {ORIGINAL_SENDER_KEY: ALICE, PER_FIRE_THREAD_ROOT_KEY: True}
+    assert (recheck["room_id"], recheck["thread_id"]) == (ALICE_ROOM, "$event1")
+    assert recheck["body"].startswith("@mind ⚠️ Prompt maintenance needs a re-check: MEMORY.md shrank 100%")
+    assert recheck["extra_content"] == {ORIGINAL_SENDER_KEY: ALICE, PER_FIRE_THREAD_ROOT_KEY: True}
+    runner.response_finished(["$event2"])
+    assert await wait_for_background_tasks(SETTLE_TIMEOUT_SECONDS)
+    assert ("mind", ALICE) not in runner._active
+
+
+@pytest.mark.asyncio
+async def test_one_requesters_chain_does_not_hold_another_requesters(tmp_path: Path) -> None:
+    """Each private instance has its own files, so requesters' automations run side by side."""
+    _config, _paths, runner, bot, _roots = _private_setup(tmp_path, {ALICE: MEMORY, BOB: MEMORY})
+
+    await _tick(runner, NOON)
+    await _tick(runner, DAY_LATER)
+
+    assert sorted((m["room_id"], m["extra_content"][ORIGINAL_SENDER_KEY]) for m in bot.sent) == [
+        (ALICE_ROOM, ALICE),
+        (BOB_ROOM, BOB),
+    ]
+    assert runner._active == {("mind", ALICE), ("mind", BOB)}
+
+
+@pytest.mark.asyncio
+async def test_a_shared_check_keeps_its_state_beside_the_agent_without_a_requester(tmp_path: Path) -> None:
+    """A shared agent's state stays where it was before private agents could run automations."""
+    _config, paths, runner, _bot = _setup(tmp_path)
+    seen: list[AutomationContext] = []
+    _use_check(runner, lambda ctx: seen.append(ctx))
+
+    await _tick(runner, NOON)
+    await _tick(runner, DAY_LATER)
+
+    (ctx,) = seen
+    assert (ctx.requester_id, ctx.execution_identity) == (None, None)
+    assert ctx.state_dir == automations_tracking_root(paths) / "mind"
+
+
+@pytest.mark.asyncio
+async def test_a_private_check_gets_the_requesters_workspace_state_and_identity(tmp_path: Path) -> None:
+    """A check reads and keeps state for the requester's instance, never the shared agent's."""
+    config, paths, runner, _bot, roots = _private_setup(tmp_path, {ALICE: MEMORY})
+    seen: list[AutomationContext] = []
+    _use_check(runner, lambda ctx: seen.append(ctx))
+
+    await _tick(runner, NOON)
+    await _tick(runner, DAY_LATER)
+
+    (ctx,) = seen
+    identity = build_requester_execution_identity(agent_name="mind", runtime_paths=paths, requester_id=ALICE)
+    state_root = resolve_agent_runtime("mind", config, paths, identity).state_root
+    assert (ctx.requester_id, ctx.workspace) == (ALICE, roots[ALICE])
+    assert ctx.state_dir == primary_records_dir(state_root, paths) / "automations"
+    assert ctx.execution_identity == identity
+
+
+@pytest.mark.asyncio
+async def test_a_requester_without_a_personal_room_gets_no_prompt(tmp_path: Path) -> None:
+    """Nowhere else is private to the requester and the agent, so their automations wait for a personal room.
+
+    A requester without one is a normal state, not a misconfiguration, so it is logged without a warning.
+    """
+    _config, _paths, runner, bot, _roots = _private_setup(
+        tmp_path,
+        {ALICE: MEMORY, BOB: MEMORY},
+        personal_rooms={ALICE: ALICE_ROOM},
+    )
+
+    await _tick(runner, NOON)
+    with patch.object(runner_module, "logger") as logger:
+        await _tick(runner, DAY_LATER)
+
+    assert [m["room_id"] for m in bot.sent] == [ALICE_ROOM]
+    assert ("mind", BOB) not in runner._active
+    logger.warning.assert_not_called()
+    logger.info.assert_any_call(
+        "Automation requester has no personal room; skipped",
+        agent="mind",
+        automation="prompt_curation",
+        requester=BOB,
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_requester_now_aliased_to_another_id_gets_no_prompt(tmp_path: Path) -> None:
+    """Ingress would run the prompt as the canonical ID, against another instance than the one the check measured."""
+    config, _paths, runner, bot, _roots = _private_setup(tmp_path, {ALICE: MEMORY, BOB: MEMORY})
+    config.authorization.aliases = {"@alice-main:example.test": [ALICE]}
+
+    await _tick(runner, NOON)
+    await _tick(runner, DAY_LATER)
+
+    assert [m["room_id"] for m in bot.sent] == [BOB_ROOM]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("enforce_turn_authorization")
+async def test_a_requester_the_agent_may_no_longer_answer_gets_no_prompt(tmp_path: Path) -> None:
+    """Revoked access stops unattended runs on the requester's behalf before anything is posted."""
+    _config, _paths, runner, bot, _roots = _private_setup(tmp_path, {ALICE: MEMORY, BOB: MEMORY}, access_users=[ALICE])
+
+    await _tick(runner, NOON)
+    await _tick(runner, DAY_LATER)
+
+    assert [m["room_id"] for m in bot.sent] == [ALICE_ROOM]
+    assert ("mind", BOB) not in runner._active
+
+
+@pytest.mark.asyncio
+async def test_an_instance_the_primary_never_recorded_an_owner_for_gets_no_prompt(tmp_path: Path) -> None:
+    """Only the primary's copy of an owner record names a requester, so a record worker code wrote gets no runs."""
+    config, paths, runner, bot, _roots = _private_setup(tmp_path, {ALICE: MEMORY, BOB: MEMORY})
+    bob_state_root = resolve_agent_runtime(
+        "mind",
+        config,
+        paths,
+        build_requester_execution_identity(agent_name="mind", runtime_paths=paths, requester_id=BOB),
+    ).state_root
+    (primary_records_dir(bob_state_root.parent, paths) / ".mindroom-private-instance.json").unlink()
+
+    await _tick(runner, NOON)
+    await _tick(runner, DAY_LATER)
+
+    assert [m["room_id"] for m in bot.sent] == [ALICE_ROOM]
+    assert list(runner._next_due) == [f"mind:prompt_curation:{ALICE}"]
+
+
+@pytest.mark.asyncio
+async def test_a_requester_whose_personal_room_record_is_unreadable_gets_no_prompt(tmp_path: Path) -> None:
+    """A corrupt record skips only that requester; the others still get their prompts."""
+    _config, paths, runner, bot, _roots = _private_setup(tmp_path, {ALICE: MEMORY, BOB: MEMORY})
+    personal_room_record_path(paths, "mind", BOB).write_text("{not json", encoding="utf-8")
+
+    await _tick(runner, NOON)
+    await _tick(runner, DAY_LATER)
+
+    assert [m["room_id"] for m in bot.sent] == [ALICE_ROOM]
+    assert ("mind", BOB) not in runner._active
+
+
+@pytest.mark.asyncio
+async def test_private_instances_that_cannot_be_listed_skip_only_that_pass(tmp_path: Path) -> None:
+    """A listing error leaves the schedule loop running, and the next pass schedules the instances again."""
+    _config, _paths, runner, bot, _roots = _private_setup(tmp_path, {ALICE: MEMORY})
+
+    await _tick(runner, NOON)
+    with patch.object(requester_identity, "private_instances_for_agent", side_effect=PermissionError("denied")):
+        await _tick(runner, NOON + timedelta(minutes=1))
+    await _tick(runner, NOON + timedelta(minutes=2))
+    await _tick(runner, DAY_LATER)
+
+    assert [m["room_id"] for m in bot.sent] == [ALICE_ROOM]

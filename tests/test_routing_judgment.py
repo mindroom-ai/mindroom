@@ -3,13 +3,11 @@
 from __future__ import annotations
 
 import json
-from dataclasses import replace
-from types import SimpleNamespace
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 import httpx
 import pytest
-from agno.run.agent import RunOutput
 from pydantic import ValidationError
 from structlog.testing import capture_logs
 
@@ -19,13 +17,16 @@ from mindroom.credentials.manager import get_runtime_shared_credentials_manager
 from mindroom.judgment.client import JudgmentClient
 from mindroom.judgment.typesafe import _PINNED_MODEL
 from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
-from mindroom.providers import model_loading
-from tests.conftest import test_runtime_paths
+from mindroom.tool_system.events import ToolTraceEntry, build_tool_trace_content
+from tests.conftest import install_model_providers, test_runtime_paths
+from tests.fakes.scripted_model import Await, ScriptedModel, answer
 
 if TYPE_CHECKING:
+    from collections.abc import AsyncIterator
     from pathlib import Path
 
     from mindroom.constants import RuntimePaths
+    from mindroom.llm.provider import ModelRequest, StreamEvent
 
 
 def _config(judgment: dict | None = None) -> Config:
@@ -43,20 +44,25 @@ def _config(judgment: dict | None = None) -> Config:
     )
 
 
+@dataclass
+class _FallbackRouter(ScriptedModel):
+    """The LLM router's model: it suggests ``research`` for every request and keeps each prompt."""
+
+    prompts: list[str] = field(default_factory=list)
+
+    async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
+        """Record the prompt, then answer with the fallback suggestion."""
+        self.prompts.append(request.messages[-1].get_content_string())
+        for step in answer(json.dumps({"entity_name": "research", "reasoning": "fallback"})):
+            assert not isinstance(step, Await)
+            yield step
+
+
 def _providers(monkeypatch: pytest.MonkeyPatch) -> list[str]:
-    monkeypatch.setattr(model_loading, "get_model_instance", lambda *_: SimpleNamespace(id="test"))
-    prompts = []
-
-    class Router:
-        def __init__(self, **_kwargs: object) -> None:
-            pass
-
-        async def arun(self, prompt: str, **_kwargs: object) -> RunOutput:
-            prompts.append(prompt)
-            return RunOutput(content={"entity_name": "research", "reasoning": "fallback"})
-
-    monkeypatch.setattr(routing, "Agent", Router)
-    return prompts
+    """Serve the LLM router from a fallback model and return the prompts it receives."""
+    router = _FallbackRouter(turns=[])
+    install_model_providers(monkeypatch, {"default": router})
+    return router.prompts
 
 
 def _paths(tmp_path: Path) -> RuntimePaths:
@@ -201,6 +207,46 @@ async def test_router_judge_sees_complete_recent_text_and_aliased_speakers(
 
 
 @pytest.mark.asyncio
+async def test_router_judge_clips_long_recent_messages(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A long recent reply, such as one with many tool calls, is clipped like other judges' context."""
+    _providers(monkeypatch)
+    posted = _choice_provider(monkeypatch, "candidate_0")
+    history = [ResolvedVisibleMessage.synthetic(sender="@person:example.org", body="word " * 4000, event_id="$long")]
+    result = await routing.suggest_responder(
+        "Current question",
+        ["code", "research"],
+        _config(),
+        _paths(tmp_path),
+        history,
+    )
+    assert result is not None
+    assert result.entity_name == "code"
+    assert "characters omitted" in json.dumps(posted[0]["state"])
+
+
+@pytest.mark.asyncio
+async def test_router_judge_sees_tool_calls_as_tags(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An earlier agent reply reaches the router judge with its tool calls, not display markers."""
+    _providers(monkeypatch)
+    posted = _choice_provider(monkeypatch, "candidate_0")
+    trace = [
+        ToolTraceEntry(type="tool_call_completed", tool_name="shell", args_preview="cmd=ls", result_preview="a.py"),
+    ]
+    history = [
+        ResolvedVisibleMessage.synthetic(
+            sender="@mindroom_code:localhost",
+            body="Listing.\n\n🔧 `shell` [1]",
+            event_id="$reply",
+            content={"msgtype": "m.text", **(build_tool_trace_content(trace) or {})},
+        ),
+    ]
+    await routing.suggest_responder("Current question", ["code", "research"], _config(), _paths(tmp_path), history)
+    state = json.dumps(posted[0]["state"])
+    assert "🔧" not in state
+    assert '<tool name=\\"shell\\"' in state
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("message", ["token=sk-secret", "x" * 16000], ids=["secret", "oversized"])
 async def test_unsafe_judgment_context_uses_existing_router_without_judge_call(
     tmp_path: Path,
@@ -306,11 +352,13 @@ async def test_default_and_jev_fallback_use_same_llm_router(tmp_path: Path, monk
     prompts = _providers(monkeypatch)
     aliases = []
 
-    def load(_config: Config, _paths: RuntimePaths, alias: str) -> SimpleNamespace:
-        aliases.append(alias)
-        return SimpleNamespace(id="test")
+    router = _FallbackRouter(turns=[], prompts=prompts)
 
-    monkeypatch.setattr(model_loading, "get_model_instance", load)
+    def load(_config: Config, _paths: RuntimePaths, alias: str) -> _FallbackRouter:
+        aliases.append(alias)
+        return router
+
+    monkeypatch.setattr("mindroom.providers.registry.build_model_provider", load)
     config = _config()
     config.models["cheap_router"] = config.models["default"]
     config.router.model = "cheap_router"
@@ -322,3 +370,23 @@ async def test_default_and_jev_fallback_use_same_llm_router(tmp_path: Path, monk
     assert len(prompts) == 2
     assert prompts[0] == prompts[1]
     assert aliases == ["cheap_router", "cheap_router"]
+
+
+@pytest.mark.asyncio
+async def test_llm_router_context_drops_tool_markers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The LLM router reads an agent reply's text without its display markers."""
+    prompts = _providers(monkeypatch)
+    config = _config()
+    config.router.judgment = None
+    trace = [ToolTraceEntry(type="tool_call_completed", tool_name="shell", args_preview="cmd=ls")]
+    history = [
+        ResolvedVisibleMessage.synthetic(
+            sender="@mindroom_code:localhost",
+            body="Listing.\n\n🔧 `shell` [1]",
+            event_id="$reply",
+            content={"msgtype": "m.text", **(build_tool_trace_content(trace) or {})},
+        ),
+    ]
+    await routing.suggest_responder("Help", ["code", "research"], config, _paths(tmp_path), history)
+    assert "Listing." in prompts[0]
+    assert "🔧" not in prompts[0]

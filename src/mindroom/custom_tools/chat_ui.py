@@ -12,7 +12,6 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal, get_args
 
 import nio
-from agno.tools import Toolkit
 from nio.api import RelationshipType
 
 from mindroom.constants import UI_ACTION_CONTENT_KEY
@@ -30,10 +29,11 @@ from mindroom.matrix.large_messages import EDIT_MESSAGE_SIZE_LIMIT, calculate_ev
 from mindroom.matrix.message_builder import build_message_content
 from mindroom.matrix.message_content import resolve_event_source_content
 from mindroom.path_confinement import read_regular_file_within_root
+from mindroom.tool_system.authoring import Toolkit
 from mindroom.tool_system.runtime_context import ToolRuntimeContext, get_tool_runtime_context
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Awaitable, Callable, Collection
     from pathlib import Path
 
     from mindroom.config.models import FileAccess
@@ -48,11 +48,11 @@ _SettingsSection = Literal[
     "about",
 ]
 _SidePanel = Literal["members", "computer"]
+# The libraries MindRoom Chat serves to canvas pages itself.
+_CanvasLibrary = Literal["chartjs", "d3", "mermaid", "katex"]
 
 logger = get_logger(__name__)
 
-_SETTINGS_SECTIONS: frozenset[str] = frozenset(get_args(_SettingsSection))
-_SIDE_PANELS: frozenset[str] = frozenset(get_args(_SidePanel))
 _SHOW_COMPUTER_BODY = "Open this agent's worker computer in MindRoom Chat."
 
 
@@ -75,6 +75,7 @@ _CANVAS_TITLE_MAX_UNITS = 120
 _CANVAS_TITLE_ERROR = (
     f"Canvas title must be one line of 1-{_CANVAS_TITLE_MAX_UNITS} characters of valid text without control characters."
 )
+_CANVAS_EVENT_ID_ERROR = "canvas_event_id must be the event ID returned by an earlier show_canvas call."
 # A page that fits an edit envelope travels inside the event, so every canvas stays editable;
 # that plaintext ceiling also keeps the Megolm-encrypted event far below the 64 KB hard limit.
 # Larger pages are uploaded as (encrypted) Matrix media and the event carries a reference.
@@ -98,16 +99,15 @@ _FUNCTION_INSTRUCTIONS: dict[str, str] = {
         "over, for example to log in. "
         "open_panel(panel='members') shows the Members panel: the people and agents in this room."
     ),
-    "show_computer": (
-        "show_computer() shows the Computer panel: a live view of your own worker browser, the browser that "
-        "browser_control drives with target='host'. The user can watch you on a real website or take over, for "
-        "example to log in."
-    ),
     "show_canvas": (
-        "show_canvas(...) shows the Canvas panel: a web page you write yourself, which cannot load any "
-        "website. Use it to present results (dashboards, reports, slides) or to let the user choose or fill "
-        "something in; their answer comes back as their next message. For a quick choice between a few "
-        "options, just ask in your reply."
+        "show_canvas(...) shows a canvas: a web page you write yourself, which cannot load any "
+        "website. Use it to present visual results (diagrams, charts, dashboards, reports, slides) or to let "
+        "the user choose or fill something in; their answer comes back as their next message. Prefer "
+        "show_canvas over ASCII art or Mermaid fences, since chat Markdown does not render Mermaid. For a "
+        "quick choice between a few options, just ask in your reply. Prefer inline=True, which shows the page "
+        "in the conversation, for anything the user should see or answer in the flow; use the panel for what "
+        "stays open beside it. A new canvas is posted as a separate message; in normal replies it appears "
+        "below your reply text, so refer to it as below (or by title on quiet turns)."
     ),
     "read_canvas_state": (
         "read_canvas_state(canvas_event_id) reads what the user last did in a canvas you showed with "
@@ -119,18 +119,24 @@ _FUNCTION_INSTRUCTIONS: dict[str, str] = {
 }
 
 
-# Lines that name another function; each is added only when every function it names is enabled.
-_SHOW_COMPUTER_ALIAS = "show_computer() is the same as open_panel(panel='computer')."
+# Added only when the agent has both show_canvas and open_panel.
 _REAL_WEBSITE_HINT = (
     "To show the user a real website, open it in your worker browser, whose first call in a conversation shows "
     "the Computer panel; a canvas cannot."
 )
 # Only for agents whose operator says the user's Chat allows libraries; where it does not, such pages break.
 _CANVAS_LIBRARIES_HINT = (
-    "Canvas pages may load scripts, styles, and fonts from https://cdn.jsdelivr.net/npm/ at a pinned version, "
-    'such as <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>, '
+    "For packages show_canvas's libraries do not cover, canvas pages may load scripts, styles, and fonts from "
+    "https://cdn.jsdelivr.net/npm/ at a pinned version, "
+    'such as <script src="https://cdn.jsdelivr.net/npm/leaflet@1.9.4/dist/leaflet.js"></script>, '
     "or as ES modules through /+esm; no other source works. Fetching data (inline it instead), workers, and "
     "code that evaluates strings, such as Alpine or Vue in-page templates, stay blocked."
+)
+
+_CANVAS_REMOTE_ASSETS_HINT = (
+    "Canvas pages may load images, styles, fonts, media and scripts from any https: address, "
+    "so a preview can use the real assets of the site it shows. "
+    "Fetching data, workers and nested frames stay blocked."
 )
 
 
@@ -147,8 +153,9 @@ def _canvas_edit_content(canvas_event_id: str, replacement: dict[str, object], b
     }
 
 
-def _computer_conversation(context: ToolRuntimeContext, requester_id: str) -> tuple[str, str, str, str | None]:
-    return (context.client.user_id, requester_id, context.room_id, context.resolved_thread_id)
+def _computer_notice(context: ToolRuntimeContext, requester_id: str) -> _ComputerNotice:
+    conversation = (context.client.user_id, requester_id, context.room_id, context.resolved_thread_id)
+    return _SHOWN_COMPUTERS.setdefault(conversation, _ComputerNotice())
 
 
 def _canvas_title_is_valid(title: str) -> bool:
@@ -161,6 +168,15 @@ def _canvas_title_is_valid(title: str) -> bool:
     )
 
 
+def _canvas_presentation_error(width: int | None, libraries: list[_CanvasLibrary] | None) -> str | None:
+    if width is not None and (isinstance(width, bool) or not isinstance(width, int) or not 320 <= width <= 2560):
+        return "Canvas width must be an integer from 320 to 2560 (not a boolean)."
+    known = get_args(_CanvasLibrary)
+    if libraries is not None and (not isinstance(libraries, list) or any(name not in known for name in libraries)):
+        return f"Canvas libraries must be a list of: {', '.join(known)}."
+    return None
+
+
 class ChatUITools(Toolkit):
     """Ask MindRoom Chat to show the user one bounded part of its interface."""
 
@@ -171,35 +187,36 @@ class ChatUITools(Toolkit):
         file_access: FileAccess = "workspace",
         enable_show_canvas: bool = False,
         enable_canvas_libraries: bool = False,
+        enable_canvas_remote_assets: bool = False,
     ) -> None:
         self._workspace_root = tool_output_workspace_root
         self._file_access = file_access
         self._canvas_libraries = enable_canvas_libraries
-        tools: list[Callable[..., Awaitable[str]]] = [self.show_computer, self.open_settings, self.open_panel]
+        self._canvas_remote_assets = enable_canvas_remote_assets
+        tools: list[Callable[..., Awaitable[str]]] = [self.open_settings, self.open_panel]
         # Canvases are opt-in, like Chat's own switch, so existing chat_ui agents do not send pages
         # their users' clients refuse to show.
         if enable_show_canvas:
             tools.extend([self.show_canvas, self.read_canvas_state])
-        super().__init__(name="chat_ui", add_instructions=True, tools=tools)
+        super().__init__(name="chat_ui", tools=tools)
 
     @property
-    def instructions(self) -> str:
-        """Map only the functions this agent has; include_tools and exclude_tools remove the others."""
-        enabled = {*self.functions, *self.async_functions}
-        lines = [
-            _SHOW_COMPUTER_ALIAS if name == "show_computer" and "open_panel" in enabled else line
-            for name, line in _FUNCTION_INSTRUCTIONS.items()
-            if name in enabled
-        ]
-        if "show_canvas" in enabled and enabled & {"open_panel", "show_computer"}:
+    def instructions(self) -> str:  # ty: ignore[incompatible-property-override]  # Toolkit writes it only when passed one
+        """Map the built functions; ``with_offered_instructions`` narrows them to the ones an agent is offered."""
+        return self.instructions_for(self.functions)
+
+    def instructions_for(self, function_names: Collection[str]) -> str:
+        """Map only ``function_names``, the functions an agent is offered of this toolkit once its filters ran."""
+        enabled = set(function_names)
+        lines = [line for name, line in _FUNCTION_INSTRUCTIONS.items() if name in enabled]
+        if {"show_canvas", "open_panel"} <= enabled:
             lines.append(_REAL_WEBSITE_HINT)
-        if "show_canvas" in enabled and self._canvas_libraries:
+        # Remote assets include the library source, and the libraries hint says no other source works.
+        if "show_canvas" in enabled and self._canvas_remote_assets:
+            lines.append(_CANVAS_REMOTE_ASSETS_HINT)
+        elif "show_canvas" in enabled and self._canvas_libraries:
             lines.append(_CANVAS_LIBRARIES_HINT)
         return "\n".join([_CHAT_UI_INSTRUCTIONS, *(f"- {line}" for line in lines)])
-
-    @instructions.setter
-    def instructions(self, _value: str | None) -> None:
-        """Ignore Agno's constructor assignment; the map is derived from the enabled functions."""
 
     @staticmethod
     def _payload(status: str, **fields: object) -> str:
@@ -213,14 +230,13 @@ class ChatUITools(Toolkit):
                 action=action,
                 message="Chat UI actions require a configured agent identity; team and router contexts are unsupported.",
             )
-        transport_agent_name = context.transport_agent_name or context.agent_name
-        if transport_agent_name != context.agent_name:
+        if context.recipient != context.agent_name:
             return cls._payload(
                 "error",
                 action=action,
                 message="Chat UI actions do not support delegated transport identity mismatches.",
             )
-        if not context.room_id.startswith("!") or ":" not in context.room_id:
+        if not context.room_id.startswith("!"):  # room version 12 IDs carry no ":server" part
             return cls._payload(
                 "error",
                 action=action,
@@ -281,7 +297,7 @@ class ChatUITools(Toolkit):
                 message="Chat UI action agent identity is unavailable from the managed Matrix runtime.",
             )
         sender = context.client.user_id
-        if not isinstance(sender, str) or sender != expected_sender:
+        if sender != expected_sender:
             return cls._payload(
                 "error",
                 action=action,
@@ -380,43 +396,22 @@ class ChatUITools(Toolkit):
             message="UI action request sent.",
         )
 
-    async def show_computer(self) -> str:
-        """Show the user the Computer panel: a live view of your own worker browser.
-
-        That is the browser browser_control drives with target='host'. The user starts
-        out watching. They can take control, for example to log in; while they have it
-        your browser calls are blocked, and when they hand it back you get a message.
-        Opening the panel does not navigate, send a prompt to ChatGPT, or take control,
-        and it never opens or controls the user's own browser. Your first worker
-        browser call in a conversation (browser_control with target='host', or any
-        browser_mcp function) already shows the user this panel; call show_computer
-        only to show it again in a later reply, for example when the user should log
-        in or after they closed it. One reply shows the panel once. Success means the
-        request was sent, not that the client opened the panel.
-        """
+    async def _show_computer(self) -> str:
+        """Send the show_computer notice for open_panel(panel='computer'), at most once per reply."""
         validated = self._validated_context("show_computer")
         if isinstance(validated, str):
             return validated
         context, requester_id = validated
-        notice = _SHOWN_COMPUTERS.setdefault(_computer_conversation(context, requester_id), _ComputerNotice())
+        notice = _computer_notice(context, requester_id)
         async with notice.lock:
             if notice.delivered and context.correlation_id is not None and notice.reply == context.correlation_id:
-                # This reply's first browser call, or an earlier show_computer, already delivered the notice.
+                # This reply's first browser call, or an earlier Computer panel request, already delivered the notice.
                 return self._payload(
                     "ok",
                     action="show_computer",
                     message="A Computer panel request was already sent in this reply.",
                 )
-            result = await self._send_validated_action(
-                context,
-                requester_id,
-                "show_computer",
-                _SHOW_COMPUTER_BODY,
-                {},
-            )
-            if json.loads(result)["status"] == "ok":
-                notice.delivered, notice.reply = True, context.correlation_id
-            return result
+            return await _send_computer_notice(context, requester_id, notice)
 
     async def open_settings(self, section: _SettingsSection = "general") -> str:
         """Open the user's MindRoom Chat Settings dialog at one section.
@@ -425,12 +420,6 @@ class ChatUITools(Toolkit):
         user decides what to do there. Success means the UI request was sent, not that
         the client opened Settings.
         """
-        if section not in _SETTINGS_SECTIONS:
-            return self._payload(
-                "error",
-                action="open_settings",
-                message=f"Unsupported settings section: {section!r}.",
-            )
         return await self._send_action(
             "open_settings",
             f"Open Settings ({section}) in MindRoom Chat.",
@@ -461,15 +450,9 @@ class ChatUITools(Toolkit):
             panel: 'computer' for your worker browser, or 'members' (the default) for this room's members.
 
         """
-        if panel not in _SIDE_PANELS:
-            return self._payload(
-                "error",
-                action="open_panel",
-                message=f"Unsupported side panel: {panel!r}.",
-            )
         if panel == "computer":
-            # Keep the existing wire action and runtime checks for older clients.
-            return await self.show_computer()
+            # Chat reads the Computer panel request as its own show_computer wire action.
+            return await self._show_computer()
         return await self._send_action(
             "open_panel",
             "Open the Members panel in MindRoom Chat.",
@@ -483,23 +466,48 @@ class ChatUITools(Toolkit):
         path: str | None = None,
         canvas_event_id: str | None = None,
         share_state: bool = False,
+        inline: bool = False,
+        raw: bool = False,
+        width: int | None = None,
+        libraries: list[_CanvasLibrary] | None = None,
     ) -> str:
-        """Show the user the Canvas panel: an interactive web page you wrote, beside this conversation.
+        """Show the user a canvas: an interactive web page you wrote, in this conversation or beside it.
 
-        Use a canvas when seeing or clicking beats reading or typing: dashboards,
-        reports, charts, slides, menus, forms, pickers, and multi-step flows. The page
-        cannot load any website, so it cannot show the user a real website. Pass the
-        page as ``html``, or as a workspace-relative ``path`` (e.g. ``slides/deck.html``)
-        to an HTML file, which suits pages you build and refine such as slides. Pages up
-        to 4 MB are supported. Only show pages you wrote: a canvas appears as yours and
-        whatever the user types into it could leave the panel.
+        Use a canvas when seeing or clicking beats reading or typing. The page cannot
+        load any website, so it cannot show the user a real website. Pass the page as
+        ``html``, or as a workspace-relative ``path`` to an HTML file (e.g.
+        ``slides/deck.html``) for pages you build and refine. Pages up to 4 MB are
+        supported. Only show pages you wrote: a canvas appears as yours and whatever
+        the user types into it could leave the page.
 
-        Design it like a polished web app. Write self-contained HTML with inline CSS
-        and JavaScript. Fetch, XHR, and WebSocket requests and external images are
-        blocked, and so are external scripts, styles, and fonts unless your
-        instructions name a library source; otherwise draw charts with inline SVG.
-        Embed images as data: URLs.
-        The panel can be resized from narrow to full width, so use a responsive layout.
+        Prefer ``inline=True``, which shows the page in the conversation at reply
+        width (about 700px on desktop, 360px on phones), for anything the user should
+        see or answer in the flow: charts, diagrams, mockups, pickers, short forms,
+        multi-step questions. Use the panel for what stays open beside the
+        conversation: dashboards, slides, long documents, pages the user returns to.
+        A new canvas is posted as a separate message; in normal replies it appears
+        below your reply text, so refer to it as below (or by title on quiet turns).
+        Inline, leave ``html`` and ``body`` without a background, card, title banner
+        or side padding; give charts fixed pixel heights; do not use ``vh`` units or
+        ``height:100%`` on ``html`` or ``body``. The page restarts when it scrolls out
+        of view, so give fields an ``id`` or ``name`` or call ``saveState``. For forms
+        use the themed mode, not ``raw`` or ``width``. Show the next step as a new
+        inline canvas or an update.
+
+        To preview a website or app as it will really look, use ``inline=True`` with
+        ``raw=True``: Chat adds no styles or theme variables, so browser defaults
+        apply until your CSS sets them. Set ``width`` to the viewport the design
+        targets, such as 1440 for desktop or 390 for a phone; the page renders at that
+        width, scaled down to fit. A page with ``raw`` or ``width`` ignores the inline
+        layout rules: it shows in a browser window at most 16:10 of its width tall
+        (568 to 1080px), where ``vh`` units work as in a browser and taller content
+        scrolls. The panel shows raw pages too, at the panel's own width.
+
+        Design it like a polished web app. Fetch, XHR, and WebSockets are always
+        blocked. External images, scripts, styles, and fonts are blocked too
+        unless your instructions name a source that works; embed images as data: URLs.
+        For Chart.js, D3, Mermaid, or KaTeX, pass ``libraries``, never a CDN address.
+        The panel resizes from narrow to full width, so use a responsive layout.
         Chat exposes its current theme as CSS variables so the page matches light and
         dark mode: --mr-bg, --mr-surface, --mr-surface-raised, --mr-border, --mr-text,
         --mr-text-muted, --mr-accent, --mr-accent-text, --mr-success, --mr-warning,
@@ -544,17 +552,27 @@ class ChatUITools(Toolkit):
 
         To replace the page in place, for the next step of a flow or a new version of
         a file you edited, call show_canvas again with ``canvas_event_id`` set to the
-        canvas ID. Without it, show_canvas creates a separate canvas: use a new canvas for a
+        canvas ID. show_canvas reads a ``path`` as soon as it starts, and tool calls made
+        together run at the same time, so call it only after the call that writes the
+        file has finished (for a background job, wait for its result), never alongside
+        it, or the user gets the old page.
+        Without ``canvas_event_id``, show_canvas creates a separate canvas: use a new canvas for a
         distinct artifact and an update for a new version of the same one. The user can
         switch between this conversation's canvases from the room header. Success means
         the request was sent, not that the user opened or answered it.
 
         Args:
             title: Short single-line panel title; when updating, omit it to keep the canvas's first title.
-            html: Self-contained HTML with inline CSS and JavaScript. Give html or path.
+            html: HTML with inline CSS and JavaScript. Give html or path.
             path: Workspace-relative path of an HTML file you wrote, shown instead of html.
             canvas_event_id: Event ID of an earlier canvas from this conversation to update in place.
             share_state: Let read_canvas_state read what the user does in this new canvas; updates keep the choice.
+            inline: Show the page in the conversation instead of the side panel;
+                decided when the canvas is first shown, updates keep it.
+            raw: Add no Chat styles or theme variables for this revision; updates must set it again.
+            width: Target viewport width in CSS pixels (integer 320-2560) for this revision;
+                updates must set it again, and the panel uses its own width.
+            libraries: For this revision; updates must set them again.
 
         """
         validated = self._validated_context("show_canvas")
@@ -563,8 +581,9 @@ class ChatUITools(Toolkit):
         context, requester_id = validated
         # Models often send an empty string for an omitted optional argument.
         canvas_event_id = canvas_event_id or None
-        title = title.strip() if isinstance(title, str) else ""
-        page = self._canvas_input_error(title, html, path, canvas_event_id) or await self._read_canvas_page(html, path)
+        title = (title or "").strip()
+        input_error = self._canvas_input_error(title, html, path, canvas_event_id, width, libraries)
+        page = input_error or await self._read_canvas_page(html, path)
         if isinstance(page, str):
             return page
         target = await self._canvas_metadata(context, requester_id, canvas_event_id, title, share_state=share_state)
@@ -572,7 +591,17 @@ class ChatUITools(Toolkit):
             return target
         metadata, title = target
         body = f"Interactive panel: {title}. Open it in MindRoom Chat to respond."
-        canvas = await self._canvas_field(context, metadata, body, title, page, canvas_event_id)
+        canvas = await self._canvas_field(
+            context,
+            metadata,
+            body,
+            title,
+            page,
+            canvas_event_id,
+            raw=raw,
+            width=width,
+            libraries=libraries,
+        )
         if isinstance(canvas, str):
             return canvas
         if canvas_event_id is None:
@@ -581,7 +610,11 @@ class ChatUITools(Toolkit):
                 requester_id,
                 "show_canvas",
                 body,
-                {"canvas": canvas, **({"share_state": True} if share_state else {})},
+                {
+                    "canvas": canvas,
+                    **({"share_state": True} if share_state else {}),
+                    **({"inline": True} if inline else {}),
+                },
                 formatted_body=html_lib.escape(body),
             )
         return await self._update_canvas(context, canvas_event_id, body, {**metadata, "canvas": canvas})
@@ -604,11 +637,11 @@ class ChatUITools(Toolkit):
         if isinstance(validated, str):
             return validated
         context, requester_id = validated
-        if not isinstance(canvas_event_id, str) or not canvas_event_id.startswith("$"):
+        if not canvas_event_id.startswith("$"):
             return self._payload(
                 "error",
                 action=action,
-                message="canvas_event_id must be the event ID returned by an earlier show_canvas call.",
+                message=_CANVAS_EVENT_ID_ERROR,
             )
         original = await self._canvas_target(context, requester_id, canvas_event_id, action=action)
         if isinstance(original, str):
@@ -659,6 +692,8 @@ class ChatUITools(Toolkit):
         # Chat accepts an edit only when its authority fields equal the original request's, and
         # whether a canvas shares its state is one of them, so the user is told before anything is shared.
         metadata["thread_id"] = original.get("thread_id")
+        if original.get("inline") is True:
+            metadata["inline"] = True
         if original.get("share_state") is True:
             metadata["share_state"] = True
         elif share_state:
@@ -677,27 +712,23 @@ class ChatUITools(Toolkit):
     def _canvas_input_error(
         cls,
         title: str,
-        html: object,
-        path: object,
-        canvas_event_id: object,
+        html: str | None,
+        path: str | None,
+        canvas_event_id: str | None,
+        width: int | None,
+        libraries: list[_CanvasLibrary] | None,
     ) -> str | None:
-        if canvas_event_id is not None and (
-            not isinstance(canvas_event_id, str) or not canvas_event_id.startswith("$")
-        ):
-            return cls._canvas_error(
-                "canvas_event_id must be the event ID returned by an earlier show_canvas call.",
-                canvas_event_id=canvas_event_id,
-            )
+        if presentation_error := _canvas_presentation_error(width, libraries):
+            return cls._canvas_error(presentation_error)
+        if canvas_event_id is not None and not canvas_event_id.startswith("$"):
+            return cls._canvas_error(_CANVAS_EVENT_ID_ERROR, canvas_event_id=canvas_event_id)
         # An update may omit the title; it is checked once the canvas's own title is known.
         if (title or canvas_event_id is None) and not _canvas_title_is_valid(title):
             return cls._canvas_error(_CANVAS_TITLE_ERROR)
-        given = [value for value in (html, path) if value is not None and value != ""]
-        if len(given) != 1:
+        if bool(html) == bool(path):
             return cls._canvas_error("Give exactly one of html or path.")
-        if html is not None and html != "" and (not isinstance(html, str) or not html.strip()):
+        if html and not html.strip():
             return cls._canvas_error("Canvas HTML must not be empty.")
-        if path is not None and path != "" and not isinstance(path, str):
-            return cls._canvas_error("Canvas path must be a workspace path.")
         return None
 
     async def _read_canvas_page(self, html: str | None, path: str | None) -> bytes | str:
@@ -769,11 +800,22 @@ class ChatUITools(Toolkit):
         title: str,
         page: bytes,
         canvas_event_id: str | None,
+        *,
+        raw: bool = False,
+        width: int | None = None,
+        libraries: list[_CanvasLibrary] | None = None,
     ) -> dict[str, object] | str:
         """Carry a page inside the event when an edit of it fits, otherwise as uploaded media."""
+        presentation: dict[str, object] = {}
+        if raw:
+            presentation["raw"] = True
+        if width is not None:
+            presentation["width"] = width
+        if libraries:
+            presentation["libraries"] = list(dict.fromkeys(libraries))
         # Serialized JSON is never smaller than the UTF-8 page, so larger pages skip the measurement.
         if len(page) < EDIT_MESSAGE_SIZE_LIMIT:
-            inline: dict[str, object] = {"title": title, "html": page.decode("utf-8")}
+            inline: dict[str, object] = {"title": title, "html": page.decode("utf-8"), **presentation}
             probe = _canvas_edit_content(
                 canvas_event_id or _CANVAS_SIZE_PROBE_EVENT_ID,
                 cls._canvas_replacement(body, {**metadata, "canvas": inline}),
@@ -800,7 +842,7 @@ class ChatUITools(Toolkit):
             document["file"] = encrypted_file
         else:
             document["url"] = mxc_uri
-        return {"title": title, "document": document}
+        return {"title": title, "document": document, **presentation}
 
     @classmethod
     def _canvas_error(cls, message: str, **fields: object) -> str:
@@ -899,6 +941,14 @@ class ChatUITools(Toolkit):
         return metadata
 
 
+async def _send_computer_notice(context: ToolRuntimeContext, requester_id: str, notice: _ComputerNotice) -> str:
+    """Send the show_computer notice; a delivered one counts for this conversation and reply."""
+    result = await ChatUITools._send_validated_action(context, requester_id, "show_computer", _SHOW_COMPUTER_BODY, {})
+    if json.loads(result)["status"] == "ok":
+        notice.delivered, notice.reply = True, context.correlation_id
+    return result
+
+
 async def show_computer_once() -> None:
     """Send the show_computer notice unless this agent already showed the requester its computer here.
 
@@ -909,22 +959,14 @@ async def show_computer_once() -> None:
     if isinstance(validated, str):
         return
     context, requester_id = validated
-    notice = _SHOWN_COMPUTERS.setdefault(_computer_conversation(context, requester_id), _ComputerNotice())
+    notice = _computer_notice(context, requester_id)
     # Sends for one conversation take turns, so concurrent first calls send one notice. An
     # undelivered or cancelled notice does not count, so the next browser call tries again.
     async with notice.lock:
         if notice.delivered:
             return
-        result = await ChatUITools._send_validated_action(
-            context,
-            requester_id,
-            "show_computer",
-            _SHOW_COMPUTER_BODY,
-            {},
-        )
-        payload = json.loads(result)
+        payload = json.loads(await _send_computer_notice(context, requester_id, notice))
         if payload["status"] == "ok":
-            notice.delivered, notice.reply = True, context.correlation_id
             return
         logger.warning(
             "The worker computer notice was not delivered",

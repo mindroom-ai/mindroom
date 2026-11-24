@@ -109,16 +109,13 @@ def _workspace_for_agent(
         resolved_thread_id=target.resolved_thread_id,
         session_id=target.session_id,
     )
-    resolved = resolve_agent_runtime(
+    return resolve_agent_runtime(
         agent_name,
         config,
         runtime_paths,
         execution_identity=execution_identity,
         create=True,
-    )
-    if resolved.workspace is not None:
-        return resolved.workspace.root
-    return agent_workspace_root_path(runtime_paths.storage_root, agent_name)
+    ).workspace.root
 
 
 def _parse_utc_timestamp(value: object) -> datetime | None:

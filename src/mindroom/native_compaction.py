@@ -11,127 +11,65 @@ import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any
 
+from mindroom.llm.provider import NativeCompactionReplay
+from mindroom.logging_config import get_logger
+
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from agno.models.message import Message
-    from agno.models.response import ModelResponse
+    from mindroom.llm.messages import Message
+    from mindroom.llm.runs import AnyRunRecord
 
-_NATIVE_CHECKPOINT_KEY = "mindroom_native_compaction"
+logger = get_logger(__name__)
 
-
-@dataclass(frozen=True)
-class _NativeCompactionSettings:
-    """One replay route; a null trigger leaves the authored provider policy intact."""
-
-    route: str
-    threshold: int | None
+# The ``provider_data`` key under which a completed assistant response stores its native-compaction state.
+NATIVE_CHECKPOINT_KEY = "mindroom_native_compaction"
+# The ``provider_data`` key under which the answer to a request resent without provider-encrypted replay state stores
+# its route's ``Capabilities.replay_reset_scope``: a reset, before which that route replays no such state.
+ENCRYPTED_REPLAY_RESET_KEY = "mindroom_encrypted_replay_reset"
 
 
-class NativeCompactionModel:
-    """Capability seam implemented by MindRoom's native provider adapters."""
-
-    native_compaction: _NativeCompactionSettings | None = None
-    id: str
-    provider: str
-
-    def configure_portable_replay(self, *, enabled: bool = True) -> None:
-        """Let adapters keep local history budgets authoritative over stored state."""
-
-    def restore_portable_replay(self, message: Message | None) -> None:
-        """Restore adapter-owned replay policy from the latest completed response."""
-
-    def estimate_portable_replay_tokens(self, messages: list[Message]) -> int | None:  # noqa: ARG002
-        """Return a provider-aware estimate, or None for canonical history sizing.
-
-        Callers retain the canonical transport floor unless
-        portable_replay_uses_visual_tokens() returns True. In that case, this
-        estimate must include the cost of all images whose transport data the
-        shared history estimator removes. Returning None always preserves the
-        canonical transport estimate.
-        """
-        return None
-
-    def portable_replay_uses_visual_tokens(self) -> bool:
-        """Return whether portable estimates replace image transport with visual cost."""
-        return False
-
-    def native_compaction_supported(self) -> bool:
-        """Return whether this concrete route can use automatic compaction."""
-        raise NotImplementedError
-
-    def native_compaction_endpoint(self) -> str:
-        """Return the endpoint identity used to bind opaque replay state."""
-        raise NotImplementedError
-
-    def authored_native_compaction_supported(self) -> bool:
-        """Return whether this adapter can replay its caller-authored native policy."""
-        return False
-
-    def configure_native_compaction(
-        self,
-        *,
-        threshold: int | None,
-        history_generation: str = "",
-        allow_authored: bool = False,
-    ) -> None:
-        """Enable replay for this route and portable-history generation."""
-        self.native_compaction = None
-        if threshold is None or not self.native_compaction_supported():
-            if not allow_authored or not self.authored_native_compaction_supported():
-                return
-            threshold = None
-        endpoint = self.native_compaction_endpoint()
-        if not endpoint:
-            return
-        identity = [self.provider, self.id, endpoint, history_generation]
-        route = hashlib.sha256(json.dumps(identity).encode()).hexdigest()
-        self.native_compaction = _NativeCompactionSettings(route=route, threshold=threshold)
+def native_compaction_route(*, provider: str, model_id: str, endpoint: str, history_generation: str) -> str:
+    """Return the replay route one model, endpoint, and history generation share."""
+    return hashlib.sha256(json.dumps([provider, model_id, endpoint, history_generation]).encode()).hexdigest()
 
 
-def common_native_endpoint(identities: Sequence[str]) -> str:
-    """Return one compatible client route, or disable ambiguous native replay."""
-    routes = set(identities)
-    return next(iter(routes)) if len(routes) == 1 else ""
-
-
-def record_native_checkpoint(
-    response: ModelResponse,
+def native_checkpoint_state(
     items: Sequence[dict[str, Any]],
-    settings: _NativeCompactionSettings | None,
-) -> None:
-    """Record effective replay settings and, when present, the latest checkpoint.
+    settings: NativeCompactionReplay | None,
+    *,
+    checkpoint_prefix: bool = False,
+) -> dict[str, Any] | None:
+    """Return the state a completed response stores under ``NATIVE_CHECKPOINT_KEY``: its settings and latest checkpoint.
 
-    Every completed response records its route, including explicit native-off
-    state. Approval rebuilds and signed-thinking replay need this even when the
-    provider did not compact on this request.
+    Every completed response records its route, None when native compaction is off, because approval rebuilds and
+    signed-thinking replay need it even when the provider did not compact on this request. A checkpoint in ``items``
+    means the provider compacted on this request, which no other MindRoom log reports. ``checkpoint_prefix`` marks
+    output whose own request replayed a checkpoint.
     """
-    state: dict[str, Any] | None = None
-    if settings is not None:
-        state = {"route": settings.route, "threshold": settings.threshold}
-        last = next(
-            (index for index in range(len(items) - 1, -1, -1) if _is_checkpoint(items[index])),
-            None,
+    if settings is None:
+        return None
+    state: dict[str, Any] = {"route": settings.route, "threshold": settings.threshold}
+    if settings.basis is not None:
+        state["basis"] = settings.basis
+    last = next(
+        (index for index in range(len(items) - 1, -1, -1) if _is_checkpoint(items[index])),
+        None,
+    )
+    state["checkpoint_prefix"] = checkpoint_prefix or last is not None
+    if last is not None:
+        state["items"] = list(items[last:])
+        logger.info(
+            "Native compaction checkpoint",
+            threshold_tokens=settings.threshold,
+            checkpoint_chars=len(json.dumps([items[last]], ensure_ascii=False)),
         )
-        state["checkpoint_prefix"] = last is not None
-        if last is not None:
-            state["items"] = list(items[last:])
-    response.provider_data = {
-        **(response.provider_data or {}),
-        _NATIVE_CHECKPOINT_KEY: state,
-    }
+    return state
 
 
-def record_native_request_prefix(response: ModelResponse, *, checkpoint_prefix: bool) -> None:
-    """Mark completed output that inherited a checkpoint from its actual request."""
-    state = (response.provider_data or {}).get(_NATIVE_CHECKPOINT_KEY)
-    if checkpoint_prefix and isinstance(state, dict):
-        state["checkpoint_prefix"] = True
-
-
-def recorded_native_settings(message: Message) -> _NativeCompactionSettings | None:
+def recorded_native_settings(message: Message) -> NativeCompactionReplay | None:
     """Read the effective native policy from one completed assistant response."""
-    state = (message.provider_data or {}).get(_NATIVE_CHECKPOINT_KEY)
+    state = (message.provider_data or {}).get(NATIVE_CHECKPOINT_KEY)
     if message.role != "assistant" or not isinstance(state, dict):
         return None
     route, threshold = state.get("route"), state.get("threshold")
@@ -139,15 +77,16 @@ def recorded_native_settings(message: Message) -> _NativeCompactionSettings | No
         return None
     if threshold is not None and (type(threshold) is not int or threshold <= 0):
         return None
-    return _NativeCompactionSettings(route=route, threshold=threshold)
+    basis = state.get("basis")
+    return NativeCompactionReplay(route=route, threshold=threshold, basis=basis if isinstance(basis, str) else None)
 
 
 def native_replay_route_matches(message: Message, route: str | None) -> bool | None:
     """Compare effective prefix provenance; None means legacy history without it."""
     data = message.provider_data or {}
-    if _NATIVE_CHECKPOINT_KEY not in data:
+    if NATIVE_CHECKPOINT_KEY not in data:
         return None
-    state = data[_NATIVE_CHECKPOINT_KEY]
+    state = data[NATIVE_CHECKPOINT_KEY]
     if state is None:
         return route is None
     if not isinstance(state, dict) or not isinstance(state.get("route"), str):
@@ -170,7 +109,7 @@ def checkpoint_items(message: Message, route: str | None) -> list[dict[str, Any]
     """Read compatible, structurally valid checkpoint data from persisted input."""
     if route is None or not message.provider_data or message.role != "assistant":
         return []
-    checkpoint = message.provider_data.get(_NATIVE_CHECKPOINT_KEY)
+    checkpoint = message.provider_data.get(NATIVE_CHECKPOINT_KEY)
     if not isinstance(checkpoint, dict) or checkpoint.get("route") != route:
         return []
     items = checkpoint.get("items")
@@ -179,23 +118,94 @@ def checkpoint_items(message: Message, route: str | None) -> list[dict[str, Any]
     return items if _is_checkpoint(items[0]) else []
 
 
+def native_checkpoint_id(message: Message) -> str | None:
+    """Return the message's id when the provider compacted on it, whatever its route, else None."""
+    state = (message.provider_data or {}).get(NATIVE_CHECKPOINT_KEY)
+    if not isinstance(state, dict) or not checkpoint_items(message, state.get("route")):
+        return None
+    return message.id
+
+
+def replay_basis(summary: str | None, runs: Sequence[AnyRunRecord]) -> str:
+    """Identify the history a request replays: the summary in force and the runs after it, in order."""
+    return hashlib.sha256(json.dumps([summary, [run.run_id for run in runs]]).encode()).hexdigest()
+
+
+def request_replay_basis(summary: str | None, runs: Sequence[AnyRunRecord], route: str) -> str:
+    """Return the basis a native request on ``route`` records; empty when its replay leaves out some of ``runs``.
+
+    The request replays from the latest checkpoint on its route, which covers only what its own request replayed:
+    a run that checkpointed before waiting for approval sorts after the turns it waited for. A checkpoint whose
+    history is unknown, such as one recorded before bases existed, counts as covering, as native replay assumes.
+    """
+    for index in range(len(runs) - 1, -1, -1):
+        for message in reversed(runs[index].messages):
+            if checkpoint_items(message, route):
+                recorded = (message.provider_data or {})[NATIVE_CHECKPOINT_KEY].get("basis")
+                covering = recorded is None or recorded == replay_basis(summary, runs[:index])
+                return replay_basis(summary, runs) if covering else ""
+    return replay_basis(summary, runs)
+
+
+def checkpoint_summary(message: Message, basis: str) -> str | None:
+    """Return the readable text of the message's checkpoint, whatever its route, if its request replayed ``basis``.
+
+    Encrypted checkpoints have no readable text, and checkpoints of unknown history never match.
+    """
+    state = (message.provider_data or {}).get(NATIVE_CHECKPOINT_KEY)
+    if not isinstance(state, dict) or state.get("basis") != basis:
+        return None
+    items = checkpoint_items(message, state.get("route"))
+    content = items[0].get("content") if items else None
+    return content if isinstance(content, str) else None
+
+
+def checkpoint_tail(messages: Sequence[Message], checkpoint: int) -> list[Message]:
+    """Return what replaying the checkpoint on ``messages[checkpoint]`` keeps: it, its tail, and the system messages."""
+    return [message for index, message in enumerate(messages) if index >= checkpoint or message.role == "system"]
+
+
+@dataclass(frozen=True, slots=True)
+class NativeReplay:
+    """What a request replays of its messages: the one projection its wire, its size, and its usage anchor read.
+
+    ``messages`` are the latest checkpoint with its tail and the system messages, or every message when none stands.
+    Those before ``encrypted_from`` go without provider-encrypted state. ``boundary`` indexes the request's message
+    the replay starts over at, -1 for none: usage an answer up to it reported sized another replay.
+    """
+
+    messages: list[Message]
+    encrypted_from: int = 0
+    boundary: int = -1
+
+
+def native_replay(
+    messages: Sequence[Message],
+    route: str | None,
+    *,
+    reset_scope: str | None = None,
+    stripped: bool = False,
+) -> NativeReplay:
+    """Project ``messages`` from the latest checkpoint on ``route`` or reset on ``reset_scope``, whichever is later.
+
+    A checkpoint stands for what precedes it. A reset keeps every message and sends those before it without encrypted
+    state, as a ``stripped`` request sends them all.
+    """
+    if stripped:
+        return NativeReplay(list(messages), encrypted_from=len(messages), boundary=len(messages))
+    for index in range(len(messages) - 1, -1, -1):
+        message = messages[index]
+        if checkpoint_items(message, route):
+            return NativeReplay(checkpoint_tail(messages, index), boundary=index)
+        if (
+            reset_scope is not None
+            and message.role == "assistant"
+            and (message.provider_data or {}).get(ENCRYPTED_REPLAY_RESET_KEY) == reset_scope
+        ):
+            return NativeReplay(list(messages), encrypted_from=index, boundary=index)
+    return NativeReplay(list(messages))
+
+
 def native_replay_messages(messages: Sequence[Message], route: str | None) -> list[Message]:
     """Project the latest checkpoint plus tail, retaining current system messages."""
-    last = next(
-        (index for index in range(len(messages) - 1, -1, -1) if checkpoint_items(messages[index], route)),
-        None,
-    )
-    if last is None:
-        return list(messages)
-    return [
-        message for index, message in enumerate(messages) if index >= last or message.role in {"system", "developer"}
-    ]
-
-
-def checkpoint_estimated_tokens(items: Sequence[dict[str, Any]]) -> int:
-    """Conservatively size the replay payload, including opaque checkpoint bytes.
-
-    Ciphertext size is a guard estimate, not provider token usage. Never use the
-    response's billed input count: it can include the pre-compaction transcript.
-    """
-    return (len(json.dumps(items, ensure_ascii=False)) + 3) // 4
+    return native_replay(messages, route).messages

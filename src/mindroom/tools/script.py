@@ -22,8 +22,9 @@ if TYPE_CHECKING:
     name="script",
     display_name="Background Scripts",
     description="Run Python scripts in the background, monitor them, or cancel them",
+    docs_url="https://docs.mindroom.chat/tools/background-scripts/",
     category=ToolCategory.DEVELOPMENT,
-    file_access=ToolFileAccess.UNCONFINED,
+    file_access=ToolFileAccess.NONE,
     executes_code=True,
     status=ToolStatus.AVAILABLE,
     setup_type=SetupType.NONE,
@@ -69,7 +70,6 @@ if TYPE_CHECKING:
             validation={"min": 0.01},
         ),
     ],
-    dependencies=["agno"],
     requires_room_context=True,
     function_names=(
         "start_script",
@@ -78,6 +78,7 @@ if TYPE_CHECKING:
         "cancel_script",
         "list_scripts",
     ),
+    workspace_writers=("start_script",),
     supports_toolkit_filters=False,
 )
 def script_tools() -> type[ScriptTools]:

@@ -1,590 +1,72 @@
-"""Per-tool dynamic loading state helpers and runtime selection."""
+"""What tool search shows of a deferred toolkit, and the functions a run offers of it."""
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-from threading import RLock
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
-from mindroom.config.models import EffectiveToolConfig
-from mindroom.logging_config import get_logger
-from mindroom.tool_system.catalog import TOOL_METADATA, validate_authored_tool_entry_overrides
-from mindroom.tool_system.declarations import MATRIX_ROOM_RUNTIME_TOOL_NAMES
-
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Mapping
 
-    from agno.tools import Toolkit
-
-    from mindroom.config.main import Config
-
-
-logger = get_logger(__name__)
-
-_loaded_tools: dict[tuple[str, str], list[str]] = {}
-_loaded_tools_lock = RLock()
+    from mindroom.tool_system.tool_function import AdaptedToolkit, ToolFunction
 
 
 @dataclass(frozen=True)
-class VisibleToolSurface:
-    """Provider-visible runtime tool surface for one agent/session."""
+class ToolDeferral:
+    """What tool search shows of one authored deferred tool beside its functions."""
 
-    loaded_tools: tuple[str, ...]
-    runtime_tool_configs: tuple[EffectiveToolConfig, ...]
-
-
-@dataclass(frozen=True)
-class LoadToolResult:
-    """Result of one dynamic-tool load attempt."""
-
-    status: str
-    loaded_tools: tuple[str, ...]
-    available_tools: tuple[str, ...] = ()
-    unsupported_tools: tuple[str, ...] = ()
-    collision_messages: tuple[str, ...] = ()
-    unavailable_messages: tuple[str, ...] = ()
-
-
-@dataclass(frozen=True)
-class LoadToolValidationFailure:
-    """Failure returned by runtime validators before a dynamic tool is persisted."""
-
-    status: str
-    messages: tuple[str, ...]
-
-
-@dataclass(frozen=True)
-class DeferredToolCatalogEntry:
-    """Prompt/search metadata for one authored deferred tool."""
-
-    name: str
+    domain_name: str
     description: str
-    display_name: str
-    category: str
-    function_names: tuple[str, ...]
-    loaded: bool
-    sticky: bool
+    # Instructions the toolkit and its functions would render when eager, which portable tool search returns.
+    instructions: str | None
+    function_instructions: Mapping[str, str]
 
 
-def _dynamic_tool_scope_key(session_id: str) -> str:
-    """Normalize one session id to the dynamic-tool state scope used in memory."""
-    return session_id
+@dataclass(frozen=True)
+class DeferredToolkit:
+    """The functions a run offers of one authored deferred tool, which stay off the provider request until searched."""
+
+    deferral: ToolDeferral
+    functions: tuple[ToolFunction, ...]
+
+    @property
+    def wire_function_names(self) -> tuple[str, ...]:
+        """Return the names of the functions a run offers of the tool."""
+        return tuple(function.name for function in self.functions)
 
 
-def _state_key(agent_name: str, session_id: str) -> tuple[str, str]:
-    return (agent_name, _dynamic_tool_scope_key(session_id))
+def defer_toolkit(
+    domain_name: str,
+    description: str,
+    toolkit: AdaptedToolkit,
+    *,
+    portable_search: bool,
+) -> tuple[ToolDeferral, AdaptedToolkit]:
+    """Return what tool search shows of a wire-deferred toolkit beside its functions, and the toolkit to offer.
 
-
-def _coerce_loaded_tools(value: object) -> list[str]:
-    if not isinstance(value, list):
-        return []
-
-    normalized: list[str] = []
-    seen: set[str] = set()
-    for item in value:
-        if not isinstance(item, str) or item in seen:
-            continue
-        seen.add(item)
-        normalized.append(item)
-    return normalized
-
-
-def _ordered_deferred_tools(
-    deferred_tool_names: list[str],
-    loaded_tools: list[str],
-) -> list[str]:
-    loaded = set(loaded_tools)
-    return [tool_name for tool_name in deferred_tool_names if tool_name in loaded]
-
-
-def _deferred_tool_names(config: Config, agent_name: str) -> list[str]:
-    return [entry.name for entry in config.resolve_entity(agent_name).authored_deferred_tool_configs]
-
-
-def _initial_loaded_tools(config: Config, agent_name: str) -> list[str]:
-    return [entry.name for entry in config.resolve_entity(agent_name).authored_deferred_tool_configs if entry.initial]
-
-
-def _default_loaded_tools(config: Config, agent_name: str) -> list[str]:
-    return _sanitize_loaded_tools(config, agent_name, _initial_loaded_tools(config, agent_name))[0]
-
-
-def _sanitize_loaded_tools(
-    config: Config,
-    agent_name: str,
-    loaded_tools: list[str],
-) -> tuple[list[str], list[str]]:
-    deferred_tool_names = _deferred_tool_names(config, agent_name)
-    deferred_tool_name_set = set(deferred_tool_names)
-    entity_view = config.resolve_entity(agent_name)
-    invalid_tools: list[str] = []
-    valid: list[str] = []
-    for tool_name in loaded_tools:
-        if tool_name not in deferred_tool_name_set:
-            invalid_tools.append(tool_name)
-            continue
-        if entity_view.deferred_tool_scope_incompatible_tools(tool_name):
-            invalid_tools.append(tool_name)
-            continue
-        valid.append(tool_name)
-    return _ordered_deferred_tools(deferred_tool_names, valid), invalid_tools
-
-
-def _sanitize_loaded_tools_with_current_initials(
-    config: Config,
-    agent_name: str,
-    loaded_tools: list[str],
-) -> tuple[list[str], list[str]]:
-    return _sanitize_loaded_tools(
-        config,
-        agent_name,
-        [*_initial_loaded_tools(config, agent_name), *loaded_tools],
-    )
-
-
-def _normalize_effective_tool_config_overrides(
-    tool_name: str,
-    overrides: dict[str, object],
-) -> dict[str, object]:
-    return validate_authored_tool_entry_overrides(tool_name, overrides)
-
-
-def has_deferred_tools(config: Config, agent_name: str) -> bool:
-    """Return whether one agent has at least one authored deferred tool."""
-    return bool(config.resolve_entity(agent_name).authored_deferred_tool_configs)
-
-
-def suppress_fully_deferred_toolkit_instructions(
-    toolkit: Toolkit,
-) -> None:
-    """Omit all instructions for one provider-deferred toolkit.
-
-    Native tool search cannot extend the already-sent system prompt when it discovers a tool.
+    Portable tool search returns the instructions the toolkit and its functions would render beside the definitions
+    it finds, so the toolkit offered carries none.
+    Native tool search expands only function definitions, so the toolkit keeps its instructions for the system
+    prompt and each function's own instructions go in its description.
     """
-    toolkit.add_instructions = False
-    functions = (*toolkit.get_functions().values(), *toolkit.get_async_functions().values())
-    for function in functions:
-        function.add_instructions = False
-
-
-def _special_tool_names(
-    agent_name: str,
-    config: Config,
-    delegation_depth: int,
-    enable_dynamic_tools_manager: bool,
-) -> list[str]:
-    agent_config = config.get_agent(agent_name)
-    tool_names: list[str] = []
-
-    if agent_config.delegate_to:
-        from mindroom.delegation.lifecycle import MAX_DELEGATION_DEPTH  # noqa: PLC0415
-
-        if delegation_depth < MAX_DELEGATION_DEPTH:
-            tool_names.append("delegate")
-
-    allow_self_config = (
-        agent_config.allow_self_config
-        if agent_config.allow_self_config is not None
-        else config.defaults.allow_self_config
+    deferral = ToolDeferral(
+        domain_name=domain_name,
+        description=description,
+        instructions=toolkit.instructions if portable_search else None,
+        function_instructions=toolkit.function_instructions if portable_search else {},
     )
-    if allow_self_config:
-        tool_names.append("self_config")
-
-    if agent_config.skill_learning.enabled:
-        # Like Hermes, an agent that learns skills can also save them in chat, and its skill review can only call
-        # tools the agent's own request offered.
-        tool_names.append("skill_manage")
-
-    if enable_dynamic_tools_manager and has_deferred_tools(config, agent_name):
-        tool_names.append("dynamic_tools")
-
-    return tool_names
-
-
-def _tool_config_owner_precedence(config: Config, entry: EffectiveToolConfig) -> tuple[int, int, int]:
-    directly_authored = entry.name == (entry.authored_name or entry.name)
-    authored_from_individual_tool = not config.is_tool_preset(entry.authored_name or entry.name)
-    return (int(directly_authored), int(authored_from_individual_tool), -entry.authored_order)
-
-
-def _expanded_authored_entry_config(entry: EffectiveToolConfig, tool_name: str) -> EffectiveToolConfig:
-    return EffectiveToolConfig(
-        name=tool_name,
-        tool_config_overrides=(dict(entry.tool_config_overrides) if tool_name == entry.name else {}),
-        defer=entry.defer,
-        initial=entry.initial,
-        authored_order=entry.authored_order,
-        authored_name=entry.name,
+    if portable_search:
+        return deferral, replace(toolkit, instructions=None, function_instructions={})
+    functions = tuple(
+        _with_own_instructions(function, toolkit.function_instructions[function.name])
+        if function.name in toolkit.function_instructions
+        else function
+        for function in toolkit.functions
     )
+    return deferral, replace(toolkit, functions=functions, function_instructions={})
 
 
-def _visible_authored_tool_configs(
-    config: Config,
-    agent_name: str,
-    *,
-    loaded_deferred_tools: set[str],
-) -> list[EffectiveToolConfig]:
-    visible_by_name: dict[str, EffectiveToolConfig] = {}
-    hidden_deferred_by_name: dict[str, EffectiveToolConfig] = {}
-
-    for authored_entry in config.resolve_entity(agent_name).authored_tool_configs:
-        is_loaded_deferred = authored_entry.defer and authored_entry.name in loaded_deferred_tools
-        is_visible_owner = not authored_entry.defer or is_loaded_deferred
-        for tool_name in config.expand_tool_names([authored_entry.name]):
-            expanded = _expanded_authored_entry_config(authored_entry, tool_name)
-            expanded_precedence = _tool_config_owner_precedence(config, expanded)
-            if is_visible_owner:
-                current = visible_by_name.get(tool_name)
-                if current is None or expanded_precedence > _tool_config_owner_precedence(config, current):
-                    visible_by_name[tool_name] = expanded
-                continue
-            current_hidden = hidden_deferred_by_name.get(tool_name)
-            if current_hidden is None or expanded_precedence > _tool_config_owner_precedence(config, current_hidden):
-                hidden_deferred_by_name[tool_name] = expanded
-
-    resolved: list[EffectiveToolConfig] = []
-    for tool_name in config.resolve_entity(agent_name).available_tools:
-        visible = visible_by_name.get(tool_name)
-        if visible is None:
-            continue
-        hidden = hidden_deferred_by_name.get(tool_name)
-        if (
-            hidden is not None
-            and not visible.defer
-            and _tool_config_owner_precedence(config, hidden) > _tool_config_owner_precedence(config, visible)
-        ):
-            continue
-        resolved.append(visible)
-    return resolved
-
-
-def _append_injected_special_tool_configs(
-    resolved_tool_configs: list[EffectiveToolConfig],
-    *,
-    agent_name: str,
-    config: Config,
-    delegation_depth: int,
-    enable_dynamic_tools_manager: bool,
-    include_matrix_room_runtime_tools: bool,
-) -> list[EffectiveToolConfig]:
-    matrix_room_runtime_tool_names = set(MATRIX_ROOM_RUNTIME_TOOL_NAMES)
-    if include_matrix_room_runtime_tools:
-        resolved_tool_configs = [
-            entry for entry in resolved_tool_configs if entry.name not in matrix_room_runtime_tool_names
-        ]
-    tool_names = [entry.name for entry in resolved_tool_configs]
-    injected_tool_names = _special_tool_names(
-        agent_name=agent_name,
-        config=config,
-        delegation_depth=delegation_depth,
-        enable_dynamic_tools_manager=enable_dynamic_tools_manager,
-    )
-    if include_matrix_room_runtime_tools:
-        injected_tool_names.extend(MATRIX_ROOM_RUNTIME_TOOL_NAMES)
-    for tool_name in injected_tool_names:
-        if tool_name in tool_names:
-            continue
-        if (
-            tool_name not in matrix_room_runtime_tool_names
-            and config.resolve_entity(agent_name).authored_deferred_tool_config(tool_name) is not None
-        ):
-            continue
-        resolved_tool_configs.append(
-            EffectiveToolConfig(
-                name=tool_name,
-                tool_config_overrides={},
-                authored_order=len(resolved_tool_configs),
-                authored_name=tool_name,
-            ),
-        )
-        tool_names.append(tool_name)
-    return resolved_tool_configs
-
-
-def visible_tool_surface(
-    *,
-    agent_name: str,
-    config: Config,
-    session_id: str | None = None,
-    loaded_tools: list[str] | tuple[str, ...] | set[str] | frozenset[str] | None = None,
-    delegation_depth: int = 0,
-    enable_dynamic_tools_manager: bool | None = None,
-    include_matrix_room_runtime_tools: bool = False,
-) -> VisibleToolSurface:
-    """Return the canonical provider-visible runtime tool surface for one agent/session."""
-    if loaded_tools is None:
-        loaded_tool_names = get_loaded_tools_for_session(
-            agent_name=agent_name,
-            config=config,
-            session_id=session_id,
-        )
-    else:
-        loaded_tool_names = _sanitize_loaded_tools_with_current_initials(
-            config,
-            agent_name,
-            _coerce_loaded_tools(list(loaded_tools)),
-        )[0]
-
-    manager_enabled = session_id is not None if enable_dynamic_tools_manager is None else enable_dynamic_tools_manager
-    loaded_deferred_tools = set(loaded_tool_names)
-    runtime_tool_configs = [
-        EffectiveToolConfig(
-            name=entry.name,
-            tool_config_overrides=_normalize_effective_tool_config_overrides(
-                entry.name,
-                dict(entry.tool_config_overrides),
-            ),
-            defer=entry.defer,
-            initial=entry.initial,
-            authored_order=entry.authored_order,
-            authored_name=entry.authored_name,
-        )
-        for entry in _visible_authored_tool_configs(
-            config,
-            agent_name,
-            loaded_deferred_tools=loaded_deferred_tools,
-        )
-    ]
-
-    runtime_tool_configs = _append_injected_special_tool_configs(
-        runtime_tool_configs,
-        agent_name=agent_name,
-        config=config,
-        delegation_depth=delegation_depth,
-        enable_dynamic_tools_manager=manager_enabled,
-        include_matrix_room_runtime_tools=include_matrix_room_runtime_tools,
-    )
-    return VisibleToolSurface(
-        loaded_tools=tuple(loaded_tool_names),
-        runtime_tool_configs=tuple(runtime_tool_configs),
-    )
-
-
-def get_loaded_tools_for_session(
-    *,
-    agent_name: str,
-    config: Config,
-    session_id: str | None,
-) -> list[str]:
-    """Return one agent/session's loaded dynamic tools, initializing in-memory state when needed."""
-    if session_id is None:
-        loaded_tools, _invalid_tools = _sanitize_loaded_tools_with_current_initials(config, agent_name, [])
-        return list(loaded_tools)
-
-    key = _state_key(agent_name, session_id)
-    with _loaded_tools_lock:
-        state_present = key in _loaded_tools
-        if state_present:
-            raw_loaded_tools = _coerce_loaded_tools(_loaded_tools[key])
-        else:
-            raw_loaded_tools = _initial_loaded_tools(config, agent_name)
-
-        loaded_tools, invalid_tools = _sanitize_loaded_tools_with_current_initials(config, agent_name, raw_loaded_tools)
-        if invalid_tools:
-            logger.warning(
-                "Dropping invalid dynamic tools from in-memory session state",
-                agent=agent_name,
-                session_id=session_id,
-                scope_key=key[1],
-                invalid_tools=invalid_tools,
-            )
-
-        if state_present:
-            save_loaded_tools_for_session(
-                agent_name=agent_name,
-                session_id=session_id,
-                loaded_tools=loaded_tools,
-                config=config,
-            )
-
-        return list(loaded_tools)
-
-
-def _load_validation_result(
-    validation_failure: LoadToolValidationFailure | None,
-    loaded_tools: list[str],
-) -> LoadToolResult | None:
-    if validation_failure is None:
-        return None
-    if validation_failure.status == "function_name_collision":
-        return LoadToolResult(
-            status="function_name_collision",
-            loaded_tools=tuple(loaded_tools),
-            collision_messages=tuple(sorted(validation_failure.messages)),
-        )
-    if validation_failure.status == "tool_unavailable":
-        return LoadToolResult(
-            status="tool_unavailable",
-            loaded_tools=tuple(loaded_tools),
-            unavailable_messages=tuple(sorted(validation_failure.messages)),
-        )
-    return None
-
-
-def load_tool_for_session(
-    *,
-    agent_name: str,
-    config: Config,
-    session_id: str | None,
-    tool_name: str,
-    validate_loaded_tools: Callable[[list[str]], LoadToolValidationFailure | None] | None = None,
-) -> LoadToolResult:
-    """Atomically validate and add one loaded tool to an agent/session state."""
-    deferred_tool_names = _deferred_tool_names(config, agent_name)
-    if session_id is None:
-        loaded_tools, _invalid_tools = _sanitize_loaded_tools_with_current_initials(config, agent_name, [])
-        return LoadToolResult(status="error", loaded_tools=tuple(loaded_tools))
-
-    key = _state_key(agent_name, session_id)
-    while True:
-        with _loaded_tools_lock:
-            raw_loaded_tools = _loaded_tools.get(key)
-            if raw_loaded_tools is None:
-                raw_loaded_tools = _initial_loaded_tools(config, agent_name)
-            else:
-                raw_loaded_tools = _coerce_loaded_tools(raw_loaded_tools)
-
-            loaded_tools, invalid_tools = _sanitize_loaded_tools_with_current_initials(
-                config,
-                agent_name,
-                raw_loaded_tools,
-            )
-            if invalid_tools:
-                logger.warning(
-                    "Dropping invalid dynamic tools from in-memory session state",
-                    agent=agent_name,
-                    session_id=session_id,
-                    scope_key=key[1],
-                    invalid_tools=invalid_tools,
-                )
-                save_loaded_tools_for_session(
-                    agent_name=agent_name,
-                    session_id=session_id,
-                    loaded_tools=loaded_tools,
-                    config=config,
-                )
-
-            if tool_name not in deferred_tool_names:
-                return LoadToolResult(
-                    status="unknown",
-                    loaded_tools=tuple(loaded_tools),
-                    available_tools=tuple(deferred_tool_names),
-                )
-            if incompatible_tools := config.resolve_entity(agent_name).deferred_tool_scope_incompatible_tools(
-                tool_name,
-            ):
-                return LoadToolResult(
-                    status="scope_incompatible",
-                    loaded_tools=tuple(loaded_tools),
-                    unsupported_tools=tuple(incompatible_tools),
-                )
-            if tool_name in loaded_tools:
-                return LoadToolResult(status="already_loaded", loaded_tools=tuple(loaded_tools))
-
-            candidate_loaded_tools = _ordered_deferred_tools(deferred_tool_names, [*loaded_tools, tool_name])
-            state_snapshot = tuple(_loaded_tools[key]) if key in _loaded_tools else None
-
-        # Validation may be slow, so run it unlocked; retry if same-session state changes.
-        validation_failure = (
-            validate_loaded_tools(candidate_loaded_tools) if validate_loaded_tools is not None else None
-        )
-
-        with _loaded_tools_lock:
-            current_state = tuple(_loaded_tools[key]) if key in _loaded_tools else None
-            if current_state != state_snapshot:
-                continue
-
-            if validation_result := _load_validation_result(validation_failure, loaded_tools):
-                return validation_result
-
-            save_loaded_tools_for_session(
-                agent_name=agent_name,
-                session_id=session_id,
-                loaded_tools=candidate_loaded_tools,
-                config=config,
-            )
-            return LoadToolResult(status="loaded", loaded_tools=tuple(candidate_loaded_tools))
-
-
-def unload_tool_for_session(
-    *,
-    agent_name: str,
-    config: Config,
-    session_id: str | None,
-    tool_name: str,
-) -> list[str]:
-    """Atomically remove one loaded tool from an agent/session state."""
-    if session_id is None:
-        return []
-
-    key = _state_key(agent_name, session_id)
-    with _loaded_tools_lock:
-        raw_loaded_tools = _loaded_tools.get(key)
-        if raw_loaded_tools is None:
-            raw_loaded_tools = _initial_loaded_tools(config, agent_name)
-        else:
-            raw_loaded_tools = _coerce_loaded_tools(raw_loaded_tools)
-
-        loaded_tools, invalid_tools = _sanitize_loaded_tools_with_current_initials(config, agent_name, raw_loaded_tools)
-        if invalid_tools:
-            logger.warning(
-                "Dropping invalid dynamic tools from in-memory session state",
-                agent=agent_name,
-                session_id=session_id,
-                scope_key=key[1],
-                invalid_tools=invalid_tools,
-            )
-        initial_tools = set(_initial_loaded_tools(config, agent_name))
-        loaded_tools = [name for name in loaded_tools if name != tool_name or name in initial_tools]
-        save_loaded_tools_for_session(
-            agent_name=agent_name,
-            session_id=session_id,
-            loaded_tools=loaded_tools,
-            config=config,
-        )
-        return list(loaded_tools)
-
-
-def save_loaded_tools_for_session(
-    *,
-    agent_name: str,
-    session_id: str | None,
-    loaded_tools: list[str],
-    config: Config | None = None,
-) -> None:
-    """Persist one agent/session's loaded tool set in memory."""
-    if session_id is None:
-        return
-
-    key = _state_key(agent_name, session_id)
-    with _loaded_tools_lock:
-        coerced_loaded_tools = _coerce_loaded_tools(loaded_tools)
-        if config is not None and coerced_loaded_tools == _default_loaded_tools(config, agent_name):
-            _loaded_tools.pop(key, None)
-            return
-        _loaded_tools[key] = coerced_loaded_tools
-
-
-def deferred_tool_catalog_entries(
-    *,
-    agent_name: str,
-    config: Config,
-    loaded_tools: list[str],
-) -> list[DeferredToolCatalogEntry]:
-    """Return model-visible catalog metadata for one agent's authored deferred tools."""
-    loaded = set(loaded_tools)
-    entries: list[DeferredToolCatalogEntry] = []
-    for entry in config.resolve_entity(agent_name).authored_deferred_tool_configs:
-        metadata = TOOL_METADATA.get(entry.name)
-        entries.append(
-            DeferredToolCatalogEntry(
-                name=entry.name,
-                description=(metadata.description if metadata else ""),
-                display_name=(metadata.display_name if metadata else ""),
-                category=(metadata.category.value if metadata else ""),
-                function_names=tuple(metadata.function_names or ()) if metadata else (),
-                loaded=entry.name in loaded,
-                sticky=entry.initial,
-            ),
-        )
-    return entries
+def _with_own_instructions(function: ToolFunction, instructions: str) -> ToolFunction:
+    """Return ``function`` with the instructions it asks the prompt to show after its description."""
+    description = f"{function.description}\n\n{instructions}" if function.description else instructions
+    return replace(function, description=description)

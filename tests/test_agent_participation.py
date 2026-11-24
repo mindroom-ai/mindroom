@@ -117,7 +117,7 @@ def test_judgment_backend_is_explicit_and_model_alias_is_validated(settings: dic
     config = Config.model_validate(
         {
             "agents": {"helper": {"display_name": "Helper", "participation": {"judgment": settings}}},
-            "models": {"cheap": {"provider": "test", "id": "cheap-model"}},
+            "models": {"cheap": {"provider": "openai", "id": "cheap-model"}},
         },
     )
     assert config.agents["helper"].participation.judgment.provider == settings["provider"]

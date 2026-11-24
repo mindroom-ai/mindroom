@@ -74,16 +74,14 @@ class DesktopShellRequest:
     cwd: str
     expires_at_ms: int
     timeout_seconds: int = 30
+    controller_key: str = ""
 
 
 class DesktopShellOutput(ShellOutputCapture):
     """Spool one command's combined output privately until the bridge transfers it."""
 
     def __init__(self, directory: str) -> None:
-        super().__init__(
-            ShellOutputDestination(workspace_root=directory, path="", max_bytes=MAX_SHELL_OUTPUT_BYTES),
-            None,
-        )
+        super().__init__(ShellOutputDestination(workspace_root=directory, path="", max_bytes=MAX_SHELL_OUTPUT_BYTES))
         self.exit_code: int | None = None
         self.completed = False
 
@@ -161,6 +159,7 @@ class _ShellHandle:
     started_at: float
     output: DesktopShellOutput
     killed: bool = False
+    controller_key: str = ""
 
     def state(self, record: ProcessRecord) -> Literal["completed", "killed", "running"]:
         if not record.finished:
@@ -210,13 +209,14 @@ class DesktopShell:
         self._environment = dict(environment)
         self._clock = clock
         self._monotonic_clock = monotonic_clock
-        self._lease_until = 0.0
+        self._leases: dict[str, float] = {}
         self._pending: DesktopShellRequest | None = None
         # True from the moment a request needs a decision, including while it is held back behind agent input.
         self._awaiting_decision = False
         self._decision: asyncio.Future[str] | None = None
+        self._active_controller_key: str | None = None
         self._active_request_id: str | None = None
-        self._active_owner: tuple[str, str] | None = None
+        self._active_owner: tuple[str, str, str] | None = None
         self._cancel_event = asyncio.Event()
         self._finished = asyncio.Event()
         self._finished.set()
@@ -224,7 +224,7 @@ class DesktopShell:
         self._agent_input_idle = asyncio.Event()
         self._agent_input_idle.set()
         self._agent_input_ended_at = -math.inf
-        self._used_ids: set[str] = set()
+        self._used_ids: set[tuple[str, str]] = set()
         self._records: dict[str, ProcessRecord] = {}
         self._handles: dict[str, _ShellHandle] = {}
         self._directory: str | None = None
@@ -239,6 +239,9 @@ class DesktopShell:
             if not isinstance(field, str) or not field or "\x00" in field:
                 message = "Shell request identity is invalid."
                 raise DesktopShellError(message)
+        if not isinstance(request.controller_key, str) or "\x00" in request.controller_key:
+            message = "Shell request identity is invalid."
+            raise DesktopShellError(message)
         _validate_command(request.command)
         # Only syntax is checked before approval, so the remote caller learns nothing about local directories.
         if not isinstance(request.cwd, str) or "\x00" in request.cwd or not Path(request.cwd).is_absolute():
@@ -261,15 +264,47 @@ class DesktopShell:
             raise DesktopShellError(message)
         return self._monotonic_clock() + remaining
 
-    def status(self, *, caller: tuple[str, str] | None = None) -> dict[str, object]:
+    def _effective_lease(self, controller_key: str) -> float:
+        return self._leases.get(controller_key, 0.0)
+
+    def _lease_summary(self, lease_until: float) -> tuple[int, bool]:
+        until_revoked = lease_until == math.inf
+        # Rounded up, so a live lease never reads as zero seconds.
+        remaining = 0 if until_revoked else max(0, math.ceil(lease_until - self._monotonic_clock()))
+        return remaining, until_revoked
+
+    def controller_status(self, controller_key: str) -> dict[str, object]:
+        """Report auto-approval state for one exact controller."""
+        remaining, until_revoked = self._lease_summary(self._effective_lease(controller_key))
+        return {
+            "auto_approve_remaining_seconds": remaining,
+            "auto_approve_until_revoked": until_revoked,
+        }
+
+    def status(
+        self,
+        *,
+        caller: tuple[str, str] | None = None,
+        controller_key: str | None = None,
+    ) -> dict[str, object]:
         """Describe pending approval, active command, auto-approval, and every retained handle.
 
         ``caller``, given as (requester_id, agent_name), hides ``active_request_id`` unless the
         active command belongs to that exact caller; omit it for the local, unrestricted view.
         """
         pending = self._pending
-        until_revoked = self._lease_until == math.inf
-        owns_active = caller is None or caller == self._active_owner
+        effective_lease = (
+            self._effective_lease(controller_key)
+            if controller_key is not None
+            else max(self._leases.values(), default=0.0)
+        )
+        remaining, until_revoked = self._lease_summary(effective_lease)
+        if caller is None:
+            owns_active = True
+        elif controller_key is not None:
+            owns_active = self._active_owner == (controller_key, caller[0], caller[1])
+        else:
+            owns_active = self._active_owner is not None and self._active_owner[1:] == caller
         return {
             "pending": (
                 {
@@ -283,21 +318,26 @@ class DesktopShell:
                 if pending
                 else None
             ),
-            # Rounded up, so a live lease never reads as zero seconds.
-            "auto_approve_remaining_seconds": (
-                0 if until_revoked else max(0, math.ceil(self._lease_until - self._monotonic_clock()))
-            ),
+            "auto_approve_remaining_seconds": remaining,
             "auto_approve_until_revoked": until_revoked,
             "active_request_id": self._active_request_id if owns_active else None,
-            "handles": self.handles(),
+            "handles": self.handles(controller_key=controller_key),
         }
 
-    def handles(self, requester_id: str | None = None, agent_name: str | None = None) -> list[dict[str, object]]:
-        """List retained handles, optionally only those owned by one exact requester and agent."""
+    def handles(
+        self,
+        requester_id: str | None = None,
+        agent_name: str | None = None,
+        *,
+        controller_key: str | None = None,
+    ) -> list[dict[str, object]]:
+        """List retained handles, optionally scoped to one requester, agent, and/or controller."""
         self._prune()
         entries: list[dict[str, object]] = []
         for handle, entry in self._handles.items():
             if requester_id is not None and (entry.requester_id, entry.agent_name) != (requester_id, agent_name):
+                continue
+            if controller_key is not None and entry.controller_key != controller_key:
                 continue
             record = self._records[handle]
             ended_at = record.finished_at if record.finished_at is not None else time.monotonic()
@@ -341,31 +381,43 @@ class DesktopShell:
         if self._monotonic_clock() >= self._pending_deadline:
             message = "Shell approval expired."
             raise DesktopShellError(message)
-        if approved and auto_approve_until_revoked:
-            self._lease_until = math.inf
-        elif approved and auto_approve_seconds:
-            self._lease_until = self._monotonic_clock() + auto_approve_seconds
+        if approved and (auto_approve_until_revoked or auto_approve_seconds):
+            lease_until = math.inf if auto_approve_until_revoked else self._monotonic_clock() + auto_approve_seconds
+            self._leases[pending.controller_key] = lease_until
         decision.set_result("approved" if approved else "denied")
         # The reply to this decision already shows the request as settled, so no approval surface keeps it live.
         self._pending = None
 
-    def grant(self, duration_seconds: int | None = None, *, until_revoked: bool = False) -> None:
-        """Auto-approve every locally allowed caller for a bounded duration or until revoked or stopped."""
+    def grant(
+        self,
+        duration_seconds: int | None = None,
+        *,
+        until_revoked: bool = False,
+        controller_key: str | None = None,
+    ) -> None:
+        """Auto-approve one controller (or the unscoped default key) for a bounded duration or until revoked."""
         if self._closed:
             message = "Local shell is closed."
             raise DesktopShellError(message)
         if until_revoked is True and duration_seconds is None:
-            self._lease_until = math.inf
-            return
-        if (
-            until_revoked is not False
-            or not isinstance(duration_seconds, int)
-            or isinstance(duration_seconds, bool)
-            or not 60 <= duration_seconds <= 3600
+            lease_until = math.inf
+        elif (
+            until_revoked is False
+            and isinstance(duration_seconds, int)
+            and not isinstance(duration_seconds, bool)
+            and 60 <= duration_seconds <= 3600
         ):
+            lease_until = self._monotonic_clock() + duration_seconds
+        else:
             message = "Grant 60 to 3600 seconds or until revoked."
             raise DesktopShellError(message)
-        self._lease_until = self._monotonic_clock() + duration_seconds
+        if controller_key is None:
+            self._leases[""] = lease_until
+            return
+        if not isinstance(controller_key, str) or not controller_key.strip():
+            message = "Shell controller key must be non-empty text."
+            raise DesktopShellError(message)
+        self._leases[controller_key] = lease_until
 
     @contextmanager
     def agent_input(self) -> Iterator[None]:
@@ -419,11 +471,13 @@ class DesktopShell:
             message = "Another local shell command is still awaiting approval or its first result."
             raise DesktopShellError(message)
         deadline = self._validate_request(request)
-        if request.request_id in self._used_ids:
+        used_key = (request.controller_key, request.request_id)
+        if used_key in self._used_ids:
             message = "Shell request ID has already been used."
             raise DesktopShellError(message)
         self._reserve_handle_capacity()
-        self._used_ids.add(request.request_id)
+        self._used_ids.add(used_key)
+        self._active_controller_key = request.controller_key
         self._busy = True
         self._finished.clear()
         self._cancel_event.clear()
@@ -443,7 +497,7 @@ class DesktopShell:
         """Admit one request, await local approval if needed, then run it until it completes or becomes a handle."""
         deadline = self._admit(request)
         try:
-            if self._monotonic_clock() >= self._lease_until:
+            if self._monotonic_clock() >= self._effective_lease(request.controller_key):
                 outcome = await self._await_approval(request, deadline)
                 if outcome == "denied":
                     message = "Shell command denied locally."
@@ -462,13 +516,14 @@ class DesktopShell:
                 message = "Shell working directory must be an existing directory; the command did not run."
                 raise DesktopShellError(message)
             self._active_request_id = request.request_id
-            self._active_owner = (request.requester_id, request.agent_name)
+            self._active_owner = (request.controller_key, request.requester_id, request.agent_name)
             # Reply before the remote caller stops waiting; a longer command continues as a handle.
             remaining = deadline - self._monotonic_clock() - _INLINE_WAIT_SAFETY_SECONDS
             return await self._run(request, max(_MIN_INLINE_WAIT_SECONDS, min(request.timeout_seconds, remaining)))
         finally:
             self._pending = None
             self._decision = None
+            self._active_controller_key = None
             self._active_request_id = None
             self._active_owner = None
             self._busy = False
@@ -480,7 +535,7 @@ class DesktopShell:
         run = asyncio.create_task(
             run_command(
                 self._records,
-                namespace=json.dumps([request.requester_id, request.agent_name]),
+                namespace=json.dumps([request.controller_key, request.requester_id, request.agent_name]),
                 argv=["/bin/sh", "-c", request.command],
                 env=self._environment,
                 cwd=request.cwd,
@@ -519,7 +574,14 @@ class DesktopShell:
                 output.release()
                 raise DesktopShellError(_STOPPED)
             return DesktopShellResult("completed", None, output.exit_code, output)
-        entry = _ShellHandle(request.requester_id, request.agent_name, request.command, started_at, output)
+        entry = _ShellHandle(
+            request.requester_id,
+            request.agent_name,
+            request.command,
+            started_at,
+            output,
+            controller_key=request.controller_key,
+        )
         self._handles[result.handle] = entry
         record = self._records[result.handle]
         return DesktopShellResult(entry.state(record), result.handle, record.return_code, output)
@@ -531,12 +593,13 @@ class DesktopShell:
         handle: str,
         *,
         offset: int | None = None,
+        controller_key: str | None = None,
     ) -> DesktopShellResult:
         """Report the caller's own handle; a finished one stays until ``hand_over`` confirms its output arrived.
 
         An invalid output ``offset`` is rejected without changing the handle, so a corrected check still gets the output.
         """
-        record = self._caller_record(requester_id, agent_name, handle)
+        record = self._caller_record(requester_id, agent_name, handle, controller_key=controller_key)
         entry = self._handles[handle]
         if offset is not None:
             entry.output.check_offset(offset)
@@ -558,9 +621,14 @@ class DesktopShell:
         handle: str,
         *,
         force: bool = False,
+        controller_key: str | None = None,
     ) -> Literal["killed", "completed"]:
         """Signal the caller's own running handle, keeping its output for a later check that reports it killed."""
-        return self._signal(self._caller_record(requester_id, agent_name, handle), handle, force=force)
+        return self._signal(
+            self._caller_record(requester_id, agent_name, handle, controller_key=controller_key),
+            handle,
+            force=force,
+        )
 
     def kill_handle(self, handle: str) -> None:
         """Force-kill any caller's handle from the local management channel; its owner's check reports it killed."""
@@ -576,10 +644,21 @@ class DesktopShell:
         # An earlier kill stays the reason it ended, matching what the next check reports.
         return "killed" if self._handles[handle].killed else "completed"
 
-    def _caller_record(self, requester_id: str, agent_name: str, handle: str) -> ProcessRecord:
+    def _caller_record(
+        self,
+        requester_id: str,
+        agent_name: str,
+        handle: str,
+        *,
+        controller_key: str | None = None,
+    ) -> ProcessRecord:
         self._prune()
         entry = self._handles.get(handle)
-        if entry is None or (entry.requester_id, entry.agent_name) != (requester_id, agent_name):
+        if (
+            entry is None
+            or (entry.requester_id, entry.agent_name) != (requester_id, agent_name)
+            or (controller_key is not None and entry.controller_key != controller_key)
+        ):
             raise DesktopShellError(_UNKNOWN_HANDLE)
         return self._records[handle]
 
@@ -597,16 +676,32 @@ class DesktopShell:
             self._directory = tempfile.mkdtemp(prefix="mindroom-desktop-shell-")
         return self._directory
 
-    def revoke(self) -> None:
-        """Clear auto-approval, reject pending approval, stop the active command, and kill every handle."""
-        self._lease_until = 0.0
-        self._cancel_event.set()
-        if self._decision is not None and not self._decision.done():
-            self._decision.set_result("cancelled")
-        kill_all_records(self._records)
-        for entry in self._handles.values():
-            entry.output.release()
-        self._handles.clear()
+    def revoke(self, controller_key: str | None = None) -> None:
+        """Clear auto-approval, reject pending approval, stop the active command, and kill handles.
+
+        When ``controller_key`` is given, only that controller's auto-approval, pending/active command,
+        and handles are affected; other controllers' leases and running handles remain untouched.
+        """
+        if controller_key is None:
+            self._leases.clear()
+            self._cancel_event.set()
+            if self._decision is not None and not self._decision.done():
+                self._decision.set_result("cancelled")
+            kill_all_records(self._records)
+            for entry in self._handles.values():
+                entry.output.release()
+            self._handles.clear()
+            return
+        if not isinstance(controller_key, str) or not controller_key.strip():
+            message = "Shell controller key must be non-empty text."
+            raise DesktopShellError(message)
+        self._leases.pop(controller_key, None)
+        if self._busy and self._active_controller_key == controller_key:
+            self._cancel_event.set()
+            if self._decision is not None and not self._decision.done():
+                self._decision.set_result("cancelled")
+        for handle in [h for h, entry in self._handles.items() if entry.controller_key == controller_key]:
+            self._discard(handle)
 
     async def close(self) -> None:
         """Revoke current access, wait for the active command to stop, and refuse future commands."""

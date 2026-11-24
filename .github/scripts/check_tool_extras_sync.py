@@ -2,8 +2,8 @@
 
 Checks:
 1. Every registered tool has a matching optional-dependency group (and vice-versa).
-2. The ``dependencies=[...]`` declared in each tool's decorator/metadata match the
-   packages listed in the corresponding pyproject.toml optional-dependency group.
+2. The ``dependencies=[...]`` declared in each tool's decorator/metadata are listed in
+   the corresponding pyproject.toml optional-dependency group or the base dependencies.
 """
 
 from __future__ import annotations
@@ -12,37 +12,37 @@ import ast
 import tomllib
 from pathlib import Path
 
+from packaging.requirements import Requirement
+from packaging.utils import canonicalize_name
+
 REPO_ROOT = Path(__file__).resolve().parents[2]
 PYPROJECT = REPO_ROOT / "pyproject.toml"
 TOOLS_DIR = REPO_ROOT / "src" / "mindroom" / "tools"
 
 # Groups that are not tool registrations (meta-groups, aggregates, etc.)
-IGNORED_GROUPS: set[str] = {"aws_bedrock", "matrix-e2ee", "matrix_calls", "sentence-transformers", "supabase"}
+IGNORED_GROUPS: set[str] = {
+    "aws_bedrock",
+    "chromadb",
+    "coding",  # Earlier name of filesystem, kept so `uv sync --extra coding` still resolves.
+    "external_trigger_manager",  # Earlier name of triggers, kept so `uv sync --extra external_trigger_manager` still resolves.
+    "file",  # Earlier name of filesystem, kept so `uv sync --extra file` still resolves.
+    "kubernetes",
+    "matrix-e2ee",
+    "matrix_calls",
+    "numpy",
+    "sentence-transformers",
+    "supabase",
+}
 
 
 def _normalize_dep(spec: str) -> str:
-    """Strip version specifiers, extras, and env markers to get the bare package name."""
-    # Remove environment markers  (e.g. "; python_version < '3.12'")
-    name = spec.split(";", 1)[0].strip()
-    # Remove extras  (e.g. "package[extra]")
-    if "[" in name:
-        name = name.split("[", 1)[0].strip()
-    # Remove version specifiers
-    for sep in (">=", "<=", "==", ">", "<", "~=", "!="):
-        if sep in name:
-            name = name.split(sep, 1)[0].strip()
-            break
-    return name.lower().replace("_", "-")
+    """Return the canonical package name of a requirement, without version specifiers, extras, or markers."""
+    return canonicalize_name(Requirement(spec).name)
 
 
 def _get_pyproject_data() -> dict:
     """Parse and return the full pyproject.toml data."""
     return tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))
-
-
-def _get_optional_groups(data: dict) -> set[str]:
-    """Return optional-dependency group names from pyproject.toml."""
-    return set(data.get("project", {}).get("optional-dependencies", {}).keys())
 
 
 def _get_optional_dep_packages(data: dict) -> dict[str, set[str]]:
@@ -83,7 +83,7 @@ def _extract_tool_registrations() -> dict[str, list[str]]:
 
     Detects both patterns:
       - @register_tool_with_metadata(name="x", dependencies=[...])
-      - TOOL_METADATA["x"] = ToolMetadata(name="x", dependencies=[...])
+      - register_builtin_tool_metadata(ToolMetadata(name="x", dependencies=[...]))
     """
     tools: dict[str, list[str]] = {}
     for py_file in sorted(TOOLS_DIR.glob("*.py")):
@@ -138,8 +138,6 @@ def _check_deps_complete(
     """Check 2: declared dependencies are present in pyproject optional group (or base deps)."""
     ok = True
     for tool_name, declared_deps in sorted(tools.items()):
-        if not declared_deps:
-            continue
         pyproject_pkgs = group_packages.get(tool_name, set())
         for dep in declared_deps:
             normalized = _normalize_dep(dep)
@@ -155,8 +153,8 @@ def _check_deps_complete(
 def main() -> int:
     """Check that registered tools and pyproject.toml optional-dependency groups are in sync."""
     data = _get_pyproject_data()
-    groups = _get_optional_groups(data) - IGNORED_GROUPS
     group_packages = _get_optional_dep_packages(data)
+    groups = set(group_packages) - IGNORED_GROUPS
     base_packages = _get_base_dep_packages(data)
     tools = _extract_tool_registrations()
 

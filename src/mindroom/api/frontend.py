@@ -2,14 +2,26 @@
 from __future__ import annotations
 
 from pathlib import Path, PurePosixPath
+from typing import TYPE_CHECKING
 from urllib.parse import unquote
 
 from fastapi import APIRouter, HTTPException, Request
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, RedirectResponse, Response
 
-from mindroom.api.auth import login_redirect_for_request, request_has_frontend_access, sanitize_next_path
+from mindroom.api.auth import (
+    dashboard_host_public_origin,
+    login_redirect_for_request,
+    non_administrator_chat_redirect,
+    request_has_frontend_access,
+    request_path_with_query,
+    sanitize_next_path,
+)
 from mindroom.api.config_lifecycle import api_runtime_paths
+from mindroom.egress_broker.env import egress_broker_enabled
 from mindroom.frontend_assets import ensure_frontend_dist_dir
+
+if TYPE_CHECKING:
+    from mindroom.constants import RuntimePaths
 
 router = APIRouter()
 
@@ -42,6 +54,23 @@ def _resolve_frontend_asset(frontend_dir: Path, request_path: str) -> Path | Non
     return index_path if index_path.is_file() else None
 
 
+def _connections_frontend_enabled(runtime_paths: RuntimePaths, path: str) -> bool:
+    """Return whether the dedicated connections bundle may serve one request path: the egress page needs the broker."""
+    segments = path.split("/")
+    return not (len(segments) > 1 and segments[1] == "egress" and not egress_broker_enabled(runtime_paths))
+
+
+def _refused_page_response(request: Request, path: str) -> Response:
+    """Answer a browser that may not load the dashboard: a non-administrator signed in to Connections goes to Chat."""
+    if (chat_redirect := non_administrator_chat_redirect(request)) is not None:
+        return chat_redirect
+    target_path = sanitize_next_path(f"/{path}" if path else "/")
+    login_redirect = login_redirect_for_request(request, next_path=target_path)
+    if login_redirect is not None:
+        return login_redirect
+    raise HTTPException(status_code=401, detail="Authentication required")
+
+
 @router.api_route("/", methods=["GET", "HEAD"], include_in_schema=False)
 @router.api_route("/{path:path}", methods=["GET", "HEAD"], include_in_schema=False)
 async def serve_frontend(request: Request, path: str = "") -> Response:
@@ -50,16 +79,18 @@ async def serve_frontend(request: Request, path: str = "") -> Response:
     if first_segment in _API_ROUTE_PREFIXES:
         raise HTTPException(status_code=404, detail="Not found")
 
+    # Connections sign-in, account links, and MCP consent belong to the public origin, so their pages move there.
+    if first_segment == "connections" and (public := dashboard_host_public_origin(request)) is not None:
+        return RedirectResponse(f"{public}{request_path_with_query(request)}")
+
+    # The Agent Keys page is absent for everyone while the broker is off, before any login redirect.
+    if first_segment == "connections" and not _connections_frontend_enabled(api_runtime_paths(request), path):
+        raise HTTPException(status_code=404, detail="Agent Keys are not enabled")
+
     if not await request_has_frontend_access(request):
-        target_path = sanitize_next_path(f"/{path}" if path else "/")
-        login_redirect = login_redirect_for_request(request, next_path=target_path)
-        if login_redirect is not None:
-            return login_redirect
-        raise HTTPException(status_code=401, detail="Authentication required")
+        return _refused_page_response(request, path)
 
     runtime_paths = api_runtime_paths(request)
-    if first_segment == "connections" and not (runtime_paths.env_value("MINDROOM_CONNECTIONS_AGENT") or "").strip():
-        raise HTTPException(status_code=404, detail="Connections are not enabled")
     frontend_dir = ensure_frontend_dist_dir(runtime_paths)
     if frontend_dir is None:
         raise HTTPException(status_code=404, detail="Frontend assets are not available")

@@ -1,0 +1,511 @@
+"""Current local authority gates retained tools without remote reconstruction."""
+
+from __future__ import annotations
+
+from typing import TYPE_CHECKING, cast
+
+import mcp.types as mcp_types
+import pytest
+
+from mindroom.agents import build_agent_toolkit
+from mindroom.config.agent import AgentConfig
+from mindroom.config.main import Config
+from mindroom.config.models import DefaultsConfig, EffectiveToolConfig, ModelConfig, ToolConfigEntry
+from mindroom.constants import resolve_runtime_paths
+from mindroom.mcp.manager import MCPServerManager
+from mindroom.mcp.registry import mcp_tool_entries
+from mindroom.mcp.toolkit import MindRoomMCPToolkit
+from mindroom.tool_jobs.authorization import (
+    _configured_tool_allowed,
+    authority_snapshot,
+    locally_allowed,
+    toolkit_authority,
+)
+from mindroom.tool_jobs.provenance import function_provenance
+from mindroom.tool_system.agent_tools import resolve_agent_tools
+from mindroom.tool_system.agno_toolkits import Function, Toolkit, toolkit_function_names
+from mindroom.tool_system.construction import ToolConstruction, bind_toolkit_construction, tool_config_signature
+from mindroom.tool_system.metadata import get_tool_by_name
+from mindroom.tool_system.registry import builtin_tool_registry, compose_tool_registry
+from mindroom.tool_system.sandbox_proxy import tool_placement
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+from tests.conftest import replace_test_tool_factory
+from tests.tool_job_helpers import toolkit_job_tools
+
+if TYPE_CHECKING:
+    from pathlib import Path
+
+    from mcp import ClientSession
+
+
+_OWNER = ToolExecutionIdentity("matrix", "lead", "@human:localhost", "!room:localhost", None, None, "session")
+
+
+def test_direct_toolkit_retains_authored_configuration_grant(tmp_path: Path) -> None:
+    """Direct toolkit construction admits its current options and rejects changed ones."""
+    entry = ToolConfigEntry(name="dynamic_workflow", overrides={"allowed_tools": ["calculator"]})
+    config = Config(agents={"lead": AgentConfig(display_name="Lead", tools=[entry])})
+    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
+    toolkit = build_agent_toolkit(
+        entry.name,
+        agent_tools=resolve_agent_tools(config, "lead", builtin_tool_registry()),
+        placement=tool_placement(paths, builtin_tool_registry()),
+        runtime_paths=paths,
+        tool_config_overrides=config.resolve_agent("lead").tools.authored[0].tool_config_overrides,
+        execution_identity=_OWNER,
+    )
+    assert toolkit is not None
+    assert "list_workflows" in toolkit_function_names(toolkit)
+    authority = toolkit_authority(authority_snapshot(config, "lead"), toolkit)
+
+    def allowed() -> bool:
+        return locally_allowed(
+            config,
+            _OWNER,
+            tool_name="list_workflows",
+            toolkit_name=entry.name,
+            origin={},
+            depth=0,
+            authority=authority,
+            tools=builtin_tool_registry(),
+        )
+
+    assert allowed()
+    entry.overrides.clear()
+    assert not allowed()
+
+
+@pytest.mark.parametrize("changed", ["agent", "default"])
+def test_changed_file_access_revokes_retained_work(tmp_path: Path, changed: str) -> None:
+    """A tool built under one file access must not run, or keep running, under another."""
+    entry = ToolConfigEntry(name="calculator")
+    config = Config(
+        agents={"lead": AgentConfig(display_name="Lead", tools=[entry], file_access=None)},
+        defaults=DefaultsConfig(file_access="unrestricted"),
+    )
+    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
+    toolkit = build_agent_toolkit(
+        entry.name,
+        agent_tools=resolve_agent_tools(config, "lead", builtin_tool_registry()),
+        placement=tool_placement(paths, builtin_tool_registry()),
+        runtime_paths=paths,
+        tool_config_overrides=config.resolve_agent("lead").tools.authored[0].tool_config_overrides,
+        execution_identity=_OWNER,
+    )
+    assert toolkit is not None
+    assert "add" in toolkit.get_functions()
+    authority = toolkit_authority(authority_snapshot(config, "lead"), toolkit)
+
+    def allowed() -> bool:
+        return locally_allowed(
+            config,
+            _OWNER,
+            tool_name="add",
+            toolkit_name=entry.name,
+            origin={},
+            depth=0,
+            authority=authority,
+            tools=builtin_tool_registry(),
+        )
+
+    assert allowed()
+    if changed == "agent":
+        config.agents["lead"].file_access = "workspace"
+    else:
+        config.defaults.file_access = "workspace"
+    assert not allowed()
+
+
+def test_disabling_graph_edits_revokes_a_retained_graph_edit(tmp_path: Path) -> None:
+    """A graph edit kept for approval or as a job must not run once its agent may no longer edit its graph."""
+    config = Config(
+        agents={"lead": AgentConfig(display_name="Lead", knowledge_graph=True, knowledge_graph_edits=True)},
+        models={"luna": ModelConfig(provider="openai", id="gpt-6-luna")},
+        knowledge_graph={"model": "luna"},
+    )
+    paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage")
+    toolkit = build_agent_toolkit(
+        "knowledge_graph",
+        agent_tools=resolve_agent_tools(config, "lead", builtin_tool_registry()),
+        placement=tool_placement(paths, builtin_tool_registry()),
+        runtime_paths=paths,
+        tool_config_overrides={},
+        execution_identity=_OWNER,
+    )
+    assert toolkit is not None
+    assert "delete_graph_fact" in toolkit_function_names(toolkit)
+    authority = toolkit_authority(authority_snapshot(config, "lead"), toolkit)
+
+    def allowed(tool_name: str) -> bool:
+        return locally_allowed(
+            config,
+            _OWNER,
+            tool_name=tool_name,
+            toolkit_name="knowledge_graph",
+            origin={},
+            depth=0,
+            authority=authority,
+            tools=builtin_tool_registry(),
+        )
+
+    assert allowed("delete_graph_fact")
+    config.agents["lead"].knowledge_graph_edits = False
+    assert not allowed("delete_graph_fact")
+    assert allowed("search_graph")
+
+
+def test_constructor_identity_is_a_digest_with_separate_function_filters() -> None:
+    """Secrets do not survive in access evidence; order and function filters do not change identity."""
+    options = {"token": "synthetic-constructor-secret", "nested": {"endpoint": "example.test"}}
+    signature = tool_config_signature(options)
+    assert len(signature) == 64
+    assert "synthetic-constructor-secret" not in signature
+    assert signature == tool_config_signature({"nested": options["nested"], "token": options["token"]})
+    assert signature == tool_config_signature({**options, "include_tools": ["add"], "exclude_tools": ["subtract"]})
+    assert signature != tool_config_signature({**options, "token": "changed"})
+
+
+def _calculator_authority(config: Config) -> dict[str, object]:
+    toolkit = Toolkit(name="calculator", auto_register=False)
+    toolkit.functions["add"] = Function(name="add", entrypoint=lambda: None)
+    bind_toolkit_construction(
+        toolkit,
+        ToolConstruction.from_factory("calculator", builtin_tool_registry().factory("calculator")),
+    )
+    return toolkit_authority(authority_snapshot(config, "lead"), toolkit)
+
+
+def _calculator_allowed(config: Config, authority: dict[str, object]) -> bool:
+    return locally_allowed(
+        config,
+        _OWNER,
+        tool_name="add",
+        toolkit_name="calculator",
+        origin={},
+        depth=0,
+        authority=authority,
+        tools=builtin_tool_registry(),
+    )
+
+
+@pytest.mark.parametrize(
+    ("overrides", "expected_allowed"),
+    [
+        pytest.param({}, True, id="absent"),
+        pytest.param({"include_tools": None}, True, id="null"),
+        pytest.param({"include_tools": []}, False, id="empty"),
+        pytest.param({"include_tools": ["add"]}, True, id="allowed"),
+        pytest.param({"include_tools": ["subtract"]}, False, id="denied"),
+    ],
+)
+def test_authored_include_policy_matches_real_toolkit_surface(
+    tmp_path: Path,
+    overrides: dict[str, object],
+    expected_allowed: bool,
+) -> None:
+    """Retained authority must match absent, null, empty, and named toolkit filters."""
+    config = Config(
+        agents={
+            "lead": AgentConfig(
+                display_name="Lead",
+                tools=[ToolConfigEntry(name="calculator", defer=True, overrides=overrides)],
+            ),
+        },
+    )
+    effective = next(
+        entry for entry in resolve_agent_tools(config, "lead", builtin_tool_registry()).facts.authored if entry.defer
+    )
+    toolkit = get_tool_by_name(
+        "calculator",
+        resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage"),
+        tool_config_overrides=effective.tool_config_overrides,
+        runs_in_worker=False,
+        worker_target=None,
+        tools=builtin_tool_registry(),
+    )
+
+    assert ("add" in toolkit_function_names(toolkit)) is expected_allowed
+    assert _calculator_allowed(config, _calculator_authority(config)) is expected_allowed
+
+
+@pytest.mark.parametrize(
+    ("agent_overrides", "expected_allowed"),
+    [
+        pytest.param({}, False, id="inherited_exclusion"),
+        pytest.param({"exclude_tools": None}, True, id="null_clears_inherited_exclusion"),
+    ],
+)
+def test_nullable_authored_exclusion_matches_inherited_toolkit_surface(
+    tmp_path: Path,
+    agent_overrides: dict[str, object],
+    expected_allowed: bool,
+) -> None:
+    """A null authored exclusion clears the inherited denylist without crashing authorization."""
+    config = Config(
+        defaults=DefaultsConfig(
+            tools=[ToolConfigEntry(name="calculator", overrides={"exclude_tools": ["add"]})],
+        ),
+        agents={
+            "lead": AgentConfig(
+                display_name="Lead",
+                tools=[ToolConfigEntry(name="calculator", defer=True, overrides=agent_overrides)],
+            ),
+        },
+    )
+    effective = next(
+        entry for entry in resolve_agent_tools(config, "lead", builtin_tool_registry()).facts.authored if entry.defer
+    )
+    toolkit = get_tool_by_name(
+        "calculator",
+        resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage"),
+        tool_config_overrides=effective.tool_config_overrides,
+        runs_in_worker=False,
+        worker_target=None,
+        tools=builtin_tool_registry(),
+    )
+
+    assert ("add" in toolkit_function_names(toolkit)) is expected_allowed
+    assert _calculator_allowed(config, _calculator_authority(config)) is expected_allowed
+
+
+@pytest.mark.parametrize(
+    ("server_include", "authored_include", "expected_allowed"),
+    [
+        pytest.param([], None, True, id="empty_server_include_is_unrestricted"),
+        pytest.param(["read"], None, True, id="server_include_allows_name"),
+        pytest.param(["write"], None, False, id="server_include_denies_name"),
+        pytest.param([], [], True, id="empty_mcp_assignment_include_is_unrestricted"),
+        pytest.param([], ["read"], True, id="mcp_assignment_include_allows_name"),
+        pytest.param([], ["write"], False, id="mcp_assignment_include_denies_name"),
+    ],
+)
+def test_mcp_server_and_authored_include_conventions_remain_distinct(
+    server_include: list[str],
+    authored_include: list[str] | None,
+    expected_allowed: bool,
+) -> None:
+    """MCP assignment and server empty includes retain their unrestricted convention."""
+    config = Config.model_validate(
+        {
+            "agents": {"lead": {"display_name": "Lead"}},
+            "mcp_servers": {
+                "demo": {
+                    "transport": "stdio",
+                    "command": "test-server",
+                    "include_tools": server_include,
+                },
+            },
+        },
+    )
+    overrides = {} if authored_include is None else {"include_tools": authored_include}
+    entry = EffectiveToolConfig(name="mcp_demo", tool_config_overrides=overrides)
+    tools = compose_tool_registry({}, mcp_tool_entries(config.mcp_servers))
+    construction_origin = tools.origin("mcp_demo")
+
+    assert (
+        _configured_tool_allowed(
+            config,
+            tools,
+            entry,
+            "read",
+            {"mcp_server_id": "demo", "mcp_tool_name": "read"},
+            {"name": "mcp_demo", "factory_origin": construction_origin},
+        )
+        is expected_allowed
+    )
+
+
+@pytest.mark.parametrize(
+    ("server_filters", "authored_filters"),
+    [
+        pytest.param(
+            {"include_tools": ["read"]},
+            {"exclude_tools": ["read"]},
+            id="server_includes_assignment_excludes",
+        ),
+        pytest.param(
+            {"exclude_tools": ["read"]},
+            {"include_tools": ["read"]},
+            id="server_excludes_assignment_includes",
+        ),
+    ],
+)
+@pytest.mark.asyncio
+async def test_mcp_cross_owner_exclusion_wins_for_construction_and_retained_authorization(
+    tmp_path: Path,
+    server_filters: dict[str, list[str]],
+    authored_filters: dict[str, list[str]],
+) -> None:
+    """A denylist at either MCP filter layer must hide and deauthorize a remote tool."""
+    config = Config.model_validate(
+        {
+            "agents": {"lead": {"display_name": "Lead"}},
+            "mcp_servers": {
+                "demo": {
+                    "transport": "stdio",
+                    "command": "test-server",
+                    **server_filters,
+                },
+            },
+        },
+    )
+
+    class _SingleToolSession:
+        @staticmethod
+        async def list_tools(cursor: str | None = None, **_kwargs: object) -> mcp_types.ListToolsResult:
+            assert cursor is None
+            return mcp_types.ListToolsResult(
+                tools=[
+                    mcp_types.Tool(
+                        name="read",
+                        description="Read",
+                        input_schema={"type": "object", "properties": {}},
+                    ),
+                ],
+            )
+
+    manager = MCPServerManager(
+        resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path / "storage"),
+    )
+    catalog = await manager._discover_catalog(
+        "demo",
+        config.mcp_servers["demo"],
+        cast("ClientSession", _SingleToolSession()),
+        mcp_types.InitializeResult(
+            protocol_version="2025-03-26",
+            capabilities=mcp_types.ServerCapabilities(),
+            server_info=mcp_types.Implementation(name="demo", version="1.0"),
+        ),
+    )
+    toolkit = MindRoomMCPToolkit(
+        server_id="demo",
+        manager=manager,
+        catalog=catalog,
+        server_config=config.mcp_servers["demo"],
+        include_tools=authored_filters.get("include_tools"),
+        exclude_tools=authored_filters.get("exclude_tools"),
+    )
+    entry = EffectiveToolConfig(name="mcp_demo", tool_config_overrides=authored_filters)
+    tools = compose_tool_registry({}, mcp_tool_entries(config.mcp_servers))
+    construction_origin = tools.origin("mcp_demo")
+
+    assert "demo_read" not in toolkit.functions
+    assert not _configured_tool_allowed(
+        config,
+        tools,
+        entry,
+        "read",
+        {"mcp_server_id": "demo", "mcp_tool_name": "read"},
+        {"name": "mcp_demo", "factory_origin": construction_origin},
+    )
+
+
+def _oauth_demo_config() -> Config:
+    """Return a config whose MCP server ``demo`` is OAuth-backed, so its toolkit offers the local bridge functions."""
+    return Config.model_validate(
+        {
+            "agents": {"lead": {"display_name": "Lead"}},
+            "mcp_servers": {
+                "demo": {
+                    "transport": "streamable-http",
+                    "url": "https://mcp.example.test/api",
+                    "auth": {
+                        "type": "oauth",
+                        "discovery": "manual",
+                        "authorization_url": "https://auth.example.test/authorize",
+                        "token_url": "https://auth.example.test/token",
+                    },
+                },
+            },
+        },
+    )
+
+
+def test_mcp_oauth_helpers_bypass_remote_tool_filters() -> None:
+    """MCP assignment filters apply to remote names, not always-visible local OAuth helpers."""
+    config = _oauth_demo_config()
+    overrides = {"include_tools": [], "exclude_tools": ["demo_connection_status"]}
+    toolkit = MindRoomMCPToolkit(
+        server_id="demo",
+        manager=None,
+        catalog=None,
+        tool_name="mcp_demo",
+        server_config=config.mcp_servers["demo"],
+        include_tools=overrides["include_tools"],
+        exclude_tools=overrides["exclude_tools"],
+    )
+    entry = EffectiveToolConfig(name="mcp_demo", tool_config_overrides=overrides)
+    tools = compose_tool_registry({}, mcp_tool_entries(config.mcp_servers))
+    construction_origin = tools.origin("mcp_demo")
+
+    assert "demo_connection_status" in toolkit.functions
+    assert _configured_tool_allowed(
+        config,
+        tools,
+        entry,
+        "demo_connection_status",
+        {"mcp_server_id": "demo"},
+        {"name": "mcp_demo", "factory_origin": construction_origin},
+    )
+
+
+def test_a_retained_mcp_bridge_call_names_the_remote_tool_it_calls() -> None:
+    """A job's provenance names its MCP server and the remote tool the call names, which retained grants filter."""
+    config = _oauth_demo_config()
+    toolkit = MindRoomMCPToolkit(
+        server_id="demo",
+        manager=None,
+        catalog=None,
+        tool_name="mcp_demo",
+        server_config=config.mcp_servers["demo"],
+    )
+    tools = toolkit_job_tools(toolkit, authored_name="mcp_demo")
+
+    assert function_provenance(tools["demo_call_tool"], {"tool_name": "read", "arguments": {}}) == {
+        "mcp_server_id": "demo",
+        "mcp_tool_name": "read",
+    }
+    # Listing the remote tools calls none of them.
+    assert function_provenance(tools["demo_list_tools"]) == {"mcp_server_id": "demo", "mcp_tool_name": None}
+
+
+def test_deferred_job_policy_uses_authored_grants_but_rejects_new_filters_and_origin(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Historical reads use authored grants and provenance without constructing tools."""
+    config = Config(
+        agents={"lead": AgentConfig(display_name="Lead", tools=[ToolConfigEntry(name="calculator", defer=True)])},
+    )
+    owner = ToolExecutionIdentity("matrix", "lead", "@human:localhost", "!room:localhost", None, None, "session")
+    toolkit = Toolkit(name="calculator", auto_register=False)
+    toolkit.functions["add"] = Function(name="add", entrypoint=lambda: None)
+    bind_toolkit_construction(
+        toolkit,
+        ToolConstruction.from_factory("calculator", builtin_tool_registry().factory("calculator")),
+    )
+    snapshot = toolkit_authority(authority_snapshot(config, "lead"), toolkit)
+
+    def allowed() -> bool:
+        return locally_allowed(
+            config,
+            owner,
+            tool_name="add",
+            toolkit_name="calculator",
+            origin={},
+            depth=0,
+            authority=snapshot,
+            tools=builtin_tool_registry(),
+        )
+
+    assert allowed()
+    config.agents["lead"].tools = [ToolConfigEntry(name="calculator", defer=True, overrides={"exclude_tools": ["add"]})]
+    assert not allowed()
+    config.agents["lead"].tools = [ToolConfigEntry(name="calculator", defer=True)]
+    assert allowed()
+
+    def replacement() -> type[Toolkit]:
+        msg = "Historical access must not construct a toolkit"
+        raise AssertionError(msg)
+
+    replace_test_tool_factory(monkeypatch, "calculator", replacement)
+    assert not allowed()

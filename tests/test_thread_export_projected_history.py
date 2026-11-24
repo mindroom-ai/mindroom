@@ -12,14 +12,21 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
-from unittest.mock import Mock
+from unittest.mock import AsyncMock, Mock, patch
+from urllib.parse import quote
 
 import nio
 import pytest
+import yaml
 from nio.crypto.attachments import encrypt_attachment
 
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
 from mindroom.config.main import Config
-from mindroom.event_journal import DepartureSource, EventClass, EventKind
+from mindroom.constants import STREAM_STATUS_COMPLETED, STREAM_STATUS_KEY, STREAM_STATUS_PENDING
+from mindroom.event_journal import DepartureSource, EventClass, EventKind, HydrationPolicy, journal, views
+from mindroom.event_journal.identity import journal_principal_id
+from mindroom.event_journal.principal_rows import PrincipalRows
+from mindroom.event_journal.views import ExportProjectionView
 from mindroom.matrix.conversation_hydration import (
     _MAX_FETCHED_EVENTS,
     _MAX_MESSAGES_REQUESTS,
@@ -28,23 +35,35 @@ from mindroom.matrix.conversation_hydration import (
 )
 from mindroom.matrix.conversation_reads import ConversationReader
 from mindroom.matrix.journal_ingress import _inbound_event, _projected_event
-from mindroom.thread_export import projected_history
+from mindroom.thread_export import ThreadExportSource, ThreadExportTarget, export_threads_to_sources, projected_history
+from mindroom.thread_export.models import ThreadExportRoom
 from mindroom.thread_export.projected_history import (
     ProjectedThreadReader,
     ThreadExportIncompleteError,
     export_conversation_reader,
     fetch_projected_thread_history,
 )
-from tests.conftest import TEST_ACCESS_TOKEN, FakeMediaResponse, make_matrix_client_mock, serve_media_download
+from mindroom.tool_system.events import ToolTraceEntry, build_tool_trace_content, tool_markers_out_of_text
+from tests.conftest import (
+    TEST_ACCESS_TOKEN,
+    FakeMediaResponse,
+    make_matrix_client_mock,
+    runtime_paths_for,
+    serve_media_download,
+)
 from tests.journal_membership_helpers import admit_room_membership
+from tests.thread_export_helpers import thread_export_config
+from tests.tool_position_helpers import _SHELL, _marked
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterable
+    from pathlib import Path
 
     from nio.api import RelationshipType
 
     from mindroom.event_journal import EventJournalStore, PrincipalStore
     from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
+    from mindroom.thread_export.execution import ExportedThreads
 
 pytestmark = pytest.mark.asyncio
 
@@ -52,7 +71,8 @@ ROOM = "!room:example.org"
 ROOT = "$root:example.org"
 ALICE = "@alice:example.org"
 ROUTER = "@mindroom_router:example.org"
-PRINCIPAL = f"router@{ROUTER}"
+HELPER = "@mindroom_helper:example.org"
+PRINCIPAL = journal_principal_id("router", ROUTER)
 SIDECAR_URL = "mxc://example.org/whole-message"
 SIDECAR_TEXT = "the whole long message, all of it, well past any preview"
 THREAD_SUMMARY_KEY = "io.mindroom.thread_summary"
@@ -131,6 +151,8 @@ class FakeHomeserver:
     messages_calls: int = 0
     download_calls: int = 0
     access_token: str = TEST_ACCESS_TOKEN
+    # No decryption keys: an encrypted event reaches the hydrator unreadable.
+    olm: object | None = None
 
     @property
     def history_calls(self) -> int:
@@ -312,9 +334,10 @@ async def test_a_cold_thread_hydrates_once_and_then_costs_no_history_calls(
     cold = await export(reader)
 
     assert bodies(cold) == ["root", "first", "second"]
-    # One fetch of the root and one walk of its relation tree: no `/messages`
-    # scan of the room, and no per-message refetch.
-    assert (homeserver.get_event_calls, homeserver.relation_calls) == (1, 1)
+    # One fetch of the root, one walk of its relation tree, and one request
+    # asking how deep a walk holding no edit went: no `/messages` scan of the
+    # room, and no per-message refetch.
+    assert (homeserver.get_event_calls, homeserver.relation_calls) == (1, 2)
     assert (homeserver.messages_calls, homeserver.download_calls) == (0, 0)
 
     homeserver.reset_counts()
@@ -322,6 +345,30 @@ async def test_a_cold_thread_hydrates_once_and_then_costs_no_history_calls(
 
     assert bodies(warm) == ["root", "first", "second"]
     assert homeserver.history_calls == 0
+
+
+async def test_an_export_reads_an_agents_reply_with_tool_calls_as_it_was_built(router: PrincipalStore) -> None:
+    """Matrix holds a reply without its tool marker lines, and the projection an export shares with turns holds them."""
+    built = _marked("Looked.\n\n🔧 `shell` [1]", [_SHELL])
+    held = tool_markers_out_of_text(built)
+    assert held["body"] == "Looked."
+    homeserver = FakeHomeserver()
+    replies = [
+        raw(f"$by{number}:example.org", "", ts=200 + number, sender=sender, thread_id=ROOT, extra_content=held)
+        for number, sender in enumerate((HELPER, ALICE))
+    ]
+    serve_thread(homeserver, raw(ROOT, "root", ts=100), replies)
+    reader = export_conversation_reader(
+        client=homeserver,  # type: ignore[arg-type]
+        config=Config(),
+        store=router,
+        self_sender=ROUTER,
+    )
+
+    assert bodies(await export(reader)) == ["root", "Looked.", "Looked."]
+
+    page = await router.read_conversation(room_id=ROOM, thread_id=ROOT, limit=10)
+    assert [message.content["body"] for message in page.messages] == ["root", built["body"], "Looked."]
 
 
 async def test_a_warm_thread_reads_locally_from_a_second_export_login(
@@ -362,7 +409,7 @@ async def test_live_sync_rows_alone_do_not_count_as_a_built_conversation(
 
     await export(reader)
 
-    assert (homeserver.get_event_calls, homeserver.relation_calls) == (1, 1)
+    assert (homeserver.get_event_calls, homeserver.relation_calls) == (1, 2)
 
     homeserver.reset_counts()
     await export(reader)
@@ -392,7 +439,7 @@ async def test_a_thread_longer_than_one_page_exports_in_order_with_one_root(
     assert event_ids(messages)[0] == ROOT
     # Paging must not re-hydrate: the walk happens once for the conversation,
     # not once per page.
-    assert (homeserver.get_event_calls, homeserver.relation_calls) == (1, 1)
+    assert (homeserver.get_event_calls, homeserver.relation_calls) == (1, 2)
 
 
 async def test_an_edited_message_exports_its_current_revision(router: PrincipalStore) -> None:
@@ -417,6 +464,71 @@ async def test_an_edited_message_exports_its_current_revision(router: PrincipalS
     # The ordering key stays the original's; the edit's own time is separate.
     assert edited.timestamp == 200
     assert edited.edited_timestamp == 500
+
+
+def streamed_reply(event_id: str, *, ts: int) -> dict[str, Any]:
+    """Return an agent reply still showing its streaming placeholder."""
+    return raw(
+        event_id,
+        "Thinking...",
+        ts=ts,
+        sender=HELPER,
+        thread_id=ROOT,
+        extra_content={STREAM_STATUS_KEY: STREAM_STATUS_PENDING},
+    )
+
+
+def stream_ending(event_id: str, *, replaces: str, ts: int) -> dict[str, Any]:
+    """Return the edit that ends a streamed reply, its status in the new content."""
+    ending = raw(event_id, "the whole answer", ts=ts, sender=HELPER, replaces=replaces)
+    ending["content"]["m.new_content"][STREAM_STATUS_KEY] = STREAM_STATUS_COMPLETED
+    return ending
+
+
+async def test_a_reply_ending_the_thread_walk_missed_is_exported(router: PrincipalStore) -> None:
+    """A recursive walk that left out how a reply ended still exports the ending, not its placeholder."""
+    homeserver = FakeHomeserver()
+    serve_thread(homeserver, raw(ROOT, "root", ts=100), [streamed_reply("$a:example.org", ts=200)])
+    homeserver.relations["$a:example.org"] = [stream_ending("$a-end:example.org", replaces="$a:example.org", ts=300)]
+
+    messages = await export(reader_for(router, homeserver))
+
+    assert bodies(messages) == ["root", "the whole answer"]
+
+
+async def test_a_thread_an_older_walk_left_mid_stream_exports_the_ending(
+    journal_store: EventJournalStore,
+    router: PrincipalStore,
+) -> None:
+    """A thread an older walk marked whole with a reply at its placeholder is walked again before it is exported.
+
+    Export rewrites a thread's file whenever its bytes change, so the next pass
+    after this read replaces a placeholder already written to disk.
+    """
+    root = raw(ROOT, "root", ts=100)
+    reply = streamed_reply("$a:example.org", ts=200)
+    await router.install_hydrated_conversation(
+        room_id=ROOM,
+        thread_id=ROOT,
+        events=tuple(
+            projected
+            for source in (root, reply)
+            if (projected := _projected_event(ROOM, parse(source), EventKind.MESSAGE, self_sender=ROUTER)) is not None
+        ),
+        complete=True,
+        attempted_policy_rank=HydrationPolicy.EXPORT,
+        expected_membership_epoch=await router.membership_epoch(ROOM),
+    )
+    await journal_store.backend.write(
+        lambda transaction: transaction.execute("UPDATE conversation_hydration SET walk_version = walk_version - 1"),
+    )
+    homeserver = FakeHomeserver()
+    serve_thread(homeserver, root, [reply])
+    homeserver.relations["$a:example.org"] = [stream_ending("$a-end:example.org", replaces="$a:example.org", ts=300)]
+
+    messages = await export(reader_for(router, homeserver))
+
+    assert bodies(messages) == ["root", "the whole answer"]
 
 
 async def test_a_replacement_from_another_sender_is_not_an_edit(router: PrincipalStore) -> None:
@@ -642,6 +754,31 @@ async def test_a_thread_summary_notice_keeps_its_metadata_through_the_export(
     assert messages[1].reply_to_event_id == ROOT
 
 
+async def test_an_agent_reply_exports_without_tool_display_markers(router: PrincipalStore) -> None:
+    """Agents grep exports with file tools, so a reply keeps its text and loses its display markers."""
+    homeserver = FakeHomeserver()
+    body = "Checked.\n\n🔧 `shell` [1]\n\nAll good."
+    serve_thread(
+        homeserver,
+        raw(ROOT, "root", ts=100),
+        [
+            raw(
+                "$reply:example.org",
+                body,
+                ts=200,
+                sender=ROUTER,
+                thread_id=ROOT,
+                extra_content=build_tool_trace_content([ToolTraceEntry(type="tool_call_completed", tool_name="shell")]),
+            ),
+        ],
+    )
+
+    messages = await export(reader_for(router, homeserver))
+
+    assert "🔧" not in messages[1].body
+    assert messages[1].body.endswith("All good.")
+
+
 @pytest.mark.parametrize("character", ["x", "€"])
 async def test_a_thread_fails_as_too_large_once_it_holds_twice_the_read_cap(
     router: PrincipalStore,
@@ -689,8 +826,195 @@ async def test_rejoining_the_room_forces_one_fresh_hydration(router: PrincipalSt
     ]
     messages = await export(reader)
 
-    assert (homeserver.get_event_calls, homeserver.relation_calls) == (1, 1)
+    assert (homeserver.get_event_calls, homeserver.relation_calls) == (1, 2)
     assert bodies(messages) == ["root", "first", "second"]
+
+
+@pytest.mark.parametrize("departs", ["before_the_first_chunk", "after_the_first_chunk"])
+async def test_a_walk_the_account_left_the_room_under_installs_no_more_and_the_export_walks_again(
+    router: PrincipalStore,
+    monkeypatch: pytest.MonkeyPatch,
+    departs: str,
+) -> None:
+    """A departure refuses what a walk in flight still writes, so no rejoin reads the membership before.
+
+    The owner account keeps one membership epoch, so only the room's projection generation tells its memberships
+    apart: without it the walk would install the chunks the departure did not drop, or the history it fetched before
+    the departure, and mark that complete.
+    """
+    homeserver = FakeHomeserver()
+    serve_thread(
+        homeserver,
+        raw(ROOT, "root", ts=100),
+        [
+            raw("$a:example.org", "first", ts=200, thread_id=ROOT),
+            raw("$b:example.org", "second", ts=300, thread_id=ROOT),
+        ],
+    )
+    await admit_room_membership(router, ROOM, "join")
+    monkeypatch.setattr(views, "_HYDRATION_INSTALL_CHUNK_SIZE", 1)
+    write = PrincipalRows._write
+    rejoined = False
+
+    async def rejoin_once() -> None:
+        nonlocal rejoined
+        if not rejoined:
+            rejoined = True
+            await admit_room_membership(router, ROOM, "leave", source=DepartureSource.LOCAL)
+            await admit_room_membership(router, ROOM, "join")
+            homeserver.relations[ROOT] = [raw("$c:example.org", "third", ts=400, thread_id=ROOT)]
+
+    async def write_around_a_rejoin(self: PrincipalRows, operation: Any, *args: Any, **kwargs: Any) -> Any:  # noqa: ANN401
+        installs = operation is journal.install_hydration_chunk
+        if installs and departs == "before_the_first_chunk":
+            await rejoin_once()
+        result = await write(self, operation, *args, **kwargs)
+        if installs:
+            await rejoin_once()
+        return result
+
+    monkeypatch.setattr(PrincipalRows, "_write", write_around_a_rejoin)
+    reader = reader_for(router, homeserver)
+
+    assert bodies(await export(reader)) == ["root", "third"]
+    homeserver.reset_counts()
+    assert bodies(await export(reader)) == ["root", "third"]
+    assert (homeserver.get_event_calls, homeserver.relation_calls) == (0, 0)
+
+
+async def test_a_thread_fingerprint_moves_with_every_change_its_export_shows(router: PrincipalStore) -> None:
+    """A thread's fingerprint holds while nothing its export shows changes, and moves with every change that does.
+
+    A workspace pass skips a thread whose fingerprint has not moved since the pass that wrote it, so a change this
+    missed would leave an export showing what the thread no longer says.
+    """
+    homeserver = FakeHomeserver()
+    root = raw(ROOT, "root", ts=100)
+    original = raw("$b:example.org", "v1", ts=200, thread_id=ROOT)
+    serve_thread(homeserver, root, [original])
+    reader = reader_for(router, homeserver)
+    await admit_live(router, [root, original])
+    # Without a hydration marker a strict read walks the server, so nothing local vouches for the thread.
+    assert await router.thread_fingerprint(room_id=ROOM, thread_id=ROOT) is None
+    await prompt_reader_for(router, homeserver, window_messages=1).read_strict(room_id=ROOM, thread_id=ROOT, limit=50)
+    assert await router.conversation_hydration_was_truncated(room_id=ROOM, thread_id=ROOT)
+    seen = [await router.thread_fingerprint(room_id=ROOM, thread_id=ROOT)]
+    assert seen[0] is not None
+
+    async def moved() -> bool:
+        fingerprint = await router.thread_fingerprint(room_id=ROOM, thread_id=ROOT)
+        new = fingerprint not in seen
+        seen.append(fingerprint)
+        return new
+
+    # The export walks the whole thread, finding only rows sync already admitted, so only the marker changes.
+    await export(reader)
+    assert await moved()
+    await admit_live(router, [raw("$other:example.org", "elsewhere", ts=150, thread_id="$elsewhere:example.org")])
+    assert not await moved()
+    await admit_live(router, [raw("$edit:example.org", "v2", ts=300, replaces="$b:example.org")])
+    assert await moved()
+    reply = raw("$c:example.org", "reply", ts=350, thread_id=ROOT)
+    await admit_live(router, [reply])
+    assert await moved()
+    await admit_live(router, [raw("$root-edit:example.org", "root v2", ts=360, replaces=ROOT)])
+    assert await moved()
+    # Redacting the visible edit withholds the body until a strict read refetches the original.
+    homeserver.relations["$b:example.org"] = []
+    await admit_live(router, [redaction("$r:example.org", "$edit:example.org", ts=400)])
+    assert await moved()
+    await export(reader)
+    assert await moved()
+    await admit_live(router, [redaction("$r2:example.org", "$c:example.org", ts=500)])
+    assert await moved()
+    # A rejoin ends the hydration marker, so the next strict read walks the thread again.
+    await admit_room_membership(router, ROOM, "leave", source=DepartureSource.LOCAL)
+    await admit_room_membership(router, ROOM, "join")
+    assert await router.thread_fingerprint(room_id=ROOM, thread_id=ROOT) is None
+
+
+async def workspace_pass(
+    store: PrincipalStore,
+    homeserver: FakeHomeserver,
+    tmp_path: Path,
+    exported: ExportedThreads,
+) -> list[str]:
+    """Run one workspace export pass over the thread and return the bodies its file holds."""
+    config = thread_export_config(tmp_path)
+    output_dir = tmp_path / "exports"
+    source = ThreadExportSource(
+        client=homeserver,  # type: ignore[arg-type]
+        reader=reader_for(store, homeserver),
+        rooms=(ThreadExportRoom(key="room", room_id=ROOM, alias="", name="Room"),),
+        entity_name="router",
+        membership_index=AgentReplyMembershipIndex(),
+        exported=exported,
+    )
+    with patch(
+        "mindroom.thread_export.execution.enumerate_room_thread_root_ids",
+        new=AsyncMock(return_value=([ROOT], False)),
+    ):
+        (stats,) = await export_threads_to_sources(
+            config=config,
+            runtime_paths=runtime_paths_for(config),
+            sources=(source,),
+            targets=(ThreadExportTarget(output_dir=output_dir),),
+            full_pass=False,
+        )
+    assert stats.failures == 0
+    exported_file = output_dir / "room" / f"{quote(ROOT, safe='')}.yaml"
+    return [message["body"] for message in yaml.safe_load(exported_file.read_text(encoding="utf-8"))["messages"]]
+
+
+async def test_a_rejoin_after_a_cold_export_exports_what_changed_while_away(
+    router: PrincipalStore,
+    tmp_path: Path,
+) -> None:
+    """A workspace pass after a rejoin walks the thread again, even one the previous pass exported cold.
+
+    The cold pass read the thread with no hydration marker. A rejoin removes the marker again, and sync can deliver
+    the same rows back, so the thread looks as it did when the cold pass read it, and only a walk shows what changed.
+    """
+    homeserver = FakeHomeserver()
+    root = raw(ROOT, "root", ts=100)
+    first = raw("$a:example.org", "first", ts=200, thread_id=ROOT)
+    serve_thread(homeserver, root, [first])
+    exported: ExportedThreads = {}
+
+    assert await workspace_pass(router, homeserver, tmp_path, exported) == ["root", "first"]
+    await admit_room_membership(router, ROOM, "leave", source=DepartureSource.LOCAL)
+    await admit_room_membership(router, ROOM, "join")
+    await admit_live(router, [root, first])
+    serve_thread(homeserver, root, [first, raw("$b:example.org", "second", ts=300, thread_id=ROOT)])
+
+    assert await workspace_pass(router, homeserver, tmp_path, exported) == ["root", "first", "second"]
+
+
+async def test_a_reply_a_pass_read_and_its_sender_deleted_since_leaves_the_export(
+    router: PrincipalStore,
+    tmp_path: Path,
+) -> None:
+    """A reply admitted while a pass reads the thread, then deleted, is gone after the next pass.
+
+    The thread's rows after the deletion are the rows the pass found before it read, so what the pass remembers
+    has to be the rows it read.
+    """
+    homeserver = FakeHomeserver()
+    serve_thread(homeserver, raw(ROOT, "root", ts=100), [raw("$a:example.org", "first", ts=200, thread_id=ROOT)])
+    exported: ExportedThreads = {}
+    await workspace_pass(router, homeserver, tmp_path, exported)
+    fingerprint = ExportProjectionView.thread_fingerprint
+
+    async def admit_after_fingerprint(view: ExportProjectionView, **kwargs: str) -> object:
+        taken = await fingerprint(view, **kwargs)
+        await admit_live(router, [raw("$late:example.org", "regret", ts=300, thread_id=ROOT)])
+        return taken
+
+    with patch.object(ExportProjectionView, "thread_fingerprint", admit_after_fingerprint):
+        assert await workspace_pass(router, homeserver, tmp_path, exported) == ["root", "first", "regret"]
+    await admit_live(router, [redaction("$r:example.org", "$late:example.org", ts=400)])
+
+    assert await workspace_pass(router, homeserver, tmp_path, exported) == ["root", "first"]
 
 
 async def test_a_thread_whose_root_the_server_lost_fails_rather_than_exporting_replies(
@@ -721,7 +1045,7 @@ async def test_one_principals_warm_projection_does_not_serve_another(
     other = journal_store.principal("general@@mindroom_general:example.org")
     await export(reader_for(other, homeserver))
 
-    assert (homeserver.get_event_calls, homeserver.relation_calls) == (1, 1)
+    assert (homeserver.get_event_calls, homeserver.relation_calls) == (1, 2)
 
 
 async def test_a_thread_hydration_could_not_finish_fails_rather_than_exporting_a_suffix(

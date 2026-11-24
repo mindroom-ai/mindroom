@@ -13,32 +13,29 @@ import warnings
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
-from agno.media import Image
-
 from mindroom.file_access import resolve_agent_file
+from mindroom.llm.media import VIEWED_IMAGE_ID_PREFIX, Image
+from mindroom.tool_system.tool_function import ToolValue
 
 if TYPE_CHECKING:
     from pathlib import Path
 
-    from agno.tools.function import ToolResult
     from PIL.Image import Image as PillowImage
 
     from mindroom.config.models import FileAccess
     from mindroom.file_access import AuthorizedFile
 
-VIEWED_IMAGE_ID_PREFIX = "mindroom_viewed_"
 MAX_SOURCE_BYTES = 20 * 1024 * 1024
 _MAX_IMAGE_BYTES = 5 * 1024 * 1024
-_MAX_PIXELS = 40_000_000
+# Untrusted images decode only in these formats, so Pillow never hands them to an external renderer such as Ghostscript.
+SUPPORTED_IMAGE_FORMATS = ("PNG", "JPEG", "GIF", "WEBP")
+MAX_DECODED_PIXELS = 40_000_000
 _MAX_EDGE = 2048
-_SUPPORTED_FORMATS = {"PNG", "JPEG", "GIF", "WEBP"}
 
 
-def media_error(message: str, *, metadata: dict[str, object]) -> ToolResult:
+def media_error(message: str, *, metadata: dict[str, object]) -> ToolValue:
     """Keep the artifact receipt while explicitly reporting unsuccessful viewing."""
-    from agno.tools.function import ToolResult  # noqa: PLC0415
-
-    return ToolResult(content=json.dumps({**metadata, "view_status": "error", "message": message}, sort_keys=True))
+    return ToolValue(content=json.dumps({**metadata, "view_status": "error", "message": message}, sort_keys=True))
 
 
 def _encode_image(image: PillowImage) -> tuple[bytes, str]:
@@ -54,10 +51,8 @@ def _encode_image(image: PillowImage) -> tuple[bytes, str]:
     return output.getvalue(), "image/jpeg"
 
 
-def image_result(data: bytes, *, metadata: dict[str, object]) -> ToolResult:  # noqa: PLR0911
+def image_result(data: bytes, *, metadata: dict[str, object]) -> ToolValue:  # noqa: PLR0911
     """Deliver supported image bytes as model media with disclosed transformations."""
-    from agno.tools.function import ToolResult  # noqa: PLC0415
-
     if not data:
         return media_error("Image file is empty.", metadata=metadata)
     if len(data) > MAX_SOURCE_BYTES:
@@ -72,10 +67,13 @@ def image_result(data: bytes, *, metadata: dict[str, object]) -> ToolResult:  # 
             warnings.simplefilter("error", PILImage.DecompressionBombWarning)
             with PILImage.open(io.BytesIO(data)) as source:
                 original_width, original_height = source.size
-                if source.format not in _SUPPORTED_FORMATS:
+                if source.format not in SUPPORTED_IMAGE_FORMATS:
                     return media_error("Viewing supports PNG, JPEG, GIF and WebP images.", metadata=metadata)
-                if original_width * original_height > _MAX_PIXELS:
-                    return media_error(f"Image exceeds the {_MAX_PIXELS}-pixel decoded limit.", metadata=metadata)
+                if original_width * original_height > MAX_DECODED_PIXELS:
+                    return media_error(
+                        f"Image exceeds the {MAX_DECODED_PIXELS}-pixel decoded limit.",
+                        metadata=metadata,
+                    )
                 animated = source.n_frames > 1 if source.format in {"GIF", "WEBP", "PNG"} else False
                 source.seek(0)
                 oriented = ImageOps.exif_transpose(source)
@@ -118,9 +116,9 @@ def image_result(data: bytes, *, metadata: dict[str, object]) -> ToolResult:  # 
         "converted": converted,
         "first_frame_only": animated,
     }
-    return ToolResult(
+    return ToolValue(
         content=json.dumps(receipt, sort_keys=True),
-        images=[Image(id=f"{VIEWED_IMAGE_ID_PREFIX}{uuid4().hex}", content=data, mime_type=mime_type)],
+        images=(Image(id=f"{VIEWED_IMAGE_ID_PREFIX}{uuid4().hex}", content=data, mime_type=mime_type),),
     )
 
 
@@ -133,7 +131,7 @@ def _read_authorized_image(authorized: AuthorizedFile) -> bytes:
         return file.read(MAX_SOURCE_BYTES + 1)
 
 
-def view_agent_image(path: str, *, workspace: Path | None, file_access: FileAccess) -> ToolResult:
+def view_agent_image(path: str, *, workspace: Path | None, file_access: FileAccess) -> ToolValue:
     """Read one regular image under the agent's file access, resolving relative paths from the workspace."""
     metadata: dict[str, object] = {"path": path}
     if not isinstance(path, str) or not path.strip():

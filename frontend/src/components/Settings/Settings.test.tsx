@@ -57,7 +57,10 @@ const ROOT: JsonSchema = {
     PersonalRoomsConfig: {
       type: "object",
       properties: {
-        agent: { type: "string", "x-mindroom": { reference: "agent" } },
+        agent: {
+          type: "string",
+          "x-mindroom": { reference: "personal_room_agent" },
+        },
       },
       required: ["agent"],
     },
@@ -110,6 +113,29 @@ describe("Settings", () => {
     );
     expect(updateConfigValue).toHaveBeenCalledWith(["personal_rooms"], {
       agent: "helper",
+    });
+  });
+
+  it("offers personal agent templates as the personal-room agent", () => {
+    vi.mocked(useConfigStore).mockReturnValue({
+      ...vi.mocked(useConfigStore)(),
+      config: {
+        ...vi.mocked(useConfigStore)().config,
+        personal_agents: { mind: { agent: { display_name: "Mind" } } },
+        personal_rooms: { agent: "helper" },
+      },
+    } as never);
+    render(<Settings />);
+    fireEvent.click(screen.getByRole("button", { name: "Personal rooms" }));
+    const agent = screen.getByRole("combobox", { name: "Agent" });
+    expect(
+      Array.from((agent as HTMLSelectElement).options).map(
+        (option) => option.value,
+      ),
+    ).toEqual(expect.arrayContaining(["helper", "mind"]));
+    fireEvent.change(agent, { target: { value: "mind" } });
+    expect(updateConfigValue).toHaveBeenCalledWith(["personal_rooms"], {
+      agent: "mind",
     });
   });
 

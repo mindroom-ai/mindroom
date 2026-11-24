@@ -9,9 +9,10 @@ replicaCount: 1
 
 image:
   repository: ghcr.io/mindroom-ai/mindroom-chat
-  tag: latest
+  # A MindRoom Chat release (vYYYY.M.N), from https://github.com/mindroom-ai/mindroom-chat/releases.
+  tag: v2026.11.0
   digest: ""
-  pullPolicy: Always
+  pullPolicy: IfNotPresent
 
 imagePullSecrets: []
 
@@ -85,6 +86,14 @@ bugReports:
   # Empty keeps the menu item as Download bug report, which saves the report as a file.
   admins: []
 
+# Custom emoji shared by everyone on the homeserver, kept in one room that the client joins automatically.
+serverEmoji:
+  # Room alias such as #emoji:example.com, or a room ID, published in /.well-known/matrix/client as io.mindroom.emoji.
+  # Quote the value, as in room: "#emoji:example.com": unquoted, # starts a YAML comment and ! a YAML tag, and the chart publishes nothing.
+  # Create the room with scripts/utilities/create_server_emoji_room.py.
+  # Empty keeps custom emoji personal to each user.
+  room: ""
+
 serviceWorker:
   # Register the client service worker, scoped to basePath.
   enabled: true
@@ -127,6 +136,12 @@ config:
   # Maps merge key by key across values files, lists replace, and string values are rendered with tpl.
   values: {}
 
+# Operator notices shown as banners above every client screen.
+notices:
+  # ConfigMap with a notices.json key, mounted so edits reach running pods without a restart.
+  # Leave empty to serve the image's empty notice list.
+  existingConfigMap: ""
+
 # Chart-managed nginx server configuration.
 nginx:
   # Container port nginx listens on. Ports below 1024 require extra privileges.
@@ -140,6 +155,10 @@ nginx:
   # Additional directives inserted into the chart-managed nginx server block.
   # The snippet is evaluated as a Helm template before it is rendered.
   serverSnippet: ""
+  # Additional directives inserted before the server block, at nginx's http
+  # level, for directives such as log_format that a server block cannot hold.
+  # The snippet is evaluated as a Helm template before it is rendered.
+  httpSnippet: ""
   # Key in the nginx ConfigMap holding the root cleanup service worker script.
   # An existing ConfigMap must provide this key when rootServiceWorkerCleanup is enabled.
   cleanupWorkerKey: root-cleanup-sw.js

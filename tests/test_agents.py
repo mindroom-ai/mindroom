@@ -10,20 +10,11 @@ import stat
 import tempfile
 from dataclasses import replace
 from pathlib import Path
-from types import SimpleNamespace
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Any, cast
 from unittest.mock import MagicMock, patch
 
 import pytest
-from agno.agent import Agent
-from agno.agent._init import set_learning_machine
-from agno.db.in_memory import InMemoryDb
-from agno.knowledge.knowledge import Knowledge
-from agno.learn import LearningMachine, LearningMode, UserMemoryConfig, UserProfileConfig
-from agno.run import RunContext
-from agno.run.agent import RunOutput
-from agno.session import AgentSession
-from agno.tools.function import Function, FunctionCall
+from agno.tools.function import Function
 from agno.tools.toolkit import Toolkit
 from pydantic import ValidationError
 from structlog.testing import capture_logs
@@ -31,18 +22,13 @@ from structlog.testing import capture_logs
 import mindroom.workspaces as workspaces_module
 from mindroom import agents as agents_module
 from mindroom import path_confinement, prompts
-from mindroom.agent_storage import get_agent_runtime_state_dbs
+from mindroom.agent_loop.build import AgentBuild, prompt_for_turn
 from mindroom.agents import (
-    _AdditionalContextChunk,
-    _apply_preload_cap,
     _load_context_files,
-    _prune_toolkit_functions,
     _render_tool_execution_environment,
-    _trim_chunk_tails,
     agent_build_can_overlap_file_memory,
     build_agent_toolkit,
     create_agent,
-    get_agent_toolkit_names,
 )
 from mindroom.config.agent import (
     AgentConfig,
@@ -52,22 +38,26 @@ from mindroom.config.agent import (
 )
 from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
 from mindroom.config.knowledge import KnowledgeBaseConfig, KnowledgeGitConfig
-from mindroom.config.main import Config
-from mindroom.config.models import DefaultsConfig, ModelConfig
-from mindroom.config.plugin import PluginEntryConfig
+from mindroom.config.main import Config, iter_config_validation_messages
+from mindroom.config.models import BackgroundToolJobsConfig, DefaultsConfig, ModelConfig
 from mindroom.constants import ROUTER_AGENT_NAME, RuntimePaths, resolve_runtime_paths
 from mindroom.credentials.manager import CredentialsManager, get_runtime_credentials_manager, load_scoped_credentials
-from mindroom.entity_resolution import managed_entity_power_user_ids_for_room
+from mindroom.custom_tools.thread_model import ThreadModelTools
+from mindroom.delegation.state import SubagentPersona
+from mindroom.entity_resolution import current_entity_id, managed_entity_power_user_ids_for_room
 from mindroom.entity_rooms import get_rooms_for_entity
-from mindroom.history.session_context import close_team_runtime_state_dbs
-from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, HookRegistry, ToolBeforeCallContext, hook
-from mindroom.knowledge.availability import KnowledgeAvailability
+from mindroom.hooks import EVENT_TOOL_BEFORE_CALL, ToolBeforeCallContext, hook
+from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, KnowledgeSourceDescription
 from mindroom.knowledge.utils import resolve_agent_knowledge_access
+from mindroom.llm.messages import system_text
 from mindroom.matrix.state import MatrixState
+from mindroom.memory import build_memory_prompt_parts
 from mindroom.private_storage.private_instance_identity import (
     PrivateInstanceIdentity,
     load_private_instance_identity,
+    private_instances_for_agent,
 )
+from mindroom.prompt_templates import render_prompt_template
 from mindroom.prompts import (
     HIDDEN_TOOL_CALLS_PROMPT,
     OPENAI_COMPAT_HISTORY_GUIDANCE,
@@ -80,9 +70,25 @@ from mindroom.runtime_resolution import (
 from mindroom.runtime_resolution import (
     resolve_agent_workspace_from_state_path as resolve_workspace,
 )
-from mindroom.teams import materialize_exact_team_members
-from mindroom.tool_call_budget import install_model_call_cap
+from mindroom.session_storage.agent_storage import create_session_storage
+from mindroom.shared_directories.store import (
+    PendingInvitation,
+    add_shared_directory_member,
+    create_shared_directory,
+    invite_pending_shared_directory_member,
+)
+from mindroom.teams.members import resolve_exact_team_members
+from mindroom.tool_jobs.execution import agent_tool_middleware
+from mindroom.tool_system.agent_tools import resolve_agent_tools
+from mindroom.tool_system.construction import get_toolkit_construction
+from mindroom.tool_system.declarations import ToolCategory, ToolFileAccess, ToolMetadata
+from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
 from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
+from mindroom.tool_system.plugins import config_plugins
+from mindroom.tool_system.registry import builtin_tool_registry
+from mindroom.tool_system.runtime_context import detached_tool_scope
+from mindroom.tool_system.sandbox_proxy import tool_placement
+from mindroom.tool_system.tool_function import ToolGate
 from mindroom.tool_system.worker_routing import (
     ToolExecutionIdentity,
     agent_state_root_path,
@@ -94,16 +100,23 @@ from mindroom.tool_system.worker_routing import (
     resolve_unscoped_worker_key,
     resolve_worker_key,
     shared_storage_root,
-    tool_execution_identity,
     visible_workspace_roots,
     worker_root_path,
 )
-from mindroom.workspaces import _copy_workspace_template, validate_workspace_template_dir
+from mindroom.workspaces import MIND_TEMPLATE_CONTEXT_FILES, _copy_workspace_template, validate_workspace_template_dir
+from tests.agent_tool_helpers import toolkit_offers
+from tests.conftest import publish_hook_plugin, register_test_tool, runtime_paths_for
+from tests.fakes.knowledge import published_index_lookup
 from tests.identity_helpers import persist_entity_accounts
+from tests.matrix_state_helpers import save_matrix_state
+from tests.tool_approval_helpers import gated_functions
+from tests.turn_model_helpers import turn_model
 
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from mindroom.knowledge.registry import PublishedIndexResolution
+    from mindroom.tool_system.tool_function import ToolFunction
     from mindroom.tool_system.worker_routing import WorkerScope
 
 
@@ -173,18 +186,37 @@ def _bind_runtime_paths(config: Config, runtime_paths: RuntimePaths) -> Config:
     return bound_config
 
 
-def _create_agent_for_test(agent_name: str, config: Config, **kwargs: object) -> Agent:
-    """Create an agent with the test config's explicit runtime context."""
-    from tests.conftest import runtime_paths_for  # noqa: PLC0415
+def _role(build: AgentBuild) -> str:
+    """Return the build's rendered role section."""
+    role = build.prompt.role
+    assert role is not None
+    return role
 
+
+def _offered(build: AgentBuild) -> dict[str, ToolFunction]:
+    """Return the functions a run of ``build`` offers the model, by name."""
+    return dict(build.spec.functions)
+
+
+def _toolkit_named(name: str, *_args: object, **_kwargs: object) -> Toolkit:
+    """Return a toolkit called ``name`` offering one function of its own, as the registered tool ``name`` would."""
+    return Toolkit(name=name, tools=[Function(name=f"{name}_probe", entrypoint=lambda: None)])
+
+
+def _create_agent_for_test(agent_name: str, config: Config, **kwargs: object) -> AgentBuild:
+    """Create an agent with the test config's explicit runtime context."""
+    runtime_paths = runtime_paths_for(config)
     execution_identity = cast("ToolExecutionIdentity | None", kwargs.pop("execution_identity", None))
+    kwargs.setdefault("supports_native_tool_approval", True)
+    if "model" not in kwargs:
+        kwargs["model"] = turn_model(config, runtime_paths, agent_name)
+    kwargs.setdefault("plugins", config_plugins(config, runtime_paths))
     return create_agent(
         agent_name,
         config,
-        runtime_paths_for(config),
+        runtime_paths,
         execution_identity=execution_identity,
-        supports_native_tool_approval=True,
-        **kwargs,
+        **({"knowledge": None} | kwargs),
     )
 
 
@@ -202,6 +234,7 @@ def test_managed_entity_power_user_ids_for_room_includes_configured_teams(tmp_pa
                     rooms=["ops"],
                 ),
             },
+            models={"default": ModelConfig(provider="openai", id="gpt-5.6-luna")},
         ),
         runtime_paths,
     )
@@ -218,6 +251,7 @@ def test_get_rooms_for_entity_uses_authored_entity_rooms_only(tmp_path: Path) ->
     config = _bind_runtime_paths(
         Config(
             agents={"general": AgentConfig(display_name="GeneralAgent", rooms=["lobby"])},
+            models={"default": ModelConfig(provider="openai", id="gpt-5.6-luna")},
         ),
         runtime_paths,
     )
@@ -226,42 +260,31 @@ def test_get_rooms_for_entity_uses_authored_entity_rooms_only(tmp_path: Path) ->
     assert get_rooms_for_entity(ROUTER_AGENT_NAME, config) == ["lobby"]
 
 
-class _TestVectorDb:
-    def exists(self) -> bool:
-        return True
-
-    def create(self) -> None:
-        return
-
-    def search(
-        self,
-        *,
-        query: str,
-        limit: int,
-        filters: dict[str, object] | list[object] | None = None,
-    ) -> list[object]:
-        _ = (query, limit, filters)
+class _EmptyIndex:
+    async def asearch(self, query: str, *, limit: int) -> list[object]:
+        _ = (query, limit)
         return []
 
 
-def _queryable_knowledge_handle() -> Knowledge:
-    return Knowledge(vector_db=_TestVectorDb())
+def _queryable_knowledge_handle() -> _EmptyIndex:
+    return _EmptyIndex()
+
+
+def _knowledge(base_id: str, *, description: str = "Reference docs.") -> AgentKnowledge:
+    """Return knowledge over one published source that the test never searches."""
+    source = KnowledgeSource(
+        description=KnowledgeSourceDescription(base_id=base_id, description=description),
+        index=cast("Any", _EmptyIndex()),
+    )
+    return AgentKnowledge(sources=(source,))
 
 
 def _patch_published_knowledge(
     monkeypatch: pytest.MonkeyPatch,
-    knowledge_by_base: dict[str, Knowledge],
+    knowledge_by_base: dict[str, _EmptyIndex],
 ) -> None:
-    def _get_published_index(base_id: str, **_kwargs: object) -> object:
-        return SimpleNamespace(
-            key=SimpleNamespace(base_id=base_id),
-            index=SimpleNamespace(
-                knowledge=knowledge_by_base[base_id],
-                state=SimpleNamespace(last_refresh_at=None, last_published_at=None),
-            ),
-            availability=KnowledgeAvailability.READY,
-            state=None,
-        )
+    def _get_published_index(base_id: str, **_kwargs: object) -> PublishedIndexResolution:
+        return published_index_lookup(base_id, knowledge_by_base[base_id])
 
     monkeypatch.setattr("mindroom.knowledge.utils.get_published_index", _get_published_index)
 
@@ -281,15 +304,15 @@ def test_agent_identity_prompt_can_be_overridden_from_config() -> None:
     openai_compat_agent = _create_agent_for_test(
         "general",
         config,
-        include_openai_compat_guidance=True,
+        outside_matrix=True,
     )
 
-    assert "## Custom Identity" in agent.role
-    assert "Name=GeneralAgent;" in agent.role
-    assert "## Your Identity" not in agent.role
-    assert "## Custom Identity" in openai_compat_agent.role
-    assert "Matrix=not available in OpenAI-compatible API" in openai_compat_agent.role
-    assert "OpenAI-compatible API" in openai_compat_agent.role
+    assert "## Custom Identity" in _role(agent)
+    assert "Name=GeneralAgent;" in _role(agent)
+    assert "## Your Identity" not in _role(agent)
+    assert "## Custom Identity" in _role(openai_compat_agent)
+    assert "Matrix=not available in OpenAI-compatible API" in _role(openai_compat_agent)
+    assert "OpenAI-compatible API" in _role(openai_compat_agent)
 
 
 def test_default_mind_role_includes_effective_matrix_homeserver(tmp_path: Path) -> None:
@@ -314,9 +337,9 @@ def test_default_mind_role_includes_effective_matrix_homeserver(tmp_path: Path) 
     mind = _create_agent_for_test("mind", config)
     general = _create_agent_for_test("general", config)
 
-    assert "## MindRoom Runtime" in mind.role
-    assert "Active Matrix homeserver: `https://matrix.self-hosted.example`" in mind.role
-    assert "## MindRoom Runtime" not in general.role
+    assert "## MindRoom Runtime" in _role(mind)
+    assert "Active Matrix homeserver: `https://matrix.self-hosted.example`" in _role(mind)
+    assert "## MindRoom Runtime" not in _role(general)
 
 
 def test_agent_identity_prompt_uses_persisted_current_matrix_id(tmp_path: Path) -> None:
@@ -338,12 +361,12 @@ def test_agent_identity_prompt_uses_persisted_current_matrix_id(tmp_path: Path) 
     )
     state = MatrixState.load(runtime_paths=runtime_paths)
     state.add_account("agent_general", "mindroom_general_oldns", "pw", domain="localhost")
-    state.save(runtime_paths=runtime_paths)
+    save_matrix_state(state, runtime_paths)
 
     agent = _create_agent_for_test("general", config)
 
-    assert "@mindroom_general_oldns:localhost" in agent.role
-    assert "@mindroom_general:localhost" not in agent.role
+    assert "@mindroom_general_oldns:localhost" in _role(agent)
+    assert "@mindroom_general:localhost" not in _role(agent)
 
 
 def test_create_agent_includes_openai_compat_guidance_only_when_requested() -> None:
@@ -354,14 +377,14 @@ def test_create_agent_includes_openai_compat_guidance_only_when_requested() -> N
     openai_compat_agent = _create_agent_for_test(
         "general",
         config,
-        include_openai_compat_guidance=True,
+        outside_matrix=True,
     )
 
-    assert OPENAI_COMPAT_HISTORY_GUIDANCE not in matrix_agent.role
-    assert OPENAI_COMPAT_HISTORY_GUIDANCE in openai_compat_agent.role
-    assert "OpenAI-compatible API" in openai_compat_agent.role
-    assert "Matrix ID:" not in openai_compat_agent.role
-    assert "## Matrix Reply Targeting" not in openai_compat_agent.role
+    assert OPENAI_COMPAT_HISTORY_GUIDANCE not in _role(matrix_agent)
+    assert OPENAI_COMPAT_HISTORY_GUIDANCE in _role(openai_compat_agent)
+    assert "OpenAI-compatible API" in _role(openai_compat_agent)
+    assert "Matrix ID:" not in _role(openai_compat_agent)
+    assert "## Matrix Reply Targeting" not in _role(openai_compat_agent)
 
 
 def test_create_agent_includes_matrix_reply_targeting_policy() -> None:
@@ -370,11 +393,11 @@ def test_create_agent_includes_matrix_reply_targeting_policy() -> None:
 
     agent = _create_agent_for_test("general", config)
 
-    assert "## Matrix Reply Targeting" in agent.role
-    assert "explicit Matrix mention" in agent.role
-    assert "multi-agent, multi-team, or multi-human" in agent.role
-    assert "not dispatched" in agent.role
-    assert "natural-language addressing" in agent.role
+    assert "## Matrix Reply Targeting" in _role(agent)
+    assert "explicit Matrix mention" in _role(agent)
+    assert "multi-agent, multi-team, or multi-human" in _role(agent)
+    assert "not dispatched" in _role(agent)
+    assert "natural-language addressing" in _role(agent)
 
 
 def test_config_round_trips_structured_agent_tool_entries() -> None:
@@ -410,10 +433,6 @@ def test_config_round_trips_structured_agent_tool_entries() -> None:
 
     agent_config = config.agents["openclaw"]
     assert agent_config.tool_names == ["shell", "browser"]
-    assert agent_config.get_tool_overrides("shell") == {
-        "extra_env_passthrough": ["GITEA_TOKEN", "WHISPER_URL"],
-        "shell_path_prepend": ["/run/wrappers/bin"],
-    }
     assert config.authored_model_dump()["agents"]["openclaw"]["tools"] == [
         {
             "shell": {
@@ -423,42 +442,45 @@ def test_config_round_trips_structured_agent_tool_entries() -> None:
         },
         "browser",
     ]
-    assert config.resolve_entity("openclaw").tool_runtime_overrides("shell") == {
+    candidates = {
+        entry.name: entry for entry in resolve_agent_tools(config, "openclaw", builtin_tool_registry()).candidates()
+    }
+    assert candidates["shell"].tool_config_overrides == {
         "extra_env_passthrough": "GITEA_TOKEN, WHISPER_URL",
         "shell_path_prepend": "/run/wrappers/bin",
     }
 
 
-@patch("mindroom.agent_storage._ConversationSqliteDb")
-def test_get_agent_calculator(mock_storage: MagicMock) -> None:  # noqa: ARG001
-    """Tests that the calculator agent is created correctly."""
+@pytest.mark.parametrize(
+    ("agent_name", "display_name"),
+    [
+        ("calculator", "CalculatorAgent"),
+        ("code", "CodeAgent"),
+        ("shell", "ShellAgent"),
+        ("summary", "SummaryAgent"),
+    ],
+)
+def test_get_agent_builds_configured_agent(agent_name: str, display_name: str) -> None:
+    """Each configured agent builds under its display name."""
     config = _test_config()
-    agent = _create_agent_for_test("calculator", config=config)
-    assert isinstance(agent, Agent)
-    assert agent.name == "CalculatorAgent"
+    agent = _create_agent_for_test(agent_name, config=config)
+    assert isinstance(agent, AgentBuild)
+    assert agent.spec.name == display_name
 
 
-@patch("mindroom.agent_storage._ConversationSqliteDb")
-def test_get_agent_general(mock_storage: MagicMock) -> None:  # noqa: ARG001
+def test_get_agent_general() -> None:
     """Tests that the general agent is created correctly."""
     config = _test_config()
     config.agents["general"].instructions = ["Use the configured instruction."]
     agent = _create_agent_for_test("general", config=config)
-    assert isinstance(agent, Agent)
-    assert agent.name == "GeneralAgent"
-    assert "General assistant" in agent.role
-    assert "## Core Expertise" not in agent.role
-    assert "Use the configured instruction." in agent.instructions
-    assert isinstance(agent.learning, LearningMachine)
-    assert isinstance(agent.learning.user_profile, UserProfileConfig)
-    assert agent.learning.user_profile.mode is LearningMode.ALWAYS
-    assert isinstance(agent.learning.user_memory, UserMemoryConfig)
-    assert agent.learning.user_memory.mode is LearningMode.ALWAYS
+    assert isinstance(agent, AgentBuild)
+    assert agent.spec.name == "GeneralAgent"
+    assert "General assistant" in _role(agent)
+    assert "## Core Expertise" not in _role(agent)
+    assert "Use the configured instruction." in agent.prompt.instructions
 
 
-@patch("mindroom.agent_storage._ConversationSqliteDb")
 def test_agent_role_describes_local_tool_execution_environment(
-    _mock_storage: MagicMock,  # noqa: PT019
     tmp_path: Path,
 ) -> None:
     """The prompt should identify an entirely local effective tool surface."""
@@ -468,21 +490,19 @@ def test_agent_role_describes_local_tool_execution_environment(
 
     agent = _create_agent_for_test("calculator", config=_bind_runtime_paths(config, runtime_paths))
 
-    assert "## Tool Execution Environment" in agent.role
-    assert "All available tools run in the primary MindRoom runtime: `calculator`." in agent.role
-    assert "No tools use a worker runtime." in agent.role
-    assert "Worker backend:" not in agent.role
+    assert "## Tool Execution Environment" in _role(agent)
+    assert "All available tools run in the primary MindRoom runtime: `calculator`." in _role(agent)
+    assert "No tools use a worker runtime." in _role(agent)
+    assert "Worker backend:" not in _role(agent)
 
 
 @patch("mindroom.agents.get_tool_by_name")
-@patch("mindroom.agent_storage._ConversationSqliteDb")
 def test_agent_role_describes_mixed_dedicated_worker_routing(
-    _mock_storage: MagicMock,  # noqa: PT019
     mock_get_tool_by_name: MagicMock,
     tmp_path: Path,
 ) -> None:
     """The prompt should identify mixed local and dedicated-worker tools."""
-    mock_get_tool_by_name.return_value = MagicMock()
+    mock_get_tool_by_name.side_effect = _toolkit_named
     config = _test_config()
     config.agents["general"].tools = ["shell", "calculator"]
     config.agents["general"].include_default_tools = False
@@ -499,14 +519,14 @@ def test_agent_role_describes_mixed_dedicated_worker_routing(
 
     agent = _create_agent_for_test("general", config=_bind_runtime_paths(config, runtime_paths))
 
-    assert "Local tools (primary MindRoom runtime): `calculator`." in agent.role
-    assert "Worker-routed tools: `shell`." in agent.role
-    assert "Worker backend: `kubernetes`." in agent.role
-    assert "Worker reuse: one runtime used only by this user-agent pair." in agent.role
-    assert "Worker state is reused across turns for that scope." in agent.role
-    assert "After the configured idle timeout, the deployment scales to zero" in agent.role
-    assert "persisted files and caches remain until an operator deletes that worker state." in agent.role
-    assert "Execution location is determined per tool; this agent is not sandboxed as a whole." in agent.role
+    assert "Local tools (primary MindRoom runtime): `calculator`." in _role(agent)
+    assert "Worker-routed tools: `shell`." in _role(agent)
+    assert "Worker backend: `kubernetes`." in _role(agent)
+    assert "Worker reuse: one runtime used only by this user-agent pair." in _role(agent)
+    assert "Worker state is reused across turns for that scope." in _role(agent)
+    assert "After the configured idle timeout, the deployment scales to zero" in _role(agent)
+    assert "persisted files and caches remain until an operator deletes that worker state." in _role(agent)
+    assert "Execution location is determined per tool; this agent is not sandboxed as a whole." in _role(agent)
 
 
 @pytest.mark.parametrize(
@@ -536,8 +556,12 @@ def test_tool_execution_environment_explains_dedicated_worker_scope(
         worker_routed_tool_names=("shell",),
         worker_scope=worker_scope,
         file_access="workspace",
+        workdir=None,
+        workspace_root=tmp_path,
         unconfined_tool_names=("shell",),
         primary_only_unconfined_tool_names=(),
+        shared_directories=(),
+        pending_shared_directory_invitations=(),
     )
 
     assert f"Worker reuse: {expected_reuse}." in rendered
@@ -555,8 +579,12 @@ def test_tool_execution_environment_explains_static_runner_without_persistence_c
         worker_routed_tool_names=("shell",),
         worker_scope="user_agent",
         file_access="workspace",
+        workdir=None,
+        workspace_root=tmp_path,
         unconfined_tool_names=("shell",),
         primary_only_unconfined_tool_names=(),
+        shared_directories=(),
+        pending_shared_directory_invitations=(),
     )
 
     assert "Worker backend: `static_runner`." in rendered
@@ -579,8 +607,12 @@ def test_tool_execution_environment_explains_docker_idle_lifecycle(tmp_path: Pat
         worker_routed_tool_names=("shell",),
         worker_scope="user_agent",
         file_access="workspace",
+        workdir=None,
+        workspace_root=tmp_path,
         unconfined_tool_names=("shell",),
         primary_only_unconfined_tool_names=(),
+        shared_directories=(),
+        pending_shared_directory_invitations=(),
     )
 
     assert "After the configured idle timeout, the container stops" in rendered
@@ -594,7 +626,11 @@ def test_tool_execution_environment_explains_docker_idle_lifecycle(tmp_path: Pat
         ("unrestricted", "- File access for path tools: `unrestricted` (any path the tool's process can reach)."),
     ],
 )
-def test_tool_execution_environment_reports_file_access(tmp_path: Path, file_access: str, expected: str) -> None:
+def test_tool_execution_environment_reports_file_access(
+    tmp_path: Path,
+    file_access: str,
+    expected: str,
+) -> None:
     """The model should learn which files its path tools may use and which tools are never confined."""
     for worker_routed in ((), ("shell",)):
         rendered = _render_tool_execution_environment(
@@ -603,8 +639,12 @@ def test_tool_execution_environment_reports_file_access(tmp_path: Path, file_acc
             worker_routed_tool_names=worker_routed,
             worker_scope=None,
             file_access=file_access,
+            workdir=None,
+            workspace_root=tmp_path,
             unconfined_tool_names=("python", "shell"),
             primary_only_unconfined_tool_names=("duckdb",),
+            shared_directories=(),
+            pending_shared_directory_invitations=(),
         )
         assert expected in rendered
         assert "- Not confined by file_access (only a worker isolates them): `python`, `shell`." in rendered
@@ -612,6 +652,53 @@ def test_tool_execution_environment_reports_file_access(tmp_path: Path, file_acc
             "- Not confined by file_access and unable to run in a worker (trusted primary runtime only): `duckdb`."
             in rendered
         )
+
+
+def test_agent_role_lists_the_shared_directories_the_agent_reaches(
+    tmp_path: Path,
+) -> None:
+    """An agent learns which shared directories its path tools reach, and each one's access."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = _bind_runtime_paths(_test_config(), runtime_paths)
+    create_shared_directory(runtime_paths, owner="general", name="report")
+    create_shared_directory(runtime_paths, owner="calculator", name="sums")
+    add_shared_directory_member(runtime_paths, owner="general", name="report", member="calculator")
+    shares = runtime_paths.storage_root / "shared_directories"
+
+    calculator = _create_agent_for_test("calculator", config=config)
+    general = _create_agent_for_test("general", config=config)
+
+    assert (
+        f"- Shared directories: `{shares / 'calculator' / 'sums'}` (yours, read-write), "
+        f"`{shares / 'general' / 'report'}` (from general, read-only)."
+    ) in _role(calculator)
+    assert f"- Shared directories: `{shares / 'general' / 'report'}` (yours, read-write)." in _role(general)
+    assert "Pending shared directory invitations" not in _role(calculator)
+    file_access_line = "- File access for path tools: `workspace` (agent workspace and attachments only)."
+    assert file_access_line in _role(calculator)
+    assert file_access_line in _role(general)
+
+
+def test_agent_role_names_pending_invitations_without_their_path(tmp_path: Path) -> None:
+    """An invited agent that has not accepted learns of the invitation, but not the directory's path or who asked."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = _bind_runtime_paths(_test_config(), runtime_paths)
+    create_shared_directory(runtime_paths, owner="general", name="report")
+    invite_pending_shared_directory_member(
+        runtime_paths,
+        owner="general",
+        name="report",
+        invitation=PendingInvitation(agent="calculator", requester="@a:localhost", requested_at="2026-11-12T10:00Z"),
+    )
+
+    role = _role(_create_agent_for_test("calculator", config=config))
+
+    assert (
+        "- Pending shared directory invitations; ask your user before accepting or declining: `general/report`."
+    ) in role
+    assert "@a:localhost" not in role
+    assert "shared_directories/general" not in role
+    assert "- Shared directories:" not in role
 
 
 def test_tool_execution_environment_omits_unrestricted_line_without_code_tools(tmp_path: Path) -> None:
@@ -622,16 +709,18 @@ def test_tool_execution_environment_omits_unrestricted_line_without_code_tools(t
         worker_routed_tool_names=(),
         worker_scope=None,
         file_access="workspace",
+        workdir=None,
+        workspace_root=tmp_path,
         unconfined_tool_names=(),
         primary_only_unconfined_tool_names=(),
+        shared_directories=(),
+        pending_shared_directory_invitations=(),
     )
     assert "Not confined by file_access" not in rendered
 
 
 @patch("mindroom.agents.get_tool_by_name", side_effect=ImportError("dependency missing"))
-@patch("mindroom.agent_storage._ConversationSqliteDb")
 def test_agent_role_omits_tool_that_failed_to_build(
-    _mock_storage: MagicMock,  # noqa: PT019
     _mock_get_tool_by_name: MagicMock,  # noqa: PT019
 ) -> None:
     """The prompt should not advertise a toolkit that is unavailable at runtime."""
@@ -640,15 +729,13 @@ def test_agent_role_omits_tool_that_failed_to_build(
 
     agent = _create_agent_for_test("calculator", config=config)
 
-    assert agent.tools == []
-    assert "No tools are available in this runtime." in agent.role
-    assert "Worker backend:" not in agent.role
+    assert agent.spec.toolkits == ()
+    assert "No tools are available in this runtime." in _role(agent)
+    assert "Worker backend:" not in _role(agent)
 
 
 @pytest.mark.parametrize("tool_name", ["report_publishing", "oauth_connections"])
-@patch("mindroom.agent_storage._ConversationSqliteDb")
 def test_agent_role_keeps_direct_toolkit_local_when_worker_routing_is_requested(
-    _mock_storage: MagicMock,  # noqa: PT019
     tmp_path: Path,
     tool_name: str,
 ) -> None:
@@ -669,10 +756,10 @@ def test_agent_role_keeps_direct_toolkit_local_when_worker_routing_is_requested(
 
     agent = _create_agent_for_test("general", config=_bind_runtime_paths(config, runtime_paths))
 
-    assert [tool.name for tool in agent.tools] == [tool_name]
-    assert f"All available tools run in the primary MindRoom runtime: `{tool_name}`." in agent.role
-    assert "No tools use a worker runtime." in agent.role
-    assert "Worker backend:" not in agent.role
+    assert [tool.name for tool in agent.spec.toolkits] == [tool_name]
+    assert f"All available tools run in the primary MindRoom runtime: `{tool_name}`." in _role(agent)
+    assert "No tools use a worker runtime." in _role(agent)
+    assert "Worker backend:" not in _role(agent)
 
 
 @pytest.mark.parametrize(
@@ -683,9 +770,7 @@ def test_agent_role_keeps_direct_toolkit_local_when_worker_routing_is_requested(
     ],
 )
 @pytest.mark.parametrize("unreadable_kind", ["corrupt_plaintext", "wrong_key"])
-@patch("mindroom.agent_storage._ConversationSqliteDb")
 def test_unreadable_oauth_credentials_leave_agent_reset_tool_available(
-    _mock_storage: MagicMock,  # noqa: PT019
     tmp_path: Path,
     tool_name: str,
     credential_service: str,
@@ -745,63 +830,33 @@ def test_unreadable_oauth_credentials_leave_agent_reset_tool_available(
         runtime_paths=runtime_paths,
         execution_identity=identity,
         supports_native_tool_approval=True,
+        knowledge=None,
+        model=turn_model(config, runtime_paths, "general"),
+        plugins=config_plugins(config, runtime_paths),
     )
 
-    toolkits = {tool.name: tool for tool in agent.tools}
+    toolkits = {tool.name: tool for tool in agent.spec.toolkits}
     assert tool_name in toolkits
-    assert "reset_oauth_connection" in toolkits["oauth_connections"].async_functions
+    assert "reset_oauth_connection" in {function.name for function in toolkits["oauth_connections"].functions}
 
 
-@patch("mindroom.agent_storage._ConversationSqliteDb")
-def test_restricted_agent_omits_tool_execution_environment(
-    _mock_storage: MagicMock,  # noqa: PT019
-) -> None:
+def test_restricted_agent_omits_tool_execution_environment() -> None:
     """Restricted in-process agents should not advertise unavailable capabilities."""
     config = _test_config()
 
     agent = _create_agent_for_test("general", config=config, disable_runtime_capabilities=True)
 
-    assert "## Tool Execution Environment" not in agent.role
+    assert "## Tool Execution Environment" not in _role(agent)
 
 
-def test_get_agent_runtime_state_dbs_accepts_backend_neutral_agno_storage() -> None:
-    """Runtime DB discovery should not require SQLite-specific storage handles."""
-    history_db = InMemoryDb()
-    learning_db = InMemoryDb()
-    agent = Agent(db=history_db, learning=LearningMachine(db=learning_db))
-
-    assert get_agent_runtime_state_dbs(agent) == (history_db, learning_db)
-
-
-def test_get_agent_runtime_state_dbs_includes_learning_storage(tmp_path: Path) -> None:
-    """Runtime-owned agent DB cleanup should include the separate learning storage."""
-    config = _test_config()
-    config.models = {"default": ModelConfig(provider="ollama", id="test-model")}
-    config = _bind_runtime_paths(config, _runtime_paths(tmp_path))
-
-    agent = _create_agent_for_test("general", config=config)
-
-    assert isinstance(agent.learning, LearningMachine)
-    history_db, learning_db = get_agent_runtime_state_dbs(agent)
-    assert history_db is agent.db
-    assert learning_db is agent.learning.db
-    assert history_db is not learning_db
-
-    if learning_db is not None:
-        learning_db.close()
-    if history_db is not None:
-        history_db.close()
-
-
-@patch("mindroom.agent_storage._ConversationSqliteDb")
-def test_hidden_tool_calls_prompt_is_injected(mock_storage: MagicMock) -> None:  # noqa: ARG001
+def test_hidden_tool_calls_prompt_is_injected() -> None:
     """Agents with hidden tool calls get a prompt hint to avoid narrating tool usage."""
     config = _test_config()
     config.agents["general"].show_tool_calls = False
 
     agent = _create_agent_for_test("general", config=config)
 
-    assert HIDDEN_TOOL_CALLS_PROMPT in agent.instructions
+    assert HIDDEN_TOOL_CALLS_PROMPT in agent.prompt.instructions
 
 
 @pytest.mark.parametrize(
@@ -837,47 +892,43 @@ def test_history_limits_require_positive_values(factory: Callable[[], object], f
         factory()
 
 
-@patch("mindroom.agent_storage._ConversationSqliteDb")
-def test_scheduler_tool_enabled_by_default(mock_storage: MagicMock) -> None:  # noqa: ARG001
+def test_scheduler_tool_enabled_by_default() -> None:
     """All agents should get the scheduler tool even when not explicitly configured."""
     config = _test_config()
     config.agents["summary"].tools = []
 
     agent = _create_agent_for_test("summary", config=config)
-    tool_names = [tool.name for tool in agent.tools]
+    tool_names = [tool.name for tool in agent.spec.toolkits]
 
     assert "scheduler" in tool_names
 
 
-@patch("mindroom.agent_storage._ConversationSqliteDb")
-def test_configurable_default_tools_are_applied(mock_storage: MagicMock) -> None:  # noqa: ARG001
+def test_configurable_default_tools_are_applied() -> None:
     """defaults.tools should be merged into every agent's configured tools."""
     config = _test_config()
     config.defaults.tools = ["scheduler", "calculator"]
     config.agents["summary"].tools = []
 
     agent = _create_agent_for_test("summary", config=config)
-    tool_names = [tool.name for tool in agent.tools]
+    tool_names = [tool.name for tool in agent.spec.toolkits]
 
     assert "scheduler" in tool_names
     assert "calculator" in tool_names
 
 
-@patch("mindroom.agent_storage._ConversationSqliteDb")
-def test_default_tools_do_not_duplicate_agent_tools(mock_storage: MagicMock) -> None:  # noqa: ARG001
+def test_default_tools_do_not_duplicate_agent_tools() -> None:
     """An agent tool already present should not be duplicated by defaults.tools."""
     config = _test_config()
     config.defaults.tools = ["scheduler"]
     config.agents["summary"].tools = ["scheduler"]
 
     agent = _create_agent_for_test("summary", config=config)
-    tool_names = [tool.name for tool in agent.tools]
+    tool_names = [tool.name for tool in agent.spec.toolkits]
 
     assert tool_names.count("scheduler") == 1
 
 
-@patch("mindroom.agent_storage._ConversationSqliteDb")
-def test_agent_include_default_tools_false_skips_config_defaults(mock_storage: MagicMock) -> None:  # noqa: ARG001
+def test_agent_include_default_tools_false_skips_config_defaults() -> None:
     """Agent include_default_tools=False should skip defaults.tools entirely."""
     config = _test_config()
     config.defaults.tools = ["scheduler", "calculator"]
@@ -885,7 +936,7 @@ def test_agent_include_default_tools_false_skips_config_defaults(mock_storage: M
     config.agents["summary"].include_default_tools = False
 
     agent = _create_agent_for_test("summary", config=config)
-    tool_names = [tool.name for tool in agent.tools]
+    tool_names = [tool.name for tool in agent.spec.toolkits]
 
     assert "scheduler" not in tool_names
     assert "calculator" not in tool_names
@@ -897,10 +948,10 @@ def test_openclaw_compat_expands_to_implied_tools() -> None:
     config.agents["summary"].tools = ["openclaw_compat"]
     config.agents["summary"].include_default_tools = False
 
-    assert config.resolve_entity("summary").available_tools == [
+    assert config.resolve_agent("summary").tools.tool_names == (
         "openclaw_compat",
         "shell",
-        "coding",
+        "filesystem",
         "duckduckgo",
         "website",
         "browser",
@@ -908,7 +959,7 @@ def test_openclaw_compat_expands_to_implied_tools() -> None:
         "matrix_message",
         "attachments",
         "matrix_room",
-    ]
+    )
 
 
 def test_openclaw_compat_expansion_dedupes_preserving_order() -> None:
@@ -922,11 +973,11 @@ def test_openclaw_compat_expansion_dedupes_preserving_order() -> None:
     ]
     config.defaults.tools = ["openclaw_compat", "python", "scheduler"]
 
-    assert config.resolve_entity("summary").available_tools == [
+    assert config.resolve_agent("summary").tools.tool_names == (
         "browser",
         "openclaw_compat",
         "shell",
-        "coding",
+        "filesystem",
         "python",
         "scheduler",
         "duckduckgo",
@@ -934,13 +985,11 @@ def test_openclaw_compat_expansion_dedupes_preserving_order() -> None:
         "matrix_message",
         "attachments",
         "matrix_room",
-    ]
+    )
 
 
 @patch("mindroom.agents.get_tool_by_name")
-@patch("mindroom.agent_storage._ConversationSqliteDb")
 def test_create_agent_uses_native_tool_lookups_for_openclaw_compat(
-    mock_storage: MagicMock,  # noqa: ARG001
     mock_get_tool_by_name: MagicMock,
 ) -> None:
     """Agent construction should look up openclaw_compat and all its implied tools."""
@@ -952,13 +1001,11 @@ def test_create_agent_uses_native_tool_lookups_for_openclaw_compat(
     _create_agent_for_test("summary", config=config)
 
     looked_up_tools = [call.args[0] for call in mock_get_tool_by_name.call_args_list]
-    assert looked_up_tools == config.resolve_entity("summary").available_tools
+    assert looked_up_tools == list(config.resolve_agent("summary").tools.tool_names)
 
 
 @patch("mindroom.agents.get_tool_by_name")
-@patch("mindroom.agent_storage._ConversationSqliteDb")
 def test_create_agent_passes_merged_tool_config_overrides_to_registered_tools(
-    mock_storage: MagicMock,  # noqa: ARG001
     mock_get_tool_by_name: MagicMock,
 ) -> None:
     """Agent construction should merge defaults and agent overrides before tool lookup."""
@@ -979,28 +1026,24 @@ def test_create_agent_passes_merged_tool_config_overrides_to_registered_tools(
 
 
 @patch("mindroom.agents.get_tool_by_name")
-@patch("mindroom.agent_storage._ConversationSqliteDb")
-def test_create_agent_bootstraps_tool_registry_once_for_multiple_tools(
-    mock_storage: MagicMock,  # noqa: ARG001
+def test_create_agent_builds_every_toolkit_from_the_caller_s_plugin_view(
     mock_get_tool_by_name: MagicMock,
 ) -> None:
-    """Agent construction should not reload plugin/MCP registry state per toolkit."""
+    """Agent construction builds each toolkit from the one plugin view its caller captured."""
     mock_get_tool_by_name.return_value = MagicMock()
     config = _test_config()
     config.agents["general"].tools = ["shell", "coding", "duckduckgo", "website"]
     config.agents["general"].include_default_tools = False
+    plugins = config_plugins(config, runtime_paths_for(config))
 
-    with patch("mindroom.agents.ensure_tool_registry_loaded") as mock_ensure_registry:
-        _create_agent_for_test("general", config=config)
+    _create_agent_for_test("general", config=config, plugins=plugins)
 
     assert len(mock_get_tool_by_name.call_args_list) == 4
-    assert mock_ensure_registry.call_count == 1
+    assert all(call.kwargs["tools"] is plugins.tools for call in mock_get_tool_by_name.call_args_list)
 
 
 @patch("mindroom.agents.get_tool_by_name")
-@patch("mindroom.agent_storage._ConversationSqliteDb")
 def test_create_agent_keeps_runtime_base_dir_separate_from_authored_tool_config(
-    mock_storage: MagicMock,  # noqa: ARG001
     mock_get_tool_by_name: MagicMock,
     tmp_path: Path,
 ) -> None:
@@ -1024,9 +1067,7 @@ def test_create_agent_keeps_runtime_base_dir_separate_from_authored_tool_config(
 
 
 @patch("mindroom.agents.get_tool_by_name")
-@patch("mindroom.agent_storage._ConversationSqliteDb")
 def test_create_agent_continues_when_implied_tool_import_fails(
-    mock_storage: MagicMock,  # noqa: ARG001
     mock_get_tool_by_name: MagicMock,
 ) -> None:
     """Optional dependency import failures should not abort agent creation with implied tools."""
@@ -1039,36 +1080,36 @@ def test_create_agent_continues_when_implied_tool_import_fails(
         tool_config_overrides: dict[str, object] | None = None,
         tool_init_overrides: dict[str, object] | None = None,
         runtime_overrides: dict[str, object] | None = None,
-        shared_storage_root_path: object | None = None,
-        worker_tools_override: list[str] | None = None,
+        runs_in_worker: bool | None = None,
+        workspace_in_worker: bool = False,
         allowed_shared_services: frozenset[str] | None = None,
         tool_output_workspace_root: object | None = None,
         agent_state_root: object | None = None,
         tool_output_auto_save_threshold_bytes: int = 50 * 1024,
         worker_target: object | None = None,
         runtime_config: object | None = None,
-    ) -> MagicMock:
+        tools: object | None = None,
+    ) -> Toolkit:
         del (
             _runtime_paths,
             credentials_manager,
             tool_config_overrides,
             tool_init_overrides,
             runtime_overrides,
-            shared_storage_root_path,
-            worker_tools_override,
+            runs_in_worker,
+            workspace_in_worker,
             allowed_shared_services,
             tool_output_workspace_root,
             agent_state_root,
             tool_output_auto_save_threshold_bytes,
             worker_target,
             runtime_config,
+            tools,
         )
         if name == "browser":
             missing_dependency_message = "No module named 'playwright'"
             raise ImportError(missing_dependency_message)
-        tool = MagicMock()
-        tool.name = name
-        return tool
+        return _toolkit_named(name)
 
     mock_get_tool_by_name.side_effect = _lookup_tool
 
@@ -1078,7 +1119,7 @@ def test_create_agent_continues_when_implied_tool_import_fails(
 
     agent = _create_agent_for_test("summary", config=config)
 
-    tool_names = [tool.name for tool in agent.tools]
+    tool_names = [tool.name for tool in agent.spec.toolkits]
     assert "browser" not in tool_names
     assert "openclaw_compat" in tool_names
     assert "shell" in tool_names
@@ -1086,9 +1127,7 @@ def test_create_agent_continues_when_implied_tool_import_fails(
 
 
 @patch("mindroom.agents.get_tool_by_name")
-@patch("mindroom.agent_storage._ConversationSqliteDb")
 def test_create_agent_continues_when_tool_lookup_reports_unknown_tool(
-    mock_storage: MagicMock,  # noqa: ARG001
     mock_get_tool_by_name: MagicMock,
 ) -> None:
     """Unknown or stale tool names should still be warned about and skipped."""
@@ -1101,36 +1140,36 @@ def test_create_agent_continues_when_tool_lookup_reports_unknown_tool(
         tool_config_overrides: dict[str, object] | None = None,
         tool_init_overrides: dict[str, object] | None = None,
         runtime_overrides: dict[str, object] | None = None,
-        shared_storage_root_path: object | None = None,
-        worker_tools_override: list[str] | None = None,
+        runs_in_worker: bool | None = None,
+        workspace_in_worker: bool = False,
         allowed_shared_services: frozenset[str] | None = None,
         tool_output_workspace_root: object | None = None,
         agent_state_root: object | None = None,
         tool_output_auto_save_threshold_bytes: int = 50 * 1024,
         worker_target: object | None = None,
         runtime_config: object | None = None,
-    ) -> MagicMock:
+        tools: object | None = None,
+    ) -> Toolkit:
         del (
             _runtime_paths,
             credentials_manager,
             tool_config_overrides,
             tool_init_overrides,
             runtime_overrides,
-            shared_storage_root_path,
-            worker_tools_override,
+            runs_in_worker,
+            workspace_in_worker,
             allowed_shared_services,
             tool_output_workspace_root,
             agent_state_root,
             tool_output_auto_save_threshold_bytes,
             worker_target,
             runtime_config,
+            tools,
         )
         if name == "stale_tool":
             msg = "Unknown tool: stale_tool"
             raise ValueError(msg)
-        tool = MagicMock()
-        tool.name = name
-        return tool
+        return _toolkit_named(name)
 
     mock_get_tool_by_name.side_effect = _lookup_tool
 
@@ -1140,12 +1179,10 @@ def test_create_agent_continues_when_tool_lookup_reports_unknown_tool(
 
     agent = _create_agent_for_test("general", config=config)
 
-    assert [tool.name for tool in agent.tools] == ["shell"]
+    assert [tool.name for tool in agent.spec.toolkits] == ["shell"]
 
 
-@patch("mindroom.agent_storage._ConversationSqliteDb")
 def test_create_agent_skips_a_toolkit_whose_construction_raises_unexpectedly(
-    _mock_storage: MagicMock,  # noqa: PT019
     tmp_path: Path,
 ) -> None:
     """A toolkit failing with something other than ValueError or ImportError must not stop the agent."""
@@ -1156,7 +1193,7 @@ def test_create_agent_skips_a_toolkit_whose_construction_raises_unexpectedly(
     build_agent_toolkit = agents_module.build_agent_toolkit
 
     def build(tool_name: str, **kwargs: object) -> Toolkit | None:
-        if tool_name == "file":
+        if tool_name == "filesystem":
             msg = "toolkit constructor bug"
             raise RuntimeError(msg)
         return build_agent_toolkit(tool_name, **kwargs)
@@ -1164,13 +1201,36 @@ def test_create_agent_skips_a_toolkit_whose_construction_raises_unexpectedly(
     with patch.object(agents_module, "build_agent_toolkit", side_effect=build):
         agent = _create_agent_for_test("general", config=config)
 
-    assert [tool.name for tool in agent.tools] == ["calculator"]
+    assert [tool.name for tool in agent.spec.toolkits] == ["calculator"]
+
+
+def test_create_agent_skips_a_toolkit_whose_function_sets_an_agno_hook(tmp_path: Path) -> None:
+    """A plugin function with an Agno hook MindRoom does not run drops its own toolkit, never the agent."""
+    runtime_paths = resolve_runtime_paths(config_path=tmp_path / "config.yaml", storage_path=tmp_path, process_env={})
+    config = _bind_runtime_paths(_test_config(), runtime_paths)
+    config.agents["general"].tools = ["file", "calculator"]
+    config.agents["general"].include_default_tools = False
+    build_agent_toolkit = agents_module.build_agent_toolkit
+
+    def ping(text: str) -> str:
+        return text
+
+    def build(tool_name: str, **kwargs: object) -> Toolkit | None:
+        if tool_name == "filesystem":
+            return Toolkit(name="filesystem", tools=[Function(name="ping", entrypoint=ping, pre_hook=lambda: None)])
+        return build_agent_toolkit(tool_name, **kwargs)
+
+    with patch.object(agents_module, "build_agent_toolkit", side_effect=build), capture_logs() as logs:
+        agent = _create_agent_for_test("general", config=config)
+
+    assert [tool.name for tool in agent.spec.toolkits] == ["calculator"]
+    [warning] = [log for log in logs if log["event"] == "Could not load tool for agent construction"]
+    assert warning["tool"] == "filesystem"
+    assert "'ping' sets an Agno pre_hook" in warning["error"]
 
 
 @patch("mindroom.agents.get_tool_by_name")
-@patch("mindroom.agent_storage._ConversationSqliteDb")
 def test_create_agent_expands_openclaw_compat_for_worker_tool_overrides(
-    mock_storage: MagicMock,  # noqa: ARG001
     mock_get_tool_by_name: MagicMock,
 ) -> None:
     """Worker override list should receive expanded tool names including openclaw_compat."""
@@ -1182,16 +1242,18 @@ def test_create_agent_expands_openclaw_compat_for_worker_tool_overrides(
 
     _create_agent_for_test("summary", config=config)
 
-    expected_worker_tools = config.expand_tool_names(["openclaw_compat"])
-    worker_overrides = [call.kwargs["worker_tools_override"] for call in mock_get_tool_by_name.call_args_list]
-    assert worker_overrides
-    assert all(override == expected_worker_tools for override in worker_overrides)
+    expected_worker_tools = tuple(config.expand_tool_names(["openclaw_compat"]))
+    assert resolve_agent_tools(config, "summary", builtin_tool_registry()).facts.worker_tools == expected_worker_tools
+    placement = tool_placement(runtime_paths_for(config), builtin_tool_registry())
+    placements = {call.args[0]: call.kwargs["runs_in_worker"] for call in mock_get_tool_by_name.call_args_list}
+    assert placements
+    assert placements == {
+        tool_name: placement.runs_in_worker(tool_name, expected_worker_tools) for tool_name in placements
+    }
 
 
 @patch("mindroom.agents.get_tool_by_name")
-@patch("mindroom.agent_storage._ConversationSqliteDb")
 def test_create_agent_uses_memory_file_workspace_for_base_dir_tools(
-    mock_storage: MagicMock,  # noqa: ARG001
     mock_get_tool_by_name: MagicMock,
     tmp_path: Path,
 ) -> None:
@@ -1211,7 +1273,7 @@ def test_create_agent_uses_memory_file_workspace_for_base_dir_tools(
     overrides_by_tool = {
         call.args[0]: call.kwargs.get("tool_init_overrides") for call in mock_get_tool_by_name.call_args_list
     }
-    assert overrides_by_tool["coding"] == {"base_dir": str(workspace)}
+    assert overrides_by_tool["filesystem"] == {"base_dir": str(workspace)}
     assert overrides_by_tool["shell"] == {"base_dir": str(workspace)}
     assert overrides_by_tool["duckduckgo"] is None
 
@@ -1231,27 +1293,24 @@ def test_direct_agent_toolkit_exposes_output_redirect_for_workspace_agent(tmp_pa
 
     toolkit = build_agent_toolkit(
         "memory",
-        agent_name="general",
-        config=config,
+        agent_tools=resolve_agent_tools(config, "general", builtin_tool_registry()),
+        placement=tool_placement(runtime_paths, builtin_tool_registry()),
         runtime_paths=runtime_paths,
-        worker_tools=[],
-        runtime_overrides=None,
         agent_runtime=agent_runtime,
         execution_identity=None,
     )
 
     assert toolkit is not None
-    function = toolkit.async_functions["list_memories"].model_copy(deep=True)
-    function.process_entrypoint()
+    function = toolkit_offers(toolkit, "list_memories")
     assert OUTPUT_PATH_ARGUMENT in function.parameters["properties"]
 
 
-def test_memory_toolkit_is_omitted_when_agent_memory_is_disabled(tmp_path: Path) -> None:
-    """Agents with an effective disabled memory backend should not receive MemoryTools."""
+@pytest.mark.parametrize("tool_name", ["memory", "self_config", "skill_manage"])
+def test_direct_agent_toolkit_records_its_construction(tmp_path: Path, tool_name: str) -> None:
+    """Background tool jobs authorize a direct toolkit's calls only from the construction it records."""
     runtime_paths = _runtime_paths(tmp_path)
     config = _bind_runtime_paths(_test_config(), runtime_paths)
-    config.memory.backend = "mem0"
-    config.agents["general"].memory_backend = "none"
+    config.agents["general"].memory_backend = "file"
     agent_runtime = resolve_agent_runtime(
         "general",
         config,
@@ -1261,17 +1320,35 @@ def test_memory_toolkit_is_omitted_when_agent_memory_is_disabled(tmp_path: Path)
     )
 
     toolkit = build_agent_toolkit(
-        "memory",
-        agent_name="general",
-        config=config,
+        tool_name,
+        agent_tools=resolve_agent_tools(config, "general", builtin_tool_registry()),
+        placement=tool_placement(runtime_paths, builtin_tool_registry()),
         runtime_paths=runtime_paths,
-        worker_tools=[],
-        runtime_overrides=None,
         agent_runtime=agent_runtime,
         execution_identity=None,
     )
 
-    assert toolkit is None
+    assert toolkit is not None
+    construction = get_toolkit_construction(toolkit)
+    assert construction is not None
+    assert construction.name == tool_name
+
+
+def test_memory_toolkit_is_omitted_when_agent_memory_is_disabled(tmp_path: Path) -> None:
+    """Agents with an effective disabled memory backend should not receive MemoryTools."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = _bind_runtime_paths(_test_config(), runtime_paths)
+    config.memory.backend = "mem0"
+    config.agents["general"].tools = ["memory"]
+    assert "memory" in [
+        entry.name for entry in resolve_agent_tools(config, "general", builtin_tool_registry()).candidates()
+    ]
+
+    config.agents["general"].memory_backend = "none"
+
+    assert "memory" not in [
+        entry.name for entry in resolve_agent_tools(config, "general", builtin_tool_registry()).candidates()
+    ]
 
 
 def test_resolve_agent_workspace_uses_canonical_agent_workspace_for_file_memory(tmp_path: Path) -> None:
@@ -1338,6 +1415,24 @@ def test_resolve_agent_runtime_persists_private_instance_identity_on_materializa
         worker_key=worker_key,
         requester_id="requester-a",
     )
+
+
+def test_session_storage_records_the_owner_of_a_new_private_instance(tmp_path: Path) -> None:
+    """A turn can open its session storage before building the agent; the owner record must come first anyway."""
+    bound_config, runtime_paths, execution_identity = _private_runtime_resolution_context(tmp_path)
+    worker_key = resolve_worker_key("user", execution_identity, agent_name="general")
+    assert worker_key is not None
+
+    create_session_storage("general", bound_config, runtime_paths, execution_identity=execution_identity)
+    resolve_agent_runtime("general", bound_config, runtime_paths, execution_identity=execution_identity, create=True)
+
+    scope_root = private_instance_scope_root_path(runtime_paths.storage_root, worker_key)
+    assert load_private_instance_identity(runtime_paths.storage_root, scope_root) == PrivateInstanceIdentity(
+        worker_key=worker_key,
+        requester_id="requester-a",
+    )
+    owners = private_instances_for_agent(runtime_paths.storage_root, "general", "user")
+    assert [owner.requester_id for owner in owners] == ["requester-a"]
 
 
 def test_resolve_agent_runtime_reconciles_a_populated_legacy_workspace_without_an_identity_record(
@@ -1455,13 +1550,24 @@ def test_resolve_agent_runtime_separates_previously_colliding_requesters(
 
 def test_resolve_agent_execution_rejects_private_instance_identity_without_requester(tmp_path: Path) -> None:
     """Private execution resolution must reject a missing requester before routing a worker."""
-    bound_config, _, execution_identity = _private_runtime_resolution_context(tmp_path, requester_id=None)
+    bound_config, runtime_paths, execution_identity = _private_runtime_resolution_context(tmp_path, requester_id=None)
 
     with pytest.raises(
         ValueError,
         match=re.escape("Private agent 'general' requires a requester identity to resolve requester-local state"),
     ):
-        resolve_agent_execution("general", bound_config, execution_identity=execution_identity)
+        resolve_agent_execution("general", bound_config, runtime_paths, execution_identity=execution_identity)
+
+
+def test_session_storage_refuses_a_private_instance_owned_by_a_mindroom_account(tmp_path: Path) -> None:
+    """A private agent run as its own account, like an internal todo poke, must not create an instance it owns."""
+    bound_config, runtime_paths, execution_identity = _private_runtime_resolution_context(tmp_path)
+    agent_identity = replace(execution_identity, requester_id=current_entity_id("general", runtime_paths).full_id)
+
+    with pytest.raises(ValueError, match=re.escape("requires a human or bot-account requester")):
+        create_session_storage("general", bound_config, runtime_paths, execution_identity=agent_identity)
+
+    assert private_instances_for_agent(runtime_paths.storage_root, "general", "user") == ()
 
 
 def test_resolve_agent_runtime_rejects_whitespace_private_instance_requester_before_creation(
@@ -1653,9 +1759,8 @@ def test_resolve_agent_runtime_uses_shared_agent_roots_for_shared_agents(tmp_pat
     assert runtime.execution.is_private is False
     assert runtime.execution.worker_key is None
     assert runtime.state_root == agent_state_root_path(tmp_path, "general")
-    assert runtime.workspace is None
-    assert runtime.tool_base_dir is None
-    assert runtime.file_memory_root is None
+    assert runtime.workspace.root == agent_workspace_root_path(tmp_path, "general")
+    assert runtime.workspace.file_memory_path is None
 
 
 def test_resolve_agent_runtime_routes_shared_sessions_to_explicit_session_storage(tmp_path: Path) -> None:
@@ -1713,6 +1818,7 @@ def test_runtime_resolution_exports_public_resolved_agent_execution_contract(tmp
     resolved_execution = runtime_resolution.resolve_agent_execution(
         "general",
         config,
+        runtime_paths,
         execution_identity=None,
     )
 
@@ -1748,13 +1854,12 @@ def test_resolve_agent_runtime_keeps_user_scope_worker_key_for_shared_agents(tmp
     assert runtime.execution.execution_scope == "user"
     assert runtime.execution.worker_key == resolve_worker_key("user", identity, agent_name="general")
     assert runtime.state_root == agent_state_root_path(tmp_path, "general")
-    assert runtime.workspace is None
-    assert runtime.tool_base_dir is None
-    assert runtime.file_memory_root is None
+    assert runtime.workspace.root == agent_workspace_root_path(tmp_path, "general")
+    assert runtime.workspace.file_memory_path is None
 
 
-def test_resolve_agent_runtime_requires_explicit_shared_execution_identity(tmp_path: Path) -> None:
-    """Shared worker scope should not infer worker keys from ambient runtime context."""
+def test_resolve_agent_runtime_without_identity_keeps_shared_roots_under_the_tenant_worker(tmp_path: Path) -> None:
+    """Without a request, a shared agent's execution uses its tenant's shared worker, and its state stays shared."""
     runtime_paths = resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
         storage_path=tmp_path,
@@ -1767,9 +1872,9 @@ def test_resolve_agent_runtime_requires_explicit_shared_execution_identity(tmp_p
 
     assert runtime.execution.is_private is False
     assert runtime.execution.execution_scope == "shared"
-    assert runtime.execution.worker_key is None
+    assert runtime.execution.worker_key == "v1:tenant-123:shared:general"
     assert runtime.state_root == agent_state_root_path(tmp_path, "general")
-    assert runtime.workspace is None
+    assert runtime.workspace.root == agent_workspace_root_path(tmp_path, "general")
 
 
 def test_resolve_agent_runtime_uses_private_instance_roots_for_private_agents(
@@ -1810,10 +1915,8 @@ def test_resolve_agent_runtime_uses_private_instance_roots_for_private_agents(
     assert runtime.execution.is_private is True
     assert runtime.execution.worker_key == expected_worker_key
     assert runtime.state_root == (private_instance_scope_root_path(tmp_path, expected_worker_key) / "general")
-    assert runtime.workspace is not None
     assert runtime.workspace.root == runtime.state_root / "mind_data"
-    assert runtime.tool_base_dir == runtime.workspace.root
-    assert runtime.file_memory_root == runtime.workspace.root
+    assert runtime.workspace.file_memory_path == runtime.workspace.root
 
 
 def test_dedicated_worker_runtime_resolution_never_writes_the_private_identity_record(tmp_path: Path) -> None:
@@ -1953,7 +2056,7 @@ def test_resolve_agent_runtime_creates_workspace_knowledge_links_for_private_bas
     )
 
     assert runtime.workspace is not None
-    private_base_id = config.resolve_entity("general").private_knowledge_base_id
+    private_base_id = config.resolve_agent("general").policy.private_knowledge_base_id
     assert private_base_id is not None
     knowledge_link = runtime.workspace.root / "knowledge" / private_base_id
     assert knowledge_link.is_symlink()
@@ -2149,7 +2252,7 @@ def test_resolve_agent_runtime_skips_workspace_knowledge_links_for_private_root_
     )
 
     assert runtime.workspace is not None
-    private_base_id = config.resolve_entity("general").private_knowledge_base_id
+    private_base_id = config.resolve_agent("general").policy.private_knowledge_base_id
     assert private_base_id is not None
     knowledge_link = runtime.workspace.root / "knowledge" / private_base_id
     assert not knowledge_link.exists()
@@ -2282,9 +2385,7 @@ def test_private_workspace_template_reconciles_missing_files_in_owned_partially_
 
 
 @patch("mindroom.agents.get_tool_by_name")
-@patch("mindroom.agent_storage._ConversationSqliteDb")
 def test_create_agent_does_not_pass_browser_specific_runtime_overrides(
-    mock_storage: MagicMock,  # noqa: ARG001
     mock_get_tool_by_name: MagicMock,
     tmp_path: Path,
 ) -> None:
@@ -2305,12 +2406,10 @@ def test_create_agent_does_not_pass_browser_specific_runtime_overrides(
 
 
 @patch("mindroom.agents.get_tool_by_name")
-@patch("mindroom.agent_storage._ConversationSqliteDb")
 def test_create_agent_passes_authored_shell_runtime_overrides(
-    mock_storage: MagicMock,  # noqa: ARG001
     mock_get_tool_by_name: MagicMock,
 ) -> None:
-    """Authored per-agent shell overrides should be converted into runtime kwargs."""
+    """Authored per-agent shell list settings should reach the constructor as validated settings."""
     mock_get_tool_by_name.return_value = MagicMock()
 
     config = _test_config()
@@ -2326,55 +2425,62 @@ def test_create_agent_passes_authored_shell_runtime_overrides(
 
     _create_agent_for_test("general", config=config)
 
-    runtime_overrides_by_tool = {
-        call.args[0]: call.kwargs.get("runtime_overrides") for call in mock_get_tool_by_name.call_args_list
+    settings_by_tool = {
+        call.args[0]: call.kwargs.get("tool_config_overrides") for call in mock_get_tool_by_name.call_args_list
     }
-    assert runtime_overrides_by_tool["shell"] == {
+    assert settings_by_tool["shell"] == {
         "extra_env_passthrough": "GITEA_TOKEN, WHISPER_URL",
         "shell_path_prepend": "/run/wrappers/bin",
     }
 
 
-@patch("mindroom.agents.get_tool_by_name")
-@patch("mindroom.agent_storage._ConversationSqliteDb")
-def test_create_agent_keeps_tool_default_base_dir_without_memory_workspace(
-    mock_storage: MagicMock,  # noqa: ARG001
-    mock_get_tool_by_name: MagicMock,
-) -> None:
-    """Agents without file-backed workspace semantics should keep tool defaults."""
-    mock_get_tool_by_name.return_value = MagicMock()
+def _run_directory_with_secret(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Make a process working directory that holds a runtime secret, as the backend's run directory does."""
+    run_directory = tmp_path / "run"
+    run_directory.mkdir()
+    (run_directory / ".env").write_text("OPENAI_API_KEY=run-directory-secret\n", encoding="utf-8")
+    monkeypatch.chdir(run_directory)
+    return run_directory
 
+
+def _agent_offered(tool_name: str, runtime_paths: RuntimePaths, *, file_memory: bool = False) -> AgentBuild:
+    """Build the ``general`` agent offered only the tool ``tool_name``."""
     config = _test_config()
-    config.agents["general"].tools = ["coding", "shell", "duckduckgo"]
+    config.agents["general"].tools = [tool_name]
     config.agents["general"].include_default_tools = False
-
-    _create_agent_for_test("general", config=config)
-
-    overrides_by_tool = {
-        call.args[0]: call.kwargs.get("tool_init_overrides") for call in mock_get_tool_by_name.call_args_list
-    }
-    assert overrides_by_tool["coding"] is None
-    assert overrides_by_tool["shell"] is None
-    assert overrides_by_tool["duckduckgo"] is None
+    if file_memory:
+        config.agents["general"].memory_backend = "file"
+    return _create_agent_for_test("general", config=_bind_runtime_paths(config, runtime_paths))
 
 
-@patch("mindroom.agents.load_plugins")
-def test_create_agent_threads_config_path_to_plugin_loading(
-    mock_load_plugins: MagicMock,
+def _tool_entrypoints(build: AgentBuild) -> dict[str, Callable[..., str]]:
+    """Return what the build runs for each call, by function name."""
+    return {name: function.entrypoint for name, function in build.spec.functions.items()}
+
+
+@pytest.mark.parametrize("file_memory", [True, False])
+def test_agent_workspace_file_tools_stay_inside_the_workspace(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    file_memory: bool,
 ) -> None:
-    """Agent creation should resolve relative plugin paths from the active config file."""
-    config_path = tmp_path / "cfg" / "config.yaml"
-    config_path.parent.mkdir(parents=True, exist_ok=True)
-    config = _test_config()
-    runtime_paths = _runtime_paths(tmp_path, config_path=config_path)
+    """Whatever its memory backend, an agent's file tools work in its workspace and refuse the run directory."""
+    run_directory = _run_directory_with_secret(tmp_path, monkeypatch)
+    runtime_paths = _runtime_paths(tmp_path / "storage")
+    workspace = agent_workspace_root_path(runtime_paths.storage_root, "general")
+    workspace.mkdir(parents=True)
+    (workspace / "notes.md").write_text("workspace notes\n", encoding="utf-8")
 
-    with patch("mindroom.agent_storage._ConversationSqliteDb"):
-        _create_agent_for_test("general", config=_bind_runtime_paths(config, runtime_paths))
-
-    mock_load_plugins.assert_called_once()
-    assert mock_load_plugins.call_args.args[0] is not None  # config
-    assert mock_load_plugins.call_args.args[1] is not None  # runtime_paths
+    agent = _agent_offered("file", runtime_paths, file_memory=file_memory)
+    file_tools = _tool_entrypoints(agent)
+    coding = _tool_entrypoints(_agent_offered("coding", runtime_paths, file_memory=file_memory))
+    assert file_tools["read_file"]("notes.md") == "1| workspace notes"
+    assert "workspace notes" in coding["read_file"]("notes.md")
+    assert coding["write_file"]("draft.md", "draft\n").startswith("Wrote")
+    assert (workspace / "draft.md").read_text(encoding="utf-8") == "draft\n"
+    assert file_tools["read_file"](str(run_directory / ".env")).startswith("Error")
+    assert "run-directory-secret" not in coding["read_file"](str(run_directory / ".env"))
+    assert "- File access for path tools: `workspace` (agent workspace and attachments only)." in _role(agent)
 
 
 def test_config_rejects_removed_memory_file_path_field() -> None:
@@ -2416,9 +2522,7 @@ def test_create_agent_rejects_bare_env_var_context_files() -> None:
 
 
 @patch("mindroom.agents.get_tool_by_name")
-@patch("mindroom.agent_storage._ConversationSqliteDb")
 def test_create_agent_applies_agent_workspace_override_for_worker_routed_scoped_tools(
-    mock_storage: MagicMock,  # noqa: ARG001
     mock_get_tool_by_name: MagicMock,
     tmp_path: Path,
 ) -> None:
@@ -2438,22 +2542,23 @@ def test_create_agent_applies_agent_workspace_override_for_worker_routed_scoped_
     overrides_by_tool = {
         call.args[0]: call.kwargs.get("tool_init_overrides") for call in mock_get_tool_by_name.call_args_list
     }
-    assert overrides_by_tool["coding"] == {"base_dir": str(workspace)}
+    assert overrides_by_tool["filesystem"] == {"base_dir": str(workspace)}
     assert overrides_by_tool["shell"] == {"base_dir": str(workspace)}
 
 
-@patch("mindroom.agent_storage._ConversationSqliteDb")
-def test_openclaw_compat_implies_matrix_message_tool(mock_storage: MagicMock) -> None:  # noqa: ARG001
+def test_openclaw_compat_implies_matrix_message_tool() -> None:
     """openclaw_compat should stay in the runtime toolkit list and imply matrix_message."""
     config = _test_config()
     config.agents["summary"].tools = ["openclaw_compat"]
     config.agents["summary"].include_default_tools = False
 
-    effective_tools = config.resolve_entity("summary").available_tools
+    effective_tools = config.resolve_agent("summary").tools.tool_names
     assert "openclaw_compat" in effective_tools
     assert "matrix_message" in effective_tools
 
-    runtime_toolkits = get_agent_toolkit_names("summary", config)
+    runtime_toolkits = [
+        entry.name for entry in resolve_agent_tools(config, "summary", builtin_tool_registry()).candidates()
+    ]
     assert "openclaw_compat" in runtime_toolkits
     assert "matrix_message" in runtime_toolkits
 
@@ -2464,7 +2569,7 @@ def test_openclaw_compat_implied_matrix_message_does_not_duplicate() -> None:
     config.agents["summary"].tools = ["openclaw_compat", "matrix_message"]
     config.agents["summary"].include_default_tools = False
 
-    effective_tools = config.resolve_entity("summary").available_tools
+    effective_tools = config.resolve_agent("summary").tools.tool_names
     assert effective_tools.count("matrix_message") == 1
 
 
@@ -2474,8 +2579,8 @@ def test_matrix_message_implies_attachments_and_matrix_room_tools() -> None:
     config.agents["summary"].tools = ["matrix_message"]
     config.agents["summary"].include_default_tools = False
 
-    effective_tools = config.resolve_entity("summary").available_tools
-    assert effective_tools == ["matrix_message", "attachments", "matrix_room"]
+    effective_tools = config.resolve_agent("summary").tools.tool_names
+    assert effective_tools == ("matrix_message", "attachments", "matrix_room")
 
 
 def test_matrix_message_implied_attachments_does_not_duplicate() -> None:
@@ -2484,123 +2589,33 @@ def test_matrix_message_implied_attachments_does_not_duplicate() -> None:
     config.agents["summary"].tools = ["matrix_message", "attachments"]
     config.agents["summary"].include_default_tools = False
 
-    effective_tools = config.resolve_entity("summary").available_tools
+    effective_tools = config.resolve_agent("summary").tools.tool_names
     assert effective_tools.count("attachments") == 1
-
-
-@patch("mindroom.agent_storage._ConversationSqliteDb")
-def test_get_agent_code(mock_storage: MagicMock) -> None:  # noqa: ARG001
-    """Tests that the code agent is created correctly."""
-    config = _test_config()
-    agent = _create_agent_for_test("code", config=config)
-    assert isinstance(agent, Agent)
-    assert agent.name == "CodeAgent"
-
-
-@patch("mindroom.agent_storage._ConversationSqliteDb")
-def test_get_agent_shell(mock_storage: MagicMock) -> None:  # noqa: ARG001
-    """Tests that the shell agent is created correctly."""
-    config = _test_config()
-    agent = _create_agent_for_test("shell", config=config)
-    assert isinstance(agent, Agent)
-    assert agent.name == "ShellAgent"
-
-
-@patch("mindroom.agent_storage._ConversationSqliteDb")
-def test_get_agent_summary(mock_storage: MagicMock) -> None:  # noqa: ARG001
-    """Tests that the summary agent is created correctly."""
-    config = _test_config()
-    agent = _create_agent_for_test("summary", config=config)
-    assert isinstance(agent, Agent)
-    assert agent.name == "SummaryAgent"
 
 
 def test_get_agent_unknown() -> None:
     """Tests that an unknown agent raises a ValueError."""
     config = _test_config()
+    # The turn model names an explicit model, so the build itself is what rejects the unknown agent.
+    model = turn_model(config, runtime_paths_for(config), "unknown", "default")
     with pytest.raises(ValueError, match="Unknown agent: unknown"):
-        _create_agent_for_test("unknown", config=config)
+        _create_agent_for_test("unknown", config=config, model=model)
 
 
-@patch("mindroom.agent_storage._ConversationSqliteDb")
-def test_get_agent_learning_can_be_disabled(mock_storage: MagicMock) -> None:
-    """Tests that learning can be disabled per agent."""
-    config = _test_config()
-    config.agents["general"].learning = False
-    agent = _create_agent_for_test("general", config=config)
-    assert isinstance(agent, Agent)
-    assert agent.learning is False
-    assert mock_storage.call_count == 1
+def test_agent_session_storage_uses_the_agent_state_root(tmp_path: Path) -> None:
+    """Session databases should live under the canonical agent state root."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = _bind_runtime_paths(_test_config(), runtime_paths)
+
+    store = create_session_storage("general", config, runtime_paths, execution_identity=None)
+
+    assert store.path == agent_state_root_path(tmp_path, "general") / "sessions" / "general.db"
 
 
-@patch("mindroom.agent_storage._ConversationSqliteDb")
-def test_get_agent_learning_defaults_fallback_when_agent_setting_omitted(mock_storage: MagicMock) -> None:
-    """Tests that defaults.learning is used when per-agent learning is omitted."""
-    config = _test_config()
-    config.defaults.learning = False
-    config.agents["general"].learning = None
-
-    agent = _create_agent_for_test("general", config=config)
-
-    assert isinstance(agent, Agent)
-    assert agent.learning is False
-    # Learning storage should not be created when defaults disable learning.
-    assert mock_storage.call_count == 1
-
-
-@patch("mindroom.agent_storage._ConversationSqliteDb")
-def test_get_agent_learning_agentic_mode(mock_storage: MagicMock) -> None:  # noqa: ARG001
-    """Tests that learning mode can be configured as agentic."""
-    config = _test_config()
-    config.agents["general"].learning_mode = "agentic"
-    agent = _create_agent_for_test("general", config=config)
-    assert isinstance(agent, Agent)
-    assert isinstance(agent.learning, LearningMachine)
-    assert isinstance(agent.learning.user_profile, UserProfileConfig)
-    assert agent.learning.user_profile.mode is LearningMode.AGENTIC
-    assert isinstance(agent.learning.user_memory, UserMemoryConfig)
-    assert agent.learning.user_memory.mode is LearningMode.AGENTIC
-
-
-@patch("mindroom.agent_storage._ConversationSqliteDb")
-def test_get_agent_learning_inherits_defaults(mock_storage: MagicMock) -> None:
-    """Tests that learning mode falls back to defaults when agent config is None."""
-    config = _test_config()
-    # Agent has no explicit learning settings (None), defaults say enabled + agentic.
-    config.agents["general"].learning = None
-    config.agents["general"].learning_mode = None
-    config.defaults.learning = True
-    config.defaults.learning_mode = "agentic"
-
-    agent = _create_agent_for_test("general", config=config)
-
-    assert isinstance(agent, Agent)
-    assert isinstance(agent.learning, LearningMachine)
-    assert isinstance(agent.learning.user_profile, UserProfileConfig)
-    assert agent.learning.user_profile.mode is LearningMode.AGENTIC
-    assert isinstance(agent.learning.user_memory, UserMemoryConfig)
-    assert agent.learning.user_memory.mode is LearningMode.AGENTIC
-    assert mock_storage.call_count == 2
-
-
-@patch("mindroom.agent_storage._ConversationSqliteDb")
-def test_get_agent_uses_storage_path_for_sessions_and_learning(mock_storage: MagicMock, tmp_path: Path) -> None:
-    """Session and learning databases should live under the canonical agent state root."""
-    config = _test_config()
-    _create_agent_for_test("general", config=_bind_runtime_paths(config, _runtime_paths(tmp_path)))
-
-    agent_root = agent_state_root_path(tmp_path, "general")
-    db_files = [Path(str(call.kwargs["db_file"])) for call in mock_storage.call_args_list]
-    assert agent_root / "sessions" / "general.db" in db_files
-    assert agent_root / "learning" / "general.db" in db_files
-
-
-@patch("mindroom.agent_storage._ConversationSqliteDb")
-def test_get_agent_routes_only_sessions_to_explicit_session_storage(
-    mock_storage: MagicMock,
+def test_agent_session_storage_routes_only_sessions_to_explicit_session_storage(
     tmp_path: Path,
 ) -> None:
-    """Dedicated session storage must not move learning or workspace state."""
+    """Dedicated session storage holds the agent's session database instead of its state root."""
     storage_root = tmp_path / "storage"
     session_storage_root = tmp_path / "session-state"
     runtime_paths = resolve_runtime_paths(
@@ -2610,17 +2625,13 @@ def test_get_agent_routes_only_sessions_to_explicit_session_storage(
     )
     config = _bind_runtime_paths(_test_config(), runtime_paths)
 
-    _create_agent_for_test("general", config=config)
+    store = create_session_storage("general", config, runtime_paths, execution_identity=None)
 
-    db_files = [Path(str(call.kwargs["db_file"])) for call in mock_storage.call_args_list]
-    assert session_storage_root / "agents" / "general" / "sessions" / "general.db" in db_files
-    assert agent_state_root_path(storage_root, "general") / "learning" / "general.db" in db_files
-    assert agent_state_root_path(storage_root, "general") / "sessions" / "general.db" not in db_files
+    assert store.path == session_storage_root / "agents" / "general" / "sessions" / "general.db"
 
 
-@patch("mindroom.agent_storage._ConversationSqliteDb")
-def test_get_agent_uses_worker_storage_for_sessions_and_learning(mock_storage: MagicMock, tmp_path: Path) -> None:
-    """Worker scope should not change the canonical session and learning paths."""
+def test_agent_session_storage_ignores_a_user_worker_scope(tmp_path: Path) -> None:
+    """Worker scope should not change the canonical session path."""
     config = _test_config()
     config.agents["general"].worker_scope = "user"
     execution_identity = ToolExecutionIdentity(
@@ -2634,19 +2645,19 @@ def test_get_agent_uses_worker_storage_for_sessions_and_learning(mock_storage: M
     )
     worker_key = resolve_worker_key("user", execution_identity, agent_name="general")
     assert worker_key is not None
+    runtime_paths = _runtime_paths(tmp_path)
 
-    with tool_execution_identity(execution_identity):
-        _create_agent_for_test("general", config=_bind_runtime_paths(config, _runtime_paths(tmp_path)))
+    store = create_session_storage(
+        "general",
+        _bind_runtime_paths(config, runtime_paths),
+        runtime_paths,
+        execution_identity=execution_identity,
+    )
 
-    agent_root = agent_state_root_path(tmp_path, "general")
-    db_files = [Path(str(call.kwargs["db_file"])) for call in mock_storage.call_args_list]
-    assert agent_root / "sessions" / "general.db" in db_files
-    assert agent_root / "learning" / "general.db" in db_files
+    assert store.path == agent_state_root_path(tmp_path, "general") / "sessions" / "general.db"
 
 
-@patch("mindroom.agent_storage._ConversationSqliteDb")
-def test_get_agent_uses_shared_worker_storage_without_execution_identity(
-    mock_storage: MagicMock,
+def test_agent_session_storage_ignores_a_shared_worker_scope_without_execution_identity(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2654,8 +2665,14 @@ def test_get_agent_uses_shared_worker_storage_without_execution_identity(
     config = _test_config()
     config.agents["general"].worker_scope = "shared"
     monkeypatch.setenv("CUSTOMER_ID", "tenant-123")
+    runtime_paths = _runtime_paths(tmp_path)
 
-    _create_agent_for_test("general", config=_bind_runtime_paths(config, _runtime_paths(tmp_path)))
+    store = create_session_storage(
+        "general",
+        _bind_runtime_paths(config, runtime_paths),
+        runtime_paths,
+        execution_identity=None,
+    )
 
     shared_identity = ToolExecutionIdentity(
         channel="matrix",
@@ -2671,15 +2688,10 @@ def test_get_agent_uses_shared_worker_storage_without_execution_identity(
     worker_key = resolve_worker_key("shared", shared_identity, agent_name="general")
     assert worker_key is not None
 
-    agent_root = agent_state_root_path(tmp_path, "general")
-    db_files = [Path(str(call.kwargs["db_file"])) for call in mock_storage.call_args_list]
-    assert agent_root / "sessions" / "general.db" in db_files
-    assert agent_root / "learning" / "general.db" in db_files
+    assert store.path == agent_state_root_path(tmp_path, "general") / "sessions" / "general.db"
 
 
-@patch("mindroom.agent_storage._ConversationSqliteDb")
 def test_create_agent_loads_shared_worker_scoped_tool_credentials_with_explicit_shared_identity(
-    mock_storage: MagicMock,  # noqa: ARG001
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2694,6 +2706,16 @@ def test_create_agent_loads_shared_worker_scoped_tool_credentials_with_explicit_
     config.defaults.tools = []
     config.agents["general"].tools = ["credentialed_toolkit"]
     config.agents["general"].worker_scope = "shared"
+    register_test_tool(
+        monkeypatch,
+        ToolMetadata(
+            name="credentialed_toolkit",
+            display_name="Credentialed Toolkit",
+            description="Needs an API key",
+            category=ToolCategory.DEVELOPMENT,
+            file_access=ToolFileAccess.NONE,
+        ),
+    )
 
     credentials_manager = CredentialsManager(tmp_path / "credentials")
     shared_identity = ToolExecutionIdentity(
@@ -2722,27 +2744,29 @@ def test_create_agent_loads_shared_worker_scoped_tool_credentials_with_explicit_
         tool_config_overrides: dict[str, object] | None = None,
         tool_init_overrides: dict[str, object] | None = None,
         runtime_overrides: dict[str, object] | None = None,
-        shared_storage_root_path: object | None = None,
-        worker_tools_override: list[str] | None = None,
+        runs_in_worker: bool | None = None,
+        workspace_in_worker: bool = False,
         allowed_shared_services: frozenset[str] | None = None,
         tool_output_workspace_root: object | None = None,
         agent_state_root: object | None = None,
         tool_output_auto_save_threshold_bytes: int = 50 * 1024,
         worker_target: object | None = None,
         runtime_config: object | None = None,
-    ) -> MagicMock:
+        tools: object | None = None,
+    ) -> Toolkit:
         del (
             _runtime_paths,
             tool_config_overrides,
             tool_init_overrides,
             runtime_overrides,
-            shared_storage_root_path,
-            worker_tools_override,
+            runs_in_worker,
+            workspace_in_worker,
             allowed_shared_services,
             tool_output_workspace_root,
             agent_state_root,
             tool_output_auto_save_threshold_bytes,
             runtime_config,
+            tools,
         )
         credentials = load_scoped_credentials(
             tool_name,
@@ -2752,15 +2776,13 @@ def test_create_agent_loads_shared_worker_scoped_tool_credentials_with_explicit_
         if not isinstance(credentials, dict) or "api_key" not in credentials:
             msg = "API key required"
             raise ValueError(msg)
-        tool = MagicMock()
-        tool.name = tool_name
-        return tool
+        return _toolkit_named(tool_name)
 
     monkeypatch.setattr("mindroom.agents.get_tool_by_name", _get_tool_by_name)
 
     agent = _create_agent_for_test("general", config=config, execution_identity=shared_identity)
 
-    assert [tool.name for tool in agent.tools] == ["credentialed_toolkit"]
+    assert [tool.name for tool in agent.spec.toolkits] == ["credentialed_toolkit"]
 
 
 def test_resolve_worker_key_rejects_unknown_scope() -> None:
@@ -2969,9 +2991,7 @@ def test_resolve_agent_owned_path_rejects_path_traversal(tmp_path: Path) -> None
 
 
 @patch("mindroom.agents.get_tool_by_name")
-@patch("mindroom.agent_storage._ConversationSqliteDb")
 def test_create_agent_reads_canonical_context_files_and_reloads_from_agent_root(
-    mock_storage: MagicMock,  # noqa: ARG001
     mock_get_tool_by_name: MagicMock,
     tmp_path: Path,
 ) -> None:
@@ -3001,28 +3021,28 @@ def test_create_agent_reads_canonical_context_files_and_reloads_from_agent_root(
         session_id="session-1",
     )
 
-    with tool_execution_identity(execution_identity):
+    with detached_tool_scope(execution_identity):
         agent = _create_agent_for_test("general", config=_bind_runtime_paths(config, _runtime_paths(tmp_path)))
 
-    assert "Canonical soul context." in agent.role
+    assert "Canonical soul context." in _role(agent)
     assert mock_get_tool_by_name.call_args is not None
     assert mock_get_tool_by_name.call_args.kwargs["tool_init_overrides"] == {"base_dir": str(canonical_workspace)}
 
     canonical_soul.write_text("Updated canonical soul context.", encoding="utf-8")
 
-    with tool_execution_identity(execution_identity):
+    with detached_tool_scope(execution_identity):
         updated_agent = _create_agent_for_test("general", config=_bind_runtime_paths(config, _runtime_paths(tmp_path)))
 
-    assert "Updated canonical soul context." in updated_agent.role
+    assert "Updated canonical soul context." in _role(updated_agent)
 
     canonical_soul.unlink()
 
-    with tool_execution_identity(execution_identity):
+    with detached_tool_scope(execution_identity):
         deleted_agent = _create_agent_for_test("general", config=_bind_runtime_paths(config, _runtime_paths(tmp_path)))
 
     assert not canonical_soul.exists()
-    assert "Canonical soul context." not in deleted_agent.role
-    assert "Updated canonical soul context." not in deleted_agent.role
+    assert "Canonical soul context." not in _role(deleted_agent)
+    assert "Updated canonical soul context." not in _role(deleted_agent)
 
 
 @pytest.mark.parametrize("planted", ["other_instance_link", "primary_file_link", "fifo"])
@@ -3053,6 +3073,7 @@ def test_load_context_files_refuses_planted_workspace_entries(tmp_path: Path, pl
             runtime_paths,
             agent_name="general",
             storage_path=storage_path,
+            workspace_root=agent_workspace_root_path(storage_path, "general"),
         )
 
     assert [chunk.body for chunk in loaded] == ["own user notes"]
@@ -3079,9 +3100,10 @@ def test_load_context_files_reads_a_huge_workspace_file_up_to_its_cap(
         _runtime_paths(storage_path),
         agent_name="general",
         storage_path=storage_path,
+        workspace_root=agent_workspace_root_path(storage_path, "general"),
     )
 
-    assert [chunk.body for chunk in loaded] == [("soul " * 4).strip()]
+    assert [chunk.body for chunk in loaded] == ["soul " * 4]
 
 
 def test_context_files_in_a_workspace_reached_through_a_link_are_refused(tmp_path: Path) -> None:
@@ -3098,6 +3120,7 @@ def test_context_files_in_a_workspace_reached_through_a_link_are_refused(tmp_pat
             _runtime_paths(storage_path),
             agent_name="general",
             storage_path=storage_path,
+            workspace_root=agent_workspace_root_path(storage_path, "general"),
         )
 
     assert loaded == []
@@ -3117,6 +3140,7 @@ def test_load_context_files_truncates_a_workspace_file_above_one_mebibyte(tmp_pa
             _runtime_paths(storage_path),
             agent_name="general",
             storage_path=storage_path,
+            workspace_root=agent_workspace_root_path(storage_path, "general"),
         )
 
     assert len(chunk.body) == 1 << 20
@@ -3155,10 +3179,11 @@ def test_load_context_files_keeps_internal_workspace_links(tmp_path: Path) -> No
         _runtime_paths(storage_path),
         agent_name="general",
         storage_path=storage_path,
+        workspace_root=agent_workspace_root_path(storage_path, "general"),
     )
 
     assert [(chunk.title, chunk.body) for chunk in loaded] == [
-        (str(workspace.resolve() / "docs" / "soul.md"), "Linked soul."),
+        (str(workspace.resolve() / "docs" / "soul.md"), "Linked soul.\n"),
     ]
 
 
@@ -3184,15 +3209,14 @@ def test_load_context_files_prefers_projected_assets_over_workspace_shadows(
         runtime_paths,
         agent_name="general",
         storage_path=storage_path,
+        workspace_root=agent_workspace_root_path(storage_path, "general"),
     )
 
     assert len(loaded) == 1
-    assert loaded[0].body == "config"
+    assert loaded[0].body == "config\n"
 
 
-@patch("mindroom.agent_storage._ConversationSqliteDb")
 def test_create_agent_scaffolds_default_mind_workspace_under_runtime_storage_root(
-    _mock_storage: MagicMock,  # noqa: PT019
     tmp_path: Path,
 ) -> None:
     """The default starter Mind profile should materialize its workspace under the active runtime root."""
@@ -3206,7 +3230,6 @@ def test_create_agent_scaffolds_default_mind_workspace_under_runtime_storage_roo
                 rooms=["personal"],
                 tools=[],
                 include_default_tools=False,
-                learning=False,
                 memory_backend="file",
                 context_files=[
                     "SOUL.md",
@@ -3232,14 +3255,12 @@ def test_create_agent_scaffolds_default_mind_workspace_under_runtime_storage_roo
     assert (workspace / "TOOLS.md").exists()
     assert (workspace / "HEARTBEAT.md").exists()
     assert (workspace / "MEMORY.md").exists()
-    assert "## Personality Context" in agent.role
+    assert "## Personality Context" in _role(agent)
     assert agent_build_can_overlap_file_memory("mind", config, runtime_storage)
 
 
 @patch("mindroom.agents.get_tool_by_name")
-@patch("mindroom.agent_storage._ConversationSqliteDb")
 def test_create_agent_uses_unscoped_kubernetes_worker_workspace_for_dedicated_tools(
-    mock_storage: MagicMock,
     mock_get_tool_by_name: MagicMock,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3257,22 +3278,20 @@ def test_create_agent_uses_unscoped_kubernetes_worker_workspace_for_dedicated_to
     monkeypatch.setenv("MINDROOM_WORKER_BACKEND", "kubernetes")
     monkeypatch.setenv("CUSTOMER_ID", "tenant-123")
     runtime_paths = _runtime_paths(tmp_path, config_path=config_dir / "config.yaml")
+    config = _bind_runtime_paths(config, runtime_paths)
 
-    _create_agent_for_test("general", config=_bind_runtime_paths(config, runtime_paths))
+    _create_agent_for_test("general", config=config)
 
     agent_root = agent_state_root_path(tmp_path, "general")
     canonical_workspace = agent_workspace_root_path(tmp_path, "general")
-    db_files = [Path(str(call.kwargs["db_file"])) for call in mock_storage.call_args_list]
-    assert agent_root / "sessions" / "general.db" in db_files
-    assert agent_root / "learning" / "general.db" in db_files
+    store = create_session_storage("general", config, runtime_paths, execution_identity=None)
+    assert store.path == agent_root / "sessions" / "general.db"
     assert mock_get_tool_by_name.call_args is not None
     assert mock_get_tool_by_name.call_args.kwargs["tool_init_overrides"] == {"base_dir": str(canonical_workspace)}
 
 
 @patch("mindroom.agents.get_tool_by_name")
-@patch("mindroom.agent_storage._ConversationSqliteDb")
 def test_create_agent_uses_mounted_dedicated_worker_root_for_unscoped_agent_state(
-    mock_storage: MagicMock,
     mock_get_tool_by_name: MagicMock,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -3294,21 +3313,19 @@ def test_create_agent_uses_mounted_dedicated_worker_root_for_unscoped_agent_stat
     monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_KEY", worker_key)
     monkeypatch.setenv("MINDROOM_SANDBOX_DEDICATED_WORKER_ROOT", str(dedicated_root))
     runtime_paths = _runtime_paths(shared_root, config_path=config_dir / "config.yaml")
+    config = _bind_runtime_paths(config, runtime_paths)
 
-    _create_agent_for_test("general", config=_bind_runtime_paths(config, runtime_paths))
+    _create_agent_for_test("general", config=config)
 
     agent_root = agent_state_root_path(shared_root, "general")
     canonical_workspace = agent_workspace_root_path(shared_root, "general")
-    db_files = [Path(str(call.kwargs["db_file"])) for call in mock_storage.call_args_list]
-    assert agent_root / "sessions" / "general.db" in db_files
-    assert agent_root / "learning" / "general.db" in db_files
-    assert not any(path.is_relative_to(dedicated_root) for path in db_files)
+    store = create_session_storage("general", config, runtime_paths, execution_identity=None)
+    assert store.path == agent_root / "sessions" / "general.db"
     assert mock_get_tool_by_name.call_args is not None
     assert mock_get_tool_by_name.call_args.kwargs["tool_init_overrides"] == {"base_dir": str(canonical_workspace)}
 
 
-@patch("mindroom.agent_storage._ConversationSqliteDb")
-def test_agent_context_files_are_loaded_into_role(mock_storage: MagicMock, tmp_path: Path) -> None:  # noqa: ARG001
+def test_agent_context_files_are_loaded_into_role(tmp_path: Path) -> None:
     """Context files should load directly from the canonical workspace."""
     config = _test_config()
     workspace = agent_workspace_root_path(tmp_path, "general")
@@ -3322,114 +3339,163 @@ def test_agent_context_files_are_loaded_into_role(mock_storage: MagicMock, tmp_p
 
     agent = _create_agent_for_test("general", config=_bind_runtime_paths(config, _runtime_paths(tmp_path)))
 
-    assert "## Personality Context" in agent.role
-    assert f"### {soul_path}" in agent.role
-    assert "Core personality directive." in agent.role
-    assert f"### {user_path}" in agent.role
-    assert "User preference: concise answers." in agent.role
+    assert "## Personality Context" in _role(agent)
+    assert f"### {soul_path}" in _role(agent)
+    assert "Core personality directive." in _role(agent)
+    assert f"### {user_path}" in _role(agent)
+    assert "User preference: concise answers." in _role(agent)
     soul_path.write_text("Canonical soul directive.", encoding="utf-8")
 
     updated_agent = _create_agent_for_test("general", config=_bind_runtime_paths(config, _runtime_paths(tmp_path)))
 
-    assert "Canonical soul directive." in updated_agent.role
+    assert "Canonical soul directive." in _role(updated_agent)
 
 
-def _preload_chunks() -> list[_AdditionalContextChunk]:
-    return [
-        _AdditionalContextChunk(title="/ws/FIRST.md", body="FIRST_START " + "A" * 600),
-        _AdditionalContextChunk(title="/ws/SECOND.md", body="SECOND_START " + "B" * 600),
-    ]
+def _context_files_role(tmp_path: Path, files: dict[str, str], max_chars: int) -> str:
+    """Render the role of an agent that preloads ``files``, each cut to ``max_chars`` characters."""
+    config = _test_config()
+    workspace = agent_workspace_root_path(tmp_path, "general")
+    workspace.mkdir(parents=True, exist_ok=True)
+    for name, text in files.items():
+        (workspace / name).write_text(text, encoding="utf-8")
+    config.agents["general"].context_files = list(files)
+    bound = _bind_runtime_paths(config, _runtime_paths(tmp_path))
+    bound.defaults.max_preload_file_chars = max_chars
+    return _role(_create_agent_for_test("general", config=bound))
 
 
-def _apply_test_preload_cap(chunks: list[_AdditionalContextChunk], max_preload_chars: int) -> tuple[str, int]:
-    return _apply_preload_cap(
-        chunks,
-        max_preload_chars,
-        section_heading=prompts.PERSONALITY_CONTEXT_SECTION_HEADING,
-        truncation_marker_template=prompts.CONTEXT_TRUNCATION_MARKER_TEMPLATE,
-        chunk_marker_template=prompts.CONTEXT_CHUNK_OMITTED_MARKER_TEMPLATE,
+def _cut_marker(path: Path, max_chars: int) -> str:
+    return render_prompt_template(
+        prompts.PRELOAD_FILE_CUT_MARKER_TEMPLATE,
+        path=path,
+        max_chars=max_chars,
     )
 
 
-def test_trim_chunk_tails_counts_whitespace_removed_by_cleanup() -> None:
-    """Tail trimming must count whitespace removed after the requested slice."""
-    chunk = _AdditionalContextChunk(title="/ws/SOUL.md", body="alpha   beta")
-
-    omitted_chars = _trim_chunk_tails(
-        [chunk],
-        len("alpha   "),
-        render=lambda chunks: chunks[0].body,
-    )
-
-    assert chunk.body == "alpha"
-    assert chunk.omitted_chars == 7
-    assert omitted_chars == 7
+_LONG_FILE = "".join(f"line {index:02} of the file\n" for index in range(10))
 
 
-def test_preload_cap_truncates_context_files_in_order() -> None:
-    """Preload cap should drop earlier context files before later ones."""
-    chunks = _preload_chunks()
-    heading_and_markers = len(prompts.PERSONALITY_CONTEXT_SECTION_HEADING) + 400
+def test_preload_keeps_the_first_whole_lines_of_a_file_over_its_limit(tmp_path: Path) -> None:
+    """Each line counts with its newline: 3 lines of 21 characters fill 63, so the 4th is left out, marked."""
+    with capture_logs() as logs:
+        role = _context_files_role(tmp_path, {"SOUL.md": _LONG_FILE}, 70)
+    soul = agent_workspace_root_path(tmp_path, "general") / "SOUL.md"
 
-    rendered, omitted_chars = _apply_test_preload_cap(chunks, len(chunks[1].body) + heading_and_markers)
-
-    assert omitted_chars >= len(_preload_chunks()[0].body)
-    assert "FIRST_START" not in rendered
-    assert "SECOND_START" in rendered
-    assert "[Context files exceeded the preload budget - " in rendered
-
-
-def test_preload_cap_keeps_the_dropped_file_path_visible() -> None:
-    """A dropped context file must stay visible as its path plus an omission marker."""
-    chunks = _preload_chunks()
-    dropped_body_length = len(chunks[0].body)
-    heading_and_markers = len(prompts.PERSONALITY_CONTEXT_SECTION_HEADING) + 400
-
-    rendered, _ = _apply_test_preload_cap(chunks, len(chunks[1].body) + heading_and_markers)
-
-    assert "### /ws/FIRST.md" in rendered
-    assert f"[Truncated - {dropped_body_length} chars omitted. Read /ws/FIRST.md for the rest.]" in rendered
+    [cut_log] = [entry for entry in logs if entry["event"] == "context_file_preload_cut"]
+    assert (cut_log["agent"], cut_log["path"]) == ("general", str(soul))
+    kept = "line 00 of the file\nline 01 of the file\nline 02 of the file"
+    assert f"### {soul}\n{kept}\n{_cut_marker(soul, 70)}" in role
+    assert "line 03" not in role
 
 
-def test_preload_cap_rejects_budget_too_small_for_required_markers() -> None:
-    """A hard cap must fail explicitly rather than slice away required file markers."""
-    chunks = [
-        _AdditionalContextChunk(
-            title=f"/workspace/context/file-{index}.md",
-            body="x" * 700,
-        )
-        for index in range(6)
-    ]
+def test_preload_cuts_a_first_line_longer_than_the_limit_at_the_limit(tmp_path: Path) -> None:
+    """A file whose first line alone is over the limit keeps that line's first characters."""
+    role = _context_files_role(tmp_path, {"SOUL.md": "x" * 50 + "\nsecond line\n"}, 20)
+    soul = agent_workspace_root_path(tmp_path, "general") / "SOUL.md"
 
-    with pytest.raises(ValueError, match="cannot fit required context headings and omission markers"):
-        _apply_test_preload_cap(chunks, 400)
+    assert f"### {soul}\n{'x' * 20}\n{_cut_marker(soul, 20)}" in role
+    assert "x" * 21 not in role
 
 
-def test_preload_cap_trims_last_context_body_instead_of_dropping_it() -> None:
-    """After dropping earlier files, the final file should keep as much leading content as fits."""
-    rendered, omitted_chars = _apply_test_preload_cap(_preload_chunks(), 1_000)
+def test_preload_cuts_each_file_on_its_own(tmp_path: Path) -> None:
+    """A growing file never shortens or drops another one; both stay in the prompt."""
+    small = {"SOUL.md": "Soul directive.\n", "USER.md": "User fact.\n"}
+    grown = {"SOUL.md": "Soul directive.\n", "USER.md": "User fact.\n" + _LONG_FILE * 5}
 
-    assert len(_preload_chunks()[0].body) < omitted_chars < sum(len(chunk.body) for chunk in _preload_chunks())
-    assert "FIRST_START" not in rendered
-    assert "SECOND_START" in rendered
-    assert "### /ws/FIRST.md" in rendered
-    assert "### /ws/SECOND.md" in rendered
-    assert len(rendered) <= 1_000
+    role = _context_files_role(tmp_path, small, 70)
+    grown_role = _context_files_role(tmp_path, grown, 70)
+    soul = agent_workspace_root_path(tmp_path, "general") / "SOUL.md"
+    user = agent_workspace_root_path(tmp_path, "general") / "USER.md"
 
-
-def test_preload_cap_leaves_untruncated_context_unmarked() -> None:
-    """Context that fits the budget must carry no omission markers."""
-    rendered, omitted_chars = _apply_test_preload_cap(_preload_chunks(), 50_000)
-
-    assert omitted_chars == 0
-    assert "Truncated" not in rendered
-    assert "FIRST_START" in rendered
-    assert "SECOND_START" in rendered
+    assert f"### {soul}\nSoul directive." in role
+    assert f"### {soul}\nSoul directive.\n\n### {user}\nUser fact." in grown_role
+    assert _cut_marker(user, 70) in grown_role
+    assert _cut_marker(soul, 70) not in grown_role
+    first_grown = {"SOUL.md": "Soul directive.\n" + _LONG_FILE * 5, "USER.md": "User fact.\n"}
+    assert f"### {user}\nUser fact." in _context_files_role(tmp_path, first_grown, 70)
 
 
-@patch("mindroom.agent_storage._ConversationSqliteDb")
+def test_preload_is_unchanged_by_lines_added_past_a_cut(tmp_path: Path) -> None:
+    """The marker holds no count that grows with the file, so appended lines leave the prompt byte-identical."""
+    role = _context_files_role(tmp_path, {"SOUL.md": _LONG_FILE}, 70)
+
+    assert _context_files_role(tmp_path, {"SOUL.md": _LONG_FILE + "appended line\n" * 100}, 70) == role
+    edited = _context_files_role(tmp_path, {"SOUL.md": _LONG_FILE.replace("line 01", "line 1")}, 70)
+    assert edited != role
+    assert "line 1 of the file" in edited
+
+
+def test_preload_leaves_a_file_within_its_limit_unmarked(tmp_path: Path) -> None:
+    """A file that fits its limit exactly is inlined whole, with no marker."""
+    role = _context_files_role(tmp_path, {"SOUL.md": _LONG_FILE}, len(_LONG_FILE))
+
+    assert "line 09 of the file" in role
+    assert "prompt limit" not in role
+
+
+async def _memory_preamble(tmp_path: Path, text: str, max_chars: int) -> str:
+    """Return the MEMORY.md preamble of an agent whose MEMORY.md is ``text``, cut to ``max_chars`` characters."""
+    config = _test_config()
+    config.agents["general"].memory_backend = "file"
+    workspace = agent_workspace_root_path(tmp_path, "general")
+    workspace.mkdir(parents=True, exist_ok=True)
+    (workspace / "MEMORY.md").write_bytes(text.encode())
+    bound = _bind_runtime_paths(config, _runtime_paths(tmp_path))
+    bound.defaults.max_preload_file_chars = max_chars
+    parts = await build_memory_prompt_parts("x", "general", bound, runtime_paths_for(bound))
+    return parts.session_preamble
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("text", "max_chars", "kept"),
+    [
+        (_LONG_FILE, 70, "line 00 of the file\nline 01 of the file\nline 02 of the file"),
+        ("aa\r\nbb\r\ncc\r\n", 6, "aa"),
+        ("  a\nz", 3, "a"),
+    ],
+    ids=["lines", "crlf", "leading-space"],
+)
+async def test_memory_entrypoint_and_a_context_file_get_the_same_cut(
+    tmp_path: Path,
+    text: str,
+    max_chars: int,
+    kept: str,
+) -> None:
+    """One rule cuts every preloaded file: MEMORY.md keeps exactly what a context file of the same text keeps."""
+    role = _context_files_role(tmp_path, {"SOUL.md": text}, max_chars)
+    preamble = await _memory_preamble(tmp_path, text, max_chars)
+
+    workspace = agent_workspace_root_path(tmp_path, "general")
+    assert f"\n{kept}\n{_cut_marker(workspace / 'SOUL.md', max_chars)}" in role
+    assert preamble.endswith(f"\n{kept}\n{_cut_marker(workspace / 'MEMORY.md', max_chars)}")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("text", "max_chars", "appended"),
+    [("aa\nbb\n", 5, "cc\n"), ("x" * ((1 << 20) + 10), 100, "y")],
+    ids=["lines", "past-the-read-cap"],
+)
+async def test_both_preloads_are_unchanged_by_text_added_past_the_cut(
+    tmp_path: Path,
+    text: str,
+    max_chars: int,
+    appended: str,
+) -> None:
+    """Text added past the cut leaves both renders as they were, even for a one-line file past the 1 MiB read."""
+    workspace = agent_workspace_root_path(tmp_path, "general")
+    role = _context_files_role(tmp_path, {"SOUL.md": text}, max_chars)
+    preamble = await _memory_preamble(tmp_path, text, max_chars)
+
+    assert _cut_marker(workspace / "SOUL.md", max_chars) in role
+    assert preamble.endswith(_cut_marker(workspace / "MEMORY.md", max_chars))
+    assert text[:3] in preamble
+    assert _context_files_role(tmp_path, {"SOUL.md": text + appended}, max_chars) == role
+    assert await _memory_preamble(tmp_path, text + appended, max_chars) == preamble
+
+
 def test_agent_context_section_states_files_are_preloaded(
-    mock_storage: MagicMock,  # noqa: ARG001
     tmp_path: Path,
 ) -> None:
     """The context section must tell the model these files are already inlined."""
@@ -3442,20 +3508,19 @@ def test_agent_context_section_states_files_are_preloaded(
 
     agent = _create_agent_for_test("general", config=_bind_runtime_paths(config, _runtime_paths(tmp_path)))
 
-    assert "headed by the path of the file it was read from" in agent.role
-    assert "Do not re-read a file" in agent.role
+    assert "headed by the path of the file it was read from" in _role(agent)
+    assert "Do not re-read a file" in _role(agent)
 
 
-@patch("mindroom.agent_storage._ConversationSqliteDb")
-def test_agent_missing_context_file_is_ignored(mock_storage: MagicMock, tmp_path: Path) -> None:  # noqa: ARG001
+def test_agent_missing_context_file_is_ignored(tmp_path: Path) -> None:
     """Missing context files should not prevent agent creation."""
     config = _test_config()
     config.agents["general"].context_files = ["does-not-exist.md"]
 
     agent = _create_agent_for_test("general", config=_bind_runtime_paths(config, _runtime_paths(tmp_path)))
 
-    assert "## Personality Context" not in agent.role
-    assert "does-not-exist.md" not in agent.role
+    assert "## Personality Context" not in _role(agent)
+    assert "does-not-exist.md" not in _role(agent)
 
 
 def test_agent_relative_context_paths_resolve_from_workspace_not_cwd(tmp_path: Path) -> None:
@@ -3473,12 +3538,11 @@ def test_agent_relative_context_paths_resolve_from_workspace_not_cwd(tmp_path: P
     other_cwd.mkdir(parents=True, exist_ok=True)
     os.chdir(other_cwd)
     try:
-        with patch("mindroom.agent_storage._ConversationSqliteDb"):
-            agent = _create_agent_for_test("general", config=_bind_runtime_paths(config, _runtime_paths(tmp_path)))
+        agent = _create_agent_for_test("general", config=_bind_runtime_paths(config, _runtime_paths(tmp_path)))
     finally:
         os.chdir(original_cwd)
 
-    assert "Relative soul context." in agent.role
+    assert "Relative soul context." in _role(agent)
 
 
 def test_bind_runtime_paths_rejects_missing_private_template_dir(tmp_path: Path) -> None:
@@ -3637,13 +3701,13 @@ def test_planted_link_in_the_default_mind_workspace_never_breaks_agent_builds(tm
             "mind": AgentConfig(
                 display_name="Mind",
                 memory_backend="file",
-                context_files=list(agents_module._DEFAULT_MIND_CONTEXT_FILES),
+                context_files=list(MIND_TEMPLATE_CONTEXT_FILES),
             ),
         },
     )
 
     with capture_logs() as logs:
-        agents_module.ensure_default_agent_workspaces(config, storage_path)
+        agents_module.ensure_default_agent_workspaces(config, _runtime_paths(storage_path))
 
     assert any(entry["log_level"] == "warning" for entry in logs)
     assert not (tmp_path / "missing.md").exists()
@@ -3719,9 +3783,7 @@ def test_copy_workspace_template_without_xattr_apis(tmp_path: Path, monkeypatch:
     assert (workspace_root / "AGENTS.md").read_text(encoding="utf-8") == "template\n"
 
 
-@patch("mindroom.agent_storage._ConversationSqliteDb")
 def test_create_agent_private_root_loads_requester_context_from_isolated_workspace(
-    mock_storage: MagicMock,  # noqa: ARG001
     tmp_path: Path,
     build_private_template_dir: Callable[..., Path],
 ) -> None:
@@ -3773,6 +3835,9 @@ def test_create_agent_private_root_loads_requester_context_from_isolated_workspa
         config=config,
         runtime_paths=runtime_paths,
         execution_identity=alice_identity,
+        knowledge=None,
+        model=turn_model(config, runtime_paths, "general"),
+        plugins=config_plugins(config, runtime_paths),
     )
     alice_worker_key = resolve_worker_key("user", alice_identity)
     assert alice_worker_key is not None
@@ -3785,6 +3850,9 @@ def test_create_agent_private_root_loads_requester_context_from_isolated_workspa
         config=config,
         runtime_paths=runtime_paths,
         execution_identity=alice_identity,
+        knowledge=None,
+        model=turn_model(config, runtime_paths, "general"),
+        plugins=config_plugins(config, runtime_paths),
     )
 
     bob_agent = create_agent(
@@ -3792,21 +3860,22 @@ def test_create_agent_private_root_loads_requester_context_from_isolated_workspa
         config=config,
         runtime_paths=runtime_paths,
         execution_identity=bob_identity,
+        knowledge=None,
+        model=turn_model(config, runtime_paths, "general"),
+        plugins=config_plugins(config, runtime_paths),
     )
     bob_worker_key = resolve_worker_key("user", bob_identity)
     assert bob_worker_key is not None
     bob_workspace = (private_instance_scope_root_path(tmp_path, bob_worker_key) / "general") / "mind_data"
 
     assert alice_workspace != bob_workspace
-    assert "Alice private root context." in alice_agent.role
+    assert "Alice private root context." in _role(alice_agent)
     assert (bob_workspace / "USER.md").exists()
-    assert "Alice private root context." not in bob_agent.role
+    assert "Alice private root context." not in _role(bob_agent)
     assert alice_workspace.parent == private_instance_scope_root_path(tmp_path, alice_worker_key) / "general"
 
 
-@patch("mindroom.agent_storage._ConversationSqliteDb")
 def test_create_agent_private_template_dir_does_not_imply_context_files(
-    mock_storage: MagicMock,  # noqa: ARG001
     tmp_path: Path,
     build_private_template_dir: Callable[..., Path],
 ) -> None:
@@ -3846,14 +3915,15 @@ def test_create_agent_private_template_dir_does_not_imply_context_files(
         config=config,
         runtime_paths=runtime_paths,
         execution_identity=identity,
+        knowledge=None,
+        model=turn_model(config, runtime_paths, "general"),
+        plugins=config_plugins(config, runtime_paths),
     )
 
-    assert "Template user." not in agent.role
+    assert "Template user." not in _role(agent)
 
 
-@patch("mindroom.agent_storage._ConversationSqliteDb")
 def test_create_agent_loads_private_workspace_skills(
-    mock_storage: MagicMock,  # noqa: ARG001
     tmp_path: Path,
 ) -> None:
     """Private agents should load skills from the resolved requester workspace."""
@@ -3890,15 +3960,17 @@ def test_create_agent_loads_private_workspace_skills(
         config=config,
         runtime_paths=runtime_paths,
         execution_identity=identity,
+        knowledge=None,
+        model=turn_model(config, runtime_paths, "general"),
+        plugins=config_plugins(config, runtime_paths),
     )
 
-    assert agent.skills is not None
-    assert agent.skills.get_skill_names() == ["private-skill"]
+    assert agent.prompt.skills_block is not None
+    assert "<name>private-skill</name>" in agent.prompt.skills_block
+    assert "get_skill_instructions" in _offered(agent)
 
 
-@patch("mindroom.agent_storage._ConversationSqliteDb")
 def test_create_agent_private_root_requires_execution_identity(
-    mock_storage: MagicMock,  # noqa: ARG001
     tmp_path: Path,
 ) -> None:
     """Private agents should fail closed instead of falling back to shared config-relative state."""
@@ -3910,50 +3982,35 @@ def test_create_agent_private_root_requires_execution_identity(
     )
 
     with pytest.raises(ValueError, match="requires an active execution identity"):
-        create_agent("general", config=config, runtime_paths=_runtime_paths(tmp_path), execution_identity=None)
+        create_agent(
+            "general",
+            config=config,
+            runtime_paths=_runtime_paths(tmp_path),
+            execution_identity=None,
+            knowledge=None,
+            model=turn_model(config, _runtime_paths(tmp_path), "general"),
+            plugins=config_plugins(config, _runtime_paths(tmp_path)),
+        )
 
     assert not (tmp_path / "mind_data").exists()
 
 
-@patch("mindroom.agent_storage._ConversationSqliteDb")
-def test_create_agent_disabled_tool_names_omit_resolved_tools(
-    mock_storage: MagicMock,  # noqa: ARG001
-    tmp_path: Path,
-) -> None:
-    """Call-scoped agent construction can omit mutating tools from borrowed agents."""
-    config = _test_config()
-    config.agents["general"].tools = ["memory", "calculator"]
-    runtime_paths = _runtime_paths(tmp_path)
-    config = _bind_runtime_paths(config, runtime_paths)
-    built_tools: list[str] = []
-
-    def fake_build_agent_toolkit(tool_name: str, **_kwargs: object) -> None:
-        built_tools.append(tool_name)
-
-    with patch("mindroom.agents.build_agent_toolkit", side_effect=fake_build_agent_toolkit):
-        create_agent(
-            "general",
-            config=config,
-            runtime_paths=runtime_paths,
-            execution_identity=None,
-            disabled_tool_names=frozenset({"memory"}),
-        )
-
-    assert "calculator" in built_tools
-    assert "memory" not in built_tools
-
-
-def test_tool_function_filter_prunes_resolved_functions() -> None:
+def test_tool_function_filter_prunes_resolved_functions(tmp_path: Path) -> None:
     """Channel policies filter actual functions without dropping a safe toolkit peer."""
-    safe = Function(name="safe", entrypoint=lambda: "safe")
-    unsafe = Function(name="unsafe", entrypoint=lambda: "unsafe")
-    toolkit = Toolkit(name="mixed", tools=[safe, unsafe])
+    config = _test_config()
+    config.agents["general"].tools = ["calculator"]
+    config = _bind_runtime_paths(config, _runtime_paths(tmp_path))
+    toolkit = Toolkit(
+        name="mixed",
+        tools=[Function(name="safe", entrypoint=lambda: "safe"), Function(name="unsafe", entrypoint=lambda: "unsafe")],
+    )
 
-    filtered = _prune_toolkit_functions(toolkit, lambda function: function.name == "safe")
+    with patch("mindroom.agents.build_agent_toolkit", return_value=toolkit):
+        build = _create_agent_for_test("general", config, tool_function_filter=lambda function: function.name == "safe")
 
-    assert filtered is toolkit
-    assert set(toolkit.functions) == {"safe"}
-    assert toolkit.async_functions == {}
+    assert set(_offered(build)) == {"safe"}
+    # The built toolkit is left as it was built.
+    assert set(toolkit.functions) == {"safe", "unsafe"}
 
 
 def test_native_approval_capability_marks_only_potentially_gated_calls() -> None:
@@ -3982,18 +4039,11 @@ def test_native_approval_capability_marks_only_potentially_gated_calls() -> None
         ],
     )
 
-    filtered = agents_module.apply_tool_approval_capability(
-        toolkit,
-        config,
-        supports_native_tool_approval=True,
-    )
+    functions = gated_functions(toolkit, config)
 
-    assert filtered is toolkit
-    assert toolkit.functions["dangerous"].requires_confirmation is True
-    assert toolkit.async_functions["dangerous_async"].requires_confirmation is True
-    assert toolkit.functions["dangerous"].approval_type == "mindroom_policy"
-    assert toolkit.async_functions["dangerous_async"].approval_type == "mindroom_policy"
-    assert toolkit.functions["safe"].requires_confirmation is not True
+    assert functions["dangerous"].gate is ToolGate.POLICY
+    assert functions["dangerous_async"].gate is ToolGate.POLICY
+    assert functions["safe"].gate is None
 
 
 def test_non_resumable_tool_surface_hides_potentially_gated_calls() -> None:
@@ -4022,15 +4072,7 @@ def test_non_resumable_tool_surface_hides_potentially_gated_calls() -> None:
         ],
     )
 
-    filtered = agents_module.apply_tool_approval_capability(
-        toolkit,
-        config,
-        supports_native_tool_approval=False,
-    )
-
-    assert filtered is toolkit
-    assert set(toolkit.functions) == {"safe"}
-    assert toolkit.async_functions == {}
+    assert set(gated_functions(toolkit, config, resumable=False)) == {"safe"}
 
 
 def test_non_resumable_tool_surface_hides_native_confirmation_calls() -> None:
@@ -4044,14 +4086,7 @@ def test_non_resumable_tool_surface_hides_native_confirmation_calls() -> None:
         ],
     )
 
-    filtered = agents_module.apply_tool_approval_capability(
-        toolkit,
-        config,
-        supports_native_tool_approval=False,
-    )
-
-    assert filtered is toolkit
-    assert set(toolkit.functions) == {"safe"}
+    assert set(gated_functions(toolkit, config, resumable=False)) == {"safe"}
 
 
 def test_native_approval_capability_preserves_tool_authored_confirmation() -> None:
@@ -4062,37 +4097,84 @@ def test_native_approval_capability_preserves_tool_authored_confirmation() -> No
         tools=[Function(name="native_confirmation", entrypoint=lambda: None, requires_confirmation=True)],
     )
 
-    filtered = agents_module.apply_tool_approval_capability(
-        toolkit,
-        config,
-        supports_native_tool_approval=True,
-    )
+    function = gated_functions(toolkit, config)["native_confirmation"]
 
-    assert filtered is toolkit
-    assert toolkit.functions["native_confirmation"].requires_confirmation is True
-    assert toolkit.functions["native_confirmation"].approval_type is None
+    assert function.gate is ToolGate.CONFIRM
 
 
-def test_non_resumable_tool_surface_drops_an_empty_toolkit() -> None:
-    """A channel that hides every function must not register an unusable toolkit name."""
+def test_job_approval_capability_marks_only_calls_that_can_become_jobs() -> None:
+    """A gated call that can become a managed job asks as its job; a call that must finish in its run still pauses it."""
     config = Config.model_validate({"tool_approval": {"default": "require_approval"}})
-    toolkit = Toolkit(
-        name="approval-test",
-        tools=[Function(name="dangerous", entrypoint=lambda: None)],
+
+    def gated(*, connects: bool = False, **options: bool) -> ToolFunction:
+        toolkit = Toolkit(name="approval-test", tools=[Function(name="gated", entrypoint=lambda: None, **options)])
+        toolkit._requires_connect = connects
+        return gated_functions(toolkit, config, approvals_as_jobs=True)["gated"]
+
+    assert gated().gate is ToolGate.JOB
+    for paused in (gated(stop_after_tool_call=True), gated(connects=True)):
+        assert paused.gate is ToolGate.POLICY
+    # A model switch stops the run only when it applies to the current response, which a job could not continue.
+    switch = gated_functions(ThreadModelTools(), config, approvals_as_jobs=True)["switch_thread_model"]
+    assert switch.gate is ToolGate.POLICY
+    # An authored confirmation is the tool's own pause, never a job's approval.
+    assert gated(requires_confirmation=True).gate is ToolGate.CONFIRM
+
+
+@pytest.mark.parametrize(
+    ("enabled", "depth", "asks_as_job"),
+    [(True, 0, True), (False, 0, False), (True, 1, False)],
+    ids=["top-level", "jobs-off", "subagent"],
+)
+def test_only_a_top_level_job_agent_asks_for_approvals_as_jobs(
+    tmp_path: Path,
+    *,
+    enabled: bool,
+    depth: int,
+    asks_as_job: bool,
+) -> None:
+    """A subagent's calls keep pausing their run, as every call does with jobs off."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = _bind_runtime_paths(
+        Config(
+            agents={"helper": AgentConfig(display_name="Helper", tools=["calculator", "shell"])},
+            models={"default": ModelConfig(provider="openai", id="test-model")},
+            tool_approval=ToolApprovalConfig(
+                rules=[
+                    ApprovalRuleConfig(match="add", action="require_approval"),
+                    ApprovalRuleConfig(match="run_shell_command", action="require_approval"),
+                ],
+            ),
+            background_tool_jobs=BackgroundToolJobsConfig(enabled=enabled),
+        ),
+        runtime_paths,
     )
 
-    filtered = agents_module.apply_tool_approval_capability(
-        toolkit,
-        config,
-        supports_native_tool_approval=False,
-    )
+    build = _create_agent_for_test("helper", config, delegation_depth=depth)
 
-    assert filtered is None
+    functions = _offered(build)
+    expected = ToolGate.JOB if asks_as_job else ToolGate.POLICY
+    assert functions["add"].gate is expected
+    assert functions["run_shell_command"].gate is expected
 
 
-@pytest.mark.asyncio
-async def test_create_agent_tool_filter_applies_to_agno_generated_knowledge_function(tmp_path: Path) -> None:
-    """The stored channel policy filters functions Agno adds after construction."""
+def test_non_resumable_tool_surface_drops_an_empty_toolkit(tmp_path: Path) -> None:
+    """A channel that hides every function must not register an unusable toolkit name."""
+    config = _test_config()
+    config.agents["general"].tools = ["calculator"]
+    config.tool_approval = ToolApprovalConfig(default="require_approval")
+    config = _bind_runtime_paths(config, _runtime_paths(tmp_path))
+    toolkit = Toolkit(name="approval-test", tools=[Function(name="dangerous", entrypoint=lambda: None)])
+
+    with patch("mindroom.agents.build_agent_toolkit", return_value=toolkit):
+        build = _create_agent_for_test("general", config, supports_native_tool_approval=False)
+
+    assert _offered(build) == {}
+    assert "`calculator`" not in _role(build)
+
+
+def test_create_agent_tool_filter_applies_to_the_generated_knowledge_function(tmp_path: Path) -> None:
+    """The channel's function policy filters the knowledge search the build generates beside its toolkits."""
     config = _test_config()
     config.agents["general"].knowledge_bases = ["docs"]
     config.knowledge_bases = {
@@ -4108,27 +4190,12 @@ async def test_create_agent_tool_filter_applies_to_agno_generated_knowledge_func
     agent = _create_agent_for_test(
         "general",
         config,
-        knowledge=Knowledge(name="docs"),
+        knowledge=_knowledge("docs"),
         tool_function_filter=allow_call_function,
     )
-    run_output = RunOutput(
-        run_id="run-call-policy",
-        agent_id="general",
-        agent_name="GeneralAgent",
-        session_id="session-call-policy",
-    )
-    run_context = RunContext(run_id="run-call-policy", session_id="session-call-policy")
-    session = AgentSession(
-        session_id="session-call-policy",
-        agent_id="general",
-        created_at=1,
-        updated_at=1,
-    )
-
-    tools = await agent.aget_tools(run_output, run_context, session)
 
     assert "search_knowledge_base" in seen
-    assert all(not isinstance(tool, Function) or tool.name != "search_knowledge_base" for tool in tools)
+    assert "search_knowledge_base" not in _offered(agent)
 
 
 def _config_with_workspace_skill(tmp_path: Path) -> Config:
@@ -4148,18 +4215,7 @@ def _config_with_workspace_skill(tmp_path: Path) -> Config:
     return config
 
 
-async def _generated_functions(agent: Agent, user_id: str | None = None) -> dict[str, Function]:
-    tools = await agent.aget_tools(
-        RunOutput(run_id="run", agent_id="general", agent_name="GeneralAgent", session_id="session"),
-        RunContext(run_id="run", session_id="session"),
-        AgentSession(session_id="session", agent_id="general", created_at=1, updated_at=1),
-        user_id=user_id,
-    )
-    return {tool.name: tool for tool in tools if isinstance(tool, Function)}
-
-
-@pytest.mark.asyncio
-async def test_create_agent_hides_agno_generated_functions_an_approval_rule_may_gate(tmp_path: Path) -> None:
+def test_create_agent_hides_generated_functions_an_approval_rule_may_gate(tmp_path: Path) -> None:
     """Generated functions have no toolkit origin to pause and resume, so gated ones are never exposed."""
     config = _config_with_workspace_skill(tmp_path)
     config.tool_approval = ToolApprovalConfig(
@@ -4169,76 +4225,49 @@ async def test_create_agent_hides_agno_generated_functions_an_approval_rule_may_
         ],
     )
 
-    functions = await _generated_functions(_create_agent_for_test("general", config, knowledge=Knowledge(name="docs")))
+    functions = _offered(_create_agent_for_test("general", config, knowledge=_knowledge("docs")))
 
     assert "get_skill_instructions" in functions
     assert "get_skill_script" not in functions
     assert "search_knowledge_base" not in functions
 
 
-@pytest.mark.asyncio
-async def test_create_agent_prompts_omit_skill_and_knowledge_functions_approval_hides(tmp_path: Path) -> None:
+def test_create_agent_prompts_omit_skill_and_knowledge_functions_approval_hides(tmp_path: Path) -> None:
     """The system message never tells the model to call skill or knowledge-search functions it cannot see."""
     config = _config_with_workspace_skill(tmp_path)
     config.tool_approval = ToolApprovalConfig(default="require_approval")
-    agent = _create_agent_for_test("general", config, knowledge=Knowledge(name="docs"))
-    session = AgentSession(session_id="session", agent_id="general", created_at=1, updated_at=1)
-    run_context = RunContext(run_id="run", session_id="session")
-    tools = await agent.aget_tools(
-        RunOutput(run_id="run", agent_id="general", agent_name="GeneralAgent", session_id="session"),
-        run_context,
-        session,
-    )
+    agent = _create_agent_for_test("general", config, knowledge=_knowledge("docs"))
 
-    message = await agent.aget_system_message(session, run_context, [t for t in tools if isinstance(t, Function)])
+    prompt = system_text(prompt_for_turn(agent))
 
-    assert message is not None
     for advertised in ("<skills_system>", "get_skill_instructions", "get_skill_script", "search_knowledge_base"):
-        assert advertised not in str(message.content)
+        assert advertised not in prompt
 
 
 @pytest.mark.asyncio
-async def test_create_agent_runs_plugin_tool_hooks_for_agno_generated_functions(tmp_path: Path) -> None:
-    """A plugin before-call gate can decline a function Agno adds after agent construction."""
+async def test_create_agent_runs_plugin_tool_hooks_for_generated_functions(tmp_path: Path) -> None:
+    """A plugin before-call gate can decline a function the build generates beside its toolkits."""
 
     @hook(EVENT_TOOL_BEFORE_CALL)
     async def decline(ctx: ToolBeforeCallContext) -> None:
         ctx.decline("blocked by plugin")
 
-    plugin = SimpleNamespace(
-        name="gate",
-        entry_config=PluginEntryConfig(path="gate"),
-        plugin_order=0,
-        discovered_hooks=(decline,),
-        discovered_automations=(),
-    )
     config = _config_with_workspace_skill(tmp_path)
-    config.agents["general"].learning_mode = "agentic"
-    agent = _create_agent_for_test("general", config, hook_registry=HookRegistry.from_plugins([plugin]))
-    set_learning_machine(agent)
+    plugins = publish_hook_plugin(config, _runtime_paths(tmp_path), "gate", [decline])
+    agent = _create_agent_for_test("general", config, plugins=plugins)
 
-    functions = await _generated_functions(agent, user_id="@alice:localhost")
-    skill_call = FunctionCall(
-        function=functions["get_skill_instructions"],
-        arguments={"skill_name": "scripted"},
-        call_id="call-1",
+    skill_result = await execute_tool_call(
+        _offered(agent)["get_skill_instructions"],
+        {"skill_name": "scripted"},
+        ToolCallContext(run_id="run", session_id="session", user_id="@alice:localhost", call_id="call-1"),
+        middleware=agent_tool_middleware(agent),
     )
-    memory_call = FunctionCall(
-        function=functions["update_user_memory"],
-        arguments={"task": "Remember the user prefers tea."},
-        call_id="call-2",
-    )
-    skill_result = await skill_call.aexecute()
-    memory_result = await memory_call.aexecute()
 
-    assert "[TOOL CALL DECLINED]" in str(skill_result.result)
-    assert "SKILL BODY" not in str(skill_result.result)
-    assert "[TOOL CALL DECLINED]" in str(memory_result.result)
+    assert "[TOOL CALL DECLINED]" in str(skill_result.content)
+    assert "SKILL BODY" not in str(skill_result.content)
 
 
-@patch("mindroom.agent_storage._ConversationSqliteDb")
 def test_create_agent_disable_runtime_capabilities_omits_all_tools_and_skills(
-    mock_storage: MagicMock,  # noqa: ARG001
     tmp_path: Path,
 ) -> None:
     """Restricted in-process agent construction should reuse persona/model without capabilities."""
@@ -4265,19 +4294,20 @@ def test_create_agent_disable_runtime_capabilities_omits_all_tools_and_skills(
             runtime_paths=runtime_paths,
             execution_identity=None,
             disable_runtime_capabilities=True,
+            knowledge=None,
+            model=turn_model(config, runtime_paths, "general"),
+            plugins=config_plugins(config, runtime_paths),
         )
 
     assert built_tools == []
     load_agent_skills.assert_not_called()
-    assert agent.tools is None or agent.tools == []
-    assert agent.skills is None
-    assert "Private workspace directive." not in agent.role
-    assert "## Personality Context" not in agent.role
+    assert agent.spec.toolkits == ()
+    assert agent.prompt.skills_block is None
+    assert "Private workspace directive." not in _role(agent)
+    assert "## Personality Context" not in _role(agent)
 
 
-@patch("mindroom.agent_storage._ConversationSqliteDb")
 def test_create_agent_disable_runtime_capabilities_does_not_materialize_private_workspace(
-    mock_storage: MagicMock,  # noqa: ARG001
     tmp_path: Path,
 ) -> None:
     """Restricted in-process agent construction should resolve private paths without creating state."""
@@ -4317,12 +4347,13 @@ def test_create_agent_disable_runtime_capabilities_does_not_materialize_private_
         config=config,
         runtime_paths=runtime_paths,
         execution_identity=identity,
-        session_id="session-1",
-        persist_runtime_state=False,
         disable_runtime_capabilities=True,
+        knowledge=None,
+        model=turn_model(config, runtime_paths, "general"),
+        plugins=config_plugins(config, runtime_paths),
     )
 
-    assert agent.tools is None or agent.tools == []
+    assert agent.spec.toolkits == ()
     assert not runtime.workspace.root.exists()
 
 
@@ -4377,7 +4408,10 @@ def test_config_rejects_legacy_agent_memory_dir_field() -> None:
     """Legacy memory_dir field must fail fast to avoid silent drops."""
     with pytest.raises(
         ValidationError,
-        match=re.escape("Agent field 'memory_dir' was removed. Use 'context_files' and memory.backend=file instead."),
+        match=re.escape(
+            "Agent field 'memory_dir' was removed. Every agent works in its own workspace: list the files it "
+            "always loads in 'context_files', and set memory_backend=file to keep its memory files there.",
+        ),
     ):
         Config(
             agents={
@@ -4453,6 +4487,66 @@ def test_config_rejects_retired_auto_resume_after_restart() -> None:
         )
 
 
+def test_config_ignores_overrides_of_the_retired_cut_markers() -> None:
+    """Overrides of the marker templates the per-file cut replaced still load, and a save drops them."""
+    config = Config(
+        prompts={
+            "CONTEXT_TRUNCATION_MARKER_TEMPLATE": "[{omitted_chars} omitted]",
+            "CONTEXT_CHUNK_OMITTED_MARKER_TEMPLATE": "[{title}: {omitted_chars} omitted]",
+            "FILE_MEMORY_ENTRYPOINT_TRUNCATION_TEMPLATE": "[{included_lines} of {total_lines}]",
+            "PERSONALITY_CONTEXT_SECTION_HEADING": "## Files",
+        },
+    )
+
+    assert config.prompts == {"PERSONALITY_CONTEXT_SECTION_HEADING": "## Files"}
+
+
+def test_a_curation_prompt_override_with_retired_placeholders_names_them() -> None:
+    """The curation prompt lost its MEMORY.md line and token placeholders; an override still using them says which."""
+    with pytest.raises(ValidationError, match=r"Unsupported prompt placeholder.*: max_entrypoint_lines, memory_lines"):
+        Config(prompts={"PROMPT_CURATION_PROMPT_TEMPLATE": "{memory_lines} lines, cap {max_entrypoint_lines}"})
+
+
+def test_config_ignores_the_retired_shared_preload_budget() -> None:
+    """A config that still sets the retired total budget loads, keeps the per-file limit, and a save drops it."""
+    config = Config.model_validate(
+        {
+            "defaults": {"max_preload_chars": 65000},
+            "memory": {"file": {"max_entrypoint_lines": 200, "max_entrypoint_tokens": 50000}},
+            "agents": {"calculator": {"display_name": "CalculatorAgent"}},
+        },
+    )
+
+    assert config.defaults.max_preload_file_chars == 30000
+    dumped = config.model_dump(exclude_unset=True)
+    assert "max_preload_chars" not in dumped["defaults"]
+    assert "file" not in dumped.get("memory", {})
+    assert Config(defaults={"max_preload_file_chars": 500}).defaults.max_preload_file_chars == 500
+    with pytest.raises(ValidationError):
+        Config(defaults={"max_preload_file_chars": 0})
+    # The limit's next character must fit the 1 MiB read even at 4 bytes a character.
+    assert Config(defaults={"max_preload_file_chars": 200_000}).defaults.max_preload_file_chars == 200_000
+    with pytest.raises(ValidationError):
+        Config(defaults={"max_preload_file_chars": 200_001})
+
+
+@pytest.mark.parametrize("field", ["learning", "learning_mode", "compress_tool_results"])
+def test_config_rejects_retired_agno_fields_and_says_to_remove_them(field: str) -> None:
+    """A retired Agno field in defaults or on an agent fails validation with a message naming it and saying to remove it."""
+    with pytest.raises(ValidationError) as exc_info:
+        Config.model_validate(
+            {
+                "defaults": {field: True},
+                "agents": {"general": {"display_name": "GeneralAgent", field: True}},
+            },
+        )
+
+    assert sorted(iter_config_validation_messages(exc_info.value)) == [
+        (f"agents → general → {field}", f"Unknown key '{field}': remove it or correct its spelling"),
+        (f"defaults → {field}", f"Unknown key '{field}': remove it or correct its spelling"),
+    ]
+
+
 def test_config_rejects_legacy_agent_toolkit_fields_with_bundle_safe_hint() -> None:
     """Removed agent toolkit knobs should point users to expand presets before lazy flags."""
     with pytest.raises(
@@ -4517,8 +4611,8 @@ def test_config_resolves_per_agent_memory_backend_override() -> None:
         memory={"backend": "mem0"},
     )
 
-    assert config.resolve_entity("general").memory_backend == "mem0"
-    assert config.resolve_entity("writer").memory_backend == "file"
+    assert config.resolve_scope("general").memory_backend == "mem0"
+    assert config.resolve_scope("writer").memory_backend == "file"
 
 
 def test_config_reports_mixed_memory_backend_usage() -> None:
@@ -4532,8 +4626,8 @@ def test_config_reports_mixed_memory_backend_usage() -> None:
     )
 
     assert config.uses_file_memory() is True
-    assert config.resolve_entity("general").memory_backend == "file"
-    assert config.resolve_entity("writer").memory_backend == "mem0"
+    assert config.resolve_scope("general").memory_backend == "file"
+    assert config.resolve_scope("writer").memory_backend == "mem0"
 
 
 def test_config_rejects_memory_file_path_even_with_mem0_backend() -> None:
@@ -4641,45 +4735,73 @@ def test_file_mode_agent_instructions_list_workspace_knowledge_path(tmp_path: Pa
 
     agent = _create_agent_for_test("general", config)
 
-    rendered_instructions = "\n".join(str(instruction) for instruction in agent.instructions)
+    rendered_instructions = "\n".join(str(instruction) for instruction in agent.prompt.instructions)
     assert "File-only knowledge bases are available in the workspace." in rendered_instructions
     assert "- research: `knowledge/research`" in rendered_instructions
     assert "Research notes and decision records." in rendered_instructions
     assert "search_knowledge_base" in rendered_instructions
 
 
-def test_workspace_agent_instructions_include_skill_authoring_guidance(tmp_path: Path) -> None:
-    """Agents with workspace-rooted tools should learn they can author skills in their workspace."""
+@pytest.mark.parametrize("memory_backend", ["file", "mem0"])
+def test_workspace_agent_instructions_include_skill_authoring_guidance(tmp_path: Path, memory_backend: str) -> None:
+    """Every agent works in its own workspace, so each learns it can author skills there, whatever its memory."""
     runtime_paths = _runtime_paths(tmp_path)
     config = _bind_runtime_paths(_test_config(), runtime_paths)
-    config.agents["general"].memory_backend = "file"
+    config.agents["general"].memory_backend = memory_backend
 
     agent = _create_agent_for_test("general", config)
 
-    assert WORKSPACE_SKILL_AUTHORING_PROMPT in agent.instructions
+    assert WORKSPACE_SKILL_AUTHORING_PROMPT in agent.prompt.instructions
 
 
-def test_agent_without_workspace_omits_skill_authoring_guidance(tmp_path: Path) -> None:
-    """Agents without a workspace should not be told to write workspace skill files."""
+@pytest.mark.parametrize("also_valid", [False, True])
+def test_agent_instructions_name_each_workspace_skill_that_did_not_load(tmp_path: Path, also_valid: bool) -> None:
+    """An agent learns which of its workspace skills did not load and why, even when no other skill loads."""
     runtime_paths = _runtime_paths(tmp_path)
     config = _bind_runtime_paths(_test_config(), runtime_paths)
-    config.agents["general"].memory_backend = "mem0"
+    skills_root = agent_workspace_root_path(runtime_paths.storage_root, "general") / "skills"
+    (skills_root / "xl_check").mkdir(parents=True)
+    (skills_root / "xl_check" / "SKILL.md").write_text(
+        "---\nname: xl_check\ndescription: Use when: the task needs an xlsx check\n---\n\n# Body\n",
+    )
+    if also_valid:
+        (skills_root / "good").mkdir()
+        (skills_root / "good" / "SKILL.md").write_text("---\nname: good\ndescription: Good skill\n---\n\n# Body\n")
 
     agent = _create_agent_for_test("general", config)
 
-    assert WORKSPACE_SKILL_AUTHORING_PROMPT not in agent.instructions
+    [note] = [instruction for instruction in agent.prompt.instructions if "skills/xl_check/SKILL.md" in instruction]
+    assert "mapping values are not allowed in this context" in note
+    assert "line 3, column 22" in note
+    assert not any("skills/good/" in instruction for instruction in agent.prompt.instructions)
+    assert (agent.prompt.skills_block is not None) is also_valid
+
+
+def test_agent_whose_skill_functions_approval_hides_is_not_told_about_skills_that_did_not_load(
+    tmp_path: Path,
+) -> None:
+    """Approval rules that hide every skill function leave out all skill guidance, including skills that did not load."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = _bind_runtime_paths(_test_config(), runtime_paths)
+    config.tool_approval = ToolApprovalConfig(default="require_approval")
+    skill_dir = agent_workspace_root_path(runtime_paths.storage_root, "general") / "skills" / "xl_check"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        "---\nname: xl_check\ndescription: Use when: the task needs an xlsx check\n---\n\n# Body\n",
+    )
+
+    agent = _create_agent_for_test("general", config)
+
+    assert not any("skills/xl_check/SKILL.md" in instruction for instruction in agent.prompt.instructions)
 
 
 @pytest.mark.parametrize("has_memory_tool", [False, True])
-@pytest.mark.parametrize("async_mode", [False, True])
-@pytest.mark.asyncio
-async def test_agent_knowledge_search_tool_description_lists_configured_sources_by_capability(
+def test_agent_knowledge_search_tool_description_lists_configured_sources_by_capability(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     has_memory_tool: bool,
-    async_mode: bool,
 ) -> None:
-    """Sync and async knowledge tools recommend memory search only when that function exists."""
+    """The knowledge search tool recommends memory search only when that function exists."""
     config = _test_config()
     config.agents["general"].tools = ["memory"] if has_memory_tool else []
     config.agents["general"].knowledge_bases = ["engineering", "product"]
@@ -4706,36 +4828,9 @@ async def test_agent_knowledge_search_tool_description_lists_configured_sources_
     knowledge = resolve_agent_knowledge_access("general", config, runtime_paths).knowledge
     assert knowledge is not None
     agent = _create_agent_for_test("general", config, knowledge=knowledge)
-    if has_memory_tool and not async_mode:
-        agent.tools = [
-            *(agent.tools or []),
-            Function(name="search_memories", entrypoint=lambda: "memory result"),
-        ]
-    run_output = RunOutput(
-        run_id="run-knowledge-description",
-        agent_id="general",
-        agent_name="GeneralAgent",
-        session_id="session-knowledge-description",
-        input="hello",
-        content="ok",
-    )
-    run_context = RunContext(run_id="run-knowledge-description", session_id="session-knowledge-description")
-    session = AgentSession(
-        session_id="session-knowledge-description",
-        agent_id="general",
-        created_at=1,
-        updated_at=1,
-    )
 
-    tools = (
-        await agent.aget_tools(run_output, run_context, session)
-        if async_mode
-        else agent.get_tools(run_output, run_context, session)
-    )
-    search_tools = [tool for tool in tools if isinstance(tool, Function) and tool.name == "search_knowledge_base"]
-
-    assert len(search_tools) == 1
-    description = search_tools[0].description
+    assert ("search_memories" in _offered(agent)) is has_memory_tool
+    description = _offered(agent)["search_knowledge_base"].description
     assert description is not None
     assert "Search this agent's configured knowledge bases" in description
     assert "- engineering: Architecture docs, ADRs, deployment runbooks, and coding conventions." in description
@@ -4760,62 +4855,62 @@ def test_memory_only_agent_gets_semantic_knowledge_search_description(
     config.memory.search.mode = "semantic"
     seen_base_ids: list[str] = []
 
-    def _get_published_index(base_id: str, **kwargs: object) -> object:
+    def _get_published_index(base_id: str, **kwargs: object) -> PublishedIndexResolution:
         effective_config = kwargs["config"]
         assert isinstance(effective_config, Config)
         base_config = effective_config.knowledge_bases[base_id]
         assert base_config.path == str(agent_workspace_root_path(runtime_paths.storage_root, "general").resolve())
         seen_base_ids.append(base_id)
-        return SimpleNamespace(
-            key=SimpleNamespace(base_id=base_id),
-            index=SimpleNamespace(
-                knowledge=_queryable_knowledge_handle(),
-                state=SimpleNamespace(last_refresh_at=None, last_published_at=None),
-            ),
-            availability=KnowledgeAvailability.READY,
-            state=None,
-        )
+        return published_index_lookup(base_id, _queryable_knowledge_handle())
 
     monkeypatch.setattr("mindroom.knowledge.utils.get_published_index", _get_published_index)
 
     knowledge = resolve_agent_knowledge_access("general", config, runtime_paths).knowledge
     assert knowledge is not None
     agent = _create_agent_for_test("general", config, knowledge=knowledge)
-    run_output = RunOutput(
-        run_id="run-memory-knowledge-description",
-        agent_id="general",
-        agent_name="GeneralAgent",
-        session_id="session-memory-knowledge-description",
-        input="hello",
-        content="ok",
-    )
-    run_context = RunContext(
-        run_id="run-memory-knowledge-description",
-        session_id="session-memory-knowledge-description",
-    )
-    session = AgentSession(
-        session_id="session-memory-knowledge-description",
-        agent_id="general",
-        created_at=1,
-        updated_at=1,
-    )
-
-    search_tools = [
-        tool
-        for tool in agent.get_tools(run_output, run_context, session)
-        if isinstance(tool, Function) and tool.name == "search_knowledge_base"
-    ]
-
-    assert len(search_tools) == 1
+    assert "search_knowledge_base" in _offered(agent)
     assert len(seen_base_ids) == 1
     assert seen_base_ids[0].startswith("file_memory_agent_general_")
-    description = search_tools[0].description
+    description = _offered(agent)["search_knowledge_base"].description
     assert description is not None
     assert (
         f"- {seen_base_ids[0]}: Configured file memory for this agent. "
         "Read-only semantic search over configured Markdown paths (default: memory/**/*.md)."
     ) in description
     assert "use search_memories" not in description
+
+
+@pytest.mark.parametrize("configured_base", [None, "engineering"])
+def test_graph_agent_knowledge_search_also_searches_its_graph(configured_base: str | None) -> None:
+    """A graph-enabled agent's knowledge search lists its graph beside any configured bases, or alone."""
+    config = _test_config()
+    config.agents["general"].knowledge_graph = True
+    knowledge = _knowledge(configured_base) if configured_base is not None else None
+
+    agent = _create_agent_for_test("general", config, knowledge=knowledge)
+
+    description = _offered(agent)["search_knowledge_base"].description
+    assert description is not None
+    assert "- knowledge_graph: " in description
+    assert (f"- {configured_base}: " in description) is (configured_base is not None)
+
+
+@pytest.mark.parametrize(("kept", "searches_graph"), [(("engineering",), False), (None, True)])
+def test_persona_searches_the_graph_only_when_it_keeps_every_source(
+    kept: tuple[str, ...] | None,
+    searches_graph: bool,
+) -> None:
+    """A persona that names the bases it keeps skips the graph, as it skips file memory; one that keeps all searches it."""
+    config = _test_config()
+    config.agents["general"].knowledge_graph = True
+    persona = SubagentPersona(source_kind="inline", source_name="", system_prompt="P", knowledge=kept)
+
+    agent = _create_agent_for_test("general", config, knowledge=_knowledge("engineering"), persona=persona)
+
+    description = _offered(agent)["search_knowledge_base"].description
+    assert description is not None
+    assert "- engineering: " in description
+    assert ("- knowledge_graph: " in description) is searches_graph
 
 
 def test_agent_knowledge_search_tool_description_preserves_colon_space_source_ids(
@@ -4849,30 +4944,8 @@ def test_agent_knowledge_search_tool_description_preserves_colon_space_source_id
     knowledge = resolve_agent_knowledge_access("general", config, runtime_paths).knowledge
     assert knowledge is not None
     agent = _create_agent_for_test("general", config, knowledge=knowledge)
-    run_output = RunOutput(
-        run_id="run-knowledge-description-colon",
-        agent_id="general",
-        agent_name="GeneralAgent",
-        session_id="session-knowledge-description-colon",
-        input="hello",
-        content="ok",
-    )
-    run_context = RunContext(run_id="run-knowledge-description-colon", session_id="session-knowledge-description-colon")
-    session = AgentSession(
-        session_id="session-knowledge-description-colon",
-        agent_id="general",
-        created_at=1,
-        updated_at=1,
-    )
-
-    search_tools = [
-        tool
-        for tool in agent.get_tools(run_output, run_context, session)
-        if isinstance(tool, Function) and tool.name == "search_knowledge_base"
-    ]
-
-    assert len(search_tools) == 1
-    description = search_tools[0].description
+    assert "search_knowledge_base" in _offered(agent)
+    description = _offered(agent)["search_knowledge_base"].description
     assert description is not None
     assert "- foo: bar: Special source with punctuation in its ID." in description
 
@@ -4892,71 +4965,17 @@ def test_agent_knowledge_search_tool_description_excludes_unavailable_sources(tm
         ),
     }
     config = _bind_runtime_paths(config, _runtime_paths(tmp_path))
-    ready_knowledge = Knowledge(
-        name="engineering",
+    ready_knowledge = _knowledge(
+        "engineering",
         description="Architecture docs, ADRs, deployment runbooks, and coding conventions.",
     )
 
     agent = _create_agent_for_test("general", config, knowledge=ready_knowledge)
-    run_output = RunOutput(
-        run_id="run-knowledge-description-mixed",
-        agent_id="general",
-        agent_name="GeneralAgent",
-        session_id="session-knowledge-description-mixed",
-        input="hello",
-        content="ok",
-    )
-    run_context = RunContext(run_id="run-knowledge-description-mixed", session_id="session-knowledge-description-mixed")
-    session = AgentSession(
-        session_id="session-knowledge-description-mixed",
-        agent_id="general",
-        created_at=1,
-        updated_at=1,
-    )
-
-    search_tools = [
-        tool
-        for tool in agent.get_tools(run_output, run_context, session)
-        if isinstance(tool, Function) and tool.name == "search_knowledge_base"
-    ]
-
-    assert len(search_tools) == 1
-    description = search_tools[0].description
+    assert "search_knowledge_base" in _offered(agent)
+    description = _offered(agent)["search_knowledge_base"].description
     assert description is not None
     assert "- engineering: Architecture docs, ADRs, deployment runbooks, and coding conventions." in description
     assert "legal" not in description
-
-
-def test_agent_accepts_custom_knowledge_protocol_without_source_metadata(tmp_path: Path) -> None:
-    """Custom knowledge implementations need not expose Agno Knowledge metadata fields."""
-
-    def search_knowledge_base(query: str) -> str:
-        """Search the custom knowledge backend."""
-        return f"custom result for {query}"
-
-    class CustomKnowledge:
-        def build_context(self, **_kwargs: object) -> str:
-            return "Use the custom knowledge backend."
-
-        def get_tools(self, **_kwargs: object) -> list[object]:
-            return [search_knowledge_base]
-
-        async def aget_tools(self, **_kwargs: object) -> list[object]:
-            return [search_knowledge_base]
-
-    config = _test_config()
-    config.agents["general"].knowledge_bases = ["custom"]
-    config.knowledge_bases = {
-        "custom": KnowledgeBaseConfig(
-            description="Custom protocol-backed search.",
-            path="./knowledge_docs/custom",
-        ),
-    }
-    config = _bind_runtime_paths(config, _runtime_paths(tmp_path))
-
-    agent = _create_agent_for_test("general", config, knowledge=CustomKnowledge())
-
-    assert agent.knowledge is not None
 
 
 @pytest.mark.parametrize("base_id", ["foo\nbar", "foo\rbar"])
@@ -5087,6 +5106,13 @@ def test_config_rejects_invalid_private_root_values(root: str, expected_message:
         )
 
 
+def test_private_template_dir_is_trimmed_and_must_not_be_blank() -> None:
+    """A private template directory keeps no surrounding whitespace and cannot be blank."""
+    assert AgentPrivateConfig(per="user", template_dir=" templates ").template_dir == "templates"
+    with pytest.raises(ValidationError, match=re.escape("private.template_dir must not be empty")):
+        AgentPrivateConfig(per="user", template_dir="   ")
+
+
 def test_config_rejects_removed_room_thread_private_scope() -> None:
     """Private requester scopes should no longer accept room-thread isolation."""
     with pytest.raises(ValidationError, match="Input should be 'user' or 'user_agent'"):
@@ -5145,7 +5171,7 @@ def test_config_accepts_private_knowledge_path_dot_for_private_root() -> None:
         },
     )
 
-    private_base_id = config.resolve_entity("mind").private_knowledge_base_id
+    private_base_id = config.resolve_agent("mind").policy.private_knowledge_base_id
     assert private_base_id is not None
     assert config.get_knowledge_base_config(private_base_id).path == "."
 
@@ -5285,9 +5311,9 @@ def test_config_private_and_shared_knowledge_coexist() -> None:
         },
     )
 
-    private_base_id = config.resolve_entity("mind").private_knowledge_base_id
+    private_base_id = config.resolve_agent("mind").policy.private_knowledge_base_id
     assert private_base_id is not None
-    assert config.resolve_entity("mind").knowledge_base_ids == ["company_docs", private_base_id]
+    assert config.resolve_agent("mind").knowledge_base_ids == ("company_docs", private_base_id)
     private_config = config.get_knowledge_base_config(private_base_id)
     assert private_config.path == "memory"
 
@@ -5306,8 +5332,8 @@ def test_template_dir_does_not_imply_private_knowledge() -> None:
         },
     )
 
-    assert config.resolve_entity("mind").private_knowledge_base_id is None
-    assert config.resolve_entity("mind").knowledge_base_ids == []
+    assert config.resolve_agent("mind").policy.private_knowledge_base_id is None
+    assert config.resolve_agent("mind").knowledge_base_ids == ()
 
 
 def test_get_private_knowledge_base_agent_requires_active_private_knowledge() -> None:
@@ -5480,65 +5506,60 @@ def test_config_rejects_git_backed_private_knowledge_overlapping_template_conten
         )
 
 
-def test_team_member_matches_solo_agent_construction() -> None:
-    """A team-materialized member must equal the same agent built solo, modulo explicit deltas."""
-    from tests.conftest import runtime_paths_for  # noqa: PLC0415
-
-    config = _test_config()
-    runtime_paths = runtime_paths_for(config)
-
-    solo = create_agent("calculator", config, runtime_paths, execution_identity=None)
-    member = materialize_exact_team_members(
+def test_a_team_member_build_opens_no_conversation_database(tmp_path: Path) -> None:
+    """A member saves through its team's store, so building it leaves its own sessions directory untouched."""
+    runtime_paths = _runtime_paths(tmp_path)
+    config = _bind_runtime_paths(_test_config(), runtime_paths)
+    members = resolve_exact_team_members(
         ["calculator"],
         config=config,
         runtime_paths=runtime_paths,
         execution_identity=None,
-    ).agents[0]
-    try:
-        assert member.role == solo.role
-        assert member.name == solo.name
-        assert member.id == solo.id
-        assert type(member.model) is type(solo.model)
-        assert member.model is not None
-        assert solo.model is not None
-        assert member.model.id == solo.model.id
-        assert [tool.name for tool in member.tools or []] == [tool.name for tool in solo.tools or []]
-        assert member.markdown == solo.markdown
-        assert type(member.learning) is type(solo.learning)
-        assert member.add_history_to_context == solo.add_history_to_context
-        assert member.num_history_runs == solo.num_history_runs
-        assert member.num_history_messages == solo.num_history_messages
-        assert member.max_tool_calls_from_history == solo.max_tool_calls_from_history
-        assert member.knowledge == solo.knowledge
-        assert member.compress_tool_results == solo.compress_tool_results
+        refresh_scheduler=None,
+        active_model_names={"calculator": turn_model(config, runtime_paths, "calculator").model_name},
+    )
 
-        # The only authored construction delta: members never get the Matrix
-        # reaction-based interactive question prompt.
-        interactive_prompt = config.get_prompt("INTERACTIVE_QUESTION_PROMPT")
-        assert interactive_prompt in solo.instructions
-        assert list(member.instructions or []) == [
-            instruction for instruction in solo.instructions or [] if instruction != interactive_prompt
-        ]
-    finally:
-        close_team_runtime_state_dbs(agents=[solo, member], team_db=None)
+    members.build("calculator", members.model_names["calculator"])
+
+    assert not (agent_state_root_path(tmp_path, "calculator") / "sessions").exists()
 
 
-def test_create_agent_passes_resolved_tool_call_budget_to_agno() -> None:
-    """Every constructed agent is bounded by its resolved per-turn tool-call budget."""
-    from tests.conftest import runtime_paths_for  # noqa: PLC0415
-
+def test_team_member_matches_solo_agent_construction() -> None:
+    """A team-materialized member must equal the same agent built solo, modulo explicit deltas."""
     config = _test_config()
     runtime_paths = runtime_paths_for(config)
-    config.agents["calculator"].max_tool_calls_per_turn = 7
 
-    with patch("mindroom.agents.install_model_call_cap", wraps=install_model_call_cap) as install_cap:
-        capped = create_agent("calculator", config, runtime_paths, execution_identity=None)
-        inheriting = create_agent("general", config, runtime_paths, execution_identity=None)
+    solo = create_agent(
+        "calculator",
+        config,
+        runtime_paths,
+        execution_identity=None,
+        knowledge=None,
+        model=turn_model(config, runtime_paths, "calculator"),
+        plugins=config_plugins(config, runtime_paths),
+    )
+    members = resolve_exact_team_members(
+        ["calculator"],
+        config=config,
+        runtime_paths=runtime_paths,
+        execution_identity=None,
+        refresh_scheduler=None,
+        active_model_names={"calculator": turn_model(config, runtime_paths, "calculator").model_name},
+    )
+    member = members.build("calculator", members.model_names["calculator"])
+    assert member.prompt.role == solo.prompt.role
+    assert (member.spec.id, member.spec.name) == (solo.spec.id, solo.spec.name)
+    assert member.spec.model.identity == solo.spec.model.identity
+    assert [toolkit.name for toolkit in member.spec.toolkits] == [toolkit.name for toolkit in solo.spec.toolkits]
+    assert set(_offered(member)) == set(_offered(solo))
+    assert member.prompt.markdown == solo.prompt.markdown
+    assert member.history_settings == solo.history_settings
+    assert member.prompt.knowledge_block == solo.prompt.knowledge_block
 
-    assert capped.tool_call_limit == 7
-    assert inheriting.tool_call_limit == config.defaults.max_tool_calls_per_turn == 1000
-    # The budget must end runaway runs, not only refuse their calls.
-    assert [(call.args, call.kwargs) for call in install_cap.call_args_list] == [
-        ((capped.model,), {"entity_name": "calculator"}),
-        ((inheriting.model,), {"entity_name": "general"}),
+    # The only authored construction delta: members never get the Matrix
+    # reaction-based interactive question prompt.
+    interactive_prompt = config.get_prompt("INTERACTIVE_QUESTION_PROMPT")
+    assert interactive_prompt in solo.prompt.instructions
+    assert list(member.prompt.instructions) == [
+        instruction for instruction in solo.prompt.instructions if instruction != interactive_prompt
     ]

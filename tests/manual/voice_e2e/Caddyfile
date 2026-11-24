@@ -1,0 +1,9 @@
+{
+	default_bind 127.0.0.1
+	skip_install_trust
+	admin off
+}
+
+localhost {
+	reverse_proxy 127.0.0.1:8008
+}

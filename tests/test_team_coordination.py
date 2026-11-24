@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Any
-from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -32,14 +31,14 @@ class TestTeamCoordination:
         # 2. Writer agent uses that data to create report
 
         # Research agent's response
-        async def research_response() -> AsyncGenerator[str, None]:
+        async def research_response() -> AsyncGenerator[str]:
             yield "I've found the following AI trends:\n"
             yield "1. LLMs are becoming multimodal\n"
             yield "2. Edge AI deployment is growing\n"
             yield "3. AI agents are collaborating more effectively"
 
         # Writer should wait for research to complete, then use that context
-        async def writer_response() -> AsyncGenerator[str, None]:
+        async def writer_response() -> AsyncGenerator[str]:
             yield "Based on the research findings, here's the report:\n"
             yield "# AI Trends Report\n"
             yield "The landscape of AI is rapidly evolving with three key trends..."
@@ -96,10 +95,8 @@ We have different recommendations:
         assert "Recommended approach" in expected_resolution
 
     @pytest.mark.asyncio
-    @patch("mindroom.response_runner.ai_response")
     async def test_team_handoff_mechanism(
         self,
-        mock_ai_response: AsyncMock,  # noqa: ARG002
         tmp_path: Path,  # noqa: ARG002
     ) -> None:
         """Test explicit handoffs between team members."""

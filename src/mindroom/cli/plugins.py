@@ -2,19 +2,23 @@
 
 from __future__ import annotations
 
+import json
+import sys
+from contextlib import nullcontext, redirect_stdout
 from pathlib import Path  # noqa: TC003
 from typing import TYPE_CHECKING
 
 import typer
 
-from mindroom import constants
-
-from .config import CONFIG_PATH_OPTION, console
+from .config import CONFIG_PATH_OPTION, activate_cli_runtime, console, print_literal
 
 if TYPE_CHECKING:
+    from mindroom.plugin_check import OutsideImport
     from mindroom.plugin_install import InstallResult
 
-plugins_app = typer.Typer(help="Validate and vendor external MindRoom plugins.")
+plugins_app = typer.Typer(help="Check, install, and update MindRoom plugins.")
+
+_OUTSIDE_IMPORTS = "imports from outside the plugin API can break in any MindRoom release"
 
 _PLUGINS_DIR_OPTION: Path | None = typer.Option(
     None,
@@ -25,29 +29,73 @@ _PLUGINS_DIR_OPTION: Path | None = typer.Option(
 
 @plugins_app.command("check")
 def plugin_check(
-    path: Path = typer.Argument(  # noqa: B008
+    path: str = typer.Argument(
         ...,
-        exists=True,
-        file_okay=False,
-        dir_okay=True,
-        resolve_path=True,
-        help="Plugin directory containing mindroom.plugin.json.",
+        help="Plugin directory or Python package spec, in any form a config.yaml plugins entry takes.",
     ),
+    strict: bool = typer.Option(False, "--strict", help="Treat imports from outside the plugin API as errors."),
+    json_output: bool = typer.Option(False, "--json", help="Print machine-readable JSON."),
 ) -> None:
     """Strictly validate one plugin against this MindRoom version."""
-    from mindroom.plugin_check import check_plugin  # noqa: PLC0415
+    from mindroom.plugin_check import check_plugin, imports_outside_plugin_api, resolve_plugin_root  # noqa: PLC0415
 
+    outside_imports: list[OutsideImport] = []
     try:
-        result = check_plugin(path)
+        # With --json, logs and anything the plugin prints go to stderr, so stdout carries only the JSON document.
+        with redirect_stdout(sys.stderr) if json_output else nullcontext():
+            plugin_root = resolve_plugin_root(path)
+            outside_imports = imports_outside_plugin_api(plugin_root)
+            result = check_plugin(plugin_root)
     except Exception as exc:
-        console.print(f"[red]Plugin check failed:[/red] {exc}")
+        if json_output:
+            failure = {
+                "status": "failed",
+                "detail": str(exc),
+                "internal_imports": _internal_imports_json(outside_imports),
+            }
+            typer.echo(json.dumps(failure))
+        else:
+            print_literal("[red]Plugin check failed:[/red] ", exc)
+            _print_outside_imports(outside_imports, strict=strict)
         raise typer.Exit(1) from None
 
-    console.print(f"[green]Plugin is compatible:[/green] {result.name}")
-    console.print(f"  Tools:       {', '.join(result.tool_names) or 'none'}")
-    console.print(f"  Hooks:       {', '.join(result.hook_names) or 'none'}")
-    console.print(f"  Automations: {', '.join(result.automation_names) or 'none'}")
-    console.print(f"  Skills:      {', '.join(result.skill_directories) or 'none'}")
+    strict_failure = strict and bool(outside_imports)
+    if json_output:
+        summary = {
+            "status": "compatible",
+            "name": result.name,
+            "tools": result.tool_names,
+            "hooks": result.hook_names,
+            "automations": result.automation_names,
+            "skills": result.skill_directories,
+            "internal_imports": _internal_imports_json(outside_imports),
+        }
+        if strict_failure:
+            summary |= {"status": "failed", "detail": _OUTSIDE_IMPORTS}
+        typer.echo(json.dumps(summary))
+        if strict_failure:
+            raise typer.Exit(1)
+        return
+    print_literal("[green]Plugin is compatible:[/green] ", result.name)
+    print_literal("  Tools:       ", ", ".join(result.tool_names) or "none")
+    print_literal("  Hooks:       ", ", ".join(result.hook_names) or "none")
+    print_literal("  Automations: ", ", ".join(result.automation_names) or "none")
+    print_literal("  Skills:      ", ", ".join(result.skill_directories) or "none")
+    _print_outside_imports(outside_imports, strict=strict)
+    if strict_failure:
+        raise typer.Exit(1)
+
+
+def _internal_imports_json(outside_imports: list[OutsideImport]) -> list[dict[str, str | int]]:
+    return [{"path": found.path.as_posix(), "line": found.line, "name": found.name} for found in outside_imports]
+
+
+def _print_outside_imports(outside_imports: list[OutsideImport], *, strict: bool) -> None:
+    if outside_imports:
+        label = "[red]Error:[/red]" if strict else "[yellow]Warning:[/yellow]"
+        console.print(f"{label} {_OUTSIDE_IMPORTS}:")
+        for found in outside_imports:
+            console.out(f"  {found.path}:{found.line}: {found.name}")
 
 
 @plugins_app.command("install")
@@ -59,19 +107,19 @@ def plugin_install(
     path: Path | None = CONFIG_PATH_OPTION,
     plugins_dir: Path | None = _PLUGINS_DIR_OPTION,
 ) -> None:
-    """Vendor one plugin from GitHub after it passes the strict compatibility check."""
+    """Install one plugin from GitHub after a strict compatibility check."""
     from mindroom.plugin_install import install_plugin, parse_plugin_spec  # noqa: PLC0415
 
-    config_dir = _runtime_config_dir(path)
+    config_dir = activate_cli_runtime(path).config_dir
     try:
         result = install_plugin(parse_plugin_spec(spec), _resolved_plugins_dir(plugins_dir, config_dir))
     except Exception as exc:
-        console.print(f"[red]Plugin install failed:[/red] {exc}")
+        print_literal("[red]Plugin install failed:[/red] ", exc)
         raise typer.Exit(1) from None
 
     _print_installed(result)
     console.print("\nAdd it to config.yaml:")
-    console.print(f"plugins:\n  - path: {_config_snippet_path(result.directory, config_dir)}")
+    print_literal("plugins:\n  - path: ", _config_snippet_path(result.directory, config_dir))
 
 
 @plugins_app.command("update")
@@ -92,13 +140,13 @@ def plugin_update(
         console.print("[red]--ref requires a single plugin NAME.[/red]")
         raise typer.Exit(2)
     if name is not None and (not name or name in {".", ".."} or "/" in name or "\\" in name):
-        console.print(f"[red]Invalid plugin name (expected a plain directory name):[/red] {name}")
+        print_literal("[red]Invalid plugin name (expected a plain directory name):[/red] ", name)
         raise typer.Exit(2)
 
-    resolved_plugins_dir = _resolved_plugins_dir(plugins_dir, _runtime_config_dir(path))
+    resolved_plugins_dir = _resolved_plugins_dir(plugins_dir, activate_cli_runtime(path).config_dir)
     directories = find_locked_plugin_dirs(resolved_plugins_dir) if update_all else (resolved_plugins_dir / str(name),)
     if not directories:
-        console.print(f"No vendored plugins found in {resolved_plugins_dir}")
+        print_literal("No vendored plugins found in ", resolved_plugins_dir)
         return
 
     failed = False
@@ -107,10 +155,10 @@ def plugin_update(
             update = update_plugin(directory, ref=ref)
         except Exception as exc:
             failed = True
-            console.print(f"[red]Plugin update failed:[/red] {directory.name}: {exc}")
+            print_literal("[red]Plugin update failed:[/red] ", f"{directory.name}: {exc}")
             continue
         if update.installed is None:
-            console.print(f"Already up to date: {directory.name} ({update.previous_commit[:12]})")
+            print_literal("Already up to date: ", f"{directory.name} ({update.previous_commit[:12]})")
         else:
             _print_installed(update.installed, previous_commit=update.previous_commit)
     if failed:
@@ -119,24 +167,16 @@ def plugin_update(
 
 def _print_installed(result: InstallResult, previous_commit: str | None = None) -> None:
     transition = f"{previous_commit[:12]} -> " if previous_commit else ""
-    console.print(
-        f"[green]Installed plugin:[/green] {result.name} "
-        f"({result.lock.repository}@{transition}{result.lock.commit[:12]})",
+    print_literal(
+        "[green]Installed plugin:[/green] ",
+        f"{result.name} ({result.lock.repository}@{transition}{result.lock.commit[:12]})",
     )
-    console.print(f"  Location: {result.directory}")
+    print_literal("  Location: ", result.directory)
     if result.has_pyproject:
         console.print(
             "[yellow]  Note: the plugin declares pyproject.toml dependencies; "
             "they are not installed automatically.[/yellow]",
         )
-
-
-def _runtime_config_dir(path: Path | None) -> Path:
-    runtime_paths = constants.resolve_runtime_paths(
-        config_path=path,
-        process_env=constants.exported_process_env(),
-    )
-    return runtime_paths.config_dir
 
 
 def _resolved_plugins_dir(plugins_dir: Path | None, config_dir: Path) -> Path:

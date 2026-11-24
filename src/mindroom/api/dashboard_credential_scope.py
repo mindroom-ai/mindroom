@@ -3,26 +3,32 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING
 
 from fastapi import HTTPException, Request
 
-from mindroom.agent_policy import ResolvedAgentPolicy, resolve_agent_policy_from_data
 from mindroom.api import config_lifecycle
+from mindroom.api.auth_user import request_auth_user
 from mindroom.authorization import (
-    is_platform_administrator,
     is_sender_allowed_for_agent_credential_management,
     is_sender_allowed_for_agent_oauth_connection,
 )
+from mindroom.config.resolution import agent_policy
 from mindroom.matrix.identity import try_parse_historical_matrix_user_id
-from mindroom.requester_identity import resolve_human_requester_alias
-from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope
+from mindroom.requester_identity import is_platform_administrator, resolve_human_requester_alias
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity, WorkerScope, build_requester_execution_identity
 
 if TYPE_CHECKING:
+    from mindroom.agent_policy import ResolvedAgentPolicy
     from mindroom.config.main import Config
     from mindroom.constants import RuntimePaths
 
-_OWNER_MATRIX_USER_ID_ENV = "MINDROOM_OWNER_USER_ID"
+
+class AgentNotConnectableError(HTTPException):
+    """The request names an agent that is unknown or the requester may not connect accounts for.
+
+    Its detail repeats that name from the request, which browser pages never show.
+    """
 
 
 @dataclass(frozen=True)
@@ -35,33 +41,6 @@ class _DashboardAgentExecutionScopeResolution:
     requested_execution_scope: WorkerScope | None
     execution_scope_override_provided: bool
     draft_scope_preview: bool
-
-
-def _request_auth_user(request: Request) -> dict[str, Any] | None:
-    auth_user = request.scope.get("auth_user")
-    return auth_user if isinstance(auth_user, dict) else None
-
-
-def require_auth_user_id(request: Request) -> str:
-    """Return the authenticated dashboard user id or raise 401."""
-    auth_user = _request_auth_user(request) or {}
-    user_id = auth_user.get("user_id")
-    if isinstance(user_id, str) and user_id:
-        return user_id
-    raise HTTPException(status_code=401, detail="Missing or invalid credentials")
-
-
-def _dashboard_requester_id_for_request(request: Request, runtime_paths: RuntimePaths) -> str | None:
-    """Return the requester identity dashboard-scoped worker credentials should use."""
-    auth_user = _request_auth_user(request) or {}
-    if auth_user.get("auth_source") == "trusted_upstream":
-        matrix_user_id = auth_user.get("matrix_user_id")
-        return try_parse_historical_matrix_user_id(matrix_user_id) if isinstance(matrix_user_id, str) else None
-    owner_user_id = runtime_paths.env_value(_OWNER_MATRIX_USER_ID_ENV)
-    if owner_user_id:
-        return owner_user_id
-    user_id = auth_user.get("user_id")
-    return user_id if isinstance(user_id, str) and user_id else None
 
 
 def reject_unbound_private_dashboard_requester(
@@ -96,21 +75,14 @@ def build_dashboard_execution_identity(
     and it exists solely so dashboard previews hit the same scoped-runtime seams as
     live requests once an execution scope is chosen.
     """
-    tenant_id = runtime_paths.env_value("CUSTOMER_ID")
-    account_id = runtime_paths.env_value("ACCOUNT_ID")
-    requester_id = _dashboard_requester_id_for_request(request, runtime_paths)
+    auth_user = request_auth_user(request)
+    requester_id = auth_user.requester_id(runtime_paths) if auth_user is not None else None
     if requester_id is not None and config is not None:
         requester_id = resolve_human_requester_alias(requester_id, config, runtime_paths)
-    return ToolExecutionIdentity(
-        channel="matrix",
+    return build_requester_execution_identity(
         agent_name=agent_name,
+        runtime_paths=runtime_paths,
         requester_id=requester_id,
-        room_id=None,
-        thread_id=None,
-        resolved_thread_id=None,
-        session_id=None,
-        tenant_id=tenant_id,
-        account_id=account_id,
     )
 
 
@@ -138,7 +110,7 @@ def resolve_dashboard_execution_scope_override(
     if raw_execution_scope == "unscoped":
         return True, None
     if raw_execution_scope in {"shared", "user", "user_agent"}:
-        return True, cast("WorkerScope", raw_execution_scope)
+        return True, raw_execution_scope
     raise HTTPException(
         status_code=400,
         detail=("Query parameter 'execution_scope' must be one of 'shared', 'user', 'user_agent', or 'unscoped'."),
@@ -175,7 +147,7 @@ def resolve_dashboard_agent_execution_scope_request(
 
     if agent_name not in config.agents:
         if not allow_draft_override:
-            raise HTTPException(status_code=404, detail=f"Unknown agent: {agent_name}")
+            raise AgentNotConnectableError(status_code=404, detail=f"Unknown agent: {agent_name}")
         # A draft agent exists only in the dashboard's unsaved config, so resolve it
         # as an agent-less scope preview: no persisted policy, no per-agent
         # authorization, and never an authoritative credential status.
@@ -190,12 +162,7 @@ def resolve_dashboard_agent_execution_scope_request(
             draft_scope_preview=True,
         )
 
-    persisted_policy = resolve_agent_policy_from_data(
-        agent_name,
-        config.agents[agent_name],
-        default_worker_scope=config.defaults.worker_scope,
-        private_knowledge_base_id_prefix=config.PRIVATE_KNOWLEDGE_BASE_ID_PREFIX,
-    )
+    persisted_policy = agent_policy(config, agent_name)
     persisted_execution_scope = persisted_policy.effective_execution_scope
     requested_execution_scope = (
         execution_scope_override if execution_scope_override_provided else persisted_execution_scope
@@ -271,10 +238,10 @@ def require_agent_oauth_connection_authorized(
         agent_name,
         config,
         runtime_paths,
-        config_lifecycle.app_state(request.app).agent_reply_memberships,
+        config_lifecycle.app_state(request.app).runtime.agent_reply_memberships,
         requester_owned=requester_owned,
     ):
-        raise HTTPException(
+        raise AgentNotConnectableError(
             status_code=403,
             detail=f"Not authorized to manage OAuth connections for agent '{agent_name}'",
         )

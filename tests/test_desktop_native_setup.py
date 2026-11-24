@@ -84,6 +84,15 @@ def _fake_access(monkeypatch: pytest.MonkeyPatch) -> None:
     )
 
 
+async def _assert_setup_headers(headers: object, *, access: bool) -> None:
+    assert headers["x-static-header"] == "static-value"
+    if access:
+        assert isinstance(headers, CloudflareAccessHeaders)
+        # The Matrix client prepares the token before every request.
+        await headers.prepare()
+        assert headers["cf-access-token"] == "access-token"
+
+
 @pytest.mark.parametrize("access", [False, True])
 def test_login_authenticates_with_configured_headers_and_saves_access_mode(
     tmp_path: Path,
@@ -96,11 +105,7 @@ def test_login_authenticates_with_configured_headers_and_saves_access_mode(
 
     async def resolve(requested: DesktopLoginMethod, **kwargs: object) -> DesktopLoginMethod:
         assert requested is DesktopLoginMethod.AUTO
-        headers = kwargs["http_headers"]
-        assert headers["x-static-header"] == "static-value"
-        if access:
-            assert isinstance(headers, CloudflareAccessHeaders)
-            assert headers["cf-access-token"] == "access-token"
+        await _assert_setup_headers(kwargs["http_headers"], access=access)
         return DesktopLoginMethod.PASSWORD
 
     async def login(**kwargs: object) -> tuple[object, DesktopMatrixSession]:
@@ -135,14 +140,11 @@ def test_pair_preserves_or_upgrades_saved_access_only_after_claim(
     _fake_access(monkeypatch)
     session_path = tmp_path / "desktop_bridge" / "matrix_session.json"
     original = session_path.read_bytes()
-    owner = SimpleNamespace(close=AsyncMock())
+    owner = SimpleNamespace(client=object(), close=AsyncMock())
 
     async def open_client(session: DesktopMatrixSession, **kwargs: object) -> object:
         assert session.cloudflare_access is saved_access
-        headers = kwargs["http_headers"]
-        assert headers["x-static-header"] == "static-value"
-        if saved_access or requested_access:
-            assert headers["cf-access-token"] == "access-token"
+        await _assert_setup_headers(kwargs["http_headers"], access=bool(saved_access or requested_access))
         return owner
 
     async def claim(_owner: object, controller: PinnedMatrixDevice, *, code: str) -> str:
@@ -152,6 +154,7 @@ def test_pair_preserves_or_upgrades_saved_access_only_after_claim(
         return "ABCD-EFGH"
 
     monkeypatch.setattr("mindroom.desktop.session.open_desktop_client", open_client)
+    monkeypatch.setattr("mindroom.desktop.session.client_ed25519_fingerprint", lambda _client: "device-ed25519")
     monkeypatch.setattr("mindroom.desktop.pairing_client.send_desktop_pairing_claim", claim)
     parameters: dict[str, object] = {"code": "pairing-code"}
     if requested_access is not None:
@@ -160,6 +163,9 @@ def test_pair_preserves_or_upgrades_saved_access_only_after_claim(
     result = asyncio.run(host.handle(NativeRequest("pair", "pair", parameters)))
 
     assert result["confirmation_command"] == "!desktop confirm pairing-code ABCD-EFGH"
+    assert result["agent_confirmation_command"] == "!desktop confirm assistant pairing-code ABCD-EFGH"
+    assert result["device_id"] == "LOCAL"
+    assert result["device_ed25519"] == "device-ed25519"
     assert load_desktop_session(session_path).cloudflare_access is bool(saved_access or requested_access)
     if not requested_access:
         assert session_path.read_bytes() == original
@@ -177,7 +183,7 @@ def test_pair_rejects_failed_claim_or_changed_setup_without_overwriting_session(
     _fake_access(monkeypatch)
     session_path = tmp_path / "desktop_bridge" / "matrix_session.json"
     original_session = load_desktop_session(session_path)
-    owner = SimpleNamespace(close=AsyncMock())
+    owner = SimpleNamespace(client=object(), close=AsyncMock())
 
     async def open_client(*_args: object, **_kwargs: object) -> object:
         if change == "config_replaced":
@@ -192,6 +198,7 @@ def test_pair_rejects_failed_claim_or_changed_setup_without_overwriting_session(
         return "ABCD-EFGH"
 
     monkeypatch.setattr("mindroom.desktop.session.open_desktop_client", open_client)
+    monkeypatch.setattr("mindroom.desktop.session.client_ed25519_fingerprint", lambda _client: "device-ed25519")
     monkeypatch.setattr("mindroom.desktop.pairing_client.send_desktop_pairing_claim", claim)
 
     with pytest.raises(NativeProtocolError) as exc:

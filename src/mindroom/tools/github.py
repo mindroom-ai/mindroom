@@ -1,8 +1,4 @@
-"""Tools registry for all available Agno tools.
-
-This module provides a centralized registry for all tools that can be used by agents.
-Tools are registered by string name and can be instantiated dynamically when loading agents.
-"""
+"""GitHub tool configuration."""
 
 from __future__ import annotations
 
@@ -37,6 +33,7 @@ if TYPE_CHECKING:
     config_fields=[
         ConfigField(
             name="access_token",
+            env=("GITHUB_ACCESS_TOKEN",),
             label="Access Token",
             type="password",
             required=False,
@@ -58,7 +55,7 @@ if TYPE_CHECKING:
         ToolManagedInitArg.WORKER_TARGET,
         ToolManagedInitArg.RUNTIME_CONFIG,
     ),
-    docs_url="https://docs.agno.com/tools/toolkits/others/github",
+    docs_url="https://docs.mindroom.chat/tools/project-management/#github",
     function_names=(
         "assign_issue",
         "close_issue",

@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO, cast
 
+from mindroom.agent_cli.shell_contract import SHELL_FUNCTION
+
 
 @dataclass(frozen=True)
 class ShellOutputDestination:
@@ -17,6 +19,8 @@ class ShellOutputDestination:
     workspace_root: str
     path: str
     max_bytes: int
+    # Whether the agent's tools work in a workdir, so the receipt names the saved file by absolute path.
+    tools_use_workdir: bool = False
 
     @classmethod
     def from_payload(cls, payload: object) -> ShellOutputDestination | None:
@@ -28,25 +32,46 @@ class ShellOutputDestination:
             raise TypeError(msg)
         data = cast("dict[str, object]", payload)
         workspace_root, path, max_bytes = data.get("workspace_root"), data.get("path"), data.get("max_bytes")
+        tools_use_workdir = data.get("tools_use_workdir")
         if (
             not isinstance(workspace_root, str)
             or not isinstance(path, str)
             or not isinstance(max_bytes, int)
             or isinstance(max_bytes, bool)
             or max_bytes <= 0
+            or not isinstance(tools_use_workdir, bool)
         ):
             msg = "Invalid shell output destination policy."
             raise ValueError(msg)
-        return cls(workspace_root=workspace_root, path=path, max_bytes=max_bytes)
+        return cls(workspace_root=workspace_root, path=path, max_bytes=max_bytes, tools_use_workdir=tools_use_workdir)
 
 
-def format_shell_completion(stdout: str, stderr: str, *, return_code: int) -> str:
-    """Format completed output without discarding either failure stream."""
-    if return_code == 0:
-        return stdout
-    if stdout and stderr:
-        return f"Error: {stdout}\nStderr:\n{stderr}"
-    return f"Error: {stdout or stderr}"
+def format_shell_completion(stdout: str, stderr: str | None, *, return_code: int) -> str:
+    """Format completed output: stdout, then any stderr under ``Stderr:``; a failure leads with its exit code.
+
+    The exit code comes first so a bounded job summary still shows that the command failed.
+    ``stderr`` is None when the command printed nothing to it, so stderr of only blank lines keeps its section.
+    """
+    lines = [f"Exit code {return_code}"] if return_code else []
+    if stdout:
+        lines += ["Output:", stdout] if return_code else [stdout]
+    if stderr is not None:
+        lines += ["Stderr:", stderr]
+    return "\n".join(lines)
+
+
+def format_shell_timeout(stdout: str, stderr: str | None, *, timeout: float, no_output_file: bool = False) -> str:
+    """Format the output so far of a command stopped at its timeout, leading with the stop.
+
+    ``stderr`` is None when the command printed nothing to it, as for `format_shell_completion`.
+    ``no_output_file`` says the call asked for an output file, which a stopped command does not save.
+    """
+    lines = [f"Stopped after {timeout:g}s." + (" No output file was saved." if no_output_file else "")]
+    if stdout:
+        lines += ["Output:", stdout]
+    if stderr is not None:
+        lines += ["Stderr:", stderr]
+    return "\n".join(lines)
 
 
 class CapturedShellStream:
@@ -60,11 +85,11 @@ class CapturedShellStream:
         self.reached_eof = False
 
     def append(self, text: str) -> None:
-        """Append decoded output until the cap or a storage error is reached."""
-        if self.error is not None or self.file.closed:
-            return
+        """Count decoded output, and spool it until the cap or a storage error is reached."""
         payload = text.encode("utf-8", errors="replace")
         self.byte_count += len(payload)
+        if self.error is not None or self.file.closed:
+            return
         if self.byte_count > self.max_bytes:
             self.error = f"Redirected shell output exceeds the {self.max_bytes} byte limit."
             return
@@ -82,9 +107,8 @@ class CapturedShellStream:
 class ShellOutputCapture:
     """Own both output streams and publish only a complete supported result."""
 
-    def __init__(self, destination: ShellOutputDestination, cwd: str | None) -> None:
+    def __init__(self, destination: ShellOutputDestination) -> None:
         self.destination = destination
-        self.cwd = cwd
         self.stdout = CapturedShellStream(destination)
         try:
             self.stderr = CapturedShellStream(destination)
@@ -92,10 +116,23 @@ class ShellOutputCapture:
             self.stdout.file.close()
             raise
         self.incomplete = False
+        # Why incomplete output went unsaved, when its owner knows better than "interrupted".
+        self.interruption: str | None = None
         self.closed = False
 
     def publish(self, return_code: int | None) -> str:
         """Revalidate and atomically publish using the shared output-file policy."""
+        receipt = self._publish_receipt(return_code)
+        if return_code and self.interruption is None:
+            # The receipt is all the caller sees, so a failed or killed command, saved or not, must say how it
+            # exited. A command its owner stopped, such as at its timeout, is explained by the interruption instead.
+            receipt["mindroom_tool_output"]["exit_code"] = return_code
+        if return_code == 0 and self.stderr.byte_count:
+            # A success saves its stdout alone, so the receipt says how much it printed to stderr.
+            receipt["mindroom_tool_output"]["stderr_bytes"] = self.stderr.byte_count
+        return json.dumps(receipt)
+
+    def _publish_receipt(self, return_code: int | None) -> dict[str, dict[str, object]]:
         # Keep the supervisor's ordinary startup independent of Agno imports.
         from mindroom.tool_system.output_files import (  # noqa: PLC0415
             ToolOutputFilePolicy,
@@ -114,35 +151,33 @@ class ShellOutputCapture:
             or return_code is None
             or return_code < 0
         ):
-            error = "Shell command or output capture was interrupted; no complete output file was saved."
+            error = (
+                self.interruption
+                or "Shell command or output capture was interrupted; no complete output file was saved."
+            )
         if error is not None:
-            return json.dumps({"mindroom_tool_output": {"status": "error", "error": error}})
+            return {"mindroom_tool_output": {"status": "error", "error": error}}
         assert return_code is not None
         try:
             request = prepare_tool_output_file(
                 ToolOutputFilePolicy(
                     workspace_root=Path(self.destination.workspace_root),
                     max_bytes=self.destination.max_bytes,
+                    tools_use_workdir=self.destination.tools_use_workdir,
                 ),
-                tool_name="run_shell_command",
+                tool_name=SHELL_FUNCTION,
                 output_path=self.destination.path,
             )
             if isinstance(request, dict):
-                return json.dumps(request)
+                return cast("dict[str, dict[str, object]]", request)
             output = (
                 selected.read()
                 if selected is not None
-                else format_shell_completion(self.stdout.read(), self.stderr.read(), return_code=return_code)
+                else format_shell_completion(self.stdout.read(), self.stderr.read() or None, return_code=return_code)
             )
-            if self.cwd is not None:
-                output = f"[cwd: {self.cwd}]\n{output}"
-            return json.dumps(finalize_tool_output_file(request, output))
+            return cast("dict[str, dict[str, object]]", finalize_tool_output_file(request, output))
         except OSError:
-            return json.dumps(
-                {
-                    "mindroom_tool_output": {"status": "error", "error": "Failed to publish complete shell output."},
-                },
-            )
+            return {"mindroom_tool_output": {"status": "error", "error": "Failed to publish complete shell output."}}
 
     def close(self) -> None:
         """Release unlinked capture files on completion, cancellation, or eviction."""

@@ -1,15 +1,14 @@
-"""The one persisted knowledge index state document.
+"""The two persisted state documents of one knowledge base, each with one writer.
 
-Each knowledge base keeps exactly one state file,
-``<storage_root>/knowledge_db/<storage_key>/indexing_settings.json``, and this
-module owns its whole schema: one dataclass, one loader, one writer.
+``publication.json`` names what search serves: the collection, the settings its vectors were built under, and the
+corpus signature and revision it matches. Only the publisher writes it, while it holds the base's source-root lock:
+the refresh child, or the runtime's files-mode publication after a dashboard upload or delete. The one-time startup
+conversion of an earlier release's state also writes it, before any refresh or search runs.
 
-Two collaborators write that file. The indexing manager records a publication
-(which collection is live, what it contains, which revision produced it), and
-the registry records the refresh job around it (queued, running, failed, and
-the error and timestamps that go with it). Both go through
-``save_published_index_state`` with a *whole* state, so neither can reset the
-other's fields merely by not knowing about them.
+``refresh_status.json`` records what the runtime knows about refreshing that publication: a source change not yet
+published, the last refresh failure, and when a refresh last finished. Only runtime processes write it, never the
+refresh child, each write a load-modify-save under the base's status lock. Whether a refresh is running is not stored:
+the runtime's scheduler knows.
 """
 
 from __future__ import annotations
@@ -17,179 +16,165 @@ from __future__ import annotations
 import json
 import os
 import uuid
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, replace
 from datetime import UTC, datetime
-from typing import TYPE_CHECKING, Literal, cast, get_args
+from typing import TYPE_CHECKING, TypeIs
 
+from mindroom.file_locks import advisory_file_lock
 from mindroom.knowledge.indexing_config import IndexingSettings, published_index_settings_compatible
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
+    from collections.abc import Callable, Mapping
     from pathlib import Path
 
-
-_PublishedIndexStatus = Literal["resetting", "indexing", "complete", "failed"]
-_RefreshJob = Literal["idle", "pending", "running", "failed"]
-
-# Derived, never restated: a hand-written copy that drifts from the Literal
-# makes the loader silently refuse every record carrying the new value, or
-# makes the cast that follows the membership test a lie.
-_PUBLISHED_INDEX_STATUSES: frozenset[str] = frozenset(get_args(_PublishedIndexStatus))
-_REFRESH_JOBS: frozenset[str] = frozenset(get_args(_RefreshJob))
+_PUBLICATION_FILE = "publication.json"
+_REFRESH_STATUS_FILE = "refresh_status.json"
+_REFRESH_STATUS_LOCK_FILE = "refresh_status.lock"
 
 
 @dataclass(frozen=True)
-class PublishedIndexState:
-    """Persisted state for the published knowledge index.
-
-    ``settings`` through ``source_signature`` describe one publication;
-    ``refresh_job`` through ``consecutive_refresh_failures`` describe the
-    refresh job that produced or is producing it.
-    """
+class Publication:
+    """What one knowledge base's search serves."""
 
     settings: IndexingSettings
-    status: _PublishedIndexStatus
-    collection: str | None = None
-    last_published_at: str | None = None
-    published_revision: str | None = None
-    indexed_count: int | None = None
-    source_signature: str | None = None
-    refresh_job: _RefreshJob = "idle"
+    #: The collection holding the vectors; None for a files-mode base, which publishes its source listing only.
+    collection: str | None
+    indexed_count: int
+    source_signature: str
+    published_revision: str | None
+    last_published_at: str
+    #: The collection this publication replaced, kept for the next refresh to take over; None when it kept none,
+    #: as after a forced rebuild, which trusts no older collection.
+    retired: str | None = None
+
+    def serves(self, expected: IndexingSettings) -> bool:
+        """Return whether this publication's vectors can answer queries made under ``expected``."""
+        return self.collection is not None and published_index_settings_compatible(self.settings, expected)
+
+
+@dataclass(frozen=True)
+class RefreshStatus:
+    """What the runtime knows about refreshing a base's publication."""
+
+    #: Why the source is known to have changed since the last publication, or None.
     reason: str | None = None
+    #: Incremented by every source-change mark, so a refresh clears only the marks made before it started.
+    reason_generation: int = 0
     last_error: str | None = None
-    updated_at: str | None = None
-    last_refresh_at: str | None = None
     consecutive_refresh_failures: int = 0
-
-    def queryable_for(self, expected: IndexingSettings) -> bool:
-        """Whether this publication can safely serve the retained reader settings."""
-        return (
-            self.status == "complete"
-            and self.collection is not None
-            and published_index_settings_compatible(self.settings, expected)
-        )
+    last_refresh_at: str | None = None
 
 
-def load_published_index_state(metadata_path: Path) -> PublishedIndexState | None:
-    """Load the persisted state, or ``None`` when the file holds no usable state.
-
-    A field the payload does not carry becomes ``None`` rather than rejecting
-    the document, so an in-progress or failed record keeps everything it does
-    say -- including the collection a previous publication left live, which is
-    the only on-disk proof of which collection candidate cleanup must spare.
-
-    Two things can still refuse a payload. Settings and status give every other
-    field its meaning, so a record missing either identifies nothing. And a
-    record that calls itself ``complete`` without proving what it published is
-    corrupt rather than merely thin: see ``_records_a_publication``.
-    """
-    payload = _load_payload(metadata_path)
-    if payload is None:
-        return None
-    settings = _parse_settings(payload.get("settings"))
-    status = payload.get("status")
-    # A JSON array or object decodes to an unhashable value, so membership is
-    # only asked once the value is known to be a string.
-    if settings is None or not isinstance(status, str) or status not in _PUBLISHED_INDEX_STATUSES:
-        return None
-    state = PublishedIndexState(
-        settings=settings,
-        status=cast("_PublishedIndexStatus", status),
-        collection=_optional_str(payload.get("collection")),
-        last_published_at=_optional_str(payload.get("last_published_at")),
-        published_revision=_optional_str(payload.get("published_revision")),
-        indexed_count=_nonnegative_int(payload.get("indexed_count")),
-        source_signature=_optional_str(payload.get("source_signature")),
-        refresh_job=_refresh_job(payload.get("refresh_job")),
-        reason=_optional_str(payload.get("reason")),
-        last_error=_optional_str(payload.get("last_error")),
-        updated_at=_optional_str(payload.get("updated_at")),
-        last_refresh_at=_optional_str(payload.get("last_refresh_at")),
-        consecutive_refresh_failures=_nonnegative_int(payload.get("consecutive_refresh_failures")) or 0,
-    )
-    if state.status == "complete" and not _records_a_publication(state):
-        return None
-    return state
+def utc_now() -> str:
+    """Return the current time as stored in knowledge state."""
+    return datetime.now(tz=UTC).isoformat()
 
 
-def _records_a_publication(state: PublishedIndexState) -> bool:
-    """Return whether a ``complete`` record proves the publication it claims.
-
-    Every writer of a ``complete`` record states how many files it indexed and
-    the corpus signature it indexed them from; a semantic base also names the
-    collection holding the vectors, while a file-mode base publishes source
-    metadata and has none. A record missing any of those describes an index
-    nothing can check, so it is treated as corrupt and the base is refreshed
-    rather than served from a publication it cannot substantiate.
-    """
-    return (
-        state.indexed_count is not None
-        and state.source_signature is not None
-        and (state.collection is not None or state.settings.mode == "files")
-    )
+def publication_path(storage_path: Path) -> Path:
+    """Return the publication file of the base stored at ``storage_path``."""
+    return storage_path / _PUBLICATION_FILE
 
 
-def state_for_publication(
+def new_publication(
     *,
     settings: IndexingSettings,
     collection: str | None,
     indexed_count: int,
     source_signature: str,
     published_revision: str | None,
-) -> PublishedIndexState:
-    """Return the whole state one successful publication leaves on disk.
-
-    Both publish paths -- the semantic one that swaps in a candidate
-    collection, and the file-mode one that publishes source metadata with no
-    collection at all -- differ only in those two values, so they share this.
-    Building the state twice is how a field gets left to its default by
-    omission, which is the failure this module exists to make impossible.
-
-    Publication also resolves the refresh job it belongs to: the work that job
-    tracked has just landed, so its reason, error and failure streak are
-    cleared by the same write rather than surviving into a ``complete`` record.
-    """
-    now = datetime.now(tz=UTC).isoformat()
-    return PublishedIndexState(
+    retired: str | None = None,
+) -> Publication:
+    """Return the publication a refresh makes now; both publish paths build it here."""
+    return Publication(
         settings=settings,
-        status="complete",
         collection=collection,
-        last_published_at=now,
-        published_revision=published_revision,
         indexed_count=indexed_count,
         source_signature=source_signature,
-        refresh_job="idle",
-        reason=None,
-        last_error=None,
-        updated_at=now,
-        last_refresh_at=now,
-        consecutive_refresh_failures=0,
+        published_revision=published_revision,
+        last_published_at=utc_now(),
+        retired=retired,
     )
 
 
-def save_published_index_state(metadata_path: Path, state: PublishedIndexState) -> None:
-    """Atomically persist one whole state, so no field is lost by omission."""
-    optional_fields: dict[str, object | None] = {
-        "collection": state.collection,
-        "last_published_at": state.last_published_at,
-        "published_revision": state.published_revision,
-        "indexed_count": state.indexed_count,
-        "source_signature": state.source_signature,
-        "reason": state.reason,
-        "last_error": state.last_error,
-        "updated_at": state.updated_at,
-        "last_refresh_at": state.last_refresh_at,
-    }
+def load_publication(storage_path: Path) -> Publication | None:
+    """Return the base's publication, or None when it has none or its file does not parse.
+
+    Callers that must tell the two apart check whether ``publication_path`` exists: an unreadable publication proves
+    nothing about which collection is live.
+    """
+    payload = load_json_object(publication_path(storage_path))
+    if payload is None:
+        return None
+    settings = settings_from_json(payload.get("settings"))
+    collection = payload.get("collection")
+    indexed_count = payload.get("indexed_count")
+    source_signature = payload.get("source_signature")
+    published_revision = payload.get("published_revision")
+    last_published_at = payload.get("last_published_at")
+    retired = payload.get("retired")
+    if (
+        settings is None
+        or not (collection is None or (isinstance(collection, str) and collection))
+        or (collection is None and settings.mode != "files")
+        or not is_count(indexed_count)
+        or not isinstance(source_signature, str)
+        or not source_signature
+        or not (published_revision is None or (isinstance(published_revision, str) and published_revision))
+        or not isinstance(last_published_at, str)
+        or not (retired is None or (isinstance(retired, str) and retired))
+    ):
+        return None
+    return Publication(
+        settings=settings,
+        collection=collection,
+        indexed_count=indexed_count,
+        source_signature=source_signature,
+        published_revision=published_revision,
+        last_published_at=last_published_at,
+        retired=retired,
+    )
+
+
+def save_publication(storage_path: Path, publication: Publication) -> None:
+    """Atomically replace the base's publication."""
     write_json_atomic(
-        metadata_path,
-        {
-            "settings": state.settings.to_metadata(),
-            "status": state.status,
-            "refresh_job": state.refresh_job,
-            "consecutive_refresh_failures": state.consecutive_refresh_failures,
-            **{name: value for name, value in optional_fields.items() if value is not None},
-        },
+        publication_path(storage_path),
+        {**asdict(publication), "settings": publication.settings.to_metadata()},
     )
+
+
+def publication_unreadable(storage_path: Path, publication: Publication | None) -> bool:
+    """Return whether a publication file exists that ``load_publication`` could not read, proving nothing live."""
+    return publication is None and publication_path(storage_path).exists()
+
+
+def load_refresh_status(storage_path: Path) -> RefreshStatus:
+    """Return the base's refresh status; a missing or unreadable file reads as nothing known."""
+    payload = load_json_object(storage_path / _REFRESH_STATUS_FILE)
+    if payload is None:
+        return RefreshStatus()
+    reason_generation = payload.get("reason_generation")
+    failures = payload.get("consecutive_refresh_failures")
+    return RefreshStatus(
+        reason=optional_str(payload.get("reason")),
+        reason_generation=reason_generation if is_count(reason_generation) else 0,
+        last_error=optional_str(payload.get("last_error")),
+        consecutive_refresh_failures=failures if is_count(failures) else 0,
+        last_refresh_at=optional_str(payload.get("last_refresh_at")),
+    )
+
+
+def update_refresh_status(storage_path: Path, change: Callable[[RefreshStatus], RefreshStatus]) -> RefreshStatus:
+    """Apply ``change`` to the base's refresh status under its lock, which orders threads and processes alike."""
+    with advisory_file_lock(storage_path / _REFRESH_STATUS_LOCK_FILE):
+        status = change(load_refresh_status(storage_path))
+        write_json_atomic(storage_path / _REFRESH_STATUS_FILE, asdict(status))
+    return status
+
+
+def marked_stale(status: RefreshStatus, reason: str) -> RefreshStatus:
+    """Return ``status`` recording a source change, which supersedes the last failure until a refresh reports again."""
+    return replace(status, reason=reason, reason_generation=status.reason_generation + 1, last_error=None)
 
 
 def write_json_atomic(path: Path, payload: Mapping[str, object]) -> None:
@@ -204,18 +189,18 @@ def write_json_atomic(path: Path, payload: Mapping[str, object]) -> None:
         raise
 
 
-def _load_payload(metadata_path: Path) -> dict[str, object] | None:
-    # ``ValueError`` rather than ``JSONDecodeError``: invalid UTF-8 bytes raise
-    # ``UnicodeDecodeError``, which is a ``ValueError`` and not an ``OSError``,
-    # and every caller of the loader treats an unreadable file as "no state".
+def load_json_object(path: Path) -> dict[str, object] | None:
+    """Return the JSON object stored at ``path``, or None when the file is missing, unreadable, or not an object."""
+    # ``ValueError`` rather than ``JSONDecodeError``: invalid UTF-8 raises ``UnicodeDecodeError``, a ``ValueError``.
     try:
-        payload = json.loads(metadata_path.read_text(encoding="utf-8")) if metadata_path.exists() else None
+        payload = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    return dict(payload) if isinstance(payload, dict) else None
+    return payload if isinstance(payload, dict) else None
 
 
-def _parse_settings(raw_settings: object) -> IndexingSettings | None:
+def settings_from_json(raw_settings: object) -> IndexingSettings | None:
+    """Return indexing settings stored as a JSON object of strings, or None when they are not."""
     if not isinstance(raw_settings, dict):
         return None
     metadata: dict[str, str] = {}
@@ -226,48 +211,11 @@ def _parse_settings(raw_settings: object) -> IndexingSettings | None:
     return IndexingSettings.from_metadata(metadata)
 
 
-def _optional_str(value: object) -> str | None:
+def optional_str(value: object) -> str | None:
+    """Return a stored non-empty string, or None for anything else."""
     return value if isinstance(value, str) and value else None
 
 
-def _nonnegative_int(value: object) -> int | None:
-    match value:
-        case bool():
-            return None
-        case int() if value >= 0:
-            return value
-        # ``is_integer`` is false for both infinities and NaN, which are the
-        # only floats ``int`` refuses, and no finite float can exceed its
-        # reach: this conversion cannot raise.
-        case float() if value.is_integer() and value >= 0:
-            return int(value)
-        case str():
-            return _nonnegative_int_from_text(value.strip())
-    return None
-
-
-def _nonnegative_int_from_text(text: str) -> int | None:
-    """Parse a decimal count, treating anything ``int`` refuses as absent.
-
-    Catching the failure beats predicating on it. No property of the
-    characters decides whether ``int`` accepts them: ``isdigit`` admits
-    superscripts like "²" that it rejects, and even a well-formed all-ASCII
-    decimal string raises once it passes CPython's integer conversion limit,
-    which is not about characters at all. A caller of this loader treats it as
-    total, so one ``except`` covering both -- and whatever else ``int`` grows
-    -- is what makes that true. ``isdecimal`` still gates which shapes count
-    as a number, keeping "+1" and "1_000" out; it just no longer decides
-    whether converting is safe.
-    """
-    if not text.isdecimal():
-        return None
-    try:
-        return int(text)
-    except ValueError:
-        return None
-
-
-def _refresh_job(value: object) -> _RefreshJob:
-    if isinstance(value, str) and value in _REFRESH_JOBS:
-        return cast("_RefreshJob", value)
-    return "idle"
+def is_count(value: object) -> TypeIs[int]:
+    """Return whether ``value`` is a stored count: a JSON integer, never a boolean, and never negative."""
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0

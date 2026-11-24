@@ -2,28 +2,36 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from fastapi import FastAPI
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 from starlette.requests import Request
 
+from mindroom.ai import TurnResult
 from mindroom.api import config_lifecycle, openai_compat
-from mindroom.api.main import initialize_api_app
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, TeamConfig
+from mindroom.config.budgets import BudgetsConfig
 from mindroom.config.main import Config
-from mindroom.config.models import ModelConfig
+from mindroom.config.models import ModelConfig, ModelPricing
 from mindroom.constants import resolve_runtime_paths
 from mindroom.custom_tools.delegate import DelegateTools
+from mindroom.llm.events import TextDelta
 from mindroom.routing import ResponderSelection
 from mindroom.tool_system.runtime_context import get_detached_requester_context, get_tool_runtime_context
+from mindroom.tool_system.worker_routing import agent_workspace_root_path
+from tests.access_schema_support import membership_index
+from tests.api.conftest import publish_api_config
+from tests.budget_helpers import budget_monitor_with_spend
+from tests.conftest import bind_runtime_paths, completed_ai_response_mock, completing
 from tests.identity_helpers import persist_entity_accounts
+from tests.runtime_fakes import bind_test_embedded_runtime, openai_compat_app
 
 pytestmark = pytest.mark.usefixtures("enforce_turn_authorization")
 
@@ -31,8 +39,8 @@ if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Iterator
     from pathlib import Path
 
-    from mindroom.ai import ResponseTurnContext
     from mindroom.constants import RuntimePaths
+    from mindroom.response_turn import ResponseTurnContext
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
@@ -41,6 +49,24 @@ class _ApiHarness:
     client: TestClient
     config: Config
     runtime_paths: RuntimePaths
+
+
+def _delegate_tools(
+    api: _ApiHarness,
+    execution_identity: ToolExecutionIdentity,
+    agent_name: str = "leader",
+    *,
+    delegation_depth: int = 0,
+) -> DelegateTools:
+    workspace = agent_workspace_root_path(api.runtime_paths.storage_root, agent_name)
+    return DelegateTools(
+        agent_name,
+        api.runtime_paths,
+        api.config,
+        workspace,
+        execution_identity,
+        delegation_depth=delegation_depth,
+    )
 
 
 @pytest.fixture
@@ -80,11 +106,9 @@ def api(tmp_path: Path) -> Iterator[_ApiHarness]:
         },
     )
     persist_entity_accounts(config, runtime_paths)
-    app = FastAPI()
-    app.include_router(openai_compat.router)
-    initialize_api_app(app, runtime_paths)
-    config_lifecycle.require_api_state(app).snapshot.runtime_config = config
-    with patch.object(openai_compat, "_load_config", return_value=(config, runtime_paths)), TestClient(app) as client:
+    app = openai_compat_app(runtime_paths)
+    publish_api_config(app, config)
+    with TestClient(app) as client:
         yield _ApiHarness(client, config, runtime_paths)
 
 
@@ -94,39 +118,31 @@ def test_mapped_request_delegates_with_canonical_identity(api: _ApiHarness, stre
     """Run the real delegate tool from both API drivers, including after an SSE yield."""
     child_calls: list[ResponseTurnContext] = []
 
-    async def child(ctx: ResponseTurnContext, **kwargs: object) -> str:
+    async def child(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> TurnResult:
         child_calls.append(ctx)
         assert ctx.requester_id == "@alice:example.org"
         assert ctx.room_id is None
-        assert kwargs["include_openai_compat_guidance"] is True
+        assert ctx.outside_matrix is True
         assert get_tool_runtime_context() is None
         assert get_detached_requester_context() is not None
-        return "specialist result"
+        return TurnResult("specialist result")
 
-    async def delegate(
-        ctx: ResponseTurnContext,
-        *,
-        execution_identity: ToolExecutionIdentity,
-        **_kwargs: object,
-    ) -> str:
+    async def delegate(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> str:
+        execution_identity = ctx.execution_identity
+        assert execution_identity is not None
         assert ctx.requester_id == "@alice:example.org"
         assert execution_identity.requester_id == ctx.requester_id
         (identity,) = config_lifecycle.app_state(api.client.app).openai_responses
         assert (identity.responder, identity.requester_id) == ("leader", "@alice:example.org")
-        tool = DelegateTools("leader", ["specialist"], api.runtime_paths, api.config, execution_identity)
+        tool = _delegate_tools(api, execution_identity)
         return await tool.run_subagent(agent_name="specialist", task="help")
 
-    async def streaming(
-        ctx: ResponseTurnContext,
-        *,
-        execution_identity: ToolExecutionIdentity,
-        **_kwargs: object,
-    ) -> AsyncIterator[str]:
-        yield "Working: "
-        yield await delegate(ctx, execution_identity=execution_identity)
+    async def streaming(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> AsyncIterator[TextDelta]:
+        yield TextDelta("Working: ")
+        yield TextDelta(await delegate(ctx))
 
     with (
-        patch.object(openai_compat, "ai_response", side_effect=delegate),
+        patch.object(openai_compat, "ai_response", side_effect=completing(delegate)),
         patch.object(openai_compat, "stream_agent_response", side_effect=streaming),
         patch("mindroom.ai.ai_response", side_effect=child),
     ):
@@ -147,21 +163,53 @@ def test_mapped_request_delegates_with_canonical_identity(api: _ApiHarness, stre
     assert not config_lifecycle.app_state(api.client.app).openai_responses
 
 
+def test_mapped_request_delegates_on_the_fallback_once_over_budget(api: _ApiHarness) -> None:
+    """A delegated child must not keep an over-budget API requester on a priced model."""
+    api.config.models["default"].pricing = ModelPricing(input=5, output=30)
+    api.config.models["luna"] = ModelConfig(provider="ollama", id="cheap", pricing=ModelPricing(input=0.2, output=1.25))
+    api.config.budgets = BudgetsConfig(fallback_model="luna", monthly_limit_usd=10)
+    bind_test_embedded_runtime(
+        api.client.app,
+        budget_monitor=budget_monitor_with_spend(api.runtime_paths, {"@alice:example.org": 12.0}),
+    )
+    child_models: list[str | None] = []
+
+    async def child(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> TurnResult:
+        child_models.append(ctx.active_model_name)
+        return TurnResult("specialist result")
+
+    async def delegate(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> str:
+        execution_identity = ctx.execution_identity
+        assert execution_identity is not None
+        tool = _delegate_tools(api, execution_identity)
+        return await tool.run_subagent(agent_name="specialist", task="help")
+
+    with (
+        patch.object(openai_compat, "ai_response", side_effect=completing(delegate)),
+        patch("mindroom.ai.ai_response", side_effect=child),
+    ):
+        response = api.client.post(
+            "/v1/chat/completions",
+            headers={"Authorization": "Bearer alice-key"},
+            json={"model": "leader", "messages": [{"role": "user", "content": "help"}]},
+        )
+
+    assert response.status_code == 200
+    assert child_models == ["luna"]
+
+
 @pytest.mark.parametrize(("key", "target"), [("legacy-key", "specialist"), ("alice-key", "forbidden")])
 def test_delegation_fails_closed(api: _ApiHarness, key: str, target: str) -> None:
     """Unmapped callers and forbidden targets never reach child execution."""
 
-    async def delegate(
-        _ctx: ResponseTurnContext,
-        *,
-        execution_identity: ToolExecutionIdentity,
-        **_kwargs: object,
-    ) -> str:
-        tool = DelegateTools("leader", [target], api.runtime_paths, api.config, execution_identity)
+    async def delegate(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> str:
+        execution_identity = ctx.execution_identity
+        assert execution_identity is not None
+        tool = _delegate_tools(api, execution_identity)
         return await tool.run_subagent(agent_name=target, task="help")
 
     with (
-        patch.object(openai_compat, "ai_response", side_effect=delegate),
+        patch.object(openai_compat, "ai_response", side_effect=completing(delegate)),
         patch("mindroom.ai.ai_response", new_callable=AsyncMock) as child,
     ):
         response = api.client.post(
@@ -214,6 +262,29 @@ def test_team_access_grants_its_members(api: _ApiHarness) -> None:
     assert response.status_code == 403
 
 
+def test_room_membership_access_reads_the_runtime_membership_index(api: _ApiHarness) -> None:
+    """A caller granted through a room reaches the agent while no trigger delivery is bound."""
+    api.config.agents["specialist"].rooms = ["lobby"]
+    api.config.agents["specialist"].access = ResponderAccessConfig(members_of_rooms=["lobby"])
+    bind_test_embedded_runtime(
+        api.client.app,
+        agent_reply_memberships=asyncio.run(
+            membership_index(bind_runtime_paths(api.config, api.runtime_paths), {"lobby": {"@alice:example.org"}}),
+        ),
+    )
+    assert config_lifecycle.app_state(api.client.app).external_trigger_runtime is None
+    headers = {"Authorization": "Bearer alice-key"}
+    response = api.client.get("/v1/models", headers=headers)
+    assert "specialist" in {model["id"] for model in response.json()["data"]}
+    with patch.object(openai_compat, "ai_response", new=completed_ai_response_mock(return_value="done")):
+        response = api.client.post(
+            "/v1/chat/completions",
+            headers=headers,
+            json={"model": "specialist", "messages": [{"role": "user", "content": "help"}]},
+        )
+    assert response.status_code == 200
+
+
 def test_bot_identity_cannot_be_used_as_requester(api: _ApiHarness) -> None:
     """Mapped bot identities cannot gain the internal-sender authorization bypass."""
     api.config.bot_accounts = ["@alice:example.org"]
@@ -231,25 +302,22 @@ def test_nested_delegation_retains_authority_and_denies_forbidden_target(api: _A
     """A specialist can delegate again but cannot acquire another requester's grants."""
     api.config.agents["specialist"].delegate_to = ["forbidden"]
 
-    async def parent(_ctx: ResponseTurnContext, *, execution_identity: ToolExecutionIdentity, **_kwargs: object) -> str:
-        tool = DelegateTools("leader", ["specialist"], api.runtime_paths, api.config, execution_identity)
+    async def parent(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> str:
+        execution_identity = ctx.execution_identity
+        assert execution_identity is not None
+        tool = _delegate_tools(api, execution_identity)
         return await tool.run_subagent(agent_name="specialist", task="help")
 
-    async def child(ctx: ResponseTurnContext, *, execution_identity: ToolExecutionIdentity, **_kwargs: object) -> str:
+    async def child(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> TurnResult:
+        execution_identity = ctx.execution_identity
+        assert execution_identity is not None
         assert ctx.requester_id == "@alice:example.org"
         assert execution_identity.agent_name == "specialist"
-        tool = DelegateTools(
-            "specialist",
-            ["forbidden"],
-            api.runtime_paths,
-            api.config,
-            execution_identity,
-            delegation_depth=1,
-        )
-        return await tool.run_subagent(agent_name="forbidden", task="help")
+        tool = _delegate_tools(api, execution_identity, "specialist", delegation_depth=1)
+        return TurnResult(await tool.run_subagent(agent_name="forbidden", task="help"))
 
     with (
-        patch.object(openai_compat, "ai_response", side_effect=parent),
+        patch.object(openai_compat, "ai_response", side_effect=completing(parent)),
         patch("mindroom.ai.ai_response", side_effect=child) as child_mock,
     ):
         response = api.client.post(
@@ -266,7 +334,9 @@ def test_nested_delegation_retains_authority_and_denies_forbidden_target(api: _A
 def test_delegation_rechecks_current_authorization(api: _ApiHarness, policy: str, tmp_path: Path) -> None:
     """Changed policy and absent room state cannot reuse authority from request admission."""
 
-    async def parent(_ctx: ResponseTurnContext, *, execution_identity: ToolExecutionIdentity, **_kwargs: object) -> str:
+    async def parent(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> str:
+        execution_identity = ctx.execution_identity
+        assert execution_identity is not None
         replacement = api.config.model_copy(deep=True)
         replacement.agents["specialist"].access = ResponderAccessConfig(
             current_room_members=True,
@@ -276,11 +346,11 @@ def test_delegation_rechecks_current_authorization(api: _ApiHarness, policy: str
         snapshot.runtime_config = replacement
         if policy == "replace_runtime":
             snapshot.runtime_paths = resolve_runtime_paths(config_path=tmp_path / "replaced.yaml", process_env={})
-        tool = DelegateTools("leader", ["specialist"], api.runtime_paths, api.config, execution_identity)
+        tool = _delegate_tools(api, execution_identity)
         return await tool.run_subagent(agent_name="specialist", task="help")
 
     with (
-        patch.object(openai_compat, "ai_response", side_effect=parent),
+        patch.object(openai_compat, "ai_response", side_effect=completing(parent)),
         patch("mindroom.ai.ai_response", new_callable=AsyncMock) as child,
     ):
         response = api.client.post(
@@ -296,15 +366,17 @@ def test_delegation_rechecks_current_authorization(api: _ApiHarness, policy: str
 def test_delegation_rechecks_current_caller_allowlist(api: _ApiHarness) -> None:
     """Hot reload revoking a caller's delegation edge stops an active API run."""
 
-    async def parent(_ctx: ResponseTurnContext, *, execution_identity: ToolExecutionIdentity, **_kwargs: object) -> str:
+    async def parent(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> str:
+        execution_identity = ctx.execution_identity
+        assert execution_identity is not None
         replacement = api.config.model_copy(deep=True)
         replacement.agents["leader"].delegate_to = []
         config_lifecycle.require_api_state(api.client.app).snapshot.runtime_config = replacement
-        tool = DelegateTools("leader", ["specialist"], api.runtime_paths, api.config, execution_identity)
+        tool = _delegate_tools(api, execution_identity)
         return await tool.run_subagent(agent_name="specialist", task="help")
 
     with (
-        patch.object(openai_compat, "ai_response", side_effect=parent),
+        patch.object(openai_compat, "ai_response", side_effect=completing(parent)),
         patch("mindroom.ai.ai_response", new_callable=AsyncMock) as child,
     ):
         response = api.client.post(
@@ -325,7 +397,7 @@ def test_auto_route_only_receives_permitted_agents(api: _ApiHarness) -> None:
             "suggest_responder",
             new=AsyncMock(return_value=ResponderSelection("specialist")),
         ) as route,
-        patch.object(openai_compat, "ai_response", new=AsyncMock(return_value="done")),
+        patch.object(openai_compat, "ai_response", new=completed_ai_response_mock(return_value="done")),
     ):
         response = api.client.post(
             "/v1/chat/completions",
@@ -340,12 +412,12 @@ def test_rebound_key_has_a_separate_session(api: _ApiHarness) -> None:
     """Reassigning a key's canonical requester cannot open its former conversation."""
     sessions: list[str] = []
 
-    async def parent(ctx: ResponseTurnContext, **_kwargs: object) -> str:
+    async def parent(ctx: ResponseTurnContext, *_args: object, **_kwargs: object) -> str:
         sessions.append(ctx.session_id)
         return "done"
 
     api.config.agents["leader"].access = ResponderAccessConfig(users=["@alice:example.org", "@bob:example.org"])
-    with patch.object(openai_compat, "ai_response", side_effect=parent):
+    with patch.object(openai_compat, "ai_response", side_effect=completing(parent)):
         for requester in ["@alice:example.org", "@bob:example.org"]:
             with patch.object(openai_compat, "_api_key_requester", return_value=requester):
                 response = api.client.post(

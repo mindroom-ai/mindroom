@@ -14,23 +14,25 @@ from __future__ import annotations
 
 import tempfile
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 from mindroom.authorization import ResponderCandidatePermissions
+from mindroom.bot_runtime_view import BotRuntimeState
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig, TeamConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig
 from mindroom.conversation_resolver import MessageContext
-from mindroom.matrix.client import ResolvedVisibleMessage
+from mindroom.matrix.client_visible_messages import ResolvedVisibleMessage
 from mindroom.matrix.thread_diagnostics import THREAD_HISTORY_DEGRADED_DIAGNOSTIC
 from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.message_target import MessageTarget
-from mindroom.teams import TeamIntent, TeamMode, TeamOutcome, TeamResolution
-from mindroom.thread_utils import check_agent_mentioned, get_agents_in_thread, is_router_only_agent_mention
+from mindroom.teams.formation import TeamIntent, TeamMemberStatus, TeamOutcome, TeamResolution, TeamResolutionMember
+from mindroom.teams.spec import TeamMode
+from mindroom.thread_utils import check_agent_mentioned, get_agents_in_thread
 from mindroom.turn_policy import PreparedDispatch, ResponseAction, TurnPolicy, _ResponderAvailability
 from tests.authorization_helpers import (
     make_test_turn_policy_deps,
@@ -43,14 +45,12 @@ from tests.conftest import (
     runtime_paths_for,
     test_runtime_paths,
 )
-from tests.identity_helpers import entity_ids, persist_entity_accounts
+from tests.identity_helpers import entity_ids
+from tests.runtime_fakes import ready_runtime
 
-
-def _bind_runtime_config(config: Config, runtime_root: Path | None = None) -> Config:
-    runtime_paths = test_runtime_paths(runtime_root or Path(tempfile.mkdtemp()))
-    bound_config = bind_runtime_paths(config, runtime_paths)
-    persist_entity_accounts(bound_config, runtime_paths_for(bound_config))
-    return bound_config
+if TYPE_CHECKING:
+    from mindroom.constants import RuntimePaths
+    from mindroom.matrix.identity import MatrixID
 
 
 def _message(
@@ -68,12 +68,31 @@ def _message(
     )
 
 
+def _policy(
+    config: Config,
+    runtime_paths: RuntimePaths,
+    agent_name: str,
+    matrix_id: MatrixID,
+    logger: MagicMock | None = None,
+) -> TurnPolicy:
+    """Build one entity's turn policy in a ready test runtime."""
+    return TurnPolicy(
+        make_test_turn_policy_deps(
+            runtime=BotRuntimeState(orchestrator=ready_runtime(config, runtime_paths_for(config))),
+            logger=logger if logger is not None else MagicMock(),
+            runtime_paths=runtime_paths,
+            agent_name=agent_name,
+            matrix_id=matrix_id,
+        ),
+    )
+
+
 class TestAgentResponseLogic:
     """Test the agent response decision logic."""
 
     def setup_method(self) -> None:
         """Set up test config."""
-        self.config = _bind_runtime_config(
+        self.config = bind_runtime_paths(
             Config(
                 agents={
                     name: AgentConfig(
@@ -92,6 +111,7 @@ class TestAgentResponseLogic:
                 room_models={},
                 models={"default": ModelConfig(provider="ollama", id="test-model")},
             ),
+            test_runtime_paths(Path(tempfile.mkdtemp())),
         )
         self.runtime_paths = runtime_paths_for(self.config)
         self.domain = self.config.get_domain(self.runtime_paths)
@@ -164,32 +184,19 @@ class TestAgentResponseLogic:
             ),
             runtime_paths,
         )
-        persist_entity_accounts(config, runtime_paths_for(config))
         runtime_paths = runtime_paths_for(config)
         team_id = entity_ids(config, runtime_paths)["ops"]
-        runtime = MagicMock()
-        runtime.config = config
-        runtime.orchestrator = None
-        policy = TurnPolicy(
-            make_test_turn_policy_deps(
-                runtime=runtime,
-                logger=MagicMock(),
-                runtime_paths=runtime_paths,
-                agent_name="ops",
-                matrix_id=team_id,
-            ),
-        )
+        policy = _policy(config, runtime_paths, "ops", team_id)
 
         responder_pool = policy._filter_materializable_responders(
             [team_id],
-            _ResponderAvailability(materializable_agent_names={"alpha", "beta"}, live_entity_names=None),
+            _ResponderAvailability(materializable_agent_names={"alpha", "beta"}, live_entity_names=frozenset({"ops"})),
         )
         action = policy._team_response_action(
             TeamResolution(
                 intent=TeamIntent.EXPLICIT_MEMBERS,
                 requested_members=[team_id],
                 member_statuses=[],
-                eligible_members=[],
                 outcome=TeamOutcome.REJECT,
                 reason="Team request includes no available members.",
             ),
@@ -219,27 +226,21 @@ class TestAgentResponseLogic:
             ),
             runtime_paths,
         )
-        persist_entity_accounts(config, runtime_paths_for(config))
         runtime_paths = runtime_paths_for(config)
         ids = entity_ids(config, runtime_paths)
-        runtime = MagicMock()
-        runtime.config = config
-        runtime.orchestrator = None
-        policy = TurnPolicy(
-            make_test_turn_policy_deps(
-                runtime=runtime,
-                logger=MagicMock(),
-                runtime_paths=runtime_paths,
-                agent_name="shared",
-                matrix_id=ids["shared"],
-            ),
-        )
+        policy = _policy(config, runtime_paths, "shared", ids["shared"])
 
         team_resolution = TeamResolution(
             intent=TeamIntent.EXPLICIT_MEMBERS,
             requested_members=[ids["private_worker"], ids["shared"]],
-            member_statuses=[],
-            eligible_members=[ids["private_worker"]],
+            member_statuses=[
+                TeamResolutionMember(
+                    agent=ids["private_worker"],
+                    name="private_worker",
+                    status=TeamMemberStatus.ELIGIBLE,
+                ),
+                TeamResolutionMember(agent=ids["shared"], name="shared", status=TeamMemberStatus.UNSUPPORTED_FOR_TEAM),
+            ],
             outcome=TeamOutcome.REJECT,
             reason="Team request includes unsupported members.",
         )
@@ -276,27 +277,17 @@ class TestAgentResponseLogic:
             ),
             runtime_paths,
         )
-        persist_entity_accounts(config, runtime_paths_for(config))
         runtime_paths = runtime_paths_for(config)
         ids = entity_ids(config, runtime_paths)
-        runtime = MagicMock()
-        runtime.config = config
-        runtime.orchestrator = None
-        policy = TurnPolicy(
-            make_test_turn_policy_deps(
-                runtime=runtime,
-                logger=MagicMock(),
-                runtime_paths=runtime_paths,
-                agent_name="shared",
-                matrix_id=ids["shared"],
-            ),
-        )
+        policy = _policy(config, runtime_paths, "shared", ids["shared"])
 
         team_resolution = TeamResolution(
             intent=TeamIntent.EXPLICIT_MEMBERS,
             requested_members=[ids["private_one"], ids["private_two"]],
-            member_statuses=[],
-            eligible_members=[ids["private_one"], ids["private_two"]],
+            member_statuses=[
+                TeamResolutionMember(agent=ids["private_one"], name="private_one", status=TeamMemberStatus.ELIGIBLE),
+                TeamResolutionMember(agent=ids["private_two"], name="private_two", status=TeamMemberStatus.ELIGIBLE),
+            ],
             outcome=TeamOutcome.TEAM,
             mode=TeamMode.COORDINATE,
         )
@@ -318,18 +309,11 @@ class TestAgentResponseLogic:
     async def test_single_visible_responder_replies_when_planning_history_degraded(self) -> None:
         """A degraded dispatch read must not silence the sole visible responder in a thread."""
         room = create_mock_room("!room:localhost", ["calculator", "general"], self.config)
-        runtime = MagicMock()
-        runtime.client = None
-        runtime.config = self.config
-        runtime.orchestrator = None
-        policy = TurnPolicy(
-            make_test_turn_policy_deps(
-                runtime=runtime,
-                logger=MagicMock(),
-                runtime_paths=self.runtime_paths,
-                agent_name="calculator",
-                matrix_id=entity_ids(self.config, self.runtime_paths)["calculator"],
-            ),
+        policy = _policy(
+            self.config,
+            self.runtime_paths,
+            "calculator",
+            entity_ids(self.config, self.runtime_paths)["calculator"],
         )
         context = MessageContext(
             am_i_mentioned=False,
@@ -373,7 +357,6 @@ class TestAgentResponseLogic:
             multiple_visible_action = await policy._resolve_response_action(
                 dispatch,
                 room,
-                False,
                 has_active_response_for_target=lambda _target: False,
             )
 
@@ -386,7 +369,6 @@ class TestAgentResponseLogic:
             single_visible_action = await policy._resolve_response_action(
                 dispatch,
                 room,
-                False,
                 has_active_response_for_target=lambda _target: False,
             )
 
@@ -396,19 +378,13 @@ class TestAgentResponseLogic:
     async def test_response_policy_logs_multi_agent_thread_skip(self) -> None:
         """A multi-agent thread skip should leave a useful policy diagnostic."""
         room = create_mock_room("!room:localhost", ["calculator", "general"], self.config)
-        runtime = MagicMock()
-        runtime.client = None
-        runtime.config = self.config
-        runtime.orchestrator = None
         logger = MagicMock()
-        policy = TurnPolicy(
-            make_test_turn_policy_deps(
-                runtime=runtime,
-                logger=logger,
-                runtime_paths=self.runtime_paths,
-                agent_name="calculator",
-                matrix_id=entity_ids(self.config, self.runtime_paths)["calculator"],
-            ),
+        policy = _policy(
+            self.config,
+            self.runtime_paths,
+            "calculator",
+            entity_ids(self.config, self.runtime_paths)["calculator"],
+            logger,
         )
         context = MessageContext(
             am_i_mentioned=False,
@@ -461,7 +437,6 @@ class TestAgentResponseLogic:
             action = await policy._resolve_response_action(
                 dispatch,
                 room,
-                False,
                 has_active_response_for_target=lambda _target: False,
             )
 
@@ -483,19 +458,13 @@ class TestAgentResponseLogic:
     async def test_response_policy_does_not_log_multi_agent_skip_for_multi_human_thread(self) -> None:
         """Multi-human thread suppression should not be misreported as multi-agent suppression."""
         room = create_mock_room("!room:localhost", ["calculator", "general"], self.config)
-        runtime = MagicMock()
-        runtime.client = None
-        runtime.config = self.config
-        runtime.orchestrator = None
         logger = MagicMock()
-        policy = TurnPolicy(
-            make_test_turn_policy_deps(
-                runtime=runtime,
-                logger=logger,
-                runtime_paths=self.runtime_paths,
-                agent_name="calculator",
-                matrix_id=entity_ids(self.config, self.runtime_paths)["calculator"],
-            ),
+        policy = _policy(
+            self.config,
+            self.runtime_paths,
+            "calculator",
+            entity_ids(self.config, self.runtime_paths)["calculator"],
+            logger,
         )
         context = MessageContext(
             am_i_mentioned=False,
@@ -540,7 +509,6 @@ class TestAgentResponseLogic:
             action = await policy._resolve_response_action(
                 dispatch,
                 room,
-                False,
                 has_active_response_for_target=lambda _target: False,
             )
 
@@ -556,18 +524,11 @@ class TestAgentResponseLogic:
     async def test_response_policy_continues_after_router_handoff(self) -> None:
         """The main turn policy should ignore router handoff as conversational participation."""
         room = create_mock_room("!room:localhost", ["calculator", "general"], self.config)
-        runtime = MagicMock()
-        runtime.client = None
-        runtime.config = self.config
-        runtime.orchestrator = None
-        policy = TurnPolicy(
-            make_test_turn_policy_deps(
-                runtime=runtime,
-                logger=MagicMock(),
-                runtime_paths=self.runtime_paths,
-                agent_name="general",
-                matrix_id=entity_ids(self.config, self.runtime_paths)["general"],
-            ),
+        policy = _policy(
+            self.config,
+            self.runtime_paths,
+            "general",
+            entity_ids(self.config, self.runtime_paths)["general"],
         )
         context = MessageContext(
             am_i_mentioned=False,
@@ -629,7 +590,6 @@ class TestAgentResponseLogic:
             action = await policy._resolve_response_action(
                 dispatch,
                 room,
-                False,
                 has_active_response_for_target=lambda _target: False,
             )
 
@@ -649,28 +609,15 @@ class TestAgentResponseLogic:
             ),
             runtime_paths,
         )
-        persist_entity_accounts(config, runtime_paths_for(config))
         runtime_paths = runtime_paths_for(config)
         team_id = entity_ids(config, runtime_paths)["ops"]
-        runtime = MagicMock()
-        runtime.config = config
-        runtime.orchestrator = None
-        policy = TurnPolicy(
-            make_test_turn_policy_deps(
-                runtime=runtime,
-                logger=MagicMock(),
-                runtime_paths=runtime_paths,
-                agent_name="ops",
-                matrix_id=team_id,
-            ),
-        )
+        policy = _policy(config, runtime_paths, "ops", team_id)
         rejection = ResponseAction(
             kind="reject",
             form_team=TeamResolution(
                 intent=TeamIntent.EXPLICIT_MEMBERS,
                 requested_members=[team_id],
                 member_statuses=[],
-                eligible_members=[],
                 outcome=TeamOutcome.REJECT,
                 reason="Team request includes no available members.",
             ),
@@ -762,56 +709,6 @@ class TestAgentResponseLogic:
             _message(sender=f"@user:{self.domain}", body="What about 3+3?"),
         ]
 
-        should_respond = agent_response_should_respond(
-            agent_name="calculator",
-            am_i_mentioned=False,
-            is_thread=True,
-            room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
-            thread_history=thread_history,
-            config=self.config,
-            runtime_paths=self.runtime_paths,
-            sender_id=self.sender,
-        )
-        assert should_respond is False
-
-    def test_invited_agent_behaves_like_native_agent(self) -> None:
-        """Invited agents should follow the same rules as native agents."""
-        # Test 1: Invited agent with no agents in thread - router decides (multiple agents)
-        should_respond = agent_response_should_respond(
-            agent_name="calculator",
-            am_i_mentioned=False,
-            is_thread=True,
-            room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
-            thread_history=[],
-            config=self.config,
-            runtime_paths=self.runtime_paths,
-            sender_id=self.sender,
-        )
-        assert should_respond is False  # Router decides when multiple agents available
-
-        # Test 2: Invited agent as only agent in thread - should continue
-        thread_history = [
-            _message(sender=self.agent_id("calculator"), body="2+2=4"),
-            _message(sender="@user:localhost", body="What about 3+3?"),
-        ]
-        should_respond = agent_response_should_respond(
-            agent_name="calculator",
-            am_i_mentioned=False,
-            is_thread=True,
-            room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
-            thread_history=thread_history,
-            config=self.config,
-            runtime_paths=self.runtime_paths,
-            sender_id=self.sender,
-        )
-        assert should_respond is True
-
-        # Test 3: Invited agent with multiple agents - nobody responds
-        thread_history = [
-            _message(sender=self.agent_id("calculator"), body="2+2=4"),
-            _message(sender=self.agent_id("general"), body="Let me help"),
-            _message(sender="@user:localhost", body="What about 3+3?"),
-        ]
         should_respond = agent_response_should_respond(
             agent_name="calculator",
             am_i_mentioned=False,
@@ -986,8 +883,8 @@ class TestAgentResponseLogic:
             is False
         )
 
-    def test_explicit_router_mention_still_detected(self) -> None:
-        """Filtering router from participants must not hide explicit router mentions."""
+    def test_owner_mention_is_a_mention_of_no_agent(self) -> None:
+        """A tag of the owner account names no agent, the owner itself included, and counts as a non-agent mention."""
         router_id = entity_ids(self.config, self.runtime_paths)["router"]
         event_source = {
             "content": {
@@ -1007,18 +904,9 @@ class TestAgentResponseLogic:
             room=create_mock_room(config=self.config),
         )
 
-        assert mentioned_agents == [router_id]
-        assert am_i_mentioned is True
-        assert has_non_agent_mentions is False
-        assert (
-            is_router_only_agent_mention(
-                mentioned_agents,
-                has_non_agent_mentions=has_non_agent_mentions,
-                config=self.config,
-                runtime_paths=self.runtime_paths,
-            )
-            is True
-        )
+        assert mentioned_agents == []
+        assert am_i_mentioned is False
+        assert has_non_agent_mentions is True
 
     def test_unsynced_member_cache_treats_any_human_mention_as_suppressing(self) -> None:
         """A failed membership refresh must degrade to silence, not to an interjection."""
@@ -1119,7 +1007,6 @@ class TestAgentResponseLogic:
             ),
             self.runtime_paths,
         )
-        persist_entity_accounts(config, runtime_paths_for(config))
         runtime_paths = runtime_paths_for(config)
         room = create_mock_room("!room:localhost", ["calculator", "research"], config)
         thread_history = [
@@ -1159,7 +1046,6 @@ class TestAgentResponseLogic:
             ),
             self.runtime_paths,
         )
-        persist_entity_accounts(config, runtime_paths_for(config))
         runtime_paths = runtime_paths_for(config)
 
         should_respond = agent_response_should_respond(
@@ -1181,20 +1067,6 @@ class TestAgentResponseLogic:
             agent_name="calculator",
             am_i_mentioned=False,
             is_thread=False,
-            room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
-            thread_history=[],
-            config=self.config,
-            runtime_paths=self.runtime_paths,
-            sender_id=self.sender,
-        )
-        assert should_respond is False
-
-    def test_agent_not_in_room_no_response(self) -> None:
-        """If agent is not in room (native or invited), don't respond."""
-        should_respond = agent_response_should_respond(
-            agent_name="calculator",
-            am_i_mentioned=False,
-            is_thread=True,
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
             thread_history=[],
             config=self.config,
@@ -1243,22 +1115,8 @@ class TestAgentResponseLogic:
         )
         assert should_respond is False
 
-    def test_router_selection_scenarios(self) -> None:
-        """Test various scenarios where router should be used."""
-        # Scenario 1: Empty thread, native agent
-        should_respond = agent_response_should_respond(
-            agent_name="calculator",
-            am_i_mentioned=False,
-            is_thread=True,
-            room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
-            thread_history=[],
-            config=self.config,
-            runtime_paths=self.runtime_paths,
-            sender_id=self.sender,
-        )
-        assert should_respond is False
-
-        # Scenario 2: Thread with only user messages
+    def test_user_only_thread_uses_router(self) -> None:
+        """A thread holding only user messages leaves the choice to the router when several agents could answer."""
         thread_history = [
             _message(sender="@user:localhost", body="I need help with math"),
             _message(sender="@user:localhost", body="Can someone help?"),
@@ -1269,35 +1127,6 @@ class TestAgentResponseLogic:
             is_thread=True,
             room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
             thread_history=thread_history,
-            config=self.config,
-            runtime_paths=self.runtime_paths,
-            sender_id=self.sender,
-        )
-        assert should_respond is False
-
-    def test_room_message_no_access_no_response(self) -> None:
-        """Agent without room access doesn't respond to room messages."""
-        should_respond = agent_response_should_respond(
-            agent_name="calculator",
-            am_i_mentioned=False,
-            is_thread=False,
-            room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
-            thread_history=[],
-            config=self.config,
-            runtime_paths=self.runtime_paths,
-            sender_id=self.sender,
-        )
-        assert should_respond is False
-
-    def test_edge_case_empty_configured_rooms(self) -> None:
-        """Test agent with no configured rooms but invited to thread."""
-        # Should behave same as native agent when invited
-        should_respond = agent_response_should_respond(
-            agent_name="calculator",
-            am_i_mentioned=False,
-            is_thread=True,
-            room=create_mock_room("!room:localhost", ["calculator", "general", "agent1"], self.config),
-            thread_history=[],
             config=self.config,
             runtime_paths=self.runtime_paths,
             sender_id=self.sender,
@@ -1328,9 +1157,8 @@ class TestAgentResponseLogic:
         )
         assert should_respond is False
 
-    def test_router_disabled_when_any_agent_mentioned(self) -> None:
-        """Test that router is disabled when any agent is mentioned, not just the current one."""
-        # Room message scenario - agent1 is NOT mentioned but agent2 IS mentioned
+    def test_only_the_mentioned_agent_responds_directly(self) -> None:
+        """An unmentioned agent leaves a room message to the router; a mentioned one answers in its thread."""
         should_respond = agent_response_should_respond(
             agent_name="agent1",
             am_i_mentioned=False,
@@ -1341,22 +1169,6 @@ class TestAgentResponseLogic:
             runtime_paths=self.runtime_paths,
             sender_id=self.sender,
         )
-        # Agent1 should not respond and should NOT use router
-        assert not should_respond
-
-        # Now test when no agents are mentioned - router should be used
-        should_respond = agent_response_should_respond(
-            agent_name="agent1",
-            am_i_mentioned=False,
-            is_thread=False,
-            room=create_mock_room("!test:example.org", ["agent1", "calculator", "general"], self.config),
-            thread_history=[],
-            config=self.config,
-            runtime_paths=self.runtime_paths,
-            sender_id=self.sender,
-            # No agents mentioned
-        )
-        # Agent1 should not respond but SHOULD use router
         assert not should_respond
 
         # Test when current agent is mentioned
@@ -1536,7 +1348,6 @@ class TestAgentResponseLogic:
             bot_accounts=["@telegram:localhost"],
         )
         config = bind_runtime_paths(config, test_runtime_paths(Path(tempfile.mkdtemp())))
-        persist_entity_accounts(config, runtime_paths_for(config))
         runtime_paths = runtime_paths_for(config)
         room = create_mock_room("!room:localhost", ["calculator"], config)
 

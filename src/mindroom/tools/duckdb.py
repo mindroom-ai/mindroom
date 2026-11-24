@@ -31,18 +31,12 @@ if TYPE_CHECKING:
             default=None,
         ),
         ConfigField(
-            name="connection",
-            label="Connection",
-            type="text",
-            required=False,
-            default=None,
-        ),
-        ConfigField(
             name="init_commands",
             label="Init Commands",
-            type="text",
+            type="string[]",
             required=False,
             default=None,
+            description="SQL statements run, in order, when the tool opens its database connection.",
         ),
         ConfigField(
             name="read_only",
@@ -51,16 +45,9 @@ if TYPE_CHECKING:
             required=False,
             default=False,
         ),
-        ConfigField(
-            name="config",
-            label="Config",
-            type="text",
-            required=False,
-            default=None,
-        ),
     ],
     dependencies=["duckdb"],
-    docs_url="https://docs.agno.com/tools/toolkits/database/duckdb",
+    docs_url="https://docs.mindroom.chat/tools/data-and-databases/#duckdb",
     function_names=(
         "create_fts_index",
         "create_table_from_path",

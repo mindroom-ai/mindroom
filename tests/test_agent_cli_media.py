@@ -1,6 +1,6 @@
 """Actual Bash results retain hidden tool media and bounded, truthful receipts."""
 
-# ruff: noqa: ANN001, ANN002, ANN003, ANN202, ARG001, D103, PLR0915
+# ruff: noqa: ANN001, ANN002, ANN003, ANN202, ARG001, D103
 from __future__ import annotations
 
 import asyncio
@@ -11,31 +11,35 @@ from uuid import uuid4
 
 import pytest
 from agno.media import Audio, File, Image
-from agno.models.message import Message
-from agno.run.agent import ToolCallCompletedEvent, ToolCallStartedEvent
 from agno.tools.function import Function, ToolResult
 from agno.tools.toolkit import Toolkit
 
 from mindroom.agent_cli import turn
-from mindroom.agent_cli.bash import MinimalBashTools
+from mindroom.agent_cli.bash import minimal_bash_toolkit
 from mindroom.agent_cli.events import stream_cli_events
 from mindroom.agent_cli.json_io import MAX_ENVELOPE_BYTES, canonical_json
 from mindroom.agent_cli.lifetime import response_cli_lifetime
-from mindroom.agent_cli.projection import project_cli_result
-from mindroom.agent_cli.protocol import ContextReadOperation, ToolCallOperation, ToolCallReceipt, ToolDescribeOperation
+from mindroom.agent_cli.protocol import ContextReadOperation, ToolCallOperation, ToolDescribeOperation
 from mindroom.agent_cli.session import CliTurnOwner
 from mindroom.agent_cli.shell_contract import AgentCliShellEnv
-from mindroom.agent_cli.turn import LiveTurnTools
-from mindroom.agent_storage import create_state_storage
-from mindroom.agno_compat_prepared_tools import prepare_agent_tools
-from mindroom.ai import _process_stream_events, _StreamingAttemptState, collect_streamed_response_content
-from mindroom.attachment_media import resolve_scoped_attachments
+from mindroom.agent_loop.model_loop import EMPTY_REQUEST, LoopHooks
+from mindroom.agent_loop.run import run_agent
+from mindroom.agent_loop.spec import AgentSpec
+from mindroom.ai import _process_stream_events, _StreamingAttemptState
+from mindroom.attachments.media import resolve_scoped_attachments
+from mindroom.history.types import HistoryScope
+from mindroom.llm.events import ToolCompleted, ToolStarted
+from mindroom.llm.messages import Message
+from mindroom.response_turn import collect_streamed_response_content
+from mindroom.session_storage.agent_storage import create_state_storage
+from mindroom.tool_system.agno_toolkits import adapt_toolkit
 from mindroom.tool_system.events import CollectedStreamPresentation, deserialize_tool_trace, serialize_tool_trace
 from mindroom.tool_system.output_files import ToolOutputFilePolicy
-from mindroom.tool_system.runtime_context import build_execution_identity_from_runtime_context
 from mindroom.tool_system.tool_access import ToolKey
+from tests.conftest import live_turn_tools_for_test
+from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 from tests.minimal_agent_fixtures import cli_window
-from tests.test_agent_tool_calls import _catalog
+from tests.test_agent_tool_calls import _catalog, _toolkit
 
 
 async def _run(tmp_path, result, *, policy=None):  # noqa: C901
@@ -45,10 +49,10 @@ async def _run(tmp_path, result, *, policy=None):  # noqa: C901
     async def produce() -> ToolResult:
         return result
 
-    async def hook(name, function_call, arguments):
-        hooks.append((name, "before"))
-        value = await function_call(**arguments)
-        hooks.append((name, "after"))
+    async def hook(call, call_next):
+        hooks.append((call.function.name, "before"))
+        value = await call_next(call.arguments)
+        hooks.append((call.function.name, "after"))
         return value
 
     async def run_shell_command(args: str, timeout: int = 30, tail: int = 100) -> str:  # noqa: ASYNC109
@@ -69,73 +73,67 @@ async def _run(tmp_path, result, *, policy=None):  # noqa: C901
         )
         return "shell done"
 
-    media = Toolkit(name="media", tools=[produce])
-    media.get_async_functions()["produce"].tool_hooks = [hook]
-    shell = Toolkit(name="shell", tools=[run_shell_command])
-    shell.get_async_functions()["run_shell_command"].tool_hooks = [hook]
-    catalog = await _catalog(tmp_path, [shell, media])
+    catalog = await _catalog(
+        tmp_path,
+        [_toolkit("shell", run_shell_command), _toolkit("media", produce)],
+        middleware=(hook,),
+    )
     catalog.runtime_context = replace(catalog.runtime_context, storage_path=tmp_path / "storage")
-    catalog.run_response.agent_id = "helper"
-    catalog.agent.db = create_state_storage("helper", tmp_path, subdir="sessions", session_table="sessions")
+    catalog.store = create_state_storage("helper", tmp_path, HistoryScope(kind="agent", scope_id="helper"))
     receipts = []
 
     async def authorize(key, arguments):
         pass
 
     (tmp_path / "workspace").mkdir(exist_ok=True)
-    owner = LiveTurnTools(
-        CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
+    owner = live_turn_tools_for_test(
+        CliTurnOwner(catalog.runtime_context.execution_identity, "turn", "run"),
         catalog=catalog,
         authorize=authorize,
         output_file_policy=policy or ToolOutputFilePolicy(tmp_path / "workspace"),
     )
     owner.shell_env = AgentCliShellEnv("http://127.0.0.1:9", "test-grant")
-    facade = MinimalBashTools(execute=owner.execute_bash)
-    function = prepare_agent_tools(
-        catalog.agent,
-        processed_tools=[facade],
-        run_response=catalog.run_response,
-        run_context=catalog.run_context,
-        session=catalog.session,
-    )[0]
-    message = Message(
-        role="assistant",
-        tool_calls=[
-            {
-                "id": "outer",
-                "type": "function",
-                "function": {"name": "bash", "arguments": '{"command":"generate"}'},
-            },
-        ],
+    spec = AgentSpec(
+        id="helper",
+        name="Helper",
+        model=ScriptedModel([calls(tool_call("bash", "outer", command="generate")), answer("done")]),
+        system_messages=(),
+        toolkits=(minimal_bash_toolkit(execute=owner.execute_bash),),
     )
-    messages = [message]
-    events = []
     finished = False
 
     async def source():
         nonlocal finished
-        async with response_cli_lifetime() as lifetime:
-            lifetime.bind_provider(owner.checkpoint, function)
-            calls = catalog.agent.model.get_function_calls_to_run(message, messages, {"bash": function})
-            async for event in catalog.agent.model.arun_function_calls(calls, messages):
-                events.append(event)
-                for tool in event.tool_executions or []:
-                    if event.event == "ToolCallStarted":
-                        yield ToolCallStartedEvent(tool=tool)
-                    elif event.event == "ToolCallCompleted":
-                        finished = True
-                        yield ToolCallCompletedEvent(tool=tool)
+        async with response_cli_lifetime():
+            run = run_agent(
+                spec,
+                [Message(role="user", content="generate")],
+                ctx=catalog.run,
+                hooks=LoopHooks(before_dispatch=owner.checkpoint.capture),
+                persist=None,
+                request_template=EMPTY_REQUEST,
+            )
+            async for event in run:
+                if isinstance(event, ToolCompleted):
+                    finished = True
+                yield event
 
     async def watched():
         async for event in stream_cli_events(source()):
-            if isinstance(event, ToolCallStartedEvent) and event.tool.tool_name == "produce":
+            if isinstance(event, ToolStarted) and event.call.tool_name == "produce":
                 assert not finished
             yield event
 
     state = _StreamingAttemptState()
     async with asyncio.timeout(5):
         text, trace = await collect_streamed_response_content(
-            _process_stream_events(watched(), state=state, show_tool_calls=True, agent_name="helper"),
+            _process_stream_events(
+                watched(),
+                state=state,
+                show_tool_calls=True,
+                show_reasoning=False,
+                agent_name="helper",
+            ),
             presentation=CollectedStreamPresentation(show_tool_calls=True),
         )
     receipt = await owner.get_call(receipts[0]["call_id"])
@@ -150,12 +148,16 @@ async def _run(tmp_path, result, *, policy=None):  # noqa: C901
     assert "⏳" not in text
     assert trace[1].parent_bash_call_id == "outer"
     assert trace[1].toolkit_name == "media"
-    assert [tool.tool_name for tool in state.completed_tool_executions] == ["bash"]
+    # The run's own calls, which its completed attempt reports, are those of its record: the hidden call is not one.
+    assert state.terminal.record is not None
+    assert [tool.tool_name for tool in state.terminal.record.tools or ()] == ["bash"]
 
     stored = serialize_tool_trace(trace, include_internal=True)
     assert deserialize_tool_trace(stored)[1].parent_bash_call_id == "outer"
     assert "parent_bash_call_id" not in serialize_tool_trace(trace)[1]
-    return owner, messages, events, receipt
+    record = state.terminal.record
+    assert record is not None
+    return owner, record.messages, receipt
 
 
 @pytest.mark.asyncio
@@ -166,7 +168,7 @@ async def test_real_bash_carries_media_and_scoped_attachment_references(tmp_path
         audios=[Audio(content=b"audio", mime_type="audio/wav", format="wav")],
         files=[File(content=b"document", mime_type="application/pdf", filename="result.pdf")],
     )
-    owner, messages, events, receipt = await _run(tmp_path, generated)
+    owner, messages, receipt = await _run(tmp_path, generated)
     try:
         assert receipt["status"] == "completed"
         refs = receipt["attachments"]
@@ -190,10 +192,28 @@ async def test_real_bash_carries_media_and_scoped_attachment_references(tmp_path
             )
             == 0
         )
-        assert any(event.images and event.audios and event.files for event in events)
-        assert any(message.images and message.audio and message.files for message in messages)
+        # The media reach the model once, on the message after the Bash result.
+        assert [bool(message.images and message.audio and message.files) for message in messages[-3:]] == [
+            False,
+            True,
+            False,
+        ]
         assert [message.tool_call_id for message in messages if message.role == "tool"] == ["outer"]
         assert all(tool["function"]["name"] == "bash" for message in messages for tool in message.tool_calls or [])
+    finally:
+        await owner.close()
+
+
+@pytest.mark.asyncio
+async def test_bash_receipt_references_url_media_by_url_without_an_attachment(tmp_path) -> None:
+    """A medium the tool gave by URL is referenced by that URL; nothing is saved or registered for it."""
+    linked = ToolResult(content="linked", images=[Image(url="https://example.test/linked.png", mime_type="image/png")])
+    owner, _messages, receipt = await _run(tmp_path, linked)
+    try:
+        assert receipt["status"] == "completed"
+        assert receipt["attachments"] == [
+            {"kind": "image", "mime_type": "image/png", "url": "https://example.test/linked.png"},
+        ]
     finally:
         await owner.close()
 
@@ -205,7 +225,7 @@ async def test_completed_large_media_result_uses_workspace_artifact(tmp_path, fa
     root = tmp_path / "workspace"
     root.mkdir()
     policy = ToolOutputFilePolicy(root, max_bytes=8 if failure else 1000000, auto_save_threshold_bytes=1000000)
-    owner, _messages, events, receipt = await _run(
+    owner, messages, receipt = await _run(
         tmp_path,
         ToolResult(
             content=content,
@@ -233,7 +253,9 @@ async def test_completed_large_media_result_uses_workspace_artifact(tmp_path, fa
             stdout, _ = await consumer.communicate()
             assert consumer.returncode == 0
             assert stdout == content.encode()
-        assert any(event.images and event.images[0].url == "https://example.test/generated.png" for event in events)
+        assert any(
+            message.images and message.images[0].url == "https://example.test/generated.png" for message in messages
+        )
     finally:
         await owner.close()
 
@@ -269,15 +291,16 @@ async def test_single_oversized_schema_is_retrievable_through_scoped_context(tmp
         skip_entrypoint_processing=True,
         parameters={"type": "object", "properties": properties},
     )
-    catalog = await _catalog(tmp_path, [Toolkit(name="big", tools=[function])])
+    catalog = await _catalog(tmp_path, [adapt_toolkit(Toolkit(name="big", tools=[function]))])
 
     async def authorize(key, arguments):
         pass
 
-    owner = LiveTurnTools(
-        CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
+    owner = live_turn_tools_for_test(
+        CliTurnOwner(catalog.runtime_context.execution_identity, "turn", "run"),
         catalog=catalog,
         authorize=authorize,
+        output_file_policy=ToolOutputFilePolicy(tmp_path / "workspace"),
     )
     try:
         async with owner._window("outer"):
@@ -310,7 +333,7 @@ async def test_projection_exception_keeps_completed_status_and_media(tmp_path, m
         raise OSError(msg)
 
     monkeypatch.setattr(turn, "project_cli_result", fail_projection)
-    owner, _messages, events, receipt = await _run(
+    owner, messages, receipt = await _run(
         tmp_path,
         ToolResult(
             content="completed effect",
@@ -320,7 +343,7 @@ async def test_projection_exception_keeps_completed_status_and_media(tmp_path, m
     try:
         assert receipt["status"] == "completed"
         assert "projection" in str(receipt["outcome"])
-        assert any(event.images for event in events)
+        assert any(message.images for message in messages)
     finally:
         await owner.close()
 
@@ -337,13 +360,14 @@ async def test_admission_uses_current_window_context_after_rebuild(tmp_path) -> 
         assert key == ToolKey("state", "inspect_scope")
 
     async def catalog_for_window():
-        return await _catalog(tmp_path, [Toolkit(name="state", tools=[inspect_scope])])
+        return await _catalog(tmp_path, [_toolkit("state", inspect_scope)])
 
     catalog = await catalog_for_window()
-    owner = LiveTurnTools(
-        CliTurnOwner(build_execution_identity_from_runtime_context(catalog.runtime_context), "turn", "run"),
+    owner = live_turn_tools_for_test(
+        CliTurnOwner(catalog.runtime_context.execution_identity, "turn", "run"),
         catalog=catalog,
         authorize=authorize,
+        output_file_policy=ToolOutputFilePolicy(tmp_path / "workspace"),
     )
 
     async def submit(window: str):
@@ -375,32 +399,3 @@ async def test_admission_uses_current_window_context_after_rebuild(tmp_path) -> 
         assert tag.get() == "unbound"
     finally:
         await owner.close()
-
-
-@pytest.mark.parametrize(
-    "result",
-    [
-        # Quotes double when JSON-escaped, so this alone would overflow the 64 KiB receipt envelope.
-        '"' * 40_000,
-        # Halving stops just under the budget, so the notice must count toward it too.
-        "x" * 32_700,
-    ],
-    ids=["escaped", "notice-at-budget"],
-)
-def test_large_result_without_workspace_is_shortened_to_fit_its_receipt(result: str) -> None:
-    """With nowhere to save the full output, an oversized result still reaches the caller, shortened."""
-    projected = project_cli_result(result, None, "run_shell_command")
-
-    assert isinstance(projected, str)
-    assert projected.startswith(result[:1000])
-    assert projected.endswith("Call the tool directly for all of it.]")
-    assert len(json.dumps(projected, ensure_ascii=False).encode()) <= 16 * 1024
-    receipt = ToolCallReceipt(
-        call_id=uuid4(),
-        toolkit="shell",
-        function="run_shell_command",
-        status="completed",
-        outcome=projected,
-    )
-    assert len(canonical_json(receipt.model_dump(mode="json")).encode()) <= MAX_ENVELOPE_BYTES
-    assert project_cli_result("small", None, "run_shell_command") == "small"

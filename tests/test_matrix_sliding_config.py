@@ -2,29 +2,56 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, create_autospec
 from uuid import uuid4
 
 import nio
 import pytest
-from nio.durable import DurableSyncConfig, SlidingSyncConfig, open_durable_sync
+from nio.durable import DurableSync, DurableSyncConfig, SlidingSyncConfig, open_durable_sync
 from pydantic import ValidationError
 
 from mindroom.config.main import Config
 from mindroom.config.matrix import MatrixSyncConfig
 from mindroom.matrix.state import MatrixState
-from mindroom.matrix.sync_loop import bot_ingestion_config
+from mindroom.matrix.sync_loop import bot_ingestion_config, subscribe_sliding_rooms
 from mindroom.orchestration.config_updates import ConfigUpdatePlan
-from mindroom.orchestrator import _MultiAgentOrchestrator
+from tests.matrix_state_helpers import save_matrix_state
 from tests.threading_helpers import ThreadingBehaviorTestBase
 
 if TYPE_CHECKING:
     from pathlib import Path
 
     from mindroom.bot import AgentBot
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["classic", "sliding"])
+async def test_subscriptions_add_each_joined_room_whose_state_nio_still_awaits(mode: str) -> None:
+    """A joined room outside the list stays subscribed until its state arrives; a sendable or left room adds none."""
+    config = Config.model_validate({"matrix_sync": {"mode": mode, "sliding_timeline_limit": 3}})
+    session = create_autospec(DurableSync, instance=True)
+    awaited, sendable, left = "!awaited:example.org", "!sendable:example.org", "!left:example.org"
+    session.client = SimpleNamespace(rooms=dict.fromkeys((awaited, sendable, left)))
+
+    async def wait_for_room_ready(room_id: str) -> bool:
+        if room_id == awaited:
+            await asyncio.Event().wait()
+        return room_id == sendable
+
+    session.wait_for_room_ready.side_effect = wait_for_room_ready
+
+    await subscribe_sliding_rooms(session, config, ["!configured:example.org", "#alias:example.org"])
+
+    if mode == "classic":
+        session.update_sliding_subscriptions.assert_not_awaited()
+        return
+    subscriptions = session.update_sliding_subscriptions.await_args.args[0]
+    assert set(subscriptions) == {"!configured:example.org", awaited}
+    assert subscriptions[awaited]["timeline_limit"] == 3
 
 
 def test_sliding_config_retains_timeline_limit_and_classic_default() -> None:
@@ -62,6 +89,7 @@ def test_sliding_config_preserves_discovery_explicit_rooms_and_extensions() -> N
             ["m.room.avatar", ""],
             ["m.room.encryption", ""],
             ["m.room.member", "$LAZY"],
+            ["m.space.child", "*"],
         ],
     }
     assert sliding.lists == {"mindroom": {"ranges": [[0, 99]], **room_config}}
@@ -115,7 +143,7 @@ class TestSlidingBot(ThreadingBehaviorTestBase):
         assert session is not None
         try:
             assert session._sliding is not None
-            request = json.loads(session._sliding.request()[2])
+            request = json.loads(session._sliding.request(0)[2])
             assert request["conn_id"] == "mindroom-general"
             assert request["room_subscriptions"]["!outside:example.org"]["timeline_limit"] == 17
         finally:
@@ -158,23 +186,23 @@ class TestSlidingBot(ThreadingBehaviorTestBase):
             assert joined
             left = True
 
-        monkeypatch.setattr(bot, "join_configured_rooms", join_rooms)
-        monkeypatch.setattr(bot, "leave_unconfigured_rooms", leave_rooms)
+        monkeypatch.setattr(bot._room_lifecycle, "join_configured_rooms", join_rooms)
+        monkeypatch.setattr(bot._room_lifecycle, "leave_unconfigured_rooms", leave_rooms)
         try:
             await bot.ensure_rooms()
             assert left
             if mode == "sliding":
                 assert session._sliding is not None
-                request = json.loads(session._sliding.request()[2])
+                request = json.loads(session._sliding.request(0)[2])
                 assert set(request["room_subscriptions"]) == {"!outside:example.org"}
                 assert request["room_subscriptions"]["!outside:example.org"]["timeline_limit"] == 19
                 assert ["m.room.member", "$LAZY"] in request["room_subscriptions"]["!outside:example.org"][
                     "required_state"
                 ]
-                monkeypatch.setattr(bot, "join_configured_rooms", AsyncMock())
+                monkeypatch.setattr(bot._room_lifecycle, "join_configured_rooms", AsyncMock())
                 bot.rooms = []
                 await bot.ensure_rooms()
-                assert json.loads(session._sliding.request()[2])["room_subscriptions"] == {}
+                assert json.loads(session._sliding.request(0)[2])["room_subscriptions"] == {}
             else:
                 assert session.config.sliding is None
         finally:
@@ -194,12 +222,10 @@ class TestSlidingBot(ThreadingBehaviorTestBase):
         bot.config.agents["general"].rooms = ["outside"]
         state = MatrixState.load(runtime_paths=bot.runtime_paths)
         state.add_room("outside", "!outside:example.org", "#outside:example.org", "Outside")
-        state.save(runtime_paths=bot.runtime_paths)
+        save_matrix_state(state, bot.runtime_paths)
         bot.rooms = ["!old:example.org"]
         bot.running = True
-        orchestrator = _MultiAgentOrchestrator(runtime_paths=bot.runtime_paths)
-        orchestrator.config = bot.config
-        orchestrator.agent_bots = {"general": bot}
+        orchestrator = bot.orchestrator
         client = nio.AsyncClient("https://example.org", bot.agent_user.user_id, device_id="DEVICE")
         client.restore_login(bot.agent_user.user_id, "DEVICE", "token")
         session = open_durable_sync(
@@ -209,34 +235,28 @@ class TestSlidingBot(ThreadingBehaviorTestBase):
             config=DurableSyncConfig(sliding=SlidingSyncConfig(room_subscriptions={"!old:example.org": {}})),
         )
         bot._ingestion_session = session
-        monkeypatch.setattr(bot, "join_configured_rooms", AsyncMock())
-        monkeypatch.setattr(bot, "leave_unconfigured_rooms", AsyncMock())
-        for method in (
-            "_ensure_rooms_exist",
-            "_ensure_root_space",
-            "_ensure_room_invitations",
-            "refresh_agent_reply_memberships",
-        ):
-            monkeypatch.setattr(orchestrator, method, AsyncMock())
+        monkeypatch.setattr(bot._room_lifecycle, "join_configured_rooms", AsyncMock())
+        monkeypatch.setattr(bot._room_lifecycle, "leave_unconfigured_rooms", AsyncMock())
+        for method in ("ensure_rooms_exist", "link_root_space", "_ensure_room_invitations"):
+            monkeypatch.setattr(orchestrator._rooms, method, AsyncMock())
+        monkeypatch.setattr(orchestrator, "refresh_agent_reply_memberships", AsyncMock())
         plan = ConfigUpdatePlan(
             new_config=bot.config,
-            changed_mcp_servers=set(),
-            configured_entities={"general"},
-            entities_to_restart=set(),
-            new_entities=set(),
-            removed_entities=set(),
+            restart=set(),
+            start=set(),
+            remove=set(),
             mindroom_user_changed=False,
             room_access_changed=False,
             matrix_space_changed=False,
             authorization_changed=False,
-            entities_to_reconcile_rooms={"general"},
+            reconcile_rooms={"general"},
         )
         try:
             await orchestrator._reconcile_post_update_rooms(plan, changed_entities=set())
             assert bot._ingestion_session is session
             assert bot.rooms == ["!outside:example.org"]
             assert session._sliding is not None
-            subscriptions = json.loads(session._sliding.request()[2])["room_subscriptions"]
+            subscriptions = json.loads(session._sliding.request(0)[2])["room_subscriptions"]
             assert set(subscriptions) == {"!outside:example.org"}
             assert subscriptions["!outside:example.org"]["timeline_limit"] == 29
         finally:

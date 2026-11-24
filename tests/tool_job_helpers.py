@@ -1,0 +1,1150 @@
+"""Shared tool job runtime and assembled-function construction for tests."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import time
+from copy import deepcopy
+from dataclasses import asdict, dataclass, field, replace
+from functools import partial
+from typing import TYPE_CHECKING, Any
+from unittest.mock import AsyncMock, MagicMock
+from uuid import uuid4
+
+from mindroom.agent_loop.build import prompt_for_turn
+from mindroom.agent_loop.model_loop import EMPTY_REQUEST, LoopHooks
+from mindroom.agent_loop.run import resume_agent, run_agent
+from mindroom.agent_loop.spec import AgentSpec, RunContext, UnstoredSession
+from mindroom.agent_reply_membership import AgentReplyMembershipIndex
+from mindroom.agents import create_agent
+from mindroom.ai import run_delegated_child_response
+from mindroom.ai_runtime import queued_notice_after_tool_batch
+from mindroom.approval.resume import ResumeRunner
+from mindroom.bot import AgentBot
+from mindroom.config.access import ResponderAccessConfig
+from mindroom.config.agent import AgentConfig, TeamConfig
+from mindroom.config.approval import ApprovalRuleConfig, ToolApprovalConfig
+from mindroom.config.main import Config
+from mindroom.config.models import BackgroundToolJobsConfig, DefaultsConfig
+from mindroom.delegation.background import delegation_child, delegation_job, reconcile_delegation
+from mindroom.delegation.execution import _drive_delegations
+from mindroom.delegation.recovery import interrupt_stopped_child
+from mindroom.delegation.state import DelegationChild
+from mindroom.event_journal import (
+    ApprovalCall,
+    ApprovalCardReservation,
+    BackgroundApprovalDecision,
+    CallKey,
+    EventJournalStore,
+    ToolJobStore,
+    approval_arguments_digest,
+)
+from mindroom.event_journal.offloading import ThreadOffload
+from mindroom.event_journal.opening import event_journal_sqlite_path
+from mindroom.history.request_messages import build_resume_request
+from mindroom.history.types import HistoryScope
+from mindroom.llm.events import RunFinished
+from mindroom.llm.messages import Message
+from mindroom.loop_hooks import HookTurn, agent_loop_hooks
+from mindroom.matrix.identity import MatrixID
+from mindroom.mid_turn import QueuedMessage
+from mindroom.orchestration.tool_job_runtime import ToolJobRuntimeCoordinator
+from mindroom.participation_hook import participation_hook
+from mindroom.run_storage import RunStorage
+from mindroom.session_storage.agent_storage import create_session_storage
+from mindroom.session_storage.store import persist_to
+from mindroom.session_storage.types import ConversationSession
+from mindroom.tool_jobs.consumption import set_consumption_storage
+from mindroom.tool_jobs.execution import JobActor, assembled_job_tools, job_definitions_hook, with_job_admission
+from mindroom.tool_jobs.execution_scope import owned_tool_execution
+from mindroom.tool_jobs.notices import job_notice_hook
+from mindroom.tool_jobs.runtime import (
+    TERMINAL_STATUSES,
+    BackgroundJob,
+    BackgroundOutcome,
+    JobClaim,
+    JobGrant,
+    JobSpec,
+    ToolJobRuntime,
+    _parse_saved_job,
+)
+from mindroom.tool_system.agno_toolkits import Toolkit, adapt_toolkit
+from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
+from mindroom.tool_system.plugins import config_plugins
+from mindroom.tool_system.tool_function import AdaptedToolkit
+from mindroom.tool_system.worker_routing import ToolExecutionIdentity
+from tests.access_schema_support import with_responder_access
+from tests.conftest import FakeApprovalTransport, bind_runtime_paths, test_runtime_paths
+from tests.delegation_helpers import ScriptedAgents, _delegate_runtime_context
+from tests.fakes.scripted_model import ScriptedModel
+from tests.identity_helpers import entity_ids
+from tests.turn_model_helpers import turn_model
+
+if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable, Mapping, Sequence
+    from datetime import datetime
+    from pathlib import Path
+
+    import pytest
+
+    from mindroom.agent_loop.build import AgentBuild
+    from mindroom.agent_loop.run import Persist
+    from mindroom.approval.tool_approval import BackgroundScriptToolOrigin
+    from mindroom.constants import RuntimePaths
+    from mindroom.delegation.state import ChildResponseRunner
+    from mindroom.event_journal import ToolJobSnapshotUpdate
+    from mindroom.llm.provider import ModelProvider
+    from mindroom.llm.runs import RunRecord
+    from mindroom.participation import ParticipationGate
+    from mindroom.session_storage.store import ConversationStore
+    from mindroom.tool_jobs.execution_authority import JobTool
+    from mindroom.tool_system.invocation import ToolMiddleware
+    from mindroom.tool_system.runtime_context import ToolRuntimeContext
+    from mindroom.tool_system.tool_function import ToolFunction, ToolOutcome
+    from tests.fakes.scripted_model import ScriptStep
+
+
+# One generous bound for waits that must eventually finish; a slow CI host must not turn them into failures.
+JOB_TEST_TIMEOUT = 30
+_LEADER_SCOPE = HistoryScope(kind="agent", scope_id="leader")
+# The requester every delegating conversation's replies answer.
+DELEGATING_REQUESTER = "@alice:example.org"
+
+
+def _grant_all(_job: BackgroundJob) -> JobGrant:
+    return "allowed"
+
+
+def _allow_execution(_owner: ToolExecutionIdentity, _tool: JobTool, _arguments: Mapping[str, Any]) -> None:
+    return None
+
+
+async def _no_cleanup(_job: BackgroundJob) -> None:
+    return None
+
+
+def _never_continues(_job: BackgroundJob) -> bool:
+    return False
+
+
+def always_owned(*_args: object, **_kwargs: object) -> bool:
+    """Own every call's execution, as a turn with background jobs on does."""
+    return True
+
+
+class NewerMessageWaits:
+    """The reply's queue, which holds a newer message of its requester until the reply ends."""
+
+    def has_interrupting_messages(self) -> bool:
+        """Say a newer message waits."""
+        return True
+
+    def interrupting_snapshot(self) -> tuple[QueuedMessage, ...]:
+        """Return the one newer message."""
+        return (QueuedMessage("$newer", None),)
+
+    def queued_snapshot(self) -> tuple[QueuedMessage, ...]:
+        """Hold no Queue message."""
+        return ()
+
+    def requester_steer_snapshot(self) -> tuple[QueuedMessage, ...]:
+        """Hold no Steer of the reply's requester."""
+        return ()
+
+
+def tool_job_journal(storage_root: Path) -> EventJournalStore:
+    """Open the event journal of one storage root, as one process does; another open is another process."""
+    return EventJournalStore.open_sqlite(event_journal_sqlite_path(storage_root))
+
+
+class ProcessRuntime(ToolJobRuntime):
+    """One process's runtime over its own journal connection, which shutting down closes as the process exit would."""
+
+    def __init__(
+        self,
+        journal: EventJournalStore,
+        *,
+        grant: Callable[[BackgroundJob], JobGrant],
+        authorize_execution: Callable[[ToolExecutionIdentity, JobTool, Mapping[str, Any]], None],
+        cancel: Callable[[BackgroundJob], Awaitable[BackgroundOutcome | None]],
+        continues: Callable[[BackgroundJob], bool] = _never_continues,
+        reply_stopped: Callable[[BackgroundJob], Awaitable[bool]] | None = None,
+    ) -> None:
+        super().__init__(
+            journal.tool_jobs(uuid4().hex),
+            grant=grant,
+            authorize_execution=authorize_execution,
+            cancel=cancel,
+            continues=continues,
+            reply_stopped=reply_stopped,
+        )
+        self._journal = journal
+
+    @property
+    def journal(self) -> EventJournalStore:
+        """Return this process's journal connection, which job cards reserve their calls through as the router does."""
+        return self._journal
+
+    async def shutdown(self) -> None:
+        """Shut down in order, then close this process's journal connection."""
+        try:
+            await super().shutdown()
+        finally:
+            await self.close_journal()
+
+    async def close_journal(self) -> None:
+        """Close this process's journal connection, as its exit does with or without an orderly shutdown."""
+        await self._journal.close()
+
+
+# The router principal a test's job cards are reserved under.
+_JOB_CARD_PRINCIPAL = "router@jobs"
+
+
+async def reserve_job_card(journal: EventJournalStore, run_id: str, call_id: str, *, tool_name: str) -> None:
+    """Reserve one job card's call in the journal, as the approval manager does, so the save of the job's end decides it."""
+    delivery_id = f"script-approval:{run_id}:{call_id}"
+    assert await journal.principal(_JOB_CARD_PRINCIPAL).approvals.reserve_detached_card(
+        call=CallKey.detached(run_id, call_id),
+        owner_kind="job",
+        tool_name=tool_name,
+        toolkit_name="shell",
+        invoking_agent="code",
+        room_id="!room:example.org",
+        thread_id=None,
+        expires_at_ns=time.time_ns() + 3_600_000_000_000,
+        card=ApprovalCardReservation(
+            delivery_id=delivery_id,
+            tool_call_id=call_id,
+            event_type="io.mindroom.tool_approval",
+            approver_user_id="@alice:example.org",
+            approvable=True,
+            payload={"approval_id": delivery_id, "tool_name": tool_name, "status": "pending"},
+        ),
+    )
+
+
+async def job_card_decision(journal: EventJournalStore, run_id: str, call_id: str) -> BackgroundApprovalDecision | None:
+    """Return the journal's decision of one job card's call, or None while the card stays answerable."""
+    return await journal.principal(_JOB_CARD_PRINCIPAL).approvals.detached_decision(CallKey.detached(run_id, call_id))
+
+
+@dataclass
+class JobApprovalCards:
+    """Stand in for the approval store: record each card a job posts and answer it when the test decides.
+
+    Given the job journal, each card's call is reserved there, as the router reserves it, so the job's end denies it.
+    """
+
+    decision: asyncio.Future[BackgroundApprovalDecision]
+    journal: EventJournalStore | None = None
+    posted: asyncio.Event = field(default_factory=asyncio.Event)
+    requested: list[tuple[str, str, str]] = field(default_factory=list)
+    transport: FakeApprovalTransport = field(default_factory=FakeApprovalTransport)
+
+    async def request_background_approval(
+        self,
+        *,
+        origin: BackgroundScriptToolOrigin,
+        tool_name: str,
+        **_kwargs: object,
+    ) -> BackgroundApprovalDecision:
+        """Post one job's card and wait for the test's decision."""
+        if self.journal is not None:
+            await reserve_job_card(self.journal, origin.run_id, origin.call_id, tool_name=tool_name)
+        self.requested.append((origin.run_id, origin.call_id, tool_name))
+        self.posted.set()
+        return await asyncio.shield(self.decision)
+
+
+async def tool_job_runtime(
+    storage_root: Path,
+    *,
+    grant: Callable[[BackgroundJob], JobGrant] = _grant_all,
+    authorize_execution: Callable[[ToolExecutionIdentity, JobTool, Mapping[str, Any]], None] = _allow_execution,
+    cancel: Callable[[BackgroundJob], Awaitable[BackgroundOutcome | None]] = _no_cleanup,
+    continues: Callable[[BackgroundJob], bool] = _never_continues,
+    reply_stopped: Callable[[BackgroundJob], Awaitable[bool]] | None = None,
+) -> ProcessRuntime:
+    """Start one process's runtime whose grants allow every job and call and whose adapters need no extra cleanup.
+
+    It owns the saved jobs, fencing any earlier runtime, but leaves restoring them to `recover`. With ``continues``
+    naming subagent jobs, as the coordinator's runtime does, it keeps those a restart stopped for
+    `continue_stopped_jobs`; without, every job a restart stops ends.
+    """
+    runtime = ProcessRuntime(
+        tool_job_journal(storage_root),
+        grant=grant,
+        authorize_execution=authorize_execution,
+        cancel=cancel,
+        continues=continues,
+        reply_stopped=reply_stopped,
+    )
+    await runtime._store.take_ownership()
+    return runtime
+
+
+def _inline_statement[Result](_offload: ThreadOffload, call: Callable[[], Result]) -> asyncio.Future[Result]:
+    work = asyncio.get_running_loop().create_future()
+    try:
+        work.set_result(call())
+    except Exception as error:
+        work.set_exception(error)
+    return work
+
+
+def run_journal_statements_inline(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run journal statements on the event loop, so an idle loop means every save has landed or failed."""
+    monkeypatch.setattr(ThreadOffload, "submit", _inline_statement)
+
+
+# The journal's own saves, which every interception wraps however often a test intercepts them.
+_JOURNAL_ACCEPT, _JOURNAL_SAVE, _JOURNAL_SAVE_MANY = ToolJobStore.accept, ToolJobStore.save, ToolJobStore.save_many
+# Runs around one job save with its decoded snapshot and payload; raising fails the save, before or after it lands.
+type SaveHook = Callable[[dict[str, Any], object | None], Awaitable[None] | None]
+
+
+def intercept_job_saves(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    before: SaveHook | None = None,
+    after: SaveHook | None = None,
+) -> None:
+    """Run hooks around every journal save of a job, as a failing or slow database would; no hooks restores saving."""
+    original_accept, original_save, original_save_many = _JOURNAL_ACCEPT, _JOURNAL_SAVE, _JOURNAL_SAVE_MANY
+
+    async def hook(callback: SaveHook | None, job_json: str, payload_json: str | None) -> None:
+        if callback is not None:
+            result = callback(json.loads(job_json), None if payload_json is None else json.loads(payload_json))
+            if result is not None:
+                await result
+
+    async def accept(store: ToolJobStore, job_id: str, job_json: str) -> None:
+        await hook(before, job_json, None)
+        await original_accept(store, job_id, job_json)
+        await hook(after, job_json, None)
+
+    async def save(
+        store: ToolJobStore,
+        job_id: str,
+        job_json: str,
+        result_payload_json: str | None = None,
+        *,
+        approval_end_reason: str | None,
+    ) -> None:
+        await hook(before, job_json, result_payload_json)
+        await original_save(store, job_id, job_json, result_payload_json, approval_end_reason=approval_end_reason)
+        await hook(after, job_json, result_payload_json)
+
+    async def save_many(store: ToolJobStore, updates: Sequence[ToolJobSnapshotUpdate]) -> None:
+        for update in updates:
+            await hook(before, update.job_json, update.result_payload_json)
+        await original_save_many(store, updates)
+        for update in updates:
+            await hook(after, update.job_json, update.result_payload_json)
+
+    monkeypatch.setattr(ToolJobStore, "accept", accept)
+    monkeypatch.setattr(ToolJobStore, "save", save)
+    monkeypatch.setattr(ToolJobStore, "save_many", save_many)
+
+
+async def saved_jobs(storage_root: Path) -> dict[str, BackgroundJob]:
+    """Read every job the journal of one storage root holds, as the next process would recover it."""
+    journal = tool_job_journal(storage_root)
+    try:
+        return {saved.job_id: _parse_saved_job(saved) for saved in await journal.tool_jobs("reader").load_all()}
+    finally:
+        await journal.close()
+
+
+async def saved_job_card_decision(storage_root: Path, run_id: str, call_id: str) -> BackgroundApprovalDecision | None:
+    """Read one job card's decision from the journal of one storage root, as the next process would."""
+    journal = tool_job_journal(storage_root)
+    try:
+        return await job_card_decision(journal, run_id, call_id)
+    finally:
+        await journal.close()
+
+
+async def write_saved_job(storage_root: Path, job_id: str, job_json: str) -> None:
+    """Save one snapshot as is, as an earlier process might have left it; the writer takes the jobs over."""
+    journal = tool_job_journal(storage_root)
+    try:
+        store = journal.tool_jobs(uuid4().hex)
+        await store.take_ownership()
+        if job_id in {saved.job_id for saved in await journal.tool_jobs("reader").load_all()}:
+            await store.save(job_id, job_json, approval_end_reason=None)
+        else:
+            await store.accept(job_id, job_json)
+    finally:
+        await journal.close()
+
+
+async def saved_payload(storage_root: Path, job_id: str) -> object:
+    """Read the outcome payload saved for one job, or None."""
+    journal = tool_job_journal(storage_root)
+    try:
+        payload = await journal.tool_jobs("reader").load_payload(job_id)
+    finally:
+        await journal.close()
+    return None if payload is None else json.loads(payload)
+
+
+async def lookup(runtime: ToolJobRuntime, job_id: str, *, owner: ToolExecutionIdentity, depth: int) -> BackgroundJob:
+    """Inspect an exact job as a caller would reach it, failing like any access when that caller cannot see it."""
+    async with runtime._lock:
+        return deepcopy(runtime._entry(job_id, owner, depth).job)
+
+
+def pending_outcomes(runtime: ToolJobRuntime) -> list[BackgroundJob]:
+    """Ended outcomes a reply could still collect: unconsumed, unclaimed, and authorized."""
+    return [
+        entry.job
+        for entry in runtime._entries.values()
+        if entry.job.status in TERMINAL_STATUSES
+        and not entry.job.consumed
+        and entry.claim is None
+        and runtime._grant(entry.job) == "allowed"
+    ]
+
+
+def pending_outcome(runtime: ToolJobRuntime, job_id: str) -> BackgroundJob | None:
+    """The pending outcome of one job, if a reply could still collect it."""
+    return next((job for job in pending_outcomes(runtime) if job.job_id == job_id), None)
+
+
+def toolkit_job_tools(
+    toolkit: Toolkit,
+    *,
+    authored_name: str = "application",
+    snapshot: Mapping[str, Any] | None = None,
+) -> dict[str, JobTool]:
+    """Offer every function of ``toolkit`` as agent assembly does, authored as ``authored_name``.
+
+    ``snapshot`` is the actor's execution scope and file access, as ``authority_snapshot`` freezes it; only such
+    functions may become jobs.
+    """
+    return assembled_job_tools(
+        ((toolkit, function) for function in adapt_toolkit(toolkit, key=authored_name).functions),
+        snapshot or {},
+    )
+
+
+def job_tool(
+    entrypoint: Callable[..., object],
+    *,
+    authored_name: str = "application",
+    snapshot: Mapping[str, Any] | None = None,
+) -> JobTool:
+    """Offer one callable as a function of a MindRoom-assembled toolkit; see ``toolkit_job_tools``."""
+    [tool] = toolkit_job_tools(
+        Toolkit(name=authored_name, tools=[entrypoint]),
+        authored_name=authored_name,
+        snapshot=snapshot,
+    ).values()
+    return tool
+
+
+def job_actor(
+    *tools: JobTool,
+    name: str = "leader",
+    team: bool = False,
+    depth: int = 0,
+) -> JobActor:
+    """An agent, or a team, offering ``tools`` as tool jobs see it."""
+    return JobActor(name=name, team=team, depth=depth, tools={tool.function.name: tool for tool in tools})
+
+
+async def call_job_tool(
+    actor: JobActor,
+    name: str,
+    arguments: Mapping[str, Any] | None = None,
+    *,
+    call_id: str | None = "call",
+    run_id: str = "run",
+    session_id: str = "session",
+    session_state: dict[str, Any] | None = None,
+    middleware: tuple[ToolMiddleware, ...] = (),
+) -> ToolOutcome:
+    """Run one model call of the actor's function ``name`` through job admission, as the owned loop dispatches it."""
+    context = ToolCallContext(
+        run_id=run_id,
+        session_id=session_id,
+        call_id=call_id,
+        session_state={} if session_state is None else session_state,
+        user_id=None,
+    )
+    return await execute_tool_call(
+        actor.tools[name].function,
+        arguments,
+        context,
+        middleware=with_job_admission(actor, middleware),
+    )
+
+
+def _job_turn(
+    actor: JobActor,
+    model: ModelProvider,
+    *,
+    session_id: str,
+    session_state: dict[str, Any] | None,
+    store: ConversationStore | None,
+    generated: tuple[ToolFunction, ...],
+    middleware: tuple[ToolMiddleware, ...],
+    participation: ParticipationGate | None = None,
+    queued_notice: str | None = None,
+) -> tuple[AgentSpec, LoopHooks, ConversationSession, Persist[RunRecord] | None]:
+    functions = (*(tool.function for tool in actor.tools.values()), *generated)
+    spec = AgentSpec(
+        id=actor.name,
+        name=actor.name,
+        model=model,
+        system_messages=(),
+        toolkits=(AdaptedToolkit(name="tools", functions=functions, instructions=None),),
+    )
+    hooks = LoopHooks(
+        # The job definitions project before the participation gate decides, as an agent's turn installs them.
+        before_request=(
+            job_definitions_hook(actor),
+            *((participation_hook(participation, model),) if participation is not None else ()),
+        ),
+        tool_middleware=with_job_admission(actor, middleware),
+        after_tool_batch=(
+            *((queued_notice_after_tool_batch(queued_notice),) if queued_notice is not None else ()),
+            job_notice_hook(actor.name),
+        ),
+    )
+    session = ConversationSession(
+        session_id=session_id,
+        kind="team" if actor.team else "agent",
+        owner_id=actor.name,
+        session_state={} if session_state is None else session_state,
+    )
+    return spec, hooks, session, None if store is None else persist_to(store, session)
+
+
+async def run_job_turn(
+    actor: JobActor,
+    model: ModelProvider,
+    prompt: str = "start",
+    *,
+    run_id: str = "run",
+    session_id: str = "session",
+    session_state: dict[str, Any] | None = None,
+    store: ConversationStore | None = None,
+    generated: tuple[ToolFunction, ...] = (),
+    middleware: tuple[ToolMiddleware, ...] = (),
+    participation: ParticipationGate | None = None,
+    queued_notice: str | None = None,
+) -> RunRecord:
+    """Run one turn of the actor on the owned loop with the job hooks an agent's turn installs.
+
+    ``session_state`` is the session's state the run's tools share; ``store`` saves the run and that state as a
+    reply does. ``generated`` are functions beside the actor's assembled toolkits, as MindRoom adds knowledge search,
+    skill, and team delegation functions, which never become jobs. ``participation`` gates the reply as an agent's
+    turn does, deciding after the job definitions project. ``queued_notice`` is the text of the queued-message notice
+    the turn's batches give when a newer message waits, as a reply's turn installs it.
+    """
+    spec, hooks, session, persist = _job_turn(
+        actor,
+        model,
+        session_id=session_id,
+        session_state=session_state,
+        store=store,
+        generated=generated,
+        middleware=middleware,
+        participation=participation,
+        queued_notice=queued_notice,
+    )
+    run = RunContext(run_id=run_id, session=session)
+    events = run_agent(
+        spec,
+        [Message(role="user", content=prompt)],
+        ctx=run,
+        hooks=hooks,
+        persist=persist,
+        request_template=EMPTY_REQUEST,
+    )
+    finished = [event.record async for event in events if isinstance(event, RunFinished)]
+    return finished[-1]
+
+
+async def resume_job_turn(
+    actor: JobActor,
+    model: ModelProvider,
+    paused: RunRecord,
+    *,
+    session_state: dict[str, Any] | None = None,
+    store: ConversationStore | None = None,
+    middleware: tuple[ToolMiddleware, ...] = (),
+) -> RunRecord:
+    """Resume ``paused`` with every call it waits on approved, as an approval card's decision resumes a reply."""
+    session_id = paused.session_id or "session"
+    spec, hooks, session, persist = _job_turn(
+        actor,
+        model,
+        session_id=session_id,
+        session_state=session_state,
+        store=store,
+        generated=(),
+        middleware=middleware,
+    )
+    approved = [
+        ApprovalCall(
+            tool_call_id=str(requirement.tool_execution.tool_call_id),
+            tool_name=str(requirement.tool_execution.tool_name),
+            invoking_agent=actor.name,
+            toolkit_name=actor.tools[str(requirement.tool_execution.tool_name)].toolkit_name,
+            expires_at_ns=2**62,
+            arguments_digest=approval_arguments_digest(requirement.tool_execution.tool_args),
+        )
+        for requirement in paused.requirements or ()
+    ]
+    events = resume_agent(
+        spec,
+        paused,
+        build_resume_request(paused=paused.messages, summary=None, history=[]),
+        approved=approved,
+        denied={},
+        external_results={},
+        context=lambda run_id: RunContext(run_id=run_id, session=session),
+        hooks=hooks,
+        persist=persist,
+        request_template=EMPTY_REQUEST,
+    )
+    finished = [event.record async for event in events if isinstance(event, RunFinished)]
+    return finished[-1]
+
+
+async def run_built_turn(
+    build: AgentBuild,
+    *,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    prompt: str = "start",
+    run_id: str = "run",
+    session_id: str = "session",
+) -> RunRecord:
+    """Run one turn of an agent ``create_agent`` built, on the owned loop with the hooks every agent turn installs."""
+    name = build.spec.id
+    hooks = agent_loop_hooks(
+        build,
+        HookTurn(
+            config=config,
+            runtime_paths=runtime_paths,
+            model_name="default",
+            storage=RunStorage(
+                store=None,
+                session=ConversationSession(session_id=session_id, kind="agent", owner_id=name),
+                scope=None,
+            ),
+            replay_plan=None,
+            prompt_id=None,
+        ),
+    )
+    finished = [
+        event.record
+        async for event in run_agent(
+            replace(build.spec, system_messages=prompt_for_turn(build)),
+            [Message(role="user", content=prompt)],
+            ctx=RunContext(run_id=run_id, session=UnstoredSession(session_id)),
+            hooks=hooks,
+            request_template=build.request_template,
+            persist=None,
+        )
+        if isinstance(event, RunFinished)
+    ]
+    return finished[-1]
+
+
+async def start_job(runtime: ToolJobRuntime, job_id: str, **options: Any) -> BackgroundJob:  # noqa: ANN401
+    """Accept a job, then drop the claim its start minted, as a foreground caller whose wait ended early does."""
+    job, claim = await runtime.start(job_id, **options)
+    await runtime.release_wait(job_id, claim)
+    return job
+
+
+async def keep_child(_child: DelegationChild) -> None:
+    """A cancellation cleanup that leaves the child as its operation settled it."""
+
+
+async def admit_delegation_spec(
+    runtime: ToolJobRuntime,
+    child: DelegationChild,
+    spec: JobSpec,
+    *,
+    owner: ToolExecutionIdentity,
+) -> tuple[BackgroundJob, JobClaim | None]:
+    """Accept ``spec`` as ``child``'s subagent job under the child's own ID, claiming its outcome."""
+    return await runtime.start(
+        child.delegation_id,
+        tool_name=spec.tool_name,
+        depth=child.depth - 1,
+        kind=spec.kind,
+        adapter=spec.adapter,
+        owner=owner,
+        operation=spec.operation,
+        cancel=spec.cancel,
+    )
+
+
+async def admit_delegation_job(
+    runtime: ToolJobRuntime,
+    child: DelegationChild,
+    *,
+    owner: ToolExecutionIdentity,
+    operation: Callable[[], Awaitable[BackgroundOutcome]],
+    cancel: Callable[[DelegationChild], Awaitable[None]] = keep_child,
+) -> tuple[BackgroundJob, JobClaim | None]:
+    """Accept ``operation`` as ``child``'s subagent job under the child's own ID, claiming its outcome."""
+    return await admit_delegation_spec(runtime, child, delegation_job(child, operation, cleanup=cancel), owner=owner)
+
+
+async def start_delegation_job(
+    runtime: ToolJobRuntime,
+    child: DelegationChild,
+    *,
+    owner: ToolExecutionIdentity,
+    operation: Callable[[], Awaitable[BackgroundOutcome]],
+    cancel: Callable[[DelegationChild], Awaitable[None]] = keep_child,
+) -> BackgroundJob:
+    """Accept ``operation`` as ``child``'s subagent job, then drop the claim its start minted, as `start_job` does."""
+    job, claim = await admit_delegation_job(runtime, child, owner=owner, operation=operation, cancel=cancel)
+    await runtime.release_wait(job.job_id, claim)
+    return job
+
+
+def answer_of(record: RunRecord, call_id: str) -> Message:
+    """Return the one message that answered one call of a run, as the run stores it."""
+    [message] = [message for message in record.messages or () if message.tool_call_id == call_id]
+    return message
+
+
+def settle_stopped_subagent(
+    config: Config,
+    runtime_paths: RuntimePaths,
+) -> Callable[[BackgroundJob], Awaitable[BackgroundOutcome | None]]:
+    """Return the cancel cleanup that settles a stopped subagent job's child as the job coordinator does."""
+    return partial(
+        reconcile_delegation,
+        cleanup=partial(interrupt_stopped_child, config=config, runtime_paths=runtime_paths),
+        runtime_paths=runtime_paths,
+    )
+
+
+class ResolvingMembership(AgentReplyMembershipIndex):
+    """Room membership that is still resolving until a test proves it either way."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.state = "pending"
+
+    def is_current_room_member(
+        self,
+        sender_id: str,
+        room_id: str,
+        config: Config,
+        runtime_paths: RuntimePaths,
+    ) -> bool:
+        """Return whether the test proved the sender a member."""
+        del sender_id, room_id, config, runtime_paths
+        return self.state == "member"
+
+    def grants_pending(
+        self,
+        config: Config,
+        *,
+        joined_rooms: Sequence[str],
+        current_room_id: str | None,
+    ) -> bool:
+        """Return whether membership is still resolving."""
+        del config, joined_rooms, current_room_id
+        return self.state == "pending"
+
+
+# The journal principal of the bot whose replies start the jobs `stopped_job_coordinator` continues.
+JOB_BOT_PRINCIPAL = "leader@test"
+
+
+def stopped_job_coordinator(
+    runtime: ProcessRuntime,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    context: ToolRuntimeContext | None,
+    *,
+    synced: bool = True,
+    joined: bool = True,
+    unavailable: bool = False,
+    memberships: AgentReplyMembershipIndex | None = None,
+) -> ToolJobRuntimeCoordinator:
+    """Return a coordinator over ``runtime`` whose one bot is a stand-in with the real journal principal.
+
+    ``context`` is the tool context the conversation's bot rebuilds, None for a bot without a Matrix client yet;
+    ``synced`` is whether that bot completed its first sync, ``joined`` whether it is still in the jobs' rooms, and
+    ``unavailable`` whether its start failed for good.
+    Access is the coordinator's own check of ``config`` and ``memberships``.
+    """
+    bot = MagicMock(running=True, first_sync_complete=synced, admit_job_follow_up=AsyncMock())
+    bot.tool_runtime_support.build_context.return_value = context
+    bot.client.rooms.__contains__.return_value = joined
+    bot.journal_principal.return_value = runtime.journal.principal(JOB_BOT_PRINCIPAL)
+    coordinator = ToolJobRuntimeCoordinator(
+        runtime_paths=runtime_paths,
+        config_provider=lambda: config,
+        bot_provider=lambda _name: bot,
+        agent_reply_memberships=memberships or AgentReplyMembershipIndex(),
+        journal_provider=lambda: runtime.journal,
+        entity_unavailable=lambda _name: unavailable,
+    )
+    coordinator._runtime = runtime
+    return coordinator
+
+
+async def continue_stopped_jobs(
+    runtime: ProcessRuntime,
+    config: Config,
+    runtime_paths: RuntimePaths,
+    context: ToolRuntimeContext | None,
+    *,
+    synced: bool = True,
+    joined: bool = True,
+    unavailable: bool = False,
+    memberships: AgentReplyMembershipIndex | None = None,
+) -> None:
+    """Run the coordinator's pass that continues or settles the subagent jobs a restart stopped."""
+    coordinator = stopped_job_coordinator(
+        runtime,
+        config,
+        runtime_paths,
+        context,
+        synced=synced,
+        joined=joined,
+        unavailable=unavailable,
+        memberships=memberships,
+    )
+    await coordinator._continue_stopped_jobs(runtime)
+
+
+def subagent_job_id(runtime: ToolJobRuntime, child: DelegationChild) -> str:
+    """Return the ID of the subagent job that runs ``child``'s turn."""
+    [job_id] = [
+        job.job_id
+        for job in runtime.retained_jobs()
+        if job.kind == "delegation" and delegation_child(job).delegation_id == child.delegation_id
+    ]
+    return job_id
+
+
+async def wait_for_status(runtime: ToolJobRuntime, job_id: str, status: str) -> None:
+    """Wait until the runtime publishes the expected status for an accepted job."""
+    entry = runtime._entries[job_id]
+    while entry.job.status != status:
+        await entry.changed.wait()
+
+
+def backdate_job(runtime: ToolJobRuntime, job_id: str, updated_at: datetime) -> None:
+    """Backdate a saved job in memory so retention treats it as old."""
+    entry = runtime._entries[job_id]
+    entry.job = replace(entry.job, updated_at=updated_at.isoformat())
+
+
+def job_owner() -> ToolExecutionIdentity:
+    """The parent identity most runtime tests start jobs under."""
+    return ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="parent",
+        requester_id="@alice:test",
+        room_id="!room:test",
+        thread_id=None,
+        resolved_thread_id="$root",
+        session_id="parent-session",
+    )
+
+
+def job_child(job_id: str = "a" * 32) -> DelegationChild:
+    """A native child owned by `job_owner`, with a reusable subagent ID."""
+    return DelegationChild(
+        delegation_id=job_id,
+        parent_tool_call_id="call",
+        caller_agent_name="parent",
+        child_agent_name="child",
+        task="research",
+        session_id="child-session",
+        run_id="run",
+        model_name="default",
+        requested_model_name="default",
+        depth=1,
+        execution_identity={},
+        subagent_id="b" * 32,
+        agent_mode="standard",
+        persona=None,
+    )
+
+
+def managed_team_config(tmp_path: Path) -> Config:
+    """An enabled instance whose `team` routes through `lead`, which may delegate to `worker`."""
+    access = ResponderAccessConfig(users=["@human:localhost"], current_room_members=False)
+    return bind_runtime_paths(
+        Config(
+            background_tool_jobs=BackgroundToolJobsConfig(enabled=True),
+            agents={
+                "lead": AgentConfig(display_name="Lead", delegate_to=["worker"], access=access),
+                "worker": AgentConfig(display_name="Worker", access=access),
+            },
+            teams={"team": TeamConfig(display_name="Team", role="Work", agents=["lead"], access=access)},
+        ),
+        runtime_paths=test_runtime_paths(tmp_path),
+    )
+
+
+def completed_delegation_job() -> BackgroundJob:
+    """A finished native delegation from `lead` to `worker`, as `managed_team_config` routes it."""
+    owner = ToolExecutionIdentity(
+        channel="matrix",
+        agent_name="lead",
+        requester_id="@human:localhost",
+        room_id="!room:localhost",
+        thread_id="$thread",
+        resolved_thread_id="$thread",
+        session_id="!room:localhost_$thread",
+        transport_agent_name="team",
+    )
+    child = DelegationChild(
+        delegation_id="job_123",
+        parent_tool_call_id="call_123",
+        caller_agent_name="lead",
+        child_agent_name="worker",
+        task="Inspect files",
+        session_id="child_session",
+        run_id="child_run",
+        model_name="default",
+        requested_model_name="default",
+        depth=1,
+        execution_identity={},
+        subagent_id="c" * 32,
+        agent_mode="standard",
+        persona=None,
+    )
+    return BackgroundJob(
+        job_id="job_123",
+        tool_name="worker",
+        depth=0,
+        kind="delegation",
+        adapter={"child": asdict(child)},
+        owner=owner,
+        status="completed",
+        result="Finished @worker",
+    )
+
+
+def team_coordinator(tmp_path: Path, config: Config) -> ToolJobRuntimeCoordinator:
+    """A coordinator whose only bot is the `team` transport."""
+    bot = MagicMock(spec=AgentBot)
+    bot.matrix_id = MatrixID.parse("@mindroom_team:localhost")
+    paths = test_runtime_paths(tmp_path)
+    return ToolJobRuntimeCoordinator(
+        runtime_paths=paths,
+        config_provider=lambda: config,
+        bot_provider=lambda name: bot if name == "team" else None,
+        agent_reply_memberships=AgentReplyMembershipIndex(),
+        journal_provider=partial(tool_job_journal, paths.storage_root),
+    )
+
+
+async def awaiting_approval(runtime: ToolJobRuntime, job_id: str) -> BackgroundOutcome:
+    """Wait for approval cards forever, as a paused background child does until a decision or cancellation."""
+    await runtime.set_awaiting_approval(job_id, awaiting=True)
+    await asyncio.Event().wait()
+    raise AssertionError
+
+
+class SpanRecorder:
+    """Stand in for the reply span's tool-call records, refusing every call once a Stop committed."""
+
+    def __init__(self, *, stopped: bool) -> None:
+        self.stopped = stopped
+        self.records: list[tuple[str, str, dict[str, object], object]] = []
+
+    async def started(self, tool_name: str, args: Mapping[str, object]) -> str | None:
+        """Record a call before it runs, or refuse it after a Stop."""
+        if self.stopped:
+            raise asyncio.CancelledError
+        self.records.append(("started", tool_name, dict(args), None))
+        return "record-1"
+
+    async def finished(self, call_id: str, tool_name: str, args: Mapping[str, object], result: object) -> None:
+        """Record what a call returned."""
+        assert call_id == "record-1"
+        self.records.append(("finished", tool_name, dict(args), result))
+
+
+def job_coordinator(tmp_path: Path, runtime: ToolJobRuntime, bot: MagicMock) -> ToolJobRuntimeCoordinator:
+    """A coordinator around a test runtime whose grants allow every job, delivering through one bot."""
+    paths = test_runtime_paths(tmp_path)
+    coordinator = ToolJobRuntimeCoordinator(
+        runtime_paths=paths,
+        config_provider=Config,
+        bot_provider=lambda _name: bot,
+        agent_reply_memberships=MagicMock(),
+        journal_provider=lambda: tool_job_journal(paths.storage_root),
+    )
+    coordinator._runtime = runtime
+    # The journal the runtime keeps its jobs in, which the replies share.
+    coordinator._journal = tool_job_journal(tmp_path)
+    return coordinator
+
+
+def job_context(tmp_path: Path, owner: ToolExecutionIdentity) -> ToolRuntimeContext:
+    """The tool runtime context of a reply in the conversation of ``owner``, on a managed team config."""
+    paths = test_runtime_paths(tmp_path)
+    return replace(
+        _delegate_runtime_context(managed_team_config(tmp_path), paths, execution_identity=owner),
+        agent_name=owner.agent_name,
+        transport_agent_name=owner.transport_agent_name,
+    )
+
+
+async def cancel_settled(
+    runtime: ToolJobRuntime,
+    job_id: str,
+    *,
+    owner: ToolExecutionIdentity,
+    depth: int,
+) -> BackgroundJob:
+    """Cancel a job as its caller, then wait until the runtime drained it to its outcome."""
+    requested = await runtime.cancel(job_id, owner=owner, depth=depth)
+    drain = runtime._entries[job_id].drain
+    return requested if drain is None else await asyncio.shield(drain)
+
+
+def delegating_config(
+    *,
+    child_tools: Sequence[str] = (),
+    rules: Sequence[ApprovalRuleConfig] = (),
+    jobs: bool = True,
+) -> Config:
+    """Return the leader that delegates to ``code``, which the requester may reach; ``jobs`` turns tool jobs on."""
+    config = with_responder_access(
+        Config(
+            agents={
+                "leader": AgentConfig(display_name="Leader", delegate_to=["code"]),
+                "code": AgentConfig(display_name="Code", tools=list(child_tools)),
+            },
+            defaults=DefaultsConfig(tools=[]),
+            memory={"backend": "none"},
+            tool_approval=ToolApprovalConfig(rules=list(rules)),
+        ),
+        "code",
+        users=[DELEGATING_REQUESTER],
+    )
+    config.background_tool_jobs.enabled = jobs
+    return config
+
+
+@dataclass
+class DelegatingLeader:
+    """The leader as a reply builds it: its subagent calls run as jobs, or pause for the native driver without jobs.
+
+    Each turn builds the leader with ``create_agent`` and runs it on the owned loop with the hooks every agent turn
+    installs; ``drive`` hands the delegations a turn paused on to the native driver, which continues it through the
+    production resume.
+    """
+
+    config: Config
+    paths: RuntimePaths
+    identity: ToolExecutionIdentity
+    agents: ScriptedAgents
+    depth: int = 0
+    store: ConversationStore = field(init=False)
+    session: ConversationSession = field(init=False)
+    build: AgentBuild | None = field(default=None, init=False)
+
+    def __post_init__(self) -> None:
+        """Give the agents their Matrix identities and open the leader's conversation store."""
+        entity_ids(self.config, self.paths)
+        self.store = create_session_storage("leader", self.config, self.paths, self.identity)
+        self.session = ConversationSession(session_id=self.identity.session_id or "", kind="agent", owner_id="leader")
+
+    @property
+    def model(self) -> ScriptedModel:
+        """The leader's provider for its current turn."""
+        return self.agents.models["leader"]
+
+    @owned_tool_execution(enabled=always_owned)
+    async def turn(self, *turns: Sequence[ScriptStep], run_id: str = "parent-run") -> RunRecord:
+        """Run the leader on ``turns`` until it completes or pauses on its delegations.
+
+        The turn owns its tool execution as a reply does: its managed calls become jobs whose results the leader's saved
+        run acknowledges.
+        """
+        set_consumption_storage(lambda: self.store)
+        self.agents.models["leader"] = ScriptedModel(list(turns))
+        self.build = build = create_agent(
+            "leader",
+            self.config,
+            self.paths,
+            self.identity,
+            delegation_depth=self.depth,
+            supports_native_tool_approval=True,
+            include_interactive_questions=False,
+            knowledge=None,
+            model=turn_model(self.config, self.paths, "leader"),
+            plugins=config_plugins(self.config, self.paths),
+        )
+        hooks = agent_loop_hooks(
+            build,
+            HookTurn(
+                config=self.config,
+                runtime_paths=self.paths,
+                model_name="default",
+                storage=RunStorage(store=self.store, session=self.session, scope=_LEADER_SCOPE),
+                replay_plan=None,
+                prompt_id=None,
+            ),
+        )
+        events = run_agent(
+            replace(build.spec, system_messages=prompt_for_turn(build)),
+            [Message(role="user", content="Delegate")],
+            ctx=RunContext(
+                run_id=run_id,
+                user_id=self.identity.requester_id,
+                session=self.session,
+            ),
+            hooks=hooks,
+            persist=persist_to(self.store, self.session),
+            request_template=build.request_template,
+        )
+        finished = [event.record async for event in events if isinstance(event, RunFinished)]
+        return finished[-1]
+
+    async def drive(self, record: RunRecord, run_child: ChildResponseRunner) -> RunRecord:
+        """Advance ``record``'s delegations with ``run_child`` and continue the leader with their results."""
+        assert self.build is not None
+        runner = ResumeRunner(
+            build=self.build,
+            config=self.config,
+            runtime_paths=self.paths,
+            model_name="default",
+            storage=RunStorage(self.store, self.session, _LEADER_SCOPE),
+            user_id=self.identity.requester_id,
+        )
+        return await _drive_delegations(
+            record,
+            continue_parent=runner,
+            agent_name="leader",
+            run_child=run_child,
+            config=self.config,
+            runtime_paths=self.paths,
+            execution_identity=self.identity,
+            delegation_depth=self.depth,
+        )
+
+    async def reply(
+        self,
+        *turns: Sequence[ScriptStep],
+        run_child: ChildResponseRunner = run_delegated_child_response,
+        run_id: str = "parent-run",
+    ) -> RunRecord:
+        """Run one leader reply; the native driver runs the delegations it pauses on with ``run_child``."""
+        return await self.drive(await self.turn(*turns, run_id=run_id), run_child)

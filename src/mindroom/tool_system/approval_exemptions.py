@@ -13,12 +13,14 @@ from typing import TYPE_CHECKING
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
-_EXEMPTION_PREDICATES: dict[str, Callable[[Mapping[str, object]], bool]] = {}
+    from mindroom.constants import RuntimePaths
+
+_EXEMPTION_PREDICATES: dict[str, Callable[[Mapping[str, object], RuntimePaths], bool]] = {}
 
 
 def register_tool_approval_exemption(
     function_name: str,
-    is_exempt: Callable[[Mapping[str, object]], bool],
+    is_exempt: Callable[[Mapping[str, object], RuntimePaths], bool],
 ) -> None:
     """Register a tool-owned predicate that marks calls whose approval would be redundant.
 
@@ -28,7 +30,11 @@ def register_tool_approval_exemption(
     _EXEMPTION_PREDICATES[function_name] = is_exempt
 
 
-def tool_call_is_approval_exempt(function_name: str, arguments: Mapping[str, object]) -> bool:
+def tool_call_is_approval_exempt(
+    function_name: str,
+    arguments: Mapping[str, object],
+    runtime_paths: RuntimePaths,
+) -> bool:
     """Return whether the owning tool marked this call as not needing approval."""
     is_exempt = _EXEMPTION_PREDICATES.get(function_name)
-    return is_exempt is not None and is_exempt(arguments)
+    return is_exempt is not None and is_exempt(arguments, runtime_paths)

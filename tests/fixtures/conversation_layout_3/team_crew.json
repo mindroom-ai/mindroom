@@ -1,0 +1,1085 @@
+{
+ "sessions": {
+  "agent-path": {
+   "metadata": null,
+   "observed": {
+    "folded_tool_call_ids": {},
+    "force_queued": false,
+    "ledger": [
+     [
+      "t2",
+      {
+       "created_at": 1750000030,
+       "metadata": {
+        "requester_id": "@alice:example.org"
+       },
+       "metrics": {
+        "details": {
+         "model": [
+          {
+           "id": "synthetic-model",
+           "input_tokens": 20,
+           "output_tokens": 2,
+           "provider": "Synthetic",
+           "total_tokens": 22
+          }
+         ]
+        },
+        "input_tokens": 20,
+        "output_tokens": 2,
+        "total_tokens": 22
+       },
+       "model": "synthetic-model",
+       "model_provider": "Synthetic",
+       "requests": [
+        {
+         "created_at": 1750000030,
+         "metrics": {
+          "input_tokens": 20,
+          "output_tokens": 2,
+          "total_tokens": 22
+         },
+         "model": "synthetic-model",
+         "model_provider": "Synthetic"
+        }
+       ],
+       "run_id": "t2",
+       "team_id": "crew",
+       "updated_at": 1750000030,
+       "user_id": "@alice:example.org"
+      }
+     ]
+    ],
+    "list_runs": [
+     {
+      "agent_id": "crew",
+      "content": "half an answer\n\n(turn stopped before completion)",
+      "created_at": 1750000020,
+      "messages": [
+       {
+        "content": "question interrupted",
+        "created_at": 1750000020,
+        "from_history": false,
+        "id": "01000000-0000-0000-0000-000200000001",
+        "role": "user",
+        "stop_after_tool_call": false
+       },
+       {
+        "content": "half an answer\n\n(turn stopped before completion)",
+        "created_at": 1750000020,
+        "from_history": false,
+        "id": "01000000-0000-0000-0000-000200000002",
+        "role": "assistant",
+        "stop_after_tool_call": false
+       }
+      ],
+      "metadata": {
+       "matrix_event_id": "$interrupted",
+       "matrix_seen_event_ids": [],
+       "mindroom_original_status": "cancelled",
+       "mindroom_replay_state": "interrupted"
+      },
+      "run_id": "interrupted",
+      "session_id": "agent-path",
+      "status": "COMPLETED"
+     },
+     {
+      "content": "team answer t2",
+      "created_at": 1750000030,
+      "member_responses": [],
+      "messages": [
+       {
+        "content": "team question t2",
+        "created_at": 1750000030,
+        "from_history": false,
+        "id": "01000000-0000-0000-0000-000300000001",
+        "role": "user",
+        "stop_after_tool_call": false
+       },
+       {
+        "content": "team answer t2",
+        "created_at": 1750000030,
+        "from_history": false,
+        "id": "01000000-0000-0000-0000-000300000002",
+        "metrics": {
+         "input_tokens": 20,
+         "output_tokens": 2,
+         "total_tokens": 22
+        },
+        "provider_data": {
+         "mindroom_model": {
+          "id": "synthetic-model",
+          "provider": "Synthetic"
+         }
+        },
+        "role": "assistant",
+        "stop_after_tool_call": false
+       }
+      ],
+      "metadata": {
+       "matrix_event_id": "$t2",
+       "requester_id": "@alice:example.org"
+      },
+      "metrics": {
+       "details": {
+        "model": [
+         {
+          "id": "synthetic-model",
+          "input_tokens": 20,
+          "output_tokens": 2,
+          "provider": "Synthetic",
+          "total_tokens": 22
+         }
+        ]
+       },
+       "input_tokens": 20,
+       "output_tokens": 2,
+       "total_tokens": 22
+      },
+      "model": "synthetic-model",
+      "model_provider": "Synthetic",
+      "run_id": "t2",
+      "session_id": "agent-path",
+      "status": "COMPLETED",
+      "team_id": "crew",
+      "user_id": "@alice:example.org"
+     }
+    ],
+    "loaded_runs": [],
+    "redaction_candidates": [],
+    "request": [
+     {
+      "content": "probe",
+      "created_at": 0,
+      "from_history": false,
+      "id": "probe",
+      "role": "user",
+      "stop_after_tool_call": false
+     }
+    ],
+    "resume_requests": {},
+    "row": {
+     "created_at": 1750000020,
+     "session_data": {
+      "session_metrics": {
+       "details": {
+        "model": [
+         {
+          "id": "synthetic-model",
+          "input_tokens": 20,
+          "output_tokens": 2,
+          "provider": "Synthetic",
+          "total_tokens": 22
+         }
+        ]
+       },
+       "input_tokens": 20,
+       "output_tokens": 2,
+       "total_tokens": 22
+      },
+      "session_state": {}
+     },
+     "updated_at": 1750000030,
+     "user_id": "@alice:example.org"
+    },
+    "seen_event_ids": [],
+    "session": null,
+    "session_runs": []
+   },
+   "runs_by_id": {
+    "interrupted": {
+     "agent_id": "crew",
+     "content": "half an answer\n\n(turn stopped before completion)",
+     "created_at": 1750000020,
+     "messages": [
+      {
+       "content": "question interrupted",
+       "created_at": 1750000020,
+       "from_history": false,
+       "id": "01000000-0000-0000-0000-000200000001",
+       "role": "user",
+       "stop_after_tool_call": false
+      },
+      {
+       "content": "half an answer\n\n(turn stopped before completion)",
+       "created_at": 1750000020,
+       "from_history": false,
+       "id": "01000000-0000-0000-0000-000200000002",
+       "role": "assistant",
+       "stop_after_tool_call": false
+      }
+     ],
+     "metadata": {
+      "matrix_event_id": "$interrupted",
+      "matrix_seen_event_ids": [],
+      "mindroom_original_status": "cancelled",
+      "mindroom_replay_state": "interrupted"
+     },
+     "run_id": "interrupted",
+     "session_id": "agent-path",
+     "status": "COMPLETED"
+    },
+    "t2": {
+     "content": "team answer t2",
+     "created_at": 1750000030,
+     "member_responses": [],
+     "messages": [
+      {
+       "content": "team question t2",
+       "created_at": 1750000030,
+       "from_history": false,
+       "id": "01000000-0000-0000-0000-000300000001",
+       "role": "user",
+       "stop_after_tool_call": false
+      },
+      {
+       "content": "team answer t2",
+       "created_at": 1750000030,
+       "from_history": false,
+       "id": "01000000-0000-0000-0000-000300000002",
+       "metrics": {
+        "input_tokens": 20,
+        "output_tokens": 2,
+        "total_tokens": 22
+       },
+       "provider_data": {
+        "mindroom_model": {
+         "id": "synthetic-model",
+         "provider": "Synthetic"
+        }
+       },
+       "role": "assistant",
+       "stop_after_tool_call": false
+      }
+     ],
+     "metadata": {
+      "matrix_event_id": "$t2",
+      "requester_id": "@alice:example.org"
+     },
+     "metrics": {
+      "details": {
+       "model": [
+        {
+         "id": "synthetic-model",
+         "input_tokens": 20,
+         "output_tokens": 2,
+         "provider": "Synthetic",
+         "total_tokens": 22
+        }
+       ]
+      },
+      "input_tokens": 20,
+      "output_tokens": 2,
+      "total_tokens": 22
+     },
+     "model": "synthetic-model",
+     "model_provider": "Synthetic",
+     "run_id": "t2",
+     "session_id": "agent-path",
+     "status": "COMPLETED",
+     "team_id": "crew",
+     "user_id": "@alice:example.org"
+    }
+   }
+  },
+  "team-turns": {
+   "metadata": null,
+   "observed": {
+    "folded_tool_call_ids": {},
+    "force_queued": false,
+    "ledger": [
+     [
+      "t1",
+      {
+       "created_at": 1750000010,
+       "metadata": {
+        "requester_id": "@alice:example.org"
+       },
+       "metrics": {
+        "details": {
+         "model": [
+          {
+           "id": "synthetic-model",
+           "input_tokens": 20,
+           "output_tokens": 2,
+           "provider": "Synthetic",
+           "total_tokens": 22
+          }
+         ]
+        },
+        "input_tokens": 20,
+        "output_tokens": 2,
+        "total_tokens": 22
+       },
+       "model": "synthetic-model",
+       "model_provider": "Synthetic",
+       "requests": [
+        {
+         "created_at": 1750000010,
+         "metrics": {
+          "input_tokens": 20,
+          "output_tokens": 2,
+          "total_tokens": 22
+         },
+         "model": "synthetic-model",
+         "model_provider": "Synthetic"
+        }
+       ],
+       "run_id": "t1",
+       "team_id": "crew",
+       "updated_at": 1750000010,
+       "user_id": "@alice:example.org"
+      }
+     ]
+    ],
+    "list_runs": [
+     {
+      "content": "team answer t1",
+      "created_at": 1750000010,
+      "member_responses": [],
+      "messages": [
+       {
+        "content": "team question t1",
+        "created_at": 1750000010,
+        "from_history": false,
+        "id": "01000000-0000-0000-0000-000100000009",
+        "role": "user",
+        "stop_after_tool_call": false
+       },
+       {
+        "content": "team answer t1",
+        "created_at": 1750000010,
+        "from_history": false,
+        "id": "01000000-0000-0000-0000-00010000000a",
+        "metrics": {
+         "input_tokens": 20,
+         "output_tokens": 2,
+         "total_tokens": 22
+        },
+        "provider_data": {
+         "mindroom_model": {
+          "id": "synthetic-model",
+          "provider": "Synthetic"
+         }
+        },
+        "role": "assistant",
+        "stop_after_tool_call": false
+       }
+      ],
+      "metadata": {
+       "matrix_event_id": "$t1",
+       "requester_id": "@alice:example.org"
+      },
+      "metrics": {
+       "details": {
+        "model": [
+         {
+          "id": "synthetic-model",
+          "input_tokens": 20,
+          "output_tokens": 2,
+          "provider": "Synthetic",
+          "total_tokens": 22
+         }
+        ]
+       },
+       "input_tokens": 20,
+       "output_tokens": 2,
+       "total_tokens": 22
+      },
+      "model": "synthetic-model",
+      "model_provider": "Synthetic",
+      "run_id": "t1",
+      "session_id": "team-turns",
+      "status": "COMPLETED",
+      "team_id": "crew",
+      "user_id": "@alice:example.org"
+     }
+    ],
+    "loaded_runs": [
+     {
+      "content": "team answer t1",
+      "created_at": 1750000010,
+      "member_responses": [],
+      "messages": [
+       {
+        "content": "team question t1",
+        "created_at": 1750000010,
+        "from_history": false,
+        "id": "01000000-0000-0000-0000-000100000009",
+        "role": "user",
+        "stop_after_tool_call": false
+       },
+       {
+        "content": "team answer t1",
+        "created_at": 1750000010,
+        "from_history": false,
+        "id": "01000000-0000-0000-0000-00010000000a",
+        "metrics": {
+         "input_tokens": 20,
+         "output_tokens": 2,
+         "total_tokens": 22
+        },
+        "provider_data": {
+         "mindroom_model": {
+          "id": "synthetic-model",
+          "provider": "Synthetic"
+         }
+        },
+        "role": "assistant",
+        "stop_after_tool_call": false
+       }
+      ],
+      "metadata": {
+       "matrix_event_id": "$t1",
+       "requester_id": "@alice:example.org"
+      },
+      "metrics": {
+       "details": {
+        "model": [
+         {
+          "id": "synthetic-model",
+          "input_tokens": 20,
+          "output_tokens": 2,
+          "provider": "Synthetic",
+          "total_tokens": 22
+         }
+        ]
+       },
+       "input_tokens": 20,
+       "output_tokens": 2,
+       "total_tokens": 22
+      },
+      "model": "synthetic-model",
+      "model_provider": "Synthetic",
+      "run_id": "t1",
+      "session_id": "team-turns",
+      "status": "COMPLETED",
+      "team_id": "crew",
+      "user_id": "@alice:example.org"
+     }
+    ],
+    "redaction_candidates": [
+     "$t1"
+    ],
+    "request": [
+     {
+      "content": "team question t1",
+      "created_at": 1750000010,
+      "from_history": true,
+      "id": "01000000-0000-0000-0000-000100000009",
+      "role": "user",
+      "stop_after_tool_call": false
+     },
+     {
+      "content": "team answer t1",
+      "created_at": 1750000010,
+      "from_history": true,
+      "id": "01000000-0000-0000-0000-00010000000a",
+      "metrics": {
+       "input_tokens": 20,
+       "output_tokens": 2,
+       "total_tokens": 22
+      },
+      "provider_data": {
+       "mindroom_model": {
+        "id": "synthetic-model",
+        "provider": "Synthetic"
+       }
+      },
+      "role": "assistant",
+      "stop_after_tool_call": false
+     },
+     {
+      "content": "probe",
+      "created_at": 0,
+      "from_history": false,
+      "id": "probe",
+      "role": "user",
+      "stop_after_tool_call": false
+     }
+    ],
+    "resume_requests": {},
+    "row": {
+     "created_at": 1750000010,
+     "session_data": {
+      "session_metrics": {
+       "details": {
+        "model": [
+         {
+          "id": "synthetic-model",
+          "input_tokens": 20,
+          "output_tokens": 2,
+          "provider": "Synthetic",
+          "total_tokens": 22
+         }
+        ]
+       },
+       "input_tokens": 20,
+       "output_tokens": 2,
+       "total_tokens": 22
+      },
+      "session_state": {
+       "plan": "draft"
+      }
+     },
+     "updated_at": 1750000010,
+     "user_id": "@alice:example.org"
+    },
+    "seen_event_ids": [],
+    "session": {
+     "created_at": 1750000010,
+     "kind": "team",
+     "metadata": null,
+     "owner_id": "crew",
+     "session_state": {
+      "plan": "draft"
+     },
+     "summary": null
+    },
+    "session_runs": []
+   },
+   "runs_by_id": {
+    "t1": {
+     "content": "team answer t1",
+     "created_at": 1750000010,
+     "member_responses": [],
+     "messages": [
+      {
+       "content": "team question t1",
+       "created_at": 1750000010,
+       "from_history": false,
+       "id": "01000000-0000-0000-0000-000100000009",
+       "role": "user",
+       "stop_after_tool_call": false
+      },
+      {
+       "content": "team answer t1",
+       "created_at": 1750000010,
+       "from_history": false,
+       "id": "01000000-0000-0000-0000-00010000000a",
+       "metrics": {
+        "input_tokens": 20,
+        "output_tokens": 2,
+        "total_tokens": 22
+       },
+       "provider_data": {
+        "mindroom_model": {
+         "id": "synthetic-model",
+         "provider": "Synthetic"
+        }
+       },
+       "role": "assistant",
+       "stop_after_tool_call": false
+      }
+     ],
+     "metadata": {
+      "matrix_event_id": "$t1",
+      "requester_id": "@alice:example.org"
+     },
+     "metrics": {
+      "details": {
+       "model": [
+        {
+         "id": "synthetic-model",
+         "input_tokens": 20,
+         "output_tokens": 2,
+         "provider": "Synthetic",
+         "total_tokens": 22
+        }
+       ]
+      },
+      "input_tokens": 20,
+      "output_tokens": 2,
+      "total_tokens": 22
+     },
+     "model": "synthetic-model",
+     "model_provider": "Synthetic",
+     "run_id": "t1",
+     "session_id": "team-turns",
+     "status": "COMPLETED",
+     "team_id": "crew",
+     "user_id": "@alice:example.org"
+    }
+   }
+  }
+ },
+ "updated_sessions": null,
+ "usage_rows": [
+  {
+   "mode": "runs",
+   "row": {
+    "entity_id": "crew",
+    "entity_kind": "team",
+    "requester_id": "@alice:example.org",
+    "row_key": "team-turns",
+    "runs": [
+     {
+      "created_at": 1750000010,
+      "kind": "run",
+      "metrics": {
+       "input_tokens": 20,
+       "output_tokens": 2,
+       "total_tokens": 22
+      },
+      "model": "synthetic-model",
+      "model_metrics": [
+       {
+        "metrics": {
+         "input_tokens": 20,
+         "output_tokens": 2,
+         "total_tokens": 22
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       }
+      ],
+      "model_provider": "Synthetic",
+      "parent_run_id": null,
+      "requester_id": "@alice:example.org",
+      "requests": [
+       {
+        "created_at": 1750000010,
+        "metrics": {
+         "input_tokens": 20,
+         "output_tokens": 2,
+         "total_tokens": 22
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       }
+      ],
+      "run_id": "t1",
+      "team_id": "crew",
+      "voice_finalized": false,
+      "voice_seconds": null
+     }
+    ],
+    "runs_available": true,
+    "session_metrics": {},
+    "session_metrics_available": false,
+    "session_model_metrics": []
+   },
+   "since": null
+  },
+  {
+   "mode": "runs",
+   "row": {
+    "entity_id": "crew",
+    "entity_kind": "agent",
+    "requester_id": "@alice:example.org",
+    "row_key": "agent-path",
+    "runs": [
+     {
+      "created_at": 1750000030,
+      "kind": "run",
+      "metrics": {
+       "input_tokens": 20,
+       "output_tokens": 2,
+       "total_tokens": 22
+      },
+      "model": "synthetic-model",
+      "model_metrics": [
+       {
+        "metrics": {
+         "input_tokens": 20,
+         "output_tokens": 2,
+         "total_tokens": 22
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       }
+      ],
+      "model_provider": "Synthetic",
+      "parent_run_id": null,
+      "requester_id": "@alice:example.org",
+      "requests": [
+       {
+        "created_at": 1750000030,
+        "metrics": {
+         "input_tokens": 20,
+         "output_tokens": 2,
+         "total_tokens": 22
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       }
+      ],
+      "run_id": "t2",
+      "team_id": "crew",
+      "voice_finalized": false,
+      "voice_seconds": null
+     }
+    ],
+    "runs_available": true,
+    "session_metrics": {},
+    "session_metrics_available": false,
+    "session_model_metrics": []
+   },
+   "since": null
+  },
+  {
+   "mode": "runs",
+   "row": {
+    "entity_id": "crew",
+    "entity_kind": "agent",
+    "requester_id": "@alice:example.org",
+    "row_key": "agent-path",
+    "runs": [
+     {
+      "created_at": 1750000030,
+      "kind": "run",
+      "metrics": {
+       "input_tokens": 20,
+       "output_tokens": 2,
+       "total_tokens": 22
+      },
+      "model": "synthetic-model",
+      "model_metrics": [
+       {
+        "metrics": {
+         "input_tokens": 20,
+         "output_tokens": 2,
+         "total_tokens": 22
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       }
+      ],
+      "model_provider": "Synthetic",
+      "parent_run_id": null,
+      "requester_id": "@alice:example.org",
+      "requests": [
+       {
+        "created_at": 1750000030,
+        "metrics": {
+         "input_tokens": 20,
+         "output_tokens": 2,
+         "total_tokens": 22
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       }
+      ],
+      "run_id": "t2",
+      "team_id": "crew",
+      "voice_finalized": false,
+      "voice_seconds": null
+     }
+    ],
+    "runs_available": true,
+    "session_metrics": {},
+    "session_metrics_available": false,
+    "session_model_metrics": []
+   },
+   "since": 0
+  },
+  {
+   "mode": "runs",
+   "row": {
+    "entity_id": "crew",
+    "entity_kind": "team",
+    "requester_id": "@alice:example.org",
+    "row_key": "team-turns",
+    "runs": [
+     {
+      "created_at": 1750000010,
+      "kind": "run",
+      "metrics": {
+       "input_tokens": 20,
+       "output_tokens": 2,
+       "total_tokens": 22
+      },
+      "model": "synthetic-model",
+      "model_metrics": [
+       {
+        "metrics": {
+         "input_tokens": 20,
+         "output_tokens": 2,
+         "total_tokens": 22
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       }
+      ],
+      "model_provider": "Synthetic",
+      "parent_run_id": null,
+      "requester_id": "@alice:example.org",
+      "requests": [
+       {
+        "created_at": 1750000010,
+        "metrics": {
+         "input_tokens": 20,
+         "output_tokens": 2,
+         "total_tokens": 22
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       }
+      ],
+      "run_id": "t1",
+      "team_id": "crew",
+      "voice_finalized": false,
+      "voice_seconds": null
+     }
+    ],
+    "runs_available": true,
+    "session_metrics": {},
+    "session_metrics_available": false,
+    "session_model_metrics": []
+   },
+   "since": 0
+  },
+  {
+   "mode": "both",
+   "row": {
+    "entity_id": "crew",
+    "entity_kind": "team",
+    "requester_id": "@alice:example.org",
+    "row_key": "team-turns",
+    "runs": [
+     {
+      "created_at": 1750000010,
+      "kind": "run",
+      "metrics": {
+       "input_tokens": 20,
+       "output_tokens": 2,
+       "total_tokens": 22
+      },
+      "model": "synthetic-model",
+      "model_metrics": [
+       {
+        "metrics": {
+         "input_tokens": 20,
+         "output_tokens": 2,
+         "total_tokens": 22
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       }
+      ],
+      "model_provider": "Synthetic",
+      "parent_run_id": null,
+      "requester_id": "@alice:example.org",
+      "requests": [
+       {
+        "created_at": 1750000010,
+        "metrics": {
+         "input_tokens": 20,
+         "output_tokens": 2,
+         "total_tokens": 22
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       }
+      ],
+      "run_id": "t1",
+      "team_id": "crew",
+      "voice_finalized": false,
+      "voice_seconds": null
+     }
+    ],
+    "runs_available": true,
+    "session_metrics": {
+     "input_tokens": 20,
+     "output_tokens": 2,
+     "total_tokens": 22
+    },
+    "session_metrics_available": true,
+    "session_model_metrics": [
+     {
+      "metrics": {
+       "input_tokens": 20,
+       "output_tokens": 2,
+       "total_tokens": 22
+      },
+      "model": "synthetic-model",
+      "model_provider": "Synthetic"
+     }
+    ]
+   },
+   "since": null
+  },
+  {
+   "mode": "both",
+   "row": {
+    "entity_id": "crew",
+    "entity_kind": "agent",
+    "requester_id": "@alice:example.org",
+    "row_key": "agent-path",
+    "runs": [
+     {
+      "created_at": 1750000030,
+      "kind": "run",
+      "metrics": {
+       "input_tokens": 20,
+       "output_tokens": 2,
+       "total_tokens": 22
+      },
+      "model": "synthetic-model",
+      "model_metrics": [
+       {
+        "metrics": {
+         "input_tokens": 20,
+         "output_tokens": 2,
+         "total_tokens": 22
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       }
+      ],
+      "model_provider": "Synthetic",
+      "parent_run_id": null,
+      "requester_id": "@alice:example.org",
+      "requests": [
+       {
+        "created_at": 1750000030,
+        "metrics": {
+         "input_tokens": 20,
+         "output_tokens": 2,
+         "total_tokens": 22
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       }
+      ],
+      "run_id": "t2",
+      "team_id": "crew",
+      "voice_finalized": false,
+      "voice_seconds": null
+     }
+    ],
+    "runs_available": true,
+    "session_metrics": {
+     "input_tokens": 20,
+     "output_tokens": 2,
+     "total_tokens": 22
+    },
+    "session_metrics_available": true,
+    "session_model_metrics": [
+     {
+      "metrics": {
+       "input_tokens": 20,
+       "output_tokens": 2,
+       "total_tokens": 22
+      },
+      "model": "synthetic-model",
+      "model_provider": "Synthetic"
+     }
+    ]
+   },
+   "since": null
+  },
+  {
+   "mode": "both",
+   "row": {
+    "entity_id": "crew",
+    "entity_kind": "agent",
+    "requester_id": "@alice:example.org",
+    "row_key": "agent-path",
+    "runs": [
+     {
+      "created_at": 1750000030,
+      "kind": "run",
+      "metrics": {
+       "input_tokens": 20,
+       "output_tokens": 2,
+       "total_tokens": 22
+      },
+      "model": "synthetic-model",
+      "model_metrics": [
+       {
+        "metrics": {
+         "input_tokens": 20,
+         "output_tokens": 2,
+         "total_tokens": 22
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       }
+      ],
+      "model_provider": "Synthetic",
+      "parent_run_id": null,
+      "requester_id": "@alice:example.org",
+      "requests": [
+       {
+        "created_at": 1750000030,
+        "metrics": {
+         "input_tokens": 20,
+         "output_tokens": 2,
+         "total_tokens": 22
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       }
+      ],
+      "run_id": "t2",
+      "team_id": "crew",
+      "voice_finalized": false,
+      "voice_seconds": null
+     }
+    ],
+    "runs_available": true,
+    "session_metrics": {},
+    "session_metrics_available": false,
+    "session_model_metrics": []
+   },
+   "since": 0
+  },
+  {
+   "mode": "both",
+   "row": {
+    "entity_id": "crew",
+    "entity_kind": "team",
+    "requester_id": "@alice:example.org",
+    "row_key": "team-turns",
+    "runs": [
+     {
+      "created_at": 1750000010,
+      "kind": "run",
+      "metrics": {
+       "input_tokens": 20,
+       "output_tokens": 2,
+       "total_tokens": 22
+      },
+      "model": "synthetic-model",
+      "model_metrics": [
+       {
+        "metrics": {
+         "input_tokens": 20,
+         "output_tokens": 2,
+         "total_tokens": 22
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       }
+      ],
+      "model_provider": "Synthetic",
+      "parent_run_id": null,
+      "requester_id": "@alice:example.org",
+      "requests": [
+       {
+        "created_at": 1750000010,
+        "metrics": {
+         "input_tokens": 20,
+         "output_tokens": 2,
+         "total_tokens": 22
+        },
+        "model": "synthetic-model",
+        "model_provider": "Synthetic"
+       }
+      ],
+      "run_id": "t1",
+      "team_id": "crew",
+      "voice_finalized": false,
+      "voice_seconds": null
+     }
+    ],
+    "runs_available": true,
+    "session_metrics": {},
+    "session_metrics_available": false,
+    "session_model_metrics": []
+   },
+   "since": 0
+  }
+ ]
+}

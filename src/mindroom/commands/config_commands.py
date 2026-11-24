@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import shlex
 from typing import TYPE_CHECKING, Any
 
@@ -11,6 +12,7 @@ from pydantic import ValidationError
 
 from mindroom import yaml_io
 from mindroom.api import config_lifecycle
+from mindroom.config.commit import ConfigCommit
 from mindroom.config.main import (
     Config,
     ConfigRuntimeValidationError,
@@ -19,9 +21,10 @@ from mindroom.config.main import (
     redact_authored_config,
 )
 from mindroom.config.schema_hints import redaction_marker_location
-from mindroom.event_journal.opening import describe_event_journal, pending_event_journal_restart
+from mindroom.event_journal.opening import describe_in_force_event_journal, pending_event_journal_restart
 from mindroom.logging_config import get_logger
-from mindroom.redaction import MAX_CANONICAL_JSON_INTEGER, REDACTED
+from mindroom.redaction import REDACTED
+from mindroom.tool_jobs.settings import pending_background_tool_jobs_restart
 
 if TYPE_CHECKING:
     from mindroom.constants import RuntimePaths
@@ -56,7 +59,7 @@ def _parse_config_args(args_text: str) -> tuple[str, list[str]]:
         return "show", []
 
     operation = parts[0].lower()
-    args = parts[1:] if len(parts) > 1 else []
+    args = parts[1:]
     return operation, args
 
 
@@ -148,17 +151,6 @@ def _parse_value(value_str: str) -> Any:  # noqa: ANN401
     return value_str
 
 
-def _fits_room_state(value: Any) -> bool:  # noqa: ANN401
-    """Return whether Matrix canonical JSON, which rejects floats and very large integers, can carry a value."""
-    if isinstance(value, dict):
-        return all(isinstance(key, str) and _fits_room_state(item) for key, item in value.items())
-    if isinstance(value, list):
-        return all(_fits_room_state(item) for item in value)
-    if isinstance(value, int):
-        return abs(value) <= MAX_CANONICAL_JSON_INTEGER
-    return value is None or isinstance(value, str)
-
-
 def _format_value(value: Any) -> str:  # noqa: ANN401
     """Format a value for display as YAML.
 
@@ -218,7 +210,7 @@ async def handle_config_command(  # noqa: C901, PLR0911, PLR0912
     if operation == "get":
         if not args:
             return (
-                "❌ Please specify a configuration path to get\nExample: `!config get agents.analyst.display_name`",
+                "❌ Please specify a configuration path to get\nExample: `/config get agents.analyst.display_name`",
                 None,
             )
 
@@ -233,7 +225,7 @@ async def handle_config_command(  # noqa: C901, PLR0911, PLR0912
     elif operation == "set":
         if len(args) < 2:
             return (
-                '❌ Please specify a path and value\nExample: `!config set agents.analyst.display_name "New Name"`',
+                '❌ Please specify a path and value\nExample: `/config set agents.analyst.display_name "New Name"`',
                 None,
             )
 
@@ -248,7 +240,7 @@ async def handle_config_command(  # noqa: C901, PLR0911, PLR0912
             field_path = ".".join((config_path_str, *marker_location))
             return (
                 f"❌ `{field_path}` contains the redaction marker `{REDACTED}` or a masked URL password, which "
-                "`!config show` and `!config get` print in place of a hidden value. "
+                "`/config show` and `/config get` print in place of a hidden value. "
                 "Set that field to its real value instead."
                 f"\n\n{_CONFIG_CHANGE_REJECTED_MESSAGE}"
             ), None
@@ -259,22 +251,19 @@ async def handle_config_command(  # noqa: C901, PLR0911, PLR0912
         except (KeyError, IndexError, TypeError):
             old_value = None  # Path doesn't exist yet
 
-        # Create a copy to test the change
-        test_config_dict = config_dict.copy()
-
         try:
             # Verify the path exists or can be created
-            _set_nested_value(test_config_dict, config_path_str, value)
+            _set_nested_value(config_dict, config_path_str, value)
         except (KeyError, IndexError, TypeError) as e:
             return f"❌ Configuration path error: `{config_path_str}`\nError: {e}", None
 
         try:
-            await asyncio.to_thread(Config.validate_with_runtime, test_config_dict, runtime_paths)
+            await asyncio.to_thread(Config.validate_with_runtime, config_dict, runtime_paths)
         except (ValidationError, ConfigRuntimeValidationError) as e:
             return format_invalid_config_message(e, footer=_CONFIG_CHANGE_REJECTED_MESSAGE), None
         else:
             # Redact the exact payload that confirmation applies, not a normalized model of it.
-            redacted_value = _get_nested_value(redact_authored_config(test_config_dict), config_path_str)
+            redacted_value = _get_nested_value(redact_authored_config(config_dict), config_path_str)
             formatted_old = "Not set" if old_value is None else _format_value(old_value)
             formatted_new = _format_value(redacted_value)
 
@@ -286,13 +275,16 @@ async def handle_config_command(  # noqa: C901, PLR0911, PLR0912
                 f"React with ✅ to confirm or ❌ to cancel this change."
             )
 
+            try:
+                survives_json = json.loads(json.dumps(value)) == value
+            except (TypeError, ValueError):
+                survives_json = False
             # Return the preview and the change info for confirmation
             change_info = {
                 "config_path": config_path_str,
                 "new_value": value,
-                # The pending change is stored in room state that every member can read,
-                # so a value that redaction masks stays out of it, as does one room state cannot carry.
-                "new_value_withheld": redacted_value != value or not _fits_room_state(value),
+                # A value that redaction masks, or that the store's JSON does not give back, stays out of the record.
+                "new_value_withheld": redacted_value != value or not survives_json,
             }
 
             return preview_msg, change_info
@@ -307,7 +299,7 @@ async def handle_config_command(  # noqa: C901, PLR0911, PLR0912
             '• For JSON arrays/objects, use matching quotes: `["item1", "item2"]`\n'
             "• Or use single quotes consistently: `['item1', 'item2']`\n\n"
             "**Example:**\n"
-            '`!config set agents.analyst.tools ["tool1", "tool2"]`'
+            '`/config set agents.analyst.tools ["tool1", "tool2"]`'
         ), None
 
     else:
@@ -315,7 +307,7 @@ async def handle_config_command(  # noqa: C901, PLR0911, PLR0912
         return (
             f"❌ Unknown operation: '{operation}'\n"
             f"Available operations: {', '.join(available_ops)}\n\n"
-            "Try `!help config` for usage examples."
+            "Try `/help config` for usage examples."
         ), None
 
 
@@ -353,25 +345,29 @@ async def apply_config_change(
         # Apply the specific change
         _set_nested_value(config_dict, config_path_str, new_value)
 
+        def commit_change() -> ConfigCommit:
+            commit = ConfigCommit.from_payload(config_dict, runtime_paths)
+            config_lifecycle.commit_config(runtime_paths, commit, loaded=config)
+            return commit
+
         try:
-            saved = await asyncio.to_thread(
-                config_lifecycle.validate_and_persist_config_payload,
-                config_dict,
-                runtime_paths,
-            )
+            commit = await asyncio.to_thread(commit_change)
         except (ValidationError, ConfigRuntimeValidationError) as ve:
             return format_invalid_config_message(ve, footer=_CONFIG_CHANGE_REJECTED_MESSAGE)
 
-        # The event journal is opened once, at startup, and every bot shares
-        # that one store; saying the change affects new interactions would be
-        # untrue for this one field.
-        if pending_event_journal_restart(saved, runtime_paths):
-            return (
-                f"✅ **Configuration updated successfully!**\n\n"
-                f"Changes saved to {path}.\n\n"
-                f"⚠️ The event journal in force is still "
-                f"{describe_event_journal(config.event_journal, runtime_paths)}; the new value applies "
-                f"after MindRoom restarts."
+        # Startup-pinned settings (the shared event journal store, background tool jobs) keep their in-force
+        # value until restart; saying the change affects new interactions would be untrue for them.
+        restart_notices = []
+        if pending_background_tool_jobs_restart(commit.config, runtime_paths):
+            restart_notices.append("⚠️ Background tool jobs keep their startup setting until MindRoom restarts.")
+        in_force_journal = describe_in_force_event_journal(runtime_paths)
+        if in_force_journal is not None and pending_event_journal_restart(commit.config, runtime_paths):
+            restart_notices.append(
+                f"⚠️ The event journal in force is still {in_force_journal}; the new value applies after MindRoom restarts.",
+            )
+        if restart_notices:
+            return f"✅ **Configuration updated successfully!**\n\nChanges saved to {path}.\n\n" + "\n\n".join(
+                restart_notices,
             )
         return (  # noqa: TRY300
             f"✅ **Configuration updated successfully!**\n\n"

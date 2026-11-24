@@ -20,6 +20,7 @@ from backend.utils.audit import AuditActor, record_audit_actor
 from fastapi import Header, HTTPException, Request
 from slowapi import Limiter
 from slowapi.util import get_remote_address
+from supabase import AuthApiError
 
 if TYPE_CHECKING:
     from supabase import Client
@@ -166,6 +167,28 @@ def _ensure_auth_client() -> Client:
     return auth_client
 
 
+def _request_client_ip(request: Request | None) -> str:
+    return client_ip_from_request(request) if request is not None else "unknown"
+
+
+def _refuse_locked_out_client(client_ip: str) -> None:
+    """Refuse a client whose recent failed authentications locked it out, on both Supabase-token verification paths."""
+    if auth_monitor.is_blocked(client_ip):
+        record_auth_event(actor="user", outcome="blocked_request")
+        raise HTTPException(status_code=429, detail="Too many failed attempts. Please try again later.")
+
+
+def _token_was_rejected(exc: Exception) -> bool:
+    """Return whether Supabase rejected the token rather than failing to answer.
+
+    Rejections are reported but never count toward the lockout: Supabase also rejects authentic tokens
+    whose session ended, for example after a sign-out on another device, or that just expired, so counting
+    them would lock legitimate clients and everyone sharing their address out, while a signed token
+    cannot be guessed anyway.
+    """
+    return isinstance(exc, AuthApiError) and exc.status in {401, 403}
+
+
 def _extract_bearer_token(authorization: str | None) -> str:
     """Extract and validate bearer token from authorization header.
 
@@ -198,13 +221,8 @@ async def _authenticate_user(  # noqa: C901, PLR0912
     and a restored account is re-read on its next request.
     A refused account is not recorded as a successful authentication.
     """
-    # Get client IP for monitoring
-    client_ip = client_ip_from_request(request) if request is not None else "unknown"
-
-    # Check if IP is blocked
-    if auth_monitor.is_blocked(client_ip):
-        record_auth_event(actor="user", outcome="blocked_request")
-        raise HTTPException(status_code=429, detail="Too many failed attempts. Please try again later.")
+    client_ip = _request_client_ip(request)
+    _refuse_locked_out_client(client_ip)
 
     try:
         token = _extract_bearer_token(authorization)
@@ -226,8 +244,6 @@ async def _authenticate_user(  # noqa: C901, PLR0912
     try:
         user = ac.auth.get_user(token)
         if not user or not user.user:
-            # Record auth failure
-            auth_monitor.record_failure(client_ip)
             msg = "Invalid token"
             raise HTTPException(status_code=401, detail=msg)  # noqa: TRY301
 
@@ -289,10 +305,7 @@ async def _authenticate_user(  # noqa: C901, PLR0912
         db_time = time.perf_counter() - start
         logger.info("Auth database lookup: %.2fms", db_time * 1000)
 
-    except HTTPException as e:
-        # Record failure if it's an auth error (not a 404)
-        if e.status_code == 401:
-            auth_monitor.record_failure(client_ip)
+    except HTTPException:
         raise
     except Exception:
         logger.exception("User verification error")
@@ -327,10 +340,17 @@ async def verify_user_allow_deleted(authorization: str = Header(None), request: 
 
 async def verify_admin(authorization: str = Header(None), request: Request = None) -> dict:
     """Verify admin access via Supabase auth for an active admin account."""
+    client_ip = _request_client_ip(request)
+    try:
+        _refuse_locked_out_client(client_ip)
+    except HTTPException:
+        record_admin_verification("blocked")
+        raise
     try:
         token = _extract_bearer_token(authorization)
     except HTTPException as exc:
         if exc.status_code == 401:
+            auth_monitor.record_failure(client_ip)
             record_admin_verification("unauthorized")
         raise
 
@@ -354,8 +374,8 @@ async def verify_admin(authorization: str = Header(None), request: Request = Non
         return {"user_id": user.user.id, "email": user.user.email}  # noqa: TRY300
     except HTTPException:
         raise
-    except Exception:
+    except Exception as exc:
         logger.exception("Admin verification error")
         msg = "Authentication failed"
-        record_admin_verification("error")
+        record_admin_verification("unauthorized" if _token_was_rejected(exc) else "error")
         raise HTTPException(status_code=401, detail=msg) from None

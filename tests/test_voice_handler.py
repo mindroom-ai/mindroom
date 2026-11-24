@@ -11,18 +11,26 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import nio
 import pytest
-from agno.media import Audio
 
 from mindroom.authorization import ensure_room_membership_synced
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.voice import VoiceConfig, VoiceSTTConfig, _VoiceLLMConfig
-from mindroom.constants import ATTACHMENT_IDS_KEY, VOICE_RAW_AUDIO_FALLBACK_KEY
+from mindroom.constants import (
+    ATTACHMENT_IDS_KEY,
+    MID_TURN_MODE_KEY,
+    SUBMISSION_CONTENT_KEY,
+    VOICE_RAW_AUDIO_FALLBACK_KEY,
+)
+from mindroom.llm.errors import ProviderError
+from mindroom.llm.media import Audio
 from mindroom.model_defaults import LOCAL_OPENAI_API_KEY_DEFAULT
+from mindroom.model_selection import THREAD_MODEL_CONTENT_KEY
 from mindroom.voice import handler as voice_handler
 from tests.access_schema_support import with_current_room_member_access
 from tests.authorization_helpers import isolated_membership_index
-from tests.conftest import bind_runtime_paths, runtime_paths_for, test_runtime_paths
+from tests.conftest import bind_runtime_paths, install_model_providers, runtime_paths_for, test_runtime_paths
+from tests.fakes.scripted_model import Await, ScriptedModel, answer
 from tests.identity_helpers import persist_actual_entity_accounts
 
 if TYPE_CHECKING:
@@ -690,30 +698,23 @@ class TestVoiceHandler:
             ),
         )
         monkeypatch.setattr(voice_handler, "_VOICE_NORMALIZER_LLM_TIMEOUT_SECONDS", 0.05, raising=False)
-        arun_started = asyncio.Event()
+        request_started = asyncio.Event()
 
-        class HungAgent:
-            def __init__(self, *_args: object, **_kwargs: object) -> None:
-                pass
+        async def hang() -> None:
+            request_started.set()
+            await asyncio.Event().wait()
 
-            async def arun(self, *_args: object, **_kwargs: object) -> None:
-                arun_started.set()
-                await asyncio.Event().wait()
+        install_model_providers(monkeypatch, {"default": ScriptedModel([[Await(hang)]])})
+        result = await asyncio.wait_for(
+            _process_transcription("turn on the lights", config),
+            timeout=2.0,
+        )
 
-        with (
-            patch("mindroom.voice.handler.model_loading.get_model_instance", return_value=MagicMock()),
-            patch("mindroom.voice.handler.Agent", HungAgent),
-        ):
-            result = await asyncio.wait_for(
-                _process_transcription("turn on the lights", config),
-                timeout=2.0,
-            )
-
-        assert arun_started.is_set()
+        assert request_started.is_set()
         assert result == "turn on the lights"
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("failure_stage", ["model", "constructor", "run", "timeout", "empty"])
+    @pytest.mark.parametrize("failure_stage", ["model", "run", "timeout", "empty"])
     @pytest.mark.parametrize("unavailable_mention", [False, True])
     async def test_cleanup_failure_preserves_recognized_transcript(
         self,
@@ -735,26 +736,17 @@ class TestVoiceHandler:
             transcript = "@helper please ask @private about tomorrow's appointment."
         expected = transcript.replace("@private", "private")
 
-        class CleanupAgent:
-            def __init__(self, **_kwargs: object) -> None:
-                if failure_stage == "constructor":
-                    message = "cleanup construction failed"
-                    raise RuntimeError(message)
+        async def fail() -> None:
+            if failure_stage == "timeout":
+                raise TimeoutError
+            message = "cleanup provider failed"
+            raise ProviderError(message, provider="Synthetic")
 
-            async def arun(self, *_args: object, **_kwargs: object) -> None:
-                if failure_stage == "empty":
-                    return
-                if failure_stage == "timeout":
-                    raise TimeoutError
-                message = "cleanup provider failed"
-                raise RuntimeError(message)
-
-        with (
-            patch(
-                "mindroom.voice.handler.model_loading.get_model_instance",
-                side_effect=RuntimeError("cleanup model unavailable") if failure_stage == "model" else None,
-            ),
-            patch("mindroom.voice.handler.Agent", CleanupAgent),
+        model = ScriptedModel([answer("") if failure_stage == "empty" else [Await(fail)]])
+        with patch(
+            "mindroom.providers.registry.build_model_provider",
+            side_effect=RuntimeError("cleanup model unavailable") if failure_stage == "model" else None,
+            return_value=model,
         ):
             result = await _process_transcription(
                 transcript,
@@ -766,16 +758,16 @@ class TestVoiceHandler:
         assert result == expected
 
     @pytest.mark.asyncio
-    async def test_cleanup_cancellation_propagates(self) -> None:
+    async def test_cleanup_cancellation_propagates(self, monkeypatch: pytest.MonkeyPatch) -> None:
         """Cancellation remains control flow instead of becoming a transcript fallback."""
         config = _runtime_bound_config(Config(voice=VoiceConfig(enabled=True)))
-        with (
-            patch("mindroom.voice.handler.model_loading.get_model_instance"),
-            patch("mindroom.voice.handler.Agent") as agent_class,
-        ):
-            agent_class.return_value.arun = AsyncMock(side_effect=asyncio.CancelledError)
-            with pytest.raises(asyncio.CancelledError):
-                await _process_transcription("recognized speech", config)
+
+        async def cancel() -> None:
+            raise asyncio.CancelledError
+
+        install_model_providers(monkeypatch, {"default": ScriptedModel([[Await(cancel)]])})
+        with pytest.raises(asyncio.CancelledError):
+            await _process_transcription("recognized speech", config)
 
     @pytest.mark.asyncio
     async def test_normalize_voice_message_fails_when_normalization_hangs(
@@ -863,3 +855,46 @@ class TestVoiceHandler:
         assert download_started.is_set()
         assert prepared.source["content"][VOICE_RAW_AUDIO_FALLBACK_KEY] is True
         assert ATTACHMENT_IDS_KEY not in prepared.source["content"]
+
+    @pytest.mark.parametrize("is_edit", [False, True])
+    def test_build_prepared_voice_message_keeps_composer_metadata(self, is_edit: bool) -> None:
+        """Keep a voice pick only for the original event, even when dispatch rewrites its relation."""
+        config = _runtime_bound_config(Config(voice=VoiceConfig(enabled=True)))
+        marker = {"id": "upload-1", "more": True}
+        event = MagicMock(spec=nio.RoomMessageAudio)
+        event.event_id = "$marked_voice"
+        event.sender = "@alice:example.com"
+        pick = {
+            "version": 1,
+            "runtime_user_id": "@mindroom_helper:example.com",
+            "runtime_device_id": "DEVICE",
+            "model": "large",
+        }
+        event.source = {
+            "content": {
+                "body": "voice.ogg",
+                "msgtype": "m.audio",
+                SUBMISSION_CONTENT_KEY: marker,
+                MID_TURN_MODE_KEY: "steer",
+                THREAD_MODEL_CONTENT_KEY: pick,
+            },
+        }
+        if is_edit:
+            event.source["content"]["m.relates_to"] = {"rel_type": "m.replace", "event_id": "$original"}
+
+        prepared = voice_handler._build_prepared_voice_message(
+            event,
+            config,
+            runtime_paths_for(config),
+            text="🎤 hello",
+            attachment_id=None,
+            thread_id="$root" if is_edit else None,
+            raw_audio_fallback=False,
+        )
+
+        assert prepared.source["content"][SUBMISSION_CONTENT_KEY] == marker
+        assert prepared.source["content"][MID_TURN_MODE_KEY] == "steer"
+        if is_edit:
+            assert THREAD_MODEL_CONTENT_KEY not in prepared.source["content"]
+        else:
+            assert prepared.source["content"][THREAD_MODEL_CONTENT_KEY] == pick

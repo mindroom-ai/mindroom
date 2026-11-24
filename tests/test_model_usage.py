@@ -1,0 +1,132 @@
+"""Request-context sizing from one response's provider usage counters."""
+# ruff: noqa: D103
+
+from __future__ import annotations
+
+import pytest
+
+from mindroom.llm.messages import Message
+from mindroom.llm.usage import MessageMetrics, TokenCounts
+from mindroom.model_usage import ContextTokens, message_context_tokens, uncached_input_tokens_from_counts
+from mindroom.providers.names import ROUTE_PROVIDERS
+
+
+def _assistant(metrics: MessageMetrics) -> Message:
+    return Message(role="assistant", content="ok", metrics=metrics)
+
+
+def test_message_context_tokens_add_cache_tokens_only_where_reported_outside_input() -> None:
+    anthropic = _assistant(
+        MessageMetrics(tokens=TokenCounts(input_tokens=10, cache_read_tokens=90, cache_write_tokens=5)),
+    )
+    openai = _assistant(MessageMetrics(tokens=TokenCounts(input_tokens=100, cache_read_tokens=90)))
+
+    assert message_context_tokens(
+        anthropic,
+        provider="Anthropic",
+        configured_provider="anthropic",
+        model_id="m",
+    ) == ContextTokens(105, cache_read_tokens=90, cache_write_tokens=5)
+    assert message_context_tokens(
+        openai,
+        provider="OpenAI",
+        configured_provider="openai",
+        model_id="m",
+    ) == ContextTokens(100, cache_read_tokens=90)
+
+
+@pytest.mark.parametrize(
+    ("provider", "configured_provider"),
+    [(ROUTE_PROVIDERS["claude_code"], "claude_code"), (ROUTE_PROVIDERS["claude_code"], None), (None, "claude_code")],
+    ids=["a configured model", "a stored run", "only the configured route"],
+)
+def test_a_claude_code_response_reports_its_cache_tokens_outside_its_input(
+    provider: str | None,
+    configured_provider: str | None,
+) -> None:
+    answer = _assistant(
+        MessageMetrics(tokens=TokenCounts(input_tokens=10, cache_read_tokens=90, cache_write_tokens=5)),
+    )
+
+    assert message_context_tokens(
+        answer,
+        provider=provider,
+        configured_provider=configured_provider,
+        model_id="claude-sonnet-5-5",
+    ) == ContextTokens(105, cache_read_tokens=90, cache_write_tokens=5)
+
+
+@pytest.mark.parametrize("stored", [False, True], ids=["reported", "stored-under-provider-metrics"])
+def test_native_final_iteration_context_wins_over_billed_counters(stored: bool) -> None:
+    """A Claude response's context reports each counter, a zero one too, however an earlier release stored it."""
+    metrics = MessageMetrics(
+        tokens=TokenCounts(input_tokens=900, cache_read_tokens=0),
+        context=TokenCounts(input_tokens=40, cache_read_tokens=60),
+    )
+    if stored:
+        legacy = {
+            "input_tokens": 900,
+            "provider_metrics": {"context_usage": {"input_tokens": 40, "cache_read_tokens": 60}},
+        }
+        metrics = MessageMetrics.from_dict(legacy)
+
+    assert message_context_tokens(
+        _assistant(metrics),
+        provider="Anthropic",
+        configured_provider="anthropic",
+        model_id="m",
+    ) == ContextTokens(100, cache_read_tokens=60, cache_write_tokens=0)
+
+
+def test_response_without_reported_usage_has_no_context_tokens() -> None:
+    assert (
+        message_context_tokens(
+            _assistant(MessageMetrics()),
+            provider="OpenAI",
+            configured_provider="openai",
+            model_id="m",
+        )
+        is None
+    )
+
+
+def test_uncached_input_subtracts_cache_reads_where_input_includes_them() -> None:
+    assert (
+        uncached_input_tokens_from_counts(
+            input_tokens=1_000,
+            cache_read_tokens=400,
+            cache_write_tokens=None,
+            provider="OpenAI",
+            configured_provider="openai",
+            model_id="gpt-6-luna",
+        )
+        == 600
+    )
+
+
+def test_uncached_input_counts_cache_writes_where_cache_is_reported_outside_input() -> None:
+    assert (
+        uncached_input_tokens_from_counts(
+            input_tokens=1_000,
+            cache_read_tokens=9_000,
+            cache_write_tokens=50,
+            provider="Anthropic",
+            configured_provider="anthropic",
+            model_id="claude-sonnet-5-5",
+        )
+        == 1_050
+    )
+
+
+def test_uncached_input_is_unknown_without_input() -> None:
+    assert (
+        uncached_input_tokens_from_counts(
+            input_tokens=None,
+            cache_read_tokens=10,
+            cache_write_tokens=None,
+            provider="OpenAI",
+            configured_provider="openai",
+            model_id="gpt-6-luna",
+        )
+        is None
+    )

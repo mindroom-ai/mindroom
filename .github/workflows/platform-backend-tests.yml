@@ -5,11 +5,13 @@ on:
     branches: [main]
     paths:
       - "saas-platform/**"
+      - "cluster/**"
       - ".github/workflows/platform-backend-tests.yml"
   pull_request:
     branches: [main]
     paths:
       - "saas-platform/**"
+      - "cluster/**"
       - ".github/workflows/platform-backend-tests.yml"
 
 permissions:
@@ -25,9 +27,6 @@ jobs:
     name: platform-backend
     runs-on: ubuntu-24.04
     timeout-minutes: 20
-    env:
-      # The tests mock Kubernetes; an empty kubeconfig keeps any unmocked kubectl or helm call off real clusters.
-      KUBECONFIG: /dev/null
     defaults:
       run:
         working-directory: saas-platform/platform-backend

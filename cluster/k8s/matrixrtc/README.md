@@ -118,6 +118,8 @@ The policies select only ingress; egress stays unrestricted because the authoriz
 - `livekit.extraConfig` is merged over the rendered LiveKit `config.yaml` for options such as `webhook`, `limit`, `prometheus`, or `rtc.turn_servers`.
   It cannot set the chart-owned `port`, `keys`, `key_file`, `rtc.node_ip`, `rtc.use_external_ip`, `rtc.tcp_port`, `rtc.udp_port`, `rtc.port_range_start`, `rtc.port_range_end`, or `room.auto_create`, because the Services, probes, NetworkPolicies, and room access rules depend on them.
 - `livekit.extraEnv` and `auth.extraEnv` append raw environment variables, for example `LIVEKIT_CS_API_URL_OVERRIDES` or `LIVEKIT_REDIS_URL` for the authorization service.
+- `auth.logLevel` sets the authorization service's `LIVEKIT_LOG_LEVEL` to `debug`, `info`, `warn`, or `error`.
+  The default `warn` leaves out its info lines, such as one for every health probe, because it writes all logs to stderr, which log collectors usually read as errors.
 - Both pods run as an unprivileged user with a read-only root filesystem and no service account token; adjust `podSecurityContext` and `securityContext` to match your policy.
 
 ## Notes

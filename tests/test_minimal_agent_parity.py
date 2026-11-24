@@ -6,23 +6,19 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import sys
 import time
 from collections.abc import AsyncIterator, Iterator  # noqa: TC003 - Agno evaluates tool annotations
-from contextlib import asynccontextmanager
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 from types import SimpleNamespace
+from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
-import httpx
+import nio
 import pytest
 import yaml
-from agno.agent import Agent
-from agno.learn import LearningMachine
-from agno.models.fallback import FallbackConfig
-from agno.models.openai import OpenAIChat
-from agno.models.response import ModelResponse
 from agno.run import RunContext  # noqa: TC002 - injected tool argument
-from agno.skills import LocalSkills, Skills
 from agno.tools.toolkit import Toolkit
 from pydantic import ValidationError
 
@@ -36,29 +32,45 @@ from mindroom.agent_cli.protocol import (
 )
 from mindroom.agent_cli.session import CliAuthenticationError, TurnToolRegistry
 from mindroom.agent_cli.shell_contract import current_agent_cli_shell_env
-from mindroom.agent_storage import create_session_storage
+from mindroom.budgets.monitor import BudgetMonitor
 from mindroom.config.access import ResponderAccessConfig
 from mindroom.config.agent import AgentConfig, AgentPrivateConfig
 from mindroom.config.plugin import PluginEntryConfig
 from mindroom.credentials.manager import get_runtime_credentials_manager, save_scoped_credentials
-from mindroom.delegation.lifecycle import child_execution_identity
+from mindroom.custom_tools import temporary_secrets
+from mindroom.history.storage import has_queued_force_compaction
 from mindroom.interactive import parse_and_format_interactive
+from mindroom.knowledge.read_protocol import SearchHit
+from mindroom.knowledge.search import AgentKnowledge, KnowledgeSource, KnowledgeSourceDescription
 from mindroom.mcp.config import MCPServerConfig
 from mindroom.mcp.manager import MCPServerManager
-from mindroom.mcp.registry import sync_mcp_tool_registry
 from mindroom.mcp.toolkit import bind_mcp_server_manager
 from mindroom.memory import search_agent_memories
-from mindroom.providers import stream_retry as provider_stream_retry
-from mindroom.response_turn import apply_exact_approval_decisions
-from mindroom.tool_system.dynamic_toolkits import get_loaded_tools_for_session
-from mindroom.tool_system.events import CollectedStreamPresentation
+from mindroom.reply_scope import SpanHandle, SpanSlot, _current_slot
+from mindroom.response_turn import (
+    CollectedStreamPresentation,
+    apply_exact_approval_decisions,
+    collect_streamed_response_content,
+)
+from mindroom.secret_requests import SECRET_REQUEST_CONTENT_KEY, secret_request_registry
+from mindroom.session_storage.agent_storage import create_session_storage
+from mindroom.tool_system.plugins import config_plugins
 from mindroom.tool_system.runtime_context import (
-    build_execution_identity_from_runtime_context,
+    current_execution_identity,
     get_tool_runtime_context,
     tool_runtime_context,
 )
-from mindroom.tool_system.worker_routing import get_tool_execution_identity
+from mindroom.tool_system.worker_routing import agent_workspace_root_path
 from tests.access_schema_support import with_responder_access
+from tests.approval_continuation_helpers import answered_calls
+from tests.conftest import (
+    SETTLE_TIMEOUT_SECONDS,
+    install_model_providers,
+    make_matrix_client_mock,
+    publish_test_plugins,
+)
+from tests.delegation_helpers import ScriptedAgents
+from tests.fakes.scripted_model import SYNTHETIC, ScriptedModel, answer
 from tests.identity_helpers import persist_entity_accounts
 from tests.minimal_agent_fixtures import (  # noqa: F401 - agent_cli_api is a pytest fixture
     PLUGIN,
@@ -66,10 +78,15 @@ from tests.minimal_agent_fixtures import (  # noqa: F401 - agent_cli_api is a py
     agent_cli_api,
     cli_window,
     install_scripted_shell,
+    offered_tools,
+    settled_receipt,
     shell_cli_owner,
 )
 from tests.test_agent_cli_authority import _runtime_context, _turn_context
-from tests.test_delegation_execution import DelegationModel
+
+if TYPE_CHECKING:
+    from mindroom.llm.provider import ModelRequest, StreamEvent
+    from mindroom.tool_system.invocation import ToolCall, ToolNext
 
 pytestmark = pytest.mark.usefixtures("enforce_turn_authorization", "agent_cli_api")
 
@@ -113,8 +130,7 @@ class ProtocolShell:
                 call_id=call_id,
             ),
         )
-        while (receipt := await self.owner.get_call(str(call_id)))["status"] in {"queued", "running", "waiting"}:  # noqa: ASYNC110
-            await asyncio.sleep(0)
+        receipt = await settled_receipt(self.owner, str(call_id))
         self.receipts.append(receipt)
         self.catalog_snapshots.append(self.owner.catalog.metadata())
         assert receipt["status"] == "completed", receipt
@@ -123,8 +139,7 @@ class ProtocolShell:
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("function", ["sync", "asynchronous", "generator", "async_generator"])
-@pytest.mark.parametrize("streamed", [False, True])
-async def test_response_direct_cli_parity(tmp_path, monkeypatch, function, streamed) -> None:  # noqa: C901 - paired native and CLI execution
+async def test_response_direct_cli_parity(tmp_path, monkeypatch, function) -> None:
     """Removing canonical context, hooks, generators, or hidden dispatch breaks parity."""
     runtime = _runtime_context(tmp_path)
     runtime.config.administrators = [runtime.requester_id]
@@ -132,7 +147,6 @@ async def test_response_direct_cli_parity(tmp_path, monkeypatch, function, strea
         display_name="Helper",
         tools=["shell", "calculator"],
         memory_backend="file",
-        learning=False,
     )
     runtime = replace(runtime, orchestrator=SimpleNamespace(agent_cli_registry=TurnToolRegistry()))
     persist_entity_accounts(runtime.config, runtime.runtime_paths)
@@ -141,7 +155,7 @@ async def test_response_direct_cli_parity(tmp_path, monkeypatch, function, strea
 
     def effect(value, run_context):
         context = get_tool_runtime_context()
-        identity = get_tool_execution_identity()
+        identity = current_execution_identity()
         effects.append((value, context.agent_name, context.requester_id, context.target, identity))
         run_context.session_state["parity"] = value
 
@@ -162,10 +176,10 @@ async def test_response_direct_cli_parity(tmp_path, monkeypatch, function, strea
         yield "result:"
         yield str(value)
 
-    async def hook(name, function_call, arguments):
-        hooks.append((name, "before"))
-        result = await function_call(**arguments)
-        hooks.append((name, "after"))
+    async def hook(call: ToolCall, call_next: ToolNext) -> object:
+        hooks.append((call.function.name, "before"))
+        result = await call_next(call.arguments)
+        hooks.append((call.function.name, "after"))
         return result
 
     original = agents.get_tool_by_name
@@ -173,17 +187,16 @@ async def test_response_direct_cli_parity(tmp_path, monkeypatch, function, strea
     def build(name, *args, **kwargs):
         if name != "calculator":
             return original(name, *args, **kwargs)
-        toolkit = Toolkit(name="calculator", tools=[sync, asynchronous, generator, async_generator])
-        for entry in toolkit.get_async_functions().values():
-            entry.tool_hooks = [hook]
-        return toolkit
+        return Toolkit(name="calculator", tools=[sync, asynchronous, generator, async_generator])
 
     monkeypatch.setattr(agents, "get_tool_by_name", build)
+    # The build's tool policy, which runs around every call the reply makes, natively or through Bash.
+    monkeypatch.setattr(agents, "build_tool_hook_middleware", lambda *_args, **_kwargs: hook)
     shell = ProtocolShell(runtime.orchestrator.agent_cli_registry)
     install_scripted_shell(monkeypatch, shell.run_shell_command)
     provider = ScriptedProvider()
     provider.install(monkeypatch)
-    identity = build_execution_identity_from_runtime_context(runtime)
+    identity = runtime.execution_identity
     results = []
     for mode in ("standard", "minimal"):
         provider.steps = [
@@ -194,37 +207,33 @@ async def test_response_direct_cli_parity(tmp_path, monkeypatch, function, strea
             ],
             "done",
         ]
-        ctx = replace(_turn_context(), agent_mode=mode, run_id=None)
+        ctx = replace(
+            _turn_context(),
+            agent_mode=mode,
+            run_id=None,
+            prompt="same parity task",
+            execution_identity=identity,
+            supports_native_tool_approval=True,
+            show_tool_calls=True,
+        )
         with tool_runtime_context(runtime):
-            kwargs = {
-                "prompt": "same parity task",
-                "runtime_paths": runtime.runtime_paths,
-                "config": runtime.config,
-                "execution_identity": identity,
-                "supports_native_tool_approval": True,
-                "show_tool_calls": True,
-            }
-            result = (
-                await ai.collect_streamed_response_content(
-                    ai.stream_agent_response(ctx, **kwargs),
-                    presentation=CollectedStreamPresentation(show_tool_calls=True),
-                )
-                if streamed
-                else await ai.ai_response(ctx, **kwargs)
-            )
+            result = (await ai.ai_response(ctx, runtime.runtime_paths, runtime.config)).text
         results.append(result)
     assert effects[0][:4] == effects[1][:4]
     assert effects[1][4] == identity
     assert len(effects) == 2
-    assert hooks == [(function, "before"), (function, "after")] * 2
+    assert [hook for hook in hooks if hook[0] == function] == [(function, "before"), (function, "after")] * 2
+    # Minimal Bash runs the agent's own shell call under the same policy; the Bash facade itself has none.
+    assert ("bash", "before") not in hooks
+    assert ("run_shell_command", "before") in hooks
     assert shell.receipts[0]["outcome"] == "result:7"
-    assert shell.owner.catalog.run_context.session_state["parity"] == 7
-    assert all("done" in str(result) for result in results)
+    assert shell.owner.catalog.run.session_state["parity"] == 7
+    assert all("done" in result for result in results)
     assert len(provider.requests) == 4
-    assert function in str(provider.requests[0]["tools"])
-    assert all([tool["function"]["name"] for tool in request["tools"]] == ["bash"] for request in provider.requests[2:])
-    assert "result:7" in str(provider.requests[1]["messages"])
-    assert "result:7" in str(provider.requests[3]["messages"])
+    assert function in offered_tools(provider.requests[0])
+    assert all(offered_tools(request) == ["bash"] for request in provider.requests[2:])
+    assert "result:7" in str(provider.requests[1].messages)
+    assert "result:7" in str(provider.requests[3].messages)
     assert shell.tokens[0] not in str(provider.requests)
 
 
@@ -232,6 +241,7 @@ async def test_response_direct_cli_parity(tmp_path, monkeypatch, function, strea
 async def test_same_child_responder_direct_and_cli_provenance(tmp_path, monkeypatch) -> None:
     """The same child responder keeps native parent and follow-up relationships in both modes."""
     comparisons = []
+    respond_as_child = ai.run_delegated_child_response
     for mode in ("standard", "minimal"):
         runtime = _runtime_context(tmp_path / mode)
         runtime.config.administrators = [runtime.requester_id]
@@ -240,40 +250,35 @@ async def test_same_child_responder_direct_and_cli_provenance(tmp_path, monkeypa
             tools=["shell"],
             delegate_to=["code"],
             memory_backend="file",
-            learning=False,
         )
-        runtime.config.agents["code"] = AgentConfig(display_name="Code", learning=False)
+        runtime.config.agents["code"] = AgentConfig(display_name="Code")
+        # The standard parent pauses for the native driver only with background tool jobs off.
+        runtime.config.background_tool_jobs.enabled = False
         with_responder_access(runtime.config, "code", users=[runtime.requester_id])
-        runtime = replace(runtime, orchestrator=SimpleNamespace(agent_cli_registry=TurnToolRegistry()))
+        runtime = replace(
+            runtime,
+            orchestrator=SimpleNamespace(
+                agent_cli_registry=TurnToolRegistry(),
+                budgets=BudgetMonitor(
+                    runtime_paths=runtime.runtime_paths,
+                    config_provider=lambda config=runtime.config: config,
+                ),
+            ),
+        )
         persist_entity_accounts(runtime.config, runtime.runtime_paths)
         children = []
 
-        async def child_response(child, *, runtime=runtime, children=children, **kwargs):
+        async def child_response(child, *, children=children, **kwargs):
             children.append(child)
-            child_identity = child_execution_identity(child)
-            child_agent = Agent(
-                id="code",
-                db=create_session_storage("code", runtime.config, runtime.runtime_paths, child_identity),
-                model=DelegationModel(id="test", responses=[ModelResponse(content="child done")]),
-            )
-            try:
-                await child_agent.arun(
-                    child.task,
-                    run_id=child.run_id,
-                    session_id=child.session_id,
-                    user_id=runtime.requester_id,
-                )
-            finally:
-                child_agent.db.close()
-            return "child done"
+            return await respond_as_child(child, **kwargs)
 
         monkeypatch.setattr(ai, "run_delegated_child_response", child_response)
         shell = ProtocolShell(runtime.orchestrator.agent_cli_registry)
         install_scripted_shell(monkeypatch, shell.run_shell_command)
         provider = ScriptedProvider()
-        provider.install(monkeypatch)
+        ScriptedAgents({"helper": provider, "code": ScriptedModel([answer("child done")] * 2)}).install(monkeypatch)
         for function, initial_arguments in (
-            ("run_subagent", {"agent_name": "code", "task": "work"}),
+            ("run_subagent", {"agent_name": "code", "task": "work", "title": "Do the work"}),
             ("continue_subagent", None),
         ):
             arguments = initial_arguments
@@ -290,12 +295,16 @@ async def test_same_child_responder_direct_and_cli_provenance(tmp_path, monkeypa
             ]
             with tool_runtime_context(runtime):
                 await ai.ai_response(
-                    replace(_turn_context(), agent_mode=mode, run_id=None),
-                    prompt="delegate task",
-                    runtime_paths=runtime.runtime_paths,
-                    config=runtime.config,
-                    execution_identity=build_execution_identity_from_runtime_context(runtime),
-                    supports_native_tool_approval=True,
+                    replace(
+                        _turn_context(),
+                        agent_mode=mode,
+                        run_id=None,
+                        prompt="delegate task",
+                        execution_identity=runtime.execution_identity,
+                        supports_native_tool_approval=True,
+                    ),
+                    runtime.runtime_paths,
+                    runtime.config,
                 )
         assert len(children) == 2
         first, second = children
@@ -309,9 +318,7 @@ async def test_same_child_responder_direct_and_cli_provenance(tmp_path, monkeypa
                 receipt["call_id"] for receipt in shell.receipts
             ]
             assert all(receipt["parent_bash_call_id"] != receipt["call_id"] for receipt in shell.receipts)
-            assert all(
-                [tool["function"]["name"] for tool in request["tools"]] == ["bash"] for request in provider.requests
-            )
+            assert all(offered_tools(request) == ["bash"] for request in provider.requests)
         else:
             assert all(child.parent_tool_call_id.startswith("provider-") for child in children)
         comparisons.append(
@@ -327,10 +334,15 @@ def response_harness(tmp_path, monkeypatch) -> SimpleNamespace:
     runtime.config.agents["helper"] = AgentConfig(
         display_name="Helper",
         tools=["shell"],
-        learning=False,
         memory_backend="file",
     )
-    runtime = replace(runtime, orchestrator=SimpleNamespace(agent_cli_registry=TurnToolRegistry()))
+    runtime = replace(
+        runtime,
+        orchestrator=SimpleNamespace(
+            agent_cli_registry=TurnToolRegistry(),
+            budgets=BudgetMonitor(runtime_paths=runtime.runtime_paths, config_provider=lambda: runtime.config),
+        ),
+    )
     shell = ProtocolShell(runtime.orchestrator.agent_cli_registry)
     install_scripted_shell(monkeypatch, shell.run_shell_command)
     provider = ScriptedProvider()
@@ -338,20 +350,26 @@ def response_harness(tmp_path, monkeypatch) -> SimpleNamespace:
 
     h = SimpleNamespace(runtime=runtime, shell=shell, provider=provider)
 
-    async def respond(steps, *, mode="minimal", prompt="release parity"):
+    async def respond(steps, *, mode="minimal", prompt="release parity", knowledge=None):
         runtime = h.runtime
         persist_entity_accounts(runtime.config, runtime.runtime_paths)
         provider.steps = steps
         with tool_runtime_context(runtime):
-            return await ai.ai_response(
-                replace(_turn_context(), agent_mode=mode, run_id=None),
-                prompt=prompt,
-                runtime_paths=runtime.runtime_paths,
-                config=runtime.config,
-                execution_identity=build_execution_identity_from_runtime_context(runtime),
-                supports_native_tool_approval=True,
-                show_tool_calls=True,
+            result = await ai.ai_response(
+                replace(
+                    _turn_context(),
+                    agent_mode=mode,
+                    run_id=None,
+                    prompt=prompt,
+                    knowledge=knowledge,
+                    execution_identity=runtime.execution_identity,
+                    supports_native_tool_approval=True,
+                    show_tool_calls=True,
+                ),
+                runtime.runtime_paths,
+                runtime.config,
             )
+        return result.text
 
     h.respond = respond
     return h
@@ -359,6 +377,88 @@ def response_harness(tmp_path, monkeypatch) -> SimpleNamespace:
 
 def _bash_call(toolkit, function, arguments):
     return [("bash", {"command": json.dumps([toolkit, function, arguments])})]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["minimal", "standard"], ids=["minimal-bash", "standard-native-shell"])
+async def test_a_secret_card_asked_through_the_cli_names_the_call_line_the_reply_shows(
+    response_harness,
+    monkeypatch,
+    mode,
+) -> None:
+    """A card a CLI call posts from a shell command names that call's own trace entry and the reply making it.
+
+    Minimal Bash and a standard-mode native shell run `request_temporary_secret` through the CLI owner; the reply's
+    trace shows the inner call on its own line, so the card's `tool_call_id` is that entry's and not the shell's.
+    """
+    h = response_harness
+    h.runtime.config.agents["helper"].tools = ["shell", "temporary_secrets"]
+    client = make_matrix_client_mock(user_id="@mindroom_helper:example.test")
+    client.room_send.return_value = nio.RoomSendResponse("$card:example.test", "!room:example.test")
+    h.runtime = replace(h.runtime, client=client)
+    monkeypatch.setattr(temporary_secrets, "chat_refusal", AsyncMock(return_value=None))
+    persist_entity_accounts(h.runtime.config, h.runtime.runtime_paths)
+    command = json.dumps(["temporary_secrets", "request_temporary_secret", {"name": "TOKEN", "reason": "to deploy"}])
+    shell_call = ("bash", {"command": command}) if mode == "minimal" else ("run_shell_command", {"args": command})
+    h.provider.steps = [[shell_call], "done"]
+    ctx = replace(
+        _turn_context(),
+        agent_mode=mode,
+        run_id=None,
+        prompt="ask for the token",
+        execution_identity=h.runtime.execution_identity,
+        supports_native_tool_approval=True,
+        show_tool_calls=True,
+    )
+    handle = MagicMock(spec=SpanHandle)
+    handle.reply = MagicMock(event_id="$response:example.test")
+    handle.stopped.return_value = False
+
+    def cards() -> list[dict[str, object]]:
+        sent = [call.kwargs["content"] for call in client.room_send.await_args_list]
+        return [
+            content.get("m.new_content", content)
+            for content in sent
+            if "m.new_content" in content or SECRET_REQUEST_CONTENT_KEY in content
+        ]
+
+    token = _current_slot.set(SpanSlot(handle=handle))
+    try:
+        with tool_runtime_context(h.runtime):
+            reply = asyncio.create_task(
+                collect_streamed_response_content(
+                    ai.stream_agent_response(ctx, h.runtime.runtime_paths, h.runtime.config),
+                    presentation=CollectedStreamPresentation(show_tool_calls=True),
+                ),
+            )
+    finally:
+        _current_slot.reset(token)
+    async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+        while not cards():
+            assert not reply.done(), reply.result()
+            await asyncio.sleep(0.001)
+    [pending] = cards()
+    secret_request_registry().resolve(pending[SECRET_REQUEST_CONTENT_KEY]["request_id"], "declined")
+    async with asyncio.timeout(SETTLE_TIMEOUT_SECONDS):
+        text, trace = await reply
+
+    assert "done" in text
+    shell_name = "bash" if mode == "minimal" else "run_shell_command"
+    [outer] = [entry for entry in trace if entry.tool_name == shell_name]
+    [inner] = [entry for entry in trace if entry.tool_name == "request_temporary_secret"]
+    # Minimal Bash runs the CLI call in the Bash call's window; a native shell in a window of its own.
+    assert (
+        inner.parent_bash_call_id == outer.tool_call_id
+        if mode == "minimal"
+        else inner.parent_bash_call_id.startswith("native-")
+    )
+    assert inner.tool_call_id not in {None, outer.tool_call_id}
+    pending_card, settled_card = cards()
+    assert pending_card[SECRET_REQUEST_CONTENT_KEY]["status"] == "pending"
+    assert settled_card[SECRET_REQUEST_CONTENT_KEY]["status"] == "declined"
+    for card in (pending_card, settled_card):
+        content = card[SECRET_REQUEST_CONTENT_KEY]
+        assert (content["response_event_id"], content["tool_call_id"]) == ("$response:example.test", inner.tool_call_id)
 
 
 @pytest.mark.asyncio
@@ -372,114 +472,83 @@ async def test_durable_memory_standard_minimal_standard(response_harness) -> Non
         "helper",
         h.runtime.config,
         h.runtime.runtime_paths,
-        build_execution_identity_from_runtime_context(h.runtime),
+        h.runtime.execution_identity,
     )
-    old_messages = [message.to_dict() for message in storage.get_session(h.runtime.session_id).runs[0].messages]
+    old_messages = [message.to_dict() for message in storage.load_session(h.runtime.session_id).runs[0].messages]
     await h.respond([_bash_call("memory", "add_memory", {"content": "Release parity durable lesson"}), "minimal saved"])
     assert h.shell.receipts[-1]["outcome"] == "Memorized: Release parity durable lesson"
     found = await search_agent_memories(
         "Release parity durable",
         "helper",
-        h.runtime.runtime_paths.storage_root,
         h.runtime.config,
         h.runtime.runtime_paths,
         limit=5,
     )
     assert any(item["memory"] == "Release parity durable lesson" for item in found.results)
     await h.respond(["standard sees same history"], mode="standard", prompt="after switch")
-    session = storage.get_session(h.runtime.session_id)
-    storage.close()
+    session = storage.load_session(h.runtime.session_id)
     assert len(session.runs) == 3
     assert [message.to_dict() for message in session.runs[0].messages] == old_messages
     final = h.provider.requests[-1]
-    assert "standard history sentinel" in str(final["messages"])
-    assert "Release parity durable lesson" in str(final["messages"])
-    assert [tool["function"]["name"] for tool in h.provider.requests[1]["tools"]] == ["bash"]
-    assert "add_memory" in str(final["tools"])
-    calls = {call["id"] for message in final["messages"] for call in message.get("tool_calls", [])}
-    assert any(message.get("tool_call_id") in calls for message in final["messages"])
+    assert "standard history sentinel" in str(final.messages)
+    assert "Release parity durable lesson" in str(final.messages)
+    assert offered_tools(h.provider.requests[1]) == ["bash"]
+    assert "add_memory" in offered_tools(final)
+    calls = {call["id"] for message in final.messages for call in message.tool_calls or ()}
+    assert any(message.tool_call_id in calls for message in final.messages)
+
+
+class _ReleaseIndex:
+    """A published index that answers every search with one chunk naming the query."""
+
+    async def asearch(self, query: str, *, limit: int) -> list[SearchHit]:
+        return [SearchHit(content=f"knowledge:{query}")]
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("generated", ["skills", "knowledge", "learning"])
-async def test_generated_tools_actual_minimal_response(response_harness, monkeypatch, tmp_path, generated) -> None:
-
+@pytest.mark.parametrize("generated", ["skills", "knowledge"])
+async def test_generated_tools_actual_minimal_response(response_harness, generated) -> None:
+    """The agent's generated functions are reached through Bash as `agent`, with Bash still the only tool offered."""
     h = response_harness
-    original = ai.create_agent
-    writes = []
-
-    async def retriever(agent, query, **kwargs):
-        return [{"content": f"knowledge:{agent.id}:{query}"}]
-
-    async def learning_tools(user_id, session_id, agent_id, **kwargs):
-        async def remember(value: str) -> str:
-            writes.append((agent_id, user_id, session_id, value))
-            return "learning saved"
-
-        return [remember]
-
-    skill = tmp_path / "skills" / "release-guide"
+    skill = agent_workspace_root_path(h.runtime.runtime_paths.storage_root, "helper") / "skills" / "release-guide"
     skill.mkdir(parents=True)
     (skill / "SKILL.md").write_text(
         "---\nname: release-guide\ndescription: Release guide\n---\nUse the same canonical session.\n",
     )
-
-    def build(*args, **kwargs):
-        agent = original(*args, **kwargs)
-        if generated == "skills":
-            agent.skills = Skills(loaders=[LocalSkills(str(skill.parent))])
-        elif generated == "knowledge":
-            agent.knowledge_retriever = retriever
-            agent.search_knowledge = True
-        else:
-            agent._learning = LearningMachine(custom_stores={"release": SimpleNamespace(aget_tools=learning_tools)})
-        return agent
-
-    monkeypatch.setattr(ai, "create_agent", build)
+    knowledge = AgentKnowledge(
+        sources=(
+            KnowledgeSource(description=KnowledgeSourceDescription("release", "Releases"), index=_ReleaseIndex()),
+        ),
+    )
     function, arguments, expected = {
         "skills": ("get_skill_instructions", {"skill_name": "release-guide"}, "same canonical session"),
-        "knowledge": ("search_knowledge_base", {"query": "release"}, "knowledge:helper:release"),
-        "learning": ("remember", {"value": "lesson"}, "learning saved"),
+        "knowledge": ("search_knowledge_base", {"query": "release"}, "knowledge:release"),
     }[generated]
-    result = await h.respond([_bash_call("agent", function, arguments), "done"])
-    assert "done" in str(result)
+    result = await h.respond(
+        [_bash_call("agent", function, arguments), "done"],
+        knowledge=knowledge if generated == "knowledge" else None,
+    )
+    assert "done" in result
     assert expected in str(h.shell.receipts[-1]["outcome"])
-    assert expected in str(h.provider.requests[-1]["messages"])
-    assert all([tool["function"]["name"] for tool in request["tools"]] == ["bash"] for request in h.provider.requests)
-    if generated == "learning":
-        assert writes == [("helper", h.runtime.requester_id, h.runtime.session_id, "lesson")]
+    assert expected in str(h.provider.requests[-1].messages)
+    assert all(offered_tools(request) == ["bash"] for request in h.provider.requests)
 
 
 @pytest.mark.asyncio
-async def test_dynamic_load_unload_rebuild_keeps_one_bash(response_harness) -> None:
+async def test_deferred_toolkit_is_callable_through_bash_without_loading(response_harness) -> None:
 
     h = response_harness
     h.runtime.config.agents["helper"] = AgentConfig(
         display_name="Helper",
-        learning=False,
         memory_backend="file",
         tools=["shell", {"calculator": {"defer": True}}],
     )
-    result = await h.respond(
-        [
-            _bash_call("dynamic_tools", "load_tool", {"tool_name": "calculator"}),
-            _bash_call("calculator", "add", {"a": 2, "b": 3}),
-            _bash_call("dynamic_tools", "unload_tool", {"tool_name": "calculator"}),
-            "done",
-        ],
-    )
-    assert "done" in str(result)
-    assert len(h.shell.receipts) == 3
-    assert '"result": 5' in h.shell.receipts[1]["outcome"]
-    assert all(receipt["status"] == "completed" for receipt in h.shell.receipts)
-    assert len(h.shell.tokens) == 1
-    assert len(h.provider.requests) == 4
-    assert all([tool["function"]["name"] for tool in request["tools"]] == ["bash"] for request in h.provider.requests)
-    assert not get_loaded_tools_for_session(
-        agent_name="helper",
-        config=h.runtime.config,
-        session_id=h.runtime.session_id,
-    )
+    result = await h.respond([_bash_call("calculator", "add", {"a": 2, "b": 3}), "done"])
+    assert "done" in result
+    assert len(h.shell.receipts) == 1
+    assert '"result": 5' in h.shell.receipts[0]["outcome"]
+    assert len(h.provider.requests) == 2
+    assert all(offered_tools(request) == ["bash"] for request in h.provider.requests)
 
 
 @pytest.mark.asyncio
@@ -496,10 +565,12 @@ async def test_deferred_upstream_mcp_response_filters_and_requester(
     script.write_text(
         'from mcp.server.mcpserver import MCPServer\nserver = MCPServer("echo")\n@server.tool()\ndef echo(text: str) -> str:\n return "echo:" + text\n@server.tool()\ndef secret() -> str:\n raise AssertionError("filtered tool ran")\nserver.run()\n',
     )
-    h.runtime.config.mcp_servers = {"echo": MCPServerConfig(transport="stdio", command="uv", args=["run", str(script)])}
-    h.runtime.config.agents["helper"] = AgentConfig(
+    config = h.runtime.config.model_copy(deep=True)
+    config.mcp_servers = {
+        "echo": MCPServerConfig(transport="stdio", command=sys.executable, args=[str(script)]),
+    }
+    config.agents["helper"] = AgentConfig(
         display_name="Helper",
-        learning=False,
         memory_backend="file",
         private=AgentPrivateConfig(per="user_agent") if private else None,
         tools=[
@@ -508,6 +579,8 @@ async def test_deferred_upstream_mcp_response_filters_and_requester(
             {"duckduckgo": {"defer": True}},
         ],
     )
+    # The turn starts on the edited config, so its context captures that config's tools.
+    h.runtime = replace(h.runtime, config=config, plugins=config_plugins(config, h.runtime.runtime_paths))
     manager = MCPServerManager(h.runtime.runtime_paths)
     bind_mcp_server_manager(manager)
     calls = []
@@ -520,9 +593,8 @@ async def test_deferred_upstream_mcp_response_filters_and_requester(
     monkeypatch.setattr(manager, "call_tool", call)
     try:
         await manager.sync_servers(h.runtime.config)
-        sync_mcp_tool_registry(h.runtime.config)
         result = await h.respond([_bash_call("mcp_echo", "echo_echo", {"text": "same requester"}), "done"])
-        assert "done" in str(result)
+        assert "done" in result
         assert "echo:same requester" in h.shell.receipts[-1]["outcome"]
         assert len(calls) == 1
         server, function, arguments, kwargs = calls[0]
@@ -533,56 +605,9 @@ async def test_deferred_upstream_mcp_response_filters_and_requester(
         metadata = h.shell.catalog_snapshots[-1]
         assert next(item for item in metadata if item["toolkit"] == "duckduckgo")["deferred"] is True
         assert not any(item.get("function") == "echo_secret" for item in metadata)
-        assert all(
-            [tool["function"]["name"] for tool in request["tools"]] == ["bash"] for request in h.provider.requests
-        )
+        assert all(offered_tools(request) == ["bash"] for request in h.provider.requests)
     finally:
-        bind_mcp_server_manager(None)
-        sync_mcp_tool_registry(None)
         await manager.shutdown()
-
-
-@pytest.mark.asyncio
-async def test_actual_fallback_request_keeps_only_bash(response_harness, monkeypatch) -> None:
-    from openai import APIStatusError  # noqa: PLC0415 - keep optional provider/server imports deferred
-
-    h = response_harness
-    original = ai.create_agent
-    failed_requests = []
-    send = h.provider.send
-    monkeypatch.setattr(provider_stream_retry, "_RETRY_BASE_DELAY_SECONDS", 0.0)
-
-    async def failing_primary(**request):
-        if request["model"] == "test-model":
-            failed_requests.append(request)
-            message = "fake provider unavailable"
-            raise APIStatusError(
-                message,
-                response=httpx.Response(503, request=httpx.Request("POST", "https://fake.test")),
-                body=None,
-            )
-        return await send(**request)
-
-    monkeypatch.setattr(
-        OpenAIChat,
-        "get_async_client",
-        lambda _self: SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=failing_primary))),
-    )
-
-    def build(*args, **kwargs):
-        agent = original(*args, **kwargs)
-        agent.fallback_config = FallbackConfig(on_error=[OpenAIChat(id="fallback", api_key="fake")])
-        return agent
-
-    monkeypatch.setattr(ai, "create_agent", build)
-    result = await h.respond(["fallback done"])
-    assert "fallback done" in str(result)
-    assert failed_requests
-    assert h.provider.requests[-1]["model"] == "fallback"
-    assert all(
-        [tool["function"]["name"] for tool in request["tools"]] == ["bash"]
-        for request in failed_requests + h.provider.requests
-    )
 
 
 @pytest.mark.asyncio
@@ -591,10 +616,11 @@ async def test_compaction_cli_marks_real_session_before_next_reply(response_harn
     h.runtime.config.agents["helper"].tools = ["shell", "compact_context"]
     h.runtime.config.models["default"].context_window = 128000
     result = await h.respond([_bash_call("compact_context", "compact_context", {}), "done"])
-    assert "done" in str(result)
+    assert "done" in result
     assert "before the next reply" in h.shell.receipts[-1]["outcome"]
-    state = h.shell.owner.catalog.run_context.session_state
-    assert state["mindroom_pending_compaction_scope_keys"]
+    catalog = h.shell.owner.catalog
+    assert catalog.store is not None
+    assert has_queued_force_compaction(catalog.store, catalog.run.session_id)
     assert len(h.provider.requests) == 2
 
 
@@ -623,8 +649,8 @@ async def test_interactive_context_actual_response_and_selection(response_harnes
     chosen = rendered.interactive_metadata.option_map["1"]
     result = await h.respond(["same-session selection accepted"], prompt=f"The user selected: {chosen}")
     assert "same-session selection accepted" in result
-    assert "Which path?" in str(h.provider.requests[-1]["messages"])
-    assert h.shell.owner.catalog.run_context.session_id == h.runtime.session_id
+    assert "Which path?" in str(h.provider.requests[-1].messages)
+    assert h.shell.owner.catalog.run.session_id == h.runtime.session_id
 
 
 @pytest.mark.asyncio
@@ -673,8 +699,7 @@ async def test_authored_confirmation_actual_owner_rechecks_effect_boundary(
         return tuple(
             apply_exact_approval_decisions(
                 paused.requirements,
-                decisions=dict.fromkeys(ids, decision != "deny"),
-                denial_reasons=dict.fromkeys(ids, "No"),
+                answered_calls(ids, approved=decision != "deny", reason="No"),
             ),
         )
 
@@ -689,7 +714,7 @@ async def test_authored_confirmation_actual_owner_rechecks_effect_boundary(
     assert len(decisions) == 1
     assert effects == (["exact value"] if decision == "allow" else [])
     assert h.shell.receipts[-1]["status"] == ("completed" if decision == "allow" else "failed")
-    assert all([tool["function"]["name"] for tool in request["tools"]] == ["bash"] for request in h.provider.requests)
+    assert all(offered_tools(request) == ["bash"] for request in h.provider.requests)
 
 
 @pytest.mark.asyncio
@@ -705,11 +730,7 @@ async def test_self_config_cli_preserves_native_next_build_change(response_harne
         ids = [str(tool.tool_call_id) for tool in paused.tools]
         approved.extend(ids)
         return tuple(
-            apply_exact_approval_decisions(
-                paused.requirements,
-                decisions=dict.fromkeys(ids, True),
-                denial_reasons=dict.fromkeys(ids),
-            ),
+            apply_exact_approval_decisions(paused.requirements, answered_calls(ids, approved=True)),
         )
 
     h.runtime = replace(h.runtime, cli_approval_handler=approve)
@@ -721,7 +742,7 @@ async def test_self_config_cli_preserves_native_next_build_change(response_harne
     assert receipt["status"] == "completed"
     saved = yaml.safe_load(h.runtime.runtime_paths.config_path.read_text())
     assert saved["agents"]["helper"]["instructions"] == ["new persisted instruction"]
-    assert "new persisted instruction" not in h.provider.requests[0]["messages"][0]["content"]
+    assert "new persisted instruction" not in h.provider.requests[0].messages[0].get_content_string()
 
 
 @pytest.mark.asyncio
@@ -738,11 +759,11 @@ async def test_concurrent_factory_owners_scoped_credentials_and_grants(tmp_path,
     )
     (plugin / "tools.py").write_text(PLUGIN)
     config.plugins = [PluginEntryConfig(path=str(plugin))]
+    publish_test_plugins(config, base.runtime_paths)
     for name in ("helper", "other"):
         config.agents[name] = AgentConfig(
             display_name=name,
             tools=["shell", "parity"],
-            learning=False,
             memory_backend="file",
             worker_scope=scope,
         )
@@ -776,31 +797,25 @@ async def test_concurrent_factory_owners_scoped_credentials_and_grants(tmp_path,
                 shell.owner.authenticate(peer.tokens[-1], now_ns=time.time_ns())
             with pytest.raises(CliAuthenticationError):
                 await shell.owner.get_call(peer.receipts[-1]["call_id"])
-        for field in ("requester_id", "agent_name", "session_id", "generation"):
+        for forged in ("requester_id", "agent_name", "session_id", "generation"):
             with pytest.raises(ValidationError):
-                parse_operation({"operation": "tools.list", field: "forged"})
+                parse_operation({"operation": "tools.list", forged: "forged"})
         return result
 
     install_scripted_shell(monkeypatch, run_shell_command)
-
-    async def send(**request):
-        runtime = get_tool_runtime_context()
-        return await providers[runtime.session_id].send(**request)
-
-    monkeypatch.setattr(
-        OpenAIChat,
-        "get_async_client",
-        lambda _self: SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=send))),
-    )
+    # Each conversation gets its own scripted model, chosen by the session its reply runs in.
+    ScriptedAgents({}, by_session=providers).install(monkeypatch)
     for agent in config.agents:
         for requester in requesters:
             session = f"{agent}-{requester}"
+            # Each turn starts after the plugin publication, so its context captures the published plugins.
             runtime = replace(
                 base,
                 agent_name=agent,
                 requester_id=requester,
                 target=replace(base.target, session_id=session),
                 orchestrator=SimpleNamespace(agent_cli_registry=registry),
+                plugins=config_plugins(config, base.runtime_paths),
             )
             runtimes[session] = runtime
             target = runtime.resolve_worker_target()
@@ -829,16 +844,12 @@ async def test_concurrent_factory_owners_scoped_credentials_and_grants(tmp_path,
             requester_id=runtime.requester_id,
             agent_mode=mode,
             run_id=None,
+            prompt="concurrent scoped integration",
+            execution_identity=runtime.execution_identity,
+            supports_native_tool_approval=True,
         )
         with tool_runtime_context(runtime):
-            return await ai.ai_response(
-                turn,
-                prompt="concurrent scoped integration",
-                runtime_paths=runtime.runtime_paths,
-                config=config,
-                execution_identity=build_execution_identity_from_runtime_context(runtime),
-                supports_native_tool_approval=True,
-            )
+            return (await ai.ai_response(turn, runtime.runtime_paths, config)).text
 
     minimal_steps = {session: provider.steps for session, provider in providers.items()}
     for session, runtime in runtimes.items():
@@ -848,7 +859,7 @@ async def test_concurrent_factory_owners_scoped_credentials_and_grants(tmp_path,
         standard_results = await asyncio.gather(*(respond(runtime, "standard") for runtime in runtimes.values()))
     assert all("done" in result for result in standard_results)
     for session, provider in providers.items():
-        assert "primary credential accepted" in str(provider.requests[-1]["messages"])
+        assert "primary credential accepted" in str(provider.requests[-1].messages)
         provider.steps = minimal_steps[session]
     async with asyncio.timeout(20):
         results = await asyncio.gather(*(respond(runtime) for runtime in runtimes.values()))
@@ -862,121 +873,41 @@ async def test_concurrent_factory_owners_scoped_credentials_and_grants(tmp_path,
         with pytest.raises(CliAuthenticationError):
             await shell.owner.get_call(shell.receipts[-1]["call_id"])
         assert not any(secret in str(providers[session].requests) for secret in secrets.values())
-        assert all(
-            [tool["function"]["name"] for tool in request["tools"]] == ["bash"]
-            for request in providers[session].requests[2:]
-        )
+        assert all(offered_tools(request) == ["bash"] for request in providers[session].requests[2:])
 
 
-@pytest.mark.asyncio
-@pytest.mark.parametrize("provider_name", ["anthropic", "google"])
-async def test_provider_sdk_initial_and_continued_minimal_requests(
-    response_harness,
-    monkeypatch,
-    provider_name,
-) -> None:
-    from agno.models.anthropic import Claude  # noqa: PLC0415 - keep optional provider/server imports deferred
-    from agno.models.google import Gemini  # noqa: PLC0415 - keep optional provider/server imports deferred
-    from anthropic.lib.streaming import ContentBlockStopEvent  # noqa: PLC0415 - optional provider SDK
-    from anthropic.types import (  # noqa: PLC0415 - keep optional provider/server imports deferred
-        ContentBlockDeltaEvent,
-        TextDelta,
-        ToolUseBlock,
-    )
-    from google.genai.types import (  # noqa: PLC0415 - keep optional provider/server imports deferred
-        Candidate,
-        Content,
-        FunctionCall,
-        GenerateContentResponse,
-        Part,
-    )
+@dataclass
+class _NamedModel(ScriptedProvider):
+    """A scripted model that logs its own name for every request it answers."""
 
-    h = response_harness
-    h.runtime.config.models["default"].provider = provider_name
-    h.runtime.config.models["default"].id = "test-provider"
-    h.runtime.config.agents["helper"].tools = ["shell", "calculator"]
-    requests = []
-    command = json.dumps(["calculator", "add", {"a": 2, "b": 3}])
+    log: list[str] = field(default_factory=list)
 
-    @asynccontextmanager
-    async def anthropic_stream(**request):
-        requests.append(request)
-        first = len(requests) == 1
-
-        async def events():
-            if first:
-                yield ContentBlockStopEvent(
-                    type="content_block_stop",
-                    index=0,
-                    content_block=ToolUseBlock(
-                        type="tool_use",
-                        id="anthropic-bash",
-                        name="bash",
-                        input={"command": command},
-                    ),
-                )
-            else:
-                yield ContentBlockDeltaEvent(
-                    type="content_block_delta",
-                    index=0,
-                    delta=TextDelta(type="text_delta", text="done"),
-                )
-
-        yield events()
-
-    async def google_stream(**request):
-        requests.append(request)
-        first = len(requests) == 1
-
-        async def events():
-            part = (
-                Part(function_call=FunctionCall(id="google-bash", name="bash", args={"command": command}))
-                if first
-                else Part(text="done")
-            )
-            yield GenerateContentResponse(candidates=[Candidate(content=Content(role="model", parts=[part]))])
-
-        return events()
-
-    messages = SimpleNamespace(stream=anthropic_stream)
-    monkeypatch.setattr(
-        Claude,
-        "get_async_client",
-        lambda _self: SimpleNamespace(messages=messages, beta=SimpleNamespace(messages=messages)),
-    )
-    monkeypatch.setattr(
-        Gemini,
-        "get_client",
-        lambda _self: SimpleNamespace(
-            aio=SimpleNamespace(models=SimpleNamespace(generate_content_stream=google_stream)),
-        ),
-    )
-    result = await h.respond([])
-    assert "done" in str(result)
-    assert len(requests) == 2
-    assert '"result": 5' in h.shell.receipts[-1]["outcome"]
-    for request in requests:
-        if provider_name == "anthropic":
-            assert [tool["name"] for tool in request["tools"]] == ["bash"]
-        else:
-            assert [function.name for tool in request["config"].tools for function in tool.function_declarations] == [
-                "bash",
-            ]
-    assert "result" in str(requests[1])
+    async def stream(self, request: ModelRequest) -> AsyncIterator[StreamEvent]:
+        """Log this model's id, then answer as scripted."""
+        self.log.append(self.identity.id)
+        async for event in super().stream(request):
+            yield event
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("when", ["after-toolcall", "next-turn"])
-async def test_model_switch_timing_actual_minimal_requests(response_harness, when) -> None:
+async def test_model_switch_timing_actual_minimal_requests(response_harness, monkeypatch, when) -> None:
     h = response_harness
     h.runtime.config.agents["helper"].tools = ["shell", "thread_model"]
     h.runtime.config.models["other"] = h.runtime.config.models["default"].model_copy(update={"id": "other-model"})
-    await h.respond([_bash_call("thread_model", "switch_thread_model", {"model_name": "other", "when": when}), "done"])
-    assert [request["model"] for request in h.provider.requests] == [
-        "test-model",
-        "other-model" if when == "after-toolcall" else "test-model",
-    ]
+    steps: list = []
+    log: list[str] = []
+    requests: list[ModelRequest] = []
+    models = {
+        name: _NamedModel(steps=steps, requests=requests, log=log, identity=replace(SYNTHETIC, id=model_id))
+        for name, model_id in (("default", "test-model"), ("other", "other-model"))
+    }
+    install_model_providers(monkeypatch, models)
+    steps.extend([_bash_call("thread_model", "switch_thread_model", {"model_name": "other", "when": when}), "done"])
+    await h.respond([])
+    assert log == ["test-model", "other-model" if when == "after-toolcall" else "test-model"]
     assert len(h.shell.tokens) == 1
-    await h.respond(["next turn done"])
-    assert h.provider.requests[-1]["model"] == "other-model"
-    assert all([tool["function"]["name"] for tool in request["tools"]] == ["bash"] for request in h.provider.requests)
+    steps.append("next turn done")
+    assert "next turn done" in await h.respond([])
+    assert log[-1] == "other-model"
+    assert all(offered_tools(request) == ["bash"] for request in requests)

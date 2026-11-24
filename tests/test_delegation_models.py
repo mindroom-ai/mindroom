@@ -6,33 +6,34 @@ import json
 from typing import TYPE_CHECKING
 
 import pytest
-from agno.agent import Agent
-from agno.models.response import ModelResponse
-from agno.run.base import RunStatus
 
-from mindroom.agent_storage import create_session_storage
-from mindroom.agents import apply_tool_approval_capability
-from mindroom.ai import run_delegated_child_response
 from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
-from mindroom.config.models import DefaultsConfig, ModelConfig
+from mindroom.config.models import DefaultsConfig, ModelConfig, ReasoningConfig
 from mindroom.custom_tools.delegate import DelegateTools
-from mindroom.delegation.execution import drive_delegations
+from mindroom.llm.runs import RunRecord, RunStatus
+from mindroom.session_storage.agent_storage import create_session_storage
 from mindroom.thread_models import set_thread_model_override
 from mindroom.tool_system.runtime_context import tool_runtime_context
+from mindroom.tool_system.worker_routing import agent_workspace_root_path
+from tests.agent_tool_helpers import toolkit_offers
+from tests.delegation_helpers import _delegate_runtime_context, _runtime_paths, respond
+from tests.fakes.scripted_model import ScriptedModel, answer, calls, tool_call
 from tests.identity_helpers import entity_ids
-from tests.test_delegate_tools import _delegate_runtime_context, _runtime_paths
 from tests.test_delegation_direct_audit import _identity
-from tests.test_delegation_execution import DelegationModel, _call
 
 if TYPE_CHECKING:
     from pathlib import Path
+
+    from mindroom.constants import RuntimePaths
+    from mindroom.llm.provider import ModelProvider
+    from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("native", [False, True], ids=["direct", "native"])
 @pytest.mark.parametrize("agent_name", [None, "worker"], ids=["self", "named"])
-@pytest.mark.parametrize("model", [None, "alternate", "missing", "", "   "])
+@pytest.mark.parametrize("model", [None, "alternate", "alternate@high", "missing", "alternate@xhigh", "", "   "])
 async def test_subagent_model_selection(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -48,9 +49,13 @@ async def test_subagent_model_selection(
         },
         models={
             "default": ModelConfig(provider="openai", id="gpt-6-astra"),
-            "alternate": ModelConfig(provider="anthropic", id="claude-sonnet-5"),
+            "alternate": ModelConfig(
+                provider="anthropic",
+                id="claude-sonnet-5",
+                reasoning=ReasoningConfig(levels=["low", "high"], default="low"),
+            ),
         },
-        defaults=DefaultsConfig(tools=[], learning=False),
+        defaults=DefaultsConfig(tools=[]),
         memory={"backend": "none"},
     )
     paths = _runtime_paths(tmp_path)
@@ -60,79 +65,101 @@ async def test_subagent_model_selection(
         paths,
         thread_id="$thread",
         model_name="default",
-        room_id="!room:example.org",
-        set_by="@alice:example.org",
         entity_names=("leader", "worker"),
         config=config,
     )
-    toolkit = DelegateTools("leader", ["leader", "worker"], paths, config, execution_identity=identity)
-    models = {
-        name: DelegationModel(id=name, responses=[ModelResponse(content=f"Answer from {name}")])
-        for name in ("default", "alternate")
-    }
-    monkeypatch.setattr(
-        "mindroom.agents._load_agent_model_instance",
-        lambda _config, _paths, name, *_args: models[name],
+    parent = ScriptedModel(
+        [
+            calls(tool_call("run_subagent", "delegate", task="Report", agent_name=agent_name, model=model)),
+            answer("Parent done"),
+        ],
     )
+    built_models: list[str] = []
+
+    def build(
+        _config: Config,
+        _paths: RuntimePaths,
+        model_name: str,
+        execution_identity: ToolExecutionIdentity | None = None,
+    ) -> ModelProvider:
+        if execution_identity is not None and execution_identity.session_id == identity.session_id:
+            return parent
+        built_models.append(model_name)
+        return ScriptedModel([answer(f"Answer from {model_name}")])
+
+    monkeypatch.setattr("mindroom.providers.registry.build_model_provider", build)
 
     with tool_runtime_context(_delegate_runtime_context(config, paths, execution_identity=identity)):
         if native:
-            apply_tool_approval_capability(
-                toolkit,
-                config,
-                supports_native_tool_approval=True,
-                registered_tool_name="delegate",
+            text = await respond(
+                "leader",
+                "Delegate",
+                config=config,
+                runtime_paths=paths,
+                identity=identity,
+                run_id="parent-run",
             )
-            storage = create_session_storage("leader", config, paths, identity)
-            parent = Agent(
-                id="leader",
-                db=storage,
-                tools=[toolkit],
-                model=DelegationModel(
-                    id="parent",
-                    responses=[
-                        ModelResponse(
-                            tool_calls=[
-                                _call("run_subagent", "delegate", task="Report", agent_name=agent_name, model=model),
-                            ],
-                        ),
-                        ModelResponse(content="Parent done"),
-                    ],
-                ),
-            )
-            try:
-                response = await parent.arun("Delegate", session_id=identity.session_id, user_id=identity.requester_id)
-                response = await drive_delegations(
-                    parent,
-                    response,
-                    agent_name="leader",
-                    run_child=run_delegated_child_response,
-                    config=config,
-                    runtime_paths=paths,
-                    execution_identity=identity,
-                )
-                assert response.status == RunStatus.completed
-                result = next(str(tool.result) for tool in response.tools or () if tool.tool_name == "run_subagent")
-            finally:
-                storage.close()
+            assert isinstance(text, str)
+            assert text == "🔧 `run_subagent` [1]\n\nParent done"
+            stored = create_session_storage("leader", config, paths, identity).get_run("parent-run")
+            assert isinstance(stored, RunRecord)
+            assert stored.status is RunStatus.completed
+            result = next(str(tool.result) for tool in stored.tools or () if tool.tool_name == "run_subagent")
         else:
+            toolkit = DelegateTools(
+                "leader",
+                paths,
+                config,
+                agent_workspace_root_path(paths.storage_root, "leader"),
+                execution_identity=identity,
+            )
             result = await toolkit.run_subagent(task="Report", agent_name=agent_name, model=model)
 
     records = list(tmp_path.glob("agents/*/workspace/.mindroom/delegations/*/*/run.json"))
     handles = list((paths.storage_root / "subagent_sessions").glob("*.json"))
-    if model in (None, "alternate"):
+    if model in (None, "alternate", "alternate@high"):
         expected_model = model or "default"
         assert f"Answer from {expected_model}" in result
+        assert built_models == [expected_model]
         assert len(records) == len(handles) == 1
         record = json.loads(records[0].read_text())
         assert record["model_name"] == expected_model
         assert record["child_agent_name"] == (agent_name or "leader")
         assert record["caller_agent_name"] == "leader"
         assert json.loads(handles[0].read_text())["child"]["model_name"] == expected_model
+    elif model == "alternate@xhigh":
+        assert "Cannot delegate: unsupported level 'xhigh' for alternate; supported: low, high." in result
+        assert built_models == []
+        assert not records
+        assert not handles
     else:
         assert "Unknown model" in result
         assert "alternate" in result
         assert "default" in result
+        assert built_models == []
         assert not records
         assert not handles
     assert config.agents["leader"].model == config.agents["worker"].model == "default"
+
+
+def test_the_subagent_tool_description_lists_each_model_s_reasoning_levels(tmp_path: Path) -> None:
+    """The model list in the tool description tells the caller each model's levels and how to name one."""
+    config = Config(
+        agents={"leader": AgentConfig(display_name="Leader", delegate_to=["leader"])},
+        models={
+            "default": ModelConfig(provider="openai", id="gpt-6-astra"),
+            "sol": ModelConfig(
+                provider="codex",
+                id="gpt-6.2-sol",
+                reasoning={"levels": ["low", "high"], "default": "low"},
+            ),
+        },
+        defaults=DefaultsConfig(tools=[]),
+    )
+    paths = _runtime_paths(tmp_path)
+    tools = DelegateTools("leader", paths, config, agent_workspace_root_path(paths.storage_root, "leader"))
+
+    description = toolkit_offers(tools, "run_subagent").description
+
+    assert description is not None
+    assert "Available models: default, sol (levels: low, high; default low; write sol@<level>). " in description

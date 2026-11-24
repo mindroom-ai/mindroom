@@ -8,21 +8,16 @@ import inspect
 import json
 from types import SimpleNamespace
 from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock
 
 import httpx
 import pytest
 import yaml
-from agno.agent import Agent
-from agno.models.openai import OpenAIChat
 from agno.run import RunContext
-from agno.team import Team
 from agno.tools import openai as agno_openai
-from agno.tools.function import FunctionCall, ToolResult
-from agno.tools.sql import SQLTools
-from agno.tools.toolkit import Toolkit
 
 from mindroom.agents import create_agent
-from mindroom.api import sandbox_runner
+from mindroom.api import sandbox_runner, sandbox_runner_app
 from mindroom.config.main import Config
 from mindroom.constants import resolve_runtime_paths
 from mindroom.credentials.manager import get_runtime_credentials_manager
@@ -30,17 +25,25 @@ from mindroom.custom_tools.browser import BrowserTools
 from mindroom.desktop.client import DesktopResponseRouter
 from mindroom.desktop.protocol import DesktopResponse
 from mindroom.message_target import MessageTarget
+from mindroom.tool_jobs.execution import agent_tool_middleware
 from mindroom.tool_system import sandbox_proxy
-from mindroom.tool_system.declarations import tool_schema_source
+from mindroom.tool_system.agno_toolkits import ToolCallActor
+from mindroom.tool_system.invocation import ToolCallContext, execute_tool_call
+from mindroom.tool_system.output_files import OUTPUT_PATH_ARGUMENT
+from mindroom.tool_system.plugins import config_plugins
+from mindroom.tool_system.progress import structured_tool_result
 from mindroom.tool_system.runtime_context import (
-    build_execution_identity_from_runtime_context,
     get_tool_runtime_context,
     tool_runtime_context,
 )
-from mindroom.tool_system.worker_arguments import prepare_worker_call_arguments
-from mindroom.tool_system.worker_routing import descriptive_worker_id_for_key, resolve_worker_key
+from mindroom.tool_system.tool_function import ToolGate
+from mindroom.tools import agno_compat_openai
+from mindroom.voice.openai_realtime_speech import pcm_to_wav
+from tests.agent_tool_helpers import offered_function, run_offered, source_toolkit
+from tests.api.sandbox_runner_support import execute_call
 from tests.authorization_helpers import make_test_tool_runtime_context
 from tests.conftest import (
+    call_proxy_sync_for_test,
     make_conversation_reader_mock,
     make_matrix_client_mock,
     make_relation_lookup,
@@ -48,26 +51,21 @@ from tests.conftest import (
 )
 from tests.identity_helpers import persist_entity_accounts
 from tests.test_agent_worker_routing import _create_routing_agent
+from tests.turn_model_helpers import turn_model
+from tests.workflow_helpers import NodeFailed, tool_args, workflow_stack
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable
+    from collections.abc import Callable
     from pathlib import Path
 
-    from agno.tools.function import Function
-
+    from mindroom.agent_loop.build import AgentBuild
     from mindroom.desktop.protocol import DesktopCommand
     from mindroom.matrix.olm_to_device import PinnedMatrixDevice
+    from mindroom.tool_system.invocation import ToolCall, ToolNext
     from mindroom.tool_system.runtime_context import ToolRuntimeContext
 
 _MODEL_KEY = "dummy-primary-model-key-not-granted-to-worker"
 _TOOL_KEY = "dummy-media-tool-key"
-
-
-def _function(agent: Agent, name: str) -> Function:
-    toolkit = next(
-        tool for tool in agent.tools or [] if isinstance(tool, Toolkit) and name in tool.get_async_functions()
-    )
-    return toolkit.get_async_functions()[name]
 
 
 @pytest.fixture
@@ -84,11 +82,24 @@ def worker_requests(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> list[dic
 
     def execute(request: httpx.Request) -> httpx.Response:
         assert request.url.host == "sandbox.invalid"
+        if request.url.path == "/healthz":
+            # A runner that started no eager setup has no setup state to report.
+            runner = SimpleNamespace(app=SimpleNamespace(state=SimpleNamespace()))
+            return httpx.Response(200, json=asyncio.run(sandbox_runner_app.healthz(runner)))
         assert request.url.path.endswith("/execute")
         payload = json.loads(request.content)
         requests.append(payload)
-        prepared = sandbox_runner.PreparedSandboxRunnerExecuteRequest.model_validate(payload)
-        response = asyncio.run(sandbox_runner._execute_prepared_request_inprocess(prepared, runtime_paths, config))
+        fields = {name: value for name, value in payload.items() if name != "protocol"}
+        # The primary sends its live config; the runner reads the agents it routes from it, as the endpoint does.
+        snapshot = fields.get("config_snapshot")
+        call_config = (
+            config
+            if snapshot is None
+            else sandbox_runner._primary_validated_config(snapshot, runtime_paths, log_skipped_plugins=False)
+        )
+        response = asyncio.run(
+            sandbox_runner._execute_request_inprocess(execute_call(runtime_paths, call_config, **fields)),
+        )
         return httpx.Response(200, json=response.model_dump(mode="json"))
 
     monkeypatch.setattr(
@@ -129,7 +140,7 @@ def test_ordinary_json_is_opaque_across_worker_transport(
         },
     )
 
-    result = sandbox_proxy._call_proxy_sync(
+    result = call_proxy_sync_for_test(
         runtime_paths=paths,
         tool_name="calculator",
         function_name="add",
@@ -142,8 +153,307 @@ def test_ordinary_json_is_opaque_across_worker_transport(
     assert result == tool_result
 
 
+_PROXY_ENV = {
+    "MINDROOM_SANDBOX_PROXY_URL": "http://sandbox.invalid",
+    "MINDROOM_SANDBOX_PROXY_TOKEN": "dummy-worker-token",
+}
+
+
+def _worker_shell(tmp_path: Path, command: str) -> object:
+    """Run *command* with the shell tool of the worker behind `worker_requests`."""
+    return call_proxy_sync_for_test(
+        runtime_paths=resolve_runtime_paths(
+            config_path=tmp_path / "config.yaml",
+            storage_path=tmp_path / "storage",
+            process_env=_PROXY_ENV,
+        ),
+        tool_name="shell",
+        function_name="run_shell_command",
+        args=(),
+        kwargs={"args": command, "timeout": 30},
+        credentials_manager=None,
+    )
+
+
+@pytest.mark.parametrize("exit_code", [0, 3])
+def test_worker_shell_reports_its_exit_status_to_a_caller_that_asks_for_a_structured_result(
+    tmp_path: Path,
+    worker_requests: list[dict[str, object]],
+    exit_code: int,
+) -> None:
+    """The status crosses the wire beside the output, so the caller never reads it out of what the command printed."""
+    with structured_tool_result() as facts:
+        result = _worker_shell(tmp_path, f"echo 'Exit code 7'; exit {exit_code}")
+
+    assert facts == {"exit_code": exit_code, "not_started": False}
+    assert "Exit code 7" in str(result)
+    assert worker_requests[0]["structured_result"] is True
+
+
+def test_a_plain_worker_call_answers_without_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    worker_requests: list[dict[str, object]],
+) -> None:
+    """A call that did not ask gets the answer it always got: no facts are collected for it or sent back."""
+    answers: list[sandbox_runner.ExecuteResponse] = []
+    execute = sandbox_runner._execute_request_inprocess
+
+    async def recording(call: sandbox_runner._ExecuteCall) -> sandbox_runner.ExecuteResponse:
+        answers.append(await execute(call))
+        return answers[-1]
+
+    monkeypatch.setattr(sandbox_runner, "_execute_request_inprocess", recording)
+
+    assert "Exit code 3" in str(_worker_shell(tmp_path, "exit 3"))
+    assert ("structured_result" in worker_requests[0], answers[0].metadata) == (False, None)
+    assert "metadata" not in answers[0].model_dump(mode="json")
+
+
+@pytest.mark.asyncio
+async def test_workflow_shell_node_on_a_worker_carries_the_real_exit_status(
+    tmp_path: Path,
+    worker_requests: list[dict[str, object]],
+) -> None:
+    """A worker-routed `shell()` settles `completed` with its status, so a resume never runs the command again."""
+    with workflow_stack(tmp_path, process_env=_PROXY_ENV) as stack:
+        await stack.start()
+        command = tool_args("shell", "run_shell_command", args="echo 'Exit code 7'; exit 3", timeout=30)
+
+        result = await stack.result("@0", "tool", command)
+
+        await stack.engine.close()
+    assert isinstance(result, dict)
+    assert (result["exit_code"], len(worker_requests)) == (3, 1)
+    assert "Exit code 7" in str(result["output"])
+
+
+@pytest.mark.asyncio
+async def test_workflow_shell_refusal_on_a_worker_fails_with_its_reason(
+    tmp_path: Path,
+    worker_requests: list[dict[str, object]],
+) -> None:
+    """The worker's shell tool refused before any command ran, and says so beside its answer."""
+    with workflow_stack(tmp_path, process_env=_PROXY_ENV) as stack:
+        await stack.start()
+
+        with pytest.raises(NodeFailed) as ended:
+            await stack.result("@0", "tool", tool_args("shell", "run_shell_command", args="echo never", timeout=0))
+
+        await stack.engine.close()
+    assert (ended.value.kind, len(worker_requests)) == ("failed", 1)
+    assert str(ended.value) == "Error: timeout must be a positive number of seconds; omit it for the default limit."
+
+
+def _lost(_answer: httpx.Response) -> httpx.Response:
+    msg = "The connection dropped before the answer."
+    raise ConnectionError(msg)
+
+
+def _answered(status: int, body: dict[str, object] | str) -> Callable[[httpx.Response], httpx.Response]:
+    """Return a stand-in for whatever sits between the primary and its worker: it swaps the worker's answer."""
+    if isinstance(body, str):
+        return lambda _answer: httpx.Response(status, text=body)
+    return lambda _answer: httpx.Response(status, json=body)
+
+
+def _between_primary_and_worker(
+    monkeypatch: pytest.MonkeyPatch,
+    reply: Callable[[httpx.Response], httpx.Response],
+    *,
+    reaches_worker: bool = True,
+) -> None:
+    """Answer each execute request of the `worker_requests` runner with *reply*, after or without the worker's run."""
+
+    class Between(httpx.MockTransport):
+        def handle_request(self, request: httpx.Request) -> httpx.Response:
+            if not request.url.path.endswith("/execute"):
+                return super().handle_request(request)
+            return reply(super().handle_request(request) if reaches_worker else httpx.Response(200))
+
+    monkeypatch.setattr(httpx, "MockTransport", Between)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("reply", "kind"),
+    [
+        (_lost, "indeterminate"),
+        (_answered(200, {"ok": False, "error": "The tool gave up.", "failure_kind": "tool"}), "indeterminate"),
+        (_answered(200, {"ok": False, "error": "The worker gave up.", "failure_kind": "worker"}), "indeterminate"),
+        (_answered(200, {"ok": True, "result": "done", "served_by": "cache"}), "indeterminate"),
+        (_answered(200, {"ok": False, "failure_kind": "tool", "error": ["not", "text"]}), "indeterminate"),
+        (_answered(200, "<html>It works!</html>"), "indeterminate"),
+        (_answered(502, "<html>Bad Gateway</html>"), "indeterminate"),
+        (_answered(504, {"detail": "Gateway Timeout"}), "indeterminate"),
+    ],
+    ids=[
+        "answer-lost",
+        "tool-ended-failed",
+        "worker-failed",
+        "malformed-success",
+        "malformed-tool-failure",
+        "not-json",
+        "intermediary-502",
+        "intermediary-504",
+    ],
+)
+async def test_workflow_call_that_reached_its_worker_and_did_not_succeed_is_never_safe_to_rerun(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    worker_requests: list[dict[str, object]],
+    reply: Callable[[httpx.Response], httpx.Response],
+    kind: str,
+) -> None:
+    """The worker ran the command: no answer but its result, not even the tool's own failure, lets the call run again."""
+    _between_primary_and_worker(monkeypatch, reply)
+    effect = tmp_path / "effect.txt"
+    with workflow_stack(tmp_path, process_env=_PROXY_ENV) as stack:
+        await stack.start()
+        command = tool_args("shell", "run_shell_command", args=f"echo ran >> {effect}", timeout=30)
+
+        with pytest.raises(NodeFailed) as ended:
+            await stack.result("@0", "tool", command)
+
+        await stack.engine.close()
+    assert (ended.value.kind, effect.read_text(), len(worker_requests)) == (kind, "ran\n", 1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("fails", "kind", "sent"),
+    [("before it is sent", "failed", 0), ("at its close", "indeterminate", 1)],
+)
+async def test_workflow_call_for_a_worker_is_safe_to_rerun_only_while_it_never_left(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    worker_requests: list[dict[str, object]],
+    fails: str,
+    kind: str,
+    sent: int,
+) -> None:
+    """A call that failed before it was sent never started; one whose toolkit failed to close after the tool ran did.
+
+    The second is the reproducer of the second full review (Astra, verification of B2).
+    """
+    ran: list[str] = []
+
+    async def body(*_args: object, **_kwargs: object) -> str:
+        ran.append("the tool returned")
+        return "ok"
+
+    async def connect() -> None:
+        return None
+
+    async def close() -> None:
+        msg = "The connection did not close."
+        raise OSError(msg)
+
+    def unsent(*_args: object, **_kwargs: object) -> object:
+        msg = "No worker could be reached."
+        raise RuntimeError(msg)
+
+    toolkit = SimpleNamespace(connect=connect, close=close)
+    if fails == "at its close":
+        monkeypatch.setattr(sandbox_runner, "_resolve_entrypoint", lambda **_kwargs: (toolkit, body))
+        monkeypatch.setattr(sandbox_runner, "requires_connect", lambda offered: offered is toolkit)
+    else:
+        monkeypatch.setattr(sandbox_proxy, "_build_execute_request", unsent)
+    with workflow_stack(tmp_path, process_env=_PROXY_ENV) as stack:
+        await stack.start()
+
+        with pytest.raises(NodeFailed) as ended:
+            await stack.result("@0", "tool", tool_args("shell", "run_shell_command", args="true", timeout=30))
+
+        await stack.engine.close()
+    assert (ended.value.kind, len(ran), len(worker_requests)) == (kind, sent, sent)
+
+
+def _unsendable(_result: object) -> object:
+    msg = "The result is larger than the worker may send."
+    raise ValueError(msg)
+
+
+@pytest.mark.asyncio
+async def test_workflow_write_on_a_worker_whose_result_could_not_be_sent_is_not_safe_to_rerun(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    worker_requests: list[dict[str, object]],
+) -> None:
+    """The tool ran and its result did not fit the wire: the worker says so, and no resume runs the write again."""
+    monkeypatch.setattr(sandbox_runner, "serialize_worker_tool_result", _unsendable)
+    effect = tmp_path / "effect.txt"
+    with workflow_stack(tmp_path, process_env=_PROXY_ENV) as stack:
+        await stack.start()
+        command = tool_args("shell", "run_shell_command", args=f"echo ran >> {effect}", timeout=30)
+
+        with pytest.raises(NodeFailed) as ended:
+            await stack.result("@0", "tool", command)
+
+        await stack.engine.close()
+    assert (ended.value.kind, effect.read_text(), len(worker_requests)) == ("indeterminate", "ran\n", 1)
+
+
+def test_a_plain_worker_call_whose_result_could_not_be_sent_fails_as_it_always_did(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    worker_requests: list[dict[str, object]],
+) -> None:
+    """A call that asked for no structured result gets the failure it got before, with no new field on the wire."""
+    answers: list[dict[str, object]] = []
+    execute = sandbox_runner._execute_request_inprocess
+
+    async def recording(call: sandbox_runner._ExecuteCall) -> sandbox_runner.ExecuteResponse:
+        answer = await execute(call)
+        answers.append(answer.model_dump(mode="json"))
+        return answer
+
+    monkeypatch.setattr(sandbox_runner, "_execute_request_inprocess", recording)
+    monkeypatch.setattr(sandbox_runner, "serialize_worker_tool_result", _unsendable)
+
+    with pytest.raises(RuntimeError, match="The result is larger than the worker may send"):
+        _worker_shell(tmp_path, "true")
+    assert (len(worker_requests), answers[0].keys()) == (
+        1,
+        {"ok", "result", "error", "failure_kind", "shell_backgrounded"},
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("reply", "kind"),
+    [
+        (
+            _answered(422, {"ok": False, "error": "Invalid request: structured_result", "failure_kind": "tool"}),
+            "failed",
+        ),
+        (_answered(401, {"detail": "Unauthorized sandbox runner request"}), "indeterminate"),
+        (_answered(503, "<html>Service Unavailable</html>"), "indeterminate"),
+    ],
+    ids=["worker-refused", "untyped-refusal", "intermediary-503"],
+)
+async def test_workflow_call_is_known_not_to_have_started_only_by_the_worker_s_own_refusal(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    worker_requests: list[dict[str, object]],
+    reply: Callable[[httpx.Response], httpx.Response],
+    kind: str,
+) -> None:
+    """A worker from before workflows refuses the call in its own words; any other error may hide a call that ran."""
+    _between_primary_and_worker(monkeypatch, reply, reaches_worker=False)
+    with workflow_stack(tmp_path, process_env=_PROXY_ENV) as stack:
+        await stack.start()
+
+        with pytest.raises(NodeFailed) as ended:
+            await stack.result("@0", "tool", tool_args("shell", "run_shell_command", args="true", timeout=30))
+
+        await stack.engine.close()
+    assert (ended.value.kind, worker_requests) == (kind, [])
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("explicit", [False, True])
-def test_routing_preserves_pandas_frames_across_calls(
+async def test_routing_preserves_pandas_frames_across_calls(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     explicit: bool,
@@ -159,27 +469,30 @@ def test_routing_preserves_pandas_frames_across_calls(
         {"MINDROOM_SANDBOX_PROXY_URL": "http://sandbox.invalid"},
         agent_settings={"tools": ["pandas"], **({"worker_tools": ["pandas"]} if explicit else {})},
     )
-    created = FunctionCall(
-        function=_function(agent, "create_pandas_dataframe"),
-        arguments={
+    created = await run_offered(
+        agent,
+        "create_pandas_dataframe",
+        {
             "dataframe_name": "retained",
             "create_using_function": "DataFrame",
             "function_parameters": {"data": {"value": [42]}},
         },
-    ).execute()
-    assert created.status == "success"
-    assert created.result == "retained"
+    )
+    assert not created.is_error
+    assert created.content == "retained"
 
-    operated = FunctionCall(
-        function=_function(agent, "run_dataframe_operation"),
-        arguments={"dataframe_name": "retained", "operation": "head", "operation_parameters": {}},
-    ).execute()
-    assert operated.status == "success"
-    assert "42" in operated.result
+    operated = await run_offered(
+        agent,
+        "run_dataframe_operation",
+        {"dataframe_name": "retained", "operation": "head", "operation_parameters": {}},
+    )
+    assert not operated.is_error
+    assert "42" in operated.content
 
 
+@pytest.mark.asyncio
 @pytest.mark.parametrize("explicit", [False, True])
-def test_routing_preserves_sql_memory_database_across_calls(
+async def test_routing_preserves_sql_memory_database_across_calls(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     explicit: bool,
@@ -207,31 +520,30 @@ def test_routing_preserves_sql_memory_database_across_calls(
         process_env,
         agent_settings={"tools": ["sql"], **({"worker_tools": ["sql"]} if explicit else {})},
     )
-    toolkit = next(tool for tool in agent.tools or [] if isinstance(tool, SQLTools))
+    toolkit = source_toolkit(offered_function(agent, "run_sql_query"))
     try:
-        created = FunctionCall(
-            function=toolkit.functions["run_sql_query"],
-            arguments={"query": "CREATE TABLE retained (value INTEGER)"},
-        ).execute()
-        assert created.status == "success"
-        returned = FunctionCall(
-            function=toolkit.functions["run_sql_query"],
-            arguments={"query": "SELECT name FROM sqlite_master WHERE name='retained'"},
-        ).execute()
-        assert returned.status == "success"
-        assert json.loads(returned.result) == [{"name": "retained"}]
+        created = await run_offered(agent, "run_sql_query", {"query": "CREATE TABLE retained (value INTEGER)"})
+        assert not created.is_error
+        returned = await run_offered(
+            agent,
+            "run_sql_query",
+            {"query": "SELECT name FROM sqlite_master WHERE name='retained'"},
+        )
+        assert not returned.is_error
+        assert json.loads(returned.content) == [{"name": "retained"}]
     finally:
         toolkit.db_engine.dispose()
 
 
-@pytest.mark.parametrize("media_kind", ["image", "audio"])
-def test_worker_openai_media_preserves_typed_result_without_primary_secrets(
+@pytest.mark.asyncio
+@pytest.mark.parametrize("media_kind", ["image", "audio", "speech_endpoint_audio"])
+async def test_worker_openai_media_preserves_typed_result_without_primary_secrets(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     worker_requests: list[dict[str, object]],
     media_kind: str,
 ) -> None:
-    """Only provider IO is stubbed; Agno injection, proxy and runner stay real."""
+    """Only provider IO is stubbed; argument injection, proxy and runner stay real."""
     content = b"provider-media-bytes"
     provider = SimpleNamespace(
         images=SimpleNamespace(
@@ -242,38 +554,44 @@ def test_worker_openai_media_preserves_typed_result_without_primary_secrets(
         audio=SimpleNamespace(speech=SimpleNamespace(create=lambda **_kwargs: SimpleNamespace(content=content))),
     )
     monkeypatch.setattr(agno_openai, "OpenAIClient", lambda **_kwargs: provider)
+    monkeypatch.setattr(agno_compat_openai, "synthesize_realtime_speech", AsyncMock(return_value=content))
     agent = _create_routing_agent(
         tmp_path / "primary",
         {
             "MINDROOM_SANDBOX_PROXY_URL": "http://sandbox.invalid",
             "MINDROOM_SANDBOX_PROXY_TOKEN": "dummy-worker-token",
-            "OPENAI_API_KEY": _TOOL_KEY,
         },
-        agent_settings={"tools": ["openai"]},
+        agent_settings={
+            "tools": [
+                {"openai": {"text_to_speech_model": "gpt-4o-mini-tts", "text_to_speech_format": "mp3"}}
+                if media_kind == "speech_endpoint_audio"
+                else "openai",
+            ],
+        },
     )
-    agent.model = OpenAIChat(id="gpt-6-astra", api_key=_MODEL_KEY)
     name, arguments = (
         ("generate_image", {"prompt": "Offline image"})
         if media_kind == "image"
         else ("generate_speech", {"text_input": "Offline speech"})
     )
-    function = _function(agent, name)
-    function._agent = agent
-    response = FunctionCall(function=function, arguments=arguments).execute()
+    # The primary's run state stays on the primary, though the call's injected agent carries it.
+    context = ToolCallContext(run_id="run", session_id="session", session_state={"secret": _MODEL_KEY}, user_id=None)
+    response = await run_offered(agent, name, arguments, context=context)
 
-    assert response.status == "success"
+    assert not response.is_error
     assert len(worker_requests) == 1
     assert _MODEL_KEY not in json.dumps(worker_requests)
     if media_kind == "audio":
+        # A Realtime model's speech takes no agent.
+        assert "agent" not in worker_requests[0]["kwargs"]
+    if media_kind == "speech_endpoint_audio":
         assert worker_requests[0]["kwargs"]["agent"] is None
-    assert isinstance(response.result, ToolResult)
-    media = response.result.images if media_kind == "image" else response.result.audios
-    assert media is not None
+    media = response.images if media_kind == "image" else response.audios
     assert len(media) == 1
-    assert media[0].content == content
+    assert media[0].content == (pcm_to_wav(content) if media_kind == "audio" else content)
 
 
-@pytest.mark.parametrize("shape", ["value", "nested", "key", "nonfinite", "positional", "agent", "context", "team"])
+@pytest.mark.parametrize("shape", ["value", "nested", "key", "nonfinite", "positional", "actor", "context"])
 def test_invalid_arguments_rejected_before_worker_side_effects(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -291,16 +609,16 @@ def test_invalid_arguments_rejected_before_worker_side_effects(
     def provision_forbidden(*_args: object, **_kwargs: object) -> object:
         pytest.fail("Invalid arguments reached worker provisioning")
 
-    monkeypatch.setattr(sandbox_proxy, "_primary_worker_manager_context", provision_forbidden)
+    monkeypatch.setattr(sandbox_proxy, "lease_worker_manager", provision_forbidden)
     value: object = {
         "value": Opaque(),
         "nested": {"payload": [Opaque()]},
         "key": {Opaque(): "value"},
         "nonfinite": float("nan"),
         "positional": Opaque(),
-        "agent": Agent(model=OpenAIChat(id="gpt-6-astra", api_key=_MODEL_KEY)),
+        # What an entrypoint's ``agent`` or ``team`` parameter receives, carrying the toolkit's state.
+        "actor": ToolCallActor(session_state={"secret": _MODEL_KEY}),
         "context": {"alias": RunContext(run_id="run", session_id="session", session_state={"secret": _MODEL_KEY})},
-        "team": Team(members=[]),
     }[shape]
     paths = resolve_runtime_paths(
         config_path=tmp_path / "config.yaml",
@@ -308,7 +626,7 @@ def test_invalid_arguments_rejected_before_worker_side_effects(
         process_env={"MINDROOM_SANDBOX_PROXY_URL": "http://sandbox.invalid"},
     )
     with pytest.raises((TypeError, ValueError), match=r"[Aa]rgument"):
-        sandbox_proxy._call_proxy_sync(
+        call_proxy_sync_for_test(
             runtime_paths=paths,
             tool_name="calculator",
             function_name="add",
@@ -318,23 +636,31 @@ def test_invalid_arguments_rejected_before_worker_side_effects(
         )
 
 
+@pytest.mark.parametrize(
+    "output_path",
+    [{}, {OUTPUT_PATH_ARGUMENT: "saved.wav"}],
+    ids=["no-output-path", "output-path"],
+)
 @pytest.mark.parametrize("positional", [True, False])
-@pytest.mark.parametrize("use_team", [True, False])
-def test_declared_unused_agent_keeps_call_arguments(positional: bool, use_team: bool, tmp_path: Path) -> None:
-    """Discard only the declared runtime slot while retaining normal call data."""
+def test_declared_unused_agent_keeps_call_arguments(
+    positional: bool,
+    output_path: dict[str, object],
+    tmp_path: Path,
+) -> None:
+    """Discard only the declared runtime slot while retaining normal call data and the call's output path."""
 
-    def entrypoint(agent: Agent | Team | None, path: Path, *, options: object) -> None:
+    def entrypoint(agent: object, path: Path, *, options: object) -> None:
         del agent, path, options
 
-    owner = Team(members=[]) if use_team else Agent()
+    owner = ToolCallActor(session_state={"secret": _MODEL_KEY})
     path = tmp_path / "output.wav"
     options = {"values": (1, True, None, 2.5)}
     args = (owner, path) if positional else ()
     kwargs = {"options": options} if positional else {"agent": owner, "path": path, "options": options}
 
-    encoded_args, encoded_kwargs = prepare_worker_call_arguments(
+    encoded_args, encoded_kwargs = sandbox_proxy._worker_call_arguments(
         args,
-        kwargs,
+        {**kwargs, **output_path},
         entrypoint=entrypoint,
         inert_agent=True,
     )
@@ -342,14 +668,16 @@ def test_declared_unused_agent_keeps_call_arguments(positional: bool, use_team: 
     expected_options = {"values": [1, True, None, 2.5]}
     assert encoded_args == ([None, str(path)] if positional else [])
     assert encoded_kwargs == (
-        {"options": expected_options} if positional else {"agent": None, "path": str(path), "options": expected_options}
+        {"options": expected_options, **output_path}
+        if positional
+        else {"agent": None, "path": str(path), "options": expected_options, **output_path}
     )
 
 
 def test_worker_keyword_names_must_be_strings() -> None:
     """The boundary rejects non-JSON keys instead of silently coercing them."""
     with pytest.raises(TypeError, match="worker argument"):
-        prepare_worker_call_arguments((), {1: "value"}, entrypoint=None, inert_agent=False)  # type: ignore[invalid-argument-type]
+        sandbox_proxy._worker_call_arguments((), {1: "value"}, entrypoint=lambda: None, inert_agent=False)  # type: ignore[invalid-argument-type]
 
 
 def _context_agent(
@@ -358,15 +686,13 @@ def _context_agent(
     *,
     routing: str = "url",
     tool_config: dict[str, object] | None = None,
-    extra_env: dict[str, str] | None = None,
     roomless: bool = False,
     require_approval: bool = False,
-) -> tuple[Agent, ToolRuntimeContext]:
+) -> tuple[AgentBuild, ToolRuntimeContext]:
     """Materialize a real agent with authored config and matching requester context."""
     process_env = {
         "MINDROOM_SANDBOX_PROXY_URL": "http://sandbox.invalid",
         "MINDROOM_SANDBOX_PROXY_TOKEN": "dummy-worker-token",
-        **(extra_env or {}),
     }
     if routing != "url":
         process_env["MINDROOM_SANDBOX_EXECUTION_MODE"] = "off" if routing == "explicit" else "all"
@@ -380,6 +706,8 @@ def _context_agent(
             "models": {"default": {"provider": "ollama", "id": "test-model"}},
             "administrators": ["@alice:example.test"],
             "tool_approval": {"default": "require_approval" if require_approval else "auto_approve"},
+            # Approved calls run under the approval policy gate, not as background jobs.
+            "background_tool_jobs": {"enabled": False},
             "agents": {
                 "routing": {
                     "display_name": "Routing",
@@ -410,10 +738,12 @@ def _context_agent(
         "routing",
         config,
         runtime_paths,
-        execution_identity=None if roomless else build_execution_identity_from_runtime_context(context),
+        execution_identity=None if roomless else context.execution_identity,
         include_interactive_questions=False,
-        persist_runtime_state=False,
         supports_native_tool_approval=True,
+        knowledge=None,
+        model=turn_model(config, runtime_paths, "routing"),
+        plugins=config_plugins(config, runtime_paths),
     )
     return agent, context
 
@@ -473,16 +803,17 @@ async def test_config_manager_mutation_keeps_primary_runtime(tmp_path: Path, rou
     """Authorized config mutations persist the primary file under broad and explicit routing."""
     agent, context = _context_agent(tmp_path, "config_manager", routing=routing)
     with tool_runtime_context(context):
-        response = await FunctionCall(
-            function=_function(agent, "manage_config"),
-            arguments={
+        response = await run_offered(
+            agent,
+            "manage_config",
+            {
                 "operation": "patch",
                 "changes": [{"op": "replace", "path": "/agents/routing/role", "value": "Updated role"}],
             },
-        ).aexecute()
+        )
 
-    assert response.status == "success"
-    assert "Authored configuration patch updated" in response.result
+    assert not response.is_error
+    assert "Authored configuration patch updated" in response.content
     assert yaml.safe_load(context.runtime_paths.config_path.read_text())["agents"]["routing"]["role"] == "Updated role"
 
 
@@ -492,61 +823,10 @@ async def test_config_manager_remains_available_for_roomless_inspection(tmp_path
     """Primary ownership must not introduce a room requirement for read-only inspection."""
     agent, _context = _context_agent(tmp_path, "config_manager", roomless=True)
     with tool_runtime_context(None):
-        response = await FunctionCall(
-            function=_function(agent, "get_info"),
-            arguments={"info_type": "agents"},
-        ).aexecute()
+        response = await run_offered(agent, "get_info", {"info_type": "agents"})
 
-    assert response.status == "success"
-    assert "Routing" in response.result
-
-
-@pytest.mark.asyncio
-@pytest.mark.usefixtures("forbid_worker_lease")
-@pytest.mark.parametrize("routing", ["url", "all", "explicit"])
-async def test_vault_access_uses_primary_owner_token_file(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    routing: str,
-) -> None:
-    """Self-service grants keep the primary-mounted owner token and requester worker identity."""
-    token_file = tmp_path / "owner-token"
-    token_file.write_text("owner-token-value\n")
-    requests: list[httpx.Request] = []
-
-    def handle(request: httpx.Request) -> httpx.Response:
-        requests.append(request)
-        return httpx.Response(201, json={})
-
-    client_type = httpx.AsyncClient
-    transport = httpx.MockTransport(handle)
-    monkeypatch.setattr(httpx, "AsyncClient", lambda **kwargs: client_type(transport=transport, **kwargs))
-    agent, context = _context_agent(
-        tmp_path,
-        "agent_vault_access",
-        routing=routing,
-        extra_env={
-            "MATRIX_HOMESERVER": "https://example.test",
-            "MINDROOM_AGENT_VAULT_ACCESS_API_URL": "https://vault.example.test",
-            "MINDROOM_AGENT_VAULT_ACCESS_ADMIN_TOKEN_FILE": str(token_file),
-            "MINDROOM_AGENT_VAULT_ACCESS_UI_BASE_URL": "https://vault.example.test/ui",
-            "MINDROOM_AGENT_VAULT_ACCESS_EMAIL_DOMAIN": "example.test",
-        },
-    )
-    with tool_runtime_context(context):
-        response = await FunctionCall(function=_function(agent, "request_vault_access"), arguments={}).aexecute()
-
-    assert response.status == "success"
-    payload = json.loads(response.result)
-    assert payload["access"] == "granted"
-    identity = build_execution_identity_from_runtime_context(context)
-    worker_key = resolve_worker_key("user_agent", identity)
-    assert worker_key is not None
-    assert payload["vault"] == descriptive_worker_id_for_key(worker_key, prefix="agent-vault")
-    assert requests
-    assert {request.headers["authorization"] for request in requests} == {"Bearer owner-token-value"}
-    grants = [json.loads(request.content) for request in requests if request.url.path.endswith("/users")]
-    assert grants == [{"email": "alice@example.test", "role": "admin"}]
+    assert not response.is_error
+    assert "Routing" in response.content
 
 
 @pytest.mark.asyncio
@@ -571,10 +851,10 @@ async def test_browser_desktop_keeps_primary_matrix_context(
     if target is not None:
         arguments["target"] = target
     with tool_runtime_context(context):
-        response = await FunctionCall(function=_function(agent, "browser_control"), arguments=arguments).aexecute()
+        response = await run_offered(agent, "browser_control", arguments)
 
-    assert response.status == "success"
-    assert json.loads(response.result)["provider"] == "desktop"
+    assert not response.is_error
+    assert json.loads(response.content)["provider"] == "desktop"
     assert len(desktop_commands) == 1
     assert desktop_commands[0].action == "browser_observe"
     assert desktop_commands[0].parameters == {
@@ -596,46 +876,44 @@ async def test_browser_host_override_keeps_worker_transport_schema_and_hooks(
         tool_config={**_DESKTOP_CONFIG, "default_target": "desktop"},
         require_approval=True,
     )
-    function = _function(agent, "browser_control")
-    toolkit = next(tool for tool in agent.tools or [] if isinstance(tool, BrowserTools))
-    assert function.entrypoint is not None
-    assert inspect.unwrap(tool_schema_source(function.entrypoint)) == toolkit.browser
-    assert inspect.signature(function.entrypoint) == inspect.signature(toolkit.browser)
+    function = offered_function(agent, "browser_control")
+    toolkit = source_toolkit(function)
+    assert isinstance(toolkit, BrowserTools)
+    assert inspect.unwrap(function.entrypoint) == toolkit.browser
     schema = json.loads(json.dumps(function.parameters))
-    assert function.requires_confirmation is True
-    assert function.approval_type == "mindroom_policy"
-    assert function.tool_hooks
+    assert function.gate is ToolGate.POLICY
+    assert agent_tool_middleware(agent)
     hook_calls: list[tuple[str, str]] = []
 
-    async def observe(name: str, func: Callable[..., Awaitable[object]], args: dict[str, object]) -> object:
-        assert name == "browser_control"
+    async def observe(call: ToolCall, call_next: ToolNext) -> object:
+        assert call.function.name == "browser_control"
         assert get_tool_runtime_context() is context
-        target = str(args["target"])
+        target = str(call.arguments["target"])
         hook_calls.append(("before", target))
-        result = await func(**args)
+        result = await call_next(call.arguments)
         hook_calls.append(("after", target))
         return result
 
-    function.tool_hooks = [*function.tool_hooks, observe]
+    middleware = (*agent_tool_middleware(agent), observe)
+    run = ToolCallContext(run_id="run", session_id="session", user_id=None)
     with tool_runtime_context(context):
-        desktop = await FunctionCall(
-            function=function,
-            arguments={"action": "snapshot", "target": "desktop"},
-        ).aexecute()
-        assert desktop.status == "success"
+        desktop = await execute_tool_call(
+            function,
+            {"action": "snapshot", "target": "desktop"},
+            run,
+            middleware=middleware,
+        )
+        assert not desktop.is_error
         assert worker_requests == []
-        host = await FunctionCall(
-            function=function,
-            arguments={"action": "status", "target": "host"},
-        ).aexecute()
+        host = await execute_tool_call(function, {"action": "status", "target": "host"}, run, middleware=middleware)
 
-    assert host.status == "success"
-    assert json.loads(host.result)["running"] is False
+    assert not host.is_error
+    assert json.loads(host.content)["running"] is False
     assert len(desktop_commands) == len(worker_requests) == 1
     assert worker_requests[0]["kwargs"]["target"] == "host"
     assert hook_calls == [("before", "desktop"), ("after", "desktop"), ("before", "host"), ("after", "host")]
     assert function.parameters == schema
-    assert function.requires_confirmation is True
+    assert function.gate is ToolGate.POLICY
 
 
 @pytest.mark.asyncio
@@ -646,10 +924,9 @@ async def test_browser_primary_placement_binds_positional_arguments(
 ) -> None:
     """Placement binds positional arguments against the actual browser signature."""
     agent, context = _context_agent(tmp_path, "browser", tool_config=_DESKTOP_CONFIG)
-    function = _function(agent, "browser_control")
-    assert function.entrypoint is not None
+    function = offered_function(agent, "browser_control")
     with tool_runtime_context(context):
-        result = await function.entrypoint("snapshot", " desktop ")
+        result = await function.entrypoint("snapshot", "desktop")
 
     assert json.loads(result)["provider"] == "desktop"
     assert len(desktop_commands) == 1
@@ -660,7 +937,6 @@ async def test_browser_primary_placement_binds_positional_arguments(
 @pytest.mark.parametrize(
     ("arguments", "error"),
     [
-        ({"target": "sandbox"}, "does not support sandbox or node"),
         ({"target": "host", "node": "unsupported"}, "node parameter is not supported"),
         ({"target": "desktop"}, "configured Matrix desktop device identity"),
     ],
@@ -673,13 +949,10 @@ async def test_browser_invalid_targets_fail_before_worker_lease(
     """Target validation and desktop configuration errors remain local and allocate nothing."""
     agent, context = _context_agent(tmp_path, "browser")
     with tool_runtime_context(context):
-        result = await FunctionCall(
-            function=_function(agent, "browser_control"),
-            arguments={"action": "status", **arguments},
-        ).aexecute()
+        result = await run_offered(agent, "browser_control", {"action": "status", **arguments})
 
-    assert result.status == "failure"
-    assert error in result.error
+    assert result.is_error
+    assert error in result.content
 
 
 @pytest.mark.asyncio
@@ -689,18 +962,19 @@ async def test_browser_discovery_keeps_existing_worker_behavior(
     worker_requests: list[dict[str, object]],
     action: str,
 ) -> None:
-    """Discovery ignores target/node hints as before, including a desktop default."""
+    """Discovery ignores target/node hints, including a desktop default."""
     agent, context = _context_agent(
         tmp_path / "primary",
         "browser",
         tool_config={**_DESKTOP_CONFIG, "default_target": "desktop"},
     )
     with tool_runtime_context(context):
-        response = await FunctionCall(
-            function=_function(agent, "browser_control"),
-            arguments={"action": action, "target": "sandbox", "node": "ignored"},
-        ).aexecute()
+        response = await run_offered(
+            agent,
+            "browser_control",
+            {"action": action, "target": "desktop", "node": "ignored"},
+        )
 
-    assert response.status == "success"
-    assert json.loads(response.result)["actionTable"]
+    assert not response.is_error
+    assert json.loads(response.content)["actionTable"]
     assert len(worker_requests) == 1

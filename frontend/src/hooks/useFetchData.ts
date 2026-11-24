@@ -1,4 +1,10 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import {
+  useState,
+  useEffect,
+  useCallback,
+  useLayoutEffect,
+  useRef,
+} from "react";
 
 type FetchState<T> = {
   data: T;
@@ -14,7 +20,9 @@ export function useFetchData<T>(fetcher: () => Promise<T>, defaultValue: T) {
   const [error, setError] = useState<string | null>(null);
   const requestIdRef = useRef(0);
   const currentFetcherRef = useRef(fetcher);
-  currentFetcherRef.current = fetcher;
+  useLayoutEffect(() => {
+    currentFetcherRef.current = fetcher;
+  }, [fetcher]);
 
   const refetch = useCallback(async () => {
     const isCurrentFetcher = () => currentFetcherRef.current === fetcher;

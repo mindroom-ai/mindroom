@@ -1,0 +1,36 @@
+# API cleanup: one config commit, one request identity
+
+This record holds the decisions behind one write protocol for the config file, one typed request identity with one requester rule, and OAuth operations that never authenticate a request themselves.
+
+## Decisions
+
+- Every config file write MindRoom makes while it runs goes through one commit: the dashboard's full and raw saves, the config tools, and `!config set`.
+  Writers in other processes stay outside it: the `mindroom config` CLI commands, including `apply-bundle`, which installs into a running instance under the bundle's own lock.
+  The API publishes the committed config to every in-process API state while it holds their locks, so no load or dashboard save can slip between the file write and the publication.
+- A change derived from a loaded config (a tool or `!config set`) is refused when the file's fingerprint changed since that load.
+  A dashboard full or raw save stays exempt and checks only that nothing was published since its request pinned the snapshot, because it deliberately lets a save repair a broken file no reload has read (`docs/dev/2026-10-28-lifecycle-owners.md`).
+- The per-entity dashboard routes (agents, teams, models, room models, rooms) and Home Assistant's entities and service routes are deleted instead of ported to the commit: nothing calls them, the dashboard edits the whole config, and keeping them kept a second, file-checked dashboard write path alive.
+- A refused tool change is reported to the agent instead of retried: the change was computed from the old file, so replaying it on the new one could apply a decision made on stale data.
+- The commit lock order is the app registry lock, then every registered API state lock (in id order, before filtering by runtime), then the personal-agent roster lock, which config writes share with personal-agent provisioning.
+  Locking every state before filtering keeps a state that rebinds onto the runtime mid-commit from missing the publication.
+- The one-time access migration's compare-and-replace takes the same roster lock, because it runs on any load that sees the old format, including an old file restored while MindRoom runs.
+- The API reconciles knowledge modes only for the configs it publishes on its own, its dashboard saves, each against the pinned config its revision check proved it replaced.
+  The runtime reconciles every config it applies, which covers its own load and every tool or `!config set` commit, so those leave it to the runtime.
+- A commit publishes the config it validated with the personal-agent roster it read; a roster entry settled meanwhile reaches the API views through the reload that provisioning requests and through the runtime's reload of the committed file.
+- The request identity is a frozen `AuthUser`; one `requester_id()` rule maps a signed-in Matrix user to themselves and an operator login (standalone or hosted platform) to the configured owner.
+  A platform login without `ACCOUNT_ID` accepts any user of its Supabase project; it already acts as the owner for the owner's private credentials and can edit the whole config, so letting it open the owner's reports adds no authority.
+- Reports also admit a login through an identity it carries, because a gateway's user-ID claim may itself be a Matrix ID when its Matrix claim is absent.
+- OAuth operations never authenticate a request; each router authenticates through its own dependency, so the dashboard route gate no longer exempts `/api/connections` paths.
+  The callback, success, and reset exemptions stay, because those handlers validate their own state or reset capability.
+- The app caches the auth clients for the runtime it serves, resolved once per request, and a request whose app moved to another runtime meanwhile is refused as stale when it rebinds its snapshot, so its auth state and its config never name two runtimes.
+- Spotify is a registered OAuth provider, so its connect, status, refresh, and disconnect are the generic ones, and the former routes, their environment client, and their redirect path are gone without an alias.
+  Tokens those routes stored are adopted when a scope's `spotify_oauth` store is created, because that is the one moment the scope's identity and its store's binding are both known; legacy directory names are hashed and cannot be mapped back to a scope.
+  The adopted connection records `SPOTIFY_CLIENT_ID` as its client, because that is the client the former routes renewed it with; the configured client is not assumed, since a different app would make the token look usable.
+
+## Rejected alternatives
+
+- A registry of "config views" under `config/` that the API registers into: it needs a protocol whose only implementer is the API state, and a callback for the dashboard's pinned-snapshot check, because the publication must hold the API locks across the write.
+- Caching the auth state per config generation: it reads only the environment, so rebuilding it per save would drop the Supabase client and JWKS cache for nothing.
+- Gating only reports on `ACCOUNT_ID`: that keeps two requester rules; gating credentials too would move private credentials in an unhosted configuration.
+- Migrating Spotify tokens eagerly at startup over the configured shared agents: it misses unscoped connections and those of agents since removed, and runs before an operator could save the client.
+- Reconciling at every publication, tool commits and the runtime's load included: the embedded runtime already reconciles what it applies, so it only reconciled the same transition twice.

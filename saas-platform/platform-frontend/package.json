@@ -25,10 +25,8 @@
     "@supabase/auth-ui-shared": "^0.1.8",
     "@supabase/ssr": "^0.10.3",
     "@supabase/supabase-js": "^2.106.0",
-    "@types/js-yaml": "^4.0.9",
     "lucide-react": "^1.16.0",
-    "nanoid": "^5.1.11",
-    "next": "^16.2.6",
+    "next": "^16.4.1",
     "react": "^19.2.6",
     "react-dom": "^19.2.6",
     "stripe": "^22.1.1"
@@ -49,12 +47,5 @@
     "tailwindcss": "^4.3.0",
     "typescript": "^6.0.3",
     "whatwg-fetch": "^3.6.20"
-  },
-  "overrides": {
-    "brace-expansion": "1.1.13",
-    "minimatch": "3.1.4",
-    "picomatch": "4.0.4",
-    "postcss": "8.5.14",
-    "ws": "8.20.1"
   }
 }

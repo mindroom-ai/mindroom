@@ -1,0 +1,211 @@
+{
+ "calculator": {
+  "mindroom_memories_8f334045": [
+   {
+    "document": null,
+    "embedding": [
+     0.5977210402488708,
+     0.11356700211763382,
+     0.2988605201244354,
+     -0.7351968884468079
+    ],
+    "id": "94ddc73b-61c7-4028-a8a5-6c72f7edf593",
+    "metadata": {
+     "created_at": "2026-10-29T23:36:07.480343+00:00",
+     "data": "PRs get pair reviews",
+     "hash": "9f9946469f86e1b63ff7cfce2d4a174a",
+     "is_team": true,
+     "mindroom_replica_key": "m_20261029233607_0fb80a7b",
+     "session_id": "session-pair",
+     "team_members": [
+      "general",
+      "calculator"
+     ],
+     "text_lemmatized": "PRs get pair reviews",
+     "type": "conversation",
+     "updated_at": "2026-10-29T23:36:07.480343+00:00",
+     "user_id": "team_calculator+general"
+    }
+   },
+   {
+    "document": null,
+    "embedding": [
+     -0.10743445158004761,
+     -0.19696316123008728,
+     -0.34020909667015076,
+     0.9131928086280823
+    ],
+    "id": "abebe663-8c8a-47c9-a6d7-b60fd419249d",
+    "metadata": {
+     "created_at": "2026-10-29T23:36:07.834481+00:00",
+     "data": "The team retro is on the last Thursday",
+     "hash": "c6b6055ade9c041fa7b6f5a21229aeab",
+     "is_team": true,
+     "mindroom_replica_key": "m_20261029233607_22dbdcf0",
+     "session_id": "session-pair",
+     "team_members": [
+      "general",
+      "calculator"
+     ],
+     "text_lemmatized": "The team retro is on the last Thursday",
+     "type": "conversation",
+     "updated_at": "2026-10-29T23:36:07.834481+00:00",
+     "user_id": "team_calculator+general"
+    }
+   },
+   {
+    "document": null,
+    "embedding": [
+     -0.40936920046806335,
+     -0.6447564959526062,
+     -0.42472052574157715,
+     0.4861259162425995
+    ],
+    "id": "dc939cf1-3760-4297-abe9-211ba918f2c2",
+    "metadata": {
+     "created_at": "2026-10-29T23:36:07.480354+00:00",
+     "data": "The team uses trunk-based development",
+     "hash": "dfe3d02228b8a897a3cf4def1f6fcce8",
+     "is_team": true,
+     "mindroom_replica_key": "m_20261029233607_0fb80a7b",
+     "session_id": "session-pair",
+     "team_members": [
+      "general",
+      "calculator"
+     ],
+     "text_lemmatized": "The team uses trunk-based development",
+     "type": "conversation",
+     "updated_at": "2026-10-29T23:36:07.480354+00:00",
+     "user_id": "team_calculator+general"
+    }
+   },
+   {
+    "document": null,
+    "embedding": [
+     -0.24697451293468475,
+     -0.4939490258693695,
+     -0.7650185823440552,
+     -0.3313072621822357
+    ],
+    "id": "e15314a8-a7d5-44c9-b316-2edb632519d9",
+    "metadata": {
+     "created_at": "2026-10-29T23:36:07.480323+00:00",
+     "data": "The team ships on Fridays",
+     "hash": "4195f90e2e4e53bec3ae7048f2a8f216",
+     "is_team": true,
+     "mindroom_replica_key": "m_20261029233607_0fb80a7b",
+     "session_id": "session-pair",
+     "team_members": [
+      "general",
+      "calculator"
+     ],
+     "text_lemmatized": "The team ships on Fridays",
+     "type": "conversation",
+     "updated_at": "2026-10-29T23:36:07.480323+00:00",
+     "user_id": "team_calculator+general"
+    }
+   }
+  ]
+ },
+ "general": {
+  "mindroom_memories_8f334045": [
+   {
+    "document": null,
+    "embedding": [
+     0.7230721116065979,
+     -0.008407815359532833,
+     -0.36153605580329895,
+     0.5885471105575562
+    ],
+    "id": "0c991601-8e1d-41ba-bdcf-f1ddfdc1fad7",
+    "metadata": {
+     "created_at": "2026-10-29T23:36:07.628925+00:00",
+     "data": "The team standup is at 9am",
+     "hash": "342c271ea959859958e8d59163f949e7",
+     "is_team": true,
+     "mindroom_replica_key": "m_20261029233607_e65745fd",
+     "session_id": "session-pair",
+     "team_members": [
+      "general",
+      "calculator"
+     ],
+     "text_lemmatized": "The team standup is at 9am",
+     "type": "conversation",
+     "updated_at": "2026-10-29T23:36:07.628925+00:00",
+     "user_id": "team_calculator+general"
+    }
+   },
+   {
+    "document": null,
+    "embedding": [
+     -0.573512613773346,
+     0.7975409626960754,
+     -0.1792226880788803,
+     -0.05376680940389633
+    ],
+    "id": "4e79a080-c549-4f67-a8e1-14dba7665da0",
+    "metadata": {
+     "created_at": "2026-10-29T23:36:07.138023+00:00",
+     "data": "The team reviews PRs in pairs",
+     "hash": "5ccf03850c973f2ffa1082e7b2f4b660",
+     "is_team": true,
+     "mindroom_replica_key": "m_20261029233607_0fb80a7b",
+     "session_id": "session-pair",
+     "team_members": [
+      "general",
+      "calculator"
+     ],
+     "text_lemmatized": "The team reviews PRs in pairs",
+     "type": "conversation",
+     "updated_at": "2026-10-29T23:36:07.138023+00:00",
+     "user_id": "team_calculator+general"
+    }
+   },
+   {
+    "document": null,
+    "embedding": [
+     0.5662994384765625,
+     0.4113122224807739,
+     -0.17883139848709106,
+     -0.6914814114570618
+    ],
+    "id": "d9cceb5c-c2ec-42ff-9d7b-4c9cdce7b2aa",
+    "metadata": {
+     "agent": "general",
+     "created_at": "2026-10-29T23:36:06.892209+00:00",
+     "data": "General likes tea",
+     "hash": "b869b908328fd8b8fc5745091caa8f5f",
+     "text_lemmatized": "General likes tea",
+     "updated_at": "2026-10-29T23:36:06.892209+00:00",
+     "user_id": "agent_general"
+    }
+   },
+   {
+    "document": null,
+    "embedding": [
+     -0.24697451293468475,
+     -0.4939490258693695,
+     -0.7650185823440552,
+     -0.3313072621822357
+    ],
+    "id": "e43e1202-eb85-4143-a007-08e3b22be31b",
+    "metadata": {
+     "created_at": "2026-10-29T23:36:07.138003+00:00",
+     "data": "The team ships on Fridays",
+     "hash": "4195f90e2e4e53bec3ae7048f2a8f216",
+     "is_team": true,
+     "mindroom_replica_key": "m_20261029233607_0fb80a7b",
+     "session_id": "session-pair",
+     "team_members": [
+      "general",
+      "calculator"
+     ],
+     "text_lemmatized": "The team ships on Fridays",
+     "type": "conversation",
+     "updated_at": "2026-10-29T23:36:07.138003+00:00",
+     "user_id": "team_calculator+general"
+    }
+   }
+  ]
+ }
+}

@@ -1,0 +1,377 @@
+{
+ "scenario": {
+  "actions": [
+   {
+    "events": [
+     "$m1"
+    ],
+    "op": "admit",
+    "room": "a"
+   },
+   {
+    "op": "redact",
+    "room": "b",
+    "target": "$m1"
+   },
+   {
+    "op": "redact",
+    "room": "a",
+    "target": "$m9"
+   },
+   {
+    "op": "pending",
+    "sources": [
+     "$m2"
+    ]
+   },
+   {
+    "events": [
+     "$m2"
+    ],
+    "op": "admit",
+    "room": "a"
+   },
+   {
+    "op": "redact",
+    "room": "b",
+    "target": "$m2"
+   },
+   {
+    "op": "pending",
+    "room": "a",
+    "sources": [
+     "$m1"
+    ]
+   },
+   {
+    "op": "redact",
+    "room": "b",
+    "target": "$m1"
+   },
+   {
+    "history": [
+     [
+      "$m2",
+      null,
+      0
+     ]
+    ],
+    "op": "prepare",
+    "room": "a",
+    "sources": [
+     "$m1"
+    ]
+   },
+   {
+    "op": "redact",
+    "room": "a",
+    "target": "$m2"
+   },
+   {
+    "op": "redact",
+    "room": "a",
+    "target": "$m1"
+   },
+   {
+    "op": "prepare",
+    "room": "a",
+    "sources": [
+     "$m1"
+    ]
+   },
+   {
+    "op": "reopen"
+   }
+  ],
+  "ids": [
+   "$m1",
+   "$m2",
+   "$m9"
+  ],
+  "input": null
+ },
+ "steps": [
+  {
+   "action": null,
+   "changes": {},
+   "outcome": null
+  },
+  {
+   "action": {
+    "events": [
+     "$m1"
+    ],
+    "op": "admit",
+    "room": "a"
+   },
+   "changes": {},
+   "outcome": "ok"
+  },
+  {
+   "action": {
+    "op": "redact",
+    "room": "b",
+    "target": "$m1"
+   },
+   "changes": {
+    "redacted_event_ids": {
+     "b": [
+      "$m1"
+     ]
+    },
+    "redacted_history_events": {
+     "b": {
+      "$m1": null
+     }
+    }
+   },
+   "outcome": "ignored"
+  },
+  {
+   "action": {
+    "op": "redact",
+    "room": "a",
+    "target": "$m9"
+   },
+   "changes": {
+    "redacted_event_ids": {
+     "a": [
+      "$m9"
+     ]
+    },
+    "redacted_history_events": {
+     "a": {
+      "$m9": null
+     }
+    }
+   },
+   "outcome": "ignored"
+  },
+  {
+   "action": {
+    "op": "pending",
+    "sources": [
+     "$m2"
+    ]
+   },
+   "changes": {
+    "turn_record": {
+     "$m2": {
+      "anchor": "$m2",
+      "completed": false,
+      "prompts": {
+       "$m2": "$m2 original"
+      },
+      "requester": "@alice:example.org",
+      "sources": [
+       "$m2"
+      ]
+     }
+    }
+   },
+   "outcome": "ok"
+  },
+  {
+   "action": {
+    "events": [
+     "$m2"
+    ],
+    "op": "admit",
+    "room": "a"
+   },
+   "changes": {},
+   "outcome": "ok"
+  },
+  {
+   "action": {
+    "op": "redact",
+    "room": "b",
+    "target": "$m2"
+   },
+   "changes": {
+    "redacted_event_ids": {
+     "b": [
+      "$m1",
+      "$m2"
+     ]
+    },
+    "redacted_history_events": {
+     "b": {
+      "$m1": null,
+      "$m2": null
+     }
+    }
+   },
+   "outcome": "ignored"
+  },
+  {
+   "action": {
+    "op": "pending",
+    "room": "a",
+    "sources": [
+     "$m1"
+    ]
+   },
+   "changes": {
+    "pending_intent": {
+     "$m1": true
+    },
+    "turn_record": {
+     "$m1": {
+      "anchor": "$m1",
+      "completed": false,
+      "history_scope": "agent:agent",
+      "prompts": {
+       "$m1": "$m1 original"
+      },
+      "requester": "@alice:example.org",
+      "response_owner": "agent",
+      "sources": [
+       "$m1"
+      ],
+      "target": {
+       "reply_to_event_id": null,
+       "resolved_thread_id": "$thread-a",
+       "room_id": "!a:example.org",
+       "session_id": "!a:example.org:$thread-a",
+       "source_thread_id": "$thread-a"
+      }
+     }
+    }
+   },
+   "outcome": "ok"
+  },
+  {
+   "action": {
+    "op": "redact",
+    "room": "b",
+    "target": "$m1"
+   },
+   "changes": {},
+   "outcome": "ignored"
+  },
+  {
+   "action": {
+    "history": [
+     [
+      "$m2",
+      null,
+      0
+     ]
+    ],
+    "op": "prepare",
+    "room": "a",
+    "sources": [
+     "$m1"
+    ]
+   },
+   "changes": {},
+   "outcome": "proceed"
+  },
+  {
+   "action": {
+    "op": "redact",
+    "room": "a",
+    "target": "$m2"
+   },
+   "changes": {
+    "is_handled": {
+     "$m2": true
+    },
+    "redacted_event_ids": {
+     "a": [
+      "$m2",
+      "$m9"
+     ]
+    },
+    "redacted_history_events": {
+     "a": {
+      "$m2": null,
+      "$m9": null
+     }
+    },
+    "turn_record": {
+     "$m2": {
+      "anchor": "$m2",
+      "completed": false,
+      "redacted": [
+       "$m2"
+      ],
+      "requester": "@alice:example.org",
+      "sources": [
+       "$m2"
+      ]
+     }
+    }
+   },
+   "outcome": "tombstoned"
+  },
+  {
+   "action": {
+    "op": "redact",
+    "room": "a",
+    "target": "$m1"
+   },
+   "changes": {
+    "is_handled": {
+     "$m1": true
+    },
+    "redacted_event_ids": {
+     "a": [
+      "$m1",
+      "$m2",
+      "$m9"
+     ]
+    },
+    "redacted_history_events": {
+     "a": {
+      "$m1": null,
+      "$m2": null,
+      "$m9": null
+     }
+    },
+    "turn_record": {
+     "$m1": {
+      "anchor": "$m1",
+      "completed": false,
+      "history_scope": "agent:agent",
+      "redacted": [
+       "$m1"
+      ],
+      "requester": "@alice:example.org",
+      "response_owner": "agent",
+      "sources": [
+       "$m1"
+      ],
+      "target": {
+       "reply_to_event_id": null,
+       "resolved_thread_id": "$thread-a",
+       "room_id": "!a:example.org",
+       "session_id": "!a:example.org:$thread-a",
+       "source_thread_id": "$thread-a"
+      }
+     }
+    }
+   },
+   "outcome": "tombstoned"
+  },
+  {
+   "action": {
+    "op": "prepare",
+    "room": "a",
+    "sources": [
+     "$m1"
+    ]
+   },
+   "changes": {},
+   "outcome": "suppressed"
+  },
+  {
+   "action": {
+    "op": "reopen"
+   },
+   "changes": {},
+   "outcome": "ok"
+  }
+ ]
+}

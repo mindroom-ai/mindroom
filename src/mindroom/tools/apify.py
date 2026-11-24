@@ -16,7 +16,7 @@ if TYPE_CHECKING:
     file_access=ToolFileAccess.NONE,
     display_name="Apify",
     description="Web scraping, crawling, data extraction, and web automation platform with ready-to-use Actors",
-    category=ToolCategory.DEVELOPMENT,  # Based on agno docs URL path 'others/'
+    category=ToolCategory.DEVELOPMENT,
     status=ToolStatus.REQUIRES_CONFIG,  # Requires API token
     setup_type=SetupType.API_KEY,  # Uses API token authentication
     icon="FaCode",  # Web scraping/automation icon
@@ -25,6 +25,7 @@ if TYPE_CHECKING:
         # Authentication
         ConfigField(
             name="apify_api_token",
+            env=("APIFY_API_TOKEN",),
             label="API Token",
             type="password",
             required=False,
@@ -42,7 +43,7 @@ if TYPE_CHECKING:
         ),
     ],
     dependencies=["apify-client"],  # Required dependency for Apify integration
-    docs_url="https://docs.agno.com/tools/toolkits/others/apify",
+    docs_url="https://docs.mindroom.chat/tools/web-scraping-and-browser/#apify",
     function_names=("register_actor",),
 )
 def apify_tools() -> type[ApifyTools]:

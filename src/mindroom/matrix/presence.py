@@ -6,11 +6,13 @@ from typing import TYPE_CHECKING
 
 import nio
 
-from mindroom.constants import ROUTER_AGENT_NAME
+from mindroom.config.resolution import entity_model_name
 from mindroom.logging_config import get_logger
+from mindroom.tool_system.agent_tools import resolve_agent_tools
 
 if TYPE_CHECKING:
     from mindroom.config.main import Config
+    from mindroom.tool_system.registry import ToolRegistry
 
 logger = get_logger(__name__)
 
@@ -52,6 +54,7 @@ async def set_presence_status(
 def build_agent_status_message(
     agent_name: str,
     config: Config,
+    tools: ToolRegistry,
     *,
     voice_calls_available: bool = False,
 ) -> str:
@@ -60,16 +63,16 @@ def build_agent_status_message(
     Args:
         agent_name: Name of the agent
         config: Application configuration
+        tools: The tools this runtime can build for ``config``
         voice_calls_available: Whether this bot has a usable MatrixRTC call manager
 
     Returns:
-        Status message string, limited to 250 characters
+        Status message string
 
     """
     status_parts = []
 
-    entity_view = config.resolve_entity(agent_name)
-    model_name = entity_view.model_name
+    model_name = entity_model_name(config, agent_name)
 
     # Format model info
     if model_name in config.models:
@@ -81,9 +84,7 @@ def build_agent_status_message(
     status_parts.append(f"🤖 Model: {model_info}")
 
     # Add role/purpose for teams and agents
-    if agent_name == ROUTER_AGENT_NAME:
-        status_parts.append("📍 Routes messages to appropriate agents or teams")
-    elif agent_name in config.teams:
+    if agent_name in config.teams:
         team_config = config.teams[agent_name]
         if team_config.role:
             status_parts.append(f"👥 {team_config.role[:100]}")  # Limit length
@@ -93,7 +94,7 @@ def build_agent_status_message(
         if agent_config.role:
             status_parts.append(f"💼 {agent_config.role[:100]}")  # Limit length
         # Add tool count
-        effective_tools = entity_view.available_tools
+        effective_tools = resolve_agent_tools(config, agent_name, tools).tool_names
         if effective_tools:
             status_parts.append(f"🔧 {len(effective_tools)} tools available")
         if voice_calls_available:
@@ -103,43 +104,18 @@ def build_agent_status_message(
     return " | ".join(status_parts)
 
 
-async def is_user_online(
-    client: nio.AsyncClient,
-    user_id: str,
-    room_id: str | None = None,
-) -> bool:
-    """Check if a Matrix user is currently online.
+async def is_user_online(client: nio.AsyncClient, user_id: str) -> bool:
+    """Ask the homeserver whether a Matrix user is currently online.
 
     Args:
         client: The Matrix client to use for the presence check
         user_id: The Matrix user ID string (e.g., "@user:example.com")
-        room_id: Optional room ID whose synced membership cache should be checked first
 
     Returns:
         True if the user is online or unavailable (active but busy),
         False if offline or presence check fails
 
     """
-    rooms = client.rooms
-    cached_rooms = rooms if isinstance(rooms, dict) else {}
-    candidate_rooms = [cached_rooms.get(room_id)] if room_id is not None else cached_rooms.values()
-    for room in candidate_rooms:
-        if room is None or user_id not in room.users:
-            continue
-        cached_user = room.users[user_id]
-        if cached_user.presence not in ("online", "unavailable"):
-            continue
-        is_online = True
-        logger.debug(
-            "User presence check from room cache",
-            user_id=user_id,
-            room_id=room.room_id,
-            presence=cached_user.presence,
-            is_online=is_online,
-            last_active_ago=cached_user.last_active_ago,
-        )
-        return is_online
-
     try:
         response = await client.get_presence(user_id)
 
@@ -209,7 +185,7 @@ async def should_use_streaming(
         return True
 
     # Check if the requester is online
-    is_online = await is_user_online(client, requester_user_id, room_id=room_id)
+    is_online = await is_user_online(client, requester_user_id)
 
     logger.info(
         "Streaming decision",

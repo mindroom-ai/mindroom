@@ -7,7 +7,7 @@ import json
 from collections.abc import Callable  # noqa: TC003  # resolved by Agno function schema introspection
 from contextlib import contextmanager, suppress
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, override
+from typing import TYPE_CHECKING, override
 
 import httpx
 from agno.agent import Agent  # noqa: TC002  # resolved by Agno function schema introspection
@@ -127,15 +127,13 @@ class MindRoomE2BTools(E2BTools):
         self,
         api_key: str | None = None,
         timeout: int = 300,
-        sandbox_options: dict[str, Any] | None = None,
         *,
         tool_output_workspace_root: Path | None = None,
         file_access: FileAccess = "workspace",
-        **kwargs: Any,  # noqa: ANN401
     ) -> None:
         self._workspace_root = tool_output_workspace_root
         self._file_access = file_access
-        super().__init__(api_key=api_key, timeout=timeout, sandbox_options=sandbox_options, **kwargs)
+        super().__init__(api_key=api_key, timeout=timeout)
 
     def _workspace_location(self, path: str) -> tuple[Path, Path]:
         """Return the workspace root as spelled, so a replaced workspace is refused, and the canonical path below it."""
@@ -153,7 +151,7 @@ class MindRoomE2BTools(E2BTools):
         raise ValueError(msg)
 
     # AGNO_COMPAT: E2BTools.run_python_code reads sandbox code output without a size bound.
-    # Reason: Agno 3.0.9 calls Sandbox.run_code, which in e2b-code-interpreter 2.1.1 reads each output line whole,
+    # Reason: Agno 3.2.1 calls Sandbox.run_code, which in e2b-code-interpreter 2.1.1 reads each output line whole,
     # so one large print or image grows the primary's memory before any callback runs. This override copies
     # Agno's result formatting, and _run_code_within_read_limit copies the SDK's /execute request.
     # Upstream issue: Tracking gap; no matching issue has been verified.
@@ -196,7 +194,7 @@ class MindRoomE2BTools(E2BTools):
         return json.dumps(results)
 
     # AGNO_COMPAT: E2BTools.run_command keeps a command's whole output without a size bound.
-    # Reason: Agno 3.0.9 waits on the E2B SDK's commands.run, which in e2b 2.2.3 keeps all stdout and stderr
+    # Reason: Agno 3.2.1 waits on the E2B SDK's commands.run, which in e2b 2.2.3 keeps all stdout and stderr
     # until the command ends, so a chatty command grows the primary's memory without limit.
     # Upstream issue: Tracking gap; no matching issue has been verified.
     # Upstream PR: No matching fix has been verified.

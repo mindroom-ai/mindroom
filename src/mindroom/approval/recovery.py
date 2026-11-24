@@ -7,35 +7,44 @@ from dataclasses import dataclass, field
 from functools import partial
 from typing import TYPE_CHECKING
 
-from mindroom.approval.failure import prepare_approval_failure
-from mindroom.event_journal import DeliveryStage
+from mindroom.approval.continuation_rules import (
+    DiscardUnavailable,
+    OwnerUnavailable,
+    continuation_facts,
+    next_step,
+)
+from mindroom.approval.failure import prepare_approval_failure, read_final
+from mindroom.event_journal import ApprovalFailure
 from mindroom.logging_config import get_logger
+from mindroom.reply_lifecycle import ApprovalFailureKind
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Iterable
 
     from mindroom.approval.manager import ApprovalManager
-    from mindroom.event_journal import ApprovalContinuation, ApprovalDeliveryView, EventJournalStore
+    from mindroom.event_journal import ApprovalContinuation, EventJournalStore
 
 logger = get_logger(__name__)
 _STARTUP_CLEANUP_INITIAL_RETRY_SECONDS = 1.0
 _STARTUP_CLEANUP_MAX_RETRY_SECONDS = 30.0
 _STARTUP_CLEANUP_ATTEMPTS_BEFORE_ESCALATION = 10
 _UNAVAILABLE_OWNER_SCAN_LIMIT = 100
+_UPGRADE_REASON = "MindRoom was upgraded while this approval was pending. Ask again."
 
 
 @dataclass
 class ApprovalRecovery:
     """Retain startup gates across transport binding; the manager owns task shutdown."""
 
-    deliver_unavailable_notice: Callable[[ApprovalContinuation, str], Awaitable[ApprovalDeliveryView | None]]
+    deliver_unavailable_notice: Callable[[ApprovalContinuation, str], Awaitable[bool]]
     journal_provider: Callable[[], EventJournalStore] | None = None
     entity_configured: Callable[[str], bool] | None = None
     entity_permanently_unavailable: Callable[[str], bool] | None = None
+    # Whether the config starts no owner account, the sender of every card from before cards recorded their sender.
+    owner_absent: Callable[[], bool] | None = None
     recover_unavailable_final: Callable[[str, ApprovalContinuation], Awaitable[bool]] | None = None
     cancel_delegations: Callable[[ApprovalContinuation, str], Awaitable[None]] | None = None
     manager: ApprovalManager | None = None
-    _startup_router_ready_for_cleanup: bool = field(default=False, init=False, repr=False)
     _startup_runtime_support_ready_for_cleanup: bool = field(default=False, init=False, repr=False)
     _startup_cleanup_done: bool = field(default=False, init=False, repr=False)
     _startup_cleanup_lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
@@ -50,39 +59,46 @@ class ApprovalRecovery:
     def bind(self, manager: ApprovalManager) -> None:
         """Attach the runtime owner without losing readiness observed during bootstrap."""
         self.manager = manager
-        if (
-            self._startup_router_ready_for_cleanup
-            and self._startup_runtime_support_ready_for_cleanup
-            and not self._startup_cleanup_done
-        ):
+        if self._startup_runtime_support_ready_for_cleanup and not self._startup_cleanup_done:
             self._schedule_startup_cleanup_retry()
 
     def _unavailable_entity_reason(self, entity_name: str) -> str | None:
-        permanently_unavailable = (
-            self.entity_permanently_unavailable is not None and self.entity_permanently_unavailable(entity_name)
-        )
-        configured = self.entity_configured is None or self.entity_configured(entity_name)
-        if configured and not permanently_unavailable:
-            return None
-        if permanently_unavailable:
+        if self.entity_permanently_unavailable is not None and self.entity_permanently_unavailable(entity_name):
             return f"Requesting agent '{entity_name}' could not start and is unavailable."
-        return f"Requesting agent '{entity_name}' is no longer available."
+        if self.entity_configured is None or self.entity_configured(entity_name):
+            return None
+        return _removed_entity_reason(entity_name)
 
     async def reconcile_unavailable_entities(self, entity_names: Iterable[str]) -> None:
         """Fail closed continuations whose owner cannot ever run them."""
         names = set(entity_names)
-        if not names:
-            return
-        if not await self._reconcile_unavailable_owner_pages(names):
-            self._startup_cleanup_done = False
-            self._schedule_startup_cleanup_retry()
+        if names and await self._reconcile_unavailable_owner_pages(names, self._unavailable_entity_reason):
+            self._retry_unsettled_owners()
 
-    async def _reconcile_unavailable_owner_pages(self, entity_names: set[str] | None) -> bool:
-        """Settle unavailable owners across one complete cursor scan."""
+    async def reconcile_removed_entities(self, entity_names: set[str]) -> set[str]:
+        """Settle the continuations of entities being removed, before the config that removes them is published.
+
+        Returns the entities whose settlement is still unresolved. No retry is
+        scheduled here: a retry would judge them by the config still in force,
+        which lists them, so the caller settles them again once the removal is
+        published.
+        """
+        return await self._reconcile_unavailable_owner_pages(entity_names, _removed_entity_reason)
+
+    def _retry_unsettled_owners(self) -> None:
+        self._startup_cleanup_done = False
+        self._schedule_startup_cleanup_retry()
+
+    async def _reconcile_unavailable_owner_pages(
+        self,
+        entity_names: set[str] | None,
+        reason_for: Callable[[str], str | None],
+    ) -> set[str]:
+        """Settle unavailable owners across one complete cursor scan; return the owners left unsettled."""
         journal = None if self.journal_provider is None else self.journal_provider()
         if journal is None:
-            return True
-        complete = True
+            return set()
+        unsettled: set[str] = set()
         cursor: str | None = None
         while True:
             owners = await journal.approval_continuations(limit=_UNAVAILABLE_OWNER_SCAN_LIMIT, after=cursor)
@@ -92,12 +108,12 @@ class ApprovalRecovery:
             for principal_id, continuation in owners:
                 if entity_names is not None and continuation.entity_name not in entity_names:
                     continue
-                reason = self._unavailable_entity_reason(continuation.entity_name)
-                if reason is not None:
-                    complete = await self._discard_unavailable(principal_id, continuation, reason) and complete
+                reason = reason_for(continuation.entity_name)
+                if reason is not None and not await self._discard_unavailable(principal_id, continuation, reason):
+                    unsettled.add(continuation.entity_name)
             if len(owners) < _UNAVAILABLE_OWNER_SCAN_LIMIT:
                 break
-        return complete
+        return unsettled
 
     async def _discard_unavailable(
         self,
@@ -108,46 +124,59 @@ class ApprovalRecovery:
         """Expire visible cards, then atomically release the removed owner's sources."""
         assert self.journal_provider is not None
         store = self.journal_provider().principal(principal_id)
-        current = await store.approval_continuation(continuation.approval_id)
+        current = await store.approvals.approval_continuation(continuation.approval_id)
         if current is None:
             return True
-        final_delivery = await store.load_matrix_delivery(
-            delivery_id=current.source_event_ids[0],
-            stage=DeliveryStage.FINAL,
-        )
-        if final_delivery is not None:
+        final, final_span_outcome = await read_final(store, current)
+        facts = continuation_facts(current, runtime_generation=None, final=final, final_span_outcome=final_span_outcome)
+        if not isinstance(next_step(facts, OwnerUnavailable()), DiscardUnavailable):
+            # Its final answer is the entity's to recover, under the entity's own principal.
             return self.recover_unavailable_final is not None and await self.recover_unavailable_final(
                 principal_id,
                 current,
             )
         manager = self.manager
+        # The bot of an owner the config no longer lists had its chance to edit its cards before it stopped; one that
+        # can never start has no bot to edit them.
+        removed = (self.entity_configured is not None and not self.entity_configured(current.entity_name)) or (
+            self.entity_permanently_unavailable is not None and self.entity_permanently_unavailable(current.entity_name)
+        )
         current = await prepare_approval_failure(
             current,
-            reason,
+            ApprovalFailure(ApprovalFailureKind.ERROR, reason),
             request_failure=partial(
-                store.request_approval_failure,
+                store.approvals.request_approval_failure,
                 current.approval_id,
                 expected_state=current.state,
                 expected_generation=current.generation,
                 expected_runtime_generation=current.runtime_generation,
             ),
-            expire_cards=None if manager is None else manager.expire_continuation_cards,
+            expire_cards=None if manager is None else partial(manager.expire_continuation_cards, unedited=removed),
         )
         if current is None:
             return False
         if self.cancel_delegations is not None:
             await self.cancel_delegations(current, reason)
-        notice_store = await self.deliver_unavailable_notice(current, reason)
-        if notice_store is None:
+        if not await self.deliver_unavailable_notice(current, reason):
             return False
-        return await store.discard_unavailable_approval_continuation(
-            current.approval_id,
-            notice_principal_id=notice_store.principal_id,
-        )
+        # No bot of the gone entity is there to run what the discard's commit left for afterwards; the conversation
+        # its approval held learns of the end from the approval signals.
+        effects = await store.approvals.discard_unavailable_approval_continuation(current.approval_id)
+        return effects is not None
+
+    async def _end_cards_without_sender(self) -> None:
+        """Expire every pending card the router sent before cards recorded their sender.
+
+        Each paused turn resumes as after a timeout; a later call finds only a card whose edit waits for a router bot.
+        A router the config no longer starts never edits its card, which then retires unedited, keeping its pending look.
+        """
+        # LEGACY_COMPAT: Approval cards the router sent, stored without a sender; see legacy_approval_records.py.
+        assert self.manager is not None
+        absent = self.owner_absent is not None and self.owner_absent()
+        await self.manager.expire_cards(lambda card: card.sender_principal_id is None, _UPGRADE_REASON, absent)
 
     def reset_startup_cleanup_gate(self) -> None:
         """Reset one-shot startup approval cleanup state."""
-        self._startup_router_ready_for_cleanup = False
         self._startup_runtime_support_ready_for_cleanup = False
         self._startup_cleanup_done = False
         self._startup_cleanup_retry_delay = _STARTUP_CLEANUP_INITIAL_RETRY_SECONDS
@@ -170,19 +199,9 @@ class ApprovalRecovery:
         self._startup_runtime_support_ready_for_cleanup = True
         await self._run_startup_cleanup_if_ready()
 
-    async def mark_router_ready(self) -> None:
-        """Record router first sync without depending on Matrix bot internals."""
-        self._startup_router_ready_for_cleanup = True
-        await self._run_startup_cleanup_if_ready()
-
     async def _run_startup_cleanup_if_ready(self) -> None:
         """Retry approval-card recovery and unavailable-owner cleanup until both finish."""
-        if (
-            self.manager is None
-            or self._startup_cleanup_done
-            or not self._startup_router_ready_for_cleanup
-            or not self._startup_runtime_support_ready_for_cleanup
-        ):
+        if self.manager is None or self._startup_cleanup_done or not self._startup_runtime_support_ready_for_cleanup:
             return
         async with self._startup_cleanup_lock:
             if self._startup_cleanup_done:
@@ -191,7 +210,10 @@ class ApprovalRecovery:
             cards_recovered = await self._recover_approval_cards_on_startup()
             owners_settled = False
             try:
-                owners_settled = await self._reconcile_unavailable_owner_pages(None)
+                owners_settled = not await self._reconcile_unavailable_owner_pages(
+                    None,
+                    self._unavailable_entity_reason,
+                )
             except Exception:
                 logger.warning(
                     "tool_approval_unavailable_owner_cleanup_failed",
@@ -210,6 +232,7 @@ class ApprovalRecovery:
             manager = self.manager
             if manager is None:
                 return False
+            await self._end_cards_without_sender()
             sweep = await manager.recover_cards_on_startup()
         except Exception as exc:
             logger.warning(
@@ -260,3 +283,7 @@ class ApprovalRecovery:
         self._startup_cleanup_retry_delay = min(delay * 2, _STARTUP_CLEANUP_MAX_RETRY_SECONDS)
         await asyncio.sleep(delay)
         await self._run_startup_cleanup_if_ready()
+
+
+def _removed_entity_reason(entity_name: str) -> str:
+    return f"Requesting agent '{entity_name}' is no longer available."

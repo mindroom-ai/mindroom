@@ -12,10 +12,11 @@ from typing import TYPE_CHECKING, cast
 import requests
 from agentql import AgentQLServerError, AgentQLServerTimeoutError, APIKeyError, QueryParser
 from agentql._core._api_constants import (
+    AGENTQL_SERVER_URL_ENV_VAR,
     DEFAULT_REQUEST_ORIGIN,
+    DEFAULT_SERVER_URL,
     GET_AGENTQL_DATA_ENDPOINT,
     GET_AGENTQL_ELEMENT_ENDPOINT,
-    SERVICE_URL,
 )
 from agentql._core._errors import API_KEY_NOT_SET_MESSAGE
 from agentql._core._utils import raise_401_error
@@ -48,27 +49,39 @@ if TYPE_CHECKING:
 logger = get_logger(__name__)
 
 # AGNO_COMPAT: AgentQLTools does not pass its resolved key to SDK queries.
-# Reason: Agno 3.0.9 stores api_key but AgentQL 1.18.1 resolves auth from shared
-# SDK, environment, or CLI-file state. Its Page has no per-call credential hook.
+# Reason: Agno 3.2.1 stores api_key but AgentQL 1.18.1 resolves auth from shared
+# SDK, environment, or CLI-file state. Its Page has no per-call credential hook,
+# and the SDK also reads its host from the live process environment on every request.
 # Keep the private page dispatch and HTTP boundary local to one toolkit key;
 # retain SDK query parsing, readiness, parameters, and typed transport failures.
 # Deliberately reject redirects and preserve parsing errors from malformed
 # successful responses instead of inheriting the SDK's generic server error.
 # Upstream issue: Tracking gap; a resolved-key handoff and a per-request or
-# per-page SDK authentication extension point are needed. No issue identified.
-# Upstream PR: None identified for this credential handoff.
-# Remove when: Agno forwards its resolved key through an isolated AgentQL SDK
+# per-page SDK authentication and host extension point are needed. No issue identified.
+# Upstream PR: None identified for this credential and host handoff.
+# Remove when: Agno forwards its resolved key and host through an isolated AgentQL SDK
 # request API; retain scoped-key precedence, redirect rejection, parse diagnostics,
-# and concurrent-call isolation.
+# concurrent-call isolation, and the host read from the runtime environment and `.env`.
 # Coverage: tests/test_agentql_tools.py::test_agentql_resolved_key_reaches_request_without_shared_auth_mutation;
+# tests/test_agentql_tools.py::test_agentql_reads_its_host_from_the_env_file_beside_config;
 # tests/test_agentql_tools.py::test_agentql_concurrent_scoped_calls_leave_unrelated_sdk_auth_untouched;
 # tests/test_agentql_tools.py::test_agentql_retains_sdk_query_errors_and_browser_cleanup;
 # tests/test_agentql_tools.py::test_agentql_redirect_does_not_forward_scoped_request;
 # tests/test_agentql_tools.py::test_agentql_malformed_success_retains_parse_error.
 
 
+def _agentql_api_host(runtime_paths: RuntimePaths) -> str:
+    """Resolve the AgentQL host from the SDK's two settings, read from the runtime environment and its `.env`."""
+    return (
+        runtime_paths.env_value("AGENTQL_API_HOST")
+        or runtime_paths.env_value(AGENTQL_SERVER_URL_ENV_VAR)
+        or DEFAULT_SERVER_URL
+    )
+
+
 def _query_agentql_server(
     *,
+    api_host: str,
     api_key: str | None,
     query: str,
     accessibility_tree: dict[str, Any],
@@ -98,7 +111,7 @@ def _query_agentql_server(
             request_data["metadata"] |= cast("dict[str, Any]", kwargs["metadata"])
         endpoint = GET_AGENTQL_DATA_ENDPOINT if query_data else GET_AGENTQL_ELEMENT_ENDPOINT
         response = requests.post(
-            os.getenv("AGENTQL_API_HOST", SERVICE_URL) + endpoint,
+            api_host + endpoint,
             json=request_data,
             headers={"X-API-Key": api_key},
             timeout=timeout,
@@ -109,7 +122,11 @@ def _query_agentql_server(
         request_id = error.response.headers.get("X_REQUEST_ID") if error.response is not None else None
         if isinstance(error, requests.exceptions.ReadTimeout):
             raise AgentQLServerTimeoutError from error
-        if isinstance(error, requests.exceptions.HTTPError) and error.response.status_code == 401:
+        if (
+            isinstance(error, requests.exceptions.HTTPError)
+            and error.response is not None
+            and error.response.status_code == 401
+        ):
             raise_401_error(error, request_id)
         error_code = error.response.status_code if error.response is not None else None
         server_error = error.response.content.decode("utf-8") if error.response is not None else None
@@ -131,14 +148,16 @@ def _query_agentql_server(
 
 
 class _CredentialedPage(AgentQLPage):
-    """Retain SDK page behavior while binding request authentication to this page."""
+    """Retain SDK page behavior while binding the request host and authentication to this page."""
 
+    _api_host: str
     _api_key: str | None
 
     @classmethod
-    def with_api_key(cls, page: PlaywrightPage, api_key: str | None) -> Self:
-        """Initialize the SDK's page monitor and attach the toolkit's resolved key."""
+    def for_service(cls, page: PlaywrightPage, *, api_host: str, api_key: str | None) -> Self:
+        """Initialize the SDK's page monitor and attach the toolkit's AgentQL host and resolved key."""
         wrapped = cls.create(page)
+        wrapped._api_host = api_host
         wrapped._api_key = api_key
         return wrapped
 
@@ -159,6 +178,7 @@ class _CredentialedPage(AgentQLPage):
         if not accessibility_tree:
             accessibility_tree = get_accessibility_tree(self._page, include_hidden=include_hidden)
         response = _query_agentql_server(
+            api_host=self._api_host,
             api_key=self._api_key,
             query=query,
             accessibility_tree=accessibility_tree,
@@ -193,7 +213,8 @@ def _destination_relay(egress: BrowserEgress) -> Iterator[str]:
 class MindRoomAgentQLTools(AgnoAgentQLTools):
     """Preserve Agno registration with scoped requests and complete custom results."""
 
-    # Mirror the authored upstream options beside the managed runtime paths the browser egress needs.
+    # Mirror the authored upstream options beside the managed runtime paths, which supply the AgentQL host and the
+    # browser egress.
     def __init__(
         self,
         runtime_paths: RuntimePaths,
@@ -203,6 +224,11 @@ class MindRoomAgentQLTools(AgnoAgentQLTools):
         all: bool = False,  # noqa: A002 - upstream option name
         agentql_query: str = "",
     ) -> None:
+        # The tool's `AGENTQL_API_KEY` declaration supplies the runtime environment's key; refusing to build without
+        # one means Agno's own fallback, which reads the live process environment, never runs.
+        if not api_key:
+            msg = "AGENTQL_API_KEY not set: set the tool's api_key, or AGENTQL_API_KEY in the environment or `.env`."
+            raise ValueError(msg)
         super().__init__(
             api_key=api_key,
             enable_scrape_website=enable_scrape_website,
@@ -227,7 +253,7 @@ class MindRoomAgentQLTools(AgnoAgentQLTools):
         return self._scrape(url, "{ text_content[] }", custom=False)
 
     # AGNO_COMPAT: AgentQLTools custom scraping discards extracted values.
-    # Reason: Agno 3.0.9 iterates a response dict and joins only its keys; nested
+    # Reason: Agno 3.2.1 iterates a response dict and joins only its keys; nested
     # values, lists, and even the requested page title disappear from the result.
     # Upstream issue: Tracking gap; no matching custom-result formatting issue identified.
     # Upstream PR: None identified for lossless custom query results.
@@ -251,7 +277,7 @@ class MindRoomAgentQLTools(AgnoAgentQLTools):
         return self._scrape(url, self.agentql_query, custom=True)
 
     # AGNO_COMPAT: AgentQLTools launches its browser without a destination policy.
-    # Reason: Agno 3.0.9 scrape_website and custom_scrape_website launch Chromium with no
+    # Reason: Agno 3.2.1 scrape_website and custom_scrape_website launch Chromium with no
     # proxy and navigate to the model-chosen URL, so file:// paths, redirects, and subresources
     # reached local files and loopback, private, and metadata targets from the MindRoom process.
     # Upstream issue: Tracking gap; no matching issue identified on October 1, 2026.
@@ -283,7 +309,11 @@ class MindRoomAgentQLTools(AgnoAgentQLTools):
                     args=[PROXIED_WEBRTC_ONLY_ARG],
                 ) as browser,
             ):
-                page = _CredentialedPage.with_api_key(browser.new_page(), self.api_key)
+                page = _CredentialedPage.for_service(
+                    browser.new_page(),
+                    api_host=_agentql_api_host(self._runtime_paths),
+                    api_key=self.api_key,
+                )
                 page.goto(url)
                 try:
                     response = page.query_data(query)

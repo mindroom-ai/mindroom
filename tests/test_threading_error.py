@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import nio
 import pytest
@@ -12,8 +12,11 @@ from mindroom.config.agent import AgentConfig
 from mindroom.config.main import Config
 from mindroom.config.models import ModelConfig, RouterConfig
 from mindroom.delivery_gateway import SendTextRequest
-from mindroom.matrix.client import DeliveredMatrixEvent
+from mindroom.matrix.client_delivery import DeliveredMatrixEvent
+from mindroom.matrix.thread_history_result import thread_history_result
 from mindroom.matrix.users import AgentMatrixUser
+from mindroom.router.relay import execute_router_relay
+from mindroom.routing_judgment import ResponderSelection
 from tests.bot_helpers import make_test_agent_bot
 from tests.conftest import (
     TEST_PASSWORD,
@@ -25,13 +28,13 @@ from tests.conftest import (
     wrap_extracted_collaborators,
 )
 from tests.response_attempt_helpers import install_direct_response_admission
+from tests.response_runner_helpers import streamed_answer
 from tests.threading_helpers import (
     ThreadingBehaviorTestBase,
     _make_client_mock,
     _matrix_room,
     _runtime_bound_config,
     seed_hydrated_conversation,
-    thread_history_result,
 )
 
 if TYPE_CHECKING:
@@ -41,7 +44,7 @@ if TYPE_CHECKING:
 
 
 class TestThreadingBehavior(ThreadingBehaviorTestBase):
-    """Threading behavior tests moved verbatim from tests/test_threading_error.py."""
+    """End-to-end threading behavior of agent replies and router commands."""
 
     @pytest.mark.asyncio
     async def test_agent_creates_thread_when_mentioned_in_main_room(self, bot: AgentBot) -> None:
@@ -77,8 +80,6 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 room_id="!test:localhost",
             ),
         )
-
-        # Initialize the bot (to set up components it needs)
 
         # Mock response generation to capture the call and send a test response.
         generate_response = AsyncMock()
@@ -147,12 +148,10 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             ),
         )
 
-        # Initialize response tracking
-
         # Make AI fast.
         resolver = unwrap_extracted_collaborator(bot._conversation_resolver)
         with (
-            patch("mindroom.response_runner.ai_response", AsyncMock(return_value="OK")),
+            patch("mindroom.response_runner.stream_agent_response", new=streamed_answer(AsyncMock(return_value="OK"))),
             patch.object(
                 resolver,
                 "fetch_thread_history",
@@ -174,6 +173,7 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         assert initial_content["m.relates_to"]["event_id"] == "$thread_root:localhost"
         assert initial_content["m.relates_to"]["m.in_reply_to"]["event_id"] == "$thread_msg:localhost"
 
+    @pytest.mark.usefixtures("commands_aimed_at_bot_under_test")
     @pytest.mark.asyncio
     async def test_command_as_reply_doesnt_cause_thread_error(self, tmp_path: Path) -> None:
         """Plain-reply commands should answer the command event without following stale reply targets."""
@@ -194,92 +194,75 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             ),
             tmp_path,
         )
+        config.defaults.enable_streaming = False
 
         bot = make_test_agent_bot(
             agent_user=agent_user,
-            storage_path=tmp_path,
             rooms=["!test:localhost"],
-            enable_streaming=False,
             config=config,
             runtime_paths=runtime_paths_for(config),
         )
         wrap_extracted_collaborators(bot)
-
-        # Mock the orchestrator
-        mock_orchestrator = MagicMock()
-        mock_orchestrator.current_config = config
-        bot.orchestrator = mock_orchestrator
 
         # Create a mock client
         bot.client = _make_client_mock(user_id="@mindroom_router:localhost")
 
         # Initialize components that depend on client
 
-        # Mock the agent to return a response
-        mock_agent = MagicMock()
-        mock_response = MagicMock()
-        mock_response.content = "I can help you with that!"
+        room = nio.MatrixRoom(room_id="!test:localhost", own_user_id=bot.client.user_id)
+        room.name = "Test Room"
 
-        # Make the agent's arun method return the response
-        async def mock_arun(*_args: object, **_kwargs: object) -> MagicMock:
-            return mock_response
-
-        mock_agent.arun = mock_arun
-
-        with patch("mindroom.bot.create_agent", return_value=mock_agent):
-            room = nio.MatrixRoom(room_id="!test:localhost", own_user_id=bot.client.user_id)
-            room.name = "Test Room"
-
-            # Create a command that's a reply to another message (not in a thread)
-            event = nio.RoomMessageText.from_dict(
-                {
-                    "content": {
-                        "body": "!help",
-                        "msgtype": "m.text",
-                        "m.relates_to": {"m.in_reply_to": {"event_id": "$some_other_msg:localhost"}},
-                    },
-                    "event_id": "$cmd_reply:localhost",
-                    "sender": "@user:localhost",
-                    "origin_server_ts": 1234567890,
-                    "room_id": "!test:localhost",
-                    "type": "m.room.message",
+        # Create a command that's a reply to another message (not in a thread)
+        event = nio.RoomMessageText.from_dict(
+            {
+                "content": {
+                    "body": "!help",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"m.in_reply_to": {"event_id": "$some_other_msg:localhost"}},
                 },
-            )
+                "event_id": "$cmd_reply:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "room_id": "!test:localhost",
+                "type": "m.room.message",
+            },
+        )
 
-            # Mock the bot's response - it should succeed
-            bot.client.room_send = AsyncMock(
-                return_value=nio.RoomSendResponse.from_dict(
-                    {"event_id": "$response:localhost"},
-                    room_id="!test:localhost",
-                ),
-            )
+        # Mock the bot's response - it should succeed
+        bot.client.room_send = AsyncMock(
+            return_value=nio.RoomSendResponse.from_dict(
+                {"event_id": "$response:localhost"},
+                room_id="!test:localhost",
+            ),
+        )
 
-            # The reply target is a plain message with no thread under it, and
-            # a hydrated conversation is what makes that a fact rather than an
-            # absence. An unhydrated one leaves the root unproven, and unproven
-            # roots answer at room level instead of opening a thread.
-            await seed_hydrated_conversation(
-                bot,
-                room_id=room.room_id,
-                thread_id="$some_other_msg:localhost",
-            )
+        # The reply target is a plain message with no thread under it, and
+        # a hydrated conversation is what makes that a fact rather than an
+        # absence. An unhydrated one leaves the root unproven, and unproven
+        # roots answer at room level instead of opening a thread.
+        await seed_hydrated_conversation(
+            bot,
+            room_id=room.room_id,
+            thread_id="$some_other_msg:localhost",
+        )
 
-            # Process the command
-            await bot._on_message(room, event)
-            await drain_coalescing(bot)
+        # Process the command
+        await bot._on_message(room, event)
+        await drain_coalescing(bot)
 
-            # The bot should send an error message about needing threads
-            bot.client.room_send.assert_called_once()
+        # The bot should send an error message about needing threads
+        bot.client.room_send.assert_called_once()
 
-            # Check the content
-            call_args = bot.client.room_send.call_args
-            content = call_args.kwargs["content"]
+        # Check the content
+        call_args = bot.client.room_send.call_args
+        content = call_args.kwargs["content"]
 
-            assert "m.relates_to" in content
-            assert content["m.relates_to"]["rel_type"] == "m.thread"
-            assert content["m.relates_to"]["event_id"] == "$cmd_reply:localhost"
-            assert content["m.relates_to"]["m.in_reply_to"]["event_id"] == "$cmd_reply:localhost"
+        assert "m.relates_to" in content
+        assert content["m.relates_to"]["rel_type"] == "m.thread"
+        assert content["m.relates_to"]["event_id"] == "$cmd_reply:localhost"
+        assert content["m.relates_to"]["m.in_reply_to"]["event_id"] == "$cmd_reply:localhost"
 
+    @pytest.mark.usefixtures("commands_aimed_at_bot_under_test")
     @pytest.mark.asyncio
     async def test_command_in_thread_works_correctly(self, tmp_path: Path) -> None:
         """Test that commands in threads work without errors."""
@@ -300,90 +283,74 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             ),
             tmp_path,
         )
+        config.defaults.enable_streaming = False
 
         bot = make_test_agent_bot(
             agent_user=agent_user,
-            storage_path=tmp_path,
             rooms=["!test:localhost"],
-            enable_streaming=False,
             config=config,
             runtime_paths=runtime_paths_for(config),
         )
         wrap_extracted_collaborators(bot)
-        # Mock the orchestrator
-        mock_orchestrator = MagicMock()
-        mock_orchestrator.current_config = config
-        bot.orchestrator = mock_orchestrator
 
         # Create a mock client
         bot.client = _make_client_mock(user_id="@mindroom_router:localhost")
 
         # Initialize components that depend on client
 
-        # Mock the agent to return a response
-        mock_agent = MagicMock()
-        mock_response = MagicMock()
-        mock_response.content = "I can help you with that!"
+        room = nio.MatrixRoom(room_id="!test:localhost", own_user_id=bot.client.user_id)
+        room.name = "Test Room"
 
-        # Make the agent's arun method return the response
-        async def mock_arun(*_args: object, **_kwargs: object) -> MagicMock:
-            return mock_response
-
-        mock_agent.arun = mock_arun
-
-        with patch("mindroom.bot.create_agent", return_value=mock_agent):
-            room = nio.MatrixRoom(room_id="!test:localhost", own_user_id=bot.client.user_id)
-            room.name = "Test Room"
-
-            # Create a command in a thread
-            event = nio.RoomMessageText.from_dict(
-                {
-                    "content": {
-                        "body": "!list_schedules",
-                        "msgtype": "m.text",
-                        "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root:localhost"},
-                    },
-                    "event_id": "$cmd_thread:localhost",
-                    "sender": "@user:localhost",
-                    "origin_server_ts": 1234567890,
-                    "room_id": "!test:localhost",
-                    "type": "m.room.message",
+        # Create a command in a thread
+        event = nio.RoomMessageText.from_dict(
+            {
+                "content": {
+                    "body": "!list_schedules",
+                    "msgtype": "m.text",
+                    "m.relates_to": {"rel_type": "m.thread", "event_id": "$thread_root:localhost"},
                 },
-            )
+                "event_id": "$cmd_thread:localhost",
+                "sender": "@user:localhost",
+                "origin_server_ts": 1234567890,
+                "room_id": "!test:localhost",
+                "type": "m.room.message",
+            },
+        )
 
-            # Mock room_get_state for list_schedules command
-            bot.client.room_get_state = AsyncMock(
-                return_value=nio.RoomGetStateResponse.from_dict(
-                    [],  # No scheduled tasks
-                    room_id="!test:localhost",
-                ),
-            )
+        # Mock room_get_state for list_schedules command
+        bot.client.room_get_state = AsyncMock(
+            return_value=nio.RoomGetStateResponse.from_dict(
+                [],  # No scheduled tasks
+                room_id="!test:localhost",
+            ),
+        )
 
-            # Mock the bot's response
-            bot.client.room_send = AsyncMock(
-                return_value=nio.RoomSendResponse.from_dict(
-                    {"event_id": "$response:localhost"},
-                    room_id="!test:localhost",
-                ),
-            )
+        # Mock the bot's response
+        bot.client.room_send = AsyncMock(
+            return_value=nio.RoomSendResponse.from_dict(
+                {"event_id": "$response:localhost"},
+                room_id="!test:localhost",
+            ),
+        )
 
-            # Process the command
-            await bot._on_message(room, event)
-            await drain_coalescing(bot)
+        # Process the command
+        await bot._on_message(room, event)
+        await drain_coalescing(bot)
 
-            # The bot should respond
-            bot.client.room_send.assert_called_once()
+        # The bot should respond
+        bot.client.room_send.assert_called_once()
 
-            # Check the content
-            call_args = bot.client.room_send.call_args
-            content = call_args.kwargs["content"]
+        # Check the content
+        call_args = bot.client.room_send.call_args
+        content = call_args.kwargs["content"]
 
-            # The response should be in the same thread
-            assert "m.relates_to" in content
-            assert content["m.relates_to"]["rel_type"] == "m.thread"
-            assert content["m.relates_to"]["event_id"] == "$thread_root:localhost"
-            assert content["m.relates_to"]["m.in_reply_to"]["event_id"] == "$cmd_thread:localhost"
+        # The response should be in the same thread
+        assert "m.relates_to" in content
+        assert content["m.relates_to"]["rel_type"] == "m.thread"
+        assert content["m.relates_to"]["event_id"] == "$thread_root:localhost"
+        assert content["m.relates_to"]["m.in_reply_to"]["event_id"] == "$cmd_thread:localhost"
 
+    @pytest.mark.usefixtures("commands_aimed_at_bot_under_test")
     @pytest.mark.asyncio
     async def test_command_reply_to_thread_message_stays_in_thread_transitively(
         self,
@@ -406,19 +373,15 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             ),
             tmp_path,
         )
+        config.defaults.enable_streaming = False
 
         bot = make_test_agent_bot(
             agent_user=agent_user,
-            storage_path=tmp_path,
             rooms=["!test:localhost"],
-            enable_streaming=False,
             config=config,
             runtime_paths=runtime_paths_for(config),
         )
         wrap_extracted_collaborators(bot)
-        mock_orchestrator = MagicMock()
-        mock_orchestrator.current_config = config
-        bot.orchestrator = mock_orchestrator
 
         bot.client = _make_client_mock(user_id="@mindroom_router:localhost")
 
@@ -479,19 +442,15 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
             ),
             tmp_path,
         )
+        config.defaults.enable_streaming = False
 
         bot = make_test_agent_bot(
             agent_user=agent_user,
-            storage_path=tmp_path,
             rooms=["!test:localhost"],
-            enable_streaming=False,
             config=config,
             runtime_paths=runtime_paths_for(config),
         )
         wrap_extracted_collaborators(bot)
-        mock_orchestrator = MagicMock()
-        mock_orchestrator.current_config = config
-        bot.orchestrator = mock_orchestrator
 
         bot.client = _make_client_mock(user_id="@mindroom_router:localhost")
 
@@ -530,7 +489,10 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
         )
 
         with (
-            patch("mindroom.router_relay.suggest_responder_for_message", AsyncMock(return_value="general")),
+            patch(
+                "mindroom.router.relay.suggest_responder_for_message",
+                AsyncMock(return_value=ResponderSelection("general")),
+            ),
             patch(
                 "mindroom.delivery_gateway.send_message_outcome",
                 AsyncMock(
@@ -541,7 +503,8 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 ),
             ) as mock_send,
         ):
-            await bot._turn_controller._execute_router_relay(
+            await execute_router_relay(
+                bot._turn_dispatcher.deps,
                 room,
                 event,
                 thread_history=[],
@@ -551,10 +514,10 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
 
         mock_send.assert_awaited_once()
         bot.client.room_get_event.assert_not_called()
-        content = mock_send.call_args.args[2]
-        assert content["m.relates_to"]["rel_type"] == "m.thread"
-        assert content["m.relates_to"]["event_id"] == "$thread_root:localhost"
-        assert content["m.relates_to"]["m.in_reply_to"]["event_id"] == "$plain_reply:localhost"
+        assert mock_send.call_args.kwargs["message_type"] == "io.mindroom.route"
+        route = mock_send.call_args.args[2]["io.mindroom.route"]
+        assert route["thread_id"] == "$thread_root:localhost"
+        assert route["event_ids"] == ["$plain_reply:localhost"]
 
     @pytest.mark.asyncio
     async def test_message_with_multiple_relations_handled_correctly(self, bot: AgentBot) -> None:
@@ -595,8 +558,6 @@ class TestThreadingBehavior(ThreadingBehaviorTestBase):
                 room_id="!test:localhost",
             ),
         )
-
-        # Initialize response tracking
 
         # Mock response generation.
         generate_response = AsyncMock()

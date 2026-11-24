@@ -1,3 +1,4 @@
+import { apiErrorMessageFromResponse } from "@/lib/api";
 import type {
   CancelScheduleResponse,
   ScheduleListResponse,
@@ -68,14 +69,8 @@ export async function cancelSchedule(
   return response.json();
 }
 
-async function extractErrorMessage(response: Response): Promise<string> {
-  try {
-    const data = await response.json();
-    if (typeof data?.detail === "string") {
-      return data.detail;
-    }
-  } catch {
-    // Fall through to default message
-  }
-  return `Request failed (Error ${response.status})`;
-}
+const extractErrorMessage = (response: Response) =>
+  apiErrorMessageFromResponse(
+    response,
+    `Request failed (Error ${response.status})`,
+  );

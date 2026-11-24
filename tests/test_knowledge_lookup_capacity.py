@@ -1,24 +1,20 @@
-"""Published metadata contention must not consume unrelated executor capacity."""
+"""Slow knowledge lookups must not consume unrelated executor capacity, and none waits on a collection deletion."""
 
 from __future__ import annotations
 
 import asyncio
-import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from contextvars import ContextVar
-from dataclasses import dataclass
-from threading import Lock
+from threading import Event, Lock
 from typing import TYPE_CHECKING
 
 import pytest
-from agno.knowledge.embedder.base import Embedder
-from chromadb.api.client import Client
-from chromadb.config import Settings
 
 from mindroom.knowledge import registry, utils
-from mindroom.knowledge.index_metadata import save_published_index_state, state_for_publication
+from mindroom.knowledge.collection_lifetime import collection_lifetime_lock
+from mindroom.knowledge.vector_store import KnowledgeCollection
 from tests.conftest import runtime_paths_for
-from tests.knowledge_test_support import _config
+from tests.knowledge_test_support import _config, publish, seed_collection
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -29,11 +25,15 @@ if TYPE_CHECKING:
     from mindroom.tool_system.worker_routing import ToolExecutionIdentity
 
 
-@dataclass
-class _Embedder(Embedder):
-    def get_embedding(self, text: str) -> list[float]:
-        message = f"An existence lookup must not request an embedding ({len(text)} characters)"
+class _Embedder:
+    sends_batches = False
+
+    def embed(self, texts: list[str], *, purpose: str) -> list[list[float]]:
+        message = f"An existence lookup must not request a {purpose} embedding ({len(texts)} texts)"
         raise AssertionError(message)
+
+    async def aembed(self, texts: list[str], *, purpose: str) -> list[list[float]]:
+        return self.embed(texts, purpose=purpose)
 
 
 async def _wait_until(condition: Callable[[], bool]) -> None:
@@ -54,34 +54,42 @@ def published_metadata(
     runtime_paths = runtime_paths_for(config)
     key = registry.resolve_published_index_key("docs", config=config, runtime_paths=runtime_paths)
     storage = registry.published_index_storage_path(key)
-    with Client(settings=Settings(is_persistent=True, persist_directory=str(storage))) as client:
-        client.create_collection("published")
-    save_published_index_state(
-        registry.published_index_metadata_path(key),
-        state_for_publication(
-            settings=key.indexing_settings,
-            collection="published",
-            indexed_count=1,
-            source_signature="one-document",
-            published_revision=None,
-        ),
-    )
+    seed_collection(KnowledgeCollection(path=storage, name="published"), [{"content": "one document"}])
+    publish(key, collection="published", source_signature="one-document")
     monkeypatch.setattr(registry, "create_configured_embedder", lambda *_args: _Embedder())
     return config, runtime_paths, storage
 
 
 @pytest.mark.asyncio
-async def test_locked_lookup_burst_preserves_executor_capacity_context_and_queued_cancellation(
+async def test_a_lookup_does_not_wait_for_a_collection_deletion(
+    published_metadata: tuple[Config, RuntimePaths, Path],
+) -> None:
+    """A deletion's exclusive lifetime lock blocks searches of the collection, never the lookup that finds it."""
+    config, runtime_paths, storage = published_metadata
+
+    with collection_lifetime_lock(storage, exclusive=True):
+        result = await asyncio.wait_for(
+            utils.resolve_knowledge_base_access_async("docs", config, runtime_paths, execution_identity=None),
+            timeout=3,
+        )
+
+    assert result.knowledge is not None
+
+
+@pytest.mark.asyncio
+async def test_blocked_lookup_burst_preserves_executor_capacity_context_and_queued_cancellation(
     published_metadata: tuple[Config, RuntimePaths, Path],
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """Blocked metadata reads stay bounded and leave unrelated work runnable."""
-    config, runtime_paths, storage = published_metadata
+    """Lookups blocked on slow storage stay bounded and leave unrelated work runnable."""
+    config, runtime_paths, _storage = published_metadata
     requester: ContextVar[str] = ContextVar("lookup_requester", default="missing")
     started: list[str] = []
     active = 0
     peak = 0
     state_lock = Lock()
+    # Stands in for storage that stalls every lookup until it is released, such as a hung network filesystem.
+    storage_released = Event()
     original_lookup = registry.get_published_index
 
     def lookup(
@@ -97,6 +105,7 @@ async def test_locked_lookup_burst_preserves_executor_capacity_context_and_queue
             active += 1
             peak = max(peak, active)
         try:
+            assert storage_released.wait(timeout=5)
             return original_lookup(
                 base_id,
                 config=config,
@@ -108,8 +117,6 @@ async def test_locked_lookup_burst_preserves_executor_capacity_context_and_queue
                 active -= 1
 
     monkeypatch.setattr(utils, "get_published_index", lookup)
-    connection = sqlite3.connect(storage / "chroma.sqlite3")
-    connection.execute("BEGIN EXCLUSIVE")
     tasks: list[asyncio.Task[utils.KnowledgeBaseAccessResolution]] = []
     with ThreadPoolExecutor(max_workers=1) as executor:
         asyncio.get_running_loop().set_default_executor(executor)
@@ -118,13 +125,22 @@ async def test_locked_lookup_burst_preserves_executor_capacity_context_and_queue
                 token = requester.set(f"request-{index}")
                 try:
                     tasks.append(
-                        asyncio.create_task(utils.resolve_knowledge_base_access_async("docs", config, runtime_paths)),
+                        asyncio.create_task(
+                            utils.resolve_knowledge_base_access_async(
+                                "docs",
+                                config,
+                                runtime_paths,
+                                execution_identity=None,
+                            ),
+                        ),
                     )
                 finally:
                     requester.reset(token)
             await _wait_until(lambda: len(started) >= 1)
             assert await asyncio.wait_for(asyncio.to_thread(lambda: "available"), timeout=0.5) == "available"
             await _wait_until(lambda: len(started) == 4)
+            # An unblocked lookup finishes in milliseconds; these stay pending until the storage is released.
+            await asyncio.sleep(0.1)
             for task in tasks[4:]:
                 task.cancel()
             for task in tasks[4:]:
@@ -132,8 +148,7 @@ async def test_locked_lookup_burst_preserves_executor_capacity_context_and_queue
                     await task
             assert not any(task.done() for task in tasks[:4])
         finally:
-            connection.rollback()
-            connection.close()
+            storage_released.set()
             results = await asyncio.gather(*tasks, return_exceptions=True)
 
     assert peak == 4
