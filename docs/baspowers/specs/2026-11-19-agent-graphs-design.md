@@ -723,11 +723,10 @@ The script broker's per-run lock becomes a per-run semaphore of size 1 for plain
   The card is edited to show the answer and the node completes with it, so a resumed run does not ask twice.
 - **An agent's `ask_user` tool** creates its own `ask` node under the agent's node, keyed by the question, and the agent's job waits in the runtime's existing human-decision wait.
   If a restart continues the agent and it asks the same question again, it gets the saved answer.
-- **Approvals of an agent's call.** The node's job goes to `awaiting_approval` and shows the existing card; the node is `waiting` on `approval`.
-  Across a restart there are three outcomes, tried in this order (PR B4b; before it ships, such an agent runs again when it had called no tool and is `indeterminate` otherwise).
+- **Approvals of an agent's call (amended 2026-11-24).** The node's job goes to `awaiting_approval` and shows the existing card; the node is `waiting` on `approval`.
+  Across a restart there are two outcomes:
   Restore: the paused run is saved before the stopped job's cleanup rewrites it, loaded from the child's session, and resumed with the exact decisions already given and the cards' original expiry.
-  Follow-up turn: the gated call never ran, so the child is continued as a running job is and told which calls finished; it makes the gated call again and a new card appears.
-  `indeterminate`: only when it cannot be excluded that a call of the child started and was not recorded.
+  Uncontinuable fallback: if the paused run or its approval metadata cannot be loaded, no follow-up turn is synthesized; the call ends as an uncontinuable agent call does (`indeterminate` if its record is unreadable or another tool call started, or `interrupted` to retry on the next attempt when its record proves only the unstarted gated call existed).
   A child that waits in its own `ask_user` is marked so on its job, because both waits share one job status.
 - **Approvals of a script `tool()` call.** The broker's card path tells the engine, so the node is `waiting` on `approval` while keeping its concurrency slot.
   The broker has claimed such a call but its effect has not started, which the receipt records, so after a restart the replay runs it as the next generation and asks again; a denial or an expired card raises `ToolError(kind="denied")`.
@@ -976,7 +975,7 @@ Round 1:
 
 Round 2, decided by both reviewers at Bas's request:
 
-7. An approval wait across a restart restores the exact paused child, then falls back to a follow-up turn, then to `indeterminate`; it is its own PR after B4.
+7. An approval wait across a restart restores the exact paused child, then falls back to `indeterminate` or `interrupted` when unloadable (amended 2026-11-24: unloadable paused-turn follow-up fallback removed); it is its own PR after B4.
 8. The PRs are built in order with checkpoints after B3b and B5; sessions and peers stay in v1 as separate PRs.
 
 No question is open.

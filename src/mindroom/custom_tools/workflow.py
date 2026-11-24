@@ -490,8 +490,7 @@ class WorkflowTools(Toolkit, ManagedJobToolkit):
 
         *job_id* names the job the run is reserved for, which no call that waits for its run itself has. *outer* is
         the call of a run that this start is made in: the new run is a run inside that one, under that call, and
-        *source* is its script as its key was made from. The tool call of an agent that reserves such a run is
-        saved with the run in the same write, so a restart can prove which run that call started.
+        *source* is its script as its key was made from.
         """
         title, max_concurrent = arguments.get("title"), arguments.get("max_concurrent", 16)
         if not isinstance(max_concurrent, int) or max_concurrent < 1:

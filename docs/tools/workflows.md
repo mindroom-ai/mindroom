@@ -581,21 +581,17 @@ A run whose script had already returned its report ends with that report and get
 - An agent that was waiting for an approval when MindRoom stopped keeps waiting: its job is not ended, its card stays open with the expiry it had, and a decision that was already given on another card of the same turn stands.
   Once MindRoom runs again the agent's paused turn is resumed with those decisions, so the agent is not sent its task again, no tool call it had finished is made again, and no call gets a second card.
   This holds for an orderly restart and for a killed process alike, and however many restarts the wait lasts.
-- When that paused turn cannot be resumed, the agent goes on in a new turn instead: it is sent its prompt and an account of the tool calls it had finished, its open cards are closed as `Superseded after a restart.`, and it asks again for the call that had waited, which had not run.
-  When neither is possible the call ends as that of an agent that cannot be continued does, and a tool call that was still waiting for its decision counts as not started.
+- When that paused turn cannot be resumed, for example because its saved paused run or approval metadata cannot be loaded, no follow-up turn is synthesized for it.
+  Instead, the call ends as that of an agent that cannot be continued does: `indeterminate` if its record is unreadable or it had started another tool call, or `failed` with kind `interrupted` if its record proves no tool call started (a call still waiting for its decision counts as not started), in which case the next attempt runs it again.
 - A `tool()` or `shell()` call of the script that was waiting for an approval when MindRoom stopped never ran: the next attempt asks again with a new card.
 - After 5 attempts in a row that finish no call, the run ends `interrupted` with `Stopped resuming after 5 attempts that finished nothing. Fix the script and call resume_workflow.`
 - A run with no job, which is one that `start_workflow` waited for inside a subagent, is resumed in the same way, under the agent and requester it was started for.
   When the call that waited for it is gone, nothing delivers the report; `get_workflow(run_id)` returns it in `result`.
 - A run inside a run goes on by itself after a restart, as the same run.
-  The agent that was inside its `start_workflow` call when MindRoom stopped is continued, and it is not asked to make the call again.
-  The call was saved with the run it started, in the same write, so the agent's job waits for that run and then sends the agent the run's report as the result of its call.
-  A run that ended meanwhile gives its stored report at once.
-  A run that another call resumed meanwhile gives the report its own attempt ended with, and is left to that other call.
-  This holds for an orderly restart and for a killed process alike, and however many restarts the wait lasts.
-  Stopping the agent while its job waits cancels the run inside.
-- The agent is not continued when that cannot be proven: the call reserved no run before MindRoom stopped, the script file it named has changed since, or a call of another tool was cut short in the same turn.
-  Its call then ends `indeterminate`, the run inside stays under that call with its report in `get_workflow` of that run, and cancelling the outer run cancels it.
+  The agent that was inside its `start_workflow` call when MindRoom stopped is continued as any interrupted agent turn is, with its prompt and an account of its tool calls (including that `start_workflow` was cut short).
+  Because the nested run is keyed by its parent call, script digest, and arguments rather than a tool call ID, when the continued agent calls `start_workflow` again with the same script and arguments it attaches to the live nested run or receives its stored report immediately without starting a second run.
+  Stopping the agent while it waits, or cancelling the outer run, cancels the nested run.
+- When the agent cannot be continued, for example after three restarts in a row or because its session is gone, its call ends `indeterminate`, the nested run stays under that call with its report in `get_workflow` of that run, and cancelling the outer run cancels it.
   A script's own `tool("workflow", "start_workflow", ...)` call that a restart cut short ends `indeterminate` too.
 - A run that MindRoom stopped while its script process was starting stays `starting`, and the next start launches it.
 - A run whose job was stopped gets no further attempt, and `resume_workflow` continues it.
