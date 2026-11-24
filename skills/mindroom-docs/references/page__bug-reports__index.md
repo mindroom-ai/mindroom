@@ -10,7 +10,7 @@ Users keep their privacy from each other: a report is visible only to the person
 ## How it works
 
 1. In MindRoom Chat, the user opens the menu on any message and chooses **Report a bug**.
-2. MindRoom Chat collects the evidence and sends it to a private room shared only with the administrators, then opens that room so the user can add details.
+2. MindRoom Chat shows a consent dialog, then collects the evidence, sends it to a private room shared only with the administrators, and opens that room so the user can add details.
 3. The administrators' MindRoom Chat joins that room automatically, so nobody has to accept an invite.
 4. The administrator runs [`mindroom debug-report`](https://docs.mindroom.chat/cli/#debug-report) on the attached file to collect the backend side of the same moment.
 5. Both files go to whoever fixes the issue, for example a coding agent.
@@ -28,7 +28,7 @@ Add the administrators to the homeserver's `/.well-known/matrix/client` file:
 
 With the `mindroom-client` Helm chart, list them in `bugReports.admins` and the chart serves that file; see the [chart README](https://github.com/mindroom-ai/mindroom/blob/main/cluster/k8s/client/README.md#bug-reports).
 Nothing changes in `config.yaml`.
-Without this key, the menu item is called **Download bug report** and saves the report as a file instead.
+Without this key, the menu item is called **Download bug report** (shown only when **Developer Tools** is enabled) and saves the full report as a file instead.
 
 ## What a report contains
 
@@ -37,7 +37,8 @@ Without this key, the menu item is called **Download bug report** and saves the 
 - App details such as version, platform, browser, and connection state.
 - The same data as **Export diagnostics** under **Settings → About**.
 
-Nothing is redacted, and reports from encrypted rooms are stored decrypted in the report room.
+Before sending via **Report a bug**, MindRoom Chat shows a consent dialog that leaves message text out of encrypted-room reports (keeping each message's sender, timestamp, type, and relations) unless the user opts in to **Include message text**.
+Unencrypted-room reports, opted-in encrypted-room reports, and local **Download bug report** files are unredacted and store decrypted message content.
 
 ## Where reports go
 

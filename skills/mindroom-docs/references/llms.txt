@@ -7,6 +7,7 @@
 - [Home](https://docs.mindroom.chat/)
 - [Showcase](https://docs.mindroom.chat/showcase/)
 - [Install & First Run](https://docs.mindroom.chat/getting-started/)
+- [MindRoom Chat](https://docs.mindroom.chat/mindroom-chat/)
 - [macOS App](https://docs.mindroom.chat/installation/macos-app/)
 - [iOS App](https://docs.mindroom.chat/ios/)
 - [Dashboard](https://docs.mindroom.chat/dashboard/)

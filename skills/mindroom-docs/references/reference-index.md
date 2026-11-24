@@ -14,6 +14,7 @@ Generated from `docs/` via `.github/scripts/generate_skill_references.py`.
 |  | Home | `index.md` | `index.md` | `page__index.md` |
 |  | Showcase | `showcase.md` | `showcase/index.md` | `page__showcase__index.md` |
 | Get Started | Install & First Run | `getting-started.md` | `getting-started/index.md` | `page__getting-started__index.md` |
+| Get Started | MindRoom Chat | `mindroom-chat.md` | `mindroom-chat/index.md` | `page__mindroom-chat__index.md` |
 | Get Started | macOS App | `installation/macos-app.md` | `installation/macos-app/index.md` | `page__installation__macos-app__index.md` |
 | Get Started | iOS App | `ios.md` | `ios/index.md` | `page__ios__index.md` |
 | Get Started | Dashboard | `dashboard.md` | `dashboard/index.md` | `page__dashboard__index.md` |
