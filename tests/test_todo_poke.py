@@ -707,7 +707,10 @@ async def test_poke_overflow_formats_singular_and_plural_and_caps_metadata(
 async def test_poke_escapes_markdown_prose_while_keeping_metadata_plain(tmp_path: Path) -> None:
     """Untrusted titles escape Markdown and @mentions in fallback prose but stay plain normalized text in metadata."""
     todo_root = tmp_path / "todo"
-    raw_title = "  Check\n\t`code` *em* _sub_ [link](https://example.test) ~~del~~ <tag> > quote \\ @reviewer  "
+    raw_title = (
+        "  Check\n\t`code` *em* _sub_ [link](https://example.test) ~~del~~ <tag> > quote "
+        "&amp; $BUILD_DIR/$FILE_NAME \\ @reviewer  "
+    )
     _write_thread(todo_root, "scope", items=[_item("t1", title=raw_title, priority="high")])
     sent_metadata: list[dict[str, Any]] = []
     deps, _queried_rooms, sent = _deps(todo_root, sent_metadata=sent_metadata)
@@ -716,7 +719,7 @@ async def test_poke_escapes_markdown_prose_while_keeping_metadata_plain(tmp_path
 
     expected_prose = (
         "Check \\`code\\` \\*em\\* \\_sub\\_ \\[link\\](https://example.test) "
-        "\\~\\~del\\~\\~ \\<tag\\> \\> quote \\\\ @\u200breviewer"
+        "\\~\\~del\\~\\~ \\<tag\\> \\> quote \\&amp; \\$BUILD\\_DIR/\\$FILE\\_NAME \\\\ @\u200breviewer"
     )
     body = sent[0][1]
     assert body.splitlines() == [
@@ -730,6 +733,8 @@ async def test_poke_escapes_markdown_prose_while_keeping_metadata_plain(tmp_path
     assert "<del>" not in rendered_html
     assert "<tag>" not in rendered_html
     assert "<blockquote>" not in rendered_html
+    assert "&amp;amp;" in rendered_html
+    assert "$BUILD_DIR/$FILE_NAME" in rendered_html
     assert sent_metadata == [
         {
             "version": 1,
@@ -737,7 +742,10 @@ async def test_poke_escapes_markdown_prose_while_keeping_metadata_plain(tmp_path
             "items": [
                 {
                     "id": "t1",
-                    "title": "Check `code` *em* _sub_ [link](https://example.test) ~~del~~ <tag> > quote \\ @reviewer",
+                    "title": (
+                        "Check `code` *em* _sub_ [link](https://example.test) ~~del~~ <tag> > quote "
+                        "&amp; $BUILD_DIR/$FILE_NAME \\ @reviewer"
+                    ),
                     "priority": "high",
                 },
             ],

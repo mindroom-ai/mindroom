@@ -61,7 +61,7 @@ _POKE_STATE_FILENAME = "poke_state.json"
 _VISIBLE_ITEM_LIMIT = 5
 _RETRY_BACKSTOP_SECONDS = 60 * 60
 _MAX_UNCHANGED_REPOKES = 3
-_MARKDOWN_PROSE_ESCAPE_RE = re.compile(r"([\\`*_\[\]~<>])")
+_MARKDOWN_PROSE_ESCAPE_RE = re.compile(r"([\\`*_\[\]~<>&$])")
 _LEADING_BLOCK_MARKER_RE = re.compile(r"^([+-](?=\s|$)|#(?=#{0,5}(?:\s|$)))")
 _LEADING_ORDERED_LIST_RE = re.compile(r"^(\d+)([.)])(?=\s|$)")
 
