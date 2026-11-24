@@ -230,8 +230,8 @@ def random() -> float:
 def send(to, text):
     """Message an agent of this run by name; "*" reaches every agent that has not finished."""
 
-def inbox(wait_seconds=0) -> list[dict]:
-    """Return messages agents sent to "script", waiting up to wait_seconds for the first one."""
+def inbox(wait_seconds=0) -> dict:
+    """Return {"messages": [...]} sent to "script", waiting up to wait_seconds for the first one; adds "note" on timeout."""
 
 class state:
     """The run's shared values, also readable and writable by its agents."""
