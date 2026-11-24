@@ -6,13 +6,12 @@ import json
 import logging
 import os
 import platform
-import re
 import secrets
 import shlex
 import shutil
 import subprocess
 import textwrap
-from dataclasses import dataclass, replace
+from dataclasses import replace
 from pathlib import Path  # noqa: TC003
 from typing import TYPE_CHECKING, Any, Literal, NamedTuple
 
@@ -26,13 +25,23 @@ from mindroom.atomic_file import atomic_write_bytes_at, existing_file_mode
 from mindroom.cli.agent_docs import ensure_config_agent_docs
 from mindroom.cli.env_file import upsert_env_values, write_private_env_text
 from mindroom.cli.help_format import PanelOrderedGroup, examples
-from mindroom.cli.interactive import Separator, confirm, secret, section, select, terminal_is_interactive
+from mindroom.cli.interactive import confirm, secret, section, select, terminal_is_interactive
+from mindroom.cli.setup_wizard import (
+    PROVIDER_CHOICES,
+    StarterModelSelection,
+    WizardIO,
+    default_model_selection,
+    normalize_provider_preset,
+    preset_api_key_env,
+    print_setup_summary,
+    prompt_provider_preset,
+    resolve_interactive_setup,
+)
+from mindroom.cli.setup_wizard import PROVIDER_PRESETS as _PROVIDER_PRESETS
+from mindroom.cli.setup_wizard import ProviderPreset as _ProviderPreset
 from mindroom.model_defaults import (
     AZURE_OPENAI_API_VERSION_DEFAULT,
-    CONFIG_INIT_ADDITIONAL_MODELS,
-    CONFIG_INIT_HELPER_MODELS,
     CONFIG_INIT_MODEL_ALTERNATIVES,
-    CONFIG_INIT_MODEL_PRESETS,
     LLAMA_CPP_BASE_URL_DEFAULT,
     LLAMA_CPP_GEMMA,
     LLAMA_CPP_QWEN,
@@ -57,7 +66,6 @@ from mindroom.runtime_env_policy import (
 if TYPE_CHECKING:
     from collections.abc import Callable, Mapping
 
-    from mindroom.cli.setup_detection import DetectedProvider, DetectionSnapshot, OllamaModelInfo
     from mindroom.config.main import Config
     from mindroom.config.models import ModelConfig
     from mindroom.constants import RuntimePaths
@@ -93,37 +101,6 @@ CONFIG_PATH_OPTION: Path | None = typer.Option(
 )
 
 _MatrixServerPreset = Literal["self-hosted", "mindroom.chat"]
-_ProviderPreset = Literal[
-    "anthropic",
-    "bedrock_claude",
-    "azure",
-    "claude_code",
-    "codex",
-    "kimi",
-    "llama_cpp",
-    "ollama",
-    "openai",
-    "openrouter",
-    "vertexai_claude",
-]
-_ProviderMenuChoice = _ProviderPreset | Literal["claude_code+codex"]
-_CombinedDefaultChoice = Literal["sonnet", "sol", "opus"]
-
-
-@dataclass(frozen=True)
-class StarterModelSelection:
-    """Resolved model layout and readiness for starter config and `.env` generation."""
-
-    primary_preset: _ProviderPreset
-    default_model: ModelPreset
-    additional_models: tuple[tuple[str, ModelPreset], ...] = ()
-    helper_model: str | None = None
-    commented_alternatives_preset: _ProviderPreset | None = None
-    combined_claude_codex: bool = False
-    claude_cli_path: str | None = None
-    uses_detected_ollama_models: bool = False
-    ready: bool = False
-
 
 _PUBLIC_HOSTED_ENV_DEFAULTS: tuple[tuple[str, str], ...] = (
     ("MATRIX_HOMESERVER", constants.DEFAULT_MATRIX_HOMESERVER),
@@ -137,118 +114,18 @@ _MATRIX_SERVER_HELP = (
     "Matrix defaults: self-hosted = configure your own homeserver; mindroom.chat = hosted Matrix pairing defaults."
 )
 _PROVIDER_HELP = "Default model provider for the generated config."
-
-
-@dataclass(frozen=True)
-class _SetupHints:
-    """What a preset needs before agents can answer, worded for each place setup is described."""
-
-    # First-run setup keeps starting MindRoom, which reads `.env` only at startup, so `.env` steps end in a restart.
-    first_run: str
-    # `config init` next steps for the hosted (mindroom.chat) and self-hosted Matrix presets.
-    hosted: str
-    self_hosted: str
-
-
-@dataclass(frozen=True)
-class _PresetInfo:
-    """One provider preset: its menu entry, the extra names `--provider` accepts, and its setup hints."""
-
-    label: str
-    needs: str
-    aliases: tuple[str, ...] = ()
-    # The `--provider` value help lists, when it is one of the aliases rather than the preset name.
-    choice: str | None = None
-    # None means the preset needs exactly one API key, which first-run setup asks for.
-    setup: _SetupHints | None = None
-
-
-def _login_hints(command: str) -> _SetupHints:
-    """Describe the same login step for each setup path."""
-    return _SetupHints(
-        first_run=f"Run {command} in another terminal",
-        hosted=f"Run {command} before starting MindRoom (Matrix homeserver is prefilled)",
-        self_hosted=f"Set your Matrix homeserver and run {command} before starting MindRoom",
-    )
-
-
-# Every provider preset in menu order, default first.
-_PROVIDER_PRESETS: dict[_ProviderPreset, _PresetInfo] = {
-    "openai": _PresetInfo("OpenAI", "API key"),
-    "anthropic": _PresetInfo("Anthropic", "API key", aliases=("claude",)),
-    "openrouter": _PresetInfo("OpenRouter", "API key"),
-    "codex": _PresetInfo(
-        "Codex",
-        "ChatGPT sign-in through `codex login`",
-        setup=_login_hints("`codex login`"),
-    ),
-    "claude_code": _PresetInfo(
-        "Claude subscription",
-        "Claude sign-in through `claude auth login`",
-        setup=_login_hints("`claude auth login`"),
-    ),
-    "kimi": _PresetInfo(
-        "Kimi Code",
-        "Kimi sign-in through `kimi`",
-        setup=_login_hints("`kimi` and `/login`"),
-    ),
-    "ollama": _PresetInfo(
-        "Ollama",
-        "Local models served by Ollama",
-        setup=_SetupHints(
-            first_run="Start Ollama and pull the local models",
-            hosted="Start Ollama and pull the local models (Matrix homeserver is prefilled)",
-            self_hosted="Set your Matrix homeserver, start Ollama, and pull the local models",
-        ),
-    ),
-    "llama_cpp": _PresetInfo(
-        "llama.cpp",
-        "Local models served by llama.cpp",
-        aliases=("llama.cpp", "llama-cpp"),
-        choice="llama.cpp",
-        setup=_SetupHints(
-            first_run="Start llama.cpp server with the local model",
-            hosted="Start llama.cpp server with the local model (Matrix homeserver is prefilled)",
-            self_hosted="Set your Matrix homeserver and start llama.cpp server with the local model",
-        ),
-    ),
-    "azure": _PresetInfo(
-        "Azure OpenAI",
-        "Azure OpenAI key and endpoint in .env",
-        aliases=("azure_openai", "azure-openai"),
-        setup=_SetupHints(
-            first_run="Set your Azure OpenAI key and endpoint in {env_path}, confirm the config model deployment name, "
-            "and restart `mindroom run`",
-            hosted="Set your Azure OpenAI key/endpoint and confirm the config model deployment name",
-            self_hosted="Set your Matrix homeserver, Azure OpenAI key/endpoint, and config model deployment name",
-        ),
-    ),
-    "bedrock_claude": _PresetInfo(
-        "AWS Bedrock",
-        "Claude on AWS Bedrock, AWS credentials in .env",
-        setup=_SetupHints(
-            first_run="Set your AWS Bedrock region and credentials in {env_path} and restart `mindroom run`",
-            hosted="Set AWS Bedrock region and credentials (Matrix homeserver is prefilled)",
-            self_hosted="Set your Matrix homeserver, AWS Bedrock region, and AWS credentials",
-        ),
-    ),
-    "vertexai_claude": _PresetInfo(
-        "Vertex AI",
-        "Claude on Vertex AI, Google Cloud project in .env",
-        aliases=("vertexai", "vertex", "vertexai-anthropic", "vertex-anthropic"),
-        setup=_SetupHints(
-            first_run="Set your Vertex AI project and region in {env_path}, sign in with Google auth, "
-            "and restart `mindroom run`",
-            hosted="Set your Vertex AI project/region and Google auth (Matrix homeserver is prefilled)",
-            self_hosted="Set your Matrix homeserver, Vertex AI project/region, and Google auth",
-        ),
-    ),
-}
-_PROVIDER_PRESET_NAMES: dict[str, _ProviderPreset] = {
-    name: preset for preset, info in _PROVIDER_PRESETS.items() for name in (preset, *info.aliases)
-}
-PROVIDER_CHOICES = tuple(sorted(info.choice or preset for preset, info in _PROVIDER_PRESETS.items()))
 _PROVIDER_CHOICES_TEXT = f"{', '.join(PROVIDER_CHOICES[:-1])}, or {PROVIDER_CHOICES[-1]}"
+
+
+def _wizard_io() -> WizardIO:
+    """Bind the shared console and interactive prompt callables for the setup wizard."""
+    return WizardIO(
+        console=console,
+        print_literal=print_literal,
+        select=select,
+        confirm=confirm,
+        secret=secret,
+    )
 
 
 def _config_init_owner_user_id(runtime_paths: RuntimePaths) -> str | None:
@@ -378,7 +255,7 @@ def _write_env_file(
             "; restart MindRoom if it is already running to apply it.",
         )
         changed = True
-    if provider_api_key and (env_key := _preset_api_key_env(selected_preset)):
+    if provider_api_key and (env_key := preset_api_key_env(selected_preset)):
         upsert_env_values(env_path, {env_key: provider_api_key})
         print_literal("[green]Env file updated:[/green] ", f"{env_path} ({env_key})")
         changed = True
@@ -615,22 +492,24 @@ def config_init(
     interactive_wizard = can_prompt and terminal_is_interactive()
     replace_env_file = False
     detection_runtime = runtime_paths
+    wizard_io = _wizard_io()
     if interactive_wizard:
         replace_env_file = _should_replace_env_file(env_path, force=force, no_input=no_input)
         # When overwriting `.env`, detect/check against process env only so keys about to be wiped do not skip prompts.
         detection_runtime = replace(runtime_paths, env_file_values={}) if replace_env_file else runtime_paths
         console.print(section("Model provider"))
-        selection, provider_api_key = _resolve_interactive_setup(
+        selection, provider_api_key = resolve_interactive_setup(
             detection_runtime,
             explicit_preset=None,
             interactive=True,
             for_config_init=True,
+            io=wizard_io,
         )
     elif can_prompt and selected_matrix_server == "self-hosted":
-        selection = _default_model_selection(_prompt_provider_preset())
+        selection = default_model_selection(prompt_provider_preset(select_fn=wizard_io.select))
         provider_api_key = None
     else:
-        selection = _default_model_selection(explicit_preset or "openai")
+        selection = default_model_selection(explicit_preset or "openai")
         provider_api_key = None
 
     if print_config:
@@ -660,7 +539,7 @@ def config_init(
         else None,
     )
     if interactive_wizard:
-        _print_setup_summary(selection)
+        print_setup_summary(selection, io=wizard_io)
     _print_config_init_next_steps(
         env_path,
         env_changed=env_changed,
@@ -682,9 +561,10 @@ def create_first_run_config(
     """
     if provider is None:
         explicit_preset = None
-    elif (explicit_preset := _normalize_provider_preset(provider)) is None:
+    elif (explicit_preset := normalize_provider_preset(provider)) is None:
         msg = f"Invalid --provider value. Use: {_PROVIDER_CHOICES_TEXT}."
         raise ValueError(msg)
+    wizard_io = _wizard_io()
     print_literal(
         "\n[bold]Welcome to MindRoom![/bold] Let's create your config at ",
         runtime_paths.config_path,
@@ -694,10 +574,11 @@ def create_first_run_config(
         "[dim]Own Matrix server? Press Ctrl+C and run `mindroom config init --matrix-server self-hosted`.[/dim]",
     )
     console.print(section("Model provider"))
-    selection, provider_api_key = _resolve_interactive_setup(
+    selection, provider_api_key = resolve_interactive_setup(
         runtime_paths,
         explicit_preset=explicit_preset,
         interactive=interactive,
+        io=wizard_io,
     )
     _write_starter_setup(
         runtime_paths,
@@ -709,82 +590,12 @@ def create_first_run_config(
         model_selection=selection,
         ollama_host=((runtime_paths.env_value("OLLAMA_HOST") or "").strip() or None) if interactive else None,
     )
-    _print_setup_summary(selection)
+    print_setup_summary(selection, io=wizard_io)
     if not selection.ready and (setup := _PROVIDER_PRESETS[selection.primary_preset].setup) is not None:
         console.print("\nMindRoom keeps starting; your agents can answer once you:")
         print_literal("  ", setup.first_run.format(env_path=runtime_paths.env_path))
         if not selection.uses_detected_ollama_models:
             _print_local_model_commands(selection.primary_preset)
-
-
-def _print_setup_summary(selection: StarterModelSelection) -> None:
-    """Print a compact summary of configured models, router, and provider readiness."""
-    default_label = selection.default_model.display_name or selection.default_model.id
-    models = [f"default ({default_label})", *(name for name, _ in selection.additional_models)]
-    router_model = selection.helper_model or "default"
-    header = "Setup ready" if selection.ready else "Setup created"
-    status = "[green]ready[/green]" if selection.ready else "[yellow]needs setup[/yellow]"
-    console.print(f"\n[bold]{header}[/bold]")
-    print_literal("  Models: ", ", ".join(models))
-    console.print(f"  Router: {router_model}")
-    console.print(f"  Status: {status}")
-
-
-def _print_skipped_key_hint(env_key: str, env_path: Path, *, for_config_init: bool) -> None:
-    if for_config_init:
-        print_literal(f"Skipped. Add {env_key} to ", env_path, " before starting MindRoom.")
-        return
-    print_literal(
-        f"Skipped. Connect your provider in the dashboard once MindRoom is running, or add {env_key} to ",
-        env_path,
-        " and restart `mindroom run`.",
-    )
-
-
-def _prompt_provider_key(
-    selected_preset: _ProviderPreset,
-    runtime_paths: RuntimePaths,
-    *,
-    interactive: bool,
-    for_config_init: bool = False,
-) -> tuple[str | None, bool]:
-    """Ask a terminal for the preset's API key with live verification; return `(typed_key, ready)`."""
-    from mindroom.credentials.environment import get_secret_from_env  # noqa: PLC0415
-
-    preset = _PROVIDER_PRESETS[selected_preset]
-    env_key = _preset_api_key_env(selected_preset)
-    if preset.setup is not None or env_key is None:
-        return None, False
-    if get_secret_from_env(env_key, runtime_paths):
-        console.print(f"Using {env_key} from your environment.")
-        return None, True
-    if not interactive:
-        _print_skipped_key_hint(env_key, runtime_paths.env_path, for_config_init=for_config_init)
-        return None, False
-
-    from mindroom.cli.setup_detection import verify_provider_api_key  # noqa: PLC0415
-
-    while True:
-        value = secret(f"{preset.label} API key (input hidden, press Enter to skip)").strip()
-        if not value:
-            _print_skipped_key_hint(env_key, runtime_paths.env_path, for_config_init=for_config_init)
-            return None, False
-        with console.status(f"Verifying {preset.label} API key..."):
-            check = verify_provider_api_key(selected_preset, value, runtime_paths=runtime_paths)
-        if check.status == "valid":
-            console.print(f"[green]✓[/green] Verified key with {preset.label}.")
-            return value, True
-        if check.status == "rejected":
-            reason = f" ({escape(check.detail)})" if check.detail else ""
-            console.print(
-                f"[red]✗[/red] {preset.label} rejected that API key{reason}. Try again, or press Enter to skip.",
-            )
-            continue
-        if check.detail.startswith("Custom endpoint configured"):
-            console.print(f"[yellow]{escape(check.detail)} Saving anyway.[/yellow]")
-        else:
-            console.print("[yellow]Could not verify key right now; saving anyway.[/yellow]")
-        return value, True
 
 
 def _starter_config(
@@ -1200,7 +1011,7 @@ def _parse_config_init_flags(
     if selected_matrix_server is None:
         console.print(f"[red]Invalid --matrix-server value.[/red] Use: {_MATRIX_SERVER_CHOICES_TEXT}.")
         raise typer.Exit(1)
-    provider_preset = _normalize_provider_preset(provider) if provider else None
+    provider_preset = normalize_provider_preset(provider) if provider else None
     if provider and provider_preset is None:
         console.print(f"[red]Invalid --provider value.[/red] Use: {_PROVIDER_CHOICES_TEXT}.")
         raise typer.Exit(1)
@@ -1227,290 +1038,9 @@ def check_env_keys(config: Config, runtime_paths: RuntimePaths) -> None:
         console.print("\nYou can set these in a .env file or export them in your shell.")
 
 
-def _normalize_provider_preset(provider: str) -> _ProviderPreset | None:
-    """Normalize provider preset values used by prompts and CLI flags."""
-    return _PROVIDER_PRESET_NAMES.get(provider.strip().lower())
-
-
-def _default_model_selection(
-    preset: _ProviderPreset,
-    *,
-    claude_cli_path: str | None = None,
-    ready: bool = False,
-) -> StarterModelSelection:
-    """Build the standard single-provider starter model selection."""
-    return StarterModelSelection(
-        primary_preset=preset,
-        default_model=CONFIG_INIT_MODEL_PRESETS[preset],
-        additional_models=CONFIG_INIT_ADDITIONAL_MODELS.get(preset, ()),
-        helper_model=CONFIG_INIT_HELPER_MODELS.get(preset),
-        commented_alternatives_preset=preset,
-        claude_cli_path=claude_cli_path if preset == "claude_code" else None,
-        ready=ready,
-    )
-
-
-def _combined_claude_codex_selection(
-    default_choice: _CombinedDefaultChoice,
-    *,
-    claude_cli_path: str | None,
-    ready: bool,
-) -> StarterModelSelection:
-    """Build the combined 6-model Claude Code + Codex starter selection without duplicating default."""
-    claude_extra = dict(CONFIG_INIT_ADDITIONAL_MODELS["claude_code"])
-    codex_extra = dict(CONFIG_INIT_ADDITIONAL_MODELS["codex"])
-    all_models: tuple[tuple[str, ModelPreset], ...] = (
-        ("sonnet", CONFIG_INIT_MODEL_PRESETS["claude_code"]),
-        ("opus", claude_extra["opus"]),
-        ("haiku", claude_extra["haiku"]),
-        ("sol", CONFIG_INIT_MODEL_PRESETS["codex"]),
-        ("astra", codex_extra["astra"]),
-        ("luna", codex_extra["luna"]),
-    )
-    by_name = dict(all_models)
-    additional = tuple((name, preset) for name, preset in all_models if name != default_choice)
-    is_codex_default = default_choice == "sol"
-    return StarterModelSelection(
-        primary_preset="codex" if is_codex_default else "claude_code",
-        default_model=by_name[default_choice],
-        additional_models=additional,
-        helper_model="luna" if is_codex_default else "haiku",
-        combined_claude_codex=True,
-        claude_cli_path=claude_cli_path,
-        ready=ready,
-    )
-
-
-_YAML_RESERVED_KEYS = frozenset({"true", "false", "yes", "no", "on", "off", "null", "y", "n"})
-
-
-def _ollama_model_key(model_name: str, used: set[str]) -> str:
-    """Return a clean, unique YAML model key for a pulled Ollama model name."""
-    base = model_name.removesuffix(":latest")
-    slug = re.sub(r"[^a-zA-Z0-9]+", "_", base.lower()).strip("_") or "model"
-    if not slug[0].isalpha() or slug in _YAML_RESERVED_KEYS:
-        slug = f"ollama_{slug}"
-    candidate = slug
-    suffix = 2
-    while candidate in used:
-        candidate = f"{slug}_{suffix}"
-        suffix += 1
-    used.add(candidate)
-    return candidate
-
-
-def _ollama_model_selection(chosen_name: str, models: tuple[OllamaModelInfo, ...]) -> StarterModelSelection:
-    """Build an Ollama starter selection from already-pulled local models."""
-    ctx = CONFIG_INIT_MODEL_PRESETS["ollama"].context_window
-    used_keys = {"default"}
-    extras = tuple(
-        (_ollama_model_key(model.name, used_keys), ModelPreset("ollama", model.name, ctx))
-        for model in [model for model in models if model.name != chosen_name][:2]
-    )
-    return StarterModelSelection(
-        primary_preset="ollama",
-        default_model=ModelPreset("ollama", chosen_name, ctx),
-        additional_models=extras,
-        uses_detected_ollama_models=True,
-        ready=True,
-    )
-
-
-def _detected_provider_badge(detected: DetectedProvider) -> str:
-    """Format the status column for one detected provider in the interactive menu."""
-    from mindroom.cli.setup_detection import inline_cli_login_command  # noqa: PLC0415
-
-    if detected.ready:
-        if detected.preset in {"claude_code", "codex", "kimi"}:
-            return "✓ signed in" if detected.status_detail == "signed in" else f"✓ signed in ({detected.status_detail})"
-        if detected.preset == "ollama":
-            return f"✓ running ({detected.status_detail})"
-        return f"✓ {detected.status_detail}"
-    if detected.cli_path is not None:
-        if inline_cli_login_command(detected.preset) is not None:
-            return "○ CLI installed · sign in now"
-        return "○ CLI installed"
-    return f"○ {detected.status_detail}"
-
-
-def _prompt_provider_preset() -> _ProviderPreset:
-    """Ask for a starter provider preset in default menu order without detection."""
-    width = max(len(info.label) for info in _PROVIDER_PRESETS.values()) + 2
-    return select(
-        "Which model provider should your agents use?",
-        [(preset, f"{info.label:<{width}}{info.needs}") for preset, info in _PROVIDER_PRESETS.items()],
-    )
-
-
-def _prompt_provider_choice(snapshot: DetectionSnapshot) -> _ProviderMenuChoice:
-    """Show the starter provider menu, ordering detected ready/installed providers first."""
-    if not snapshot.providers:
-        return _prompt_provider_preset()
-
-    width = max(len("Claude + Codex"), *(len(info.label) for info in _PROVIDER_PRESETS.values())) + 2
-    choices: list[tuple[_ProviderMenuChoice, str] | Separator] = []
-    listed: set[_ProviderPreset] = set()
-
-    if snapshot.both_claude_and_codex_ready():
-        choices.append(("claude_code+codex", f"{'Claude + Codex':<{width}}recommended · both signed in"))
-
-    for is_ready in (True, False):
-        for preset_name, detected in snapshot.providers.items():
-            if detected.ready is not is_ready or preset_name not in _PROVIDER_PRESETS:
-                continue
-            preset: _ProviderPreset = preset_name  # type: ignore[assignment]
-            label = _PROVIDER_PRESETS[preset].label
-            choices.append((preset, f"{label:<{width}}{_detected_provider_badge(detected)}"))
-            listed.add(preset)
-
-    remaining = [
-        (preset, f"{info.label:<{width}}{info.needs}")
-        for preset, info in _PROVIDER_PRESETS.items()
-        if preset not in listed
-    ]
-    if choices and remaining:
-        choices.append(Separator("Other providers"))
-    choices.extend(remaining)
-    return select("Which model provider should your agents use?", choices)
-
-
-def _maybe_run_inline_cli_login(
-    preset: _ProviderPreset,
-    detected: DetectedProvider | None,
-    runtime_paths: RuntimePaths,
-) -> DetectedProvider | None:
-    """Offer to run `codex login` or `claude auth login` inline when the CLI is installed but signed out."""
-    from mindroom.cli.setup_detection import (  # noqa: PLC0415
-        detect_single_provider,
-        inline_cli_login_command,
-        run_inline_cli_login,
-    )
-
-    if detected is None or detected.ready or detected.cli_path is None:
-        return detected
-    cmd = inline_cli_login_command(preset)
-    if cmd is None or not confirm(f"Not signed in yet. Run `{cmd}` now?", default=True):
-        return detected
-    if not run_inline_cli_login(preset, detected.cli_path, runtime_paths=runtime_paths):
-        console.print(f"[yellow]`{cmd}` did not finish signing in; you can run it later.[/yellow]")
-        return detected
-    refreshed = detect_single_provider(preset, runtime_paths)
-    if refreshed is not None:
-        detected = refreshed
-    if detected.ready:
-        console.print(
-            f"[green]✓[/green] Signed in to {_PROVIDER_PRESETS[preset].label} ({escape(detected.status_detail)}).",
-        )
-    else:
-        console.print(f"[yellow]Still not signed in; you can run `{cmd}` later.[/yellow]")
-    return detected
-
-
-def _resolve_interactive_setup(
-    runtime_paths: RuntimePaths,
-    *,
-    explicit_preset: _ProviderPreset | None,
-    interactive: bool,
-    for_config_init: bool = False,
-) -> tuple[StarterModelSelection, str | None]:
-    """Run provider detection, menu selection, inline login/Ollama pick/key verification, and build starter models."""
-    if not interactive:
-        preset = explicit_preset or "openai"
-        api_key, key_ready = _prompt_provider_key(
-            preset,
-            runtime_paths,
-            interactive=False,
-            for_config_init=for_config_init,
-        )
-        return _default_model_selection(preset, ready=key_ready), api_key
-
-    from mindroom.cli.setup_detection import (  # noqa: PLC0415
-        DetectionSnapshot,
-        detect_available_providers,
-        detect_single_provider,
-    )
-
-    if explicit_preset is None:
-        with console.status("Detecting local logins, API keys, and local servers..."):
-            snapshot = detect_available_providers(runtime_paths)
-        if summary := snapshot.summary_line():
-            console.print(f"[dim]{escape(summary)}[/dim]")
-        choice = _prompt_provider_choice(snapshot)
-    else:
-        single = detect_single_provider(explicit_preset, runtime_paths)
-        snapshot = DetectionSnapshot(providers={explicit_preset: single} if single is not None else {})
-        choice = explicit_preset
-
-    return _finalize_interactive_choice(choice, snapshot, runtime_paths, for_config_init=for_config_init)
-
-
-def _finalize_interactive_choice(
-    choice: _ProviderMenuChoice,
-    snapshot: DetectionSnapshot,
-    runtime_paths: RuntimePaths,
-    *,
-    for_config_init: bool,
-) -> tuple[StarterModelSelection, str | None]:
-    """Collect provider-specific follow-up answers (model pick, inline CLI login, or verified API key)."""
-    if choice == "claude_code+codex":
-        sonnet_label = CONFIG_INIT_MODEL_PRESETS["claude_code"].display_name or "Claude Sonnet 5.5"
-        opus_label = dict(CONFIG_INIT_ADDITIONAL_MODELS["claude_code"])["opus"].display_name or "Claude Opus 5.5"
-        default_choice: _CombinedDefaultChoice = select(
-            "Default model for Mind?",
-            [("sonnet", sonnet_label), ("sol", "Codex Sol"), ("opus", opus_label)],
-        )
-        claude_det = snapshot.get("claude_code")
-        return (
-            _combined_claude_codex_selection(
-                default_choice,
-                claude_cli_path=claude_det.cli_path if claude_det else None,
-                ready=snapshot.both_claude_and_codex_ready(),
-            ),
-            None,
-        )
-
-    if choice in {"codex", "claude_code"}:
-        detected = _maybe_run_inline_cli_login(choice, snapshot.get(choice), runtime_paths)
-        claude_cli_path = detected.cli_path if choice == "claude_code" and detected else None
-        return (
-            _default_model_selection(choice, claude_cli_path=claude_cli_path, ready=bool(detected and detected.ready)),
-            None,
-        )
-
-    if choice == "ollama":
-        detected = snapshot.get("ollama")
-        if detected and detected.ready and detected.ollama_models:
-            width = max(len(model.name) for model in detected.ollama_models) + 2
-            chosen_model = select(
-                "Default local model?",
-                [
-                    (model.name, f"{model.name:<{width}}{size}" if (size := model.format_size()) else model.name)
-                    for model in detected.ollama_models
-                ],
-            )
-            return _ollama_model_selection(chosen_model, detected.ollama_models), None
-        return _default_model_selection("ollama", ready=False), None
-
-    if choice == "kimi":
-        detected = snapshot.get("kimi")
-        return _default_model_selection("kimi", ready=bool(detected and detected.ready)), None
-
-    api_key, key_ready = _prompt_provider_key(
-        choice,
-        runtime_paths,
-        interactive=True,
-        for_config_init=for_config_init,
-    )
-    return _default_model_selection(choice, ready=key_ready), api_key
-
-
 def _model_config_dict(model_preset: ModelPreset, *, claude_cli_path: str | None = None) -> dict[str, Any]:
     """Build the YAML-serializable mapping for one generated model entry."""
-    data: dict[str, Any] = {"provider": model_preset.provider, "id": model_preset.id}
-    if model_preset.display_name is not None:
-        data["display_name"] = model_preset.display_name
-    if model_preset.context_window is not None:
-        data["context_window"] = model_preset.context_window
+    data: dict[str, Any] = dict(model_preset.to_config_dict())
     extra_kwargs: dict[str, Any] = {}
     if model_preset.provider == "llama_cpp":
         extra_kwargs["api_key"] = LOCAL_OPENAI_API_KEY_DEFAULT
@@ -1520,8 +1050,8 @@ def _model_config_dict(model_preset: ModelPreset, *, claude_cli_path: str | None
         extra_kwargs["options"] = {"num_ctx": model_preset.context_window}
     if model_preset.provider == "claude_code" and claude_cli_path:
         extra_kwargs["cli_path"] = claude_cli_path
-    if model_preset.reasoning_effort is not None:
-        extra_kwargs["reasoning_effort"] = model_preset.reasoning_effort
+    if isinstance(preset_extra := data.get("extra_kwargs"), dict):
+        extra_kwargs.update(preset_extra)
     if extra_kwargs:
         data["extra_kwargs"] = extra_kwargs
     return data
@@ -1574,7 +1104,7 @@ def _full_template(
     `config init` intentionally generates the shared single-user starter model.
     Requester-private agents remain an opt-in advanced config surface.
     """
-    selection = model_selection or _default_model_selection(provider_preset)
+    selection = model_selection or default_model_selection(provider_preset)
     models_block = _models_template_block(selection)
     commented_model_options_block = _commented_model_options_template_block(selection.commented_alternatives_preset)
     helper_model = selection.helper_model
@@ -1904,11 +1434,6 @@ def _new_dashboard_api_key() -> str:
     return secrets.token_urlsafe(32)
 
 
-def _preset_api_key_env(provider_preset: _ProviderPreset) -> str | None:
-    """Return the API key env var of the preset's model provider, if it has one."""
-    return constants.env_key_for_provider(CONFIG_INIT_MODEL_PRESETS[provider_preset].provider)
-
-
 def _ollama_env_template(*, uses_detected_models: bool, ollama_host: str | None) -> str:
     header = f"# Ollama local model server\nOLLAMA_HOST={ollama_host or OLLAMA_HOST_DEFAULT}"
     if uses_detected_models:
@@ -2016,7 +1541,7 @@ def _provider_env_template(  # noqa: C901, PLR0911
         # {llama_cpp_server_command(LLAMA_CPP_QWEN)}
         """).rstrip()
 
-    required_env_key = _preset_api_key_env(provider_preset)
+    required_env_key = preset_api_key_env(provider_preset)
     provider_lines: list[str] = ["# AI provider API keys (set the uncommented keys for this preset)"]
     for env_key in ("ANTHROPIC_API_KEY", "OPENAI_API_KEY", "OPENROUTER_API_KEY"):
         if env_key == required_env_key:

@@ -21,9 +21,6 @@ from mindroom import constants
 from mindroom.credentials.environment import get_secret_from_env
 from mindroom.model_defaults import (
     ANTHROPIC_BASE_URL_DEFAULT,
-    CEREBRAS_HOST_DEFAULT,
-    DEEPSEEK_BASE_URL_DEFAULT,
-    GROQ_HOST_DEFAULT,
     OLLAMA_HOST_DEFAULT,
     OPENAI_BASE_URL_DEFAULT,
     OPENROUTER_BASE_URL_DEFAULT,
@@ -92,9 +89,6 @@ _STOCK_PROVIDER_BASE_URLS: dict[str, str] = {
     "anthropic": ANTHROPIC_BASE_URL_DEFAULT,
     "openai": OPENAI_BASE_URL_DEFAULT,
     "openrouter": OPENROUTER_BASE_URL_DEFAULT,
-    "deepseek": DEEPSEEK_BASE_URL_DEFAULT,
-    "cerebras": CEREBRAS_HOST_DEFAULT,
-    "groq": GROQ_HOST_DEFAULT,
 }
 
 
@@ -157,6 +151,7 @@ class KeyCheckResult:
 
     status: KeyCheckStatus
     detail: str = ""
+    custom_endpoint: bool = False
 
 
 def detect_available_providers(runtime_paths: RuntimePaths, *, timeout_seconds: float = 3.0) -> DetectionSnapshot:
@@ -208,6 +203,7 @@ def verify_provider_api_key(
         return KeyCheckResult(
             status="inconclusive",
             detail=f"Custom endpoint configured ({', '.join(endpoint_vars)}); skipping {label} key check.",
+            custom_endpoint=True,
         )
     check = PROVIDER_KEY_CHECKS.get(preset)
     if check is None:

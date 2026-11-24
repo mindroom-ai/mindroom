@@ -17,7 +17,8 @@ from typer.testing import CliRunner
 
 from mindroom import constants as constants_module
 from mindroom.cli import config as config_cli
-from mindroom.cli import setup_detection
+from mindroom.cli import setup_detection, setup_wizard
+from mindroom.cli.interactive import Separator
 from mindroom.cli.main import app
 from mindroom.cli.setup_detection import (
     DetectedProvider,
@@ -33,7 +34,7 @@ from mindroom.model_defaults import OLLAMA_HOST_DEFAULT, OPENAI_BASE_URL_DEFAULT
 from tests.conftest import load_config_yaml
 
 if TYPE_CHECKING:
-    from collections.abc import Callable
+    from collections.abc import Callable, Sequence
     from pathlib import Path
 
 runner = CliRunner()
@@ -469,6 +470,7 @@ class TestLiveApiKeyVerification:
         with patch.object(setup_detection.httpx, "get", return_value=httpx.Response(200)) as stock_get:
             stock_res = verify_provider_api_key("openai", sample_key, runtime_paths=stock_rt)
         assert stock_res == KeyCheckResult(status="valid")
+        assert stock_res.custom_endpoint is False
         assert stock_get.call_count == 1
 
         # Custom provider endpoint env var skips stock key check with zero HTTP calls.
@@ -476,6 +478,7 @@ class TestLiveApiKeyVerification:
         with patch.object(setup_detection.httpx, "get", side_effect=AssertionError("must not send HTTP")):
             custom_res = verify_provider_api_key("openai", sample_key, runtime_paths=custom_rt)
         assert custom_res.status == "inconclusive"
+        assert custom_res.custom_endpoint is True
         assert "OPENAI_BASE_URL" in custom_res.detail
 
     def test_rejected_and_non_ascii_keys_retry_until_valid_or_skipped(
@@ -583,7 +586,7 @@ class TestCombinedClaudeCodexSetup:
         select_calls: list[tuple[str, list[str]]] = []
 
         def fake_select(message: str, choices: list[Any]) -> str:
-            values = [c[0] for c in choices if not isinstance(c, config_cli.Separator)]
+            values = [c[0] for c in choices if not isinstance(c, Separator)]
             select_calls.append((message, values))
             return default_pick if message == "Default model for Mind?" else values[0]
 
@@ -625,14 +628,13 @@ class TestCombinedClaudeCodexSetup:
         """Detected ready and installed providers lead above a Separator; empty detection keeps default order."""
         captured: list[list[Any]] = []
 
-        def fake_select(_msg: str, choices: list[Any]) -> str:
+        def fake_select[Value: str](_msg: str, choices: Sequence[tuple[Value, str] | Separator]) -> Value:
             captured.append(list(choices))
-            return str(next(c[0] for c in choices if not isinstance(c, config_cli.Separator)))
+            return next(c[0] for c in choices if not isinstance(c, Separator))
 
-        with patch.object(config_cli, "select", side_effect=fake_select):
-            config_cli._prompt_provider_choice(DetectionSnapshot())
-        assert [c[0] for c in captured[0]] == list(config_cli._PROVIDER_PRESETS)
-        assert not any(isinstance(c, config_cli.Separator) for c in captured[0])
+        setup_wizard.prompt_provider_choice(DetectionSnapshot(), select_fn=fake_select)
+        assert [c[0] for c in captured[0]] == list(setup_wizard.PROVIDER_PRESETS)
+        assert not any(isinstance(c, Separator) for c in captured[0])
 
         snapshot = _snapshot(
             DetectedProvider("claude_code", True, "Claude Max", cli_path="/usr/bin/claude"),
@@ -641,11 +643,10 @@ class TestCombinedClaudeCodexSetup:
             DetectedProvider("openai", True, "OPENAI_API_KEY set"),
             DetectedProvider("ollama", True, "gemma4:latest"),
         )
-        with patch.object(config_cli, "select", side_effect=fake_select):
-            config_cli._prompt_provider_choice(snapshot)
+        setup_wizard.prompt_provider_choice(snapshot, select_fn=fake_select)
         entries = captured[1]
-        sep_idx = next(i for i, c in enumerate(entries) if isinstance(c, config_cli.Separator))
-        assert entries[sep_idx] == config_cli.Separator("Other providers")
+        sep_idx = next(i for i, c in enumerate(entries) if isinstance(c, Separator))
+        assert entries[sep_idx] == Separator("Other providers")
         above = entries[:sep_idx]
         assert [c[0] for c in above] == ["claude_code+codex", "claude_code", "codex", "openai", "ollama", "kimi"]
         assert "recommended" in above[0][1]
@@ -654,7 +655,7 @@ class TestCombinedClaudeCodexSetup:
         assert "✓ running (gemma4:latest)" in above[4][1]
         assert "○ CLI installed" in above[5][1]
         assert [c[0] for c in entries[sep_idx + 1 :]] == [
-            p for p in config_cli._PROVIDER_PRESETS if p not in snapshot.providers
+            p for p in setup_wizard.PROVIDER_PRESETS if p not in snapshot.providers
         ]
 
 
